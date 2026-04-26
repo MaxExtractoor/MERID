@@ -34,7 +34,7 @@ export function useLocalStorage<T>(
       if (!item) return initialValue;
       return serializer.read(item);
     } catch (error) {
-      console.warn(`Error reading localStorage key "${key}":`, error);
+      // localStorage read error - returning initial value
       return initialValue;
     }
   }, [key, initialValue, serializer]);
@@ -64,7 +64,7 @@ export function useLocalStorage<T>(
           window.localStorage.setItem(key, serializer.write(valueToStore));
         }
       } catch (error) {
-        console.warn(`Error setting localStorage key "${key}":`, error);
+        // localStorage write error - non-critical
       }
     },
     [key, storedValue, serializer, initialValue]
@@ -78,7 +78,7 @@ export function useLocalStorage<T>(
       }
       setStoredValue(initialValue);
     } catch (error) {
-      console.warn(`Error removing localStorage key "${key}":`, error);
+      // localStorage remove error - non-critical
     }
   }, [key, initialValue]);
 
@@ -100,7 +100,7 @@ export function useLocalStorage<T>(
       try {
         setStoredValue(serializer.read(e.newValue));
       } catch (error) {
-        console.warn(`Error parsing localStorage change for key "${key}":`, error);
+        // localStorage change parse error - ignoring update
       }
     };
 

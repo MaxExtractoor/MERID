@@ -275,38 +275,48 @@ class LiveCorrelationBot:
             )
             return True
         
-        # Live trading — route through KalshiExecutor
+        # Live trading — route through order_router (Single Executor Principle)
         try:
-            from merid.execution.executors.kalshi import KalshiExecutor
-            executor = KalshiExecutor()
+            from merid.event_venues.kalshi.order_router import (
+                route_order_async,
+                OrderIntent,
+            )
 
-            # Run the async execute_trade in a new event loop if none is running
+            # Estimate contract count from dollar size (1 contract ≈ price in cents)
+            edge = opp.get("edge", 0.05)
+            price_cents = max(1, min(99, int(50 * (1 + edge))))  # rough mid + edge
+            count = max(1, int(size * 100 / max(price_cents, 1)))
+
+            intent = OrderIntent(
+                ticker=opp["market"],
+                side="yes",
+                action="buy",
+                price_cents=price_cents,
+                count=count,
+                order_type="limit",
+                time_in_force="ioc",
+                source="correlation_bot",
+            )
+
             async def _submit():
-                return await executor.execute_trade(
-                    symbol=opp["market"],
-                    side="buy",
-                    amount=size,
-                    order_type="market",
-                    metadata={"outcome": "yes", "source": "correlation_bot"},
-                )
+                return await route_order_async(intent)
 
             try:
-                import concurrent.futures
                 loop = asyncio.get_running_loop()
                 future = asyncio.run_coroutine_threadsafe(_submit(), loop)
                 result = future.result(timeout=10)
             except RuntimeError:
                 result = asyncio.run(_submit())
 
-            if result.success:
+            if result.status.startswith("filled"):
                 logger.info(
-                    "[LIVE] Executed %s size=%.2f order_id=%s",
-                    opp["market"], size, result.tx_id,
+                    "[LIVE] Executed %s size=%.2f status=%s",
+                    opp["market"], size, result.status,
                 )
                 self._stats.trades_executed += 1
                 return True
             else:
-                logger.warning("[LIVE] Order failed for %s: %s", opp["market"], result.error)
+                logger.warning("[LIVE] Order failed for %s: %s", opp["market"], result.reason)
                 self._stats.errors += 1
                 return False
 

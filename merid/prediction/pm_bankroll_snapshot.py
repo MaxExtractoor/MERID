@@ -80,24 +80,41 @@ def build_agent_grid_bankroll_overlay(
     _pm_src = out.get("pm_signal_source")
     _eq_usd = 0.0
     _peak_usd = 0.0
+    _live_usd = 0.0
     _risk_st = None
     try:
-        from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+        # PM CYCLE WIRING: Use unified v2 bankroll service as primary source
+        from merid.event_venues.kalshi import get_equity_for_risk_calc_sync, get_summary_sync
+        _effective_usd = get_equity_for_risk_calc_sync()
+        _summary = get_summary_sync()
+        _eq_usd = float(_effective_usd) if _effective_usd else 0.0
+        _live_usd = float(_summary.equity_usd) if _summary and _summary.equity_usd else 0.0
 
-        _risk_st = get_kalshi_risk().state
-        _eq_usd = float(_risk_st.current_equity_usd or 0.0)
-        _peak_usd = float(_risk_st.peak_equity_usd or 0.0)
+        # Get peak/drawdown from risk manager for reporting (not for sizing)
+        try:
+            from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+            _risk_st = get_kalshi_risk().state
+            _peak_usd = float(_risk_st.peak_equity_usd or 0.0)
+        except Exception:
+            pass
+
         if _eq_usd > 0:
             _bal_cents = int(_eq_usd * 100)
             out["balance_cents"] = _bal_cents
             out["total_value_cents"] = _bal_cents + int(out.get("portfolio_cents") or 0)
+            # Use live balance for peak/drawdown calculation if peak not tracked separately
             if _peak_usd > 0 and _eq_usd <= _peak_usd:
                 out["peak_balance_cents"] = int(_peak_usd * 100)
                 out["drawdown_pct"] = round((1.0 - _eq_usd / _peak_usd) * 100.0, 2)
+            elif _live_usd > 0 and _eq_usd <= _live_usd:
+                # Fallback: use live balance as peak if no tracked peak
+                out["peak_balance_cents"] = int(_live_usd * 100)
+                out["drawdown_pct"] = round((1.0 - _eq_usd / _live_usd) * 100.0, 2)
             out["pm_bankroll_equity_usd"] = round(_eq_usd, 2)
-            out["pm_bankroll_source"] = "kalshi_risk_manager"
+            out["pm_bankroll_live_usd"] = round(_live_usd, 2)
+            out["pm_bankroll_source"] = "unified_bankroll_service"
     except Exception as exc:
-        logger.debug("kalshi_risk overlay: %s", exc)
+        logger.debug("unified_bankroll overlay: %s", exc)
 
     # Kelly / risk-per-trade: CT TraderConfig env (Kelly caps). When AgentGrid owns PM,
     # headline ``initial_bankroll_cents`` must reflect live equity — not KALSHI_TRADER_BANKROLL placeholder.
@@ -117,19 +134,21 @@ def build_agent_grid_bankroll_overlay(
     except Exception as exc:
         logger.debug("TraderConfig overlay: %s", exc)
 
-    if _pm_src == "agent_grid" and _eq_usd > 0:
-        _bc = int(_eq_usd * 100)
-        _cfg = out.get("config") or {}
-        if not isinstance(_cfg, dict):
-            _cfg = {}
-        _cfg["initial_bankroll_cents"] = _bc
-        _cfg["pm_reference_bankroll"] = "kalshi_risk_manager"
-        out["config"] = _cfg
+    if _pm_src == "agent_grid":
+        if _eq_usd > 0:
+            _bc = int(_eq_usd * 100)
+            _cfg = out.get("config") or {}
+            if not isinstance(_cfg, dict):
+                _cfg = {}
+            _cfg["initial_bankroll_cents"] = _bc
+            _cfg["pm_reference_bankroll"] = "unified_bankroll_service"
+            out["config"] = _cfg
+        else:
+            out["pm_equity_pending_sync"] = True
+        # Get PnL from risk manager if available (regardless of bankroll state)
         if _risk_st is not None:
             out["total_pnl_cents"] = int(round(_risk_st.daily_pnl_usd * 100))
             out["total_fees_cents"] = int(round(_risk_st.daily_fees_usd * 100))
-    elif _pm_src == "agent_grid" and _eq_usd <= 0:
-        out["pm_equity_pending_sync"] = True
 
     if ct_err and not grid_on:
         out.setdefault("reason", ct_err)

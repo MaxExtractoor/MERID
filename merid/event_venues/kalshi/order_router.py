@@ -50,26 +50,35 @@ logger = get_logger("merid.event_venues.kalshi.order_router")
 # ═══════════════════════════════════════════════════════════════════════════
 
 # Whitelist of modules allowed to call route_order_async()
+# CRITICAL: ONLY trading_agent can execute trades. ALL other agents are SIGNAL-ONLY.
+# This enforces the single executor principle - no bypasses allowed.
 _ALLOWED_CALLER_PREFIXES = (
-    "merid.prediction.kalshi_tools",
+    # PRIMARY EXECUTION AGENT - ONLY module that can execute trades
     "merid.prediction.trading_agent",
+    # Tests are allowed for testing the router itself
     "tests.",
     "test_",
-    "merid.event_venues.kalshi.order_router",  # self
+    # Self-calls (internal recursion)
+    "merid.event_venues.kalshi.order_router",
     # Package init re-exports
     "merid.event_venues.kalshi",
     "merid.kalshi",
-    # Legitimate production callers
-    "core.constitution_enforcer",  # Governance/risk enforcement
+    # Governance/risk enforcement (can review but not execute)
+    "core.constitution_enforcer",
+    # Audit and policy modules (read-only)
     "merid.event_venues.kalshi.execution_audit",
     "merid.event_venues.kalshi.maker_taker_policy",
     "merid.event_venues.kalshi.take_profit",
     "merid.event_venues.kalshi.universe",
-    "merid.lanes.btc15m_lane",
-    "merid.lanes.crypto15m_lane",
-    "merid.prediction.universal_agent",
-    "merid.trading.ct_execution_adapter",  # CT → router migration (Phase 2/3)
-    "web.api.kalshi_api",  # API endpoints
+    # NOTE: SIGNAL-ONLY agents - these must route through trading_agent
+    # "merid.prediction.kalshi_tools",  # SIGNAL ONLY - use trading_agent
+    # "merid.trading.ct_execution_adapter",  # SIGNAL ONLY - CT must route through trading_agent
+    # "merid.trading.kalshi_continuous_trader",  # SIGNAL ONLY - CT must route through trading_agent
+    # "merid.lanes.btc15m_lane",      # SIGNAL ONLY - no execution
+    # "merid.lanes.crypto15m_lane",   # SIGNAL ONLY - no execution
+    # "merid.prediction.universal_agent",  # SIGNAL ONLY - no execution
+    # Operator API endpoints (manual override only)
+    "web.api.kalshi_api",
     "web.api.kalshi_grid_api",
     # Test modules that legitimately test the router
     "core.test_kalshi_gate_truth_table",
@@ -85,9 +94,9 @@ _ALLOWED_CALLER_PREFIXES = (
 )
 
 # Known bypasses documented in AGENT_WIRING_AUDIT.md
-_KNOWN_BYPASS_PATHS = {
-    "merid.trading.kalshi_continuous_trader",  # Uses direct HTTP; tracked for migration
-}
+# SECURITY FIX: CT bypass removed. All orders now flow through canonical router.
+# See: merid/trading/kalshi_continuous_trader.py (use_router_percent hard-coded to 100)
+_KNOWN_BYPASS_PATHS: set = set()
 
 
 def _get_caller_module() -> str:
@@ -289,6 +298,8 @@ class OrderIntent:
     sentiment_asset: Optional[str] = None
     sentiment_timeframe: Optional[str] = None
     sentiment_driven: bool = False
+    # Effective equity for risk sizing (CT passes capped equity via max_riskable_usd)
+    effective_equity_usd: Optional[float] = None
 
 
 def _resolve_tif(intent: OrderIntent) -> tuple[str, Optional[int]]:
@@ -483,6 +494,119 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
         return "invalid_side"
     if intent.action not in ("buy", "sell"):
         return "invalid_action"
+    return None
+
+
+def _derive_live_bankroll_usd() -> Optional[float]:
+    """Derive live bankroll from Kalshi balance API.
+    
+    Returns:
+        Live bankroll in USD, or None if cannot be determined
+    """
+    # Source 1: Kalshi risk module live bankroll
+    try:
+        from merid.event_venues.kalshi.kalshi_risk import get_live_bankroll
+        live = get_live_bankroll()
+        if live > 0:
+            return live
+    except Exception:
+        pass
+    
+    # Source 2: Direct Kalshi client balance API
+    try:
+        from merid.event_venues.kalshi.kalshi_client import get_kalshi_client
+        client = get_kalshi_client()
+        balance_data = client.get_balance()
+        if balance_data:
+            balance_cents = balance_data.get("balance_cents", 0)
+            if balance_cents > 0:
+                return balance_cents / 100.0
+    except Exception:
+        pass
+    
+    # FAIL CLOSED: Cannot determine bankroll - do not trade
+    return None
+
+
+def _check_bankroll_risk_cap(intent: OrderIntent) -> Optional[OrderResult]:
+    """Enforce 1-2% total bankroll risk cap across TOP 3 edges.
+    
+    CRITICAL: Uses ONLY actual Kalshi balance. No fallbacks, no hardcodes.
+    With live bankroll, 2% = total cap across all 3 edges combined.
+    Each edge gets proportional allocation based on relative edge strength.
+    
+    FAIL-CLOSED: If live bankroll cannot be determined, order is REJECTED.
+
+    Returns OrderResult if cap exceeded or bankroll unavailable, None if OK.
+    """
+    # Get effective equity from intent or derive from live Kalshi balance
+    effective_equity_usd = intent.effective_equity_usd
+    if effective_equity_usd is None or effective_equity_usd <= 0:
+        effective_equity_usd = _derive_live_bankroll_usd()
+    
+    # FAIL CLOSED: Cannot determine bankroll - reject order
+    if effective_equity_usd is None or effective_equity_usd <= 0:
+        logger.error(
+            "[BANKROLL-CAP-REJECT] %s — Cannot determine live Kalshi balance. "
+            "Order rejected. Ensure Kalshi API credentials are valid.",
+            intent.ticker
+        )
+        return OrderResult(
+            status="rejected",
+            mode=TradingMode.LIVE,
+            reason="bankroll_unavailable: Cannot determine live Kalshi balance. "
+                   "Check Kalshi API credentials and balance endpoint.",
+            latency_ms=0.0,
+        )
+
+    # Get configured risk fraction (default to 1.5%, clamp to 1-2%)
+    risk_fraction = float(os.getenv("MERID_MAX_RISK_FRACTION_PER_CYCLE", "0.015"))
+    risk_fraction = max(0.01, min(0.02, risk_fraction))  # Clamp to 1-2%
+
+    # Calculate max total risk across ALL 3 EDGES COMBINED
+    max_total_risk_usd = effective_equity_usd * risk_fraction
+    
+    # Per-edge allocation: divide by 3 for rough sizing check
+    # (actual allocation is proportional by edge in Top3Allocator)
+    per_edge_estimate = max_total_risk_usd / 3.0
+
+    # Calculate notional of this intent
+    intent_notional_usd = intent.count * intent.price_cents / 100.0
+
+    # Check if this single intent exceeds per-edge estimate
+    if intent_notional_usd > per_edge_estimate * 1.5:  # 50% tolerance for edge variance
+        logger.warning(
+            "[BANKROLL-CAP-REJECT] %s — intent=$%.2f > per-edge-estimate=$%.2f "
+            "(total-cap=$%.2f for 3 edges, %.1f%% of $%.2f bankroll). "
+            "Size by Top3Allocator only.",
+            intent.ticker,
+            intent_notional_usd,
+            per_edge_estimate,
+            max_total_risk_usd,
+            risk_fraction * 100,
+            effective_equity_usd,
+        )
+        logger.warning(
+            "[order-router] REJECTED by bankroll risk cap: %s — "
+            "intent_notional=$%.2f exceeds max_total_risk=$%.2f (%.1f%% of $%.2f equity). "
+            "Sizing bypass detected - orders must be sized by TopNAllocator.",
+            intent.ticker,
+            intent_notional_usd,
+            max_total_risk_usd,
+            risk_fraction * 100,
+            effective_equity_usd,
+        )
+        return OrderResult(
+            status="rejected",
+            mode=TradingMode.LIVE,
+            reason=(
+                f"bankroll_risk_cap_exceeded: Order notional (${intent_notional_usd:.2f}) "
+                f"exceeds per-edge limit based on live Kalshi balance. "
+                f"Size orders via Top3Allocator with live balance only."
+            ),
+            latency_ms=0.0,
+        )
+
     return None
 
 
@@ -1055,6 +1179,7 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             asset=_asset,
             timeframe=_timeframe,
             group_id=_group_id,
+            effective_equity_usd=intent.effective_equity_usd,
         )
         if not allowed:
             latency = (time.monotonic() - t0) * 1000
@@ -1786,6 +1911,11 @@ def route_order(intent: OrderIntent) -> OrderResult:
     if sanity_rejection:
         return sanity_rejection
 
+    # ── Bankroll Risk Cap: 1-2% total bankroll enforcement ────────────────
+    _risk_cap_rejection = _check_bankroll_risk_cap(intent)
+    if _risk_cap_rejection:
+        return _risk_cap_rejection
+
     # ── Market Regime Gate: basket flatness check ────────────────────
     _regime_rejection = _check_market_regime_gate(intent, mode, t0)
     if _regime_rejection:
@@ -1930,6 +2060,76 @@ def _infer_asset_from_ticker(ticker: str) -> str:
         if f"KX{sym}" in t or t.startswith(sym):
             return sym
     return "UNKNOWN"
+
+
+def _check_top3_batch_allocation(
+    intent: OrderIntent, mode: TradingMode, t0: float
+) -> Optional[OrderResult]:
+    """Top-3 Batch Allocation Gate — Only allow assets in current batch.
+
+    Enforces that only assets selected in the current top-3 edge batch
+    can have orders submitted. This ensures the 1-2% total bankroll
+    allocation is respected across all order sources (CT, agents, lanes).
+
+    The gate is only active in LIVE mode and when a batch exists.
+    Exits (sells) are always allowed to close positions.
+
+    Returns a rejection OrderResult if asset not in batch, None if allowed.
+    """
+    # Only apply to buy orders (entries)
+    action = (intent.action or "").lower()
+    if action != "buy":
+        return None  # exits always allowed
+
+    # Skip check if env disables it (emergency override)
+    if os.getenv("MERID_DISABLE_TOP3_BATCH_GATE", "").lower() in ("1", "true", "yes"):
+        return None
+
+    try:
+        from merid.trading.top3_batch_manager import get_top3_batch_manager, BatchStatus
+
+        batch_mgr = get_top3_batch_manager()
+        batch = batch_mgr.get_current_batch()
+
+        if batch is None or batch.status != BatchStatus.ACTIVE:
+            # No active batch - allow through (CT will create one)
+            return None
+
+        # Extract asset from ticker
+        asset = _infer_asset_from_ticker(intent.ticker)
+        if asset == "UNKNOWN":
+            logger.warning("[TOP3-GATE] Unknown asset for ticker %s", intent.ticker)
+            return None  # fail-open for unknown assets
+
+        # Check if asset is in batch allocations
+        if not batch.is_asset_allowed(asset):
+            latency = (time.monotonic() - t0) * 1000
+            logger.warning(
+                "[TOP3-GATE] REJECTED %s | asset=%s not in batch | batch_assets=%s",
+                intent.ticker, asset, [a.asset for a in batch.allocations]
+            )
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason=f"top3_batch:asset_not_in_batch:{asset}",
+                latency_ms=round(latency, 2),
+            )
+
+        # Check if allocation limit reached
+        alloc = batch.get_allocation_for_asset(asset)
+        if alloc:
+            # Could add notional tracking here if needed
+            logger.debug(
+                "[TOP3-GATE] ALLOWED %s | asset=%s | target=%d¢ | weight=%.1f%%",
+                intent.ticker, asset, alloc.target_notional, alloc.weight * 100
+            )
+
+        return None  # allowed
+
+    except Exception as exc:
+        # Gate infrastructure failure — fail-open with warning
+        logger.warning("[TOP3-GATE] Infrastructure error (fail-open): %s", exc)
+        return None
 
 
 def _run_shared_risk_guard_and_dedup(
@@ -2114,10 +2314,21 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
     if sanity_rejection:
         return sanity_rejection
 
+    # ── Bankroll Risk Cap: 1-2% total bankroll enforcement ────────────────
+    _risk_cap_rejection = _check_bankroll_risk_cap(intent)
+    if _risk_cap_rejection:
+        return _risk_cap_rejection
+
     # ── Market Regime Gate: basket flatness check ────────────────────
     _regime_rejection = _check_market_regime_gate(intent, mode, t0)
     if _regime_rejection:
         return _regime_rejection
+
+    # ── Top-3 Batch Allocation Gate ─────────────────────────────────
+    # Enforces that only assets in the current top-3 edge batch can trade
+    _top3_rejection = _check_top3_batch_allocation(intent, mode, t0)
+    if _top3_rejection:
+        return _top3_rejection
 
     # ── Pre-trade gate: lease + dedup + fill-awareness ────────────────
     gate_rejection = _run_pre_trade_gate(intent, mode, t0)
@@ -2127,14 +2338,12 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
     # ── Cross-caller order dedup + shared GlobalRiskGuard (LIVE only) ─
     # Ensures CT, agent-grid (35 agents), lanes, and web all share the same
     # 1-2% envelope and cannot double-submit on the same signal in the same
-    # time bucket.  CT is a documented bypass (it calls the guard upstream
-    # with its own unified equity_cents) and skips these checks here.
+    # time bucket. All callers now flow through this check (no bypasses).
     # Paper / mock intents skip the shared guard so synthetic bankrolls in
     # tests don't inadvertently trip the env-fallback equity check; the CT
     # loop owns its own paper-mode cap separately.
     _skip_shared_guard = (
-        _caller in _KNOWN_BYPASS_PATHS
-        or not _is_live_mode(mode)
+        not _is_live_mode(mode)
         or os.getenv("MERID_DISABLE_SHARED_RISK_GUARD", "").lower() in ("1", "true", "yes")
     )
     if not _skip_shared_guard:

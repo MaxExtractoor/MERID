@@ -1,60 +1,71 @@
+import os
 from dataclasses import dataclass, field
 from typing import Dict, Tuple
 
 from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS
 
 
+def _env_float(env_key: str, default: float) -> float:
+    return float(os.getenv(env_key, str(default)))
+
+
+def _env_int(env_key: str, default: int) -> int:
+    return int(os.getenv(env_key, str(default)))
+
+
 @dataclass
 class CryptoAlertConfig:
-    # --- Volatility thresholds (spread/depth ratio, 0–1) ---
+    # --- Volatility thresholds (ENV-DRIVEN: spread/depth ratio, 0–1) ---
     # symbol → frequency → threshold; "_default" used as fallback
     VOLATILITY_THRESHOLDS: Dict[str, Dict[str, float]] = field(default_factory=lambda: {
-        "BTC":  {"15m": 0.15, "hourly": 0.20, "daily": 0.30, "_default": 0.25},
-        "ETH":  {"15m": 0.18, "hourly": 0.22, "daily": 0.32, "_default": 0.27},
-        "SOL":  {"15m": 0.22, "hourly": 0.28, "daily": 0.38, "_default": 0.30},
-        "XRP":  {"15m": 0.20, "hourly": 0.25, "daily": 0.35, "_default": 0.28},
-        "DOGE": {"15m": 0.25, "hourly": 0.30, "daily": 0.40, "_default": 0.33},
-        "_default": {"_default": 0.25},
+        "BTC":  {"15m": _env_float("MERID_VOL_THRESH_BTC_15M", 0.15), "hourly": _env_float("MERID_VOL_THRESH_BTC_H", 0.20), "daily": _env_float("MERID_VOL_THRESH_BTC_D", 0.30), "_default": _env_float("MERID_VOL_THRESH_BTC", 0.25)},
+        "ETH":  {"15m": _env_float("MERID_VOL_THRESH_ETH_15M", 0.18), "hourly": _env_float("MERID_VOL_THRESH_ETH_H", 0.22), "daily": _env_float("MERID_VOL_THRESH_ETH_D", 0.32), "_default": _env_float("MERID_VOL_THRESH_ETH", 0.27)},
+        "SOL":  {"15m": _env_float("MERID_VOL_THRESH_SOL_15M", 0.22), "hourly": _env_float("MERID_VOL_THRESH_SOL_H", 0.28), "daily": _env_float("MERID_VOL_THRESH_SOL_D", 0.38), "_default": _env_float("MERID_VOL_THRESH_SOL", 0.30)},
+        "XRP":  {"15m": _env_float("MERID_VOL_THRESH_XRP_15M", 0.20), "hourly": _env_float("MERID_VOL_THRESH_XRP_H", 0.25), "daily": _env_float("MERID_VOL_THRESH_XRP_D", 0.35), "_default": _env_float("MERID_VOL_THRESH_XRP", 0.28)},
+        "DOGE": {"15m": _env_float("MERID_VOL_THRESH_DOGE_15M", 0.25), "hourly": _env_float("MERID_VOL_THRESH_DOGE_H", 0.30), "daily": _env_float("MERID_VOL_THRESH_DOGE_D", 0.40), "_default": _env_float("MERID_VOL_THRESH_DOGE", 0.33)},
+        "_default": {"_default": _env_float("MERID_VOL_THRESH_DEFAULT", 0.25)},
     })
 
-    # --- High-volume thresholds (contracts per 24h) ---
+    # --- High-volume thresholds (ENV-DRIVEN: contracts per 24h) ---
     HIGH_VOLUME_THRESHOLDS: Dict[str, Dict[str, int]] = field(default_factory=lambda: {
-        "BTC":  {"15m": 500, "hourly": 1000, "daily": 5000, "_default": 2000},
-        "ETH":  {"15m": 300, "hourly":  800, "daily": 3000, "_default": 1500},
-        "SOL":  {"15m": 200, "hourly":  500, "daily": 2000, "_default": 1000},
-        "XRP":  {"15m": 200, "hourly":  500, "daily": 2000, "_default": 1000},
-        "DOGE": {"15m": 150, "hourly":  400, "daily": 1500, "_default":  800},
-        "_default": {"_default": 1000},
+        "BTC":  {"15m": _env_int("MERID_VOL_BTC_15M", 500), "hourly": _env_int("MERID_VOL_BTC_H", 1000), "daily": _env_int("MERID_VOL_BTC_D", 5000), "_default": _env_int("MERID_VOL_BTC", 2000)},
+        "ETH":  {"15m": _env_int("MERID_VOL_ETH_15M", 300), "hourly": _env_int("MERID_VOL_ETH_H", 800), "daily": _env_int("MERID_VOL_ETH_D", 3000), "_default": _env_int("MERID_VOL_ETH", 1500)},
+        "SOL":  {"15m": _env_int("MERID_VOL_SOL_15M", 200), "hourly": _env_int("MERID_VOL_SOL_H", 500), "daily": _env_int("MERID_VOL_SOL_D", 2000), "_default": _env_int("MERID_VOL_SOL", 1000)},
+        "XRP":  {"15m": _env_int("MERID_VOL_XRP_15M", 200), "hourly": _env_int("MERID_VOL_XRP_H", 500), "daily": _env_int("MERID_VOL_XRP_D", 2000), "_default": _env_int("MERID_VOL_XRP", 1000)},
+        "DOGE": {"15m": _env_int("MERID_VOL_DOGE_15M", 150), "hourly": _env_int("MERID_VOL_DOGE_H", 400), "daily": _env_int("MERID_VOL_DOGE_D", 1500), "_default": _env_int("MERID_VOL_DOGE", 800)},
+        "_default": {"_default": _env_int("MERID_VOL_DEFAULT", 1000)},
     })
 
-    # --- 50/50 band per symbol (low, high) ---
+    # --- 50/50 band per symbol (ENV-DRIVEN: low, high) ---
     FIFTY_FIFTY_BAND: Dict[str, Tuple[float, float]] = field(default_factory=lambda: {
-        "BTC": (0.45, 0.55), "ETH": (0.45, 0.55),
-        "SOL": (0.45, 0.55), "XRP": (0.45, 0.55),
-        "DOGE": (0.45, 0.55),
+        "BTC": (_env_float("MERID_50_50_BTC_LOW", 0.45), _env_float("MERID_50_50_BTC_HIGH", 0.55)),
+        "ETH": (_env_float("MERID_50_50_ETH_LOW", 0.45), _env_float("MERID_50_50_ETH_HIGH", 0.55)),
+        "SOL": (_env_float("MERID_50_50_SOL_LOW", 0.45), _env_float("MERID_50_50_SOL_HIGH", 0.55)),
+        "XRP": (_env_float("MERID_50_50_XRP_LOW", 0.45), _env_float("MERID_50_50_XRP_HIGH", 0.55)),
+        "DOGE": (_env_float("MERID_50_50_DOGE_LOW", 0.45), _env_float("MERID_50_50_DOGE_HIGH", 0.55)),
     })
 
-    # --- Minimum volume for FIFTY_FIFTY tag ---
+    # --- Minimum volume for FIFTY_FIFTY tag (ENV-DRIVEN) ---
     MIN_VOLUME_FOR_FIFTY_FIFTY: Dict[str, Dict[str, int]] = field(default_factory=lambda: {
-        "BTC":  {"15m": 100, "hourly": 200, "daily": 500, "_default": 200},
-        "ETH":  {"15m":  80, "hourly": 150, "daily": 400, "_default": 150},
-        "SOL":  {"15m":  50, "hourly": 100, "daily": 300, "_default": 100},
-        "XRP":  {"15m":  50, "hourly": 100, "daily": 300, "_default": 100},
-        "DOGE": {"15m":  40, "hourly":  80, "daily": 200, "_default":  80},
-        "_default": {"_default": 100},
+        "BTC":  {"15m": _env_int("MERID_MINVOL_BTC_15M", 100), "hourly": _env_int("MERID_MINVOL_BTC_H", 200), "daily": _env_int("MERID_MINVOL_BTC_D", 500), "_default": _env_int("MERID_MINVOL_BTC", 200)},
+        "ETH":  {"15m": _env_int("MERID_MINVOL_ETH_15M", 80), "hourly": _env_int("MERID_MINVOL_ETH_H", 150), "daily": _env_int("MERID_MINVOL_ETH_D", 400), "_default": _env_int("MERID_MINVOL_ETH", 150)},
+        "SOL":  {"15m": _env_int("MERID_MINVOL_SOL_15M", 50), "hourly": _env_int("MERID_MINVOL_SOL_H", 100), "daily": _env_int("MERID_MINVOL_SOL_D", 300), "_default": _env_int("MERID_MINVOL_SOL", 100)},
+        "XRP":  {"15m": _env_int("MERID_MINVOL_XRP_15M", 50), "hourly": _env_int("MERID_MINVOL_XRP_H", 100), "daily": _env_int("MERID_MINVOL_XRP_D", 300), "_default": _env_int("MERID_MINVOL_XRP", 100)},
+        "DOGE": {"15m": _env_int("MERID_MINVOL_DOGE_15M", 40), "hourly": _env_int("MERID_MINVOL_DOGE_H", 80), "daily": _env_int("MERID_MINVOL_DOGE_D", 200), "_default": _env_int("MERID_MINVOL_DOGE", 80)},
+        "_default": {"_default": _env_int("MERID_MINVOL_DEFAULT", 100)},
     })
 
-    # --- Timing windows ---
-    NEW_MARKET_WINDOW_MINUTES: int = 60
-    CLOSING_SOON_WINDOW_MINUTES: int = 10
-    META_REFRESH_INTERVAL_SECONDS: int = 300
-    TICK_INTERVAL_SECONDS: int = 30
+    # --- Timing windows (ENV-DRIVEN) ---
+    NEW_MARKET_WINDOW_MINUTES: int = field(default_factory=lambda: _env_int("MERID_NEW_MARKET_WINDOW_MIN", 60))
+    CLOSING_SOON_WINDOW_MINUTES: int = field(default_factory=lambda: _env_int("MERID_CLOSING_SOON_WINDOW_MIN", 10))
+    META_REFRESH_INTERVAL_SECONDS: int = field(default_factory=lambda: _env_int("MERID_META_REFRESH_SEC", 300))
+    TICK_INTERVAL_SECONDS: int = field(default_factory=lambda: _env_int("MERID_TICK_INTERVAL_SEC", 30))
 
-    # --- Alert limits ---
-    TOP_N_PER_TAG_PER_SYMBOL: int = 5
-    RISK_ALERT_COOLDOWN_MINUTES: int = 5
-    MARKET_SELECTION_COOLDOWN_MINUTES: int = 10
-    TREND_VOLUME_MULTIPLIER: float = 1.5
+    # --- Alert limits (ENV-DRIVEN) ---
+    TOP_N_PER_TAG_PER_SYMBOL: int = field(default_factory=lambda: _env_int("MERID_TOP_N_PER_TAG", 5))
+    RISK_ALERT_COOLDOWN_MINUTES: int = field(default_factory=lambda: _env_int("MERID_RISK_COOLDOWN_MIN", 5))
+    MARKET_SELECTION_COOLDOWN_MINUTES: int = field(default_factory=lambda: _env_int("MERID_MARKET_COOLDOWN_MIN", 10))
+    TREND_VOLUME_MULTIPLIER: float = field(default_factory=lambda: _env_float("MERID_TREND_VOL_MULT", 1.5))
 
     # --- Feature flags ---
     ENABLE_LOGGING: bool = True

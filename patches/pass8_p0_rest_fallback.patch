@@ -1,0 +1,54 @@
+# Pass 8 P0 Patch: Remove REST fallback in place_order - FAIL CLOSED
+# File: web/api/kalshi_api.py
+# Location: place_order handler around line 2772-2900
+
+--- a/web/api/kalshi_api.py
++++ b/web/api/kalshi_api.py
+@@ -2890,15 +2890,35 @@
+     except ImportError as _import_err:
+-        # Fallback: try direct REST if order_router unavailable
+-        logger.warning(f"Order router unavailable, using REST fallback: {_import_err}")
+-        rest = _get_rest_client()
+-        if mode_value == "live":
+-            result = rest.create_order(
+-                ticker=ticker,
+-                side=side,
+-                action=action,
+-                count=count,
+-                price=price_cents,
+-            )
+-        else:
+-            # Paper: simulate
+-            result = {"order_id": f"paper-{uuid.uuid4().hex[:12]}", ...}
++        # PASS 8 P0: FAIL CLOSED in LIVE/PAPER - no fallback allowed
++        # The REST fallback bypasses order_router, violating single-executor contract
++        logger.error(
++            f"[PASS8_GUARD] Order router import failed in {mode_value} mode: {_import_err}. "
++            "REST fallback blocked - trading halted for safety."
++        )
++
++        if mode_value in ("live", "paper"):
++            # Trigger kill-switch alert
++            try:
++                from merid.risk.kill_switches import get_kill_switch
++                ks = get_kill_switch()
++                ks.trigger(
++                    reason="Executor contract violation: order_router unavailable",
++                    severity="critical",
++                    source="kalshi_api.place_order"
++                )
++            except Exception as _ks_err:
++                logger.error(f"Failed to trigger kill-switch: {_ks_err}")
++
++            raise HTTPException(
++                status_code=503,
++                detail="Trading system degraded. Order router unavailable. "
++                "All trading halted. Contact operations immediately."
++            )
++        else:
++            # SIM/MOCK only: Allow fallback for development
++            logger.warning("SIM/MOCK mode: Using REST fallback for development")
++            rest = _get_rest_client()
++            result = rest.create_order(...)
+ 
+     return {"status": result.status, ...}

@@ -72,6 +72,7 @@ class KalshiFill:
     yes_price_dollars: Optional[Decimal] = None  # Price if side=yes
     no_price_dollars: Optional[Decimal] = None  # Price if side=no
     fee_cost: Decimal = Decimal("0")  # Fee paid
+    proceeds_dollars: Optional[Decimal] = None  # Net proceeds (price * count - fees)
     client_order_id: Optional[str] = None  # Our idempotency key
     subaccount_number: Optional[int] = None
     created_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -244,7 +245,334 @@ class KalshiFillsLedger:
         # Load persisted fills on startup
         self._loaded_count = 0
         
+        # DEFENSIVE-FIX-001: Circuit breaker and error tracking
+        self._schema_error_count: int = 0
+        self._schema_error_window_start: Optional[datetime] = None
+        self._circuit_open: bool = False
+        self._circuit_reason: Optional[str] = None
+        self._circuit_opened_at: Optional[datetime] = None
+        self._fills_dropped_count: int = 0
+        
+        # DEFENSIVE-FIX-002: Rate-limited logging state
+        self._last_schema_error_log: Optional[datetime] = None
+        self._schema_error_log_count: int = 0
+        
+        # DEFENSIVE-FIX-003: Dead Letter Queue (DLQ) for failed fills
+        self._dlq_db_path = "data/kalshi_fills_dlq.db"
+        self._dlq_buffer: List[Dict[str, Any]] = []
+        self._dlq_buffer_max = 50  # Flush buffer at this size
+        
         logger.info("KalshiFillsLedger initialized")
+    
+    def _classify_error(self, error: Exception) -> tuple[str, bool]:
+        """Classify error as permanent (no retry) or transient (retry ok).
+        
+        Returns:
+            Tuple of (error_category: str, is_permanent: bool)
+        """
+        error_str = str(error).lower()
+        error_type = type(error).__name__
+        
+        # Permanent errors - retrying will never succeed
+        permanent_markers = [
+            "no column named",
+            "table .* has no column",
+            "constraint failed",
+            "foreign key constraint",
+            "datatype mismatch",
+            "syntax error",
+            "table not found",
+            "no such table",
+        ]
+        for marker in permanent_markers:
+            if marker in error_str:
+                return ("schema_permanent", True)
+        
+        # Connection errors - may succeed on retry
+        transient_markers = [
+            "database is locked",
+            "busy",
+            "timeout",
+            "unable to open",
+            "disk i/o error",
+            "connection",
+        ]
+        for marker in transient_markers:
+            if marker in error_str:
+                return ("transient", False)
+        
+        # Default: unknown errors treated as transient (safer to retry once)
+        return ("unknown", False)
+    
+    def _should_log_schema_error(self) -> bool:
+        """Rate-limit schema error logging to prevent log spam."""
+        now = datetime.now(timezone.utc)
+        
+        if self._last_schema_error_log is None:
+            self._last_schema_error_log = now
+            self._schema_error_log_count = 1
+            return True
+        
+        # Reset counter every 60 seconds
+        if (now - self._last_schema_error_log).total_seconds() > 60:
+            self._last_schema_error_log = now
+            self._schema_error_log_count = 0
+            return True
+        
+        # Allow first 5 errors per minute, then suppress
+        self._schema_error_log_count += 1
+        return self._schema_error_log_count <= 5
+    
+    def _check_circuit_breaker(self, error: Exception) -> bool:
+        """Check and update circuit breaker state. Returns True if circuit should open."""
+        category, is_permanent = self._classify_error(error)
+        
+        if not is_permanent:
+            return False
+        
+        now = datetime.now(timezone.utc)
+        
+        # Initialize window if needed
+        if self._schema_error_window_start is None:
+            self._schema_error_window_start = now
+            self._schema_error_count = 1
+            return False
+        
+        # Reset window after 60 seconds
+        if (now - self._schema_error_window_start).total_seconds() > 60:
+            self._schema_error_window_start = now
+            self._schema_error_count = 1
+            return False
+        
+        # Increment error count
+        self._schema_error_count += 1
+        
+        # Open circuit after 10 permanent errors in 60 seconds
+        if self._schema_error_count >= 10 and not self._circuit_open:
+            self._circuit_open = True
+            self._circuit_reason = f"{category}: {str(error)[:100]}"
+            self._circuit_opened_at = now
+            logger.error(
+                "CIRCUIT BREAKER OPEN: kalshi_fills persistence halted due to repeated errors. "
+                "Reason: %s. Fills will be queued to DLQ until circuit resets.",
+                self._circuit_reason
+            )
+            return True
+        
+        return False
+    
+    async def _write_to_dlq(self, fill: KalshiFill, error: Exception, category: str) -> None:
+        """Write failed fill to Dead Letter Queue for later replay."""
+        try:
+            import aiosqlite
+            
+            record = {
+                "fill_id": fill.fill_id,
+                "error_type": type(error).__name__,
+                "error_category": category,
+                "error_message": str(error)[:500],
+                "market_ticker": fill.market_ticker,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "fill_json": json.dumps(fill.to_dict()) if hasattr(fill, 'to_dict') else str(fill),
+            }
+            
+            self._dlq_buffer.append(record)
+            
+            # Flush buffer if full
+            if len(self._dlq_buffer) >= self._dlq_buffer_max:
+                await self._flush_dlq_buffer()
+                
+        except Exception as dlq_error:
+            # Last resort - log but don't fail
+            logger.error(f"Failed to write to DLQ: {dlq_error} (original error: {error})")
+    
+    async def _flush_dlq_buffer(self) -> None:
+        """Flush buffered DLQ records to SQLite."""
+        if not self._dlq_buffer:
+            return
+        
+        try:
+            import aiosqlite
+            import os
+            
+            os.makedirs(os.path.dirname(self._dlq_db_path) if os.path.dirname(self._dlq_db_path) else ".", exist_ok=True)
+            
+            async with aiosqlite.connect(self._dlq_db_path) as db:
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS failed_fills (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        fill_id TEXT,
+                        error_type TEXT,
+                        error_category TEXT,
+                        error_message TEXT,
+                        market_ticker TEXT,
+                        timestamp TEXT,
+                        fill_json TEXT,
+                        replayed INTEGER DEFAULT 0
+                    )
+                """)
+                
+                records = [
+                    (r["fill_id"], r["error_type"], r["error_category"], 
+                     r["error_message"], r["market_ticker"], r["timestamp"], r["fill_json"])
+                    for r in self._dlq_buffer
+                ]
+                
+                await db.executemany("""
+                    INSERT INTO failed_fills 
+                    (fill_id, error_type, error_category, error_message, market_ticker, timestamp, fill_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, records)
+                await db.commit()
+            
+            flushed = len(self._dlq_buffer)
+            self._dlq_buffer.clear()
+            logger.info(f"DLQ flush complete: {flushed} records written")
+            
+        except Exception as e:
+            logger.error(f"Failed to flush DLQ buffer: {e}")
+    
+    async def reset_circuit_breaker(self) -> Dict[str, Any]:
+        """Manual reset of circuit breaker and replay eligible DLQ fills.
+        
+        Call this after schema migration is applied.
+        """
+        was_open = self._circuit_open
+        
+        # Reset circuit state
+        self._circuit_open = False
+        self._circuit_reason = None
+        self._circuit_opened_at = None
+        self._schema_error_count = 0
+        self._schema_error_window_start = None
+        
+        # Flush any pending DLQ records
+        await self._flush_dlq_buffer()
+        
+        # Replay eligible fills
+        replayed = await self._replay_dlq_fills()
+        
+        result = {
+            "circuit_was_open": was_open,
+            "circuit_now_closed": True,
+            "dlq_replayed_count": replayed,
+            "fills_dropped_total": self._fills_dropped_count,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+        if was_open:
+            logger.info(f"Circuit breaker manually reset: {result}")
+        
+        return result
+    
+    async def _replay_dlq_fills(self) -> int:
+        """Replay fills from DLQ that failed due to schema errors."""
+        try:
+            import aiosqlite
+            
+            replayed = 0
+            async with aiosqlite.connect(self._dlq_db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                # Get failed fills that haven't been replayed
+                async with db.execute("""
+                    SELECT * FROM failed_fills 
+                    WHERE replayed = 0
+                    AND error_category = 'schema_permanent'
+                    ORDER BY timestamp ASC
+                    LIMIT 1000
+                """) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    for row in rows:
+                        try:
+                            fill_id = row["fill_id"]
+                            fill_json = row["fill_json"]
+                            
+                            # Parse the fill JSON and re-insert
+                            fill_data = json.loads(fill_json)
+                            
+                            # Check if already in memory
+                            if fill_id in self._fills:
+                                # Already have it - mark as replayed
+                                replayed += 1
+                                continue
+                            
+                            # Re-parse and add to ledger
+                            fill = self._parse_fill(fill_data, "dlq_replay")
+                            if fill and fill.fill_id:
+                                async with self._mutex:
+                                    self._fills[fill.fill_id] = fill
+                                    self._index_fill(fill)
+                                replayed += 1
+                                
+                        except Exception as replay_error:
+                            logger.warning(f"Failed to replay fill {fill_id}: {replay_error}")
+                
+                # Mark replayed records
+                if replayed > 0:
+                    await db.execute("""
+                        UPDATE failed_fills 
+                        SET replayed = 1
+                        WHERE replayed = 0
+                        AND error_category = 'schema_permanent'
+                    """)
+                    await db.commit()
+            
+            if replayed > 0:
+                logger.info(f"Replayed {replayed} fills from DLQ")
+                # Trigger persistence
+                await self._persist()
+            
+            return replayed
+            
+        except Exception as e:
+            logger.error(f"Failed to replay DLQ fills: {e}")
+            return 0
+    
+    async def get_dlq_status(self) -> Dict[str, Any]:
+        """Get status of the dead letter queue."""
+        try:
+            import aiosqlite
+            
+            await self._flush_dlq_buffer()
+            
+            async with aiosqlite.connect(self._dlq_db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                # Count by category
+                async with db.execute("""
+                    SELECT error_category, COUNT(*) as cnt 
+                    FROM failed_fills 
+                    WHERE replayed = 0
+                    GROUP BY error_category
+                """) as cursor:
+                    by_category = {row["error_category"]: row["cnt"] for row in await cursor.fetchall()}
+                
+                # Count replayed
+                async with db.execute("""
+                    SELECT COUNT(*) as cnt FROM failed_fills WHERE replayed = 1
+                """) as cursor:
+                    replayed = (await cursor.fetchone())["cnt"]
+                
+                # Total
+                async with db.execute("""
+                    SELECT COUNT(*) as cnt FROM failed_fills
+                """) as cursor:
+                    total = (await cursor.fetchone())["cnt"]
+                
+                return {
+                    "circuit_open": self._circuit_open,
+                    "circuit_reason": self._circuit_reason,
+                    "pending_by_category": by_category,
+                    "replayed_count": replayed,
+                    "total_count": total,
+                    "buffered_count": len(self._dlq_buffer),
+                    "fills_dropped_count": self._fills_dropped_count,
+                }
+                
+        except Exception as e:
+            return {"error": str(e), "circuit_open": self._circuit_open}
     
     async def start(self) -> int:
         """Bootstrap ledger by loading persisted fills from SQLite.
@@ -854,6 +1182,65 @@ class KalshiFillsLedger:
             **_metrics_snap(),
         }
     
+    async def health_check(self) -> Dict[str, Any]:
+        """Health check for the fills ledger - consumed by health endpoints.
+        
+        Returns health status including:
+        - circuit_breaker state
+        - DLQ status
+        - persistence health
+        - event loop impact indicators
+        """
+        try:
+            dlq_status = await self.get_dlq_status()
+        except Exception as e:
+            dlq_status = {"error": str(e)}
+        
+        # Check if writer task is running
+        writer_healthy = (
+            self._writer_task is not None 
+            and not self._writer_task.done()
+            and not self._writer_task.cancelled()
+        )
+        
+        # Determine overall status
+        if self._circuit_open:
+            status = "degraded"
+            message = f"Circuit breaker open: {self._circuit_reason}"
+        elif dlq_status.get("pending_by_category", {}).get("schema_permanent", 0) > 0:
+            status = "degraded"
+            message = "Schema errors in DLQ - migration may be needed"
+        elif not writer_healthy and self._fills:
+            status = "degraded"
+            message = "Writer task not running but fills pending"
+        else:
+            status = "healthy"
+            message = "Fills ledger operating normally"
+        
+        return {
+            "status": status,
+            "message": message,
+            "circuit_breaker": {
+                "open": self._circuit_open,
+                "reason": self._circuit_reason,
+                "opened_at": self._circuit_opened_at.isoformat() if self._circuit_opened_at else None,
+                "error_count_60s": self._schema_error_count,
+            },
+            "dlq": {
+                "pending_total": sum(dlq_status.get("pending_by_category", {}).values()),
+                "by_category": dlq_status.get("pending_by_category", {}),
+                "replayed": dlq_status.get("replayed_count", 0),
+                "buffered": dlq_status.get("buffered_count", 0),
+            },
+            "persistence": {
+                "writer_healthy": writer_healthy,
+                "db_initialized": self._db_initialized,
+                "fills_in_memory": len(self._fills),
+                "fills_dropped": self._fills_dropped_count,
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    
     # ── Private methods ─────────────────────────────────────────────────────
     
     def _parse_fill(self, raw: Dict[str, Any], source: str) -> KalshiFill:
@@ -940,6 +1327,20 @@ class KalshiFillsLedger:
             if source != "websocket" and _count_fp > 0:
                 _action = "buy"
 
+        # Calculate proceeds_dollars (net cash flow after fees)
+        # Buy: negative (money out), Sell: positive (money in)
+        proceeds = Decimal("0")
+        if yes_price_dollars is not None and _count_fp > 0:
+            if _action == "buy":
+                proceeds = -(yes_price_dollars * _count_fp) - fee_decimal
+            else:  # sell
+                proceeds = (yes_price_dollars * _count_fp) - fee_decimal
+        elif no_price_dollars is not None and _count_fp > 0:
+            if _action == "buy":
+                proceeds = -(no_price_dollars * _count_fp) - fee_decimal
+            else:  # sell
+                proceeds = (no_price_dollars * _count_fp) - fee_decimal
+
         return KalshiFill(
             fill_id=str(fill_id),
             trade_id=raw.get("trade_id"),
@@ -951,6 +1352,7 @@ class KalshiFillsLedger:
             yes_price_dollars=yes_price_dollars,
             no_price_dollars=no_price_dollars,
             fee_cost=fee_decimal,
+            proceeds_dollars=proceeds,
             client_order_id=raw.get("client_order_id"),
             subaccount_number=raw.get("subaccount_number"),
             created_time=created_time,
@@ -980,10 +1382,11 @@ class KalshiFillsLedger:
             self._fills_by_market[fill.market_ticker].append(fill.fill_id)
     
     async def _init_db(self) -> None:
-        """Initialize SQLite with WAL mode and proper settings."""
-        if self._db_initialized:
-            return
+        """Initialize SQLite with WAL mode and proper settings.
         
+        CRITICAL: This method ALWAYS runs schema migrations, even if _db_initialized
+        is True. This ensures that existing databases get new columns added.
+        """
         import aiosqlite
         import os
         
@@ -997,7 +1400,11 @@ class KalshiFillsLedger:
             await db.execute("PRAGMA temp_store=MEMORY;")
             await db.execute("PRAGMA mmap_size=268435456;")  # 256MB mmap
             
-            # Create tables
+            # Get current columns BEFORE creating table (to detect if table exists)
+            async with db.execute("PRAGMA table_info(kalshi_fills)") as cur:
+                existing_cols = {r[1] for r in await cur.fetchall()}
+            
+            # Create tables (if not exists)
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS kalshi_fills (
                     fill_id TEXT PRIMARY KEY,
@@ -1010,6 +1417,7 @@ class KalshiFillsLedger:
                     yes_price_dollars REAL,
                     no_price_dollars REAL,
                     fee_cost REAL,
+                    proceeds_dollars REAL,
                     client_order_id TEXT,
                     subaccount_number INTEGER,
                     created_time TEXT,
@@ -1030,19 +1438,54 @@ class KalshiFillsLedger:
             await db.execute("""
                 CREATE INDEX IF NOT EXISTS idx_fills_time ON kalshi_fills(created_time)
             """)
-            # Migrate: decision_trace_id for audit (nullable)
+            # NOTE: idx_fills_proceeds is created AFTER the proceeds_dollars migration below
+            
+            # CRITICAL: ALWAYS run migrations, regardless of _db_initialized
+            # Get updated column list after table creation
             async with db.execute("PRAGMA table_info(kalshi_fills)") as cur:
                 _cols = {r[1] for r in await cur.fetchall()}
+            
+            # Migrate: decision_trace_id for audit (nullable)
             if "decision_trace_id" not in _cols:
-                await db.execute("ALTER TABLE kalshi_fills ADD COLUMN decision_trace_id TEXT")
+                try:
+                    logger.info("Migrating kalshi_fills: adding decision_trace_id column")
+                    await db.execute("ALTER TABLE kalshi_fills ADD COLUMN decision_trace_id TEXT")
+                    await db.commit()
+                    logger.info("Migration complete: decision_trace_id column added")
+                except Exception as migrate_exc:
+                    logger.error(f"Failed to add decision_trace_id column: {migrate_exc}")
+            
+            # SCHEMA-FIX-001: Migrate proceeds_dollars column (fixes production incident)
+            if "proceeds_dollars" not in _cols:
+                try:
+                    logger.info("Migrating kalshi_fills: adding proceeds_dollars column")
+                    await db.execute("ALTER TABLE kalshi_fills ADD COLUMN proceeds_dollars REAL")
+                    await db.commit()
+                    logger.info("Migration complete: proceeds_dollars column added")
+                except Exception as migrate_exc:
+                    logger.error(f"Failed to add proceeds_dollars column: {migrate_exc}")
+                    # Continue anyway - fills will go to DLQ if writes fail
+            
+            # Create index on proceeds_dollars AFTER migration ensures column exists
+            try:
+                await db.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_fills_proceeds ON kalshi_fills(proceeds_dollars)
+                """)
+            except Exception as idx_exc:
+                logger.warning(f"Could not create idx_fills_proceeds (column may not exist): {idx_exc}")
+            
             await db.commit()
         
         self._db_initialized = True
-        logger.info("SQLite DB initialized with WAL mode")
+        logger.info("SQLite DB initialized with WAL mode and schema migrations complete")
     
-    async def _execute_with_retry(self, db, sql: str, params: tuple = (), retries: int = 8) -> None:
-        """Execute SQL with retry on database locked errors."""
-        delay = 0.1
+    async def _execute_with_retry(self, db, sql: str, params: tuple = (), retries: int = 3) -> None:
+        """Execute SQL with retry on database locked errors.
+        
+        DEFENSIVE-FIX-004: Reduced retries from 8 to 3, added error classification.
+        Permanent errors (schema mismatch) are never retried.
+        """
+        delay = 0.05  # Start with shorter delay
         last_error = None
         
         for i in range(retries):
@@ -1051,12 +1494,24 @@ class KalshiFillsLedger:
                 return
             except sqlite3.OperationalError as e:
                 last_error = e
-                if "database is locked" not in str(e).lower():
+                error_str = str(e).lower()
+                
+                # Classify error
+                category, is_permanent = self._classify_error(e)
+                
+                # Permanent errors: don't retry at all
+                if is_permanent:
                     raise
+                
+                # Only retry on database locked errors
+                if "database is locked" not in error_str and "busy" not in error_str:
+                    raise
+                
                 if i < retries - 1:
+                    # Use shorter backoff to reduce event-loop blocking
                     logger.debug(f"DB locked, retrying in {delay}s (attempt {i+1}/{retries})")
                     await asyncio.sleep(delay)
-                    delay = min(delay * 2, 2.0)  # Exponential backoff, cap at 2s
+                    delay = min(delay * 2, 0.5)  # Exponential backoff, cap at 500ms
             except Exception:
                 raise
         
@@ -1095,6 +1550,15 @@ class KalshiFillsLedger:
         
         import aiosqlite
         
+        # FIX 3: CRITICAL - Initialize DB schema BEFORE opening persistent connection
+        # This ensures migrations run first, so the persistent connection sees the correct schema
+        try:
+            await self._init_db()
+            logger.info("Database schema initialized before writer connection")
+        except Exception as e:
+            logger.error(f"Fills writer: failed to initialize DB schema: {e}")
+            # Continue anyway - will fail gracefully on first write attempt
+        
         _writer_db = None
         try:
             _writer_db = await aiosqlite.connect(self._db_path)
@@ -1107,36 +1571,51 @@ class KalshiFillsLedger:
         except Exception as e:
             logger.error(f"Fills writer: failed to open DB connection: {e}")
         
+        # EVENT-LOOP-FIX-001: Track DLQ flush timing
+        import time
+        _last_dlq_flush = time.monotonic()
+        _dlq_flush_interval = 30.0  # Flush DLQ every 30 seconds
+        
         while not self._shutdown_event.is_set():
             try:
-                # Wait for work signal with timeout
+                # Wait for work signal with shorter timeout to reduce event-loop lag
                 try:
                     await asyncio.wait_for(
-                        self._persist_queue.get(), 
-                        timeout=1.0
+                        self._persist_queue.get(),
+                        timeout=0.5  # Reduced from 1.0 to 0.5 for more responsive shutdown
                     )
                 except asyncio.TimeoutError:
-                    # Periodic flush even if no signals
+                    # Periodic flush even if no signals - but don't block event loop
                     pass
-                
-                # Batch collect any additional signals
+
+                # Batch collect any additional signals (with limit to prevent starvation)
                 batch_signals = 1
-                while batch_signals < 100 and not self._persist_queue.empty():
+                max_batch_collect = 50  # Limit to prevent event loop blocking
+                while batch_signals < max_batch_collect and not self._persist_queue.empty():
                     try:
                         self._persist_queue.get_nowait()
                         batch_signals += 1
                     except asyncio.QueueEmpty:
                         break
-                
+                    except Exception:
+                        break
+
                 # Perform the actual persistence with the persistent connection
                 await self._flush_to_db(_writer_db)
-                
+
+                # Periodic DLQ flush (non-blocking)
+                now = time.monotonic()
+                if now - _last_dlq_flush > _dlq_flush_interval:
+                    await self._flush_dlq_buffer()
+                    _last_dlq_flush = now
+
             except asyncio.CancelledError:
                 logger.info("Fills writer loop cancelled")
                 break
             except Exception as e:
                 logger.error(f"Writer loop error: {e}")
-                await asyncio.sleep(0.1)
+                # Reduced sleep to prevent event loop blocking
+                await asyncio.sleep(0.05)
         
         # Final flush on shutdown
         try:
@@ -1177,23 +1656,32 @@ class KalshiFillsLedger:
                 return
             
             async def _do_flush(_db) -> None:
-                # Batch upsert using retry logic
+                # Batch upsert using retry logic with circuit breaker and DLQ
+                errors_by_category: Dict[str, int] = {}
+                
                 for fill in fills_snapshot:
                     try:
+                        # Check circuit breaker before attempting write
+                        if self._circuit_open:
+                            self._fills_dropped_count += 1
+                            await self._write_to_dlq(fill, Exception(f"Circuit open: {self._circuit_reason}"), "circuit_open")
+                            continue
+                        
                         await self._execute_with_retry(_db, """
                             INSERT OR REPLACE INTO kalshi_fills (
                                 fill_id, trade_id, order_id, market_ticker, side, action,
                                 count_fp, yes_price_dollars, no_price_dollars, fee_cost,
-                                client_order_id, subaccount_number, created_time,
+                                proceeds_dollars, client_order_id, subaccount_number, created_time,
                                 ingestion_source, ingested_at, agent_id, intent_id,
                                 reconciled, raw_payload, decision_trace_id
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
                             fill.fill_id, fill.trade_id, fill.order_id, fill.market_ticker,
                             fill.side, fill.action, fill.count_fp,
                             float(fill.yes_price_dollars) if fill.yes_price_dollars else None,
                             float(fill.no_price_dollars) if fill.no_price_dollars else None,
                             float(fill.fee_cost),
+                            float(fill.proceeds_dollars) if fill.proceeds_dollars else None,
                             fill.client_order_id, fill.subaccount_number,
                             fill.created_time.isoformat(),
                             fill.ingestion_source,
@@ -1204,10 +1692,39 @@ class KalshiFillsLedger:
                             fill.decision_trace_id,
                         ))
                     except Exception as e:
-                        logger.warning(f"Failed to persist fill {fill.fill_id}: {e}")
+                        # Classify error
+                        category, is_permanent = self._classify_error(e)
+                        errors_by_category[category] = errors_by_category.get(category, 0) + 1
+                        
+                        # Update circuit breaker
+                        if is_permanent:
+                            self._check_circuit_breaker(e)
+                        
+                        # Write to DLQ
+                        await self._write_to_dlq(fill, e, category)
+                        
+                        # Rate-limited logging
+                        if is_permanent and self._should_log_schema_error():
+                            logger.error(
+                                "kalshi_fills schema error (rate-limited): %s | fill_id=%s ticker=%s",
+                                e, fill.fill_id, fill.market_ticker
+                            )
+                        elif not is_permanent:
+                            logger.warning(f"Failed to persist fill {fill.fill_id}: {e}")
+                        
                         # Continue with other fills - don't let one bad fill break the batch
                 
                 await _db.commit()
+                
+                # Aggregate logging for schema errors (once per batch)
+                if errors_by_category:
+                    for category, count in errors_by_category.items():
+                        if category == "schema_permanent" and count > 0:
+                            logger.error(
+                                "kalshi_fills batch summary: %d permanent errors (schema mismatch) - "
+                                "Fills queued to DLQ. Run migration or reset circuit breaker.",
+                                count
+                            )
             
             if db is not None:
                 # Use the persistent writer connection (preferred path)
@@ -1256,6 +1773,12 @@ class KalshiFillsLedger:
             except Exception as e:
                 logger.warning(f"Error waiting for writer task: {e}")
         
+        # Final DLQ flush
+        try:
+            await self._flush_dlq_buffer()
+        except Exception as e:
+            logger.warning(f"Final DLQ flush failed: {e}")
+        
         logger.info("KalshiFillsLedger shutdown complete")
 
     async def load_from_db(self) -> int:
@@ -1291,6 +1814,10 @@ class KalshiFillsLedger:
                     dtid = row["decision_trace_id"] if "decision_trace_id" in row.keys() else None
                     if not dtid and raw_payload:
                         dtid = (raw_payload or {}).get("decision_trace_id")
+                    # SCHEMA-FIX-002: Handle optional proceeds_dollars for backward compatibility
+                    pd_raw = row["proceeds_dollars"] if "proceeds_dollars" in row.keys() else None
+                    proceeds_dollars = Decimal(str(pd_raw)) if pd_raw else None
+                    
                     fill = KalshiFill(
                         fill_id=row["fill_id"],
                         trade_id=row["trade_id"],
@@ -1302,6 +1829,7 @@ class KalshiFillsLedger:
                         yes_price_dollars=Decimal(str(row["yes_price_dollars"])) if row["yes_price_dollars"] else None,
                         no_price_dollars=Decimal(str(row["no_price_dollars"])) if row["no_price_dollars"] else None,
                         fee_cost=Decimal(str(row["fee_cost"])) if row["fee_cost"] else Decimal("0"),
+                        proceeds_dollars=proceeds_dollars,
                         client_order_id=row["client_order_id"],
                         subaccount_number=row["subaccount_number"],
                         created_time=datetime.fromisoformat(row["created_time"]) if row["created_time"] else datetime.now(timezone.utc),

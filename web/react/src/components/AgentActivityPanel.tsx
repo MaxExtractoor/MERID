@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { Bot, Brain, Shield, TrendingUp, AlertTriangle, CheckCircle, Clock } from 'lucide-react';
+import { Bot, Brain, Shield, TrendingUp, AlertTriangle, CheckCircle, Clock } from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS, AGENT_STATUS } from '../config/constants';
 

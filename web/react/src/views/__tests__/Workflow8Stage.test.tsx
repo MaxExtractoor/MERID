@@ -32,6 +32,12 @@ jest.mock('../../hooks/useDashboard', () => ({
   RiskProtectionCard: () => <div data-testid="risk-protection-card">Risk Protection</div>,
 }));
 
+// Mock useNetworkStatusProvider
+jest.mock('../../hooks/useNetworkStatusProvider', () => ({
+  useNetworkStatus: () => ({ isOnline: true, backendReachable: true }),
+  NetworkProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}));
+
 // Mock localStorage
 const mockLocalStorage = {
   getItem: jest.fn(),

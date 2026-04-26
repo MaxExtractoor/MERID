@@ -97,33 +97,43 @@ CRYPTO_CONFIG: Dict[str, Dict[str, Any]] = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. NEAR-SPOT BAND CONFIGURATION
+# 2. NEAR-SPOT BAND CONFIGURATION (ENV-DRIVEN)
 # ─────────────────────────────────────────────────────────────────────────────
+import os
 
+def _env_band(env_key: str, default: float) -> float:
+    """Get band percentage from environment with fallback default."""
+    return float(os.getenv(env_key, str(default)))
+
+def _env_int(env_key: str, default: int) -> int:
+    """Get int from environment with fallback default."""
+    return int(os.getenv(env_key, str(default)))
+
+# ENV-DRIVEN band configurations - no hardcoded values
 NEAR_SPOT_CONFIG: Dict[Tuple[str, str], Dict[str, Any]] = {
     # BTC bands: tighter for short-term contracts (scalping), wider for longer-term
-    ("BTC", "15M"):  {"pct_band": 2.0,  "max_markets": 10},
-    ("BTC", "1H"):   {"pct_band": 1.5,  "max_markets": 8},
-    ("BTC", "1D"):   {"pct_band": 1.0,  "max_markets": 5},
+    ("BTC", "15M"):  {"pct_band": _env_band("MERID_BAND_BTC_15M", 2.0),  "max_markets": _env_int("MERID_MAX_MARKETS_BTC_15M", 10)},
+    ("BTC", "1H"):   {"pct_band": _env_band("MERID_BAND_BTC_1H", 1.5),   "max_markets": _env_int("MERID_MAX_MARKETS_BTC_1H", 8)},
+    ("BTC", "1D"):   {"pct_band": _env_band("MERID_BAND_BTC_1D", 1.0),   "max_markets": _env_int("MERID_MAX_MARKETS_BTC_1D", 5)},
     
     # ETH: slightly wider bands (higher vol than BTC)
-    ("ETH", "15M"):  {"pct_band": 2.5,  "max_markets": 10},
-    ("ETH", "1H"):   {"pct_band": 2.0,  "max_markets": 8},
-    ("ETH", "1D"):   {"pct_band": 1.5,  "max_markets": 5},
+    ("ETH", "15M"):  {"pct_band": _env_band("MERID_BAND_ETH_15M", 2.5),  "max_markets": _env_int("MERID_MAX_MARKETS_ETH_15M", 10)},
+    ("ETH", "1H"):   {"pct_band": _env_band("MERID_BAND_ETH_1H", 2.0),   "max_markets": _env_int("MERID_MAX_MARKETS_ETH_1H", 8)},
+    ("ETH", "1D"):   {"pct_band": _env_band("MERID_BAND_ETH_1D", 1.5),   "max_markets": _env_int("MERID_MAX_MARKETS_ETH_1D", 5)},
     
     # SOL: higher volatility
-    ("SOL", "15M"):  {"pct_band": 3.0,  "max_markets": 10},
-    ("SOL", "1H"):   {"pct_band": 2.5,  "max_markets": 8},
-    ("SOL", "1D"):   {"pct_band": 2.0,  "max_markets": 5},
+    ("SOL", "15M"):  {"pct_band": _env_band("MERID_BAND_SOL_15M", 3.0),  "max_markets": _env_int("MERID_MAX_MARKETS_SOL_15M", 10)},
+    ("SOL", "1H"):   {"pct_band": _env_band("MERID_BAND_SOL_1H", 2.5),   "max_markets": _env_int("MERID_MAX_MARKETS_SOL_1H", 8)},
+    ("SOL", "1D"):   {"pct_band": _env_band("MERID_BAND_SOL_1D", 2.0),   "max_markets": _env_int("MERID_MAX_MARKETS_SOL_1D", 5)},
     
     # XRP: high volatility, wider bands
-    ("XRP", "15M"):  {"pct_band": 3.0,  "max_markets": 10},
-    ("XRP", "1H"):   {"pct_band": 2.5,  "max_markets": 8},
-    ("XRP", "1D"):   {"pct_band": 2.0,  "max_markets": 5},
+    ("XRP", "15M"):  {"pct_band": _env_band("MERID_BAND_XRP_15M", 3.0),  "max_markets": _env_int("MERID_MAX_MARKETS_XRP_15M", 10)},
+    ("XRP", "1H"):   {"pct_band": _env_band("MERID_BAND_XRP_1H", 2.5),   "max_markets": _env_int("MERID_MAX_MARKETS_XRP_1H", 8)},
+    ("XRP", "1D"):   {"pct_band": _env_band("MERID_BAND_XRP_1D", 2.0),   "max_markets": _env_int("MERID_MAX_MARKETS_XRP_1D", 5)},
     
     # DOGE: highest volatility, widest bands
-    ("DOGE", "1H"):  {"pct_band": 5.0,  "max_markets": 12},
-    ("DOGE", "1D"):  {"pct_band": 4.0,  "max_markets": 10},
+    ("DOGE", "1H"):  {"pct_band": _env_band("MERID_BAND_DOGE_1H", 5.0),  "max_markets": _env_int("MERID_MAX_MARKETS_DOGE_1H", 12)},
+    ("DOGE", "1D"):  {"pct_band": _env_band("MERID_BAND_DOGE_1D", 4.0),  "max_markets": _env_int("MERID_MAX_MARKETS_DOGE_1D", 10)},
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

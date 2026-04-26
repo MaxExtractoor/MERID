@@ -1,5 +1,5 @@
 import React from 'react';
-import { Clock, AlertTriangle, CheckCircle, XCircle, RefreshCw } from 'lucide-react';
+import { Clock, AlertTriangle, CheckCircle, XCircle, RefreshCw } from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import ErrorBar from './ErrorBar';
 import { API_ENDPOINTS, DEFAULTS} from '../config/constants';

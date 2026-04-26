@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { HelpCircle, X } from 'lucide-react';
+import { HelpCircle, X } from '../ui/icons';
 
 interface HelpPopoverProps {
   title: string;

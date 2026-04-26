@@ -266,9 +266,13 @@ def instruments_for_domain(domain: str) -> List[InstrumentConfig]:
 
 @dataclass
 class GlobalPaperConfig:
-    """Top-level paper trading configuration."""
-    total_capital_usd: float = 50_000.0
-    max_portfolio_notional_usd: float = 50_000.0
+    """Top-level paper trading configuration.
+    
+    CRITICAL: No hardcoded defaults. 0 means "derive from actual Kalshi balance".
+    Paper trading should mirror live capital for realistic risk simulation.
+    """
+    total_capital_usd: float = 0.0  # 0 = derive from Kalshi balance (was $50K)
+    max_portfolio_notional_usd: float = 0.0  # 0 = 100% of total_capital_usd
 
     # Cadence (seconds)
     tick_interval: float = 5.0

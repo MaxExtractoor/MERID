@@ -1,0 +1,36 @@
+# Pass 8 P0 Patch: Hard-guard Continuous Trader API
+# File: web/api/kalshi_continuous_trader_api.py
+# Location: Module-level or at top of trading endpoints
+
+--- a/web/api/kalshi_continuous_trader_api.py
++++ b/web/api/kalshi_continuous_trader_api.py
+@@ -1,5 +1,28 @@
+ """Kalshi Continuous Trader API — REST wrapper for legacy CT script."""
+ 
++# PASS 8 P0: Module-level guard — CT uses direct HTTP, bypasses all risk controls
++# This API wraps kalshi_continuous_trader.py which:
++# - Uses requests.post() directly to Kalshi
++# - Has hardcoded bankroll ($1000)
++# - Bypasses order_router, risk guards, top-3 enforcement
++# - Is a PARALLEL EXECUTION PATH that violates single-executor architecture
++
++import os
++from fastapi import HTTPException
++
++def _enforce_ct_api_guard():
++    """Block CT API in LIVE/PAPER — unsafe parallel execution path."""
++    _mode = os.getenv("MERID_TRADE_MODE", os.getenv("KALSHI_ENV", "unknown"))
++    if _mode in ("live", "paper", "LIVE", "PAPER"):
++        raise HTTPException(
++            status_code=403,
++            detail=f"Continuous Trader API disabled in {_mode} mode. "
++            "This endpoint wraps a legacy script that uses direct HTTP "
++            "and bypasses the canonical risk stack. Use /api/v1/kalshi/orders instead."
++        )
++
++# Apply guard at module load
++_enforce_ct_api_guard()
++
+ from __future__ import annotations
+ from typing import Dict, Any, Optional
+ ...

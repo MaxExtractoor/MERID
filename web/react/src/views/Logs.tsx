@@ -1,9 +1,9 @@
 import { useState, useMemo } from "react";
-import { RefreshCw } from 'lucide-react';
+import { RefreshCw } from '../ui/icons';
 import { useApiData } from "../hooks/useApiData";
 import { API_BASE_URL, API_ENDPOINTS, LOG_LEVELS, DEFAULTS, AUTH_TOKEN_KEY } from "../config/constants";
 import { formatDateTime } from "../utils/formatters";
-import DataTableEnhanced from "../components/DataTableEnhanced";
+import DataTable from "../components/DataTable";
 import ErrorAlert from "../components/ErrorAlert";
 import EmptyState from "../components/EmptyState";
 
@@ -396,7 +396,7 @@ export default function Logs() {
       {/* Logs Table */}
       <div className="bg-slate-900 rounded-xl border border-slate-800 p-6">
         <h2 className="text-lg font-semibold text-white mb-4">Log Entries</h2>
-        <DataTableEnhanced
+        <DataTable
           data={filteredLogs}
           columns={columns}
           pageSize={25}

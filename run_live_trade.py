@@ -1,5 +1,26 @@
 """End-to-end: forecasters -> swarm consensus -> debate -> live Kalshi order."""
-import asyncio, os, json, time, base64
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PRODUCTION HARDENING — CRITICAL BYPASS DISABLED
+# ═══════════════════════════════════════════════════════════════════════════
+# This script contains a DIRECT HTTP BYPASS to Kalshi API that circumvents
+# the canonical order_router and ALL risk guards (GlobalRiskGuard 1-2% cap,
+# Top-3 batch gate, PreTradeGate, execution gate, kill switches).
+#
+# To enable this bypass (NOT RECOMMENDED): set MERID_ALLOW_LIVE_TRADE_BYPASS=1
+# See: run_live_trade.py.DISABLED for full documentation.
+# ═══════════════════════════════════════════════════════════════════════════
+import os
+if os.getenv("MERID_ALLOW_LIVE_TRADE_BYPASS", "").lower() not in ("1", "true", "yes"):
+    raise RuntimeError(
+        "[PRODUCTION HARDENING] run_live_trade.py is DISABLED. "
+        "This script contains a direct HTTP bypass that circumvents all risk guards. "
+        "Use the canonical path: POST /api/v1/kalshi/orders or KalshiContinuousTrader. "
+        "To bypass (NOT RECOMMENDED): MERID_ALLOW_LIVE_TRADE_BYPASS=1"
+    )
+# ═══════════════════════════════════════════════════════════════════════════
+
+import asyncio, json, time, base64
 from pathlib import Path
 from datetime import datetime, timezone
 

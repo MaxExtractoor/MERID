@@ -5,7 +5,7 @@
 import { useState } from 'react';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS } from '../config/constants';
-import { Bell, BellOff, AlertTriangle, CheckCircle, Clock } from 'lucide-react';
+import { Bell, BellOff, AlertTriangle, CheckCircle, Clock } from '../ui/icons';
 
 interface NotificationStatus {
   channel: string;

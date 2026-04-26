@@ -1,4 +1,4 @@
-import { ShieldOff, AlertOctagon, Wifi, DollarSign, FileWarning } from 'lucide-react';
+import { ShieldOff, AlertOctagon, Wifi, DollarSign, FileWarning } from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { HelpPopover } from './HelpPopover';

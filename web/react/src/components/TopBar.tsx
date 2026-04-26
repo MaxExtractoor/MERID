@@ -1,5 +1,5 @@
 import React from "react";
-import { Search, Menu, Sun, Moon, Settings } from "lucide-react";
+import { Search, Menu, Sun, Moon, Settings } from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 import { useTheme } from '../theme';

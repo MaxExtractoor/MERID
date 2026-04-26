@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useApiData } from '../hooks/useApiData';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY } from '../config/constants';
 import ErrorBar from './ErrorBar';
-import { TrendingUp, ChevronUp, Zap, Target, Trophy, DollarSign } from 'lucide-react';
+import { TrendingUp, ChevronUp, Zap, Target, Trophy, DollarSign } from '../ui/icons';
 
 function authHeaders(headers?: HeadersInit): HeadersInit {
   const token = localStorage.getItem(AUTH_TOKEN_KEY);

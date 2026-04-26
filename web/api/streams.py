@@ -103,7 +103,10 @@ async def trade_stream(websocket: WebSocket):
         # Try to get paper trading engine for real trade logs
         from trading.paper_trading import get_paper_engine
         paper_engine = get_paper_engine()
-    except Exception:
+    except ImportError:
+        paper_engine = None
+    except RuntimeError as e:
+        logger.debug("Paper trading engine not initialized: %s", e)
         paper_engine = None
 
     try:
@@ -367,15 +370,13 @@ async def risk_stream(websocket: WebSocket):
                 })
             except (WebSocketDisconnect, RuntimeError):
                 break
-            except Exception:
+            except (RuntimeError, ConnectionResetError) as e:
+                logger.debug("WebSocket send failed: %s", e)
                 try:
                     await websocket.send_json({
                         "event_type": "risk_summary",
-                        "total_equity": 10000.0,
-                        "total_pnl": 0,
-                        "unrealized_pnl": 0,
-                        "position_count": 0,
-                        "exposure": {},
+                        "status": "error",
+                        "message": "Failed to broadcast risk summary"
                     })
                 except (WebSocketDisconnect, RuntimeError):
                     break
@@ -399,7 +400,7 @@ async def broadcast_trade(trade_data: Dict):
     for websocket in _trade_connections:
         try:
             await websocket.send_json(trade_data)
-        except Exception:
+        except (RuntimeError, ConnectionResetError, BrokenPipeError):
             disconnected.add(websocket)
     
     _trade_connections.difference_update(disconnected)
@@ -412,7 +413,7 @@ async def broadcast_agent_decision(decision_data: Dict):
     for websocket in _agent_connections:
         try:
             await websocket.send_json(decision_data)
-        except Exception:
+        except (RuntimeError, ConnectionResetError, BrokenPipeError):
             disconnected.add(websocket)
     
     _agent_connections.difference_update(disconnected)
@@ -425,7 +426,7 @@ async def broadcast_simulation_update(update_data: Dict):
     for websocket in _simulation_connections:
         try:
             await websocket.send_json(update_data)
-        except Exception:
+        except (RuntimeError, ConnectionResetError, BrokenPipeError):
             disconnected.add(websocket)
     
     _simulation_connections.difference_update(disconnected)
@@ -438,7 +439,7 @@ async def broadcast_position_update(position_data: Dict):
     for websocket in _position_connections:
         try:
             await websocket.send_json(position_data)
-        except Exception:
+        except (RuntimeError, ConnectionResetError, BrokenPipeError):
             disconnected.add(websocket)
     
     _position_connections.difference_update(disconnected)

@@ -6,24 +6,21 @@ import Overview from "./views/Overview";
 import Logs from "./views/Logs";
 import Settings from "./views/Settings";
 
-// Import legacy views (to be refactored incrementally)
-import KillSwitchView from "./views/KillSwitchView";
-import KalshiGridView from "./views/KalshiGridView";
-import KalshiAllMarketsView from "./views/KalshiAllMarketsView";
-import KalshiDashboardView from "./views/KalshiDashboardView";
-import KalshiPortfolioView from "./views/KalshiPortfolioView";
-import PositionsView from "./views/PositionsView";
-import OrdersView from "./views/OrdersView";
-import KalshiVolDashboardView from "./views/KalshiVolDashboardView";
-import KalshiTerminalView from "./views/KalshiTerminalView";
+// Consolidated Unified Views (Stages 1, 4, 5, 6, 7, 8)
+import DiscoverView from "./views/DiscoverView";
+import SizeView from "./views/SizeView";
+import ExecuteView from "./views/ExecuteView";
+import MonitorView from "./views/MonitorView";
+import PromoteView from "./views/PromoteView";
+import ProtectView from "./views/ProtectView";
+
+// Individual Stage Views (Stages 2, 3)
 import KalshiAgentPerformanceView from "./views/KalshiAgentPerformanceView";
 import KalshiSentimentView from "./views/KalshiSentimentView";
-import LaneControlDashboard from "./views/LaneControlDashboard";
+import KalshiVolDashboardView from "./views/KalshiVolDashboardView";
 import SwarmConsensusMatrix from "./views/SwarmConsensusMatrix";
 import CalibrationDashboardView from "./views/CalibrationDashboardView";
 import OperatorDashboard from "./views/OperatorDashboard";
-import KalshiRiskScreen from "./views/KalshiRiskScreen";
-import KalshiRiskContextView from "./views/KalshiRiskContextView";
 
 // Optimized UI Components
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -31,6 +28,7 @@ import CommandPalette from "./components/CommandPalette";
 import { OfflineIndicator } from "./components/OfflineIndicator";
 import { StubRegistryProvider } from "./components/GlobalStubBanner";
 import { KalshiModeProvider } from "./context/KalshiModeContext";
+import { NetworkProvider } from "./hooks/useNetworkStatusProvider";
 import { RealtimeDisconnectedBanner } from "./components/RealtimeDisconnectedBanner";
 import { ExecutionBlockedBanner } from "./components/ExecutionBlockedBanner";
 import { GateChangeToast } from "./components/GateChangeToast";
@@ -41,52 +39,42 @@ import type { View } from "./types/views";
 import { LEGACY_VIEW_MAP } from "./types/views";
 
 // Zero-lag view loader with preloading
+// Consolidated architecture: Stages 1, 5, 8 use unified views
 const VIEW_COMPONENTS: Record<string, React.LazyExoticComponent<React.ComponentType<any>> | React.ComponentType<any>> = {
-  // System
+  // System Views
   overview: Overview,
   operator: OperatorDashboard,
   logs: Logs,
   settings: Settings,
   
-  // Stage 1: Discover (mapped from legacy)
-  discover: KalshiDashboardView,
-  "discover-all-markets": KalshiAllMarketsView,
-  "discover-trending": KalshiAllMarketsView,
+  // Stage 1: Discover (Unified Consolidated View)
+  discover: DiscoverView,
   
-  // Stage 2: Analyze (mapped from legacy)
-  "analyze-edge": KalshiDashboardView,
+  // Stage 2: Analyze (Individual Views)
+  "analyze-edge": KalshiVolDashboardView,  // Edge signals use vol dashboard
   "analyze-sentiment": KalshiSentimentView,
   "analyze-vol": KalshiVolDashboardView,
   
-  // Stage 3: Consensus (mapped from legacy)
+  // Stage 3: Consensus (Individual Views)
   "consensus-swarm": SwarmConsensusMatrix,
   "consensus-debates": SwarmConsensusMatrix,
   "consensus-performance": KalshiAgentPerformanceView,
   "consensus-calibration": CalibrationDashboardView,
   
-  // Stage 4: Size (mapped from legacy)
-  "size-bankroll": LaneControlDashboard,
-  "size-lanes": LaneControlDashboard,
-  "size-sizing": KalshiVolDashboardView,
+  // Stage 4: Size (Unified Consolidated View)
+  size: SizeView,
   
-  // Stage 5: Execute (mapped from legacy)
-  "execute-terminal": KalshiTerminalView,
-  "execute-orders": OrdersView,
-  "execute-positions": PositionsView,
+  // Stage 5: Execute (Unified Consolidated View)
+  execute: ExecuteView,
   
-  // Stage 6: Monitor (mapped from legacy)
-  "monitor-portfolio": KalshiPortfolioView,
-  "monitor-pnl": KalshiPortfolioView,
-  "monitor-health": OperatorDashboard,
+  // Stage 6: Monitor (Unified Consolidated View)
+  monitor: MonitorView,
   
-  // Stage 7: Promote (mapped from legacy)
-  "promote-pipeline": KalshiGridView,
-  "promote-grid": KalshiGridView,
+  // Stage 7: Promote (Unified Consolidated View)
+  promote: PromoteView,
   
-  // Stage 8: Protect (mapped from legacy)
-  "protect-risk": KalshiRiskScreen,
-  "protect-kill-switch": KillSwitchView,
-  "protect-alerts": KalshiRiskContextView,
+  // Stage 8: Protect (Unified Consolidated View)
+  protect: ProtectView,
 };
 
 // Legacy view compatibility layer for transition period
@@ -156,6 +144,7 @@ export default function App() {
 
   return (
     <ThemeProvider>
+    <NetworkProvider>
     <StubRegistryProvider>
     <KalshiModeProvider>
     <ToastProvider>
@@ -219,6 +208,7 @@ export default function App() {
     </ToastProvider>
     </KalshiModeProvider>
     </StubRegistryProvider>
+    </NetworkProvider>
     </ThemeProvider>
   );
 }

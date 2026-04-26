@@ -293,7 +293,8 @@ class MeridLoop:
 
         # Adaptive slow-action tracking: skip steps that were recently slow (BUG-EL fix)
         self._slow_action_last_skip: Dict[str, float] = {}  # step -> timestamp when skipped due to slowness
-        self._SLOW_ACTION_COOLDOWN_S = 60.0  # skip slow action for 60s after it exceeds budget
+        # BUG-EL FIX: Increased cooldown from 60s to 120s to give system more recovery time
+        self._SLOW_ACTION_COOLDOWN_S = 120.0  # skip slow action for 120s after it exceeds budget
 
         # Timers for staggered cadences
         self._last_feature_refresh = 0.0
@@ -394,11 +395,12 @@ class MeridLoop:
     # Maximum acceptable tick duration before we log a warning (ms)
     TICK_DURATION_WARN_MS = float(os.getenv("MERID_LOOP_TICK_DURATION_WARN_MS", "30000"))
 
-    _STEP_TIMEOUT_S = float(os.getenv("MERID_LOOP_STEP_TIMEOUT_S", "5"))  # max seconds per tick step
+    _STEP_TIMEOUT_S = float(os.getenv("MERID_LOOP_STEP_TIMEOUT_S", "3"))  # BUG-EL FIX: Reduced from 5s to 3s to fail faster on slow steps
     # Step-specific timeout overrides (can be customized via env var as JSON)
+    # BUG-EL13 FIX: Added consensus timeout, reduced arb_scan to 10s, added notify timeout
     _STEP_TIMEOUT_OVERRIDES = json.loads(os.getenv(
         "MERID_LOOP_STEP_TIMEOUT_OVERRIDES",
-        '{"features": 30, "agent_cycles": 30, "promotion_sync": 15, "liquidity": 20, "betting": 30, "reconciliation": 10, "arb_scan": 10}'
+        '{"features": 15, "agent_cycles": 20, "promotion_sync": 10, "liquidity": 10, "betting": 15, "reconciliation": 5, "arb_scan": 10, "consensus": 8, "notify": 2, "cqi": 10, "order_groups": 5}'
     ))
 
     def _should_skip_due_to_slowness(self, step_name: str, now: float) -> bool:
@@ -611,9 +613,14 @@ class MeridLoop:
             parallel_coros.append(self._run_step("cqi", self._update_cqi(now, summary), summary))
             self._last_cqi_update = now
 
+        # BUG-EL13 FIX: Added interval gate and slow-skip for order_groups
         if "prediction" in self.config.active_domains and now - self._last_order_groups_sync >= self._order_groups_sync_interval:
-            parallel_coros.append(self._run_step("order_groups", self._sync_order_groups(summary), summary))
-            self._last_order_groups_sync = now
+            if self._should_skip_due_to_slowness("order_groups", now):
+                self.metrics.slow_action_skips += 1
+                summary["actions"].append("order_groups:skipped_recently_slow")
+            else:
+                parallel_coros.append(self._run_step("order_groups", self._sync_order_groups(summary), summary))
+                self._last_order_groups_sync = now
 
         if parallel_coros:
             await asyncio.gather(*parallel_coros)
@@ -732,9 +739,18 @@ class MeridLoop:
         store = self._signal_store()
         step_start = time.perf_counter()
 
-        # AGGRESSIVE LIMIT: Process max 1 symbol per tick to prevent event-loop blocking
-        # BUG-EL18 fix: Reduced from 5 symbols to prevent 6.5s+ blocking (budget is 1s)
+        # BUG-EL15/EL18 FIX: Process max 1 symbol per tick with 30s minimum interval
+        # to prevent thread pool saturation behind CPU work
         MAX_SYMBOLS_PER_TICK = 1
+        _MIN_FEATURE_INTERVAL_S = 30.0
+        
+        # Check if enough time has passed since last feature refresh
+        _last_features = getattr(self, '_last_feature_process_time', 0)
+        if (now - _last_features) < _MIN_FEATURE_INTERVAL_S:
+            summary["actions"].append("features_refreshed:interval_gate")
+            return
+        self._last_feature_process_time = now
+        
         symbols_this_tick = self.config.active_symbols[:MAX_SYMBOLS_PER_TICK]
         
         # P1-HARDENING: Check budget before expensive thread pool work

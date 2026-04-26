@@ -85,7 +85,21 @@ function LatencyPanel({ compact = false }: LatencyPanelProps) {
 
   if (!data) return null;
 
-  const { percentiles, thresholds, alert, slo_compliance } = data;
+  const { percentiles: _percentiles, thresholds: _thresholds, alert, slo_compliance } = data as any;
+  const percentiles = _percentiles ?? {
+    p50_ms: 0,
+    p95_ms: 0,
+    p99_ms: 0,
+    min_ms: 0,
+    avg_ms: 0,
+    max_ms: 0,
+  };
+  const thresholds = _thresholds ?? {
+    warning_p95_ms: 0,
+    critical_p95_ms: 0,
+    warning_p99_ms: 0,
+    critical_p99_ms: 0,
+  };
   const safeSlo = slo_compliance ?? { compliant: true, target_p99_ms: 0, current_p99_ms: 0 };
   const sloStatus = getSloStatus(safeSlo.compliant);
 

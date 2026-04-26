@@ -16,7 +16,7 @@ import React, { useState, useCallback, useMemo } from 'react';
 import { 
   Plus, Trash2, Send, Loader2, AlertTriangle, 
   CheckCircle, Package, Layers 
-} from 'lucide-react';
+} from '../ui/icons';
 import { API_BASE_URL, API_ENDPOINTS, CHART_COLORS, AUTH_TOKEN_KEY } from '../config/constants';
 import { logUxEvent } from '../utils/uxTelemetry';
 

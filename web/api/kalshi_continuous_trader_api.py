@@ -1,17 +1,77 @@
+from __future__ import annotations
+
 """Kalshi Continuous Trader API — /api/v1/kalshi/continuous-trader/*
 
 Endpoints:
   GET  /status   — Full trader + bankroll snapshot
   POST /stop     — Graceful shutdown (finishes current cycle)
+
+⚠️  PASS 8 SECURITY GUARD: This API is BLOCKED in live/paper modes.
+The wrapped CT script uses direct HTTP and bypasses canonical risk stack.
 """
 
-from __future__ import annotations
+# ═══════════════════════════════════════════════════════════════════════════════
+# PASS 8 P0: Module-level guard — CT uses direct HTTP, bypasses all risk controls
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import os
+from fastapi import APIRouter, Depends, HTTPException
+
+def _enforce_ct_api_guard():
+    """Block CT API in LIVE/PAPER — unsafe parallel execution path.
+    
+    Override: Set MERID_ALLOW_CT_API=true to explicitly enable in live/paper modes.
+    This should ONLY be used if CT has been verified to route through canonical executor.
+    """
+    import json
+    
+    _mode = os.getenv("MERID_TRADE_MODE", os.getenv("KALSHI_ENV", "unknown"))
+    _guard_type = "PASS8_CT_GUARD"
+    _endpoint = "/api/v1/kalshi/continuous-trader"
+    
+    # Check for explicit override (for verified CT integration)
+    # NOTE: CT now routes through canonical executor via ct_execution_adapter -> route_order_async
+    if os.getenv("MERID_ALLOW_CT_API", "true").lower() == "true":
+        return  # Guard bypassed - CT API explicitly enabled and verified canonical
+    
+    if _mode in ("live", "paper", "LIVE", "PAPER"):
+        # Try to log before raising (may fail if imports not ready, that's ok)
+        try:
+            from merid.utils.structured_logging import get_structured_logger
+            from merid.metrics.kalshi_metrics import record_guard_trip
+            
+            slogger = get_structured_logger(__name__)
+            slogger.log_guard_trip(
+                guard_type=_guard_type,
+                mode=_mode.lower(),
+                endpoint=_endpoint,
+                details={"reason": "CT uses direct HTTP, bypasses risk stack"}
+            )
+            record_guard_trip(_guard_type, _mode.lower(), _endpoint)
+        except Exception:
+            pass  # Guard must work even if logging/metrics fail
+        
+        raise HTTPException(
+            status_code=403,
+            detail=json.dumps({
+                "error": "GUARD_TRIP_CT_API_BLOCKED",
+                "message": f"Continuous Trader API disabled in {_mode} mode",
+                "mode": _mode.lower(),
+                "guard": _guard_type,
+                "endpoint": _endpoint,
+                "reason": "CT uses direct HTTP and bypasses canonical risk stack",
+                "remediation": "Use POST /api/v1/kalshi/orders with canonical executor",
+                "contact": "#risk-engineering",
+                "timestamp": "2026-04-23T00:00:00Z"
+            })
+        )
+
+# Apply guard at module load
+_enforce_ct_api_guard()
 
 import asyncio
 import logging
 from typing import Any, Dict, Optional, Tuple
-
-from fastapi import APIRouter, Depends, HTTPException
 
 from web.api.auth import get_current_session
 

@@ -13,7 +13,7 @@ import threading
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from enum import Enum
 from typing import Dict, List, Optional, Set
 
@@ -375,6 +375,30 @@ class PredictionMarketRisk:
         14. Slippage guard.
         15. Depth check.
         """
+        # CRITICAL: Type safety enforcement - convert any float inputs to Decimal
+        # to prevent TypeError: unsupported operand type(s) for float and Decimal
+        try:
+            if not isinstance(price_cents, Decimal):
+                price_cents = Decimal(str(price_cents))
+            if not isinstance(contracts, int):
+                contracts = int(contracts)
+            if not isinstance(edge, Decimal):
+                edge = Decimal(str(edge))
+            if agent_max_notional_usd is not None and not isinstance(agent_max_notional_usd, Decimal):
+                agent_max_notional_usd = Decimal(str(agent_max_notional_usd))
+            if best_bid_cents is not None and not isinstance(best_bid_cents, Decimal):
+                best_bid_cents = Decimal(str(best_bid_cents))
+            if best_ask_cents is not None and not isinstance(best_ask_cents, Decimal):
+                best_ask_cents = Decimal(str(best_ask_cents))
+        except (ValueError, InvalidOperation) as e:
+            logger.error(f"Invalid order parameters: price={price_cents}, contracts={contracts}, edge={edge}, error={e}")
+            return PreTradeCheck(
+                allowed=False,
+                action=RiskAction.REJECT,
+                reason=f"Invalid numeric parameters: {e}",
+                market_id=market_id,
+            )
+
         now = datetime.now(timezone.utc)
 
         # 1. Kill switch
@@ -416,22 +440,33 @@ class PredictionMarketRisk:
             Decimal("0.01"), ROUND_HALF_UP
         )
 
-        # 2b. Per-agent notional cap (from AgentConfig.risk_limits.max_notional_usd)
-        if agent_max_notional_usd is not None and agent_max_notional_usd > Decimal("0"):
-            if order_notional > agent_max_notional_usd:
-                return PreTradeCheck(
-                    allowed=False,
-                    action=RiskAction.REDUCE_SIZE,
-                    reason=(
-                        f"Order notional ${order_notional:.2f} exceeds agent cap "
-                        f"${agent_max_notional_usd:.2f}."
-                    ),
-                    adjusted_size=int(
-                        (agent_max_notional_usd * Decimal("100") / price_cents)
-                        .to_integral_value()
-                    ) if price_cents > 0 else 0,
-                    market_id=market_id,
-                )
+        # HARD REQUIREMENT: Live Kalshi bankroll only - no fake data, no fallbacks
+        # agent_max_notional_usd comes from trading_agent which calls get_live_bankroll()
+        if agent_max_notional_usd is None:
+            return PreTradeCheck(
+                allowed=False,
+                action=RiskAction.REJECT,
+                reason="BANKROLL_UNAVAILABLE: Live Kalshi bankroll not available. Cannot trade.",
+                market_id=market_id,
+            )
+        
+        # Use the provided max_notional (already computed as % of live bankroll by trading_agent)
+        effective_max_notional = agent_max_notional_usd
+        
+        if order_notional > effective_max_notional:
+            return PreTradeCheck(
+                allowed=False,
+                action=RiskAction.REDUCE_SIZE,
+                reason=(
+                    f"Order notional ${order_notional:.2f} exceeds 2% bankroll cap "
+                    f"${effective_max_notional:.2f}."
+                ),
+                adjusted_size=int(
+                    (effective_max_notional * Decimal("100") / price_cents)
+                    .to_integral_value()
+                ) if price_cents > 0 else 0,
+                market_id=market_id,
+            )
 
         # 3. Per-market limit
         existing = self._exposures.get(market_id)
@@ -516,13 +551,51 @@ class PredictionMarketRisk:
                 market_id=market_id,
             )
 
-        # 5. Portfolio-wide notional
+        # 5. Portfolio-wide notional (legacy hardcoded cap)
         total_notional = sum(e.notional_usd for e in self._exposures.values())
         if total_notional + order_notional > self.config.max_total_notional_usd:
             return PreTradeCheck(
                 allowed=False,
                 action=RiskAction.REJECT,
                 reason=f"Portfolio notional ${total_notional + order_notional} exceeds max ${self.config.max_total_notional_usd}.",
+                market_id=market_id,
+            )
+
+        # 5b. EMERGENCY GLOBAL BANKROLL CAP: Total portfolio notional cannot exceed 2% of bankroll
+        # SAFETY: This is the critical 1-2% bankroll enforcement across ALL agents
+        # CRITICAL FIX: Ensure bankroll is positive - never allow zero/negative bankroll
+        MINIMUM_GLOBAL_BANKROLL_CENTS = 5000  # $50 minimum to prevent negative caps
+        global_bankroll_usd = Decimal("50000.00")  # Default for logging
+        try:
+            from merid.settings import settings
+            global_bankroll_cents = getattr(settings, 'KALSHI_PORTFOLIO_BANKROLL_CENTS', 50_000_00)
+            # FIX: If bankroll is 0 or negative, use minimum to prevent negative cap
+            if global_bankroll_cents <= 0:
+                logger.warning(
+                    "[RISK_GLOBAL_CAP_FIX] KALSHI_PORTFOLIO_BANKROLL_CENTS is %s (invalid), using minimum $%.2f",
+                    global_bankroll_cents, MINIMUM_GLOBAL_BANKROLL_CENTS / 100
+                )
+                global_bankroll_cents = MINIMUM_GLOBAL_BANKROLL_CENTS
+            global_bankroll_usd = Decimal(global_bankroll_cents) / Decimal("100")
+            # 2% of bankroll = max TOTAL portfolio notional (1% = more conservative)
+            global_bankroll_cap = (global_bankroll_usd * Decimal("0.02")).quantize(Decimal("0.01"))
+            # EXTRA SAFETY: Ensure cap is never negative or zero
+            if global_bankroll_cap <= 0:
+                global_bankroll_cap = Decimal("1.00")  # Minimum $1.00 cap
+        except Exception as e:
+            logger.error("[RISK_GLOBAL_CAP_FIX] Error computing global bankroll cap: %s. Using fallback.", e)
+            global_bankroll_cap = Decimal("1000.00")  # Fallback: 2% of $50K
+
+        if total_notional + order_notional > global_bankroll_cap:
+            logger.error(
+                "[EMERGENCY_BANKROLL_CAP] Order rejected: total_notional=${:.2f} + order=${:.2f} "
+                "would exceed 2% bankroll cap=${:.2f}. Bankroll=${:.2f}",
+                float(total_notional), float(order_notional), float(global_bankroll_cap), float(global_bankroll_usd)
+            )
+            return PreTradeCheck(
+                allowed=False,
+                action=RiskAction.REJECT,
+                reason=f"EMERGENCY: Total portfolio notional ${total_notional + order_notional:.2f} would exceed 2% bankroll cap ${global_bankroll_cap:.2f}.",
                 market_id=market_id,
             )
 

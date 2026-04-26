@@ -25,6 +25,8 @@ from merid.trading.top3_batch_manager import (
 @pytest.fixture
 def fresh_batch_manager():
     """Provide a fresh batch manager singleton for each test."""
+    import os
+    os.environ["MERID_TEST_MODE"] = "1"
     reset_top3_batch_manager()
     return get_top3_batch_manager()
 
@@ -102,7 +104,7 @@ class TestBatchCreation:
         assert mgr.get_current_batch() is batch1
     
     def test_new_batch_created_when_previous_closed(self, fresh_batch_manager, sample_candidates):
-        """New batch should be created after previous is closed."""
+        """New batch should be created after previous is closed and reconciled."""
         mgr = fresh_batch_manager
         
         # Create first batch
@@ -116,7 +118,14 @@ class TestBatchCreation:
         for alloc in batch1.allocations:
             mgr.mark_asset_closed(batch1_id, alloc.asset)
         
-        # Now can create new batch
+        # CRITICAL: Must reconcile bankroll before new cycle can start
+        # Cycle lock prevents new batches until FULLY_RECONCILED
+        mgr.mark_batch_reconciled(batch1_id, realized_pnl_cents=500)
+        
+        # Verify batch is now FULLY_RECONCILED
+        assert mgr.get_current_batch().status == BatchStatus.FULLY_RECONCILED
+        
+        # Now can create new batch (cycle lock is released)
         batch2 = mgr.maybe_create_new_batch(
             bankroll_notional=100_000,
             candidates=sample_candidates,
@@ -195,7 +204,37 @@ class TestBatchLifecycle:
             candidates=sample_candidates,
         )
         
+        # Close it (force=True required since positions are still technically "open" in test state)
+        mgr.close_batch(batch.batch_id, reason="manual_test", force=True)
+        
+        assert batch.status == BatchStatus.CLOSED
+    
+    def test_close_batch_manual_bypass_attempt(self, fresh_batch_manager, sample_candidates):
+        """Should reject manual batch closure when positions are open."""
+        mgr = fresh_batch_manager
+        
+        batch = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=sample_candidates,
+        )
+        
+        # Attempt to close without force=True
         result = mgr.close_batch(batch.batch_id, reason="manual_test")
+        
+        assert result is False
+        assert batch.status == BatchStatus.ACTIVE
+    
+    def test_close_batch_manual_bypass_attempt_force(self, fresh_batch_manager, sample_candidates):
+        """Should allow manual batch closure with force=True."""
+        mgr = fresh_batch_manager
+        
+        batch = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=sample_candidates,
+        )
+        
+        # Attempt to close with force=True
+        result = mgr.close_batch(batch.batch_id, reason="manual_test", force=True)
         
         assert result is True
         assert batch.status == BatchStatus.CLOSED
@@ -373,3 +412,131 @@ class TestBatchPersistence:
         loaded_batch = mgr2.get_current_batch()
         assert loaded_batch is not None
         assert loaded_batch.batch_id == batch_id
+
+
+class TestCycleLocking:
+    """REGRESSION TESTS: Cycle locking prevents cycle piling.
+    
+    Critical safety feature: No new cycle can start until previous
+    cycle is FULLY_RECONCILED (bankroll updated with realized P&L).
+    """
+    
+    def test_cycle_unlocked_when_no_batch(self, fresh_batch_manager):
+        """Fresh start - cycle should be unlocked."""
+        mgr = fresh_batch_manager
+        
+        locked, reason = mgr.is_cycle_locked()
+        
+        assert locked is False
+        assert reason == ""
+    
+    def test_cycle_locked_when_batch_active(self, fresh_batch_manager, sample_candidates):
+        """Cycle locked when batch is ACTIVE."""
+        mgr = fresh_batch_manager
+        
+        # Create an active batch
+        batch = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=sample_candidates[:3],
+        )
+        assert batch is not None
+        assert batch.status == BatchStatus.ACTIVE
+        
+        # Cycle should be locked
+        locked, reason = mgr.is_cycle_locked()
+        assert locked is True
+        assert "ACTIVE" in reason
+    
+    def test_cycle_locked_when_batch_closed(self, fresh_batch_manager, sample_candidates):
+        """Cycle locked when batch is CLOSED but not reconciled."""
+        mgr = fresh_batch_manager
+        
+        # Create batch
+        batch = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=sample_candidates[:3],
+        )
+        assert batch is not None
+        
+        # Close the batch (simulate all positions closed)
+        mgr.close_batch(batch.batch_id, reason="test_close", force=True)
+        
+        # Verify CLOSED status
+        current = mgr.get_current_batch()
+        assert current.status == BatchStatus.CLOSED
+        
+        # Cycle should STILL be locked (not yet reconciled)
+        locked, reason = mgr.is_cycle_locked()
+        assert locked is True
+        assert "CLOSED" in reason
+    
+    def test_cycle_unlocked_when_fully_reconciled(self, fresh_batch_manager, sample_candidates):
+        """Cycle unlocked when batch is FULLY_RECONCILED."""
+        mgr = fresh_batch_manager
+        
+        # Create batch
+        batch = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=sample_candidates[:3],
+        )
+        assert batch is not None
+        
+        # Close the batch
+        mgr.close_batch(batch.batch_id, reason="test_close", force=True)
+        
+        # Mark as reconciled
+        result = mgr.mark_batch_reconciled(batch.batch_id, realized_pnl_cents=500)
+        assert result is True
+        
+        # Verify FULLY_RECONCILED status
+        current = mgr.get_current_batch()
+        assert current.status == BatchStatus.FULLY_RECONCILED
+        
+        # Cycle should now be unlocked
+        locked, reason = mgr.is_cycle_locked()
+        assert locked is False
+        assert reason == ""
+    
+    def test_new_batch_blocked_when_cycle_locked(self, fresh_batch_manager, sample_candidates):
+        """Cannot create new batch when cycle is locked (regression test)."""
+        mgr = fresh_batch_manager
+        
+        # Create first batch
+        batch1 = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=sample_candidates[:3],
+        )
+        assert batch1 is not None
+        
+        # Attempt to create second batch while first is still ACTIVE
+        batch2 = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=sample_candidates[2:5],  # Different edges
+        )
+        
+        # Second batch should be blocked
+        assert batch2 is None
+    
+    def test_new_batch_allowed_after_reconciliation(self, fresh_batch_manager, sample_candidates):
+        """New batch allowed only after FULLY_RECONCILED."""
+        mgr = fresh_batch_manager
+        
+        # Create first batch
+        batch1 = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=sample_candidates[:3],
+        )
+        assert batch1 is not None
+        batch1_id = batch1.batch_id
+        
+        # Close and reconcile (force=True required)
+        mgr.close_batch(batch1_id, reason="test_close", force=True)
+        mgr.mark_batch_reconciled(batch1_id, realized_pnl_cents=500)
+        
+        # Now new batch should be allowed
+        batch2 = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=sample_candidates[2:5],
+        )
+        assert batch2 is not None
+        assert batch2.batch_id != batch1_id

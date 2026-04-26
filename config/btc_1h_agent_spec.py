@@ -3,8 +3,17 @@ BTC 1h Agent Spec — regime-aware BTC hourly Kalshi markets.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from typing import Optional
+
+
+def _env_float(env_key: str, default: float) -> float:
+    return float(os.getenv(env_key, str(default)))
+
+
+def _env_int(env_key: str, default: int) -> int:
+    return int(os.getenv(env_key, str(default)))
 
 
 @dataclass
@@ -29,13 +38,13 @@ class Btc1hInputs:
 
 @dataclass
 class Btc1hParams:
-    """Configurable BTC 1h parameters (config-only tuning)."""
+    """Configurable BTC 1h parameters (ENV-DRIVEN)."""
 
-    min_edge_threshold: float = 0.015
-    max_vol_ratio: float = 2.5
-    min_time_to_expiry_sec: int = 10 * 60
-    max_time_to_expiry_sec: int = 70 * 60
-    max_exposure_pct: float = 0.05
+    min_edge_threshold: float = field(default_factory=lambda: _env_float("MERID_BTC1H_MIN_EDGE", 0.015))
+    max_vol_ratio: float = field(default_factory=lambda: _env_float("MERID_BTC1H_MAX_VOL_RATIO", 2.5))
+    min_time_to_expiry_sec: int = field(default_factory=lambda: _env_int("MERID_BTC1H_MIN_TTE", 600))  # 10*60
+    max_time_to_expiry_sec: int = field(default_factory=lambda: _env_int("MERID_BTC1H_MAX_TTE", 4200))  # 70*60
+    max_exposure_pct: float = field(default_factory=lambda: _env_float("MERID_BTC1H_MAX_EXPOSURE_PCT", 0.05))
 
 
 @dataclass

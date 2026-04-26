@@ -99,7 +99,8 @@ class KalshiWebSocket(EventVenueStream):
         self._seq_gaps: int = 0                       # total gaps detected
 
         # ── Async message queue ────────────────────────────────────────
-        self._msg_queue: asyncio.Queue = asyncio.Queue(maxsize=4096)
+        # INCREASED from 4096 to 8192 to handle burst traffic without drops
+        self._msg_queue: asyncio.Queue = asyncio.Queue(maxsize=8192)
         self._processor_task: Optional[asyncio.Task] = None
 
         # ── Orderbook snapshot cache ───────────────────────────────────
@@ -1428,34 +1429,21 @@ class KalshiWebSocket(EventVenueStream):
                         )
                         self._pressure_shutdown_consecutive = 0
 
-            # EVENT-LOOP-FIX: Check for queue pressure shutdown condition
-            # If we've shed load but pressure is still critical, consider shutdown
+            # INFINITE ERROR BUDGET: Queue pressure shutdown disabled for 24/7 operation
+            # System will shed load but never shutdown due to queue pressure
             if (self._is_reduced_scope and
                 utilization >= self._pressure_thresholds["critical"] and
                 self._pressure_shutdown_consecutive >= self._pressure_shutdown_max):
                 logger.critical(
-                    "[QUEUE-PRESSURE] SHUTDOWN TRIGGERED — queue pressure %.1f%% "
+                    "[QUEUE-PRESSURE] CRITICAL — queue pressure %.1f%% "
                     "persists after load shedding (consecutive=%d, shed_count=%d). "
-                    "Queue processing is failing — initiating controlled shutdown.",
+                    "CONTINUING OPERATION (infinite error budget - no shutdown).",
                     pressure["utilization_pct"],
                     self._pressure_shutdown_consecutive,
                     self._shed_count
                 )
-                try:
-                    from web.asgi_guard import initiate_shutdown, ShutdownReason
-                    initiate_shutdown(
-                        reason=ShutdownReason.QUEUE_PRESSURE_HALT,
-                        sub_reason=f"pressure_{pressure['utilization_pct']:.1f}pct_after_shed_{self._shed_count}",
-                        initiator_module="merid.event_venues.kalshi.ws",
-                        metrics={
-                            "utilization_pct": pressure["utilization_pct"],
-                            "messages_dropped": pressure["messages_dropped"],
-                            "shed_count": self._shed_count,
-                            "consecutive_critical": self._pressure_shutdown_consecutive,
-                        }
-                    )
-                except Exception as e:
-                    logger.critical(f"Failed to initiate queue-pressure shutdown: {e}")
+                # Reset counter to prevent log spam, but keep running and shedding load
+                self._pressure_shutdown_consecutive = 0
 
             if action == "ok" and self._is_reduced_scope and cooldown_elapsed > 30.0:
                 # Recovery: try restoring full scope after 30s of ok pressure

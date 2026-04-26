@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, PauseCircle, Trash, Copy, RefreshCw, Terminal } from 'lucide-react';
+import { Play, PauseCircle, Trash, Copy, RefreshCw, Terminal } from '../ui/icons';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY} from '../config/constants';
 
 function authHeaders(headers?: HeadersInit): HeadersInit {

@@ -25,6 +25,7 @@ Usage::
 
 from __future__ import annotations
 
+import os
 import threading
 import hashlib
 import json
@@ -35,6 +36,14 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from utils.logger import get_logger
+
+
+def _env_int(env_key: str, default: int) -> int:
+    return int(os.getenv(env_key, str(default)))
+
+
+def _env_float(env_key: str, default: float) -> float:
+    return float(os.getenv(env_key, str(default)))
 
 logger = get_logger("merid.prediction.ai_guardrails")
 
@@ -107,28 +116,43 @@ class GuardrailResult:
 
 @dataclass
 class GuardrailConfig:
-    """Hard-coded limits that NO model can override."""
-    # Position limits
-    max_contracts_per_order: int = 50
-    max_contracts_per_market: int = 200
-    max_total_notional_usd: float = 500.0
-    max_notional_per_market_usd: float = 100.0
+    """ENV-DRIVEN limits that NO model can override.
+    
+    CRITICAL: max_total_notional_usd and max_notional_per_market_usd are now
+    DYNAMICALLY DERIVED from settings.KALSHI_PORTFOLIO_BANKROLL_CENTS.
+    Hardcoded defaults removed to prevent risk bypass with fake capital.
+    All other limits are ENV-DRIVEN with sensible defaults.
+    """
+    # Position limits (ENV-DRIVEN, contract counts)
+    max_contracts_per_order: int = field(default_factory=lambda: _env_int("MERID_MAX_CONTRACTS_PER_ORDER", 50))
+    max_contracts_per_market: int = field(default_factory=lambda: _env_int("MERID_MAX_CONTRACTS_PER_MARKET", 200))
+    
+    # NOTIONAL LIMITS: These are computed from actual Kalshi balance, not hardcoded.
+    # Default 0 means "derive from bankroll" - see _get_dynamic_limits()
+    max_total_notional_usd: float = 0.0  # 0 = derive from bankroll (was 500.0)
+    max_notional_per_market_usd: float = 0.0  # 0 = derive from bankroll (was 100.0)
 
-    # Rate limits
-    max_orders_per_minute: int = 30
-    max_orders_per_hour: int = 200
+    # Rate limits (ENV-DRIVEN)
+    max_orders_per_minute: int = field(default_factory=lambda: _env_int("MERID_MAX_ORDERS_PER_MINUTE", 30))
+    max_orders_per_hour: int = field(default_factory=lambda: _env_int("MERID_MAX_ORDERS_PER_HOUR", 200))
 
-    # Price sanity
-    min_price_cents: int = 1
-    max_price_cents: int = 99
+    # Price sanity (ENV-DRIVEN)
+    min_price_cents: int = field(default_factory=lambda: _env_int("MERID_MIN_PRICE_CENTS", 1))
+    max_price_cents: int = field(default_factory=lambda: _env_int("MERID_MAX_PRICE_CENTS", 99))
 
-    # Data staleness
-    max_data_age_seconds: float = 300.0  # 5 minutes
+    # Data staleness (ENV-DRIVEN)
+    max_data_age_seconds: float = field(default_factory=lambda: _env_float("MERID_MAX_DATA_AGE_SEC", 300.0))
 
-    # Parameter bounds (for AI-suggested parameter changes)
-    kelly_fraction_bounds: tuple = (0.01, 0.50)
-    vol_scale_bounds: tuple = (0.1, 3.0)
-    max_drawdown_halt_pct: float = 0.20
+    # Parameter bounds (ENV-DRIVEN - for AI-suggested parameter changes)
+    kelly_fraction_bounds: tuple = field(default_factory=lambda: (
+        _env_float("MERID_KELLY_FRAC_MIN", 0.01),
+        _env_float("MERID_KELLY_FRAC_MAX", 0.50)
+    ))
+    vol_scale_bounds: tuple = field(default_factory=lambda: (
+        _env_float("MERID_VOL_SCALE_MIN", 0.1),
+        _env_float("MERID_VOL_SCALE_MAX", 3.0)
+    ))
+    max_drawdown_halt_pct: float = field(default_factory=lambda: _env_float("MERID_MAX_DRAWDOWN_HALT_PCT", 0.20))
 
     # Actions that ALWAYS require human confirmation
     requires_confirmation: tuple = (
@@ -242,12 +266,13 @@ class AIGuardrails:
                 f"Size {contracts} exceeds max {self.config.max_contracts_per_order}",
             )
 
-        # Notional check
+        # Notional check (dynamic from bankroll if not explicitly configured)
         notional = (contracts * price) / 100.0
-        if notional > self.config.max_notional_per_market_usd:
+        max_per_market = self._get_dynamic_max_per_market()
+        if notional > max_per_market:
             return self._reject(
                 s, RejectionReason.EXCEEDS_NOTIONAL_CAP,
-                f"Notional ${notional:.2f} exceeds cap ${self.config.max_notional_per_market_usd}",
+                f"Notional ${notional:.2f} exceeds cap ${max_per_market:.2f} (bankroll-derived)",
             )
 
         # Rate limit check
@@ -266,6 +291,28 @@ class AIGuardrails:
         self._orders_this_minute += 1
         self._orders_this_hour += 1
         return self._allow(s)
+
+    def _get_dynamic_max_per_market(self) -> float:
+        """
+        Compute max notional per market from actual bankroll.
+        
+        If config has explicit value > 0, use it.
+        Otherwise derive from KALSHI_PORTFOLIO_BANKROLL_CENTS (1% of bankroll).
+        """
+        # If explicitly configured, use that
+        if self.config.max_notional_per_market_usd > 0:
+            return self.config.max_notional_per_market_usd
+        
+        # Otherwise derive from actual Kalshi bankroll
+        try:
+            from merid.settings import settings
+            bankroll_cents = settings.KALSHI_PORTFOLIO_BANKROLL_CENTS
+            # Use 1% of bankroll per market (conservative)
+            return bankroll_cents / 100.0 * 0.01  # 1% of bankroll in USD
+        except Exception:
+            # Fail-safe: if we can't get bankroll, return extremely conservative $10
+            # This forces explicit configuration or working bankroll fetch
+            return 10.0
 
     # ── Resize checks ─────────────────────────────────────────────────────
 
@@ -346,13 +393,16 @@ class AIGuardrails:
         value: float,
         historical_mean: float,
         historical_std: float,
-        z_threshold: float = 5.0,
+        z_threshold: float = None,
         label: str = "input",
     ) -> bool:
         """Detect anomalous model inputs using z-score.
 
         Returns True if anomalous (should be rejected/flagged).
         """
+        # ENV-DRIVEN: Use env var or default to 5.0
+        if z_threshold is None:
+            z_threshold = _env_float("MERID_ANOMALY_Z_THRESHOLD", 5.0)
         if historical_std <= 0:
             return False
         z = abs(value - historical_mean) / historical_std
@@ -423,7 +473,7 @@ class AIGuardrails:
         self,
         primary_output: float,
         payload: Dict[str, Any],
-        max_divergence: float = 0.30,
+        max_divergence: float = None,
     ) -> Dict[str, Any]:
         """Compare primary model output against all shadow models.
 
@@ -439,6 +489,9 @@ class AIGuardrails:
         max_divergence : float
             Maximum allowed absolute divergence before flagging.
         """
+        # ENV-DRIVEN: Use env var or default to 0.30
+        if max_divergence is None:
+            max_divergence = _env_float("MERID_SHADOW_MAX_DIVERGENCE", 0.30)
         if not self._shadow_models:
             return {"ok": True, "shadows": {}, "blocked": False}
 

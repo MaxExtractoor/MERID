@@ -14,7 +14,7 @@ interface CacheOptions {
   strategy?: 'lru' | 'fifo' | 'lfu'; // Cache eviction strategy
 }
 
-class AdvancedCache<T = any> {
+export class AdvancedCache<T = any> {
   private cache = new Map<string, CacheEntry<T>>();
   private accessOrder = new Map<string, number>();
   private accessCount = new Map<string, number>();

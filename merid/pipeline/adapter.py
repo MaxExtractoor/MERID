@@ -17,6 +17,7 @@ from merid.pipeline.proposal import ExecutionResult, TradeProposal, OrderSide
 from merid.event_venues.kalshi.client import KalshiVenueClient
 from merid.event_venues.kalshi.models import KalshiConfig
 from merid.event_venues.base import VenueOrder, MarketFilter
+from merid.guards.global_execution_guard import get_global_execution_guard
 
 from utils.logger import get_logger
 
@@ -199,6 +200,29 @@ class KalshiUnifiedAdapter(UnifiedVenueAdapter):
                 )
         except ImportError:
             pass  # risk_controller not available in test environments
+
+        # UNIFIED GUARD CHECK — 2% bankroll cap enforcement
+        # This blocks orders that would exceed the global portfolio limit
+        _guard = get_global_execution_guard()
+        _price_cents = int((proposal.price or 50) * 100)  # Default to 50 cents if no price
+        _allowed, _reason = _guard.check_order(
+            ticker=proposal.native_symbol or proposal.instrument_id,
+            contracts=int(proposal.qty),
+            price_cents=_price_cents,
+            source="pipeline_adapter",
+            asset=proposal.metadata.get("asset"),
+        )
+        if not _allowed:
+            logger.error(
+                "[PIPELINE_ADAPTER_BLOCKED] GlobalExecutionGuard rejected order: %s | proposal=%s",
+                _reason, proposal.proposal_id
+            )
+            return ExecutionResult(
+                proposal_id=proposal.proposal_id,
+                venue=self.venue_name,
+                status="error",
+                error=f"Global guard blocked: {_reason}",
+            )
 
         # Convert TradeProposal to VenueOrder
         v_order = VenueOrder(

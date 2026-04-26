@@ -21,7 +21,7 @@ import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import type { OperatorRiskState } from '../types/risk';
 import { formatCurrency } from '../utils/formatters';
-import { Monitor, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { Monitor, AlertTriangle, CheckCircle2 } from '../ui/icons';
 
 export default function OperatorDashboard() {
   const {

@@ -1,0 +1,112 @@
+{#
+  Mode Banner Component for MERID Web Dashboard
+  
+  Usage:
+    {% include "components/mode_banner.html" %}
+  
+  The mode is automatically determined from the server context.
+#}
+{% if mode %}
+<div class="mode-banner mode-{{ mode }}" role="alert" aria-live="polite">
+    <div class="mode-indicator">
+        <span class="mode-icon">
+            {% if mode == "sim" %}🔬
+            {% elif mode == "paper" %}📄
+            {% elif mode == "live" %}⚡
+            {% else %}⚙️{% endif %}
+        </span>
+        <span class="mode-text">{{ mode.upper() }} MODE</span>
+    </div>
+    <div class="mode-description">
+        {% if mode == "sim" %}
+            Simulation environment — no real funds at risk
+        {% elif mode == "paper" %}
+            Paper trading — simulated orders, tracked performance
+        {% elif mode == "live" %}
+            ⚠️ LIVE TRADING — REAL FUNDS AT RISK ⚠️
+        {% else %}
+            Unknown mode — verify configuration
+        {% endif %}
+    </div>
+    {% if mode == "live" %}
+    <div class="mode-actions">
+        <a href="#" class="mode-help" onclick="alert('Contact #risk-engineering for assistance'); return false;">
+            Need Help?
+        </a>
+    </div>
+    {% endif %}
+</div>
+
+<style>
+    .mode-banner {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 24px;
+        border-radius: 6px;
+        margin: 0 0 20px 0;
+        font-family: system-ui, -apple-system, sans-serif;
+        font-size: 14px;
+        transition: all 0.2s ease;
+    }
+    
+    .mode-sim {
+        background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
+        color: white;
+        border-left: 4px solid #2E7D32;
+    }
+    
+    .mode-paper {
+        background: linear-gradient(135deg, #FF9800 0%, #F57C00 100%);
+        color: white;
+        border-left: 4px solid #E65100;
+    }
+    
+    .mode-live {
+        background: linear-gradient(135deg, #F44336 0%, #D32F2F 100%);
+        color: white;
+        border-left: 4px solid #B71C1C;
+        animation: pulse-live 2s infinite;
+    }
+    
+    @keyframes pulse-live {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(244, 67, 54, 0.4); }
+        50% { box-shadow: 0 0 0 10px rgba(244, 67, 54, 0); }
+    }
+    
+    .mode-indicator {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 600;
+        font-size: 16px;
+    }
+    
+    .mode-icon {
+        font-size: 20px;
+    }
+    
+    .mode-description {
+        flex: 1;
+        text-align: center;
+        font-weight: 500;
+    }
+    
+    .mode-actions a {
+        color: white;
+        text-decoration: underline;
+        font-weight: 500;
+    }
+    
+    /* Live mode specific enhancements */
+    .mode-live .mode-indicator {
+        font-size: 18px;
+        letter-spacing: 0.5px;
+    }
+    
+    .mode-live .mode-description {
+        font-size: 16px;
+        font-weight: 600;
+    }
+</style>
+{% endif %}

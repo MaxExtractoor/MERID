@@ -2,7 +2,7 @@ import { useState } from 'react';
 import {
   Settings, Shield, AlertTriangle,
   RefreshCw, Play, Pause, Zap
-} from 'lucide-react';
+} from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import ErrorBar from './ErrorBar';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY} from '../config/constants';

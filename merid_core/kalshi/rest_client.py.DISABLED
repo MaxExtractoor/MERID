@@ -1,0 +1,89 @@
+================================================================================
+FILE PARTIALLY DISABLED: merid_core/kalshi/rest_client.py
+================================================================================
+
+STATUS:      RESTRICTED (T-001 Zero-Trust Audit)
+REASON:      Direct HTTP client with order operations that bypass canonical router
+HARDENED:    2026-04-23
+
+--------------------------------------------------------------------------------
+BYPASS RISK
+--------------------------------------------------------------------------------
+This module provides KalshiRestClient, a low-level HTTP client that performs
+direct API calls to Kalshi, completely bypassing the canonical order routing
+and ALL risk guards:
+
+  - POST /portfolio/orders           → create_order()
+  - PATCH /portfolio/orders/{id}    → amend_order()
+  - DELETE /portfolio/orders/{id}   → cancel_order()
+  - DELETE /portfolio/orders         → batch_cancel_orders()
+
+These methods BYPASS:
+  - order_router.route_order_async() (canonical order routing)
+  - GlobalRiskGuard (1-2% bankroll cap enforcement)
+  - Top3BatchManager (top-3 allocation gate)
+  - PreTradeGate (lease acquisition + deduplication)
+  - Execution gate (kill switches, circuit breakers)
+  - Full audit trail via decision_trace_id
+
+--------------------------------------------------------------------------------
+PRODUCTION HARDENING
+--------------------------------------------------------------------------------
+All order-related methods now require:
+  MERID_ALLOW_REST_CLIENT_ORDERS=1
+
+Without this flag, the following methods raise RuntimeError:
+  - create_order()        → POST /portfolio/orders
+  - amend_order()         → PATCH /portfolio/orders/{id}
+  - cancel_order()        → DELETE /portfolio/orders/{id}
+  - batch_cancel_orders() → DELETE /portfolio/orders
+
+Read-only operations (get_balance, get_positions, get_orders, get_fills,
+get_market, get_orderbook) remain available for data retrieval.
+
+--------------------------------------------------------------------------------
+EXCEPTION
+--------------------------------------------------------------------------------
+To enable direct order operations (NOT RECOMMENDED):
+
+  export MERID_ALLOW_REST_CLIENT_ORDERS=1
+
+--------------------------------------------------------------------------------
+CANONICAL PATH
+--------------------------------------------------------------------------------
+For legitimate order execution, use:
+
+  POST /api/v1/kalshi/orders  →  kalshi_api.py  →  order_router.route_order_async()
+  
+or
+
+  KalshiContinuousTrader  →  CTExecutionAdapter  →  order_router.route_order_async()
+
+These paths enforce the full 9-gate execution path with complete auditability.
+
+--------------------------------------------------------------------------------
+USAGE RESTRICTIONS
+--------------------------------------------------------------------------------
+Safe (read-only, no bypass flag needed):
+  - get_balance()
+  - get_positions()
+  - get_orders()
+  - get_fills()
+  - get_market()
+  - get_orderbook()
+
+Blocked (requires MERID_ALLOW_REST_CLIENT_ORDERS=1):
+  - create_order()        → RuntimeError without bypass
+  - amend_order()         → RuntimeError without bypass
+  - cancel_order()        → RuntimeError without bypass
+  - batch_cancel_orders() → RuntimeError without bypass
+
+--------------------------------------------------------------------------------
+REFERENCES
+--------------------------------------------------------------------------------
+- T-001 Zero-Trust Audit
+- Checkpoint 12: Bypass Neutralization Sprint
+- merid/event_venues/kalshi/order_router.py (canonical routing)
+- merid_core/kalshi/execution_pipeline.py (parallel execution - QUARANTINED)
+
+================================================================================

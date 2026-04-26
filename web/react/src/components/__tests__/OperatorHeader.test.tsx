@@ -8,12 +8,14 @@
 import { render, screen } from '@testing-library/react';
 import OperatorHeader from '../OperatorHeader';
 
-// Mock child components
-jest.mock('../components/ExecutionGateStrip', () => ({
+// Mock child components (relative to OperatorHeader.tsx at src/components/)
+jest.mock('../ExecutionGateStrip', () => ({
+  __esModule: true,
   default: () => <div data-testid="execution-gate-strip">Execution Gate</div>,
 }));
 
-jest.mock('../components/DataHealthSummary', () => ({
+jest.mock('../DataHealthSummary', () => ({
+  __esModule: true,
   default: () => <div data-testid="data-health-summary">Data Health</div>,
 }));
 
@@ -27,7 +29,8 @@ describe('OperatorHeader', () => {
 
   it('has correct container styling', () => {
     const { container } = render(<OperatorHeader />);
-    expect(container.firstChild).toHaveClass('flex', 'items-center', 'justify-between', 'gap-4', 'p-4');
+    // Current layout stacks the two summary widgets vertically
+    expect(container.firstChild).toHaveClass('flex', 'flex-col', 'gap-4');
   });
 
   it('maintains accessibility structure', () => {

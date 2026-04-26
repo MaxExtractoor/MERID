@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Set
 
 @dataclass
 class ProfileConfig:
-    """Configuration for a MERID runtime profile."""
+    """Configuration for a MERID runtime profile (ENV-DRIVEN)."""
     name: str
     description: str
     
@@ -23,27 +23,27 @@ class ProfileConfig:
     enabled_routers: Set[str] = field(default_factory=set)
     disabled_routers: Set[str] = field(default_factory=set)
     
-    # Social advisory settings
-    social_advisory_enabled: bool = False
+    # Social advisory settings (ENV-DRIVEN)
+    social_advisory_enabled: bool = field(default_factory=lambda: os.getenv("MERID_SOCIAL_ADVISORY_ENABLED", "false").lower() == "true")
     social_advisory_weights: Dict[str, float] = field(default_factory=dict)
-    social_advisory_max_nudge: float = 0.1
+    social_advisory_max_nudge: float = field(default_factory=lambda: float(os.getenv("MERID_SOCIAL_ADVISORY_MAX_NUDGE", "0.1")))
     
-    # Incentive ledger settings
-    incentive_ledger_enabled: bool = False
-    incentives_live: bool = False  # If False, feedback is dry-run only
+    # Incentive ledger settings (ENV-DRIVEN)
+    incentive_ledger_enabled: bool = field(default_factory=lambda: os.getenv("MERID_INCENTIVE_LEDGER_ENABLED", "false").lower() == "true")
+    incentives_live: bool = field(default_factory=lambda: os.getenv("MERID_INCENTIVES_LIVE", "false").lower() == "true")  # If False, feedback is dry-run only
     
-    # Feedback scheduler settings
-    feedback_scheduler_enabled: bool = False
-    feedback_scheduler_dry_run: bool = True
-    feedback_scheduler_interval_rounds: int = 10
-    feedback_scheduler_interval_seconds: float = 300.0
+    # Feedback scheduler settings (ENV-DRIVEN)
+    feedback_scheduler_enabled: bool = field(default_factory=lambda: os.getenv("MERID_FEEDBACK_SCHED_ENABLED", "false").lower() == "true")
+    feedback_scheduler_dry_run: bool = field(default_factory=lambda: os.getenv("MERID_FEEDBACK_SCHED_DRY_RUN", "true").lower() == "true")
+    feedback_scheduler_interval_rounds: int = field(default_factory=lambda: int(os.getenv("MERID_FEEDBACK_SCHED_ROUNDS", "10")))
+    feedback_scheduler_interval_seconds: float = field(default_factory=lambda: float(os.getenv("MERID_FEEDBACK_SCHED_SEC", "300.0")))
     
-    # Mode restrictions
-    allowed_modes: List[str] = field(default_factory=lambda: ["mock", "paper", "live"])
+    # Mode restrictions (ENV-DRIVEN)
+    allowed_modes: List[str] = field(default_factory=lambda: os.getenv("MERID_ALLOWED_MODES", "mock,paper,live").split(","))
     
-    # Safety flags
-    allow_live_trading: bool = True
-    replay_isolated: bool = False
+    # Safety flags (ENV-DRIVEN)
+    allow_live_trading: bool = field(default_factory=lambda: os.getenv("MERID_ALLOW_LIVE_TRADING", "true").lower() == "true")
+    replay_isolated: bool = field(default_factory=lambda: os.getenv("MERID_REPLAY_ISOLATED", "false").lower() == "true")
 
 
 # Define profile configurations

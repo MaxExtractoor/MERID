@@ -1,0 +1,33 @@
+# THIS FILE HAS BEEN DISABLED AS PART OF PRODUCTION HARDENING
+#
+# Reason: Contains DIRECT HTTP BYPASS to Kalshi API that circumvents:
+#   - order_router.route_order_async()
+#   - GlobalRiskGuard (1-2% bankroll cap)
+#   - Top-3 batch allocation gate
+#   - PreTradeGate (deduplication)
+#   - Execution gate / kill switches
+#   - All risk pre-checks
+#
+# Evidence of bypass:
+#   - Lines 181-204: Direct httpx.AsyncClient() POST to /portfolio/orders
+#   - Lines 162-178: Manual RSA signing (bypasses canonical KalshiVenueClient)
+#   - Line 165: Hardcoded https://api.elections.kalshi.com/trade-api/v2
+#
+# If you need live trading, use the canonical path:
+#   - POST /api/v1/kalshi/orders (web API) -> order_router -> risk guards -> venue
+#   - KalshiContinuousTrader with proper strategy configuration
+#
+# To execute this bypass (NOT RECOMMENDED), rename this file back to .py
+# WARNING: This will bypass ALL risk controls and could cause significant losses.
+#
+# See: docs/PRODUCTION_HARDENING_FINAL_REPORT.md for full audit details.
+# Date: 2026-04-23
+# Auditor: Cascade
+
+raise RuntimeError(
+    "[PRODUCTION HARDENING] run_live_trade.py has been DISABLED. "
+    "This script contains a direct HTTP bypass to Kalshi that circumvents "
+    "all risk guards (GlobalRiskGuard 1-2% cap, Top-3 batch gate, PreTradeGate). "
+    "Use the canonical web API endpoint /api/v1/kalshi/orders instead, "
+    "or run KalshiContinuousTrader with proper configuration."
+)

@@ -1523,62 +1523,67 @@ class BTC15MLane:
                 "cycle_id": cycle_id,
             }
 
-        # --- Live path via canonical order router ---
-        # This ensures: kill switch checks, fills ledger tracking, risk controller lineage
+        # --- Live path via Signal Router (Single Executor Principle) ---
+        # SIGNAL-ONLY AGENT: btc15m_lane submits signals to trading_agent for execution.
+        # This ensures only trading_agent can execute trades, maintaining risk guard alignment.
         try:
-            from merid.event_venues.kalshi.decision_trace import new_decision_trace_id
-            from merid.event_venues.kalshi.order_router import route_order_async, OrderIntent
-            from merid.prediction.venue_gate import TradingMode
+            from merid.event_venues.kalshi import submit_signal
 
             limit_price = float(consensus.get("probability", 0.5))
             price_dollars = max(limit_price, 0.01)
             contracts = max(1, int(approved_size / price_dollars))
             price_cents = max(1, min(99, int(round(limit_price * 100))))
-            _lane_mode = TradingMode.PAPER if self.config.paper_mode else TradingMode.LIVE
             _side = direction if direction in ("yes", "no") else "yes"
 
-            intent = OrderIntent(
-                ticker=market_id,
-                side=_side,
+            # Submit signal to trading_agent for execution
+            # trading_agent will validate, risk-check, and execute via route_order_async
+            signal = submit_signal(
+                agent_id=f"btc15m_lane_{cycle_id}",
+                agent_type="btc15m_lane",
+                market_id=market_id,
                 action="buy",
+                side=_side,
+                size=contracts,
                 price_cents=price_cents,
-                count=contracts,
-                mode=_lane_mode,
-                time_in_force="gtc",
-                source=f"lane_{self.config.asset}_{self.config.timeframe}",
-                client_tag=f"btc15m_{cycle_id}",
-                decision_trace_id=new_decision_trace_id("lane"),
-                sentiment_driven=True,
-                sentiment_asset=self.config.asset,
-                sentiment_timeframe=self.config.timeframe,
+                confidence=float(consensus.get("confidence", 0.5)),
+                edge=float(consensus.get("edge", 0.0)),
+                reasoning=f"Consensus aligned: {consensus.get('consensus_direction', 'neutral')} @ {consensus.get('consensus_probability', 0.5):.1%}",
+                metadata={
+                    "cycle_id": cycle_id,
+                    "phase": risk_decision.get("phase", "?"),
+                    "lifecycle": risk_decision.get("lifecycle_state", "?"),
+                    "approved_size": approved_size,
+                    "sentiment_asset": self.config.asset,
+                    "sentiment_timeframe": self.config.timeframe,
+                    "paper_mode": self.config.paper_mode,
+                },
+                origin_agent="BTC_15M",
+                risk_bucket="crypto_directional",
+                timeframe_label="15m",
             )
 
-            order_result = await route_order_async(intent)
+            logger.info(
+                "[%s] Signal submitted to trading_agent: %s | market=%s side=%s size=%d price=%d¢",
+                cycle_id, signal.signal_id, market_id, _side, contracts, price_cents
+            )
 
-            if order_result.status in ("rejected",):
-                raise Exception(f"Order rejected: {order_result.reason or ''}")
-
-            placed = order_result.fill or {}
-            order_id = placed.get("order_id") or placed.get("fill_id")
-            
-            logger.info("[%s] Order routed via canonical pipeline: %s", cycle_id, order_id)
-            # Live PnL is recorded when fill arrives via order_manager callback;
-            # call _compound_equity(0) here to keep trade counter in sync
+            # Signal is routed asynchronously; we acknowledge submission immediately
+            # trading_agent will handle execution and logging
             self._compound_equity(0.0)
             self._metrics.record_order(mode="live", size=approved_size)
 
-            # Telegram alert for live fills
+            # Telegram alert for signal submission
             try:
                 import asyncio
                 from merid.alerts.webhook_client import tg_send
                 asyncio.create_task(tg_send(
-                    f"🟢 [Kalshi BTC15m] {direction.upper()} {contracts}x {market_id} "
+                    f"🟡 [Kalshi BTC15m] SIGNAL SUBMITTED: {direction.upper()} {contracts}x {market_id} "
                     f"@ {limit_price:.2f} size=${approved_size:.2f} "
                     f"| phase={risk_decision.get('phase', '?')} "
                     f"| equity=${self.config.equity:.2f}"
                 ))
             except Exception as _e:
-                logger.debug("tg_order_submitted: %s", _e)
+                logger.debug("tg_signal_submitted: %s", _e)
 
             return {
                 "submitted": True,
@@ -1589,23 +1594,23 @@ class BTC15MLane:
                 "size": approved_size,
                 "contracts": contracts,
                 "limit_price": limit_price,
-                "order_result": order_result,
+                "signal_id": signal.signal_id,
                 "cycle_id": cycle_id,
             }
         except Exception as exc:
-            logger.error("[%s] Order submission failed: %s", cycle_id, exc)
+            logger.error("[%s] Signal submission failed: %s", cycle_id, exc)
             self._metrics.record_order(mode=effective_mode, size=approved_size, approved=False)
-            self._metrics.record_api_error("kalshi_place_order")
+            self._metrics.record_api_error("signal_submit")
             # Telegram alert for submission failures
             try:
                 import asyncio
                 from merid.alerts.webhook_client import tg_send
                 asyncio.create_task(tg_send(
-                    f"🔴 [Kalshi BTC15m] ORDER FAILED: {exc} "
+                    f"🔴 [Kalshi BTC15m] SIGNAL FAILED: {exc} "
                     f"| {direction.upper()} {market_id} size=${approved_size:.2f}"
                 ))
             except Exception as _e:
-                logger.debug("tg_order_failed: %s", _e)
+                logger.debug("tg_signal_failed: %s", _e)
             return {"submitted": False, "reason": str(exc), "cycle_id": cycle_id}
 
     # ------------------------------------------------------------------

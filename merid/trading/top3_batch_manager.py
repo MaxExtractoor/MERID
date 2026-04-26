@@ -142,6 +142,10 @@ class Top3BatchManager:
     def get_current_batch(self) -> Optional[Top3Batch]:
         """Get the currently active batch, if any.
         
+        Also handles auto-closing and auto-reconciliation:
+        1. Auto-close ACTIVE batch when all positions are closed
+        2. Auto-reconcile CLOSED batch after 30 seconds (allows bankroll update)
+        
         Returns:
             Active Top3Batch or None if no batch exists
         """
@@ -154,6 +158,24 @@ class Top3BatchManager:
                         self._current_batch.batch_id
                     )
                     self._current_batch.status = BatchStatus.CLOSED
+                    self._save_state()
+            
+            # CRITICAL: Auto-reconcile CLOSED batches after delay
+            # This ensures bankroll has been updated before allowing new cycles
+            if self._current_batch and self._current_batch.status == BatchStatus.CLOSED:
+                # Check if batch has been closed for 30+ seconds (allows P&L reconciliation)
+                closed_duration = (__import__('datetime').datetime.now(__import__('datetime').timezone.utc) - 
+                                 self._current_batch.cycle_ts)
+                if closed_duration.total_seconds() > 30:
+                    # Estimate realized P&L from allocations (or 0 if unknown)
+                    realized_pnl = getattr(self._current_batch, 'realized_pnl_cents', 0)
+                    logger.info(
+                        "[TOP3-BATCH] Auto-reconciling batch %s after %ds (realized_pnl=%d¢)",
+                        self._current_batch.batch_id, 
+                        int(closed_duration.total_seconds()),
+                        realized_pnl
+                    )
+                    self._current_batch.status = BatchStatus.FULLY_RECONCILED
                     self._save_state()
             
             return self._current_batch
@@ -178,17 +200,32 @@ class Top3BatchManager:
             New Top3Batch if created, None otherwise
         """
         with self._lock:
-            # Check condition 1: No active batch
-            if self._current_batch and self._current_batch.status == BatchStatus.ACTIVE:
-                logger.debug(
-                    "[TOP3-BATCH] Cannot create new batch: batch %s is still ACTIVE",
-                    self._current_batch.batch_id
+            # CRITICAL: Check if cycle is locked (any non-reconciled batch exists)
+            # This prevents cycle piling - only allow new batch when previous is FULLY_RECONCILED
+            locked, reason = self.is_cycle_locked()
+            if locked:
+                logger.warning(
+                    "[TOP3-BATCH] Cannot create new batch: %s",
+                    reason
                 )
                 return None
             
             # Check condition 3: Valid bankroll
             if bankroll_notional <= 0:
                 logger.warning("[TOP3-BATCH] Cannot create batch: invalid bankroll %d", bankroll_notional)
+                return None
+            
+            # CRITICAL: Reject stale signals (edges computed before previous cycle was reconciled)
+            # This ensures fresh market analysis for each new cycle
+            stale_signals = [c for c in candidates if not c.is_fresh(max_age_seconds=60.0)]
+            if stale_signals:
+                logger.error(
+                    "[STALE-SIGNAL-REJECT] Cannot create batch: %d stale edges detected (age > 60s). "
+                    "Each cycle requires FRESH signals computed after previous cycle reconciliation. "
+                    "Stale assets: %s",
+                    len(stale_signals),
+                    [c.asset for c in stale_signals]
+                )
                 return None
             
             # Compute allocations
@@ -301,29 +338,152 @@ class Top3BatchManager:
             logger.info("[TOP3-BATCH] Marked %s as closed in batch %s", asset, batch_id)
             return True
     
-    def close_batch(self, batch_id: str, reason: str = "manual") -> bool:
-        """Force close a batch (for manual override or error recovery).
+    def close_batch(self, batch_id: str, reason: str = "manual", 
+                    force: bool = False,
+                    require_positions_closed: bool = True) -> bool:
+        """Close a batch (for manual override or error recovery).
+        
+        CRITICAL SAFETY: By default, requires all positions to be closed before
+        allowing batch close. This prevents bypassing the cycle lock with open
+        positions still at risk.
         
         Args:
-            batch_id: ID of the batch to close
-            reason: Reason for closing (logged)
+            batch_id: ID of batch to close
+            reason: Reason for manual close
+            force: If True, bypass position check (requires explicit override)
+            require_positions_closed: If True (default), requires all positions closed
             
         Returns:
-            True if closed successfully, False if batch not found
+            True if closed successfully, False if batch not found or positions open
         """
         with self._lock:
             if not self._current_batch or self._current_batch.batch_id != batch_id:
                 logger.warning("[TOP3-BATCH] Cannot close: batch %s not found", batch_id)
                 return False
             
+            # CRITICAL: Check if positions are still open (prevents cycle lock bypass)
+            if require_positions_closed and not force:
+                if not self._current_batch.all_positions_closed():
+                    open_positions = [
+                        alloc.asset for alloc in self._current_batch.allocations
+                        if not alloc.closed
+                    ]
+                    logger.error(
+                        "[TOP3-BATCH] BLOCKED: Cannot close batch %s with open positions: %s. "
+                        "Use force=True with explicit authorization to override.",
+                        batch_id,
+                        open_positions
+                    )
+                    return False
+            
+            # Log forced close with warning
+            if force or not require_positions_closed:
+                logger.critical(
+                    "[TOP3-BATCH] FORCE CLOSE batch %s (reason: %s, force=%s, positions_open=%s). "
+                    "This bypasses normal cycle safety - operator intervention logged.",
+                    batch_id,
+                    reason,
+                    force,
+                    not self._current_batch.all_positions_closed()
+                )
+            
             self._current_batch.status = BatchStatus.CLOSED
             self._save_state()
             
             logger.warning(
-                "[TOP3-BATCH] Force-closed batch %s (reason=%s)",
-                batch_id, reason
+                "[TOP3-BATCH] Batch %s manually CLOSED (reason: %s)",
+                batch_id,
+                reason
             )
             return True
+    
+    def mark_batch_reconciled(self, batch_id: str, realized_pnl_cents: int) -> bool:
+        """Mark a batch as FULLY_RECONCILED after bankroll is updated.
+        
+        This is the critical final step in the cycle lifecycle:
+        1. Batch ACTIVE (positions open)
+        2. Batch CLOSED (all positions resolved)  
+        3. Batch FULLY_RECONCILED (bankroll updated with realized P&L)
+        
+        Only when status is FULLY_RECONCILED can a new cycle start.
+        
+        Args:
+            batch_id: ID of the batch to mark reconciled
+            realized_pnl_cents: Realized P&L from this batch (for logging)
+            
+        Returns:
+            True if batch marked reconciled, False if batch not found or already reconciled
+        """
+        with self._lock:
+            if not self._current_batch or self._current_batch.batch_id != batch_id:
+                logger.warning(
+                    "[TOP3-BATCH] Cannot reconcile: batch %s not found or mismatch (current=%s)",
+                    batch_id,
+                    self._current_batch.batch_id if self._current_batch else None
+                )
+                return False
+            
+            # Only allow transition from CLOSED to FULLY_RECONCILED
+            if self._current_batch.status != BatchStatus.CLOSED:
+                logger.warning(
+                    "[TOP3-BATCH] Cannot reconcile batch %s: status is %s (expected CLOSED)",
+                    batch_id,
+                    self._current_batch.status.value
+                )
+                return False
+            
+            # Mark as fully reconciled
+            self._current_batch.status = BatchStatus.FULLY_RECONCILED
+            self._current_batch.realized_pnl_cents = realized_pnl_cents
+            self._save_state()
+            
+            logger.info(
+                "[TOP3-BATCH] Batch %s FULLY_RECONCILED: realized_pnl=%d¢ - new cycle can now start",
+                batch_id,
+                realized_pnl_cents
+            )
+            return True
+    
+    def is_cycle_locked(self) -> Tuple[bool, str]:
+        """CRITICAL: Check if trading cycle is locked.
+        
+        A cycle is LOCKED (no new execution allowed) when:
+        - Batch is ACTIVE (positions still open)
+        - Batch is CLOSED but not yet RECONCILED (P&L not realized)
+        
+        A cycle is UNLOCKED (new execution allowed) when:
+        - No batch exists (fresh start)
+        - Previous batch is FULLY_RECONCILED (bankroll updated)
+        
+        This prevents cycle piling - ensures strict sequential execution:
+        Cycle 1 Open -> All Positions Close -> Bankroll Reconciled -> Cycle 2 Open
+        
+        Returns:
+            Tuple of (locked: bool, reason: str)
+            - locked: True if cycle is locked, False if new cycle can start
+            - reason: Empty if unlocked, descriptive message if locked
+        """
+        with self._lock:
+            batch = self.get_current_batch()
+            
+            if batch is None:
+                return False, ""  # Fresh start - cycle unlocked
+            
+            # LOCKED: Batch is ACTIVE (positions still open)
+            if batch.status == BatchStatus.ACTIVE:
+                return True, f"CYCLE_LOCKED: Batch {batch.batch_id} is ACTIVE with open positions"
+            
+            # LOCKED: Batch is CLOSED but not reconciled
+            # This is the critical gap that prevents cycle piling
+            if batch.status == BatchStatus.CLOSED:
+                return True, f"CYCLE_LOCKED: Batch {batch.batch_id} is CLOSED but bankroll not reconciled"
+            
+            # LOCKED: Any other non-reconciled status
+            if batch.status != BatchStatus.FULLY_RECONCILED:
+                return True, f"CYCLE_LOCKED: Batch {batch.batch_id} status={batch.status.value}"
+            
+            # UNLOCKED: Previous cycle fully reconciled
+            return False, ""
     
     # ═════════════════════════════════════════════════════════════════
     # Public API: Entry Validation
@@ -429,6 +589,66 @@ class Top3BatchManager:
         
         return allowed, reason
     
+    def is_in_current_batch(self, market_id: str) -> bool:
+        """Check if a market/asset is in the current top-3 batch allocations.
+        
+        SAFETY: Used by trading agents to verify they are only trading
+        top-3 edges per cycle. Prevents 4th, 5th, etc. edges from trading.
+        
+        Args:
+            market_id: Full market ticker (e.g., KXBTC-240125-79000-C)
+            
+        Returns:
+            True if asset extracted from market_id is in current batch allocations
+        """
+        with self._lock:
+            batch = self.get_current_batch()
+            if batch is None:
+                return False
+            
+            if batch.status != BatchStatus.ACTIVE:
+                return False
+            
+            # Extract asset from market_id (e.g., "KXBTC-240125-79000-C" -> "BTC")
+            asset = self._extract_asset_from_market_id(market_id)
+            if not asset:
+                return False
+            
+            # Check if asset is in batch allocations
+            allocation = batch.get_allocation_for_asset(asset)
+            return allocation is not None
+    
+    def _extract_asset_from_market_id(self, market_id: str) -> str:
+        """Extract asset code from Kalshi market ID.
+        
+        Examples:
+            KXBTC15M-240125-79000-C -> BTC
+            KXETH1H-240125-2200-P -> ETH
+            KXSOL-240125-100-C -> SOL
+        """
+        market_id_upper = market_id.upper()
+        
+        # Known crypto assets
+        assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+        for asset in assets:
+            if asset in market_id_upper or f"KX{asset}" in market_id_upper:
+                return asset
+        
+        # Fallback: try to extract after KX prefix
+        if market_id_upper.startswith("KX"):
+            # Remove KX and take next 3-4 chars that are letters
+            remainder = market_id_upper[2:]
+            asset_code = ""
+            for char in remainder:
+                if char.isalpha():
+                    asset_code += char
+                else:
+                    break
+            if asset_code in assets:
+                return asset_code
+        
+        return ""
+    
     # ═════════════════════════════════════════════════════════════════
     # Public API: Metrics and Status
     # ═════════════════════════════════════════════════════════════════
@@ -490,8 +710,24 @@ def get_top3_batch_manager() -> Top3BatchManager:
 
 
 def reset_top3_batch_manager() -> None:
-    """Reset the batch manager singleton (for testing)."""
+    """Reset the batch manager singleton (for testing).
+    
+    CRITICAL SAFETY: This function is TEST-ONLY. It will CRASH in production
+    to prevent accidental or malicious cycle lock bypass.
+    """
     global _batch_manager_instance
+    
+    # SAFETY: Prevent production use - only allow in test mode
+    if os.environ.get("MERID_TEST_MODE", "0") != "1":
+        logger.critical(
+            "[TOP3-BATCH] SECURITY VIOLATION: reset_top3_batch_manager() called in production! "
+            "This function is TEST-ONLY and can bypass cycle locks. Aborting."
+        )
+        raise RuntimeError(
+            "reset_top3_batch_manager() is TEST-ONLY. "
+            "Set MERID_TEST_MODE=1 to enable in test environments."
+        )
+    
     with _batch_manager_lock:
         # Clear cache first to prevent stale state from being reloaded
         try:

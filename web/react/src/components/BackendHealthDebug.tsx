@@ -8,7 +8,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useBackendHealth } from '../context/BackendHealthContext';
-import { Activity, X, ChevronDown, ChevronUp } from 'lucide-react';
+import { Activity, X, ChevronDown, ChevronUp } from '../ui/icons';
 
 interface LogEntry {
   ts: number;

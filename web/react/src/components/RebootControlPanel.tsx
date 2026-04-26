@@ -5,7 +5,7 @@
  * Shows kill switch status, grid status, catalog count, and action buttons.
  */
 
-import { RefreshCw, Play, Square, Database, ShieldAlert, ShieldCheck } from 'lucide-react';
+import { RefreshCw, Play, Square, Database, ShieldAlert, ShieldCheck } from '../ui/icons';
 
 interface OperatorKillSwitchState {
   global_kill?: boolean;

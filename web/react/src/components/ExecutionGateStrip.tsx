@@ -1,4 +1,4 @@
-import { ShieldAlert, ShieldCheck, AlertTriangle, TrendingUp, Activity, Radio, RefreshCw } from 'lucide-react';
+import { ShieldAlert, ShieldCheck, AlertTriangle, TrendingUp, Activity, Radio, RefreshCw } from '../ui/icons';
 import { useState, useCallback } from 'react';
 import { useApiData } from '../hooks/useApiData';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY } from '../config/constants';

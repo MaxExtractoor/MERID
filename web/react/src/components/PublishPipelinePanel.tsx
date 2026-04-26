@@ -14,7 +14,7 @@ import {
   Radio, Twitter, MessageCircle,
   XCircle, RefreshCw, Zap,
   ChevronDown, ChevronUp,
-} from 'lucide-react';
+} from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY } from '../config/constants';
 

@@ -36,7 +36,7 @@ MAX_TOOL_RESULTS = int(os.getenv("MERID_MAX_TOOL_RESULTS", "4"))
 # This flag is the primary defense against the 7-BTC-orders-with-28-equity bug.
 # See: tests/trading/test_risk_oversizing_regression.py
 # ═══════════════════════════════════════════════════════════════════════════
-USE_TOPN_ALLOCATOR: bool = str(os.getenv("USE_TOPN_ALLOCATOR", "false")).lower() in ("1", "true", "yes", "on")
+USE_TOPN_ALLOCATOR: bool = str(os.getenv("USE_TOPN_ALLOCATOR", "true")).lower() in ("1", "true", "yes", "on")
 MAX_CYCLE_RISK_PCT: float = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.02"))  # 2% default
 MAX_TOTAL_RISK_PCT: float = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.02"))  # 2% default
 

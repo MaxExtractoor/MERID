@@ -13,7 +13,7 @@ import {
   ComposedChart, Area, Bar, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea, Legend,
 } from 'recharts';
-import { TrendingUp, TrendingDown, BarChart3, LineChart } from 'lucide-react';
+import { TrendingUp, TrendingDown, BarChart3, LineChart } from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS, CHART_COLORS } from '../config/constants';
 

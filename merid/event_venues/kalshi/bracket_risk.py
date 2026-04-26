@@ -42,14 +42,14 @@ class BracketRiskConfig:
     # Per-bracket loss cap: max loss per contract as % of session equity
     max_loss_per_contract_pct: float = 1.0   # 1% of equity per contract
 
-    # Per-bracket absolute loss cap (cents)
-    max_loss_per_bracket_cents: float = 5000.0  # $50 max loss per bracket
+    # Per-bracket absolute loss cap (cents). 0 = derive from bankroll %
+    max_loss_per_bracket_cents: float = 0.0  # 0 = 5% of bankroll (was $50)
 
     # Cross-bracket: max combined contracts on overlapping brackets in same hour
     max_contracts_per_hour: int = 50
 
-    # Cross-bracket: max combined notional on same hour (cents)
-    max_notional_per_hour_cents: float = 25000.0  # $250
+    # Cross-bracket: max combined notional on same hour (cents). 0 = derive from bankroll %
+    max_notional_per_hour_cents: float = 0.0  # 0 = 10% of bankroll (was $250)
 
     # Consecutive loser kill-switch
     max_consecutive_losers: int = 5

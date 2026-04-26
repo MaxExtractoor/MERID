@@ -1,30 +1,36 @@
 """
 Kalshi Continuous BTC Trader
 ============================
-Runs a live trading loop on Kalshi BTC 15-minute markets.
+⚠️  PRODUCTION HARDENING: THIS SCRIPT IS DISABLED  ⚠️
 
-Each cycle:
-  1. Fetch BTC spot from CoinGecko
-  2. Scan open KXBTUPDOWN-15M and threshold markets, rank candidates
-  3. Fetch orderbooks for the top candidates
-  4. Compute edge (spot-derived model prob vs orderbook implied prob)
-  5. Check balance + existing positions to avoid over-exposure
-  6. Place limit orders where edge exceeds threshold
-  7. Manage resting orders (cancel stale, track fills)
-  8. Sleep and repeat
+This script contains a DIRECT HTTP BYPASS to Kalshi API that circumvents the
+canonical order_router and ALL risk guards (GlobalRiskGuard 1-2% cap, Top-3 batch
+gate, PreTradeGate, execution gate, kill switches).
 
-Usage:
-  py scripts/kalshi_continuous_trader.py                    # default 60s cycle
-  py scripts/kalshi_continuous_trader.py --interval 30      # 30s cycles
-  py scripts/kalshi_continuous_trader.py --dry-run           # log only, no orders
-  py scripts/kalshi_continuous_trader.py --max-cycles 10     # stop after 10 cycles
-  py scripts/kalshi_continuous_trader.py --max-position 5    # max 5 contracts per market
-  py scripts/kalshi_continuous_trader.py --max-spend 50      # max 50c total spend
+To enable this bypass (NOT RECOMMENDED): set MERID_ALLOW_CT_SCRIPT_BYPASS=1
+See: kalshi_continuous_trader.py.DISABLED for full documentation.
 
-Press Ctrl+C to gracefully stop.
+If you need continuous trading, use the canonical path:
+  - merid/trading/kalshi_continuous_trader.py (async server module)
+  - This routes through order_router and enforces all risk guards
 """
 
 from __future__ import annotations
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PRODUCTION HARDENING — CRITICAL BYPASS DISABLED
+# ═══════════════════════════════════════════════════════════════════════════
+import os
+if os.getenv("MERID_ALLOW_CT_SCRIPT_BYPASS", "").lower() not in ("1", "true", "yes"):
+    raise RuntimeError(
+        "[PRODUCTION HARDENING] scripts/kalshi_continuous_trader.py is DISABLED. "
+        "This script contains direct HTTP bypasses to Kalshi API that circumvent "
+        "the canonical order_router and ALL risk guards. "
+        "Use merid/trading/kalshi_continuous_trader.py (async module) instead, "
+        "which routes through the hardened order_router with proper risk controls. "
+        "To bypass (NOT RECOMMENDED): MERID_ALLOW_CT_SCRIPT_BYPASS=1"
+    )
+# ═══════════════════════════════════════════════════════════════════════════
 
 import argparse
 import base64

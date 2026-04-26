@@ -141,6 +141,24 @@ from merid.kalshi.kalshi_crypto_intents import (
 from merid.kalshi.agent_mode_router import AgentModeRouter, get_agent_mode_router
 from merid.kalshi.execution_telemetry import ExecutionTelemetryTracker
 
+# ── Macro overlay (Phase 3) ───────────────────────────────────────────────
+from merid.kalshi.macro_models import (
+    MacroCategory,
+    MacroRegime,
+    VolatilityRegime,
+    MacroState,
+    MacroMarketState,
+    MacroConvictionScore,
+    AssetMacroSensitivity,
+    DEFAULT_ASSET_SENSITIVITIES,
+)
+from merid.kalshi.macro_overlay import (
+    KalshiMacroOverlay,
+    MacroConvictionScorer,
+    get_kalshi_macro_overlay,
+    reset_kalshi_macro_overlay,
+)
+
 # ── Category helpers ──────────────────────────────────────────────────────
 KALSHI_CRYPTO_TICKERS = {"KXBTC", "KXETH", "KXSOL", "KXDOGE", "KXXRP"}
 
@@ -205,4 +223,9 @@ __all__ = [
     # Category helpers
     "KALSHI_CRYPTO_TICKERS", "KALSHI_EVENT_CATEGORIES", "KALSHI_CRYPTO_CATEGORIES",
     "is_crypto_market", "market_domain",
+    # Macro overlay (Phase 3)
+    "KalshiMacroOverlay", "get_kalshi_macro_overlay", "reset_kalshi_macro_overlay",
+    "MacroConvictionScorer", "MacroCategory", "MacroRegime", "VolatilityRegime",
+    "MacroState", "MacroMarketState", "MacroConvictionScore",
+    "AssetMacroSensitivity", "DEFAULT_ASSET_SENSITIVITIES",
 ]

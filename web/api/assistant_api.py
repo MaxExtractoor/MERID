@@ -64,7 +64,10 @@ def _gather_system_snapshot() -> Dict[str, Any]:
             "positions_count": len(pf.positions),
             "domains": list({p.domain for p in pf.positions.values()} if hasattr(pf, "positions") else []),
         }
-    except Exception:
+    except ImportError:
+        snapshot["portfolio"] = {"status": "unavailable", "reason": "module_not_found"}
+    except (RuntimeError, AttributeError) as e:
+        logger.debug("Portfolio snapshot unavailable: %s", e)
         snapshot["portfolio"] = {"status": "unavailable"}
 
     # Risk
@@ -72,7 +75,10 @@ def _gather_system_snapshot() -> Dict[str, Any]:
         from merid.pipeline.risk_manager import get_global_risk_manager
         rm = get_global_risk_manager()
         snapshot["risk"] = rm.summary()
-    except Exception:
+    except ImportError:
+        snapshot["risk"] = {"status": "unavailable", "reason": "module_not_found"}
+    except (RuntimeError, AttributeError) as e:
+        logger.debug("Risk snapshot unavailable: %s", e)
         snapshot["risk"] = {"status": "unavailable"}
 
     # Pipeline
@@ -82,14 +88,20 @@ def _gather_system_snapshot() -> Dict[str, Any]:
         snapshot["pipeline_modes"] = {
             v: cfg.mode.value for v, cfg in mm._venues.items()
         }
-    except Exception:
+    except ImportError:
+        snapshot["pipeline_modes"] = {"status": "unavailable", "reason": "module_not_found"}
+    except (RuntimeError, AttributeError) as e:
+        logger.debug("Pipeline modes unavailable: %s", e)
         snapshot["pipeline_modes"] = {"status": "unavailable"}
 
     # LLM governance
     try:
         store = get_llm_governance_store()
         snapshot["llm_governance"] = store.get_traces_summary(window_s=3600)
-    except Exception:
+    except ImportError:
+        snapshot["llm_governance"] = {"status": "unavailable", "reason": "module_not_found"}
+    except (RuntimeError, AttributeError) as e:
+        logger.debug("LLM governance unavailable: %s", e)
         snapshot["llm_governance"] = {"status": "unavailable"}
 
     # Dev swarm
@@ -100,7 +112,10 @@ def _gather_system_snapshot() -> Dict[str, Any]:
             "paused": ds.is_paused,
             "tasks_completed": len(ds._completed_tasks) if hasattr(ds, "_completed_tasks") else 0,
         }
-    except Exception:
+    except ImportError:
+        snapshot["dev_swarm"] = {"status": "unavailable", "reason": "module_not_found"}
+    except (RuntimeError, AttributeError) as e:
+        logger.debug("Dev swarm unavailable: %s", e)
         snapshot["dev_swarm"] = {"status": "unavailable"}
 
     return snapshot

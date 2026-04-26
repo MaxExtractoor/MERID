@@ -9,7 +9,7 @@ import {
   AlertOctagon,
   Clock,
   BarChart3
-} from 'lucide-react';
+} from '../ui/icons';
 import { useRiskProtections, getOverallRiskStatus, isTradingBlocked } from '../hooks/useRiskProtections';
 // import { CircuitBreakerState } from '../types/risk';
 import { formatDateTime, formatPercent, formatCurrency } from '../utils/formatters';

@@ -108,6 +108,25 @@ async def get_global_health(request: Request) -> dict:
     except Exception as _e:
         checks["health_monitor"] = {"error": str(_e)}
 
+    # 4.5. Fills Ledger Health (critical for trading integrity)
+    # Added as part of SCHEMA-FIX-001: Monitor circuit breaker and DLQ status
+    _is_validation = os.environ.get("MERID_VALIDATION_MODE", "") == "1"
+    if _is_validation:
+        checks["fills_ledger"] = {"status": "unknown", "note": "validation_mode_skipped"}
+    else:
+        try:
+            from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+            ledger = get_fills_ledger()
+            fl_health = await ledger.health_check()
+            checks["fills_ledger"] = fl_health
+            # Circuit breaker open is a critical failure
+            if fl_health.get("circuit_breaker", {}).get("open"):
+                critical_failures.append("fills_ledger_circuit_open")
+            # Schema errors in DLQ are a warning but not critical (fills are queued)
+        except Exception as _e:
+            checks["fills_ledger"] = {"status": "unknown", "error": str(_e)}
+            # Don't fail health check for fills ledger - it's a data integrity issue, not a service outage
+
     # 5. Event-loop lag — reported in `checks` only; does not fail overall health / HTTP status
     # (aligned with execution_gate: lag is diagnostic, not a trading or probe block).
     try:

@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react';
-import { AlertTriangle } from 'lucide-react';
+import { AlertTriangle } from '../ui/icons';
 import { StubRegistryContext } from '../hooks/useStubRegistry';
 
 export function StubRegistryProvider({ children }: { children: React.ReactNode }) {

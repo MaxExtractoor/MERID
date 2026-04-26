@@ -1,5 +1,5 @@
 import React from 'react';
-import { CheckCircle, AlertTriangle, DollarSign } from 'lucide-react';
+import { CheckCircle, AlertTriangle, DollarSign } from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { DataAgeBadge } from './DataAgeBadge';

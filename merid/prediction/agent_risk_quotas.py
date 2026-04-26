@@ -77,40 +77,41 @@ class AgentRiskQuotaManager:
         self.agent_profiles: Dict[str, AgentRiskProfile] = {}
         self.team_profiles: Dict[str, TeamRiskProfile] = {}
         self.position_allocations: Dict[str, Dict[str, float]] = {}  # symbol -> {agent_id: risk_amount}
-        self.last_portfolio_equity: float = 1_000_000.0
+        # CRITICAL: No default - must fetch from actual settings/Kalshi balance
+        self._portfolio_equity_usd: Optional[float] = None  # Lazy-loaded from settings
         
         # Risk tier configurations
         self.tier_configs = {
             RiskTier.GOLD: {
-                "quota_pct": 0.15,      # 15% of portfolio equity per agent
-                "team_quota_pct": 0.25,  # 25% of portfolio equity per team
+                "quota_pct": 0.015,      # 1.5% of portfolio equity per agent (15% of 10% max risk)
+                "team_quota_pct": 0.025,  # 2.5% of portfolio equity per team
                 "min_debate_count": 10,
                 "min_avg_lift": 0.02,
                 "min_success_rate": 0.7,
                 "min_calibration": 0.6,
-                "min_reward": 100.0
+                "min_reward": 10.0  # $10 minimum (was $100)
             },
             RiskTier.SILVER: {
-                "quota_pct": 0.08,      # 8% of portfolio equity per agent
-                "team_quota_pct": 0.15,  # 15% of portfolio equity per team
+                "quota_pct": 0.008,      # 0.8% of portfolio equity per agent
+                "team_quota_pct": 0.015,  # 1.5% of portfolio equity per team
                 "min_debate_count": 5,
                 "min_avg_lift": 0.01,
                 "min_success_rate": 0.5,
                 "min_calibration": 0.4,
-                "min_reward": 50.0
+                "min_reward": 5.0  # $5 minimum
             },
             RiskTier.BRONZE: {
-                "quota_pct": 0.03,      # 3% of portfolio equity per agent
-                "team_quota_pct": 0.08,  # 8% of portfolio equity per team
+                "quota_pct": 0.003,      # 0.3% of portfolio equity per agent
+                "team_quota_pct": 0.008,  # 0.8% of portfolio equity per team
                 "min_debate_count": 3,
                 "min_avg_lift": 0.005,
                 "min_success_rate": 0.3,
                 "min_calibration": 0.2,
-                "min_reward": 25.0
+                "min_reward": 2.5  # $2.50 minimum
             },
             RiskTier.RESTRICTED: {
-                "quota_pct": 0.01,      # 1% of portfolio equity per agent
-                "team_quota_pct": 0.03,  # 3% of portfolio equity per team
+                "quota_pct": 0.001,      # 0.1% of portfolio equity per agent
+                "team_quota_pct": 0.003,  # 0.3% of portfolio equity per team
                 "min_debate_count": 0,
                 "min_avg_lift": 0.0,
                 "min_success_rate": 0.0,
@@ -129,6 +130,33 @@ class AgentRiskQuotaManager:
         
         self.last_profile_update = 0.0
         self.profile_update_interval = 3600  # Update profiles every hour
+    
+    @property
+    def portfolio_equity_usd(self) -> float:
+        """
+        Get portfolio equity from settings (actual Kalshi bankroll).
+        
+        Falls back to settings.MERID_TOTAL_CAPITAL_USD which is either:
+        1. Explicitly configured, or
+        2. Auto-fetched from Kalshi API balance
+        """
+        if self._portfolio_equity_usd is None:
+            try:
+                from merid.settings import settings
+                self._portfolio_equity_usd = settings.MERID_TOTAL_CAPITAL_USD
+                logger.info(
+                    "[AGENT_RISK_QUOTAS] Loaded portfolio equity from settings: $%.2f",
+                    self._portfolio_equity_usd
+                )
+            except Exception as exc:
+                logger.error(
+                    "[AGENT_RISK_QUOTAS] Failed to load portfolio equity from settings: %s. "
+                    "Risk quotas will fail closed.",
+                    exc
+                )
+                # Fail-closed: return 0 to trigger rejection
+                self._portfolio_equity_usd = 0.0
+        return self._portfolio_equity_usd
     
     async def check_position_risk_quota(
         self,

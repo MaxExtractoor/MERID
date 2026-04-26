@@ -195,7 +195,17 @@ class RiskController:
             return
         try:
             from merid.settings import settings
-            self.daily_loss_limit = settings.MERID_MAX_DAILY_LOSS_USD
+            # Use USD limit if set, otherwise compute from percentage * bankroll
+            _usd_limit = settings.MERID_MAX_DAILY_LOSS_USD
+            if _usd_limit > 0:
+                self.daily_loss_limit = _usd_limit
+            else:
+                # Compute from percentage - 15% default for top-3 edge strategy
+                _bankroll = getattr(settings, 'KALSHI_PORTFOLIO_BANKROLL_CENTS', 0) / 100.0
+                if _bankroll <= 0:
+                    _bankroll = getattr(settings, 'MERID_TOTAL_CAPITAL_USD', 100.0)
+                _pct = getattr(settings, 'MERID_MAX_DAILY_LOSS_PCT', 0.15)
+                self.daily_loss_limit = _bankroll * _pct
             self.max_position_value = settings.MERID_MAX_POSITION_SIZE_USD
         except (ImportError, AttributeError):
             pass

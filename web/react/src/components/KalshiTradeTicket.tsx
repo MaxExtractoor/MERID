@@ -8,13 +8,14 @@
  *   - Limit price input with bid/ask reference
  *   - Payout and max loss visualization
  *   - Validation and error surfacing
+ *   - Enhanced: Network status, timeout handling, retry logic
  */
 
 import React, { useState, useMemo, useCallback, useEffect, useRef, memo } from 'react';
 import {
   DollarSign, AlertTriangle, CheckCircle, Info,
-  ArrowRight, Loader2,
-} from 'lucide-react';
+  ArrowRight, Loader2, RefreshCw, WifiOff, Clock,
+} from '../ui/icons';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY } from '../config/constants';
 import { useApiData } from '../hooks/useApiData';
 import { logUxEvent } from '../utils/uxTelemetry';
@@ -39,14 +40,16 @@ interface TradeTicketProps {
   mode?: 'paper' | 'live';
   kellyFraction?: number;
   positionLimitPct?: number;
-  orderGroupId?: string; // Optional: assign order to a specific group
+  orderGroupId?: string;
   availableGroups?: Array<{
     order_group_id: string;
     name: string;
     status: 'active' | 'triggered' | 'canceled' | 'pending';
     utilization_pct: number;
-  }>; // Available order groups for selection
-  lastUpdated?: string | number; // T-035: ISO timestamp or epoch of last price update
+  }>;
+  lastUpdated?: string | number;
+  enhanced?: boolean;
+  balance?: { available: number; total: number };
 }
 
 type Side = 'yes' | 'no';
@@ -71,6 +74,13 @@ function kalshiFee(priceCents: number, contracts: number, side: Side): number {
   return Math.max(0, profit * KALSHI_FEE_RATE);
 }
 
+type TradeErrorType = 'validation' | 'network' | 'api' | 'insufficient_balance' | 'market_closed';
+interface TradeError {
+  type: TradeErrorType;
+  message: string;
+  recoverable: boolean;
+}
+
 const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
   ticker,
   question: _question,
@@ -84,6 +94,8 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
   orderGroupId: initialGroupId,
   availableGroups = [],
   lastUpdated,
+  enhanced = false,
+  balance,
 }) => {
   // Execution gate — prevent order submission when trading is halted
   const { data: gateData } = useApiData<{ blocked: boolean; safe_to_trade: boolean }>(
@@ -106,8 +118,12 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
   const [limitPrice, setLimitPrice] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [tradeError, setTradeError] = useState<TradeError | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [selectedGroupId, setSelectedGroupId] = useState<string>(initialGroupId || '');
+  const [networkStatus, setNetworkStatus] = useState<'online' | 'offline' | 'slow'>('online');
+  const retryCountRef = useRef(0);
+  const submitTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const yesOutcome = outcomes.find(o => (o.name ?? '').toLowerCase() === 'yes') ?? outcomes[0];
   const noOutcome = outcomes.find(o => (o.name ?? '').toLowerCase() === 'no') ?? outcomes[1];
@@ -139,28 +155,60 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
     return Math.round((activeOutcome.ask - activeOutcome.bid) * 100);
   }, [activeOutcome]);
 
+  // Network status monitoring (enhanced mode)
+  useEffect(() => {
+    if (!enhanced) return;
+    const checkNetworkStatus = async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/v1/health`, { 
+          method: 'HEAD',
+          signal: AbortSignal.timeout(3000)
+        });
+        setNetworkStatus(response.ok ? 'online' : 'slow');
+      } catch {
+        setNetworkStatus('offline');
+      }
+    };
+    checkNetworkStatus();
+    const interval = setInterval(checkNetworkStatus, 30000);
+    return () => clearInterval(interval);
+  }, [enhanced]);
+
   const validate = useCallback((): string | null => {
     if (effectiveContracts <= 0) return 'Size must be at least 1 contract';
     if (priceCents <= 0 || priceCents >= 100) return 'Price must be between 1¢ and 99¢';
     if (useLimit && limitPrice == null) return 'Enter a limit price';
+    if (enhanced && balance && balance.available < cost) return 'Insufficient balance';
     return null;
-  }, [effectiveContracts, priceCents, useLimit, limitPrice]);
+  }, [effectiveContracts, priceCents, useLimit, limitPrice, enhanced, balance, cost]);
 
   const handleSubmit = useCallback(async () => {
     const err = validate();
-    if (err) { setError(err); return; }
+    if (err) { 
+      if (enhanced) {
+        setTradeError({ type: 'validation', message: err, recoverable: true });
+      } else {
+        setError(err); 
+      }
+      return; 
+    }
 
     // T-035: Block trading on stale data (>30s since last price update)
     if (lastUpdated) {
       const dataAge = Date.now() - new Date(lastUpdated).getTime();
       if (dataAge > 30_000) {
-        setError('Market data is stale (>30s). Refresh before trading.');
+        const staleMsg = 'Market data is stale (>30s). Refresh before trading.';
+        if (enhanced) {
+          setTradeError({ type: 'market_closed', message: staleMsg, recoverable: true });
+        } else {
+          setError(staleMsg);
+        }
         return;
       }
     }
 
     // Require explicit confirmation for live orders
-    if (mode === 'live') {
+    if (mode === 'live' && !enhanced) {
       const confirmed = window.confirm(
         `⚠️ LIVE ORDER — real money at risk\n\n` +
         `Buy ${effectiveContracts} ${side?.toUpperCase?.() ?? '?'} on ${ticker}\n` +
@@ -173,7 +221,18 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
 
     setSubmitting(true);
     setError(null);
+    setTradeError(null);
     setSuccess(null);
+
+    // Set submission timeout for enhanced mode
+    if (enhanced) {
+      if (submitTimeoutRef.current) clearTimeout(submitTimeoutRef.current);
+      submitTimeoutRef.current = setTimeout(() => {
+        setTradeError({ type: 'network', message: 'Order submission timed out.', recoverable: true });
+        setSubmitting(false);
+      }, 15000);
+    }
+
     try {
       const params = new URLSearchParams({
         ticker,
@@ -192,13 +251,21 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}`, 'X-Session-ID': token } : {}),
         },
+        ...(enhanced ? { signal: AbortSignal.timeout(12000) } : {}),
       });
+
+      if (submitTimeoutRef.current) {
+        clearTimeout(submitTimeoutRef.current);
+        submitTimeoutRef.current = null;
+      }
+
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.detail || `Order failed (${res.status})`);
       }
       const msg = `Order placed: ${effectiveContracts} ${side?.toUpperCase?.() ?? '?'} @ ${priceCents}¢`;
       setSuccess(msg);
+      retryCountRef.current = 0;
       logUxEvent('trade_ticket_order', mode, {
         ticker,
         side,
@@ -208,11 +275,21 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
       });
       onOrderPlaced?.();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Order submission failed');
+      const errorMessage = e instanceof Error ? e.message : 'Order submission failed';
+      if (enhanced) {
+        setTradeError({
+          type: errorMessage.includes('network') || errorMessage.includes('timeout') ? 'network' : 'api',
+          message: errorMessage,
+          recoverable: retryCountRef.current < 2,
+        });
+        retryCountRef.current += 1;
+      } else {
+        setError(errorMessage);
+      }
     } finally {
       setSubmitting(false);
     }
-  }, [validate, ticker, side, effectiveContracts, priceCents, cost, netProfit, useLimit, mode, onOrderPlaced, selectedGroupId, lastUpdated]);
+  }, [validate, ticker, side, effectiveContracts, priceCents, cost, netProfit, useLimit, mode, onOrderPlaced, selectedGroupId, lastUpdated, enhanced]);
 
   useEffect(() => {
     if (!success) return;
@@ -220,9 +297,29 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
     return () => clearTimeout(t);
   }, [success]);
 
+  // Cleanup timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (submitTimeoutRef.current) clearTimeout(submitTimeoutRef.current);
+    };
+  }, []);
+
+  const NetworkStatusIndicator = () => (
+    <div className="flex items-center gap-1 text-xs">
+      {networkStatus === 'offline' && <WifiOff className="w-3 h-3 text-red-400" />}
+      {networkStatus === 'slow' && <Clock className="w-3 h-3 text-yellow-400" />}
+      <span className={networkStatus === 'online' ? 'text-green-400' : networkStatus === 'slow' ? 'text-yellow-400' : 'text-red-400'}>
+        {networkStatus === 'online' ? 'Online' : networkStatus === 'slow' ? 'Slow' : 'Offline'}
+      </span>
+    </div>
+  );
+
   return (
     <div className="bg-slate-800 rounded-xl p-4 space-y-4">
-      <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Trade Ticket</h3>
+      <div className="flex justify-between items-center">
+        <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Trade Ticket</h3>
+        {enhanced && <NetworkStatusIndicator />}
+      </div>
 
       {/* Sentiment Indicator */}
       {['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'].some(a => ticker?.toUpperCase?.().includes(a)) && (
@@ -426,11 +523,33 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
         </div>
       )}
 
-      {/* Error / Success */}
-      {error && (
-        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-xs">
-          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-          <span>{error}</span>
+      {/* Error - base mode */}
+      {!enhanced && error && (
+        <div className="rounded-lg bg-red-500/10 border border-red-500/30 p-3 flex items-start gap-2">
+          <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+          <div className="text-sm text-red-300">{error}</div>
+        </div>
+      )}
+
+      {/* Error - enhanced mode */}
+      {enhanced && tradeError && (
+        <div className={`rounded-lg border p-3 flex items-start gap-2 ${
+          tradeError.recoverable ? 'bg-amber-500/10 border-amber-500/30' : 'bg-red-500/10 border-red-500/30'
+        }`}>
+          <AlertTriangle className={`w-4 h-4 shrink-0 mt-0.5 ${tradeError.recoverable ? 'text-amber-400' : 'text-red-400'}`} />
+          <div className="flex-1">
+            <div className={`text-sm ${tradeError.recoverable ? 'text-amber-300' : 'text-red-300'}`}>{tradeError.message}</div>
+            {tradeError.recoverable && (
+              <button 
+                onClick={handleSubmit}
+                disabled={submitting}
+                className="mt-2 flex items-center gap-1 px-2 py-1 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-600 text-white text-xs rounded"
+              >
+                <RefreshCw className={`w-3 h-3 ${submitting ? 'animate-spin' : ''}`} />
+                {submitting ? 'Retrying...' : 'Retry'}
+              </button>
+            )}
+          </div>
         </div>
       )}
       {success && (

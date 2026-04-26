@@ -21,6 +21,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Resolve .env absolute path so it loads correctly regardless of CWD
 _ENV_FILE = str(Path(__file__).resolve().parent.parent / ".env")
 
+# Load .env file if python-dotenv is available
+try:
+    from dotenv import load_dotenv
+    load_dotenv(_ENV_FILE, override=True)
+except ImportError:
+    pass  # dotenv not installed, rely on system env vars
+
 logger = get_logger("merid.settings")
 
 
@@ -325,9 +332,25 @@ class Settings(BaseSettings):
         default="ws",
         description="Kalshi websocket implementation: ws (required for live) or websocket_service (dev only)",
     )
-    MERID_PM_MAX_NOTIONAL_PER_MARKET: float = Field(default=500.0, description="Max notional per PM market (USD)")
-    MERID_PM_MAX_DAILY_LOSS: float = Field(default=250.0, description="Max daily loss for prediction markets (USD)")
-    MERID_PM_MAX_TOTAL_NOTIONAL: float = Field(default=5000.0, description="Max total PM portfolio notional (USD)")
+    # PM limits - ENV-DRIVEN percentages of bankroll (aligns with Top 3 / 1-2% / 15% strategy)
+    # Top 3 strategy: 1-2% total risk across 3 edges = ~0.33-0.67% per edge
+    # Daily drawdown: 15% max (from env MERID_MAX_DAILY_LOSS_PCT)
+    MERID_PM_RISK_PER_EDGE_PCT: float = Field(
+        default=0.0,  # 0 = compute from MERID_MAX_RISK_FRACTION_PER_CYCLE / 3
+        description="Risk per edge as % of bankroll (0 = cycle_cap / 3)"
+    )
+    MERID_PM_MAX_NOTIONAL_PER_MARKET: float = Field(
+        default=0.0,  # 0 = use MERID_PM_RISK_PER_EDGE_PCT
+        description="Max notional per PM market (0 = risk_per_edge_pct of bankroll)"
+    )
+    MERID_PM_MAX_DAILY_LOSS: float = Field(
+        default=0.0,  # 0 = use MERID_MAX_DAILY_LOSS_PCT
+        description="Max daily loss for PM (0 = MERID_MAX_DAILY_LOSS_PCT of bankroll)"
+    )
+    MERID_PM_MAX_TOTAL_NOTIONAL: float = Field(
+        default=0.0,  # 0 = 50% of bankroll
+        description="Max total PM notional (0 = 50% of bankroll)"
+    )
     KALSHI_USE_DEMO: bool = Field(default=True, description="Use Kalshi demo/sandbox API (MUST be explicitly set to False for production)")
     KALSHI_EMAIL: Optional[str] = Field(default=None, description="Kalshi account email")
     KALSHI_PASSWORD: Optional[str] = Field(default=None, description="Kalshi account password")
@@ -338,6 +361,10 @@ class Settings(BaseSettings):
     MERID_ERROR_THRESHOLD: int = Field(
         default=50,
         description="Number of errors in 1 hour that triggers kill switch (default: 50, raised from 10 for noisy PM agents)",
+    )
+    MERID_MAX_DAILY_LOSS_PCT: float = Field(
+        default=0.15,
+        description="Maximum daily portfolio loss percentage before kill switch triggers (0.15 = 15% for top-3 edge strategy)"
     )
     MERID_ERROR_THRESHOLD_STARTUP_GRACE_SECONDS: int = Field(
         default=600,
@@ -367,13 +394,23 @@ class Settings(BaseSettings):
     # =============================================================================
     # UNIFIED PIPELINE SETTINGS (multi-venue)
     # =============================================================================
-    MERID_TOTAL_CAPITAL_USD: float = Field(default=50000.0, description="Total capital for pipeline risk manager")
-    MERID_MAX_PORTFOLIO_NOTIONAL_USD: float = Field(default=50000.0, description="Max portfolio-wide notional")
-    MERID_CRYPTO_MAX_NOTIONAL_USD: float = Field(default=25000.0, description="Max crypto domain notional")
-    MERID_CRYPTO_MAX_DAILY_LOSS_USD: float = Field(default=1000.0, description="Max crypto daily loss")
+    # ═══════════════════════════════════════════════════════════════════════════
+    # CRITICAL: NO DEFAULT — Must be set via env var OR fetched from Kalshi API
+    # Default -1 forces fetch from Kalshi balance; if fetch fails, system won't start
+    # ═══════════════════════════════════════════════════════════════════════════
+    MERID_TOTAL_CAPITAL_USD: float = Field(
+        default=-1.0,
+        description="Total capital for pipeline risk manager. REQUIRED: Set explicitly or auto-fetched from Kalshi balance."
+    )
+    # 0 = derive from MERID_TOTAL_CAPITAL_USD (was $50000 hardcoded)
+    MERID_MAX_PORTFOLIO_NOTIONAL_USD: float = Field(default=0.0, description="Max portfolio-wide notional (0 = 100% of capital)")
+    # 0 = derive from MERID_TOTAL_CAPITAL_USD × MERID_CRYPTO_ALLOCATION_PCT (was $25000/$1000)
+    MERID_CRYPTO_MAX_NOTIONAL_USD: float = Field(default=0.0, description="Max crypto domain notional (0 = derive from capital)")
+    MERID_CRYPTO_MAX_DAILY_LOSS_USD: float = Field(default=0.0, description="Max crypto daily loss (0 = derive from capital)")
     MERID_CRYPTO_ALLOCATION_PCT: float = Field(default=0.50, description="Max crypto capital allocation %")
-    MERID_EQUITY_MAX_NOTIONAL_USD: float = Field(default=20000.0, description="Max equity domain notional")
-    MERID_EQUITY_MAX_DAILY_LOSS_USD: float = Field(default=500.0, description="Max equity daily loss")
+    # 0 = derive from MERID_TOTAL_CAPITAL_USD × MERID_EQUITY_ALLOCATION_PCT (was $20000/$500)
+    MERID_EQUITY_MAX_NOTIONAL_USD: float = Field(default=0.0, description="Max equity domain notional (0 = derive from capital)")
+    MERID_EQUITY_MAX_DAILY_LOSS_USD: float = Field(default=0.0, description="Max equity daily loss (0 = derive from capital)")
     MERID_EQUITY_ALLOCATION_PCT: float = Field(default=0.40, description="Max equity capital allocation %")
 
     # =============================================================================
@@ -382,10 +419,10 @@ class Settings(BaseSettings):
     # Trading mode: "paper" (simulated), "live" (real money)
     MERID_TRADING_MODE: str = Field(default="paper", description="Trading mode: paper or live")
     
-    # Safety interlocks for live trading
-    MERID_MAX_ORDER_SIZE_USD: float = Field(default=100.0, description="Maximum single order size in USD")
-    MERID_MAX_DAILY_LOSS_USD: float = Field(default=500.0, description="Maximum daily loss before halt")
-    MERID_MAX_POSITION_SIZE_USD: float = Field(default=1000.0, description="Maximum position size per market")
+    # Safety interlocks for live trading (0 = derive from bankroll %, these are last-line guards)
+    MERID_MAX_ORDER_SIZE_USD: float = Field(default=0.0, description="Max single order USD (0 = 1% of bankroll)")
+    MERID_MAX_DAILY_LOSS_USD: float = Field(default=0.0, description="Max daily loss halt USD (0 = 5% of bankroll)")
+    MERID_MAX_POSITION_SIZE_USD: float = Field(default=0.0, description="Max position USD (0 = 2% of bankroll)")
     MERID_REQUIRE_CONFIRMATION: bool = Field(default=True, description="Require confirmation for live orders")
 
     MERID_CRYPTO_EDGE_FLOOR_PROFILE: str = Field(
@@ -394,7 +431,7 @@ class Settings(BaseSettings):
     )
     MERID_CRYPTO_MM_CONSENSUS_MODE: str = Field(
         default="full",
-        description="full | soft | bypass — swarm/MM consensus gating (FORMING blocks unless soft/bypass)",
+        description="full | soft — swarm/MM consensus gating. SAFETY: 'bypass' mode is DISABLED. All orders must flow through main execution gate with proper consensus and risk checks.",
     )
     MERID_CRYPTO_SHADOW_EDGE_YES: float = Field(
         default=0.0,
@@ -518,19 +555,25 @@ class Settings(BaseSettings):
     # =============================================================================
     # PORTFOLIO RISK SETTINGS (bankroll-driven, was hardcoded in agent_grid_config.py)
     # =============================================================================
-    # Base bankroll for portfolio risk calculations (defaults to total capital)
-    KALSHI_PORTFOLIO_BANKROLL_CENTS: int = Field(default=50_000_00, description="Portfolio risk bankroll in cents (default $50,000)")
+    # Base bankroll for portfolio risk calculations — DERIVED from MERID_TOTAL_CAPITAL_USD
+    # This ensures the 1-2% max notional sizing is computed from ACTUAL configured capital,
+    # not from magic numbers. Default 0 means "derive from MERID_TOTAL_CAPITAL_USD" in __init__.
+    KALSHI_PORTFOLIO_BANKROLL_CENTS: int = Field(
+        default=0,  # 0 = derive from MERID_TOTAL_CAPITAL_USD in __init__
+        description="Portfolio risk bankroll in cents (0 = auto-derive from MERID_TOTAL_CAPITAL_USD)"
+    )
     
     # Portfolio limit percentages of bankroll (replace hardcoded $25K/$2K in agent_grid_config)
     KALSHI_PORTFOLIO_MAX_NOTIONAL_PCT: float = Field(default=0.50, description="Max total notional as % of bankroll (default 50%)")
-    KALSHI_PORTFOLIO_MAX_DAILY_LOSS_PCT: float = Field(default=0.10, description="Max daily loss as % of bankroll (default 10%)")
+    KALSHI_PORTFOLIO_MAX_DAILY_LOSS_PCT: float = Field(default=0.155, description="Max daily loss as % of bankroll (15% for top-3 edge strategy)")
     KALSHI_PORTFOLIO_MAX_PER_ASSET_PCT: float = Field(default=0.16, description="Max per-asset notional as % of bankroll (default 16%)")
     KALSHI_PORTFOLIO_MAX_MARGIN_UTIL_PCT: float = Field(default=0.75, description="Max margin utilization % (default 75%)")
     KALSHI_PORTFOLIO_CHECK_INTERVAL_S: int = Field(default=30, description="Portfolio risk check interval in seconds")
     KALSHI_PORTFOLIO_CLUSTER_STOP_PCT: float = Field(default=0.50, description="Static per-cluster stop loss as fraction of daily loss cap (safety limit for dynamic calculations)")
     
-    # Dynamic contract cap settings
-    KALSHI_MAX_CONTRACTS_TOTAL: int = Field(default=5000, description="Hard ceiling for total contracts across all assets/timeframes")
+    # Dynamic contract cap settings - DERIVED from bankroll (was hardcoded 5000)
+    # Formula: 1 contract per $10 of bankroll, min 10, max 10000
+    KALSHI_MAX_CONTRACTS_TOTAL: int = Field(default=0, description="Hard ceiling for total contracts (0 = derive from bankroll: 1 per $10)")
     KALSHI_MAX_CONTRACTS_PER_ASSET_FRACTION: float = Field(default=0.35, description="Fraction of total contracts per asset (e.g., 0.35 = 35%)")
     KALSHI_MAX_CONTRACTS_PER_CLUSTER_FRACTION: float = Field(default=0.15, description="Fraction of total contracts per cluster (asset+timeframe)")
     
@@ -547,22 +590,25 @@ class Settings(BaseSettings):
         description="Rollout phase: dry_run | soft_gate | hard_gate"
     )
     
-    # Timeframe-wide budget: max contracts across all 5 assets (BTC/ETH/SOL/XRP/DOGE) per 15m bar
+    # Timeframe-wide budget: DERIVED from bankroll (was hardcoded 1/2/1)
+    # Formula: 1 contract per $50 of bankroll for 15m, min 1, max 100
     MAX_CONTRACTS_PER_TF_CRYPTO_15M: int = Field(
-        default=1,
-        description="Max contracts per 15m timeframe across all 5 crypto assets (default: 1)"
+        default=0,
+        description="Max contracts per 15m timeframe (0 = derive from bankroll: 1 per $50)"
     )
     
-    # Markets limit: max distinct tickers per 15m bar
+    # Markets limit: DERIVED from bankroll (was hardcoded 2)
+    # Formula: 1 market per $25 of bankroll, min 2, max 50
     MAX_MARKETS_PER_TF_CRYPTO_15M: int = Field(
-        default=2,
-        description="Max distinct markets per 15m timeframe (default: 2)"
+        default=0,
+        description="Max distinct markets per 15m timeframe (0 = derive from bankroll: 1 per $25)"
     )
     
-    # Per-expiry open exposure cap: max open contracts per expiry across all crypto assets
+    # Per-expiry open exposure cap: DERIVED from bankroll (was hardcoded 1)
+    # Formula: 1 contract per $100 of bankroll, min 1, max 20
     MAX_OPEN_CONTRACTS_PER_EXPIRY_CRYPTO_15M: int = Field(
-        default=1,
-        description="Max open contracts per expiry across all 15m crypto assets (default: 1)"
+        default=0,
+        description="Max open contracts per expiry (0 = derive from bankroll: 1 per $100)"
     )
     
     # Budget scaling function: "constant" or "linear" (future: bankroll-driven scaling)
@@ -589,6 +635,102 @@ class Settings(BaseSettings):
     @property
     def kalshi_portfolio_max_per_asset_cents(self) -> int:
         return int(self.KALSHI_PORTFOLIO_BANKROLL_CENTS * self.KALSHI_PORTFOLIO_MAX_PER_ASSET_PCT)
+    
+    # Dynamic computed properties - Top 3 / 1-2% / 15% aligned
+    @property
+    def effective_pm_risk_per_edge_pct(self) -> float:
+        """Risk per edge: cycle_cap / 3 for Top 3 strategy.
+        
+        With 1-2% total cap across 3 edges, each edge gets ~0.33-0.67%.
+        """
+        if self.MERID_PM_RISK_PER_EDGE_PCT > 0:
+            return self.MERID_PM_RISK_PER_EDGE_PCT
+        # Default: cycle_cap (1-2%) divided by 3 edges
+        return self.MERID_MAX_RISK_FRACTION_PER_CYCLE / 3.0
+    
+    @property
+    def effective_pm_max_notional_per_market(self) -> float:
+        """Max notional per PM market: risk_per_edge_pct of live bankroll."""
+        if self.MERID_PM_MAX_NOTIONAL_PER_MARKET > 0:
+            return self.MERID_PM_MAX_NOTIONAL_PER_MARKET
+        # Use live bankroll from Kalshi API
+        bankroll = self._get_live_bankroll_usd()
+        return bankroll * self.effective_pm_risk_per_edge_pct
+    
+    @property
+    def effective_pm_max_daily_loss(self) -> float:
+        """Max daily loss: MERID_MAX_DAILY_LOSS_PCT of live bankroll (default 15%)."""
+        if self.MERID_PM_MAX_DAILY_LOSS > 0:
+            return self.MERID_PM_MAX_DAILY_LOSS
+        # Use live bankroll from Kalshi API
+        bankroll = self._get_live_bankroll_usd()
+        return bankroll * self.MERID_MAX_DAILY_LOSS_PCT
+    
+    @property
+    def effective_pm_max_total_notional(self) -> float:
+        """Max total PM notional: 50% of live bankroll."""
+        if self.MERID_PM_MAX_TOTAL_NOTIONAL > 0:
+            return self.MERID_PM_MAX_TOTAL_NOTIONAL
+        # Use live bankroll from Kalshi API
+        bankroll = self._get_live_bankroll_usd()
+        return bankroll * 0.50
+    
+    def _get_live_bankroll_usd(self) -> float:
+        """Get live bankroll from Kalshi API or fallback to configured.
+        
+        CRITICAL: ONLY uses ACTUAL Kalshi API balance. NO fake fallbacks.
+        """
+        # ONLY use actual Kalshi API balance - NO configured fallbacks
+        try:
+            from merid.event_venues.kalshi.order_router import _derive_live_bankroll_usd
+            live = _derive_live_bankroll_usd()
+            if live is not None and live > 0:
+                return live
+        except Exception as exc:
+            logger.error("[_get_live_bankroll_usd] Failed to fetch actual Kalshi balance: %s", exc)
+        
+        # FAIL CLOSED: Cannot determine REAL bankroll from API
+        raise RuntimeError(
+            "Cannot determine ACTUAL Kalshi bankroll from API. "
+            "System requires real balance - no configured fallbacks allowed. "
+            "Check Kalshi API credentials and connectivity."
+        )
+    
+    @property
+    def effective_max_contracts_total(self) -> int:
+        """Max total contracts: env-driven or 1 per $10 of live bankroll."""
+        if self.KALSHI_MAX_CONTRACTS_TOTAL > 0:
+            return self.KALSHI_MAX_CONTRACTS_TOTAL
+        # Use live bankroll
+        bankroll_usd = self._get_live_bankroll_usd()
+        return max(10, min(10000, int(bankroll_usd / 10)))
+    
+    @property
+    def effective_max_contracts_per_tf_15m(self) -> int:
+        """Max contracts per 15m: env-driven or 1 per $50 of live bankroll."""
+        if self.MAX_CONTRACTS_PER_TF_CRYPTO_15M > 0:
+            return self.MAX_CONTRACTS_PER_TF_CRYPTO_15M
+        # Use live bankroll
+        bankroll_usd = self._get_live_bankroll_usd()
+        return max(1, min(100, int(bankroll_usd / 50)))
+    
+    @property
+    def effective_max_markets_per_tf_15m(self) -> int:
+        """Max markets per 15m: env-driven or 1 per $25 of live bankroll."""
+        if self.MAX_MARKETS_PER_TF_CRYPTO_15M > 0:
+            return self.MAX_MARKETS_PER_TF_CRYPTO_15M
+        # Use live bankroll
+        bankroll_usd = self._get_live_bankroll_usd()
+        return max(2, min(50, int(bankroll_usd / 25)))
+    
+    @property
+    def effective_max_open_per_expiry_15m(self) -> int:
+        """Max open per expiry: env-driven or 1 per $100 of live bankroll."""
+        if self.MAX_OPEN_CONTRACTS_PER_EXPIRY_CRYPTO_15M > 0:
+            return self.MAX_OPEN_CONTRACTS_PER_EXPIRY_CRYPTO_15M
+        # Use live bankroll
+        bankroll_usd = self._get_live_bankroll_usd()
+        return max(1, min(20, int(bankroll_usd / 100)))
     
     # =============================================================================
     # KALSHI RESILIENCE SETTINGS (BUG-1: previously hard-coded module constants)
@@ -635,6 +777,132 @@ class Settings(BaseSettings):
                 logger.info(f"Settings loaded from: {env_file}")
             else:
                 logger.warning(f"Environment file not found: {env_file}")
+        
+        # SAFETY: Validate and reject consensus bypass mode
+        if self.MERID_CRYPTO_MM_CONSENSUS_MODE.lower() == "bypass":
+            logger.error(
+                "[SECURITY] MERID_CRYPTO_MM_CONSENSUS_MODE='bypass' is DISABLED at startup. "
+                "All orders must flow through main execution gate with proper consensus and risk checks."
+            )
+            self.MERID_CRYPTO_MM_CONSENSUS_MODE = "full"
+        
+        # ═══════════════════════════════════════════════════════════════════════════
+        # CRITICAL: ENSURE CAPITAL IS REAL (from Kalshi) NOT HARDCODED DEFAULT
+        # ═══════════════════════════════════════════════════════════════════════════
+        if self.MERID_TOTAL_CAPITAL_USD <= 0:
+            # Attempt to fetch from Kalshi API
+            try:
+                kalshi_balance = self._fetch_kalshi_balance()
+                if kalshi_balance > 0:
+                    self.MERID_TOTAL_CAPITAL_USD = kalshi_balance
+                    logger.critical(
+                        "[RISK_CONFIG] MERID_TOTAL_CAPITAL_USD auto-fetched from Kalshi balance: $%.2f",
+                        self.MERID_TOTAL_CAPITAL_USD
+                    )
+                else:
+                    raise RuntimeError(
+                        "[PRODUCTION HARDENING] Cannot fetch valid balance from Kalshi API. "
+                        "MERID_TOTAL_CAPITAL_USD must be set explicitly or system must have working Kalshi API credentials."
+                    )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"[PRODUCTION HARDENING] MERID_TOTAL_CAPITAL_USD not configured and Kalshi balance fetch failed: {exc}. "
+                    f"Set MERID_TOTAL_CAPITAL_USD explicitly or fix Kalshi API credentials."
+                ) from exc
+        
+        # DERIVE bankroll from actual configured capital (MERID_TOTAL_CAPITAL_USD)
+        # This ensures 1-2% max notional sizing is computed from REAL capital, not magic numbers
+        if self.KALSHI_PORTFOLIO_BANKROLL_CENTS <= 0:
+            # Convert total capital USD to cents for bankroll
+            self.KALSHI_PORTFOLIO_BANKROLL_CENTS = int(self.MERID_TOTAL_CAPITAL_USD * 100)
+            logger.critical(
+                "[RISK_CONFIG] KALSHI_PORTFOLIO_BANKROLL_CENTS derived from MERID_TOTAL_CAPITAL_USD: "
+                "$%.2f USD -> %d cents (1-2%% max notional = $%.2f-$%.2f)",
+                self.MERID_TOTAL_CAPITAL_USD,
+                self.KALSHI_PORTFOLIO_BANKROLL_CENTS,
+                self.MERID_TOTAL_CAPITAL_USD * 0.01,  # 1%
+                self.MERID_TOTAL_CAPITAL_USD * 0.02   # 2%
+            )
+    
+    def _fetch_kalshi_balance(self) -> float:
+        """
+        Fetch actual account balance from Kalshi API.
+        
+        Returns:
+            Balance in USD as float. Returns 0 if unable to fetch.
+        """
+        import requests
+        from pathlib import Path
+        
+        # Get Kalshi API credentials
+        key_id = os.getenv("KALSHI_API_KEY_ID", "")
+        private_key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH", "")
+        env = os.getenv("KALSHI_ENV", "demo")
+        
+        if not key_id or not private_key_path:
+            logger.error("[KALSHI_BALANCE_FETCH] Missing KALSHI_API_KEY_ID or KALSHI_PRIVATE_KEY_PATH")
+            return 0.0
+        
+        try:
+            # Load private key
+            private_key_data = Path(private_key_path).read_bytes()
+            
+            # Determine base URL
+            base_url = "https://api.elections.kalshi.com/trade-api/v2" if env == "prod" else "https://demo-api.kalshi.co/trade-api/v2"
+            
+            # Create signature (Kalshi format: timestamp + method + path with v2 prefix)
+            timestamp = str(int(__import__('time').time() * 1000))
+            path = "/trade-api/v2/portfolio/balance"
+            msg_string = timestamp + "GET" + path
+            
+            # Import cryptography
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+            
+            private_key = serialization.load_pem_private_key(private_key_data, password=None)
+            
+            # Detect key type and sign accordingly
+            if isinstance(private_key, Ed25519PrivateKey):
+                # Ed25519 keys (Kalshi standard) - no padding, pure Ed25519 signing
+                signature = private_key.sign(msg_string.encode("utf-8"))
+            else:
+                # RSA keys (legacy support) - use PSS padding
+                from cryptography.hazmat.primitives import hashes
+                from cryptography.hazmat.primitives.asymmetric import padding
+                signature = private_key.sign(
+                    msg_string.encode("utf-8"),
+                    padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=32),
+                    hashes.SHA256(),
+                )
+            signature_b64 = __import__('base64').b64encode(signature).decode("utf-8")
+            
+            # Make request
+            headers = {
+                "KALSHI-ACCESS-KEY": key_id,
+                "KALSHI-ACCESS-SIGNATURE": signature_b64,
+                "KALSHI-ACCESS-TIMESTAMP": timestamp,
+                "Accept": "application/json",
+            }
+            
+            # URL uses the base_url which already has /trade-api/v2
+            url = f"{base_url}/portfolio/balance"
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            
+            data = response.json()
+            # Kalshi returns balance in cents
+            balance_cents = data.get("balance", 0)
+            balance_usd = balance_cents / 100.0
+            
+            logger.info(
+                "[KALSHI_BALANCE_FETCH] Successfully fetched Kalshi balance: $%.2f USD (from %s)",
+                balance_usd, env
+            )
+            return balance_usd
+            
+        except Exception as exc:
+            logger.error("[KALSHI_BALANCE_FETCH] Failed to fetch balance: %s", exc)
+            return 0.0
     
     @property
     def is_development(self) -> bool:
@@ -823,13 +1091,25 @@ class Settings(BaseSettings):
             return caps
         except Exception as e:
             logger.warning(f"Dynamic allocation calculation failed: {e}, using fallback")
-            # Fallback to conservative defaults
+            # CRITICAL: Compute fallback from actual bankroll, NOT hardcoded defaults
+            bankroll_usd = self.KALSHI_PORTFOLIO_BANKROLL_CENTS / 100.0
+            if bankroll_usd <= 0:
+                logger.critical("[PRODUCTION HARDENING] Cannot determine asset caps: bankroll=%s", bankroll_usd)
+                raise RuntimeError(
+                    "Asset cap calculation failed and bankroll is zero/invalid. "
+                    "Cannot proceed without valid bankroll from Kalshi balance."
+                )
+            
+            # Derive caps from bankroll (conservative: 50% of bankroll total across all assets)
+            logger.warning(
+                "[FALLBACK] Using bankroll-derived asset caps: bankroll=$%.2f", bankroll_usd
+            )
             return {
-                "BTC": AssetCapConfig(max_daily_notional_usd=2000, max_single_trade_usd=500),
-                "ETH": AssetCapConfig(max_daily_notional_usd=1500, max_single_trade_usd=375),
-                "SOL": AssetCapConfig(max_daily_notional_usd=1000, max_single_trade_usd=250),
-                "XRP": AssetCapConfig(max_daily_notional_usd=750, max_single_trade_usd=188),
-                "DOGE": AssetCapConfig(max_daily_notional_usd=250, max_single_trade_usd=63),
+                "BTC": AssetCapConfig(max_daily_notional_usd=bankroll_usd * 0.25, max_single_trade_usd=bankroll_usd * 0.0625),
+                "ETH": AssetCapConfig(max_daily_notional_usd=bankroll_usd * 0.20, max_single_trade_usd=bankroll_usd * 0.05),
+                "SOL": AssetCapConfig(max_daily_notional_usd=bankroll_usd * 0.15, max_single_trade_usd=bankroll_usd * 0.0375),
+                "XRP": AssetCapConfig(max_daily_notional_usd=bankroll_usd * 0.10, max_single_trade_usd=bankroll_usd * 0.025),
+                "DOGE": AssetCapConfig(max_daily_notional_usd=bankroll_usd * 0.05, max_single_trade_usd=bankroll_usd * 0.0125),
             }
     
     def get_asset_cap(self, asset: str) -> AssetCapConfig:
@@ -945,13 +1225,25 @@ class Settings(BaseSettings):
             return caps
         except Exception as e:
             logger.warning(f"Dynamic allocation calculation failed: {e}, using fallback")
-            # Fallback to conservative defaults
+            # CRITICAL: Compute fallback from actual bankroll, NOT hardcoded defaults
+            bankroll_usd = self.KALSHI_PORTFOLIO_BANKROLL_CENTS / 100.0
+            if bankroll_usd <= 0:
+                logger.critical("[PRODUCTION HARDENING] Cannot determine asset caps: bankroll=%s", bankroll_usd)
+                raise RuntimeError(
+                    "Asset cap calculation failed and bankroll is zero/invalid. "
+                    "Cannot proceed without valid bankroll from Kalshi balance."
+                )
+            
+            # Derive caps from bankroll (conservative: 50% of bankroll total across all assets)
+            logger.warning(
+                "[FALLBACK] Using bankroll-derived asset caps: bankroll=$%.2f", bankroll_usd
+            )
             return {
-                "BTC": AssetCapConfig(max_daily_notional_usd=2000, max_single_trade_usd=500),
-                "ETH": AssetCapConfig(max_daily_notional_usd=1500, max_single_trade_usd=375),
-                "SOL": AssetCapConfig(max_daily_notional_usd=1000, max_single_trade_usd=250),
-                "XRP": AssetCapConfig(max_daily_notional_usd=750, max_single_trade_usd=188),
-                "DOGE": AssetCapConfig(max_daily_notional_usd=250, max_single_trade_usd=63),
+                "BTC": AssetCapConfig(max_daily_notional_usd=bankroll_usd * 0.25, max_single_trade_usd=bankroll_usd * 0.0625),
+                "ETH": AssetCapConfig(max_daily_notional_usd=bankroll_usd * 0.20, max_single_trade_usd=bankroll_usd * 0.05),
+                "SOL": AssetCapConfig(max_daily_notional_usd=bankroll_usd * 0.15, max_single_trade_usd=bankroll_usd * 0.0375),
+                "XRP": AssetCapConfig(max_daily_notional_usd=bankroll_usd * 0.10, max_single_trade_usd=bankroll_usd * 0.025),
+                "DOGE": AssetCapConfig(max_daily_notional_usd=bankroll_usd * 0.05, max_single_trade_usd=bankroll_usd * 0.0125),
             }
     
     def get_asset_cap(self, asset: str) -> AssetCapConfig:

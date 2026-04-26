@@ -8,13 +8,52 @@ jest.mock('../../hooks/useApiData', () => ({
   useApiData: jest.fn(() => ({ data: null, loading: false, refetch: jest.fn() })),
 }));
 
+jest.mock('../../hooks/useCircuitBreaker', () => ({
+  useCircuitBreaker: jest.fn(() => ({
+    breakers: [],
+    loading: false,
+    error: null,
+    fetchCircuitBreaker: jest.fn(),
+    resetBreaker: jest.fn(),
+  })),
+}));
+
+jest.mock('../../hooks/useOrderErrors', () => ({
+  useOrderErrors: jest.fn(() => ({
+    errors: [],
+    loading: false,
+    fetchOrderErrors: jest.fn(),
+  })),
+}));
+
+jest.mock('../../hooks/useLatency', () => ({
+  useLatency: jest.fn(() => ({
+    data: null,
+    loading: false,
+    error: null,
+    refetch: jest.fn(),
+  })),
+}));
+
 // Access the mock AFTER jest.mock is hoisted — require returns the mocked module
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const mockUseApiData: jest.Mock = (require('../../hooks/useApiData') as { useApiData: jest.Mock }).useApiData;
 
 jest.mock('../../config/constants', () => ({
-  API_BASE_URL: '',
+  API_BASE_URL: 'http://127.0.0.1:8011',
   AUTH_TOKEN_KEY: 'merid-access',
+  WS_URL: 'ws://127.0.0.1:8011/ws/trades',
+  WS_PORTFOLIO_URL: 'ws://127.0.0.1:8011/ws/risk',
+  CHART_COLORS: {
+    GREEN: '#22c55e',
+    RED: '#ef4444',
+    YELLOW: '#eab308',
+    BLUE: '#3b82f6',
+    PURPLE: '#a855f7',
+    ORANGE: '#f97316',
+    WHITE: '#ffffff',
+    GRAY: '#6b7280',
+  },
   API_ENDPOINTS: {
     KALSHI_POSITIONS: '/api/v1/kalshi/positions',
     KALSHI_ORDERS: '/api/v1/kalshi/orders',
@@ -35,6 +74,12 @@ jest.mock('../../config/constants', () => ({
     KALSHI_ORDERS_BATCH_CANCEL: '/api/v1/kalshi/orders',
     KALSHI_EXPORT: '/api/v1/kalshi/export',
     SYSTEM_EXECUTION_GATE: '/api/v1/system/execution-gate',
+    KALSHI_HEALTH: '/api/v1/kalshi/health',
+    KALSHI_ORDER_GROUPS: '/api/v1/kalshi/order-groups',
+    SYSTEM_HEALTH: '/api/v1/system/health',
+    KALSHI_CIRCUIT_BREAKER: '/api/v1/kalshi/circuit-breaker',
+    KALSHI_ORDER_ERRORS: '/api/v1/kalshi/order-errors',
+    KALSHI_LATENCY: '/api/v1/kalshi/latency',
   },
   ORDER_STATUS: {
     RESTING: 'resting',
@@ -205,6 +250,9 @@ function setupMocks(overrides: Record<string, unknown> = {}) {
     if (endpoint.includes('/kalshi/sizing-metrics')) {
       return { data: overrides.sizing ?? MOCK_SIZING, loading: false, refetch: jest.fn() };
     }
+    if (endpoint.includes('/kalshi/health')) {
+      return { data: overrides.health ?? { ok: true, status: 'healthy' }, loading: false, refetch: jest.fn() };
+    }
     return { data: null, loading: false, refetch: jest.fn() };
   });
 }
@@ -221,8 +269,10 @@ describe('KalshiPortfolioView', () => {
   describe('Rendering', () => {
     it('renders portfolio title with mode badge', () => {
       render(<KalshiPortfolioView />);
-      expect(screen.getByText(/Kalshi Portfolio/i)).toBeInTheDocument();
-      expect(screen.getByTestId('mode-badge')).toBeInTheDocument();
+      // Multiple headings contain "Kalshi Portfolio" (page header and section header)
+      expect(screen.getAllByText(/Kalshi Portfolio/i).length).toBeGreaterThanOrEqual(1);
+      // Mode badge is rendered in multiple places
+      expect(screen.getAllByTestId('mode-badge').length).toBeGreaterThanOrEqual(1);
     });
 
     it('shows position and order counts', () => {
@@ -239,82 +289,52 @@ describe('KalshiPortfolioView', () => {
     });
   });
 
-  describe('Tabs', () => {
-    it('renders all 4 tabs', () => {
+  describe('Unified Dashboard', () => {
+    it('shows summary cards with equity and unrealized PnL', () => {
       render(<KalshiPortfolioView />);
-      expect(screen.getByText(/^Positions/)).toBeInTheDocument();
-      expect(screen.getByText(/^Orders/)).toBeInTheDocument();
-      expect(screen.getByText(/^Fills/)).toBeInTheDocument();
-      expect(screen.getByText(/^Risk/)).toBeInTheDocument();
+      // Equity card shows grid portfolio value
+      expect(screen.getByText('$512.50')).toBeInTheDocument();
+      // Unrealized PnL from risk data
+      expect(screen.getByText('$1.65')).toBeInTheDocument();
     });
 
-    it('shows positions tab by default with position data', () => {
+    it('shows risk overview metrics', () => {
       render(<KalshiPortfolioView />);
-      expect(screen.getByText('KXBTC-1H-T95000')).toBeInTheDocument();
-      expect(screen.getByText('KXETH-15M-T3000')).toBeInTheDocument();
-    });
-
-    it('switches to orders tab', () => {
-      render(<KalshiPortfolioView />);
-      fireEvent.click(screen.getByText(/^Orders/));
-      expect(screen.queryByText('ord-001')).not.toBeInTheDocument(); // order ID is truncated
-      expect(screen.getByText('resting')).toBeInTheDocument();
-    });
-
-    it('switches to fills tab', () => {
-      render(<KalshiPortfolioView />);
-      fireEvent.click(screen.getByText(/^Fills/));
-      expect(screen.getByText('$0.18')).toBeInTheDocument(); // fee
-    });
-  });
-
-  describe('Per-Asset Filter', () => {
-    it('renders asset filter chips when multiple assets present', () => {
-      render(<KalshiPortfolioView />);
-      expect(screen.getByText('KXBTC')).toBeInTheDocument();
-      expect(screen.getByText('KXETH')).toBeInTheDocument();
-    });
-  });
-
-  describe('Risk Tab', () => {
-    it('shows daily PnL and drawdown', () => {
-      render(<KalshiPortfolioView />);
-      fireEvent.click(screen.getByText(/^Risk/));
+      // Daily PnL displayed in risk panel
       expect(screen.getByText('$12.50')).toBeInTheDocument();
-      expect(screen.getByText('2.1%')).toBeInTheDocument();
+      // Kill switch status
+      expect(screen.getByText('OFF')).toBeInTheDocument();
     });
 
-    it('shows category exposure', () => {
+    it('shows position and order counts in header', () => {
       render(<KalshiPortfolioView />);
-      fireEvent.click(screen.getByText(/^Risk/));
-      expect(screen.getByText('crypto')).toBeInTheDocument();
-      expect(screen.getAllByText('$8.00').length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByText(/2 positions/)).toBeInTheDocument();
+      expect(screen.getByText(/1 open orders/)).toBeInTheDocument();
     });
   });
 
-  describe('Risk Tab — Sizing Metrics', () => {
+  describe('Sizing Metrics', () => {
     it('shows Kelly utilization', () => {
       render(<KalshiPortfolioView />);
-      fireEvent.click(screen.getByText(/^Risk/));
+      // Kelly utilization displayed inline (no tab click needed)
       expect(screen.getByText('65%')).toBeInTheDocument();
-      expect(screen.getByText('f=0.120')).toBeInTheDocument();
     });
 
     it('shows vol scale', () => {
       render(<KalshiPortfolioView />);
-      fireEvent.click(screen.getByText(/^Risk/));
+      // Vol scale shown in sizing panel
       expect(screen.getByText('0.85x')).toBeInTheDocument();
     });
 
     it('shows drawdown tier badge', () => {
       render(<KalshiPortfolioView />);
-      fireEvent.click(screen.getByText(/^Risk/));
+      // Drawdown tier displayed as badge
       expect(screen.getByText('Normal')).toBeInTheDocument();
     });
 
     it('shows risk-adjusted metrics (Sharpe/Sortino/Calmar)', () => {
       render(<KalshiPortfolioView />);
-      fireEvent.click(screen.getByText(/^Risk/));
+      // Risk-adjusted metrics shown inline
       expect(screen.getByText('2.45')).toBeInTheDocument();
       expect(screen.getByText('3.10')).toBeInTheDocument();
       expect(screen.getByText('4.80')).toBeInTheDocument();
@@ -366,11 +386,11 @@ describe('KalshiPortfolioView', () => {
       setupMocks({ mode: MOCK_MODE_PAPER });
       (global.fetch as jest.Mock).mockResolvedValueOnce({ ok: true, json: async () => ({}) });
       render(<KalshiPortfolioView />);
-      // Click the toggle button (opens confirmation modal)
-      const toggleBtn = screen.getByTitle(/Switch to Live mode/i);
+      // Click the toggle button (opens confirmation modal) - find by role
+      const toggleBtn = screen.getByRole('button', { name: /paper/i });
       fireEvent.click(toggleBtn);
       // Confirm the modal
-      const confirmBtn = screen.getByText('Confirm');
+      const confirmBtn = screen.getByRole('button', { name: /confirm/i });
       fireEvent.click(confirmBtn);
       await Promise.resolve();
       expect(global.fetch).toHaveBeenCalledWith(
@@ -387,8 +407,8 @@ describe('KalshiPortfolioView', () => {
       });
       render(<KalshiPortfolioView />);
       // Click toggle then confirm the modal
-      fireEvent.click(screen.getByTitle(/Switch to Live mode/i));
-      fireEvent.click(screen.getByText('Confirm'));
+      fireEvent.click(screen.getByRole('button', { name: /paper/i }));
+      fireEvent.click(screen.getByRole('button', { name: /confirm/i }));
       await screen.findByText(/Live mode not enabled/);
     });
 

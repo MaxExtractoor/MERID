@@ -12,7 +12,7 @@ Inputs (all optional; falls back gracefully when not provided):
   - Kalman sentiment adjustment   (raw_sentiment)
 
 Resolution order (each step can only tighten, never loosen):
-  1. lifecycle_frac              — state-machine base (0% / 1% / 2%)
+  1. lifecycle_frac              — state-machine base (0% / 0.5% / 1%) — NOT 2%!
   2. mc_adjust_risk_frac()       — halve if MC prob_ruin or p5 too high
   3. drawdown_guarded_risk_frac()— step-down at 5/7/10% drawdown
   4. dynamic_size()              — consec-loss + equity-high compounding
@@ -20,7 +20,7 @@ Resolution order (each step can only tighten, never loosen):
   6. kalshi_fractional_kelly_size()— quarter-Kelly cap
   7. kf_sentiment_adjust()       — ±20% Kalman sentiment nudge
   8. min(all above)              — take the tightest estimate
-  9. Hard 5% equity cap
+  9. Hard 2% TOTAL cycle cap (1% per edge max, 3 edges × 1% = 3% worst case)
 
 Usage:
     profile = KalshiRiskProfile(equity=10.52, peak_equity=10.52)
@@ -40,6 +40,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 from utils.logger import get_logger
 from dataclasses import dataclass, field
 from typing import Dict, Optional
@@ -59,12 +60,13 @@ class KalshiRiskProfile:
     equity: float
     peak_equity: float
 
-    # Optional inputs — set via setters
+    # Optional inputs — set via setters (all env-driven, no hardcoded defaults)
     _mc_metrics: Optional[Dict[str, float]] = field(default=None, repr=False)
     _fg: Optional[object] = field(default=None, repr=False)          # FGState
     _atr_value: float = field(default=0.0, repr=False)
     _stop_dollars: float = field(default=0.0, repr=False)
-    _lifecycle_frac: float = field(default=0.02, repr=False)
+    # 1% max per trade (3% worst case for 3 edges). 2% default = 6% total = FORBIDDEN.
+    _lifecycle_frac: float = field(default_factory=lambda: float(os.getenv("MERID_LIFECYCLE_BASE_FRAC", "0.01")), repr=False)
     _raw_sentiment: Optional[float] = field(default=None, repr=False)
     _kalman: Optional[object] = field(default=None, repr=False)       # SentimentKalman
 
@@ -85,7 +87,9 @@ class KalshiRiskProfile:
         return self
 
     def set_lifecycle_frac(self, frac: float) -> "KalshiRiskProfile":
-        self._lifecycle_frac = max(0.0, min(frac, 0.05))
+        # Use env-driven max lifecycle fraction (default 5% hard cap)
+        _max_lifecycle_frac = float(os.getenv("MERID_MAX_LIFECYCLE_FRAC", "0.05"))
+        self._lifecycle_frac = max(0.0, min(frac, _max_lifecycle_frac))
         return self
 
     def set_sentiment(self, raw_combined: float, kalman=None) -> "KalshiRiskProfile":
@@ -188,8 +192,9 @@ class KalshiRiskProfile:
             )
             kf_mult = kf_size / max(pre_kf_size, 1e-9)
 
-        # ── Step 9: hard 5% equity cap ────────────────────────────────────
-        final_size = min(kf_size, 0.05 * eq)
+        # ── Step 9: hard equity cap (env-driven, default 5%) ─────────────────
+        _hard_equity_cap_pct = float(os.getenv("MERID_HARD_EQUITY_CAP_PCT", "0.05"))
+        final_size = min(kf_size, _hard_equity_cap_pct * eq)
         final_size = max(final_size, 0.0)
 
         return {

@@ -51,6 +51,7 @@ var ICON_NAMES = [
   'CircleDot','BarChart','BarChart2','Signal','Repeat','ChevronFirst',
   'ChevronLast','ChevronsLeft','ChevronsRight','ListFilter','SlidersHorizontal',
   'CircleAlert','TriangleAlert','ShieldQuestion','CircleHelp',
+  'Ban','BellOff','ClipboardList','Rocket','StopCircle','Tag','Trash',
 ];
 
 var i, exports = module.exports;

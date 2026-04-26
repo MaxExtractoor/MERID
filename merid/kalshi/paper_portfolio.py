@@ -23,6 +23,10 @@ class PaperPosition:
     agent_id: str
 
 
+# Number of concurrent lanes for bankroll allocation split
+_DEFAULT_LANE_COUNT = 8  # 4 symbols * 2 modes (live/paper)
+
+
 @dataclass
 class PaperTrade:
     """Completed paper trade."""
@@ -217,16 +221,45 @@ class KalshiPaperPortfolio:
             return 0
     
     def get_lane_bankroll(self, lane_id: str) -> float:
-        """Get bankroll allocated to a specific lane."""
+        """Get bankroll allocated to a specific lane.
+        
+        PRIORITY:
+        1. Live Kalshi bankroll via v2 unified service (for live trading)
+        2. Paper portfolio cash balance (for paper trading fallback)
+        
+        This ensures position sizing uses the actual Kalshi balance when available,
+        falling back to paper balance only when live bankroll is unavailable.
+        """
+        # Try live bankroll first via v2 unified service
         try:
-            # For paper trading, return a portion of total cash based on lane
-            # In production, this would be more sophisticated allocation
-            base_bankroll = float(self._cash_balance)
-            # Allocate equally among potential lanes (4 symbols * 2 modes = 8 lanes)
-            return base_bankroll / 8.0
+            from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+            live_equity = get_equity_for_risk_calc_sync()
+            if live_equity is not None and live_equity > 0:
+                # Allocate equally among lanes
+                allocated = float(live_equity) / _DEFAULT_LANE_COUNT
+                logger.debug(f"Using live Kalshi bankroll for {lane_id}: ${allocated:.2f}")
+                return allocated
         except Exception as exc:
-            logger.error(f"Failed to get lane bankroll: {exc}")
-            return 1000.0  # Fallback bankroll
+            logger.debug(f"Live bankroll unavailable for {lane_id}: {exc}")
+        
+        # Fallback to paper portfolio cash balance
+        try:
+            base_bankroll = float(self._cash_balance)
+            if base_bankroll > 0:
+                allocated = base_bankroll / _DEFAULT_LANE_COUNT
+                logger.warning(f"Using paper bankroll for {lane_id}: ${allocated:.2f}")
+                return allocated
+        except Exception as exc:
+            logger.error(f"Failed to get paper bankroll for {lane_id}: {exc}")
+        
+        # PRODUCTION SAFETY: No bankroll available - fail closed with 0
+        # Never use hardcoded fallback values in production
+        logger.critical(
+            f"[BANKROLL-FAIL-CLOSED] No bankroll available for {lane_id}. "
+            f"Live Kalshi API unavailable AND paper balance empty. "
+            f"Returning 0 to prevent trading with fake bankroll."
+        )
+        return 0.0
     
     def get_portfolio_summary(self) -> Dict[str, Any]:
         """Get portfolio summary."""

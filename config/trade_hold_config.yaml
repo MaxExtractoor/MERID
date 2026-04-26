@@ -19,12 +19,12 @@
 # legacy code path runs unmodified (safe rollback).
 enabled: true
 
-# ── Warmup / lifecycle ────────────────────────────────────────────────
+# ── Warmup / lifecycle (ENV-DRIVEN) ────────────────────────────────────
 warmup:
-  min_seconds: 15.0          # Minimum seconds in WARMING_UP before promotion
-  max_seconds: 90.0          # Hard ceiling — promote unconditionally
-  max_stagger_seconds: 30.0  # Per-agent stagger based on name hash
-  min_cycles_for_data_ready: 1  # Cycles required before data-readiness promotion
+  min_seconds: ${MERID_WARMUP_MIN_SECONDS:-15.0}
+  max_seconds: ${MERID_WARMUP_MAX_SECONDS:-90.0}
+  max_stagger_seconds: ${MERID_WARMUP_MAX_STAGGER:-30.0}
+  min_cycles_for_data_ready: ${MERID_WARMUP_MIN_CYCLES:-1}
 
 # ── Session ───────────────────────────────────────────────────────────
 session:
@@ -32,44 +32,54 @@ session:
   maintenance_start_et: "03:00"
   maintenance_end_et: "05:00"
 
-# ── Entry window ──────────────────────────────────────────────────────
+# ── Entry window (ENV-DRIVEN) ──────────────────────────────────────────
 entry_window:
-  expiry_proximity_guard_seconds: 90   # Block new entries this close to expiry
-  expiry_caution_zone_seconds: 120     # Warn when within this range
+  expiry_proximity_guard_seconds: ${MERID_EXPIRY_PROXIMITY_GUARD:-90}
+  expiry_caution_zone_seconds: ${MERID_EXPIRY_CAUTION_ZONE:-120}
 
-# ── Strategy thresholds (defaults — per-agent overrides in grid YAML) ─
+# ── Strategy thresholds (ENV-DRIVEN - aligns with Top 3 / 1-2% strategy) ─
 strategy:
-  min_edge_early: 0.08       # 8% — EARLY phase (>24h)
-  min_edge_mid: 0.07         # 7% — MID (4-24h)
-  min_edge_late: 0.06        # 6% — LATE (1-4h)
-  min_edge_terminal: 0.06    # 6% — TERMINAL (<1h)
-  min_arb_edge: 0.005        # 0.5% for pure arb
-  min_confidence: 0.60       # Model confidence floor
-  min_volume: 0              # 0 = disabled (Kalshi often reports 0 on short-dated)
-  min_open_interest: 0       # 0 = disabled
-  snapshot_stale_seconds: 120  # Max age for market data snapshot
+  min_edge_early: ${MERID_MIN_EDGE_EARLY:-0.08}
+  min_edge_mid: ${MERID_MIN_EDGE_MID:-0.07}
+  min_edge_late: ${MERID_MIN_EDGE_LATE:-0.06}
+  min_edge_terminal: ${MERID_MIN_EDGE_TERMINAL:-0.06}
+  min_arb_edge: ${MERID_MIN_ARB_EDGE:-0.005}
+  min_confidence: ${MERID_MIN_CONFIDENCE:-0.60}
+  min_volume: ${MERID_MIN_VOLUME:-0}
+  min_open_interest: ${MERID_MIN_OPEN_INTEREST:-0}
+  snapshot_stale_seconds: ${MERID_SNAPSHOT_STALE_SECONDS:-120}
 
-# ── Consensus / swarm ─────────────────────────────────────────────────
+# ── Consensus / swarm (ENV-DRIVEN) ────────────────────────────────────
 consensus:
-  solo_wait_seconds: 0.0     # Seconds without consensus before solo exec (0=immediate)
-  solo_trades_cap: 3         # Max live orders per agent while swarm degraded
-  solo_wall_seconds: 1800.0  # Wall-clock limit for degraded mode (30min)
-  consensus_wait_timeout_ms: 500  # Wait for FORMING consensus before proceeding
+  solo_wait_seconds: ${MERID_SOLO_WAIT_SECONDS:-0.0}
+  solo_trades_cap: ${MERID_SOLO_TRADES_CAP:-3}
+  solo_wall_seconds: ${MERID_SOLO_WALL_SECONDS:-1800.0}
+  consensus_wait_timeout_ms: ${MERID_CONSENSUS_WAIT_TIMEOUT:-500}
 
-# ── Risk / pre-trade (mirrors PredictionRiskConfig defaults) ──────────
+# ═══════════════════════════════════════════════════════════════════════════
+# Risk / pre-trade (DERIVED from Kalshi bankroll, was hardcoded)
+# CRITICAL: 1-2% TOTAL CYCLE RISK CAP (Pass 8 Invariant)
+# These are PER-MARKET CAPS, not per-cycle allocations.
+# TopNAllocator enforces the 1-2% TOTAL across all markets in a cycle.
+# 3 markets × 2% = 6% is STRICTLY FORBIDDEN.
+# ═══════════════════════════════════════════════════════════════════════════
 risk:
-  max_contracts_per_order: 50
-  max_contracts_per_market: 500
+  max_contracts_per_order: 50      # Absolute safety cap (contracts are cheap on Kalshi)
+  max_contracts_per_market: 0    # 0 = derive: 1 contract per $10 bankroll, max 500
   min_order_size: 1
-  max_order_size: 100
-  max_notional_per_market_usd: 500.0
-  max_notional_per_event_usd: 1000.0
-  max_total_notional_usd: 5000.0
-  max_daily_loss_usd: 500.0
-  max_open_markets: 50
-  max_orders_per_minute: 30
-  max_orders_per_hour: 200
-  min_post_fee_edge: 0.01    # Minimum post-fee edge (fraction)
+  max_order_size: 0              # 0 = derive: 1% of bankroll / price, max 100
+  # CAP: 1% per market (TopNAllocator ensures 1-2% TOTAL across all markets)
+  # 2% per market × 3 markets = 6% FORBIDDEN. 1% max keeps us within 1-2% total.
+  max_notional_per_market_usd: 0   # 0 = derive: 1% of bankroll CAP (was 2%/$500)
+  # CAP: 2% per event absolute max (never 5% - that would cause major losses)
+  max_notional_per_event_usd: 0    # 0 = derive: 2% of bankroll MAX CAP (was 5%/$1000)
+  # HARD CAP: Never exceed 50% of bankroll total (safety limit, not target)
+  max_total_notional_usd: 0      # 0 = derive: 50% of bankroll MAX CAP (was $5000)
+  max_daily_loss_usd: 0          # 0 = derive: 5% of bankroll (was $500)
+  max_open_markets: 0            # 0 = derive: 1 per $50 bankroll, max 50
+  max_orders_per_minute: 30      # Rate limit (not bankroll-scaled)
+  max_orders_per_hour: 200      # Rate limit (not bankroll-scaled)
+  min_post_fee_edge: 0.01        # Minimum post-fee edge (fraction)
   tick_size_cents: 1
   max_spread_cents: 10
   max_slippage_cents: 3

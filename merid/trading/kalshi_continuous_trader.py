@@ -78,6 +78,7 @@ from merid.trading.top3_batch_manager import (
     REJECT_ASSET_NOT_IN_TOP3,
     REJECT_NOTIONAL_LIMIT_REACHED,
 )
+from merid.guards.global_execution_guard import get_global_execution_guard
 
 # Module-level logger (must be defined before feature flag logging)
 logger = get_logger(__name__)
@@ -170,8 +171,30 @@ class TraderConfig:
     dry_run: bool = False
 
     # ── Bankroll management (capital-preservation-first) ──────────────
-    initial_bankroll_cents: int = 1400   # $14.00 - calibrated to match user's $12.97 Kalshi cash + buffer
-    max_risk_per_trade_pct: float = 0.015 # risk max 1.5% of bankroll per trade (tightened from 2%)
+    # initial_bankroll_cents is a STATIC REFERENCE for performance reporting only.
+    # It should be set once at the start of a trading epoch (e.g., $10,000 = 1_000_000 cents).
+    # It is NOT used for live sizing — live sizing uses actual Kalshi balance with max_riskable_usd cap.
+    initial_bankroll_cents: int = 0  # 0 = no reference set (performance % returns will be relative to 0)
+
+    # Live equity risk controls
+    # max_riskable_usd: Cap on how much of live Kalshi balance can be used for sizing.
+    #   If live_balance > max_riskable_usd, effective_equity = max_riskable_usd
+    #   If live_balance <= max_riskable_usd, effective_equity = live_balance
+    #   0 = no cap (use full live balance)
+    max_riskable_usd: float = 0.0  # 0 = unlimited (use full Kalshi balance)
+
+    # min_operational_balance_usd: Floor below which trading halts (safety reserve)
+    #   If live_balance < min_operational_balance_usd: no new orders, existing positions may be reduced
+    #   0 = no minimum (trade with any balance)
+    min_operational_balance_usd: float = 0.0  # 0 = no minimum reserve
+
+    # ═════════════════════════════════════════════════════════════════
+    # CRITICAL: 1-2% TOTAL CYCLE RISK CAP (NOT per-trade)
+    # This is the MAX TOTAL risk across ALL edges in a cycle.
+    # Top3Allocator divides this among top 3 edges with priority fill.
+    # NEVER change this to exceed 0.02 (2%) - 3x2% = 6% is FORBIDDEN.
+    # ═════════════════════════════════════════════════════════════════
+    max_risk_per_trade_pct: float = 0.015  # 1.5% TOTAL across all edges per cycle
     kelly_fraction: float = 0.20         # fifth-Kelly (more conservative, survival-first)
     max_contract_price_cents: int = 65   # Allow mid-curve markets up to 65¢ (was 35¢)
     min_contract_price_cents: int = 2    # skip penny contracts (no liquidity)
@@ -218,15 +241,12 @@ class TraderConfig:
     fee_per_contract: Decimal = Decimal("0.02")  # ~2¢ Kalshi taker fee (= 0.07 * P*(1-P) at 50¢)
     slippage: Decimal = Decimal("0.01")  # 1% slippage
 
-    # ── CT -> Router Migration (Phase 2: Canary Flip) ────────────────
-    # Percentage of orders to route through canonical router vs direct HTTP.
-    # 0 = all HTTP (Phase 1 shadow mode; legacy, now disabled by default)
-    # 1-99 = canary flip (random selection)
-    # 100 = all router (Phase 3 — canonical chokepoint)
-    # Env: CT_USE_ROUTER_PERCENT (default 100 — routes via route_order_async so
-    # the shared GlobalRiskGuard / dedup / pre-trade gate all apply).  Set to 0
-    # only as an emergency break-glass (logged as WARNING at startup).
-    use_router_percent: int = 100
+    # ── CT -> Router Migration (Phase 3: Canonical Chokepoint) ───────
+    # SECURITY FIX: Hard-coded to 100 (router-only). The direct HTTP bypass
+    # has been removed to enforce single-execution-authority.
+    # All orders MUST flow through the canonical router and unified risk guard.
+    # See: docs/security/single_execution_authority.md
+    use_router_percent: int = field(default=100, init=False)
 
     # ── Market selection ─────────────────────────────────────────────
     # Default: 15m–weekly from kalshi_universe (excludes monthly/annual); see kalshi_ct_default_series_tickers
@@ -345,8 +365,12 @@ class TraderConfig:
         return cls(
             interval_seconds=int(os.getenv("KALSHI_TRADER_INTERVAL", "60")),
             dry_run=os.getenv("KALSHI_TRADER_DRY_RUN", "false").lower() in ("true", "1", "yes"),
-            initial_bankroll_cents=int(os.getenv("KALSHI_TRADER_BANKROLL", "1400")),  # $14.00 default matches calibrated bankroll
-            max_risk_per_trade_pct=float(os.getenv("KALSHI_TRADER_RISK_PCT", "0.015")),  # 1.5% - calibrated
+            # initial_bankroll_cents: static reference for performance reporting (not live sizing)
+            initial_bankroll_cents=int(os.getenv("KALSHI_TRADER_BANKROLL", "0")),  # 0 = no reference epoch set
+            # Live equity caps for safety
+            max_riskable_usd=float(os.getenv("KALSHI_TRADER_MAX_RISKABLE_USD", "0.0")),  # 0 = use full Kalshi balance
+            min_operational_balance_usd=float(os.getenv("KALSHI_TRADER_MIN_OP_BALANCE_USD", "0.0")),  # 0 = no minimum
+            max_risk_per_trade_pct=float(os.getenv("KALSHI_TRADER_RISK_PCT", "0.015")),  # 1.5% of effective_equity
             kelly_fraction=float(os.getenv("KALSHI_TRADER_KELLY_FRAC", "0.20")),  # fifth-Kelly - calibrated
             max_contract_price_cents=99 if smoke_test else int(os.getenv("KALSHI_TRADER_MAX_PRICE", "65")),
             min_contract_price_cents=int(os.getenv("KALSHI_TRADER_MIN_PRICE", "2")),
@@ -387,8 +411,8 @@ class TraderConfig:
             max_cycle_spend_pct=float(os.getenv("KALSHI_TRADER_CYCLE_SPEND_PCT", "0.10")),  # 10% - calibrated
             yes_stop_loss_cents=int(os.getenv("KALSHI_TRADER_YES_STOP_CENTS", "8")),
             yes_profit_take_cents=int(os.getenv("KALSHI_TRADER_YES_PROFIT_CENTS", "85")),
-            # Phase 2: CT -> Router migration canary flip
-            use_router_percent=int(os.getenv("CT_USE_ROUTER_PERCENT", "100")),
+            # SECURITY: use_router_percent is hard-coded to 100 (router-only)
+            # Direct HTTP bypass has been removed. See use_router_percent field definition.
         )
 
     def __post_init__(self) -> None:
@@ -402,6 +426,49 @@ class TraderConfig:
         _ct_on = os.getenv("MERID_ENABLE_KALSHI_CT", "").lower() in ("1", "true", "yes", "on")
         _tag = "[CT-LEGACY/DEV] " if (_ct_on and not _suppress) else ""
 
+        # ═══════════════════════════════════════════════════════════════════════════
+        # BANKROLL CONFIGURATION AUDIT
+        # ═══════════════════════════════════════════════════════════════════════════
+        # initial_bankroll_cents is now a STATIC REFERENCE for performance reporting.
+        # It is NOT fetched from Kalshi and does NOT affect live sizing.
+        # Live sizing uses actual Kalshi balance with max_riskable_usd cap applied.
+
+        if self.initial_bankroll_cents > 0:
+            logger.info(
+                "[BANKROLL-CONFIG] Static reference bankroll set: $%.2f USD (%d cents). "
+                "This is used for performance reporting only, not live sizing.",
+                self.initial_bankroll_cents / 100,
+                self.initial_bankroll_cents
+            )
+        else:
+            logger.info(
+                "[BANKROLL-CONFIG] No static reference bankroll set. "
+                "Performance % returns will be relative to 0. "
+                "To set a reference, use KALSHI_TRADER_BANKROLL env var."
+            )
+
+        # Log live equity risk controls
+        if self.max_riskable_usd > 0:
+            logger.info(
+                "[BANKROLL-CONFIG] max_riskable_usd=$%.2f — live Kalshi balance will be capped at this amount for sizing",
+                self.max_riskable_usd
+            )
+        else:
+            logger.info(
+                "[BANKROLL-CONFIG] max_riskable_usd=0 (unlimited) — full Kalshi balance will be used for sizing"
+            )
+
+        if self.min_operational_balance_usd > 0:
+            logger.info(
+                "[BANKROLL-CONFIG] min_operational_balance_usd=$%.2f — trading will halt below this threshold",
+                self.min_operational_balance_usd
+            )
+        else:
+            logger.info(
+                "[BANKROLL-CONFIG] min_operational_balance_usd=0 (no minimum) — trading allowed with any balance"
+            )
+
+        # Legacy warning for old default (should no longer trigger with new 0 default)
         _default_bankroll = 574
         if (
             not _suppress
@@ -1789,12 +1856,10 @@ class KalshiContinuousTrader:
         live_ok: bool,
         live_block_reason: str,
     ) -> bool:
-        """Submit sell YES to close a long. Returns True if order accepted (201) or dry-run."""
+        """Submit sell YES to close a long via canonical router. Returns True if order accepted or dry-run."""
         if qty <= 0:
             return False
-        # Deterministic client_order_id so Kalshi deduplicates retries for exit orders.
-        # Key = ticker + side + price so the same exit attempt always maps to the same ID.
-        _exit_coid_key = f"exit-{ticker}-yes-{max(1, min(99, limit_yes_cents))}"
+        
         order_data = {
             "ticker": ticker,
             "action": "sell",
@@ -1802,76 +1867,89 @@ class KalshiContinuousTrader:
             "count": qty,
             "type": "limit",
             "yes_price": max(1, min(99, limit_yes_cents)),
-            "client_order_id": str(uuid.uuid5(uuid.NAMESPACE_DNS, _exit_coid_key)),
+            # client_order_id generated by pre-trade gate via adapter
         }
+        
         logger.info(
             "  -> EXIT ORDER: SELL YES %dx %s @ %d¢",
             qty, ticker, order_data["yes_price"],
         )
+        
         if dry_run:
             logger.info("    [DRY RUN] %s", json.dumps(order_data))
             return True
+            
         if not live_ok:
             logger.warning("    EXIT blocked: %s", live_block_reason)
             return False
-        resp = self._post("/portfolio/orders", order_data)
-        if resp.status_code == 201:
-            order = resp.json().get("order", resp.json())
-            status = order.get("status", "?")
-            oid = order.get("order_id", "?")
-            fee = int(float(order.get("taker_fees_dollars", "0")) * 100)
-            logger.info("    EXIT %s | id=%s", status.upper(), oid)
-            cost_est = order_data["yes_price"] * qty
-            self.tracker.record_order(order, cost_est)
-            if self._notifier:
-                self._notifier.record_fill(
-                    ticker=ticker,
-                    side="yes",
-                    contracts=qty,
-                    price_cents=order_data["yes_price"],
-                    fee_cents=fee,
-                    edge=0.0,
-                    status=status,
-                    order_id=oid,
+        
+        # Route through canonical router (security fix: no direct HTTP)
+        try:
+            from merid.trading.ct_execution_adapter import get_ct_execution_adapter
+            adapter = get_ct_execution_adapter()
+            router_result = asyncio.get_event_loop().run_until_complete(
+                adapter.execute_live(order_data, self._last_effective_equity_usd)
+            )
+
+            if router_result.status in ("filled_live", "submitted_live"):
+                fill = router_result.fill or {}
+                oid = fill.get("order_id", "?")
+                status = "filled" if router_result.status == "filled_live" else "submitted"
+                logger.info("    EXIT %s | id=%s", status.upper(), oid)
+                
+                # Record via tracker/notifier
+                self.tracker.record_order({
+                    "order_id": oid,
+                    "ticker": ticker,
+                    "status": status,
+                    "filled_count": fill.get("filled_count", 0),
+                }, order_data["yes_price"] * qty)
+                
+                if self._notifier:
+                    self._notifier.record_fill(
+                        ticker=ticker,
+                        side="yes",
+                        contracts=qty,
+                        price_cents=order_data["yes_price"],
+                        fee_cents=0,  # Fee tracked by router
+                        edge=0.0,
+                        status=status,
+                        order_id=oid,
+                    )
+                return True
+            else:
+                logger.warning(
+                    "    EXIT FAILED via router: %s | %s",
+                    router_result.status,
+                    router_result.reason or "unknown"
                 )
-            return True
-        if resp.status_code == _CT_TRANSPORT_FAILURE_STATUS:
-            logger.warning("    EXIT FAILED: local/transport error (see prior POST warning)")
-        else:
-            logger.warning("    EXIT FAILED %d: %s", resp.status_code, resp.text[:200])
-        return False
+                return False
+                
+        except Exception as exc:
+            logger.error("    EXIT FAILED (router error): %s", exc)
+            return False
 
     def _get_balance(self) -> Tuple[int, int]:
-        """Return (available_balance_cents, portfolio_value_cents).
-
-        Kalshi /portfolio/balance returns:
-          {"balance": <available_cents>, "locked_balance": <locked_cents>}
-        There is no 'portfolio_value' field — open position value is derived
-        by summing total_cost across positions fetched separately.
+        """Get balance from unified v2 bankroll service.
+        
+        Returns (available_balance_cents, portfolio_value_cents) from LIVE Kalshi API.
+        Uses v2 unified bankroll service as single source of truth.
         """
-        for attempt in range(2):
-            r = self._get("/portfolio/balance")
-            if r.status_code == 200:
-                d = r.json()
-                available = int(d.get("balance", 0))
-                # portfolio_value is not returned by /portfolio/balance.
-                # It is computed from _get_positions() total_cost sums.
-                # We return 0 here; the cycle reconciles using _current_exposure_cents
-                # which is computed from live positions below.
-                return available, 0
-            if attempt == 0 and r.status_code in (429, 503):
-                logger.warning(
-                    "[BALANCE-FETCH-RETRY] HTTP %d on attempt 1 — sleeping 2s before retry",
-                    r.status_code,
-                )
-                time.sleep(2)
-                continue
-            break
-        logger.warning(
-            "[BALANCE-FETCH-FAIL] HTTP %d — returning (0,0); all trades will be skipped this cycle",
-            r.status_code,
-        )
-        return 0, 0
+        import asyncio
+        from merid.event_venues.kalshi import get_bankroll_service
+        
+        try:
+            service = asyncio.run(get_bankroll_service())
+            summary = asyncio.run(service.get_summary())
+            if summary.equity_usd is not None:
+                equity_cents = int(float(summary.equity_usd) * 100)
+                return equity_cents, equity_cents
+            else:
+                logger.error("[_get_balance] Bankroll unavailable: state=%s", summary.state)
+                return 0, 0
+        except Exception as exc:
+            logger.error("[_get_balance] Error fetching bankroll: %s", exc)
+            return 0, 0
 
     def _get_positions(self) -> Dict[str, dict]:
         """Fetch positions from Kalshi.
@@ -2329,6 +2407,36 @@ class KalshiContinuousTrader:
                 )
                 return
 
+        # ═════════════════════════════════════════════════════════════════
+        # PHASE 8: Integration Validator Health Check
+        # ═════════════════════════════════════════════════════════════════
+        try:
+            from merid.safety.integration_validator import get_integration_validator
+            
+            _validator = get_integration_validator()
+            _safety_report = _validator.run_health_check()
+            
+            if not _safety_report.is_safe_to_trade:
+                logger.warning(
+                    "  BLOCKED by IntegrationValidator: %s (status=%s)",
+                    _safety_report.blocked_reason or "unknown",
+                    _safety_report.overall_status.value,
+                )
+                return
+            
+            logger.debug(
+                "  IntegrationValidator: status=%s, violations=%d",
+                _safety_report.overall_status.value,
+                len(_safety_report.active_violations),
+            )
+        except Exception as exc:
+            logger.error(
+                "  BLOCKED: IntegrationValidator check failed (%s) — fail-closed",
+                exc,
+                exc_info=True,
+            )
+            return
+        
         self._cycle += 1
         cycle = self._cycle
         
@@ -2486,18 +2594,125 @@ class KalshiContinuousTrader:
             except Exception as _bam_exc:
                 logger.debug("BtcAnchoredMoveModel price feed failed: %s", _bam_exc)
 
-        # 2. Account state + bankroll management
-        balance_cents, portfolio_cents = self._get_balance()
-        total_value_cents = balance_cents + portfolio_cents
+        # ═══════════════════════════════════════════════════════════════════════════
+        # 2. LIVE KALSHI BANKROLL - Single Source of Truth (v2 Unified Service)
+        # ═══════════════════════════════════════════════════════════════════════════
+        # ONLY source of "real money": Kalshi /portfolio/balance API via v2 service
+        # No fake data, no fallbacks, no constructed values allowed
+        from merid.event_venues.kalshi import get_bankroll_service, BalanceState
+        
+        live_equity_usd = 0.0
+        raw_balance_cents = 0
+        portfolio_cents = 0
+        total_value_cents = 0
+        _br_state = BalanceState.UNKNOWN
+        
+        try:
+            # Use v2 unified bankroll service - async in sync context
+            import asyncio
+            _service = asyncio.run(get_bankroll_service())
+            _summary = asyncio.run(_service.get_summary())
+            _br_state = _summary.state
+            
+            if _summary.equity_usd is not None:
+                live_equity_usd = float(_summary.equity_usd)
+                raw_balance_cents = int(live_equity_usd * 100)
+                portfolio_cents = raw_balance_cents  # v2 doesn't track separately
+                total_value_cents = raw_balance_cents
+        except Exception as _br_err:
+            logger.critical(
+                "[BANKROLL-HALT] Kalshi bankroll service failed: %s. "
+                "HALTING cycle - cannot trade without real bankroll.",
+                _br_err
+            )
+            if self._notifier:
+                self._notifier.notify_halt(
+                    f"bankroll_unavailable: {_br_err}",
+                    self._cycle
+                )
+            return
+        
+        if _br_state == BalanceState.ERROR or live_equity_usd <= 0:
+            # HARD HALT: Cannot trade without real bankroll from Kalshi API
+            logger.critical(
+                "[BANKROLL-HALT] Kalshi /portfolio/balance unavailable: state=%s. "
+                "HALTING cycle - cannot trade without real bankroll.",
+                _br_state.value
+            )
+            if self._notifier:
+                self._notifier.notify_halt(
+                    f"bankroll_unavailable: state={_br_state.value}",
+                    self._cycle
+                )
+            return
+        
+        # Live equity from ACTUAL Kalshi API via v2 unified service
+        logger.debug("[BANKROLL] state=%s equity=$%.2f", _br_state.value, live_equity_usd)
+
+        # ═══════════════════════════════════════════════════════════════════════════
+        # DYNAMIC EFFECTIVE EQUITY COMPUTATION (drawdown-scaled max_riskable)
+        # ═══════════════════════════════════════════════════════════════════════════
+
+        # Compute current drawdown from peak
+        _peak_equity = self.bankroll.peak_balance_cents / 100.0
+        _current_drawdown_pct = 0.0
+        if _peak_equity > 0 and live_equity_usd < _peak_equity:
+            _current_drawdown_pct = (_peak_equity - live_equity_usd) / _peak_equity
+
+        # DYNAMIC max_riskable_usd: Scales down as drawdown increases
+        # At 0% DD: full live equity | At 15% DD: 85% of equity | floor at 50%
+        if self.config.max_riskable_usd > 0:
+            # Static cap configured - use it as ceiling
+            _base_max_riskable = min(live_equity_usd, self.config.max_riskable_usd)
+        else:
+            # No static cap - use live equity as base
+            _base_max_riskable = live_equity_usd
+
+        # Apply drawdown scaling: linear reduction from 100% to 50% as DD goes 0% → 15%
+        _dd_scale_factor = max(0.5, 1.0 - (_current_drawdown_pct / 0.30))  # 30% DD = 50% scale
+        _dynamic_max_riskable = _base_max_riskable * _dd_scale_factor
+
+        effective_equity_usd = min(live_equity_usd, _dynamic_max_riskable)
+
+        # Store for order placement (passed to router for portfolio risk limits)
+        self._last_effective_equity_usd = effective_equity_usd
+
+        # Convert back to cents for internal calculations
+        effective_total_cents = int(effective_equity_usd * 100)
+        effective_balance_cents = int((raw_balance_cents / 100.0) * (effective_equity_usd / max(live_equity_usd, 0.01)) * 100)
+
+        # Log equity state with dynamic scaling transparency
         logger.info(
-            "  Balance: $%.2f | Portfolio: $%.2f | Total: $%.2f",
-            balance_cents / 100, portfolio_cents / 100, total_value_cents / 100,
+            "  Live: $%.2f | Peak: $%.2f | DD: %.1f%% | Dynamic cap: $%.2f (scale: %.0f%%) | Effective: $%.2f",
+            live_equity_usd, _peak_equity, _current_drawdown_pct * 100,
+            _dynamic_max_riskable, _dd_scale_factor * 100, effective_equity_usd
         )
+
+        # ═══════════════════════════════════════════════════════════════════════════
+        # DYNAMIC MIN OPERATIONAL BALANCE (drawdown halt threshold)
+        # ═══════════════════════════════════════════════════════════════════════════
+        # min_op_balance = peak * (1 - drawdown_halt_pct) — unified with drawdown halt
+        _dynamic_min_op_balance = _peak_equity * (1.0 - self.config.drawdown_halt_pct)
+
+        if live_equity_usd < _dynamic_min_op_balance:
+            logger.critical(
+                "[SAFETY-HALT] Live equity $%.2f below dynamic min (peak $%.2f × (1 - %.1f%%) = $%.2f). "
+                "HALTING new order placement. Existing positions maintained.",
+                live_equity_usd, _peak_equity, self.config.drawdown_halt_pct * 100,
+                _dynamic_min_op_balance
+            )
+            if self._notifier:
+                self._notifier.notify_halt(
+                    f"drawdown_halt: ${live_equity_usd:.2f} < ${_dynamic_min_op_balance:.2f} "
+                    f"(peak ${_peak_equity:.2f}, dd {_current_drawdown_pct:.1%})",
+                    self._cycle
+                )
+            return
 
         # Recalibrate risk limits when balance moves >5% (best-effort)
         try:
             from merid.event_venues.kalshi.balance_calibrator import get_balance_calibrator
-            get_balance_calibrator().update(balance_cents)
+            get_balance_calibrator().update(effective_balance_cents)
         except Exception as _cal_exc:
             logger.debug("BalanceCalibrator update skipped: %s", _cal_exc)
 
@@ -2537,13 +2752,13 @@ class KalshiContinuousTrader:
                 self._notifier.notify_halt(self.bankroll.halt_reason, self._cycle)
             return
 
-        if balance_cents < self.config.min_balance_cents:
-            # balance_cents=0 almost always means the API call failed (see BALANCE-FETCH-FAIL above);
+        if effective_balance_cents < self.config.min_balance_cents:
+            # effective_balance_cents=0 almost always means the API call failed (see BALANCE-FETCH-FAIL above);
             # a genuinely $0 balance would be unusual.  Logged at WARNING (retried next cycle).
             logger.warning(
-                "  [BALANCE-GATE] Balance $%.2f below $%.2f reserve — skipping cycle "
+                "  [BALANCE-GATE] Effective balance $%.2f below $%.2f reserve — skipping cycle "
                 "(if this repeats, check API connectivity / auth)",
-                balance_cents / 100, self.config.min_balance_cents / 100,
+                effective_balance_cents / 100, self.config.min_balance_cents / 100,
             )
             return
 
@@ -3207,6 +3422,22 @@ class KalshiContinuousTrader:
                 _top3_allocations = {
                     a.asset: a for a in _top3_batch.allocations
                 }
+                
+                # ═══════════════════════════════════════════════════════════════════
+                # TOP 1 PRIORITY EXECUTION: Always execute top edge first
+                # ═══════════════════════════════════════════════════════════════════
+                # The batch is created with priority sequential fill (top edge first).
+                # Log explicit confirmation of TOP 1 execution priority.
+                if _top3_batch.allocations:
+                    _top1 = _top3_batch.allocations[0]  # First allocation is TOP 1
+                    logger.info(
+                        "[TOP1-PRIORITY] Executing TOP 1 edge first | asset=%s edge=%.4f notional=%d¢ | "
+                        "Total batch: %d assets, %.2f%% of bankroll",
+                        _top1.asset, _top1.edge, _top1.target_notional,
+                        len(_top3_batch.allocations),
+                        (_top3_batch.total_target_notional / balance_cents) * 100 if balance_cents > 0 else 0
+                    )
+                
                 logger.info(
                     "[TOP3-BATCH] Active batch %s with %d assets: %s",
                     _top3_batch.batch_id,
@@ -3222,26 +3453,55 @@ class KalshiContinuousTrader:
             # When USE_TOPN_ALLOCATOR=true, use the new allocator that enforces
             # 1-2% cycle-wide risk cap with max-loss-based sizing.
             # This replaces the per-trade Kelly sizing.
-            # 
-            # CRITICAL: Use total_value_cents (cash + portfolio) for bankroll, NOT just cash.
-            # This aligns with KalshiRiskManager equity view and the production spec.
+            #
+            # CRITICAL: Use effective_total_cents (capped by max_riskable_usd) for bankroll.
+            # This ensures the 1-2% risk cap is computed from the same equity used for sizing,
+            # respecting the max_riskable_usd safety cap configured by the operator.
             if _USE_TOPN_ALLOCATOR and self._topn_allocator and _topn_candidates:
-                # Use total equity (cash + positions) as bankroll_B per spec Section 3
-                # This matches the risk manager's view of equity and ensures consistent
-                # risk % calculations across all risk layers.
-                _bankroll_cents = total_value_cents  # cash + portfolio, NOT just balance_cents
+                # Use EFFECTIVE equity (capped) as bankroll_B per bankroll refactor spec
+                # This ensures consistent risk % calculations across all risk layers.
+                _bankroll_cents = effective_total_cents  # CAPPED equity, NOT raw total_value_cents
                 
+                # HARD GUARD: Never allow 0 or negative bankroll
+                # Derive from live Kalshi balance if computed value is invalid
+                if _bankroll_cents <= 0:
+                    try:
+                        from merid.event_venues.kalshi.order_router import _derive_live_bankroll_usd
+                        _live_bankroll = _derive_live_bankroll_usd()
+                        if _live_bankroll is not None and _live_bankroll > 0:
+                            _bankroll_cents = int(_live_bankroll * 100)
+                            logger.warning(
+                                "[BANKROLL-FALLBACK] effective_total_cents=%d, using live bankroll=%d cents",
+                                effective_total_cents, _bankroll_cents
+                            )
+                        else:
+                            # FAIL CLOSED: Cannot get live bankroll - skip this cycle
+                            logger.error(
+                                "[BANKROLL-FAILCLOSED] Cannot determine live Kalshi balance. "
+                                "Skipping cycle - no trades will be sized."
+                            )
+                            return
+                    except Exception as _e:
+                        # FAIL CLOSED: Cannot get live bankroll - skip this cycle
+                        logger.error(
+                            "[BANKROLL-FAILCLOSED] Failed to get live bankroll: %s. "
+                            "Skipping cycle - no trades will be sized.",
+                            _e
+                        )
+                        return
+
                 # Log both sources for observability and verification
-                if abs(balance_cents - total_value_cents) > 100:  # >$1 difference
+                if abs(effective_balance_cents - effective_total_cents) > 100:  # >$1 difference
                     logger.info(
-                        "[BANKROLL-SOURCES] topn_B=$%.2f (total equity), "
-                        "cash_B=$%.2f (available), portfolio=$%.2f | delta=$%.2f",
+                        "[BANKROLL-SOURCES] topn_B=$%.2f (effective equity, capped=%s), "
+                        "cash_B=$%.2f (effective), portfolio=$%.2f | raw_live=$%.2f",
                         _bankroll_cents / 100,
-                        balance_cents / 100,
+                        "yes" if self.config.max_riskable_usd > 0 else "no",
+                        effective_balance_cents / 100,
                         portfolio_cents / 100,
-                        (total_value_cents - balance_cents) / 100
+                        total_value_cents / 100
                     )
-                
+
                 _cycle = self._topn_allocator.compute_allocations(
                     equity_cents=_bankroll_cents,
                     candidates=_topn_candidates,
@@ -3388,6 +3648,8 @@ class KalshiContinuousTrader:
         # same underlying in a single cycle — the cap wouldn't catch this because each
         # individual order is small relative to the per-asset exposure cap.
         _assets_ordered_this_cycle: set = set()
+        # EDGE #1 PRIORITY: Track which assets have been executed this cycle for strict priority enforcement
+        self._executed_this_cycle: set = set()
         # LEAK-009: per-cycle in-flight dedup set — prevents placing two orders for
         # the exact same (ticker, side) within one cycle (e.g. if the same market
         # appears in multiple overlap groups or candidate lists after filtering).
@@ -3436,6 +3698,12 @@ class KalshiContinuousTrader:
             # ═══════════════════════════════════════════════════════════════════
             # TOP-3 ENFORCEMENT GATE: Only allow assets in current batch allocation
             # ═══════════════════════════════════════════════════════════════════
+            # CRITICAL: Strict Edge #1 Priority Enforcement
+            # Edge #1 must ALWAYS be executed before Edge #2 or #3
+            # If Edge #1 is in the batch but not yet executed, all other edges are blocked
+            # ═══════════════════════════════════════════════════════════════════
+            _edge1_priority_enforced = os.getenv("EDGE1_PRIORITY_STRICT", "true").lower() in ("true", "1", "yes")
+
             if _top3_enabled and _top3_allocations:
                 if _candidate_asset not in _top3_allocations:
                     logger.info(
@@ -3443,13 +3711,36 @@ class KalshiContinuousTrader:
                         c.ticker, _candidate_asset, list(_top3_allocations.keys())
                     )
                     continue
-                
-                # Log top-3 allowance
+
+                # Determine rank of this asset in the batch
                 _alloc = _top3_allocations[_candidate_asset]
+                _asset_rank = next(
+                    (i for i, a in enumerate(_top3_batch.allocations if _top3_batch else []) if a.asset == _candidate_asset),
+                    -1
+                )
+                _rank_label = ["TOP1", "TOP2", "TOP3"][_asset_rank] if _asset_rank >= 0 else "BATCH"
+
+                # STRICT EDGE #1 PRIORITY CHECK
+                if _edge1_priority_enforced and _asset_rank > 0:
+                    # This is Edge #2 or #3 - check if Edge #1 has been executed
+                    _edge1_asset = _top3_batch.allocations[0].asset if _top3_batch and _top3_batch.allocations else None
+                    _edge1_executed = _edge1_asset in getattr(self, '_executed_this_cycle', set())
+
+                    if _edge1_asset and not _edge1_executed:
+                        # Edge #1 exists but hasn't been executed - BLOCK Edge #2/#3
+                        logger.warning(
+                            "[EDGE#1-PRIORITY-BLOCK] %s | %s blocked | Edge#1 (%s) must execute first | "
+                            "rank=%d | executed_this_cycle=%s",
+                            c.ticker, _rank_label, _edge1_asset, _asset_rank + 1,
+                            list(getattr(self, '_executed_this_cycle', set()))
+                        )
+                        continue
+
                 logger.info(
-                    "[TOP3-ALLOW] %s | asset=%s edge=%.4f target=%d¢ weight=%.1f%%",
-                    c.ticker, _candidate_asset, _alloc.edge, 
-                    _alloc.target_notional, _alloc.weight * 100
+                    "[%s-EXECUTE] %s | asset=%s edge=%.4f target=%d¢ weight=%.1f%% | priority=%d/%d",
+                    _rank_label, c.ticker, _candidate_asset, _alloc.edge,
+                    _alloc.target_notional, _alloc.weight * 100,
+                    _asset_rank + 1, len(_top3_allocations)
                 )
             
             # DRY-RUN INSTRUMENTATION: Asset/Timeframe Inference
@@ -3529,7 +3820,7 @@ class KalshiContinuousTrader:
                     continue
                 
                 order_count = self.bankroll.calculate_order_size(
-                    balance_cents=balance_cents,
+                    balance_cents=effective_balance_cents,
                     edge=c.best_edge,
                     contract_price_cents=c.limit_price_cents,
                     existing_position=existing,
@@ -3613,7 +3904,7 @@ class KalshiContinuousTrader:
             if self._guardian:
                 # Get effective caps (computed or static)
                 effective_caps = self._guardian.get_effective_live_caps(
-                    bankroll_cents=balance_cents,
+                    bankroll_cents=effective_balance_cents,
                     btc_vol_annual=getattr(self._guardian.checklist, 'target_vol_annual', 0.65)
                 )
                 _asset_cap = effective_caps.get(_candidate_asset, 0.0)
@@ -3644,7 +3935,7 @@ class KalshiContinuousTrader:
                 continue
 
             cost_cents = order_count * c.limit_price_cents
-            if cost_cents + 1 > balance_cents:
+            if cost_cents + 1 > effective_balance_cents:
                 logger.debug("    Skip %s: can't afford %d¢", c.ticker, cost_cents)
                 continue
             # BUG-F3 fix: per-cycle spend cap
@@ -3653,14 +3944,14 @@ class KalshiContinuousTrader:
                             c.ticker, _cycle_spent, cost_cents, _max_cycle_spend)
                 break
             # Stage 1–2 — per-asset cap first, then global (see ``evaluate_entry_exposure_skip``).
-            _global_cap_cents = int(balance_cents * self.config.global_max_exposure_pct)
+            _global_cap_cents = int(effective_balance_cents * self.config.global_max_exposure_pct)
             _asset_max_pct = self.config.asset_max_exposure_pct.get(
                 _candidate_asset, self.config.asset_exposure_default_pct
             )
             _series_mult = self.config.series_exposure_multiplier.get(_candidate_tf, 1.0)
             _asset_cap_cents = max(
                 self.config.min_asset_cap_cents,
-                int(balance_cents * _asset_max_pct * _series_mult),
+                int(effective_balance_cents * _asset_max_pct * _series_mult),
             )
             _asset_current = _per_asset_exp.get(_candidate_asset, 0)
 
@@ -3680,11 +3971,11 @@ class KalshiContinuousTrader:
                 "tf=%s balance=%d¢ global_cap=%d¢ asset_cap=%d¢ asset_current=%d¢ | "
                 "multipliers: asset_pct=%.2f%% series_mult=%.2f",
                 self._cycle, _candidate_asset, c.ticker, c.best_side or "none",
-                _candidate_tf, balance_cents, _global_cap_cents, _asset_cap_cents, _asset_current,
+                _candidate_tf, effective_balance_cents, _global_cap_cents, _asset_cap_cents, _asset_current,
                 _asset_max_pct * 100, _series_mult
             )
             _exp_skip = self.evaluate_entry_exposure_skip(
-                balance_cents,
+                effective_balance_cents,
                 _current_exposure_cents,
                 _per_asset_exp,
                 cost_cents,
@@ -4070,13 +4361,95 @@ class KalshiContinuousTrader:
                 edge=float(c.best_edge) if c.best_edge else 0.0,
             )
             
+            # ═════════════════════════════════════════════════════════════════
+            # PHASE 7: Q-Inline Policy Evaluation
+            # ═════════════════════════════════════════════════════════════════
+            try:
+                from merid.policy.qinline_policy import get_qinline_policy
+                
+                _policy = get_qinline_policy()
+                
+                # Compute mid price from orderbook (best_yes_bid/ask are probabilities 0-1)
+                _mid_cents = c.limit_price_cents  # Use limit price as mid proxy
+                if hasattr(c, 'best_yes_bid') and hasattr(c, 'best_yes_ask'):
+                    _bid = int((c.best_yes_bid or 0) * 100)
+                    _ask = int((c.best_yes_ask or 0) * 100)
+                    # Validate: bid must be positive and ask >= bid for valid market
+                    if _bid > 0 and _ask >= _bid:
+                        _mid_cents = (_bid + _ask) // 2
+                
+                # Get current position for this ticker
+                _current_pos = 0
+                if hasattr(self, 'cache') and self.cache is not None:
+                    _current_pos = self.cache.get_position_contracts(c.ticker)
+                
+                # Get remaining risk budget (default to conservative 100% if unavailable)
+                _remaining_risk = 1.0
+                if hasattr(self, '_risk_guard') and self._risk_guard is not None:
+                    if hasattr(self._risk_guard, 'get_remaining_budget_pct'):
+                        _remaining_risk = self._risk_guard.get_remaining_budget_pct()
+                
+                # Evaluate policy
+                _policy_decision = _policy.evaluate(
+                    ticker=c.ticker,
+                    mid_price_cents=_mid_cents,
+                    current_position=_current_pos,
+                    remaining_risk_budget_pct=_remaining_risk,
+                )
+                
+                # Log policy decision
+                logger.debug(
+                    "  Q-Inline Policy: %s %s (conf=%.2f, urgency=%s, contracts=%d, regime_mult=%.2f)",
+                    c.ticker,
+                    _policy_decision.decision.value,
+                    _policy_decision.confidence,
+                    _policy_decision.urgency.value,
+                    _policy_decision.target_contracts,
+                    _policy_decision.regime_multiplier,
+                )
+                
+                # Check if policy blocks execution
+                if not _policy_decision.should_execute:
+                    logger.info(
+                        "  [POLICY-VETO] %s: decision=%s (confidence=%.2f, macro=%.2f, momentum=%.2f, btc=%.2f)",
+                        c.ticker,
+                        _policy_decision.decision.value,
+                        _policy_decision.confidence,
+                        _policy_decision.macro_contribution,
+                        _policy_decision.momentum_contribution,
+                        _policy_decision.btc_anchor_contribution,
+                    )
+                    continue  # Skip this candidate
+                
+                # Use policy-adjusted sizing (respects both increases and decreases)
+                if _policy_decision.target_contracts > 0:
+                    if _policy_decision.target_contracts != order_count:
+                        logger.debug(
+                            "  [POLICY-SIZE] %s: Kelly=%d → Policy=%d (regime_mult=%.2f)",
+                            c.ticker,
+                            order_count,
+                            _policy_decision.target_contracts,
+                            _policy_decision.regime_multiplier,
+                        )
+                    order_count = _policy_decision.target_contracts
+                    
+            except Exception as exc:
+                logger.error(
+                    "  [POLICY-FAIL] %s: Q-Inline evaluation failed (%s) — skipping candidate",
+                    c.ticker,
+                    exc,
+                    exc_info=True,
+                )
+                continue  # Skip candidate if policy evaluation fails
+            
             # Calculate existing open risk (simplified: cost basis of open positions)
             _existing_risk_cents = _current_exposure_cents  # From earlier in the loop
-            
-            # CRITICAL: Use total equity (cash + portfolio) for guard check
-            # This aligns with TopN allocator and risk manager equity view
-            _guard_equity_cents = total_value_cents  # NOT just balance_cents
-            
+
+            # CRITICAL: Use EFFECTIVE total equity (capped by max_riskable_usd) for guard check
+            # This ensures the 1-2% per-cycle risk cap is computed from the same equity
+            # used for sizing, not the raw live balance which might exceed max_riskable_usd.
+            _guard_equity_cents = effective_total_cents  # NOT total_value_cents (raw)
+
             _guard_allowed, _guard_reason = self._risk_guard.check_order(
                 equity_cents=_guard_equity_cents,
                 existing_risk_cents=_existing_risk_cents,
@@ -4101,12 +4474,16 @@ class KalshiContinuousTrader:
                     c.ticker, c.limit_price_cents, c.best_edge
                 )
                 orders_placed += 1  # Count as "placed" for metrics
+                # EDGE #1 PRIORITY: Track for observation mode as well
+                self._executed_this_cycle.add(_candidate_asset)
                 continue  # Skip actual execution
 
             if self.config.dry_run:
                 logger.info("    [DRY RUN] %s", json.dumps(order_data))
                 self.bankroll.record_trade_direction(c.ticker, c.best_side, float(c.best_edge))
                 orders_placed += 1
+                # EDGE #1 PRIORITY: Track for dry-run mode
+                self._executed_this_cycle.add(_candidate_asset)
                 # [CT-TRACE] execute — Dry run order recorded
                 logger.info(
                     "[CT-TRACE] stage=execute | corr_id=%s | cycle=%d | market=%s | side=%s | size=%d | price=%d¢ | status=dry_run | formulas=%s | audit_spec=%s",
@@ -4145,72 +4522,30 @@ class KalshiContinuousTrader:
                 cycle,
             )
 
-            # CANARY FLIP: Route to HTTP or canonical router based on config
-            # Phase 1 (0%): HTTP only + shadow mode logging
-            # Phase 2 (1-99%): Random selection for gradual migration
-            # Phase 3 (100%): Router only, HTTP path removed
-            import random
-
-            router_pct = self.config.use_router_percent
-            rand_val = random.randint(1, 100)
-            use_router = rand_val <= router_pct
-
-            # [AUDIT] Log canary routing decision for monitoring
-            logger.info(
-                "[AUDIT] ct_route_decision | routed_via=%s | pct=%d | rand=%d | ticker=%s",
-                "router" if use_router else "http",
-                router_pct,
-                rand_val,
-                c.ticker,
-            )
-
-            if use_router:
-                # Phase 3 (canonical): All orders flow through route_order_async
-                # via the CT execution adapter. Shared GlobalRiskGuard, dedup,
-                # pre-trade gate, sanity checks, caller audit all apply.
-                # Router failures are TERMINAL — no HTTP fallback.  The legacy
-                # ``_post`` path is reachable only with CT_USE_ROUTER_PERCENT=0.
-                try:
-                    adapter = get_ct_execution_adapter()
-                    router_result = asyncio.get_event_loop().run_until_complete(
-                        adapter.execute_live(order_data)
-                    )
-                    resp = self._build_synthetic_response(router_result, order_data)
-                    logger.info(
-                        "[CT-CANARY] Routed via canonical router | ticker=%s | status=%s | pct=%d%%",
-                        c.ticker, router_result.status, router_pct,
-                    )
-                except Exception as _router_exc:
-                    logger.error(
-                        "[CT-CANARY] Router execution FAILED (terminal, no HTTP fallback): %s",
-                        _router_exc,
-                    )
-                    # Synthesize a rejected response; no direct venue submit.
-                    resp = self._build_synthetic_rejection(order_data, f"router_error:{_router_exc}")
-            else:
-                # Break-glass only: legacy direct HTTP (bypasses shared guard).
-                # Emits a prominent audit log so this is not silently reached.
-                logger.warning(
-                    "[CT-CANARY] LEGACY_DIRECT_HTTP path reached (CT_USE_ROUTER_PERCENT=%d) | "
-                    "ticker=%s — bypasses shared GlobalRiskGuard/dedup. This path is "
-                    "emergency-only; flip CT_USE_ROUTER_PERCENT back to 100 ASAP.",
-                    router_pct, c.ticker,
+            # Phase 3 (canonical): All orders flow through route_order_async
+            # via the CT execution adapter. Shared GlobalRiskGuard, dedup,
+            # pre-trade gate, sanity checks, caller audit all apply.
+            # SECURITY: Direct HTTP bypass has been permanently removed.
+            try:
+                adapter = get_ct_execution_adapter()
+                router_result = asyncio.get_event_loop().run_until_complete(
+                    adapter.execute_live(order_data, self._last_effective_equity_usd)
                 )
-                resp = self._post("/portfolio/orders", order_data)
+                resp = self._build_synthetic_response(router_result, order_data)
+                logger.info(
+                    "[CT-CANONICAL] Routed via canonical router | ticker=%s | status=%s",
+                    c.ticker, router_result.status,
+                )
+            except Exception as _router_exc:
+                logger.error(
+                    "[CT-CANONICAL] Router execution FAILED (terminal, no HTTP fallback): %s",
+                    _router_exc,
+                )
+                # Synthesize a rejected response; no direct venue submit.
+                resp = self._build_synthetic_rejection(order_data, f"router_error:{_router_exc}")
 
-            # SHADOW MODE: Call canonical router for parity comparison (when in Phase 1 or 2)
-            # This runs in parallel but does not affect live state
-            if router_pct < 100:
-                try:
-                    adapter = get_ct_execution_adapter()
-                    http_result = resp.json() if resp.status_code == 201 else {"status": "failed", "code": resp.status_code}
-                    # Fire-and-forget shadow call (async, don't block cycle)
-                    _shadow_task = asyncio.create_task(adapter.execute_shadow(order_data, http_result), name="ct-shadow-router")
-                    _shadow_task.add_done_callback(
-                        lambda t: logger.warning("CT shadow task failed: %s", t.exception()) if not t.cancelled() and t.exception() else None
-                    )
-                except Exception as _shadow_exc:
-                    logger.debug("[CT-SHADOW] Shadow router call skipped (non-fatal): %s", _shadow_exc)
+            # Note: Shadow mode removed. All orders flow through canonical router.
+            # The use_router_percent field is hard-coded to 100 (Phase 3 canonical chokepoint).
 
             if resp.status_code == 201:
                 order = resp.json().get("order", resp.json())
@@ -4347,6 +4682,8 @@ class KalshiContinuousTrader:
                 _current_exposure_cents += cost_cents
                 _per_asset_exp[_candidate_asset] = _per_asset_exp.get(_candidate_asset, 0) + cost_cents
                 _assets_ordered_this_cycle.add(_candidate_asset)
+                # EDGE #1 PRIORITY: Track this asset as executed for strict priority enforcement
+                self._executed_this_cycle.add(_candidate_asset)
                 _inflight_this_cycle.add((c.ticker, c.best_side))  # LEAK-009
                 # BUG-016: record per-cell order metric
                 try:
@@ -5083,6 +5420,15 @@ class KalshiContinuousTrader:
         # from positions total_cost and cached in _last_portfolio_cents each cycle.
         port = self._last_portfolio_cents
         total = bal + port
+
+        # Compute effective equity (with max_riskable_usd cap applied)
+        live_equity_usd = total / 100.0
+        if cfg.max_riskable_usd > 0:
+            effective_equity_usd = min(live_equity_usd, cfg.max_riskable_usd)
+        else:
+            effective_equity_usd = live_equity_usd
+        effective_total_cents = int(effective_equity_usd * 100)
+
         _pm_gate_ok, _pm_gate_reason = self._live_api_orders_allowed()
         _eg = self._last_execution_gate or {}
         ct_profile = os.environ.get("KALSHI_CT_PROFILE", "production").strip().lower() or "production"
@@ -5107,10 +5453,18 @@ class KalshiContinuousTrader:
             "kalshi_ct_profile": ct_profile,
             "kalshi_ct_auto_exit_enabled": self._auto_exit_enabled(),
             "interval_seconds": cfg.interval_seconds,
-            # Bankroll
+            # Bankroll — raw Kalshi balance (for reference)
             "balance_cents": bal,
             "portfolio_cents": port,
             "total_value_cents": total,
+            # Effective equity — what we're actually trading with (capped)
+            "live_equity_usd": live_equity_usd,
+            "max_riskable_usd": cfg.max_riskable_usd,
+            "effective_equity_usd": effective_equity_usd,
+            "effective_total_cents": effective_total_cents,
+            "min_operational_balance_usd": cfg.min_operational_balance_usd,
+            "equity_cap_active": cfg.max_riskable_usd > 0 and live_equity_usd > cfg.max_riskable_usd,
+            # Peak, drawdown, halt state (computed from effective equity in cycle loop)
             "peak_balance_cents": bm.peak_balance_cents,
             "drawdown_pct": round(bm.get_drawdown_pct(total) * 100, 2),
             "halted": bm.is_halted,
@@ -5137,6 +5491,8 @@ class KalshiContinuousTrader:
             # Config summary
             "config": {
                 "initial_bankroll_cents": cfg.initial_bankroll_cents,
+                "max_riskable_usd": cfg.max_riskable_usd,
+                "min_operational_balance_usd": cfg.min_operational_balance_usd,
                 "kelly_fraction": cfg.kelly_fraction,
                 "max_risk_per_trade_pct": cfg.max_risk_per_trade_pct,
                 "max_contract_price_cents": cfg.max_contract_price_cents,

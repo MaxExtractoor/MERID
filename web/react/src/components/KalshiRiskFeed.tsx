@@ -9,13 +9,13 @@
  *   - Liquidity alerts (wide spreads, thin books)
  */
 
-import React, { useMemo, useCallback, useState } from 'react';
+import React, { useMemo, useCallback, useState, useEffect } from 'react';
 import {
   AlertTriangle, Shield, Activity, Zap,
   TrendingDown, Radio, AlertCircle,
   ArrowDownCircle, PauseCircle, ExternalLink, Wifi, WifiOff,
-  Search, ShieldOff, Minimize2,
-} from 'lucide-react';
+  Search, ShieldOff, Minimize2, RefreshCw,
+} from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, API_BASE_URL, DEFAULTS, AUTH_TOKEN_KEY } from '../config/constants';
 import { logUxEvent } from '../utils/uxTelemetry';
@@ -54,11 +54,28 @@ interface RiskFeedProps {
   maxItems?: number;
   onNavigate?: (view: string) => void;
   onOpenMarket?: (ticker: string) => void;
+  enhanced?: boolean;
+  autoRefresh?: boolean;
+  refreshInterval?: number;
 }
 
-const KalshiRiskFeed: React.FC<RiskFeedProps> = ({ maxItems = 50, onNavigate, onOpenMarket }) => {
+const KalshiRiskFeed: React.FC<RiskFeedProps> = ({ 
+  maxItems = 50, 
+  onNavigate, 
+  onOpenMarket,
+  enhanced = false,
+  autoRefresh = true,
+  refreshInterval = 30000
+}) => {
   const [actionStatus, setActionStatus] = useState<Record<string, 'pending' | 'done' | 'error'>>({});
+  const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'reconnecting'>('connected');
+  const [isPaused, setIsPaused] = useState(false);
   const { alerts: wsAlerts, summary: wsSummary, connected: wsConnected } = useKalshiRiskStream();
+  
+  // Enhanced: Track connection status
+  useEffect(() => {
+    setConnectionStatus(wsConnected ? 'connected' : 'disconnected');
+  }, [wsConnected]);
 
   const authHeaders = useCallback((headers?: HeadersInit): HeadersInit => {
     const token = localStorage.getItem(AUTH_TOKEN_KEY);
@@ -143,10 +160,22 @@ const KalshiRiskFeed: React.FC<RiskFeedProps> = ({ maxItems = 50, onNavigate, on
       onOpenMarket(ticker);
     }
   }, [onOpenMarket]);
-  const { data, loading } = useApiData<RiskFeedResponse>(
+  const { data, loading, refetch } = useApiData<RiskFeedResponse>(
     API_ENDPOINTS.KALSHI_RISK_EVENTS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
+    { pollingInterval: enhanced && autoRefresh && connectionStatus === 'connected' ? refreshInterval : DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
   );
+  
+  // Enhanced: Manual refresh
+  const handleRefresh = useCallback(async () => {
+    if (!enhanced) return;
+    setConnectionStatus('reconnecting');
+    try {
+      await refetch();
+      setConnectionStatus('connected');
+    } catch {
+      setConnectionStatus('disconnected');
+    }
+  }, [enhanced, refetch]);
 
   // Also pull from liquidity alerts
   const liqResult = useApiData<{ alerts: Array<{ ticker: string; message: string; severity: string; ts: string }> }>(
@@ -203,14 +232,42 @@ const KalshiRiskFeed: React.FC<RiskFeedProps> = ({ maxItems = 50, onNavigate, on
             </span>
           )}
           <span className="text-[10px] text-gray-500">{events.length} events</span>
-          <span title={wsConnected ? 'WS risk stream connected' : 'WS risk stream disconnected — using polling'}>
-            {wsConnected
-              ? <Wifi className="w-3 h-3 text-emerald-400" />
-              : <WifiOff className="w-3 h-3 text-gray-600" />
-            }
-          </span>
+          {enhanced ? (
+            <>
+              <span className={
+                connectionStatus === 'connected' ? 'text-emerald-400' : 
+                connectionStatus === 'reconnecting' ? 'text-yellow-400' : 'text-red-400'
+              }>
+                {connectionStatus === 'connected' ? 'Live' : 
+                 connectionStatus === 'reconnecting' ? 'Reconnecting...' : 'Offline'}
+              </span>
+              <button
+                onClick={handleRefresh}
+                disabled={connectionStatus === 'reconnecting'}
+                className="p-1 text-gray-400 hover:text-white transition-colors disabled:opacity-50"
+                title="Manual refresh"
+              >
+                <RefreshCw className={`w-3 h-3 ${connectionStatus === 'reconnecting' ? 'animate-spin' : ''}`} />
+              </button>
+            </>
+          ) : (
+            <span title={wsConnected ? 'WS risk stream connected' : 'WS risk stream disconnected — using polling'}>
+              {wsConnected
+                ? <Wifi className="w-3 h-3 text-emerald-400" />
+                : <WifiOff className="w-3 h-3 text-gray-600" />
+              }
+            </span>
+          )}
         </div>
       </div>
+
+      {/* Enhanced: WebSocket disconnect warning */}
+      {enhanced && connectionStatus === 'disconnected' && (
+        <div className="flex items-center gap-2 px-4 py-2 border-b border-red-500/30 bg-red-500/10 text-red-400 text-xs">
+          <WifiOff className="w-3.5 h-3.5" />
+          <span>Connection lost. Using polling fallback...</span>
+        </div>
+      )}
 
       {/* Live risk summary from WS */}
       {wsSummary && (

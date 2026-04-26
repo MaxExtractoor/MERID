@@ -1,0 +1,29 @@
+# Pass 8 P0 Patch: Disable FIX endpoint in LIVE/PAPER
+# File: web/api/kalshi_api.py
+# Location: @router.post("/fix/orders") around line 5950
+
+--- a/web/api/kalshi_api.py
++++ b/web/api/kalshi_api.py
+@@ -5947,6 +5947,22 @@
+ @router.post("/fix/orders")
+ async def fix_submit_order(
++    # PASS 8 P0: Hard disable FIX endpoint in LIVE/PAPER modes
++    # The FIX path bypasses order_router and uses KalshiFIXClient directly,
++    # violating the single-executor contract. Only allowed in SIM/MOCK.
++    from merid.trading.trade_mode import get_trade_mode
++    _mode = get_trade_mode()
++    if _mode in ("live", "paper"):
++        logger.error(
++            f"[PASS8_GUARD] FIX endpoint blocked in {_mode} mode. "
++            f"TradeIntent: ticker={ticker}, side={side}, qty={quantity}"
++        )
++        raise HTTPException(
++            status_code=403,
++            detail=f"FIX protocol disabled in {_mode} mode. "
++            "Use /api/v1/kalshi/orders with canonical executor. "
++            "Contact: #risk-engineering if you believe this is an error."
++        )
++
+     ticker: str,
+     side: str,  # "buy" or "sell"
+     quantity: int,

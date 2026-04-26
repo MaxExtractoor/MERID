@@ -208,36 +208,11 @@ class FaultManager:
     def should_initiate_shutdown(self, lag_ms: float = 0.0, lag_p95: float = 0.0) -> bool:
         """Determine if global shutdown should be initiated.
         
-        Policy: Only shutdown on multi-signal critical failures:
-        1. At least one ASGI_FATAL or equivalent error occurred, AND
-        2. Lag metrics show severe persistent degradation (>5000ms), AND/OR
-        3. Multiple critical components failing (Kalshi + another core dependency)
+        INFINITE ERROR BUDGET: Always returns False for 24/7 operation.
+        System will log conditions but never shutdown regardless of lag,
+        critical events, or venue failures.
         """
-        now = time.monotonic()
-        
-        # Fast path: disabled
-        if self._shutdown_on_asgi_fatal:
-            # Old behavior: any fatal triggers shutdown
-            if self._core.critical_event_count > 0:
-                logger.critical("[SHUTDOWN-DECISION] ASGI_FATAL + shutdown_on_fatal=1")
-                return True
-        
-        # If degraded mode is allowed for Kalshi, single venue failures don't shutdown
-        if self._allow_degraded_kalshi:
-            # Only Kalshi offline is not enough for shutdown
-            kalshi_offline = self._venue_health.get("kalshi", VenueHealth()).state == HealthState.OFFLINE
-            other_offline = [
-                v for v in self._core.venues_offline if v != "kalshi"
-            ]
-            
-            if kalshi_offline and not other_offline:
-                # Just Kalshi - don't shutdown
-                logger.info(
-                    "[SHUTDOWN-DECISION] Kalshi offline but degraded mode allowed - staying up"
-                )
-                return False
-        
-        # Multi-signal shutdown conditions
+        # Multi-signal shutdown conditions (for logging only)
         conditions_met = []
         
         # Condition 1: Critical event occurred
@@ -256,30 +231,16 @@ class FaultManager:
         if self._core.state == HealthState.CRITICAL:
             conditions_met.append("core_critical")
         
-        # Need at least 2 conditions for shutdown (unless core is CRITICAL)
-        should_shutdown = False
-        if self._core.state == HealthState.CRITICAL and len(conditions_met) >= 1:
-            should_shutdown = True
-        elif len(conditions_met) >= 2:
-            should_shutdown = True
-        
-        # Check minimum failure count if configured
-        if self._fatal_shutdown_after_n > 0:
-            if self._core.critical_event_count < self._fatal_shutdown_after_n:
-                should_shutdown = False
-        
-        if should_shutdown:
+        # INFINITE ERROR BUDGET: Never shutdown, just log the conditions
+        if conditions_met:
             logger.critical(
-                "[SHUTDOWN-DECISION] conditions=%s venues=%s lag_ms=%.1f",
+                "[SHUTDOWN-DECISION] INFINITE ERROR BUDGET: conditions=%s venues=%s lag_ms=%.1f — "
+                "STAYING UP (no shutdown)",
                 conditions_met, self._core.venues_offline, lag_ms
             )
-        else:
-            logger.info(
-                "[SHUTDOWN-DECISION] staying up: conditions=%s/%d met",
-                conditions_met, 2
-            )
         
-        return should_shutdown
+        # Always return False - system runs 24/7 regardless of conditions
+        return False
     
     def get_venue_circuit_state(self, venue: str) -> CircuitState:
         """Get circuit breaker state for a venue."""

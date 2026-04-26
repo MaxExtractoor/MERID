@@ -30,7 +30,12 @@ def _real_system_metrics() -> Dict[str, Any]:
             "memory_usage": round(psutil.virtual_memory().percent, 1),
             "active_connections": 0,
         }
-    except Exception:
+    except ImportError:
+        # psutil not installed - return safe defaults
+        return {"cpu_usage": 0.0, "memory_usage": 0.0, "active_connections": 0}
+    except (OSError, ValueError) as e:
+        # System-level errors (e.g., /proc not accessible) - log and return defaults
+        logger.debug("psutil system metrics failed: %s", e)
         return {"cpu_usage": 0.0, "memory_usage": 0.0, "active_connections": 0}
 
 
@@ -38,7 +43,12 @@ def _get_paper_engine():
     try:
         from trading.paper_trading import get_paper_engine
         return get_paper_engine()
-    except Exception:
+    except ImportError:
+        # Paper trading module not available
+        return None
+    except RuntimeError as e:
+        # Engine not initialized - log at debug level
+        logger.debug("Paper engine not available: %s", e)
         return None
 
 
@@ -47,7 +57,12 @@ def _get_kalshi_risk():
     try:
         from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
         return get_kalshi_risk()
-    except Exception:
+    except ImportError:
+        # Kalshi risk module not available
+        return None
+    except RuntimeError as e:
+        # Risk manager not initialized
+        logger.debug("Kalshi risk manager not available: %s", e)
         return None
 
 
@@ -56,7 +71,12 @@ def _get_kalshi_grid():
     try:
         from merid.prediction.agent_grid import get_agent_grid
         return get_agent_grid()
-    except Exception:
+    except ImportError:
+        # Agent grid module not available
+        return None
+    except RuntimeError as e:
+        # Grid not initialized
+        logger.debug("Agent grid not available: %s", e)
         return None
 
 
@@ -1190,6 +1210,114 @@ async def get_price_feed_staleness() -> Dict[str, Any]:
     """Per-symbol price feed staleness with safe_to_trade flag."""
     from core.execution_gate import check_price_feed_staleness
     return check_price_feed_staleness()
+
+
+@router.get("/api/v1/safety/report")
+async def get_safety_report() -> Dict[str, Any]:
+    """Full safety report from IntegrationValidator (Phase 8).
+    
+    Returns aggregated health status across all signal layers,
+    active invariant violations, and execution readiness.
+    """
+    try:
+        from merid.safety.integration_validator import get_integration_validator
+        
+        validator = get_integration_validator()
+        report = validator.run_health_check()
+        
+        # Serialize the report
+        return {
+            "timestamp": report.timestamp,
+            "overall_status": report.overall_status.value,
+            "is_safe_to_trade": report.is_safe_to_trade,
+            "can_execute": report.can_execute,
+            "blocked_reason": report.blocked_reason,
+            "signal_freshness": {
+                "macro": report.macro_fresh,
+                "momentum": report.momentum_fresh,
+                "btc_anchor": report.btc_anchor_fresh,
+                "regime": report.regime_fresh,
+            },
+            "health_checks": {
+                name: {
+                    "status": h.status,
+                    "message": h.message,
+                    "latency_ms": h.latency_ms,
+                    "details": h.details,
+                }
+                for name, h in report.health_checks.items()
+            },
+            "active_violations": [
+                {
+                    "invariant_id": v.invariant_id,
+                    "severity": v.severity.value,
+                    "message": v.message,
+                    "timestamp": v.timestamp,
+                    "context": v.context,
+                }
+                for v in report.active_violations
+            ],
+            "total_violations_24h": report.total_violations_24h,
+        }
+    except Exception as exc:
+        logger.error("Failed to generate safety report: %s", exc)
+        return {
+            "timestamp": time.time(),
+            "overall_status": "unknown",
+            "is_safe_to_trade": False,
+            "error": str(exc),
+        }
+
+
+@router.get("/api/v1/safety/violations")
+async def get_safety_violations(
+    since: float = None,
+    severity: str = None,
+) -> Dict[str, Any]:
+    """Get invariant violation history with optional filtering."""
+    try:
+        from merid.safety.integration_validator import (
+            get_integration_validator,
+            InvariantSeverity,
+        )
+        
+        validator = get_integration_validator()
+        
+        # Parse severity filter
+        sev_filter = None
+        if severity:
+            try:
+                sev_filter = InvariantSeverity(severity.lower())
+            except ValueError:
+                pass  # Invalid severity, ignore filter
+        
+        # Get violations
+        violations = validator.get_violation_history(
+            since=since,
+            severity=sev_filter,
+        )
+        
+        return {
+            "timestamp": time.time(),
+            "count": len(violations),
+            "violations": [
+                {
+                    "invariant_id": v.invariant_id,
+                    "severity": v.severity.value,
+                    "message": v.message,
+                    "timestamp": v.timestamp,
+                    "context": v.context,
+                }
+                for v in violations
+            ],
+        }
+    except Exception as exc:
+        logger.error("Failed to get violations: %s", exc)
+        return {
+            "timestamp": time.time(),
+            "count": 0,
+            "error": str(exc),
+        }
 
 
 @router.get("/api/v1/system/session-log")

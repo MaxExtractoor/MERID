@@ -1,4 +1,4 @@
-import { Clock, Wifi, WifiOff } from 'lucide-react';
+import { Clock, Wifi, WifiOff } from '../ui/icons';
 import './DataFreshnessIndicator.css';
 
 export interface DataFreshnessIndicatorProps {

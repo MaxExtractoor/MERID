@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { Search, ArrowRight, LayoutDashboard, ShieldAlert, Shield, Terminal, Settings, Monitor, BarChart3, Briefcase, Gauge, Activity, GitBranch, Grid, Target, Globe, TrendingUp, ClipboardList, Flame, MessageSquare, Wallet, Sliders, DollarSign, Heart, Rocket, Bell, FileText, Crosshair, Award, LayoutGrid } from 'lucide-react';
+import { Search, ArrowRight, LayoutDashboard, ShieldAlert, Shield, Terminal, Settings, Monitor, BarChart3, Briefcase, Gauge, Activity, GitBranch, Grid, Target, Globe, TrendingUp, ClipboardList, Flame, MessageSquare, Wallet, Sliders, DollarSign, Heart, Rocket, Bell, FileText, Crosshair, Award, LayoutGrid } from '../ui/icons';
 import type { View } from '../types/views';
 import { DEFAULTS } from '../config/constants';
 import { useFeatureFlags } from '../config/featureFlags';
@@ -14,10 +14,8 @@ interface CommandItem {
 }
 
 const COMMANDS: CommandItem[] = [
-  // Stage 1: Discover
-  { id: 'discover', label: 'Markets', section: 'Discover', icon: Search, keywords: ['kalshi', 'markets', 'catalog', 'discovery', 'trade'] },
-  { id: 'discover-all-markets', label: 'All Markets', section: 'Discover', icon: Globe, keywords: ['all', 'markets', 'universe', 'categories', 'sweep', 'global'] },
-  { id: 'discover-trending', label: 'Trending', section: 'Discover', icon: Flame, keywords: ['trending', 'hot', 'popular', 'volume'] },
+  // Stage 1: Discover (Consolidated - unified view with tabs)
+  { id: 'discover', label: 'Discover Markets', section: 'Discover', icon: Search, keywords: ['kalshi', 'markets', 'catalog', 'discovery', 'trade', 'all', 'universe', 'trending', 'focus'] },
   
   // Stage 2: Analyze
   { id: 'analyze-edge', label: 'Edge Signals', section: 'Analyze', icon: Target, keywords: ['edge', 'alpha', 'signal', 'opportunity'] },
@@ -30,29 +28,20 @@ const COMMANDS: CommandItem[] = [
   { id: 'consensus-performance', label: 'Performance', section: 'Consensus', icon: Award, keywords: ['performance', 'agent', 'win', 'sharpe', 'calibration', 'pnl'] },
   { id: 'consensus-calibration', label: 'Calibration', section: 'Consensus', icon: Crosshair, keywords: ['calibration', 'brier', 'forecaster', 'weight', 'accuracy'] },
   
-  // Stage 4: Size
-  { id: 'size-bankroll', label: 'Bankroll', section: 'Size', icon: Wallet, keywords: ['bankroll', 'capital', 'equity', 'balance'] },
-  { id: 'size-lanes', label: 'Lane Control', section: 'Size', icon: GitBranch, keywords: ['lane', 'timeframe', 'cross', 'xtf', 'promoter', 'deployment'] },
-  { id: 'size-sizing', label: 'Sizing Metrics', section: 'Size', icon: Sliders, keywords: ['sizing', 'kelly', 'position', 'risk', 'allocation'] },
+  // Stage 4: Size (Consolidated - unified view with tabs)
+  { id: 'size', label: 'Size & Bankroll', section: 'Size', icon: Sliders, keywords: ['bankroll', 'capital', 'equity', 'balance', 'lane', 'timeframe', 'sizing', 'kelly', 'risk', 'allocation'] },
   
-  // Stage 5: Execute
-  { id: 'execute-terminal', label: 'Terminal', section: 'Execute', icon: Terminal, keywords: ['terminal', 'trade', 'orderbook', 'ticket', 'execute'] },
-  { id: 'execute-orders', label: 'Orders', section: 'Execute', icon: ClipboardList, keywords: ['orders', 'resting', 'pending', 'cancel', 'open orders'] },
-  { id: 'execute-positions', label: 'Positions', section: 'Execute', icon: TrendingUp, keywords: ['positions', 'holdings', 'open', 'exposure'] },
+  // Stage 5: Execute (Consolidated - unified view with tabs)
+  { id: 'execute', label: 'Execute Terminal', section: 'Execute', icon: Terminal, keywords: ['terminal', 'trade', 'orderbook', 'ticket', 'execute', 'orders', 'resting', 'cancel', 'positions', 'holdings', 'exposure'] },
   
-  // Stage 6: Monitor
-  { id: 'monitor-portfolio', label: 'Portfolio', section: 'Monitor', icon: Briefcase, keywords: ['portfolio', 'fills', 'pnl', 'equity', 'returns'] },
-  { id: 'monitor-pnl', label: 'PnL History', section: 'Monitor', icon: DollarSign, keywords: ['pnl', 'profit', 'loss', 'history', 'performance'] },
-  { id: 'monitor-health', label: 'System Health', section: 'Monitor', icon: Heart, keywords: ['health', 'status', 'diagnostics', 'checks'] },
+  // Stage 6: Monitor (Consolidated - unified view with tabs)
+  { id: 'monitor', label: 'Monitor Portfolio', section: 'Monitor', icon: Briefcase, keywords: ['portfolio', 'fills', 'pnl', 'equity', 'returns', 'history', 'profit', 'loss', 'health', 'status', 'diagnostics'] },
   
-  // Stage 7: Promote
-  { id: 'promote-pipeline', label: 'Pipeline', section: 'Promote', icon: Rocket, keywords: ['pipeline', 'promote', 'paper', 'shadow', 'live', 'deployment'] },
-  { id: 'promote-grid', label: 'Agent Grid', section: 'Promote', icon: LayoutGrid, keywords: ['grid', 'agents', 'paper', 'ladder'] },
+  // Stage 7: Promote (Consolidated - unified view with tabs)
+  { id: 'promote', label: 'Promote Pipeline', section: 'Promote', icon: Rocket, keywords: ['pipeline', 'promote', 'paper', 'shadow', 'live', 'deployment', 'grid', 'agents', 'ladder'] },
   
-  // Stage 8: Protect
-  { id: 'protect-risk', label: 'Risk Center', section: 'Protect', icon: ShieldAlert, keywords: ['risk', 'alerts', 'exposure', 'limits'] },
-  { id: 'protect-kill-switch', label: 'Kill Switch', section: 'Protect', icon: Shield, keywords: ['kill', 'halt', 'safety', 'gate', 'block', 'emergency'] },
-  { id: 'protect-alerts', label: 'Alerts', section: 'Protect', icon: Bell, keywords: ['alerts', 'notifications', 'warnings', 'errors'] },
+  // Stage 8: Protect (Consolidated - unified view with tabs)
+  { id: 'protect', label: 'Protect Risk Center', section: 'Protect', icon: ShieldAlert, keywords: ['risk', 'alerts', 'exposure', 'limits', 'kill', 'halt', 'safety', 'emergency'] },
   
   // System
   { id: 'overview', label: 'Overview', section: 'System', icon: LayoutDashboard, keywords: ['home', 'dashboard', 'summary'] },

@@ -5,9 +5,19 @@ Defines filters, caps, and thresholds for Kalshi-only mode.
 The actual active markets are dynamically selected from the Kalshi catalog API
 using pinned markets + auto-selection algorithm.
 """
+import os
 from typing import List, Literal, TypedDict, Dict
 
 from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS, ACTIVE_CRYPTO_WS_TIMEFRAMES
+
+
+def _env_int(env_key: str, default: int) -> int:
+    return int(os.getenv(env_key, str(default)))
+
+
+def _env_list(env_key: str, default: List[str]) -> List[str]:
+    val = os.getenv(env_key)
+    return val.split(",") if val else default
 
 KalshiCategory = Literal["economics", "crypto", "politics", "sports", "weather", "other"]
 
@@ -35,24 +45,24 @@ KALSHI_ALLOWED_CATEGORIES: List[KalshiCategory] = [
     # Optionally add: "sports", "weather", "other"
 ]
 
-# Maximum markets per category in auto-selection
+# Maximum markets per category in auto-selection (ENV-DRIVEN)
 KALSHI_PER_CATEGORY_CAP: Dict[str, int] = {
-    "economics": 40,
-    "crypto": 30,
-    "politics": 30,
-    "sports": 20,
-    "weather": 20,
-    "other": 20,
+    "economics": _env_int("MERID_KALSHI_CAP_ECONOMICS", 40),
+    "crypto": _env_int("MERID_KALSHI_CAP_CRYPTO", 30),
+    "politics": _env_int("MERID_KALSHI_CAP_POLITICS", 30),
+    "sports": _env_int("MERID_KALSHI_CAP_SPORTS", 20),
+    "weather": _env_int("MERID_KALSHI_CAP_WEATHER", 20),
+    "other": _env_int("MERID_KALSHI_CAP_OTHER", 20),
 }
 
-# Overall universe size limit
-KALSHI_UNIVERSE_LIMIT: int = 200
+# Overall universe size limit (ENV-DRIVEN)
+KALSHI_UNIVERSE_LIMIT: int = _env_int("MERID_KALSHI_UNIVERSE_LIMIT", 200)
 
-# Minimum 24h volume for auto-selection
-KALSHI_MIN_VOLUME_24H: int = 500
+# Minimum 24h volume for auto-selection (ENV-DRIVEN)
+KALSHI_MIN_VOLUME_24H: int = _env_int("MERID_KALSHI_MIN_VOLUME_24H", 500)
 
-# Maximum days to expiry for auto-selection
-KALSHI_MAX_DAYS_TO_EXPIRY: int = 60
+# Maximum days to expiry for auto-selection (ENV-DRIVEN)
+KALSHI_MAX_DAYS_TO_EXPIRY: int = _env_int("MERID_KALSHI_MAX_DAYS_EXPIRY", 60)
 
 # Legacy: optional prefixes for additional filtering (can be removed if auto-selection covers)
 KALSHI_INCLUDED_SERIES_PREFIXES: List[str] = [

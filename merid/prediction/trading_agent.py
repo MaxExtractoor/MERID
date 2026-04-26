@@ -296,6 +296,12 @@ class KalshiTradingAgent:
         # This ensures each agent instance has a unique identity even if config.agent_id is shared
         self._instance_id = uuid.uuid4().hex[:8]
         self._unique_agent_id = f"{config.agent_id}_{self._instance_id}"
+        
+        # HARD REQUIREMENT: Live Kalshi bankroll only - no fake data, no fallbacks
+        # max_notional_usd=0 means "derive from live Kalshi balance" (1-2% risk fraction)
+        # NOTE: Bankroll initialization is deferred to start() method since __init__ is sync
+        # and we need async context to call the bankroll service
+        self._bankroll_needs_init = float(self.config.risk_limits.max_notional_usd) == 0
 
         # Reuse existing subsystems
         self._model = PredictionMarketModel()
@@ -336,6 +342,35 @@ class KalshiTradingAgent:
             self._strike_selector = get_strike_selector_for_agent(config)
         except Exception:
             self._strike_selector = None
+
+    def _get_effective_max_orders(self, top_n_edges: int = 3) -> int:
+        """Compute dynamic max orders based on bankroll and available edges.
+
+        Uses the formula: min(floor(bankroll_usd / 100), 3, top_n_edges)
+        This ensures small bankrolls only trade top 1 edge, growing to 3 as compounding occurs.
+        """
+        try:
+            from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+            bankroll_usd = float(get_kalshi_risk().state.current_equity_usd or 0.0)
+        except Exception:
+            bankroll_usd = 0.0
+
+        # CRITICAL: ONLY use ACTUAL Kalshi API balance - NO configured fallbacks
+        if bankroll_usd <= 0:
+            try:
+                from merid.event_venues.kalshi.kalshi_risk import get_live_bankroll
+                bankroll_usd = get_live_bankroll()
+            except Exception as exc:
+                logger.error(
+                    "[TRADING_AGENT] Failed to get ACTUAL Kalshi balance for max_orders: %s",
+                    exc
+                )
+                bankroll_usd = 0.0
+
+        return self.config.risk_limits.get_effective_max_orders(
+            bankroll_cents=int(bankroll_usd * 100),
+            top_n_edges=top_n_edges
+        )
 
     @staticmethod
     def _build_strategy_config(config: AgentConfig) -> StrategyConfig:
@@ -421,20 +456,57 @@ class KalshiTradingAgent:
         return sc
 
     def _swarm_consensus_bypassed(self) -> bool:
+        """SAFETY: All consensus bypass mechanisms are HARD-DISABLED.
+        
+        This method previously supported three bypass paths (YAML config, env var, 
+        and mm_consensus_mode), but these have been removed for production safety.
+        All orders MUST flow through the main execution gate with proper consensus,
+        risk checks, and top-3 edge selection.
+        
+        Returns:
+            bool: Always False - bypass is not permitted
+        """
+        # Check for bypass attempts and log security warnings
+        bypass_attempted = False
+        
+        # Check 1: YAML bypass_swarm_consensus flag (now ignored)
         if getattr(self.config, "bypass_swarm_consensus", False):
-            return True
+            bypass_attempted = True
+            self.logger.warning(
+                "[SECURITY] Agent %s has bypass_swarm_consensus=true in YAML - THIS IS IGNORED. "
+                "All orders must flow through main execution gate.",
+                self.config.name
+            )
+        
+        # Check 2: mm_consensus_mode bypass (now rejected)
         try:
             from merid.prediction.crypto_edge_production import get_crypto_edge_runtime
-
-            if get_crypto_edge_runtime().mm_consensus_mode == "bypass":
-                return True
-        except Exception as e:
-            logging.getLogger(__name__).debug(f"Consensus bypass check failed: {e}")
+            _mm_mode = get_crypto_edge_runtime().mm_consensus_mode
+            if _mm_mode == "bypass":
+                bypass_attempted = True
+                self.logger.error(
+                    "[SECURITY] MERID_CRYPTO_MM_CONSENSUS_MODE=bypass detected for agent %s - "
+                    "BYPASS MODE IS DISABLED. Using 'full' consensus mode. "
+                    "All orders must flow through main execution gate.",
+                    self.config.name
+                )
+        except Exception:
+            pass
+        
+        # Check 3: Environment variable bypass list (now ignored)
         raw = (os.getenv("MERID_PM_BYPASS_SWARM_CONSENSUS_AGENTS") or "").strip()
-        if not raw:
-            return False
-        allowed = {x.strip() for x in raw.split(",") if x.strip()}
-        return self.config.name in allowed
+        if raw:
+            allowed = {x.strip() for x in raw.split(",") if x.strip()}
+            if self.config.name in allowed:
+                bypass_attempted = True
+                self.logger.error(
+                    "[SECURITY] Agent %s found in MERID_PM_BYPASS_SWARM_CONSENSUS_AGENTS - "
+                    "THIS IS IGNORED. All orders must flow through main execution gate.",
+                    self.config.name
+                )
+        
+        # Safety: Always return False - bypass is never permitted
+        return False
 
     @property
     def agent_id(self) -> str:
@@ -477,6 +549,47 @@ class KalshiTradingAgent:
         if self.state.running:
             self.logger.warning(f"{self.config.name} already running")
             return
+
+        # Initialize bankroll from live Kalshi API if needed (deferred from __init__)
+        if self._bankroll_needs_init:
+            from merid.event_venues.kalshi import get_bankroll_service, BalanceState
+            
+            try:
+                service = await get_bankroll_service()
+                summary = await service.get_summary()
+                
+                if summary.state == BalanceState.FRESH and summary.equity_usd is not None:
+                    live_bankroll_usd = float(summary.equity_usd)
+                    from merid.settings import settings
+                    risk_fraction = getattr(settings, 'MERID_MAX_RISK_FRACTION_PER_CYCLE', 0.02)
+                    effective_notional = live_bankroll_usd * risk_fraction
+                    self.config.risk_limits.max_notional_usd = effective_notional
+                    self.logger.info(
+                        f"[LIVE-BANKROLL-OK] {self.config.name}: max_notional_usd=${effective_notional:.2f} "
+                        f"(Kalshi API: equity=${live_bankroll_usd:.2f} × {risk_fraction*100:.0f}%)"
+                    )
+                elif summary.state == BalanceState.STALE and summary.equity_usd is not None:
+                    live_bankroll_usd = float(summary.equity_usd)
+                    from merid.settings import settings
+                    risk_fraction = getattr(settings, 'MERID_MAX_RISK_FRACTION_PER_CYCLE', 0.02) * 0.5
+                    effective_notional = live_bankroll_usd * risk_fraction
+                    self.config.risk_limits.max_notional_usd = effective_notional
+                    self.logger.warning(
+                        f"[LIVE-BANKROLL-STALE] {self.config.name}: max_notional_usd=${effective_notional:.2f} "
+                        f"(Kalshi API degraded: equity=${live_bankroll_usd:.2f} × {risk_fraction*100:.0f}%)"
+                    )
+                else:
+                    self.logger.critical(
+                        f"[BANKROLL-UNAVAILABLE] {self.config.name}: "
+                        f"Kalshi bankroll {summary.state.value}: {summary.last_error_reason}. "
+                        f"Agent DISABLED - no trading without live bankroll. "
+                        f"Check KALSHI_API_KEY, network, and Kalshi API status."
+                    )
+                    self.config.risk_limits.max_notional_usd = None
+            except Exception as e:
+                self.logger.critical(f"[BANKROLL-INIT-FAILED] {self.config.name}: {e}")
+                self.config.risk_limits.max_notional_usd = None
+
         self._shutdown.clear()
         self._drain_done.clear()
         self._in_execution.clear()
@@ -628,6 +741,16 @@ class KalshiTradingAgent:
         except Exception as _sub_exc:
             self.logger.debug("Settlement subscription setup skipped: %s", _sub_exc)
 
+        # ═══════════════════════════════════════════════════════════════════
+        # Signal Router Subscription (Single Executor Principle)
+        # ═══════════════════════════════════════════════════════════════════
+        # trading_agent subscribes to signals from signal-only agents (lanes,
+        # tools, CT adapter) and executes them via route_order_async.
+        try:
+            self._setup_signal_subscription()
+        except Exception as _sig_sub_exc:
+            self.logger.debug("Signal subscription setup skipped: %s", _sig_sub_exc)
+
     def _setup_settlement_subscription(self) -> None:
         """Subscribe to settlement events to reset TP round-trips on expiry.
 
@@ -698,6 +821,150 @@ class KalshiTradingAgent:
 
         except Exception as exc:
             self.logger.debug("Settlement event handling failed: %s", exc)
+
+    def _setup_signal_subscription(self) -> None:
+        """Subscribe to SignalRouter to receive signals from signal-only agents.
+
+        SIGNAL-ONLY AGENTS: btc15m_lane, crypto15m_lane, kalshi_tools,
+        ct_execution_adapter (kalshi_continuous_trader).
+        These agents call submit_signal() which routes to this callback.
+        trading_agent is the SOLE EXECUTOR that calls route_order_async.
+        """
+        try:
+            from merid.event_venues.kalshi import subscribe_to_signals
+
+            def _signal_callback(signal):
+                asyncio.create_task(self._on_signal(signal))
+
+            subscribe_to_signals(_signal_callback)
+            self.logger.debug("Subscribed to SignalRouter for signal-only agent signals")
+        except Exception as exc:
+            self.logger.debug("Failed to subscribe to SignalRouter: %s", exc)
+
+    async def _on_signal(self, signal) -> None:
+        """Handle signals from signal-only agents and execute via order router.
+
+        This is the ONLY path that calls route_order_async for live execution.
+        Signal-only agents (lanes, tools, CT) submit signals; trading_agent
+        validates, risk-checks, and executes them.
+
+        Args:
+            signal: AgentSignal from SignalRouter
+        """
+        try:
+            # Extract quality metrics (getattr for backward compat)
+            quality_score = getattr(signal, 'quality_score', 0.0)
+            is_duplicate = getattr(signal, 'is_duplicate', False)
+            consensus_count = getattr(signal, 'consensus_count', 1)
+            executable = getattr(signal, 'executable', False)
+
+            self.logger.info(
+                "[SIGNAL-IN] from %s | ticker=%s | side=%s | size=%s | price=%s "
+                "| quality=%.2f | dup=%s | exec=%s | intent=%s",
+                signal.agent_id, signal.market_id, signal.side,
+                signal.size, signal.price_cents, quality_score,
+                is_duplicate, executable, getattr(signal, 'intent', ''),
+            )
+
+            # Reject signals that failed validation at origin
+            if executable and not getattr(signal, 'is_valid', True):
+                self.logger.warning(
+                    "[SIGNAL-IN] Rejecting invalid executable signal: %s",
+                    getattr(signal, 'validation_errors', []),
+                )
+                return
+
+            # Reject duplicate signals - only execute first signal for each market/action/side combo
+            if is_duplicate:
+                self.logger.debug(
+                    "[SIGNAL-IN] Ignoring duplicate signal for %s %s %s",
+                    signal.market_id, signal.action, signal.side
+                )
+                return
+            
+            # Reject low quality signals
+            if quality_score < 0.30:
+                self.logger.warning(
+                    "[SIGNAL-IN] Rejecting low quality signal (%.2f < 0.30) from %s",
+                    quality_score, signal.agent_id
+                )
+                return
+
+            # Only execute if this agent handles the ticker
+            if not self._handles_ticker(signal.market_id):
+                self.logger.debug(
+                    "[SIGNAL-IN] Ignoring signal for ticker %s (not handled by %s)",
+                    signal.market_id, self.config.name
+                )
+                return
+
+            # Build OrderIntent and route through canonical pipeline
+            from merid.event_venues.kalshi.order_router import (
+                route_order_async, OrderIntent
+            )
+            from merid.event_venues.kalshi.decision_trace import new_decision_trace_id
+            from merid.prediction.venue_gate import TradingMode
+            from merid.event_venues.kalshi import get_bankroll_service
+
+            # Get effective bankroll for risk check
+            _effective_equity_usd = 0.0
+            try:
+                _br_service = await get_bankroll_service()
+                _summary = await _br_service.get_summary()
+                if _summary.equity_usd is not None:
+                    _effective_equity_usd = float(_summary.equity_usd)
+            except Exception as _bre:
+                self.logger.warning("[SIGNAL-IN] Failed to get bankroll: %s", _bre)
+            
+            # Consensus-based sizing: increase size if multiple agents agree
+            # Base size * (1 + 0.25 * (consensus_count - 1)), capped at 2x
+            consensus_multiplier = min(2.0, 1.0 + 0.25 * (consensus_count - 1))
+            adjusted_size = int(signal.size * consensus_multiplier) if signal.size else 1
+            
+            if consensus_count > 1:
+                self.logger.info(
+                    "[SIGNAL-IN] Consensus boost: %s agents agree, size %s -> %s",
+                    consensus_count, signal.size, adjusted_size
+                )
+
+            _origin = getattr(signal, 'origin_agent', '') or signal.agent_id
+
+            intent = OrderIntent(
+                ticker=signal.market_id,
+                side=signal.side,
+                action=signal.action,
+                price_cents=signal.price_cents,
+                count=adjusted_size,
+                mode=TradingMode.LIVE,
+                order_type="limit",
+                time_in_force="gtc",
+                source=f"signal_router:{signal.agent_type}:{_origin}",
+                agent_id=signal.agent_id,
+                decision_trace_id=new_decision_trace_id(signal.agent_type),
+                confidence=signal.confidence,
+                rationale=signal.reasoning[:200] if signal.reasoning else None,
+                sentiment_driven=signal.metadata.get('sentiment_driven', False) if signal.metadata else False,
+                sentiment_asset=signal.metadata.get('sentiment_asset') if signal.metadata else None,
+                sentiment_timeframe=signal.metadata.get('sentiment_timeframe') if signal.metadata else None,
+                effective_equity_usd=_effective_equity_usd if _effective_equity_usd > 0 else None,
+                edge_pct=getattr(signal, 'edge', None),
+            )
+
+            result = await route_order_async(intent)
+
+            if result.status == "rejected":
+                self.logger.warning(
+                    "[SIGNAL-EXEC] REJECTED | ticker=%s | reason=%s",
+                    signal.market_id, result.reason
+                )
+            else:
+                self.logger.info(
+                    "[SIGNAL-EXEC] %s | ticker=%s | order_id=%s",
+                    result.status, signal.market_id, result.fill.get("order_id") if result.fill else ""
+                )
+
+        except Exception as exc:
+            self.logger.warning("[SIGNAL-IN] Signal execution failed: %s", exc)
 
     async def drain(self) -> None:
         """BUG-L5: Disable new work, wait for current cycle, run final stop-loss sweep.
@@ -1014,12 +1281,13 @@ class KalshiTradingAgent:
             if self._shutdown.is_set():
                 break
 
-            # Check per-window order limit
-            if self.state.orders_this_window >= self.config.risk_limits.max_orders_per_window:
-                self.logger.debug(f"Order limit reached for window ({self.state.orders_this_window})")
+            # Check per-window order limit (dynamically computed from bankroll)
+            _effective_max_orders = self._get_effective_max_orders(top_n_edges=3)
+            if self.state.orders_this_window >= _effective_max_orders:
+                self.logger.debug(f"Order limit reached for window ({self.state.orders_this_window}/{_effective_max_orders})")
                 self._emit_decision_log(Decision.hold(
                     HoldReason.ORDER_LIMIT,
-                    f"window order limit reached ({self.state.orders_this_window}/{self.config.risk_limits.max_orders_per_window})",
+                    f"window order limit reached ({self.state.orders_this_window}/{_effective_max_orders})",
                     market_id=market.market_id,
                     agent_name=self.config.name,
                     cycle_number=self.state.cycles_run,
@@ -1729,6 +1997,68 @@ class KalshiTradingAgent:
                     ))
                     continue
 
+                # TOP-3 EDGE ENFORCEMENT: Only top 3 edges allowed to trade per cycle
+                # CRITICAL: Prevents cycle piling - must wait for full reconciliation
+                _in_top3 = False
+                try:
+                    from merid.trading.top3_batch_manager import get_top3_batch_manager
+                    from merid.trading.top3_edge_allocator import EdgeCandidate
+                    
+                    batch_mgr = get_top3_batch_manager()
+                    
+                    # CRITICAL: Check if cycle is locked (prevent cycle piling)
+                    # Cycle is locked when:
+                    # - Batch is ACTIVE (positions still open)
+                    # - Batch is CLOSED but not reconciled (bankroll not updated)
+                    # Only unlocked when FULLY_RECONCILED or no batch exists
+                    locked, lock_reason = batch_mgr.is_cycle_locked()
+                    if locked:
+                        self.logger.warning(
+                            "[CYCLE_LOCKED] %s: %s - previous cycle must close and reconcile first",
+                            market.market_id, lock_reason
+                        )
+                        _in_top3 = False
+                    elif batch_mgr.has_active_batch():
+                        # Batch is active - check if this asset is in top-3 allocation
+                        current_batch = batch_mgr.get_current_batch()
+                        if current_batch:
+                            # Create edge candidate for comparison
+                            _edge_val = float(signal.edge.net_edge) if signal.edge else 0.0
+                            _candidate = EdgeCandidate(
+                                asset=asset,
+                                timeframe=timeframe,
+                                edge=_edge_val,
+                                market_id=market.market_id,
+                                side=side_str,
+                                max_notional_cap=int(signal.contracts * price_cents) if price_cents > 0 else 0,
+                            )
+                            _in_top3 = batch_mgr.is_in_current_batch(market.market_id)
+                        else:
+                            _in_top3 = False
+                    else:
+                        # No batch at all (fresh start) - allow for new cycle creation
+                        _in_top3 = True
+                        
+                except Exception as _top3_exc:
+                    # Fail-open: if top3 check fails, log and allow
+                    self.logger.debug("[TOP3_CHECK] Error in top-3 verification: %s", _top3_exc)
+                    _in_top3 = True
+
+                if not _in_top3:
+                    self.logger.warning(
+                        "[TOP3_BLOCKED] %s not in top-3 edge allocation for cycle — skipping execution",
+                        market.market_id
+                    )
+                    self._emit_decision_log(Decision.hold(
+                        HoldReason.TOP3_EXCLUDED,
+                        f"{market.market_id} not in top-3 edge allocation",
+                        market_id=market.market_id,
+                        agent_name=self.config.name,
+                        cycle_number=self.state.cycles_run,
+                        elapsed_ms=_decision_timer.elapsed_ms(),
+                    ))
+                    continue
+
                 # Place order via tool — all checks passed → TRADE
                 _execution_dispatched += 1
                 self._emit_decision_log(Decision.trade(
@@ -2250,10 +2580,12 @@ class KalshiTradingAgent:
             self.logger.debug("price_refresh skipped: %s", _pr_exc)
 
         # CRITICAL FIX: session_equity_cents must never be 0 (makes loss cap dead).
-        # If equity feed missing, set to None to signal UNKNOWN → block trading.
+        # Use v2 unified bankroll service for consistency with sizing layer.
         try:
-            from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
-            _equity_usd = get_kalshi_risk().state.current_equity_usd
+            from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+            
+            _effective_usd = get_equity_for_risk_calc_sync()
+            _equity_usd = _effective_usd if _effective_usd is not None else 0.0  # For backward compatibility with logging
             if _equity_usd > 0:
                 _equity_cents = _equity_usd * 100.0
                 for _pos in self._tracked_positions.values():
@@ -2364,9 +2696,18 @@ class KalshiTradingAgent:
                             pos.entry_price_cents, tp_action.limit_price_cents
                         )
                 except Exception as _pnl_exc:
-                    self.logger.debug("TP unrealized PnL calc skipped: %s", _pnl_exc)
+                    self.logger.debug("[TP-PNL-CALC] Failed to calculate unrealized PnL: %s", _pnl_exc)
 
-                from merid.event_venues.kalshi.order_router import route_order_async, OrderIntent
+                # BANKROLL UNIFICATION: Get effective bankroll from v2 service
+                _effective_equity_usd = 0.0
+                try:
+                    from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+                    _effective_usd = get_equity_for_risk_calc_sync()
+                    if _effective_usd is not None:
+                        _effective_equity_usd = float(_effective_usd)
+                except Exception as _bre:
+                    self.logger.debug("[trading_agent.tp] Failed to get effective bankroll: %s", _bre)
+
                 _tp_intent = OrderIntent(
                     ticker=pos.ticker,
                     side=pos.side,
@@ -2381,6 +2722,7 @@ class KalshiTradingAgent:
                     agent_id=self.agent_id,
                     rationale=tp_action.reason[:200],
                     post_only=_tp_post_only,  # NEW: False for high PnL exits to force taker
+                    effective_equity_usd=_effective_equity_usd if _effective_equity_usd > 0 else None,
                 )
                 _tp_result = await route_order_async(_tp_intent)
                 _tp_ok = _tp_result.status not in ("rejected",)
@@ -2498,6 +2840,18 @@ class KalshiTradingAgent:
                 # release, rate limiting, group accounting, and execution guard all
                 # fire uniformly.  Direct _kalshi_place_order() bypassed all of them.
                 from merid.event_venues.kalshi.order_router import route_order_async, OrderIntent
+                from merid.event_venues.kalshi import get_bankroll_service
+
+                # BANKROLL UNIFICATION: Get effective bankroll from v2 service
+                _effective_equity_usd = 0.0
+                try:
+                    from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+                    _sl_equity = get_equity_for_risk_calc_sync()
+                    if _sl_equity is not None:
+                        _effective_equity_usd = float(_sl_equity)
+                except Exception as _bre:
+                    self.logger.debug("[trading_agent.sl] Failed to get effective bankroll: %s", _bre)
+
                 # IOC escalation safety: generate deterministic client_order_id and store it
                 # so we can reuse it for IOC escalation to prevent double fills
                 import hashlib, time
@@ -2518,6 +2872,7 @@ class KalshiTradingAgent:
                     decision_trace_id=new_decision_trace_id("sl"),
                     sentiment_driven=False,
                     client_tag=_sl_client_tag,  # Deterministic ID for idempotency
+                    effective_equity_usd=_effective_equity_usd if _effective_equity_usd > 0 else None,
                 )
                 _sl_result = await route_order_async(_sl_intent)
                 _close_ok = _sl_result.status not in ("rejected",)
@@ -2666,7 +3021,8 @@ class KalshiTradingAgent:
             category = self.config.category
             assets = self.config.assets if self.config.assets else [""]
             timeframe = self.config.timeframes[0] if self.config.timeframes else ""
-            per_asset_limit = max(5, self.config.risk_limits.max_orders_per_window * 3)
+            _effective_max_orders = self._get_effective_max_orders(top_n_edges=3)
+            per_asset_limit = max(5, _effective_max_orders * 3)
 
             seen_tickers: set = set()
             all_markets = []
@@ -2809,11 +3165,13 @@ class KalshiTradingAgent:
         try:
             _eq = 0.0
             try:
-                from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
-
-                _eq = float(get_kalshi_risk().state.current_equity_usd or 0.0)
+                from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+                
+                _effective_usd = get_equity_for_risk_calc_sync()
+                if _effective_usd is not None:
+                    _eq = float(_effective_usd)
             except Exception as e:
-                self.logger.debug(f"Silent error suppressed: {e}")
+                self.logger.debug(f"[pm_sizing_context] bankroll fetch failed: {e}")
             sc = self._strategy.config
             edge_s = (
                 float(signal.edge.net_edge) if signal.edge and hasattr(signal.edge, "net_edge") else None
@@ -3070,7 +3428,17 @@ class KalshiTradingAgent:
         elif strike is None and spot_override is None:
             snapshot.spot_strike_basis_note = "missing_strike_and_spot"
         elif strike is None:
-            snapshot.spot_strike_basis_note = "missing_strike"
+            # Check if this is a directional market (no strike by design) vs missing strike
+            # Directional markets: 15m up/down, UPDOWN series - no strike in ticker or text
+            _is_directional = (
+                "15M" in market.market_id.upper()
+                or "UPDOWN" in market.market_id.upper()
+                or (market.question and "above" not in market.question.lower() and "below" not in market.question.lower())
+            )
+            if _is_directional:
+                snapshot.spot_strike_basis_note = "directional_passthrough"
+            else:
+                snapshot.spot_strike_basis_note = "missing_strike"
         elif spot_override is None:
             snapshot.spot_strike_basis_note = "missing_spot"
         else:
@@ -3495,7 +3863,7 @@ class KalshiTradingAgent:
             is_new_entry=is_new_entry,
             seconds_to_expiry=seconds_to_expiry,
             orders_this_window=self.state.orders_this_window,
-            max_orders_per_window=self.config.risk_limits.max_orders_per_window,
+            max_orders_per_window=self._get_effective_max_orders(top_n_edges=3),
             consensus_status=consensus_status,
             consensus_direction_matches=consensus_direction_matches,
             consensus_bypassed=consensus_bypassed or self._swarm_consensus_bypassed(),
@@ -3572,8 +3940,13 @@ class KalshiTradingAgent:
             from merid.prediction.crypto_edge_production import get_crypto_edge_runtime
 
             _mm = get_crypto_edge_runtime().mm_consensus_mode
+            # SAFETY: bypass mode is disabled - all orders must go through full consensus gate
             if _mm == "bypass":
-                return max(1, int(order_contracts))
+                self.logger.error(
+                    "[SECURITY] mm_consensus_mode='bypass' detected in _check_consensus_gate - "
+                    "BYPASS IS DISABLED. Treating as 'full' mode. All orders must flow through main gate."
+                )
+                _mm = "full"
 
             if market_id:
                 asset = self._strategy._extract_asset_from_market_id(market_id) if self._strategy else ""
@@ -3789,19 +4162,24 @@ class KalshiTradingAgent:
                 # Use per-agent singleton so daily PnL and open-exposure
                 # state persist across calls (not zeroed on every signal).
                 if self._btc15m_risk is None:
-                    # Bootstrap equity + phase from PromotionEngine if available
+                    # Bootstrap equity from unified v2 bankroll service (single source of truth)
                     _init_equity = 0.0
                     try:
-                        from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk as _gkr_ta
-                        _init_equity = float(getattr(_gkr_ta().state, 'current_equity_usd', 0) or 0)
+                        from merid.event_venues.kalshi import get_equity_for_risk_calc_sync
+                        _effective_usd = get_equity_for_risk_calc_sync()
+                        if _effective_usd:
+                            _init_equity = float(_effective_usd)
+                            self.logger.debug("[crypto15m_risk] Bootstrapped equity from unified bankroll: $%.2f", _init_equity)
                     except Exception as _e:
-                        self.logger.debug("equity_lookup_kalshi_risk: %s", _e)
+                        self.logger.debug("[crypto15m_risk] unified bankroll unavailable: %s", _e)
+                    # Fallback only for emergency initialization (should not happen)
                     if _init_equity <= 0:
                         try:
                             from merid.settings import settings as _s_ta
                             _init_equity = float(getattr(_s_ta, 'PAPER_STARTING_BALANCE', 0) or 0)
+                            self.logger.warning("[crypto15m_risk] Fallback to PAPER_STARTING_BALANCE: $%.2f — unified bankroll should be available", _init_equity)
                         except Exception as _e:
-                            self.logger.debug("equity_lookup_settings: %s", _e)
+                            self.logger.debug("[crypto15m_risk] settings fallback failed: %s", _e)
                     _init_phase = RiskPhase.PHASE_0
                     try:
                         from merid.risk.promotion_engine import get_promotion_engine
@@ -3818,20 +4196,23 @@ class KalshiTradingAgent:
                         phase=_init_phase,
                     )
                 risk_manager = self._btc15m_risk
-                # B9: _init_equity is only defined when self._btc15m_risk was None above.
-                # Re-resolve current equity here so update_from_phase always has a value.
+                # B9: Re-resolve current equity from unified v2 bankroll service
                 _cur_equity = 0.0
                 try:
-                    from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk as _gkr_upd
-                    _cur_equity = float(getattr(_gkr_upd().state, 'current_equity_usd', 0) or 0)
+                    from merid.event_venues.kalshi import get_equity_for_risk_calc_sync
+                    _effective_usd = get_equity_for_risk_calc_sync()
+                    if _effective_usd:
+                        _cur_equity = float(_effective_usd)
                 except Exception as e:
-                    self.logger.debug(f"Silent error suppressed: {e}")
+                    self.logger.debug("[crypto15m_risk] unified bankroll update failed: %s", e)
+                # Fallback only for emergency (should not happen)
                 if _cur_equity <= 0:
                     try:
                         from merid.settings import settings as _s_upd
                         _cur_equity = float(getattr(_s_upd, 'PAPER_STARTING_BALANCE', 0) or 0)
+                        self.logger.warning("[crypto15m_risk] Fallback to PAPER_STARTING_BALANCE for update: $%.2f", _cur_equity)
                     except Exception as e:
-                        self.logger.debug(f"Silent error suppressed: {e}")
+                        self.logger.debug("[crypto15m_risk] settings fallback for update failed: %s", e)
                 try:
                     risk_manager.update_from_phase(_cur_equity)
                 except Exception as _e:
@@ -4111,6 +4492,17 @@ class KalshiTradingAgent:
                         ticker=market.market_id, side=s, action="buy",
                         price_cents=p, count=size,
                     )
+
+                # BANKROLL UNIFICATION: Get effective bankroll from v2 unified service
+                from merid.event_venues.kalshi import get_equity_for_risk_calc_sync
+                _effective_equity_usd = 0.0
+                try:
+                    _eff = get_equity_for_risk_calc_sync()
+                    if _eff:
+                        _effective_equity_usd = float(_eff)
+                except Exception as _bre:
+                    self.logger.debug("[trading_agent.arb] Failed to get effective bankroll: %s", _bre)
+
                 _intent = _ArbIntent(
                     ticker=market.market_id, side=s, action="buy",
                     price_cents=p, count=size,
@@ -4123,6 +4515,7 @@ class KalshiTradingAgent:
                     edge_pct=float(signal.edge.net_edge) if signal.edge else None,
                     decision_trace_id=_arb_trace,
                     sentiment_driven=False,
+                    effective_equity_usd=_effective_equity_usd if _effective_equity_usd > 0 else None,
                 )
                 _r = await route_order_async(_intent)
                 # Adapt to legacy .success / .payload / .error_message interface
@@ -4187,6 +4580,7 @@ class KalshiTradingAgent:
             # so the order router can log and apply them.
             try:
                 from merid.event_venues.kalshi.order_router import route_order_async, OrderIntent
+                from merid.event_venues.kalshi import get_equity_for_risk_calc_sync
                 from trading.trade_mode import TradeMode as _TradeMode
                 _intent_mode = _TradeMode.PAPER if force_paper else None
                 _conf = float(signal.edge.confidence) if signal.edge and hasattr(signal.edge, "confidence") else None
@@ -4201,6 +4595,18 @@ class KalshiTradingAgent:
                     else None
                 )
                 _trace = _sig_corr_s or new_decision_trace_id("ta")
+
+                # BANKROLL UNIFICATION: Get effective bankroll from v2 unified service
+                # This ensures the risk layer uses the same bankroll value as the sizing layer
+                _effective_equity_usd = 0.0
+                try:
+                    _eff = get_equity_for_risk_calc_sync()
+                    if _eff:
+                        _effective_equity_usd = float(_eff)
+                except Exception as _bre:
+                    self.logger.debug("[trading_agent] Failed to get effective bankroll: %s — risk check may block", _bre)
+                    # Continue with 0; risk layer will fail-closed if equity is required
+
                 _intent = OrderIntent(
                     ticker=market.market_id,
                     side=side,
@@ -4219,6 +4625,7 @@ class KalshiTradingAgent:
                     decision_trace_id=_trace,
                     client_tag=_sig_corr_s,
                     sentiment_driven=bool(_conf and _conf > 0.4),
+                    effective_equity_usd=_effective_equity_usd if _effective_equity_usd > 0 else None,
                 )
                 _route_result = await route_order_async(_intent)
                 # Adapt OrderResult → legacy .success/.payload/.error_message
@@ -4226,28 +4633,12 @@ class KalshiTradingAgent:
                 result_payload = _route_result.fill or {}
                 result_error = _route_result.reason or ""
             except Exception as _re:
-                self.logger.warning("route_order_async failed, falling back: %s", _re)
-                if force_paper:
-                    from merid.prediction.kalshi_tools import _kalshi_place_paper_order
-                    _fb = await _kalshi_place_paper_order(
-                        ticker=market.market_id,
-                        side=side,
-                        action=action,
-                        price_cents=price_cents,
-                        count=size,
-                    )
-                else:
-                    _fb = await _kalshi_place_order(
-                        ticker=market.market_id,
-                        side=side,
-                        action=action,
-                        price_cents=price_cents,
-                        count=size,
-                        agent_name=self.agent_id,
-                    )
-                result_success = _fb.success
-                result_payload = _fb.payload
-                result_error = _fb.error_message
+                # SECURITY: No fallback - all orders must go through canonical router.
+                # Fallbacks create complexity and potential bypass paths.
+                self.logger.error("route_order_async failed, order rejected: %s", _re)
+                result_success = False
+                result_payload = {}
+                result_error = f"router_failed:{str(_re)[:100]}"
 
         try:
             from merid.prediction.crypto_edge_production import log_execution_decision
@@ -4854,7 +5245,8 @@ class KalshiTradingAgent:
                 "risk_limits": {
                     "max_yes_position": self.config.risk_limits.max_yes_position,
                     "max_no_position": self.config.risk_limits.max_no_position,
-                    "max_orders_per_window": self.config.risk_limits.max_orders_per_window,
+                    "max_orders_per_window": self._get_effective_max_orders(top_n_edges=3),
+                    "max_orders_per_window_configured": self.config.risk_limits.max_orders_per_window,  # 0 = auto
                     "max_notional_usd": str(self.config.risk_limits.max_notional_usd),
                 },
                 "entry_window": {

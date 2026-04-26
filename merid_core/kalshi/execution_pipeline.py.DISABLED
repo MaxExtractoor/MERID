@@ -1,0 +1,77 @@
+================================================================================
+FILE DISABLED: merid_core/kalshi/execution_pipeline.py
+================================================================================
+
+STATUS:      QUARANTINED (T-001 Zero-Trust Audit)
+REASON:      Parallel execution engine that bypasses ALL safety gates
+HARDENED:    2026-04-23
+
+--------------------------------------------------------------------------------
+BYPASS RISK
+--------------------------------------------------------------------------------
+This module is a PARALLEL execution engine that directly calls the Kalshi REST
+API via merid_core.kalshi.rest_client, completely bypassing:
+
+  - order_router.route_order_async() (canonical order routing)
+  - GlobalRiskGuard (1-2% bankroll cap enforcement)
+  - Top3BatchManager (top-3 allocation gate)
+  - PreTradeGate (lease acquisition + deduplication)
+  - Execution gate (kill switches, circuit breakers)
+  - VenueGate (venue health checks)
+  - Risk manager (position limits, daily loss limits)
+  - Deployment controller (mode enforcement)
+
+When MERID_NATS_EXECUTION_ENABLED=true, this module:
+  1. Consumes OrderIntents from NATS event bus
+  2. Performs local (not canonical) risk checks
+  3. Calls rest_client.create_order() directly via asyncio.to_thread()
+  4. Updates local position tracking
+  5. Publishes execution outcomes
+
+This allows trades to execute OUTSIDE the canonical 9-gate execution path.
+
+--------------------------------------------------------------------------------
+PRODUCTION HARDENING
+--------------------------------------------------------------------------------
+The module now requires BOTH:
+  1. MERID_NATS_EXECUTION_ENABLED=true (legacy flag)
+  2. MERID_ALLOW_EXECUTION_PIPELINE_BYPASS=1 (new hardening flag)
+
+Without MERID_ALLOW_EXECUTION_PIPELINE_BYPASS, the module raises RuntimeError
+at import time, completely disabling the bypass path.
+
+--------------------------------------------------------------------------------
+EXCEPTION
+--------------------------------------------------------------------------------
+To enable this bypass (NOT RECOMMENDED):
+
+  export MERID_ALLOW_EXECUTION_PIPELINE_BYPASS=1
+  export MERID_NATS_EXECUTION_ENABLED=true
+
+--------------------------------------------------------------------------------
+CANONICAL PATH
+--------------------------------------------------------------------------------
+For legitimate order execution, use:
+
+  POST /api/v1/kalshi/orders  →  kalshi_api.py  →  order_router.route_order_async()
+  
+or
+
+  KalshiContinuousTrader  →  CTExecutionAdapter  →  order_router.route_order_async()
+
+These paths enforce:
+  - GlobalRiskGuard (max 1-2% bankroll allocation)
+  - Top3BatchManager (top-3 edges only)
+  - PreTradeGate (lease + deduplication)
+  - Execution gate / kill switches
+  - Full audit trail via decision_trace_id
+
+--------------------------------------------------------------------------------
+REFERENCES
+--------------------------------------------------------------------------------
+- T-001 Zero-Trust Audit
+- Checkpoint 12: Bypass Neutralization Sprint
+- merid/event_venues/kalshi/order_router.py (canonical routing)
+- merid/guards/global_execution_guard.py (final safety net)
+
+================================================================================

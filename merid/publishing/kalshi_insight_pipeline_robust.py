@@ -330,15 +330,27 @@ class KalshiInsightPipelineRobust:
         return markets
 
     async def _fetch_via_executor_robust(self, executor: Any, category: str) -> List[KalshiMarket]:
-        """Fetch via executor with validation."""
-        loop = asyncio.get_running_loop()
+        """Fetch via KalshiVenueClient with validation."""
+        from merid.event_venues.kalshi.client import get_kalshi_client
+        client = get_kalshi_client()
+        if client is None:
+            return []
         
-        raw = await loop.run_in_executor(
-            None,
-            lambda: executor.get_markets(status="open", limit=200),
-        )
+        event_markets = await client.list_markets()
         
-        markets_raw = raw if isinstance(raw, list) else raw.get("markets", [])
+        # list_markets returns List[EventMarket] — build dicts for _normalize_market_robust
+        markets_raw = []
+        for em in (event_markets or []):
+            d = dict(em.raw_data) if em.raw_data else {}
+            d.setdefault("ticker", em.market_id)
+            d.setdefault("title", em.question)
+            d.setdefault("category", em.category)
+            d.setdefault("volume", int(em.volume or 0))
+            d.setdefault("open_interest", int(em.open_interest or 0))
+            d.setdefault("status", "open" if em.active else "closed")
+            if em.outcomes:
+                d.setdefault("yes_bid", float(em.outcomes[0].price * 100))
+            markets_raw.append(d)
         
         # Validate and normalize markets
         valid_markets = []

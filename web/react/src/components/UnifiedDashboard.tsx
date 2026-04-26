@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Icon, type IconName } from '../ui/icons';
 import ReconciliationDashboard from './ReconciliationDashboard';
 import ExplainabilityAnalytics from './ExplainabilityAnalytics';
-import EnhancedAuditTrail from './EnhancedAuditTrail';
+import AuditTrail from './AuditTrail';
 import PerformanceDashboard from './PerformanceDashboard';
 
 type TabType = 'reconciliation' | 'decisions' | 'audit' | 'performance';
@@ -52,7 +52,7 @@ const UnifiedDashboard: React.FC = () => {
       label: 'Audit Trail',
       icon: 'fileText',
       description: 'System audit logs and compliance tracking',
-      component: EnhancedAuditTrail,
+      component: AuditTrail,
       color: 'text-green-400'
     },
     {

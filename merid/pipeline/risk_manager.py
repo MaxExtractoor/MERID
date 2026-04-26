@@ -130,13 +130,31 @@ class GlobalRiskManager:
 
     def __init__(
         self,
-        total_capital_usd: Decimal = Decimal("50000"),
-        max_portfolio_notional_usd: Decimal = Decimal("50000"),
+        total_capital_usd: Optional[Decimal] = None,
+        max_portfolio_notional_usd: Optional[Decimal] = None,
         domain_configs: Optional[Dict[TradeDomain, DomainRiskConfig]] = None,
     ):
+        # CRITICAL: No hardcoded defaults - must fetch from settings or Kalshi balance
+        if total_capital_usd is None:
+            try:
+                from merid.settings import settings
+                total_capital_usd = Decimal(str(settings.MERID_TOTAL_CAPITAL_USD))
+                logger.info("[RISK_MANAGER] Loaded total_capital_usd from settings: $%s", total_capital_usd)
+            except Exception as exc:
+                logger.error("[RISK_MANAGER] Failed to load total_capital_usd from settings: %s", exc)
+                raise RuntimeError(
+                    "GlobalRiskManager requires total_capital_usd - either provide explicitly "
+                    "or ensure settings.MERID_TOTAL_CAPITAL_USD is configured (fetched from Kalshi balance)"
+                ) from exc
+        
+        if max_portfolio_notional_usd is None:
+            # Default to 100% of total capital (portfolio notional = total capital deployed)
+            max_portfolio_notional_usd = total_capital_usd
+            logger.info("[RISK_MANAGER] Set max_portfolio_notional_usd = total_capital_usd: $%s", max_portfolio_notional_usd)
+        
         self.total_capital_usd = total_capital_usd
         self.max_portfolio_notional_usd = max_portfolio_notional_usd
-        self._domain_configs = domain_configs or dict(_DEFAULT_DOMAIN_CONFIGS)
+        self._domain_configs = domain_configs or self._build_default_domain_configs(total_capital_usd)
         self._exposures: Dict[str, VenueExposure] = {}  # venue -> exposure
         self._halted_domains: Dict[str, str] = {}  # domain -> reason
         self._proposal_log: List[dict] = []
@@ -154,6 +172,61 @@ class GlobalRiskManager:
         if not hasattr(self, '_exposure_lock'):
             self._exposure_lock = threading.Lock()
         return self._exposure_lock
+
+    def _build_default_domain_configs(
+        self, total_capital_usd: Decimal
+    ) -> Dict[TradeDomain, DomainRiskConfig]:
+        """
+        Build domain risk configs DYNAMICALLY from actual capital.
+        
+        CRITICAL: Replaces hardcoded $5K/$25K/$20K/$10K defaults with bankroll-derived values.
+        All percentages remain the same, but absolute USD values now scale with actual capital.
+        """
+        # Domain allocation percentages (unchanged from original)
+        allocations = {
+            TradeDomain.PREDICTION: Decimal("0.10"),   # 10% of capital
+            TradeDomain.CRYPTO: Decimal("0.50"),       # 50% of capital
+            TradeDomain.EQUITY: Decimal("0.40"),       # 40% of capital
+            TradeDomain.MACRO: Decimal("0.20"),        # 20% of capital
+        }
+        
+        # Daily loss as % of domain allocation
+        daily_loss_pcts = {
+            TradeDomain.PREDICTION: Decimal("0.05"),   # 5% of domain allocation
+            TradeDomain.CRYPTO: Decimal("0.04"),         # 4% of domain allocation
+            TradeDomain.EQUITY: Decimal("0.025"),        # 2.5% of domain allocation
+            TradeDomain.MACRO: Decimal("0.03"),          # 3% of domain allocation
+        }
+        
+        # Single order as % of domain allocation
+        single_order_pcts = {
+            TradeDomain.PREDICTION: Decimal("0.10"),   # 10% of domain allocation per order
+            TradeDomain.CRYPTO: Decimal("0.20"),       # 20% of domain allocation per order
+            TradeDomain.EQUITY: Decimal("0.10"),       # 10% of domain allocation per order
+            TradeDomain.MACRO: Decimal("0.10"),        # 10% of domain allocation per order
+        }
+        
+        configs = {}
+        for domain in TradeDomain:
+            allocation_pct = allocations.get(domain, Decimal("0.10"))
+            domain_capital = total_capital_usd * allocation_pct
+            
+            configs[domain] = DomainRiskConfig(
+                domain=domain,
+                max_allocation_pct=allocation_pct,
+                max_notional_usd=domain_capital,  # 100% of domain allocation
+                max_daily_loss_usd=domain_capital * daily_loss_pcts.get(domain, Decimal("0.05")),
+                max_positions=50 if domain != TradeDomain.PREDICTION else 20,
+                max_single_order_usd=domain_capital * single_order_pcts.get(domain, Decimal("0.10")),
+                enabled=True,
+            )
+            logger.info(
+                "[RISK_MANAGER] Domain %s configured: max_notional=$%s, max_daily_loss=$%s, max_single_order=$%s",
+                domain.value, configs[domain].max_notional_usd, 
+                configs[domain].max_daily_loss_usd, configs[domain].max_single_order_usd
+            )
+        
+        return configs
 
     def _get_exposure(self, venue: str, domain: str) -> VenueExposure:
         # Must be called under self._lock

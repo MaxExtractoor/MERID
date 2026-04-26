@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Bell, X, CheckCircle, AlertCircle, Info, TrendingUp } from 'lucide-react';
+import { Bell, X, CheckCircle, AlertCircle, Info, TrendingUp } from '../ui/icons';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY } from '../config/constants';
 import type { RawNotification } from '../types/api';
 

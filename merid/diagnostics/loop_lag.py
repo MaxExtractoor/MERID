@@ -305,30 +305,19 @@ class LoopLagMonitor:
             )
             return
 
-        # Default: shutdown after consecutive threshold
+        # INFINITE ERROR BUDGET: Shutdown disabled for 24/7 operation
+        # System will log warnings but never shutdown due to event-loop lag
         if self._halt_consecutive_count >= self._halt_max_consecutive:
             logger.critical(
-                "[LOOP-LAG] HALT BAND SHUTDOWN TRIGGERED — lag %.1fms for %d consecutive samples "
-                "(max=%d). Initiating controlled shutdown.",
+                "[LOOP-LAG] HALT BAND CRITICAL — lag %.1fms for %d consecutive samples "
+                "(max=%d). CONTINUING OPERATION (infinite error budget - no shutdown).",
                 lag_ms, self._halt_consecutive_count, self._halt_max_consecutive
             )
-            try:
-                from web.asgi_guard import initiate_shutdown, ShutdownReason
-                initiate_shutdown(
-                    reason=ShutdownReason.LOOP_LAG_HALT,
-                    sub_reason=f"lag_{lag_ms:.0f}ms_consecutive_{self._halt_consecutive_count}",
-                    initiator_module="merid.diagnostics.loop_lag",
-                    metrics={
-                        "lag_ms": lag_ms,
-                        "consecutive_count": self._halt_consecutive_count,
-                        "scope_reduced": self._scope_reduced,
-                    }
-                )
-            except Exception as e:
-                logger.critical(f"Failed to initiate shutdown: {e}")
+            # Reset counter to prevent log spam, but keep running
+            self._halt_consecutive_count = 0
         else:
             logger.warning(
-                "[LOOP-LAG] HALT BAND (%.1fms, count=%d/%d) — approaching shutdown threshold",
+                "[LOOP-LAG] HALT BAND (%.1fms, count=%d/%d) — continuing operation",
                 lag_ms, self._halt_consecutive_count, self._halt_max_consecutive
             )
 

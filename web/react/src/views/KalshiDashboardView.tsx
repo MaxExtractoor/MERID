@@ -170,12 +170,12 @@ function loadFavoritesLocal(): Set<string> {
     if (!raw) return new Set();
     const arr = JSON.parse(raw);
     if (!Array.isArray(arr)) {
-      console.warn('[KalshiDashboard] Favorites data malformed, resetting');
+      // Malformed favorites data - will reset to empty
       return new Set();
     }
     return new Set(arr as string[]);
   } catch (e) {
-    console.warn('[KalshiDashboard] Failed to load favorites from localStorage:', e);
+    // Failed to load favorites - will use empty set
     return new Set();
   }
 }
@@ -185,8 +185,7 @@ function saveFavoritesLocal(favs: Set<string>): void {
     const arr = Array.from(favs);
     localStorage.setItem('kalshi_favorites', JSON.stringify(arr));
   } catch (e) {
-    console.error('[KalshiDashboard] Failed to save favorites to localStorage:', e);
-    // Could show toast notification here in future
+    // Failed to save favorites - non-critical, will retry on next change
   }
 }
 
@@ -200,7 +199,7 @@ function getPresetFromURL(): QuickTab {
     const p = params.get('preset');
     if (p && QUICK_TABS.some(t => t.id === p)) return p as QuickTab;
   } catch (e) {
-    console.warn('[KalshiDashboard] Failed to parse URL preset:', e);
+    // Failed to parse URL preset - using default
   }
   return 'all';
 }

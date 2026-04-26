@@ -313,6 +313,17 @@ class AgentGrid:
         # Start market catalog
         await self._catalog.start()
 
+        # Start bankroll service v2 first - required for all risk calculations
+        # CRITICAL: This must start before PortfolioRiskAgent and trading agents
+        try:
+            from merid.event_venues.kalshi import get_bankroll_service
+            _bankroll_service = await get_bankroll_service()
+            await _bankroll_service.start()
+            logger.info("✓ BankrollServiceV2: started background refresh")
+        except Exception as _be:
+            logger.critical("[AGENT_GRID] BankrollServiceV2 failed to start: %s", _be)
+            raise RuntimeError(f"BankrollServiceV2 startup failed: {_be}") from _be
+
         # Start portfolio risk agent first, then wait for its first snapshot
         # before allowing any trading agent to execute orders. (BUG-L1)
         await self._portfolio_risk.start()
@@ -753,6 +764,15 @@ class AgentGrid:
         # Then portfolio risk — runs one final check after all agents are drained
         await self._portfolio_risk.stop()
         self._draining = False
+
+        # Stop bankroll service v2 (after all agents stopped, before catalog)
+        try:
+            from merid.event_venues.kalshi import get_bankroll_service
+            _bankroll_service = await get_bankroll_service()
+            await _bankroll_service.stop()
+            logger.info("✓ BankrollServiceV2: stopped")
+        except Exception as _be:
+            logger.warning("[AGENT_GRID] BankrollServiceV2 stop failed: %s", _be)
 
         # Stop social broadcaster
         await self._broadcaster.stop()

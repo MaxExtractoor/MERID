@@ -3,7 +3,7 @@
  */
 
 import React from 'react';
-import { ArrowUp, ArrowDown, Minus } from 'lucide-react';
+import { ArrowUp, ArrowDown, Minus } from './icons';
 
 export type MetricTrend = 'up' | 'down' | 'neutral';
 

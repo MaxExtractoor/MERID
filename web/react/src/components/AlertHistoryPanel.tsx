@@ -2,7 +2,7 @@ import { useState } from 'react';
 import {
   Bell, RefreshCw, Search, AlertTriangle,
   AlertOctagon, Info, CheckCircle
-} from 'lucide-react';
+} from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import ErrorBar from './ErrorBar';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';

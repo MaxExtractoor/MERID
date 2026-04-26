@@ -319,7 +319,7 @@ class KalshiVenueAdapter:
         """Fetch orders from Kalshi REST API."""
         try:
             await self.client.connect()
-            orders = await self.client.get_orders()
+            orders = await self.client.get_open_orders()
             # NOTE: Do NOT close client here - singleton adapter keeps connection alive
             if status:
                 orders = [o for o in orders if o.status == status]

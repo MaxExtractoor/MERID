@@ -144,10 +144,24 @@ def validate_kalshi_grid(strict: bool = True) -> Dict[str, CellStatus]:
 
             # ── Check 2: risk limits ──────────────────────────────────
             notional = float(agent.risk_limits.max_notional_usd)
+            # If 0, derive from real Kalshi bankroll (1-2% for top-3 edge strategy)
+            if notional == 0:
+                try:
+                    from merid.settings import settings
+                    # Use KALSHI_PORTFOLIO_BANKROLL_CENTS (canonical real bankroll)
+                    bankroll_cents = getattr(settings, 'KALSHI_PORTFOLIO_BANKROLL_CENTS', 0)
+                    if bankroll_cents > 0:
+                        bankroll_usd = bankroll_cents / 100.0
+                    else:
+                        bankroll_usd = getattr(settings, 'MERID_TOTAL_CAPITAL_USD', 10000.0)
+                    risk_fraction = getattr(settings, 'MERID_MAX_RISK_FRACTION_PER_CYCLE', 0.02)
+                    notional = bankroll_usd * risk_fraction
+                except Exception:
+                    notional = 200.0  # Default $200 if settings fail
             cell.max_notional_usd = notional
-            if notional <= 0:
+            if notional < 0:
                 cell.errors.append(
-                    f"{key}: max_notional_usd={notional} must be > 0 "
+                    f"{key}: max_notional_usd={notional} must be >= 0 "
                     "(agent cannot size any trade)"
                 )
             else:

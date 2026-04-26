@@ -3,6 +3,7 @@ import { Icon } from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY} from '../config/constants';
 import { log } from '../ui/logger';
+import { DRAWDOWN_TIER_CONFIG, getDrawdownTierConfig } from '../shared/config/riskConfig';
 import type { KalshiBalance, KalshiPosition, KalshiOrder, KalshiRiskSummary, SizingMetrics } from '../types/kalshi';
 import KalshiModeBadge from '../components/KalshiModeBadge';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
@@ -33,12 +34,6 @@ const _normalizeLabel = (value: unknown, defaultValue = 'UNKNOWN'): string => {
   return String(value);
 };
 
-const DRAWDOWN_TIER_CONFIG: Record<string, { label: string; color: string; bg: string }> = {
-  normal: { label: 'Normal', color: 'text-green-400', bg: 'bg-green-500/20' },
-  warning: { label: 'Warning', color: 'text-yellow-400', bg: 'bg-yellow-500/20' },
-  downsize: { label: 'Downsized', color: 'text-orange-400', bg: 'bg-orange-500/20' },
-  halt: { label: 'Halted', color: 'text-red-400', bg: 'bg-red-500/20' },
-};
 
 const KalshiPortfolioView: React.FC = () => {
 

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronUp, Terminal } from 'lucide-react';
+import { ChevronDown, ChevronUp, Terminal } from '../ui/icons';
 import ConsoleViewer from './ConsoleViewer';
 
 export default function CollapsibleConsole() {

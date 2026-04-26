@@ -196,9 +196,8 @@ describe('validators', () => {
 
   describe('validateVenue', () => {
     it('validates correct venues', () => {
-      expect(validateVenue('coinbase')).toEqual({ valid: true });
-      expect(validateVenue('kraken')).toEqual({ valid: true });
-      expect(validateVenue('binance')).toEqual({ valid: true });
+      expect(validateVenue('kalshi')).toEqual({ valid: true });
+      expect(validateVenue('KALSHI')).toEqual({ valid: true });
     });
 
     it('rejects invalid venues', () => {
@@ -207,6 +206,10 @@ describe('validators', () => {
         error: 'Venue is required' 
       });
       expect(validateVenue('invalid')).toEqual({ 
+        valid: false, 
+        error: 'Invalid venue' 
+      });
+      expect(validateVenue('coinbase')).toEqual({ 
         valid: false, 
         error: 'Invalid venue' 
       });
@@ -296,7 +299,7 @@ describe('validators', () => {
       size: 1.5,
       orderType: 'limit',
       price: 45000,
-      venue: 'coinbase',
+      venue: 'kalshi',
     };
 
     it('validates complete order', () => {

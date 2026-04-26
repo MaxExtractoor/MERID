@@ -2,6 +2,9 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { API_BASE_URL, API_ENDPOINTS } from '../config/constants';
 import { log } from '../ui/logger';
 
+// Debug logging flag - disabled in production
+const DEBUG = process.env.NODE_ENV === 'development';
+
 interface OrderbookLevel {
   price: number;
   quantity: number;
@@ -104,7 +107,7 @@ export function useKalshiOrderbookStream(
       eventSource.addEventListener('snapshot', (event) => {
         try {
           const data = JSON.parse(event.data);
-          console.log('📸 Orderbook snapshot received:', data);
+          if (DEBUG) log.debug('Orderbook snapshot received', { ticker });
           setState(prev => ({
             ...prev,
             data: {
@@ -118,14 +121,14 @@ export function useKalshiOrderbookStream(
             lastUpdate: Date.now(),
           }));
         } catch (error) {
-          console.error('Failed to parse snapshot:', error);
+          log.error('Failed to parse orderbook snapshot', { error: String(error), ticker });
         }
       });
 
       eventSource.addEventListener('delta', (event) => {
         try {
           const delta = JSON.parse(event.data);
-          console.log('🔄 Orderbook delta received:', delta);
+          if (DEBUG) log.debug('Orderbook delta received', { ticker, levels: delta.yes_bids?.length });
           
           setState(prev => {
             if (!prev.data) return prev;
@@ -174,21 +177,21 @@ export function useKalshiOrderbookStream(
             };
           });
         } catch (error) {
-          console.error('Failed to parse delta:', error);
+          log.error('Failed to parse orderbook delta', { error: String(error), ticker });
         }
       });
 
       eventSource.addEventListener('heartbeat', (event) => {
         try {
           const data = JSON.parse(event.data);
-          console.log('💓 Orderbook heartbeat:', data);
+          // Heartbeat received - no action needed
         } catch (error) {
           // Heartbeat parsing errors are not critical
         }
       });
 
       eventSource.addEventListener('error', (event) => {
-        console.error('📡 Orderbook stream error:', event);
+        log.error('Orderbook stream error', { ticker, type: 'sse' });
         setState(prev => ({
           ...prev,
           connected: false,
@@ -200,13 +203,13 @@ export function useKalshiOrderbookStream(
           clearTimeout(reconnectTimeoutRef.current);
         }
         reconnectTimeoutRef.current = setTimeout(() => {
-          console.log('🔄 Attempting to reconnect orderbook stream...');
+          if (DEBUG) log.debug('Reconnecting orderbook stream', { ticker });
           connect();
         }, 5000);
       });
 
       eventSource.addEventListener('closed', (event) => {
-        console.log('📡 Orderbook stream closed:', event);
+        if (DEBUG) log.debug('Orderbook stream closed', { ticker });
         setState(prev => ({
           ...prev,
           connected: false,
@@ -214,7 +217,7 @@ export function useKalshiOrderbookStream(
       });
 
     } catch (error) {
-      console.error('Failed to create EventSource:', error);
+      log.error('Failed to create EventSource', { error: String(error), ticker });
       setState(prev => ({
         ...prev,
         connected: false,

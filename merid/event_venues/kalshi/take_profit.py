@@ -40,7 +40,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional, Tuple
 
 from utils.logger import get_logger
 
@@ -198,6 +198,22 @@ class TakeProfitConfig:
     tp_min_edge_after_fees_cents: float = 2.0
 
     # ═══════════════════════════════════════════════════════════════════════════
+    # Entry/Exit Timing Precision (REGRESSION PROTECTION)
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    # Maximum acceptable latency from signal generation to entry execution (seconds)
+    # If entry is delayed beyond this, position is NOT opened (prevents stale entries)
+    max_entry_latency_seconds: float = 5.0
+    
+    # Maximum acceptable latency from TP trigger to exit execution (seconds)
+    # If exit is delayed beyond this, emergency exit is triggered at market
+    max_exit_latency_seconds: float = 3.0
+    
+    # Require entry execution timestamp to be within this many seconds of signal
+    require_entry_timestamp_validation: bool = True
+    
+    # Require exit execution timestamp to be within this many seconds of TP trigger
+    require_exit_timestamp_validation: bool = True
     # PnL-based hard take-profit (new)
     # ═══════════════════════════════════════════════════════════════════════════
     # Hard TP: close full position when unrealized PnL % reaches this threshold
@@ -433,6 +449,24 @@ class TakeProfitPositionState:
     # Idempotency: last action time to avoid double-firing
     last_action_ts: float = 0.0
     pending_fill: bool = False      # True after order placed, before fill confirmed
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Entry/Exit Timing Precision (REGRESSION PROTECTION)
+    # ═══════════════════════════════════════════════════════════════════════
+    # These timestamps enable validation that entry/exit executed within
+    # acceptable latency windows to prevent stale signal execution
+    
+    # UTC timestamp when signal was generated (for entry timing validation)
+    signal_generated_ts: Optional[float] = None
+    
+    # UTC timestamp when entry was executed (for latency measurement)
+    entry_executed_ts: Optional[float] = None
+    
+    # UTC timestamp when TP trigger was evaluated (for exit timing validation)
+    tp_trigger_ts: Optional[float] = None
+    
+    # UTC timestamp when exit was executed (for latency measurement)
+    exit_executed_ts: Optional[float] = None
 
     # Diagnostics
     created_ts: float = field(default_factory=time.time)
@@ -1291,14 +1325,134 @@ class TakeProfitManager:
 
     def evict_expired(self, now_ts: Optional[float] = None) -> int:
         """Remove CLOSED states older than 24h to prevent unbounded growth.
-
+        
         Returns number of evicted entries.
         """
-        cutoff = (now_ts or time.time()) - 86400.0
-        to_remove = [
-            pid for pid, ps in self._states.items()
-            if ps.tp_state == TakeProfitState.CLOSED and ps.created_ts < cutoff
-        ]
-        for pid in to_remove:
-            del self._states[pid]
-        return len(to_remove)
+        if now_ts is None:
+            now_ts = time.time()
+        
+        expired = []
+        cutoff = now_ts - (24 * 3600)  # 24 hours
+        
+        for position_id, ps in self._states.items():
+            if ps.tp_state == TakeProfitState.CLOSED and ps.created_ts < cutoff:
+                expired.append(position_id)
+        
+        for position_id in expired:
+            del self._states[position_id]
+        
+        return len(expired)
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Entry/Exit Timing Precision Validation
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    def validate_entry_timing(
+        self,
+        position_id: str,
+        signal_generated_ts: float,
+        entry_executed_ts: float,
+    ) -> Tuple[bool, str]:
+        """Validate that entry executed within acceptable latency window.
+        
+        CRITICAL: Prevents stale entries - if entry is delayed too long
+        after signal generation, the market may have moved unfavorably.
+        
+        Args:
+            position_id: Unique identifier for this position
+            signal_generated_ts: UTC timestamp when signal was generated
+            entry_executed_ts: UTC timestamp when entry was executed
+            
+        Returns:
+            Tuple of (valid: bool, reason: str)
+            - valid: True if entry timing is acceptable, False if stale
+            - reason: Empty if valid, descriptive error if invalid
+        """
+        cfg = self._config
+        
+        if not cfg.require_entry_timestamp_validation:
+            return True, ""
+        
+        latency = entry_executed_ts - signal_generated_ts
+        
+        if latency < 0:
+            return False, f"TIMING_VIOLATION: Entry executed {abs(latency):.2f}s BEFORE signal generated (impossible)"
+        
+        if latency > cfg.max_entry_latency_seconds:
+            return False, (
+                f"STALE_ENTRY: Entry latency {latency:.2f}s exceeds max {cfg.max_entry_latency_seconds}s "
+                f"(signal ts={signal_generated_ts:.3f}, entry ts={entry_executed_ts:.3f})"
+            )
+        
+        logger.info(
+            "[TP-TIMING] %s: Entry valid - latency %.2fs (max %.2fs)",
+            position_id, latency, cfg.max_entry_latency_seconds
+        )
+        return True, ""
+    
+    def validate_exit_timing(
+        self,
+        position_id: str,
+        tp_trigger_ts: float,
+        exit_executed_ts: float,
+    ) -> Tuple[bool, str]:
+        """Validate that exit executed within acceptable latency window.
+        
+        CRITICAL: Prevents stale exits - if exit is delayed too long
+        after TP trigger, we may miss the optimal exit price.
+        
+        Args:
+            position_id: Unique identifier for this position
+            tp_trigger_ts: UTC timestamp when TP trigger was evaluated
+            exit_executed_ts: UTC timestamp when exit was executed
+            
+        Returns:
+            Tuple of (valid: bool, reason: str)
+            - valid: True if exit timing is acceptable, False if delayed
+            - reason: Empty if valid, descriptive error if invalid
+        """
+        cfg = self._config
+        
+        if not cfg.require_exit_timestamp_validation:
+            return True, ""
+        
+        latency = exit_executed_ts - tp_trigger_ts
+        
+        if latency < 0:
+            return False, f"TIMING_VIOLATION: Exit executed {abs(latency):.2f}s BEFORE TP trigger (impossible)"
+        
+        if latency > cfg.max_exit_latency_seconds:
+            return False, (
+                f"DELAYED_EXIT: Exit latency {latency:.2f}s exceeds max {cfg.max_exit_latency_seconds}s "
+                f"(trigger ts={tp_trigger_ts:.3f}, exit ts={exit_executed_ts:.3f})"
+            )
+        
+        logger.info(
+            "[TP-TIMING] %s: Exit valid - latency %.2fs (max %.2fs)",
+            position_id, latency, cfg.max_exit_latency_seconds
+        )
+        return True, ""
+    
+    def record_entry_execution(self, position_id: str, entry_ts: float) -> None:
+        """Record entry execution timestamp for timing validation.
+        
+        Args:
+            position_id: Position identifier
+            entry_ts: UTC timestamp when entry was executed
+        """
+        ps = self._states.get(position_id)
+        if ps:
+            ps.entry_executed_ts = entry_ts
+            logger.debug("[TP-TIMING] %s: Entry recorded at %.3f", position_id, entry_ts)
+    
+    def record_exit_execution(self, position_id: str, exit_ts: float) -> None:
+        """Record exit execution timestamp for timing validation.
+        
+        Args:
+            position_id: Position identifier
+            exit_ts: UTC timestamp when exit was executed
+        """
+        ps = self._states.get(position_id)
+        if ps:
+            ps.exit_executed_ts = exit_ts
+            logger.debug("[TP-TIMING] %s: Exit recorded at %.3f", position_id, exit_ts)

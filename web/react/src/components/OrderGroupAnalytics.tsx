@@ -12,7 +12,7 @@
  */
 
 import React, { useMemo } from 'react';
-import { TrendingUp, AlertCircle } from 'lucide-react';
+import { TrendingUp, AlertCircle } from '../ui/icons';
 import { CHART_COLORS } from '../config/constants';
 
 interface UtilizationPoint {

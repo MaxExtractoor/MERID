@@ -1,6 +1,6 @@
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
-import { CheckCircle, XCircle, Zap, Settings, Target, BarChart3 } from 'lucide-react';
+import { CheckCircle, XCircle, Zap, Settings, Target, BarChart3 } from '../ui/icons';
 
 interface LaneStatus {
   lane?: {
@@ -51,10 +51,10 @@ export default function ContextStrip() {
       <div className="border-b px-4 py-2 flex items-center justify-between bg-slate-900/60 border-slate-700">
         <div className="flex items-center gap-3">
           <div className="animate-pulse flex items-center gap-3">
-            <div className="w-16 h-4 bg-slate-700 rounded"></div>
-            <div className="w-12 h-4 bg-slate-700 rounded"></div>
-            <div className="w-14 h-4 bg-slate-700 rounded"></div>
-            <div className="w-20 h-4 bg-slate-700 rounded"></div>
+            <div data-testid="skeleton" className="w-16 h-4 bg-slate-700 rounded"></div>
+            <div data-testid="skeleton" className="w-12 h-4 bg-slate-700 rounded"></div>
+            <div data-testid="skeleton" className="w-14 h-4 bg-slate-700 rounded"></div>
+            <div data-testid="skeleton" className="w-20 h-4 bg-slate-700 rounded"></div>
           </div>
         </div>
         <div className="animate-pulse w-16 h-4 bg-slate-700 rounded"></div>
@@ -178,7 +178,13 @@ export default function ContextStrip() {
         {/* Freshness Badge */}
         {mostRecentUpdate && (
           <div className="text-slate-500 text-[10px]">
-            {new Date(mostRecentUpdate).toLocaleTimeString()}
+            {new Intl.DateTimeFormat('en-US', {
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+              hour12: true,
+              timeZone: 'UTC',
+            }).format(new Date(mostRecentUpdate))}
           </div>
         )}
 

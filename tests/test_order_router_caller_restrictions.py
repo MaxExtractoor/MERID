@@ -16,29 +16,29 @@ import pytest
 # Allowed module prefixes (must match order_router.py)
 # ═══════════════════════════════════════════════════════════════════════════
 
+# SINGLE EXECUTOR PRINCIPLE: Only trading_agent can execute trades
+# This must match order_router.py _ALLOWED_CALLER_PREFIXES exactly
 _ALLOWED_CALLER_PREFIXES = (
-    "merid.prediction.kalshi_tools",
+    # PRIMARY EXECUTION AGENT - ONLY module that can execute trades
     "merid.prediction.trading_agent",
+    # Tests are allowed for testing the router itself
     "tests.",
     "test_",
+    # Self-calls (internal recursion)
     "merid.event_venues.kalshi.order_router",
     # Package init re-exports
     "merid.event_venues.kalshi",
     "merid.kalshi",
-    # Legitimate production callers
+    # Governance/risk enforcement (can review but not execute)
     "core.constitution_enforcer",
+    # Audit and policy modules (read-only)
     "merid.event_venues.kalshi.execution_audit",
     "merid.event_venues.kalshi.maker_taker_policy",
     "merid.event_venues.kalshi.take_profit",
     "merid.event_venues.kalshi.universe",
-    "merid.lanes.btc15m_lane",
-    "merid.lanes.crypto15m_lane",
-    "merid.prediction.universal_agent",
-    "merid.trading.ct_execution_adapter",  # CT migration adapter
+    # Operator API endpoints (manual override only)
     "web.api.kalshi_api",
     "web.api.kalshi_grid_api",
-    # Audit tooling
-    "scripts.show_wiring_status",
     # Test modules that legitimately test the router
     "core.test_kalshi_gate_truth_table",
     "event_venues.kalshi.test_kalshi_sprint_a",
@@ -52,7 +52,17 @@ _ALLOWED_CALLER_PREFIXES = (
     "test_order_router_caller_restrictions",
 )
 
-_KNOWN_BYPASS_PATHS = {
+# NO BYPASSES - All agents except trading_agent are SIGNAL-ONLY
+_KNOWN_BYPASS_PATHS = set()
+
+# SIGNAL-ONLY modules that import route_order but will be rejected at runtime
+# These modules must route through trading_agent - they cannot execute directly
+_SIGNAL_ONLY_MODULES = {
+    "merid.lanes.btc15m_lane",
+    "merid.lanes.crypto15m_lane",
+    "merid.prediction.kalshi_tools",
+    "merid.prediction.universal_agent",
+    "merid.trading.ct_execution_adapter",
     "merid.trading.kalshi_continuous_trader",
 }
 
@@ -145,18 +155,20 @@ def _is_authorized_module(mod_name: str) -> bool:
 class TestCallerModuleWhitelist:
     """Verify only authorized modules import the order router."""
 
-    def test_kalshi_tools_is_authorized(self):
-        """kalshi_tools is the canonical tool → router bridge."""
-        assert _is_authorized_module("merid.prediction.kalshi_tools")
+    def test_kalshi_tools_is_signal_only(self):
+        """kalshi_tools is SIGNAL-ONLY and must route through trading_agent."""
+        # SINGLE EXECUTOR: kalshi_tools cannot execute directly
+        assert not _is_authorized_module("merid.prediction.kalshi_tools")
 
     def test_trading_agent_is_authorized(self):
-        """trading_agent uses router for stop-loss and execution."""
+        """trading_agent is the SOLE executor for stop-loss and execution."""
+        # SINGLE EXECUTOR: Only trading_agent can execute
         assert _is_authorized_module("merid.prediction.trading_agent")
 
-    def test_continuous_trader_is_known_bypass(self):
-        """continuous_trader is a documented bypass (uses direct HTTP)."""
-        assert _is_authorized_module("merid.trading.kalshi_continuous_trader")
-        assert "merid.trading.kalshi_continuous_trader" in _KNOWN_BYPASS_PATHS
+    def test_continuous_trader_is_signal_only(self):
+        """kalshi_continuous_trader is SIGNAL-ONLY and must route through trading_agent."""
+        # SINGLE EXECUTOR: CT cannot execute directly - must go through trading_agent
+        assert not _is_authorized_module("merid.trading.kalshi_continuous_trader")
 
     def test_random_module_not_authorized(self):
         """Unknown modules should NOT be authorized."""
@@ -203,15 +215,19 @@ class TestImportRestrictions:
             # Check if this module is authorized
             mod_name = _module_name_from_path(py_file, repo_root)
 
+            # SIGNAL-ONLY modules are allowed to import but will be rejected at runtime
+            if mod_name in _SIGNAL_ONLY_MODULES:
+                continue
+
             if not _is_authorized_module(mod_name):
                 violations.append((mod_name, str(py_file)))
 
         if violations:
-            msg = "Unauthorized modules importing route_order:\n"
+            msg = "Unauthorized modules importing route_order (not in whitelist or signal-only list):\n"
             for mod, path in violations:
                 msg += f"  - {mod} ({path})\n"
             msg += "\nTo authorize, add to order_router.py:_ALLOWED_CALLER_PREFIXES "
-            msg += "or _KNOWN_BYPASS_PATHS with justification."
+            msg += "or add to _SIGNAL_ONLY_MODULES if it should route through trading_agent."
             pytest.fail(msg)
 
 
@@ -228,19 +244,25 @@ class TestRuntimeCallerGuard:
         assert "test" in caller.lower() or "pytest" in caller.lower()
 
     def test_is_authorized_caller_accepts_whitelist(self):
-        """Authorized prefixes should be accepted."""
+        """Authorized prefixes should be accepted - ONLY trading_agent can execute."""
         from merid.event_venues.kalshi.order_router import _is_authorized_caller
 
-        assert _is_authorized_caller("merid.prediction.kalshi_tools")
+        # SINGLE EXECUTOR PRINCIPLE: Only trading_agent can execute trades
         assert _is_authorized_caller("merid.prediction.trading_agent")
         assert _is_authorized_caller("tests.test_something")
         assert _is_authorized_caller("test_foo")
 
-    def test_is_authorized_caller_accepts_known_bypasses(self):
-        """Known bypass paths should be accepted."""
+    def test_is_authorized_caller_rejects_signal_only_agents(self):
+        """Signal-only agents must route through trading_agent - cannot execute directly."""
         from merid.event_venues.kalshi.order_router import _is_authorized_caller
 
-        assert _is_authorized_caller("merid.trading.kalshi_continuous_trader")
+        # These agents are SIGNAL-ONLY and must NOT be able to bypass trading_agent
+        assert not _is_authorized_caller("merid.prediction.kalshi_tools")
+        assert not _is_authorized_caller("merid.trading.kalshi_continuous_trader")
+        assert not _is_authorized_caller("merid.trading.ct_execution_adapter")
+        assert not _is_authorized_caller("merid.lanes.btc15m_lane")
+        assert not _is_authorized_caller("merid.lanes.crypto15m_lane")
+        assert not _is_authorized_caller("merid.prediction.universal_agent")
 
     def test_is_authorized_caller_rejects_unknown(self):
         """Unknown modules should be rejected."""
@@ -324,10 +346,10 @@ class TestRouterRejectsUnauthorized:
         """
         from merid.event_venues.kalshi.order_router import route_order_async
 
-        # Mock the caller to be authorized (kalshi_tools)
+        # Mock the caller to be authorized (trading_agent - SOLE EXECUTOR)
         monkeypatch.setattr(
             "merid.event_venues.kalshi.order_router._get_caller_module",
-            lambda: "merid.prediction.kalshi_tools",
+            lambda: "merid.prediction.trading_agent",
         )
 
         result = await route_order_async(mock_intent)

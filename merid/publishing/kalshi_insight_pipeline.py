@@ -255,13 +255,25 @@ class KalshiInsightPipeline:
         return []
 
     async def _fetch_via_executor(self, executor: Any, category: str) -> List[KalshiMarket]:
-        """Fetch via KalshiExecutor (authenticated)."""
-        loop = asyncio.get_running_loop()
-        raw = await loop.run_in_executor(
-            None,
-            lambda: executor.get_markets(status="open", limit=200),
-        )
-        markets_raw = raw if isinstance(raw, list) else raw.get("markets", [])
+        """Fetch via KalshiVenueClient (authenticated)."""
+        from merid.event_venues.kalshi.client import get_kalshi_client
+        client = get_kalshi_client()
+        if client is None:
+            return []
+        event_markets = await client.list_markets()
+        # list_markets returns List[EventMarket] — build dicts for _normalize_market
+        markets_raw = []
+        for em in (event_markets or []):
+            d = dict(em.raw_data) if em.raw_data else {}
+            d.setdefault("ticker", em.market_id)
+            d.setdefault("title", em.question)
+            d.setdefault("category", em.category)
+            d.setdefault("volume", int(em.volume or 0))
+            d.setdefault("open_interest", int(em.open_interest or 0))
+            d.setdefault("status", "open" if em.active else "closed")
+            if em.outcomes:
+                d.setdefault("yes_bid", float(em.outcomes[0].price * 100))
+            markets_raw.append(d)
         return [
             m for m in (self._normalize_market(r) for r in markets_raw)
             if m and m.category == category and m.volume >= MIN_VOLUME

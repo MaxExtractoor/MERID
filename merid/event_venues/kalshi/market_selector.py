@@ -168,24 +168,28 @@ AGENT_SERIES_MAP: Dict[str, List[str]] = {
 async def get_agent_market_tickers(
     agent_name: str,
     *,
+    series_tickers: Optional[List[str]] = None,
     min_volume: float = 0,
 ) -> List[str]:
     """Resolve an agent's series → live Kalshi market IDs via the catalog.
 
-    1. Look up the agent's series tickers from AGENT_SERIES_MAP
+    1. Look up the agent's series tickers from AGENT_SERIES_MAP (or use provided)
     2. For each series, query the catalog for matching markets
     3. Return deduplicated list of market IDs (highest volume first)
 
     Args:
         agent_name: Agent name (e.g., "BTC_15M").
+        series_tickers: Optional list of series tickers to use (defaults to AGENT_SERIES_MAP lookup).
         min_volume: Optional minimum volume filter.
 
     Returns:
         List of Kalshi market ticker strings.
     """
-    series_list = AGENT_SERIES_MAP.get(agent_name)
-    if series_list is None:
-        logger.warning("No series mapping for agent %s", agent_name)
+    # FIX 1: Use passed series_tickers, fallback to AGENT_SERIES_MAP
+    series_list = series_tickers if series_tickers is not None else AGENT_SERIES_MAP.get(agent_name)
+    
+    if not series_list:
+        logger.warning(f"No series configured for agent {agent_name}")
         return []
 
     if not series_list:
@@ -280,7 +284,7 @@ async def get_agent_market_tickers(
     return tickers
 
 
-async def enable_kalshi_agent(agent_name: str) -> Dict[str, Any]:
+async def enable_kalshi_agent(agent_name: str, series_tickers: Optional[List[str]] = None) -> Dict[str, Any]:
     """Subscribe an agent to its Kalshi prediction markets.
 
     1. Resolve market IDs via get_agent_market_tickers
@@ -289,12 +293,13 @@ async def enable_kalshi_agent(agent_name: str) -> Dict[str, Any]:
 
     Args:
         agent_name: Agent name (e.g., "BTC_15M").
+        series_tickers: Optional list of series tickers to use instead of AGENT_SERIES_MAP lookup.
 
     Returns:
         Dict with agent_name, series, market_ids, subscribed count.
     """
-    series_list = AGENT_SERIES_MAP.get(agent_name, [])
-    market_ids = await get_agent_market_tickers(agent_name)
+    series_list = series_tickers if series_tickers is not None else AGENT_SERIES_MAP.get(agent_name, [])
+    market_ids = await get_agent_market_tickers(agent_name, series_tickers=series_list)
 
     if not market_ids:
         logger.info(
@@ -334,3 +339,58 @@ async def enable_kalshi_agent(agent_name: str) -> Dict[str, Any]:
         "market_ids": market_ids,
         "subscribed": ws_subscribed,
     }
+
+
+def validate_agent_series_map() -> List[str]:
+    """Validate all series tickers in AGENT_SERIES_MAP for correctness.
+    
+    Returns:
+        List of validation issues found (empty if all valid).
+    """
+    issues: List[str] = []
+    
+    for agent_name, series_list in AGENT_SERIES_MAP.items():
+        if not series_list:
+            continue  # Empty is valid for some agents
+        
+        for series_ticker in series_list:
+            # Check format
+            if not series_ticker.startswith('KX'):
+                issues.append(f"{agent_name}: Invalid series format '{series_ticker}'")
+            
+            # Check for asset mismatches
+            agent_upper = agent_name.upper()
+            series_upper = series_ticker.upper()
+            
+            # DOGE should not map to XRP
+            if 'DOGE' in agent_upper and 'XRP' in series_upper:
+                issues.append(f"CRITICAL: {agent_name} mapped to XRP series: {series_ticker}")
+            
+            # XRP should not map to DOGE
+            if 'XRP' in agent_upper and 'DOGE' in series_upper:
+                issues.append(f"CRITICAL: {agent_name} mapped to DOGE series: {series_ticker}")
+            
+            # BTC should not map to other assets
+            if 'BTC' in agent_upper and not any(x in series_upper for x in ['BTC', 'BITCOIN']):
+                if any(x in series_upper for x in ['ETH', 'SOL', 'XRP', 'DOGE']):
+                    issues.append(f"CRITICAL: {agent_name} mapped to wrong asset series: {series_ticker}")
+            
+            # Weekly agents shouldn't map to 15M series
+            if 'WEEKLY' in agent_upper and '15M' in series_upper:
+                issues.append(f"WARNING: {agent_name} (weekly) mapped to 15min series: {series_ticker}")
+            
+            # 15M agents shouldn't map to weekly series
+            if '15M' in agent_upper and any(x in series_upper for x in ['W1', 'D1']):
+                issues.append(f"WARNING: {agent_name} (15M) mapped to long-term series: {series_ticker}")
+    
+    return issues
+
+
+# Run validation on module import
+_validation_issues = validate_agent_series_map()
+if _validation_issues:
+    logger.error("AGENT_SERIES_MAP validation failed:")
+    for issue in _validation_issues:
+        logger.error(f"  - {issue}")
+else:
+    logger.info(f"Validated {len(AGENT_SERIES_MAP)} agent series mappings - all correct")
