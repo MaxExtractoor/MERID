@@ -23,6 +23,8 @@ from merid.trading.top3_batch_manager import (
 @pytest.fixture
 def reset_state():
     """Reset and provide batch manager singleton before each test."""
+    import os
+    os.environ["MERID_TEST_MODE"] = "1"
     reset_top3_batch_manager()
     yield get_top3_batch_manager()
     reset_top3_batch_manager()
@@ -139,10 +141,20 @@ class TestNoSprayingRegression:
         for asset in ["BTC", "ETH", "SOL"]:
             mgr.mark_asset_closed(batch1.batch_id, asset)
         
-        # Now can create new batch
+        # CRITICAL: Must reconcile bankroll before new cycle can start
+        mgr.mark_batch_reconciled(batch1.batch_id, realized_pnl_cents=500)
+        
+        # Create fresh candidates (old ones may be stale)
+        fresh_candidates = [
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
+            EdgeCandidate("SOL", edge=0.06, max_notional_cap=3000),
+        ]
+        
+        # Now can create new batch (cycle lock released)
         batch3 = mgr.maybe_create_new_batch(
             bankroll_notional=100_000,
-            candidates=candidates,
+            candidates=fresh_candidates,
         )
         assert batch3 is not None
         assert batch3.batch_id != batch1.batch_id
@@ -325,7 +337,7 @@ class TestNoBypassPaths:
         """
         mgr = get_top3_batch_manager()
         
-        # Create and immediately close batch
+        # Create batch
         batch = mgr.maybe_create_new_batch(
             bankroll_notional=100_000,
             candidates=[
@@ -333,7 +345,10 @@ class TestNoBypassPaths:
             ],
         )
         
-        # Close it
+        # Mark position as closed first (simulating trade completion)
+        mgr.mark_asset_closed(batch.batch_id, "BTC")
+        
+        # Now close the batch
         mgr.close_batch(batch.batch_id, reason="test")
         
         # Should be closed
@@ -342,3 +357,312 @@ class TestNoBypassPaths:
         # Entry should be blocked
         allowed, reason, _ = mgr.can_open_new_position("BTC", 500)
         assert allowed is False, "Entry should be blocked when batch is closed"
+
+
+class TestStaleSignalPrevention:
+    """REGRESSION TESTS: Stale signal prevention.
+    
+    Critical safety: Each new cycle after reconciliation must use FRESH
+    edges/signals computed AFTER the previous cycle was reconciled.
+    Prevents using stale market analysis from before the reconciliation period.
+    """
+    
+    def test_fresh_signal_allowed(self, reset_state):
+        """Fresh signals (recent timestamp) should allow batch creation."""
+        mgr = get_top3_batch_manager()
+        
+        # Create fresh candidates (just computed)
+        fresh_candidates = [
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
+        ]
+        
+        batch = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=fresh_candidates,
+        )
+        
+        assert batch is not None, "Fresh signals should allow batch creation"
+    
+    def test_stale_signal_blocked(self, reset_state):
+        """Stale signals (old timestamp) should BLOCK batch creation."""
+        mgr = get_top3_batch_manager()
+        from datetime import datetime, timezone, timedelta
+        
+        # Create stale candidates (2 minutes old)
+        stale_time = datetime.now(timezone.utc) - timedelta(seconds=120)
+        stale_candidates = [
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000, timestamp=stale_time),
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000, timestamp=stale_time),
+        ]
+        
+        batch = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=stale_candidates,
+        )
+        
+        assert batch is None, "Stale signals (>60s) should BLOCK batch creation"
+    
+    def test_mixed_fresh_stale_blocked(self, reset_state):
+        """If ANY signal is stale, batch creation is blocked."""
+        mgr = get_top3_batch_manager()
+        from datetime import datetime, timezone, timedelta
+        
+        stale_time = datetime.now(timezone.utc) - timedelta(seconds=120)
+        mixed_candidates = [
+            EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),  # Fresh
+            EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000, timestamp=stale_time),  # Stale
+        ]
+        
+        batch = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=mixed_candidates,
+        )
+        
+        assert batch is None, "Mixed fresh/stale: stale wins, batch blocked"
+    
+    def test_signal_freshness_check_age(self):
+        """Test EdgeCandidate.is_fresh() returns correct age."""
+        from datetime import datetime, timezone, timedelta
+        
+        # Fresh signal (just now)
+        fresh = EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000)
+        assert fresh.is_fresh(max_age_seconds=60.0) is True
+        assert fresh.age_seconds() < 1.0
+        
+        # Stale signal (2 minutes old)
+        stale_time = datetime.now(timezone.utc) - timedelta(seconds=120)
+        stale = EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000, timestamp=stale_time)
+        assert stale.is_fresh(max_age_seconds=60.0) is False
+        assert stale.age_seconds() >= 119.0  # Should be at least ~120s old
+    
+    def test_unique_signal_ids(self):
+        """Each EdgeCandidate should have unique signal_id."""
+        import time
+        c1 = EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000)
+        time.sleep(0.01)  # Small delay to ensure different timestamps
+        c2 = EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000)
+        
+        assert c1.signal_id != c2.signal_id, "Each signal should have unique ID"
+
+
+class TestEntryExitTimingPrecision:
+    """REGRESSION TESTS: Entry/Exit timing precision validation.
+    
+    Critical safety: Entry and exit must execute within strict latency
+    windows to prevent stale execution and ensure optimal pricing.
+    """
+    
+    def test_entry_timing_valid(self):
+        """Entry within latency window should be valid."""
+        from merid.event_venues.kalshi.take_profit import TakeProfitManager
+        import time
+        
+        tpm = TakeProfitManager()
+        now = time.time()
+        
+        valid, reason = tpm.validate_entry_timing(
+            position_id="test_pos",
+            signal_generated_ts=now - 2.0,  # 2 seconds ago
+            entry_executed_ts=now,  # Now
+        )
+        
+        assert valid is True, f"Entry within 5s window should be valid: {reason}"
+        assert reason == ""
+    
+    def test_entry_timing_too_slow(self):
+        """Entry exceeding max latency should be rejected."""
+        from merid.event_venues.kalshi.take_profit import TakeProfitManager
+        import time
+        
+        tpm = TakeProfitManager()
+        now = time.time()
+        
+        valid, reason = tpm.validate_entry_timing(
+            position_id="test_pos",
+            signal_generated_ts=now - 10.0,  # 10 seconds ago (exceeds 5s max)
+            entry_executed_ts=now,
+        )
+        
+        assert valid is False, "Entry >5s after signal should be rejected"
+        assert "STALE_ENTRY" in reason
+    
+    def test_exit_timing_valid(self):
+        """Exit within latency window should be valid."""
+        from merid.event_venues.kalshi.take_profit import TakeProfitManager
+        import time
+        
+        tpm = TakeProfitManager()
+        now = time.time()
+        
+        valid, reason = tpm.validate_exit_timing(
+            position_id="test_pos",
+            tp_trigger_ts=now - 1.5,  # 1.5 seconds ago
+            exit_executed_ts=now,  # Now
+        )
+        
+        assert valid is True, f"Exit within 3s window should be valid: {reason}"
+        assert reason == ""
+    
+    def test_exit_timing_too_slow(self):
+        """Exit exceeding max latency should be rejected."""
+        from merid.event_venues.kalshi.take_profit import TakeProfitManager
+        import time
+        
+        tpm = TakeProfitManager()
+        now = time.time()
+        
+        valid, reason = tpm.validate_exit_timing(
+            position_id="test_pos",
+            tp_trigger_ts=now - 8.0,  # 8 seconds ago (exceeds 3s max)
+            exit_executed_ts=now,
+        )
+        
+        assert valid is False, "Exit >3s after trigger should be rejected"
+        assert "DELAYED_EXIT" in reason
+    
+    def test_timing_impossible_backward(self):
+        """Entry/exit executed before signal/trigger is impossible."""
+        from merid.event_venues.kalshi.take_profit import TakeProfitManager
+        import time
+        
+        tpm = TakeProfitManager()
+        now = time.time()
+        
+        # Entry executed BEFORE signal generated
+        valid, reason = tpm.validate_entry_timing(
+            position_id="test_pos",
+            signal_generated_ts=now,  # Signal generated now
+            entry_executed_ts=now - 1.0,  # But entry was 1 second ago (impossible!)
+        )
+        
+        assert valid is False, "Entry before signal is impossible"
+        assert "TIMING_VIOLATION" in reason
+    
+    def test_timing_validation_disabled(self):
+        """Timing validation can be disabled via config."""
+        from merid.event_venues.kalshi.take_profit import TakeProfitManager, TakeProfitConfig
+        import time
+        
+        # Create manager with validation disabled
+        config = TakeProfitConfig(
+            require_entry_timestamp_validation=False,
+            require_exit_timestamp_validation=False,
+        )
+        tpm = TakeProfitManager(config=config)
+        now = time.time()
+        
+        # Even with 100s delay, should be accepted when validation disabled
+        valid, reason = tpm.validate_entry_timing(
+            position_id="test_pos",
+            signal_generated_ts=now - 100.0,
+            entry_executed_ts=now,
+        )
+        
+        assert valid is True, "Validation disabled should accept any timing"
+        assert reason == ""
+
+
+class TestBypassPrevention:
+    """REGRESSION TESTS: Verify no bypass paths exist for cycle locking.
+    
+    These tests ensure that the cycle lock cannot be bypassed through
+    any manual or automated mechanism.
+    """
+    
+    def test_close_batch_requires_force_with_open_positions(self, reset_state):
+        """Manual close should be blocked when positions are open."""
+        mgr = get_top3_batch_manager()
+        
+        batch = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=[
+                EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
+                EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
+            ],
+        )
+        assert batch is not None
+        assert batch.status == BatchStatus.ACTIVE
+        
+        # Attempt to close without force - should be blocked
+        result = mgr.close_batch(batch.batch_id, reason="bypass_attempt")
+        assert result is False, "Close should be blocked with open positions"
+        assert batch.status == BatchStatus.ACTIVE, "Batch should remain ACTIVE"
+        
+        # Verify cycle is still locked
+        locked, reason = mgr.is_cycle_locked()
+        assert locked is True, "Cycle should still be locked"
+    
+    def test_close_batch_force_bypass(self, reset_state):
+        """Force=True allows bypass but logs critical warning."""
+        mgr = get_top3_batch_manager()
+        
+        batch = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=[
+                EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
+            ],
+        )
+        
+        # Force close with positions open
+        result = mgr.close_batch(batch.batch_id, reason="emergency", force=True)
+        assert result is True, "Force close should succeed"
+        assert batch.status == BatchStatus.CLOSED
+    
+    def test_mark_reconcile_requires_closed_status(self, reset_state):
+        """Cannot reconcile a batch that isn't CLOSED."""
+        mgr = get_top3_batch_manager()
+        
+        batch = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=[EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000)],
+        )
+        
+        # Try to reconcile while still ACTIVE - should fail
+        result = mgr.mark_batch_reconciled(batch.batch_id, realized_pnl_cents=100)
+        assert result is False, "Cannot reconcile ACTIVE batch"
+        
+        # Force close then reconcile
+        mgr.close_batch(batch.batch_id, reason="test", force=True)
+        result = mgr.mark_batch_reconciled(batch.batch_id, realized_pnl_cents=100)
+        assert result is True, "Can reconcile after CLOSED"
+        assert batch.status == BatchStatus.FULLY_RECONCILED
+    
+    def test_cycle_lock_persists_across_get_current_batch_calls(self, reset_state):
+        """Cycle lock state should be consistent across repeated checks."""
+        mgr = get_top3_batch_manager()
+        
+        batch = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=[EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000)],
+        )
+        
+        # Multiple checks should all report locked
+        for _ in range(5):
+            locked, reason = mgr.is_cycle_locked()
+            assert locked is True, f"Cycle should be locked: {reason}"
+        
+        # get_current_batch should also return locked batch
+        current = mgr.get_current_batch()
+        assert current is not None
+        assert current.status == BatchStatus.ACTIVE
+    
+    def test_no_alternate_batch_creation_path(self, reset_state):
+        """maybe_create_new_batch is the ONLY path to create batches."""
+        mgr = get_top3_batch_manager()
+        
+        # Create first batch
+        batch1 = mgr.maybe_create_new_batch(
+            bankroll_notional=100_000,
+            candidates=[EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000)],
+        )
+        assert batch1 is not None
+        
+        # There is no other method to create a batch - verified by inspection:
+        # - No direct _current_batch assignment outside maybe_create_new_batch
+        # - No import of Top3Batch constructor in other modules for batch creation
+        # - All batch creation flows through maybe_create_new_batch
+        
+        # Verify the lock is in place
+        locked, _ = mgr.is_cycle_locked()
+        assert locked is True, "Cycle should be locked preventing new batches"

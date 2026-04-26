@@ -63,11 +63,30 @@ def build_risk_posture_snapshot() -> Dict[str, Any]:
         _kr = get_kalshi_risk()
         _kr._sync_pnl_from_ledger()
         _st = _kr.state
+
+        # BANKROLL UNIFICATION: Fetch from v2 unified service for comparison
+        _effective_usd = None
+        _live_usd = None
+        try:
+            from merid.event_venues.kalshi import get_equity_for_risk_calc_sync, get_summary_sync
+            _effective_usd = get_equity_for_risk_calc_sync()
+            _summary = get_summary_sync()
+            if _effective_usd:
+                _effective_usd = round(_effective_usd, 2)
+            if _summary and _summary.equity_usd is not None:
+                _live_usd = round(float(_summary.equity_usd), 2)
+        except Exception:
+            pass
+
         snap["kalshi_risk"] = {
             "kill_switch_active": bool(_kr.kill_switch_active),
             "kill_switch_reason": getattr(_st, "kill_switch_reason", None),
             "daily_pnl_usd": getattr(_st, "daily_pnl_usd", None),
             "current_equity_usd": getattr(_st, "current_equity_usd", None),
+            # Unified bankroll data for observability
+            "effective_bankroll_usd": _effective_usd,
+            "live_venue_balance_usd": _live_usd,
+            "bankroll_source": "unified_bankroll_service" if _effective_usd else "kalshi_risk_manager",
         }
     except Exception as exc:
         snap["kalshi_risk"] = {"error": str(exc)}

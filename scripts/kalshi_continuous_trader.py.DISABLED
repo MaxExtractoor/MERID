@@ -1,0 +1,39 @@
+# THIS FILE HAS BEEN DISABLED AS PART OF PRODUCTION HARDENING
+#
+# Reason: Contains DIRECT HTTP BYPASS to Kalshi API that circumvents:
+#   - order_router.route_order_async()
+#   - GlobalRiskGuard (1-2% bankroll cap)
+#   - Top-3 batch allocation gate
+#   - PreTradeGate (deduplication)
+#   - Execution gate / kill switches
+#   - All risk pre-checks
+#
+# Evidence of bypass:
+#   - Line 1018: api_post("/portfolio/orders", order_data) - direct order placement
+#   - Lines 171-172: api_post() uses requests.post() directly to BASE_URL
+#   - Line 1048: api_delete() for direct order cancellation
+#   - Line 168: api_get() for direct API calls
+#   - Lines 150-164: Manual RSA signing (bypasses KalshiVenueClient)
+#   - Lines 133-141: BASE_URL hardcoded to elections.kalshi.com or demo-api.kalshi.co
+#
+# This script has its own risk controls (drawdown, bankroll, etc.) but they are
+# NOT integrated with the canonical risk pipeline (GlobalRiskGuard, Top3BatchGate).
+#
+# If you need continuous trading, use the canonical path:
+#   - merid/trading/kalshi_continuous_trader.py (async server module)
+#   - This routes through order_router and enforces all risk guards
+#
+# To use this script (NOT RECOMMENDED), rename this file back to .py
+# WARNING: This will bypass ALL risk controls and could cause significant losses.
+#
+# See: docs/PRODUCTION_HARDENING_FINAL_REPORT.md for full audit details.
+# Date: 2026-04-23
+# Auditor: Cascade
+
+raise RuntimeError(
+    "[PRODUCTION HARDENING] scripts/kalshi_continuous_trader.py has been DISABLED. "
+    "This script contains direct HTTP bypasses to Kalshi API that circumvent "
+    "the canonical order_router and ALL risk guards (GlobalRiskGuard, Top-3 batch, "
+    "PreTradeGate). Use merid/trading/kalshi_continuous_trader.py (async module) "
+    "which routes through the hardened order_router."
+)

@@ -11,7 +11,7 @@ import {
   DollarSign, TrendingUp, TrendingDown, Activity,
   AlertTriangle, Shield, Gauge, BarChart3,
   ChevronDown, ChevronUp, StopCircle,
-} from 'lucide-react';
+} from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY } from '../config/constants';
 

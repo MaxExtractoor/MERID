@@ -11,7 +11,7 @@
  */
 
 import { useState, useCallback, useEffect } from 'react';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight } from '../ui/icons';
 import { logUiError } from '../utils/logger';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, GRID_CELL_STATUS, AUTH_TOKEN_KEY} from '../config/constants';
 import PaperLadderCard from '../components/PaperLadderCard';

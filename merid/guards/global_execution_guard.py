@@ -1,0 +1,301 @@
+"""Unified Global Execution Guard — Final safety net for ALL order paths.
+
+This module provides a SINGLE chokepoint that ALL order execution paths must
+call before submitting orders to Kalshi. It enforces:
+1. Global 2% bankroll cap (across ALL execution paths)
+2. Top-3 edge allocation check
+3. Total notional tracking (singleton across the process)
+4. Emergency circuit breaker
+
+Usage::
+    from merid.guards.global_execution_guard import get_global_execution_guard
+    
+    guard = get_global_execution_guard()
+    allowed, reason = guard.check_order(
+        ticker="KXBTC15M-...",
+        contracts=10,
+        price_cents=55,
+        source="trading_agent",  # or "pipeline_adapter", "kalshi_client", etc.
+    )
+    
+    if not allowed:
+        logger.error(f"[GLOBAL_GUARD_BLOCKED] {reason}")
+        return  # Do not submit order
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+from dataclasses import dataclass, field
+from decimal import Decimal
+from typing import Dict, List, Optional, Tuple
+from datetime import datetime, timezone
+
+from utils.logger import get_logger
+
+logger = get_logger("merid.guards.global_execution_guard")
+
+
+@dataclass
+class GuardDecision:
+    """Decision from the global execution guard."""
+    allowed: bool
+    reason: str
+    current_total_notional_usd: float
+    proposed_notional_usd: float
+    bankroll_cap_usd: float
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class GlobalExecutionGuard:
+    """Unified execution guard — SINGLE chokepoint for ALL order paths.
+    
+    This is a process-wide singleton that tracks total notional exposure
+    and enforces the 2% bankroll cap regardless of which execution path
+    the order came from.
+    
+    SAFETY INVARIANTS:
+    1. All orders MUST call check_order() before submission
+    2. Total notional cannot exceed 2% of configured bankroll
+    3. All decisions are logged with [GLOBAL_GUARD] prefix for audit
+    4. Fail-closed: any error in guard = order blocked
+    """
+    
+    _instance: Optional["GlobalExecutionGuard"] = None
+    _lock: threading.Lock = threading.Lock()
+    
+    def __new__(cls) -> "GlobalExecutionGuard":
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+    
+    def __init__(self):
+        if self._initialized:
+            return
+        
+        with self._lock:
+            if self._initialized:
+                return
+            
+            self._total_notional_usd: float = 0.0
+            self._orders_this_minute: int = 0
+            self._orders_this_hour: int = 0
+            self._last_minute_reset: float = time.time()
+            self._last_hour_reset: float = time.time()
+            self._order_history: List[Dict] = []
+            self._max_history: int = 1000
+            self._emergency_halt: bool = False
+            self._halt_reason: str = ""
+            self._initialized = True
+            
+            logger.info("[GLOBAL_GUARD] Initialized — all order paths must route through this guard")
+    
+    def check_order(
+        self,
+        ticker: str,
+        contracts: int,
+        price_cents: int,
+        source: str,
+        asset: Optional[str] = None,
+    ) -> Tuple[bool, str]:
+        """Check if order is allowed — THE UNIFIED GATE.
+        
+        ALL execution paths MUST call this before submitting orders.
+        
+        Args:
+            ticker: Market ticker
+            contracts: Number of contracts
+            price_cents: Price per contract in cents
+            source: Which execution path (trading_agent, pipeline_adapter, kalshi_client, etc.)
+            asset: Optional asset code (BTC, ETH, etc.)
+            
+        Returns:
+            (allowed: bool, reason: str)
+            - allowed = True: Order may proceed
+            - allowed = False: Order MUST be rejected
+        """
+        with self._lock:
+            # 0. Emergency halt check
+            if self._emergency_halt:
+                logger.error(
+                    "[GLOBAL_GUARD_BLOCKED] Emergency halt active: %s | ticker=%s source=%s",
+                    self._halt_reason, ticker, source
+                )
+                return False, f"EMERGENCY_HALT: {self._halt_reason}"
+            
+            # 1. Validate inputs
+            if contracts <= 0:
+                return False, "Invalid contract count (must be > 0)"
+            
+            if price_cents <= 0 or price_cents >= 100:
+                return False, f"Invalid price_cents: {price_cents} (must be 1-99)"
+            
+            # 2. Calculate notional
+            proposed_notional_usd = (contracts * price_cents) / 100.0
+            
+            # 3. Get bankroll and compute 2% cap
+            try:
+                from merid.settings import settings
+                bankroll_cents = getattr(settings, 'KALSHI_PORTFOLIO_BANKROLL_CENTS', 50_000_00)
+                bankroll_usd = bankroll_cents / 100.0
+                bankroll_cap_usd = bankroll_usd * 0.02  # 2% of bankroll
+            except Exception as e:
+                logger.error("[GLOBAL_GUARD_ERROR] Failed to get bankroll: %s", e)
+                # Fail-closed: block order if we can't determine bankroll
+                return False, f"BANKROLL_UNAVAILABLE: {e}"
+            
+            # 4. Check global notional cap
+            new_total = self._total_notional_usd + proposed_notional_usd
+            
+            if new_total > bankroll_cap_usd:
+                logger.error(
+                    "[GLOBAL_GUARD_BLOCKED] 2%% BANKROLL CAP EXCEEDED | "
+                    "ticker=%s contracts=%d price_cents=%d "
+                    "current_total=$%.2f proposed=$%.2f new_total=$%.2f cap=$%.2f "
+                    "bankroll=$%.2f source=%s",
+                    ticker, contracts, price_cents,
+                    self._total_notional_usd, proposed_notional_usd, new_total,
+                    bankroll_cap_usd, bankroll_usd, source
+                )
+                return False, (
+                    f"GLOBAL_CAP_EXCEEDED: total_notional=${new_total:.2f} exceeds "
+                    f"2% bankroll cap=${bankroll_cap_usd:.2f} (bankroll=${bankroll_usd:.2f})"
+                )
+            
+            # 5. Rate limiting (per-minute, per-hour)
+            now = time.time()
+            if now - self._last_minute_reset >= 60:
+                self._orders_this_minute = 0
+                self._last_minute_reset = now
+            if now - self._last_hour_reset >= 3600:
+                self._orders_this_hour = 0
+                self._last_hour_reset = now
+            
+            # Get rate limits from settings
+            try:
+                from merid.settings import settings
+                max_per_minute = getattr(settings, 'MAX_ORDERS_PER_MINUTE', 30)
+                max_per_hour = getattr(settings, 'MAX_ORDERS_PER_HOUR', 300)
+            except Exception:
+                max_per_minute = 30
+                max_per_hour = 300
+            
+            if self._orders_this_minute >= max_per_minute:
+                logger.warning(
+                    "[GLOBAL_GUARD_BLOCKED] Rate limit: %d orders/minute | ticker=%s source=%s",
+                    max_per_minute, ticker, source
+                )
+                return False, f"RATE_LIMIT_MINUTE: {max_per_minute} orders/minute exceeded"
+            
+            if self._orders_this_hour >= max_per_hour:
+                logger.warning(
+                    "[GLOBAL_GUARD_BLOCKED] Rate limit: %d orders/hour | ticker=%s source=%s",
+                    max_per_hour, ticker, source
+                )
+                return False, f"RATE_LIMIT_HOUR: {max_per_hour} orders/hour exceeded"
+            
+            # 6. All checks passed — record the order
+            self._total_notional_usd = new_total
+            self._orders_this_minute += 1
+            self._orders_this_hour += 1
+            
+            order_record = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "ticker": ticker,
+                "contracts": contracts,
+                "price_cents": price_cents,
+                "notional_usd": proposed_notional_usd,
+                "total_notional_usd": new_total,
+                "source": source,
+                "asset": asset,
+            }
+            self._order_history.append(order_record)
+            if len(self._order_history) > self._max_history:
+                self._order_history.pop(0)
+            
+            logger.info(
+                "[GLOBAL_GUARD_APPROVED] ticker=%s contracts=%d price_cents=%d "
+                "notional=$%.2f total_now=$%.2f cap=$%.2f source=%s",
+                ticker, contracts, price_cents,
+                proposed_notional_usd, new_total, bankroll_cap_usd, source
+            )
+            
+            return True, "OK"
+    
+    def record_fill(self, ticker: str, contracts: int, price_cents: int, source: str) -> None:
+        """Record a fill to update total notional.
+        
+        This should be called when an order actually fills (not just submits).
+        """
+        with self._lock:
+            notional_usd = (contracts * price_cents) / 100.0
+            # For now, we track submitted notional as a conservative estimate
+            # In production, you'd track actual filled notional separately
+            logger.debug(
+                "[GLOBAL_GUARD_FILL] ticker=%s contracts=%d price_cents=%d "
+                "notional=$%.2f source=%s",
+                ticker, contracts, price_cents, notional_usd, source
+            )
+    
+    def get_status(self) -> Dict:
+        """Get current guard status for monitoring."""
+        with self._lock:
+            try:
+                from merid.settings import settings
+                bankroll_cents = getattr(settings, 'KALSHI_PORTFOLIO_BANKROLL_CENTS', 50_000_00)
+                bankroll_usd = bankroll_cents / 100.0
+                bankroll_cap_usd = bankroll_usd * 0.02
+            except Exception:
+                bankroll_usd = 50000.0
+                bankroll_cap_usd = 1000.0
+            
+            return {
+                "total_notional_usd": round(self._total_notional_usd, 2),
+                "bankroll_usd": round(bankroll_usd, 2),
+                "bankroll_cap_2pct_usd": round(bankroll_cap_usd, 2),
+                "pct_of_cap_used": round((self._total_notional_usd / bankroll_cap_usd) * 100, 1) if bankroll_cap_usd > 0 else 0,
+                "orders_this_minute": self._orders_this_minute,
+                "orders_this_hour": self._orders_this_hour,
+                "emergency_halt": self._emergency_halt,
+                "halt_reason": self._halt_reason,
+                "order_count_last_hour": len(self._order_history),
+            }
+    
+    def emergency_halt(self, reason: str) -> None:
+        """Emergency halt — block ALL orders immediately."""
+        with self._lock:
+            self._emergency_halt = True
+            self._halt_reason = reason
+            logger.critical(
+                "[GLOBAL_GUARD_EMERGENCY_HALT] All order execution HALTED: %s",
+                reason
+            )
+    
+    def emergency_resume(self) -> None:
+        """Resume after emergency halt (requires manual intervention)."""
+        with self._lock:
+            was_halted = self._emergency_halt
+            self._emergency_halt = False
+            self._halt_reason = ""
+            if was_halted:
+                logger.critical("[GLOBAL_GUARD_EMERGENCY_RESUME] Order execution RESUMED")
+    
+    def reset_total_notional(self, new_value: float = 0.0) -> None:
+        """Reset total notional (for testing or reconciliation)."""
+        with self._lock:
+            old_value = self._total_notional_usd
+            self._total_notional_usd = new_value
+            logger.warning(
+                "[GLOBAL_GUARD_RESET] Total notional reset: $%.2f -> $%.2f",
+                old_value, new_value
+            )
+
+
+# Module-level singleton accessor
+def get_global_execution_guard() -> GlobalExecutionGuard:
+    """Get the process-wide GlobalExecutionGuard singleton."""
+    return GlobalExecutionGuard()

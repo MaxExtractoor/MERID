@@ -47,11 +47,35 @@ class EdgeCandidate:
         edge: Expected edge (model probability - market implied probability)
         max_notional_cap: Per-asset cap from existing risk models (in cents)
         metadata: Contract details (ticker, expiry, etc.)
+        timestamp: UTC timestamp when this edge was computed (defaults to now)
+        signal_id: Unique identifier for this signal to prevent reuse
+    
+    CRITICAL: timestamp and signal_id prevent stale signal reuse across cycles.
+    Each new cycle after reconciliation must use FRESH edges computed AFTER
+    the previous cycle was reconciled. This ensures market conditions are current.
     """
     asset: Literal["BTC", "ETH", "SOL", "XRP", "DOGE"]
     edge: float
     max_notional_cap: int  # cents
     metadata: Dict[str, Any] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    signal_id: str = field(default_factory=lambda: f"sig_{datetime.now(timezone.utc).timestamp()}_{uuid.uuid4().hex[:8]}")
+    
+    def is_fresh(self, max_age_seconds: float = 60.0) -> bool:
+        """Check if this edge candidate is fresh (not stale).
+        
+        Args:
+            max_age_seconds: Maximum age allowed (default 60s)
+            
+        Returns:
+            True if edge is fresh, False if stale
+        """
+        age = (datetime.now(timezone.utc) - self.timestamp).total_seconds()
+        return age <= max_age_seconds
+    
+    def age_seconds(self) -> float:
+        """Return age of this edge in seconds."""
+        return (datetime.now(timezone.utc) - self.timestamp).total_seconds()
 
 
 @dataclass(frozen=True)
@@ -68,15 +92,17 @@ class Top3Allocation:
     edge: float
     target_notional: int  # cents
     weight: float
+    closed: bool = False  # Whether position is closed
     contracts: List[Dict[str, Any]] = field(default_factory=list)  # Contract-level details
 
 
 class BatchStatus(str, Enum):
     """Lifecycle states for a top-3 batch."""
-    PENDING = "pending"      # Created but not yet confirmed active
-    ACTIVE = "active"        # Currently open, positions being filled
-    CLOSING = "closing"      # Positions being closed/exited
-    CLOSED = "closed"        # All positions resolved, batch complete
+    PENDING = "pending"           # Created but not yet confirmed active
+    ACTIVE = "active"             # Currently open, positions being filled
+    CLOSING = "closing"           # Wind-down initiated, no new entries
+    CLOSED = "closed"             # Fully unwound, awaiting reconciliation
+    FULLY_RECONCILED = "fully_reconciled"  # Bankroll updated, cycle lock released, batch complete
 
 
 @dataclass
@@ -126,6 +152,12 @@ class Top3Batch:
             "filled_assets": list(self.filled_assets),
             "closed_assets": list(self.closed_assets),
         }
+    
+    def all_positions_closed(self) -> bool:
+        """Check if all allocated positions have been closed."""
+        if not self.allocations:
+            return False  # No allocations means nothing to close - not "all closed"
+        return len(self.closed_assets) >= len(self.allocations)
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Top3Batch":
@@ -221,11 +253,13 @@ class Top3SelectionSpec:
         Formal: new_entry_allowed(agent_a) iff batch.exists AND batch.contains(asset_a)
     """
     
-    # Configuration defaults
-    DEFAULT_CYCLE_RISK_CAP_PCT_MIN: float = 0.01  # 1%
-    DEFAULT_CYCLE_RISK_CAP_PCT_MAX: float = 0.02  # 2%
-    DEFAULT_EPS: float = 1e-6  # For edge equality comparison
-    MAX_ASSETS: int = 3
+    # Configuration - ENV-DRIVEN (no hardcoded defaults)
+    # These read from environment at runtime, defaulting only if env not set
+    DEFAULT_CYCLE_RISK_CAP_PCT_MIN: float = field(default_factory=lambda: float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MIN", "0.01")))
+    DEFAULT_CYCLE_RISK_CAP_PCT_MAX: float = field(default_factory=lambda: float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MAX", "0.02")))
+    DEFAULT_EPS: float = field(default_factory=lambda: float(os.getenv("MERID_TOP3_EDGE_EPS", "1e-6")))
+    MAX_ASSETS: int = field(default_factory=lambda: int(os.getenv("MERID_TOP3_MAX_ASSETS", "3")))
+    MIN_ALLOCATION_CENTS: int = field(default_factory=lambda: int(os.getenv("MERID_TOP3_MIN_ALLOCATION_CENTS", "50")))  # $0.50 minimum
     
     VALID_ASSETS: Tuple[str, ...] = ("BTC", "ETH", "SOL", "XRP", "DOGE")
 
@@ -239,120 +273,142 @@ def select_top3_allocations(
     bankroll_notional: int,  # cents
     cycle_risk_cap_pct: float,
     candidates: List[EdgeCandidate],
-    eps: float = 1e-6,
+    eps: Optional[float] = None,  # Uses env MERID_TOP3_EDGE_EPS if None
+    min_allocation_cents: Optional[int] = None,  # Uses env MERID_TOP3_MIN_ALLOCATION_CENTS if None
 ) -> List[Top3Allocation]:
-    """Select top-3 allocations by edge with proportional sizing.
-    
+    """Select top-3 allocations with STRICT EDGE #1 PRIORITY sequential fill.
+
+    CRITICAL RULES (per user wagering specification):
+    1. Edge #1 (highest edge) MUST be executed first - non-negotiable priority
+    2. Edge #1 gets minimum 1% of bankroll if valid (cycle_risk_cap_pct >= 0.01)
+    3. Edge #2 is ONLY considered after Edge #1 is fully allocated
+    4. Edge #3 is ONLY considered after Edge #2 is fully allocated
+    5. If any edge fails min constraints, it and ALL subsequent edges are skipped
+    6. Never skip Edge #1 to take Edge #2 or #3
+
     Args:
         bankroll_notional: Current bankroll in cents
         cycle_risk_cap_pct: Risk cap as fraction (0.01-0.02)
         candidates: List of edge candidates (all 5 assets potentially)
-        eps: Epsilon for floating point comparisons
-        
+        eps: Epsilon for floating point comparisons (uses env if None)
+        min_allocation_cents: Minimum allocation in cents (uses env if None)
+
     Returns:
-        List of up to 3 allocations, sorted by edge descending
-        
-    Implements the algorithm from Top3SelectionSpec:
-    1. Filter out candidates with edge <= 0 or invalid
-    2. Sort by edge descending
-    3. Take at most 3: top = sorted_candidates[:3]
-    4. Compute total_cycle_notional = min(cap * bankroll, sum(max_notional_cap_i))
-    5. If total_cycle_notional <= 0, return empty
-    6. Compute edge weights (equal split if edges within eps)
-    7. Return allocations
+        List of allocations (1-3 edges), strictly following Edge #1 priority
     """
+    # Resolve parameters from env if not provided
+    _eps = eps if eps is not None else float(os.getenv("MERID_TOP3_EDGE_EPS", "1e-6"))
+    _min_alloc = min_allocation_cents if min_allocation_cents is not None else int(os.getenv("MERID_TOP3_MIN_ALLOCATION_CENTS", "50"))
+
     spec = Top3SelectionSpec()
-    
+
     # Step 1: Filter invalid candidates
     valid_candidates = [
-        c for c in candidates 
+        c for c in candidates
         if c.edge > 0 and c.asset in spec.VALID_ASSETS and c.max_notional_cap > 0
     ]
-    
+
     if not valid_candidates:
-        logger.debug("[TOP3-SELECT] No valid candidates with positive edge")
+        logger.info("[EDGE#1-PRIORITY] No valid candidates with positive edge - NO TRADES")
         return []
-    
-    # Step 2: Sort by edge descending
+
+    # Step 2: Sort by edge descending to establish Edge #1, #2, #3 ranking
     sorted_candidates = sorted(valid_candidates, key=lambda c: c.edge, reverse=True)
-    
-    # Step 3: Take at most 3
-    top = sorted_candidates[:spec.MAX_ASSETS]
-    
-    # Step 4: Compute total cycle notional (respect caps)
-    max_possible_notional = sum(c.max_notional_cap for c in top)
-    cap_notional = int(cycle_risk_cap_pct * bankroll_notional)
-    total_cycle_notional = min(cap_notional, max_possible_notional)
-    
-    # Step 5: Check if we have any notional to allocate
-    if total_cycle_notional <= 0:
-        logger.debug("[TOP3-SELECT] Total cycle notional is zero (cap=%d, max_possible=%d)",
-                     cap_notional, max_possible_notional)
-        return []
-    
-    # Step 6: Compute edge weights
-    edges = [c.edge for c in top]
-    edge_sum = sum(edges)
-    
-    # Check if all edges are equal (within epsilon)
-    max_edge = max(edges)
-    min_edge = min(edges)
-    edges_equal = (max_edge - min_edge) < eps
-    
+
+    # Log the ranked edges
+    logger.info("[EDGE#1-PRIORITY] Bankroll=$%.2f | Risk cap=%.2f%%", bankroll_notional / 100, cycle_risk_cap_pct * 100)
+    for i, c in enumerate(sorted_candidates[:3], 1):
+        logger.info("  Edge#%d: %s | edge=%.4f | max_cap=%d¢", i, c.asset, c.edge, c.max_notional_cap)
+
+    # Step 3: Compute budgets
+    # Edge #1 gets minimum 1% (or full cap if cap < 1%)
+    min_edge1_pct = 0.01  # 1% minimum for Edge #1
+    total_budget_cents = int(cycle_risk_cap_pct * bankroll_notional)
+    edge1_budget_cents = int(min(min_edge1_pct, cycle_risk_cap_pct) * bankroll_notional)
+
+    # Step 4: SEQUENTIAL PRIORITY FILL - Edge #1 first, then #2, then #3
     allocations: List[Top3Allocation] = []
-    
-    if edges_equal:
-        # Equal split among tied edges
-        notional_per_asset = total_cycle_notional // len(top)
-        remainder = total_cycle_notional - (notional_per_asset * len(top))
-        
-        for i, candidate in enumerate(top):
-            # Distribute remainder to first assets
-            extra = 1 if i < remainder else 0
-            allocations.append(Top3Allocation(
-                asset=candidate.asset,
-                edge=candidate.edge,
-                target_notional=notional_per_asset + extra,
-                weight=1.0 / len(top),
-                contracts=candidate.metadata.get("contracts", []),
-            ))
-        
-        logger.info(
-            "[TOP3-SELECT] Equal split for %d assets (edges ~%.6f), notional=%d each",
-            len(top), edges[0], notional_per_asset
-        )
-    else:
-        # Proportional by edge
-        remaining_notional = total_cycle_notional
-        
-        for i, candidate in enumerate(top):
-            is_last = (i == len(top) - 1)
-            
-            if is_last:
-                # Last asset gets remainder to ensure sum equals total
-                notional_i = remaining_notional
-            else:
-                # Weighted allocation
-                weight = candidate.edge / edge_sum
-                notional_i = int(total_cycle_notional * weight)
-                # Clamp to per-asset cap
-                notional_i = min(notional_i, candidate.max_notional_cap)
-            
+    remaining_budget_cents = total_budget_cents
+    max_edges = min(spec.MAX_ASSETS, len(sorted_candidates))
+
+    for edge_rank in range(1, max_edges + 1):
+        if edge_rank > len(sorted_candidates):
+            break
+
+        candidate = sorted_candidates[edge_rank - 1]
+        edge_label = f"Edge#{edge_rank}"
+
+        # Determine budget for this edge
+        if edge_rank == 1:
+            edge_budget_cents = min(edge1_budget_cents, remaining_budget_cents)
+        else:
+            edge_budget_cents = remaining_budget_cents
+
+        if edge_budget_cents <= 0:
+            logger.info(
+                "[%s-SKIP] %s | reason=zero_budget | bankroll_depleted_by_higher_priority_edges",
+                edge_label, candidate.asset
+            )
+            # Skip all subsequent edges
+            for sub_rank in range(edge_rank + 1, max_edges + 1):
+                if sub_rank <= len(sorted_candidates):
+                    sub_c = sorted_candidates[sub_rank - 1]
+                    logger.info(
+                        "[Edge#%d-SKIP] %s | reason=previous_edge_budget_exhausted",
+                        sub_rank, sub_c.asset
+                    )
+            break
+
+        # Check if this edge can be allocated
+        # For Top3, we use notional-based allocation (different from TopN max-loss)
+        notional_i = min(candidate.max_notional_cap, edge_budget_cents)
+
+        # Only allocate if we have meaningful notional
+        if notional_i >= _min_alloc:
             allocations.append(Top3Allocation(
                 asset=candidate.asset,
                 edge=candidate.edge,
                 target_notional=notional_i,
-                weight=candidate.edge / edge_sum,
+                weight=1.0 / edge_rank,  # Weight reflects priority order
                 contracts=candidate.metadata.get("contracts", []),
             ))
-            
-            remaining_notional -= notional_i
-        
+            remaining_budget_cents -= notional_i
+
+            logger.info(
+                "[%s-EXECUTED] %s | notional=%d¢ | edge=%.4f | remaining_budget=%d¢",
+                edge_label, candidate.asset, notional_i, candidate.edge, remaining_budget_cents
+            )
+        else:
+            # Failed min allocation - skip this edge and ALL subsequent edges
+            logger.warning(
+                "[%s-SKIP] %s | reason=below_min_allocation | notional=%d¢ < min=%d¢ | "
+                "SUBSEQUENT EDGES ALSO SKIPPED",
+                edge_label, candidate.asset, notional_i, _min_alloc
+            )
+
+            # Skip all subsequent edges
+            for sub_rank in range(edge_rank + 1, max_edges + 1):
+                if sub_rank <= len(sorted_candidates):
+                    sub_c = sorted_candidates[sub_rank - 1]
+                    logger.info(
+                        "[Edge#%d-SKIP] %s | reason=blocked_by_%s_failure",
+                        sub_rank, sub_c.asset, edge_label
+                    )
+            break
+
+    # Final summary
+    if allocations:
+        total_notional = sum(a.target_notional for a in allocations)
         logger.info(
-            "[TOP3-SELECT] Weighted split: %s",
-            ", ".join(f"{a.asset}={a.target_notional}c (w={a.weight:.2f})" for a in allocations)
+            "[EDGE#1-PRIORITY-SUCCESS] Allocated %d edges: %s | total=%d¢ (%.2f%% of bankroll)",
+            len(allocations),
+            ", ".join(f"#{i+1}:{a.asset}" for i, a in enumerate(allocations)),
+            total_notional,
+            (total_notional / bankroll_notional) * 100 if bankroll_notional > 0 else 0
         )
-    
+    else:
+        logger.info("[EDGE#1-PRIORITY] NO ALLOCATIONS - All edges skipped")
+
     return allocations
 
 
@@ -428,16 +484,92 @@ class Top3EdgeAllocator:
             List of up to 3 allocations with target notionals
         """
         if bankroll_notional <= 0:
-            logger.warning("[TOP3-ALLOCATOR] Invalid bankroll: %d", bankroll_notional)
-            return []
+            logger.warning("[TOP3-ALLOCATOR] Invalid bankroll: %d, attempting live derivation", bankroll_notional)
+            # Try to derive live bankroll from Kalshi API
+            try:
+                from merid.event_venues.kalshi.order_router import _derive_live_bankroll_usd
+                _live = _derive_live_bankroll_usd()
+                if _live is not None and _live > 0:
+                    bankroll_notional = int(_live * 100)
+                    logger.info("[TOP3-ALLOCATOR] Recovered with live bankroll: %d cents", bankroll_notional)
+                else:
+                    # FAIL CLOSED: Cannot get live bankroll
+                    logger.error("[TOP3-ALLOCATOR] Cannot determine live Kalshi balance. No allocations.")
+                    return []
+            except Exception as _e:
+                # FAIL CLOSED: Cannot get live bankroll
+                logger.error("[TOP3-ALLOCATOR] Failed to get live bankroll: %s. No allocations.", _e)
+                return []
         
         if not candidates:
             logger.debug("[TOP3-ALLOCATOR] No candidates provided")
             return []
         
+        # ═════════════════════════════════════════════════════════════════
+        # SENTIMENT-BASED RISK ADJUSTMENT
+        # ═════════════════════════════════════════════════════════════════
+        # Check market sentiment and reduce sizing in extreme regimes
+        _sentiment_adjusted_cap_pct = self._cycle_risk_cap_pct
+        try:
+            from merid.sentiment.sentiment_bus import get_sentiment_bus
+            from merid.sentiment.crypto_risk_dial import get_crypto_risk_dial
+            
+            # Get aggregate market sentiment (use BTC as proxy for crypto basket)
+            _sentiment_bus = get_sentiment_bus()
+            _btc_sentiment = _sentiment_bus.get_sentiment("BTC")
+            
+            if _btc_sentiment:
+                # Check for extreme sentiment regimes
+                if _btc_sentiment.trend_regime in ["extreme_fear", "extreme_greed"]:
+                    # Reduce cycle cap by 35% in extreme regimes
+                    _sentiment_adjusted_cap_pct = self._cycle_risk_cap_pct * 0.65
+                    logger.info(
+                        "[TOP3-SENTIMENT] Extreme regime detected: %s | "
+                        "cycle_cap adjusted: %.2f%% → %.2f%%",
+                        _btc_sentiment.trend_regime,
+                        self._cycle_risk_cap_pct * 100,
+                        _sentiment_adjusted_cap_pct * 100
+                    )
+                elif _btc_sentiment.should_reduce_size():
+                    # Reduce by 20% in regular fear/greed regimes
+                    _sentiment_adjusted_cap_pct = self._cycle_risk_cap_pct * 0.80
+                    logger.info(
+                        "[TOP3-SENTIMENT] Elevated sentiment: %s | "
+                        "cycle_cap adjusted: %.2f%% → %.2f%%",
+                        _btc_sentiment.trend_regime,
+                        self._cycle_risk_cap_pct * 100,
+                        _sentiment_adjusted_cap_pct * 100
+                    )
+                else:
+                    logger.debug(
+                        "[TOP3-SENTIMENT] Normal regime: %s | cap unchanged",
+                        _btc_sentiment.trend_regime
+                    )
+            
+            # Asset-specific risk dial adjustments
+            for candidate in candidates:
+                if candidate.asset in ("ETH", "SOL", "XRP", "DOGE"):
+                    try:
+                        _risk_dial = get_crypto_risk_dial(candidate.asset)
+                        _can_trade, _reason = _risk_dial.can_trade()
+                        if not _can_trade:
+                            # Zero out this candidate's allocation
+                            logger.warning(
+                                "[TOP3-RISK-DIAL] HALT for %s | reason=%s | excluding from allocation",
+                                candidate.asset, _reason
+                            )
+                            # Modify the candidate in place via metadata
+                            candidate.metadata["risk_dial_halt"] = True
+                            candidate.edge = 0.0  # Zero edge excludes from selection
+                    except Exception as _rd_exc:
+                        logger.debug("[TOP3-RISK-DIAL] Check skipped for %s: %s", candidate.asset, _rd_exc)
+        except Exception as _sent_exc:
+            # Sentiment failure is non-fatal, log and continue with original cap
+            logger.debug("[TOP3-SENTIMENT] Adjustment skipped: %s", _sent_exc)
+        
         allocations = select_top3_allocations(
             bankroll_notional=bankroll_notional,
-            cycle_risk_cap_pct=self._cycle_risk_cap_pct,
+            cycle_risk_cap_pct=_sentiment_adjusted_cap_pct,
             candidates=candidates,
             eps=self.spec.DEFAULT_EPS,
         )
@@ -447,8 +579,8 @@ class Top3EdgeAllocator:
             total = sum(a.target_notional for a in allocations)
             pct_of_bankroll = (total / bankroll_notional) * 100
             logger.info(
-                "[TOP3-ALLOCATOR] Selected %d assets, total=%d¢ (%.2f%% of bankroll)",
-                len(allocations), total, pct_of_bankroll
+                "[TOP3-ALLOCATOR] Selected %d assets, total=%d¢ (%.2f%% of bankroll, cap=%.2f%%)",
+                len(allocations), total, pct_of_bankroll, _sentiment_adjusted_cap_pct * 100
             )
         else:
             logger.info("[TOP3-ALLOCATOR] No allocations selected")

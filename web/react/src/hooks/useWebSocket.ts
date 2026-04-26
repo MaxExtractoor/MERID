@@ -32,7 +32,7 @@ type WebSocketState<TMessage = unknown> = {
 };
 
 export function useWebSocket<TMessage = unknown>(
-  { url, protocols, autoConnect = true, heartbeatMs = 30_000, pongTimeoutMs = 10_000, autoReconnect = true, maxReconnectMs = 30_000, token }: UseWebSocketOptions
+  { url, protocols, autoConnect = false, heartbeatMs = 30_000, pongTimeoutMs = 10_000, autoReconnect = true, maxReconnectMs = 30_000, token }: UseWebSocketOptions
 ): WebSocketState<TMessage> {
   const socketRef = useRef<WebSocket | null>(null);
   const [status, setStatus] = useState<WebSocketStatus>('disconnected');
@@ -232,6 +232,7 @@ export function useKalshiRiskStream(token?: string): WebSocketState {
   return useWebSocket({
     url: `${WS_BASE_URL}/ws/risk`,
     token,
+    autoConnect: true,
     autoReconnect: true,
     maxReconnectMs: 30000,
     heartbeatMs: 10000,
@@ -247,6 +248,7 @@ export function useTradeEventsStream(token?: string): WebSocketState {
   return useWebSocket({
     url: `${WS_BASE_URL}/ws/trades`,
     token,
+    autoConnect: true,
     autoReconnect: true,
     maxReconnectMs: 30000,
     heartbeatMs: 15000,
@@ -262,6 +264,7 @@ export function useLiveTickStream(token?: string): WebSocketState {
   return useWebSocket({
     url: `${WS_BASE_URL}/ws/live`,
     token,
+    autoConnect: true,
     autoReconnect: true,
     maxReconnectMs: 30000,
     heartbeatMs: 15000,

@@ -93,7 +93,8 @@ class CircuitBreaker:
     name: str
     failure_threshold: int = 5
     recovery_timeout: float = 30.0
-    half_open_max_calls: int = 1
+    half_open_max_calls: int = 3  # Increased from 1 to allow more testing
+    half_open_success_required: int = 2  # NEW: Require multiple successes to close
     
     # Internal state
     _state: CircuitState = field(default=CircuitState.CLOSED, init=False)
@@ -101,6 +102,7 @@ class CircuitBreaker:
     _success_count: int = field(default=0, init=False)
     _last_failure_time: float = field(default=0.0, init=False)
     _half_open_calls: int = field(default=0, init=False)
+    _half_open_successes: int = field(default=0, init=False)  # NEW: Track half-open successes
     # Threading lock: asyncio.Lock binds to the loop where the breaker was first
     # constructed; Kalshi client + reconciliation may hop loops (asyncio.run).
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False)
@@ -150,6 +152,7 @@ class CircuitBreaker:
                     old = self._state.value
                     self._state = CircuitState.HALF_OPEN
                     self._half_open_calls = 0
+                    self._half_open_successes = 0  # Reset success counter for fresh test
                     logger.debug(f"Circuit '{self.name}' transitioning to HALF_OPEN")
                     _notify_listeners(self.name, old, "half_open", {"reason": "recovery_timeout"})
                 else:
@@ -165,13 +168,20 @@ class CircuitBreaker:
         """Record a successful call."""
         with self._lock:
             if self._state == CircuitState.HALF_OPEN:
+                self._half_open_successes += 1
                 self._success_count += 1
-                old = self._state.value
-                self._state = CircuitState.CLOSED
-                self._failure_count = 0
-                self._success_count = 0
-                logger.info(f"Circuit '{self.name}' CLOSED (recovered)")
-                _notify_listeners(self.name, old, "closed", {"reason": "recovered"})
+                # Require multiple consecutive successes before closing
+                if self._half_open_successes >= self.half_open_success_required:
+                    old = self._state.value
+                    self._state = CircuitState.CLOSED
+                    self._failure_count = 0
+                    self._success_count = 0
+                    self._half_open_successes = 0
+                    self._half_open_calls = 0
+                    logger.info(f"Circuit '{self.name}' CLOSED (recovered after {self.half_open_success_required} successes)")
+                    _notify_listeners(self.name, old, "closed", {"reason": "recovered", "half_open_successes": self._half_open_successes})
+                else:
+                    logger.debug(f"Circuit '{self.name}' half-open success {self._half_open_successes}/{self.half_open_success_required}")
             elif self._state == CircuitState.CLOSED:
                 self._failure_count = 0
     
@@ -226,6 +236,7 @@ class CircuitBreaker:
         self._success_count = 0
         self._last_failure_time = 0.0
         self._half_open_calls = 0
+        self._half_open_successes = 0
         logger.info(f"Circuit '{self.name}' manually reset to CLOSED")
     
     def get_stats(self) -> dict:
@@ -237,6 +248,10 @@ class CircuitBreaker:
             "failure_threshold": self.failure_threshold,
             "time_until_retry": self._time_until_retry(),
             "recovery_timeout": self.recovery_timeout,
+            "half_open_calls": self._half_open_calls,
+            "half_open_successes": self._half_open_successes,
+            "half_open_max_calls": self.half_open_max_calls,
+            "half_open_success_required": self.half_open_success_required,
         }
 
 

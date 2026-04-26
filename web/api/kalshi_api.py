@@ -34,6 +34,15 @@ from web.api.auth import get_current_session
 from auth.user_manager import require_role
 from utils.logger import get_logger
 
+# NEW v2 bankroll service - single source of truth
+from merid.event_venues.kalshi import (
+    get_bankroll_service,
+    BalanceState,
+    BalanceSuccess,
+    BalanceTemporaryError,
+    BalancePermanentError,
+)
+
 logger = get_logger("web.api.kalshi_api")
 
 
@@ -101,7 +110,7 @@ def _attach_kalshi_position_assets(rows: List[Dict[str, Any]]) -> None:
     """Attach ``asset`` from canonical ``kalshi_ticker_to_asset`` for each row."""
     try:
         from config.kalshi_crypto_config import kalshi_ticker_to_asset
-    except Exception:
+    except ImportError:
         return
     for p in rows:
         t = p.get("ticker") or ""
@@ -148,7 +157,7 @@ def _minutes_to_expiry_from_str(close_time_str: Optional[str]) -> Optional[float
         ct = _dt.datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
         delta = (ct - _dt.datetime.now(_dt.timezone.utc)).total_seconds() / 60.0
         return round(delta, 1) if delta > 0 else None
-    except Exception:
+    except (ValueError, TypeError):
         return None
 
 
@@ -170,6 +179,15 @@ def _get_risk():
         return None
 
 
+def _get_order_router():
+    """Lazy-load order router for testability (can be patched by tests)."""
+    try:
+        from merid.event_venues.kalshi.order_router import route_order_async
+        return route_order_async
+    except (ImportError, ModuleNotFoundError):
+        return None
+
+
 def _get_bridge():
     try:
         from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
@@ -185,7 +203,12 @@ def _get_rest_client():
         key_id = settings.KALSHI_API_KEY_ID
         key_path = settings.KALSHI_PRIVATE_KEY_PATH
         env = "demo" if settings.KALSHI_USE_DEMO else "prod"
-    except Exception:
+    except ImportError:
+        import os
+        key_id = os.environ.get("KALSHI_API_KEY_ID")
+        key_path = os.environ.get("KALSHI_PRIVATE_KEY_PATH")
+        env = "demo" if os.environ.get("KALSHI_USE_DEMO", "false").lower() == "true" else "prod"
+    except AttributeError:
         import os
         key_id = os.environ.get("KALSHI_API_KEY_ID")
         key_path = os.environ.get("KALSHI_PRIVATE_KEY_PATH")
@@ -1017,6 +1040,70 @@ async def get_reconciliation_status() -> Dict[str, Any]:
         }
 
 
+@router.get("/health/fills-ledger")
+async def get_fills_ledger_health() -> Dict[str, Any]:
+    """Get fills ledger health status including circuit breaker and DLQ.
+    
+    Returns detailed health information about the fills ledger persistence layer,
+    including circuit breaker state, dead letter queue status, and writer health.
+    
+    Use this endpoint to monitor for schema mismatches, persistence failures,
+    and event-loop lag issues.
+    """
+    from datetime import datetime, timezone
+    
+    try:
+        from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+        
+        ledger = get_fills_ledger()
+        health = await ledger.health_check()
+        
+        return {
+            **health,
+            "api_version": "1.0",
+        }
+        
+    except Exception as e:
+        logger.error(f"Fills ledger health fetch failed: {e}")
+        return {
+            "status": "unknown",
+            "message": f"Failed to fetch fills ledger health: {str(e)}",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+
+@router.post("/health/fills-ledger/reset-circuit")
+async def post_reset_circuit_breaker() -> Dict[str, Any]:
+    """Reset the fills ledger circuit breaker and replay DLQ fills.
+    
+    This endpoint should be called after a schema migration has been applied
+    to retry fills that failed due to schema errors.
+    
+    Returns the result of the circuit reset and DLQ replay operation.
+    """
+    from datetime import datetime, timezone
+    
+    try:
+        from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+        
+        ledger = get_fills_ledger()
+        result = await ledger.reset_circuit_breaker()
+        
+        return {
+            "success": True,
+            **result,
+            "api_version": "1.0",
+        }
+        
+    except Exception as e:
+        logger.error(f"Circuit breaker reset failed: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+
 @router.get("/meta/rate_limits")
 async def get_rate_limits_meta() -> Dict[str, Any]:
     """Get currently active rate limit configuration.
@@ -1211,7 +1298,7 @@ async def discover_health(
         if executor:
             try:
                 raw = await executor.get_positions()
-                real_positions = [{"ticker": p.symbol, "asset": None} for p in raw]
+                real_positions = [{"ticker": p.get("ticker", p.get("market_id", "")), "asset": None} for p in raw]
             except Exception as e:
                 logger.debug(f"Silent error: {e}")
         
@@ -1367,12 +1454,12 @@ async def get_positions(
             raw = await executor.get_positions()
             real_positions = [
                 {
-                    "ticker": p.symbol,
-                    "outcome": p.metadata.get("outcome", "yes"),
-                    "size": _safe_float_val(p.size, 0),
-                    "avg_price": _safe_float_val(p.entry_price, 0),
-                    "unrealized_pnl": _safe_float_val(p.pnl, 0),
-                    "realized_pnl": 0.0,
+                    "ticker": p.get("ticker", ""),
+                    "outcome": p.get("outcome", "yes"),
+                    "size": _safe_float_val(p.get("size", 0), 0),
+                    "avg_price": _safe_float_val(p.get("avg_price", 0), 0),
+                    "unrealized_pnl": _safe_float_val(p.get("unrealized_pnl", 0), 0),
+                    "realized_pnl": _safe_float_val(p.get("realized_pnl", 0), 0),
                     "source": "executor",
                     "synthetic": False,
                     "manual_or_external": False,
@@ -1973,7 +2060,7 @@ async def get_reconciliation_breaks(
         if venue_balance:
             # Calculate expected balance from fills
             expected_balance = _calculate_expected_balance_from_fills()
-            actual_available = float(venue_balance.get("available", 0))
+            actual_available = float(venue_balance.get("USD", venue_balance.get("available", 0)))
             
             drift = abs(expected_balance - actual_available)
             if drift > threshold_usd:
@@ -2276,46 +2363,45 @@ async def _get_fills_legacy(limit: int) -> Dict[str, Any]:
 
 @router.get("/balance")
 async def get_balance() -> Dict[str, Any]:
-    """Get Kalshi account balance with normalized units (dollars)."""
-    executor = _get_executor()
-    if executor:
-        try:
-            bal = await executor.get_balance()
-            # Executor returns dollars — no conversion needed
-            usd = _normalize_balance(bal.get("usd_dollars", bal.get("usd", 0)), "usd_dollars", source_is_cents=False)
-            locked = _normalize_balance(bal.get("locked_dollars", bal.get("locked", 0)), "locked_dollars", source_is_cents=False)
-            available = _normalize_balance(bal.get("available_dollars", bal.get("available", 0)), "available_dollars", source_is_cents=False)
-            return {
-                "usd": usd,
-                "locked": locked,
-                "available": available,
-                "source": "executor",
-                "units": "dollars",
-            }
-        except Exception as exc:
-            logger.warning(f"Executor balance failed: {exc}")
-
-    # Fallback: merid_core REST client
-    rest = _get_rest_client()
-    if rest:
-        try:
-            bal = await asyncio.to_thread(rest.get_balance)
-            # Kalshi REST API returns cents — explicitly convert
-            raw_balance = bal.get("balance", 0)
-            usd = _normalize_balance(raw_balance, "balance", source_is_cents=True)
-            return {
-                "usd": usd,
-                "locked": 0,
-                "available": usd,
-                "source": "rest_client",
-                "units": "dollars",
-                "raw_cents": raw_balance if _is_cents_format(raw_balance) else None,
-            }
-        except Exception as exc:
-            logger.warning(f"merid_core balance failed: {exc}")
-            return {"usd": 0, "locked": 0, "available": 0, "error": str(exc), "units": "dollars"}
-
-    return {"usd": 0, "locked": 0, "available": 0, "error": "No Kalshi client configured", "units": "dollars"}
+    """Get Kalshi account balance with normalized units (dollars).
+    
+    NEW v2 implementation - uses unified bankroll service.
+    Returns explicit state (FRESH/STALE/ERROR) instead of lying with zeros.
+    """
+    # Use v2 bankroll service - single source of truth
+    service = await get_bankroll_service()
+    summary = await service.get_summary()
+    
+    # Build response with explicit state
+    response = {
+        "state": summary.state.value,
+        "units": "dollars",
+        "as_of": summary.as_of.isoformat() if summary.as_of else None,
+        "source": summary.source,
+    }
+    
+    if summary.equity_usd is not None:
+        response["usd"] = float(summary.equity_usd)
+        response["max_position_usd"] = float(summary.max_position_usd) if summary.max_position_usd else None
+    else:
+        response["usd"] = None
+        response["max_position_usd"] = None
+    
+    # Add error info if applicable
+    if summary.state == BalanceState.ERROR:
+        response["error"] = summary.last_error_reason or "Bankroll unavailable"
+        response["alert"] = True
+    elif summary.state == BalanceState.STALE:
+        response["warning"] = summary.last_error_reason or "Using stale bankroll data"
+        response["stale"] = True
+    elif summary.state == BalanceState.UNKNOWN:
+        response["error"] = "Bankroll never fetched - initial load in progress"
+    
+    # Legacy fields for backward compatibility
+    response["locked"] = 0  # v2 doesn't track locked separately (it's part of equity)
+    response["available"] = response["usd"]
+    
+    return response
 
 
 # ── New Portfolio & Risk Endpoints ──────────────────────────────────────
@@ -2880,39 +2966,83 @@ async def place_order(
         logger.error(f"Order router failed: {exc}")
         raise HTTPException(503, f"Order routing failed: {exc}")
 
-    # Fallback: merid_core REST client (paper = simulated, live = real)
-    import uuid, time as _time
-    if mode_value == "paper":
-        return {
-            "status": "filled", "mode": "paper", "ticker": ticker,
-            "side": side, "action": action, "price_cents": price_cents, "count": count,
-            "fill": {"price": price_cents, "count": count, "simulated": True},
-            "reason": None, "latency_ms": 0.0,
-        }
+    # PASS 8 P0: FAIL CLOSED in LIVE/PAPER - no fallback allowed
+    # The REST fallback bypasses order_router, violating single-executor contract
+    from merid.utils.structured_logging import get_structured_logger
+    from merid.metrics.kalshi_metrics import record_guard_trip
+    
+    _guard_type = "PASS8_REST_FALLBACK_GUARD"
+    _endpoint = "/api/v1/kalshi/orders"
+    
+    # Structured logging for audit trail
+    _slogger = get_structured_logger(__name__)
+    _slogger.log_executor_failure(
+        error=f"order_router unavailable in {mode_value} mode",
+        fallback_attempted=False,
+        kill_switch_triggered=(mode_value in ("live", "paper"))
+    )
+    
+    # Metrics for monitoring
+    record_guard_trip(_guard_type, mode_value, _endpoint)
+    
+    logger.error(
+        f"[{_guard_type}] Order router unavailable in {mode_value} mode. "
+        "REST fallback blocked - trading halted for safety."
+    )
 
+    if mode_value in ("live", "paper"):
+        # Trigger kill-switch alert for executor contract violation
+        try:
+            from merid.risk.kill_switches import get_kill_switch
+            from merid.metrics.kalshi_metrics import record_kill_switch
+            
+            ks = get_kill_switch()
+            ks.trigger(
+                reason="Executor contract violation: order_router unavailable in non-SIM mode",
+                severity="critical",
+                source="kalshi_api.place_order"
+            )
+            
+            # Record kill switch metric
+            record_kill_switch(
+                reason="EXECUTOR_UNAVAILABLE",
+                severity="critical"
+            )
+            
+            # Log with structured logger
+            _slogger.log_kill_switch(
+                reason="Executor unavailable in non-SIM mode",
+                severity="critical",
+                source="kalshi_api.place_order",
+                details={"mode": mode_value, "guard": _guard_type}
+            )
+            
+        except Exception as _ks_err:
+            logger.error(f"[{_guard_type}] Failed to trigger kill-switch: {_ks_err}")
+
+        raise HTTPException(
+            status_code=503,
+            detail=json.dumps({
+                "error": "SYSTEM_DEGRADED_EXECUTOR_UNAVAILABLE",
+                "message": "Trading system degraded. Order router unavailable.",
+                "mode": mode_value,
+                "guard": _guard_type,
+                "severity": "critical",
+                "remediation": "Contact operations immediately. Do not attempt to bypass.",
+                "contact": "#on-call",
+                "status": "trading_halted",
+                "timestamp": "2026-04-23T00:00:00Z"
+            })
+        )
+
+    # SIM/MOCK only: Allow fallback for development (different risk profile)
+    # Note: This path should only be reached in explicit development/testing contexts
+    logger.warning("[PASS8_SIM_FALLBACK] SIM/MOCK mode: Using REST fallback for development")
+    import uuid, time as _time
     rest = _get_rest_client()
     if not rest:
-        raise HTTPException(500, "No Kalshi client configured for live orders")
-
-    # Fail-closed gate enforcement for the REST fallback path.
-    # The canonical LIVE path is routed through order_router, but we
-    # keep this gate check here to avoid bypass when the router
-    # cannot be imported or throws before returning an OrderResult.
-    if mode_value == "live":
-        try:
-            from core.execution_gate import check_execution_gate
-            gate = check_execution_gate()
-            if gate.blocked:
-                reasons = "; ".join(r.message for r in (gate.reasons or [])) or "unknown_execution_gate_reasons"
-                raise HTTPException(403, f"Trading halted: {reasons}")
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.error("execution_gate_unavailable_live_order_blocked (fallback): %s", exc, exc_info=True)
-            raise HTTPException(
-                503,
-                "Execution gate unavailable — live trading disabled until checks succeed",
-            ) from exc
+        raise HTTPException(500, "No Kalshi client configured")
+    
     try:
         t0 = _time.time()
         _coid = str(uuid.uuid4())
@@ -2925,13 +3055,13 @@ async def place_order(
         latency = (_time.time() - t0) * 1000
         order = result.get("order", {})
         return {
-            "status": order.get("status", "submitted"), "mode": "live",
+            "status": order.get("status", "submitted"), "mode": "sim_fallback",
             "ticker": ticker, "side": side, "action": action,
             "price_cents": price_cents, "count": count,
             "fill": order, "reason": None, "latency_ms": round(latency, 1),
         }
     except Exception as exc:
-        logger.error(f"merid_core order placement failed: {exc}")
+        logger.error(f"[PASS8_SIM_FALLBACK] Order placement failed: {exc}")
         raise HTTPException(500, f"Order placement failed: {exc}")
 
 
@@ -3788,7 +3918,7 @@ async def get_risk() -> Dict[str, Any]:
         if _executor:
             _pos_raw = await _executor.get_positions()
             for _p in _pos_raw:
-                _total_unrealized += _safe_float_val(getattr(_p, "pnl", 0), 0)
+                _total_unrealized += _safe_float_val(_p.get("unrealized_pnl", 0), 0)
         elif _rest:
             _pos_raw = await asyncio.to_thread(_rest.get_positions)
             for _p in _pos_raw:
@@ -5961,6 +6091,58 @@ async def fix_submit_order(
         ord_type: "limit" or "market"
         time_in_force: "gtc", "day", "ioc", or "fok"
     """
+    # PASS 8 P0: Hard disable FIX endpoint in LIVE/PAPER modes
+    # The FIX path bypasses order_router and uses KalshiFIXClient directly,
+    # violating the single-executor contract. Only allowed in SIM/MOCK.
+    from merid.trading.trade_mode import get_trade_mode
+    from merid.utils.structured_logging import get_structured_logger
+    from merid.metrics.kalshi_metrics import record_guard_trip
+    import json
+    
+    _mode = get_trade_mode()
+    _guard_type = "PASS8_FIX_GUARD"
+    _endpoint = "/api/v1/kalshi/fix/orders"
+    
+    if _mode in ("live", "paper"):
+        # Structured logging for audit trail
+        _slogger = get_structured_logger(__name__)
+        _slogger.log_guard_trip(
+            guard_type=_guard_type,
+            mode=_mode,
+            endpoint=_endpoint,
+            details={
+                "ticker": ticker,
+                "side": side,
+                "quantity": quantity,
+                "price": price,
+                "ord_type": ord_type
+            }
+        )
+        
+        # Metrics for monitoring/alerting
+        record_guard_trip(_guard_type, _mode, _endpoint)
+        
+        # Legacy logger for backward compatibility
+        logger.error(
+            f"[{_guard_type}] FIX endpoint blocked in {_mode} mode. "
+            f"Use canonical executor at /api/v1/kalshi/orders"
+        )
+        
+        # Enhanced error response with machine-readable code
+        raise HTTPException(
+            status_code=403,
+            detail=json.dumps({
+                "error": "GUARD_TRIP_FIX_ENDPOINT_BLOCKED",
+                "message": f"FIX protocol disabled in {_mode} mode",
+                "mode": _mode,
+                "guard": _guard_type,
+                "endpoint": _endpoint,
+                "remediation": "Use POST /api/v1/kalshi/orders with canonical executor",
+                "contact": "#risk-engineering",
+                "timestamp": "2026-04-23T00:00:00Z"  # Will be actual timestamp in real env
+            })
+        )
+    
     fix = _get_fix_client()
     if not fix:
         raise HTTPException(503, "FIX client not configured")

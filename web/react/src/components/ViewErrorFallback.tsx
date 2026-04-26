@@ -5,7 +5,7 @@
  * when a view crashes during rendering.
  */
 
-import { AlertTriangle, RefreshCw, Home } from 'lucide-react';
+import { AlertTriangle, RefreshCw, Home } from '../ui/icons';
 
 interface ViewErrorFallbackProps {
   viewName?: string;

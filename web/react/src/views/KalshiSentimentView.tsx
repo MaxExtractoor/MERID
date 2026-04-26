@@ -13,7 +13,7 @@ import {
   Activity, TrendingUp, TrendingDown, BarChart3,
   AlertTriangle, Gauge, RefreshCw, Flame, Snowflake,
   ArrowUp, ArrowDown, Clock, Zap, Target, ArrowRight, Minus,
-} from 'lucide-react';
+} from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import { useLaneSentimentSnapshot } from '../hooks/useSentimentBundle';
 import { API_ENDPOINTS, DEFAULTS, CHART_COLORS } from '../config/constants';

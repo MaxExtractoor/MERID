@@ -81,10 +81,14 @@ class TradeVerdict:
 
 @dataclass
 class DomainCap:
-    """Per-domain execution limits."""
+    """Per-domain execution limits.
+    
+    PRODUCTION SAFETY: Defaults are 0. Limits must be configured explicitly
+    from live bankroll - never use hardcoded values.
+    """
     domain: str
-    max_daily_notional_usd: float = 5000.0
-    max_single_trade_usd: float = 1000.0
+    max_daily_notional_usd: float = 0.0  # No default - configure from bankroll
+    max_single_trade_usd: float = 0.0  # No default - configure from bankroll
     max_daily_trades: int = 50
     enabled: bool = True
     kill_switch: bool = False
@@ -159,10 +163,14 @@ class VenueExposureCap:
 
 @dataclass
 class AssetCap:
-    """Per-asset daily notional limits for crypto trading."""
+    """Per-asset daily notional limits for crypto trading.
+    
+    PRODUCTION SAFETY: Defaults are 0. Limits must be configured explicitly
+    from live bankroll - never use hardcoded values.
+    """
     asset: str
-    max_daily_notional_usd: float = 4000.0
-    max_single_trade_usd: float = 1000.0
+    max_daily_notional_usd: float = 0.0  # No default - configure from bankroll
+    max_single_trade_usd: float = 0.0  # No default - configure from bankroll
 
     # Runtime counters (reset daily)
     daily_notional_usd: float = 0.0

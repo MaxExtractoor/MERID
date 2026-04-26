@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Clock, ShieldOff, Zap, RefreshCw, Radio, Settings, Filter, Lightbulb } from 'lucide-react';
+import { Clock, ShieldOff, Zap, RefreshCw, Radio, Settings, Filter, Lightbulb } from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { HelpPopover } from './HelpPopover';

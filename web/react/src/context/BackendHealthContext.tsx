@@ -33,7 +33,7 @@ export interface BackendHealthState {
   reportFailure: () => void;
 }
 
-const BackendHealthContext = createContext<BackendHealthState>({
+export const BackendHealthContext = createContext<BackendHealthState>({
   backendOffline: false,
   lastSuccessAt: null,
   nextRetryAt: null,

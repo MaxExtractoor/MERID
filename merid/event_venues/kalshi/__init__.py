@@ -41,6 +41,43 @@ from merid.event_venues.kalshi.kalshi_risk import (
     get_kalshi_risk,
     edge_from_prediction,
     kelly_size_from_kalman,
+    get_live_bankroll,
+    get_live_bankroll_async,
+)
+# LEGACY: Old bankroll service moved to legacy/
+# Use bankroll_service_v2 instead
+# from merid.event_venues.kalshi.legacy.bankroll_service import ...
+
+# NEW v2 modules - preferred
+from merid.event_venues.kalshi.types import (
+    BalanceState,
+    RawVenueBalance,
+    InternalBankroll,
+    BalanceSuccess,
+    BalanceTemporaryError,
+    BalancePermanentError,
+    BalanceResult,
+)
+from merid.event_venues.kalshi.client_v2 import KalshiClientV2
+from merid.event_venues.kalshi.bankroll_service_v2 import (
+    BankrollServiceV2,
+    BankrollSummary,
+    get_bankroll_service,
+    get_equity_for_risk_calc_sync,
+    get_summary_sync,
+)
+from merid.event_venues.kalshi.signal_router import (
+    AgentSignal,
+    SignalRouter,
+    get_signal_router,
+    subscribe_to_signals,
+    submit_signal,
+)
+from merid.event_venues.kalshi.risk_policy import (
+    KalshiRiskPolicy,
+    RiskAllowance,
+    get_default_policy,
+    check_trade_allowed,
 )
 from merid.event_venues.kalshi.ws_bridge import (
     KalshiWebSocketBridge,
@@ -93,6 +130,7 @@ from merid.event_venues.kalshi.crypto_series import (
 )
 
 __all__ = [
+    # Core v1 client
     "KalshiVenueClient",
     "KalshiSessionError",
     "KalshiBusinessError",
@@ -121,6 +159,8 @@ __all__ = [
     "dynamic_position_sizes",
     "multi_market_kelly_sizes",
     "get_kalshi_risk",
+    "get_live_bankroll",
+    "get_live_bankroll_async",
     "KalshiWebSocketBridge",
     "get_ws_bridge",
     "MarketSnapshot",
@@ -164,4 +204,26 @@ __all__ = [
     "MarketInfo",
     "invalidate_crypto_series_cache",
     "get_cache_stats",
+    # NEW v2 modules
+    "BalanceState",
+    "RawVenueBalance",
+    "InternalBankroll",
+    "BalanceSuccess",
+    "BalanceTemporaryError",
+    "BalancePermanentError",
+    "BalanceResult",
+    "KalshiClientV2",
+    "BankrollServiceV2",
+    "BankrollSummary",
+    "get_equity_for_risk_calc_sync",
+    "get_summary_sync",
+    "AgentSignal",
+    "SignalRouter",
+    "get_signal_router",
+    "subscribe_to_signals",
+    "submit_signal",
+    "KalshiRiskPolicy",
+    "RiskAllowance",
+    "get_default_policy",
+    "check_trade_allowed",
 ]

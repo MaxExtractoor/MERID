@@ -2,7 +2,7 @@ venue:
   name: kalshi
   base_url: https://api.elections.kalshi.com/trade-api/v2
   use_demo: false
-  max_notional_per_expiry_usd: 1000
+  max_notional_per_expiry_usd: 0  # 0 = derive from actual Kalshi bankroll (was $1000)
   max_open_markets_per_asset: 20
 session:
   maintenance_day: 3
@@ -26,10 +26,11 @@ agents:
     category: crypto
     frequency: fifteen_min
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 10
     cutoff_minutes_before_expiry: 2
@@ -64,10 +65,11 @@ agents:
     category: crypto
     frequency: hourly
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 30
     cutoff_minutes_before_expiry: 2
@@ -97,10 +99,11 @@ agents:
     category: crypto
     frequency: daily
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 120
     cutoff_minutes_before_expiry: 15
@@ -130,10 +133,11 @@ agents:
     category: crypto
     frequency: weekly
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 5
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 1440
     cutoff_minutes_before_expiry: 60
@@ -164,10 +168,11 @@ agents:
     category: crypto
     frequency: fifteen_min
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 10
     cutoff_minutes_before_expiry: 2
@@ -201,10 +206,11 @@ agents:
     category: crypto
     frequency: hourly
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 30
     cutoff_minutes_before_expiry: 2
@@ -234,10 +240,11 @@ agents:
     category: crypto
     frequency: daily
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 120
     cutoff_minutes_before_expiry: 15
@@ -267,10 +274,11 @@ agents:
     category: crypto
     frequency: weekly
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 5
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 1440
     cutoff_minutes_before_expiry: 60
@@ -305,10 +313,11 @@ agents:
     category: crypto
     frequency: fifteen_min
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 10
     cutoff_minutes_before_expiry: 2
@@ -338,10 +347,11 @@ agents:
     category: crypto
     frequency: hourly
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 30
     cutoff_minutes_before_expiry: 2
@@ -371,10 +381,11 @@ agents:
     category: crypto
     frequency: daily
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 120
     cutoff_minutes_before_expiry: 15
@@ -404,10 +415,11 @@ agents:
     category: crypto
     frequency: weekly
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 5
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 1440
     cutoff_minutes_before_expiry: 60
@@ -442,10 +454,11 @@ agents:
     category: crypto
     frequency: fifteen_min
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 10
     cutoff_minutes_before_expiry: 2
@@ -475,10 +488,11 @@ agents:
     category: crypto
     frequency: hourly
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 30
     cutoff_minutes_before_expiry: 2
@@ -508,10 +522,11 @@ agents:
     category: crypto
     frequency: daily
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 120
     cutoff_minutes_before_expiry: 15
@@ -541,10 +556,11 @@ agents:
     category: crypto
     frequency: weekly
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 5
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 1440
     cutoff_minutes_before_expiry: 60
@@ -575,10 +591,11 @@ agents:
     category: crypto
     frequency: monthly
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 5
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 10080
     cutoff_minutes_before_expiry: 360
@@ -598,10 +615,11 @@ agents:
     category: crypto
     frequency: annual
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 3
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 43200
     cutoff_minutes_before_expiry: 1440
@@ -621,10 +639,11 @@ agents:
     category: crypto
     frequency: monthly
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 5
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 10080
     cutoff_minutes_before_expiry: 360
@@ -643,10 +662,11 @@ agents:
     category: crypto
     frequency: annual
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 3
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 43200
     cutoff_minutes_before_expiry: 1440
@@ -666,10 +686,11 @@ agents:
     category: crypto
     frequency: monthly
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 5
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 10080
     cutoff_minutes_before_expiry: 360
@@ -688,10 +709,11 @@ agents:
     category: crypto
     frequency: annual
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 3
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 43200
     cutoff_minutes_before_expiry: 1440
@@ -711,10 +733,11 @@ agents:
     category: crypto
     frequency: monthly
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 5
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 10080
     cutoff_minutes_before_expiry: 360
@@ -733,10 +756,11 @@ agents:
     category: crypto
     frequency: annual
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 3
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 43200
     cutoff_minutes_before_expiry: 1440
@@ -756,10 +780,11 @@ agents:
     category: crypto
     frequency: monthly
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 5
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 10080
     cutoff_minutes_before_expiry: 360
@@ -778,10 +803,11 @@ agents:
     category: crypto
     frequency: annual
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 3
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 43200
     cutoff_minutes_before_expiry: 1440
@@ -805,10 +831,11 @@ agents:
     category: crypto
     frequency: fifteen_min
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 10
     cutoff_minutes_before_expiry: 2
@@ -827,10 +854,11 @@ agents:
     category: crypto
     frequency: hourly
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 30
     cutoff_minutes_before_expiry: 2
@@ -849,10 +877,11 @@ agents:
     category: crypto
     frequency: daily
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 120
     cutoff_minutes_before_expiry: 15
@@ -871,40 +900,45 @@ agents:
     category: crypto
     frequency: weekly
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 5
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 1440
     cutoff_minutes_before_expiry: 60
 # Multi-asset 15m crypto MM. ``pm_spot_hard_gate: true`` = do not emit QUOTE without healthy
 # Coinbase/LivePriceFeed PM spot (see merid.prediction.trading_agent._apply_pm_spot_hard_gate).
 # Add the same flag to any future market_maker agent that requires spot-aligned quoting.
-- name: CRYPTO_15M_MM
-  assets: []
-  timeframes:
-  - 15m
-  archetype: market_maker
-  pm_spot_hard_gate: true
-  strategy:
-    # MM quotes both sides — slightly lower threshold than directional because spread capture
-    # compensates, but still aggressively conservative vs original 1-2.5%
-    min_edge_early: 0.06
-    min_edge_mid:   0.05
-    min_edge_late:  0.04
-    min_edge_terminal: 0.03
-  market_filter:
-    category: crypto
-    frequency: fifteen_min
-  risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
-  entry_window:
-    minutes_before_expiry: 14
-    cutoff_minutes_before_expiry: 2
+# QUARANTINED: Agent-based MM uses min_depth_contracts sizing which bypasses Top-N allocator.
+# Only CT-cycle MM is allowed (uses Top-N allocator with 1-2% total bankroll cap).
+# Re-enable only after agent-based sizing routes through TopNAllocator.
+# - name: CRYPTO_15M_MM
+#   enabled: false
+#   assets: []
+#   timeframes:
+#   - 15m
+#   archetype: market_maker
+#   pm_spot_hard_gate: true
+#   strategy:
+#     min_edge_early: 0.06
+#     min_edge_mid:   0.05
+#     min_edge_late:  0.04
+#     min_edge_terminal: 0.03
+#     max_contracts_per_order: 3
+#     mm_inventory_limit: 3
+#   market_filter:
+#     category: crypto
+#     frequency: fifteen_min
+#   risk_limits:
+#     max_yes_position: 3
+#     max_no_position: 3
+#     max_orders_per_window: 0
+#     max_notional_usd: 0
+#   entry_window:
+#     minutes_before_expiry: 14
+#     cutoff_minutes_before_expiry: 2
 # QUARANTINED: KALSHI_ARB_SCANNER — arbitrage archetype with no assets/timeframes.
 # Dead in Kalshi-only mode: no crypto exchange connections for cross-venue arb.
 # Preserved as a placeholder only; the ``archetype: arbitrage`` branch in strategy.py
@@ -921,10 +955,11 @@ agents:
   market_filter:
     category: economics
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 1440
     cutoff_minutes_before_expiry: 60
@@ -938,10 +973,11 @@ agents:
   market_filter:
     category: financials
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 1440
     cutoff_minutes_before_expiry: 60
@@ -953,10 +989,11 @@ agents:
   market_filter:
     category: politics
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 5
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 10080
     cutoff_minutes_before_expiry: 1440
@@ -969,10 +1006,11 @@ agents:
   market_filter:
     category: climate
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 5
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 1440
     cutoff_minutes_before_expiry: 60
@@ -983,10 +1021,11 @@ agents:
   market_filter:
     category: sports
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 1440
     cutoff_minutes_before_expiry: 30
@@ -997,10 +1036,11 @@ agents:
   market_filter:
     category: tech
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 5
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 10080
     cutoff_minutes_before_expiry: 1440
@@ -1017,10 +1057,11 @@ agents:
   market_filter:
     category: crypto
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 8
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 1440
     cutoff_minutes_before_expiry: 30
@@ -1032,10 +1073,11 @@ agents:
   market_filter:
     category: economics
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 5
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 10080
     cutoff_minutes_before_expiry: 1440
@@ -1052,10 +1094,11 @@ agents:
   market_filter:
     category: crypto
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 8
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 1440
     cutoff_minutes_before_expiry: 30
@@ -1067,10 +1110,11 @@ agents:
   market_filter:
     category: financials
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 5
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 1440
     cutoff_minutes_before_expiry: 60
@@ -1089,10 +1133,11 @@ agents:
   market_filter:
     category: crypto
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 240
     cutoff_minutes_before_expiry: 5
@@ -1104,10 +1149,11 @@ agents:
   market_filter:
     category: all
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 8
-    max_notional_usd: 250
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 480
     cutoff_minutes_before_expiry: 20
@@ -1117,10 +1163,11 @@ agents:
   market_filter:
     category: all
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 5
-    max_notional_usd: 200
+    # 3 contracts max per side — with 1-2% total cycle risk, this is ~1% per side max
+    max_yes_position: 3  # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_no_position: 3   # Max 3 contracts (aligned with 1-2% total cycle risk)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $200)
   entry_window:
     minutes_before_expiry: 60
     cutoff_minutes_before_expiry: 5

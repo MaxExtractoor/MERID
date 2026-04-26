@@ -6,7 +6,6 @@
 import React from 'react';
 
 import {
-  // Navigation & UI
   ChevronLeft,
   ChevronRight,
   ChevronUp,
@@ -26,8 +25,6 @@ import {
   ShieldAlert,
   ShieldOff,
   AlertCircle,
-  
-  // Trading & Finance
   TrendingUp,
   TrendingDown,
   DollarSign,
@@ -52,8 +49,6 @@ import {
   Brain,
   Power,
   PowerOff,
-  
-  // Actions
   Play,
   Pause,
   Square,
@@ -71,8 +66,6 @@ import {
   Layers,
   Package,
   Sliders,
-  
-  // Status & Indicators
   Clock,
   Wifi,
   WifiOff,
@@ -89,8 +82,6 @@ import {
   Database,
   HelpCircle,
   Server,
-  
-  // Charts & Analytics
   PieChart,
   LineChart,
   AreaChart,
@@ -100,14 +91,10 @@ import {
   Flame,
   Bookmark,
   Lightbulb,
-  
-  // Time & Calendar
   Calendar,
   CalendarDays,
   Timer,
   Hourglass,
-  
-  // Communication
   MessageSquare,
   Bell,
   Send,
@@ -117,8 +104,6 @@ import {
   Volume2,
   VolumeX,
   ExternalLink,
-  
-  // Files & Documents
   FileText,
   File,
   FileWarning,
@@ -126,15 +111,11 @@ import {
   FolderOpen,
   DownloadCloud,
   UploadCloud,
-  
-  // Development
   Code,
   Terminal,
   GitBranch,
   Cpu,
   HardDrive,
-  
-  // Social & Collaboration
   Users2,
   UserPlus,
   UserCheck,
@@ -142,29 +123,21 @@ import {
   Heart,
   Share,
   Link,
-  
-  // Security & Privacy
   Lock,
   Unlock,
   Key,
   Fingerprint,
-  
-  // Media
   Image,
   Video,
   Music,
   Camera,
   Mic,
   MicOff,
-  
-  // Transportation & Movement
   Truck,
   Plane,
   Ship,
   Car,
   Bike,
-  
-  // Weather & Environment
   Cloud,
   CloudRain,
   CloudOff,
@@ -174,8 +147,6 @@ import {
   Thermometer,
   Snowflake,
   Droplets,
-  
-  // Miscellaneous
   MoreHorizontal,
   MoreVertical,
   Maximize2,
@@ -192,6 +163,14 @@ import {
   ArrowDownCircle,
   PauseCircle,
   RotateCcw,
+  Ban,
+  BellOff,
+  ClipboardList,
+  Grid,
+  Rocket,
+  StopCircle,
+  Tag,
+  Trash,
 } from 'lucide-react';
 
 // Icon registry for type-safe icon usage
@@ -411,8 +390,6 @@ export {
   ChevronDown,
   Menu,
   LucideX as X,
-  Search,
-  Filter,
   Settings,
   Home,
   Globe,
@@ -555,10 +532,21 @@ export {
   Hash,
   AtSign,
   Percent,
+  Search,
+  Filter,
+  Inbox,
   ArrowRight,
   ArrowDownCircle,
   PauseCircle,
   RotateCcw,
+  Ban,
+  BellOff,
+  ClipboardList,
+  Grid,
+  Rocket,
+  StopCircle,
+  Tag,
+  Trash,
 };
 
 export default {

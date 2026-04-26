@@ -3,7 +3,7 @@
 
 from typing import Dict, Any
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from utils.logger import get_logger
 
@@ -12,10 +12,10 @@ logger = get_logger("config.agent_modes")
 
 @dataclass
 class AgentModeConfig:
-    """Configuration for a single agent's mode and sizing."""
+    """Configuration for a single agent's mode and sizing (ENV-DRIVEN)."""
     mode: str  # "shadow", "paper", "live"
-    size_multiplier: float = 1.0
-    enabled: bool = True
+    size_multiplier: float = field(default_factory=lambda: float(os.getenv("MERID_AGENT_SIZE_MULTIPLIER", "1.0")))
+    enabled: bool = field(default_factory=lambda: os.getenv("MERID_AGENT_ENABLED", "true").lower() == "true")
 
 
 # Default agent mode configurations

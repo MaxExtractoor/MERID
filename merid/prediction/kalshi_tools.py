@@ -409,93 +409,89 @@ async def _kalshi_place_order(
                 tool_name="kalshi_place_order",
             )
 
-        # Route through canonical order router (ensures fills ledger, risk checks, lineage)
+        # Route through Signal Router (Single Executor Principle)
+        # SIGNAL-ONLY AGENT: kalshi_tools submits signals to trading_agent for execution.
+        # trading_agent is the SOLE EXECUTOR that calls route_order_async.
         try:
-            from merid.event_venues.kalshi.decision_trace import new_decision_trace_id
-            from merid.event_venues.kalshi.order_router import route_order_async, OrderIntent
-            from merid.prediction.venue_gate import TradingMode
+            from merid.event_venues.kalshi import submit_signal
 
             _pc = max(1, min(99, int(price_cents or 50)))
-            _mode = TradingMode.PAPER if _is_shadow else TradingMode.LIVE
-            intent = OrderIntent(
-                ticker=ticker,
-                side=side,
+
+            signal = submit_signal(
+                agent_id=_agent_name if _agent_name else "kalshi_tools",
+                agent_type="kalshi_tools",
+                market_id=ticker,
                 action=action,
+                side=side,
+                size=max(1, int(count)),
                 price_cents=_pc,
-                count=max(1, int(count)),
-                mode=_mode,
-                order_type="limit" if price_cents else "market",
-                time_in_force="gtc",
-                source="kalshi_tools",
-                decision_trace_id=new_decision_trace_id("tool"),
-                sentiment_driven=False,
-                agent_id=_agent_name if _agent_name else None,
+                confidence=0.7,
+                reasoning=f"Tool-based order: {action} {side} on {ticker}",
+                metadata={
+                    "is_shadow": _is_shadow,
+                    "original_price_cents": price_cents,
+                },
+                origin_agent=_agent_name if _agent_name else "kalshi_tools",
+                risk_bucket="tool_manual",
             )
 
-            result = await route_order_async(intent)
+            logger.info(
+                "[kalshi_tools] Signal submitted to trading_agent: %s | %s %s on %s count=%d price=%d¢",
+                signal.signal_id, action, side, ticker, count, _pc
+            )
 
-            if result.status in ("rejected",):
-                return ToolResult.fail(
-                    ToolErrorCode.INTERNAL,
-                    f"Order rejected: {result.reason or ''}",
-                    tool_name="kalshi_place_order",
-                )
-
-            placed = result.fill or {}
             payload = {
-                "order_id": placed.get("order_id") or placed.get("fill_id") or "",
+                "order_id": signal.signal_id,
                 "ticker": ticker,
                 "side": side,
                 "action": action,
                 "price_cents": price_cents or _pc,
                 "count": count,
-                "status": result.status,
+                "status": "signal_submitted",
                 "simulated": False,
                 "shadow": _is_shadow,
+                "signal_id": signal.signal_id,
+                "message": "Signal submitted to trading_agent for execution",
             }
-            
-        except ImportError as _imp:
-            # FAIL-CLOSED: order_router is required for idempotency safety.
-            # Direct client calls bypass: deterministic client_order_id, pre-trade gate,
-            # jittered backoff, duplicate error handling, and sanity checking.
-            logger.error("order_router unavailable — rejecting order for safety: %s", _imp)
-            return ToolResult.fail(
-                ToolErrorCode.INTERNAL,
-                "Order router unavailable — order rejected for idempotency safety",
+
+            if _is_shadow and _agent_name:
+                try:
+                    from merid.event_venues.kalshi.deployment import get_deployment_controller
+                    get_deployment_controller().record_shadow_trade(_agent_name)
+                    from merid.prediction.paper_session import get_paper_session
+                    _ps = get_paper_session()
+                    if _ps.is_active:
+                        _ps.record_fill(
+                            agent_name=_agent_name,
+                            pnl_cents=0.0,
+                            fees_cents=0.0,
+                            won=None,
+                        )
+                except Exception as _she:
+                    logger.warning("shadow parallel paper record failed: %s", _she)
+            elif _agent_name:
+                try:
+                    from merid.event_venues.kalshi.deployment import get_deployment_controller
+                    get_deployment_controller().record_live_trade(_agent_name)
+                except Exception as _lte:
+                    logger.warning("live trade record failed: %s", _lte)
+
+            return ToolResult(
+                success=True,
+                payload=payload,
+                source="kalshi",
+                validity=ToolValidity.FRESH,
                 tool_name="kalshi_place_order",
+                latency_ms=round((time.time() - t0) * 1000, 2),
             )
 
-        # L4: Shadow mode — record parallel paper fill and increment counters
-        if _is_shadow and _agent_name:
-            try:
-                from merid.event_venues.kalshi.deployment import get_deployment_controller
-                get_deployment_controller().record_shadow_trade(_agent_name)
-                from merid.prediction.paper_session import get_paper_session
-                _ps = get_paper_session()
-                if _ps.is_active:
-                    _ps.record_fill(
-                        agent_name=_agent_name,
-                        pnl_cents=0.0,  # PnL unknown at fill time; updated on settlement
-                        fees_cents=0.0,
-                        won=None,
-                    )
-            except Exception as _she:
-                logger.warning("shadow parallel paper record failed: %s", _she)
-        elif _agent_name:
-            try:
-                from merid.event_venues.kalshi.deployment import get_deployment_controller
-                get_deployment_controller().record_live_trade(_agent_name)
-            except Exception as _lte:
-                logger.warning("live trade record failed: %s", _lte)
-
-        return ToolResult(
-            success=True,
-            payload=payload,
-            source="kalshi",
-            validity=ToolValidity.FRESH,
-            tool_name="kalshi_place_order",
-            latency_ms=round((time.time() - t0) * 1000, 2),
-        )
+        except ImportError as _imp:
+            logger.error(f"[kalshi_tools] Signal router import failed: {_imp}")
+            return ToolResult.fail(
+                ToolErrorCode.INTERNAL,
+                "Signal router unavailable — order rejected for safety",
+                tool_name="kalshi_place_order",
+            )
 
     except Exception as exc:
         logger.error(f"kalshi_place_order failed: {exc}")

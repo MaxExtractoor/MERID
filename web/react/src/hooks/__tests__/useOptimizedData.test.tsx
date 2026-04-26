@@ -3,7 +3,7 @@
  * Covers race conditions, retry logic, caching, and error handling
  */
 import { renderHook, waitFor, act } from '@testing-library/react';
-import { useOptimizedData } from '../useOptimizedData';
+import { useOptimizedData, clearSharedCache } from '../useOptimizedData';
 
 // Mock constants
 jest.mock('../../config/constants', () => ({
@@ -17,11 +17,16 @@ jest.mock('../../config/constants', () => ({
     },
   },
   RETRY_DEFAULTS: {
-    COUNT: 3,
-    DELAY_MS: 1000,
+    MAX_RETRIES: 3,
+    BASE_DELAY: 1000,
+    MAX_DELAY: 30000,
   },
   CACHE_TTL: {
     DEFAULT: 5 * 60 * 1000,
+    RECONCILIATION: 2 * 60 * 1000,
+    DECISIONS: 10 * 60 * 1000,
+    AUDIT: 30 * 60 * 1000,
+    ANALYTICS: 15 * 60 * 1000,
   },
   AUTH_TOKEN_KEY: 'merid-access',
 }));
@@ -37,6 +42,7 @@ jest.mock('../useWebSocket', () => ({
 describe('useOptimizedData', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    clearSharedCache();
     global.fetch = jest.fn();
   });
 

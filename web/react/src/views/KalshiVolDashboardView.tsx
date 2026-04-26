@@ -14,7 +14,7 @@ import {
   Wifi, WifiOff, AlertCircle, Activity, Zap,
   ShieldOff, ToggleLeft, ToggleRight, Bot,
   ArrowRight,
-} from 'lucide-react';
+} from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, HEALTH_STATUS, AGENT_STATUS, AUTH_TOKEN_KEY} from '../config/constants';
 import KalshiModeBadge from '../components/KalshiModeBadge';

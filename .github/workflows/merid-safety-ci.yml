@@ -1,0 +1,114 @@
+name: MERID Safety CI
+
+on:
+  push:
+    branches: [ main, develop, pass12-hardening ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  PYTHON_VERSION: "3.11"
+  KALSHI_ENV: demo
+  MERID_TRADE_MODE: sim
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # Job 1: Structural Safety Checks (Fast - ~30s)
+  # ═══════════════════════════════════════════════════════════════════════════════
+  safety-checks:
+    name: Safety Invariant Checks
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install minimal dependencies
+      run: |
+        pip install pytest fastapi httpx pydantic pyyaml
+    
+    - name: Run CI Invariant Checks
+      run: |
+        echo "Running Kalshi invariant checks..."
+        python scripts/ci/check_kalshi_invariants.py
+      id: invariants
+      continue-on-error: false
+    
+    - name: Check Results
+      if: steps.invariants.outcome == 'failure'
+      run: |
+        echo "❌ INVARIANT CHECKS FAILED"
+        echo "Critical safety violations detected"
+        exit 1
+    
+    - name: Success
+      run: |
+        echo "✅ All invariant checks passed"
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # Job 2: Unit and Integration Tests
+  # ═══════════════════════════════════════════════════════════════════════════════
+  tests:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    needs: safety-checks
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Create virtual environment
+      run: |
+        python -m venv venv_test
+        source venv_test/bin/activate
+        pip install -e .
+        pip install pytest pytest-asyncio httpx fastapi pyyaml
+    
+    - name: Run Risk Enforcement Tests
+      run: |
+        source venv_test/bin/activate
+        pytest tests/risk/test_unified_risk_enforcement.py -v --tb=short
+    
+    - name: Run Security Tests
+      run: |
+        source venv_test/bin/activate
+        pytest tests/security/ -v --tb=short
+    
+    - name: Run Scenario Tests (Logic-based)
+      run: |
+        source venv_test/bin/activate
+        pytest tests/scenario/test_pass9_scenarios.py::TestScenarioA_MultiAgentFlood -v
+        pytest tests/scenario/test_pass9_scenarios.py::TestScenarioC_ConfigMisSet -v
+        pytest tests/scenario/test_pass9_scenarios.py::TestScenarioE_ModeTransitions -v
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # Summary Job
+  # ═══════════════════════════════════════════════════════════════════════════════
+  summary:
+    name: CI Summary
+    runs-on: ubuntu-latest
+    needs: [safety-checks, tests]
+    if: always()
+    
+    steps:
+    - name: Summary
+      run: |
+        echo "═══════════════════════════════════════════════════════════"
+        echo "                    MERID SAFETY CI SUMMARY"
+        echo "═══════════════════════════════════════════════════════════"
+        echo ""
+        echo "Jobs Status:"
+        echo "  Safety Checks: ${{ needs.safety-checks.result }}"
+        echo "  Test Suite: ${{ needs.tests.result }}"
+        echo ""
+        echo "═══════════════════════════════════════════════════════════"

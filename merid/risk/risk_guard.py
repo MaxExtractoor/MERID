@@ -49,22 +49,26 @@ class LimitType(str, Enum):
 
 @dataclass
 class RiskLimits:
-    """Global risk limit configuration."""
-    # Position limits
-    max_position_usd_per_symbol: float = 10000.0
-    max_total_exposure_usd: float = 100000.0
+    """Global risk limit configuration.
+    
+    PRODUCTION SAFETY: All defaults are 0. Limits must be configured explicitly
+    from live bankroll (1-2% of equity) - never use hardcoded values.
+    """
+    # Position limits - MUST be set from live bankroll (e.g., 1-2% of equity)
+    max_position_usd_per_symbol: float = 0.0  # No default - configure from bankroll
+    max_total_exposure_usd: float = 0.0  # No default - configure from bankroll
     max_leverage: float = 3.0
     
-    # Loss limits
-    max_daily_loss_usd: float = 5000.0
+    # Loss limits - MUST be set from live bankroll (e.g., daily loss limit)
+    max_daily_loss_usd: float = 0.0  # No default - configure from bankroll
     max_drawdown_pct: float = 10.0
     
     # Concentration limits
     max_concentration_pct: float = 25.0  # Max % of portfolio in single asset
     max_venue_concentration_pct: float = 50.0  # Max % on single venue
     
-    # Per-trade limits
-    max_single_trade_usd: float = 5000.0
+    # Per-trade limits - MUST be set from live bankroll
+    max_single_trade_usd: float = 0.0  # No default - configure from bankroll
     min_confidence_for_trade: float = 0.5
     
     # Timing limits

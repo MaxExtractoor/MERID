@@ -232,7 +232,7 @@ class TestBatchRegime:
     def test_new_batch_after_all_closed(
         self, top3_enabled_env, reset_batch_manager
     ):
-        """New batch can be created after all positions closed."""
+        """New batch can be created after all positions closed and reconciled."""
         mgr = get_top3_batch_manager()
         
         candidates = [
@@ -254,11 +254,15 @@ class TestBatchRegime:
         # Verify batch is closed
         assert batch1.status.value == "closed"
         
-        # Now can create new batch
+        # CRITICAL: Must reconcile before new cycle can start
+        mgr.mark_batch_reconciled(batch1.batch_id, realized_pnl_cents=500)
+        
+        # Now can create new batch (cycle lock released)
         batch2 = mgr.maybe_create_new_batch(
             bankroll_notional=100_000,
             candidates=candidates,
         )
+        
         assert batch2 is not None
         assert batch2.batch_id != batch1.batch_id
 

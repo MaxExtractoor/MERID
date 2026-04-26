@@ -1095,7 +1095,10 @@ class PnlDivergenceAlert(AlertRule):
             engine = get_paper_engine()
             port = engine.get_portfolio_summary("default")
             paper_pnl = port.get("total_pnl", 0.0) + port.get("unrealized_pnl", 0.0)
-        except Exception:
+        except ImportError:
+            paper_pnl = None
+        except (RuntimeError, AttributeError) as e:
+            logger.debug("Paper PnL unavailable: %s", e)
             paper_pnl = None
 
         risk_pnl = None
@@ -1103,7 +1106,9 @@ class PnlDivergenceAlert(AlertRule):
             from web.api.system_endpoints import _real_pnl
             pnl_data = _real_pnl()
             risk_pnl = pnl_data.get("total_pnl", 0.0)
-        except Exception as _pe:
+        except ImportError:
+            logger.debug("PnL divergence probe: _real_pnl module unavailable")
+        except (RuntimeError, AttributeError) as _pe:
             logger.debug("PnL divergence probe: _real_pnl unavailable: %s", _pe)
 
         if paper_pnl is None or risk_pnl is None:
@@ -1195,7 +1200,10 @@ class ReconciliationDegradedAlert(AlertRule):
         try:
             from merid.reconciliation import get_last_report
             report = get_last_report()
-        except Exception:
+        except ImportError:
+            report = None
+        except (RuntimeError, AttributeError) as e:
+            logger.debug("Reconciliation report unavailable: %s", e)
             report = None
 
         if report is None:
@@ -1459,7 +1467,16 @@ class WSSequenceGapAlert(AlertRule):
                     "reconnect_count": stats.get("reconnect_count", 0),
                 },
             }
-        except Exception:
+        except ImportError:
+            return {
+                "firing": False,
+                "severity": self.severity,
+                "name": self.name,
+                "description": self.description,
+                "detail": {"error": "Kalshi WS module unavailable"},
+            }
+        except (RuntimeError, AttributeError) as e:
+            logger.debug("Kalshi WS stats unavailable: %s", e)
             return {
                 "firing": False,
                 "severity": self.severity,
@@ -1715,7 +1732,10 @@ async def system_observability():
     try:
         from web.api.signal_layer_api import _METRICS_CACHE as _smc
         signal_slo = _smc.get("_slo", {})
-    except Exception:
+    except ImportError:
+        signal_slo = {"error": "module_unavailable"}
+    except (RuntimeError, AttributeError) as e:
+        logger.debug("Signal SLO unavailable: %s", e)
         signal_slo = {"error": "unavailable"}
 
     # Consensus store metrics
@@ -1723,7 +1743,10 @@ async def system_observability():
     try:
         from merid.prediction.consensus import get_prediction_consensus_store as _gpcs
         store_metrics = _gpcs().get_store_metrics()
-    except Exception:
+    except ImportError:
+        store_metrics = {"error": "module_unavailable"}
+    except (RuntimeError, AttributeError) as e:
+        logger.debug("Consensus store metrics unavailable: %s", e)
         store_metrics = {"error": "unavailable"}
 
     # Inference explainability
@@ -1731,7 +1754,10 @@ async def system_observability():
     try:
         from merid.prediction.consensus import get_prediction_consensus_store as _gpcs2
         explainability = _gpcs2().get_explainability_metrics(window_s=3600.0)
-    except Exception:
+    except ImportError:
+        explainability = {"error": "module_unavailable"}
+    except (RuntimeError, AttributeError) as e:
+        logger.debug("Explainability metrics unavailable: %s", e)
         explainability = {"error": "unavailable"}
 
     # Collaboration health (debate + teamwork)
@@ -1739,7 +1765,10 @@ async def system_observability():
     try:
         from merid.prediction.debate import get_debate_store as _gds
         collaboration = _gds().get_debate_metrics(window_s=3600.0)
-    except Exception:
+    except ImportError:
+        collaboration = {"error": "module_unavailable"}
+    except (RuntimeError, AttributeError) as e:
+        logger.debug("Debate metrics unavailable: %s", e)
         collaboration = {"error": "unavailable"}
 
     # Debate tuning health (Sprint 8)
@@ -1753,7 +1782,10 @@ async def system_observability():
             ),
             "quality_gate_min_disagreement": 0.03,
         }
-    except Exception:
+    except ImportError:
+        debate_tuning = {"error": "module_unavailable"}
+    except (RuntimeError, AttributeError) as e:
+        logger.debug("Debate tuning unavailable: %s", e)
         debate_tuning = {"error": "unavailable"}
 
     # Reward engine health (Sprint 9)
@@ -1766,7 +1798,10 @@ async def system_observability():
             "distribution_24h": engine.get_reward_distribution(window_s=86400.0),
             "gaming_indicators": engine.get_gaming_indicators(window_s=86400.0),
         }
-    except Exception:
+    except ImportError:
+        reward_engine = {"error": "module_unavailable"}
+    except (RuntimeError, AttributeError) as e:
+        logger.debug("Reward engine unavailable: %s", e)
         reward_engine = {"error": "unavailable"}
 
     # Cognitive layer health (Sprint 10)
@@ -1774,7 +1809,10 @@ async def system_observability():
     try:
         from merid.cognitive.reality_debugger import get_reality_debugger as _grd
         cognitive_health = _grd().get_cognitive_health(window_s=604800.0)
-    except Exception:
+    except ImportError:
+        cognitive_health = {"error": "module_unavailable"}
+    except (RuntimeError, AttributeError) as e:
+        logger.debug("Cognitive health unavailable: %s", e)
         cognitive_health = {"error": "unavailable"}
 
     # Betting layer health (Sprint 11)
@@ -1782,7 +1820,10 @@ async def system_observability():
     try:
         from web.api.betting import get_bookie_agent as _gba
         betting_health = _gba().get_betting_health()
-    except Exception:
+    except ImportError:
+        betting_health = {"error": "module_unavailable"}
+    except (RuntimeError, AttributeError) as e:
+        logger.debug("Betting health unavailable: %s", e)
         betting_health = {"error": "unavailable"}
 
     # Sports & live betting health (Sprint 12)
@@ -1790,7 +1831,10 @@ async def system_observability():
     try:
         from merid.betting.live_sports import get_sports_betting_manager as _gsbm
         sports_betting_health = _gsbm().get_sports_health()
-    except Exception:
+    except ImportError:
+        sports_betting_health = {"error": "module_unavailable"}
+    except (RuntimeError, AttributeError) as e:
+        logger.debug("Sports betting health unavailable: %s", e)
         sports_betting_health = {"error": "unavailable"}
 
     # Alerts
@@ -1801,7 +1845,10 @@ async def system_observability():
     try:
         from web.api.real_data_endpoints import get_fallback_counts
         real_data_fallbacks = get_fallback_counts()
-    except Exception:
+    except ImportError:
+        real_data_fallbacks = {"error": "module_unavailable"}
+    except (RuntimeError, AttributeError) as e:
+        logger.debug("Fallback counts unavailable: %s", e)
         real_data_fallbacks = {"error": "unavailable"}
 
     return {
@@ -1833,7 +1880,10 @@ async def system_slo():
         from web.api.signal_layer_api import _METRICS_CACHE as _smc2
         slo = _smc2.get("_slo", {})
         return {"slo": slo, "timestamp": time.time()}
-    except Exception:
+    except ImportError:
+        return {"slo": {}, "error": "module_unavailable", "timestamp": time.time()}
+    except (RuntimeError, AttributeError) as e:
+        logger.debug("SLO data unavailable: %s", e)
         return {"slo": {}, "error": "unavailable", "timestamp": time.time()}
 
 
@@ -1843,5 +1893,8 @@ async def consensus_store_metrics():
     try:
         from merid.prediction.consensus import get_prediction_consensus_store as _gpcs3
         return _gpcs3().get_store_metrics()
-    except Exception as exc:
+    except ImportError as exc:
+        return {"error": f"module_unavailable: {exc}"}
+    except (RuntimeError, AttributeError) as exc:
+        logger.debug("Consensus store metrics unavailable: %s", exc)
         return {"error": str(exc)}

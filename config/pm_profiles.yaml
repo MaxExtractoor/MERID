@@ -9,17 +9,18 @@
 
 profiles:
   crypto_low_edge_dev:
-    min_edge_early: 0.01
-    min_edge_mid: 0.008
-    min_edge_late: 0.006
-    min_edge_terminal: 0.005
-    min_arb_edge: 0.002
-    min_confidence: 0.35
-    max_contracts_per_order: 3
-    contrarian_sentiment_min: 75
-    vol_breakout_neutral_low: 35
-    vol_breakout_neutral_high: 65
-    # MM (15m crypto — tiny quotes; override per agent YAML if needed)
-    mm_max_spread_cents: 12
-    mm_target_spread_cents: 3
-    mm_inventory_limit: 8
+    # ENV-DRIVEN: Edge thresholds (all dynamically configurable)
+    min_edge_early: ${MERID_PM_MIN_EDGE_EARLY:-0.01}
+    min_edge_mid: ${MERID_PM_MIN_EDGE_MID:-0.008}
+    min_edge_late: ${MERID_PM_MIN_EDGE_LATE:-0.006}
+    min_edge_terminal: ${MERID_PM_MIN_EDGE_TERMINAL:-0.005}
+    min_arb_edge: ${MERID_PM_MIN_ARB_EDGE:-0.002}
+    min_confidence: ${MERID_PM_MIN_CONFIDENCE:-0.35}
+    max_contracts_per_order: ${MERID_PM_MAX_CONTRACTS_PER_ORDER:-3}
+    contrarian_sentiment_min: ${MERID_PM_CONTRARIAN_SENTIMENT_MIN:-75}
+    vol_breakout_neutral_low: ${MERID_PM_VOL_BREAKOUT_LOW:-35}
+    vol_breakout_neutral_high: ${MERID_PM_VOL_BREAKOUT_HIGH:-65}
+    # MM (15m crypto — tiny quotes; ENV-DRIVEN)
+    mm_max_spread_cents: ${MERID_PM_MM_MAX_SPREAD_CENTS:-12}
+    mm_target_spread_cents: ${MERID_PM_MM_TARGET_SPREAD_CENTS:-3}
+    mm_inventory_limit: ${MERID_PM_MM_INVENTORY_LIMIT:-8}

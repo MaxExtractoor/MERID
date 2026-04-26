@@ -10,7 +10,7 @@
  */
 
 import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
-import { AlertTriangle, CheckCircle, Info, X, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle, Info, X, XCircle } from '../ui/icons';
 
 // ── Types ────────────────────────────────────────────────────────────
 

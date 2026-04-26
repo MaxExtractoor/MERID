@@ -761,9 +761,12 @@ class KalshiRiskConfig:
     # ── Balance-relative fractions ───────────────────────────────────────
     # These are recomputed into the _usd fields by calibrate_from_balance().
     # Fractions of the live Kalshi account balance.
-    max_total_notional_pct: float = 0.80     # 80 % of balance
+    # NOTE: 80% is NOTIONAL exposure (sum of position values), NOT RISK.
+    # Actual risk is 1-2% of bankroll per cycle via TopNAllocator.
+    max_total_notional_pct: float = 0.80     # 80% of balance (notional, not risk)
     max_daily_loss_pct: float = 0.10         # 10 % of balance
-    max_single_order_pct: float = 0.05       # 5 % of balance
+    # CRITICAL: Max 1% per order (never 5% - would cause major losses)
+    max_single_order_pct: float = 0.01       # 1% of balance MAX (aligned with 1-2% cycle cap)
     _DAILY_LOSS_FRACTIONS: ClassVar[Dict[str, float]] = {
         "DEEP_UNDERWATER": 0.05,
         "UNDERWATER": 0.08,
@@ -787,7 +790,8 @@ class KalshiRiskConfig:
     })
     # Note: correlated_stack_pct is used by CategoryExposureTracker.calibrate_from_balance()
     # as the corr_fraction argument — do NOT remove.
-    correlated_stack_pct: float = 0.20      # single underlying across all timeframes
+    # CRITICAL: 2% max for single underlying (was 20% — 10× over limit!)
+    correlated_stack_pct: float = 0.02      # single underlying across all timeframes
 
     # ── Group-level exposure limits (per-asset/timeframe/overlap-window) ─────────────────
     group_limits_enabled: bool = True         # Enable group-level aggregation and caps
@@ -1049,6 +1053,7 @@ class KalshiRiskManager:
         asset: Optional[str] = None,
         timeframe: Optional[str] = None,
         group_id: Optional[str] = None,
+        effective_equity_usd: Optional[float] = None,
     ) -> Tuple[bool, str]:
         """Run all pre-trade risk checks.
 
@@ -1062,6 +1067,7 @@ class KalshiRiskManager:
             asset: Underlying asset (BTC, ETH, SOL, XRP, DOGE) - for group-level caps
             timeframe: Timeframe bucket (15m, 1h, D1, W1, 1M) - for group-level caps
             group_id: Canonical group ID for overlap-window risk aggregation
+            effective_equity_usd: Optional capped equity for portfolio limits (CT passes this)
 
         Returns:
             (allowed, reason) — True if order passes all checks
@@ -1071,7 +1077,8 @@ class KalshiRiskManager:
         gid = str(group_id) if group_id else None
         ok, reason, breach_type = self._check_order_locked(
             ticker, category, contracts, price_cents, edge, existing_position, now,
-            asset=asset, timeframe=timeframe, group_id=gid
+            asset=asset, timeframe=timeframe, group_id=gid,
+            effective_equity_usd=effective_equity_usd
         )
         if not ok:
             self._fire_risk_alert(ticker, reason, breach_type=breach_type, group_id=gid)
@@ -1119,12 +1126,48 @@ class KalshiRiskManager:
         asset: Optional[str] = None,
         timeframe: Optional[str] = None,
         group_id: Optional[str] = None,
+        effective_equity_usd: Optional[float] = None,
     ) -> Tuple[bool, str, Optional[str]]:
         """Inner check — all checks run under self._lock with breach logging.
-        
+
+        Args:
+            effective_equity_usd: Optional capped equity for portfolio limits (uses current_equity_usd if None)
+
         Returns:
             (allowed, reason, breach_type) — breach_type is None if allowed=True
         """
+        # Determine equity for portfolio limits: prefer effective (capped) if provided
+        _portfolio_equity_usd = effective_equity_usd if effective_equity_usd is not None else self._state.current_equity_usd
+
+        # BANKROLL SANITY CHECK: Detect mismatches between sizing and risk layer
+        if effective_equity_usd is not None:
+            # Check for significant discrepancy (>50%) between passed equity and internal state
+            _internal_equity = self._state.current_equity_usd
+            if _internal_equity > 0 and effective_equity_usd > 0:
+                _discrepancy_ratio = effective_equity_usd / _internal_equity
+                if _discrepancy_ratio < 0.5 or _discrepancy_ratio > 2.0:
+                    logger.warning(
+                        "[BANKROLL_SANITY] Large bankroll discrepancy detected: "
+                        "effective_equity_usd=$%.2f vs internal_equity_usd=$%.2f (ratio=%.2f). "
+                        "Sizing and risk layers may be using different bankroll sources. ticker=%s",
+                        effective_equity_usd, _internal_equity, _discrepancy_ratio, ticker
+                    )
+            elif effective_equity_usd > 0 and _internal_equity <= 0:
+                # Passed equity is set but internal state is zero - risk layer not initialized
+                logger.debug(
+                    "[BANKROLL_SANITY] Using passed effective_equity_usd=$%.2f "
+                    "(internal state is $%.2f). Risk layer state not yet initialized.",
+                    effective_equity_usd, _internal_equity
+                )
+
+        # Additional check: if equity is zero but contracts > 0, something is wrong
+        if _portfolio_equity_usd <= 0 and contracts > 0:
+            logger.warning(
+                "[BANKROLL_SANITY] Equity is $%.2f but contracts=%d > 0. "
+                "Order will likely be blocked. ticker=%s",
+                _portfolio_equity_usd, contracts, ticker
+            )
+
         with self._lock:
             self._maybe_reset_daily(now)
 
@@ -1259,19 +1302,47 @@ class KalshiRiskManager:
 
             # 5. Total portfolio notional
             # Use effective cap that derives from equity if config cap is 0
+            # CRITICAL: Use _portfolio_equity_usd (capped via max_riskable_usd from CT) for portfolio limits
             effective_max_notional = self._config.get_effective_max_total_notional(
-                self._state.current_equity_usd
+                _portfolio_equity_usd
             )
             total = self._state.total_notional_usd + notional_usd
             if total > effective_max_notional:
                 reason = f"Total notional ${total:.2f} exceeds effective max ${effective_max_notional:.2f}"
                 self._log_breach("max_total_notional", reason)
                 logger.info(
-                    "[RISK] Total notional cap: current=%.2f proposed=%.2f total=%.2f cap=%.2f equity=%.2f",
+                    "[RISK] Total notional cap: current=%.2f proposed=%.2f total=%.2f cap=%.2f "
+                    "portfolio_equity=%.2f (live_equity=%.2f, capped=%s)",
                     self._state.total_notional_usd, notional_usd, total,
-                    effective_max_notional, self._state.current_equity_usd
+                    effective_max_notional, _portfolio_equity_usd,
+                    self._state.current_equity_usd,
+                    "yes" if effective_equity_usd is not None else "no"
                 )
                 return False, reason, "max_total_notional"
+
+            # 5b. GLOBAL BANKROLL CAP: Total portfolio cannot exceed configured % of bankroll
+            # DERIVATION (no magic numbers):
+            #   1. KALSHI_PORTFOLIO_BANKROLL_CENTS from settings (explicit config)
+            #   2. If (1) invalid: current_equity_usd from Kalshi balance API
+            #   3. If (2) invalid: FAIL CLOSED with min $100 bankroll (never negative)
+            #   4. Cap_pct from MERID_BANKROLL_CAP_PCT env (default 2%, max 5%)
+            bankroll_cents, bankroll_source = self._derive_bankroll_cents()
+            cap_pct = self._derive_bankroll_cap_pct()
+            global_bankroll_cap_usd = max(bankroll_cents * cap_pct / 100, 0.0)  # Ensure non-negative
+
+            if total > global_bankroll_cap_usd:
+                logger.error(
+                    "[BANKROLL_CAP_REJECT] total_notional=${:.2f} exceeds cap=${:.2f} "
+                    "(bankroll=${:.2f} source=%s cap_pct=%.2f%%). ticker=%s",
+                    total, global_bankroll_cap_usd, bankroll_cents / 100.0,
+                    bankroll_source, cap_pct * 100, ticker
+                )
+                reason = (
+                    f"Bankroll cap exceeded: notional ${total:.2f} > cap ${global_bankroll_cap_usd:.2f} "
+                    f"(bankroll=${bankroll_cents / 100.0:.2f} source={bankroll_source} cap_pct={cap_pct * 100:.2f}%)"
+                )
+                self._log_breach("bankroll_cap_exceeded", reason)
+                return False, reason, "bankroll_cap_exceeded"
 
             # 6. Daily loss — use equity-based tracking with per-day reset
             # Compute worst-case loss for this order (full notional at risk)
@@ -1843,6 +1914,63 @@ class KalshiRiskManager:
 
         return (halt, unwind)
 
+    def _derive_bankroll_cents(self) -> Tuple[int, str]:
+        """Derive effective bankroll in cents with transparent source tracking.
+
+        Derivation order (first valid source wins):
+        1. KALSHI_PORTFOLIO_BANKROLL_CENTS from settings (explicit config)
+        2. Current equity USD from Kalshi balance API (tracked in _state)
+        3. Minimum $100 fail-closed fallback (never negative)
+
+        Returns:
+            Tuple of (bankroll_cents, source_name)
+        """
+        # Source 1: Explicit config
+        try:
+            from merid.settings import settings
+            configured_cents = getattr(settings, 'KALSHI_PORTFOLIO_BANKROLL_CENTS', 0)
+            if configured_cents > 0:
+                return (configured_cents, "config_KALSHI_PORTFOLIO_BANKROLL_CENTS")
+        except Exception:
+            pass
+
+        # Source 2: Live equity from Kalshi balance
+        equity_usd = self._state.current_equity_usd
+        if equity_usd > 0:
+            return (int(equity_usd * 100), f"live_equity_{equity_usd:.2f}")
+
+        # Source 3: Fail-closed minimum
+        logger.error(
+            "[BANKROLL_FAILCLOSED] No configured bankroll and no live equity. "
+            "Using minimum $100 fallback. Trading will be heavily constrained."
+        )
+        return (10000, "fail_closed_minimum_100usd")
+
+    def _derive_bankroll_cap_pct(self) -> float:
+        """Derive bankroll cap percentage from environment.
+
+        Reads MERID_BANKROLL_CAP_PCT env var, clamps to safe range [1%, 2%].
+        Default is 2% (max) if not configured. 5% is STRICTLY FORBIDDEN.
+
+        Returns:
+            Cap percentage as fraction (e.g., 0.02 for 2% max)
+        """
+        try:
+            raw_pct = float(os.getenv("MERID_BANKROLL_CAP_PCT", "2.0"))
+        except (ValueError, TypeError):
+            raw_pct = 2.0
+
+        # Clamp to safe range: 1% minimum, 2% maximum (5% = 6% risk = FORBIDDEN)
+        clamped_pct = max(1.0, min(2.0, raw_pct))
+
+        if clamped_pct != raw_pct:
+            logger.warning(
+                "[BANKROLL_CAP_PCT_CLAMP] env value %.2f%% clamped to %.2f%% (safe range 1%%-2%%, 5%% FORBIDDEN)",
+                raw_pct, clamped_pct
+            )
+
+        return clamped_pct / 100.0  # Convert to fraction
+
     def _compute_dynamic_daily_loss(
         self, equity_usd: float, bankroll_cents: int
     ) -> Tuple[float, str, float]:
@@ -1955,11 +2083,15 @@ class KalshiRiskManager:
 
     # Regime-based notional fractions for contract caps
     # Format: (total_frac, asset_frac, cluster_frac)
+    # CRITICAL: These are CAPS on contract notional, NOT position sizing.
+    # 1-2% TOTAL cycle risk is enforced by TopNAllocator. These caps must
+    # NEVER exceed reasonable bounds to prevent catastrophic exposure.
+    # Previous values (40%, 30%, 25%, 20%) were 10-20× OVER the 1-2% limit!
     _CONTRACT_NOTIONAL_FRACTIONS: Dict[str, Tuple[float, float, float]] = {
-        "DEEP_UNDERWATER": (0.40, 0.20, 0.10),  # 40%, 20%, 10% of bankroll
-        "UNDERWATER": (0.30, 0.15, 0.08),       # 30%, 15%, 8%
-        "BASELINE": (0.25, 0.12, 0.06),         # 25%, 12%, 6%
-        "LOCK_IN_GAINS": (0.20, 0.10, 0.04),    # 20%, 10%, 4%
+        "DEEP_UNDERWATER": (0.02, 0.01, 0.005),  # 2%, 1%, 0.5% (tightest — survival mode)
+        "UNDERWATER": (0.015, 0.008, 0.004),     # 1.5%, 0.8%, 0.4%
+        "BASELINE": (0.02, 0.01, 0.005),         # 2%, 1%, 0.5% (normal operation)
+        "LOCK_IN_GAINS": (0.01, 0.005, 0.003),  # 1%, 0.5%, 0.3% (protect profits)
     }
 
     def _compute_dynamic_contract_caps(
@@ -2753,3 +2885,45 @@ def get_kalshi_risk() -> KalshiRiskManager:
             if _risk is None:
                 _risk = KalshiRiskManager()
     return _risk
+
+
+def get_live_bankroll() -> float:
+    """Get live bankroll from Kalshi balance API via unified service.
+    
+    CRITICAL: This is now a thin wrapper around the unified bankroll service.
+    The unified service is the ONLY place that calls /portfolio/balance.
+    
+    Returns:
+        Live bankroll in USD, or 0.0 if API call fails (fail-closed)
+        
+    Uses v2 unified bankroll service as single source of truth.
+    """
+    from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+    
+    try:
+        equity = get_equity_for_risk_calc_sync()
+        if equity is not None and equity > 0:
+            return float(equity)
+    except Exception as e:
+        logger.critical("[LIVE_BANKROLL] Bankroll unavailable via v2 service: %s", e)
+    
+    logger.critical("[LIVE_BANKROLL] Returning 0.0 (fail-closed)")
+    return 0.0
+
+
+def get_live_bankroll_async() -> float:
+    """Async version of get_live_bankroll for use in async contexts.
+    
+    Returns:
+        Live bankroll in USD, or 0.0 if API call fails (fail-closed)
+    """
+    from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+    
+    try:
+        equity = get_equity_for_risk_calc_sync()
+        if equity is not None and equity > 0:
+            return float(equity)
+    except Exception as e:
+        logger.critical("[LIVE_BANKROLL_ASYNC] Bankroll unavailable: %s", e)
+    
+    return 0.0

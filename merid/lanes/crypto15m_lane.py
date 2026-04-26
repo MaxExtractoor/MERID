@@ -1298,11 +1298,11 @@ class Crypto15MLane:
             return {"submitted": False, "reason": str(exc), "cycle_id": order["cycle_id"]}
 
     async def _execute_live_order(self, order: Dict[str, Any], ctx: Dict[str, Any], consensus: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute live order on Kalshi via the canonical router.
+        """Submit live order signal to trading_agent for execution (Single Executor Principle).
 
-        Goes through ``route_order_async`` so the shared ``GlobalRiskGuard``,
-        cross-caller dedup registry, caller-allowlist audit, pre-trade gate,
-        and all downstream safety checks apply.  No direct venue client calls.
+        SIGNAL-ONLY AGENT: crypto15m_lane submits signals via SignalRouter.
+        trading_agent is the SOLE EXECUTOR that calls route_order_async.
+        This ensures risk guards, caller whitelist, and audit trail are enforced.
         """
         try:
             # Calculate contract details with proper Kalshi API format
@@ -1313,53 +1313,39 @@ class Crypto15MLane:
             price_dollars = price_cents / 100.0
             contracts = max(1, int(order["size"] / price_dollars))
 
-            # ── Canonical router path ────────────────────────────────────
-            from merid.event_venues.kalshi.decision_trace import new_decision_trace_id
-            from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
-            from merid.prediction.venue_gate import TradingMode
+            # ── Signal Router path (Single Executor Principle) ─────────────
+            from merid.event_venues.kalshi import submit_signal
 
-            intent = OrderIntent(
-                ticker=order["market_id"],
-                side=str(order["side"]).lower(),        # "yes" / "no"
-                action="buy",
-                price_cents=price_cents,
-                count=contracts,
-                mode=TradingMode.LIVE,
-                order_type="limit",
-                time_in_force="gtc",
-                source="crypto15m_lane",
+            signal = submit_signal(
                 agent_id=self.lane_id,
-                edge_pct=float(ctx.get("edge_bps", 0.0)) / 10000.0,
-                decision_trace_id=new_decision_trace_id("crypto15m_lane"),
-                sentiment_driven=False,
+                agent_type="crypto15m_lane",
+                market_id=order["market_id"],
+                action="buy",
+                side=str(order["side"]).lower(),  # "yes" / "no"
+                size=contracts,
+                price_cents=price_cents,
+                confidence=float(consensus.get("confidence", 0.5)),
+                edge=float(ctx.get("edge_bps", 0.0)) / 10000.0,
+                reasoning=f"Consensus: {consensus.get('consensus_direction', 'neutral')} @ {consensus.get('consensus_probability', 0.5):.1%}",
+                metadata={
+                    "cycle_id": order.get("cycle_id", ""),
+                    "original_size": order["size"],
+                    "edge_bps": ctx.get("edge_bps", 0.0),
+                    "limit_prob": limit_prob,
+                },
+                origin_agent=self.lane_id,
+                risk_bucket="crypto_directional",
+                timeframe_label="15m",
             )
-            router_result = await route_order_async(intent)
-
-            if router_result.status == "rejected":
-                logger.warning(
-                    "%s: router REJECTED %s on %s size=%.2f reason=%s",
-                    self.lane_id, order["side"], order["market_id"],
-                    order["size"], router_result.reason or "unknown",
-                )
-                return {
-                    "submitted": False,
-                    "reason": router_result.reason or "router_rejected",
-                    "cycle_id": order["cycle_id"],
-                }
-
-            await self.risk_bus.publish_order_event(self.cfg.risk_stream_topic, order, ctx)
 
             logger.info(
-                "%s: placed %s on %s size=%.2f edge_bps=%.1f price=%d¢ contracts=%d status=%s",
-                self.lane_id,
-                order["side"],
-                order["market_id"],
-                order["size"],
-                ctx["edge_bps"],
-                price_cents,
-                contracts,
-                router_result.status,
+                "%s: signal submitted to trading_agent: %s | %s on %s size=%.2f edge_bps=%.1f price=%d¢ contracts=%d",
+                self.lane_id, signal.signal_id, order["side"], order["market_id"],
+                order["size"], ctx["edge_bps"], price_cents, contracts,
             )
+
+            # Signal is routed asynchronously to trading_agent for execution
+            await self.risk_bus.publish_order_event(self.cfg.risk_stream_topic, order, ctx)
 
             return {
                 "submitted": True,
@@ -1370,14 +1356,12 @@ class Crypto15MLane:
                 "size": order["size"],
                 "contracts": contracts,
                 "price_cents": price_cents,
-                "order_result": router_result.fill or {},
-                "status": router_result.status,
-                "latency_ms": router_result.latency_ms,
+                "signal_id": signal.signal_id,
                 "cycle_id": order["cycle_id"],
             }
 
         except Exception as exc:
-            logger.warning("%s: order failed: %s", self.lane_id, exc)
+            logger.warning("%s: signal submission failed: %s", self.lane_id, exc)
             return {"submitted": False, "reason": str(exc), "cycle_id": order["cycle_id"]}
 
     async def _get_current_positions(self) -> int:

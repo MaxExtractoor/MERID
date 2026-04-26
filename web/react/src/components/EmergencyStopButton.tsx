@@ -9,7 +9,7 @@
  */
 
 import { useState, useCallback, forwardRef } from 'react';
-import { ShieldAlert, Loader2 } from 'lucide-react';
+import { ShieldAlert, Loader2 } from '../ui/icons';
 import { ConfirmModal } from './ConfirmModal';
 import { API_BASE_URL, API_ENDPOINTS, AUTH_TOKEN_KEY } from '../config/constants';
 

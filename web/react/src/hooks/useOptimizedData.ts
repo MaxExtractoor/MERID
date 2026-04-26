@@ -1,8 +1,17 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useAdvancedCache, globalCaches } from './useAdvancedCache';
+import { useAdvancedCache, globalCaches, AdvancedCache } from './useAdvancedCache';
 export { globalCaches };
 import { API_BASE_URL, API_ENDPOINTS, RETRY_DEFAULTS, CACHE_TTL, AUTH_TOKEN_KEY } from '../config/constants';
 import { authHeaders } from '../api/auth';
+
+// Module-level shared cache so multiple useOptimizedData instances with the
+// same cacheKey share data across component mounts/unmounts.
+const _sharedCache = new AdvancedCache<any>({ ttl: CACHE_TTL.DEFAULT, maxSize: 500, strategy: 'lru' });
+
+/** Clear the shared cache. Exposed primarily for tests. */
+export function clearSharedCache(): void {
+  _sharedCache.clear();
+}
 
 interface OptimizedDataOptions {
   endpoint: string;
@@ -67,8 +76,11 @@ export const useOptimizedData = <T = any>(options: OptimizedDataOptions): Optimi
   const mountedRef = useRef(true);
   const consecutiveErrorsRef = useRef(0);
 
-  // Cache instance
-  const cache = useAdvancedCache<T>({ ttl: cacheTTL, maxSize: 100, strategy: 'lru' });
+  // Use module-level shared cache so the same cacheKey is shared across mounts.
+  // Keep the hook instance around for per-component stats (if ever needed).
+  const _localCache = useAdvancedCache<T>({ ttl: cacheTTL, maxSize: 100, strategy: 'lru' });
+  void _localCache;
+  const cacheRef = useRef(_sharedCache);
 
   // Generate cache key if not provided
   const effectiveCacheKey = cacheKey || endpoint;
@@ -88,14 +100,14 @@ export const useOptimizedData = <T = any>(options: OptimizedDataOptions): Optimi
 
       // Try cache first if enabled and requested
       if (enableCache && useCacheFirst) {
-        const cachedData = cache.get(effectiveCacheKey);
+        const cachedData = cacheRef.current.get(effectiveCacheKey);
         if (cachedData) {
           statsRef.current.cacheHits++;
           setData(cachedData);
           setLastUpdated(Date.now());
           
           // Check if cache is stale
-          const cacheEntry = cache.cache.get(effectiveCacheKey) as any;
+          const cacheEntry = cacheRef.current.getEntry(effectiveCacheKey) as any;
           if (cacheEntry && Date.now() - cacheEntry.timestamp > cacheTTL) {
             setIsStale(true);
           }
@@ -135,7 +147,7 @@ export const useOptimizedData = <T = any>(options: OptimizedDataOptions): Optimi
       
       // Update cache
       if (enableCache) {
-        cache.set(effectiveCacheKey, result);
+        cacheRef.current.set(effectiveCacheKey, result);
       }
 
     } catch (err) {
@@ -156,7 +168,7 @@ export const useOptimizedData = <T = any>(options: OptimizedDataOptions): Optimi
     } finally {
       if (mountedRef.current) setLoading(false);
     }
-  }, [endpoint, enableCache, effectiveCacheKey, cache, cacheTTL, retryCount, retryDelay]);
+  }, [endpoint, enableCache, effectiveCacheKey, cacheTTL, retryCount, retryDelay]);
 
   // Refetch function
   const refetch = useCallback(async (): Promise<void> => {
@@ -165,11 +177,11 @@ export const useOptimizedData = <T = any>(options: OptimizedDataOptions): Optimi
 
   // Invalidate cache
   const invalidate = useCallback(() => {
-    cache.remove(effectiveCacheKey);
+    cacheRef.current.delete(effectiveCacheKey);
     setData(null);
     setLastUpdated(null);
     setIsStale(false);
-  }, [cache, effectiveCacheKey]);
+  }, [effectiveCacheKey]);
 
   // Initial data fetch
   useEffect(() => {

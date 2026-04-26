@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ShieldAlert, ShieldCheck, Pause, Play, Clock, AlertTriangle } from 'lucide-react';
+import { ShieldAlert, ShieldCheck, Pause, Play, Clock, AlertTriangle } from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import ErrorBar from './ErrorBar';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY} from '../config/constants';

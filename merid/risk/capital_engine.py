@@ -71,7 +71,8 @@ class AssetCapitalConfig:
     growth_bucket_max_usage_pct: float = 0.10
 
     # Maximum fraction of risk capital allocated per trade for this asset.
-    max_risk_pct_per_trade: float = 0.02
+    # CRITICAL: 1% per trade (3% worst case for 3 edges). 2% = 6% total = FORBIDDEN.
+    max_risk_pct_per_trade: float = 0.01
 
     # Maximum fraction of total equity allocated to this asset across all positions.
     asset_max_risk_pct_of_total_equity: float = 0.15

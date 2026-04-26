@@ -66,6 +66,11 @@ jest.mock('../../api/auth', () => ({
   authHeaders: jest.fn(() => ({ 'Content-Type': 'application/json' })),
 }));
 
+jest.mock('../../hooks/useNetworkStatusProvider', () => ({
+  useNetworkStatus: () => ({ isOnline: true, backendReachable: true }),
+  NetworkProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}));
+
 jest.mock('lucide-react', () =>
   new Proxy({}, {
     get: (_t, prop) => {
@@ -167,38 +172,37 @@ describe('BUG-007 — useApiData no double polling chain', () => {
 // ══════════════════════════════════════════════════════════════════════════════
 describe('BUG-001 — DataTableEnhanced currentPage clamped on data shrink', () => {
   it('source contains a useEffect that clamps currentPage to totalPages', () => {
-    const source = read('components', 'DataTableEnhanced.tsx');
+    const source = read('components', 'DataTable.tsx');
     expect(source).toMatch(/useEffect\(/);
     expect(source).toMatch(/currentPage > totalPages/);
     expect(source).toMatch(/setCurrentPage\(totalPages\)/);
   });
 
   it('RTL: page resets to last valid page when data shrinks below current page', async () => {
-    // DataTableEnhanced has no useApiData dependency — import directly
-    const { default: DataTableEnhanced } = await import('../../components/DataTableEnhanced');
+    // DataTable has no useApiData dependency — import directly
+    const { default: DataTable } = await import('../../components/DataTable');
 
     type Row = { id: number; name: string };
     const cols = [
-      { key: 'id' as keyof Row, label: 'ID', sortable: false },
-      { key: 'name' as keyof Row, label: 'Name', sortable: false },
+      { key: 'id', title: 'ID' },
+      { key: 'name', title: 'Name' },
     ];
 
     // 30 rows → 2 pages at pageSize=25
-    const bigData: Row[] = Array.from({ length: 30 }, (_, i) => ({ id: i + 1, name: `Item ${i + 1}` }));
+    const bigData: Row[] = Array.from({ length: 60 }, (_, i) => ({ id: i + 1, name: `Item ${i + 1}` }));
     const smallData: Row[] = Array.from({ length: 5 }, (_, i) => ({ id: i + 1, name: `Item ${i + 1}` }));
 
     const { rerender } = render(
-      <DataTableEnhanced data={bigData} columns={cols} pageSize={25} showPagination />
+      <DataTable data={bigData} columns={cols} pageSize={25} showPagination />
     );
 
     // Navigate to page 2
-    const nextBtn = screen.getByRole('button', { name: /next/i });
-    fireEvent.click(nextBtn);
-    await waitFor(() => expect(screen.queryByText('Item 26')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('2'));
+    expect(screen.getByText('Item 26')).toBeInTheDocument();
 
     // Shrink data to only 1 page worth — page 2 no longer valid
     await act(async () => {
-      rerender(<DataTableEnhanced data={smallData} columns={cols} pageSize={25} showPagination />);
+      rerender(<DataTable data={smallData} columns={cols} pageSize={25} showPagination />);
     });
 
     // Should have auto-clamped back to page 1 and show items

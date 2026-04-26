@@ -1,5 +1,5 @@
 import React from 'react';
-import { Inbox, Search, Filter, Bell, TrendingUp, BarChart3, AlertTriangle } from 'lucide-react';
+import { Inbox, Search, Filter, Bell, TrendingUp, BarChart3, AlertTriangle } from '../ui/icons';
 
 export type EmptyStateVariant = 'default' | 'search' | 'filter' | 'notifications' | 'chart' | 'data' | 'error';
 

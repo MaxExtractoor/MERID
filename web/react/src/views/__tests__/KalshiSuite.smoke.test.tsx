@@ -47,6 +47,12 @@ jest.mock('../../context/KalshiModeContext', () => ({
   useKalshiMode: () => ({ data: null, isLive: false }),
 }));
 
+// Mock useNetworkStatusProvider
+jest.mock('../../hooks/useNetworkStatusProvider', () => ({
+  useNetworkStatus: () => ({ isOnline: true, backendReachable: true }),
+  NetworkProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}));
+
 // Mock useDashboard — used by Overview (must include component exports)
 jest.mock('../../hooks/useDashboard', () => ({
   useDashboard: () => ({ trading: null, risk: null, agents: null, loading: false, error: null }),
@@ -128,8 +134,8 @@ jest.mock('recharts', () => {
 
 // Lazy imports to allow mocks to settle
 import Overview from '../Overview';
-import KillSwitchView from '../KillSwitchView';
-import KalshiTerminalView from '../KalshiTerminalView';
+import ProtectView from '../ProtectView';
+import ExecuteView from '../ExecuteView';
 import KalshiOrderbookPanel from '../../components/KalshiOrderbookPanel';
 import KalshiActivityLog from '../../components/KalshiActivityLog';
 import KalshiSentimentView from '../KalshiSentimentView';
@@ -141,9 +147,9 @@ describe('Kalshi Suite — Smoke Tests', () => {
     expect(container.firstChild).toBeTruthy();
   });
 
-  it('KillSwitchView mounts and shows title', () => {
-    render(<KillSwitchView />);
-    expect(screen.getAllByText(/Kill Switch/i).length).toBeGreaterThan(0);
+  it('ProtectView mounts and shows title', () => {
+    render(<ProtectView />);
+    expect(screen.getByText(/Protect/i)).toBeTruthy();
   });
 
   it('ExecutionGateStrip renders on Overview', () => {
@@ -151,19 +157,9 @@ describe('Kalshi Suite — Smoke Tests', () => {
     expect(container.querySelector('[class*="rounded-xl"]')).toBeTruthy();
   });
 
-  it('KalshiTerminalView mounts and shows Terminal title', () => {
-    render(<KalshiTerminalView />);
-    expect(screen.getByText(/Terminal/i)).toBeTruthy();
-  });
-
-  it('KalshiTerminalView shows search input', () => {
-    render(<KalshiTerminalView />);
-    expect(screen.getByPlaceholderText(/Ticker/i)).toBeTruthy();
-  });
-
-  it('KalshiTerminalView shows "Select a market" placeholder', () => {
-    render(<KalshiTerminalView />);
-    expect(screen.getByText(/Select a market/i)).toBeTruthy();
+  it('ExecuteView mounts and shows Execute title', () => {
+    render(<ExecuteView />);
+    expect(screen.getByText(/Execute/i)).toBeTruthy();
   });
 
   it('KalshiOrderbookPanel renders nothing when no ticker', () => {

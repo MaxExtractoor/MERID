@@ -61,6 +61,12 @@ jest.mock('../../api/auth', () => ({
   authHeaders: jest.fn(() => ({ 'Content-Type': 'application/json' })),
 }));
 
+// Mock useNetworkStatusProvider
+jest.mock('../../hooks/useNetworkStatusProvider', () => ({
+  useNetworkStatus: () => ({ isOnline: true, backendReachable: true }),
+  NetworkProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}));
+
 jest.mock('lucide-react', () => {
   return new Proxy({}, {
     get: (_t, prop) => {

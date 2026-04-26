@@ -72,6 +72,12 @@ jest.mock('../../api/auth', () => ({
   authHeaders: jest.fn(() => ({ 'Content-Type': 'application/json' })),
 }));
 
+// Mock useNetworkStatusProvider
+jest.mock('../../hooks/useNetworkStatusProvider', () => ({
+  useNetworkStatus: () => ({ isOnline: true, backendReachable: true }),
+  NetworkProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}));
+
 // ─── Constants mock — includes getChartColors for T04/T05 ─────────────────────
 jest.mock('../../config/constants', () => {
   const CHART_COLORS = {

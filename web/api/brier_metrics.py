@@ -22,7 +22,10 @@ from utils.logger import get_logger
 
 logger = get_logger("brier_metrics_api")
 
-router = APIRouter(prefix="/api/v1/metrics", tags=["brier_metrics"], dependencies=[Depends(get_current_session)]  # ZT6-01
+router = APIRouter(
+    prefix="/api/v1/metrics",
+    tags=["brier_metrics"],
+    dependencies=[Depends(get_current_session)]
 )
 
 # Pydantic models for API
@@ -585,3 +588,6 @@ async def run_batch_calibration():
         
     except Exception as e:
         logger.error(f"Batch calibration update failed: {e}")
+
+# Export alias for main.py wiring
+brier_metrics_router = router

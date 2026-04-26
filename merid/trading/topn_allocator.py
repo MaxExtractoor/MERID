@@ -280,115 +280,264 @@ def select_topn_allocations(
     config: TopNAllocatorConfig,
     cycle_risk_pct: Optional[float] = None,
 ) -> AllocationCycle:
-    """Select top-N allocations with dynamic N stepping and max-loss sizing.
-    
-    Algorithm:
+    """Select top-N allocations with STRICT EDGE #1 PRIORITY sequential fill.
+
+    ALGORITHM (per user wagering rules):
     1. Filter invalid candidates (edge <= 0, invalid asset, no stop)
-    2. Sort by edge descending
-    3. Determine cycle_risk_pct (use provided or default to max)
-    4. Compute cycle_risk_usd = equity * cycle_risk_pct
-    5. For N in [max_edges, ..., 1]:
-       a. Take top N candidates
-       b. Compute provisional risk allocation by edge weight
-       c. Compute contracts for each based on max loss
-       d. Check constraints: sum_risk <= cycle_risk_usd, min_contracts
-       e. If valid, accept this N
-    6. If no N valid, return N=0 (no trades)
-    
+    2. Sort by edge descending to rank Edge #1, #2, #3
+    3. Compute total cycle risk budget (1-2% of bankroll)
+    4. Edge #1 (highest edge) gets FIRST allocation with 1% risk budget MINIMUM
+    5. If Edge #1 allocated and budget remains, allocate to Edge #2
+    6. If Edge #2 allocated and budget remains, allocate to Edge #3
+    7. If any edge fails min constraints, skip it AND all subsequent edges
+    8. Return allocations with explicit Edge #1/#2/#3 logging
+
+    CRITICAL RULES ENFORCED:
+    - Edge #1 is MANDATORY if valid and within bankroll
+    - Edge #1 must be executed before Edge #2 or #3
+    - Never skip Edge #1 to take Edge #2 or #3
+    - Each edge gets 1-2% max risk (Edge #1 always gets at least 1% if valid)
+
     Args:
         equity_cents: Current account equity including open PnL
         candidates: List of edge candidates
         config: Allocator configuration
         cycle_risk_pct: Optional override for cycle risk % (else uses config.max)
-        
+
     Returns:
         AllocationCycle with allocations and metadata
     """
     cycle_id = f"cycle_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}"
     cycle_ts = datetime.now(timezone.utc)
-    
+
     # Step 1: Filter invalid candidates
     valid_candidates = _filter_valid_candidates(candidates, config)
-    
-    # Step 2: Sort by edge descending
+
+    # Step 2: Sort by edge descending to establish Edge #1, #2, #3 ranking
     sorted_candidates = sorted(valid_candidates, key=lambda c: c.edge, reverse=True)
-    
-    # Step 3: Compute cycle risk budget
+
+    # Log the ranked edges for transparency
+    _log_ranked_edges(sorted_candidates, equity_cents)
+
+    # Step 3: Compute cycle risk budget (1-2% total)
     if cycle_risk_pct is None:
         cycle_risk_pct = config.max_cycle_risk_pct
     else:
-        # Clamp to valid range
-        cycle_risk_pct = max(config.min_cycle_risk_pct, 
+        cycle_risk_pct = max(config.min_cycle_risk_pct,
                             min(cycle_risk_pct, config.max_cycle_risk_pct))
-    
-    cycle_risk_cents = int(equity_cents * cycle_risk_pct)
-    cycle_risk_usd = cycle_risk_cents / 100
-    
+
+    # Edge #1 gets MINIMUM 1% risk budget (non-negotiable if valid)
+    edge1_min_risk_pct = config.min_cycle_risk_pct  # 1%
+    total_cycle_risk_cents = int(equity_cents * cycle_risk_pct)
+    edge1_budget_cents = int(equity_cents * edge1_min_risk_pct)
+
     logger.info(
-        "[TOPN-ALLOCATE] Starting allocation | equity=$%.2f | cycle_risk_pct=%.2f%% | "
-        "cycle_risk_budget=$%.2f | candidates=%d",
-        equity_cents / 100, cycle_risk_pct * 100, cycle_risk_usd, len(sorted_candidates)
+        "[EDGE-PRIORITY] equity=$%.2f | total_cycle_budget=$%.2f (%.2f%%) | "
+        "edge1_minimum=$%.2f (%.2f%%)",
+        equity_cents / 100,
+        total_cycle_risk_cents / 100, cycle_risk_pct * 100,
+        edge1_budget_cents / 100, edge1_min_risk_pct * 100
     )
-    
-    # Step 4: Dynamic N stepping (3→2→1→0)
-    max_n = min(config.max_edges_per_cycle, len(sorted_candidates))
-    
-    for n in range(max_n, config.min_edges_per_cycle - 1, -1):
-        if n == 0:
-            # No trades this cycle
-            return AllocationCycle(
-                cycle_id=cycle_id,
-                cycle_ts=cycle_ts,
-                equity_cents=equity_cents,
-                cycle_risk_pct=cycle_risk_pct,
-                cycle_risk_usd=cycle_risk_usd,
-                num_candidates=len(candidates),
-                num_edges_traded=0,
-                sum_risk_usd=0.0,
-                allocations=[],
-                config=config,
-            )
-        
-        # Try allocating to top N candidates
-        top_n = sorted_candidates[:n]
-        allocations = _allocate_to_candidates(top_n, cycle_risk_cents, config)
-        
-        if allocations is not None:
-            # Valid allocation found
-            sum_risk_usd = sum(a.max_loss_usd for a in allocations)
-            
-            logger.info(
-                "[TOPN-ALLOCATE] N=%d accepted | sum_risk=$%.2f | budget=$%.2f | assets=%s",
-                n, sum_risk_usd, cycle_risk_usd, [a.asset for a in allocations]
-            )
-            
-            return AllocationCycle(
-                cycle_id=cycle_id,
-                cycle_ts=cycle_ts,
-                equity_cents=equity_cents,
-                cycle_risk_pct=cycle_risk_pct,
-                cycle_risk_usd=cycle_risk_usd,
-                num_candidates=len(candidates),
-                num_edges_traded=n,
-                sum_risk_usd=sum_risk_usd,
-                allocations=allocations,
-                config=config,
-            )
+
+    # Step 4: SEQUENTIAL PRIORITY FILL - Edge #1 first, then #2, then #3
+    allocations: List[TradeAllocation] = []
+    remaining_budget_cents = total_cycle_risk_cents
+    edges_allocated = []
+    edges_skipped = []
+
+    max_edges = min(config.max_edges_per_cycle, len(sorted_candidates))
+
+    for edge_rank in range(1, max_edges + 1):
+        if edge_rank > len(sorted_candidates):
+            break
+
+        candidate = sorted_candidates[edge_rank - 1]  # 0-indexed
+        edge_label = f"Edge#{edge_rank}"
+
+        # Determine budget for this edge
+        if edge_rank == 1:
+            # Edge #1 gets minimum 1% budget (or remaining if less)
+            edge_budget_cents = min(edge1_budget_cents, remaining_budget_cents)
         else:
-            logger.debug("[TOPN-ALLOCATE] N=%d rejected (constraints not satisfied)", n)
-    
-    # No valid N found - return empty cycle
+            # Edge #2, #3 get remaining budget (up to 1% each)
+            edge_budget_cents = remaining_budget_cents
+
+        if edge_budget_cents <= 0:
+            logger.info(
+                "[%s-SKIP] %s | reason=zero_budget_remaining | "
+                "bankroll_depleted_by_previous_edges",
+                edge_label, candidate.asset
+            )
+            edges_skipped.append((edge_rank, candidate.asset, "zero_budget_remaining"))
+            # Skip subsequent edges - no budget left
+            break
+
+        # Attempt to allocate to this edge
+        alloc = _allocate_single_candidate(candidate, edge_budget_cents, config, edge_rank)
+
+        if alloc is None:
+            # Failed min constraints - skip this edge and ALL subsequent edges
+            logger.warning(
+                "[%s-SKIP] %s | reason=failed_min_constraints | "
+                "edge=%.4f price=%d¢ | Subsequent edges (#%d+) also skipped",
+                edge_label, candidate.asset, candidate.edge,
+                candidate.entry_price_cents, edge_rank + 1
+            )
+            edges_skipped.append((edge_rank, candidate.asset, "failed_min_constraints"))
+
+            # CRITICAL: If Edge #1 fails, NO trades this cycle
+            # If Edge #2 fails, Edge #3 is also skipped
+            for subsequent_rank in range(edge_rank + 1, max_edges + 1):
+                if subsequent_rank <= len(sorted_candidates):
+                    sub_candidate = sorted_candidates[subsequent_rank - 1]
+                    sub_label = f"Edge#{subsequent_rank}"
+                    logger.info(
+                        "[%s-SKIP] %s | reason=previous_edge_failed | "
+                        "blocked_by=%s_failure",
+                        sub_label, sub_candidate.asset, edge_label
+                    )
+                    edges_skipped.append((subsequent_rank, sub_candidate.asset, f"blocked_by_{edge_label}_failure"))
+            break
+
+        # Successfully allocated to this edge
+        allocations.append(alloc)
+        remaining_budget_cents -= int(alloc.max_loss_usd * 100)
+        edges_allocated.append(edge_rank)
+
+        logger.info(
+            "[%s-ALLOCATED] %s | edge=%.4f | contracts=%d | risk=$%.2f | "
+            "remaining_budget=$%.2f",
+            edge_label, alloc.asset, alloc.edge, alloc.target_contracts,
+            alloc.max_loss_usd, remaining_budget_cents / 100
+        )
+
+    # Build and return the allocation cycle
+    sum_risk_usd = sum(a.max_loss_usd for a in allocations)
+    num_edges = len(allocations)
+
+    # Log final summary
+    logger.info(
+        "[EDGE-PRIORITY-SUMMARY] cycle=%s | edges_allocated=%s | edges_skipped=%s | "
+        "total_risk=$%.2f | total_budget=$%.2f",
+        cycle_id,
+        [f"#{r}:{a.asset}" for r, a in zip(edges_allocated, allocations)],
+        [f"#{r}:{a}" for r, a, reason in edges_skipped],
+        sum_risk_usd, total_cycle_risk_cents / 100
+    )
+
     return AllocationCycle(
         cycle_id=cycle_id,
         cycle_ts=cycle_ts,
         equity_cents=equity_cents,
         cycle_risk_pct=cycle_risk_pct,
-        cycle_risk_usd=cycle_risk_usd,
+        cycle_risk_usd=total_cycle_risk_cents / 100,
         num_candidates=len(candidates),
-        num_edges_traded=0,
-        sum_risk_usd=0.0,
-        allocations=[],
+        num_edges_traded=num_edges,
+        sum_risk_usd=sum_risk_usd,
+        allocations=allocations,
         config=config,
+    )
+
+
+def _log_ranked_edges(candidates: List[EdgeCandidate], equity_cents: int) -> None:
+    """Log the ranked edges for transparency."""
+    if not candidates:
+        logger.info("[EDGE-RANKING] No valid candidates")
+        return
+
+    logger.info("[EDGE-RANKING] Top edges by expected edge (bankroll=$%.2f):", equity_cents / 100)
+    for i, c in enumerate(candidates[:3], 1):
+        edge_pct = c.edge * 100
+        # Compute implied stake size (1-2% rule)
+        stake_pct = min(2.0, max(1.0, edge_pct * 0.5))  # Rough estimate
+        logger.info(
+            "  Edge#%d: %s | edge=%.2f%% | direction=%s | entry=%d¢ | "
+            "suggested_stake=%.1f%%",
+            i, c.asset, edge_pct, c.direction, c.entry_price_cents, stake_pct
+        )
+
+
+def _allocate_single_candidate(
+    candidate: EdgeCandidate,
+    budget_cents: int,
+    config: TopNAllocatorConfig,
+    edge_rank: int,
+) -> Optional[TradeAllocation]:
+    """Allocate risk budget to a single candidate.
+
+    Args:
+        candidate: The edge candidate to allocate
+        budget_cents: Maximum risk budget in cents for this allocation
+        config: Allocator configuration
+        edge_rank: Edge rank (1, 2, or 3) for weight calculation
+
+    Returns:
+        TradeAllocation if successful, None if constraints not met
+    """
+    # Compute max loss per contract
+    max_loss_per_contract = candidate.compute_max_loss_per_contract()
+    if max_loss_per_contract <= 0:
+        logger.debug(
+            "[_allocate_single] %s: max_loss_per_contract=%d <= 0",
+            candidate.asset, max_loss_per_contract
+        )
+        return None
+
+    # Calculate contracts that fit within risk budget
+    target_contracts = budget_cents // max_loss_per_contract
+
+    # Check min contracts constraint
+    if target_contracts < config.min_contracts:
+        logger.debug(
+            "[_allocate_single] %s: target_contracts=%d < min_contracts=%d",
+            candidate.asset, target_contracts, config.min_contracts
+        )
+        return None
+
+    # Check min notional constraint
+    notional_cents = target_contracts * candidate.entry_price_cents
+    min_notional_cents = int(config.min_notional_usd * 100)
+    if notional_cents < min_notional_cents and target_contracts > 0:
+        logger.debug(
+            "[_allocate_single] %s: notional=$%.2f < min_notional=$%.2f",
+            candidate.asset, notional_cents / 100, config.min_notional_usd
+        )
+        return None
+
+    # Check per-asset notional cap
+    if notional_cents > candidate.max_notional_cap:
+        # Cap the contracts to respect max_notional_cap
+        max_contracts_by_cap = candidate.max_notional_cap // candidate.entry_price_cents
+        target_contracts = min(target_contracts, max_contracts_by_cap)
+        if target_contracts < config.min_contracts:
+            logger.debug(
+                "[_allocate_single] %s: capped below min_contracts | max_by_cap=%d",
+                candidate.asset, max_contracts_by_cap
+            )
+            return None
+        logger.debug(
+            "[_allocate_single] %s: capped by max_notional | contracts: %d -> %d",
+            candidate.asset, target_contracts, max_contracts_by_cap
+        )
+
+    # Compute actual max loss with integer contracts
+    actual_max_loss_cents = target_contracts * max_loss_per_contract
+
+    # Weight is 1.0 for Edge#1, then proportional for #2, #3
+    # In strict priority, weight reflects priority order, not edge strength
+    weight = 1.0 / edge_rank
+
+    return TradeAllocation(
+        asset=candidate.asset,
+        edge=candidate.edge,
+        direction=candidate.direction,
+        target_contracts=target_contracts,
+        entry_price_cents=candidate.entry_price_cents,
+        stop_price_cents=candidate.stop_price_cents,
+        max_loss_usd=actual_max_loss_cents / 100,
+        weight=weight,
+        risk_budget_usd=budget_cents / 100,
+        metadata=candidate.metadata,
     )
 
 
@@ -778,9 +927,24 @@ class TopNEdgeAllocator:
             self._cycle_count += 1
             
             if equity_cents <= 0:
-                logger.warning("[TOPN] Invalid equity: %d cents", equity_cents)
-                self._rejected_cycles += 1
-                return self._create_empty_cycle(equity_cents, candidates)
+                logger.warning("[TOPN] Invalid equity: %d cents, attempting live bankroll derivation", equity_cents)
+                # Try to derive live bankroll from Kalshi API
+                try:
+                    from merid.event_venues.kalshi.order_router import _derive_live_bankroll_usd
+                    _live = _derive_live_bankroll_usd()
+                    if _live is not None and _live > 0:
+                        equity_cents = int(_live * 100)
+                        logger.info("[TOPN] Recovered with live bankroll: %d cents", equity_cents)
+                    else:
+                        # FAIL CLOSED: Cannot get live bankroll
+                        logger.error("[TOPN] Cannot determine live Kalshi balance. Rejecting cycle.")
+                        self._rejected_cycles += 1
+                        return self._create_empty_cycle(0, candidates)
+                except Exception as _e:
+                    # FAIL CLOSED: Cannot get live bankroll
+                    logger.error("[TOPN] Failed to get live bankroll: %s. Rejecting cycle.", _e)
+                    self._rejected_cycles += 1
+                    return self._create_empty_cycle(0, candidates)
             
             if not candidates:
                 logger.debug("[TOPN] No candidates provided")

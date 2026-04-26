@@ -71,6 +71,7 @@ class HoldReason(str, Enum):
     SOLO_WINDOW = "solo_window"                  # Waiting for solo execution threshold
     SOLO_CAP_REACHED = "solo_cap_reached"        # Solo trade cap exhausted
     SOLO_WALL_CLOCK = "solo_wall_clock"          # Degraded wall-clock limit
+    TOP3_EXCLUDED = "top3_excluded"              # Not in top-3 edge allocation for cycle
 
     # ── Risk / pre-trade ──────────────────────────────────────────────
     RISK_LIMIT = "risk_limit"                    # PredictionMarketRisk rejected

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { WifiOff } from 'lucide-react';
+import { WifiOff } from '../ui/icons';
 import { useMeridSocket } from '../hooks/useMeridSocket';
 
 const CLOCK_TICK_MS = 1000; // UI clock tick — updates elapsed time every second

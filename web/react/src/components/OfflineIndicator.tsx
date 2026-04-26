@@ -1,4 +1,4 @@
-import { WifiOff, CloudOff, AlertTriangle } from 'lucide-react';
+import { WifiOff, CloudOff, AlertTriangle } from '../ui/icons';
 import { useNetworkStatus } from '../hooks/useNetworkStatus';
 import './OfflineIndicator.css';
 

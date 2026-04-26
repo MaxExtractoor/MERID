@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components */
 import { useState, useEffect } from 'react';
-import { Activity, AlertCircle, CheckCircle, TrendingUp, Server, Cpu } from 'lucide-react';
+import { Activity, AlertCircle, CheckCircle, TrendingUp, Server, Cpu } from '../ui/icons';
 import { api } from '../services/api';
 import type { SystemHealth } from '../services/api';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';

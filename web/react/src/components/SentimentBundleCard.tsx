@@ -1,5 +1,5 @@
 import React from 'react';
-import { AlertTriangle, Clock, TrendingUp, TrendingDown, Minus } from 'lucide-react';
+import { AlertTriangle, Clock, TrendingUp, TrendingDown, Minus } from '../ui/icons';
 import { useLaneSentimentSnapshot, useSentimentBundle } from '../hooks/useSentimentBundle';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

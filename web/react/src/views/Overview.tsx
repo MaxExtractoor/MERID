@@ -12,7 +12,7 @@ import {
   Database,
   ShieldAlert,
   ShieldCheck,
-} from 'lucide-react';
+} from '../ui/icons';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
 import CollapsibleConsole from '../components/CollapsibleConsole';
 import AgentActivityPanel from '../components/AgentActivityPanel';

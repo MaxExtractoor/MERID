@@ -143,7 +143,7 @@ export function useResilientWebSocket<T = unknown>(
         }
       } catch (err) {
         if (err instanceof Error && err.name !== 'AbortError') {
-          console.error('Fallback poll failed:', err);
+          // Fallback poll failed - will retry on next interval
         }
       }
     };
@@ -220,7 +220,7 @@ export function useResilientWebSocket<T = unknown>(
           setLastMessage(data as T);
           onMessage?.(data);
         } catch (err) {
-          console.error('Failed to parse WebSocket message:', err);
+          // WebSocket message parse error - dropping message
         }
       };
 
@@ -321,7 +321,7 @@ export function useResilientWebSocket<T = unknown>(
 
   const send = useCallback((data: string) => {
     if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) {
-      console.warn('Cannot send: WebSocket not connected');
+      // Cannot send - WebSocket not connected (expected during reconnection)
       return;
     }
     socketRef.current.send(data);

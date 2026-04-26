@@ -114,7 +114,11 @@ class KalshiOrderBook:
 
 @dataclass
 class KalshiBalance:
-    """Represents Kalshi account balance."""
+    """Represents Kalshi account balance.
+    
+    DEPRECATED: Use RawVenueBalance from merid.event_venues.kalshi.types
+    for new code. This class is kept for backward compatibility only.
+    """
     balance: Decimal  # Available balance in cents
     locked_balance: Decimal  # Locked in orders
     total_balance: Decimal
@@ -338,3 +342,42 @@ class KalshiMarketState:
     def expiry(self) -> Optional[str]:
         """Human-readable expiration time (alias for expiration_time)."""
         return self.expiration_time
+
+
+# ── Typed venue response objects ──────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class VenueBalance:
+    """Typed balance response from Kalshi ``/portfolio/balance``.
+
+    Replaces raw ``{"USD": Decimal, "locked": Decimal}`` dicts so
+    callers never mis-key fields (e.g. ``"available"`` vs ``"USD"``).
+    """
+    available_usd: Decimal  # Spendable balance (USD)
+    locked_usd: Decimal  # Balance locked in open orders (USD)
+
+    @property
+    def total_usd(self) -> Decimal:
+        return self.available_usd + self.locked_usd
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "USD": str(self.available_usd),
+            "locked": str(self.locked_usd),
+            "total": str(self.total_usd),
+        }
+
+    @classmethod
+    def from_raw(cls, raw: Dict[str, Any]) -> "VenueBalance":
+        """Build from the raw dict returned by ``KalshiVenueClient.get_balance()``.
+
+        Accepts both ``{"USD": ..., "locked": ...}`` and
+        ``{"available": ..., "locked": ...}`` for backward compat.
+        """
+        avail = raw.get("USD", raw.get("available", Decimal("0")))
+        locked = raw.get("locked", Decimal("0"))
+        return cls(
+            available_usd=Decimal(str(avail)),
+            locked_usd=Decimal(str(locked)),
+        )

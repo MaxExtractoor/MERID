@@ -39,6 +39,18 @@ jest.mock('../../components/ExecutionGateStrip', () => ({
 jest.mock('../../config/constants', () => ({
   API_BASE_URL: '',
   AUTH_TOKEN_KEY: 'merid-access',
+  WS_URL: 'ws://127.0.0.1:8011/ws/trades',
+  WS_PORTFOLIO_URL: 'ws://127.0.0.1:8011/ws/risk',
+  CHART_COLORS: {
+    GREEN: '#22c55e',
+    RED: '#ef4444',
+    YELLOW: '#eab308',
+    BLUE: '#3b82f6',
+    PURPLE: '#a855f7',
+    ORANGE: '#f97316',
+    WHITE: '#ffffff',
+    GRAY: '#6b7280',
+  },
   API_ENDPOINTS: {
     KALSHI_MARKETS: '/api/v1/kalshi/markets',
     KALSHI_CATALOG: '/api/v1/kalshi/catalog',
@@ -163,6 +175,9 @@ function setupMocks(overrides: Record<string, unknown> = {}) {
     }
     if (endpoint.includes('/kalshi/balance')) {
       return { data: { available: 100, locked: 0 }, loading: false, refetch: jest.fn() };
+    }
+    if (endpoint.includes('/kalshi/risk')) {
+      return { data: overrides.risk ?? { daily_pnl_usd: 12.50, drawdown_pct: 2.1, kill_switch_active: false }, loading: false, refetch: jest.fn() };
     }
     return { data: null, loading: false, refetch: jest.fn() };
   });

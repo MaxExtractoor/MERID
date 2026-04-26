@@ -64,8 +64,17 @@ class CTExecutionAdapter:
         self._parity_matches = 0
         self._parity_mismatches = 0
 
-    def _order_dict_to_intent(self, order_data: Dict[str, Any]) -> "OrderIntent":
-        """Convert CT order dict to canonical OrderIntent."""
+    def _order_dict_to_intent(
+        self,
+        order_data: Dict[str, Any],
+        effective_equity_usd: Optional[float] = None,
+    ) -> "OrderIntent":
+        """Convert CT order dict to canonical OrderIntent.
+
+        Args:
+            order_data: CT order dict with ticker, side, count, price, etc.
+            effective_equity_usd: Optional capped equity for portfolio risk limits
+        """
         from merid.event_venues.kalshi.order_router import OrderIntent
         from merid.event_venues.kalshi.decision_trace import new_decision_trace_id
 
@@ -99,6 +108,7 @@ class CTExecutionAdapter:
             sentiment_driven=False,
             agent_id="kalshi_ct",
             snapshot_ts=time.time(),  # Current snapshot
+            effective_equity_usd=effective_equity_usd,
         )
         return intent
 
@@ -223,22 +233,69 @@ class CTExecutionAdapter:
             self._parity_mismatches,
         )
 
-    async def execute_live(self, order_data: Dict[str, Any]) -> "OrderResult":
-        """Execute live: use router for actual order submission (Phase 2+).
+    async def execute_live(
+        self,
+        order_data: Dict[str, Any],
+        effective_equity_usd: Optional[float] = None,
+    ) -> "OrderResult":
+        """Submit signal to trading_agent for execution (Single Executor Principle).
 
-        This replaces the direct HTTP call once shadow mode proves parity.
+        SIGNAL-ONLY AGENT: CT adapter submits signals via SignalRouter.
+        trading_agent is the SOLE EXECUTOR that calls route_order_async.
+        This ensures risk guards, caller whitelist, and audit trail are enforced.
+
+        Args:
+            order_data: CT order dict with ticker, side, count, price, etc.
+            effective_equity_usd: Optional capped equity for portfolio risk limits
         """
-        from merid.event_venues.kalshi.order_router import route_order_async
+        from merid.event_venues.kalshi import submit_signal
+        from merid.event_venues.kalshi.order_router import OrderResult
 
-        intent = self._order_dict_to_intent(order_data)
-        result = await route_order_async(intent)
+        ticker = order_data.get("ticker", "")
+        side = order_data.get("side", "yes")
+        action = order_data.get("action", "buy")
+        count = int(order_data.get("count", 1))
+        price_cents = int(order_data.get("yes_price", order_data.get("no_price", 50)))
+
+        signal = submit_signal(
+            agent_id="kalshi_continuous_trader",
+            agent_type="ct_execution_adapter",
+            market_id=ticker,
+            action=action,
+            side=side,
+            size=count,
+            price_cents=price_cents,
+            confidence=0.7,
+            reasoning=f"Continuous Trader signal: {action} {side} on {ticker}",
+            metadata={
+                "effective_equity_usd": effective_equity_usd,
+                "client_order_id": order_data.get("client_order_id"),
+                "group_id": order_data.get("group_id"),
+            },
+            origin_agent="kalshi_continuous_trader",
+            risk_bucket="ct_automated",
+        )
 
         logger.info(
-            "[CT-ADAPTER] live_call | ticker=%s | status=%s | source=ct_execution_adapter",
-            intent.ticker,
-            result.status,
+            "[CT-ADAPTER] signal_submitted | ticker=%s | signal_id=%s | side=%s | count=%d",
+            ticker, signal.signal_id, side, count,
         )
-        return result
+
+        # Return a synthetic OrderResult indicating signal submission
+        # trading_agent will receive the signal and execute via route_order_async
+        return OrderResult(
+            status="submitted_signal",
+            fill={
+                "signal_id": signal.signal_id,
+                "ticker": ticker,
+                "side": side,
+                "count": count,
+                "price_cents": price_cents,
+                "action": action,
+            },
+            latency_ms=0.0,
+            reason="Signal submitted to trading_agent for execution",
+        )
 
     def get_stats(self) -> Dict[str, Any]:
         """Return adapter statistics for monitoring."""

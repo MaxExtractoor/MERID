@@ -197,7 +197,10 @@ async def get_consensus_recent() -> Dict[str, Any]:
         cc = _get_consensus()
         plans = cc.get_active_plans()
         return {"results": plans, "count": len(plans)}
-    except Exception:
+    except ImportError:
+        return _offline({"results": [], "count": 0}, reason="Consensus module unavailable")
+    except (RuntimeError, AttributeError) as e:
+        logger.debug("Consensus coordinator not ready: %s", e)
         return _offline({"results": [], "count": 0}, reason="Consensus coordinator unavailable")
 
 
@@ -214,7 +217,10 @@ async def get_consensus_debate_latest() -> Dict[str, Any]:
             "opinion_count": len(opinions),
             "plan_count": len(plans),
         }
-    except Exception:
+    except ImportError:
+        return _offline({"opinions": [], "plans": [], "opinion_count": 0, "plan_count": 0}, reason="Consensus module unavailable")
+    except (RuntimeError, AttributeError) as e:
+        logger.debug("Consensus coordinator not ready: %s", e)
         return _offline({"opinions": [], "plans": [], "opinion_count": 0, "plan_count": 0}, reason="Consensus coordinator unavailable")
 
 
@@ -243,7 +249,9 @@ async def get_trade_floor_status() -> Dict[str, Any]:
             gate = get_venue_gate()
             current_mode = gate.mode.value.upper()
             is_simulated = not gate.is_live
-        except Exception as exc:
+        except ImportError:
+            pass  # Venue gate not available, keep defaults
+        except (RuntimeError, AttributeError) as exc:
             logger.debug("VenueGate mode lookup failed, defaulting to PAPER: %s", exc)
 
         return {
@@ -255,7 +263,18 @@ async def get_trade_floor_status() -> Dict[str, Any]:
             "total_pnl": round(total_pnl, 2),
             "active_agents": len(engine.portfolios),
         }
-    except Exception:
+    except ImportError:
+        return _offline({
+            "mode": "OFFLINE",
+            "is_simulated": True,
+            "connected": False,
+            "total_positions": 0,
+            "total_orders": 0,
+            "total_pnl": 0,
+            "active_agents": 0,
+        }, reason="Paper trading module unavailable")
+    except (RuntimeError, AttributeError) as e:
+        logger.debug("Paper trading engine not initialized: %s", e)
         return _offline({
             "mode": "OFFLINE",
             "is_simulated": True,
@@ -289,7 +308,10 @@ async def get_trade_floor_active_trades() -> Dict[str, Any]:
                     "venue": getattr(order, "venue", "Paper"),
                 })
         return {"trades": trades, "count": len(trades)}
-    except Exception:
+    except ImportError:
+        return _offline({"trades": [], "count": 0}, reason="Paper trading module unavailable")
+    except (RuntimeError, AttributeError) as e:
+        logger.debug("Paper trading engine not initialized: %s", e)
         return _offline({"trades": [], "count": 0}, reason="Paper trading engine unavailable")
 
 
@@ -311,7 +333,10 @@ async def get_trade_floor_signals() -> Dict[str, Any]:
                 "timestamp": p.get("timestamp", time.time()),
             })
         return {"signals": signals, "count": len(signals)}
-    except Exception:
+    except ImportError:
+        return _offline({"signals": [], "count": 0}, reason="Consensus module unavailable")
+    except (RuntimeError, AttributeError) as e:
+        logger.debug("Consensus coordinator not ready: %s", e)
         return _offline({"signals": [], "count": 0}, reason="Consensus coordinator unavailable")
 
 
@@ -454,7 +479,9 @@ async def get_wallet_balances_real() -> Dict[str, Any]:
             try:
                 from merid.settings import settings as _s
                 total_usd = float(getattr(_s, 'PAPER_STARTING_BALANCE', 0))
-            except Exception:
+            except ImportError:
+                total_usd = 0.0
+            except (ValueError, AttributeError):
                 total_usd = 0.0
 
         balances = [
@@ -547,7 +574,9 @@ async def get_risk_metrics_real() -> Dict[str, Any]:
             try:
                 from merid.settings import settings as _s2
                 total_equity = float(getattr(_s2, 'PAPER_STARTING_BALANCE', 0))
-            except Exception:
+            except ImportError:
+                total_equity = 0.0
+            except (ValueError, AttributeError):
                 total_equity = 0.0
 
         starting = 0.0
@@ -626,7 +655,9 @@ async def get_risk_summary() -> Dict[str, Any]:
             try:
                 from merid.settings import settings as _s
                 total_equity = float(getattr(_s, "PAPER_STARTING_BALANCE", 0)) or 1.0
-            except Exception:
+            except ImportError:
+                total_equity = 1.0
+            except (ValueError, AttributeError):
                 total_equity = 1.0
 
         margin_pct = round(min(margin_used / total_equity * 100, 100), 1) if total_equity > 0 else 0.0

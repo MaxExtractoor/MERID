@@ -49,22 +49,24 @@ logger = get_logger("merid.event_venues.kalshi.category_exposure")
 # ── Default caps (overridden by env vars) ─────────────────────────────────
 
 _DEFAULT_CATEGORY_CAPS: Dict[str, float] = {
-    "cross_category": float(os.getenv("MERID_CAT_CAP_CROSS_CATEGORY_USD", "200.0")),
-    "crypto":     float(os.getenv("MERID_CAT_CAP_CRYPTO_USD",     "2000.0")),
-    "economics":  float(os.getenv("MERID_CAT_CAP_ECONOMICS_USD",  "500.0")),
-    "macro":      float(os.getenv("MERID_CAT_CAP_MACRO_USD",      "500.0")),
-    "financials": float(os.getenv("MERID_CAT_CAP_FINANCIALS_USD", "500.0")),
-    "politics":   float(os.getenv("MERID_CAT_CAP_POLITICS_USD",   "200.0")),
-    "climate":    float(os.getenv("MERID_CAT_CAP_CLIMATE_USD",    "200.0")),
-    "sports":     float(os.getenv("MERID_CAT_CAP_SPORTS_USD",     "200.0")),
-    "tech":       float(os.getenv("MERID_CAT_CAP_TECH_USD",       "300.0")),
-    "culture":    float(os.getenv("MERID_CAT_CAP_CULTURE_USD",    "200.0")),
-    "science":    float(os.getenv("MERID_CAT_CAP_SCIENCE_USD",    "200.0")),
-    "equities":   float(os.getenv("MERID_CAT_CAP_EQUITIES_USD",   "500.0")),
-    "other":      float(os.getenv("MERID_CAT_CAP_OTHER_USD",      "200.0")),
+    "cross_category": float(os.getenv("MERID_CAT_CAP_CROSS_CATEGORY_USD", "0.0")),  # 0 = derive from bankroll
+    # 0.0 = derive from actual Kalshi bankroll (was $2000/$500/$200 hardcoded)
+    "crypto":     float(os.getenv("MERID_CAT_CAP_CRYPTO_USD",    "0.0")),
+    "macro":      float(os.getenv("MERID_CAT_CAP_MACRO_USD",     "0.0")),
+    "economics":  float(os.getenv("MERID_CAT_CAP_ECONOMICS_USD", "0.0")),
+    "financials": float(os.getenv("MERID_CAT_CAP_FINANCIALS_USD","0.0")),
+    "politics":   float(os.getenv("MERID_CAT_CAP_POLITICS_USD",   "0.0")),
+    "climate":    float(os.getenv("MERID_CAT_CAP_CLIMATE_USD",    "0.0")),
+    "sports":     float(os.getenv("MERID_CAT_CAP_SPORTS_USD",     "0.0")),
+    "tech":       float(os.getenv("MERID_CAT_CAP_TECH_USD",       "0.0")),
+    "culture":    float(os.getenv("MERID_CAT_CAP_CULTURE_USD",    "0.0")),
+    "science":    float(os.getenv("MERID_CAT_CAP_SCIENCE_USD",    "0.0")),
+    "equities":   float(os.getenv("MERID_CAT_CAP_EQUITIES_USD",   "0.0")),
+    "other":      float(os.getenv("MERID_CAT_CAP_OTHER_USD",      "0.0")),
 }
 
-_DEFAULT_CORR_CAP_USD: float = float(os.getenv("MERID_CORR_STACK_CAP_USD", "800.0"))
+# 0.0 = derive from actual Kalshi bankroll (was $800 hardcoded)
+_DEFAULT_CORR_CAP_USD: float = float(os.getenv("MERID_CORR_STACK_CAP_USD", "0.0"))
 
 # Per-asset USD caps for correlated-stack checks. 0.0 from env = unset (use _corr_cap).
 _DEFAULT_ASSET_CAPS_USD: Dict[str, float] = {

@@ -1,14 +1,25 @@
 """
 Kalshi Execution Pipeline — QUARANTINED (T-001 Zero-Trust Audit)
 
+⚠️  PRODUCTION HARDENING: THIS MODULE IS DISABLED  ⚠️
+
 WARNING: This module is a PARALLEL execution engine that bypasses MeridLoop,
 TaCo/Enhanced consensus, the 9-gate execution path, kill switch, VenueGate,
-risk manager, and deployment controller.  It must NOT be activated unless
-explicitly enabled via MERID_NATS_EXECUTION_ENABLED=true.
+risk manager, and deployment controller.
+
+It bypasses ALL safety guards including:
+  - order_router.route_order_async()
+  - GlobalRiskGuard (1-2% bankroll cap)
+  - Top3BatchManager (top-3 allocation gate)
+  - PreTradeGate (lease + deduplication)
+  - Execution gate / kill switches
+
+To enable this bypass (NOT RECOMMENDED): set MERID_ALLOW_EXECUTION_PIPELINE_BYPASS=1
 
 If you are looking for the production execution path, see:
   - merid/execution/router.py  (ExecutionRouter)
   - merid/execution/executors/kalshi.py  (KalshiExecutor)
+  - merid/event_venues/kalshi/order_router.py (canonical order routing)
 """
 
 from __future__ import annotations
@@ -22,6 +33,25 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 from enum import Enum
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PRODUCTION HARDENING — CRITICAL BYPASS DISABLED
+# ═══════════════════════════════════════════════════════════════════════════
+# This module contains a DIRECT HTTP BYPASS to Kalshi API that circumvents
+# the canonical order_router and ALL risk guards (GlobalRiskGuard 1-2% cap,
+# Top-3 batch gate, PreTradeGate, execution gate, kill switches).
+#
+# To enable this bypass (NOT RECOMMENDED): set MERID_ALLOW_EXECUTION_PIPELINE_BYPASS=1
+# ═══════════════════════════════════════════════════════════════════════════
+if os.getenv("MERID_ALLOW_EXECUTION_PIPELINE_BYPASS", "").lower() not in ("1", "true", "yes"):
+    raise RuntimeError(
+        "[PRODUCTION HARDENING] merid_core.kalshi.execution_pipeline is DISABLED. "
+        "This module contains a parallel execution engine that bypasses ALL safety gates "
+        "(order_router, GlobalRiskGuard, Top-3 batch, PreTradeGate, kill switches). "
+        "Use the canonical path: POST /api/v1/kalshi/orders or KalshiContinuousTrader. "
+        "To bypass (NOT RECOMMENDED): MERID_ALLOW_EXECUTION_PIPELINE_BYPASS=1"
+    )
+# ═══════════════════════════════════════════════════════════════════════════
 
 logger = get_logger(__name__)
 
@@ -66,12 +96,16 @@ class OrderIntent:
 
 @dataclass
 class RiskLimits:
-    """Risk limits configuration"""
+    """Risk limits configuration — DYNAMIC from Kalshi balance, not hardcoded."""
+    # Position limits (contract counts, these can have defaults)
     max_position_per_market: int = 100
     max_position_per_asset: int = 300
-    max_total_notional: float = 10000.0
-    max_daily_loss: float = 1000.0
-    max_venue_exposure: float = 5000.0
+    
+    # NOTIONAL LIMITS: 0 or negative means "derive from actual Kalshi balance"
+    # These are computed at runtime from /portfolio/balance API
+    max_total_notional: float = 0.0  # 0 = derive from bankroll (was $10,000)
+    max_daily_loss: float = 0.0    # 0 = derive from bankroll (was $1,000)
+    max_venue_exposure: float = 0.0  # 0 = derive from bankroll (was $5,000)
 
 
 class KalshiPositionLimits:

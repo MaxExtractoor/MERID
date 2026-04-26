@@ -1,6 +1,6 @@
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS } from '../config/constants';
-import { Clock, AlertCircle, Info, AlertTriangle, Zap } from 'lucide-react';
+import { Clock, AlertCircle, Info, AlertTriangle, Zap } from '../ui/icons';
 
 interface SessionLogEntry {
   timestamp: string;
@@ -79,7 +79,7 @@ export default function SessionTimeline() {
         </div>
         <div className="space-y-3">
           {[...Array(5)].map((_, i) => (
-            <div key={i} className="animate-pulse">
+            <div key={i} data-testid="skeleton" className="animate-pulse">
               <div className="flex items-start gap-3">
                 <div className="w-4 h-4 bg-slate-700 rounded-full mt-1"></div>
                 <div className="flex-1 space-y-1">
@@ -123,7 +123,13 @@ export default function SessionTimeline() {
           <span>{logs.length} events</span>
           {lastUpdated && (
             <span className="ml-2 text-slate-500">
-              {new Date(lastUpdated).toLocaleTimeString()}
+              {new Intl.DateTimeFormat('en-US', {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: true,
+                timeZone: 'UTC',
+              }).format(new Date(lastUpdated))}
             </span>
           )}
         </div>
@@ -149,7 +155,9 @@ export default function SessionTimeline() {
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-1">
                   <span className="text-xs font-medium text-slate-300 uppercase tracking-wider">
-                    {log.component.replace('_', ' ')}
+                    {log.component
+                      .replace(/_/g, ' ')
+                      .replace(/\b\w/g, (c) => c.toUpperCase())}
                   </span>
                   <span className="text-xs text-slate-500">
                     {formatTimestamp(log.timestamp)}

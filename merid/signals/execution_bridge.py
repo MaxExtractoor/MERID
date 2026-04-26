@@ -25,7 +25,9 @@ class ExecutionConfig:
     """Configuration for signal execution"""
     min_confidence: float = 0.6
     min_strength: float = 0.4
-    max_notional: float = 1000.0
+    # PRODUCTION SAFETY: Default max_notional is 0 - must be configured explicitly
+    # Never trade with hardcoded default sizing
+    max_notional: float = 0.0
     lookback_minutes: int = 60  # How far back to look for signals
     target_domains: List[str] = None
     target_signal_types: List[str] = None

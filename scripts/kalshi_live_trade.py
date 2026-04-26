@@ -1,34 +1,34 @@
 """
 Kalshi Live Trade Script — BTC 15m Market
 ==========================================
-Follows the official Kalshi "Quick Start: Create your first order" guide.
+⚠️  PRODUCTION HARDENING: THIS SCRIPT IS DISABLED  ⚠️
 
-Steps:
-  1. Load RSA credentials from .env
-  2. Find open BTC 15-minute markets
-  3. Display market details + orderbook
-  4. Place a single live BUY order (1 contract, limit price)
-  5. Check order status
-  6. Optionally cancel
+This script contains a DIRECT HTTP BYPASS to Kalshi API that circumvents the
+canonical order_router and ALL risk guards (GlobalRiskGuard 1-2% cap, Top-3 batch
+gate, PreTradeGate, execution gate, kill switches).
 
-Usage:
-  # Step 1: Discover markets (read-only, safe)
-  py scripts/kalshi_live_trade.py discover
+To enable this bypass (NOT RECOMMENDED): set MERID_ALLOW_LIVE_TRADE_BYPASS=1
+See: kalshi_live_trade.py.DISABLED for full documentation.
 
-  # Step 2: Place a live order (REAL MONEY)
-  py scripts/kalshi_live_trade.py buy --ticker KXBTCD-26MAR2003-T79299.99 --side yes --price 5 --count 1
-
-  # Step 3: Check order status
-  py scripts/kalshi_live_trade.py status --order-id <ORDER_ID>
-
-  # Step 4: Cancel order
-  py scripts/kalshi_live_trade.py cancel --order-id <ORDER_ID>
-
-  # Check balance
-  py scripts/kalshi_live_trade.py balance
+If you need live trading, use the canonical path:
+  - POST /api/v1/kalshi/orders (web API) -> order_router -> risk guards -> venue
+  - KalshiContinuousTrader with proper strategy configuration
 """
 
 from __future__ import annotations
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PRODUCTION HARDENING — CRITICAL BYPASS DISABLED
+# ═══════════════════════════════════════════════════════════════════════════
+import os
+if os.getenv("MERID_ALLOW_LIVE_TRADE_BYPASS", "").lower() not in ("1", "true", "yes"):
+    raise RuntimeError(
+        "[PRODUCTION HARDENING] kalshi_live_trade.py is DISABLED. "
+        "This script contains a direct HTTP bypass that circumvents all risk guards. "
+        "Use the canonical path: POST /api/v1/kalshi/orders or KalshiContinuousTrader. "
+        "To bypass (NOT RECOMMENDED): MERID_ALLOW_LIVE_TRADE_BYPASS=1"
+    )
+# ═══════════════════════════════════════════════════════════════════════════
 
 import argparse
 import base64

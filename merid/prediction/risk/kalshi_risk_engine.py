@@ -109,7 +109,10 @@ class KalshiRiskConfig:
 
     # ── Bankroll management ────────────────────────────────────────────
     initial_bankroll_cents: int = 1000
-    max_risk_per_trade_pct: float = field(default_factory=lambda: _get_setting_float("KALSHI_MAX_RISK_PER_TRADE_PCT", 0.02))
+    # CRITICAL: 1% per trade max (NOT 2%). With 3 trades, 3×1% = 3% worst case.
+    # 3×2% = 6% is STRICTLY FORBIDDEN. Always use TopNAllocator (1-2% total).
+    # This is a FAIL-SAFE fallback if someone disables TopNAllocator.
+    max_risk_per_trade_pct: float = field(default_factory=lambda: _get_setting_float("KALSHI_MAX_RISK_PER_TRADE_PCT", 0.01))
     kelly_fraction: float = field(default_factory=lambda: _get_setting_float("KALSHI_KELLY_FRACTION", 0.25))
     max_contract_price_cents: int = field(default_factory=lambda: _get_setting_int("KALSHI_MAX_CONTRACT_PRICE_CENTS", 35))
     min_contract_price_cents: int = field(default_factory=lambda: _get_setting_int("KALSHI_MIN_CONTRACT_PRICE_CENTS", 2))
@@ -163,14 +166,16 @@ class KalshiRiskConfig:
         """
         # Get base values from settings (or defaults)
         base_kelly = _get_setting_float("KALSHI_KELLY_FRACTION", 0.25)
-        base_risk = _get_setting_float("KALSHI_MAX_RISK_PER_TRADE_PCT", 0.02)
+        # SAFETY: Use 0.01 (1%) base to prevent 3×2% = 6% total risk
+        base_risk = _get_setting_float("KALSHI_MAX_RISK_PER_TRADE_PCT", 0.01)
         base_exposure = _get_setting_float("KALSHI_MAX_TOTAL_EXPOSURE_PCT", 0.20)
         base_dd_halt = _get_setting_float("KALSHI_DRAWDOWN_HALT_PCT", 0.20)
         base_dd_reduce = _get_setting_float("KALSHI_DRAWDOWN_REDUCE_PCT", 0.10)
 
         return cls(
             kelly_fraction=base_kelly * 0.60,  # 60% of base
-            max_risk_per_trade_pct=base_risk * 0.75,  # 75% of base
+            # 75% of 1% = 0.75% per trade. 3×0.75% = 2.25% max (within 1-2% target)
+            max_risk_per_trade_pct=base_risk * 0.75,
             max_contract_price_cents=_get_setting_int("KALSHI_MAX_CONTRACT_PRICE_CENTS", 35) - 10,
             max_position_per_market=2,
             max_open_positions=3,
@@ -190,14 +195,17 @@ class KalshiRiskConfig:
         """
         # Get base values from settings (or defaults)
         base_kelly = _get_setting_float("KALSHI_KELLY_FRACTION", 0.25)
-        base_risk = _get_setting_float("KALSHI_MAX_RISK_PER_TRADE_PCT", 0.02)
+        # SAFETY: Use 0.01 (1%) base to prevent 3×2% = 6% total risk
+        base_risk = _get_setting_float("KALSHI_MAX_RISK_PER_TRADE_PCT", 0.01)
         base_exposure = _get_setting_float("KALSHI_MAX_TOTAL_EXPOSURE_PCT", 0.20)
         base_dd_halt = _get_setting_float("KALSHI_DRAWDOWN_HALT_PCT", 0.20)
         base_dd_reduce = _get_setting_float("KALSHI_DRAWDOWN_REDUCE_PCT", 0.10)
 
         return cls(
             kelly_fraction=min(0.50, base_kelly * 1.40),  # 40% more, cap at 50%
-            max_risk_per_trade_pct=min(0.05, base_risk * 1.50),  # 50% more, cap at 5%
+            # Even aggressive: max 1.5% per trade (150% of 1%). 3×1.5% = 4.5% worst case.
+            # Still over 1-2% target — ALWAYS use TopNAllocator for proper 1-2% total cap.
+            max_risk_per_trade_pct=min(0.015, base_risk * 1.50),  # 50% more, HARD CAP 1.5%
             max_contract_price_cents=_get_setting_int("KALSHI_MAX_CONTRACT_PRICE_CENTS", 35) + 15,
             max_position_per_market=5,
             max_open_positions=8,
@@ -514,12 +522,12 @@ class KalshiRiskEngine:
         base = cfg.min_edge
 
         if self._fee_drag_tightening:
-            base = Decimal(str(float(base) * 1.25))
+            base = (base * Decimal("1.25")).quantize(Decimal("0.0001"))
 
         if contract_price_cents <= 5:
-            return Decimal(str(float(base) * cfg.fee_edge_multiplier_penny))
+            return (base * Decimal(str(cfg.fee_edge_multiplier_penny))).quantize(Decimal("0.0001"))
         elif 40 <= contract_price_cents <= 60:
-            return Decimal(str(float(base) * cfg.fee_edge_multiplier_midcurve))
+            return (base * Decimal(str(cfg.fee_edge_multiplier_midcurve))).quantize(Decimal("0.0001"))
         else:
             return base
 

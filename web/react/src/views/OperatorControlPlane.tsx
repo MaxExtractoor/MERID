@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react';
 import {
   Pause, Play, PowerOff, RefreshCw,
   ChevronDown, AlertOctagon, Settings, ShieldOff
-} from 'lucide-react';
+} from '../ui/icons';
 import { useExecutionGate } from '../hooks/useExecutionGate';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY } from '../config/constants';
 import type { OperatorSummary } from '../hooks/useOperatorSummary';

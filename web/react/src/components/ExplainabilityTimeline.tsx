@@ -2,7 +2,7 @@ import { useState } from 'react';
 import {
   Brain, ChevronDown, ChevronRight, RefreshCw,
   AlertTriangle, CheckCircle, XCircle, Clock, Zap
-} from 'lucide-react';
+} from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import ErrorBar from './ErrorBar';
 import { API_ENDPOINTS, DEFAULTS} from '../config/constants';

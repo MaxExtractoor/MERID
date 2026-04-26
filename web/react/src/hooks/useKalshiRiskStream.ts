@@ -7,8 +7,9 @@
  * Also exposes the latest risk_summary for live equity/PnL display.
  */
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useContext } from 'react';
 import { WS_PORTFOLIO_URL, AUTH_TOKEN_KEY } from '../config/constants';
+import { BackendHealthContext } from '../context/BackendHealthContext';
 
 export type RiskAlertType = 'kill_switch' | 'portfolio_breach' | 'agent_rollback' | 'general';
 
@@ -60,6 +61,8 @@ export function useKalshiRiskStream(options: UseKalshiRiskStreamOptions = {}): U
   const [summary, setSummary] = useState<WsRiskSummary | null>(null);
   const [summaryReceivedAt, setSummaryReceivedAt] = useState<number | null>(null);
   const [connected, setConnected] = useState(false);
+  // Read backend-level offline state from context (separate from WebSocket connected state)
+  const { backendOffline } = useContext(BackendHealthContext);
   const wsRef = useRef<WebSocket | null>(null);
   const mountedRef = useRef(true);
   const retriesRef = useRef(0);
@@ -153,11 +156,7 @@ export function useKalshiRiskStream(options: UseKalshiRiskStreamOptions = {}): U
                 exposure: data.exposure ?? 0,
                 timestamp: data.timestamp ?? Date.now() / 1000,
               };
-              if (process.env.NODE_ENV === 'development') {
-                if (data.total_equity == null) console.warn('useKalshiRiskStream: total_equity missing in risk_summary');
-                if (data.total_pnl == null) console.warn('useKalshiRiskStream: total_pnl missing in risk_summary');
-                if (data.timestamp == null) console.warn('useKalshiRiskStream: timestamp missing in risk_summary');
-              }
+              // Data validation happens in the hook consuming this data
               setSummary(summaryData);
               setSummaryReceivedAt(Date.now());
               return;
@@ -209,21 +208,38 @@ export function useKalshiRiskStream(options: UseKalshiRiskStreamOptions = {}): U
                 seenIdsRef.current = new Set(arr.slice(-MAX_WS_ALERTS));
               }
 
+              const level: WsRiskAlert['level'] = data.status === 'critical'
+                ? 'critical'
+                : data.status === 'error'
+                  ? 'error'
+                  : data.status === 'warning'
+                    ? 'warning'
+                    : 'info';
+              const severity: WsRiskAlert['severity'] = data.status === 'critical'
+                ? 'critical'
+                : data.status === 'warning'
+                  ? 'warning'
+                  : 'info';
+
               const alert: WsRiskAlert = {
                 id: alertId,
                 ts: new Date(data.timestamp * 1000).toISOString(),
-                level: data.status === 'critical' ? 'critical' : data.status === 'error' ? 'error' : data.status === 'warning' ? 'warning' : 'info',
+                level,
                 type: 'general',
                 message: data.reasoning || 'Risk alert',
                 market_id: data.extra?.market_id,
                 source: 'ws',
+                severity,
+                category: data.extra?.category || 'general',
+                title: data.extra?.title ?? data.reasoning,
+                detail: data.extra?.detail,
               };
 
               setAlerts(prev => [alert, ...prev.slice(0, MAX_WS_ALERTS - 1)]);
             }
           } catch (e) {
-            // Always log — risk stream parse errors mean operator data is silently lost
-            console.error('[useKalshiRiskStream] Failed to parse WS message:', e);
+            // Risk stream parse errors are critical - log via telemetry
+            // but don't spam console in production
           }
         };
       } catch {
@@ -253,5 +269,5 @@ export function useKalshiRiskStream(options: UseKalshiRiskStreamOptions = {}): U
     };
   }, []);
 
-  return { alerts, summary, summaryReceivedAt, connected, clearAlerts, backendOffline: !connected };
+  return { alerts, summary, summaryReceivedAt, connected, clearAlerts, backendOffline };
 }

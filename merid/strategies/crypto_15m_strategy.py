@@ -532,9 +532,21 @@ class Crypto15MStrategy:
         return True
     
     def _calculate_portfolio_value(self) -> float:
-        """Calculate current portfolio value (mock implementation)."""
-        # In production, this would sum all positions * current prices
-        return 100000.0  # Mock $100k portfolio
+        """Calculate current portfolio value from live Kalshi bankroll.
+        
+        PRODUCTION: Uses BankrollServiceV2 - no mock data.
+        """
+        try:
+            from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+            equity = get_equity_for_risk_calc_sync()
+            if equity is not None and equity > 0:
+                return float(equity)
+        except Exception as exc:
+            logger.error(f"[PORTFOLIO_VALUE] Failed to get live equity: {exc}")
+        
+        # PRODUCTION SAFETY: Fail closed with 0 if live bankroll unavailable
+        logger.critical("[PORTFOLIO_VALUE] Live bankroll unavailable - returning 0 (fail closed)")
+        return 0.0
     
     def _execute_trade(self, signal: Signal) -> Optional[str]:
         """Execute a trading trade."""

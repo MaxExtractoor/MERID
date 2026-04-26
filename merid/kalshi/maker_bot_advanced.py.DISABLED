@@ -1,0 +1,27 @@
+# THIS FILE HAS BEEN DISABLED AS PART OF PRODUCTION HARDENING
+#
+# Reason: Contains direct HTTP API calls to Kalshi that bypass canonical order router
+#         and risk guard pipeline (Top-3 batch gate, GlobalRiskGuard, PreTradeGate).
+#
+# Evidence of bypass:
+#   - Lines 1522-1524: requests.get() to /portfolio/orders/{order_id}/queue_position
+#   - Line 1530: requests.get() to /portfolio/orders/queue_positions  
+#   - Lines 1488-1493: _submit_real_order() placeholder for direct Kalshi submission
+#
+# If you need maker bot functionality, use the canonical path:
+#   - KalshiContinuousTrader with Strategy.MARKET_MAKER mode
+#   - Routes through order_router.route_order_async()
+#   - Full risk guard pipeline enforced
+#
+# To permanently remove this bypass risk, delete this file.
+# File moved to .DISABLED extension as safety measure.
+#
+# See: docs/PRODUCTION_HARDENING_AGENT_INVENTORY.md for full audit details.
+# Date: 2026-04-23
+# Auditor: Cascade
+
+raise RuntimeError(
+    "maker_bot_advanced has been disabled. "
+    "Use KalshiContinuousTrader with canonical order routing. "
+    "See .DISABLED file for details."
+)

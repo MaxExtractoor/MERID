@@ -46,12 +46,12 @@ class CachedPosition:
             if contracts >= self.contracts:
                 # Full close
                 pnl_cents = self.contracts * pnl_per
-                self.realized_pnl_usd += Decimal(str(pnl_cents / 100.0)) - Decimal(str(fee_cents / 100.0))
+                self.realized_pnl_usd += Decimal(pnl_cents) / Decimal("100") - Decimal(fee_cents) / Decimal("100")
                 self.contracts = 0
             else:
                 # Partial close
                 pnl_cents = contracts * pnl_per
-                self.realized_pnl_usd += Decimal(str(pnl_cents / 100.0)) - Decimal(str(fee_cents / 100.0))
+                self.realized_pnl_usd += Decimal(pnl_cents) / Decimal("100") - Decimal(fee_cents) / Decimal("100")
                 self.contracts -= contracts
 
         self.last_updated = datetime.now(timezone.utc)
@@ -63,7 +63,7 @@ class CachedPosition:
                 pnl_cents = self.contracts * (current_price_cents - self.avg_price_cents)
             else:
                 pnl_cents = self.contracts * (self.avg_price_cents - current_price_cents)
-            self.unrealized_pnl_usd = Decimal(str(pnl_cents / 100.0))
+            self.unrealized_pnl_usd = Decimal(pnl_cents) / Decimal("100")
         else:
             self.unrealized_pnl_usd = Decimal("0")
 

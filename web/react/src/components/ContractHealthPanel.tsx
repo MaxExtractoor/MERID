@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { Shield, ShieldCheck, ShieldAlert, Wifi, Activity, Tag, ToggleLeft, ToggleRight } from 'lucide-react';
+import { Shield, ShieldCheck, ShieldAlert, Wifi, Activity, Tag, ToggleLeft, ToggleRight } from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import { API_BASE_URL, DEFAULTS } from '../config/constants';
 

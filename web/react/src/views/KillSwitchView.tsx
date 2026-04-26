@@ -1,7 +1,7 @@
 import { useState, useMemo, useCallback, useEffect } from 'react';
 
 const PROPAGATION_MS = 15_000;
-import { ShieldAlert, ShieldCheck, AlertTriangle, Zap, Eye, Ban , Loader2 } from 'lucide-react';
+import { ShieldAlert, ShieldCheck, AlertTriangle, Zap, Eye, Ban , Loader2 } from '../ui/icons';
 import ModeSafetyPanel from '../components/ModeSafetyPanel';
 import PnLConsistencyWidget from '../components/PnLConsistencyWidget';
 import SessionLogPanel from '../components/SessionLogPanel';
@@ -10,6 +10,7 @@ import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY} from '../config/
 import { formatCurrency, fmtTimestamp } from '../utils/formatters';
 import KalshiModeBadge from '../components/KalshiModeBadge';
 import ErrorAlert from '../components/ErrorAlert';
+import ConfirmModal from '../components/ConfirmModal';
 import type { OperatorRiskState } from '../types/risk';
 
 interface BlockReason {
@@ -69,6 +70,7 @@ export default function KillSwitchView() {
   const [saving, setSaving] = useState(false);
   const [catError, setCatError] = useState<string | null>(null);
   const [lastKillActionAt, setLastKillActionAt] = useState<number | null>(null);
+  const [blockConfirm, setBlockConfirm] = useState<string | null>(null);
 
   // Clear propagation badge after PROPAGATION_MS
   useEffect(() => {
@@ -190,10 +192,17 @@ export default function KillSwitchView() {
     setSaving(false);
   }, [authHeaders, refetchKillSwitch]);
 
-  const cycleMode = useCallback(async (cat: string) => {
+  const cycleMode = useCallback(async (cat: string, confirmed = false) => {
     const current = (categories[cat] ?? 'read-only') as CatMode;
     const idx = CYCLE.indexOf(current);
     const next = CYCLE[(idx + 1) % CYCLE.length];
+
+    // If transitioning to blocked and not confirmed, show confirm modal
+    if (next === 'blocked' && !confirmed) {
+      setBlockConfirm(cat);
+      return;
+    }
+
     setSaving(true);
     try {
       const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.KALSHI_CATEGORIES}`, {
@@ -406,6 +415,22 @@ export default function KillSwitchView() {
 
       {/* Session Log */}
       <SessionLogPanel />
+
+      {/* Block Confirm Modal */}
+      <ConfirmModal
+        isOpen={blockConfirm !== null}
+        title="Block Category Trading"
+        message={`Are you sure you want to block trading for category "${blockConfirm}"? This will prevent all agents from trading in this category.`}
+        onConfirm={() => {
+          if (blockConfirm) {
+            cycleMode(blockConfirm, true);
+            setBlockConfirm(null);
+          }
+        }}
+        onCancel={() => setBlockConfirm(null)}
+        confirmText="Block"
+        confirmVariant="warning"
+      />
     </div>
   );
 }

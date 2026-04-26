@@ -7,7 +7,7 @@
  */
 
 import { useState, useEffect } from 'react';
-import { Wifi, WifiOff, Clock } from 'lucide-react';
+import { Wifi, WifiOff, Clock } from '../ui/icons';
 import { DEFAULTS } from "../config/constants";
 
 interface StalenessIndicatorProps {

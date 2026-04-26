@@ -34,7 +34,7 @@ class VenueConfig:
     """
     name: str = "kalshi"
     use_demo: bool = False
-    max_notional_per_expiry_usd: Decimal = Decimal("5000")
+    max_notional_per_expiry_usd: Decimal = Decimal("0")  # 0 = derive from bankroll (was $5000)
     max_open_markets_per_asset: int = 20
 
     @property
@@ -69,11 +69,35 @@ class MarketFilterConfig:
 @dataclass
 class AgentRiskLimits:
     """Per-agent risk limits."""
-    max_yes_position: int = 500
-    max_no_position: int = 500
-    max_orders_per_window: int = 10
-    max_notional_usd: Decimal = Decimal("500")
+    max_yes_position: int = 0  # 0 = derive from bankroll % (was 500)
+    max_no_position: int = 0   # 0 = derive from bankroll % (was 500)
+    max_orders_per_window: int = 0  # 0 = auto-compute from bankroll
+    max_notional_usd: Decimal = Decimal("0")  # 0 = derive from bankroll (was $500)
     max_contracts_per_order: int = 50
+
+    def get_effective_max_orders(self, bankroll_cents: int, top_n_edges: int = 3) -> int:
+        """Compute dynamic max_orders based on bankroll and available edges.
+
+        Formula: min(floor(bankroll_usd / 100), 3, top_n_edges_count)
+
+        This ensures:
+        - Small bankroll ($14) → 1 order (top edge only)
+        - Medium bankroll ($100-300) → 1-3 orders
+        - Large bankroll ($300+) → 3 orders max (capped by Top3 selector)
+        - Never exceeds available edges with sufficient signal
+        """
+        # If explicitly set (non-zero), use that value
+        if self.max_orders_per_window > 0:
+            return self.max_orders_per_window
+
+        # Compute from bankroll: 1 order per $100 of bankroll
+        bankroll_usd = bankroll_cents / 100.0
+        bankroll_derived = max(1, int(bankroll_usd // 100))
+
+        # Cap at 3 (Top3 selector limit) and available edges
+        effective = min(bankroll_derived, 3, top_n_edges)
+
+        return effective
 
 
 @dataclass
@@ -218,10 +242,10 @@ def _parse_market_filter(raw: Dict[str, Any]) -> MarketFilterConfig:
 
 def _parse_risk_limits(raw: Dict[str, Any]) -> AgentRiskLimits:
     return AgentRiskLimits(
-        max_yes_position=raw.get("max_yes_position", 500),
-        max_no_position=raw.get("max_no_position", 500),
-        max_orders_per_window=raw.get("max_orders_per_window", 10),
-        max_notional_usd=Decimal(str(raw.get("max_notional_usd", 500))),
+        max_yes_position=raw.get("max_yes_position", 0),  # 0 = derive from bankroll
+        max_no_position=raw.get("max_no_position", 0),   # 0 = derive from bankroll
+        max_orders_per_window=raw.get("max_orders_per_window", 0),  # 0 = auto-compute
+        max_notional_usd=Decimal(str(raw.get("max_notional_usd", 0))),  # 0 = derive from bankroll
         max_contracts_per_order=raw.get("max_contracts_per_order", 50),
     )
 
@@ -315,7 +339,7 @@ def _parse_agent(raw: Dict[str, Any]) -> AgentConfig:
             series_tickers = AGENT_SERIES_MAP.get(name, [])
         except Exception:
             series_tickers = []
-    return AgentConfig(
+    agent = AgentConfig(
         name=name,
         category=raw.get("category", "crypto"),
         assets=raw.get("assets", []),
@@ -337,6 +361,16 @@ def _parse_agent(raw: Dict[str, Any]) -> AgentConfig:
         series_tickers=series_tickers,
     )
 
+    # SAFETY: Log warning if bypass_swarm_consensus is set (it's now ignored)
+    if agent.bypass_swarm_consensus:
+        logger.warning(
+            "[SECURITY] Agent %s has bypass_swarm_consensus=true in YAML - THIS IS IGNORED. "
+            "All orders must flow through main execution gate.",
+            name
+        )
+
+    return agent
+
 
 def _default_agent_grid_config() -> AgentGridConfig:
     """Return default config with settings-driven portfolio risk limits."""
@@ -345,6 +379,114 @@ def _default_agent_grid_config() -> AgentGridConfig:
         session=SessionConfig(),
         agents=[],
         portfolio_risk=PortfolioRiskConfig(),  # All zeros = derive from settings
+    )
+
+
+# ── Known archetypes / categories for schema validation ───────────────
+_KNOWN_ARCHETYPES = {
+    "directional", "market_maker", "arbitrage", "momentum", "mean_reversion",
+    "contrarian", "regime_switch", "vol_breakout",
+}
+_KNOWN_CATEGORIES = {
+    "crypto", "economics", "financials", "politics", "weather", "macro",
+    "climate", "sports", "tech", "all",
+}
+_REQUIRED_AGENT_KEYS = {"name"}
+
+
+def _validate_agent_configs(raw_agents: list) -> List[str]:
+    """Validate raw YAML agent dicts before parsing.
+
+    Returns a list of error strings.  Empty list = clean.
+    Fail-fast: the caller should abort loading on errors.
+    """
+    errors: List[str] = []
+    if not isinstance(raw_agents, list):
+        errors.append("'agents' key must be a YAML list")
+        return errors
+
+    for idx, entry in enumerate(raw_agents):
+        prefix = f"agents[{idx}]"
+        if not isinstance(entry, dict):
+            errors.append(f"{prefix}: expected dict, got {type(entry).__name__}")
+            continue
+
+        # Required keys
+        for key in _REQUIRED_AGENT_KEYS:
+            if key not in entry:
+                errors.append(f"{prefix}: missing required key '{key}'")
+
+        name = entry.get("name", f"<unnamed-{idx}>")
+        prefix = f"agents[{idx}] ({name})"
+
+        # Archetype check
+        arch = entry.get("archetype", "directional")
+        if arch not in _KNOWN_ARCHETYPES:
+            errors.append(f"{prefix}: unknown archetype '{arch}' (known: {sorted(_KNOWN_ARCHETYPES)})")
+
+        # Category check
+        cat = entry.get("category", "crypto")
+        if cat not in _KNOWN_CATEGORIES:
+            errors.append(f"{prefix}: unknown category '{cat}' (known: {sorted(_KNOWN_CATEGORIES)})")
+
+        # Assets must be a list
+        assets = entry.get("assets", [])
+        if not isinstance(assets, list):
+            errors.append(f"{prefix}: 'assets' must be a list, got {type(assets).__name__}")
+
+        # Timeframes must be a list
+        tf = entry.get("timeframes", [])
+        if not isinstance(tf, list):
+            errors.append(f"{prefix}: 'timeframes' must be a list, got {type(tf).__name__}")
+
+        # risk_limits must be a dict
+        rl = entry.get("risk_limits", {})
+        if not isinstance(rl, dict):
+            errors.append(f"{prefix}: 'risk_limits' must be a dict, got {type(rl).__name__}")
+
+    return errors
+
+
+def _preflight_grid_check(agents: List[AgentConfig]) -> None:
+    """Run sanity checks on the parsed agent grid.
+
+    Logs warnings for:
+    - Duplicate agent names
+    - Agents with no assets or no timeframes (orphans)
+    - Category/archetype distribution imbalance
+    """
+    if not agents:
+        logger.warning("[GRID-PREFLIGHT] No agents defined in grid config")
+        return
+
+    # Duplicate name detection
+    seen_names: Dict[str, int] = {}
+    for a in agents:
+        seen_names[a.name] = seen_names.get(a.name, 0) + 1
+    dupes = {n: c for n, c in seen_names.items() if c > 1}
+    if dupes:
+        logger.error("[GRID-PREFLIGHT] Duplicate agent names: %s", dupes)
+
+    # Orphan detection
+    for a in agents:
+        if a.enabled and not a.assets:
+            logger.warning("[GRID-PREFLIGHT] Agent %s is enabled but has no assets", a.name)
+        if a.enabled and not a.timeframes:
+            logger.warning("[GRID-PREFLIGHT] Agent %s is enabled but has no timeframes", a.name)
+
+    # Archetype / category matrix
+    arch_counts: Dict[str, int] = {}
+    cat_counts: Dict[str, int] = {}
+    enabled_count = 0
+    for a in agents:
+        if a.enabled:
+            enabled_count += 1
+            arch_counts[a.archetype] = arch_counts.get(a.archetype, 0) + 1
+            cat_counts[a.category] = cat_counts.get(a.category, 0) + 1
+
+    logger.info(
+        "[GRID-PREFLIGHT] %d agents (%d enabled) | archetypes=%s | categories=%s",
+        len(agents), enabled_count, dict(arch_counts), dict(cat_counts),
     )
 
 
@@ -403,7 +545,7 @@ def load_agent_grid_config(path: Optional[str] = None) -> AgentGridConfig:
     venue = VenueConfig(
         name=v.get("name", "kalshi"),
         use_demo=v.get("use_demo", False),
-        max_notional_per_expiry_usd=Decimal(str(v.get("max_notional_per_expiry_usd", 5000))),
+        max_notional_per_expiry_usd=Decimal(str(v.get("max_notional_per_expiry_usd", 0))),  # 0 = derive from bankroll
         max_open_markets_per_asset=v.get("max_open_markets_per_asset", 20),
     )
 
@@ -415,8 +557,22 @@ def load_agent_grid_config(path: Optional[str] = None) -> AgentGridConfig:
         maintenance_end_et=s.get("maintenance_end_et", "05:00"),
     )
 
-    # Agents
-    agents = [_parse_agent(a) for a in raw.get("agents", [])]
+    # Agents — validate raw YAML before parsing
+    raw_agents = raw.get("agents", [])
+    validation_errors = _validate_agent_configs(raw_agents)
+    if validation_errors:
+        for err in validation_errors:
+            logger.error("[GRID-VALIDATE] %s", err)
+        logger.error(
+            "[GRID-VALIDATE] %d error(s) in %s — falling back to defaults",
+            len(validation_errors), config_path,
+        )
+        return _default_agent_grid_config()
+
+    agents = [_parse_agent(a) for a in raw_agents]
+
+    # Pre-flight sanity checks (logs warnings, does not abort)
+    _preflight_grid_check(agents)
 
     # Portfolio risk
     pr = raw.get("portfolio_risk", {})

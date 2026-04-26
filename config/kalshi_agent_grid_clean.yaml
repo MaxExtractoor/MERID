@@ -2,7 +2,7 @@ venue:
   name: kalshi
   base_url: https://api.elections.kalshi.com/trade-api/v2
   use_demo: false
-  max_notional_per_expiry_usd: 1000
+  max_notional_per_expiry_usd: 0  # 0 = derive from actual Kalshi bankroll (was $1000)
   max_open_markets_per_asset: 20
 
 session:
@@ -21,10 +21,10 @@ agents:
     category: sports
     frequency: monthly
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    max_yes_position: 0  # 0 = derive from bankroll % (was 500)
+    max_no_position: 0   # 0 = derive from bankroll % (was 500)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 1440
     cutoff_minutes_before_expiry: 60
@@ -39,10 +39,10 @@ agents:
     category: sports
     frequency: monthly
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    max_yes_position: 0  # 0 = derive from bankroll % (was 500)
+    max_no_position: 0   # 0 = derive from bankroll % (was 500)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 1440
     cutoff_minutes_before_expiry: 60
@@ -57,10 +57,10 @@ agents:
     category: sports
     frequency: monthly
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    max_yes_position: 0  # 0 = derive from bankroll % (was 500)
+    max_no_position: 0   # 0 = derive from bankroll % (was 500)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 1440
     cutoff_minutes_before_expiry: 60
@@ -74,10 +74,10 @@ agents:
   market_filter:
     category: sports
   risk_limits:
-    max_yes_position: 500
-    max_no_position: 500
-    max_orders_per_window: 10
-    max_notional_usd: 250
+    max_yes_position: 0  # 0 = derive from bankroll % (was 500)
+    max_no_position: 0   # 0 = derive from bankroll % (was 500)
+    max_orders_per_window: 0  # 0 = auto: min(floor(bankroll_usd/100), 3, top_n_edges_count)
+    max_notional_usd: 0  # 0 = derive from bankroll (was $250)
   entry_window:
     minutes_before_expiry: 1440
     cutoff_minutes_before_expiry: 60

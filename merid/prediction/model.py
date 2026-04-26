@@ -533,8 +533,16 @@ class PredictionMarketModel:
                     side, mp, market_id, spot, strike, scale,
                 )
 
+        # Track if we're using directional fallback (no strike available)
+        _directional_fallback = False
         if mp is None:
             mp = implied.yes_prob if side == "yes" else implied.no_prob
+            _directional_fallback = True
+            logger.debug(
+                "[model] Directional fallback for %s side=%s — no strike for spot-relative model, "
+                "using implied prob (edge will be ~fee+slippage)",
+                market_id, side,
+            )
 
         market_prob = implied.yes_prob if side == "yes" else implied.no_prob
 
@@ -574,12 +582,13 @@ class PredictionMarketModel:
                 edge_type = "arb"
 
         # Confidence: higher when spread is tight and volume is present
-        confidence = Decimal("0.5")
+        # Lower base confidence for directional fallback (no strike-based model)
+        confidence = Decimal("0.3") if _directional_fallback else Decimal("0.5")
         if implied.spread_cents is not None:
             if implied.spread_cents <= Decimal("2"):
-                confidence = Decimal("0.8")
+                confidence = Decimal("0.6") if _directional_fallback else Decimal("0.8")
             elif implied.spread_cents <= Decimal("5"):
-                confidence = Decimal("0.6")
+                confidence = Decimal("0.4") if _directional_fallback else Decimal("0.6")
 
         return EdgeEstimate(
             market_id=market_id,

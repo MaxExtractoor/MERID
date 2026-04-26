@@ -10,7 +10,7 @@
  */
 
 import { useState, useEffect } from 'react';
-import { WifiOff, RefreshCw } from 'lucide-react';
+import { WifiOff, RefreshCw } from '../ui/icons';
 import { useBackendHealth } from '../context/BackendHealthContext';
 import { API_BASE_URL } from '../config/constants';
 

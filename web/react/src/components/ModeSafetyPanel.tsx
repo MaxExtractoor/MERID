@@ -1,5 +1,5 @@
 import React from 'react';
-import { Shield, ShieldAlert, ShieldCheck, ShieldOff, Wifi, WifiOff, Zap, ZapOff, Clock, AlertTriangle } from 'lucide-react';
+import { Shield, ShieldAlert, ShieldCheck, ShieldOff, Wifi, WifiOff, Zap, ZapOff, Clock, AlertTriangle } from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { useExecutionGate } from '../hooks/useExecutionGate';

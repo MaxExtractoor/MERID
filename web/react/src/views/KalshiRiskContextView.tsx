@@ -14,7 +14,7 @@ import {
   Activity, TrendingUp, TrendingDown, Gauge,
   AlertTriangle, ArrowRight, Snowflake, Flame,
   Shield, Target, BarChart3, Zap,
-} from 'lucide-react';
+} from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS, CHART_COLORS } from '../config/constants';
 import KalshiModeBadge from '../components/KalshiModeBadge';

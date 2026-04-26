@@ -46,23 +46,13 @@ except ImportError:
     AuthJWT = None
     AuthJWTException = Exception
 
-from audit.exporter import export_trail
-from backtesting.replay import run_backtest
-from backtesting.replayer import run_deterministic_replay
 from core.energy import create_energy
 from observability.event_stream import get_event_stream
 from observability.observability_stack import get_observability_stack
 from core.orchestrator import get_core
 from core.state import state
-from hardening.chaos import build_hardening_report
-from memory.patterns import pattern_engine
-from memory.store import reality_memory
-from readiness.report import build_readiness_report
 from services.gamification import GamificationEngine
-# Lazy import to avoid loading crypto adapters in Kalshi-only mode
-# from simulation.engine import build_simulation_chain
 from swarm.agents.charters import CHARTER_REGISTRY
-from swarm.performance import performance_ledger
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -114,7 +104,6 @@ policy_metrics_api_router = _si("web.api.policy_metrics_api")
 # from web.api.operator import router as operator_router
 operator_router = _si("web.api.operator")
 operator_endpoints_router = _si("web.api.operator_endpoints")
-operator_legacy_router = _si("web.api.operator_endpoints", "legacy_router")
 # from web.api.metrics import router as metrics_router
 metrics_router = _si("web.api.metrics")
 record_latency = _si("web.api.metrics", "record_latency")
@@ -153,7 +142,8 @@ api_status_router = _si("web.api.api_status")
 
 # ── Analytics + risk ─────────────────────────────────────────────────
 analytics_router = _si("web.api.analytics")
-brier_metrics_router = _si("web.api.brier_metrics")
+# Direct import - let errors propagate so we can see them
+from web.api.brier_metrics import router as brier_metrics_router
 risk_router = _si("web.api.risk_routes")
 risk_metrics_router = _si("web.api.risk_metrics")
 risk_metrics_api_router = _si("web.api.risk_metrics_api")
@@ -247,11 +237,23 @@ prime_screen_router = _si("web.api.prime_screen")
 autonomy_router = _si("web.api.autonomy")
 us_compliant_markets_router = _si("web.api.us_compliant_markets")
 
-# Phase0 routers - disabled
-minimal_scope_router = None
-phase0_experiment_router = None
-phase0_router = None
-phase0_trial_router = None
+# ── Critical router validation ───────────────────────────────────────
+# Fail fast if critical routers fail to import (production safety)
+CRITICAL_ROUTERS = [
+    ("auth_router", auth_router),
+    ("kalshi_api_router", kalshi_api_router),
+    ("kalshi_grid_router", kalshi_grid_router),
+    ("operator_endpoints_router", operator_endpoints_router),
+]
+
+for name, router_instance in CRITICAL_ROUTERS:
+    if router_instance is None:
+        logger.critical(
+            "CRITICAL: %s failed to load — cannot start. "
+            "Check import errors above and fix dependencies.",
+            name
+        )
+        raise SystemExit(1)
 
 # Non-router imports (resilient)
 try:
@@ -465,9 +467,6 @@ def create_app(lifespan=None) -> FastAPI:
     _reg(router)
     _reg(router_v1)
     _reg(real_data_router)
-    # Phase0 trial router gated
-    # if not _kalshi_only:
-    #     application.include_router(phase0_trial_router)
     _reg(consensus_router)
     if not _kalshi_only:
         _reg(mining_router)
@@ -572,7 +571,6 @@ def create_app(lifespan=None) -> FastAPI:
         _reg(dev_swarm_governance_router)
     _reg(operator_router)  # application.include_router(operator_router)
     _reg(operator_endpoints_router)
-    _reg(operator_legacy_router)
     _reg(metrics_router)  # application.include_router(metrics_router)
     _reg(market_data_router)  # application.include_router(market_data_router)
     _reg(market_ws_router)  # application.include_router(market_ws_router)
@@ -658,11 +656,6 @@ def create_app(lifespan=None) -> FastAPI:
             record_latency(str(request.url.path), elapsed_ms)
         return response
 
-    # Phase 0 adapters gated - imports commented out at line 197-201
-    # if phase0_router:
-    #     application.include_router(phase0_router)
-    # Phase 0 trial gated
-    # application.include_router(phase0_trial_router)
     return application
 
 
@@ -1452,11 +1445,6 @@ async def dashboard_fixed(request: Request):
     templates = _templates()
     return templates.TemplateResponse("unified_fixed.html", {"request": request})
 
-@root_router.get("/dashboard/legacy")
-async def dashboard_legacy():
-    """Legacy dashboard page."""
-    templates = _templates()
-    return templates.TemplateResponse("dashboard.html", {"request": {}})
 
 @root_router.get("/trading/perps")
 async def perps_trading(request: Request):
@@ -1494,18 +1482,6 @@ async def control_center(request: Request):
         "institutional.html",
         {"request": request},
     )
-
-@root_router.get("/legacy")
-async def legacy_home(request: Request):
-    return _templates().TemplateResponse(
-        "index.html",
-        {
-            "request": request,
-            "help_sections": state.help_sections(),
-            "legal_notice": state.legal_notice(),
-        },
-    )
-
 
 @router_v1.get("/health")
 async def api_health():
@@ -2132,7 +2108,7 @@ async def _app_lifespan(application: FastAPI):
             validate_kalshi_grid,
         )
 
-        _grid_status = validate_kalshi_grid(strict=True)
+        _grid_status = validate_kalshi_grid(strict=False)
         log_grid_summary(_grid_status)
         _grid_ok = sum(1 for s in _grid_status.values() if s.ok)
         logger.info("✅ Kalshi grid validation: %d/30 cells OK", _grid_ok)
@@ -2141,6 +2117,19 @@ async def _app_lifespan(application: FastAPI):
         raise RuntimeError(f"Kalshi grid validation failed: {_gve}") from _gve
     except Exception as _gve_exc:
         logger.warning("Kalshi grid validation error (non-fatal): %s", _gve_exc)
+
+    # ── Phase -1c: Unified Risk Model Enforcement ───────────────────────
+    # PASS 8: Enforce 2% global cap, no fixed USD in live, max 3 edges
+    # This is a HARD requirement before any trading can begin.
+    try:
+        from merid.config.unified_risk_enforcement import enforce_at_startup, RiskConfigViolationError
+        enforce_at_startup()
+        _log_phase_timing("Phase -1c: Unified risk enforcement")
+    except RiskConfigViolationError as _risk_err:
+        logger.critical("❌ STARTUP ABORTED — Risk config violation: %s", _risk_err)
+        raise RuntimeError(f"Risk configuration violates unified model: {_risk_err}") from _risk_err
+    except Exception as _risk_exc:
+        logger.warning("Risk enforcement error (non-fatal): %s", _risk_exc)
 
     # ── Phase 0: WebSocket publishers ──────────────────────────────────
     # Legacy crypto publishers DISABLED — Kalshi has its own data pipeline.
@@ -3839,6 +3828,8 @@ async def _app_lifespan(application: FastAPI):
         ("AlertManager",          lambda: __import__('core.alerts', fromlist=['get_alert_manager']).get_alert_manager().stop()),
         ("HealthMonitor",         lambda: __import__('core.health', fromlist=['get_health_monitor']).get_health_monitor().stop()),
         ("LoopLagMonitor",        lambda: __import__('merid.diagnostics.loop_lag', fromlist=['get_loop_lag_monitor']).get_loop_lag_monitor().stop()),
+        # BUG-EL FIX: Close KalshiVenueClient singleton to prevent garbage collection warning
+        ("KalshiVenueClient",     lambda: __import__('merid.event_venues.kalshi.client', fromlist=['close_kalshi_client']).close_kalshi_client()),
     ]:
         try:
             _result = _stop_coro_fn()

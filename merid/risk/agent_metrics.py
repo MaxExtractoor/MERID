@@ -43,10 +43,11 @@ class AgentMetrics:
     agent_id: str
     role: str
     
-    # Equity tracking
-    initial_equity: float = 10000.0
-    current_equity: float = 10000.0
-    peak_equity: float = 10000.0
+    # Equity tracking - NO HARDCODED DEFAULTS (production safety)
+    # Must be set explicitly from live bankroll via BankrollServiceV2
+    initial_equity: float = 0.0
+    current_equity: float = 0.0
+    peak_equity: float = 0.0
     
     # PnL
     total_pnl: float = 0.0
@@ -139,29 +140,67 @@ class AgentMetricsTracker:
         self,
         agent_id: str,
         role: str = "analyst",
-        initial_equity: float = 10000.0,
+        initial_equity: Optional[float] = None,
     ) -> AgentMetrics:
-        """Register a new agent for tracking."""
+        """Register a new agent for tracking.
+        
+        PRODUCTION: initial_equity must come from live BankrollServiceV2.
+        No hardcoded defaults allowed.
+        """
+        effective_equity = initial_equity if initial_equity is not None else 0.0
+        
         if agent_id not in self._agents:
             self._agents[agent_id] = AgentMetrics(
                 agent_id=agent_id,
                 role=role,
-                initial_equity=initial_equity,
-                current_equity=initial_equity,
-                peak_equity=initial_equity,
+                initial_equity=effective_equity,
+                current_equity=effective_equity,
+                peak_equity=effective_equity,
             )
-            logger.info(f"Registered agent for metrics: {agent_id}")
+            if effective_equity <= 0:
+                logger.warning(
+                    f"[METRICS] Agent {agent_id} registered with zero equity. "
+                    f"Provide actual equity from live bankroll for accurate tracking."
+                )
+            else:
+                logger.info(f"Registered agent for metrics: {agent_id} (equity=${effective_equity:.2f})")
+        return self._agents[agent_id]
+    
+    def get_or_create_agent(
+        self,
+        agent_id: str,
+        role: str = "analyst",
+        initial_equity: Optional[float] = None,
+    ) -> AgentMetrics:
+        """Register a new agent for tracking.
+        
+        PRODUCTION: initial_equity must come from live BankrollServiceV2.
+        No hardcoded defaults allowed - will use 0 if not provided explicitly.
+        """
+        # PRODUCTION SAFETY: Never use hardcoded default equity
+        # Caller MUST provide actual equity from live bankroll
+        effective_equity = initial_equity if initial_equity is not None else 0.0
+        
+        if agent_id not in self._agents:
+            self._agents[agent_id] = AgentMetrics(
+                agent_id=agent_id,
+                role=role,
+                initial_equity=effective_equity,
+                current_equity=effective_equity,
+                peak_equity=effective_equity,
+            )
+            if effective_equity <= 0:
+                logger.warning(
+                    f"[METRICS] Agent {agent_id} registered with zero/negative equity. "
+                    f"Ensure live bankroll is available before tracking metrics."
+                )
+            else:
+                logger.info(f"Registered agent for metrics: {agent_id} (equity=${effective_equity:.2f})")
         return self._agents[agent_id]
     
     def get_agent(self, agent_id: str) -> Optional[AgentMetrics]:
         """Get agent metrics."""
         return self._agents.get(agent_id)
-    
-    def get_or_create_agent(self, agent_id: str, role: str = "analyst") -> AgentMetrics:
-        """Get or create agent metrics."""
-        if agent_id not in self._agents:
-            return self.register_agent(agent_id, role)
-        return self._agents[agent_id]
     
     # ============================================
     # TRADE RECORDING

@@ -14,7 +14,7 @@ def _ensure_imports():
     
     # Import directly from submodules to avoid circular imports
     # when trading.execution.defense is being loaded
-    from trading.execution.core import (
+    from trading.execution import (
         ExecutionEngine,
         ExecutionConfig,
         ExecutionMode,

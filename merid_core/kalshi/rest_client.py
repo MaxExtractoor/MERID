@@ -1,8 +1,25 @@
 """
 Kalshi REST API Client
 Handles authentication and HTTP requests to Kalshi REST API
+
+⚠️  PRODUCTION HARDENING: DIRECT ORDER OPERATIONS DISABLED  ⚠️
+
+This client provides DIRECT HTTP access to Kalshi API endpoints including:
+  - POST /portfolio/orders (create_order)
+  - PATCH /portfolio/orders/{id} (amend_order)
+  - DELETE /portfolio/orders/{id} (cancel_order)
+  - DELETE /portfolio/orders (batch_cancel_orders)
+
+These methods BYPASS the canonical order_router and ALL risk guards:
+  - GlobalRiskGuard (1-2% bankroll cap)
+  - Top3BatchManager (top-3 allocation gate)
+  - PreTradeGate (lease + deduplication)
+  - Execution gate / kill switches
+
+To enable direct order operations (NOT RECOMMENDED): set MERID_ALLOW_REST_CLIENT_ORDERS=1
 """
 
+import os
 import time
 import base64
 from utils.logger import get_logger
@@ -23,6 +40,22 @@ except ImportError:
     CRYPTO_AVAILABLE = False
 
 logger = get_logger(__name__)
+
+
+def _check_order_bypass_allowed(operation: str) -> None:
+    """
+    Check if direct order operations are allowed via environment variable.
+    Raises RuntimeError if not allowed (fail-closed default).
+    """
+    if os.getenv("MERID_ALLOW_REST_CLIENT_ORDERS", "").lower() not in ("1", "true", "yes"):
+        raise RuntimeError(
+            f"[PRODUCTION HARDENING] KalshiRestClient.{operation}() is DISABLED. "
+            "This method performs direct HTTP calls to Kalshi API that bypass "
+            "the canonical order_router and ALL risk guards (GlobalRiskGuard, "
+            "Top-3 batch gate, PreTradeGate, kill switches). "
+            "Use the canonical path: order_router.route_order_async(). "
+            f"To bypass (NOT RECOMMENDED): MERID_ALLOW_REST_CLIENT_ORDERS=1"
+        )
 
 
 def _kalshi_v2_time_in_force(tif: str) -> str:
@@ -336,6 +369,8 @@ class KalshiRestClient:
         time_in_force: str = "gtc"
     ) -> Dict[str, Any]:
         """
+        [WARNING] Direct HTTP bypass — requires MERID_ALLOW_REST_CLIENT_ORDERS=1
+
         Create order per Kalshi API spec
         
         Args:
@@ -351,6 +386,9 @@ class KalshiRestClient:
         Returns:
             Order response dict
         """
+        # Production hardening: block direct order bypass
+        _check_order_bypass_allowed("create_order")
+
         order_data: Dict[str, Any] = {
             "ticker": ticker,
             "client_order_id": client_order_id,
@@ -387,6 +425,8 @@ class KalshiRestClient:
         quantity: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
+        [WARNING] Direct HTTP bypass — requires MERID_ALLOW_REST_CLIENT_ORDERS=1
+
         Amend a resting order (cancel-replace).
         
         Kalshi supports PATCH on /portfolio/orders/{order_id} to update
@@ -401,6 +441,9 @@ class KalshiRestClient:
         Returns:
             Amended order response
         """
+        # Production hardening: block direct order bypass
+        _check_order_bypass_allowed("amend_order")
+
         patch_data: Dict[str, Any] = {}
         if price is not None:
             patch_data["price"] = price
@@ -418,14 +461,19 @@ class KalshiRestClient:
     
     def cancel_order(self, order_id: str) -> Dict[str, Any]:
         """
+        [WARNING] Direct HTTP bypass — requires MERID_ALLOW_REST_CLIENT_ORDERS=1
+
         Cancel order
-        
+
         Args:
             order_id: Kalshi order ID
-        
+
         Returns:
             Cancellation response
         """
+        # Production hardening: block direct order bypass
+        _check_order_bypass_allowed("cancel_order")
+
         return self._request("DELETE", f"/portfolio/orders/{order_id}")
     
     def batch_cancel_orders(
@@ -433,6 +481,8 @@ class KalshiRestClient:
         ticker: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
+        [WARNING] Direct HTTP bypass — requires MERID_ALLOW_REST_CLIENT_ORDERS=1
+
         Cancel multiple orders at once.
         
         If ticker is provided, cancels all resting orders for that market.
@@ -444,6 +494,8 @@ class KalshiRestClient:
         Returns:
             Batch cancel response with count of cancelled orders
         """
+        # Production hardening: block direct order bypass
+        _check_order_bypass_allowed("batch_cancel_orders")
         params: Dict[str, Any] = {}
         if ticker:
             params["ticker"] = ticker

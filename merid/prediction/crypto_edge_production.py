@@ -89,9 +89,17 @@ def get_crypto_edge_runtime() -> CryptoEdgeRuntime:
         sn = max(sn, 0.02)
         threshold_mode = "modern"
 
+    # SAFETY: bypass mode is disabled - force to 'full' if attempted
+    if mm == "bypass":
+        logger.error(
+            "[SECURITY] MERID_CRYPTO_MM_CONSENSUS_MODE='bypass' is DISABLED. "
+            "Using 'full' mode. All orders must flow through main execution gate."
+        )
+        mm = "full"
+    
     return CryptoEdgeRuntime(
         edge_floor_profile=floor if floor in ("strict", "medium", "relaxed") else "strict",
-        mm_consensus_mode=mm if mm in ("full", "soft", "bypass") else "full",
+        mm_consensus_mode=mm if mm in ("full", "soft") else "full",
         shadow_edge_yes=sy,
         shadow_edge_no=sn,
         consensus_wait_timeout_ms=max(0, wait_ms),

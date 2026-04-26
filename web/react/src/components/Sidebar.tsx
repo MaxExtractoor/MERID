@@ -27,7 +27,7 @@ import {
   TrendingUp,
   ClipboardList,
   MessageSquare,
-} from 'lucide-react';
+} from '../ui/icons';
 import type { View } from '../types/views';
 import { useKalshiMode } from '../context/KalshiModeContext';
 import { MODE_COLORS, resolveModeKey } from '../config/modeColors';
@@ -42,6 +42,8 @@ interface SidebarProps {
 
 /* ── 8-Stage Workflow Navigation ───────────────────────────────────── */
 
+// 8-Stage Workflow Navigation (Consolidated Architecture)
+// Stages 1, 5, 8 use unified views with internal tabs
 const STAGE_NAV = [
   {
     stage: '1',
@@ -50,8 +52,6 @@ const STAGE_NAV = [
     accent: 'from-blue-500 to-blue-600',
     items: [
       { name: 'Markets', href: 'discover', icon: Search },
-      { name: 'All Markets', href: 'discover-all-markets', icon: Globe },
-      { name: 'Trending', href: 'discover-trending', icon: Flame },
     ],
   },
   {
@@ -60,9 +60,9 @@ const STAGE_NAV = [
     color: 'purple',
     accent: 'from-purple-500 to-purple-600',
     items: [
-      { name: 'Edge Signals', href: 'analyze-edge', icon: Target },
+      { name: 'Edge', href: 'analyze-edge', icon: Target },
       { name: 'Sentiment', href: 'analyze-sentiment', icon: Activity },
-      { name: 'Vol & ATR', href: 'analyze-vol', icon: Gauge },
+      { name: 'Volatility', href: 'analyze-vol', icon: Gauge },
     ],
   },
   {
@@ -71,9 +71,9 @@ const STAGE_NAV = [
     color: 'cyan',
     accent: 'from-cyan-500 to-cyan-600',
     items: [
-      { name: 'Swarm Matrix', href: 'consensus-swarm', icon: Grid },
+      { name: 'Swarm', href: 'consensus-swarm', icon: Grid },
       { name: 'Debates', href: 'consensus-debates', icon: MessageSquare },
-      { name: 'Performance', href: 'consensus-performance', icon: Award },
+      { name: 'Agents', href: 'consensus-performance', icon: Award },
       { name: 'Calibration', href: 'consensus-calibration', icon: Crosshair },
     ],
   },
@@ -83,9 +83,7 @@ const STAGE_NAV = [
     color: 'amber',
     accent: 'from-amber-500 to-amber-600',
     items: [
-      { name: 'Bankroll', href: 'size-bankroll', icon: Wallet },
-      { name: 'Lane Control', href: 'size-lanes', icon: GitBranch },
-      { name: 'Sizing Metrics', href: 'size-sizing', icon: Sliders },
+      { name: 'Size', href: 'size', icon: Sliders },
     ],
   },
   {
@@ -94,9 +92,7 @@ const STAGE_NAV = [
     color: 'emerald',
     accent: 'from-emerald-500 to-emerald-600',
     items: [
-      { name: 'Terminal', href: 'execute-terminal', icon: Terminal },
-      { name: 'Orders', href: 'execute-orders', icon: ClipboardList },
-      { name: 'Positions', href: 'execute-positions', icon: TrendingUp },
+      { name: 'Execute', href: 'execute', icon: Terminal },
     ],
   },
   {
@@ -105,9 +101,7 @@ const STAGE_NAV = [
     color: 'orange',
     accent: 'from-orange-500 to-orange-600',
     items: [
-      { name: 'Portfolio', href: 'monitor-portfolio', icon: Briefcase },
-      { name: 'PnL History', href: 'monitor-pnl', icon: DollarSign },
-      { name: 'Health', href: 'monitor-health', icon: Heart },
+      { name: 'Monitor', href: 'monitor', icon: Briefcase },
     ],
   },
   {
@@ -116,8 +110,7 @@ const STAGE_NAV = [
     color: 'violet',
     accent: 'from-violet-500 to-violet-600',
     items: [
-      { name: 'Pipeline', href: 'promote-pipeline', icon: Rocket },
-      { name: 'Agent Grid', href: 'promote-grid', icon: LayoutGrid },
+      { name: 'Promote', href: 'promote', icon: Rocket },
     ],
   },
   {
@@ -126,9 +119,7 @@ const STAGE_NAV = [
     color: 'red',
     accent: 'from-red-500 to-red-600',
     items: [
-      { name: 'Risk Center', href: 'protect-risk', icon: ShieldAlert },
-      { name: 'Kill Switch', href: 'protect-kill-switch', icon: Shield },
-      { name: 'Alerts', href: 'protect-alerts', icon: Bell },
+      { name: 'Risk', href: 'protect', icon: ShieldAlert },
     ],
   },
 ] as const;
@@ -153,11 +144,9 @@ const STAGE_COLORS: Record<string, { text: string; bg: string; border: string; h
   slate: { text: 'text-slate-400', bg: 'bg-slate-500/10', border: 'border-slate-500/30', hover: 'hover:bg-slate-500/20' },
 };
 
-// Views that show live/paper mode indicator
+// Views that show live/paper mode indicator (consolidated)
 const MODE_INDICATOR_VIEWS = new Set<View>([
-  'discover', 'discover-all-markets', 'discover-trending',
-  'execute-terminal', 'execute-orders', 'execute-positions',
-  'promote-grid', 'promote-pipeline',
+  'discover', 'execute', 'promote',
 ]);
 
 interface NavItemProps {

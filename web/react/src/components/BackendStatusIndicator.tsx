@@ -6,7 +6,7 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { WifiOff, AlertTriangle, RefreshCw } from 'lucide-react';
+import { WifiOff, AlertTriangle, RefreshCw } from '../ui/icons';
 import { checkBackendHealth, resetHealthState } from '../utils/resilientFetch';
 
 interface BackendStatusIndicatorProps {

@@ -15,8 +15,9 @@
  * When adding a new view, update ONLY this type.
  */
 
-// Stage 1: DISCOVER - Market Discovery
-export type DiscoverView = "discover" | "discover-all-markets" | "discover-trending";
+// Stage 1: DISCOVER - Market Discovery (consolidated into unified DiscoverView with tabs)
+export type DiscoverView = "discover";
+export type DiscoverTab = "focus" | "universe" | "trending";
 
 // Stage 2: ANALYZE - Technical Analysis
 export type AnalyzeView = "analyze-edge" | "analyze-sentiment" | "analyze-vol";
@@ -24,23 +25,48 @@ export type AnalyzeView = "analyze-edge" | "analyze-sentiment" | "analyze-vol";
 // Stage 3: CONSENSUS - Swarm Intelligence
 export type ConsensusView = "consensus-swarm" | "consensus-debates" | "consensus-performance" | "consensus-calibration";
 
-// Stage 4: SIZE - Position Sizing
-export type SizeView = "size-bankroll" | "size-lanes" | "size-sizing";
+// Stage 4: SIZE - Position Sizing (consolidated into unified SizeView)
+export type SizeView = "size";
+export type SizeTab = "bankroll" | "lanes" | "sizing";
 
-// Stage 5: EXECUTE - Order Execution
-export type ExecuteView = "execute-terminal" | "execute-orders" | "execute-positions";
+// Stage 5: EXECUTE - Order Execution (consolidated into unified ExecuteView with tabs)
+export type ExecuteView = "execute";
+export type ExecuteTab = "terminal" | "orders" | "positions";
 
-// Stage 6: MONITOR - Portfolio Monitoring
-export type MonitorView = "monitor-portfolio" | "monitor-pnl" | "monitor-health";
+// Stage 6: MONITOR - Portfolio Monitoring (consolidated into unified MonitorView with tabs)
+export type MonitorView = "monitor";
+export type MonitorTab = "portfolio" | "pnl" | "health";
 
-// Stage 7: PROMOTE - Deployment Pipeline
-export type PromoteView = "promote-pipeline" | "promote-grid";
+// Stage 7: PROMOTE - Deployment Pipeline (consolidated into unified PromoteView)
+export type PromoteView = "promote";
+export type PromoteTab = "pipeline" | "grid";
 
-// Stage 8: PROTECT - Risk & Safety
-export type ProtectView = "protect-risk" | "protect-kill-switch" | "protect-alerts";
+// Stage 8: PROTECT - Risk & Safety (consolidated into unified ProtectView with tabs)
+export type ProtectView = "protect";
+export type ProtectTab = "overview" | "alerts" | "kill-switch" | "context";
 
 // System Views
 export type SystemView = "overview" | "operator" | "logs" | "settings";
+
+// Legacy view keys still referenced by the sidebar manifest and some tests.
+// Keep as part of the View union until the manifest is migrated to the
+// consolidated view names.
+export type LegacyView =
+  | "kalshi-terminal"
+  | "kalshi-dashboard"
+  | "kalshi-all-markets"
+  | "kalshi-portfolio"
+  | "positions"
+  | "orders"
+  | "kalshi-grid"
+  | "swarm-consensus"
+  | "kalshi-performance"
+  | "calibration-dashboard"
+  | "lane-control"
+  | "kalshi-risk-context"
+  | "kalshi-sentiment"
+  | "kalshi-vol-dashboard"
+  | "kill-switch";
 
 // Unified View Type
 export type View =
@@ -52,49 +78,39 @@ export type View =
   | MonitorView
   | PromoteView
   | ProtectView
-  | SystemView;
+  | SystemView
+  | LegacyView;
 
 // View Stage Mapping for Navigation
 export const VIEW_STAGES: Record<string, { label: string; color: string; icon: string }> = {
-  // Discover (Blue)
+  // Stage 1: Discover (Blue) - Consolidated unified view
   discover: { label: "Discover", color: "text-blue-400", icon: "search" },
-  "discover-all-markets": { label: "All Markets", color: "text-blue-400", icon: "globe" },
-  "discover-trending": { label: "Trending", color: "text-blue-400", icon: "flame" },
   
-  // Analyze (Purple)
+  // Stage 2: Analyze (Purple)
   "analyze-edge": { label: "Edge Signals", color: "text-purple-400", icon: "target" },
   "analyze-sentiment": { label: "Sentiment", color: "text-purple-400", icon: "activity" },
   "analyze-vol": { label: "Vol & ATR", color: "text-purple-400", icon: "gauge" },
   
-  // Consensus (Cyan)
+  // Stage 3: Consensus (Cyan)
   "consensus-swarm": { label: "Swarm Matrix", color: "text-cyan-400", icon: "grid" },
   "consensus-debates": { label: "Debates", color: "text-cyan-400", icon: "messageSquare" },
   "consensus-performance": { label: "Performance", color: "text-cyan-400", icon: "award" },
   "consensus-calibration": { label: "Calibration", color: "text-cyan-400", icon: "crosshair" },
   
-  // Size (Amber)
-  "size-bankroll": { label: "Bankroll", color: "text-amber-400", icon: "wallet" },
-  "size-lanes": { label: "Lane Control", color: "text-amber-400", icon: "gitBranch" },
-  "size-sizing": { label: "Sizing Metrics", color: "text-amber-400", icon: "sliders" },
+  // Stage 4: Size (Amber) - Consolidated unified view
+  size: { label: "Size", color: "text-amber-400", icon: "sliders" },
   
-  // Execute (Emerald)
-  "execute-terminal": { label: "Terminal", color: "text-emerald-400", icon: "terminal" },
-  "execute-orders": { label: "Orders", color: "text-emerald-400", icon: "clipboardList" },
-  "execute-positions": { label: "Positions", color: "text-emerald-400", icon: "trendingUp" },
+  // Stage 5: Execute (Emerald) - Consolidated unified view
+  execute: { label: "Execute", color: "text-emerald-400", icon: "terminal" },
   
-  // Monitor (Orange)
-  "monitor-portfolio": { label: "Portfolio", color: "text-orange-400", icon: "briefcase" },
-  "monitor-pnl": { label: "PnL History", color: "text-orange-400", icon: "dollarSign" },
-  "monitor-health": { label: "System Health", color: "text-orange-400", icon: "heart" },
+  // Stage 6: Monitor (Orange) - Consolidated unified view
+  monitor: { label: "Monitor", color: "text-orange-400", icon: "briefcase" },
   
-  // Promote (Violet)
-  "promote-pipeline": { label: "Pipeline", color: "text-violet-400", icon: "rocket" },
-  "promote-grid": { label: "Agent Grid", color: "text-violet-400", icon: "layoutGrid" },
+  // Stage 7: Promote (Violet) - Consolidated unified view
+  promote: { label: "Promote", color: "text-violet-400", icon: "rocket" },
   
-  // Protect (Red)
-  "protect-risk": { label: "Risk Center", color: "text-red-400", icon: "shieldAlert" },
-  "protect-kill-switch": { label: "Kill Switch", color: "text-red-400", icon: "shield" },
-  "protect-alerts": { label: "Alerts", color: "text-red-400", icon: "bell" },
+  // Stage 8: Protect (Red) - Consolidated unified view
+  protect: { label: "Protect", color: "text-red-400", icon: "shield" },
   
   // System (Slate)
   overview: { label: "Overview", color: "text-slate-200", icon: "layoutDashboard" },
@@ -103,13 +119,18 @@ export const VIEW_STAGES: Record<string, { label: string; color: string; icon: s
   settings: { label: "Settings", color: "text-slate-200", icon: "settings" },
 };
 
-// Stage Groups for Sidebar
+// Stage Groups for Sidebar - Consolidated Architecture
 export const STAGE_GROUPS = [
   { 
     id: "discover", 
     label: "1. Discover", 
     color: "blue", 
-    views: ["discover", "discover-all-markets", "discover-trending"] as View[] 
+    views: ["discover"] as View[],
+    tabs: [
+      { id: "focus", label: "Focus" },
+      { id: "universe", label: "Universe" },
+      { id: "trending", label: "Trending" },
+    ]
   },
   { 
     id: "analyze", 
@@ -127,31 +148,56 @@ export const STAGE_GROUPS = [
     id: "size", 
     label: "4. Size", 
     color: "amber", 
-    views: ["size-bankroll", "size-lanes", "size-sizing"] as View[] 
+    views: ["size"] as View[],
+    tabs: [
+      { id: "bankroll", label: "Bankroll" },
+      { id: "lanes", label: "Lane Control" },
+      { id: "sizing", label: "Sizing" },
+    ]
   },
   { 
     id: "execute", 
     label: "5. Execute", 
     color: "emerald", 
-    views: ["execute-terminal", "execute-orders", "execute-positions"] as View[] 
+    views: ["execute"] as View[],
+    tabs: [
+      { id: "terminal", label: "Terminal" },
+      { id: "orders", label: "Orders" },
+      { id: "positions", label: "Positions" },
+    ]
   },
   { 
     id: "monitor", 
     label: "6. Monitor", 
     color: "orange", 
-    views: ["monitor-portfolio", "monitor-pnl", "monitor-health"] as View[] 
+    views: ["monitor"] as View[],
+    tabs: [
+      { id: "portfolio", label: "Portfolio" },
+      { id: "pnl", label: "PnL History" },
+      { id: "health", label: "Health" },
+    ]
   },
   { 
     id: "promote", 
     label: "7. Promote", 
     color: "violet", 
-    views: ["promote-pipeline", "promote-grid"] as View[] 
+    views: ["promote"] as View[],
+    tabs: [
+      { id: "pipeline", label: "Pipeline" },
+      { id: "grid", label: "Agent Grid" },
+    ]
   },
   { 
     id: "protect", 
     label: "8. Protect", 
     color: "red", 
-    views: ["protect-risk", "protect-kill-switch", "protect-alerts"] as View[] 
+    views: ["protect"] as View[],
+    tabs: [
+      { id: "overview", label: "Overview" },
+      { id: "alerts", label: "Alerts" },
+      { id: "kill-switch", label: "Kill Switch" },
+      { id: "context", label: "Context" },
+    ]
   },
   { 
     id: "system", 
@@ -162,21 +208,53 @@ export const STAGE_GROUPS = [
 ] as const;
 
 // Legacy View Mapping (for backward compatibility during transition)
+// All legacy views now map to consolidated unified views
 export const LEGACY_VIEW_MAP: Record<string, View> = {
+  // Stage 1: Discover - all map to unified discover view
   "kalshi-dashboard": "discover",
-  "kalshi-all-markets": "discover-all-markets",
+  "kalshi-all-markets": "discover",
+  "discover-all-markets": "discover",
+  "discover-trending": "discover",
+  
+  // Stage 2: Analyze - individual views preserved
   "kalshi-sentiment": "analyze-sentiment",
   "kalshi-vol-dashboard": "analyze-vol",
+  
+  // Stage 3: Consensus - individual views preserved
   "swarm-consensus": "consensus-swarm",
   "kalshi-performance": "consensus-performance",
   "calibration-dashboard": "consensus-calibration",
-  "lane-control": "size-lanes",
-  "kalshi-terminal": "execute-terminal",
-  "orders": "execute-orders",
-  "positions": "execute-positions",
-  "kalshi-portfolio": "monitor-portfolio",
-  "kalshi-risk": "protect-risk",
-  "kill-switch": "protect-kill-switch",
-  "kalshi-grid": "promote-grid",
-  "kalshi-risk-context": "protect-risk",
+  
+  // Stage 4: Size - all map to unified size view
+  "lane-control": "size",
+  "size-bankroll": "size",
+  "size-lanes": "size",
+  "size-sizing": "size",
+  
+  // Stage 5: Execute - all map to unified execute view
+  "kalshi-terminal": "execute",
+  "execute-terminal": "execute",
+  "execute-orders": "execute",
+  "execute-positions": "execute",
+  "orders": "execute",
+  "positions": "execute",
+  
+  // Stage 6: Monitor - all map to unified monitor view
+  "kalshi-portfolio": "monitor",
+  "monitor-portfolio": "monitor",
+  "monitor-pnl": "monitor",
+  "monitor-health": "monitor",
+  
+  // Stage 7: Promote - all map to unified promote view
+  "kalshi-grid": "promote",
+  "promote-pipeline": "promote",
+  "promote-grid": "promote",
+  
+  // Stage 8: Protect - all map to unified protect view
+  "kalshi-risk": "protect",
+  "kalshi-risk-context": "protect",
+  "protect-risk": "protect",
+  "protect-kill-switch": "protect",
+  "protect-alerts": "protect",
+  "kill-switch": "protect",
 };

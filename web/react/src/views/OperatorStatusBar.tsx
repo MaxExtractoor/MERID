@@ -1,4 +1,4 @@
-import { Wifi, WifiOff, AlertTriangle, Clock, Shield } from 'lucide-react';
+import { Wifi, WifiOff, AlertTriangle, Clock, Shield } from '../ui/icons';
 import { useMeridSocket } from '../hooks/useMeridSocket';
 import { useRiskProtections, getOverallRiskStatus } from '../hooks/useRiskProtections';
 import { formatTime } from '../utils/formatters';

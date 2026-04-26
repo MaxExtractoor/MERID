@@ -635,10 +635,13 @@ class KalshiVenueClient(EventVenueClient):
         self._auth_token = None
 
     def __del__(self) -> None:
-        """Safety net: warn if client was never closed."""
+        """Safety net: warn if client was never closed (non-singleton only)."""
         # Use getattr to handle case where __init__ wasn't fully called
         http_client = getattr(self, '_http_client', None)
         if http_client is not None and not http_client.is_closed:
+            # Don't warn for singleton - it has a dedicated cleanup path via close_kalshi_client()
+            if getattr(self, '_is_singleton', False):
+                return
             logger.warning(
                 "KalshiVenueClient garbage-collected without close(). "
                 "Use 'async with client:' or call 'await client.close()' explicitly."
@@ -678,8 +681,10 @@ class KalshiVenueClient(EventVenueClient):
 
         for attempt in range(KALSHI_MAX_RETRIES + 1):
             try:
-                self._ensure_async_network_resources()
                 client = await self._ensure_client()
+                # Initialize/re-initialize network resources AFTER _ensure_client
+                # to handle case where _reset_http_client_after_loop_error() cleared them
+                self._ensure_async_network_resources()
                 # Token bucket: self-limit before hitting 429s
                 is_write = method.upper() in ("POST", "PUT", "DELETE", "PATCH")
                 assert self._rate_limiter is not None and self._request_semaphore is not None
@@ -976,7 +981,12 @@ class KalshiVenueClient(EventVenueClient):
             except Exception as e:
                 # Unexpected error - don't retry
                 latency_ms = (time.time() - start_time) * 1000
-                logger.warning(f"[kalshi] {operation_name} unexpected error: {e}")
+                # Include exception type and first 100 chars of repr for debugging
+                error_type = type(e).__name__
+                error_detail = repr(e)[:200]
+                logger.warning(
+                    f"[kalshi] {operation_name} unexpected error: {error_type}: {error_detail}"
+                )
                 return OperationResult.fail(
                     e,
                     latency_ms=latency_ms,
@@ -1447,6 +1457,40 @@ class KalshiVenueClient(EventVenueClient):
             order_group_id: Optional order group ID for aggregate limits
             self_trade_prevention_type: Optional STP mode (e.g., "taker_at_cross")
         """
+        # FINAL SAFETY NET: GlobalExecutionGuard at lowest level
+        # This catches ANY order that bypassed higher-level guards
+        try:
+            from merid.guards.global_execution_guard import get_global_execution_guard
+            _guard = get_global_execution_guard()
+            _price_cents = int((order.price or 0.50) * 100)
+            _allowed, _reason = _guard.check_order(
+                ticker=order.market_id,
+                contracts=int(order.size),
+                price_cents=_price_cents,
+                source="kalshi_client_final_net",
+                asset=order.metadata.get("asset") if hasattr(order, "metadata") else None,
+            )
+            if not _allowed:
+                logger.critical(
+                    "[KALSHI_CLIENT_BLOCKED] GlobalExecutionGuard final net rejected: %s | ticker=%s",
+                    _reason, order.market_id
+                )
+                return OperationResult.fail(
+                    f"Global execution guard blocked: {_reason}",
+                    latency_ms=0.0,
+                    retries=0,
+                )
+        except ImportError:
+            pass  # Guard not available — proceed with other checks
+        except Exception as _guard_err:
+            logger.error("[KALSHI_CLIENT_GUARD_ERROR] Guard check failed: %s", _guard_err)
+            # Fail-closed: block order if guard fails
+            return OperationResult.fail(
+                f"Global execution guard error: {_guard_err}",
+                latency_ms=0.0,
+                retries=0,
+            )
+
         # Use market_id directly as the ticker - it should already be in Kalshi's format
         # from the market catalog. DO NOT normalize here - normalization is for internal
         # grouping only and can break the actual Kalshi ticker format.
@@ -3883,4 +3927,22 @@ def get_kalshi_client(config: Optional[KalshiConfig] = None) -> KalshiVenueClien
                 import os as _os
                 _rate_tier = _os.getenv("KALSHI_RATE_TIER", "basic")
                 _client = KalshiVenueClient(config, rate_tier=_rate_tier)
+                # Mark singleton so __del__ doesn't warn about garbage collection
+                _client._is_singleton = True
     return _client
+
+
+async def close_kalshi_client() -> None:
+    """Close the singleton KalshiVenueClient — call at shutdown to prevent GC warning.
+
+    This should be called during application shutdown (e.g., in lifespan cleanup)
+    to properly close the HTTP client and prevent the garbage-collection warning.
+    """
+    global _client
+    with _client_lock:
+        if _client is not None:
+            try:
+                await _client.close()
+            except Exception:
+                pass  # Suppress errors during shutdown
+            _client = None

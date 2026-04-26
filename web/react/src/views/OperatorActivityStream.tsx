@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Activity, FileText, Brain, RefreshCw } from 'lucide-react';
+import { Activity, FileText, Brain, RefreshCw } from '../ui/icons';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY } from '../config/constants';
 import { logUiError } from '../utils/logger';
 import { formatDateTime } from '../utils/formatters';

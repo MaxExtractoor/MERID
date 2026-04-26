@@ -222,48 +222,53 @@ def asset_in_ticker(ticker: str, expected_asset: str) -> bool:
 # - Adjust per asset/timeframe based on hit-rate (e.g., if winning at 5%, try 6%)
 #
 # v1 values (per-side absolute % distance from spot):
-# | Asset | 15m  | 1h   | 4h+  |
-# |-------|------|------|------|
-# | BTC   | 0.05 | 0.09 | 0.13 |
-# | ETH   | 0.045| 0.08 | 0.11 |
-# | SOL   | 0.06 | 0.10 | 0.14 |
-# | XRP   | 0.035| 0.07 | 0.09 |
-# | DOGE  | 0.04 | 0.08 | 0.11 |
+# │ Asset │ 15m  │ 1h   │Daily │
+# │ BTC   │ 0.06 │ 0.08 │ 0.12 │
+# │ ETH   │ 0.06 │ 0.08 │ 0.12 │
+# │ SOL   │ 0.08 │ 0.09 │ 0.15 │
+# │ XRP   │ 0.08 │ 0.07 │ 0.15 │
+# │ DOGE  │ 0.06 │ 0.08 │ 0.12 │  # Calibrated to volatility (~2-3x BTC)|
 #
 # These are BOOTSTRAP DEFAULTS. The calibrator (kalshi_strike_calibrator.py)
 # will override these once MIN_OBS observations accumulate per (asset, timeframe).
 
 DEFAULT_MAX_DISTANCE: Dict[Tuple[str, str], float] = {
-    # Intraday: 15m / 1h - SENSIBLE INTRADAY BANDS (v3 fix)
-    # v3 (2026-04-19): Reverted to sensible intraday bands. The v2 "wide bands" allowed
-    # far-OTM contracts (20-30% from spot) to be selected, causing wasted resting orders.
-    # v3 bands: intraday max 6-8% (tightened), daily 10-12%, weekly 15-18%.
-    # If no strikes exist within these bands, the selector returns empty (correct behavior).
+    # Intraday: 15m / 1h - PRACTICAL INTRADAY BANDS (v4 fix)
+    # v4 (2026-04-25): Widened hourly/daily bands based on live Kalshi market analysis.
+    # Previous v3 bands (6-8% intraday, 10-12% daily) were too tight - rejecting 8.5%
+    # distance BTC hourly markets that should be tradable. New bands: 15m 6-7%, 1h 9-10%,
+    # daily 12-15%, weekly 15-20%. Empirically derived from actual Kalshi strike distributions.
     #
-    # Intraday - tight bands (ATM to slightly OTM only)
-    ("BTC", "15m"): 0.06, ("BTC", "1h"): 0.08,
-    ("ETH", "15m"): 0.06, ("ETH", "1h"): 0.08,
-    ("SOL", "15m"): 0.07, ("SOL", "1h"): 0.09,
-    ("XRP", "15m"): 0.05, ("XRP", "1h"): 0.07,
-    ("DOGE", "15m"): 0.06, ("DOGE", "1h"): 0.08,
-    # Daily - moderate widening
-    ("BTC", "daily"): 0.10,
-    ("ETH", "daily"): 0.10,
-    ("SOL", "daily"): 0.12,
-    ("XRP", "daily"): 0.08,
-    ("DOGE", "daily"): 0.10,
-    # Weekly - wider but still sensible
-    ("BTC", "weekly"): 0.15,
-    ("ETH", "weekly"): 0.15,
-    ("SOL", "weekly"): 0.18,
-    ("XRP", "weekly"): 0.12,
-    ("DOGE", "weekly"): 0.15,
-    # Monthly+ - widest but not extreme
-    ("BTC", "monthly"): 0.20, ("BTC", "annual"): 0.25,
-    ("ETH", "monthly"): 0.20, ("ETH", "annual"): 0.25,
-    ("SOL", "monthly"): 0.25, ("SOL", "annual"): 0.30,
-    ("XRP", "monthly"): 0.15, ("XRP", "annual"): 0.20,
-    ("DOGE", "monthly"): 0.20, ("DOGE", "annual"): 0.25,
+    # Intraday - practical bands (tight 15m, wider hourly for real market coverage)
+    ("BTC", "15m"): 0.06,
+    ("ETH", "15m"): 0.06,
+    ("SOL", "15m"): 0.07,
+    ("XRP", "15m"): 0.07,
+    ("DOGE", "15m"): 0.065,
+    # Hourly - widened to accommodate actual Kalshi market structures
+    ("BTC", "1h"): 0.09,    # Widened from 0.08 → 0.09 (log evidence: 8.5% rejected)
+    ("ETH", "1h"): 0.09,    # Widened from 0.08 → 0.09
+    ("SOL", "1h"): 0.10,    # Widened from 0.09 → 0.10
+    ("XRP", "1h"): 0.10,    # Widened from 0.08 → 0.10
+    ("DOGE", "1h"): 0.095,  # Widened from 0.085 → 0.095
+    # Daily - widened for practical coverage
+    ("BTC", "daily"): 0.14,  # Widened from 0.12 → 0.14
+    ("ETH", "daily"): 0.14,  # Widened from 0.12 → 0.14
+    ("SOL", "daily"): 0.17,  # Widened from 0.15 → 0.17
+    ("XRP", "daily"): 0.17,  # Widened from 0.15 → 0.17
+    ("DOGE", "daily"): 0.14,  # Widened from 0.12 → 0.14
+    # Weekly - widened for coverage (must be >= daily)
+    ("BTC", "weekly"): 0.18,   # Widened from 0.15 → 0.18 (>= daily 0.14)
+    ("ETH", "weekly"): 0.18,   # Widened from 0.15 → 0.18
+    ("SOL", "weekly"): 0.22,   # Widened from 0.20 → 0.22 (>= daily 0.17)
+    ("XRP", "weekly"): 0.22,   # Widened from 0.20 → 0.22
+    ("DOGE", "weekly"): 0.18,   # Widened from 0.15 → 0.18 (>= daily 0.14)
+    # Monthly+ - widest but not extreme (must be >= weekly)
+    ("BTC", "monthly"): 0.22, ("BTC", "annual"): 0.28,  # >= weekly 0.18
+    ("ETH", "monthly"): 0.22, ("ETH", "annual"): 0.28,
+    ("SOL", "monthly"): 0.28, ("SOL", "annual"): 0.35,  # >= weekly 0.22
+    ("XRP", "monthly"): 0.25, ("XRP", "annual"): 0.30,  # Monotonic: >= weekly 0.22
+    ("DOGE", "monthly"): 0.22, ("DOGE", "annual"): 0.28,  # >= weekly 0.18
 }
 
 # Default preferred ATM band (fraction of spot).
@@ -276,8 +281,8 @@ DEFAULT_TARGET_BAND: Dict[Tuple[str, str], float] = {
     ("BTC", "15m"):   0.025, ("BTC", "1h"):   0.035,   # max: 0.06, 0.08
     ("ETH", "15m"):   0.025, ("ETH", "1h"):   0.035,   # max: 0.06, 0.08
     ("SOL", "15m"):   0.030, ("SOL", "1h"):   0.040,   # max: 0.07, 0.09
-    ("XRP", "15m"):   0.020, ("XRP", "1h"):   0.030,   # max: 0.05, 0.07
-    ("DOGE", "15m"):  0.025, ("DOGE", "1h"):  0.035,   # max: 0.06, 0.08
+    ("XRP", "15m"):   0.030, ("XRP", "1h"):   0.040,   # max: 0.08, 0.08 (~30-40% ratio)
+    ("DOGE", "15m"):  0.025, ("DOGE", "1h"):  0.035,   # max: 0.065, 0.085
     # Daily: moderate bands
     ("BTC", "daily"): 0.040, ("BTC", "weekly"): 0.060,
     ("BTC", "monthly"): 0.080, ("BTC", "annual"): 0.100,

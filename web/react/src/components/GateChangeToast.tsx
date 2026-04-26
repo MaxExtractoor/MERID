@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { DEFAULTS } from '../config/constants';
-import { ShieldCheck, ShieldOff, X } from 'lucide-react';
+import { ShieldCheck, ShieldOff, X } from '../ui/icons';
 import { useExecutionGate } from '../hooks/useExecutionGate';
 
 interface Toast {

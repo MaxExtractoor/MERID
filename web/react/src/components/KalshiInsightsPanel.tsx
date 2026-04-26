@@ -13,7 +13,7 @@ import {
   Lightbulb, ChevronDown, ChevronUp, Check, X,
   AlertTriangle, Activity, TrendingUp, Droplets, Zap,
   ExternalLink,
-} from 'lucide-react';
+} from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY } from '../config/constants';
 

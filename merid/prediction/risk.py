@@ -13,7 +13,7 @@ import threading
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from enum import Enum
 from typing import Dict, List, Optional, Set
 
@@ -370,6 +370,30 @@ class PredictionMarketRisk:
         13. Slippage guard.
         14. Depth check.
         """
+        # CRITICAL: Type safety enforcement - convert any float inputs to Decimal
+        # to prevent TypeError: unsupported operand type(s) for float and Decimal
+        try:
+            if not isinstance(price_cents, Decimal):
+                price_cents = Decimal(str(price_cents))
+            if not isinstance(contracts, int):
+                contracts = int(contracts)
+            if not isinstance(edge, Decimal):
+                edge = Decimal(str(edge))
+            if agent_max_notional_usd is not None and not isinstance(agent_max_notional_usd, Decimal):
+                agent_max_notional_usd = Decimal(str(agent_max_notional_usd))
+            if best_bid_cents is not None and not isinstance(best_bid_cents, Decimal):
+                best_bid_cents = Decimal(str(best_bid_cents))
+            if best_ask_cents is not None and not isinstance(best_ask_cents, Decimal):
+                best_ask_cents = Decimal(str(best_ask_cents))
+        except (ValueError, InvalidOperation) as e:
+            logger.error(f"Invalid order parameters: price={price_cents}, contracts={contracts}, edge={edge}, error={e}")
+            return PreTradeCheck(
+                allowed=False,
+                action=RiskAction.REJECT,
+                reason=f"Invalid numeric parameters: {e}",
+                market_id=market_id,
+            )
+
         now = datetime.now(timezone.utc)
 
         # 1. Kill switch
@@ -411,6 +435,16 @@ class PredictionMarketRisk:
             Decimal("0.01"), ROUND_HALF_UP
         )
 
+        # HARD REQUIREMENT: No valid bankroll = no trading
+        # None indicates live bankroll fetch failed - no fake data allowed
+        if agent_max_notional_usd is None:
+            return PreTradeCheck(
+                allowed=False,
+                action=RiskAction.REJECT,
+                reason="BANKROLL_UNAVAILABLE: Live Kalshi bankroll not available. Cannot trade.",
+                market_id=market_id,
+            )
+        
         # 2b. Per-agent notional cap (from AgentConfig.risk_limits.max_notional_usd)
         if agent_max_notional_usd is not None and agent_max_notional_usd > Decimal("0"):
             if order_notional > agent_max_notional_usd:

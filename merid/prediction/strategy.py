@@ -326,26 +326,34 @@ class KalshiStrategy:
                 ExpiryPhase.TERMINAL: 35.0,
             }.get(phase, 15.0)
 
-            # CRITICAL FIX: No bankroll fallback. Fail closed if equity unavailable.
+            # CRITICAL FIX: Use unified v2 bankroll service for consistent sizing/risk
+            # PM SIZING WIRING: All position sizing must use unified bankroll as single source of truth
             _bankroll_cents = 0
             try:
-                from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
-                _equity_usd = get_kalshi_risk().state.current_equity_usd
-                if _equity_usd > 0:
-                    _bankroll_cents = int(_equity_usd * 100)
+                from merid.event_venues.kalshi import get_equity_for_risk_calc_sync, get_summary_sync
+                _effective_usd = get_equity_for_risk_calc_sync()
+                _summary = get_summary_sync()
+                if _effective_usd and _effective_usd > 0:
+                    _bankroll_cents = int(_effective_usd * 100)
+                    _state = _summary.state.value if _summary else "unknown"
+                    logger.debug(
+                        "[strategy] Using effective bankroll: $%.2f (state=%s)",
+                        _effective_usd,
+                        _state
+                    )
                 else:
-                    # Equity returned but zero/negative - treat as unavailable
+                    # Effective bankroll is zero - trading should halt
                     logger.error(
-                        "[TAINTED_PATH] strategy bankroll: KalshiRiskManager returned equity=%.2f — "
-                        "rejecting sizing request; no fallback permitted",
-                        _equity_usd,
+                        "[TAINTED_PATH] strategy bankroll: effective_equity=$%.2f — "
+                        "rejecting sizing request; check min_operational_balance or max_riskable caps",
+                        _effective_usd,
                     )
                     # Emit alert for operator visibility
                     try:
                         from core.event_bus import get_event_bus
                         get_event_bus().emit("risk.bankroll_unavailable", {
                             "agent": self._agent_name,
-                            "equity_usd": _equity_usd,
+                            "equity_usd": _effective_usd,
                             "reason": "zero_or_negative_equity",
                             "action": "reject_sizing",
                         })
@@ -357,7 +365,7 @@ class KalshiStrategy:
                         from core.risk_audit_chain import get_risk_audit_chain
                         get_risk_audit_chain().log_event("risk.bankroll_unavailable", {
                             "agent": self._agent_name,
-                            "equity_usd": _equity_usd,
+                            "equity_usd": _effective_usd,
                             "reason": "zero_or_negative_equity",
                             "action": "reject_sizing",
                             "edge_pct": edge_pct,
@@ -369,7 +377,7 @@ class KalshiStrategy:
                     return 0  # Fail closed: no size when bankroll unknown
             except Exception as _brk_exc:
                 logger.error(
-                    "[TAINTED_PATH] strategy bankroll: KalshiRiskManager unavailable (%s) — "
+                    "[TAINTED_PATH] strategy bankroll: unified bankroll service unavailable (%s) — "
                     "rejecting sizing request; no fallback permitted",
                     _brk_exc,
                 )
@@ -1601,6 +1609,10 @@ class KalshiStrategy:
         _vm = self._pm_vol_band_size_factor(snapshot)
         if _vm != 1.0:
             _depth = max(1, int(round(_depth * _vm)))
+
+        # Cap by strategy limits (respects Top-N allocator downstream)
+        _depth = min(_depth, self.config.max_contracts_per_order)
+        _depth = min(_depth, self.config.mm_inventory_limit)
 
         return StrategySignal(
             market_id=snapshot.market_id,
