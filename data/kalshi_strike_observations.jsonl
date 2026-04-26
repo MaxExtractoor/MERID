@@ -40261,3 +40261,5 @@
 {"asset": "ETH", "distance_pct": 0.304009, "spot": 2331.265, "strike": 3039.99, "ticker": "KXETH-26APR2610-T3039.99", "timeframe": "1h", "timestamp": 1777209706.289037}
 {"asset": "BTC", "distance_pct": 0.114359, "spot": 77892.335, "strike": 86799.99, "ticker": "KXBTC-26APR2610-T86799.99", "timeframe": "1h", "timestamp": 1777209706.3084302}
 {"asset": "ETH", "distance_pct": 0.304009, "spot": 2331.265, "strike": 3039.99, "ticker": "KXETH-26APR2610-T3039.99", "timeframe": "1h", "timestamp": 1777209706.3284383}
+{"asset": "ETH", "distance_pct": 0.304441, "spot": 2345.825, "strike": 3059.99, "ticker": "KXETH-26APR2617-T3059.99", "timeframe": "1h", "timestamp": 1777218584.2864451}
+{"asset": "ETH", "distance_pct": 0.389699, "spot": 2345.825, "strike": 3259.99, "ticker": "KXETH-26MAY0117-T3259.99", "timeframe": "1h", "timestamp": 1777218584.3031266}

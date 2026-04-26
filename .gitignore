@@ -6,6 +6,17 @@ web/react/jest_results.txt
 data/*.jsonl
 logs/*.log
 *.log
+server_*.log
+startup_log*.txt
+debug*.log
+err*.txt
+test_output*.txt
+test_run*.log
+pytest-run.txt
+preflight_output.txt
+audit_*.txt
+full_collect*.txt
+_pytest_tail*.txt
 
 # ── Secrets & credentials (CRITICAL — never commit) ──────────────────
 .env
