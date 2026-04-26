@@ -1,0 +1,68 @@
+import re
+
+with open("c:/Dev/MERID/merid/agents/risk_agents.py", "r", encoding="utf-8") as f:
+    content = f.read()
+
+replacement = """class AnomalyDetectorAgent(CanonicalAgent):
+    \"\"\"Watches for bad data and weird price behavior.
+
+    Checks:
+    - Per-feed staleness and schema validation.
+    - Suspicious price moves, liquidity collapses, odd spreads.
+    - Can recommend auto-pause for affected instruments/venues.
+    \"\"\"
+
+    def __init__(
+        self,
+        agent_id: str = "anomaly-detector-01",
+        stale_threshold_seconds: int = 60,
+        spike_threshold_pct: float = 0.10,
+    ):
+        super().__init__(agent_id, AgentCategory.RISK)
+        self.stale_threshold_seconds = stale_threshold_seconds
+        self.spike_threshold_pct = spike_threshold_pct
+        self._anomalies: List[Anomaly] = []
+        self._last_prices: Dict[str, Dict[str, Any]] = {}  # instrument -> {price, ts}
+
+    async def _execute(self, context: Dict[str, Any]) -> AgentOutput:
+        \"\"\"Run anomaly detection on provided market data.
+        
+        Context should contain 'market_data': list of {instrument, venue, price, bid, ask, volume, timestamp}.
+        \"\"\"
+        market_data = context.get("market_data", [])
+        anomalies = self._detect(market_data)
+        self._anomalies.extend(anomalies)
+        
+        # If critical anomalies are found, alert via event bus
+        critical_anomalies = [a for a in anomalies if a.severity == "critical"]
+        if critical_anomalies:
+            try:
+                from core.event_bus import event_stream
+                import asyncio
+                loop = asyncio.get_running_loop()
+                for anomaly in critical_anomalies:
+                    loop.create_task(event_stream.publish("risk:anomaly_detected", anomaly.to_dict()))
+            except Exception as exc:
+                logger.debug(f"Failed to publish anomaly to event bus: {exc}")
+
+        return AgentOutput(
+            agent_id=self.agent_id,
+            category=self.category.value,
+            output_type="anomalies",
+            payload={
+                "anomalies": [a.to_dict() for a in anomalies],
+                "count": len(anomalies),
+                "critical": len(critical_anomalies),
+            },
+            confidence=0.8,
+        )"""
+
+content = re.sub(
+    r'class AnomalyDetectorAgent.*?confidence=0\.8,\n        \)',
+    replacement,
+    content,
+    flags=re.DOTALL
+)
+
+with open("c:/Dev/MERID/merid/agents/risk_agents.py", "w", encoding="utf-8") as f:
+    f.write(content)
