@@ -322,7 +322,10 @@ class RiskController:
                 is_valid, warning = self._validate_fills_ledger_data(_ledger_summary)
                 if not is_valid:
                     logger.warning(f"[VALIDATION] Rejecting fills_ledger data in can_trade: {warning}")
-                    # Keep existing value instead of using corrupted data
+                    # CRITICAL FIX: Reset to 0 when stale data detected, don't keep corrupted value
+                    if self._daily_pnl != 0.0:
+                        logger.warning(f"[VALIDATION] Resetting corrupted daily_pnl from {self._daily_pnl:.2f} to 0.0")
+                        self._daily_pnl = 0.0
                 else:
                     if warning:
                         logger.info(f"[VALIDATION] {warning}")
@@ -780,31 +783,28 @@ class RiskController:
     def _validate_fills_ledger_data(self, summary: dict) -> tuple[bool, str]:
         """
         Validate fills_ledger data to detect test data / stale data.
-        
+
         Returns: (is_valid, warning_message)
         - Suspicious patterns: PnL exactly $105 with $100 limit (test artifact)
         - Stale data: fills from previous days without current day data
         - Empty data: no fills but non-zero PnL
-        
+
         This prevents test data pollution from triggering production kill switches.
         """
         daily_pnl = float(summary.get("daily_realized_pnl_usd", 0.0))
         total_fills = int(summary.get("total_fills", 0))
-        
+
         # Detect suspicious test pattern: $105 loss with $100 limit
         # This matches the test data pattern in test_trading_lifecycle_audit.py
         pnl_magnitude = abs(daily_pnl)
         if pnl_magnitude > 0 and abs(pnl_magnitude - 105.0) < 0.01 and self.daily_loss_limit == 100.0:
             return False, f"TEST DATA DETECTED: Suspicious PnL ${pnl_magnitude:.2f} with $100 limit (matches test pattern)"
-        
-        # Detect stale data: non-zero PnL but no fills
+
+        # Detect stale data: non-zero PnL but no fills (ledger corruption)
+        # NOTE: "zero fills AND zero PnL" is VALID (fresh start), not stale data.
         if abs(daily_pnl) > 0 and total_fills == 0:
-            return False, f"STALE DATA: Non-zero PnL ${daily_pnl:.2f} but zero fills"
-        
-        # Warn on suspicious round numbers (possible test data)
-        if abs(daily_pnl) > 0 and daily_pnl == int(daily_pnl) and abs(daily_pnl) > 50:
-            return True, f"SUSPICIOUS: Round number PnL ${daily_pnl:.2f} may be test data"
-        
+            return False, f"STALE DATA: Non-zero PnL ${daily_pnl:.2f} but zero fills — ledger may be corrupted"
+
         return True, ""
 
     def record_pnl(self, pnl: float) -> bool:
@@ -827,7 +827,10 @@ class RiskController:
                 is_valid, warning = self._validate_fills_ledger_data(_s)
                 if not is_valid:
                     logger.warning(f"[VALIDATION] Rejecting fills_ledger data: {warning}")
-                    # Fall back to accumulated PnL instead of corrupted ledger data
+                    # CRITICAL FIX: Reset to 0 when stale data detected, then add new PnL
+                    if self._daily_pnl != 0.0:
+                        logger.warning(f"[VALIDATION] Resetting corrupted daily_pnl from {self._daily_pnl:.2f} to 0.0 before recording new PnL")
+                        self._daily_pnl = 0.0
                     self._daily_pnl += pnl
                 else:
                     if warning:
