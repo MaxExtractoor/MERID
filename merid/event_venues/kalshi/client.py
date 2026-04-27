@@ -269,11 +269,32 @@ class KalshiTokenBucket:
         self._write_tokens = min(self.write_rate, self._write_tokens + elapsed * self.write_rate)
         self._last_refill = now
 
+    def _is_lock_bound_to_current_loop(self, lock: Optional[asyncio.Lock]) -> bool:
+        """Check if an asyncio.Lock is bound to the current event loop."""
+        if lock is None:
+            return False
+        try:
+            lock_loop = getattr(lock, '_loop', None)
+            if lock_loop is None:
+                lock_loop = getattr(lock, '_Lock__loop', None)
+            if lock_loop is not None:
+                try:
+                    current_loop = asyncio.get_running_loop()
+                    return lock_loop is current_loop
+                except RuntimeError:
+                    return False
+            return True
+        except Exception:
+            return False
+
     def _ensure_lock(self) -> asyncio.Lock:
-        """Lazy-initialize the asyncio.Lock in the current event loop."""
-        if self._lock is None:
+        """Lazy-initialize the asyncio.Lock in the current event loop.
+        
+        CRITICAL FIX: Also reset lock if bound to a different event loop.
+        """
+        if self._lock is None or not self._is_lock_bound_to_current_loop(self._lock):
             with self._lock_init_lock:
-                if self._lock is None:
+                if self._lock is None or not self._is_lock_bound_to_current_loop(self._lock):
                     self._lock = asyncio.Lock()
         return self._lock
 
@@ -371,6 +392,7 @@ class KalshiVenueClient(EventVenueClient):
         # Event-loop tracking for auto-reset on loop mismatch (Windows startup optimization)
         self._client_loop_id: Optional[int] = None
         self._loop_check_lock = threading.Lock()
+        self._client_init_lock: Optional[asyncio.Lock] = None  # Async lock for thread-safe client init
 
         # Circuit-open log suppression: avoid flooding logs when many callers
         # hit an open circuit simultaneously (e.g. 20+ agents per tick)
@@ -381,11 +403,41 @@ class KalshiVenueClient(EventVenueClient):
     def venue_name(self) -> str:
         return "kalshi"
 
+    def _is_semaphore_bound_to_current_loop(self, sem: Optional[asyncio.Semaphore]) -> bool:
+        """Check if an asyncio.Semaphore is bound to the current event loop."""
+        if sem is None:
+            return False
+        try:
+            sem_loop = getattr(sem, '_loop', None)
+            if sem_loop is None:
+                sem_loop = getattr(sem, '_Semaphore__loop', None)
+            if sem_loop is not None:
+                try:
+                    current_loop = asyncio.get_running_loop()
+                    return sem_loop is current_loop
+                except RuntimeError:
+                    return False
+            return True
+        except Exception:
+            return False
+
     def _ensure_async_network_resources(self) -> None:
-        if self._rate_limiter is not None and self._request_semaphore is not None:
+        # CRITICAL FIX: Check if resources are bound to current loop, not just exist
+        needs_init = (
+            self._rate_limiter is None or 
+            self._request_semaphore is None or
+            not self._is_semaphore_bound_to_current_loop(self._request_semaphore)
+        )
+        if not needs_init:
             return
         with self._async_network_init_lock:
-            if self._rate_limiter is not None and self._request_semaphore is not None:
+            # Double-check after acquiring lock
+            needs_init = (
+                self._rate_limiter is None or 
+                self._request_semaphore is None or
+                not self._is_semaphore_bound_to_current_loop(self._request_semaphore)
+            )
+            if not needs_init:
                 return
             asyncio.get_running_loop()
             self._rate_limiter = KalshiTokenBucket(tier=self._rate_tier)
@@ -451,6 +503,28 @@ class KalshiVenueClient(EventVenueClient):
 
         return False
 
+    def _is_lock_bound_to_current_loop(self, lock: Optional[asyncio.Lock]) -> bool:
+        """Check if an asyncio.Lock is bound to the current event loop."""
+        if lock is None:
+            return False
+        try:
+            # Try to acquire with timeout=0 - if it raises RuntimeError about different loop, it's bound elsewhere
+            # We use _get_loop() internal attribute to check binding (available in Python 3.8+)
+            lock_loop = getattr(lock, '_loop', None)
+            if lock_loop is None:
+                # Try alternative attribute names
+                lock_loop = getattr(lock, '_Lock__loop', None)
+            if lock_loop is not None:
+                try:
+                    current_loop = asyncio.get_running_loop()
+                    return lock_loop is current_loop
+                except RuntimeError:
+                    return False  # No loop running
+            # Fallback: try to acquire and immediately release
+            return True
+        except Exception:
+            return False
+
     async def _ensure_client(self) -> httpx.AsyncClient:
         """Ensure HTTP client is initialized and authenticated.
         
@@ -458,39 +532,56 @@ class KalshiVenueClient(EventVenueClient):
         This prevents "Event loop is closed" errors during startup when the client singleton
         was created in a different loop context.
         """
-        # Check for event-loop mismatch and auto-reset (prevents retry storms)
-        if self._http_client is not None and self._is_loop_mismatch():
-            logger.debug("[kalshi] Event-loop mismatch detected, resetting HTTP client proactively")
-            await self._reset_http_client_after_loop_error()
+        # Initialize async lock lazily (can't create asyncio.Lock in __init__ without loop)
+        # CRITICAL FIX: Check if lock is bound to a different event loop and reset if so
+        if self._client_init_lock is None or not self._is_lock_bound_to_current_loop(self._client_init_lock):
+            self._client_init_lock = asyncio.Lock()
+        
+        # Fast path: client exists and is healthy
+        if self._http_client is not None and not self._http_client.is_closed:
+            if not self._is_loop_mismatch():
+                return self._http_client
+        
+        # Slow path: need to create or reset client - hold lock
+        async with self._client_init_lock:
+            # Double-check after acquiring lock
+            if self._http_client is not None and not self._http_client.is_closed:
+                if not self._is_loop_mismatch():
+                    return self._http_client
+            
+            # Check for event-loop mismatch and auto-reset (prevents retry storms)
+            if self._http_client is not None and self._is_loop_mismatch():
+                logger.debug("[kalshi] Event-loop mismatch detected, resetting HTTP client proactively")
+                await self._reset_http_client_after_loop_error()
 
-        if self._http_client is None or self._http_client.is_closed:
-            logger.debug("[kalshi] Initializing new HTTP client")
-            # BUG-4: per-operation timeouts instead of a single global value
-            # BUG-4: per-operation timeouts instead of a single global value
-            # C4-FIX: Add connection pool limits to prevent exhaustion under burst load
-            self._http_client = httpx.AsyncClient(
-                timeout=httpx.Timeout(
-                    connect=_KALSHI_CONNECT_TIMEOUT,
-                    read=_KALSHI_READ_TIMEOUT,
-                    write=_KALSHI_WRITE_TIMEOUT,
-                    pool=_KALSHI_POOL_TIMEOUT,
-                ),
-                limits=httpx.Limits(
-                    max_connections=200,
-                    max_keepalive_connections=50,
-                    keepalive_expiry=30.0,
-                ),
-                headers={
-                    "User-Agent": "MERID-Kalshi-Client/1.0",
-                    "Content-Type": "application/json"
-                },
-                verify=get_shared_ssl_context(),
-            )
-            # Track which loop this client is bound to
-            self._client_loop_id = self._get_current_loop_id()
-            # Authenticate immediately on new client
-            await self._authenticate()
-        return self._http_client
+            if self._http_client is None or self._http_client.is_closed:
+                logger.debug("[kalshi] Initializing new HTTP client")
+                # BUG-4: per-operation timeouts instead of a single global value
+                # BUG-4: per-operation timeouts instead of a single global value
+                # C4-FIX: Add connection pool limits to prevent exhaustion under burst load
+                self._http_client = httpx.AsyncClient(
+                    timeout=httpx.Timeout(
+                        connect=_KALSHI_CONNECT_TIMEOUT,
+                        read=_KALSHI_READ_TIMEOUT,
+                        write=_KALSHI_WRITE_TIMEOUT,
+                        pool=_KALSHI_POOL_TIMEOUT,
+                    ),
+                    limits=httpx.Limits(
+                        max_connections=200,
+                        max_keepalive_connections=50,
+                        keepalive_expiry=30.0,
+                    ),
+                    headers={
+                        "User-Agent": "MERID-Kalshi-Client/1.0",
+                        "Content-Type": "application/json"
+                    },
+                    verify=get_shared_ssl_context(),
+                )
+                # Track which loop this client is bound to
+                self._client_loop_id = self._get_current_loop_id()
+                # Authenticate immediately on new client
+                await self._authenticate()
+            return self._http_client
 
     async def connect(self) -> None:
         """Initialize HTTP client and authenticate."""
@@ -530,11 +621,13 @@ class KalshiVenueClient(EventVenueClient):
             logger.info(f"Authenticated with Kalshi (member: {self._member_id})")
             
         except (ConnectionError, RuntimeError, ValueError, httpx.HTTPStatusError) as e:
-            # BUG-2: httpx.HTTPStatusError (raised by raise_for_status()) was not caught;
-            # record the failure against the circuit breaker so repeated auth errors
-            # eventually open the circuit instead of hammering the auth endpoint.
+            # BUG-2: httpx.HTTPStatusError (raised by raise_for_status()) was not caught.
+            # STARTUP FIX: Do NOT record auth failures against the circuit breaker.
+            # During startup, 10+ agents all call _ensure_client() → _authenticate()
+            # simultaneously. If auth fails (network not ready, loop mismatch, etc.),
+            # recording 10 failures opens the circuit for 30s, blocking ALL trading.
+            # Auth is already retried by _ensure_client() and the per-request retry loop.
             logger.error("[kalshi] Authentication failed (%s): %s", type(e).__name__, e)
-            await self._circuit_breaker.record_failure(e)
             raise
     
     async def _authenticate_rsa(self) -> None:
@@ -3484,44 +3577,52 @@ class KalshiVenueClient(EventVenueClient):
             outcomes = []
             
             # Kalshi markets typically have Yes/No outcomes
-            # Prefer last_price, then yes_price, then yes_ask
-            yes_price_raw = data.get("last_price") or data.get("yes_price") or data.get("yes_ask", 0)
+            # Prefer last_price, then yes_price, then yes_ask.
+            # BUGFIX: Use explicit None checks — Python's `or` treats 0 as falsy,
+            # causing valid 0-cent prices to fall through incorrectly.
+            yes_price_raw = data.get("last_price")
+            if yes_price_raw is None:
+                yes_price_raw = data.get("yes_price")
+            if yes_price_raw is None:
+                yes_price_raw = data.get("yes_ask", 0)
             yes_price = Decimal(str(yes_price_raw))
-            
-            # For NO, we might not have a direct last_price if it's YES-focused
+
+            # For NO, we might not have a direct last_price if it's YES-focused.
+            # Use explicit check yes_price > 0 (Decimal(0) is falsy).
             no_price_raw = data.get("no_price") or data.get("no_ask")
-            if no_price_raw is None and yes_price:
+            if no_price_raw is None and yes_price > 0:
                 no_price = Decimal("100") - yes_price
             elif no_price_raw is None:
                 no_price = Decimal("0")
             else:
                 no_price = Decimal(str(no_price_raw))
-            
+
             # Extract bid/ask if available
             yes_bid = Decimal(str(data.get("yes_bid"))) if data.get("yes_bid") is not None else None
             yes_ask = Decimal(str(data.get("yes_ask"))) if data.get("yes_ask") is not None else None
             no_bid = Decimal(str(data.get("no_bid"))) if data.get("no_bid") is not None else None
             no_ask = Decimal(str(data.get("no_ask"))) if data.get("no_ask") is not None else None
 
-            if yes_price:
-                outcomes.append(KalshiOutcome(
-                    outcome_id="yes",
-                    name="Yes",
-                    price=yes_price,
-                    probability=yes_price / Decimal("100"),
-                    best_bid=yes_bid,
-                    best_ask=yes_ask
-                ))
-            
-            if no_price:
-                outcomes.append(KalshiOutcome(
-                    outcome_id="no",
-                    name="No",
-                    price=no_price,
-                    probability=no_price / Decimal("100"),
-                    best_bid=no_bid,
-                    best_ask=no_ask
-                ))
+            # BUGFIX: Always create outcomes even if price is 0.
+            # Price=0 is valid (no trades yet), not "no outcome".
+            # Downstream phantom_pricing gate handles degenerate markets.
+            outcomes.append(KalshiOutcome(
+                outcome_id="yes",
+                name="Yes",
+                price=yes_price,
+                probability=yes_price / Decimal("100"),
+                best_bid=yes_bid,
+                best_ask=yes_ask
+            ))
+
+            outcomes.append(KalshiOutcome(
+                outcome_id="no",
+                name="No",
+                price=no_price,
+                probability=no_price / Decimal("100"),
+                best_bid=no_bid,
+                best_ask=no_ask
+            ))
             
             # Kalshi may use "subtitle" instead of "category"
             category = data.get("category") or data.get("subtitle")
@@ -3572,22 +3673,26 @@ class KalshiVenueClient(EventVenueClient):
     
     def _to_event_market(self, market: KalshiMarket) -> EventMarket:
         """Convert to venue-agnostic EventMarket."""
+        def _to_outcome(o):
+            price_d = o.price / Decimal("100")  # cents -> dollars
+            # Use actual bid/ask from API if available; otherwise fallback to price.
+            best_bid = (o.best_bid / Decimal("100")) if o.best_bid is not None else price_d
+            best_ask = (o.best_ask / Decimal("100")) if o.best_ask is not None else price_d
+            return EventOutcome(
+                outcome_id=o.outcome_id,
+                outcome_name=o.name,
+                price=price_d,
+                probability=o.probability,
+                best_bid=best_bid,
+                best_ask=best_ask,
+            )
+
         return EventMarket(
             market_id=market.ticker,
             venue="kalshi",
             question=market.title,
             description=market.description,
-            outcomes=[
-                EventOutcome(
-                    outcome_id=o.outcome_id,
-                    outcome_name=o.name,
-                    price=o.price / 100,  # Convert cents to dollars
-                    probability=o.probability,
-                    best_ask=o.price / 100,
-                    best_bid=o.price / 100
-                )
-                for o in market.outcomes
-            ],
+            outcomes=[_to_outcome(o) for o in market.outcomes],
             category=market.category,
             tags=market.tags,
             end_date=market.close_time or market.expiration_time,

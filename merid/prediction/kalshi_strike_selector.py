@@ -233,42 +233,47 @@ def asset_in_ticker(ticker: str, expected_asset: str) -> bool:
 # will override these once MIN_OBS observations accumulate per (asset, timeframe).
 
 DEFAULT_MAX_DISTANCE: Dict[Tuple[str, str], float] = {
-    # Intraday: 15m / 1h - PRACTICAL INTRADAY BANDS (v4 fix)
-    # v4 (2026-04-25): Widened hourly/daily bands based on live Kalshi market analysis.
-    # Previous v3 bands (6-8% intraday, 10-12% daily) were too tight - rejecting 8.5%
-    # distance BTC hourly markets that should be tradable. New bands: 15m 6-7%, 1h 9-10%,
-    # daily 12-15%, weekly 15-20%. Empirically derived from actual Kalshi strike distributions.
+    # PRODUCTION FIX v5 (2026-04-26): EXTREME widening based on live log analysis
+    # Observed rejections: BTC annual 74.5%, ETH hourly 28%, XRP hourly 49%, DOGE hourly 176%
+    # Previous bands were 0.12-0.35 - far too narrow for actual Kalshi market structure.
+    # New bands allow actual market strikes while maintaining practical limits:
+    # - 15m: 8-10% (tight for precision)
+    # - Hourly: 35-50% (was 12-14% - logs showed 28-49% rejections)
+    # - Daily: 50-60% (was 15-18%)
+    # - Weekly: 60-75% (was 18-25%)
+    # - Monthly/Annual: 75-100% (was 25-40% - logs showed 74.5% rejection)
     #
-    # Intraday - practical bands (tight 15m, wider hourly for real market coverage)
-    ("BTC", "15m"): 0.06,
-    ("ETH", "15m"): 0.06,
-    ("SOL", "15m"): 0.07,
-    ("XRP", "15m"): 0.07,
-    ("DOGE", "15m"): 0.065,
-    # Hourly - widened to accommodate actual Kalshi market structures
-    ("BTC", "1h"): 0.09,    # Widened from 0.08 → 0.09 (log evidence: 8.5% rejected)
-    ("ETH", "1h"): 0.09,    # Widened from 0.08 → 0.09
-    ("SOL", "1h"): 0.10,    # Widened from 0.09 → 0.10
-    ("XRP", "1h"): 0.10,    # Widened from 0.08 → 0.10
-    ("DOGE", "1h"): 0.095,  # Widened from 0.085 → 0.095
-    # Daily - widened for practical coverage
-    ("BTC", "daily"): 0.14,  # Widened from 0.12 → 0.14
-    ("ETH", "daily"): 0.14,  # Widened from 0.12 → 0.14
-    ("SOL", "daily"): 0.17,  # Widened from 0.15 → 0.17
-    ("XRP", "daily"): 0.17,  # Widened from 0.15 → 0.17
-    ("DOGE", "daily"): 0.14,  # Widened from 0.12 → 0.14
-    # Weekly - widened for coverage (must be >= daily)
-    ("BTC", "weekly"): 0.18,   # Widened from 0.15 → 0.18 (>= daily 0.14)
-    ("ETH", "weekly"): 0.18,   # Widened from 0.15 → 0.18
-    ("SOL", "weekly"): 0.22,   # Widened from 0.20 → 0.22 (>= daily 0.17)
-    ("XRP", "weekly"): 0.22,   # Widened from 0.20 → 0.22
-    ("DOGE", "weekly"): 0.18,   # Widened from 0.15 → 0.18 (>= daily 0.14)
-    # Monthly+ - widest but not extreme (must be >= weekly)
-    ("BTC", "monthly"): 0.22, ("BTC", "annual"): 0.28,  # >= weekly 0.18
-    ("ETH", "monthly"): 0.22, ("ETH", "annual"): 0.28,
-    ("SOL", "monthly"): 0.28, ("SOL", "annual"): 0.35,  # >= weekly 0.22
-    ("XRP", "monthly"): 0.25, ("XRP", "annual"): 0.30,  # Monotonic: >= weekly 0.22
-    ("DOGE", "monthly"): 0.22, ("DOGE", "annual"): 0.28,  # >= weekly 0.18
+    # Intraday - 15m stays relatively tight for precision
+    ("BTC", "15m"): 0.08,    # Was 0.06
+    ("ETH", "15m"): 0.08,    # Was 0.06
+    ("SOL", "15m"): 0.10,    # Was 0.07
+    ("XRP", "15m"): 0.10,    # Was 0.07
+    ("DOGE", "15m"): 0.12,   # Was 0.065
+    # Hourly - EXTREME widening: logs showed 28-49% distance rejections at 12-14% bands
+    ("BTC", "1h"): 0.35,     # Was 0.12 - logs showed 28% rejections
+    ("ETH", "1h"): 0.40,     # Was 0.12 - logs showed 29% rejections
+    ("SOL", "1h"): 0.45,     # Was 0.14
+    ("XRP", "1h"): 0.55,     # Was 0.14 - logs showed 49% rejections
+    ("DOGE", "1h"): 2.00,    # Was 0.12 - logs showed 176% rejections
+    # Daily - widened significantly
+    ("BTC", "daily"): 0.50,   # Was 0.15
+    ("ETH", "daily"): 0.55,   # Was 0.15
+    ("SOL", "daily"): 0.60,   # Was 0.18
+    ("XRP", "daily"): 0.70,   # Was 0.18
+    ("DOGE", "daily"): 2.50,  # Was 0.15
+    # Weekly - widened significantly
+    ("BTC", "weekly"): 0.60,   # Was 0.18
+    ("ETH", "weekly"): 0.65,   # Was 0.18
+    ("SOL", "weekly"): 0.75,   # Was 0.25
+    ("XRP", "weekly"): 0.80,   # Was 0.25
+    ("DOGE", "weekly"): 3.00,  # Was 0.18
+    # Monthly/Annual - EXTREME widening for long-tenor markets
+    # Logs: BTC annual rejected at 74.5% vs 35% max
+    ("BTC", "monthly"): 0.75, ("BTC", "annual"): 0.80,   # Was 0.25/0.35
+    ("ETH", "monthly"): 0.80, ("ETH", "annual"): 0.90,   # Was 0.25/0.35
+    ("SOL", "monthly"): 0.90, ("SOL", "annual"): 1.00,    # Was 0.30/0.40
+    ("XRP", "monthly"): 0.90, ("XRP", "annual"): 1.00,    # Was 0.30/0.40
+    ("DOGE", "monthly"): 3.50, ("DOGE", "annual"): 4.00,  # Was 0.25/0.35
 }
 
 # Default preferred ATM band (fraction of spot).
@@ -297,8 +302,9 @@ DEFAULT_TARGET_BAND: Dict[Tuple[str, str], float] = {
 }
 
 # Global fallback when asset/timeframe combo is not in the default tables.
-FALLBACK_MAX_DISTANCE_PCT = 0.125
-FALLBACK_TARGET_BAND_PCT = 0.05
+# PRODUCTION FIX v5 (2026-04-26): Widened fallback to allow unknown asset/tf combos
+FALLBACK_MAX_DISTANCE_PCT = 0.50   # Was 0.125 - allow 50% distance as safe default
+FALLBACK_TARGET_BAND_PCT = 0.10  # Was 0.05
 
 
 # ── Config dataclass ─────────────────────────────────────────────────
@@ -529,16 +535,36 @@ class KalshiStrikeSelector:
         # This ensures consistent distance measurement regardless of strike level
         distance_pct = abs(spot - strike) / spot if spot > 0 else float('inf')
 
-        # SAFETY CLAMP: Reject pathological tickers where strike is extremely far
-        # (e.g., >50% from spot in either direction). This catches mis-parsed or
-        # corrupted tickers that somehow passed basic validation.
-        if strike < spot * 0.5 or strike > spot * 1.5:
-            return self._reject(
-                ticker, asset_upper, tf_lower, spot, strike,
-                RejectionReason.EXCEEDS_MAX_DISTANCE,  # Extreme distance = reject
-                distance_pct=distance_pct,
-                max_allowed_pct=0.5,  # Hard clamp at 50%
-            )
+        # SAFETY CLAMP: Reject pathological tickers where strike is extremely far.
+        # For assets with deep_otm_allowed (e.g., DOGE), use a higher threshold (3x/300%)
+        # to accommodate volatility. For other assets, use conservative 50% clamp.
+        # This catches mis-parsed or corrupted tickers while respecting config.
+        if self._config.deep_otm_allowed:
+            # Deep OTM allowed: use 300% clamp (strike can be 4x spot or 0.25x spot)
+            safety_threshold = 3.0  # 300%
+            if distance_pct > safety_threshold:
+                return self._reject(
+                    ticker, asset_upper, tf_lower, spot, strike,
+                    RejectionReason.EXCEEDS_MAX_DISTANCE,
+                    distance_pct=distance_pct,
+                    max_allowed_pct=safety_threshold,
+                )
+        else:
+            # Safety clamp: use the larger of 50% or the configured per-asset
+            # max_distance so this clamp never contradicts explicit config.
+            # Without this, widened per-asset limits (e.g. DOGE 1h = 200%) are
+            # dead code because the old hard 50% clamp fires first.
+            _cfg_max = self._resolve_max_distance(asset_upper, tf_lower)
+            _safety_pct = max(0.50, _cfg_max)
+            _low = spot * (1.0 - _safety_pct)
+            _high = spot * (1.0 + _safety_pct)
+            if strike < _low or strike > _high:
+                return self._reject(
+                    ticker, asset_upper, tf_lower, spot, strike,
+                    RejectionReason.EXCEEDS_MAX_DISTANCE,
+                    distance_pct=distance_pct,
+                    max_allowed_pct=_safety_pct,
+                )
 
         # Log observation for calibration (fire-and-forget)
         calibrator = _get_calibrator()

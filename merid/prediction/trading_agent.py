@@ -66,6 +66,14 @@ from utils.logger import get_logger
 from merid.prediction.consensus_bridge import get_kalshi_consensus_adapter
 from merid.swarm.consensus_aggregator import get_consensus_aggregator
 
+# Cross-asset arbiter integration
+from merid.prediction.crypto_top_edge import (
+    CRYPTO_ASSETS,
+    MOMENTUM_SCALPING_TIMEFRAMES,
+    get_crypto_top_edge_arbiter,
+)
+from merid.event_venues.kalshi.position_cache import get_position_cache
+
 logger = get_logger("merid.prediction.trading_agent")
 
 # Throttle [PM_SPOT] missing-spot warnings per agent|asset (seconds between emits).
@@ -372,6 +380,258 @@ class KalshiTradingAgent:
             top_n_edges=top_n_edges
         )
 
+    def _get_position_for_arbiter(self, ticker: str, side_str: str) -> tuple[int, str, Optional[float]]:
+        """Get position data for arbiter deduplication.
+        
+        Returns:
+            Tuple of (contracts, direction, entry_time_epoch)
+        """
+        try:
+            cache = get_position_cache()
+            positions = cache.get_open_positions(ticker)
+            
+            if not positions:
+                return 0, "none", None
+            
+            # Map yes/no side to long/short direction
+            direction = "long" if side_str == "yes" else "short"
+            
+            # Sum contracts for the relevant side
+            contracts = 0
+            entry_time = None
+            
+            for pos in positions:
+                pos_side = getattr(pos, 'side', None) or getattr(pos, 'direction', None)
+                pos_contracts = getattr(pos, 'contracts', 0) or getattr(pos, 'size', 0)
+                pos_entry = getattr(pos, 'entry_time', None) or getattr(pos, 'timestamp', None)
+                
+                if pos_side == side_str:
+                    contracts += int(pos_contracts)
+                    if pos_entry and (entry_time is None or pos_entry < entry_time):
+                        entry_time = pos_entry
+            
+            # Convert entry_time to epoch if it's datetime
+            entry_epoch = None
+            if entry_time:
+                if isinstance(entry_time, datetime):
+                    entry_epoch = entry_time.timestamp()
+                elif isinstance(entry_time, (int, float)):
+                    entry_epoch = float(entry_time)
+            
+            return contracts, direction if contracts > 0 else "none", entry_epoch
+            
+        except Exception as e:
+            self.logger.debug(f"[ARBITER] Position cache lookup failed for {ticker}: {e}")
+            return 0, "none", None
+
+    def _submit_to_arbiter(
+        self,
+        signal: StrategySignal,
+        market: EventMarket,
+        asset: str,
+        timeframe: str,
+    ) -> bool:
+        """Submit signal to cross-asset arbiter for ranking.
+        
+        Returns:
+            True if signal should proceed to execution (winner or non-crypto)
+            False if signal was rejected by arbiter
+        """
+        # Only crypto assets use the arbiter
+        if asset not in CRYPTO_ASSETS:
+            return True
+        
+        # Only momentum scalping timeframes
+        if timeframe not in MOMENTUM_SCALPING_TIMEFRAMES:
+            self.logger.debug(
+                "[ARBITER] Skipping non-momentum timeframe: %s %s",
+                asset, timeframe
+            )
+            return True  # Let non-momentum through existing flow
+        
+        # Skip if signal is NO_ACTION
+        if signal.action in (SignalAction.NO_ACTION, SignalAction.HOLD):
+            return False
+        
+        # Get position data for deduplication
+        side_str = "yes" if signal.action in (SignalAction.BUY_YES, SignalAction.SELL_YES) else "no"
+        existing_contracts, existing_direction, entry_time = self._get_position_for_arbiter(
+            market.market_id, side_str
+        )
+        
+        # Get arbiter instance
+        arbiter = get_crypto_top_edge_arbiter()
+        
+        # Submit candidate to arbiter
+        try:
+            from merid.prediction.crypto_top_edge import CandidateSignal
+            
+            # Extract direction
+            direction = "long" if side_str == "yes" else "short"
+            
+            # Extract edge from signal
+            net_edge = 0.0
+            if signal.edge and hasattr(signal.edge, 'net_edge'):
+                try:
+                    net_edge = float(signal.edge.net_edge)
+                except (TypeError, ValueError):
+                    net_edge = 0.0
+            
+            # Extract confidence
+            confidence = 0.0
+            if signal.edge and hasattr(signal.edge, 'confidence'):
+                try:
+                    confidence = float(signal.edge.confidence)
+                except (TypeError, ValueError):
+                    confidence = 0.0
+            
+            candidate = CandidateSignal(
+                signal_id=f"{self.config.name}_{market.market_id}_{int(time.time() * 1000)}",
+                agent_id=self.config.name,
+                asset=asset,
+                timeframe=timeframe,
+                ticker=market.market_id,
+                net_edge=net_edge,
+                confidence=confidence,
+                direction=direction,
+                suggested_contracts=signal.contracts,
+                limit_price_cents=signal.limit_price_cents,
+                archetype="directional",
+                original_signal=signal,
+                phase=signal.phase.value if signal.phase else None,
+                correlation_id=getattr(signal, 'correlation_id', None),
+                eval_context={
+                    "agent": self.config.name,
+                    "market_id": market.market_id,
+                    "edge": net_edge,
+                },
+                existing_position_contracts=existing_contracts,
+                existing_position_direction=existing_direction,
+                position_entry_time=entry_time,
+            )
+            
+            arbiter.submit_candidate(candidate)
+            
+            self.logger.debug(
+                "[ARBITER] Submitted %s %s edge=%.4f pos=%d dir=%s",
+                asset, timeframe, net_edge, existing_contracts, existing_direction
+            )
+            
+            # Return True - the signal is submitted, arbiter will decide later
+            # The actual winner selection happens at cycle end
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"[ARBITER] Failed to submit candidate: {e}")
+            # Fail-open: allow signal through if arbiter fails
+            return True
+
+    def _is_arbiter_winner(self, market_id: str) -> bool:
+        """Check if this market was selected as winner by arbiter.
+        
+        Must be called after arbiter.run_cycle() has been executed.
+        
+        PRODUCTION FIX v6 (2026-04-26): Uses arbiter.is_winner() method which
+        checks against preserved _last_cycle_winners dict instead of the cleared
+        _current_candidates list.
+        """
+        try:
+            arbiter = get_crypto_top_edge_arbiter()
+            
+            # Use the new is_winner method that checks _last_cycle_winners
+            # This works because run_cycle() stores winners before clearing _current_candidates
+            return arbiter.is_winner(market_id, max_age_seconds=30.0)
+            
+        except Exception as e:
+            self.logger.debug(f"[ARBITER] Winner check failed for {market_id}: {e}")
+            return True  # Fail-open
+    
+    def _check_arbiter_priority(self, market_id: str, asset: str, timeframe: str) -> tuple[bool, bool, str]:
+        """Check if market is #1 priority winner with bankroll-based gating for #2/#3.
+        
+        PRODUCTION FIX v7 (2026-04-26): Implements #1 edge priority execution strategy.
+        - Always allows #1 winner to execute (highest edge, best win rate)
+        - #2 and #3 are gated based on available bankroll
+        - With <$100: only #1 executes (focus capital on highest probability)
+        - With $100-200: #1 and #2 execute (diversified but conservative)
+        - With $200+: all 3 execute (full diversification)
+        
+        CRITICAL FIX v7.1 (2026-04-26): Check at ASSET level, not specific ticker.
+        The arbiter selects winning ASSETS (e.g., BTC), not specific markets.
+        Any market for a winning asset should be allowed to execute.
+        
+        Returns:
+            Tuple of (is_winner, is_number_one, skip_reason)
+            - is_winner: True if asset is in arbiter winners
+            - is_number_one: True if #1 OR if #2/#3 with sufficient bankroll
+            - skip_reason: Why #2/#3 were skipped (for logging)
+        """
+        try:
+            from merid.event_venues.kalshi import get_equity_for_risk_calc_sync
+            
+            arbiter = get_crypto_top_edge_arbiter()
+            
+            # CRITICAL FIX: Check if ASSET is a winner (not specific ticker)
+            # Find any winner entry for this asset
+            asset_winner = None
+            for ticker, w in arbiter._last_cycle_winners.items():
+                if w.asset == asset and w.is_winner:
+                    asset_winner = w
+                    break
+            
+            if not asset_winner:
+                return False, False, f"asset_{asset}_not_winner"
+            
+            # Check if #1 winner (by rank)
+            if asset_winner.rank == 1:
+                return True, True, ""  # #1 always executes
+            
+            # Not #1 - check bankroll for #2/#3 eligibility
+            try:
+                equity_usd = get_equity_for_risk_calc_sync()
+                if equity_usd is None:
+                    equity_usd = 0.0
+                else:
+                    equity_usd = float(equity_usd)
+            except Exception:
+                equity_usd = 0.0
+            
+            rank = asset_winner.rank
+            
+            # Bankroll-based gating for #2 and #3
+            # #1 always executes (highest edge = best win rate)
+            # MICRO-BANKROLL FIX (2026-04-27): Lowered from $100/$200 to $25/$75.
+            # With $44.35 equity, old $100 threshold blocked ALL #2 winners,
+            # meaning only 1 trade per cycle could ever execute.
+            # #2 requires $25+ bankroll (1 contract at 50¢ = $0.50 risk)
+            # #3 requires $75+ bankroll
+            if rank == 2:
+                if equity_usd >= 25.0:
+                    return True, True, ""  # Sufficient bankroll for #2
+                else:
+                    return True, False, f"#{rank}_insufficient_bankroll(${equity_usd:.2f}<$25)"
+            elif rank >= 3:
+                if equity_usd >= 75.0:
+                    return True, True, ""  # Sufficient bankroll for #3
+                else:
+                    return True, False, f"#{rank}_insufficient_bankroll(${equity_usd:.2f}<$75)"
+            else:
+                return True, False, f"rank_{rank}_unknown"
+                
+        except Exception as e:
+            self.logger.debug(f"[ARBITER_PRIORITY] Check failed for {market_id}: {e}")
+            # Fail-open: if check fails, allow as if it's a winner
+            return True, True, ""
+
+    def _get_available_bankroll_usd(self) -> float:
+        """Get available bankroll in USD for priority calculations."""
+        try:
+            from merid.event_venues.kalshi import get_equity_for_risk_calc_sync
+            equity = get_equity_for_risk_calc_sync()
+            return float(equity) if equity else 0.0
+        except Exception:
+            return 0.0
+
     @staticmethod
     def _build_strategy_config(config: AgentConfig) -> StrategyConfig:
         """Merge grid ``strategy:`` overrides into ``StrategyConfig`` defaults."""
@@ -560,8 +820,12 @@ class KalshiTradingAgent:
                 
                 if summary.state == BalanceState.FRESH and summary.equity_usd is not None:
                     live_bankroll_usd = float(summary.equity_usd)
-                    from merid.settings import settings
-                    risk_fraction = getattr(settings, 'MERID_MAX_RISK_FRACTION_PER_CYCLE', 0.02)
+                    # MICRO-BANKROLL FIX: Use canonical MAX_CYCLE_RISK_PCT from core.settings
+                    # (was getattr(settings, 'MERID_MAX_RISK_FRACTION_PER_CYCLE', 0.02) which
+                    # always fell back to 2% because that field doesn't exist in Settings).
+                    # core.settings.MAX_CYCLE_RISK_PCT = 5% → $44.35 × 5% = $2.22 per cycle.
+                    from core.settings import MAX_CYCLE_RISK_PCT
+                    risk_fraction = MAX_CYCLE_RISK_PCT
                     effective_notional = live_bankroll_usd * risk_fraction
                     self.config.risk_limits.max_notional_usd = effective_notional
                     self.logger.info(
@@ -570,8 +834,8 @@ class KalshiTradingAgent:
                     )
                 elif summary.state == BalanceState.STALE and summary.equity_usd is not None:
                     live_bankroll_usd = float(summary.equity_usd)
-                    from merid.settings import settings
-                    risk_fraction = getattr(settings, 'MERID_MAX_RISK_FRACTION_PER_CYCLE', 0.02) * 0.5
+                    from core.settings import MAX_CYCLE_RISK_PCT
+                    risk_fraction = MAX_CYCLE_RISK_PCT * 0.5
                     effective_notional = live_bankroll_usd * risk_fraction
                     self.config.risk_limits.max_notional_usd = effective_notional
                     self.logger.warning(
@@ -599,6 +863,23 @@ class KalshiTradingAgent:
         self.state.lifecycle = LifecycleState.STARTING
         self.state.started_at = datetime.now(timezone.utc)  # BUG-L8: baseline for solo_seconds
         self.state.consecutive_errors = 0
+        
+        # PRODUCTION FIX v6 (2026-04-26): Emergency clear phantom batches on startup
+        # Phantom batches (ACTIVE with no fills) block all execution after crashes
+        try:
+            from merid.trading.top3_batch_manager import get_top3_batch_manager
+            batch_mgr = get_top3_batch_manager()
+            # Only first agent clears the phantom batch (avoids race conditions)
+            if self.config.name in ("BTC_HOURLY", "BTC_15M"):
+                cleared = batch_mgr.force_clear_phantom_batch(reason=f"startup_{self.config.name}")
+                if cleared:
+                    self.logger.critical(
+                        "[STARTUP-PHANTOM-CLEAR] Emergency cleared phantom batch - "
+                        "execution unblocked for new cycles"
+                    )
+        except Exception as _phantom_exc:
+            self.logger.debug("Phantom batch check skipped: %s", _phantom_exc)
+        
         import time as _agent_timing
         # D14: Defensive clear on (re)start — ensures no stale positions
         # from a previous run survive into the new session.
@@ -1430,6 +1711,16 @@ class KalshiTradingAgent:
                 signal = self._apply_pm_spot_hard_gate(market, signal, snapshot)
                 self._maybe_log_crypto_spot_strike_trace(snapshot, signal)
                 _signals_evaluated += 1
+                
+                # === Cross-Asset Arbiter Integration ===
+                # Submit crypto momentum scalping signals to arbiter for ranking
+                # Arbiter will deduplicate and select top N edges across all agents
+                if asset in CRYPTO_ASSETS and timeframe in MOMENTUM_SCALPING_TIMEFRAMES:
+                    if signal.action not in (SignalAction.NO_ACTION, SignalAction.HOLD):
+                        self._submit_to_arbiter(signal, market, asset, timeframe)
+                        # Note: Arbiter collects all candidates and runs cycle at end
+                        # The actual winner check happens before execution
+                
                 if signal.action == SignalAction.NO_ACTION:
                     _bk = _classify_pm_no_action_reason(signal.reason or "")
                     _no_action_buckets[_bk] = _no_action_buckets.get(_bk, 0) + 1
@@ -2058,6 +2349,78 @@ class KalshiTradingAgent:
                         elapsed_ms=_decision_timer.elapsed_ms(),
                     ))
                     continue
+                
+                # === Cross-Asset Arbiter Winner Check with #1 Priority ===
+                # PRODUCTION FIX v7 (2026-04-26): #1 edge gets execution priority over #2/#3.
+                # With small bankroll (<$100), only #1 executes to maximize win rate.
+                # As #1 trades profit and bankroll grows, #2 and #3 are enabled.
+                # 
+                # CRITICAL FIX v8 (2026-04-26): Fail-open when arbiter winners are stale/empty.
+                # Race condition: agents check at different times, arbiter updates once per cycle.
+                # With <$100 bankroll, we can't afford to miss #1 winners due to timing issues.
+                if asset in CRYPTO_ASSETS and timeframe in MOMENTUM_SCALPING_TIMEFRAMES:
+                    _is_winner, _is_number_one, _skip_reason = self._check_arbiter_priority(
+                        market.market_id, asset, timeframe
+                    )
+                    
+                    # CRITICAL FIX v8: Check if arbiter data is stale/empty (race condition)
+                    # If arbiter has no winners or data is >30s old, assume this is #1
+                    # This prevents blocking due to timing issues with micro-bankroll
+                    from merid.prediction.crypto_top_edge import get_crypto_top_edge_arbiter
+                    arbiter = get_crypto_top_edge_arbiter()
+                    _arbiter_stale = (
+                        not arbiter._last_cycle_winners or
+                        (arbiter._last_cycle_timestamp is not None and
+                         (datetime.now(timezone.utc) - arbiter._last_cycle_timestamp).total_seconds() > 30)
+                    )
+                    
+                    if not _is_winner and _arbiter_stale:
+                        # Arbiter data stale - fail-open and allow as #1
+                        _edge_for_log = float(signal.edge.net_edge) if signal.edge else 0.0
+                        self.logger.info(
+                            "[ARBITER_PRIORITY] %s arbiter data stale/empty - allowing as #1 (edge=%.4f)",
+                            market.market_id, _edge_for_log
+                        )
+                        _is_winner = True
+                        _is_number_one = True
+                    
+                    if not _is_winner:
+                        self.logger.warning(
+                            "[ARBITER_BLOCKED] %s not in arbiter winners — skipping execution",
+                            market.market_id
+                        )
+                        self._emit_decision_log(Decision.hold(
+                            HoldReason.TOP3_EXCLUDED,
+                            f"{market.market_id} not in cross-asset arbiter winners",
+                            market_id=market.market_id,
+                            agent_name=self.config.name,
+                            cycle_number=self.state.cycles_run,
+                            elapsed_ms=_decision_timer.elapsed_ms(),
+                        ))
+                        continue
+                    
+                    if not _is_number_one:
+                        # Not #1 winner - log why we're skipping (bankroll or priority)
+                        self.logger.info(
+                            "[ARBITER_PRIORITY] %s %s - skipping execution: %s",
+                            market.market_id, _skip_reason,
+                            "Focusing capital on #1 edge winner for maximum win rate"
+                        )
+                        self._emit_decision_log(Decision.hold(
+                            HoldReason.TOP3_EXCLUDED,
+                            f"{market.market_id} skipped: {_skip_reason}",
+                            market_id=market.market_id,
+                            agent_name=self.config.name,
+                            cycle_number=self.state.cycles_run,
+                            elapsed_ms=_decision_timer.elapsed_ms(),
+                        ))
+                        continue
+                    
+                    # #1 winner - proceed with execution
+                    self.logger.info(
+                        "[ARBITER_PRIORITY] %s is #1 edge winner - proceeding with execution",
+                        market.market_id
+                    )
 
                 # Place order via tool — all checks passed → TRADE
                 _execution_dispatched += 1
@@ -3275,6 +3638,7 @@ class KalshiTradingAgent:
         # the risk layer would always pass even for wide markets (BUG-7 fix).
         yes_bid: Decimal
         yes_ask: Decimal
+        _pricing_source = "ws"  # Track where pricing came from
         try:
             from merid.event_venues.kalshi.ws_bridge import get_live_prices
             live = get_live_prices(market.market_id)
@@ -3284,15 +3648,28 @@ class KalshiTradingAgent:
                 no_bid = max(Decimal("100") - yes_ask, Decimal("1"))
                 no_ask = max(Decimal("100") - yes_bid, Decimal("1"))
             else:
+                _pricing_source = "catalog_fallback"
                 yes_bid = max(yes_price - 1, Decimal("1"))
                 yes_ask = yes_price
                 no_bid = max(no_price - 1, Decimal("1"))
                 no_ask = no_price
         except Exception:
+            _pricing_source = "catalog_fallback"
             yes_bid = max(yes_price - 1, Decimal("1"))
             yes_ask = yes_price
             no_bid = max(no_price - 1, Decimal("1"))
             no_ask = no_price
+
+        # PHANTOM PRICING GATE (mirrors CT's SKIP-DEGENERATE check):
+        # If no WS data AND catalog outcomes were empty (defaulted to 50/50),
+        # mark the snapshot as having phantom pricing.  Phantom pricing produces
+        # meaningless edges because the market has no real two-sided quotes.
+        _has_catalog_outcomes = any(
+            o.outcome_id in ("yes", "no") for o in market.outcomes
+        )
+        _is_phantom_pricing = (
+            _pricing_source != "ws" and not _has_catalog_outcomes
+        )
 
         implied = self._model.implied_probabilities(
             yes_bid=yes_bid,
@@ -3319,6 +3696,10 @@ class KalshiTradingAgent:
             category=market.category,
             timestamp=now,
         )
+
+        # Flag phantom pricing so strategy can reject meaningless edges
+        snapshot.phantom_pricing = _is_phantom_pricing
+        snapshot.pricing_source = _pricing_source
 
         # Inject fear/greed sentiment scores
         # H2: gate on context age — stale sentiment must not bias the snapshot.

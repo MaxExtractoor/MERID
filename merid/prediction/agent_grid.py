@@ -36,6 +36,13 @@ from merid.prediction.social_broadcaster import KalshiSocialBroadcaster, get_soc
 from merid.prediction.paper_session import PaperSession, get_paper_session
 from utils.logger import get_logger
 
+# Cross-asset arbiter integration
+from merid.prediction.crypto_top_edge import (
+    CRYPTO_ASSETS,
+    MOMENTUM_SCALPING_TIMEFRAMES,
+    get_crypto_top_edge_arbiter,
+)
+
 try:
     from services.crypto_surface_loader import get_crypto_surface_loader
 except (ImportError, AttributeError):
@@ -196,6 +203,8 @@ class AgentGrid:
         self._reconciliation_task: Optional[asyncio.Task] = None
         self._outcome_resolver = None
         self._ct_coordination_task: Optional[asyncio.Task] = None
+        # Cross-asset arbiter cycle runner (for momentum scalping)
+        self._arbiter_cycle_task: Optional[asyncio.Task] = None
 
         logger.info(
             f"AgentGrid initialized: {len(self._agents)} agents, "
@@ -320,6 +329,22 @@ class AgentGrid:
             _bankroll_service = await get_bankroll_service()
             await _bankroll_service.start()
             logger.info("✓ BankrollServiceV2: started background refresh")
+            
+            # CRITICAL FIX v8 (2026-04-26): Register bankroll service as equity provider
+            # for GlobalRiskGuard. This ensures the guard uses actual Kalshi balance
+            # instead of falling back to MERID_INITIAL_CAPITAL env var.
+            from merid.guards.global_risk_guard import set_equity_provider
+            from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+            
+            def _equity_provider() -> int:
+                """Return equity in cents for GlobalRiskGuard."""
+                equity = get_equity_for_risk_calc_sync()
+                if equity is not None and equity > 0:
+                    return int(equity * 100)  # Convert USD to cents
+                return 0  # Fail-closed if no equity
+            
+            set_equity_provider(_equity_provider)
+            logger.info("✓ GlobalRiskGuard: equity provider registered from BankrollServiceV2")
         except Exception as _be:
             logger.critical("[AGENT_GRID] BankrollServiceV2 failed to start: %s", _be)
             raise RuntimeError(f"BankrollServiceV2 startup failed: {_be}") from _be
@@ -539,6 +564,13 @@ class AgentGrid:
         self._reconciliation_task.add_done_callback(_bg_task_done_cb)
         logger.info("✓ Reconciliation loop started (auto-fix enabled)")
 
+        # Start cross-asset arbiter cycle runner (momentum scalping)
+        self._arbiter_cycle_task = asyncio.create_task(
+            self._arbiter_cycle_loop(), name="crypto-top-edge-arbiter"
+        )
+        self._arbiter_cycle_task.add_done_callback(_bg_task_done_cb)
+        logger.info("✓ Cross-asset arbiter cycle runner started")
+
         # Start outcome resolver (Brier calibration + realized edge resolution)
         _skip_nonessential = __import__("os").environ.get("MERID_VALIDATION_MODE", "") == "1"
         if not _skip_nonessential:
@@ -719,6 +751,62 @@ class AgentGrid:
                 len(_no_strike_cfg), ", ".join(_no_strike_cfg[:10]),
             )
 
+    async def _arbiter_cycle_loop(self) -> None:
+        """Background task to run cross-asset arbiter cycles.
+        
+        This runs the arbiter selection cycle periodically, collecting
+        signals from all crypto agents and selecting top N winners.
+        """
+        arbiter = get_crypto_top_edge_arbiter()
+        cycle_interval = 15.0  # Run every 15 seconds (aligned with 15m timeframe)
+        
+        logger.info("[ARBITER] Cycle runner started (interval=%.1fs)", cycle_interval)
+        
+        from merid.guards.global_risk_guard import get_global_risk_guard
+        _risk_guard = get_global_risk_guard()
+
+        while self._running:
+            try:
+                # Reset the GlobalRiskGuard cycle accumulator so each 15s arbiter
+                # cycle gets a fresh per-cycle risk budget.  Without this the
+                # accumulator grows forever and blocks all orders after the first
+                # few (cycle_cap=$2.21 on $44.35 equity fills in ~4 orders).
+                _risk_guard.reset_cycle()
+
+                # Run the arbiter cycle
+                cycle_id = f"grid_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+                result = arbiter.run_cycle(cycle_id=cycle_id)
+                
+                if result.winners:
+                    logger.info(
+                        "[ARBITER] Cycle %s: %d winners, floor=%.4f, assets=%s",
+                        cycle_id,
+                        len(result.winners),
+                        result.final_floor,
+                        ",".join(sorted(result.assets_selected))
+                    )
+                    for w in result.winners:
+                        logger.debug(
+                            "[ARBITER_WINNER] %s %s edge=%.4f pos=%d incr=%d",
+                            w.asset, w.ticker, w.net_edge,
+                            w.existing_position_contracts, w.incremental_contracts
+                        )
+                else:
+                    logger.debug(
+                        "[ARBITER] Cycle %s: no winners (candidates=%d, floor=%.4f)",
+                        cycle_id, result.total_signals, result.final_floor
+                    )
+                
+                # Wait for next cycle
+                await asyncio.sleep(cycle_interval)
+                
+            except asyncio.CancelledError:
+                logger.info("[ARBITER] Cycle runner cancelled")
+                raise
+            except Exception as e:
+                logger.error("[ARBITER] Cycle runner error: %s", e)
+                await asyncio.sleep(5)  # Short sleep on error
+
     def mark_startup_failure(self, exc: Any) -> None:
         """Record failure when deferred start catches an error outside ``start()`` internals."""
         msg = exc if isinstance(exc, str) else f"{type(exc).__name__}: {exc}"
@@ -856,6 +944,15 @@ class AgentGrid:
                 await self._reconciliation_task
             except asyncio.CancelledError:
                 pass
+
+        # Stop cross-asset arbiter cycle runner
+        if self._arbiter_cycle_task and not self._arbiter_cycle_task.done():
+            self._arbiter_cycle_task.cancel()
+            try:
+                await self._arbiter_cycle_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("✓ Cross-asset arbiter cycle runner stopped")
 
         # BUG-019: Stop auto-graduation loop
         if self._auto_graduation_task and not self._auto_graduation_task.done():

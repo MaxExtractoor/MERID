@@ -573,27 +573,29 @@ def _check_bankroll_risk_cap(intent: OrderIntent) -> Optional[OrderResult]:
     # Calculate notional of this intent
     intent_notional_usd = intent.count * intent.price_cents / 100.0
 
-    # Check if this single intent exceeds per-edge estimate
-    if intent_notional_usd > per_edge_estimate * 1.5:  # 50% tolerance for edge variance
+    # MICRO-ACCOUNT ADJUSTMENT: For small bankrolls (< $100), be more permissive
+    # to allow minimum viable micro-orders (Kalshi min is ~$0.01-$0.10)
+    if effective_equity_usd < 100.0:
+        # For micro-accounts: allow up to 2x the max_total_risk for a single edge
+        # This ensures $0.50 orders can go through with $44 bankroll
+        effective_max = max_total_risk_usd * 2.0
+        tolerance_multiplier = 3.0  # 300% tolerance for micro-accounts
+    else:
+        effective_max = per_edge_estimate * 1.5
+        tolerance_multiplier = 1.5
+
+    # Check if this single intent exceeds the effective max
+    if intent_notional_usd > effective_max:
         logger.warning(
-            "[BANKROLL-CAP-REJECT] %s — intent=$%.2f > per-edge-estimate=$%.2f "
-            "(total-cap=$%.2f for 3 edges, %.1f%% of $%.2f bankroll). "
-            "Size by Top3Allocator only.",
+            "[BANKROLL-CAP-REJECT] %s — intent=$%.2f > effective-max=$%.2f "
+            "(per-edge=$%.2f, total-cap=$%.2f, tolerance=%.1fx, equity=$%.2f). "
+            "Micro-account adjustment applied for equity < $100.",
             intent.ticker,
             intent_notional_usd,
+            effective_max,
             per_edge_estimate,
             max_total_risk_usd,
-            risk_fraction * 100,
-            effective_equity_usd,
-        )
-        logger.warning(
-            "[order-router] REJECTED by bankroll risk cap: %s — "
-            "intent_notional=$%.2f exceeds max_total_risk=$%.2f (%.1f%% of $%.2f equity). "
-            "Sizing bypass detected - orders must be sized by TopNAllocator.",
-            intent.ticker,
-            intent_notional_usd,
-            max_total_risk_usd,
-            risk_fraction * 100,
+            tolerance_multiplier,
             effective_equity_usd,
         )
         return OrderResult(
@@ -601,8 +603,8 @@ def _check_bankroll_risk_cap(intent: OrderIntent) -> Optional[OrderResult]:
             mode=TradingMode.LIVE,
             reason=(
                 f"bankroll_risk_cap_exceeded: Order notional (${intent_notional_usd:.2f}) "
-                f"exceeds per-edge limit based on live Kalshi balance. "
-                f"Size orders via Top3Allocator with live balance only."
+                f"exceeds effective limit (${effective_max:.2f}) based on live Kalshi balance. "
+                f"Micro-account adjustment applied for equity < $100."
             ),
             latency_ms=0.0,
         )
@@ -1346,6 +1348,13 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                     _release_gate_record(intent, reason)
                     latency = (time.monotonic() - t0) * 1000
                     return OrderResult(status="rejected", mode=mode, reason=reason, latency_ms=round(latency, 2))
+
+                # Degenerate book: no bid AND no ask → market has no real quotes.
+                # Fail-closed: mirrors CT's [SKIP-DEGENERATE] — phantom prices produce
+                # meaningless edges and unfillable orders.
+                if _bid == 0 and _ask == 0:
+                    logger.warning("[order-router] A5: market %s degenerate book (bid=0 ask=0) — no real quotes", intent.ticker)
+                    return _a5_reject(f"market_condition:degenerate_book:{intent.ticker}")
 
                 if _bid > 0 and _bid < _cfg.min_price_cents:
                     logger.warning("[order-router] A5: market %s below min_price (%d < %d)", intent.ticker, _bid, _cfg.min_price_cents)
