@@ -3,6 +3,7 @@
 - MarketResearchAgent: ingest news/macro/on-chain, produce structured theses.
 - PredictionMarketAgent: Kalshi-specific implied probs, edge, opportunities.
 - CryptoSignalsAgent: CEX spreads, funding, basis, structural signals.
+- TrendingScannerAgent: multi-domain trending market scanner (10 domains).
 """
 
 from __future__ import annotations
@@ -299,3 +300,38 @@ class CryptoSignalsAgent(CanonicalAgent):
     async def _detect_signals(self, context: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Override point for actual signal detection."""
         return []
+
+
+# ======================================================================
+# TrendingScannerAgent
+# ======================================================================
+
+class TrendingScannerAgent(CanonicalAgent):
+    """Runs TrendingScanner across all 10 MERID domains every cycle.
+
+    Produces a ScanResult with at least 1–3 high-conviction items per
+    domain and a ranked TopOpportunity list.  Integrates with the
+    KalshiInsightPipeline cache when available.
+
+    Output type: "scan_result"
+    Payload keys: scan_id, timestamp, total_items, top_opportunities,
+                  domain_items, coverage_complete, duration_ms.
+    """
+
+    def __init__(self, agent_id: str = "trending-scanner-01"):
+        super().__init__(agent_id, AgentCategory.RESEARCH)
+
+    async def _execute(self, context: Dict[str, Any]) -> AgentOutput:
+        """Run a full trending scan and return structured payload."""
+        from merid.scanning.trending_scanner import get_trending_scanner
+
+        scanner = get_trending_scanner()
+        result = scanner.run()
+
+        return AgentOutput(
+            agent_id=self.agent_id,
+            category=self.category.value,
+            output_type="scan_result",
+            payload=result.to_dict(),
+            confidence=0.75 if result.coverage_complete else 0.5,
+        )

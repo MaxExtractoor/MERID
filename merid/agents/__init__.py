@@ -1,7 +1,8 @@
 """MERID Canonical Agent Roster — Typed, structured agents for the swarm.
 
-15 agent types across 5 categories:
-§1 Market & Research: MarketResearchAgent, PredictionMarketAgent, CryptoSignalsAgent
+16 agent types across 5 categories:
+§1 Market & Research: MarketResearchAgent, PredictionMarketAgent, CryptoSignalsAgent,
+                      TrendingScannerAgent
 §2 Strategy & Arb: StrategyDesignerAgent, ArbitrageAgent, ExecutionOptimizerAgent
 §3 Risk & Capital: RiskManagerAgent, CapitalAllocatorAgent, AnomalyDetectorAgent
 §4 Coordination: ConsensusCoordinatorAgent, ExplainabilityAgent, GovernanceAgent
