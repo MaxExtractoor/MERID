@@ -948,79 +948,74 @@ async def get_orderbook(ticker: str) -> Dict[str, Any]:
     Returns shape expected by KalshiOrderbookPanel:
       { ticker, yes_bids, yes_asks, no_bids, no_asks, spread_cents, midpoint }
     where each level is { price: float, quantity: int }.
+
+    PRODUCTION INVARIANT: Reads from market_state (single source of truth), NOT direct Kalshi REST calls.
     """
-    def _to_levels(raw: List) -> List[Dict[str, Any]]:
-        """Convert [[price_cents, qty], ...] or [[price_frac, qty], ...] to level dicts."""
-        levels = []
-        for item in raw:
-            if isinstance(item, (list, tuple)) and len(item) >= 2:
-                p, q = item[0], item[1]
-                # Normalise: Kalshi REST returns cents (1-99), old client returns fractions (0.01-0.99)
-                price = p / 100.0 if p >= 1 else float(p)
-                levels.append({"price": round(price, 4), "quantity": int(q)})
-        return levels
+    from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+    from merid.event_venues.kalshi.orderbook import LocalOrderbook
 
-    # Try old venue client first
-    client = _get_client()
-    if client:
-        try:
-            await client.connect()
-            ob = await client.get_orderbook(ticker)
-            if ob:
-                yes_bids = [{"price": round(float(p), 4), "quantity": int(s)} for p, s in (ob.bids or [])]
-                yes_asks = [{"price": round(float(p), 4), "quantity": int(s)} for p, s in (ob.asks or [])]
-                best_bid = yes_bids[0]["price"] if yes_bids else None
-                best_ask = yes_asks[0]["price"] if yes_asks else None
-                spread = (best_ask - best_bid) if best_bid is not None and best_ask is not None else None
-                midpoint = round((best_bid + best_ask) / 2, 4) if best_bid is not None and best_ask is not None else None
-                spread_cents = round(spread * 100, 1) if spread is not None else None
-                return {
-                    "ticker": ticker,
-                    "yes_bids": yes_bids,
-                    "yes_asks": yes_asks,
-                    "no_bids": [],
-                    "no_asks": [],
-                    "spread_cents": spread_cents,
-                    "midpoint": midpoint,
-                }
-        except Exception as exc:
-            logger.debug(f"Old client orderbook fallback: {exc}")
+    store = get_kalshi_market_state_store()
+    state = store.get(ticker)
 
-    # Fallback: merid_core REST client
-    rest = _get_rest_client()
-    if rest:
-        try:
-            ob = await asyncio.to_thread(rest.get_orderbook, ticker)
-            orderbook = ob.get("orderbook", ob)
-            raw_yes = orderbook.get("yes", [])  # [[price_cents, qty], ...]
-            raw_no  = orderbook.get("no", [])
+    if not state or not state.book_initialized:
+        logger.warning("[orderbook] No initialized book found for ticker=%s", ticker)
+        return {
+            "ticker": ticker,
+            "yes_bids": [],
+            "yes_asks": [],
+            "no_bids": [],
+            "no_asks": [],
+            "spread_cents": None,
+            "midpoint": None,
+            "error": "book_not_initialized"
+        }
 
-            yes_bids = _to_levels(raw_yes)
-            no_bids  = _to_levels(raw_no)
+    # Get the LocalOrderbook to access full depth
+    book = store._ob.get_book(ticker)
+    if not book:
+        logger.warning("[orderbook] No LocalOrderbook found for ticker=%s", ticker)
+        return {
+            "ticker": ticker,
+            "yes_bids": [],
+            "yes_asks": [],
+            "no_bids": [],
+            "no_asks": [],
+            "spread_cents": None,
+            "midpoint": None,
+            "error": "book_not_found"
+        }
 
-            # yes_asks = implied from no_bids (no bid at p → yes ask at 1-p)
-            yes_asks = [{"price": round(1.0 - l["price"], 4), "quantity": l["quantity"]} for l in no_bids]
-            no_asks  = [{"price": round(1.0 - l["price"], 4), "quantity": l["quantity"]} for l in yes_bids]
+    # Convert LocalOrderbook levels to the expected format
+    def _to_levels(levels_dict: Dict[int, int]) -> List[Dict[str, Any]]:
+        """Convert price_cents->size dict to list of level dicts."""
+        return [
+            {"price": round(p / 100.0, 4), "quantity": s}
+            for p, s in sorted(levels_dict.items())
+        ]
 
-            best_bid = yes_bids[0]["price"] if yes_bids else None
-            best_ask = yes_asks[0]["price"] if yes_asks else None
-            spread_cents = round((best_ask - best_bid) * 100, 1) if best_bid is not None and best_ask is not None else None
-            midpoint = round((best_bid + best_ask) / 2, 4) if best_bid is not None and best_ask is not None else None
+    yes_bids = _to_levels(book.yes_levels)
+    no_bids = _to_levels(book.no_levels)
 
-            return {
-                "ticker": ticker,
-                "yes_bids": yes_bids,
-                "yes_asks": yes_asks,
-                "no_bids": no_bids,
-                "no_asks": no_asks,
-                "spread_cents": spread_cents,
-                "midpoint": midpoint,
-            }
-        except Exception as exc:
-            logger.warning(f"merid_core orderbook failed: {exc}")
-            return {"ticker": ticker, "yes_bids": [], "yes_asks": [], "no_bids": [], "no_asks": [], "spread_cents": None, "midpoint": None, "error": str(exc)}
+    # yes_asks = implied from no_bids (no bid at p → yes ask at 1-p)
+    yes_asks = [{"price": round(1.0 - l["price"], 4), "quantity": l["quantity"]} for l in no_bids]
+    no_asks = [{"price": round(1.0 - l["price"], 4), "quantity": l["quantity"]} for l in yes_bids]
 
-    return {"ticker": ticker, "yes_bids": [], "yes_asks": [], "no_bids": [], "no_asks": [], "spread_cents": None, "midpoint": None, "error": "No Kalshi client configured"}
+    # Calculate spread and midpoint from best bid/ask
+    best_bid = yes_bids[0]["price"] if yes_bids else None
+    best_ask = yes_asks[0]["price"] if yes_asks else None
+    spread = (best_ask - best_bid) if best_bid is not None and best_ask is not None else None
+    midpoint = round((best_bid + best_ask) / 2, 4) if best_bid is not None and best_ask is not None else None
+    spread_cents = round(spread * 100, 1) if spread is not None else None
+
+    return {
+        "ticker": ticker,
+        "yes_bids": yes_bids,
+        "yes_asks": yes_asks,
+        "no_bids": no_bids,
+        "no_asks": no_asks,
+        "spread_cents": spread_cents,
+        "midpoint": midpoint,
+    }
 
 
 # ── Events ────────────────────────────────────────────────────────────────
