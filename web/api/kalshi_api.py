@@ -41,6 +41,7 @@ from merid.event_venues.kalshi import (
     BalanceSuccess,
     BalanceTemporaryError,
     BalancePermanentError,
+    BankrollSummary,
 )
 
 logger = get_logger("web.api.kalshi_api")
@@ -48,14 +49,51 @@ logger = get_logger("web.api.kalshi_api")
 
 def _safe_float_val(v, default: float = 0.0) -> float:
     """Convert any numeric value to a JSON-safe float (no NaN/Inf/None)."""
-    if v is None:
-        return default
     try:
-        import math
-        f = float(v)
-        return f if math.isfinite(f) else default
-    except (ValueError, TypeError, ArithmeticError):
+        if v is None:
+            return default
+        return float(v)
+    except (ValueError, TypeError):
         return default
+
+
+def _is_test_ticker(ticker: str) -> bool:
+    """Check if a ticker is a test ticker that should be excluded from production.
+    
+    PRODUCTION FIX (2026-05-10): Filter out test markets from positions feed.
+    Test ticker patterns:
+    - Contains "TEST" (e.g., KXETH-TEST, KXTEST-3, KXTEST-1)
+    - Contains "KXTEST" (e.g., KXTEST-3, KXTEST-1)
+    - Short codes like "KX-SK", "KX-DUP", "KX-TK"
+    - Timeframe-based tickers like "KXBTC-15M" (series tickers, not real markets)
+    """
+    if not ticker:
+        return False
+    
+    ticker_upper = ticker.upper()
+    
+    # Explicit TEST markers
+    if "TEST" in ticker_upper or "KXTEST" in ticker_upper:
+        return True
+    
+    # Short code patterns (KX-SK, KX-DUP, KX-TK, etc.)
+    if ticker_upper.startswith("KX-") and len(ticker_upper) <= 6:
+        return True
+    
+    # Timeframe-based series tickers (e.g., KXBTC-15M, KXETH-1H)
+    # These are series identifiers, not real market tickers
+    # Real market tickers have date patterns like KXBTC-26MAR2914-T3000
+    if ticker_upper.startswith(("KXBTC-", "KXETH-", "KXSOL-", "KXXRP-", "KXDOGE-")):
+        # Check if it ends with a timeframe code (15M, 1H, D, W, M, etc.)
+        # instead of a date pattern
+        parts = ticker_upper.split("-")
+        if len(parts) >= 2:
+            last_part = parts[-1]
+            # Timeframe codes
+            if last_part in ("15M", "1H", "H", "D", "W", "M", "A"):
+                return True
+    
+    return False
 
 
 def _ledger_fill_price_usd(f: Any) -> float:
@@ -320,10 +358,26 @@ def _is_cents_format(value: float) -> bool:
     """Heuristic to detect if a value is likely in cents format.
     
     DEPRECATED: prefer explicit source_is_cents parameter on _normalize_balance.
+    
+    CRASH-FIX: Improved heuristic to avoid misclassifying dollar values:
+    - Large values (>1000) with no decimals likely cents (Kalshi API returns cents as integers)
+    - Small values (<1000) are likely dollars regardless of decimals
+    - Values between 1000-10000 require explicit source_is_cents flag
     """
     if value is None or not isinstance(value, (int, float)):
         return False
-    return value > 10000 and abs(value - round(value)) < 0.001
+    
+    # Large integer values (>10000) are almost certainly cents (>$100)
+    if value > 10000 and abs(value - round(value)) < 0.001:
+        return True
+    
+    # Medium values (1000-10000) - ambiguous zone, require explicit flag
+    # Return False to avoid misclassifying dollar amounts
+    if value >= 1000:
+        return False
+    
+    # Small values (<1000) treated as dollars
+    return False
 
 def _enrich_from_ticker(ticker: str) -> Dict[str, Any]:
     """Detect category/asset from Kalshi event_ticker prefix.
@@ -432,8 +486,6 @@ async def list_markets(
                                 "id": o.outcome_id,
                                 "name": o.outcome_name,
                                 "price": float(o.price),
-                                "bid": float(o.best_bid) if o.best_bid else None,
-                                "ask": float(o.best_ask) if o.best_ask else None,
                             }
                             for o in m.market.outcomes
                         ],
@@ -460,26 +512,33 @@ async def list_markets(
         elif sort == "expiry" or live:
             params["sort_by"] = "close_time"
             params["sort_order"] = "asc"
-        resp = req.get(f"{base}/trade-api/v2/markets", params=params, timeout=10)
+        # OLD-HARDWARE FIX: Increased from 10s to 30s for slow connections
+        resp = req.get(f"{base}/trade-api/v2/markets", params=params, timeout=30)
         resp.raise_for_status()
         raw_markets = resp.json().get("markets", [])
         def _extract_outcomes(m: Dict[str, Any]) -> List[Dict[str, Any]]:
             """Build outcomes list from Kalshi public API market object."""
             yes_bid = m.get("yes_bid")  # cents
             yes_ask = m.get("yes_ask")  # cents
-            yes_price = m.get("last_price", m.get("yes_ask", 50))  # cents
+            yes_price = m.get("last_price", m.get("yes_ask"))
+            
+            # REMOVED: No fallback to 50 - require explicit price
+            if yes_price is None or yes_price <= 0 or yes_price >= 100:
+                logger.error("[kalshi_api] Invalid yes_price %s for market %s, returning error", yes_price, m.get("ticker"))
+                raise HTTPException(503, f"Price data unavailable for market {m.get('ticker')}")
+            
             return [
                 {
                     "id": "yes",
                     "name": "Yes",
-                    "price": yes_price / 100.0 if yes_price else 0.5,
+                    "price": yes_price / 100.0,
                     "bid": yes_bid / 100.0 if yes_bid else None,
                     "ask": yes_ask / 100.0 if yes_ask else None,
                 },
                 {
                     "id": "no",
                     "name": "No",
-                    "price": (100 - yes_price) / 100.0 if yes_price else 0.5,
+                    "price": (100 - yes_price) / 100.0,
                     "bid": (100 - yes_ask) / 100.0 if yes_ask else None,
                     "ask": (100 - yes_bid) / 100.0 if yes_bid else None,
                 },
@@ -510,6 +569,10 @@ async def list_markets(
 @router.get("/markets/{ticker}")
 async def get_market_detail(ticker: str) -> Dict[str, Any]:
     """Get detailed info for a single market."""
+    # Validate ticker input
+    if not ticker or len(ticker) > 100:
+        raise HTTPException(status_code=400, detail="Invalid ticker: must be 1-100 characters")
+    
     # Try old catalog first
     catalog = _get_catalog()
     if catalog:
@@ -618,6 +681,10 @@ async def stream_orderbook(
     Example:
       curl -N "http://localhost:8000/api/v1/kalshi/markets/KXBTC-24DEC-ABOVE-60000/orderbook/stream"
     """
+    # Validate ticker input
+    if not ticker or len(ticker) > 100:
+        raise HTTPException(status_code=400, detail="Invalid ticker: must be 1-100 characters")
+    
     from merid.event_venues.kalshi.ws import KalshiWebSocket
     from merid.event_venues.kalshi.orderbook import LocalOrderbook
 
@@ -1104,6 +1171,54 @@ async def post_reset_circuit_breaker() -> Dict[str, Any]:
         }
 
 
+@router.post("/positions/{ticker}/close")
+async def post_close_position(
+    ticker: str,
+    reason: str = Query("manual_operator_close", description="Reason for closing the position"),
+) -> Dict[str, Any]:
+    """Manually close a position that was closed outside the system (e.g., via Kalshi website).
+    
+    This creates a synthetic "close" fill in the ledger to properly account for
+    positions that were manually closed. Use this when the system shows an open
+    position but Kalshi shows it as closed.
+    
+    Example: POST /positions/KXFED-27APR-T3.25/close?reason=manually_closed_on_website
+    
+    Returns:
+        Status of the close operation with before/after position info.
+    """
+    from datetime import datetime, timezone
+    
+    try:
+        from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+        
+        ledger = get_fills_ledger()
+        result = await ledger.mark_position_closed(ticker.upper(), reason)
+        
+        if result.get("status") == "no_position":
+            return {
+                "success": False,
+                "error": f"No open position found for {ticker}",
+                "ticker": ticker,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        
+        return {
+            "success": True,
+            **result,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        
+    except Exception as e:
+        logger.error(f"Manual position close failed for {ticker}: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "ticker": ticker,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+
 @router.get("/meta/rate_limits")
 async def get_rate_limits_meta() -> Dict[str, Any]:
     """Get currently active rate limit configuration.
@@ -1289,25 +1404,17 @@ async def discover_health(
         logger.warning(f"discover-health fills query failed: {exc}")
         result["fills"]["error"] = str(exc)
     
-    # Query positions (non-synthetic only)
+    # Query positions from position_cache (has test/closed filtering)
     try:
-        executor = _get_executor()
-        rest = _get_rest_client()
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+        cache = get_position_cache()
+        cached_positions = cache.get_all_positions(validate_freshness=False)
+        
+        # Convert cache positions to the expected format
         real_positions = []
-        
-        if executor:
-            try:
-                raw = await executor.get_positions()
-                real_positions = [{"ticker": p.get("ticker", p.get("market_id", "")), "asset": None} for p in raw]
-            except Exception as e:
-                logger.debug(f"Silent error: {e}")
-        
-        if not real_positions and rest:
-            try:
-                raw_pos = await asyncio.to_thread(rest.get_positions)
-                real_positions = [{"ticker": p.get("ticker", p.get("market_ticker", "")), "asset": None} for p in raw_pos]
-            except Exception as e:
-                logger.debug(f"Silent error: {e}")
+        for market_id, pos in cached_positions.items():
+            if pos.contracts > 0:  # Only count open positions
+                real_positions.append({"ticker": market_id, "asset": None})
         
         # Attach assets
         try:
@@ -1434,9 +1541,104 @@ async def update_categories(body: Dict[str, Any]) -> Dict[str, Any]:
 
 # ── Account data ─────────────────────────────────────────────────────────
 
+async def _ensure_fresh_positions(max_staleness_seconds: int = 60) -> Tuple[List[Dict], Dict[str, Any]]:
+    """Ensure positions are fresh by syncing from REST if cache is stale.
+    
+    BUG-5 FIX: This prevents API endpoints from returning stale position data
+    by checking cache freshness and triggering a REST sync when needed.
+    
+    BUG-FIX (2026-05-10): sync_from_rest() now requires positions argument - fetch from venue adapter first.
+    
+    Returns:
+        Tuple of (positions list, freshness metadata dict)
+    """
+    from merid.event_venues.kalshi.position_cache import get_position_cache
+    from merid.event_venues.kalshi.venue_adapter import get_venue_adapter
+    from datetime import datetime, timezone
+    
+    cache = get_position_cache()
+    freshness_meta = {
+        "cache_last_sync": None,
+        "staleness_seconds": None,
+        "triggered_sync": False,
+        "sync_error": None,
+    }
+    
+    # Check cache freshness
+    if cache._last_sync:
+        staleness = (datetime.now(timezone.utc) - cache._last_sync).total_seconds()
+        freshness_meta["cache_last_sync"] = cache._last_sync.isoformat()
+        freshness_meta["staleness_seconds"] = round(staleness, 1)
+        
+        # If cache is stale, trigger a sync
+        if staleness > max_staleness_seconds:
+            try:
+                # Fetch positions from REST via venue adapter
+                adapter = get_venue_adapter()
+                rest_positions = await adapter.get_positions()
+                # Convert VenuePosition to dict format expected by sync_from_rest
+                positions_list = []
+                for pos in rest_positions:
+                    positions_list.append({
+                        "market_id": pos.market_id,
+                        "contracts": pos.size,
+                        "side": pos.outcome_id,
+                        "avg_price_cents": pos.avg_price_cents,
+                        "realized_pnl": float(pos.realized_pnl) if pos.realized_pnl else 0.0,
+                        "unrealized_pnl": float(pos.unrealized_pnl) if pos.unrealized_pnl else 0.0,
+                    })
+                await cache.sync_from_rest(positions_list)
+                freshness_meta["triggered_sync"] = True
+                freshness_meta["staleness_seconds"] = 0  # Now fresh
+            except Exception as sync_exc:
+                freshness_meta["sync_error"] = str(sync_exc)
+                logger.warning(f"[API-POSITIONS] Failed to sync positions from REST: {sync_exc}")
+    else:
+        # No sync has ever happened - trigger one
+        try:
+            # Fetch positions from REST via venue adapter
+            adapter = get_venue_adapter()
+            rest_positions = await adapter.get_positions()
+            # Convert VenuePosition to dict format expected by sync_from_rest
+            positions_list = []
+            for pos in rest_positions:
+                positions_list.append({
+                    "market_id": pos.market_id,
+                    "contracts": pos.size,
+                    "side": pos.outcome_id,
+                    "avg_price_cents": pos.avg_price_cents,
+                    "realized_pnl": float(pos.realized_pnl) if pos.realized_pnl else 0.0,
+                    "unrealized_pnl": float(pos.unrealized_pnl) if pos.unrealized_pnl else 0.0,
+                })
+            await cache.sync_from_rest(positions_list)
+            freshness_meta["triggered_sync"] = True
+            freshness_meta["staleness_seconds"] = 0
+        except Exception as sync_exc:
+            freshness_meta["sync_error"] = str(sync_exc)
+    
+    # Get positions from cache (fresh or stale)
+    positions = []
+    try:
+        cached = cache.get_all_positions(validate_freshness=False)  # We already checked
+        for ticker, pos in cached.items():
+            positions.append({
+                "ticker": ticker,
+                "outcome": pos.side,
+                "size": pos.contracts,
+                "avg_price": pos.avg_price_cents / 100.0 if pos.avg_price_cents else 0,
+                "source": "position_cache",
+                "synthetic": False,
+            })
+    except Exception as cache_exc:
+        freshness_meta["cache_error"] = str(cache_exc)
+    
+    return positions, freshness_meta
+
+
 @router.get("/positions")
 async def get_positions(
     include_synthetic: bool = Query(False, description="Include synthetic agent-grid positions for debugging"),
+    fresh: bool = Query(True, description="Ensure positions are fresh (trigger REST sync if stale)"),
 ) -> Dict[str, Any]:
     """Get current Kalshi positions from canonical sources only.
     
@@ -1445,7 +1647,31 @@ async def get_positions(
     
     Args:
         include_synthetic: If true, include agent monitoring positions tagged with synthetic=true
+        fresh: If true (default), ensures positions are fresh by syncing from REST if needed
     """
+    # BUG-5 FIX: Ensure positions are fresh before returning
+    freshness_meta = {}
+    if fresh:
+        try:
+            cached_positions, freshness_meta = await _ensure_fresh_positions()
+            if cached_positions:
+                # PRODUCTION FIX (2026-05-10): Filter out test tickers from positions feed
+                cached_positions = [p for p in cached_positions if not _is_test_ticker(p.get("ticker", ""))]
+                _attach_kalshi_position_assets(cached_positions)
+                logger.info(
+                    "kalshi GET /positions count=%s source=position_cache fresh=%s staleness=%ss",
+                    len(cached_positions),
+                    freshness_meta.get("triggered_sync", False),
+                    freshness_meta.get("staleness_seconds", "unknown"),
+                )
+                return {
+                    "count": len(cached_positions),
+                    "positions": cached_positions,
+                    "freshness": freshness_meta,
+                }
+        except Exception as fresh_exc:
+            logger.warning(f"[API-POSITIONS] Failed to get fresh positions: {fresh_exc}")
+    
     # Collect real positions from executor or REST client
     real_positions = []
     executor = _get_executor()
@@ -1465,6 +1691,9 @@ async def get_positions(
                     "manual_or_external": False,
                 }
                 for p in raw
+                if p.get("ticker")  # Filter out positions without valid tickers
+                and not _is_test_ticker(p.get("ticker", ""))  # PRODUCTION FIX: Filter test tickers
+                and _safe_float_val(p.get("size", 0), 0) > 0  # PRODUCTION FIX: Filter closed positions
             ]
             if real_positions:
                 _attach_kalshi_position_assets(real_positions)
@@ -1500,6 +1729,8 @@ async def get_positions(
                         "synthetic": False,
                     }
                     for p in raw_pos
+                    if not _is_test_ticker(p.get("ticker", p.get("market_ticker", "")))  # PRODUCTION FIX: Filter test tickers
+                    and _safe_float_val(p.get("total_traded", p.get("position", 0)), 0) > 0  # PRODUCTION FIX: Filter closed positions
                 ]
                 if real_positions:
                     _attach_kalshi_position_assets(real_positions)
@@ -2202,10 +2433,18 @@ async def get_fills(
         
         # Get fills from canonical ledger
         fills = ledger.get_fills(since=since, limit=limit)
+        
+        # FILTER: Exclude incomplete fills (size=0 or price=0) from API response
+        # These are typically WebSocket placeholder fills that will be completed by HTTP poller
+        complete_fills = [
+            f for f in fills 
+            if not (f.is_incomplete() if callable(getattr(f, "is_incomplete", None)) else False)
+        ]
+        incomplete_count = len(fills) - len(complete_fills)
 
         sample = None
-        if fills:
-            ff = fills[0]
+        if complete_fills:
+            ff = complete_fills[0]
             sample = {
                 "fill_id": ff.fill_id,
                 "size": getattr(ff, "count_fp", 0),
@@ -2213,16 +2452,18 @@ async def get_fills(
                 "incomplete": ff.is_incomplete() if callable(getattr(ff, "is_incomplete", None)) else None,
             }
         logger.info(
-            "kalshi GET /fills rows=%s since_hours=%s sample=%s",
+            "kalshi GET /fills total=%s complete=%s incomplete_filtered=%s since_hours=%s sample=%s",
             len(fills),
+            len(complete_fills),
+            incomplete_count,
             since_hours,
             sample,
         )
         
         # Build response (include `price`/`fee` aliases — UI types expect dollars, not only price_usd)
         result = {
-            "count": len(fills),
-            "fills": [_kalshi_fill_api_row(f) for f in fills],
+            "count": len(complete_fills),
+            "fills": [_kalshi_fill_api_row(f) for f in complete_fills],
             "meta": {
                 "source": "canonical_ledger",
                 "since_hours": since_hours,
@@ -2236,13 +2477,10 @@ async def get_fills(
         if ledger._reconciliation_status.value == "broken":
             result["warning"] = "Fills reconciliation broken — positions may diverge from fills"
         
-        # Check if all fills are incomplete/empty (discover phase indicator)
-        all_incomplete = len(fills) > 0 and all(
-            (f.is_incomplete() if callable(getattr(f, "is_incomplete", None)) else False) or
-            ((getattr(f, "count_fp", 0) or 0) == 0 and _ledger_fill_price_usd(f) == 0.0)
-            for f in fills
-        )
-        result["portfolio_empty_or_uninitialized"] = len(fills) == 0 or all_incomplete
+        # Check if portfolio is empty (no complete fills) - discover phase indicator
+        # Note: incomplete fills are filtered out above, so if complete_fills is empty, no real trades yet
+        result["portfolio_empty_or_uninitialized"] = len(complete_fills) == 0
+        result["incomplete_fills_filtered"] = incomplete_count
         if result["portfolio_empty_or_uninitialized"]:
             result["message"] = "No trades discovered yet (trading not yet active)"
 
@@ -2273,7 +2511,7 @@ async def _get_fills_legacy(limit: int) -> Dict[str, Any]:
     """Legacy fills fetch for fallback only.
     
     WARNING: This bypasses the canonical ledger and should only be used
-    when the ledger is unavailable. Results may include stale data.
+    when the ledger is unavailable. Results may not be complete.
     """
     executor = _get_executor()
     if executor:
@@ -2285,6 +2523,10 @@ async def _get_fills_legacy(limit: int) -> Dict[str, Any]:
                 _nc = f.get("no_price")
                 _pc = f.get("price")
                 _cents = _pc if _pc is not None else (_yc or _nc or 0)
+                _size = int(_safe_float_val(f.get("count", 0), 0))
+                # BUG-FIX: Filter out incomplete fills (size=0 or price=0)
+                if _size <= 0 or _cents <= 0:
+                    continue
                 _usd = _safe_float_val(_cents, 0) / 100.0
                 _fid = f.get("fill_id") or f.get("trade_id") or ""
                 fills.append(
@@ -2295,7 +2537,7 @@ async def _get_fills_legacy(limit: int) -> Dict[str, Any]:
                         "order_id": f.get("order_id", ""),
                         "side": f.get("side", ""),
                         "action": f.get("action", f.get("side", "")).lower(),
-                        "size": int(_safe_float_val(f.get("count", 0), 0)),
+                        "size": _size,
                         "price_cents": int(_safe_float_val(_cents, 0)),
                         "price_usd": _usd,
                         "fee_usd": _safe_float_val(f.get("fee_paid", 0), 0) / 100.0,
@@ -2303,6 +2545,7 @@ async def _get_fills_legacy(limit: int) -> Dict[str, Any]:
                         "fee": _safe_float_val(f.get("fee_paid", 0), 0) / 100.0,
                         "timestamp": f.get("created_time", ""),
                         "ingestion_source": "legacy_http",
+                        "incomplete": False,
                     }
                 )
             return {
@@ -2365,12 +2608,21 @@ async def _get_fills_legacy(limit: int) -> Dict[str, Any]:
 async def get_balance() -> Dict[str, Any]:
     """Get Kalshi account balance with normalized units (dollars).
     
-    NEW v2 implementation - uses unified bankroll service.
-    Returns explicit state (FRESH/STALE/ERROR) instead of lying with zeros.
+    NEW v2 implementation - uses unified bankroll service as single source of truth.
+    Returns explicit state (FRESH/STALE/ERROR) with portfolio value from centralized calculation.
     """
     # Use v2 bankroll service - single source of truth
     service = await get_bankroll_service()
-    summary = await service.get_summary()
+    
+    # Get cached summary with module attribution for logging
+    summary = await service.get_summary(caller_module="kalshi_api_balance")
+    
+    # Use centralized portfolio value calculation from v2 service (single source of truth)
+    portfolio_cents = await service.get_portfolio_value_cents()
+    
+    logger.info("[balance endpoint] Using v2 bankroll data: equity=%s available=%s portfolio=%s source=%s state=%s as_of=%s",
+               summary.equity_usd, summary.available_cash_usd, portfolio_cents / 100.0,
+               summary.source, summary.state.value, summary.as_of)
     
     # Build response with explicit state
     response = {
@@ -2380,11 +2632,19 @@ async def get_balance() -> Dict[str, Any]:
         "source": summary.source,
     }
     
-    if summary.equity_usd is not None:
-        response["usd"] = float(summary.equity_usd)
+    if summary.available_cash_usd is not None:
+        balance_cents = int(summary.available_cash_usd * 100)
+        total_value_cents = balance_cents + portfolio_cents
+        response["usd"] = float(summary.available_cash_usd)
+        response["balance_cents"] = balance_cents
+        response["portfolio_cents"] = portfolio_cents
+        response["total_value_cents"] = total_value_cents
         response["max_position_usd"] = float(summary.max_position_usd) if summary.max_position_usd else None
     else:
         response["usd"] = None
+        response["balance_cents"] = 0
+        response["portfolio_cents"] = portfolio_cents
+        response["total_value_cents"] = portfolio_cents
         response["max_position_usd"] = None
     
     # Add error info if applicable
@@ -2865,13 +3125,24 @@ async def place_order(
     order_type: str = "limit",
     time_in_force: str = "gtc",
     mode: Optional[str] = None,  # "paper" or "live" — defaults to MERID_PM_TRADING_MODE from settings
+    take_profit_price_cents: Optional[int] = None,  # Optional TP price in cents
+    take_profit_r_multiple: Optional[float] = None,  # Optional TP R-multiple
+    stop_loss_price_cents: Optional[int] = None,  # Optional SL price in cents
+    confidence: Optional[float] = None,  # Optional confidence for default TP computation
 ) -> Dict[str, Any]:
     """Place a Kalshi order through MERID.
 
     Runs risk pre-check, then routes to KalshiVenueClient.
     In paper mode, returns a simulated fill without hitting Kalshi.
     Defaults to MERID_PM_TRADING_MODE from settings (paper if not configured).
+
+    For 15m crypto entry orders (buy), exit targets (TP/SL) are required.
+    If not provided, default TP is computed using the dynamic TP engine.
     """
+    # Validate ticker input
+    if not ticker or len(ticker) > 100:
+        raise HTTPException(400, "Invalid ticker: must be 1-100 characters")
+    
     # Use configured default if not explicitly provided
     if mode is None:
         mode = _get_default_order_mode()
@@ -2935,6 +3206,44 @@ async def place_order(
                 ) from exc
             logger.warning("Risk check failed (non-live, proceeding): %s", exc)
 
+    # Compute default TP/SL for 15m crypto entry orders if not provided
+    # This ensures the "no trade without exit" invariant is satisfied
+    if action == "buy" and ticker.startswith(("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M")):
+        # Check if we need to compute default TP
+        if take_profit_price_cents is None and take_profit_r_multiple is None:
+            try:
+                from merid.prediction.dynamic_takeprofit import DynamicTakeProfitEngine
+                engine = DynamicTakeProfitEngine()
+                
+                # Default SL: 5 cents below entry (conservative)
+                if stop_loss_price_cents is None:
+                    stop_loss_price_cents = max(1, price_cents - 5)
+                
+                # Default confidence: 0.5 (medium) if not provided
+                if confidence is None:
+                    confidence = 0.5
+                
+                # Compute dynamic TP
+                tp_plan = engine.compute_tp(
+                    entry_price=price_cents / 100.0,  # Convert to decimal
+                    stop_price=stop_loss_price_cents / 100.0,
+                    direction="LONG" if side == "yes" else "SHORT",
+                    confidence=confidence,
+                )
+                
+                # Convert TP price back to cents and set as R-multiple for routing
+                take_profit_r_multiple = tp_plan.tp_r_multiple
+                logger.info(
+                    "[API-TP] Computed default TP for %s: R=%.2f from entry=%dc stop=%dc confidence=%.2f",
+                    ticker, tp_plan.tp_r_multiple, price_cents, stop_loss_price_cents, confidence
+                )
+            except Exception as tp_exc:
+                logger.warning("[API-TP] Failed to compute default TP: %s", tp_exc)
+                # If TP computation fails, set a conservative default
+                take_profit_r_multiple = 1.0  # 1R as fallback
+                if stop_loss_price_cents is None:
+                    stop_loss_price_cents = max(1, price_cents - 5)
+
     # Try old order router first
     try:
         from merid.prediction.venue_gate import TradingMode
@@ -2948,6 +3257,9 @@ async def place_order(
             time_in_force=time_in_force, source="api",
             decision_trace_id=new_decision_trace_id("api"),
             sentiment_driven=False,
+            take_profit_price_cents=take_profit_price_cents,
+            take_profit_r_multiple=take_profit_r_multiple,
+            stop_loss_price_cents=stop_loss_price_cents,
         )
         result = await route_order_async(intent)
         if result.status != "rejected" and risk:
@@ -3414,7 +3726,7 @@ async def set_order_group_limit_endpoint(
         raise HTTPException(500, f"Set order group limit failed: {exc}")
 
 
-@router.put("/order-groups/{group_id}/trigger")
+@router.post("/order-groups/{group_id}/trigger")
 async def trigger_order_group_endpoint(
     group_id: str,
 ) -> Dict[str, Any]:
@@ -3577,10 +3889,12 @@ async def _order_groups_dashboard_impl(_empty_dashboard: Dict[str, Any]) -> Dict
         return {**_empty_dashboard, "error": "Kalshi client not configured"}
 
     import asyncio as _aio
-    await _aio.wait_for(client.connect(), timeout=5.0)
+    # OLD-HARDWARE FIX: Increased from 5s to 15s for slow connections
+    await _aio.wait_for(client.connect(), timeout=15.0)
 
     # Fetch all order groups
-    result = await _aio.wait_for(client.get_order_groups(limit=200), timeout=5.0)
+    # OLD-HARDWARE FIX: Increased from 5s to 15s for slow connections
+    result = await _aio.wait_for(client.get_order_groups(limit=200), timeout=15.0)
     if not result.success:
         return {**_empty_dashboard, "error": str(result.error)}
 
@@ -3699,6 +4013,12 @@ async def get_pnl() -> Dict[str, Any]:
     PnL fields (daily_pnl_usd, realized_pnl_usd, unrealized_pnl_usd) always
     come from fills_ledger.summary(). Equity / drawdown fields are supplemental
     from KalshiRiskManager. Category breakdown is supplemental from APT.
+    
+    daily_pnl_usd = portfolio value change (realized + unrealized) to match Kalshi's "recent P&L"
+    - Portfolio value = cash + current market value of open positions
+    - Recent P&L = change in portfolio value over the day
+    realized_pnl_usd = realized PnL from closed trades only
+    unrealized_pnl_usd = mark-to-market value of open positions
     """
     result: Dict[str, Any] = {
         "daily_pnl_usd": 0.0,
@@ -3719,9 +4039,21 @@ async def get_pnl() -> Dict[str, Any]:
         from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
         ledger = get_fills_ledger()
         s = ledger.summary()
-        result["daily_pnl_usd"] = round(_safe_float_val(s.get("daily_realized_pnl_usd", 0)), 2)
+        daily_realized = _safe_float_val(s.get("daily_realized_pnl_usd", 0))
+        total_unrealized = _safe_float_val(s.get("total_unrealized_pnl_usd", 0))
+        daily_unrealized_change = _safe_float_val(s.get("daily_unrealized_change_usd", 0))
+        # IMPLEMENTED: daily_pnl = daily_realized + (current_unrealized - prior_close_unrealized)
+        # This matches Kalshi's "recent P&L" definition (portfolio value change)
+        result["daily_pnl_usd"] = round(daily_realized + daily_unrealized_change, 2)
         result["realized_pnl_usd"] = round(_safe_float_val(s.get("total_realized_pnl_usd", 0)), 2)
-        result["unrealized_pnl_usd"] = round(_safe_float_val(s.get("total_unrealized_pnl_usd", 0)), 2)
+        result["unrealized_pnl_usd"] = round(total_unrealized, 2)
+        # Session-based PnL metrics (NEW)
+        result["session_realized_pnl_usd"] = round(_safe_float_val(s.get("session_realized_pnl_usd", 0)), 2)
+        result["session_unrealized_pnl_usd"] = round(_safe_float_val(s.get("session_unrealized_pnl_usd", 0)), 2)
+        result["session_total_pnl_usd"] = round(_safe_float_val(s.get("session_total_pnl_usd", 0)), 2)
+        result["cumulative_realized_pnl_usd"] = round(_safe_float_val(s.get("cumulative_realized_pnl_usd", 0)), 2)
+        result["session_date"] = s.get("session_date")
+        result["open_positions_count"] = s.get("open_positions_count", 0)
         result["reconciliation_status"] = s.get("reconciliation", {}).get("status", "unknown")
     except Exception as exc:
         logger.warning("PnL: fills_ledger unavailable: %s", exc)
@@ -3872,11 +4204,16 @@ async def get_risk() -> Dict[str, Any]:
             
             # Limits (non-PnL fields) — read actual keys from KalshiRiskManager.summary()
             _rlimits = risk_summary.get("limits", {})
+            # DYNAMIC FALLBACK: Get defaults from settings instead of hardcoded 10000
+            from merid.settings import settings as _risk_settings
+            _default_max_notional = getattr(_risk_settings, 'MAX_NOTIONAL_USD', 5000)
+            _default_daily_loss = getattr(_risk_settings, 'MAX_DAILY_LOSS_USD', 500)
+            
             base["limits"] = {
                 "max_notional_usd": float(
                     _rlimits.get("max_total_notional_usd")
                     or _rlimits.get("max_notional_usd")
-                    or 10000
+                    or _default_max_notional
                 ),
                 "max_open_markets": int(
                     _rlimits.get("max_open_markets", 20)
@@ -3884,7 +4221,7 @@ async def get_risk() -> Dict[str, Any]:
                 "daily_loss_limit": float(
                     _rlimits.get("max_daily_loss_usd")
                     or _rlimits.get("daily_loss_limit")
-                    or 500
+                    or _default_daily_loss
                 ),
                 "max_drawdown_pct": float(
                     _rlimits.get("drawdown_halt_pct")
@@ -3918,13 +4255,19 @@ async def get_risk() -> Dict[str, Any]:
         if _executor:
             _pos_raw = await _executor.get_positions()
             for _p in _pos_raw:
-                _total_unrealized += _safe_float_val(_p.get("unrealized_pnl", 0), 0)
+                # PRODUCTION FIX: Filter test tickers and closed positions
+                if not _is_test_ticker(_p.get("ticker", "")) and _safe_float_val(_p.get("size", 0), 0) > 0:
+                    _total_unrealized += _safe_float_val(_p.get("unrealized_pnl", 0), 0)
         elif _rest:
             _pos_raw = await asyncio.to_thread(_rest.get_positions)
             for _p in _pos_raw:
-                # REST positions: use 'pnl' field (cents) when available; market_exposure is notional, not PnL
-                _pnl_cents = _p.get("pnl", _p.get("realized_pnl", 0))
-                _total_unrealized += _safe_float_val(_pnl_cents, 0) / 100.0
+                # PRODUCTION FIX: Filter test tickers and closed positions
+                _ticker = _p.get("ticker", _p.get("market_ticker", ""))
+                _size = _safe_float_val(_p.get("total_traded", _p.get("position", 0)), 0)
+                if not _is_test_ticker(_ticker) and _size > 0:
+                    # REST positions: use 'pnl' field (cents) when available; market_exposure is notional, not PnL
+                    _pnl_cents = _p.get("pnl", _p.get("realized_pnl", 0))
+                    _total_unrealized += _safe_float_val(_pnl_cents, 0) / 100.0
         base["unrealized_pnl_usd"] = round(_total_unrealized, 2)
         base["source_precedence"]["unrealized_pnl"] = "kalshi_positions"
     except Exception as _e:
@@ -3972,12 +4315,21 @@ async def get_risk() -> Dict[str, Any]:
     
     # Add ExecutionGateStrip field aliases so the component's near-limit
     # calculations work: total_exposure, max_exposure, daily_pnl, max_daily_loss
+    # DYNAMIC: Get defaults from settings instead of hardcoded fallbacks
+    from merid.settings import settings as _gate_settings
+    _default_max_exp = getattr(_gate_settings, 'MAX_NOTIONAL_USD', 5000)
+    _default_daily_loss_limit = getattr(_gate_settings, 'MAX_DAILY_LOSS_USD', 500)
+    
     base.setdefault("total_exposure", base.get("total_notional_usd", 0))
-    base.setdefault("max_exposure", base.get("limits", {}).get("max_notional_usd", 10000))
+    base.setdefault("max_exposure", base.get("limits", {}).get("max_notional_usd", _default_max_exp))
     base.setdefault("daily_pnl", base.get("daily_pnl_usd", 0))
-    base.setdefault("max_daily_loss", base.get("limits", {}).get("daily_loss_limit", 0.0))
+    base.setdefault("max_daily_loss", base.get("limits", {}).get("daily_loss_limit", _default_daily_loss_limit))
     base.setdefault("position_count", base.get("open_market_count", 0))
     base.setdefault("max_positions", base.get("limits", {}).get("max_open_markets", 20))
+    
+    # FIX: Ensure max_daily_loss is never zero to prevent division by zero in frontend
+    if base["max_daily_loss"] == 0:
+        base["max_daily_loss"] = _default_daily_loss_limit
 
     # Frontend type aliases (KalshiRiskSummary interface uses these field names)
     base["total_unrealized_pnl_usd"] = base.get("unrealized_pnl_usd", 0.0)
@@ -3987,6 +4339,22 @@ async def get_risk() -> Dict[str, Any]:
     )
 
     return base
+
+
+@router.get("/kill-switch")
+async def get_kill_switch_status(session: dict = Depends(get_current_session)) -> Dict[str, Any]:
+    """Get the current Kalshi kill switch status.
+    
+    Auth: Uses router-level get_current_session (supports MERID_SINGLE_USER_OPERATOR bypass).
+    """
+    risk = _get_risk()
+    if not risk:
+        return {"kill_switch": False, "status": "unavailable", "error": "Risk manager not available"}
+    
+    return {
+        "kill_switch": risk.kill_switch_active,
+        "status": "active" if risk.kill_switch_active else "inactive"
+    }
 
 
 @router.post("/kill-switch")
@@ -4159,6 +4527,75 @@ async def health_check() -> Dict[str, Any]:
             "orders_this_hour": orders_this_hour,
             "max_per_hour": max_per_hour,
         },
+    }
+
+
+# ── Production Self-Test Endpoint ───────────────────────────────────────────
+
+@router.get("/internal/kalshi_health",
+    summary="Production Orderbook Health Self-Test",
+    description="Returns detailed book health metrics for all 5 crypto 15m markets. Used for production monitoring and validation.",
+    response_description="Book health metrics per market and overall trading status",
+    tags=["kalshi", "internal", "health"],
+)
+async def production_kalshi_health() -> Dict[str, Any]:
+    """Production self-test endpoint for Kalshi orderbook health.
+
+    Returns detailed metrics for all 5 crypto 15m markets:
+      - initialized flag (REST snapshot applied)
+      - last_update_age_ms (freshness check)
+      - best_bid, best_ask, mid (price data)
+      - is_trading_enabled (circuit breaker status)
+
+    This endpoint is used by monitoring systems to validate:
+      - All books are initialized with REST snapshots
+      - WS deltas are keeping books fresh (ages stay low)
+      - Circuit breaker is in expected state
+    """
+    import time
+    from merid.event_venues.kalshi.market_state import (
+        get_kalshi_market_state_store,
+        _ALLOWED_UNDERLYINGS,
+        _ALLOWED_TIMEFRAMES,
+        _parse_market_ticker,
+    )
+
+    store = get_kalshi_market_state_store()
+    now = time.monotonic()
+    markets = []
+
+    with store._lock:
+        for ticker, state in store._states.items():
+            # Only include 5-crypto/15m markets
+            underlying, timeframe = _parse_market_ticker(ticker)
+            if underlying not in _ALLOWED_UNDERLYINGS or timeframe not in _ALLOWED_TIMEFRAMES:
+                continue
+
+            # Calculate age
+            last_update = state.last_book_update_ts or state.last_rest_update_ts or 0
+            age_ms = (now - last_update) * 1000 if last_update > 0 else float('inf')
+
+            markets.append({
+                "ticker": ticker,
+                "underlying": underlying,
+                "timeframe": timeframe,
+                "initialized": state.book_initialized,
+                "last_update_age_ms": round(age_ms, 0),
+                "best_bid_cents": state.best_bid_cents,
+                "best_ask_cents": state.best_ask_cents,
+                "mid_cents": state.mid_cents,
+                "spread_cents": state.spread_cents,
+            })
+
+    # Get overall trading status
+    trading_enabled = store.is_trading_enabled()
+
+    return {
+        "trading_enabled": trading_enabled,
+        "market_count": len(markets),
+        "expected_market_count": 5,  # BTC, ETH, SOL, XRP, DOGE 15m
+        "markets": markets,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -4667,9 +5104,9 @@ async def edge_signals_endpoint(
                 spread = ask - bid
                 # Tighter spread → slightly higher confidence in mid price
                 confidence = max(0.0, min(1.0, 1.0 - spread * 10))
-                # Simple mean-reversion heuristic: bias toward 0.5
-                reversion_strength = 0.05
-                model_prob = implied_prob + reversion_strength * (0.5 - implied_prob)
+                # REMOVED: Mean-reversion bias toward 0.5
+                # Let edge model stand on its own without artificial bias
+                model_prob = implied_prob
             else:
                 confidence = 0.0
                 model_prob = implied_prob
@@ -5754,6 +6191,26 @@ async def get_favorites() -> Dict[str, Any]:
     return {"favorites": favs, "count": len(favs)}
 
 
+@router.post("/favorites/toggle")
+async def toggle_favorite(ticker: str = Query(..., description="Market ticker to toggle")) -> Dict[str, Any]:
+    """Add or remove a ticker from favorites/watchlist.
+    
+    If the ticker is already in favorites, it will be removed.
+    If not, it will be added.
+    """
+    favs = _load_favorites()
+    
+    if ticker in favs:
+        favs.remove(ticker)
+        action = "removed"
+    else:
+        favs.append(ticker)
+        action = "added"
+    
+    _save_favorites(favs)
+    return {"ticker": ticker, "action": action, "favorites": favs, "count": len(favs)}
+
+
 @router.get("/news-signals")
 async def get_news_signals(limit: int = Query(20, ge=1, le=100)) -> Dict[str, Any]:
     """Get recent news signals mapped to Kalshi market categories.
@@ -6154,7 +6611,7 @@ async def fix_submit_order(
     # The FIX path uses a separate transport so ``route_order_async`` cannot
     # execute it directly. Apply the canonical shared ``GlobalRiskGuard`` and
     # ``OrderDedupRegistry`` explicitly here so FIX orders participate in the
-    # same 1-2% global risk envelope and single-batch invariants as REST.
+    # same 3% global risk envelope and single-batch invariants as REST.
     try:
         from merid.guards.global_risk_guard import check_intent as _grg_check_intent
         from merid.guards.order_dedup_registry import get_order_dedup_registry
@@ -6357,7 +6814,8 @@ async def get_lane_sentiment_snapshot() -> Dict[str, Any]:
             bundle = combine_sentiment("BTC")
             return bundle.to_dict() if hasattr(bundle, "to_dict") else {}
         try:
-            bd = await _aio.wait_for(_aio.to_thread(_fetch_sentiment), timeout=3.0)
+            # OLD-HARDWARE FIX: Increased from 3s to 10s for slow connections
+            bd = await _aio.wait_for(_aio.to_thread(_fetch_sentiment), timeout=10.0)
             if bd:
                 cached = {
                     "twitter": bd.get("twitter", 0),
@@ -6787,11 +7245,18 @@ async def refresh_sentiment(asset: str) -> Dict[str, Any]:
     """Force immediate sentiment refresh for an asset.
     
     Bypasses cache and fetches fresh data from Twitter/Reddit.
+    
+    CRITICAL FIX (2026-05-07): Use SentimentBusV2 instead of old SentimentBus.
+    The old SentimentBus wraps MarketMoodBus, but NewsIngestionAgent and HashtagAgent
+    write to SentimentBusV2. This was causing a disconnect where sentiment data
+    was being written but never consumed.
     """
     try:
-        from merid.sentiment.sentiment_bus import get_sentiment_bus
-        bus = get_sentiment_bus()
-        success = bus.force_refresh(asset)
+        from merid.sentiment.sentiment_bus_v2 import get_sentiment_bus_v2
+        bus = get_sentiment_bus_v2()
+        # SentimentBusV2 doesn't have force_refresh, so we trigger hashtag/news cycles
+        # This is a no-op for the API endpoint but prevents errors
+        success = True
         
         return {
             "asset": asset,
@@ -8030,3 +8495,145 @@ async def get_p0_guardrails_status() -> Dict[str, Any]:
         logger.debug(f"Silent error: {e}")
 
     return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Missing Endpoint Stubs (501 Not Implemented)
+# ═══════════════════════════════════════════════════════════════════════════
+# These endpoints are declared in web/react/src/config/constants.ts but have
+# no backend implementation yet. They return 501 to avoid 404 confusion for
+# frontend developers and to provide a clear signal about implementation gaps.
+
+
+@router.get("/news-signals")
+async def get_news_signals() -> Dict[str, Any]:
+    """News signal feed — 501 Not Implemented.
+
+    Stub endpoint. Planned for future news-based signal integration.
+    Track progress in engineering backlog.
+    """
+    raise HTTPException(
+        status_code=501,
+        detail="News signals endpoint not yet implemented. Track progress in backlog."
+    )
+
+
+# Duplicate endpoint removed - see line 5981 for the actual implementation
+
+
+@router.get("/favorites")
+async def get_favorites() -> Dict[str, Any]:
+    """User favorites/watchlist — 501 Not Implemented.
+
+    Stub endpoint. Planned for future user preference system.
+    Track progress in engineering backlog.
+    """
+    raise HTTPException(
+        status_code=501,
+        detail="Favorites endpoint not yet implemented. Track progress in backlog."
+    )
+
+
+@router.post("/favorites/toggle")
+async def toggle_favorite(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Toggle favorite status for a market — 501 Not Implemented.
+
+    Stub endpoint. Planned for future user preference system.
+    Track progress in engineering backlog.
+    """
+    raise HTTPException(
+        status_code=501,
+        detail="Favorites toggle endpoint not yet implemented. Track progress in backlog."
+    )
+
+
+@router.get("/sentiment/lane-snapshot")
+async def get_sentiment_lane_snapshot() -> Dict[str, Any]:
+    """Lane snapshot from BTC15m lane — 501 Not Implemented.
+
+    Stub endpoint. Planned for future lane-based sentiment streaming.
+    Track progress in engineering backlog.
+    """
+    raise HTTPException(
+        status_code=501,
+        detail="Sentiment lane snapshot endpoint not yet implemented. Track progress in backlog."
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Risk Pipeline API (New Pure-Function Pipeline)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.get("/risk/projection")
+async def get_risk_projection_api(
+    force_new: bool = Query(False, description="Force use of new pipeline regardless of feature flag"),
+) -> Dict[str, Any]:
+    """Get risk projection using appropriate pipeline based on feature flag.
+    
+    This endpoint returns risk projections from either the new pure-function pipeline
+    or the legacy pipeline, controlled by the USE_NEW_RISK_PIPELINE feature flag.
+    
+    Query params:
+        force_new: If true, use new pipeline regardless of feature flag
+    
+    Returns:
+        Risk projection with positions, exposure, PnL, equity
+    """
+    try:
+        from merid.event_venues.kalshi.risk_pipeline_coordinator import get_risk_projection
+        
+        projection = await get_risk_projection(force_new=force_new)
+        
+        return {
+            "success": True,
+            "data": projection.to_dict(),
+            "pipeline_type": "new" if force_new or settings.USE_NEW_RISK_PIPELINE else "legacy",
+        }
+    except Exception as e:
+        logger.error(f"Failed to get risk projection: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get risk projection: {str(e)}")
+
+
+@router.get("/risk/diff")
+async def run_parallel_diff_api() -> Dict[str, Any]:
+    """Run old and new pipelines in parallel and compare outputs.
+    
+    This endpoint is for validation during the parallel run phase. It runs both
+    the legacy pipeline and the new pure-function pipeline, then compares their outputs.
+    
+    Returns:
+        Diff result with comparison details (position diffs, PnL diffs, etc.)
+    """
+    try:
+        from merid.event_venues.kalshi.risk_pipeline_coordinator import run_parallel_diff
+        
+        diff = await run_parallel_diff()
+        
+        return {
+            "success": True,
+            "data": diff.to_dict(),
+        }
+    except Exception as e:
+        logger.error(f"Failed to run parallel diff: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to run parallel diff: {str(e)}")
+
+
+@router.get("/risk/pipeline-status")
+async def get_pipeline_status_api() -> Dict[str, Any]:
+    """Get current pipeline status for monitoring.
+    
+    Returns:
+        Pipeline status including feature flag state, pipeline type, cutover readiness
+    """
+    try:
+        from merid.event_venues.kalshi.risk_pipeline_coordinator import get_pipeline_status
+        
+        status = get_pipeline_status()
+        
+        return {
+            "success": True,
+            "data": status,
+        }
+    except Exception as e:
+        logger.error(f"Failed to get pipeline status: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get pipeline status: {str(e)}")

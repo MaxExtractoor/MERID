@@ -27,6 +27,7 @@ Usage::
 from __future__ import annotations
 
 import numbers
+import os
 import threading
 import asyncio
 import time
@@ -39,6 +40,7 @@ from typing import Any, Dict, List, Optional
 from merid.event_venues.base import QuoteEvent, VenueTrade
 from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS, ACTIVE_CRYPTO_FREQS
 from config.kalshi_universe import ACTIVE_CRYPTO_WS_TIMEFRAMES
+from merid.event_venues.kalshi import get_kalshi_client
 from merid.event_venues.kalshi.models import KalshiConfig
 from merid.event_venues.kalshi.ws import KALSHI_WS_MARKET_TICKERS_CHUNK_SIZE, KalshiWebSocket
 from utils.logger import get_logger
@@ -79,10 +81,23 @@ def _validate_fill_keys(agent_id: Optional[str], market_id: Optional[str]) -> tu
 
 
 # Max events buffered before we start dropping
-_BRIDGE_QUEUE_SIZE = 2048
+_BRIDGE_QUEUE_SIZE = 16384  # Increased from 8192 to 16384 - BUG-FIX (2026-05-07) for high message volume
 
 # UI coalescing interval (seconds) — don't push every tick to React
 _UI_COALESCE_INTERVAL = 0.100  # 100ms
+
+# UPSTREAM FIX: Hard cap on WS subscriptions to prevent queue pressure
+_MAX_WS_SUBSCRIPTIONS = int(os.getenv("MERID_KALSHI_MAX_WS_SUBS", "150"))  # Raised from 100 to 150 tickers
+_WS_CRITICAL_THRESHOLD = int(os.getenv("MERID_KALSHI_WS_CRITICAL", "120"))  # Raised from 80 to 120 tickers
+
+# Subscription priority tiers (for shedding when approaching cap)
+_SUBSCRIPTION_PRIORITY_CRITICAL = ["fills"]  # Never drop fills
+_SUBSCRIPTION_PRIORITY_MEDIUM = ["orderbooks", "trades"]  # Drop after critical
+_SUBSCRIPTION_PRIORITY_LOW = ["quotes"]  # Drop first when backpressure
+
+# ALLOWED_SYMBOLS whitelist for 15m crypto markets (hard filter before subscription)
+_ALLOWED_SYMBOLS = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
+_ALLOWED_TIMEFRAMES = {"15m", "15M"}  # Only 15-minute markets
 
 
 class KalshiWebSocketBridge:
@@ -107,10 +122,21 @@ class KalshiWebSocketBridge:
         self._subscribed_tickers: List[str] = []
         self._start_ts: float = 0.0
 
+        # 5s interval summary tracking
+        self._last_summary_ts: float = 0.0
+        self._interval_type_counts: Dict[str, int] = defaultdict(int)
+
         # Fill-specific metrics for data integrity tracking
         self._fills_received: int = 0
         self._fills_dropped: int = 0
         self._fills_duplicate: int = 0
+        
+        # BUG-4 FIX: Dead-letter queue for fills during reconnection
+        # Fills that arrive during reconnection are stored here for later processing
+        self._fill_dead_letter_queue: List[Dict[str, Any]] = []
+        self._fill_dead_letter_lock = asyncio.Lock()
+        self._max_dead_letter_size = 1000  # Max fills to queue during reconnection
+        self._processing_dead_letter = False
         
         # Sequence tracking for gap detection
         self._last_sequence: Optional[int] = None
@@ -131,6 +157,9 @@ class KalshiWebSocketBridge:
         self._coalesce_buffer: Dict[str, Dict[str, Any]] = {}  # market_id -> payload
         self._coalesce_interval: float = _UI_COALESCE_INTERVAL
         self._ui_batches_sent: int = 0
+        
+        # Health logger: logs book health every 60s
+        self._health_logger_task: Optional[asyncio.Task] = None
         self._start_lock = asyncio.Lock()
         
         # CRASH-001: Task failure tracking for health degradation
@@ -139,12 +168,15 @@ class KalshiWebSocketBridge:
         
         # PHASE-2: Circuit breaker for repeated WS failures (production hardening)
         # Tracks recent connection failures to prevent reconnect storms
+        # MICRO-BANKROLL FIX v9 (2026-04-26): Increased threshold from 10 to 20 failures
+        # and reduced cooldown from 30s to 15s. Micro-bankroll needs more resilience
+        # and faster recovery to avoid blocking trades during transient issues.
         self._ws_failure_history: List[float] = []  # Timestamps of recent failures
         self._circuit_breaker_tripped: bool = False
         self._circuit_breaker_reset_ts: Optional[float] = None
-        self._CIRCUIT_BREAKER_THRESHOLD: int = 10  # failures in window
+        self._CIRCUIT_BREAKER_THRESHOLD: int = 20  # v9: was 10, now 20 failures in window
         self._CIRCUIT_BREAKER_WINDOW_S: float = 60.0  # 60-second window
-        self._CIRCUIT_BREAKER_COOLDOWN_S: float = 30.0  # 30-second backoff when tripped
+        self._CIRCUIT_BREAKER_COOLDOWN_S: float = 15.0  # v9: was 30, now 15s backoff when tripped
 
     def _record_task_failure(self, task_name: str, error: str) -> None:
         """Record task failure for health monitoring."""
@@ -208,6 +240,14 @@ class KalshiWebSocketBridge:
         elif queue_pressure > 0.75 and status == "GREEN":
             status = "YELLOW"
         
+        # Log type counts breakdown periodically for diagnostics
+        if self._events_forwarded > 0 and self._events_forwarded % 1000 == 0:
+            logger.info(
+                "[WS-BRIDGE] Event type breakdown: total=%d, %s",
+                self._events_forwarded,
+                ", ".join(f"{k}={v}" for k, v in sorted(self._type_counts.items()))
+            )
+        
         return {
             "status": status,
             "running": self.is_running(),
@@ -246,6 +286,16 @@ class KalshiWebSocketBridge:
 
             self._shutdown.clear()
             self._start_ts = time.monotonic()
+
+            # Startup sanity log - confirms WS code path is executing
+            import os
+            logger.info(
+                "[WS-BOOT] bridge started tickers=%d channels=['orderbook_delta', 'ticker', 'trade', 'fill'] env=%s log_level=%s demo=%s",
+                len(self._subscribed_tickers) if self._subscribed_tickers else 0,
+                os.getenv("MERID_PROFILE", "unknown"),
+                os.getenv("LOG_LEVEL", "INFO"),
+                self._ws.config.use_demo if hasattr(self._ws, 'config') else "unknown"
+            )
 
             # Pre-flight configuration validation
             cfg = self._ws.config
@@ -314,6 +364,15 @@ class KalshiWebSocketBridge:
                         self._reconnect_count += 1
                     # Clear failure history on successful stable connection
                     self._ws_failure_history.clear()
+                    
+                    # BUG-4 FIX: Process dead-letter queue fills after reconnection
+                    # This ensures fills received during disconnection are not lost
+                    asyncio.create_task(self._process_dead_letter_queue())
+                    
+                    # BUG-4 FIX: Sync fills ledger with REST API after reconnection
+                    # This ensures any fills missed during WS downtime are captured
+                    asyncio.create_task(self._sync_fills_with_rest_on_reconnect())
+                    
                     break
                     
                 except Exception as exc:
@@ -358,9 +417,53 @@ class KalshiWebSocketBridge:
                 )
 
             if tickers:
-                self._subscribed_tickers = list(dict.fromkeys(tickers))
+                # UPSTREAM FIX: Apply hard cap and tiered subscription limiting
+                ut = sorted(set(tickers))
+                original_count = len(ut)
+
+                # FILTER: Apply ALLOWED_SYMBOLS whitelist for 15m crypto markets only
+                filtered_tickers = []
+                for ticker in ut:
+                    # Check if ticker matches allowed symbols and timeframes
+                    # Format: KXBTC15M-26MAY121115-15 or KXBTC-15M
+                    is_allowed = False
+                    for symbol in _ALLOWED_SYMBOLS:
+                        if symbol in ticker:
+                            # Check for 15m timeframe indicators
+                            if any(tf in ticker for tf in _ALLOWED_TIMEFRAMES):
+                                is_allowed = True
+                                break
+                    if is_allowed:
+                        filtered_tickers.append(ticker)
+
+                if len(filtered_tickers) != len(ut):
+                    logger.warning(
+                        "[WS-SUBSCRIPTION] Filtered %d tickers to %d based on ALLOWED_SYMBOLS whitelist (BTC/ETH/SOL/XRP/DOGE 15m only)",
+                        len(ut), len(filtered_tickers)
+                    )
+                    ut = filtered_tickers
+                
+                # Tier 1: Hard cap - never exceed 100 tickers
+                if len(ut) > _MAX_WS_SUBSCRIPTIONS:
+                    logger.error(
+                        "[WS-SUBSCRIPTION-CAP] Requested %d tickers exceeds hard cap of %d — "
+                        "applying strict truncation. Consider narrowing market discovery.",
+                        len(ut), _MAX_WS_SUBSCRIPTIONS
+                    )
+                    ut = ut[:_MAX_WS_SUBSCRIPTIONS]
+                
+                # Tier 2: Soft threshold - shed low-priority subscriptions when >80 tickers
+                _shed_quotes = len(ut) > _WS_CRITICAL_THRESHOLD
+                if _shed_quotes:
+                    logger.warning(
+                        "[WS-BACKPRESSURE] Subscriptions at %d (threshold %d) — "
+                        "shedding low-priority quote feeds, keeping fills/orderbook/trades",
+                        len(ut), _WS_CRITICAL_THRESHOLD
+                    )
+                
+                self._subscribed_tickers = list(ut)
+                
                 try:
-                    ut = sorted(set(self._subscribed_tickers))
                     ch = KALSHI_WS_MARKET_TICKERS_CHUNK_SIZE
                     
                     # BUG-L10 FIX: Subscribe with staggered delays to prevent event loop blocking
@@ -368,30 +471,118 @@ class KalshiWebSocketBridge:
                     # Use actual small delays between batches to allow event loop breathing room
                     _stagger_delay = 0.01  # 10ms between batches
                     
-                    for i in range(0, len(ut), ch):
-                        batch = ut[i : i + ch]
-                        await self._ws.subscribe_quotes(batch)
-                        # Staggered delay to allow other tasks
-                        await asyncio.sleep(_stagger_delay)
-                    
-                    for i in range(0, len(ut), ch):
-                        batch = ut[i : i + ch]
-                        await self._ws.subscribe_trades(batch)
-                        await asyncio.sleep(_stagger_delay)
-                    
-                    for i in range(0, len(ut), ch):
-                        batch = ut[i : i + ch]
-                        await self._ws.subscribe_fills(batch)
-                        await asyncio.sleep(_stagger_delay)
-                    
-                    # Orderbook subscription is batched internally, but still stagger
+                    # DIAGNOSTIC: Log the actual tickers being subscribed
+                    logger.info(
+                        "[WS-SUBSCRIPTION] Subscribing to %d tickers (original=%d): %s",
+                        len(ut), original_count,
+                        ut[:10] if len(ut) > 10 else ut  # Show first 10 to avoid log spam
+                    )
+
+                    # UPSTREAM FIX: Priority order - orderbooks (CRITICAL for cache), fills (CRITICAL for execution), trades (MEDIUM), quotes (LOW)
+
+                    # Subscribe orderbooks (CRITICAL - never drop for market state cache)
+                    logger.info("[WS-SUBSCRIPTION] sent: orderbooks (CRITICAL) markets=%s", ut[:5])
                     await self._ws.subscribe_orderbooks_batch(ut)
                     await asyncio.sleep(_stagger_delay)
                     
+                    # BOOTSTRAP: Fetch REST orderbook snapshots to initialize books before processing WS deltas
+                    # Kalshi WS does NOT send snapshots automatically - only deltas
+                    # We need to bootstrap the orderbook state via REST to avoid uninitialized books
+                    logger.info("[SNAPSHOT-BOOTSTRAP] started markets=%d", len(ut))
+                    from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                    store = get_kalshi_market_state_store()
+                    client = get_kalshi_client()
+                    
+                    # Fetch snapshots in batches to avoid overwhelming the REST API
+                    snapshot_batch_size = 10
+                    snapshot_success = 0
+                    snapshot_failed = 0
+                    for i in range(0, len(ut), snapshot_batch_size):
+                        batch = ut[i : i + snapshot_batch_size]
+                        for ticker in batch:
+                            try:
+                                # Use raw REST API request to get orderbook data directly
+                                # Bypass get_orderbook_result() which returns empty LocalOrderbook
+                                result = await client._request_with_resilience(
+                                    "GET", f"/markets/{ticker}/orderbook",
+                                    operation_name=f"get_orderbook({ticker})"
+                                )
+                                if result.success and result.data:
+                                    # Parse raw REST response: {"orderbook_fp": {"no_dollars": [[price, size], ...], "yes_dollars": [[price, size], ...]}}
+                                    data = result.data
+                                    logger.info(f"[WS-SUBSCRIPTION] REST orderbook response for {ticker}: {data}")
+                                    no_levels = []
+                                    yes_levels = []
+                                    orderbook_fp = data.get("orderbook_fp", {})
+                                    # no_dollars = no side (no contracts), yes_dollars = yes side (yes contracts)
+                                    # LocalOrderbook expects "no" and "yes" keys
+                                    if "no_dollars" in orderbook_fp:
+                                        no_levels = [[float(price), float(size)] for price, size in orderbook_fp["no_dollars"]]
+                                    if "yes_dollars" in orderbook_fp:
+                                        yes_levels = [[float(price), float(size)] for price, size in orderbook_fp["yes_dollars"]]
+                                    
+                                    snapshot_msg = {
+                                        "ticker": ticker,
+                                        "type": "orderbook_snapshot",
+                                        "no": no_levels,
+                                        "yes": yes_levels,
+                                    }
+                                    store.apply_orderbook_message(snapshot_msg)
+                                    
+                                    # Log snapshot bootstrap completion per market
+                                    n_levels = len(no_levels) + len(yes_levels)
+                                    logger.info(
+                                        "[MARKET-STATE] snapshot_bootstrap_complete market=%s levels=%d source=REST",
+                                        ticker, n_levels
+                                    )
+                                    snapshot_success += 1
+                                else:
+                                    snapshot_failed += 1
+                            except Exception as e:
+                                logger.warning(f"[WS-SUBSCRIPTION] Failed to fetch REST orderbook for {ticker}: {e}")
+                                snapshot_failed += 1
+                        # Small delay between batches to avoid rate limiting
+                        if i + snapshot_batch_size < len(ut):
+                            await asyncio.sleep(0.1)
+                    
                     logger.info(
-                        "Kalshi WebSocket: subscribed orderbook_delta+ticker+trade+fill for %d tickers "
-                        "assets=%s normalized_freqs=%s catalog_timeframes=%s",
-                        len(ut),
+                        "[SNAPSHOT-BOOTSTRAP] completed markets=%d/%d succeeded=%d failed=%d",
+                        snapshot_success, len(ut), snapshot_success, snapshot_failed
+                    )
+                    
+                    # Log initial health state after bootstrap (Step 1: Confirm orderbook bootstrap is solid)
+                    store.log_book_health()
+
+                    # Subscribe fills (CRITICAL - never drop for execution)
+                    for i in range(0, len(ut), ch):
+                        batch = ut[i : i + ch]
+                        logger.info("[WS-SUBSCRIPTION] sent: fills (CRITICAL) markets=%s", batch[:5])
+                        await self._ws.subscribe_fills(batch)
+                        await asyncio.sleep(_stagger_delay)
+
+                    # Subscribe trades (MEDIUM priority - drop if backpressure)
+                    if not _shed_quotes:
+                        for i in range(0, len(ut), ch):
+                            batch = ut[i : i + ch]
+                            logger.info("[WS-SUBSCRIPTION] sent: trades (MEDIUM) markets=%s", batch[:5])
+                            await self._ws.subscribe_trades(batch)
+                            await asyncio.sleep(_stagger_delay)
+                    else:
+                        logger.warning("[WS-BACKPRESSURE] Skipping trade subscriptions (MEDIUM) to preserve bandwidth")
+
+                    # Subscribe quotes (LOW priority - always shed if backpressure)
+                    if not _shed_quotes:
+                        for i in range(0, len(ut), ch):
+                            batch = ut[i : i + ch]
+                            await self._ws.subscribe_quotes(batch)
+                            await asyncio.sleep(_stagger_delay)
+                    else:
+                        logger.warning("[WS-BACKPRESSURE] Skipping quote subscriptions (LOW) to preserve bandwidth")
+                    
+                    logger.info(
+                        "Kalshi WebSocket: subscribed orderbook_delta+ticker+trade+fill for %d/%d tickers "
+                        "(shed=%s) assets=%s normalized_freqs=%s catalog_timeframes=%s",
+                        len(ut), original_count, _shed_quotes,
                         ACTIVE_CRYPTO_ASSETS,
                         ACTIVE_CRYPTO_FREQS,
                         ACTIVE_CRYPTO_WS_TIMEFRAMES,
@@ -425,7 +616,11 @@ class KalshiWebSocketBridge:
                     # Trigger reconnect if main listener died
                     if "kalshi-ws-bridge" in (task_name or ""):
                         logger.critical("Main WS listener died - triggering emergency reconnect")
-                        asyncio.create_task(self._emergency_reconnect())
+                        _emergency_task = asyncio.create_task(self._emergency_reconnect())
+                        def _on_emergency_done(t):
+                            if not t.cancelled() and t.exception():
+                                logger.error("Emergency reconnect task failed: %s", t.exception())
+                        _emergency_task.add_done_callback(_on_emergency_done)
 
             # Start the WS listener task (enqueues events)
             self._task = asyncio.create_task(
@@ -445,6 +640,12 @@ class KalshiWebSocketBridge:
                 name="kalshi-ws-ui-coalesce",
             )
             self._ui_coalesce_task.add_done_callback(_task_done_cb)
+            # Start the health logger task (logs book health every 60s)
+            self._health_logger_task = asyncio.create_task(
+                self._health_logger_loop(),
+                name="kalshi-ws-health-logger",
+            )
+            self._health_logger_task.add_done_callback(_task_done_cb)
             logger.info(
                 f"KalshiWebSocketBridge started — "
                 f"subscribed to {len(self._subscribed_tickers)} tickers"
@@ -457,7 +658,7 @@ class KalshiWebSocketBridge:
     async def stop(self) -> None:
         """Disconnect and stop forwarding."""
         self._shutdown.set()
-        for task in (self._task, self._forward_task, self._ui_coalesce_task):
+        for task in (self._task, self._forward_task, self._ui_coalesce_task, self._health_logger_task):
             if task and not task.done():
                 task.cancel()
                 try:
@@ -467,6 +668,7 @@ class KalshiWebSocketBridge:
         self._task = None
         self._forward_task = None
         self._ui_coalesce_task = None
+        self._health_logger_task = None
         try:
             await self._ws.close()
         except Exception as exc:
@@ -478,28 +680,194 @@ class KalshiWebSocketBridge:
             f"{self._forward_errors} errors"
         )
 
+    async def unsubscribe(self, tickers: List[str]) -> None:
+        """Remove tickers from subscription tracking to free up slots.
+        
+        Note: This removes from internal tracking; Kalshi WS doesn't support
+        true unsubscription, but removing from tracking allows new subscriptions.
+        """
+        to_remove = [t for t in tickers if t in self._subscribed_tickers]
+        if not to_remove:
+            return
+        
+        self._subscribed_tickers = [t for t in self._subscribed_tickers if t not in to_remove]
+        logger.debug(
+            "[WS-UNSUBSCRIBE] Removed %d tickers from tracking (total=%d/%d)",
+            len(to_remove), len(self._subscribed_tickers), _MAX_WS_SUBSCRIPTIONS
+        )
+
     async def subscribe(self, tickers: List[str]) -> None:
-        """Subscribe to additional tickers while running."""
+        """Subscribe to additional tickers while running.
+        
+        UPSTREAM FIX: Enforces hard cap on total subscriptions and applies
+        tiered shedding when approaching threshold. Rotates subscriptions when at cap.
+        """
         new = [t for t in tickers if t not in self._subscribed_tickers]
         if not new:
             return
+            
+        # UPSTREAM FIX: Check hard cap - smart rotation based on agent priority
+        current_count = len(self._subscribed_tickers)
+        needed_slots = len(new)
+        
+        if current_count + needed_slots > _MAX_WS_SUBSCRIPTIONS:
+            # Calculate how many to remove
+            overflow = (current_count + needed_slots) - _MAX_WS_SUBSCRIPTIONS
+            # SMART ROTATION: Keep tickers that are in the new request (agents want these)
+            # Remove tickers not in the new request (agents stopped caring about them)
+            new_set = set(new)
+            current_list = self._subscribed_tickers
+            
+            # Priority 1: Keep tickers that are in both current and new (still wanted)
+            # Priority 2: Keep new tickers (agents want these now)
+            # Priority 3: Remove old tickers not in new request
+            to_keep_priority = [t for t in current_list if t in new_set]
+            to_remove = [t for t in current_list if t not in new_set][:overflow]
+            
+            if len(to_remove) < overflow:
+                # Not enough non-priority tickers, must remove some that might be wanted
+                remaining_overflow = overflow - len(to_remove)
+                # Remove from the oldest non-new tickers
+                other_old = [t for t in current_list if t not in new_set and t not in to_remove]
+                to_remove.extend(other_old[:remaining_overflow])
+            
+            if to_remove:
+                await self.unsubscribe(to_remove)
+                logger.info(
+                    "[WS-SUBSCRIPTION-ROTATION] At cap %d/%d, unsubscribed %d tickers to make room for %d new",
+                    current_count, _MAX_WS_SUBSCRIPTIONS, len(to_remove), len(new)
+                )
+        
+        # Recalculate available slots after potential rotation
+        available_slots = _MAX_WS_SUBSCRIPTIONS - len(self._subscribed_tickers)
+        if len(new) > available_slots:
+            logger.warning(
+                "[WS-SUBSCRIPTION-CAP] Requested %d new tickers but only %d slots available — "
+                "truncating subscription list",
+                len(new), available_slots
+            )
+            new = new[:available_slots]
+        
+        # Check if we're in backpressure mode
+        _shed_quotes = (current_count + len(new)) > _WS_CRITICAL_THRESHOLD
+        
         try:
             ut = sorted(set(new))
             ch = KALSHI_WS_MARKET_TICKERS_CHUNK_SIZE
-            for i in range(0, len(ut), ch):
-                batch = ut[i : i + ch]
-                await self._ws.subscribe_quotes(batch)
-            for i in range(0, len(ut), ch):
-                batch = ut[i : i + ch]
-                await self._ws.subscribe_trades(batch)
+            
+            # UPSTREAM FIX: Priority order - fills first, then orderbook, trades, quotes
             for i in range(0, len(ut), ch):
                 batch = ut[i : i + ch]
                 await self._ws.subscribe_fills(batch)
+            
             await self._ws.subscribe_orderbooks_batch(ut)
+            
+            # BOOTSTRAP: Fetch REST orderbook snapshots to initialize books for newly subscribed tickers
+            # Kalshi WS does NOT send snapshots automatically - only deltas
+            logger.info("[SNAPSHOT-BOOTSTRAP] started for %d new tickers", len(ut))
+            from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+            store = get_kalshi_market_state_store()
+            client = get_kalshi_client()
+            
+            snapshot_batch_size = 10
+            snapshot_success = 0
+            snapshot_failed = 0
+            for i in range(0, len(ut), snapshot_batch_size):
+                batch = ut[i : i + snapshot_batch_size]
+                for ticker in batch:
+                    try:
+                        result = await client._request_with_resilience(
+                            "GET", f"/markets/{ticker}/orderbook",
+                            operation_name=f"get_orderbook({ticker})"
+                        )
+                        if result.success and result.data:
+                            data = result.data
+                            logger.info(f"[WS-SUBSCRIPTION] REST orderbook response for {ticker}")
+                            no_levels = []
+                            yes_levels = []
+                            orderbook_fp = data.get("orderbook_fp", {})
+                            if "no_dollars" in orderbook_fp:
+                                no_levels = [[float(price), float(size)] for price, size in orderbook_fp["no_dollars"]]
+                            if "yes_dollars" in orderbook_fp:
+                                yes_levels = [[float(price), float(size)] for price, size in orderbook_fp["yes_dollars"]]
+                            
+                            snapshot_msg = {
+                                "ticker": ticker,
+                                "type": "orderbook_snapshot",
+                                "no": no_levels,
+                                "yes": yes_levels,
+                            }
+                            store.apply_orderbook_message(snapshot_msg)
+                            
+                            n_levels = len(no_levels) + len(yes_levels)
+                            # Get the applied state to log bid/ask/mid for verification
+                            state = store.get(ticker)
+                            bid_str = f"{state.best_bid_cents}" if state and state.best_bid_cents else "None"
+                            ask_str = f"{state.best_ask_cents}" if state and state.best_ask_cents else "None"
+                            mid_str = f"{state.mid_cents}" if state and state.mid_cents else "None"
+                            logger.info(
+                                "[SNAPSHOT-BOOTSTRAP] complete market=%s levels=%d bid=%s ask=%s mid=%s source=REST",
+                                ticker, n_levels, bid_str, ask_str, mid_str
+                            )
+                            snapshot_success += 1
+                        else:
+                            snapshot_failed += 1
+                    except Exception as e:
+                        logger.warning(f"[WS-SUBSCRIPTION] Failed to fetch REST orderbook for {ticker}: {e}")
+                        snapshot_failed += 1
+                if i + snapshot_batch_size < len(ut):
+                    await asyncio.sleep(0.1)
+            
+            logger.info(
+                "[SNAPSHOT-BOOTSTRAP] completed for new tickers: succeeded=%d failed=%d",
+                snapshot_success, snapshot_failed
+            )
+            
+            # PRODUCTION INVARIANT: Only allow trading after all configured markets have snapshots
+            # Check that all 5 crypto 15m markets are initialized before enabling trading
+            from merid.event_venues.kalshi.market_state import (
+                get_kalshi_market_state_store,
+                _ALLOWED_UNDERLYINGS,
+                _ALLOWED_TIMEFRAMES,
+                _parse_market_ticker
+            )
+            store = get_kalshi_market_state_store()
+            all_markets_initialized = True
+            missing_snapshots = []
+            
+            with store._lock:
+                for ticker, state in store._states.items():
+                    underlying, timeframe = _parse_market_ticker(ticker)
+                    if underlying in _ALLOWED_UNDERLYINGS and timeframe in _ALLOWED_TIMEFRAMES:
+                        if not state.book_initialized:
+                            all_markets_initialized = False
+                            missing_snapshots.append(ticker)
+            
+            if all_markets_initialized:
+                logger.info(
+                    "[PRODUCTION-INVARIANT] All 5 crypto 15m markets have snapshots - trading ready"
+                )
+            else:
+                logger.warning(
+                    "[PRODUCTION-INVARIANT] Trading NOT ready - missing snapshots for markets: %s",
+                    missing_snapshots
+                )
+            
+            for i in range(0, len(ut), ch):
+                batch = ut[i : i + ch]
+                await self._ws.subscribe_trades(batch)
+            
+            if not _shed_quotes:
+                for i in range(0, len(ut), ch):
+                    batch = ut[i : i + ch]
+                    await self._ws.subscribe_quotes(batch)
+            else:
+                logger.warning("[WS-BACKPRESSURE] Skipping quote subscriptions for new tickers")
+            
             self._subscribed_tickers.extend(new)
             logger.info(
-                "WS bridge subscribed to %d additional tickers (orderbook batch)",
-                len(ut),
+                "WS bridge subscribed to %d additional tickers (total=%d/%d, shed_quotes=%s)",
+                len(ut), len(self._subscribed_tickers), _MAX_WS_SUBSCRIPTIONS, _shed_quotes
             )
         except Exception as exc:
             if not getattr(self, '_subscribe_warned', False):
@@ -548,27 +916,71 @@ class KalshiWebSocketBridge:
                 await publish_order_filled_for_ledger_fill(row)
             if is_new and row.side in ("yes", "no") and row.market_ticker:
                 pc = row.price_cents
-                get_position_cache().on_fill(
+                # BUG-FIX: await added - on_fill is now async with mutex protection
+                # PRODUCTION FIX: Pass client_order_id for TP target lookup
+                # BUG-FIX: Added fill_id for authoritative fill_source lookup from ledger
+                await get_position_cache().on_fill(
                     market_id=row.market_ticker,
                     contracts=row.count_fp,
                     price_cents=max(0, pc),
                     fee_cents=int(float(row.fee_cost) * 100),
                     side=row.side,
+                    client_order_id=getattr(row, 'client_order_id', None),
+                    fill_id=str(fill_id),  # BUG-FIX: Pass fill_id for ledger lookup
+                    action=(getattr(row, 'action', '') or 'buy').lower(),  # P0: action-aware close detection
                 )
         except Exception as exc:
             # P2: Fill handling failures are expected during high volume or temporary
             # connection issues. The HTTP poller will catch up and process these fills.
             # Logged at WARNING since fill loss is a data integrity concern.
+            
+            # BUG-4 FIX: Queue fills that fail during reconnection for later processing
+            # This prevents fill loss when fills ledger or position cache are unavailable
+            try:
+                async with self._fill_dead_letter_lock:
+                    if len(self._fill_dead_letter_queue) < self._max_dead_letter_size:
+                        # Check if this fill is already in the queue (avoid duplicates)
+                        fill_id = raw.get("fill_id") or raw.get("id")
+                        if not any(
+                            (f.get("fill_id") or f.get("id")) == fill_id 
+                            for f in self._fill_dead_letter_queue
+                        ):
+                            self._fill_dead_letter_queue.append(raw)
+                            logger.warning(
+                                "[WS_BRIDGE_FILL_QUEUED] Fill %s queued to dead-letter for later processing. "
+                                "Queue size: %d/%d",
+                                fill_id, len(self._fill_dead_letter_queue), self._max_dead_letter_size
+                            )
+                    else:
+                        # Dead-letter queue is full - this is a critical situation
+                        logger.error(
+                            "[WS_BRIDGE_FILL_DROPPED] Dead-letter queue full (%d/%d). "
+                            "Fill %s dropped - manual reconciliation required!",
+                            self._max_dead_letter_size, self._max_dead_letter_size,
+                            raw.get("fill_id") or raw.get("id")
+                        )
+            except Exception as queue_exc:
+                logger.error(
+                    "[WS_BRIDGE_FILL_QUEUE_ERROR] Failed to queue fill: %s",
+                    queue_exc
+                )
+            
             logger.warning("[WS_BRIDGE_FILL_DEFERRED] WebSocket fill handling deferred, HTTP will catch up: %s", exc)
 
     # ── Enqueue (called from WS listen callback) ─────────────────────────
 
     async def _enqueue_event(self, event: Any) -> None:
         """Put event into bounded queue; drop oldest if full.
-        
+
         Also tracks sequence numbers for gap detection and fill-specific metrics.
         EVENT-LOOP-FIX: Added backpressure check and queue depth metrics.
         """
+        # Track event type for 5s summary
+        if isinstance(event, dict):
+            event_type = event.get("type", "unknown")
+            self._interval_type_counts[event_type] += 1
+            self._type_counts[event_type] += 1
+
         # Track fill-specific metrics
         if isinstance(event, dict) and event.get("type") == "fill":
             self._fills_received += 1
@@ -640,20 +1052,51 @@ class KalshiWebSocketBridge:
 
     # ── Forward loop (drains queue → event bus) ──────────────────────────
 
+    async def _health_logger_loop(self) -> None:
+        """Periodic task to log book health for all tracked tickers."""
+        try:
+            while not self._shutdown.is_set():
+                try:
+                    from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                    store = get_kalshi_market_state_store()
+                    store.log_book_health()
+                except Exception as exc:
+                    logger.error("[WS-BRIDGE] Health logging error: %s", exc, exc_info=True)
+                
+                # Log health every 60 seconds
+                await asyncio.sleep(60.0)
+        except asyncio.CancelledError:
+            logger.info("[WS-BRIDGE] Health logger loop cancelled")
+        except Exception as exc:
+            logger.error("[WS-BRIDGE] Health logger loop crashed: %s", exc, exc_info=True)
+
     async def _forward_loop(self) -> None:
         """Continuously drain the queue and publish to the event bus.
-        
+
         EVENT-LOOP-FIX: Added batch processing and timeout budget to prevent
         blocking the event loop when processing large queues.
         """
         # Budget tracking for fair scheduling
         _MAX_BATCH_SIZE = 50  # Process max 50 events before yielding
         _BATCH_TIMEOUT_MS = 100  # Max time per batch before yielding
-        
+
         while not self._shutdown.is_set():
+            # Log 5s summary of event types
+            now = time.monotonic()
+            if now - self._last_summary_ts >= 5.0:
+                total_interval = sum(self._interval_type_counts.values())
+                if total_interval > 0:
+                    logger.info(
+                        "[WS-BRIDGE] 5s summary: total=%d, %s",
+                        total_interval,
+                        ", ".join(f"{k}={v}" for k, v in sorted(self._interval_type_counts.items()))
+                    )
+                self._interval_type_counts.clear()
+                self._last_summary_ts = now
+
             batch_count = 0
             batch_start = time.monotonic()
-            
+
             try:
                 # Process events in batches with timeout budget
                 while batch_count < _MAX_BATCH_SIZE:
@@ -692,6 +1135,21 @@ class KalshiWebSocketBridge:
     async def _publish_event(self, event: Any) -> None:
         """Forward a parsed WS event to the MERID event bus."""
         try:
+            # DIAGNOSTIC: Log all dict events to understand message routing
+            if isinstance(event, dict):
+                event_type = event.get("type") or event.get("channel") or ""
+                event_keys = list(event.keys()) if isinstance(event, dict) else "N/A"
+                has_bids = "bids" in event if isinstance(event, dict) else False
+                has_asks = "asks" in event if isinstance(event, dict) else False
+                has_delta_fp = "delta_fp" in event if isinstance(event, dict) else False
+                
+                # Log suspicious events (no bids/asks but has delta_fp)
+                if has_delta_fp and not (has_bids or has_asks):
+                    logger.warning(
+                        "[WS-BRIDGE] SUSPICIOUS EVENT: type=%s, keys=%s, has_delta_fp=%s, has_bids=%s, has_asks=%s",
+                        event_type, event_keys, has_delta_fp, has_bids, has_asks
+                    )
+            
             if isinstance(event, QuoteEvent):
                 payload = {
                     "market_id": event.market_id,
@@ -762,7 +1220,8 @@ class KalshiWebSocketBridge:
                     cache = get_position_cache()
                     if event.last_price:
                         price_cents = int(round(float(event.last_price) * 100)) if float(event.last_price) <= 1.0 else int(round(float(event.last_price)))
-                        cache.on_price_update(event.market_id, price_cents)
+                        # BUG-FIX: await added - on_price_update is now async with mutex protection
+                        await cache.on_price_update(event.market_id, price_cents)
                 except Exception as _exc:
                     logger.debug(f"Position cache price update error (ignored): {_exc}")
 
@@ -793,17 +1252,109 @@ class KalshiWebSocketBridge:
                 "orderbook_snapshot", "orderbook_delta",
             ):
                 event_type = event["type"]
+                # DIAGNOSTIC: Log snapshot events at INFO level to see if they arrive
+                if event_type == "orderbook_snapshot":
+                    logger.info(
+                        "[WS-BRIDGE] SNAPSHOT RECEIVED: ticker=%s, keys=%s, has_bids=%s, has_asks=%s",
+                        event.get("ticker", event.get("market_ticker", "unknown")),
+                        list(event.keys()) if isinstance(event, dict) else "N/A",
+                        "bids" in event if isinstance(event, dict) else False,
+                        "asks" in event if isinstance(event, dict) else False
+                    )
                 await self._publish_to_bus(f"kalshi:{event_type}", dict(event))
                 # Count moved to forward loop
                 self._type_counts[event_type] += 1
+                # DIAGNOSTIC: Log event structure
+                logger.debug(
+                    "[WS-BRIDGE] Orderbook event: type=%s, keys=%s, has_bids=%s, has_asks=%s",
+                    event_type,
+                    list(event.keys()) if isinstance(event, dict) else "N/A",
+                    "bids" in event if isinstance(event, dict) else False,
+                    "asks" in event if isinstance(event, dict) else False
+                )
                 # Feed orderbook data into KalshiMarketStateStore so book fields
                 # (mid_cents, spread_cents, depth_10c) stay live for CryptoAlertRouter
                 # and any other consumer that reads the state store directly.
                 try:
                     from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
-                    get_kalshi_market_state_store().apply_orderbook_message(event)
+                    # Extract the actual message body if nested
+                    msg_body = event.get("msg", event) if isinstance(event, dict) else event
+                    
+                    # Preserve type field from outer event if extracting nested msg
+                    if isinstance(event, dict) and isinstance(msg_body, dict) and "msg" in event:
+                        if "type" in event and "type" not in msg_body:
+                            msg_body["type"] = event["type"]
+                    
+                    # DIAGNOSTIC: Log message structure before passing to state store
+                    logger.debug(
+                        "[WS-BRIDGE] Passing to state store: event_type=%s, msg_body keys=%s, has_bids=%s, has_asks=%s",
+                        event.get("type"),
+                        list(msg_body.keys()) if isinstance(msg_body, dict) else "N/A",
+                        "bids" in msg_body if isinstance(msg_body, dict) else False,
+                        "asks" in msg_body if isinstance(msg_body, dict) else False
+                    )
+                    
+                    result = get_kalshi_market_state_store().apply_orderbook_message(msg_body)
+                    if result:
+                        logger.debug(
+                            "[WS-STATE-UPDATE] Updated market state for ticker=%s, mid_cents=%s, book_initialized=%s",
+                            result.ticker if hasattr(result, 'ticker') else 'unknown',
+                            result.mid_cents if hasattr(result, 'mid_cents') else None,
+                            result.book_initialized if hasattr(result, 'book_initialized') else False
+                        )
+                    else:
+                        logger.debug(
+                            "[WS-STATE-UPDATE] apply_orderbook_message returned None for event_type=%s, ticker=%s",
+                            event.get("type"), msg_body.get("ticker") if isinstance(msg_body, dict) else "N/A"
+                        )
                 except Exception as _exc:
-                    logger.debug("WS bridge → state store update error (ignored): %s", _exc)
+                    logger.error("WS bridge → state store update error: %s", _exc, exc_info=True)
+                
+                # CRITICAL FIX: Feed Kalshi market data into MarketMoodBus for sentiment analysis
+                # This fixes the root cause of neutral sentiment (0.0) → model_prob=0.5000 → prob_edge=0.000
+                try:
+                    from merid.swarm.market_mood_bus import get_market_mood_bus
+                    from config.kalshi_crypto_config import kalshi_ticker_to_asset
+                    
+                    body = event.get("msg", event)
+                    ticker = body.get("ticker") or body.get("market_ticker", "")
+                    asset = kalshi_ticker_to_asset(ticker) if ticker else None
+                    
+                    if asset:
+                        mood_bus = get_market_mood_bus()
+                        # Extract price, volume, spread, OI from orderbook message
+                        price = body.get("price") or body.get("mid_price")
+                        volume = body.get("volume_24h", 0)
+                        spread_bps = body.get("spread_bps", 0)
+                        open_interest = body.get("open_interest", 0)
+                        
+                        if price:
+                            mood_bus.update_kalshi_data(
+                                asset=asset,
+                                timeframe="15m",  # Use 15m as default for fast-moving crypto
+                                price=float(price),
+                                volume_24h=float(volume),
+                                spread_bps=float(spread_bps),
+                                open_interest=float(open_interest),
+                                ticker=ticker
+                            )
+                except Exception as _exc:
+                    logger.debug("WS bridge → MarketMoodBus update error (ignored): %s", _exc)
+                
+                # CRITICAL FIX: Update position cache with current prices for micro-scalp PnL calculation
+                # This fixes $0 PnL exits due to stale current_price_cents
+                try:
+                    from merid.event_venues.kalshi.position_cache import get_position_cache
+                    body = event.get("msg", event)
+                    ticker = body.get("ticker") or body.get("market_ticker", "")
+                    
+                    # Extract mid price from orderbook
+                    mid_price = body.get("mid_price") or body.get("price")
+                    if mid_price and ticker:
+                        cache = get_position_cache()
+                        await cache.update_position_price(ticker, int(mid_price))
+                except Exception as _exc:
+                    logger.debug("WS bridge → position price update error (ignored): %s", _exc)
 
             elif isinstance(event, dict) and event.get("type") in (
                 "order_group_update",
@@ -920,6 +1471,121 @@ class KalshiWebSocketBridge:
             pass
 
         return result
+
+    async def _process_dead_letter_queue(self) -> None:
+        """Process fills that were queued during reconnection.
+        
+        This ensures fills received during WebSocket downtime are not lost.
+        Called automatically after successful reconnection.
+        """
+        async with self._fill_dead_letter_lock:
+            if self._processing_dead_letter or not self._fill_dead_letter_queue:
+                return
+            self._processing_dead_letter = True
+            queue_to_process = self._fill_dead_letter_queue.copy()
+            self._fill_dead_letter_queue.clear()
+        
+        if not queue_to_process:
+            self._processing_dead_letter = False
+            return
+        
+        logger.info(
+            "[WS-DEAD-LETTER] Processing %d queued fills after reconnection",
+            len(queue_to_process)
+        )
+        
+        processed = 0
+        failed = 0
+        
+        for fill_data in queue_to_process:
+            try:
+                # Attempt to process the fill normally
+                await self._handle_kalshi_user_fill(fill_data)
+                processed += 1
+                # Small delay to not overwhelm the event loop
+                await asyncio.sleep(0.001)
+            except Exception as exc:
+                failed += 1
+                logger.warning(
+                    "[WS-DEAD-LETTER] Failed to process queued fill: %s",
+                    exc
+                )
+        
+        logger.info(
+            "[WS-DEAD-LETTER] Completed processing: %d success, %d failed",
+            processed, failed
+        )
+        
+        async with self._fill_dead_letter_lock:
+            self._processing_dead_letter = False
+
+    async def _sync_fills_with_rest_on_reconnect(self) -> None:
+        """Sync fills ledger with REST API after reconnection.
+        
+        This catches any fills that may have been missed during WebSocket
+        downtime by querying the Kalshi REST API for recent fills.
+        """
+        try:
+            from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+            from merid.event_venues.kalshi.kalshi_rest_client import get_kalshi_rest_client
+            
+            logger.info(
+                "[WS-RECONNECT-SYNC] Starting REST sync after reconnection "
+                "to capture missed fills"
+            )
+            
+            ledger = get_fills_ledger()
+            rest_client = await get_kalshi_rest_client()
+            
+            # Get recent fills from REST API (last 5 minutes)
+            # This is a safety net for any fills missed during WS downtime
+            recent_fills = await rest_client.get_recent_fills(
+                minutes=5,
+                limit=100
+            )
+            
+            new_fill_count = 0
+            duplicate_count = 0
+            
+            for fill in recent_fills:
+                try:
+                    # Convert REST fill format to WS fill format
+                    ws_fill = {
+                        "fill_id": fill.get("fill_id") or fill.get("id"),
+                        "trade_id": fill.get("trade_id"),
+                        "order_id": fill.get("order_id"),
+                        "market_ticker": fill.get("ticker") or fill.get("market_ticker"),
+                        "side": fill.get("side", "yes").lower(),
+                        "price_cents": int(fill.get("price", 0) * 100),
+                        "count": int(fill.get("count") or fill.get("contracts", 1)),
+                        "action": fill.get("action", "buy"),
+                        "ts": fill.get("created_time") or fill.get("ts"),
+                        "client_order_id": fill.get("client_order_id"),
+                    }
+                    
+                    # Ingest into fills ledger
+                    is_new = await ledger.ingest_ws_fill(ws_fill)
+                    if is_new:
+                        new_fill_count += 1
+                    else:
+                        duplicate_count += 1
+                        
+                except Exception as fill_exc:
+                    logger.debug(
+                        "[WS-RECONNECT-SYNC] Error processing REST fill: %s",
+                        fill_exc
+                    )
+            
+            logger.info(
+                "[WS-RECONNECT-SYNC] REST sync complete: %d new fills, %d duplicates",
+                new_fill_count, duplicate_count
+            )
+            
+        except Exception as exc:
+            logger.warning(
+                "[WS-RECONNECT-SYNC] Failed to sync fills with REST: %s",
+                exc
+            )
 
 
 # ── Singleton ────────────────────────────────────────────────────────────
