@@ -43,6 +43,11 @@ from config.kalshi_universe import ACTIVE_CRYPTO_WS_TIMEFRAMES
 from merid.event_venues.kalshi import get_kalshi_client
 from merid.event_venues.kalshi.models import KalshiConfig
 from merid.event_venues.kalshi.ws import KALSHI_WS_MARKET_TICKERS_CHUNK_SIZE, KalshiWebSocket
+from merid.event_venues.kalshi.market_constraints import (
+    ALLOWED_TIMEFRAMES as _ALLOWED_TIMEFRAMES,
+    ALLOWED_UNDERLYINGS as _ALLOWED_UNDERLYINGS,
+)
+from merid.event_venues.kalshi.market_state import _parse_market_ticker
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.ws_bridge")
@@ -90,14 +95,14 @@ _UI_COALESCE_INTERVAL = 0.100  # 100ms
 _MAX_WS_SUBSCRIPTIONS = int(os.getenv("MERID_KALSHI_MAX_WS_SUBS", "150"))  # Raised from 100 to 150 tickers
 _WS_CRITICAL_THRESHOLD = int(os.getenv("MERID_KALSHI_WS_CRITICAL", "120"))  # Raised from 80 to 120 tickers
 
-# Subscription priority tiers (for shedding when approaching cap)
-_SUBSCRIPTION_PRIORITY_CRITICAL = ["fills"]  # Never drop fills
+# ── Subscription priority configuration ───────────────────────────────────────
+_SUBSCRIPTION_PRIORITY_CRITICAL = ["fills"]  # Never drop
 _SUBSCRIPTION_PRIORITY_MEDIUM = ["orderbooks", "trades"]  # Drop after critical
 _SUBSCRIPTION_PRIORITY_LOW = ["quotes"]  # Drop first when backpressure
 
 # ALLOWED_SYMBOLS whitelist for 15m crypto markets (hard filter before subscription)
 _ALLOWED_SYMBOLS = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
-_ALLOWED_TIMEFRAMES = {"15m", "15M"}  # Only 15-minute markets
+# Note: _ALLOWED_TIMEFRAMES is imported from market_state.py
 
 
 class KalshiWebSocketBridge:
@@ -529,11 +534,16 @@ class KalshiWebSocketBridge:
                                     }
                                     store.apply_orderbook_message(snapshot_msg)
                                     
-                                    # Log snapshot bootstrap completion per market
+                                    # Log snapshot bootstrap completion per market with bid/ask/mid for production verification
                                     n_levels = len(no_levels) + len(yes_levels)
+                                    # Get the applied state to log bid/ask/mid for verification
+                                    state = store.get(ticker)
+                                    bid_str = f"{state.best_bid_cents}" if state and state.best_bid_cents else "None"
+                                    ask_str = f"{state.best_ask_cents}" if state and state.best_ask_cents else "None"
+                                    mid_str = f"{state.mid_cents}" if state and state.mid_cents else "None"
                                     logger.info(
-                                        "[MARKET-STATE] snapshot_bootstrap_complete market=%s levels=%d source=REST",
-                                        ticker, n_levels
+                                        "[SNAPSHOT-BOOTSTRAP] complete market=%s levels=%d bid=%s ask=%s mid=%s source=REST",
+                                        ticker, n_levels, bid_str, ask_str, mid_str
                                     )
                                     snapshot_success += 1
                                 else:
@@ -549,6 +559,29 @@ class KalshiWebSocketBridge:
                         "[SNAPSHOT-BOOTSTRAP] completed markets=%d/%d succeeded=%d failed=%d",
                         snapshot_success, len(ut), snapshot_success, snapshot_failed
                     )
+                    
+                    # PRODUCTION INVARIANT: Only allow trading after all configured markets have snapshots
+                    # Check that all 5 crypto 15m markets are initialized before enabling trading
+                    all_markets_initialized = True
+                    missing_snapshots = []
+                    
+                    with store._lock:
+                        for ticker, state in store._states.items():
+                            underlying, timeframe = _parse_market_ticker(ticker)
+                            if underlying in _ALLOWED_UNDERLYINGS and timeframe in _ALLOWED_TIMEFRAMES:
+                                if not state.book_initialized:
+                                    all_markets_initialized = False
+                                    missing_snapshots.append(ticker)
+                    
+                    if all_markets_initialized:
+                        logger.info(
+                            "[PRODUCTION-INVARIANT] All 5 crypto 15m markets have snapshots - trading ready"
+                        )
+                    else:
+                        logger.warning(
+                            "[PRODUCTION-INVARIANT] Trading NOT ready - missing snapshots for markets: %s",
+                            missing_snapshots
+                        )
                     
                     # Log initial health state after bootstrap (Step 1: Confirm orderbook bootstrap is solid)
                     store.log_book_health()
