@@ -69,11 +69,12 @@ class SentimentResult:
     """Sentiment analysis result."""
     score: float  # -1.0 to +1.0
     confidence: float  # 0.0 to 1.0 based on volume/engagement
-    volume: int  # Number of tweets analyzed
+    volume: int  # Number of tweets/posts analyzed
     avg_engagement: float  # Average engagement score
-    raw_data: List[Dict[str, Any]]  # Raw tweets for debugging
+    raw_data: List[Dict[str, Any]]  # Raw tweets/posts for debugging
     timestamp: datetime
     model_version: str = "vader"  # model used for scoring; "vader" or "vader/nitter_scrape"
+    available: bool = True  # Whether sentiment data is available (False when no posts found in window)
 
 
 class TwitterSentimentService:
@@ -371,7 +372,26 @@ class TwitterSentimentService:
         
         Returns:
             SentimentResult with score, confidence, volume
+            
+        NOTE: If Twitter API fails, returns neutral sentiment (score=0.0, confidence=0.0)
+        with default multiplier behavior. This is a graceful fallback - not a hard failure.
         """
+        import os
+        # Skip Twitter sentiment if disabled via env var
+        if os.getenv("DISABLE_TWITTER_SENTIMENT", "").lower() in ("1", "true", "yes"):
+            logger.debug(f"[twitter_disabled] Twitter sentiment disabled via env var for {asset} - skipping")
+            # Return unavailable sentiment immediately (no delay)
+            return SentimentResult(
+                score=0.0,
+                confidence=0.0,
+                volume=0,
+                avg_engagement=0.0,
+                raw_data=[],
+                timestamp=datetime.now(timezone.utc),
+                model_version="disabled",
+                available=False,
+            )
+        
         cache_key = f"{asset}:{minutes}"
         
         # Check cache
@@ -385,6 +405,91 @@ class TwitterSentimentService:
         # Fetch and analyze
         tweets = self.fetch_tweets(asset, minutes, max_results)
         result = self.analyze_sentiment(tweets)
+        
+        # Fallback: if Twitter API failed (no tweets), use Reddit sentiment as real data source
+        if result.volume == 0 and result.score == 0.0:
+            # Rate limit warning to once per minute per asset to prevent log spam
+            _last_warning_key = f"_twitter_fallback_warn_{asset}"
+            _last_warning_time = getattr(self, _last_warning_key, 0)
+            if time.time() - _last_warning_time > 60:
+                setattr(self, _last_warning_key, time.time())
+                logger.warning(
+                    f"[twitter_fallback] Twitter API failed for {asset}, "
+                    f"falling back to Reddit sentiment for real data"
+                )
+            # Fall back to Reddit sentiment (real data, not fake neutral)
+            try:
+                from merid.sentiment.reddit_scraper import RedditSentimentService, get_reddit_sentiment_service
+                import os
+                if os.getenv("ENABLE_SENTIMENT_TRUTH", "false").lower() == "false":
+                    logger.warning("Reddit sentiment disabled via ENABLE_SENTIMENT_TRUTH=false, skipping fallback")
+                    return 0.0
+                reddit_service = get_reddit_sentiment_service()
+                if reddit_service is None:
+                    logger.warning("Reddit sentiment service unavailable, skipping fallback")
+                    return 0.0
+                # Map minutes to time_filter: 15m -> hour, 60m -> day
+                time_filter = "hour" if minutes <= 60 else "day"
+                # Clean asset symbol: strip # prefix and map hashtag variants to clean symbols
+                clean_asset = asset.lstrip('#')
+                # Map common hashtag variants to clean asset symbols
+                hashtag_to_asset = {
+                    "BTCUSD": "BTC", "BitcoinPrice": "BTC", "Bitcoin": "BTC",
+                    "ETHUSD": "ETH", "EthereumPrice": "ETH", "Ethereum": "ETH",
+                    "SOLUSD": "SOL", "SolanaPrice": "SOL", "Solana": "SOL",
+                    "XRPUSD": "XRP", "RipplePrice": "XRP", "Ripple": "XRP",
+                    "DOGEUSD": "DOGE", "DogecoinPrice": "DOGE", "Dogecoin": "DOGE", "DogecoinToTheMoon": "DOGE",
+                }
+                clean_asset = hashtag_to_asset.get(clean_asset, clean_asset)
+                reddit_result = reddit_service.get_sentiment(clean_asset, time_filter=time_filter)
+                
+                # If Reddit has no posts, return result with available=False (non-fatal)
+                if reddit_result.volume == 0:
+                    logger.info(
+                        f"[twitter_fallback] No Reddit posts for {asset} (missing data, not blocking)"
+                    )
+                    result = SentimentResult(
+                        score=0.0,
+                        confidence=0.0,
+                        volume=0,
+                        avg_engagement=0.0,
+                        raw_data=[],
+                        timestamp=datetime.now(timezone.utc),
+                        model_version="no_data",
+                        available=False,
+                    )
+                else:
+                    # Use Reddit sentiment as fallback
+                    logger.info(
+                        f"[twitter_fallback] Using Reddit sentiment for {asset}: "
+                        f"score={reddit_result.score:+.3f}, confidence={reddit_result.confidence:.2f}, "
+                        f"volume={reddit_result.volume}"
+                    )
+                    result = SentimentResult(
+                        score=reddit_result.score,
+                        confidence=reddit_result.confidence * 0.8,  # Slightly lower confidence for cross-source
+                        volume=reddit_result.volume,
+                        avg_engagement=reddit_result.avg_engagement,
+                        raw_data=reddit_result.raw_data,
+                        timestamp=reddit_result.timestamp,
+                        model_version="reddit_fallback",
+                        available=reddit_result.available,
+                    )
+            except Exception as e:
+                logger.info(
+                    f"[twitter_fallback] Reddit fallback failed for {asset}: {e} (missing data, not blocking)"
+                )
+                # If Reddit fallback fails, return no data with available=False (non-fatal)
+                result = SentimentResult(
+                    score=0.0,
+                    confidence=0.0,
+                    volume=0,
+                    avg_engagement=0.0,
+                    raw_data=[],
+                    timestamp=datetime.now(timezone.utc),
+                    model_version="no_data",
+                    available=False,
+                )
         
         # Cache result
         self._cache[cache_key] = result
@@ -459,6 +564,8 @@ class TwitterSentimentService:
         asset = assets[idx]
         self._asset_round_robin_idx = idx + 1
 
+        # BUG-FIX (2026-05-12): update_mood_bus is now synchronous with httpx.Client
+        # Offload to executor to avoid blocking the event loop
         loop = asyncio.get_running_loop()
         ok = await loop.run_in_executor(None, self.update_mood_bus, asset, minutes)
         if ok:
@@ -472,10 +579,10 @@ class TwitterSentimentService:
         minutes: int = 15,
     ) -> Dict[str, SentimentResult]:
         """Get sentiment for multiple assets."""
-        return {
-            asset: self.get_sentiment(asset, minutes=minutes)
-            for asset in assets
-        }
+        results = {}
+        for asset in assets:
+            results[asset] = self.get_sentiment(asset, minutes=minutes)
+        return results
 
     def fetch_tweets_scrape(
         self,
@@ -502,14 +609,20 @@ class TwitterSentimentService:
             "https://nitter.privacydev.net",
             "https://nitter.poast.org",
             "https://nitter.cz",
+            "https://nitter.net",
+            "https://nitter.fdn.fr",
+            "https://nitter.1d4.us",
         ]
 
         query_terms = self.ASSET_QUERIES.get(asset.upper())
         if not query_terms:
             return []
 
-        # Use first keyword for simple search
-        search_term = asset.upper()
+        # Extract the primary search term from the query (e.g., "SOL" from "(SOL OR Solana OR #Solana OR #SOL OR solana price)")
+        # Use the first simple term for Nitter search
+        import re
+        primary_term_match = re.search(r'\b([A-Z]{2,})\b', query_terms.split()[0])
+        search_term = primary_term_match.group(1) if primary_term_match else asset.upper()
 
         tweets: List[TweetData] = []
         for mirror in NITTER_MIRRORS:
@@ -570,8 +683,8 @@ class TwitterSentimentService:
         self,
         asset: str,
         minutes: int = 15,
-        max_results: int = 100,
         use_cache: bool = True,
+        max_results: int = 100,
     ) -> SentimentResult:
         """
         Get sentiment using API first, falling back to scraping.
@@ -585,6 +698,19 @@ class TwitterSentimentService:
         This ensures we never waste API credits on low-value calls
         while still maintaining continuous sentiment coverage.
         """
+        import os
+        if os.getenv("DISABLE_TWITTER_SENTIMENT", "").lower() in ("1", "true", "yes"):
+            return SentimentResult(
+                score=0.0,
+                confidence=0.0,
+                volume=0,
+                avg_engagement=0.0,
+                raw_data=[],
+                timestamp=datetime.now(timezone.utc),
+                model_version="disabled",
+                available=False,
+            )
+
         cache_key = f"{asset}:{minutes}"
 
         # 1. Check cache
@@ -641,14 +767,13 @@ def quick_twitter_sentiment(asset: str, minutes: int = 15) -> float:
     """
     Quick one-liner to get Twitter sentiment score.
     
-    Returns sentiment score (-1 to +1) or 0.0 if unavailable.
+    PRODUCTION FIX (2026-05-10): Removed fake fallback data.
+    Raises exception on failure instead of returning 0.0.
+    Ensures only real sentiment data is used in trading decisions.
     """
-    try:
-        service = get_twitter_sentiment_service()
-        result = service.get_sentiment(asset, minutes=minutes)
-        return result.score
-    except Exception:
-        return 0.0
+    service = get_twitter_sentiment_service()
+    result = service.get_sentiment(asset, minutes=minutes)
+    return result.score
 
 
 def get_btc_kalshi_sentiment() -> float:

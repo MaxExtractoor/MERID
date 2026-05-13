@@ -9,7 +9,7 @@ methods for sentiment-focused workflows.
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, List, Any, Callable
 import asyncio
 from utils.logger import get_logger
@@ -42,6 +42,11 @@ class UnifiedSentiment:
     # Context
     fear_greed_index: int  # 0-100
     trend_regime: str  # "fear", "neutral", "greed", "extreme_fear", "extreme_greed"
+    
+    # Optional fields for Kalshi PM integration and fallback tracking
+    kalshi_pm_bias: float = 0.0
+    kalshi_pm_confidence: float = 0.5
+    is_fallback: bool = False  # True if this is synthetic/neutral fallback data
     
     def should_reduce_size(self) -> bool:
         """Check if position sizes should be reduced based on sentiment."""
@@ -158,7 +163,16 @@ class SentimentBus:
                 await asyncio.sleep(30)
     
     async def _reddit_update_loop(self):
-        """Background loop for Reddit sentiment updates."""
+        """Background loop for Reddit sentiment updates.
+
+        LEAN 15m KALSHI STACK (2026-05-13): Disabled when ENABLE_SENTIMENT_TRUTH=false
+        to prevent native crashes during Reddit API calls.
+        """
+        import os
+        if os.getenv("ENABLE_SENTIMENT_TRUTH", "false").lower() == "false":
+            logger.warning("Reddit update loop disabled via ENABLE_SENTIMENT_TRUTH=false")
+            return
+
         # Offset start to avoid thundering herd
         await asyncio.sleep(30)
 
@@ -167,8 +181,13 @@ class SentimentBus:
                 from merid.sentiment.reddit_scraper import get_reddit_sentiment_service
                 reddit = get_reddit_sentiment_service()
 
-                # update_mood_bus() uses sync requests.get — offload to executor
-                # so it cannot block the event loop for 3-4s per asset call.
+                if reddit is None:
+                    logger.warning("Reddit sentiment service unavailable, skipping update")
+                    await asyncio.sleep(60)
+                    continue
+
+                # BUG-FIX (2026-05-12): update_mood_bus is now synchronous with httpx.Client
+                # Offload to executor to avoid blocking the event loop
                 loop = asyncio.get_running_loop()
                 assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
                 for asset in assets:
@@ -209,7 +228,27 @@ class SentimentBus:
                 if context:
                     return self._context_to_sentiment(asset, context)
             
-            return None
+            # FALLBACK: Return neutral sentiment instead of None so model can still produce edges
+            # This prevents blocking all trades when sentiment service is warming up or unavailable
+            logger.debug(f"No sentiment context for {asset}, returning neutral fallback")
+            return UnifiedSentiment(
+                asset=asset,
+                timestamp=datetime.now(timezone.utc),
+                twitter_score=0.0,
+                twitter_confidence=0.5,
+                twitter_volume=0,
+                reddit_score=0.0,
+                reddit_confidence=0.5,
+                reddit_volume=0,
+                combined_social_sentiment=0.0,  # Neutral
+                social_confidence=0.5,
+                vader_signal="neutral",
+                fear_greed_index=50,  # Neutral
+                trend_regime="neutral",
+                kalshi_pm_bias=0.0,
+                kalshi_pm_confidence=0.5,
+                is_fallback=True,  # Mark as fallback data
+            )
             
         except Exception as exc:
             logger.debug(f"Sentiment fetch failed for {asset}: {exc}")
@@ -221,6 +260,11 @@ class SentimentBus:
         context: Any,  # SentimentContext
     ) -> UnifiedSentiment:
         """Convert MarketMoodBus context to UnifiedSentiment."""
+        
+        # CRITICAL FIX: If context is a baseline fallback (has "baseline_fallback" tag),
+        # use only social_sentiment to preserve the small non-zero value
+        # This prevents model_prob=0.5000 for assets without market data
+        is_baseline_fallback = hasattr(context, 'tags') and "baseline_fallback" in context.tags
         
         # Get CFGI fear/greed if available (more accurate than stored value)
         try:
@@ -243,7 +287,11 @@ class SentimentBus:
             regime = "extreme_greed"
         
         # Calculate combined social sentiment
-        combined = (context.social_sentiment + context.news_sentiment) / 2
+        # For baseline fallback, use only social_sentiment to preserve the small non-zero value
+        if is_baseline_fallback:
+            combined = context.social_sentiment
+        else:
+            combined = (context.social_sentiment + context.news_sentiment) / 2
         
         # Get VADER signal
         from merid.sentiment.vader_utils import vader_signal
@@ -314,7 +362,7 @@ class SentimentBus:
         try:
             from merid.sentiment.reddit_scraper import get_reddit_sentiment_service
             reddit = get_reddit_sentiment_service()
-            if reddit.update_mood_bus(asset):
+            if reddit is not None and reddit.update_mood_bus(asset):
                 success = True
         except Exception as exc:
             logger.debug(f"Reddit refresh failed: {exc}")

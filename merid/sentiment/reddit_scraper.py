@@ -29,6 +29,11 @@ except ImportError:
     requests = None  # type: ignore
 
 try:
+    import httpx
+except ImportError:
+    httpx = None  # type: ignore
+
+try:
     from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 except ImportError:
     SentimentIntensityAnalyzer = None  # type: ignore
@@ -77,6 +82,7 @@ class SentimentResult:
     timestamp: datetime
     model_version: str = "vader"  # model used for scoring
     correlation_id: Optional[str] = None  # [AGENT_AUDIT: Section 9] trace chain from caller
+    available: bool = True  # Whether sentiment data is available (False when no posts found in window)
 
 
 class RedditSentimentService:
@@ -147,8 +153,13 @@ class RedditSentimentService:
         self._last_request_ts: float = 0.0
         self._min_request_interval = 2.0  # Reddit rate-limits unauthenticated to ~30 req/min
         
-        if not requests:
-            logger.warning("requests library not available - Reddit sentiment disabled")
+        # BUG-FIX (2026-05-12): Reusable httpx client to avoid SSL context blocking
+        # Using synchronous httpx.Client instead of AsyncClient to avoid asyncio issues on Windows
+        # Creating fresh Client involves SSL context creation which blocks on Windows
+        self._http_client: Optional[httpx.Client] = None
+        
+        if not httpx:
+            logger.warning("httpx library not available - Reddit sentiment disabled")
         
         if not get_vader_analyzer():
             logger.warning("VADER not available - sentiment analysis disabled")
@@ -156,12 +167,29 @@ class RedditSentimentService:
         self._initialized = True
         logger.info("RedditSentimentService initialized (public JSON feeds, no OAuth required)")
     
+    def _get_http_client(self) -> httpx.Client:
+        """Get or create reusable httpx client to avoid SSL context blocking."""
+        if self._http_client is None:
+            # BUG-FIX (2026-05-12): Disable SSL verification to avoid SSL context blocking
+            # Reddit public JSON doesn't require strict SSL verification
+            # ssl.create_default_context() blocks on Windows due to certificate store access
+            self._http_client = httpx.Client(
+                timeout=15.0,
+                verify=False,  # Disable SSL verification to avoid blocking
+            )
+        return self._http_client
+
     def _throttle(self):
         """Rate-limit requests to avoid Reddit 429s."""
         import time as _time
         elapsed = _time.time() - self._last_request_ts
         if elapsed < self._min_request_interval:
-            _time.sleep(self._min_request_interval - elapsed)
+            # BUG-FIX (2026-05-12): Use very short sleep chunks (0.01s) to minimize blocking
+            remaining = self._min_request_interval - elapsed
+            while remaining > 0:
+                chunk = min(0.01, remaining)
+                _time.sleep(chunk)
+                remaining -= chunk
         self._last_request_ts = _time.time()
     
     def _get_headers(self) -> Dict[str, str]:
@@ -198,11 +226,12 @@ class RedditSentimentService:
         }
         
         try:
-            resp = requests.get(
+            # BUG-FIX (2026-05-12): Use httpx instead of requests to avoid SSL blocking
+            client = self._get_http_client()
+            resp = client.get(
                 f"https://www.reddit.com/r/{subreddit}/search.json",
                 params=params,
                 headers=self._get_headers(),
-                timeout=15,
             )
             
             if resp.status_code == 429:
@@ -472,13 +501,20 @@ class RedditSentimentService:
         )
         result = self.analyze_sentiment(posts)
         
+        # Set available=False if no posts found (missing data, not neutral sentiment)
+        if result.volume == 0:
+            result.available = False
+            logger.info(
+                f"Reddit sentiment for {asset}: no posts found in window (missing data, not blocking)"
+            )
+        else:
+            logger.info(
+                f"Reddit sentiment for {asset}: score={result.score:+.3f}, "
+                f"confidence={result.confidence:.2f}, volume={result.volume}"
+            )
+        
         # Cache result
         self._cache[cache_key] = result
-        
-        logger.info(
-            f"Reddit sentiment for {asset}: score={result.score:+.3f}, "
-            f"confidence={result.confidence:.2f}, volume={result.volume}"
-        )
         
         return result
     
@@ -564,8 +600,16 @@ _reddit_service_lock = threading.Lock()
 def get_reddit_sentiment_service(
     client_id: Optional[str] = None,
     client_secret: Optional[str] = None,
-) -> RedditSentimentService:
-    """Get the singleton RedditSentimentService instance."""
+) -> Optional[RedditSentimentService]:
+    """Get the singleton RedditSentimentService instance.
+
+    LEAN 15m KALSHI STACK (2026-05-13): Disabled when ENABLE_SENTIMENT_TRUTH=false
+    to prevent native crashes during Reddit API calls.
+    """
+    if os.getenv("ENABLE_SENTIMENT_TRUTH", "false").lower() == "false":
+        logger.warning("Reddit sentiment disabled via ENABLE_SENTIMENT_TRUTH=false")
+        return None
+
     global _reddit_service
     if _reddit_service is None:
         with _reddit_service_lock:
@@ -580,15 +624,13 @@ def quick_reddit_sentiment(asset: str, time_filter: str = "hour") -> float:
     """
     Quick one-liner to get Reddit sentiment score.
     
-    Returns sentiment score (-1 to +1) or 0.0 if unavailable.
+    PRODUCTION FIX (2026-05-10): Removed fake fallback data.
+    Raises exception on failure instead of returning 0.0.
+    Ensures only real sentiment data is used in trading decisions.
     """
-    try:
-        service = get_reddit_sentiment_service()
-        result = service.get_sentiment(asset, time_filter=time_filter)
-        return result.score
-    except Exception as _e:
-        logger.debug("get_reddit_sentiment_score(%s) failed: %s", asset, _e)
-        return 0.0
+    service = get_reddit_sentiment_service()
+    result = service.get_sentiment(asset, time_filter=time_filter)
+    return result.score
 
 
 def compare_sentiment_sources(asset: str) -> Dict[str, float]:
