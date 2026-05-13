@@ -4059,7 +4059,18 @@ async def _app_lifespan(application: FastAPI):
         _startup_state["services"]["startup_reconciliation"] = {"status": "skipped", "reason": "validation_mode"}
     else:
         async def _startup_reconciliation_async() -> None:
-            """Background task for startup reconciliation."""
+            """Background task for startup reconciliation.
+
+            LEAN 15m KALSHI STACK (2026-05-13): Skip when ENABLE_VENUE_RECONCILER=false
+            to prevent blocking main-loop round-trips causing timeouts.
+            BankrollServiceV2 + PositionCache + FillsLedger are sufficient for consistency.
+            """
+            import os as _recon_os
+            _recon_disabled = _recon_os.getenv("ENABLE_VENUE_RECONCILER", "false").lower() == "false"
+            if _recon_disabled:
+                logger.info("[LEAN KALSHI] Venue reconciler disabled (ENABLE_VENUE_RECONCILER=false)")
+                return
+
             try:
                 from merid.reconciliation import reconcile_all_venues, has_critical_discrepancies
                 logger.info("Background startup reconciliation running...")
@@ -4072,7 +4083,6 @@ async def _app_lifespan(application: FastAPI):
                     "Background reconciliation complete: %d discrepancies (%d critical, %d warning)",
                     len(discrepancies), n_crit, n_warn,
                 )
-                import os as _recon_os
                 _recon_mode = _recon_os.getenv("MERID_PM_TRADING_MODE", "paper")
                 if has_critical_discrepancies() and _recon_mode != "paper":
                     logger.warning("⚠️  Execution gate BLOCKED (critical reconciliation issues)")

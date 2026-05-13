@@ -1710,6 +1710,14 @@ class AgentGrid:
                 )
                 # Could trigger notification to operator dashboard here
         
+        # LEAN 15m KALSHI STACK (2026-05-13): Skip auto-promoter when ENABLE_AUTO_PROMOTER=false
+        # to prevent loading thousands of promotion states on each agent grid init/cycle
+        import os as _ap_os
+        _ap_disabled = _ap_os.getenv("ENABLE_AUTO_PROMOTER", "false").lower() == "false"
+        if _ap_disabled:
+            logger.info("[LEAN KALSHI] AutoPromoter disabled (ENABLE_AUTO_PROMOTER=false)")
+            return
+
         # Register the callback
         self._auto_promoter.register_callback(on_promotion_transition)
         
