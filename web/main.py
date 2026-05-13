@@ -3392,15 +3392,22 @@ async def _app_lifespan(application: FastAPI):
         logger.warning(f"⚠️  CryptoAlertRouter failed to start: {e}")
 
     # SpotBasisTracker — measures Coinbase spot vs Kalshi-implied spot basis per asset
-    try:
-        from merid.alignment import get_spot_basis_tracker as _get_basis_tracker
-        _basis_tracker = _get_basis_tracker()
-        _basis_tracker.start()
-        logger.info("✅ SpotBasisTracker started (1s tick, BTC/ETH/SOL/XRP/DOGE)")
-        _startup_state["services"]["spot_basis_tracker"] = {"status": "running", "started_at": time.time()}
-    except Exception as _basis_exc:
-        logger.warning("⚠️  SpotBasisTracker failed to start (non-fatal): %s", _basis_exc)
-        _startup_state["services"]["spot_basis_tracker"] = {"status": "failed", "error": str(_basis_exc)}
+    # LEAN 15m KALSHI STACK (2026-05-13): Skip when ENABLE_SPOT_BASIS_TRACKER=false to prevent hangs/timeout risk
+    # Basis features from CryptoSignalsAgent/microstructure feed are sufficient for 15m direction bets
+    _basis_disabled = __import__("os").environ.get("ENABLE_SPOT_BASIS_TRACKER", "false").lower() == "false"
+    if _basis_disabled:
+        logger.info("[LEAN KALSHI] SpotBasisTracker skipped (ENABLE_SPOT_BASIS_TRACKER=false)")
+        _startup_state["services"]["spot_basis_tracker"] = {"status": "skipped", "reason": "basis_disabled"}
+    else:
+        try:
+            from merid.alignment import get_spot_basis_tracker as _get_basis_tracker
+            _basis_tracker = _get_basis_tracker()
+            _basis_tracker.start()
+            logger.info("✅ SpotBasisTracker started (1s tick, BTC/ETH/SOL/XRP/DOGE)")
+            _startup_state["services"]["spot_basis_tracker"] = {"status": "running", "started_at": time.time()}
+        except Exception as _basis_exc:
+            logger.warning("⚠️  SpotBasisTracker failed to start (non-fatal): %s", _basis_exc)
+            _startup_state["services"]["spot_basis_tracker"] = {"status": "failed", "error": str(_basis_exc)}
 
     # CryptoRTIMonitor + CryptoTermStructureModel lifecycle
     # RTI monitor is registered as a singleton so TSM can call get_global_crypto_rti_monitor()
