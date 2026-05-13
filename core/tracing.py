@@ -59,33 +59,42 @@ class TracingManager:
         self._setup_tracing()
         
     def _setup_tracing(self):
-        """Initialize OpenTelemetry tracing."""
+        """Initialize OpenTelemetry tracing.
+
+        LEAN 15m KALSHI STACK (2026-05-13): Added safety wrapper to prevent native crashes
+        during JaegerExporter initialization. Falls back to no-op tracing if initialization fails.
+        """
         try:
             # Configure Jaeger exporter — host/port from env so containerised deploys work
             jaeger_exporter = JaegerExporter(
                 agent_host_name=os.getenv("JAEGER_AGENT_HOST", "localhost"),
                 agent_port=int(os.getenv("JAEGER_AGENT_PORT", "6831")),
             )
-            
+
             # Set up trace provider
             self.tracer_provider = TracerProvider(
                 resource=RESOURCE.create(
                     {SERVICE_NAME: self.service_name}
                 )
             )
-            
+
             # Add span processor
             span_processor = BatchSpanProcessor(jaeger_exporter)
             self.tracer_provider.add_span_processor(span_processor)
-            
+
             # Set global tracer
             trace.set_tracer_provider(self.tracer_provider)
             self.tracer = trace.get_tracer(__name__)
-            
+
             logger.info(f"Tracing initialized for {self.service_name}")
-            
+
+        except ImportError as e:
+            logger.warning(f"OpenTelemetry import failed (tracing disabled): {e}")
+            # Fall back to no-op tracer
+            self.tracer = trace.get_tracer(__name__)
         except Exception as e:
-            logger.warning(f"Failed to initialize tracing: {e}")
+            logger.warning(f"Failed to initialize tracing (using no-op): {e}")
+            # Fall back to no-op tracer
             self.tracer = trace.get_tracer(__name__)
     
     def create_span(
@@ -146,8 +155,23 @@ class TracingManager:
         return context.to_dict()
 
 
-# Global tracing manager
-tracing_manager = TracingManager()
+# Global tracing manager - initialized lazily to avoid import-time crashes
+tracing_manager = None
+
+
+def get_tracing_manager() -> TracingManager:
+    """Get or create the global tracing manager (lazy initialization)."""
+    global tracing_manager
+    if tracing_manager is None:
+        tracing_manager = TracingManager()
+    return tracing_manager
+
+
+def init_tracing(service_name: str = "merid-api") -> TracingManager:
+    """Initialize tracing explicitly (call this during app startup, not import)."""
+    global tracing_manager
+    tracing_manager = TracingManager(service_name)
+    return tracing_manager
 
 
 def trace_async(operation_name: str):
@@ -158,11 +182,13 @@ def trace_async(operation_name: str):
         @wraps(func)
         async def wrapper(*args, **kwargs):
             start_time = time.time()
-            
-            with tracing_manager.trace_operation(operation_name) as span:
+
+            # Use lazy-initialized tracing manager to avoid import-time crashes
+            manager = get_tracing_manager()
+            with manager.trace_operation(operation_name) as span:
                 span.set_attribute("function.name", func.__name__)
                 span.set_attribute("function.module", func.__module__)
-                
+
                 try:
                     result = await func(*args, **kwargs)
                     span.set_attribute("success", True)
@@ -174,7 +200,7 @@ def trace_async(operation_name: str):
                 finally:
                     duration = time.time() - start_time
                     span.set_attribute("duration_ms", duration * 1000)
-        
+
         return wrapper
     return decorator
 
@@ -218,22 +244,24 @@ class AgentTracer:
     
     @contextmanager
     def trace_agent_decision(
-        self, 
-        decision_type: str, 
+        self,
+        decision_type: str,
         inputs: Dict[str, Any],
         confidence: Optional[float] = None
     ):
         """Trace agent decision-making process."""
         span_name = f"agent.{self.agent_id}.{decision_type}"
-        
-        with tracing_manager.trace_operation(span_name) as span:
+
+        # Use lazy-initialized tracing manager to avoid import-time crashes
+        manager = get_tracing_manager()
+        with manager.trace_operation(span_name) as span:
             span.set_attribute("agent.id", self.agent_id)
             span.set_attribute("decision.type", decision_type)
             span.set_attribute("decision.inputs", str(inputs))
-            
+
             if confidence is not None:
                 span.set_attribute("decision.confidence", confidence)
-            
+
             try:
                 yield span
                 span.set_attribute("decision.outcome", "success")
