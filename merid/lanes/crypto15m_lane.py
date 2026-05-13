@@ -1,17 +1,16 @@
 """
-Crypto15MLane — Generic end-to-end orchestration for crypto 15m Kalshi trading.
+Crypto15MLane — End-to-end orchestration for 15m crypto trading on Kalshi.
 
 Wires together:
   - Kalshi market discovery (KalshiMarketCatalog)
-  - Sentiment stack (SentimentBus → SentimentBundle + Fibonacci smoothing)
+  - Sentiment stack (SentimentBus → SentimentBundle + Fibonacci smoothing) [DISABLED for lean 15m]
   - Swarm consensus (SwarmConsensusAggregator)
-  - Risk evaluation (CryptoSwarmRisk + SentimentRiskDial)
+  - Risk evaluation (CryptoSwarmRisk + SentimentRiskDial) [DISABLED for lean 15m]
   - Order execution (KalshiExecutor, mode-guarded)
   - Observability (structured logging of every decision)
 
-Supports BTC, ETH, SOL, XRP, DOGE with both live and paper trading modes.
+LEAN 15m KALSHI STACK (2026-05-13): Sentiment stack disabled for microstructure-driven trading.
 """
-
 from __future__ import annotations
 
 import threading
@@ -900,8 +899,33 @@ class Crypto15MLane:
             return []
 
     async def _aggregate_sentiment(self) -> Optional[Dict[str, Any]]:
-        """Aggregate sentiment data optimized for 15m crypto trading."""
+        """Aggregate sentiment data optimized for 15m crypto trading.
+
+        LEAN 15m KALSHI STACK (2026-05-13): Sentiment disabled, returns neutral baseline.
+        """
+        # LEAN 15m KALSHI STACK (2026-05-13): Check feature flag
+        import os
+        enable_sentiment = os.getenv("ENABLE_SENTIMENT_TRUTH", "false").lower() == "true"
+        if not enable_sentiment:
+            # Return neutral sentiment baseline for lean 15m stack
+            return {
+                "fear_greed": {
+                    "fg_index": 50,
+                    "contrarian_signal": 0.0,
+                },
+                "asset_sentiment_15m": {
+                    "sentiment_score_5m": 0.5,
+                    "sentiment_score_15m": 0.5,
+                    "sentiment_score_30m": 0.5,
+                    "sentiment_trend": "neutral",
+                    "news_sentiment": 0.0,
+                },
+                "weight": 0.0,
+            }
+
         try:
+            # Optimized 15m sentiment features per asset
+            asset_sentiment = await self._get_asset_sentiment_15m()
             # Get Fear & Greed context (global risk dial)
             from merid.prediction.fear_greed_context import get_fear_greed_context_service
             fg_service = get_fear_greed_context_service()
@@ -947,24 +971,30 @@ class Crypto15MLane:
             return None
 
     async def _get_asset_sentiment_15m(self) -> Dict[str, Any]:
-        """Get fast, per-asset sentiment optimized for 15m horizons."""
+        """Get fast, per-asset sentiment optimized for 15m horizons.
+        
+        CRITICAL FIX (2026-05-07): Use SentimentBusV2 instead of old SentimentBus.
+        The old SentimentBus wraps MarketMoodBus, but NewsIngestionAgent and HashtagAgent
+        write to SentimentBusV2. This was causing a disconnect where sentiment data
+        was being written but never consumed.
+        """
         try:
-            # Try to pull real per-asset sentiment from the sentiment bus
+            # Try to pull real per-asset sentiment from SentimentBusV2
             try:
-                from merid.sentiment.sentiment_bus import get_sentiment_bus
-                bus = get_sentiment_bus()
-                bundle = bus.get_latest(self.cfg.symbol)
-                if bundle:
+                from merid.sentiment.sentiment_bus_v2 import get_sentiment_bus_v2
+                bus = get_sentiment_bus_v2()
+                ctx = bus.get_asset_context(self.cfg.symbol)
+                if ctx:
                     return {
                         "symbol": self.cfg.symbol,
-                        "sentiment_score_5m": float(bundle.get("score_5m", 0.0)),
-                        "sentiment_score_15m": float(bundle.get("score_15m", 0.0)),
-                        "sentiment_score_30m": float(bundle.get("score_30m", 0.0)),
-                        "sentiment_trend": bundle.get("trend", "neutral"),
-                        "social_volume": int(bundle.get("social_volume", 0)),
-                        "news_sentiment": float(bundle.get("news_sentiment", 0.0)),
-                        "technical_signal": float(bundle.get("technical_signal", 0.0)),
-                        "confidence": float(bundle.get("confidence", 0.0)),
+                        "sentiment_score_5m": float(ctx.combined_score),
+                        "sentiment_score_15m": float(ctx.combined_score),
+                        "sentiment_score_30m": float(ctx.kalman_smoothed),
+                        "sentiment_trend": ctx.fg_regime,
+                        "social_volume": int(ctx.news_score * 100),  # Approximate from news score
+                        "news_sentiment": float(ctx.news_score),
+                        "technical_signal": float(ctx.hashtag_score),
+                        "confidence": float(ctx.confidence),
                     }
             except Exception as exc:
                 logger.debug("%s: sentiment bus unavailable: %s", self.lane_id, exc)

@@ -288,45 +288,37 @@ class KalshiNewsAgent:
     # ── Senders ───────────────────────────────────────────────────────────────
 
     async def _send_telegram(self, ins: InsightObject, text: str) -> bool:
-        try:
-            from agents.telegram_agent import get_telegram_agent
-            agent = get_telegram_agent()
-            msg = await agent.send_message(text, parse_mode="HTML")
-            if msg:
-                self._stats["total_telegram"] += 1
-                return True
-        except Exception as exc:
-            self._stats["errors"] += 1
-            logger.warning("Telegram send failed for %s: %s", ins.ticker, exc)
+        # SOCIAL-TRUTH (2026-05-13): Telegram agent disabled for lean 15m Kalshi trading
+        # try:
+        #     from agents.telegram_agent import get_telegram_agent
+        #     agent = get_telegram_agent()
+        #     msg = await agent.send_message(text, parse_mode="HTML")
+        #     if msg:
+        #         self._stats["total_telegram"] += 1
+        #         return True
+        # except Exception as exc:
+        #     self._stats["errors"] += 1
+        #     logger.warning("Telegram send failed for %s: %s", ins.ticker, exc)
         return False
 
     async def _send_x(self, ins: InsightObject, text: str) -> Optional[str]:
-        """Post to X/Twitter. Returns tweet_id or None."""
-        try:
-            from agents.twitter_agent import get_twitter_agent
-            agent = get_twitter_agent()
-            if not agent.enabled:
-                logger.debug("Twitter agent disabled — dry-run for %s", ins.ticker)
-                return None
-
-            # Check if we should thread (reply to previous tweet on same ticker)
-            reply_to = self._thread_ids.get(ins.ticker)
-
-            loop = asyncio.get_running_loop()
-            if reply_to:
-                tweet = await loop.run_in_executor(
-                    None,
-                    lambda: agent.post_tweet_reply(text, reply_to_id=reply_to),
-                )
-            else:
-                tweet = await loop.run_in_executor(None, lambda: agent.post_tweet(text))
-
-            if tweet and tweet.tweet_id:
-                self._stats["total_x"] += 1
-                return tweet.tweet_id
-        except Exception as exc:
-            self._stats["errors"] += 1
-            logger.warning("X post failed for %s: %s", ins.ticker, exc)
+        """Post to X/Twitter. Returns tweet_id or None.
+        
+        SOCIAL-TRUTH (2026-05-13): Twitter agent disabled for lean 15m Kalshi trading.
+        """
+        # try:
+        #     from agents.twitter_agent import get_twitter_agent
+        #     agent = get_twitter_agent()
+        #     if not agent.enabled:
+        #         logger.debug("Twitter agent disabled — dry-run for %s", ins.ticker)
+        #         return None
+        #     tweet_id = agent.post_tweet(text)
+        #     if tweet_id:
+        #         self._stats["total_x"] += 1
+        #     return tweet_id
+        # except Exception as exc:
+        #     self._stats["errors"] += 1
+        #     logger.warning("X post failed for %s: %s", ins.ticker, exc)
         return None
 
     # ── Status ────────────────────────────────────────────────────────────────

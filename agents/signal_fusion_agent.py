@@ -84,11 +84,14 @@ class SignalFusionAgent:
         return None
 
     def ingest(self, signals: List[ExternalSignal]) -> Dict[str, object]:
+        # LEAN 15m KALSHI STACK (2026-05-13): Only microstructure signals (orderflow, onchain)
+        # News and social sentiment removed for lean 15m trading
         fused = {
             "orderflow_bias": self._compute_bias(signals, "orderflow"),
             "onchain_velocity": self._compute_bias(signals, "onchain"),
-            "news_sentiment": self._compute_bias(signals, "news"),
-            "social_sentiment": self._compute_bias(signals, "social"),
+            # LEAN 15m KALSHI STACK (2026-05-13): News/social sentiment disabled
+            # "news_sentiment": self._compute_bias(signals, "news"),
+            # "social_sentiment": self._compute_bias(signals, "social"),
             "timestamp": datetime.utcnow().isoformat(),
         }
         self._history.append(fused)

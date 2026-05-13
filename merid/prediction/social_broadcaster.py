@@ -70,6 +70,8 @@ class KalshiSocialBroadcaster:
                 await self._task
             except asyncio.CancelledError:
                 pass
+            finally:
+                self._task = None
         logger.info(f"KalshiSocialBroadcaster stopped — {self._messages_logged} messages logged")
 
     async def _consume_loop(self) -> None:
@@ -369,40 +371,43 @@ class KalshiSocialBroadcaster:
 
     async def _post_to_twitter(self, message: str) -> None:
         """Post message to Twitter/X.
-
-        post_tweet() is a synchronous method — run it in a thread executor
-        so we don't block the event loop.
+        
+        SOCIAL-TRUTH (2026-05-13): Twitter agent disabled for lean 15m Kalshi trading.
         """
-        import asyncio
-        try:
-            from agents.twitter_agent import get_twitter_agent
-            twitter = get_twitter_agent()
-            # post_tweet is sync — offload to thread pool
-            result = await asyncio.to_thread(twitter.post_tweet, message)
-            if result:
-                logger.info(f"[TWITTER] Posted ({result.tweet_id}): {message[:50]}...")
-            else:
-                logger.debug(f"[TWITTER] Skipped (rate-limit/disabled): {message[:40]}...")
-        except Exception as exc:
-            # Fall back to logging if Twitter agent not configured or fails
-            logger.warning(f"[TWITTER] Post failed (fallback logging): {exc}")
-            logger.info(f"[SOCIAL:TWITTER] {message}")
+        # import asyncio
+        # try:
+        #     from agents.twitter_agent import get_twitter_agent
+        #     twitter = get_twitter_agent()
+        #     # post_tweet is sync — offload to thread pool
+        #     result = await asyncio.to_thread(twitter.post_tweet, message)
+        #     if result:
+        #         logger.info(f"[TWITTER] Posted ({result.tweet_id}): {message[:50]}...")
+        #     else:
+        #         logger.debug(f"[TWITTER] Skipped (rate-limit/disabled): {message[:40]}...")
+        # except Exception as exc:
+        #     # Fall back to logging if Twitter agent not configured or fails
+        #     logger.warning(f"[TWITTER] Post failed (fallback logging): {exc}")
+        #     logger.info(f"[SOCIAL:TWITTER] {message}")
+        pass
 
     async def _post_to_telegram(self, message: str, parse_mode: Optional[str] = None) -> None:
-        """Post message to Telegram."""
-        try:
-            from agents.telegram_agent import get_telegram_agent
-            telegram = get_telegram_agent()
-            result = await telegram.send_message(message, parse_mode=parse_mode or "HTML")
-            if result:
-                _msg_id = getattr(result, "message_id", "?")
-                logger.info(f"[TELEGRAM] Posted ({_msg_id}): {message[:50]}...")
-            else:
-                logger.debug(f"[TELEGRAM] Skipped (rate-limit/disabled): {message[:40]}...")
-        except Exception as exc:
-            # Fall back to logging if Telegram agent not configured or fails
-            logger.warning(f"[TELEGRAM] Post failed (fallback logging): {exc}")
-            logger.info(f"[SOCIAL:TELEGRAM] {message}")
+        """Post message to Telegram.
+        
+        SOCIAL-TRUTH (2026-05-13): Telegram agent disabled for lean 15m Kalshi trading.
+        """
+        # try:
+        #     from agents.telegram_agent import get_telegram_agent
+        #     telegram = get_telegram_agent()
+        #     result = await telegram.send_message(message, parse_mode=parse_mode or "HTML")
+        #     if result:
+        #         _msg_id = getattr(result, "message_id", "?")
+        #         logger.info(f"[TELEGRAM] Posted ({_msg_id}): {message[:50]}...")
+        #     else:
+        #         logger.debug(f"[TELEGRAM] Skipped (rate-limit/disabled): {message[:40]}...")
+        # except Exception as exc:
+        #     logger.warning(f"[TELEGRAM] Post failed: {exc}")
+        #     logger.info(f"[SOCIAL:TELEGRAM] {message}")
+        pass
 
     def summary(self) -> Dict[str, Any]:
         """JSON-serialisable status."""

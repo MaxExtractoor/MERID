@@ -53,6 +53,7 @@ class Btc15mAgent:
         self.portfolio_risk_agent = None  # For exposure/PnL queries
         self.kalshi_market_registry = None  # For current market data
         self.btc_lane = None  # For regime signals
+        self.signal_fusion_agent = None  # For microstructure signals
 
     def configure_dependencies(
         self,
@@ -60,14 +61,19 @@ class Btc15mAgent:
         crypto_rti_monitor: CryptoRTIMonitor,
         portfolio_risk_agent,
         kalshi_market_registry,
-        btc_lane
+        btc_lane,
+        signal_fusion_agent=None
     ):
-        """Inject dependencies from KalshiGrid."""
+        """Inject dependencies from KalshiGrid.
+
+        LEAN 15m KALSHI STACK (2026-05-13): Added signal_fusion_agent for microstructure signals.
+        """
         self.rti_stream = rti_stream
         self.crypto_rti_monitor = crypto_rti_monitor
         self.portfolio_risk_agent = portfolio_risk_agent
         self.kalshi_market_registry = kalshi_market_registry
         self.btc_lane = btc_lane
+        self.signal_fusion_agent = signal_fusion_agent
 
     def get_status(self) -> Dict[str, Any]:
         """Get agent status for grid summary."""
@@ -145,6 +151,19 @@ class Btc15mAgent:
         # Regime signal
         btc_15m_regime_signal = self.btc_lane.get_regime_signal("BTC_15M_KALSHI")
 
+        # LEAN 15m KALSHI STACK (2026-05-13): Fetch SignalFusion microstructure signals
+        orderflow_bias = 0.0
+        onchain_velocity = 0.0
+        if self.signal_fusion_agent:
+            try:
+                history = self.signal_fusion_agent.get_history(limit=1)
+                if history:
+                    latest = history[-1]
+                    orderflow_bias = float(latest.get("orderflow_bias", 0.0))
+                    onchain_velocity = float(latest.get("onchain_velocity", 0.0))
+            except Exception as exc:
+                logger.debug("SignalFusion fetch failed: %s", exc)
+
         return Btc15mInputs(
             rti_current=rti_metrics["rti_current"],
             rti_60s_sma=rti_metrics["rti_60s_sma"],
@@ -161,6 +180,9 @@ class Btc15mAgent:
             crypto_vol_alert_active=crypto_vol_alert_active,
             current_position_size=current_position_size,
             daily_pnl=self.state.daily_pnl,
+            # LEAN 15m KALSHI STACK (2026-05-13): SignalFusion microstructure signals
+            orderflow_bias=orderflow_bias,
+            onchain_velocity=onchain_velocity,
         )
 
     def _create_opinion(self, signal: Dict[str, Any], risk_check: Dict[str, Any]) -> AgentOpinion:

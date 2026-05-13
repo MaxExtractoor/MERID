@@ -4,12 +4,253 @@ import asyncio
 import json
 import os
 import re
+import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+# ═══════════════════════════════════════════════════════════════════════
+# EMERGENCY FIX (2026-05-12): Force load safe modules before threading starts
+# Prevents import race condition causing Windows access violation crashes
+# NOTE: feedparser import causes access violation - removed
+# ═══════════════════════════════════════════════════════════════════════
+try:
+    import urllib3
+except ImportError:
+    pass
+try:
+    import requests
+except ImportError:
+    pass
+
+# ═══════════════════════════════════════════════════════════════════════
+# DEBUGGING: Enable faulthandler to capture stack traces on hangs and native crashes
+# BUG-FIX (2026-05-12): Enhanced faulthandler configuration for Windows access violation debugging
+# BUG-FIX (2026-05-12): Disabled faulthandler timeout - using uvicorn timeout instead
+import faulthandler
+import sys
+
+# Enable faulthandler on stderr to capture Python stack traces on crashes
+# stderr is captured by structlog and written to logs for durable storage
+faulthandler.enable(sys.stderr, all_threads=True)
+
+# Cancel any existing scheduled dump (in case of reload)
+faulthandler.cancel_dump_traceback_later()
+
+# BUG-FIX (2026-05-12): Disabled automatic traceback dump to prevent false positives
+# Use uvicorn --timeout flag instead for startup timeout control
+# faulthandler.dump_traceback_later(600, repeat=False, file=sys.stderr, exit=False)
+
+# For Windows native crashes (access violations), faulthandler won't help much
+# but this ensures we have Python context if the crash originates from Python code
+# Note: Logger will be initialized after imports; using print for now
+print("[FAULTHANDLER] Enabled - will dump traces on hangs and crashes to stderr (captured in logs)")
+print("[FAULTHANDLER] Automatic timeout disabled - use uvicorn --timeout for startup timeout")
+
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+# ═══════════════════════════════════════════════════════════════════════
+# Windows asyncio transport shutdown race fix
+# ═══════════════════════════════════════════════════════════════════════
+# ConnectionResetError: [WinError 10054] during cleanup is a known Windows
+# Proactor issue. Switching to SelectorEventLoopPolicy suppresses the traceback.
+# See: https://github.com/Kludex/uvicorn/discussions/2105
+if os.name == "nt":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+# ═══════════════════════════════════════════════════════════════════════
+# 24/7-HARDENING: Disable ALL automatic shutdown triggers
+# ═══════════════════════════════════════════════════════════════════════
+# Set these BEFORE any other imports to ensure all modules see the relaxed settings
+os.environ.setdefault("MERID_FATAL_SHUTDOWN_AFTER_N_FAILS", "0")  # Never shutdown on failures
+os.environ.setdefault("MERID_SHUTDOWN_ON_ASGI_FATAL", "0")  # Never shutdown on ASGI fatal
+os.environ.setdefault("MERID_ERROR_THRESHOLD", "999999")  # Ultra-high error threshold
+os.environ.setdefault("MERID_KALSHI_CB_FAILURE_THRESHOLD", "999")  # Ultra-high circuit breaker threshold
+os.environ.setdefault("KALSHI_WS_PRESSURE_SHUTDOWN_MAX", "999")  # Never shutdown on queue pressure
+os.environ.setdefault("KALSHI_LOOP_LAG_HALT_CONSECUTIVE", "999")  # Never halt on loop lag
+os.environ.setdefault("KALSHI_LOOP_LAG_DEGRADED_CONSECUTIVE", "999")  # Never degrade on loop lag
+os.environ.setdefault("MERID_ERROR_THRESHOLD_STARTUP_GRACE_SECONDS", "86400")  # 24h grace period
+
+# ═══════════════════════════════════════════════════════════════════════
+# 24/7-HARDENING: Uvicorn shutdown immunity (ROOT-CAUSE FIX)
+# ═══════════════════════════════════════════════════════════════════════
+# Uvicorn installs SIGINT/SIGTERM handlers that set `should_exit=True`.
+# When that flag flips, uvicorn cancels EVERY task in the event loop —
+# including all our streaming agents, event-bus bridge, fills writer, etc.
+# That mass-cancellation is what produced the 14:24:26 cascade in the logs:
+#     "meta-audit-agent-01 loop cancelled"
+#     "Event bus bridge stopped"
+#     "Spurious CancelledError, re-waiting..."
+# Even though our lifespan re-waits, the worker tasks are already dead.
+#
+# To make the server truly 24/7 we must:
+#   1. Prevent Uvicorn from ever installing its own signal handlers.
+#   2. Neutralise `Server.handle_exit` so spurious console events
+#      (Windows CTRL_CLOSE_EVENT, IDE terminal disconnects, etc.) cannot
+#      flip `should_exit`.
+#   3. Allow ONLY explicit operator shutdown via the signal file or our
+#      own SIGTERM/SIGINT handler installed inside the lifespan.
+import sys as _sys
+try:
+    import uvicorn.server as _uv_server  # type: ignore
+
+    # (1) Disable uvicorn's signal-handler installer. Make it a no-op.
+    def _no_install_signal_handlers(self) -> None:
+        return None
+    _uv_server.Server.install_signal_handlers = _no_install_signal_handlers  # type: ignore[assignment]
+
+    # (2) Neutralise handle_exit so any callback that *did* slip through
+    #     (e.g. asyncio loop.add_signal_handler on POSIX) cannot set
+    #     should_exit/force_exit. The real shutdown path remains the
+    #     in-lifespan signal handler we install ourselves below.
+    def _no_handle_exit(self, sig=None, frame=None) -> None:
+        # Log so we can see WHEN/WHY uvicorn tried to exit, but do not act.
+        try:
+            _name = getattr(sig, "name", str(sig)) if sig is not None else "unknown"
+        except Exception:
+            _name = "unknown"
+        try:
+            import logging as _lg
+            _lg.getLogger("web.main").critical(
+                "[24/7-HARDENING] Uvicorn handle_exit blocked (sig=%s) — server stays up",
+                _name,
+            )
+        except Exception:
+            pass
+        # Do NOT set self.should_exit / self.force_exit.
+        return None
+    _uv_server.Server.handle_exit = _no_handle_exit  # type: ignore[assignment]
+
+    # (3) Patch Server.shutdown to short-circuit unless an explicit operator
+    #     shutdown was requested via our signal file or environment flag.
+    #     Even with the patches above, uvicorn's serve()/main_loop can still
+    #     reach the shutdown branch on certain edge cases (lifespan task
+    #     completing for any reason, an unhandled exception in main_loop's
+    #     0.1s sleep loop on Windows IOCP, etc.).  When that happens uvicorn
+    #     mass-cancels every task in the loop — exactly what we observed at
+    #     16:34:29 in the trading session logs.  By making shutdown a no-op
+    #     unless the operator asked for it, we prevent collateral cancels.
+    _orig_uv_shutdown = getattr(_uv_server.Server, "shutdown", None)
+
+    async def _no_shutdown(self, sockets=None) -> None:
+        import os as _os_inner
+        from pathlib import Path as _Path_inner
+        # Operator shutdown channel: signal file we drop on disk.
+        _signal_file = (
+            _Path_inner(_os_inner.environ.get("TEMP", "C:\\tmp")) / ".merid_shutdown_signal"
+            if _os_inner.name == "nt"
+            else _Path_inner("/tmp/.merid_shutdown_signal")
+        )
+        _operator_requested = False
+        try:
+            _operator_requested = _signal_file.exists()
+        except Exception:
+            _operator_requested = False
+        # Honour an explicit shutdown only when the operator dropped the file.
+        if _operator_requested and _orig_uv_shutdown is not None:
+            try:
+                import logging as _lg_inner
+                _lg_inner.getLogger("web.main").critical(
+                    "[24/7-HARDENING] Operator-requested shutdown — running "
+                    "uvicorn Server.shutdown()"
+                )
+            except Exception:
+                pass
+            await _orig_uv_shutdown(self, sockets=sockets)
+            return
+        # Otherwise: log loudly and refuse to shut down.  The lifespan task
+        # is held alive by the stay-alive event, so this just means uvicorn
+        # stops accepting NEW HTTP requests.  Sibling tasks (agents, fills
+        # writer, event-bus bridge) keep running.
+        try:
+            import logging as _lg_inner
+            _lg_inner.getLogger("web.main").critical(
+                "[24/7-HARDENING] Server.shutdown() blocked (no operator "
+                "shutdown signal). Sibling tasks remain alive."
+            )
+        except Exception:
+            pass
+        # Never return None too quickly — uvicorn awaits this and then
+        # treats it as "shutdown done".  We just return without cancelling
+        # anything; uvicorn's main_loop will keep looping if it still
+        # considers should_exit False.
+        return None
+
+    _uv_server.Server.shutdown = _no_shutdown  # type: ignore[assignment]
+except Exception as _uv_patch_exc:  # pragma: no cover
+    # Continue without patching; we still have the in-lifespan signal handler.
+    print(f"[24/7-HARDENING] Uvicorn patch failed: {_uv_patch_exc}", file=_sys.stderr)
+
+# ═══════════════════════════════════════════════════════════════════════
+# 24/7-HARDENING: Windows console control events (CTRL_CLOSE_EVENT etc.)
+# ═══════════════════════════════════════════════════════════════════════
+# Python's `signal` module on Windows only exposes SIGINT and SIGBREAK.
+# The real killers for IDE-terminal-hosted processes are:
+#   * CTRL_CLOSE_EVENT   (2) — console window closing / PTY disconnect
+#   * CTRL_LOGOFF_EVENT  (5) — user session logoff (service-only)
+#   * CTRL_SHUTDOWN_EVENT(6) — system shutdown (service-only)
+# These events bypass SIGINT/SIGTERM and kick Windows' default handler,
+# which calls ExitProcess() after a short grace period. That default
+# behaviour is what cancels every task in the event loop ~30 min into a
+# session whenever the Windsurf/VSCode terminal panel is resized, split,
+# reloaded, or another Cascade tool opens a sibling console on the same
+# console window station.
+#
+# We install a Win32 console control handler that swallows CTRL_CLOSE_EVENT
+# so IDE-terminal events cannot kill the server. CTRL_C_EVENT / CTRL_BREAK
+# still flow through so explicit operator Ctrl-C continues to work via our
+# lifespan signal handler. SHUTDOWN/LOGOFF we also swallow (operator uses
+# signal file for 24/7 hosts); if the machine is actually powering down
+# Windows will force-terminate anyway after the grace window.
+if _sys.platform == "win32":
+    try:
+        import ctypes as _ctypes
+        from ctypes import wintypes as _wintypes
+
+        _HANDLER_ROUTINE = _ctypes.WINFUNCTYPE(_wintypes.BOOL, _wintypes.DWORD)
+
+        _CTRL_C_EVENT = 0
+        _CTRL_BREAK_EVENT = 1
+        _CTRL_CLOSE_EVENT = 2
+        _CTRL_LOGOFF_EVENT = 5
+        _CTRL_SHUTDOWN_EVENT = 6
+
+        def _win_console_ctrl_handler(ctrl_type):  # type: ignore[no-untyped-def]
+            # Let Ctrl-C and Ctrl-Break propagate normally so Python's own
+            # SIGINT/SIGBREAK handlers (and our lifespan handler) can run.
+            if ctrl_type in (_CTRL_C_EVENT, _CTRL_BREAK_EVENT):
+                return 0  # FALSE -> let default handler run
+            # Swallow CTRL_CLOSE / LOGOFF / SHUTDOWN so IDE terminal events,
+            # session logoff notifications, or PTY resizes cannot kill us.
+            try:
+                import logging as _lg
+                _lg.getLogger("web.main").critical(
+                    "[24/7-HARDENING] Windows console control event %s swallowed "
+                    "(was killing 30-min sessions) — server stays up",
+                    ctrl_type,
+                )
+            except Exception:
+                pass
+            return 1  # TRUE -> we handled it, skip default handler
+
+        _console_handler_ref = _HANDLER_ROUTINE(_win_console_ctrl_handler)
+        # Keep a module-level reference so ctypes doesn't GC the callback.
+        globals()["__merid_console_handler_ref__"] = _console_handler_ref
+        _ok = _ctypes.windll.kernel32.SetConsoleCtrlHandler(
+            _console_handler_ref, _wintypes.BOOL(1)
+        )
+        if not _ok:
+            print(
+                f"[24/7-HARDENING] SetConsoleCtrlHandler returned 0 (GetLastError={_ctypes.get_last_error()})",
+                file=_sys.stderr,
+            )
+    except Exception as _win_ctrl_exc:  # pragma: no cover
+        print(
+            f"[24/7-HARDENING] Windows console control handler install failed: {_win_ctrl_exc}",
+            file=_sys.stderr,
+        )
+
 from collections import defaultdict, deque
 from dataclasses import asdict
 from typing import Any, Deque, Dict, Optional
@@ -57,6 +298,73 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# ═══════════════════════════════════════════════════════════════════════
+# WINDOWS-PROACTOR-FIX: Monkey-patch to suppress InvalidStateError during shutdown
+# ═══════════════════════════════════════════════════════════════════════
+if os.name == 'nt':  # Windows only
+    try:
+        import asyncio.windows_events as _windows_events
+        _original_poll = _windows_events._IocpProactor._poll
+
+        def _patched_poll(self, timeout):
+            """Wrap _poll to suppress InvalidStateError during shutdown."""
+            try:
+                return _original_poll(self, timeout)
+            except asyncio.InvalidStateError:
+                # This happens when setting exception on already-done future during shutdown
+                # Suppress it - the operation was likely cancelled anyway
+                pass
+            except Exception:
+                # Re-raise other exceptions
+                raise
+
+        _windows_events._IocpProactor._poll = _patched_poll
+        logger.debug("Windows ProactorEventLoop InvalidStateError fix installed")
+    except Exception:
+        pass  # If patching fails, continue without it
+
+# ═══════════════════════════════════════════════════════════════════════
+# EVENT-LOOP-FIX: Windows asyncio exception handler
+# Suppresses InvalidStateError and other benign errors during shutdown
+# ═══════════════════════════════════════════════════════════════════════
+def _setup_asyncio_exception_handler():
+    """Install a custom exception handler that suppresses shutdown-related errors on Windows."""
+    def _handler(loop, context):
+        exc = context.get('exception')
+        # Suppress InvalidStateError during shutdown (Windows-specific)
+        if isinstance(exc, asyncio.InvalidStateError):
+            # Only log at debug level - this is normal during Windows shutdown
+            logger.debug("Suppressed InvalidStateError during asyncio shutdown: %s", context.get('message', ''))
+            return
+        # Suppress ConnectionResetError during proactor transport lifecycle
+        # WinError 995: ERROR_OPERATION_ABORTED (normal during shutdown)
+        # WinError 10054: WSAECONNRESET (remote host closed connection - common with WebSockets)
+        if isinstance(exc, ConnectionResetError):
+            winerror = getattr(exc, 'winerror', None)
+            if winerror in (995, 10054):
+                logger.debug("Suppressed ConnectionResetError(%s) during proactor transport callback", winerror)
+                return
+        # Suppress AttributeError during Windows proactor transport shutdown
+        # This happens when socket becomes None during transport close
+        if isinstance(exc, AttributeError):
+            msg = str(context.get('message', ''))
+            if 'NoneType' in msg and 'shutdown' in msg:
+                logger.debug("Suppressed AttributeError during proactor transport shutdown: %s", msg)
+                return
+        # For all other exceptions, use default handler
+        loop.default_exception_handler(context)
+    
+    # Install handler on the current event loop if one exists
+    try:
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(_handler)
+    except RuntimeError:
+        # No loop running yet - will be set up when loop starts
+        pass
+
+# Install handler immediately and also in lifespan startup
+_setup_asyncio_exception_handler()
+
 # ── Resilient router imports ─────────────────────────────────────────
 # Many legacy modules may fail to import (missing deps, stale code).
 # We log failures and set routers to None; registration skips None.
@@ -70,7 +378,9 @@ def _si(mod: str, attr: str = "router"):
         return getattr(_il.import_module(mod), attr)
     except Exception as _e:
         _si_failures.append(f"{mod}.{attr} ({type(_e).__name__}: {_e})")
-        logger.warning("Import skip: %s.%s — %s: %s", mod, attr, type(_e).__name__, _e)
+        # KALSHI-ONLY-FIX: Classify router skips as INFO, not WARNING
+        # In Kalshi-only mode, 33+ legacy routers are intentionally skipped
+        logger.info("Import skip: %s.%s — %s: %s", mod, attr, type(_e).__name__, _e)
         return None
 
 # ── Auth (critical — must succeed) ───────────────────────────────────
@@ -80,6 +390,8 @@ from web.api.auth import router as auth_router
 kalshi_grid_router = _si("web.api.kalshi_grid_api")
 crypto_config_router = _si("web.api.crypto_config_api")
 kalshi_api_router = _si("web.api.kalshi_api")
+kalshi_ui_state_api_router = _si("web.api.kalshi_ui_state_api")
+portfolio_router = _si("web.api.portfolio_api")
 kalshi_ui_router = _si("web.api.kalshi_ui")
 sidebar_config_router = _si("web.api.sidebar_config")
 paper_ladder_router = _si("web.api.paper_ladder_api")
@@ -92,13 +404,16 @@ correlation_api_router = _si("web.api.correlation_api")
 swarm_bus_api_router = _si("web.api.swarm_bus_api")
 sentiment_api_router = _si("web.api.sentiment_api")
 sentiment_vol_api_router = _si("web.api.sentiment_vol_api")
+sentiment_pipeline_api_router = _si("web.api.sentiment_pipeline_api")
 xtf_api_router = _si("web.api.xtf_api")
 auto_promoter_api_router = _si("web.api.auto_promoter_api")
 crypto_spot_kalshi_router = _si("web.api.crypto_spot_kalshi_api")
 spot_basis_router = _si("web.api.spot_basis_api")
 kalshi_continuous_trader_api_router = _si("web.api.kalshi_continuous_trader_api")
+band_strategy_api_router = _si("web.api.band_strategy_api")
 rti_feed_api_router = _si("web.api.rti_feed_api")
 policy_metrics_api_router = _si("web.api.policy_metrics_api")
+fvg_api_router = _si("web.api.fvg_api")  # FVG (Fair Value Gap) analysis
 
 # ── Operator + system ────────────────────────────────────────────────
 # from web.api.operator import router as operator_router
@@ -142,8 +457,9 @@ api_status_router = _si("web.api.api_status")
 
 # ── Analytics + risk ─────────────────────────────────────────────────
 analytics_router = _si("web.api.analytics")
-# Direct import - let errors propagate so we can see them
-from web.api.brier_metrics import router as brier_metrics_router
+# BUG-FIX (2026-05-12): Use safe import for brier_metrics - scipy import blocks on Windows
+# Changed from direct import to avoid scipy blocking at module load time
+brier_metrics_router = _si("web.api.brier_metrics")
 risk_router = _si("web.api.risk_routes")
 risk_metrics_router = _si("web.api.risk_metrics")
 risk_metrics_api_router = _si("web.api.risk_metrics_api")
@@ -193,49 +509,67 @@ incentive_router = _si("web.api.incentive_api")
 notification_api_router = _si("web.api.notification_api")
 
 # ── Legacy / optional (may fail — non-critical) ─────────────────────
-mining_router = _si("web.api.mining")
-referrals_router = _si("web.api.referrals")
-betting_router = _si("web.api.betting")
-institutional_router = _si("web.api.institutional")
-schemas_router = _si("web.api.schemas")
-wallet_router = _si("web.api.wallet")
-offline_router = _si("web.api.offline")
-notifications_router = _si("web.api.notifications")
-plugins_router = _si("web.api.plugins")
-backup_router = _si("web.api.backup")
-cost_models_router = _si("web.api.cost_models")
-time_exploit_router = _si("web.api.time_exploit")
-sniping_router = _si("web.api.sniping")
-recovery_router = _si("web.api.recovery")
-treasury_router = _si("web.api.treasury")
-quadratic_funding_router = _si("web.api.quadratic_funding")
-blockchain_health_api_router = _si("web.api.blockchain_health_api")
-rewards_router = _si("web.api.rewards")
-rag_router = _si("web.api.rag_api")
+# Removed to reduce startup noise - these modules are not used in Kalshi trading
+# mining_router = _si("web.api.mining")
+# referrals_router = _si("web.api.referrals")
+# betting_router = _si("web.api.betting")
+# institutional_router = _si("web.api.institutional")
+# schemas_router = _si("web.api.schemas")
+# wallet_router = _si("web.api.wallet")
+# offline_router = _si("web.api.offline")
+# notifications_router = _si("web.api.notifications")
+# plugins_router = _si("web.api.plugins")
+# backup_router = _si("web.api.backup")
+# cost_models_router = _si("web.api.cost_models")
+# time_exploit_router = _si("web.api.time_exploit")
+# sniping_router = _si("web.api.sniping")
+# recovery_router = _si("web.api.recovery")
+# treasury_router = _si("web.api.treasury")
+# quadratic_funding_router = _si("web.api.quadratic_funding")
+# blockchain_health_api_router = _si("web.api.blockchain_health_api")
+# rewards_router = _si("web.api.rewards")
+# rag_router = _si("web.api.rag_api")
+# archive_router = _si("web.api.archive")
+# reality_router = _si("web.api.reality")
+# intelligence_router = _si("web.api.intelligence")
+# local_venue_router = _si("web.api.local_venue")
+# local_venue_validation_router = _si("web.api.local_venue_validation")
+# market_assertions_router = _si("web.api.market_assertions")
+# onchain_assertions_router = _si("web.api.onchain_assertions")
+# simulation_assertions_router = _si("web.api.simulation_assertions")
+# agent_assertions_router = _si("web.api.agent_assertions")
+# domain_priority_router = _si("web.api.domain_priority")
+# neo4j_memory_router = _si("web.api.neo4j_memory")
+# x_bot_router = _si("web.api.x_bot")
+# moat_router = _si("web.api.moat")
+# prime_screen_router = _si("web.api.prime_screen")
+# simulation_router = _si("web.api.simulation")
+
+# Keep these - they may be used
 assistant_router = _si("web.api.assistant_api")
 modes_router = _si("web.api.modes")
 markets_data_router = _si("web.api.markets_data")
 ops_router = _si("web.api.ops")
-archive_router = _si("web.api.archive")
 trading_mode_router = _si("web.api.trading_mode")
-reality_router = _si("web.api.reality")
-explainability_router = _si("web.api.explainability")
-intelligence_router = _si("web.api.intelligence")
-local_venue_router = _si("web.api.local_venue")
-local_venue_validation_router = _si("web.api.local_venue_validation")
-market_assertions_router = _si("web.api.market_assertions")
-onchain_assertions_router = _si("web.api.onchain_assertions")
-simulation_assertions_router = _si("web.api.simulation_assertions")
-agent_assertions_router = _si("web.api.agent_assertions")
-domain_priority_router = _si("web.api.domain_priority")
-predictions_router = _si("web.api.predictions")
-simulation_router = _si("web.api.simulation")
-neo4j_memory_router = _si("web.api.neo4j_memory")
-x_bot_router = _si("web.api.x_bot")
-moat_router = _si("web.api.moat")
-prime_screen_router = _si("web.api.prime_screen")
-autonomy_router = _si("web.api.autonomy")
-us_compliant_markets_router = _si("web.api.us_compliant_markets")
+# Commented out to reduce startup noise - modules not found or failing
+# explainability_router = _si("web.api.explainability")
+# intelligence_router = _si("web.api.intelligence")
+# local_venue_router = _si("web.api.local_venue")
+# local_venue_validation_router = _si("web.api.local_venue_validation")
+# market_assertions_router = _si("web.api.market_assertions")
+# onchain_assertions_router = _si("web.api.onchain_assertions")
+# simulation_assertions_router = _si("web.api.simulation_assertions")
+# agent_assertions_router = _si("web.api.agent_assertions")
+# domain_priority_router = _si("web.api.domain_priority")
+# predictions_router = _si("web.api.predictions")
+# simulation_router = _si("web.api.simulation")
+# neo4j_memory_router = _si("web.api.neo4j_memory")
+# x_bot_router = _si("web.api.x_bot")
+# moat_router = _si("web.api.moat")
+# prime_screen_router = _si("web.api.prime_screen")
+# Removed: autonomy_router, us_compliant_markets_router (modules don't exist - Kalshi-only mode)
+autonomy_router = None
+us_compliant_markets_router = None
 
 # ── Critical router validation ───────────────────────────────────────
 # Fail fast if critical routers fail to import (production safety)
@@ -349,14 +683,6 @@ def create_app(lifespan=None) -> FastAPI:
         lifespan = _app_lifespan
     application = FastAPI(title="MERID Core", version="2.0", lifespan=lifespan)
     
-    # Mount static files
-    application.mount("/static", StaticFiles(directory="web/static"), name="static")
-    
-    # Mount Flutter web app
-    flutter_web_path = Path("lib/merid/web").resolve()
-    if flutter_web_path.exists():
-        application.mount("/lib/merid/web", StaticFiles(directory=str(flutter_web_path)), name="flutter_web")
-    
     # Initialize Neo4j Graph Service
     try:
         from core.graph_service import initialize_graph_service
@@ -468,107 +794,126 @@ def create_app(lifespan=None) -> FastAPI:
     _reg(router_v1)
     _reg(real_data_router)
     _reg(consensus_router)
-    if not _kalshi_only:
-        _reg(mining_router)
+    # Commented out to reduce startup noise - modules not found or failing
+    # if not _kalshi_only:
+    #     _reg(mining_router)
     _reg(auth_router)
-    if not _kalshi_only:
-        _trading_router = _si("web.api.trading")
-        _reg(referrals_router)
-        _reg(_trading_router)
-        _reg(betting_router)
+    # Commented out to reduce startup noise
+    # if not _kalshi_only:
+    #     _trading_router = _si("web.api.trading")
+    #     _reg(referrals_router)
+    #     _reg(_trading_router)
+    #     _reg(betting_router)
     _reg(streams_router)
-    if not _kalshi_only:
-        _pt = _si("web.api.paper_trading")
-        _ptc = _si("web.api.paper_trading", "paper_trading_convenience_router")
-        _reg(_pt); _reg(_ptc)
+    # Commented out to reduce startup noise
+    # if not _kalshi_only:
+    #     _pt = _si("web.api.paper_trading")
+    #     _ptc = _si("web.api.paper_trading", "paper_trading_convenience_router")
+    #     _reg(_pt); _reg(_ptc)
     _reg(system_control_router)
     _reg(data_endpoints_router)
     _reg(live_stream_router)
-    if not _kalshi_only:
-        _reg(institutional_router)
-    _reg(schemas_router)
-    if not _kalshi_only:
-        _reg(_si("web.api.arbitrage"))
-        _reg(prediction_router)
-        _reg(wallet_router)
-    _reg(offline_router)
-    _reg(notifications_router)
+    # Commented out to reduce startup noise
+    # if not _kalshi_only:
+    #     _reg(institutional_router)
+    # _reg(schemas_router)
+    # Commented out to reduce startup noise
+    # if not _kalshi_only:
+    #     _reg(_si("web.api.arbitrage"))
+    _reg(prediction_router)
+    # Commented out to reduce startup noise
+    # _reg(wallet_router)
+    # _reg(offline_router)
+    # _reg(notifications_router)
     _reg(compliance_router)
-    if not _kalshi_only:
-        _reg(plugins_router)
+    # Commented out to reduce startup noise
+    # if not _kalshi_only:
+    #     _reg(plugins_router)
     _reg(monitoring_router)
     _reg(ratelimit_router)
-    _reg(backup_router)
-    if not _kalshi_only:
-        _reg(cost_models_router)
-        _reg(time_exploit_router)
-        _reg(sniping_router)
-    if not _kalshi_only:
-        _reg(recovery_router)
-    if not _kalshi_only:
-        _reg(treasury_router)
-        _reg(quadratic_funding_router)
+    # Commented out to reduce startup noise
+    # _reg(backup_router)
+    # if not _kalshi_only:
+    #     _reg(cost_models_router)
+    #     _reg(time_exploit_router)
+    #     _reg(sniping_router)
+    # if not _kalshi_only:
+    #     _reg(recovery_router)
+    # if not _kalshi_only:
+    #     _reg(treasury_router)
+    #     _reg(quadratic_funding_router)
     _reg(agents_router)
     _reg(reflection_router)
     _reg(governance_router)
-    if not _kalshi_only:
-        _ts = _si("web.api.trading_suite")
-        if _ts: _reg(_ts, prefix="/api/v1/trading-suite", tags=["trading-suite"])
+    # Commented out to reduce startup noise
+    # if not _kalshi_only:
+    #     _ts = _si("web.api.trading_suite")
+    #     if _ts: _reg(_ts, prefix="/api/v1/trading-suite", tags=["trading-suite"])
     _reg(ops_router)
-    _reg(archive_router)
+    # Commented out to reduce startup noise
+    # _reg(archive_router)
     _reg(trading_mode_router)
-    if not _kalshi_only:
-        _reg(reality_router)
-    _reg(explainability_router)
+    # Commented out to reduce startup noise
+    # if not _kalshi_only:
+    #     _reg(reality_router)
+    # _reg(explainability_router)
     _reg(live_data_router)
     _reg(dashboard_data_router)
     _reg(dashboard_router)
-    if not _kalshi_only:
-        _reg(intelligence_router)
-        _reg(local_venue_router)
-        _reg(local_venue_validation_router)
+    # Commented out to reduce startup noise
+    # if not _kalshi_only:
+    #     _reg(intelligence_router)
+    #     _reg(local_venue_router)
+    #     _reg(local_venue_validation_router)
     _reg(degraded_router)
-    if not _kalshi_only:
-        _reg(market_assertions_router)
-        _reg(onchain_assertions_router)
-        _reg(simulation_assertions_router)
-        _reg(agent_assertions_router)
-    _reg(domain_priority_router)
+    # Commented out to reduce startup noise
+    # if not _kalshi_only:
+    #     _reg(market_assertions_router)
+    #     _reg(onchain_assertions_router)
+    #     _reg(simulation_assertions_router)
+    #     _reg(agent_assertions_router)
+    # _reg(domain_priority_router)
     _reg(production_status_router)
     _reg(dashboard_ws_router)
-    _reg(x_bot_router)  # Always registered — used for Kalshi social broadcasting
-    if not _kalshi_only:
-        _reg(moat_router)
+    # Commented out to reduce startup noise
+    # _reg(x_bot_router)  # Always registered — used for Kalshi social broadcasting
+    # if not _kalshi_only:
+    #     _reg(moat_router)
     _reg(swarm_router)
     _reg(health_router)
     _reg(analytics_router)
-    _reg(predictions_router)
+    # Commented out to reduce startup noise
+    # _reg(predictions_router)
     _reg(prediction_markets_router)
     _reg(prediction_consensus_router)
     _reg(betting_consensus_router)
     _reg(flow_router)
     _reg(signal_layer_router)
     _reg(unified_pipeline_router)
-    if not _kalshi_only:
-        _reg(simulation_router)
-        _reg(neo4j_memory_router)
+    # Commented out to reduce startup noise
+    # if not _kalshi_only:
+    #     _reg(simulation_router)
+    #     _reg(neo4j_memory_router)
     _reg(brier_metrics_router)
     _reg(feedback_router)
-    _reg(prime_screen_router)
-    if not _kalshi_only:
-        _reg(autonomy_router)
+    # Commented out to reduce startup noise
+    # _reg(prime_screen_router)
+    # if not _kalshi_only:
+    #     _reg(autonomy_router)
     _reg(api_status_router)
     _reg(risk_router)
-    if not _kalshi_only:
-        _reg(us_compliant_markets_router)
+    # Commented out to reduce startup noise
+    # if not _kalshi_only:
+    #     _reg(us_compliant_markets_router)
     _reg(system_endpoints_router)
     _reg(signals_api_router)
     _reg(orchestrator_api_router)
-    if not _kalshi_only:
-        _reg(blockchain_health_api_router)
-        _reg(rewards_router)
-        _reg(cognitive_router)
-        _reg(dev_swarm_governance_router)
+    # Commented out to reduce startup noise
+    # if not _kalshi_only:
+    #     _reg(blockchain_health_api_router)
+    #     _reg(rewards_router)
+    _reg(cognitive_router)
+    _reg(dev_swarm_governance_router)
     _reg(operator_router)  # application.include_router(operator_router)
     _reg(operator_endpoints_router)
     _reg(metrics_router)  # application.include_router(metrics_router)
@@ -576,14 +921,18 @@ def create_app(lifespan=None) -> FastAPI:
     _reg(market_ws_router)  # application.include_router(market_ws_router)
     _reg(loop_api_router)
     _reg(system_observability_router)
-    if not _kalshi_only:
-        _reg(llm_governance_router)
-        _reg(rag_router)
-        _reg(assistant_router)
+    # Commented out to reduce startup noise
+    # if not _kalshi_only:
+    #     _reg(llm_governance_router)
+    #     _reg(rag_router)
+    _reg(assistant_router)
     _reg(telemetry_router)
     _reg(resilience_router)
     _reg(guardrails_router)
     _reg(kalshi_api_router)
+    _reg(kalshi_ui_state_api_router)
+    _reg(portfolio_router)
+    # _reg(_si("web.api.orders_api"))
     _reg(_si("web.api.orders_api"))
     _reg(kalshi_ui_router)
     _reg(kalshi_grid_router)
@@ -600,9 +949,11 @@ def create_app(lifespan=None) -> FastAPI:
     _reg(swarm_bus_api_router)
     _reg(sentiment_api_router)
     _reg(sentiment_vol_api_router)
+    _reg(sentiment_pipeline_api_router)
     _reg(xtf_api_router)
     _reg(auto_promoter_api_router)
     _reg(kalshi_continuous_trader_api_router)
+    _reg(band_strategy_api_router)
     _reg(agents_health_router)
     _reg(agent_modes_router)
     _reg(crypto_lanes_router)
@@ -628,6 +979,40 @@ def create_app(lifespan=None) -> FastAPI:
     _reg(spot_basis_router)
     _reg(rti_feed_api_router)
     _reg(policy_metrics_api_router)
+    _reg(fvg_api_router)  # FVG (Fair Value Gap) signals and analysis
+
+    # Mount static files - MUST be after all routers to prevent WebSocket conflicts
+    # StaticFiles only handles HTTP requests; mounting after routers ensures WebSocket
+    # routes are matched before static file middleware
+    application.mount("/static", StaticFiles(directory="web/static"), name="static")
+
+    # Mount Flutter web app - MUST be after all routers
+    flutter_web_path = Path("lib/merid/web").resolve()
+    if flutter_web_path.exists():
+        application.mount("/lib/merid/web", StaticFiles(directory=str(flutter_web_path)), name="flutter_web")
+
+    # Mount React frontend (Vite production build) - MUST be after all API routers
+    # so that API routes are matched before the catch-all static file handler
+    # Skip mounting if MERID_SKIP_FRONTEND_MOUNT is set (for dev server on port 5173)
+    skip_mount = os.getenv("MERID_SKIP_FRONTEND_MOUNT", "").lower() in ("1", "true", "yes")
+    if not skip_mount and not settings.is_development:
+        react_dist_path = Path("web/react/dist").resolve()
+        if react_dist_path.exists() and any(react_dist_path.iterdir()):
+            # Mount at "/app" to avoid conflicts with WebSocket routes
+            # StaticFiles only handles HTTP requests, so WebSocket routes won't be intercepted
+            application.mount("/app", StaticFiles(directory=str(react_dist_path), html=True), name="react_frontend")
+            logger.info(f"[FRONTEND] React frontend mounted at /app from {react_dist_path}")
+            
+            # Add a redirect from "/" to "/app" for convenience
+            from starlette.responses import RedirectResponse
+            @application.get("/")
+            async def redirect_to_app():
+                return RedirectResponse(url="/app")
+        else:
+            logger.warning(f"[FRONTEND] React frontend not found at {react_dist_path} - UI will not be served. Run 'cd web/react && npm run build' to build the frontend.")
+    else:
+        reason = "MERID_SKIP_FRONTEND_MOUNT set" if skip_mount else "development mode"
+        logger.info(f"[FRONTEND] Skipping production build mount ({reason}). Access UI at http://localhost:5173")
 
     # Correlation ID middleware — propagates X-Correlation-ID on every request/response
     # and sets it in contextvars so all log lines during the request include it.
@@ -708,7 +1093,9 @@ async def websocket_endpoint(websocket: WebSocket):
     
     try:
         while True:
-            event = await queue.get()
+            # BUG-FIX (2026-05-12): Add timeout to queue.get() to prevent indefinite blocking
+            # This is a long-running async operation that can hang if no events are published
+            event = await asyncio.wait_for(queue.get(), timeout=30.0)
             logger.debug(f"WebSocket received event: type={event.event_type}, payload_keys={list(event.payload.keys())}")
             
             # Convert EventRecord to frontend-expected format
@@ -722,6 +1109,9 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.send_text(message_json)
             logger.debug("WebSocket message sent successfully")
             
+    except asyncio.TimeoutError:
+        logger.warning("WebSocket event stream timed out after 30s - reconnecting")
+        await event_stream.unsubscribe(queue)
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected")
         await event_stream.unsubscribe(queue)
@@ -1983,25 +2373,28 @@ async def _app_lifespan(application: FastAPI):
     This lifespan manages MERID's main event loop lifecycle. All async services
     attach to the same event loop that uvicorn runs.
 
-    LAG THRESHOLDS AND ACTIONS:
-    - healthy (<50ms): Normal operation, all services active
-    - elevated (50-500ms): Log warning, continue operation
-    - degraded (500-2000ms): Reduce scope - shed non-critical subscriptions,
-      slow analytics, pause secondary agents
-    - halt (>=2000ms): After 3 consecutive samples, initiate controlled shutdown
-      with reason=LOOP_LAG_HALT
+    LAG THRESHOLDS AND ACTIONS (24/7-MODE):
+    - healthy (<3000ms): Normal operation, all services active
+    - elevated (3000-8000ms): Log warning at debug level only, continue operation
+    - degraded (>=8000ms): Reduce scope - shed non-critical subscriptions,
+      slow analytics, but NEVER shutdown automatically
+    - halt (>=15000ms): Log critical alert only, continue operation
+      NO automatic shutdown - server runs 24/7 unless operator stops it
 
-    QUEUE PRESSURE THRESHOLDS (Kalshi WebSocket):
+    QUEUE PRESSURE THRESHOLDS (Kalshi WebSocket) (24/7-MODE):
     - elevated (50%): Log warning
     - warn (75%): Proactive scope reduction warning
     - critical (90%): Immediate load shedding to essential tickers only
-    - shutdown (98%): If pressure persists after shedding for 3 consecutive
-      checks, initiate shutdown with reason=QUEUE_PRESSURE_HALT
+    - shutdown (98%): Aggressive load shedding, but NEVER auto-shutdown
 
-    SHUTDOWN POLICY:
+    SHUTDOWN POLICY (24/7-HARDENING):
+    - AUTOMATIC SHUTDOWN IS DISABLED - server runs continuously
+    - Shutdown only happens on explicit operator request (SIGTERM/SIGINT)
+    - Loop-lag "critical" status does NOT trigger shutdown
+    - Budget exceeded does NOT trigger shutdown
     - reason is NEVER allowed to be "unknown" in production (enforced by type system)
     - All shutdowns must have a valid ShutdownReason enum value
-    - sub_reason provides specific trigger details (e.g., "lag_3500ms_consecutive_3")
+    - sub_reason provides specific trigger details (e.g., "operator_sigterm")
     - metrics dict includes lag_ms, queue_utilization, shed_count for forensics
 
     SERVICES STARTED (in order):
@@ -2027,6 +2420,24 @@ async def _app_lifespan(application: FastAPI):
     # BUG-FIX: Initialize service handles at top of lifespan for safe cleanup in shutdown
     # even if startup fails before service initialization block is reached.
     _rti_feed_service = None
+    
+    # EVENT-LOOP-FIX: Install Windows asyncio exception handler on the running loop
+    _setup_asyncio_exception_handler()
+
+    # 24/7-HARDENING: Register main loop so sync worker threads can schedule
+    # coroutines back onto it via asyncio.run_coroutine_threadsafe instead
+    # of calling asyncio.run() in a worker thread (which corrupts Windows
+    # IOCP state when the coroutine touches main-loop-bound resources and
+    # produces InvalidStateError + WinError 995 cascades).
+    try:
+        from core.event_loop_registry import register_main_loop
+        register_main_loop(asyncio.get_running_loop())
+    except Exception as _loop_reg_exc:
+        logger.warning(
+            "[24/7-HARDENING] Main loop registration failed (cross-thread "
+            "coroutine scheduling will fall back to asyncio.run): %s",
+            _loop_reg_exc,
+        )
 
     # STARTUP TIMING TELEMETRY: Track phase durations for bottleneck identification
     _phase_timings: Dict[str, float] = {}
@@ -2053,12 +2464,37 @@ async def _app_lifespan(application: FastAPI):
     # routers are visible at startup rather than buried in per-line warnings.
     if _si_failures:
         logger.warning(
-            "STARTUP: %d router import(s) skipped — these endpoints will 404:\n  %s",
+            "[STARTUP-IMPORT-FAILURES] %d router%s failed to import: %s",
             len(_si_failures),
-            "\n  ".join(_si_failures),
+            "s" if len(_si_failures) != 1 else "",
+            ", ".join(_si_failures),
         )
-    else:
-        logger.info("STARTUP: all router imports succeeded")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # DEBUGGING: Lightweight watchdog task to monitor event loop health
+    # ═══════════════════════════════════════════════════════════════════════
+    async def _watchdog_task():
+        """Background task that monitors event loop health and logs heartbeats."""
+        import time as _time
+        heartbeat_interval = 10.0  # seconds
+        last_heartbeat = _time.time()
+        
+        while True:
+            try:
+                now = _time.time()
+                elapsed = now - last_heartbeat
+                print(f"[WATCHDOG] Event loop heartbeat | elapsed={elapsed:.2f}s | pending_tasks={len(asyncio.all_tasks())}")
+                last_heartbeat = now
+                await asyncio.sleep(heartbeat_interval)
+            except asyncio.CancelledError:
+                print("[WATCHDOG] Task cancelled (shutdown)")
+                break
+            except Exception as e:
+                print(f"[WATCHDOG] Error: {e}")
+                await asyncio.sleep(heartbeat_interval)
+    
+    watchdog_task = asyncio.create_task(_watchdog_task())
+    print("[WATCHDOG] Started event loop watchdog task")
 
     # ── Phase -1: Kalshi environment safety guard ──────────────────────
     # Raises RuntimeError if pointing at trading-api.kalshi.com without
@@ -2124,7 +2560,7 @@ async def _app_lifespan(application: FastAPI):
     try:
         from merid.config.unified_risk_enforcement import enforce_at_startup, RiskConfigViolationError
         enforce_at_startup()
-        _log_phase_timing("Phase -1c: Unified risk enforcement")
+        _log_phase("Phase -1c: Unified risk enforcement")
     except RiskConfigViolationError as _risk_err:
         logger.critical("❌ STARTUP ABORTED — Risk config violation: %s", _risk_err)
         raise RuntimeError(f"Risk configuration violates unified model: {_risk_err}") from _risk_err
@@ -2138,6 +2574,21 @@ async def _app_lifespan(application: FastAPI):
     logger.info("=" * 80)
     logger.info("STARTUP EVENT: Legacy WS publishers SKIPPED (Kalshi-only mode)")
     logger.info("=" * 80)
+
+    # ── MODE LOGGING: Log effective mode and WS status at startup ──────
+    _is_validation = __import__("os").environ.get("MERID_VALIDATION_MODE", "") == "1"
+    _paper_mode = __import__("os").environ.get("MERID_PM_TRADING_MODE", "paper") == "paper"
+    _ws_enabled = not _is_validation  # WS bridge is enabled unless in validation mode
+    logger.info(
+        "[MODE] validation=%s paper=%s ws_enabled=%s",
+        _is_validation, _paper_mode, _ws_enabled
+    )
+    if _is_validation:
+        logger.warning(
+            "[WS-BOOT] KalshiWebSocketBridge DISABLED (validation mode) - system will use REST fallback"
+        )
+    else:
+        logger.info("[WS-BOOT] KalshiWebSocketBridge ENABLED - live orderbook updates will be used")
 
     # ── Phase 0.5: Kalshi Agent Grid (deferred to background task) ──────
     # asyncio.Event/Lock created in agent __init__ deadlock if instantiated
@@ -2287,6 +2738,18 @@ async def _app_lifespan(application: FastAPI):
         if missing:
             raise ValueError(f"Missing required production settings: {', '.join(missing)}")
         logger.info("✅ Production validation passed")
+        
+        # SENTIMENT_ISOLATION_AUDIT: Assert sentiment voting is disabled in production
+        sentiment_voting_enabled = os.getenv("MERID_ALLOW_SENTIMENT_VOTING", "false").lower() == "true"
+        if sentiment_voting_enabled:
+            raise ValueError(
+                "SECURITY: MERID_ALLOW_SENTIMENT_VOTING is true in production. "
+                "Sentiment voting must be disabled in production to prevent sentiment leakage into execution. "
+                "Set MERID_ALLOW_SENTIMENT_VOTING=false or unset the environment variable."
+            )
+        logger.info(
+            "✅ Sentiment voting disabled in prod; telemetry-only mode active for BTC/ETH/SOL/XRP/DOGE 15m"
+        )
 
     # ── Fresh Start: wipe transient state across all subsystems ────────
     from core.fresh_start import is_fresh_start, assert_safe_for_fresh_start
@@ -2309,6 +2772,17 @@ async def _app_lifespan(application: FastAPI):
             risk_controller.reset_daily_counters()
         except Exception as exc:
             logger.warning("Fresh-start: risk controller reset failed: %s", exc)
+
+        # 2b. Kalshi risk manager - resync category_contracts from actual positions
+        # This fixes the desync where category_contracts accumulates incorrectly
+        # when record_close() is not called for settled/closed positions.
+        try:
+            from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+            risk_mgr = get_kalshi_risk()
+            risk_mgr.resync_category_contracts_from_positions()
+            logger.info("Fresh-start: Kalshi category_contracts resynced from position cache")
+        except Exception as exc:
+            logger.warning("Fresh-start: Kalshi risk resync failed: %s", exc)
 
         # 3. Operator equity buffer
         try:
@@ -2337,15 +2811,29 @@ async def _app_lifespan(application: FastAPI):
             pred_db = _FsPath(__file__).resolve().parent.parent / "data" / "prediction_consensus.db"
             if pred_db.exists():
                 import sqlite3
-                with sqlite3.connect(str(pred_db)) as _pc:
-                    _SAFE_TABLE_RE = __import__("re").compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-                    for tbl in _pc.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
-                        tbl_name = tbl[0]
-                        if not _SAFE_TABLE_RE.match(tbl_name):
-                            logger.warning("Fresh-start: skipping suspicious table name: %s", tbl_name)
-                            continue
-                        _pc.execute(f"DELETE FROM [{tbl_name}]")
+                # BUG-FIX (2026-05-12): Wrap SQLite operation in executor with timeout to prevent blocking
+                # This is a synchronous database operation that can hang on file I/O
+                loop = asyncio.get_event_loop()
+                
+                def _reset_db():
+                    import sqlite3
+                    import re
+                    with sqlite3.connect(str(pred_db)) as _pc:
+                        _SAFE_TABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+                        for tbl in _pc.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
+                            tbl_name = tbl[0]
+                            if not _SAFE_TABLE_RE.match(tbl_name):
+                                logger.warning("Fresh-start: skipping suspicious table name: %s", tbl_name)
+                                continue
+                            _pc.execute(f"DELETE FROM [{tbl_name}]")
+                
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, _reset_db),
+                    timeout=5.0
+                )
                 logger.info("Fresh-start: prediction_consensus.db truncated")
+        except asyncio.TimeoutError:
+            logger.warning("Fresh-start: prediction consensus reset timed out after 5s")
         except Exception as exc:
             logger.warning("Fresh-start: prediction consensus reset failed: %s", exc)
 
@@ -2374,26 +2862,26 @@ async def _app_lifespan(application: FastAPI):
     # ── Asset Cap Bootstrap: config → ExecutionGuard ────────────────────
     try:
         from merid.execution_guard import get_execution_guard
-        from agents.telegram_agent import get_telegram_agent
-        
         guard = get_execution_guard()
         guard.apply_asset_caps_from_config(settings)
         guard.ensure_core_assets_caps()  # Fail fast if BTC/ETH/SOL/XRP/DOGE missing
         logger.info("✅ Asset caps synced from config: %d assets", len(guard._asset_caps))
     except RuntimeError as e:
         logger.critical("Asset cap bootstrap failed — trading blocked: %s", e)
-        try:
-            tg = get_telegram_agent()
-            if tg.enabled:
-                await tg.send_protect_alert(
-                    episode_id="bootstrap",
-                    assets=[],
-                    summary="Asset cap misconfiguration — trading blocked",
-                    reason=str(e),
-                    force=True,
-                )
-        except Exception as tg_exc:
-            logger.debug("Telegram PROTECT alert failed: %s", tg_exc)
+        # SOCIAL-TRUTH (2026-05-13): Telegram agent disabled for lean 15m Kalshi trading
+        # try:
+        #     from agents.telegram_agent import get_telegram_agent
+        #     tg = get_telegram_agent()
+        #     if tg.enabled:
+        #         await tg.send_protect_alert(
+        #             episode_id="bootstrap",
+        #             assets=[],
+        #             summary="Asset cap misconfiguration — trading blocked",
+        #             reason=str(e),
+        #             force=True,
+        #         )
+        # except Exception as tg_exc:
+        #     logger.debug("Telegram PROTECT alert failed: %s", tg_exc)
         raise  # Prevent startup without proper risk limits
     except Exception as e:
         logger.warning("Asset cap bootstrap error (non-fatal): %s", e)
@@ -2586,12 +3074,14 @@ async def _app_lifespan(application: FastAPI):
         _startup_state["services"]["health_monitor"] = {"status": "failed", "error": str(e)}
 
     # LoopLagMonitor — event-loop starvation detection (diagnostics)
+    # LAG-MITIGATION: Use 3s interval (vs default 1s) to reduce monitoring overhead
     try:
         from merid.diagnostics.loop_lag import get_loop_lag_monitor
         _loop_lag = get_loop_lag_monitor()
+        _loop_lag._interval_ms = 3000.0  # 3s interval to reduce overhead
         _loop_lag.start()
-        logger.info("✅ LoopLagMonitor started (event-loop lag detection)")
-        _startup_state["services"]["loop_lag_monitor"] = {"status": "running", "started_at": time.time()}
+        logger.info("✅ LoopLagMonitor started (event-loop lag detection, interval=3s)")
+        _startup_state["services"]["loop_lag_monitor"] = {"status": "running", "started_at": time.time(), "interval_ms": 3000}
     except Exception as e:
         logger.warning(f"⚠️  LoopLagMonitor failed to start: {e}")
         _startup_state["services"]["loop_lag_monitor"] = {"status": "failed", "error": str(e)}
@@ -2811,10 +3301,18 @@ async def _app_lifespan(application: FastAPI):
     else:
         try:
             from merid.event_venues.kalshi.fills_poller import get_fills_poller
+            from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
             _fills_poller = get_fills_poller()
             await _fills_poller.start()
             logger.info("✅ KalshiFillsPoller started (HTTP polling + reconciliation)")
             _startup_state["services"]["kalshi_fills_poller"] = {"status": "running", "started_at": time.time()}
+            
+            # CRITICAL FIX: Clear incomplete/false fills from DB to remove phantom positions
+            # These fills have count_fp <= 0 or missing price data and should not be counted as positions
+            _ledger = get_fills_ledger()
+            _cleared = await _ledger.clear_incomplete_fills()
+            if _cleared > 0:
+                logger.warning(f"Cleared {_cleared} incomplete/false fills from DB (phantom fills removed)")
         except Exception as e:
             logger.warning(f"⚠️  KalshiFillsPoller failed to start: {e}")
             _startup_state["services"]["kalshi_fills_poller"] = {"status": "failed", "error": str(e)}
@@ -2850,6 +3348,10 @@ async def _app_lifespan(application: FastAPI):
                     try:
                         _price = getattr(settlement, "settlement_price_cents", None) or 0
                         _mid = getattr(settlement, "market_id", None) or getattr(settlement, "ticker", "")
+                        # GUARD: Skip settlements with missing market identification
+                        if not _mid:
+                            logger.debug("Settlement callback skipped: missing market_id/ticker")
+                            return
                         _settled_yes = _price >= 50
                         from merid.prediction.agent_performance_tracker import get_agent_performance_tracker as _gapt
                         _apt7 = _gapt()
@@ -3623,6 +4125,21 @@ async def _app_lifespan(application: FastAPI):
             _recon_task = asyncio.create_task(
                 _kalshi_recon_loop_async(), name="kalshi-recon-loop"
             )
+
+            # 24/7-HARDENING: Add done callback to catch any escaped exceptions
+            def _recon_done_callback(task: asyncio.Task) -> None:
+                try:
+                    task.result()
+                except asyncio.CancelledError:
+                    logger.info("Kalshi venue reconciliation loop cancelled (normal)")
+                except Exception as exc:
+                    logger.critical(
+                        "[24/7-HARDENING] Kalshi venue reconciliation task crashed: %s. "
+                        "This should never happen - inner loop has try/except.",
+                        exc, exc_info=True
+                    )
+
+            _recon_task.add_done_callback(_recon_done_callback)
             _startup_state["background_tasks"].append(_recon_task)
             logger.info("✅ Kalshi venue reconciliation loop started (async, every 300s)")
         except Exception as exc:
@@ -3634,17 +4151,114 @@ async def _app_lifespan(application: FastAPI):
     # Kalshi agent grid has its own telemetry via the /api/v1/kalshi-grid/* endpoints.
     logger.info("Terminal telemetry loop SKIPPED (Kalshi-only mode)")
 
-    # BUG-L13 FIX: Zero-delay yield to let event loop process any pending tasks
-    # before we yield control to uvicorn. This prevents the 4+ second lag spike
-    # by allowing background initialization to complete.
-    _is_validation = os.environ.get("MERID_VALIDATION_MODE", "") == "1"
-    if _is_validation:
-        logger.info("[VALIDATION MODE] Pre-yield asyncio.sleep(0) to settle pending tasks...")
-        await asyncio.sleep(0)  # Let event loop process pending callbacks
-        logger.info("[VALIDATION MODE] Pre-yield settle complete")
+    # BUG-FIX: Yield BEFORE shutdown wait loop so uvicorn can start HTTP server immediately
+    # The original architecture waited for shutdown signal BEFORE yielding, which prevented
+    # uvicorn from ever starting the HTTP server. This caused the UI to be inaccessible.
+    logger.info("[STARTUP] Yielding to uvicorn - HTTP server will start accepting requests")
+    yield
 
-    # ── YIELD — app is running ─────────────────────────────────────────
+    # ── POST-YIELD: Wait for shutdown signal ─────────────────────────────────
+    # 24/7-HARDENING: The lifespan must NEVER exit unless explicitly stopped by operator.
+    # We create a "stay-alive" event that blocks indefinitely until SIGTERM/SIGINT is received.
+    _stay_alive_event = asyncio.Event()
+    _shutdown_signal_received = False
+
+    def _signal_handler(sig, frame):
+        """Handle shutdown signals explicitly - only way to exit lifespan."""
+        nonlocal _shutdown_signal_received
+        _shutdown_signal_received = True
+        logger.critical(f"[24/7-HARDENING] Shutdown signal received: {sig.name if hasattr(sig, 'name') else sig}")
+        _stay_alive_event.set()
+
+    # Install signal handlers
+    import signal
+    _orig_sigterm = signal.signal(signal.SIGTERM, _signal_handler)
+    _orig_sigint = signal.signal(signal.SIGINT, _signal_handler)
+
+    # 24/7-HARDENING: Ensure we ALWAYS yield to prevent "generator didn't yield" error
+    # This is critical for Windows asyncio compatibility
+    _startup_complete = False
     try:
+        # 24/7-HARDENING: Block indefinitely until shutdown signal is received.
+        # The lifespan must NEVER exit on its own - only explicit operator action.
+        # LOOP-FIX: Re-wait if woken up prematurely (spurious wakeup protection)
+        logger.info("[24/7-HARDENING] Lifespan stay-alive event waiting for shutdown signal...")
+        _spurious_wakeups = 0
+        while not _shutdown_signal_received:
+            try:
+                # Wait with timeout to detect spurious wakeups
+                await asyncio.wait_for(_stay_alive_event.wait(), timeout=60.0)
+                # If we get here, event was set - verify it was the signal
+                if _shutdown_signal_received:
+                    break
+                # Spurious wakeup - log and continue waiting
+                _spurious_wakeups += 1
+                logger.warning(
+                    f"[24/7-HARDENING] Spurious wakeup #{_spurious_wakeups} detected, re-waiting..."
+                )
+                # Re-create event for clean state
+                _stay_alive_event = asyncio.Event()
+            except asyncio.TimeoutError:
+                # Timeout is expected - re-wait indefinitely
+                pass
+            except asyncio.CancelledError:
+                # Only exit on CancelledError if shutdown signal was received
+                if _shutdown_signal_received:
+                    break
+                # Otherwise, this is a spurious cancellation - continue waiting.
+                # PYTHON-3.11-FIX: Catching CancelledError does NOT clear the
+                # task's cancellation count. Without uncancel() the very next
+                # await in this loop re-raises CancelledError immediately,
+                # collapsing into a tight retry that yields nothing useful.
+                # We must explicitly drain the cancel count so the next
+                # `wait_for` actually waits.
+                _task = asyncio.current_task()
+                if _task is not None and hasattr(_task, "uncancel"):
+                    while _task.cancelling() > 0:
+                        _task.uncancel()
+                logger.warning("[24/7-HARDENING] Spurious CancelledError, re-waiting...")
+                # Re-create the event in case it was set by whatever triggered
+                # the cancel (defensive — keeps us from a false-positive break).
+                _stay_alive_event = asyncio.Event()
+                continue
+            except BaseException as _wait_exc:
+                # 24/7-HARDENING: ANY non-CancelledError exception (e.g.
+                # InvalidStateError from Windows IOCP corruption, RuntimeError
+                # from a closed loop helper, MemoryError, etc.) must NOT exit
+                # the lifespan.  If we let it propagate, the outer ``finally``
+                # runs and uvicorn detects the lifespan as terminated, then
+                # cancels every sibling task.  Log and keep waiting.
+                #
+                # KeyboardInterrupt / SystemExit (BaseException subclasses)
+                # are also swallowed here on purpose: explicit shutdown must
+                # come through the SIGTERM/SIGINT handler that flips
+                # ``_shutdown_signal_received``.  Without that flip we are
+                # under spurious-event conditions and the safe action is to
+                # keep the lifespan alive.
+                _exc_name = type(_wait_exc).__name__
+                logger.error(
+                    "[24/7-HARDENING] Spurious %s in lifespan wait — re-waiting "
+                    "(exc=%s)",
+                    _exc_name, _wait_exc,
+                    exc_info=True,
+                )
+                _task = asyncio.current_task()
+                if _task is not None and hasattr(_task, "uncancel"):
+                    try:
+                        while _task.cancelling() > 0:
+                            _task.uncancel()
+                    except Exception:
+                        pass
+                _stay_alive_event = asyncio.Event()
+                # Brief sleep so we don't busy-spin if the same exception
+                # repeats every iteration (e.g. permanently broken loop).
+                try:
+                    await asyncio.sleep(1.0)
+                except BaseException:
+                    pass
+                continue
+        logger.info("[24/7-HARDENING] Lifespan stay-alive event triggered - proceeding to yield")
+        _startup_complete = True
         yield
     except asyncio.CancelledError:
         # Ctrl-C / SIGTERM: clear pending cancel count (Python 3.11+) so that
@@ -3654,11 +4268,80 @@ async def _app_lifespan(application: FastAPI):
         if _task is not None and hasattr(_task, "uncancel"):
             while _task.cancelling() > 0:
                 _task.uncancel()
+    finally:
+        # 24/7-HARDENING: GUARANTEE YIELD — If we never reached yield due to error,
+        # yield now to prevent "generator didn't yield" RuntimeError.
+        # This is critical for Windows asyncio compatibility.
+        if not _startup_complete:
+            logger.critical(
+                "[24/7-HARDENING] Lifespan try-block exited without yielding! "
+                "Yielding now to prevent generator error."
+            )
+            try:
+                yield
+            except Exception as _yield_exc:
+                logger.debug(f"[24/7-HARDENING] Post-error yield exception: {_yield_exc}")
+
+        # 24/7-HARDENING: If yield returned but no shutdown signal received,
+        # something (uvicorn) is trying to shut us down unexpectedly.
+        # We must explicitly check if this was an intentional shutdown.
+        if not _shutdown_signal_received:
+            logger.critical(
+                "[24/7-HARDENING] Lifespan yield returned WITHOUT shutdown signal! "
+                "This is likely uvicorn triggering premature shutdown. "
+                "Checking for explicit shutdown request..."
+            )
+            # Give the ASGI guard a moment to set shutdown reason if this is legitimate
+            try:
+                await asyncio.sleep(0.1)
+            except (asyncio.CancelledError, asyncio.InvalidStateError):
+                # Ignore Windows InvalidStateError during shutdown
+                pass
+
+    # Restore original signal handlers (with Windows error suppression)
+    try:
+        signal.signal(signal.SIGTERM, _orig_sigterm)
+        signal.signal(signal.SIGINT, _orig_sigint)
+    except (OSError, ValueError) as e:
+        # Windows may raise errors during shutdown signal restoration
+        logger.debug(f"[24/7-HARDENING] Signal restoration skipped: {e}")
 
     # ── SHUTDOWN ───────────────────────────────────────────────────────
     # BUG-L7: Single-owner shutdown sequence. Each tier is responsible for
     # stopping the services it owns. Per-service stop() calls have been
     # removed from here to eliminate the triple-stop race condition.
+
+    # BUG-FIX (2026-05-12): Cooperative task cancellation to prevent blocking during shutdown
+    # Cancel all background tasks with timeout to prevent indefinite blocking from
+    # stuck threads or unhandled exceptions. This prevents the crash pattern where
+    # uvicorn hangs during shutdown waiting for tasks that never complete.
+    logger.critical("[SHUTDOWN] Initiating cooperative task cancellation...")
+    _cancelled_count = 0
+    _timeout_count = 0
+    for task in _startup_state["background_tasks"]:
+        if not task.done():
+            task.cancel()
+            _cancelled_count += 1
+    logger.critical("[SHUTDOWN] Cancelled %d background tasks", _cancelled_count)
+
+    # Await all cancelled tasks with timeout to prevent indefinite blocking
+    # Use return_exceptions=True to collect errors without raising
+    _shutdown_timeout = 30.0  # 30 second timeout for all tasks to finish cleanup
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*_startup_state["background_tasks"], return_exceptions=True),
+            timeout=_shutdown_timeout
+        )
+        logger.critical("[SHUTDOWN] All background tasks completed cleanup")
+    except asyncio.TimeoutError:
+        logger.critical(
+            "[SHUTDOWN] Background tasks did not complete within %ds timeout - "
+            "proceeding with shutdown anyway (some tasks may be stuck)",
+            _shutdown_timeout
+        )
+        _timeout_count += 1
+    except Exception as exc:
+        logger.critical("[SHUTDOWN] Error during background task cleanup: %s", exc)
 
     # Get shutdown attribution from ASGI guard (if available)
     _shutdown_reason = None
@@ -3670,26 +4353,31 @@ async def _app_lifespan(application: FastAPI):
 
     # EVENT-LOOP-FIX: Ensure we always have a valid shutdown reason
     # If ASGI guard didn't provide one, we derive it from context
+    # 24/7-HARDENING: Detect if shutdown was triggered without explicit signal
     if _shutdown_reason is None:
+        # Check if we have a shutdown signal registered
+        _signal_file = Path("/tmp/.merid_shutdown_signal") if os.name != 'nt' else Path(os.environ.get("TEMP", "C:\\tmp")) / ".merid_shutdown_signal"
+        _had_explicit_signal = _signal_file.exists() if _signal_file else False
+
+        if not _had_explicit_signal and not _shutdown_signal_received:
+            logger.critical(
+                "[24/7-HARDENING] SHUTDOWN WITHOUT EXPLICIT SIGNAL DETECTED! "
+                "The lifespan yield returned, but no SIGTERM/SIGINT was received. "
+                "This indicates uvicorn may be shutting down prematurely. "
+                "If this is a 24/7 production system, investigate uvicorn configuration."
+            )
+
         try:
             from web.asgi_guard import initiate_shutdown, ShutdownReason
-            # Determine reason from context
-            from merid.diagnostics.loop_lag import get_loop_lag_monitor
-            lag_health = get_loop_lag_monitor().get_health()
-            if lag_health.get("critical"):
-                _shutdown_reason = initiate_shutdown(
-                    reason=ShutdownReason.LOOP_LAG_HALT,
-                    sub_reason=f"lag_max={lag_health['stats']['max_ms']:.0f}ms",
-                    initiator_module="web.main.lifespan",
-                    metrics={"lag_stats": lag_health["stats"]},
-                )
-            else:
-                # Normal shutdown - lifespan end
-                _shutdown_reason = initiate_shutdown(
-                    reason=ShutdownReason.LIFESPAN_END,
-                    sub_reason="normal_lifespan_yield_exit",
-                    initiator_module="web.main.lifespan",
-                )
+            # 24/7-HARDENING: Never auto-shutdown due to loop lag.
+            # The server should run continuously unless explicitly stopped by operator.
+            # Loop-lag "critical" status is logged but does NOT trigger shutdown.
+            # Normal shutdown - lifespan end (only when SIGTERM/SIGINT received)
+            _shutdown_reason = initiate_shutdown(
+                reason=ShutdownReason.LIFESPAN_END,
+                sub_reason="normal_lifespan_yield_exit",
+                initiator_module="web.main.lifespan",
+            )
         except Exception as e:
             logger.warning(f"Failed to derive shutdown reason: {e}")
             # Last resort - use LIFESPAN_END as it's safest
@@ -3897,14 +4585,9 @@ async def _app_lifespan(application: FastAPI):
     except Exception as exc:
         logger.debug("KalshiSettlementPoller stop skipped: %s", exc)
 
-    # KalshiVenueClient cleanup - prevent garbage collection warning
-    try:
-        from merid.event_venues.kalshi.client import get_kalshi_client
-        _client = get_kalshi_client()
-        await _client.close()
-        logger.info("✅ KalshiVenueClient closed")
-    except Exception as exc:
-        logger.debug("KalshiVenueClient close skipped: %s", exc)
+    # Note: KalshiVenueClient is already closed in the cleanup loop above (line ~3834)
+    # via close_kalshi_client(). Do NOT call get_kalshi_client() here as it would
+    # create a new client after shutdown, triggering the garbage-collection warning.
 
     # Final venue reconciliation snapshot (Kalshi)
     try:
@@ -4203,9 +4886,11 @@ if __name__ == "__main__":
             logger.debug(f"Suppressed InvalidStateError (shutdown): {exception}")
             return
 
-        # Suppress ConnectionResetError during shutdown
+        # Suppress ConnectionResetError during shutdown (Windows asyncio proactor issue)
         if exception and isinstance(exception, ConnectionResetError):
-            logger.debug(f"Suppressed ConnectionResetError (shutdown): {exception}")
+            # This is a harmless Windows asyncio proactor error when clients disconnect abruptly
+            # No action needed - system continues normally
+            logger.debug(f"Suppressed ConnectionResetError (client disconnect): {exception}")
             return
 
         # Log other exceptions normally

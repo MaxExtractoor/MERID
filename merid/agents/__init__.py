@@ -1,11 +1,10 @@
-"""MERID Canonical Agent Roster — Typed, structured agents for the swarm.
+"""
+MERID Agents Package
 
-15 agent types across 5 categories:
-§1 Market & Research: MarketResearchAgent, PredictionMarketAgent, CryptoSignalsAgent
-§2 Strategy & Arb: StrategyDesignerAgent, ArbitrageAgent, ExecutionOptimizerAgent
-§3 Risk & Capital: RiskManagerAgent, CapitalAllocatorAgent, AnomalyDetectorAgent
-§4 Coordination: ConsensusCoordinatorAgent, ExplainabilityAgent, GovernanceAgent
-§5 Dev & Ops: OpsRunbookAgent, BacktestAgent
+LEAN 15m KALSHI STACK (2026-05-13): Pruned for BTC/ETH/SOL/XRP/DOGE trading.
+Core agents: StrategyAgent, RiskAgent, SkepticAgent, MarketAnalystAgent.
+Deleted agents (moved to legacy/): NewsAnalystAgent, SynthesizerAgent, ArchivistAgent, MetaAuditAgent,
+    ConsensusCoordinatorAgent, ExplainabilityAgent, GovernanceAgent.
 """
 
 from merid.agents.base import (

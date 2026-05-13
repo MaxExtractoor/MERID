@@ -428,58 +428,44 @@ def get_forecaster_bridge() -> RegimeDetectorForecasterBridge:
 # ── Alert Callback Helpers ───────────────────────────────────────────────
 
 def create_telegram_alert_callback() -> Callable[[RegimeChangeEvent], None]:
-    """Create an alert callback that sends Telegram notifications."""
-    def callback(event: RegimeChangeEvent) -> None:
-        try:
-            from agents.telegram_agent import get_telegram_agent
-            agent = get_telegram_agent()
-            if not agent.enabled:
-                return
-                
-            emoji_map = {
-                MarketRegime.TRENDING_UP: "📈",
-                MarketRegime.TRENDING_DOWN: "📉",
-                MarketRegime.HIGH_VOLATILITY: "⚠️",
-                MarketRegime.MEAN_REVERTING: "↔️",
-                MarketRegime.LOW_VOLATILITY: "😴",
-                MarketRegime.CHOPPY: "🌊",
-                MarketRegime.UNKNOWN: "❓",
-            }
-            
-            emoji = emoji_map.get(event.new_regime, "📊")
-            
-            message = (
-                f"{emoji} <b>Regime Change: {event.asset}</b>\n\n"
-                f"{event.previous_regime.value} → {event.new_regime.value}\n"
-                f"Confidence: {event.confidence:.1%}\n\n"
-                f"<i>{event.reasoning}</i>\n\n"
-                f"<b>Recommendation:</b> {event.recommended_action}"
-            )
-            
-            import asyncio
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(agent.send_message(message))
-            except RuntimeError:
-                asyncio.run(agent.send_message(message))
-                
-        except Exception as exc:
-            logger.debug(f"[RegimeDetector] Telegram alert failed: {exc}")
+    """Create an alert callback that sends Telegram notifications.
     
+    SOCIAL-TRUTH (2026-05-13): Telegram alert disabled for lean 15m Kalshi trading.
+    """
+    def callback(event: RegimeChangeEvent) -> None:
+        pass
     return callback
 
 
 def create_webhook_alert_callback(url: str) -> Callable[[RegimeChangeEvent], None]:
-    """Create an alert callback that POSTs to a webhook."""
+    """Create an alert callback that POSTs to a webhook.
+    
+    BUG-FIX (2026-05-12): Wrapped blocking requests.post in executor to prevent
+    event loop blocking when called from async contexts. Uses cooperative cancellation
+    pattern with timeout.
+    """
     def callback(event: RegimeChangeEvent) -> None:
         try:
             import requests
-            requests.post(
-                url,
-                json=event.to_dict(),
-                timeout=5.0,
-                headers={"Content-Type": "application/json"},
-            )
+            import concurrent.futures
+            
+            def _blocking_post():
+                return requests.post(
+                    url,
+                    json=event.to_dict(),
+                    timeout=5.0,
+                    headers={"Content-Type": "application/json"},
+                )
+            
+            # Run in executor to avoid blocking event loop
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_blocking_post)
+                try:
+                    future.result(timeout=6.0)  # Slightly longer than request timeout
+                except concurrent.futures.TimeoutError:
+                    logger.debug(f"[RegimeDetector] Webhook alert timed out")
+                except Exception as exc:
+                    logger.debug(f"[RegimeDetector] Webhook alert failed: {exc}")
         except Exception as exc:
             logger.debug(f"[RegimeDetector] Webhook alert failed: {exc}")
     

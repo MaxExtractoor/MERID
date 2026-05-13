@@ -389,37 +389,29 @@ class CryptoAlertRouter:
                 "PM alert fired: [info] market_selection - %s %s markets: %s",
                 symbol, tag.value, market_ids,
             )
-        if self._cfg.ENABLE_TELEGRAM_MARKET_ALERTS:
-            try:
-                from agents.telegram_agent import get_telegram_agent
-                items = [
-                    MarketSelectionItem(
-                        market_id=s.market_id,
-                        title=s.title,
-                        frequency=s.frequency,
-                        volume_24h=s.volume_24h,
-                        p_yes=s.p_yes,
-                        tags=compute_tags(s, self._cfg),
-                    )
-                    for s in top
-                ]
-                tg = get_telegram_agent()
-                await tg.send_market_selection_batch(symbol, tag, items)
-            except Exception as exc:
-                logger.warning("CryptoAlertRouter: telegram market alert failed: %s", exc)
-        try:
-            from merid.prediction.alerts import get_alert_manager, PredictionAlert, AlertCategory, AlertSeverity
-            am = get_alert_manager()
-            am.fire(PredictionAlert(
-                category=AlertCategory.MARKET_SELECTION,
-                severity=AlertSeverity.INFO,
-                title=f"market_selection: {symbol} [{tag.value}]",
-                message=f"{len(top)} markets selected for {symbol}/{tag.value}: {market_ids}",
-                market_id=symbol,
-                data={"symbol": symbol, "tag": tag.value, "markets": [s.market_id for s in top]},
-            ))
-        except Exception as exc:
-            logger.debug("CryptoAlertRouter: AlertManager fire failed (ignored): %s", exc)
+        # SOCIAL-TRUTH (2026-05-13): Telegram market alerts disabled for lean 15m Kalshi trading
+        # NOTE: Telegram dispatch is already handled by the
+        # PredictionAlertManager singleton's _make_telegram_sink.
+        # Do NOT re-send here — that caused duplicate TG messages and
+        # rate-limit cascades (see alert flood fix 2026-03).
+        # if self._cfg.ENABLE_TELEGRAM_MARKET_ALERTS:
+        #     try:
+        #         from agents.telegram_agent import get_telegram_agent
+        #         items = [
+        #             MarketSelectionItem(
+        #                 market_id=s.market_id,
+        #                 title=s.title,
+        #                 frequency=s.frequency,
+        #                 volume_24h=s.volume_24h,
+        #                 p_yes=s.p_yes,
+        #                 tags=compute_tags(s, self._cfg),
+        #             )
+        #             for s in top
+        #         ]
+        #         tg = get_telegram_agent()
+        #         await tg.send_market_selection_alert(symbol, tag, items)
+        #     except Exception as exc:
+        #         logger.warning("Telegram market selection alert failed: %s", exc)
         if self._cfg.ENABLE_METRICS:
             self._counters[("merid_crypto_selected_markets_total", symbol, tag.value)] += len(top)
 
