@@ -3609,10 +3609,15 @@ async def _app_lifespan(application: FastAPI):
     # SentimentBus — Twitter + Reddit background loops → MarketMoodBus social sentiment
     # Must start AFTER MarketMoodBus since it pushes data into it
     # BUG-L13 FIX: Skip in VALIDATION_MODE to prevent extreme event-loop lag
+    # LEAN 15m KALSHI STACK (2026-05-13): Skip when ENABLE_SENTIMENT_TRUTH=false to prevent native crashes
     _is_validation = __import__("os").environ.get("MERID_VALIDATION_MODE", "") == "1"
+    _sentiment_disabled = __import__("os").environ.get("ENABLE_SENTIMENT_TRUTH", "false").lower() == "false"
     if _is_validation:
         logger.info("[VALIDATION MODE] SentimentBus skipped (prevents 10s+ lag from Twitter/Reddit scraping)")
         _startup_state["services"]["sentiment_bus"] = {"status": "skipped", "reason": "validation_mode"}
+    elif _sentiment_disabled:
+        logger.info("[LEAN KALSHI] SentimentBus skipped (ENABLE_SENTIMENT_TRUTH=false)")
+        _startup_state["services"]["sentiment_bus"] = {"status": "skipped", "reason": "sentiment_disabled"}
     else:
         try:
             from merid.sentiment.sentiment_bus import get_sentiment_bus
@@ -3644,10 +3649,15 @@ async def _app_lifespan(application: FastAPI):
     # HashtagMonitor — background loops for hashtag scraping + news ingestion → SentimentBusV2
     # Must start AFTER SentimentBus and TwitterStreamHandler so data sources are available
     # BUG-L13 FIX: Skip in VALIDATION_MODE — this causes 39+ second lag spikes during startup
+    # LEAN 15m KALSHI STACK (2026-05-13): Skip when ENABLE_SENTIMENT_TRUTH=false to prevent native crashes
     _is_validation = __import__("os").environ.get("MERID_VALIDATION_MODE", "") == "1"
+    _sentiment_disabled = __import__("os").environ.get("ENABLE_SENTIMENT_TRUTH", "false").lower() == "false"
     if _is_validation:
         logger.info("[VALIDATION MODE] HashtagMonitor skipped (prevents 39s+ startup lag)")
         _startup_state["services"]["hashtag_monitor"] = {"status": "skipped", "reason": "validation_mode"}
+    elif _sentiment_disabled:
+        logger.info("[LEAN KALSHI] HashtagMonitor skipped (ENABLE_SENTIMENT_TRUTH=false)")
+        _startup_state["services"]["hashtag_monitor"] = {"status": "skipped", "reason": "sentiment_disabled"}
     else:
         try:
             from merid.sentiment.hashtag_monitor import get_hashtag_monitor
