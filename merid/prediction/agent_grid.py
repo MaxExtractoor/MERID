@@ -26,12 +26,14 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 # ═══════════════════════════════════════════════════════════════════════
-# DEBUGGING: Enable faulthandler to capture stack traces on hangs
+# DEBUGGING: Faulthandler disabled for lean 15m Kalshi stack
+# LEAN 15m KALSHI STACK (2026-05-13): Disabled faulthandler to prevent forced exits on hangs
+# Faulthandler was dumping traces and killing process on 30-second timeouts
+# For production stability, rely on uvicorn timeout and logging instead
+# import faulthandler
+# faulthandler.enable(sys.stderr)
+# faulthandler.dump_traceback_later(30, repeat=True)
 # ═══════════════════════════════════════════════════════════════════════
-import faulthandler
-faulthandler.enable(sys.stderr)
-# Dump stack traces every 30 seconds if process appears stuck
-faulthandler.dump_traceback_later(30, repeat=True)
 
 from merid.prediction.agent_grid_config import (
     AgentGridConfig,

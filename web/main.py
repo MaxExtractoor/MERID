@@ -24,28 +24,16 @@ except ImportError:
     pass
 
 # ═══════════════════════════════════════════════════════════════════════
-# DEBUGGING: Enable faulthandler to capture stack traces on hangs and native crashes
-# BUG-FIX (2026-05-12): Enhanced faulthandler configuration for Windows access violation debugging
-# BUG-FIX (2026-05-12): Disabled faulthandler timeout - using uvicorn timeout instead
-import faulthandler
-import sys
-
-# Enable faulthandler on stderr to capture Python stack traces on crashes
-# stderr is captured by structlog and written to logs for durable storage
-faulthandler.enable(sys.stderr, all_threads=True)
-
-# Cancel any existing scheduled dump (in case of reload)
-faulthandler.cancel_dump_traceback_later()
-
-# BUG-FIX (2026-05-12): Disabled automatic traceback dump to prevent false positives
-# Use uvicorn --timeout flag instead for startup timeout control
-# faulthandler.dump_traceback_later(600, repeat=False, file=sys.stderr, exit=False)
-
-# For Windows native crashes (access violations), faulthandler won't help much
-# but this ensures we have Python context if the crash originates from Python code
-# Note: Logger will be initialized after imports; using print for now
-print("[FAULTHANDLER] Enabled - will dump traces on hangs and crashes to stderr (captured in logs)")
-print("[FAULTHANDLER] Automatic timeout disabled - use uvicorn --timeout for startup timeout")
+# DEBUGGING: Faulthandler disabled for lean 15m Kalshi stack
+# LEAN 15m KALSHI STACK (2026-05-13): Disabled faulthandler to prevent forced exits on hangs
+# Faulthandler was dumping traces and killing process on 30-second timeouts
+# For production stability, rely on uvicorn timeout and logging instead
+# import faulthandler
+# import sys
+# faulthandler.enable(sys.stderr, all_threads=True)
+# faulthandler.cancel_dump_traceback_later()
+# print("[FAULTHANDLER] Enabled - will dump traces on hangs and crashes to stderr (captured in logs)")
+# print("[FAULTHANDLER] Automatic timeout disabled - use uvicorn --timeout for startup timeout")
 
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
