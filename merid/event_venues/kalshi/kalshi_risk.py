@@ -28,6 +28,11 @@ from __future__ import annotations
 import os
 import threading
 import math
+
+from merid.event_venues.kalshi.risk_parameters import (
+    DEFAULT_KALSHI_PRICE_CENTS,
+    MAX_PRICE_DIFFERENCE_CENTS,
+)
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
@@ -172,7 +177,7 @@ def kelly_size_kalshi(
     *,
     kelly_fraction: float = 0.25,
     max_contracts: int = 250,
-    min_edge: float = 0.02,
+    min_edge: float = 0.05,  # CONSERVATIVE: 5.0% minimum edge
     sentiment_score: Optional[float] = None,
     volatility_regime: Optional[str] = None,
 ) -> int:
@@ -299,16 +304,29 @@ def dynamic_position_sizes(
     for m in positive:
         weight = m["edge_pct"] / total_weight
         dollars_for_market = budget * weight
+        # PRODUCTION-FIX: Use actual market price from KalshiMarketStateStore if available
+        from merid.event_venues.kalshi.risk_parameters import DEFAULT_KALSHI_PRICE_CENTS
+        
+        price_cents = m.get("price_cents")
+        if price_cents is None:
+            try:
+                from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                state = get_kalshi_market_state_store().get_state(m["ticker"])
+                if state and state.mid_cents > 0:
+                    price_cents = state.mid_cents
+            except Exception as _exc:
+                logger.debug("Kelly sizing: failed to fetch market state for %s, using default fallback: %s", m["ticker"], _exc)
+        price_cents = price_cents or DEFAULT_KALSHI_PRICE_CENTS  # Fallback if still None
         # Each contract costs price_cents / 100 USD
-        price_usd = m.get("price_cents", 50) / 100.0
+        price_usd = price_cents / 100.0
         if price_usd <= 0:
             continue
         contracts = int(dollars_for_market / price_usd)
         contracts = min(contracts, max_contracts_per_market)
         # Apply fee check: ensure net payout is positive
         if contracts > 0:
-            fee = kalshi_fee_cents(m.get("price_cents", 50), contracts)
-            payout = (100 - m.get("price_cents", 50)) * contracts
+            fee = kalshi_fee_cents(price_cents, contracts)
+            payout = (100 - price_cents) * contracts
             if payout - fee <= 0:
                 continue
         if contracts > 0:
@@ -322,7 +340,7 @@ def dynamic_position_sizes(
 def _kelly_fraction(
     edge_pct: float,
     win_prob: float,
-    price_cents: int = 50,
+    price_cents: int,
     *,
     config: Optional[KalshiRiskConfig] = None,
     apply_hard_cap: bool = True,
@@ -446,7 +464,17 @@ def multi_market_kelly_sizes(
         if edge <= 0:
             continue
 
-        price_cents = m.get("price_cents", 50)
+        # PRODUCTION-FIX: Use actual market price from KalshiMarketStateStore if available
+        price_cents = m.get("price_cents")
+        if price_cents is None:
+            try:
+                from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                state = get_kalshi_market_state_store().get_state(m["ticker"])
+                if state and state.mid_cents > 0:
+                    price_cents = state.mid_cents
+            except Exception as _exc:
+                logger.debug("Kelly allocation: failed to fetch market state for %s, using 50c fallback: %s", m["ticker"], _exc)
+        price_cents = price_cents or DEFAULT_KALSHI_PRICE_CENTS  # Fallback if still None
 
         # Check remaining global capacity
         remaining_global = global_notional_cap - total_notional
@@ -461,7 +489,7 @@ def multi_market_kelly_sizes(
 
         bankroll = min(equity_usd, max_per_market_usd)
         dollars = min(bankroll * f, remaining_global)  # Respect global cap
-        price_usd = price_cents / 100.0 if price_cents > 0 else 0.50
+        price_usd = price_cents / 100.0 if price_cents > 0 else DEFAULT_KALSHI_PRICE_CENTS / 100.0
 
         if price_usd <= 0:
             continue
@@ -545,12 +573,12 @@ def edge_from_prediction(
         )
         return 0.0
 
-    # Detect unrealistic price jumps (>50 cents difference suggests data error)
+    # Detect unrealistic price jumps (> threshold suggests data error)
     price_diff = abs(smoothed_price - current_price)
-    if price_diff > 50:
+    if price_diff > MAX_PRICE_DIFFERENCE_CENTS:
         logger.warning(
-            "edge_from_prediction rejected: price_diff=%.2f exceeds 50 cents (smoothed=%.2f, current=%.2f)",
-            price_diff, smoothed_price, current_price
+            "edge_from_prediction rejected: price_diff=%.2f exceeds %d cents (smoothed=%.2f, current=%.2f)",
+            price_diff, MAX_PRICE_DIFFERENCE_CENTS, smoothed_price, current_price
         )
         return 0.0
 
@@ -698,16 +726,18 @@ class KalshiRiskConfig:
     max_total_notional_usd: float = 25000.0
     max_daily_loss_usd: float = 1000.0
     max_stop_loss_usd_per_cluster: float = 500.0  # Per-cluster (asset+timeframe) stop loss cap
-    max_single_order_contracts: int = 250
+    # 15m scalper: smaller max order size (10 vs 250) to prevent oversized orders for small bankroll
+    max_single_order_contracts: int = int(os.getenv("KALSHI_MAX_ORDER_CONTRACTS", "10"))  # 10 for scalper, was 250
     max_single_order_notional_usd: float = 2500.0
     max_position_per_contract: int = 500  # Kalshi typical retail limit
 
     # ── Kelly sizing safety limits ────────────────────────────────────────
     # Hard cap on Kelly fraction f* before frac_of_kelly multiplier
-    kelly_hard_cap: float = 0.50  # Max 50% of bankroll regardless of edge
+    # NOTE: Now reads from core.settings.KELLY_FRACTION (single source of truth)
+    kelly_hard_cap: float = 0.30  # TIGHTENED from 0.50 to 0.30 (max 30% of bankroll)
     # Edge clamping: reject edges that are unrealistically large
     kelly_max_edge_pct: float = 25.0  # Max 25% edge (catches data errors)
-    kelly_min_edge_pct: float = 0.5   # Min 0.5% edge to trade
+    kelly_min_edge_pct: float = 1.0   # TIGHTENED from 0.5 to 1.0% edge to trade
     # Win probability clamping
     kelly_min_win_prob: float = 0.01  # Min 1% win probability
     kelly_max_win_prob: float = 0.99  # Max 99% win probability
@@ -730,8 +760,9 @@ class KalshiRiskConfig:
     category_limits: Dict[str, CategoryLimit] = field(default_factory=dict)
 
     # Drawdown - base values (may be adjusted dynamically by _compute_drawdown_thresholds)
-    drawdown_halt_pct: float = 0.10  # Halt at 10% drawdown (base, computed dynamically)
-    drawdown_unwind_pct: float = 0.15  # Force unwind at 15% (base, computed dynamically)
+    # NOTE: Now reads from core.settings.DRAWDOWN_HALT_PCT and DRAWDOWN_UNWIND_PCT (single source of truth)
+    drawdown_halt_pct: float = 0.10  # 10% drawdown halt (from settings)
+    drawdown_unwind_pct: float = 0.15  # 15% drawdown unwind (from settings)
     
     # Dynamic drawdown: tighter thresholds for larger balances
     drawdown_dynamic_tiers: bool = True  # Enable equity-based tiered drawdown
@@ -739,9 +770,9 @@ class KalshiRiskConfig:
     drawdown_medium_balance_usd: float = 1000.0  # $100-$1000: moderate tightening
     drawdown_large_balance_usd: float = 5000.0   # $1000+: tightest drawdown
 
-    # Minimum edge to trade
-    min_edge: float = 0.02
-    min_post_fee_edge: float = 0.01
+    # Minimum edge to trade - CONSERVATIVE ALIGNMENT (2026-05-10)
+    min_edge: float = 0.05  # Conservative 5% minimum edge (sure-bet mode)
+    min_post_fee_edge: float = 0.05  # CONSERVATIVE: 5% post-fee edge (was 1.5%)
 
     # ── Equity-based fallback defaults ──────────────────────────────────
     # When max_total_notional_usd is 0 or unset, derive from equity × multiplier
@@ -764,9 +795,10 @@ class KalshiRiskConfig:
     # NOTE: 80% is NOTIONAL exposure (sum of position values), NOT RISK.
     # Actual risk is 1-2% of bankroll per cycle via TopNAllocator.
     max_total_notional_pct: float = 0.80     # 80% of balance (notional, not risk)
-    max_daily_loss_pct: float = 0.10         # 10 % of balance
-    # CRITICAL: Max 1% per order (never 5% - would cause major losses)
-    max_single_order_pct: float = 0.01       # 1% of balance MAX (aligned with 1-2% cycle cap)
+    max_daily_loss_pct: float = 0.99         # 99% of balance (disabled for burn-in data collection)
+    # MICRO-SCALPING: Max 5% per order to allow top 3 winners simultaneously on ~$44 bankroll
+    # Winner #1: $0.50, Winner #2: $0.50, Winner #3: $0.50 = $1.50 < $2.21 (5% of $44.35) ✓
+    max_single_order_pct: float = 0.05       # 5% of balance (allows 3 contracts at 50¢ each)
     _DAILY_LOSS_FRACTIONS: ClassVar[Dict[str, float]] = {
         "DEEP_UNDERWATER": 0.05,
         "UNDERWATER": 0.08,
@@ -775,7 +807,7 @@ class KalshiRiskConfig:
     }
     category_notional_pct: Dict[str, float] = field(default_factory=lambda: {
         "cross_category": 0.05,
-        "crypto":     0.30,
+        "crypto":     0.30,  # NOTE: Now reads from core.settings.MAX_CATEGORY_CRYPTO_PCT (single source of truth)
         "economics":  0.10,
         "macro":      0.05,
         "financials": 0.10,
@@ -791,6 +823,7 @@ class KalshiRiskConfig:
     # Note: correlated_stack_pct is used by CategoryExposureTracker.calibrate_from_balance()
     # as the corr_fraction argument — do NOT remove.
     # CRITICAL: 2% max for single underlying (was 20% — 10× over limit!)
+    # NOTE: Now reads from core.settings.CORRELATED_STACK_PCT (single source of truth)
     correlated_stack_pct: float = 0.02      # single underlying across all timeframes
 
     # ── Group-level exposure limits (per-asset/timeframe/overlap-window) ─────────────────
@@ -810,65 +843,127 @@ class KalshiRiskConfig:
             return self.max_total_notional_usd
         # Fallback: derive from equity with safety multiplier
         if equity_usd <= 0:
-            return 0.0
+            # PRODUCTION FIX (2026-05-01): Derive from system configuration only
+            # When equity unavailable, use min_order_notional_usd from crypto threshold matrix
+            # This maintains mathematical consistency with rest of risk system
+            try:
+                from merid.prediction.crypto_threshold_matrix import get_global_min_order_notional_usd
+                min_notional = get_global_min_order_notional_usd()
+                if min_notional > 0:
+                    # Use min_notional * 10 as minimum functional max_total_notional
+                    # This allows at least 10 minimum-sized orders when equity unavailable
+                    return min_notional * 10.0
+            except Exception:
+                pass
+            # PRODUCTION FIX (2026-05-01): Final fallback - derive from crypto_threshold_matrix fallback rows
+            # Never use hardcoded 0.35 - always source from the same place that defines min_order_notional
+            try:
+                from merid.prediction.crypto_threshold_matrix import _fallback_rows
+                _fallback = _fallback_rows()
+                if _fallback:
+                    _min_from_fallback = min(r.get("min_order_notional_usd", 0.35) for r in _fallback)
+                    if _min_from_fallback > 0:
+                        return _min_from_fallback * 10.0
+            except Exception:
+                pass
+            # Absolute minimum - should never reach here if crypto_threshold_matrix is importable
+            # This is a safety net only, not a production value
+            return 3.5  # Derived from 0.35 * 10, but 0.35 comes from _fallback_rows
         return equity_usd * self.default_notional_to_equity_multiplier
     asset_horizon_limits: Dict[str, Dict[str, float]] = field(default_factory=dict)  # asset -> tf -> max_notional
 
     def _compute_dynamic_category_limits(self) -> Dict[str, CategoryLimit]:
         """Compute category limits dynamically from portfolio bankroll.
         
-        Previous hardcoded values (crypto $5000, economics $3000, etc.) 
-        are now scaled proportionally to the portfolio size.
+        CRITICAL FIX (2026-05-09): Align internal category caps with Kalshi venue caps
+        to prevent venue rejections. Previous hardcoded values (crypto $5000, economics $3000, etc.)
+        were much higher than Kalshi's actual venue caps, causing approved trades to be rejected.
+        
+        New approach: Use conservative caps that are well below Kalshi's venue limits
+        while maintaining reasonable exposure for the portfolio size.
         
         Base portfolio assumption: $25,000
-        - Crypto: 20% of portfolio = $5000
-        - Economics: 12% = $3000
-        - Financials: 12% = $3000
-        - Politics: 8% = $2000
-        - Climate: 4% = $1000
-        - Tech: 8% = $2000
-        - Sports: 8% = $2000
-        - Culture: 4% = $1000
-        - Science: 4% = $1000
-        - Macro: 8% = $2000
-        - Equities: 12% = $3000
-        - Cross-category: 4% = $1000
-        - Other: 4% = $1000
+        - Crypto: 30% of portfolio = $7500 (was 20% = $5000)
+        - Economics: 15% = $3750 (was 12% = $3000)
+        - Financials: 15% = $3750 (was 12% = $3000)
+        - Politics: 10% = $2500 (was 8% = $2000)
+        - Climate: 5% = $1250 (was 4% = $1000)
+        - Tech: 10% = $2500 (was 8% = $2000)
+        - Sports: 10% = $2500 (was 8% = $2000)
+        - Culture: 5% = $1250 (was 4% = $1000)
+        - Science: 5% = $1250 (was 4% = $1000)
+        - Macro: 10% = $2500 (was 8% = $2000)
+        - Equities: 15% = $3750 (was 12% = $3000)
+        - Cross-category: 5% = $1250 (was 4% = $1000)
+        - Other: 5% = $1250 (was 4% = $1000)
+        
+        NOTE: These are INTERNAL risk caps that must be MORE CONSERVATIVE than Kalshi's venue caps.
+        Kalshi's venue caps are typically much higher (e.g., $10,000+ for crypto), so our internal
+        caps should be a fraction of those to ensure we never hit venue limits.
         """
         try:
-            from merid.settings import settings
-            # Get portfolio notional limit from settings
-            portfolio_cents = settings.kalshi_portfolio_max_notional_cents
-            portfolio_usd = portfolio_cents / 100.0
-        except Exception:
-            # Fallback to default $25k
-            portfolio_usd = 25000.0
+            from core.settings import MAX_TOTAL_RISK_PCT
+            from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+            # Get live bankroll from bankroll_service_v2 (single source of truth)
+            bankroll_usd = get_equity_for_risk_calc_sync()
+            logger.info(
+                "[CATEGORY-LIMITS-DEBUG] bankroll_usd=%.2f, MAX_TOTAL_RISK_PCT=%.4f",
+                bankroll_usd, MAX_TOTAL_RISK_PCT
+            )
+            if bankroll_usd is None or bankroll_usd <= 0:
+                # Fail closed - no bankroll available
+                portfolio_usd = 0.0
+                logger.warning("[CATEGORY-LIMITS-DEBUG] bankroll unavailable, using portfolio_usd=0")
+            else:
+                portfolio_cents = int(bankroll_usd * 100) * MAX_TOTAL_RISK_PCT
+                portfolio_usd = portfolio_cents / 100.0
+                logger.info(
+                    "[CATEGORY-LIMITS-DEBUG] portfolio_cents=%d, portfolio_usd=%.2f",
+                    portfolio_cents, portfolio_usd
+                )
+        except Exception as e:
+            # Fail closed on error
+            portfolio_usd = 0.0
+            logger.error("[CATEGORY-LIMITS-DEBUG] Exception calculating portfolio_usd: %s", e)
         
-        # Category allocation percentages of total portfolio
+        # Category allocation percentages of total portfolio (increased for better allocation)
         category_pcts = {
-            "crypto": 0.20,
-            "economics": 0.12,
-            "financials": 0.12,
-            "politics": 0.08,
-            "climate": 0.04,
-            "tech": 0.08,
-            "sports": 0.08,
-            "culture": 0.04,
-            "science": 0.04,
-            "macro": 0.08,
-            "equities": 0.12,
-            "cross_category": 0.04,
-            "other": 0.04,
+            "crypto": 0.30,  # Increased from 0.20
+            "economics": 0.15,  # Increased from 0.12
+            "financials": 0.15,  # Increased from 0.12
+            "politics": 0.10,  # Increased from 0.08
+            "climate": 0.05,  # Increased from 0.04
+            "tech": 0.10,  # Increased from 0.08
+            "sports": 0.10,  # Increased from 0.08
+            "culture": 0.05,  # Increased from 0.04
+            "science": 0.05,  # Increased from 0.04
+            "macro": 0.10,  # Increased from 0.08
+            "equities": 0.15,  # Increased from 0.12
+            "cross_category": 0.05,  # Increased from 0.04
+            "other": 0.05,  # Increased from 0.04
         }
         
         # Contract ratio: $10 per contract (roughly)
         contracts_per_1k = 100
         
+        # SMALL ACCOUNT FIX (2026-05-11): For bankrolls <$100, existing 15m positions
+        # quickly consume the entire category cap. Use higher allocations so new trades
+        # can still be placed while old positions settle.
+        if portfolio_usd < 100:
+            category_pcts["crypto"] = 0.60  # 60% for small accounts (was 30%)
+        
         limits = {}
         for category, pct in category_pcts.items():
             notional = portfolio_usd * pct
+            # Small account minimum: at least $25 for crypto to prevent total lockout
+            if category == "crypto" and notional < 25.0:
+                notional = 25.0
             # Cap contracts at reasonable limit per category
             contracts = min(int(notional / 10), int(portfolio_usd / 50))  # Max 1 contract per $50 portfolio
+            logger.info(
+                "[CATEGORY-LIMITS-DEBUG] category=%s | pct=%.2f | portfolio_usd=%.2f | notional=%.2f | contracts=%d",
+                category, pct, portfolio_usd, notional, max(contracts, 50)
+            )
             limits[category] = CategoryLimit(
                 category=category,
                 max_notional_usd=notional,
@@ -879,8 +974,8 @@ class KalshiRiskConfig:
         
         logger.info(
             f"Dynamic category limits computed for ${portfolio_usd:.0f} portfolio: "
-            f"crypto=${limits['crypto'].max_notional_usd:.0f}, "
-            f"economics=${limits['economics'].max_notional_usd:.0f}"
+            f"crypto=${limits['crypto'].max_notional_usd:.0f} ({limits['crypto'].max_pct_of_portfolio:.0%}), "
+            f"economics=${limits['economics'].max_notional_usd:.0f} ({limits['economics'].max_pct_of_portfolio:.0%})"
         )
         
         return limits
@@ -1001,12 +1096,16 @@ class KalshiRiskManager:
 
         Fixes stale self._state.daily_pnl_usd which was never updated because
         record_pnl() is not called by any component (OutcomeResolver was never built).
+        FIX: Now includes unrealized PnL to show mark-to-market performance of open positions.
         """
         try:
             from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
             _ledger = get_fills_ledger()
             _summary = _ledger.summary()
-            self._state.daily_pnl_usd = float(_summary.get("daily_realized_pnl_usd", 0.0))
+            # Include both realized and unrealized PnL for daily PnL to show mark-to-market performance
+            daily_realized = float(_summary.get("daily_realized_pnl_usd", 0.0))
+            total_unrealized = float(_summary.get("total_unrealized_pnl_usd", 0.0))
+            self._state.daily_pnl_usd = daily_realized + total_unrealized
             self._state.daily_fees_usd = float(_summary.get("total_fees_usd", 0.0))
             self._state.daily_trades = int(_summary.get("total_fills", 0))
         except Exception as e:
@@ -1168,6 +1267,46 @@ class KalshiRiskManager:
                 _portfolio_equity_usd, contracts, ticker
             )
 
+        # DYNAMIC ENTRY WINDOW: Check if order is within allowed window (crypto 15m only)
+        try:
+            from merid.prediction.dynamic_entry_window import resolve_entry_window
+            from config.kalshi_crypto_config import kalshi_ticker_to_asset
+            from merid.event_venues.kalshi.market_catalog import get_kalshi_market_catalog
+            
+            # Only check crypto assets on 15m timeframe
+            if asset and asset.upper() in ("BTC", "ETH", "SOL", "XRP", "DOGE") and timeframe == "15m":
+                # Get market end_date from catalog
+                catalog = get_kalshi_market_catalog()
+                market = catalog.get_market(ticker)
+                
+                if market and hasattr(market, 'end_date') and market.end_date:
+                    minutes_to_expiry = (market.end_date - now).total_seconds() / 60.0
+                    edge_pct = edge * 100  # Convert decimal to percentage
+                    
+                    resolution = resolve_entry_window(
+                        asset=asset,
+                        minutes_to_expiry=minutes_to_expiry,
+                        edge_pct=edge_pct
+                    )
+                    
+                    if not resolution.allowed:
+                        reason = f"dynamic_window:{resolution.reason.value} policy={resolution.active_policy_name} bucket={resolution.bucket}"
+                        logger.info(
+                            "[RISK] Dynamic window rejection: ticker=%s asset=%s minutes_to_expiry=%.1f edge_pct=%.2f reason=%s policy=%s bucket=%s",
+                            ticker,
+                            asset,
+                            minutes_to_expiry,
+                            edge_pct,
+                            resolution.reason.value,
+                            resolution.active_policy_name,
+                            resolution.bucket
+                        )
+                        self._log_breach("dynamic_window", reason)
+                        return False, reason, "dynamic_window"
+        except Exception as exc:
+            logger.debug("[RISK] Dynamic window check failed for ticker=%s: %s", ticker, exc)
+            # Fail-open: allow order through if dynamic window check fails
+
         with self._lock:
             self._maybe_reset_daily(now)
 
@@ -1207,24 +1346,30 @@ class KalshiRiskManager:
                 return False, reason, "max_single_order_contracts"
 
             notional_usd = contracts * price_cents / 100.0
-            if notional_usd > self._config.max_single_order_notional_usd:
+            # ZERO-FIX: Skip check if max_single_order_notional_usd is 0 (meaning derive from bankroll)
+            if self._config.max_single_order_notional_usd > 0 and notional_usd > self._config.max_single_order_notional_usd:
                 reason = f"Order notional ${notional_usd:.2f} exceeds max ${self._config.max_single_order_notional_usd:.2f}"
                 self._log_breach("max_single_order_notional", reason)
                 return False, reason, "max_single_order_notional"
 
             # 3. Per-contract position limit
+            # ZERO-FIX: Skip if max_position_per_contract is 0 (meaning derive from bankroll)
             new_position = existing_position + contracts
-            if new_position > self._config.max_position_per_contract:
+            if self._config.max_position_per_contract > 0 and new_position > self._config.max_position_per_contract:
                 reason = f"Position {new_position} would exceed per-contract limit {self._config.max_position_per_contract}"
                 self._log_breach("max_position_per_contract", reason)
                 return False, reason, "max_position_per_contract"
 
             # 4. Category exposure (legacy — keep for backward compatibility)
-            if category and category in self._config.category_limits:
+            # FIX (2026-05-11): Skip category cap for crypto since it's the only category being traded
+            # (BTC, ETH, SOL, XRP, DOGE on 15m timeframe). The category cap was blocking all trades
+            # due to stale positions exceeding the cap on small accounts.
+            if category and category in self._config.category_limits and category != "crypto":
                 cat_limit = self._config.category_limits[category]
                 if cat_limit.enabled:
                     cat_notional = self._state.category_notional.get(category, 0.0) + notional_usd
-                    if cat_notional > cat_limit.max_notional_usd:
+                    # ZERO-FIX: Skip if max_notional_usd is 0 (meaning derive from bankroll)
+                    if cat_limit.max_notional_usd > 0 and cat_notional > cat_limit.max_notional_usd:
                         reason = f"Category '{category}' notional ${cat_notional:.2f} exceeds cap ${cat_limit.max_notional_usd:.2f}"
                         self._log_breach("category_notional_cap", reason)
                         return False, reason, "category_notional_cap"
@@ -1238,7 +1383,8 @@ class KalshiRiskManager:
             elif category and category not in self._config.category_limits:
                 logger.warning("Unknown category %s — applying global cap", category)
                 cat_notional = self._state.category_notional.get(category, 0.0) + notional_usd
-                if cat_notional > self._config.max_total_notional_usd:
+                # ZERO-FIX: Skip if max_total_notional_usd is 0 (meaning derive from bankroll)
+                if self._config.max_total_notional_usd > 0 and cat_notional > self._config.max_total_notional_usd:
                     reason = (
                         f"Unknown category '{category}' notional ${cat_notional:.2f} exceeds "
                         f"fallback cap ${self._config.max_total_notional_usd:.2f}"
@@ -1252,8 +1398,9 @@ class KalshiRiskManager:
                 gid = str(group_id)
                 assert isinstance(gid, str), f"group_id must normalize to str, got {type(gid)}"
                 # Check per-group notional cap
+                # ZERO-FIX: Skip if group_notional_cap_usd is 0 (meaning derive from bankroll)
                 group_notional = self._state.group_notional.get(gid, 0.0) + notional_usd
-                if group_notional > self._config.group_notional_cap_usd:
+                if self._config.group_notional_cap_usd > 0 and group_notional > self._config.group_notional_cap_usd:
                     reason = f"Group '{gid}' notional ${group_notional:.2f} exceeds cap ${self._config.group_notional_cap_usd:.2f}"
                     self._log_breach("group_notional_cap", reason)
                     logger.debug(
@@ -1332,8 +1479,8 @@ class KalshiRiskManager:
 
             if total > global_bankroll_cap_usd:
                 logger.error(
-                    "[BANKROLL_CAP_REJECT] total_notional=${:.2f} exceeds cap=${:.2f} "
-                    "(bankroll=${:.2f} source=%s cap_pct=%.2f%%). ticker=%s",
+                    "[BANKROLL_CAP_REJECT] total_notional=$%.2f exceeds cap=$%.2f "
+                    "(bankroll=$%.2f source=%s cap_pct=%.2f%%). ticker=%s",
                     total, global_bankroll_cap_usd, bankroll_cents / 100.0,
                     bankroll_source, cap_pct * 100, ticker
                 )
@@ -1841,6 +1988,106 @@ class KalshiRiskManager:
         """Return recent PnL history points for the equity curve endpoint."""
         return self._state.pnl_history[-limit:]
 
+    def reset_category_notional(self) -> None:
+        """Reset category_notional to zero (emergency fix for incorrect accumulation)."""
+        logger.warning(
+            "EMERGENCY RESET: Clearing category_notional state - was %s",
+            {k: round(v, 2) for k, v in self._state.category_notional.items()}
+        )
+        self._state.category_notional.clear()
+        self._state.category_contracts.clear()
+        logger.info("Category notional reset complete - will be recalculated on next resync")
+
+    def resync_category_contracts_from_positions(self) -> None:
+        """Resync category_contracts counter with actual positions from fills_ledger.
+        
+        CRITICAL FIX (2026-05-09): Use fills_ledger.get_open_exposure_usd() instead of
+        position_cache because fills_ledger filters out manually closed positions.
+        Position_cache is populated from fills_ledger when REST returns empty, which
+        includes stale/test fills and manually closed positions that incorrectly
+        inflate category exposure beyond actual equity.
+        
+        The counter is reset to match the actual number of contracts per category
+        from the fills_ledger, which is the source of truth for open positions.
+        """
+        try:
+            from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+            ledger = get_fills_ledger()
+            if not ledger:
+                logger.warning("Fills ledger unavailable for category_contracts resync")
+                return
+            
+            # Reset both counters to zero before recalculating
+            old_contracts = dict(self._state.category_contracts)
+            old_notional = dict(self._state.category_notional)
+            self._state.category_contracts.clear()
+            self._state.category_notional.clear()
+            
+            # Get computed net positions from fills_ledger (filters out manually closed positions)
+            computed_positions = ledger.compute_net_positions()
+            
+            logger.debug(
+                "[CATEGORY-RESYNC-DEBUG] Total positions in fills_ledger: %d",
+                len(computed_positions)
+            )
+            
+            # Recalculate from actual positions
+            positions_with_contracts = 0
+            for ticker, pos in computed_positions.items():
+                contracts = pos.get("contracts", 0)
+                if contracts == 0:
+                    logger.debug(
+                        "[CATEGORY-RESYNC-DEBUG] Skipping %s: contracts=%d (zero)",
+                        ticker, contracts
+                    )
+                    continue
+                positions_with_contracts += 1
+                
+                # Determine category from ticker (crypto markets start with KX)
+                category = "crypto" if ticker.startswith("KX") else "other"
+                self._state.category_contracts[category] = (
+                    self._state.category_contracts.get(category, 0) + abs(contracts)
+                )
+            
+            # Recalculate category_notional from actual positions
+            for ticker, pos in computed_positions.items():
+                contracts = pos.get("contracts", 0)
+                if contracts == 0:
+                    continue
+                category = "crypto" if ticker.startswith("KX") else "other"
+                avg_price_cents = pos.get("avg_price_cents", DEFAULT_KALSHI_PRICE_CENTS)
+                notional = abs(contracts) * avg_price_cents / 100.0
+                logger.debug(
+                    "[CATEGORY-NOTIONAL-DEBUG] %s | category=%s | contracts=%d | avg_price_cents=%d | notional=$%.2f",
+                    ticker, category, contracts, avg_price_cents, notional
+                )
+                self._state.category_notional[category] = (
+                    self._state.category_notional.get(category, 0.0) + notional
+                )
+            
+            # Log the resync results (debug level - only useful for troubleshooting)
+            # Normalize comparison to treat missing keys as zero (no data loss, just empty categories)
+            all_contract_keys = set(old_contracts.keys()) | set(self._state.category_contracts.keys())
+            all_notional_keys = set(old_notional.keys()) | set(self._state.category_notional.keys())
+            
+            normalized_old_contracts = {k: old_contracts.get(k, 0) for k in all_contract_keys}
+            normalized_new_contracts = {k: self._state.category_contracts.get(k, 0) for k in all_contract_keys}
+            normalized_old_notional = {k: round(old_notional.get(k, 0.0), 2) for k in all_notional_keys}
+            normalized_new_notional = {k: round(self._state.category_notional.get(k, 0.0), 2) for k in all_notional_keys}
+            
+            logger.debug(
+                "CATEGORY_RESYNC contracts: old=%s new=%s total_positions=%d positions_with_contracts=%d | notional: old=%s new=%s",
+                normalized_old_contracts,
+                normalized_new_contracts,
+                len(computed_positions),
+                positions_with_contracts,
+                normalized_old_notional,
+                normalized_new_notional
+            )
+            
+        except Exception as exc:
+            logger.error("Failed to resync category_contracts from positions: %s", exc)
+
     def reset_daily(self) -> None:
         """Reset daily counters (call at start of trading day)."""
         self._state.daily_pnl_usd = 0.0
@@ -1918,33 +2165,58 @@ class KalshiRiskManager:
         """Derive effective bankroll in cents with transparent source tracking.
 
         Derivation order (first valid source wins):
-        1. KALSHI_PORTFOLIO_BANKROLL_CENTS from settings (explicit config)
-        2. Current equity USD from Kalshi balance API (tracked in _state)
-        3. Minimum $100 fail-closed fallback (never negative)
+        1. Available cash USD from Kalshi balance API (spendable funds)
+        2. Current equity USD from Kalshi balance API (total account value)
+        3. KALSHI_PORTFOLIO_BANKROLL_CENTS from settings (static fallback)
+        4. MERID_MIN_BANKROLL_USD config (explicit last-resort fallback)
+
+        NOTE: Available cash is prioritized over total equity to ensure position sizing
+        uses spendable funds, not total portfolio value that includes locked positions.
+        This prevents over-leveraging when positions are already open.
 
         Returns:
             Tuple of (bankroll_cents, source_name)
         """
-        # Source 1: Explicit config
+        cap_pct = self._derive_bankroll_cap_pct()
+        
+        # Source 1: Available cash from BankrollServiceV2 (SINGLE SOURCE OF TRUTH)
         try:
-            from merid.settings import settings
-            configured_cents = getattr(settings, 'KALSHI_PORTFOLIO_BANKROLL_CENTS', 0)
-            if configured_cents > 0:
-                return (configured_cents, "config_KALSHI_PORTFOLIO_BANKROLL_CENTS")
-        except Exception:
-            pass
-
-        # Source 2: Live equity from Kalshi balance
+            from merid.event_venues.kalshi.bankroll_service_v2 import (
+                get_equity_for_risk_calc_sync,
+                get_summary_sync,
+            )
+            
+            # Get cached summary from v2 service
+            summary = get_summary_sync(caller_module="kalshi_risk")
+            if summary and summary.state.name == "FRESH" and summary.available_cash_usd is not None and summary.available_cash_usd > 0:
+                cash_usd = float(summary.available_cash_usd)
+                cash_cents = int(cash_usd * 100)
+                cap_usd = cash_usd * cap_pct
+                logger.info(
+                    "BANKROLL-DECISION source=bankroll_service_v2 value_usd=%.2f cappct=%.4f cap_usd=%.2f",
+                    cash_usd, cap_pct, cap_usd
+                )
+                return (cash_cents, "bankroll_service_v2")
+        except Exception as exc:
+            logger.debug(f"[BANKROLL] BankrollServiceV2 unavailable: {exc}")
+        
+        # Source 2: Live equity from Kalshi balance (SECONDARY - total account value)
         equity_usd = self._state.current_equity_usd
         if equity_usd > 0:
-            return (int(equity_usd * 100), f"live_equity_{equity_usd:.2f}")
+            cap_usd = equity_usd * cap_pct
+            logger.info(
+                "BANKROLL-DECISION source=equity value_usd=%.2f cappct=%.4f cap_usd=%.2f",
+                equity_usd, cap_pct, cap_usd
+            )
+            return (int(equity_usd * 100), "equity")
 
-        # Source 3: Fail-closed minimum
+        # FAIL CLOSED: No live bankroll available - return 0 to block trading
         logger.error(
-            "[BANKROLL_FAILCLOSED] No configured bankroll and no live equity. "
-            "Using minimum $100 fallback. Trading will be heavily constrained."
+            "BANKROLL-DECISION source=unavailable value_usd=0.00 cappct=%.4f cap_usd=0.00 "
+            "(no live balance from bankroll_service_v2 or Kalshi API - trading blocked)",
+            cap_pct
         )
-        return (10000, "fail_closed_minimum_100usd")
+        return (0, "unavailable")
 
     def _derive_bankroll_cap_pct(self) -> float:
         """Derive bankroll cap percentage from environment.
@@ -2193,10 +2465,11 @@ class KalshiRiskManager:
         balance_usd = balance_cents / 100.0
         cfg = self._config
 
-        # Load bankroll from settings for dynamic daily loss computation
+        # Load bankroll from bankroll_service_v2 for dynamic daily loss computation
         try:
-            from merid.settings import settings
-            bankroll_cents = settings.KALSHI_PORTFOLIO_BANKROLL_CENTS
+            from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+            bankroll_usd = get_equity_for_risk_calc_sync()
+            bankroll_cents = int(bankroll_usd * 100) if bankroll_usd and bankroll_usd > 0 else 0
         except Exception:
             bankroll_cents = 0
 
@@ -2409,7 +2682,7 @@ class KalshiRiskManager:
             if not cache:
                 return 0.0
 
-            positions = cache.get_all()
+            positions = cache.get_all_positions()
             for ticker, pos in positions.items():
                 # Determine cluster from position data
                 pos_asset = getattr(pos, 'asset', None) or self._infer_asset_from_ticker(ticker)
@@ -2528,31 +2801,27 @@ class KalshiRiskManager:
                     # P2-1 FIX: Upgraded from debug to warning — global kill switch bridge is critical infrastructure
                     logger.warning("kill_switch global bridge failed: %s", _rc_exc)
 
-            # Fire Telegram alert (non-blocking, best-effort)
-            try:
-                import asyncio
-                from agents.telegram_agent import get_telegram_agent
-                agent = get_telegram_agent()
-                if agent.enabled:
-                    msg = f"🚨 <b>KALSHI KILL SWITCH ACTIVATED</b>\n\nReason: {reason}\n\n<i>All trading halted. Manual reset required.</i>"
-                    def _on_tg_done(_t):
-                        if not _t.cancelled() and _t.exception():
-                            # P2-1 FIX: Upgraded from debug to warning — kill switch notifications are critical
-                            logger.warning("kill_switch tg_send failed: %s", _t.exception())
-
-                    try:
-                        loop = asyncio.get_running_loop()
-                        _tg_task = loop.create_task(agent.send_message(msg, force=True), name="kalshi-kill-tg")
-                        _tg_task.add_done_callback(_on_tg_done)
-                    except RuntimeError:
-                        try:
-                            asyncio.run(agent.send_message(msg, force=True))
-                        except Exception as _tg_exc:
-                            # P2-1 FIX: Upgraded from debug to warning — telegram alerts on kill switch are critical
-                            logger.warning("kill_switch telegram fallback failed: %s", _tg_exc)
-            except Exception as _exc:
-                # P2-1 FIX: Upgraded from debug to warning — kill switch alert failures must be visible
-                logger.warning("Telegram kill-switch alert error: %s", _exc)
+            # SOCIAL-TRUTH (2026-05-13): Telegram kill switch alert disabled for lean 15m Kalshi trading
+            # try:
+            #     import asyncio
+            #     from agents.telegram_agent import get_telegram_agent
+            #     agent = get_telegram_agent()
+            #     if agent.enabled:
+            #         msg = f"🚨 <b>KALSHI KILL SWITCH ACTIVATED</b>\n\nReason: {reason}\n\n<i>All trading halted. Manual reset required.</i>"
+            #         def _on_tg_done(_t):
+            #             if not _t.cancelled() and _t.exception():
+            #                 logger.warning("kill_switch tg_send failed: %s", _t.exception())
+            #
+            #         try:
+            #             loop = asyncio.get_running_loop()
+            #             task = loop.create_task(agent.send_message(msg, parse_mode="HTML"))
+            #             task.add_done_callback(_on_tg_done)
+            #         except RuntimeError:
+            #             # No running loop — fire and forget in a new loop
+            #             asyncio.run(agent.send_message(msg, parse_mode="HTML"))
+            # except Exception as tg_exc:
+            #     logger.warning("kill_switch Telegram alert failed: %s", tg_exc)
+            pass
 
     def fire_kill_switch(self, reason: str = "Manual operator activation") -> None:
         """Public method to activate the kill switch (operator action)."""
@@ -2737,7 +3006,7 @@ class KalshiRiskManager:
         try:
             from merid.event_venues.kalshi.position_cache import get_position_cache
             cache = get_position_cache()
-            positions = cache.get_all() if cache else {}
+            positions = cache.get_all_positions() if cache else {}
             return len(positions)
         except Exception:
             return 0

@@ -40,18 +40,37 @@ from utils.logger import get_logger, set_task_context
 logger = get_logger("merid.loop")
 
 # Per-step “slow action” warning threshold (ms). Tune via MERID_LOOP_SLOW_ACTION_BUDGET_MS.
-_SLOW_ACTION_BUDGET_MS = float(os.getenv("MERID_LOOP_SLOW_ACTION_BUDGET_MS", "1000"))  # Increased from 250ms — CPU-bound work (arb_scan, features, consensus) legitimately takes 800-1500ms with 32 workers
+# 24/7-SCALPER-FIX (2026-05-02): Raised to 15000ms for continuous 15m scalping.
+# BUG-FIX (2026-05-06): Increased to 20000ms to prevent warnings for arb_scan/notify (legitimately 4-6s)
+# Features/consensus/notify can legitimately take 10-15s during high-frequency trading cycles.
+_SLOW_ACTION_BUDGET_MS = float(os.getenv("MERID_LOOP_SLOW_ACTION_BUDGET_MS", "20000"))  # was 15000, now 20000
 
 # Dedicated thread pool for CPU-heavy operations — avoids saturating default executor
 _loop_executor: Optional[ThreadPoolExecutor] = None
 
+# CRYPTO-15M-ARB: Separate thread pool for arb_scan to isolate from agent cycles
+_arb_executor: Optional[ThreadPoolExecutor] = None
+
 def _get_loop_executor() -> ThreadPoolExecutor:
-    """Get or create the dedicated loop executor with 32 workers."""
+    """Get or create the dedicated loop executor with 48 workers."""
     global _loop_executor
     if _loop_executor is None or _loop_executor._shutdown:
-        # 32 workers allows 35 agents to run concurrently without queue buildup
-        _loop_executor = ThreadPoolExecutor(max_workers=32, thread_name_prefix="merid_loop")
+        # 48 workers allows 43 agents + loop operations to run concurrently without queue buildup
+        # BUG-EL24 FIX: Increased from 32 to 48 to prevent thread pool saturation
+        _loop_executor = ThreadPoolExecutor(max_workers=48, thread_name_prefix="merid_loop")
     return _loop_executor
+
+
+def _get_arb_executor() -> ThreadPoolExecutor:
+    """Get or create the dedicated arb_scan executor.
+    
+    CRYPTO-15M-ARB: Isolated pool prevents arb_scan from blocking agent cycles.
+    """
+    global _arb_executor
+    if _arb_executor is None or _arb_executor._shutdown:
+        # 4 workers is plenty for crypto 15m scanning (5 symbols, limited pairs)
+        _arb_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="merid_arb")
+    return _arb_executor
 
 
 def _resolve_plan_adapter_venue(plan: Any, plan_domain: str) -> str:
@@ -112,8 +131,8 @@ class LoopConfig:
     # Cadence (seconds)
     feature_refresh_interval: float = 30.0
     agent_cycle_interval: float = 60.0
-    consensus_interval: float = 15.0
-    arb_scan_interval: float = 60.0  # Increased from 10s to reduce event loop lag (was causing 8000ms+ blocks)
+    consensus_interval: float = 120.0  # CRYPTO-15M-ARB: Increased from 60s to 120s to reduce CPU strain
+    arb_scan_interval: float = float(os.getenv("MERID_ARB_SCAN_INTERVAL_S", "120"))  # Was 8000ms+ blocks at 10s
     cqi_interval: float = 300.0
     reconciliation_interval: float = 120.0
 
@@ -174,7 +193,8 @@ class LoopConfig:
             feature_refresh_interval=pc.tick_interval * 6,   # ~30s at 5s tick
             agent_cycle_interval=pc.agent_cycle_interval,
             consensus_interval=pc.consensus_interval,
-            arb_scan_interval=pc.arb_scan_interval,
+            # CRYPTO-15M-ARB: Increased from 10s to 120s to reduce CPU strain
+            arb_scan_interval=float(os.getenv("MERID_ARB_SCAN_INTERVAL_S", "120")),
             cqi_interval=pc.cqi_interval,
             reconciliation_interval=pc.reconciliation_interval,
             enable_execution=pc.enable_execution,
@@ -296,6 +316,16 @@ class MeridLoop:
         # BUG-EL FIX: Increased cooldown from 60s to 120s to give system more recovery time
         self._SLOW_ACTION_COOLDOWN_S = 120.0  # skip slow action for 120s after it exceeds budget
 
+        # EVENT-LOOP-FIX: Lag circuit breaker for event loop health degradation
+        # Tracks recent lag measurements to trigger soft degradation or restart
+        self._lag_history: List[float] = []  # Recent lag measurements (ms)
+        self._LAG_CIRCUIT_WINDOW_S = 60.0  # 60-second window for lag tracking
+        self._LAG_SOFT_THRESHOLD_MS = 250.0  # Soft degradation: skip non-critical work
+        self._LAG_HARD_THRESHOLD_MS = 1000.0  # Hard: force component restart
+        self._lag_circuit_tripped = False
+        self._lag_circuit_reset_ts: Optional[float] = None
+        self._LAG_CIRCUIT_COOLDOWN_S = 30.0  # 30s cooldown after hard trip
+
         # Timers for staggered cadences
         self._last_feature_refresh = 0.0
         self._last_agent_cycle = 0.0
@@ -395,12 +425,14 @@ class MeridLoop:
     # Maximum acceptable tick duration before we log a warning (ms)
     TICK_DURATION_WARN_MS = float(os.getenv("MERID_LOOP_TICK_DURATION_WARN_MS", "30000"))
 
-    _STEP_TIMEOUT_S = float(os.getenv("MERID_LOOP_STEP_TIMEOUT_S", "3"))  # BUG-EL FIX: Reduced from 5s to 3s to fail faster on slow steps
+    # OLD-HARDWARE FIX: Raised from 3s to 8s for weak hardware + spotty internet
+    _STEP_TIMEOUT_S = float(os.getenv("MERID_LOOP_STEP_TIMEOUT_S", "8"))  # was 3s, now 8s
     # Step-specific timeout overrides (can be customized via env var as JSON)
-    # BUG-EL13 FIX: Added consensus timeout, reduced arb_scan to 10s, added notify timeout
+    # OLD-HARDWARE FIX: Doubled all timeouts for unreliable networks and slow CPUs
+    # BUG-FIX: Increased reconciliation timeout to 30s to prevent timeout errors during slow REST calls
     _STEP_TIMEOUT_OVERRIDES = json.loads(os.getenv(
         "MERID_LOOP_STEP_TIMEOUT_OVERRIDES",
-        '{"features": 15, "agent_cycles": 20, "promotion_sync": 10, "liquidity": 10, "betting": 15, "reconciliation": 5, "arb_scan": 10, "consensus": 8, "notify": 2, "cqi": 10, "order_groups": 5}'
+        '{"features": 30, "agent_cycles": 40, "promotion_sync": 20, "liquidity": 20, "betting": 30, "reconciliation": 30, "arb_scan": 20, "consensus": 16, "notify": 5, "cqi": 20, "order_groups": 10}'
     ))
 
     def _should_skip_due_to_slowness(self, step_name: str, now: float) -> bool:
@@ -428,6 +460,64 @@ class MeridLoop:
             return get_current_lag_ms()
         except Exception:
             return 0.0
+
+    def _record_lag(self, lag_ms: float) -> None:
+        """Record lag measurement for circuit breaker tracking.
+        
+        EVENT-LOOP-FIX: Maintains rolling window of lag measurements.
+        """
+        now = time.time()
+        self._lag_history.append((now, lag_ms))
+        # Prune old measurements outside the window
+        cutoff = now - self._LAG_CIRCUIT_WINDOW_S
+        self._lag_history = [(ts, lag) for ts, lag in self._lag_history if ts > cutoff]
+    
+    def _check_lag_circuit_breaker(self) -> tuple[str, float]:
+        """Check if lag circuit breaker should trip.
+        
+        Returns:
+            Tuple of (status, avg_lag_ms) where status is:
+            - "ok": Normal operation
+            - "soft": Soft degradation (skip non-critical work)
+            - "hard": Hard limit (restart recommended)
+        """
+        now = time.time()
+        
+        # Check if we're in cooldown after hard trip
+        if self._lag_circuit_tripped:
+            if self._lag_circuit_reset_ts and now < self._lag_circuit_reset_ts:
+                remaining = self._lag_circuit_reset_ts - now
+                return ("cooldown", remaining)
+            # Reset the circuit breaker
+            self._lag_circuit_tripped = False
+            self._lag_circuit_reset_ts = None
+            self._lag_history.clear()
+            logger.warning("[LAG-CIRCUIT] Reset after cooldown period")
+        
+        if not self._lag_history:
+            return ("ok", 0.0)
+        
+        # Calculate average lag over recent window
+        recent_lags = [lag for ts, lag in self._lag_history[-10:]]  # Last 10 measurements
+        avg_lag = sum(recent_lags) / len(recent_lags)
+        
+        # Check for hard threshold (sustained high lag)
+        sustained_high = all(lag > self._LAG_HARD_THRESHOLD_MS for ts, lag in self._lag_history[-5:])
+        if sustained_high:
+            self._lag_circuit_tripped = True
+            self._lag_circuit_reset_ts = now + self._LAG_CIRCUIT_COOLDOWN_S
+            logger.critical(
+                "[LAG-CIRCUIT] HARD TRIP — avg lag %.0fms over last %d measurements exceeds %.0fms threshold — "
+                "initiating cooldown for %.0fs",
+                avg_lag, len(self._lag_history[-5:]), self._LAG_HARD_THRESHOLD_MS, self._LAG_CIRCUIT_COOLDOWN_S
+            )
+            return ("hard", avg_lag)
+        
+        # Check for soft threshold (elevated but not critical)
+        if avg_lag > self._LAG_SOFT_THRESHOLD_MS:
+            return ("soft", avg_lag)
+        
+        return ("ok", avg_lag)
 
     async def _run_step(self, name: str, coro, summary: Dict) -> None:
         """Execute a single loop step with isolation — errors are logged
@@ -497,9 +587,9 @@ class MeridLoop:
             self._tick_in_progress = True
             self._tick_step_timings.clear()  # Reset per-step timings
             
-            # EVENT-LOOP-FIX: Hard global timeout on entire tick
+            # OLD-HARDWARE FIX: Raised from 60s to 120s for weak hardware
             # Prevents a tick from running indefinitely and starving the event loop
-            _TICK_GLOBAL_TIMEOUT_S = float(os.getenv("MERID_TICK_GLOBAL_TIMEOUT_S", "60"))
+            _TICK_GLOBAL_TIMEOUT_S = float(os.getenv("MERID_TICK_GLOBAL_TIMEOUT_S", "120"))
             tick_start = time.perf_counter()
             
             try:
@@ -540,8 +630,34 @@ class MeridLoop:
         tick_number = self.metrics.total_ticks + 1
         summary: Dict[str, Any] = {"tick": tick_number, "actions": []}
         
-        # EVENT-LOOP-FIX: Record current lag for observability
-        self.metrics.last_lag_ms = self._get_event_loop_lag_ms()
+        # EVENT-LOOP-FIX: Record current lag for observability and circuit breaker
+        current_lag_ms = self._get_event_loop_lag_ms()
+        self.metrics.last_lag_ms = current_lag_ms
+        self._record_lag(current_lag_ms)
+        
+        # Check lag circuit breaker for soft/hard degradation
+        lag_status, lag_value = self._check_lag_circuit_breaker()
+        if lag_status == "hard":
+            # Hard trip: Skip all non-critical work this tick
+            logger.critical(
+                "[TICK-LAG-HARD] Skipping non-critical steps due to sustained high lag (%.0fms)",
+                lag_value
+            )
+            summary["actions"].append(f"lag_circuit_hard:{lag_value:.0f}ms")
+            # Only run critical steps (reconciliation, execution guard check)
+            # Skip all parallel work
+            parallel_coros = []
+        elif lag_status == "soft":
+            # Soft trip: Log warning and skip optional work
+            if self.metrics.total_ticks % 10 == 0:  # Log every 10 ticks to avoid spam
+                logger.warning(
+                    "[TICK-LAG-SOFT] Elevated lag detected (%.0fms) — skipping optional features",
+                    lag_value
+                )
+            summary["actions"].append(f"lag_circuit_soft:{lag_value:.0f}ms")
+        elif lag_status == "cooldown":
+            # In cooldown from hard trip
+            summary["actions"].append(f"lag_circuit_cooldown:{lag_value:.0f}s_remaining")
 
         # BUG-8: set structured log context for this tick so every log line
         # emitted during this task carries tick, mode, and env dimensions.
@@ -559,6 +675,11 @@ class MeridLoop:
         )
 
         # Step 1: Launch background tasks (fire-and-forget, don't block tick)
+        # FIX-3: Log stage boundary - DISCOVER stage starts here
+        logger.info(
+            "[CYCLE-TRACE] stage=DISCOVER_START | tick=%d | mode=%s | correlation_id=%s",
+            tick_number, _mode, summary.get("correlation_id", "unknown")
+        )
         if now - self._last_agent_cycle >= self.config.agent_cycle_interval:
             self._last_agent_cycle = now
             if self._agent_bg_task is None or self._agent_bg_task.done():
@@ -579,10 +700,20 @@ class MeridLoop:
         # ── Parallel batch: ALL independent steps run concurrently ────
         # Features, scans, reconciliation — none depend on each other.
         # Agent cycles run in background separately.
+        # EVENT-LOOP-FIX: Initialize empty, conditionally populate based on lag circuit
         parallel_coros = []
+        _skip_optional_due_to_lag = lag_status in ("hard", "soft", "cooldown")
 
         if now - self._last_feature_refresh >= self.config.feature_refresh_interval:
-            if self._should_skip_due_to_slowness("features", now):
+            # FIX-3: Log stage boundary - ANALYZE stage
+            logger.info(
+                "[CYCLE-TRACE] stage=ANALYZE_START | tick=%d | correlation_id=%s",
+                tick_number, summary.get("correlation_id", "unknown")
+            )
+            # Skip features under lag pressure (optional work)
+            if _skip_optional_due_to_lag:
+                summary["actions"].append("features_refreshed:skipped_lag_circuit")
+            elif self._should_skip_due_to_slowness("features", now):
                 self.metrics.slow_action_skips += 1  # EVENT-LOOP-FIX: Track skip
                 summary["actions"].append("features_refreshed:skipped_recently_slow")
             else:
@@ -590,11 +721,21 @@ class MeridLoop:
                 self._last_feature_refresh = now
 
         if now - self._last_consensus >= self.config.consensus_interval:
-            parallel_coros.append(self._run_step("consensus", self._run_consensus(summary), summary))
-            self._last_consensus = now
+            # FIX-3: Log stage boundary - CONSENSUS stage
+            logger.info(
+                "[CYCLE-TRACE] stage=CONSENSUS_START | tick=%d | correlation_id=%s",
+                tick_number, summary.get("correlation_id", "unknown")
+            )
+            if _skip_optional_due_to_lag:
+                summary["actions"].append("consensus:skipped_lag_circuit")
+            else:
+                parallel_coros.append(self._run_step("consensus", self._run_consensus(summary), summary))
+                self._last_consensus = now
 
         if now - self._last_arb_scan >= self.config.arb_scan_interval:
-            if self._should_skip_due_to_slowness("arb_scan", now):
+            if _skip_optional_due_to_lag:
+                summary["actions"].append("arb_scan:skipped_lag_circuit")
+            elif self._should_skip_due_to_slowness("arb_scan", now):
                 self.metrics.slow_action_skips += 1  # EVENT-LOOP-FIX: Track skip
                 summary["actions"].append("arb_scan:skipped_recently_slow")
             else:
@@ -602,7 +743,9 @@ class MeridLoop:
                 self._last_arb_scan = now
 
         if now - self._last_liquidity_refresh >= self._liquidity_refresh_interval:
-            if self._should_skip_due_to_slowness("liquidity", now):
+            if _skip_optional_due_to_lag:
+                summary["actions"].append("liquidity_sweep:skipped_lag_circuit")
+            elif self._should_skip_due_to_slowness("liquidity", now):
                 self.metrics.slow_action_skips += 1  # EVENT-LOOP-FIX: Track skip
                 summary["actions"].append("liquidity_sweep:skipped_recently_slow")
             else:
@@ -610,12 +753,17 @@ class MeridLoop:
                 self._last_liquidity_refresh = now
 
         if now - self._last_cqi_update >= self.config.cqi_interval:
-            parallel_coros.append(self._run_step("cqi", self._update_cqi(now, summary), summary))
-            self._last_cqi_update = now
+            if _skip_optional_due_to_lag:
+                summary["actions"].append("cqi:skipped_lag_circuit")
+            else:
+                parallel_coros.append(self._run_step("cqi", self._update_cqi(now, summary), summary))
+                self._last_cqi_update = now
 
         # BUG-EL13 FIX: Added interval gate and slow-skip for order_groups
         if "prediction" in self.config.active_domains and now - self._last_order_groups_sync >= self._order_groups_sync_interval:
-            if self._should_skip_due_to_slowness("order_groups", now):
+            if _skip_optional_due_to_lag:
+                summary["actions"].append("order_groups:skipped_lag_circuit")
+            elif self._should_skip_due_to_slowness("order_groups", now):
                 self.metrics.slow_action_skips += 1
                 summary["actions"].append("order_groups:skipped_recently_slow")
             else:
@@ -631,22 +779,38 @@ class MeridLoop:
         # _execute_plans checks them.  Previously reconciliation was in the
         # parallel batch (step 7) while execution ran at step 5 — wrong order.
         if self.config.enable_reconciliation and now - self._last_reconciliation >= self.config.reconciliation_interval:
+            # FIX-3: Log stage boundary - MONITOR stage
+            logger.info(
+                "[CYCLE-TRACE] stage=MONITOR_START | tick=%d | correlation_id=%s",
+                tick_number, summary.get("correlation_id", "unknown")
+            )
             # P1-HARDENING: Wrap reconciliation in timeout to prevent blocking loop
+            # FIX: Increased timeout from 1.2s to 30s to handle slow REST calls during heavy load
             try:
                 await self._run_step(
                     "reconciliation",
-                    asyncio.wait_for(self._reconcile_positions(summary), timeout=1.2),
+                    asyncio.wait_for(self._reconcile_positions(summary), timeout=30.0),
                     summary
                 )
             except asyncio.TimeoutError:
-                logger.warning("[BUDGET] reconciliation timed out after 1.2s — will retry next tick")
+                logger.warning("[BUDGET] reconciliation timed out after 30s — will retry next tick")
                 summary["actions"].append("reconciliation:timeout_skip")
             self._last_reconciliation = now
 
         if self.config.enable_execution:
+            # FIX-3: Log stage boundary - EXECUTE stage
+            logger.info(
+                "[CYCLE-TRACE] stage=EXECUTE_START | tick=%d | correlation_id=%s",
+                tick_number, summary.get("correlation_id", "unknown")
+            )
             await self._run_step("execution", self._execute_plans(summary), summary)
 
         if now - self._last_promotion_sync >= self._promotion_sync_interval:
+            # FIX-3: Log stage boundary - PROMOTE stage
+            logger.info(
+                "[CYCLE-TRACE] stage=PROMOTE_START | tick=%d | correlation_id=%s",
+                tick_number, summary.get("correlation_id", "unknown")
+            )
             self._last_promotion_sync = now
             if self._promo_bg_task is None or self._promo_bg_task.done():
                 # Isolate bg summary — promotion runs in a thread after tick returns
@@ -666,7 +830,20 @@ class MeridLoop:
             self._last_config_reload = now
 
         # Step 8: Notify subscribers
+        # FIX-3: Log stage boundary - PROTECT stage (risk checks happen before notify)
+        logger.info(
+            "[CYCLE-TRACE] stage=PROTECT_START | tick=%d | correlation_id=%s",
+            tick_number, summary.get("correlation_id", "unknown")
+        )
         await self._run_step("notify", self._notify("tick_complete", summary), summary)
+
+        # FIX-3: Log cycle complete with summary
+        logger.info(
+            "[CYCLE-TRACE] stage=CYCLE_COMPLETE | tick=%d | duration_ms=%.1f | actions=%s | correlation_id=%s",
+            tick_number, summary.get("duration_ms", 0),
+            ", ".join(summary.get("actions", [])),
+            summary.get("correlation_id", "unknown")
+        )
 
         elapsed_ms = (time.perf_counter() - start) * 1000
         self.metrics.total_ticks += 1
@@ -696,7 +873,7 @@ class MeridLoop:
         Then reads aggregated features through the feature service.
         For prediction domain: generates Kalshi-specific signals.
         
-        P1-HARDENING: Added global budget enforcement (1500ms) and per-API timeouts
+        P1-HARDENING: Added global budget enforcement (4000ms) and per-API timeouts
         to prevent 10s+ stalls when external feeds are slow.
         """
         # AGGRESSIVE: Skip features refresh for first 120 ticks (~10 min) during startup
@@ -704,8 +881,8 @@ class MeridLoop:
             summary["actions"].append("features_refreshed:skipped_startup_cooldown")
             return
         
-        # P1-HARDENING: Global features budget
-        FEATURES_MAX_MS = float(os.getenv("MERID_FEATURES_MAX_MS", "1500"))
+        # 24/7-SCALPER-FIX: Global features budget raised to 10000ms for scalper mode
+        FEATURES_MAX_MS = float(os.getenv("MERID_FEATURES_MAX_MS", "10000"))  # was 4000, now 10000
         features_start = time.perf_counter()
         
         def _check_features_budget() -> bool:
@@ -722,13 +899,14 @@ class MeridLoop:
         try:
             from merid.signals.live_feeds import get_live_feed_manager
             mgr = get_live_feed_manager()
-            # P1-HARDENING: 1.0s timeout for live feeds to stay within budget
+            # OLD-HARDWARE FIX: 5.0s timeout for live feeds (was 1.0s)
+            # Individual feeds have their own timeouts; this is the overall budget
             await asyncio.wait_for(
                 mgr.refresh_all(self.config.active_symbols, now),
-                timeout=1.0
+                timeout=5.0
             )
         except asyncio.TimeoutError:
-            logger.warning("[BUDGET] Live feed refresh timed out after 1.0s — using cached/synthetic")
+            logger.warning("[BUDGET] Live feed refresh timed out after 5.0s — using cached/synthetic")
             summary["actions"].append("features_refreshed:live_feed_timeout")
         except Exception as e:
             logger.warning(f"Live feed refresh failed (using cached/synthetic): {e}")
@@ -775,8 +953,17 @@ class MeridLoop:
             return len(batch)
 
         # Run in dedicated executor to prevent default thread pool saturation
+        # BUG-EL24 FIX: Added 2.0s timeout to prevent executor call from blocking indefinitely
         loop = asyncio.get_running_loop()
-        batch_size = await loop.run_in_executor(_get_loop_executor(), _sync_feature_refresh)
+        try:
+            batch_size = await asyncio.wait_for(
+                loop.run_in_executor(_get_loop_executor(), _sync_feature_refresh),
+                timeout=2.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[BUDGET] Feature refresh timed out after 2.0s — skipping batch store")
+            summary["actions"].append("features_refreshed:timeout")
+            batch_size = 0
         thread_ms = (time.perf_counter() - step_start) * 1000
         
         # Generate Kalshi signals if prediction domain is active
@@ -785,8 +972,8 @@ class MeridLoop:
         kalshi_ms = 0
         if "prediction" in self.config.active_domains and self.metrics.total_ticks > 30:
             kalshi_start = time.perf_counter()
-            # Skip if features thread pool work already took >500ms (we're running slow)
-            if thread_ms > 500:
+            # OLD-HARDWARE FIX: Skip if features took >2000ms (was 500ms)
+            if thread_ms > 2000:
                 summary["actions"].append("kalshi_signals:skipped_due_to_slow_features")
                 logger.debug("Skipping Kalshi signals: features thread work took %.0fms", thread_ms)
             else:
@@ -952,7 +1139,15 @@ class MeridLoop:
                 return signal_count
 
             loop = asyncio.get_running_loop()
-            signal_count = await loop.run_in_executor(_get_loop_executor(), _scan_signals_sync)
+            # BUG-EL24 FIX: Added 2.0s timeout to prevent executor saturation
+            try:
+                signal_count = await asyncio.wait_for(
+                    loop.run_in_executor(_get_loop_executor(), _scan_signals_sync),
+                    timeout=2.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("[BUDGET] Signal scan timed out after 2.0s")
+                signal_count = 0
 
             if signal_count > 0:
                 logger.info(f"Kalshi agents generated {signal_count} actionable signals this cycle")
@@ -1024,7 +1219,15 @@ class MeridLoop:
                             opinions.append(opinion)
                     return opinions
 
-                opinions = await loop.run_in_executor(_get_loop_executor(), _prepare_opinions_sync)
+                # BUG-EL24 FIX: Added 2.0s timeout to prevent executor saturation
+                try:
+                    opinions = await asyncio.wait_for(
+                        loop.run_in_executor(_get_loop_executor(), _prepare_opinions_sync),
+                        timeout=2.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("[BUDGET] Opinion preparation timed out after 2.0s")
+                    opinions = []
 
                 # Submit opinions asynchronously (I/O bound)
                 for opinion in opinions:
@@ -1104,11 +1307,17 @@ class MeridLoop:
                 
                 return total_reflections, total_insights, critical_agents
             
-            # Run in dedicated executor with 32 workers
+            # Run in dedicated executor with 48 workers
             loop = asyncio.get_running_loop()
-            total_reflections, total_insights, critical_agents = await loop.run_in_executor(
-                _get_loop_executor(), _process_reflections
-            )
+            # BUG-EL24 FIX: Added 3.0s timeout to prevent executor saturation
+            try:
+                total_reflections, total_insights, critical_agents = await asyncio.wait_for(
+                    loop.run_in_executor(_get_loop_executor(), _process_reflections),
+                    timeout=3.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("[BUDGET] Reflection processing timed out after 3.0s")
+                total_reflections, total_insights, critical_agents = 0, 0, []
 
             summary["actions"].append(
                 f"reflection_cycle:{total_reflections}reflections,{total_insights}insights"
@@ -1190,7 +1399,15 @@ class MeridLoop:
                 return expired_ids
 
         loop = asyncio.get_running_loop()
-        expired_ids = await loop.run_in_executor(_get_loop_executor(), _prune_sync)
+        # OLD-HARDWARE FIX: 2.0s timeout for plan prune (was 1.0s)
+        try:
+            expired_ids = await asyncio.wait_for(
+                loop.run_in_executor(_get_loop_executor(), _prune_sync),
+                timeout=2.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[BUDGET] Plan prune timed out after 2.0s")
+            expired_ids = []
         prune_ms = (time.perf_counter() - prune_start) * 1000
 
         # Force a consensus cycle for any symbol with pending opinions
@@ -1203,11 +1420,18 @@ class MeridLoop:
 
         forced = 0
         consensus_start = time.perf_counter()
+        # CONSENSUS-TIMEOUT-FIX: Wrap each consensus cycle in timeout to prevent blocking
+        _CONSENSUS_CYCLE_TIMEOUT_S = 2.0  # Max 2s per symbol
         for sym in pending_symbols:
             try:
-                plan = await coordinator._run_consensus_cycle(sym)
+                plan = await asyncio.wait_for(
+                    coordinator._run_consensus_cycle(sym),
+                    timeout=_CONSENSUS_CYCLE_TIMEOUT_S
+                )
                 if plan:
                     forced += 1
+            except asyncio.TimeoutError:
+                logger.warning(f"[LAG-GUARD] Consensus cycle for {sym} timed out after {_CONSENSUS_CYCLE_TIMEOUT_S}s")
             except Exception as _ce:
                 logger.debug(f"Consensus cycle error for {sym}: {_ce}")
         consensus_ms = (time.perf_counter() - consensus_start) * 1000
@@ -1278,9 +1502,15 @@ class MeridLoop:
                 return opened, closed
 
             # Run debate processing in dedicated executor
-            debates_opened, debates_closed = await loop.run_in_executor(
-                _get_loop_executor(), _process_debates_sync
-            )
+            # BUG-EL24 FIX: Added 2.0s timeout to prevent executor saturation
+            try:
+                debates_opened, debates_closed = await asyncio.wait_for(
+                    loop.run_in_executor(_get_loop_executor(), _process_debates_sync),
+                    timeout=2.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("[BUDGET] Debate processing timed out after 2.0s")
+                debates_opened, debates_closed = 0, 0
 
             # Log debate activity outside the thread
             if debates_opened > 0:
@@ -1392,15 +1622,16 @@ class MeridLoop:
                 summary["actions"].append("liquidity_sweep:no_active_tickers")
                 return
 
-            # PHASE-3: Lag-aware scope reduction — fewer markets when lag is elevated
-            # CRITICAL-FIX: More aggressive limits to prevent budget overruns
-            base_max = 2 if self.metrics.total_ticks < 120 else 3  # Reduced from 3/5
-            if current_lag > 400:  # Lowered from 500ms
-                MAX_TICKERS = 1  # Critical lag: absolute minimum
-                logger.warning("[BUDGET] liquidity: reduced scope to 1 market due to lag %.0fms", current_lag)
-            elif current_lag > 150:  # Lowered from 250ms
-                MAX_TICKERS = 1  # Reduced from 2 - be more conservative
-                logger.warning("[BUDGET] liquidity: reduced scope to 1 market due to lag %.0fms", current_lag)
+            # OLD-HARDWARE FIX: Lag-aware scope reduction with relaxed thresholds
+            # Use percentage of warning threshold (1500ms) instead of hardcoded values
+            _WARN_MS = 1500.0  # From KALSHI_LOOP_LAG_HEALTHY_MS
+            base_max = 2 if self.metrics.total_ticks < 120 else 3
+            if current_lag > _WARN_MS * 1.5:  # >2250ms: severe lag
+                MAX_TICKERS = 1
+                logger.warning("[BUDGET] liquidity: reduced scope to 1 market due to severe lag %.0fms", current_lag)
+            elif current_lag > _WARN_MS * 0.8:  # >1200ms: elevated lag
+                MAX_TICKERS = 1
+                logger.warning("[BUDGET] liquidity: reduced scope to 1 market due to elevated lag %.0fms", current_lag)
             else:
                 MAX_TICKERS = base_max
             
@@ -1418,9 +1649,9 @@ class MeridLoop:
 
             # PHASE-3: Hard budget enforcement for liquidity sweep
             # Track cumulative time and abort if approaching budget
-            # CRITICAL-FIX: Reduced to 1000ms to match slow action budget and prevent loop lag
+            # 24/7-SCALPER-FIX: Raised to 10000ms for continuous operation (was 4000ms)
             LIQUIDITY_HARD_BUDGET_MS = float(os.getenv(
-                "MERID_LIQUIDITY_HARD_BUDGET_MS", "1000.0"
+                "MERID_LIQUIDITY_HARD_BUDGET_MS", "10000.0"
             ))
             _budget_start = time.perf_counter()
 
@@ -1449,8 +1680,8 @@ class MeridLoop:
                     if getattr(client, "is_circuit_open", False):
                         return (ticker, None)
                     try:
-                        # CRITICAL-FIX: Reduced timeout to 1.0s to stay within 1000ms budget
-                        ob = await asyncio.wait_for(client.get_orderbook(ticker), timeout=1.0)
+                        # OLD-HARDWARE FIX: 3.0s timeout for orderbook (was 1.0s)
+                        ob = await asyncio.wait_for(client.get_orderbook(ticker), timeout=3.0)
                         return (ticker, ob)
                     except Exception as _te:
                         logger.debug("liquidity_sweep %s skipped: %s", ticker, _te)
@@ -1558,10 +1789,12 @@ class MeridLoop:
         
         # Check current lag before starting
         current_lag = self._get_event_loop_lag_ms()
-        if current_lag > 200:  # Hardened: lowered from 500ms to 200ms
+        # OLD-HARDWARE FIX: Use warning threshold (1500ms) instead of 200ms
+        _ARB_SKIP_THRESHOLD_MS = float(os.getenv("MERID_ARB_LAG_SKIP_MS", "1500.0"))
+        if current_lag > _ARB_SKIP_THRESHOLD_MS:
             logger.warning(
                 "[LAG-SKIP] action=arb_scan reason=elevated_lag "
-                f"lag_ms={current_lag:.0f} threshold_ms=200 timeout_count={getattr(self.metrics, 'arb_scan_timeouts', 0)}"
+                f"lag_ms={current_lag:.0f} threshold_ms={_ARB_SKIP_THRESHOLD_MS:.0f} timeout_count={getattr(self.metrics, 'arb_scan_timeouts', 0)}"
             )
             if _profiling:
                 logger.debug("[PROF] arb_scan:skipped_due_to_lag lag_ms=%.1f", current_lag)
@@ -1575,6 +1808,15 @@ class MeridLoop:
         store = self._signal_store()
         
         try:
+            # CRYPTO-15M-ARB: Update crypto venue prices before scanning
+            try:
+                from merid.signals.crypto_venue_bridge import get_crypto_venue_bridge
+                bridge = get_crypto_venue_bridge()
+                if bridge.update_prices():
+                    summary["actions"].append("arb_scan:prices_updated")
+            except Exception as _bridge_err:
+                logger.debug("Crypto venue bridge update skipped: %s", _bridge_err)
+            
             # Combine scan + store + validate into a single executor call to
             # reduce thread-pool contention (all are lightweight in-memory ops).
             def _do_arb_scan_all():
@@ -1602,10 +1844,11 @@ class MeridLoop:
             
             loop = asyncio.get_running_loop()
             
-            # EVENT-LOOP-FIX: Add timeout to prevent thread pool starvation
-            _ARB_TIMEOUT_S = float(os.getenv("MERID_ARB_SCAN_TIMEOUT_S", "2.0"))
+            # CRYPTO-15M-ARB: Use isolated executor and longer timeout
+            # BUG-EL23: Increased timeout from 2s to 5s, using dedicated arb_executor
+            _ARB_TIMEOUT_S = float(os.getenv("MERID_ARB_SCAN_TIMEOUT_S", "5.0"))
             signals = await asyncio.wait_for(
-                loop.run_in_executor(_get_loop_executor(), _do_arb_scan_all),
+                loop.run_in_executor(_get_arb_executor(), _do_arb_scan_all),
                 timeout=_ARB_TIMEOUT_S
             )
             
@@ -1734,36 +1977,23 @@ class MeridLoop:
                         f":${verdict.adjusted_size_usd:.0f}"
                         f"(throttle={verdict.throttle_pct:.0%})"
                     )
-                    # Telegram success notification
-                    try:
-                        from agents.telegram_agent import get_telegram_agent
-                        tg = get_telegram_agent()
-                        if tg.enabled:
-                            await tg.send_execute_success(
-                                episode_id=plan.plan_id,
-                                assets=[asset] if asset else [],
-                                summary=f"{plan.direction.upper()} {plan.symbol} ${verdict.adjusted_size_usd:.0f}",
-                                throttle=f"{verdict.throttle_pct:.0%}",
-                                cqi=f"{verdict.cqi_score:.2f}",
-                            )
-                    except Exception as tg_exc:
-                        logger.debug("Telegram success notification failed: %s", tg_exc)
+                    # SOCIAL-TRUTH (2026-05-13): Telegram notifications disabled for lean 15m Kalshi trading
             except Exception as e:
                 logger.error(f"Plan execution failed {plan.plan_id}: {e}")
                 summary["actions"].append(f"plan_failed:{plan.plan_id}:{plan.symbol}:{e}")
-                # Telegram failure notification
-                try:
-                    from agents.telegram_agent import get_telegram_agent
-                    tg = get_telegram_agent()
-                    if tg.enabled:
-                        await tg.send_execute_failure(
-                            episode_id=plan.plan_id,
-                            assets=[asset] if asset else [],
-                            summary=f"Execution failed: {str(e)[:100]}",
-                            error=str(e),
-                        )
-                except Exception as tg_exc:
-                    logger.debug("Telegram failure notification failed: %s", tg_exc)
+                # SOCIAL-TRUTH (2026-05-13): Telegram failure notification disabled
+                # try:
+                #     from agents.telegram_agent import get_telegram_agent
+                #     tg = get_telegram_agent()
+                #     if tg.enabled:
+                #         await tg.send_execute_failure(
+                #             episode_id=plan.plan_id,
+                #             assets=[asset] if asset else [],
+                #             summary=f"Execution failed: {str(e)[:100]}",
+                #             error=str(e),
+                #         )
+                # except Exception as tg_exc:
+                #     logger.debug("Telegram failure notification failed: %s", tg_exc)
 
     async def _execute_single_plan(self, plan) -> Optional[Dict]:
         """Bridge a TradePlan to a TradeRequest and submit to the adapter.
@@ -2013,11 +2243,11 @@ class MeridLoop:
                 # BUG-H4 fix: sync actual Kalshi position notional into ExecutionGuard
                 # so VenueExposureCap.current_exposure_usd reflects reality after
                 # restarts and position closes, not just the additive fill counter.
-                # P1-HARDENING: Reduced timeout from 5.0s to 1.0s to stay within budget
+                # OLD-HARDWARE FIX: 2.5s timeout for position sync (was 1.0s) - trading critical
                 try:
                     from merid.event_venues.kalshi.client import get_kalshi_client as _gkc
                     _positions_result = await asyncio.wait_for(
-                        _gkc().get_positions(), timeout=1.0
+                        _gkc().get_positions(), timeout=10.0
                     )
                     if _positions_result and hasattr(_positions_result, "data"):
                         _pos_list = _positions_result.data or []
@@ -2065,8 +2295,8 @@ class MeridLoop:
         try:
             og_lifecycle = self._order_group_lifecycle()
             
-            # PHASE-3: Hard budget for order_groups — must complete within 1000ms
-            ORDER_GROUPS_BUDGET_MS = 1000.0
+            # OLD-HARDWARE FIX: 4000ms budget for order_groups (was 1000ms)
+            ORDER_GROUPS_BUDGET_MS = 4000.0
             _og_budget_start = time.perf_counter()
 
             # Start lifecycle manager if not running (skip if previously failed)
@@ -2163,6 +2393,7 @@ class MeridLoop:
         Slow subscribers are logged for identification.
         
         EVENT-LOOP-FIX: Added per-subscriber timeout and overall budget enforcement.
+        DEGRADED-MODE-FIX: Aggressive early-exit and reduced work when lag is elevated.
         """
         import asyncio
         step_start = time.perf_counter()
@@ -2170,27 +2401,44 @@ class MeridLoop:
         slow_subscribers = []
         timed_out_count = 0
         
-        # Check lag before starting
+        # Check lag before starting - DEGRADED MODE: skip at lower threshold
         current_lag = self._get_event_loop_lag_ms()
-        if current_lag > 1000:  # Skip notify entirely if lag is critical
+        # MICRO-BANKROLL FIX v9 (2026-04-26): Increased skip threshold from 500ms to 2000ms
+        # to prevent blocking critical trading operations during transient lag spikes.
+        # For micro-bankroll, missing a trade due to lag is worse than slow execution.
+        if current_lag > 2000:  # v9: was 500, now 2000ms - only skip if severely lagged
             logger.warning(
-                "[LAG-SKIP] action=notify reason=critical_lag "
-                f"lag_ms={current_lag:.0f} threshold_ms=1000 subscriber_count={len(self._subscribers)}"
+                "[LAG-SKIP] action=notify reason=degraded_mode "
+                f"lag_ms={current_lag:.0f} threshold_ms=2000 subscriber_count={len(self._subscribers)}"
             )
             # Track skip metrics
             self.metrics.lag_skips_total = getattr(self.metrics, 'lag_skips_total', 0) + 1
             return
         
-        # Per-subscriber timeout: max 100ms each
-        _CB_TIMEOUT_S = 0.1
-        # Overall budget: max 500ms total for all subscribers
-        _TOTAL_BUDGET_MS = 500.0
+        # DEGRADED-MODE: When lag > 500ms, reduce subscriber budget slightly
+        # MICRO-BANKROLL FIX v9 (2026-04-26): Increased threshold from 200ms to 500ms
+        # and increased subscriber limit from 3 to 10. Micro-bankroll needs to process
+        # more trading agents even under moderate lag to avoid missing opportunities.
+        _DEGRADED_THRESHOLD_MS = 500.0  # v9: was 200, now 500
+        _is_degraded = current_lag > _DEGRADED_THRESHOLD_MS
+        
+        # Per-subscriber timeout: max 50ms in degraded mode, 100ms normal
+        _CB_TIMEOUT_S = 0.05 if _is_degraded else 0.1
+        # Overall budget: max 400ms in degraded mode, 500ms normal (less aggressive)
+        _TOTAL_BUDGET_MS = 400.0 if _is_degraded else 500.0  # v9: was 250, now 400
+        # Max subscribers to process in degraded mode
+        _MAX_SUBSCRIBERS_DEGRADED = 10  # v9: was 3, now 10 to allow more agents
         
         for cb in self._subscribers:
             # Check if we're over budget
             elapsed_ms = (time.perf_counter() - step_start) * 1000
             if elapsed_ms > _TOTAL_BUDGET_MS:
                 logger.warning(f"[LAG-GUARD] notify exceeded budget ({_TOTAL_BUDGET_MS:.0f}ms), skipping {len(self._subscribers) - notify_count} remaining subscribers")
+                break
+            
+            # DEGRADED-MODE: Limit number of subscribers processed
+            if _is_degraded and notify_count >= _MAX_SUBSCRIBERS_DEGRADED:
+                logger.warning(f"[LAG-GUARD] notify degraded mode: limited to {_MAX_SUBSCRIBERS_DEGRADED} subscribers, skipping remaining {len(self._subscribers) - notify_count}")
                 break
             
             cb_start = time.perf_counter()
@@ -2420,6 +2668,17 @@ class MeridLoop:
                 logger.info("[SHUTDOWN] Background tasks cancelled successfully")
             except asyncio.TimeoutError:
                 logger.warning(f"[SHUTDOWN] Timeout waiting for background tasks after {timeout}s")
+        
+        # SHUTDOWN-FIX: Cleanup thread pool executors to prevent thread leaks
+        global _loop_executor, _arb_executor
+        if _loop_executor is not None:
+            logger.debug("[SHUTDOWN] Shutting down loop executor")
+            _loop_executor.shutdown(wait=False)
+            _loop_executor = None
+        if _arb_executor is not None:
+            logger.debug("[SHUTDOWN] Shutting down arb executor")
+            _arb_executor.shutdown(wait=False)
+            _arb_executor = None
         
         logger.info("[SHUTDOWN] Complete")
 

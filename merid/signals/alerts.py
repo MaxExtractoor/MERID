@@ -158,15 +158,16 @@ class AlertRouter:
                 logger.warning(f"X dispatch failed: {exc}")
                 return False
 
-        # Fallback: try existing TwitterAgent
-        try:
-            from agents.twitter_agent import get_twitter_agent
-            agent = get_twitter_agent()
-            text = self._format_x(alert)
-            return agent.post_tweet(text) is not None
-        except Exception as _xe:
-            logger.debug("No X sink available: %s", _xe)
-            return False
+        # SOCIAL-TRUTH (2026-05-13): Twitter agent fallback disabled for lean 15m Kalshi trading
+        # try:
+        #     from agents.twitter_agent import get_twitter_agent
+        #     agent = get_twitter_agent()
+        #     text = self._format_x(alert)
+        #     return agent.post_tweet(text) is not None
+        # except Exception as _xe:
+        #     logger.debug("No X sink available: %s", _xe)
+        #     return False
+        return False
 
     def _send_log(self, alert: Alert) -> bool:
         """Log the alert."""

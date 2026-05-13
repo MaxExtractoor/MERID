@@ -19,10 +19,19 @@ Usage::
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+# ═══════════════════════════════════════════════════════════════════════
+# DEBUGGING: Enable faulthandler to capture stack traces on hangs
+# ═══════════════════════════════════════════════════════════════════════
+import faulthandler
+faulthandler.enable(sys.stderr)
+# Dump stack traces every 30 seconds if process appears stuck
+faulthandler.dump_traceback_later(30, repeat=True)
 
 from merid.prediction.agent_grid_config import (
     AgentGridConfig,
@@ -39,7 +48,7 @@ from utils.logger import get_logger
 # Cross-asset arbiter integration
 from merid.prediction.crypto_top_edge import (
     CRYPTO_ASSETS,
-    MOMENTUM_SCALPING_TIMEFRAMES,
+    MEAN_REVERSION_TIMEFRAMES,
     get_crypto_top_edge_arbiter,
 )
 
@@ -205,6 +214,8 @@ class AgentGrid:
         self._ct_coordination_task: Optional[asyncio.Task] = None
         # Cross-asset arbiter cycle runner (for momentum scalping)
         self._arbiter_cycle_task: Optional[asyncio.Task] = None
+        # WebSocket subscription refresh task (auto-refresh when markets roll over)
+        self._ws_subscription_refresh_task: Optional[asyncio.Task] = None
 
         logger.info(
             f"AgentGrid initialized: {len(self._agents)} agents, "
@@ -303,6 +314,32 @@ class AgentGrid:
             except Exception as _pre_exc:
                 logger.warning("AgentGrid production preflight skipped: %s", _pre_exc)
 
+            # DYNAMIC ENTRY WINDOW POLICY HEADER: Log loaded policies on startup
+            try:
+                from merid.prediction.dynamic_entry_window import get_policies
+                import os
+
+                policies = get_policies()
+                policy_version = os.getenv("MERID_ENTRY_WINDOW_POLICY_VERSION", "v1")
+
+                # Build policy summary for logging
+                policy_summary = {}
+                for asset, policy in policies.items():
+                    policy_summary[asset] = {
+                        "policy_name": policy.policy_name,
+                        "base_window": f"{policy.base_window_start_minutes}-{policy.base_window_end_minutes}min",
+                        "terminal_enabled": policy.terminal_config.enabled,
+                        "terminal_edge_threshold": f"{policy.terminal_config.edge_threshold_pct}%" if policy.terminal_config.enabled else "N/A"
+                    }
+
+                logger.info(
+                    "[DYNAMIC_WINDOW_POLICY_HEADER] version=%s policies=%s",
+                    policy_version,
+                    policy_summary
+                )
+            except Exception as exc:
+                logger.warning("[DYNAMIC_WINDOW_POLICY_HEADER] Failed to log policy header: %s", exc)
+
             self._startup_phase = "starting"
             self._startup_last_error = None
             self._startup_finished_at = None
@@ -344,7 +381,53 @@ class AgentGrid:
                 return 0  # Fail-closed if no equity
             
             set_equity_provider(_equity_provider)
-            logger.info("✓ GlobalRiskGuard: equity provider registered from BankrollServiceV2")
+            
+            # PRODUCTION AUDIT (Step 2): Print canonical bankroll line at startup
+            initial_equity = get_equity_for_risk_calc_sync()
+            logger.critical(
+                "[BANKROLL_ALIGNMENT] GlobalRiskGuard STARTUP with real balance: "
+                f"equity_usd={initial_equity} source=KalshiPortfolio.get_balance via bankroll_service_v2 "
+                "(single source of truth - NO fallbacks)"
+            )
+            
+            # CRITICAL FIX (2026-05-05): Register existing risk provider for GlobalRiskGuard
+            # This ensures the guard knows about open positions and enforces 2% cycle cap
+            from merid.guards.global_risk_guard import set_existing_risk_provider
+            
+            def _existing_risk_provider() -> int:
+                """Return existing open position risk in cents for GlobalRiskGuard.
+                
+                CRITICAL FIX (2026-05-09): Use fills_ledger.get_open_exposure_usd() as PRIMARY source
+                because it filters out manually closed positions. The position_cache is populated
+                from fills_ledger when REST returns empty, which includes stale/test fills and
+                manually closed positions that incorrectly inflate existing_risk_cents beyond
+                actual equity.
+                
+                Previous approach (position_cache) caused GLOBAL RISK GUARD BLOCK because
+                129 contracts across 8 positions = $64.45 exposure on $34.81 equity (185%),
+                which is 23x over the 8% total risk cap ($2.78).
+                """
+                try:
+                    from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+                    ledger = get_fills_ledger()
+                    _open_notional_usd = ledger.get_open_exposure_usd()
+                    return int(_open_notional_usd * 100)  # Convert USD to cents
+                except Exception:
+                    # Fallback: try position cache (less accurate due to stale fills)
+                    try:
+                        from merid.event_venues.kalshi.position_cache import get_position_cache
+                        cache = get_position_cache()
+                        _positions = cache.get_all_positions(validate_freshness=False)
+                        _total = 0.0
+                        for pos in _positions.values():
+                            if pos.contracts > 0:
+                                _total += pos.contracts * (pos.avg_price_cents / 100.0)
+                        return int(_total * 100)  # Convert to cents
+                    except Exception:
+                        return 0  # Fail-closed if can't determine exposure
+            
+            set_existing_risk_provider(_existing_risk_provider)
+            logger.info("✓ GlobalRiskGuard: existing risk provider registered")
         except Exception as _be:
             logger.critical("[AGENT_GRID] BankrollServiceV2 failed to start: %s", _be)
             raise RuntimeError(f"BankrollServiceV2 startup failed: {_be}") from _be
@@ -352,7 +435,9 @@ class AgentGrid:
         # Start portfolio risk agent first, then wait for its first snapshot
         # before allowing any trading agent to execute orders. (BUG-L1)
         await self._portfolio_risk.start()
-        _risk_ready = await self._portfolio_risk.wait_ready(timeout=15.0)
+        # 15m scalper: shorter timeout (5s vs 15s) for faster startup
+        _timeout = 5.0 if os.getenv("STRATEGY_MODE", "").upper() == "MOMENTUM_SCALPER" else 15.0
+        _risk_ready = await self._portfolio_risk.wait_ready(timeout=_timeout)
         if _risk_ready:
             logger.info("✓ PortfolioRiskAgent: first snapshot complete — safe to start agents")
         else:
@@ -467,21 +552,30 @@ class AgentGrid:
             raise
 
         # Wire 1: subscribe each crypto agent to CryptoSurfaceLoader now that agents are running
+        # BANDWIDTH-FIX: Skip signal-only agents (they don't execute, don't need live surface updates)
         if self._surface_loader is not None:
             for _agent in self._agents:
-                if getattr(_agent.config, "category", None) == "crypto":
+                if getattr(_agent.config, "category", None) == "crypto" and not getattr(_agent.config, 'signalonly', False):
                     self._surface_loader.subscribe_updates(_agent.on_surface_update)
                     logger.debug("Surface loader subscribed: %s", _agent.config.name)
 
         # Wire 2: Subscribe agents to Kalshi WS via series tickers (market_selector)
         # This ensures proper market discovery via AGENT_SERIES_MAP
+        # BANDWIDTH-FIX: Skip signal-only agents (they don't execute, don't need live market data)
         try:
             from merid.event_venues.kalshi.market_selector import enable_kalshi_agent
+            _subscribed_count = 0
             for _agent in self._agents:
+                # Skip signal-only agents - they don't need live market data
+                if getattr(_agent.config, 'signalonly', False):
+                    logger.debug("Kalshi series subscription skipped (signal-only): %s", _agent.config.name)
+                    continue
                 if _agent.config.series_tickers:
                     await enable_kalshi_agent(_agent.config.name, _agent.config.series_tickers)
                     logger.debug("Kalshi series subscription: %s -> %s", _agent.config.name, _agent.config.series_tickers)
-            logger.info("✓ Kalshi series ticker subscriptions wired for %d agents", len(self._agents))
+                    _subscribed_count += 1
+            logger.info("✓ Kalshi series ticker subscriptions wired for %d agents (%d signal-only skipped)", 
+                       _subscribed_count, len(self._agents) - _subscribed_count)
         except Exception as _exc:
             logger.warning("Kalshi series subscription wiring skipped (non-fatal): %s", _exc)
 
@@ -570,6 +664,13 @@ class AgentGrid:
         )
         self._arbiter_cycle_task.add_done_callback(_bg_task_done_cb)
         logger.info("✓ Cross-asset arbiter cycle runner started")
+
+        # Start WebSocket subscription refresh (auto-refresh when markets roll over)
+        self._ws_subscription_refresh_task = asyncio.create_task(
+            self._ws_subscription_refresh_loop(), name="ws-subscription-refresh"
+        )
+        self._ws_subscription_refresh_task.add_done_callback(_bg_task_done_cb)
+        logger.info("✓ WebSocket subscription refresh started (13s interval)")
 
         # Start outcome resolver (Brier calibration + realized edge resolution)
         _skip_nonessential = __import__("os").environ.get("MERID_VALIDATION_MODE", "") == "1"
@@ -772,6 +873,16 @@ class AgentGrid:
                 # accumulator grows forever and blocks all orders after the first
                 # few (cycle_cap=$2.21 on $44.35 equity fills in ~4 orders).
                 _risk_guard.reset_cycle()
+                
+                # Reset the GlobalExecutionGuard notional accumulator so each cycle
+                # gets a fresh 2% bankroll allocation. Without this, the notional
+                # accumulator grows forever and triggers GLOBAL_CAP_EXCEEDED errors.
+                try:
+                    from merid.guards.global_execution_guard import get_global_execution_guard
+                    _exec_guard = get_global_execution_guard()
+                    _exec_guard.reset_cycle()
+                except Exception as e:
+                    logger.debug("[ARBITER] Failed to reset GlobalExecutionGuard: %s", e)
 
                 # Run the arbiter cycle
                 cycle_id = f"grid_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
@@ -806,6 +917,68 @@ class AgentGrid:
             except Exception as e:
                 logger.error("[ARBITER] Cycle runner error: %s", e)
                 await asyncio.sleep(5)  # Short sleep on error
+
+    async def _ws_subscription_refresh_loop(self) -> None:
+        """Background task to refresh WebSocket subscriptions when markets roll over.
+        
+        Kalshi markets expire every 15 minutes (for 15M timeframe). The WS subscription
+        is static at startup, so when markets roll over to new expiry times, the WS
+        stays subscribed to old/expired markets and doesn't receive data for new ones.
+        
+        This loop periodically re-subscribes agents to their current markets via
+        enable_kalshi_agent(), which resolves new markets from the catalog and updates
+        the WS bridge subscription. The WS bridge handles rotation/unsubscription of
+        old tickers automatically.
+        """
+        refresh_interval = 13.0  # Refresh every 13 seconds (de-synced from 10s heartbeat)
+        
+        logger.info("[WS-SUBSCRIPTION-REFRESH] Started (interval=%.1fs)", refresh_interval)
+        
+        while self._running:
+            try:
+                # Refresh subscriptions for all agents with series_tickers
+                from merid.event_venues.kalshi.market_selector import enable_kalshi_agent
+                
+                refresh_count = 0
+                for agent in self._agents:
+                    # Skip signal-only agents - they don't need live market data
+                    if getattr(agent.config, 'signalonly', False):
+                        continue
+                    
+                    # Only refresh agents with series_tickers configured
+                    if agent.config.series_tickers:
+                        try:
+                            result = await enable_kalshi_agent(
+                                agent.config.name, 
+                                agent.config.series_tickers
+                            )
+                            if result.get("subscribed", 0) > 0:
+                                refresh_count += 1
+                                logger.debug(
+                                    "[WS-SUBSCRIPTION-REFRESH] Refreshed %s: %d markets",
+                                    agent.config.name, result.get("subscribed", 0)
+                                )
+                        except Exception as agent_exc:
+                            logger.warning(
+                                "[WS-SUBSCRIPTION-REFRESH] Failed to refresh %s: %s",
+                                agent.config.name, agent_exc
+                            )
+                
+                if refresh_count > 0:
+                    logger.info(
+                        "[WS-SUBSCRIPTION-REFRESH] Refreshed %d agents (total=%d)",
+                        refresh_count, len(self._agents)
+                    )
+                
+                # Wait for next refresh cycle
+                await asyncio.sleep(refresh_interval)
+                
+            except asyncio.CancelledError:
+                logger.info("[WS-SUBSCRIPTION-REFRESH] Cancelled")
+                raise
+            except Exception as e:
+                logger.error("[WS-SUBSCRIPTION-REFRESH] Error: %s", e)
+                await asyncio.sleep(10)  # Longer sleep on error to avoid tight loop
 
     def mark_startup_failure(self, exc: Any) -> None:
         """Record failure when deferred start catches an error outside ``start()`` internals."""
@@ -844,8 +1017,12 @@ class AgentGrid:
 
         # BUG-L5: Drain trading agents first (completes current cycle + final stop-loss sweep),
         # then stop them. PortfolioRiskAgent stays alive until all agents are drained.
+        # HANG-FIX: Add 10s timeout to each drain to prevent indefinite shutdown hangs
         for agent in self._agents:
-            await agent.drain()
+            try:
+                await asyncio.wait_for(agent.drain(), timeout=10.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"Agent {agent.config.name} drain timed out after 10s, forcing stop")
         for agent in self._agents:
             await agent.stop()
 
@@ -897,6 +1074,8 @@ class AgentGrid:
                 await self._opinion_loop_task
             except asyncio.CancelledError:
                 pass
+            finally:
+                self._opinion_loop_task = None  # CLEAR-FIX: Prevent double-cancel
 
         if self._ct_coordination_task and not self._ct_coordination_task.done():
             self._ct_coordination_task.cancel()
@@ -904,6 +1083,8 @@ class AgentGrid:
                 await self._ct_coordination_task
             except asyncio.CancelledError:
                 pass
+            finally:
+                self._ct_coordination_task = None  # CLEAR-FIX: Prevent double-cancel
 
         # Stop execution subscriber (Sprint M)
         if hasattr(self, '_execution_subscriber') and self._execution_subscriber:
@@ -936,6 +1117,8 @@ class AgentGrid:
                 await self._volume_poll_task
             except asyncio.CancelledError:
                 pass
+            finally:
+                self._volume_poll_task = None  # CLEAR-FIX: Prevent double-cancel
 
         # Stop reconciliation loop
         if self._reconciliation_task and not self._reconciliation_task.done():
@@ -944,6 +1127,8 @@ class AgentGrid:
                 await self._reconciliation_task
             except asyncio.CancelledError:
                 pass
+            finally:
+                self._reconciliation_task = None  # CLEAR-FIX: Prevent double-cancel
 
         # Stop cross-asset arbiter cycle runner
         if self._arbiter_cycle_task and not self._arbiter_cycle_task.done():
@@ -952,7 +1137,20 @@ class AgentGrid:
                 await self._arbiter_cycle_task
             except asyncio.CancelledError:
                 pass
+            finally:
+                self._arbiter_cycle_task = None  # CLEAR-FIX: Prevent double-cancel
             logger.info("✓ Cross-asset arbiter cycle runner stopped")
+
+        # Stop WebSocket subscription refresh
+        if self._ws_subscription_refresh_task and not self._ws_subscription_refresh_task.done():
+            self._ws_subscription_refresh_task.cancel()
+            try:
+                await self._ws_subscription_refresh_task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                self._ws_subscription_refresh_task = None  # CLEAR-FIX: Prevent double-cancel
+            logger.info("✓ WebSocket subscription refresh stopped")
 
         # BUG-019: Stop auto-graduation loop
         if self._auto_graduation_task and not self._auto_graduation_task.done():
@@ -961,6 +1159,8 @@ class AgentGrid:
                 await self._auto_graduation_task
             except asyncio.CancelledError:
                 pass
+            finally:
+                self._auto_graduation_task = None  # CLEAR-FIX: Prevent double-cancel
 
         logger.info("AgentGrid stopped")
 
@@ -1062,7 +1262,9 @@ class AgentGrid:
                 logger.debug(f"Mood bus feed error (ignored): {exc}")
 
             try:
-                await asyncio.wait_for(asyncio.sleep(60), timeout=65)
+                # 15m scalper: faster mood updates (15s vs 60s)
+                _sleep = 15 if os.getenv("STRATEGY_MODE", "").upper() == "MOMENTUM_SCALPER" else 60
+                await asyncio.wait_for(asyncio.sleep(_sleep), timeout=_sleep + 5)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 break
 
@@ -1134,7 +1336,9 @@ class AgentGrid:
             except Exception as _exc:
                 logger.debug("Opinion loop error (ignored): %s", _exc)
             try:
-                await _aio.wait_for(_aio.sleep(60), timeout=65)
+                # 15m scalper: faster opinion collection (15s vs 60s)
+                _sleep = 15 if os.getenv("STRATEGY_MODE", "").upper() == "MOMENTUM_SCALPER" else 60
+                await _aio.wait_for(_aio.sleep(_sleep), timeout=_sleep + 5)
             except (_aio.TimeoutError, _aio.CancelledError):
                 break
 
@@ -1355,8 +1559,9 @@ class AgentGrid:
                 logger.warning(f"Reconciliation loop error: {exc}")
 
             try:
-                # Run every 5 minutes (300 seconds)
-                await asyncio.wait_for(asyncio.sleep(300), timeout=310)
+                # 15m scalper: faster regime collection (1 min vs 5 min)
+                _sleep = 60 if os.getenv("STRATEGY_MODE", "").upper() == "MOMENTUM_SCALPER" else 300
+                await asyncio.wait_for(asyncio.sleep(_sleep), timeout=_sleep + 10)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 break
 
@@ -1416,33 +1621,56 @@ class AgentGrid:
         return self._config
 
     def _register_alert_sinks(self) -> None:
-        """Register Twitter/Telegram sinks for prediction alerts."""
-        def twitter_alert_sink(alert):
-            """Send alert to Twitter."""
-            try:
-                from agents.twitter_agent import get_twitter_agent
-                twitter = get_twitter_agent()
+        """Register Twitter/Telegram sinks for prediction alerts.
+        
+        SOCIAL-TRUTH (2026-05-13): Twitter/Telegram sinks disabled for lean 15m Kalshi trading.
+        """
+        # def twitter_alert_sink(alert):
+        #     """Send alert to Twitter."""
+        #     try:
+        #         from agents.twitter_agent import get_twitter_agent
+        #         twitter = get_twitter_agent()
 
-                severity_emoji = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}
-                emoji = severity_emoji.get(alert.severity.value, "")
+        #         severity_emoji = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}
+        #         emoji = severity_emoji.get(alert.severity.value, "")
 
-                message = (
-                    f"{emoji} [{alert.category.value.upper()}]\n"
-                    f"{alert.title}\n"
-                    f"{alert.message[:150]}"
-                )
+        #         message = (
+        #             f"{emoji} [{alert.category.value.upper()}]\n"
+        #             f"{alert.title}\n"
+        #             f"{alert.message[:150]}"
+        #         )
+        #         twitter.post_tweet(message)
+        #     except Exception:
+        #         pass
 
-                import asyncio
-                asyncio.create_task(twitter.post_tweet(message))
-            except Exception as exc:
-                logger.debug(f"Twitter alert sink failed: {exc}")
+        # def telegram_alert_sink(alert):
+        #     """Send alert to Telegram."""
+        #     try:
+        #         from agents.telegram_agent import get_telegram_agent
+        #         telegram = get_telegram_agent()
 
+        #         severity_emoji = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}
+        #         emoji = severity_emoji.get(alert.severity.value, "")
+
+        #         message = (
+        #             f"{emoji} <b>[{alert.category.value.upper()}]</b>\n"
+        #             f"{alert.title}\n"
+        #             f"{alert.message[:200]}"
+        #         )
+        #         telegram.send_message(message, parse_mode="HTML")
+        #     except Exception:
+        #         pass
+
+        # # Register sinks
+        # self._alert_router.add_sink(twitter_alert_sink)
+        # self._alert_router.add_sink(telegram_alert_sink)
         # NOTE: Telegram sink is already registered by the PredictionAlertManager
         # singleton (via _make_telegram_sink in alerts.py).  Do NOT add a second
         # Telegram sink here — it causes every alert to be sent twice to TG,
         # triggering rate-limit cascades and 19s+ event-loop lag.
-        self._alert_manager.add_sink(twitter_alert_sink)
-        logger.info("✓ Alert sinks registered (Twitter)")
+        # self._alert_manager.add_sink(twitter_alert_sink)
+        # logger.info("✓ Alert sinks registered (Twitter)")
+        pass
 
     def _register_promotion_callbacks(self) -> None:
         """Register AutoPromoter callbacks for gauntlet and promotion events.

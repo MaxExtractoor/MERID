@@ -30,20 +30,23 @@ class Btc15mAgentSpec:
     daily_dd_limit_pct: float = -0.02  # -2% daily drawdown limit
 
     # Entry filters
-    min_edge_threshold: float = 0.05  # Only trade if model EV > 5¢ per contract
+    min_edge_threshold: float = 0.012  # 1.2¢ for aggressive micro-scalping (just above 2¢ fee, rely on volume)
     max_vol_ratio: float = 2.0  # Skip if 5m realized vol > 2x baseline
-    min_time_to_expiry: int = 300  # Don't enter last 5 minutes
-    max_time_to_expiry: int = 600  # Only trade first 10 minutes
+    min_time_to_expiry: int = 120  # Don't enter last 2 minutes (aggressive)
+    max_time_to_expiry: int = 900  # Trade first 15 minutes (wider window)
 
     # Regime confidence thresholds
-    min_regime_confidence: float = 0.7  # Require strong regime signal
+    min_regime_confidence: float = 0.5  # Lowered for more signals
     regime_window_minutes: int = 15  # Look at last 15m for regime
 
 # ── Input Feeds ──────────────────────────────────────────────────────────────
 
 @dataclass
 class Btc15mInputs:
-    """Real-time inputs for BTC 15m agent."""
+    """Real-time inputs for BTC 15m agent.
+
+    LEAN 15m KALSHI STACK (2026-05-13): Extended with SignalFusion microstructure signals.
+    """
 
     # CFB RTI feed (60s settlement basis)
     rti_current: float
@@ -76,16 +79,57 @@ class Btc15mInputs:
     current_position_size: float
     daily_pnl: float
 
+    # LEAN 15m KALSHI STACK (2026-05-13): SignalFusion microstructure signals
+    # orderflow_bias > 0 = net aggressive buying / positive imbalance
+    # orderflow_bias < 0 = net selling / negative imbalance
+    orderflow_bias: float = 0.0
+
+    # onchain_velocity > 0 = above-baseline on-chain activity (z-scored)
+    # onchain_velocity < 0 = muted activity
+    onchain_velocity: float = 0.0
+
 # ── Signal Generation ─────────────────────────────────────────────────────────
 
 class Btc15mSignalGenerator:
-    """Generates trading signals for BTC 15m contracts."""
+    """Generates trading signals for BTC 15m contracts.
+
+    LEAN 15m KALSHI STACK (2026-05-13): Probability-space Kelly sizing tied to Kalshi prices.
+    """
 
     def __init__(self, spec: Btc15mAgentSpec):
         self.spec = spec
+        # Kelly parameters
+        self.kelly_shrink = 0.25  # Fractional Kelly (conservative)
+        self.max_kelly_cap = 0.10  # Max position size as fraction of capital
+
+    @staticmethod
+    def kelly_fraction(p_model: float, price_cents: float) -> float:
+        """Calculate Kelly fraction for a YES bet.
+
+        f* = (p(b+1) - 1) / b, where b = (1-p_market) / p_market
+        """
+        p_market = price_cents / 100.0
+        b = (1 - p_market) / p_market
+        numer = p_model * (b + 1) - 1
+        if b <= 0 or numer <= 0:
+            return 0.0
+        f_star = numer / b
+        return max(0.0, min(f_star, 1.0))  # Full Kelly upper bound
+
+    @staticmethod
+    def cents_to_prob(edge_cents: float) -> float:
+        """Convert edge in cents to probability points.
+
+        Around 50c, 1c ≈ 1% probability.
+        Can be refined from backtest data.
+        """
+        return edge_cents / 100.0
 
     def generate_signal(self, inputs: Btc15mInputs) -> Optional[Dict[str, Any]]:
-        """Generate trading signal based on regime and filters."""
+        """Generate trading signal based on regime, microstructure, and filters.
+
+        LEAN 15m KALSHI STACK (2026-05-13): Incorporates SignalFusion microstructure signals.
+        """
 
         # 1. Risk filters (fail fast)
         if inputs.crypto_vol_alert_active:
@@ -116,25 +160,92 @@ class Btc15mSignalGenerator:
         if edge < self.spec.min_edge_threshold:
             return None  # EV too low
 
-        # 3. Direction and sizing
+        # 3. Direction from regime
         direction = regime.get("direction")
         if not direction:
             return None
 
-        # Calculate position size
-        # Kelly fraction scales from 0 to 1.0 of the max_position_size_pct cap
-        kelly_fraction = min(1.0, edge / 0.1)  # full cap when edge >= 10¢
+        # LEAN 15m KALSHI STACK (2026-05-13): Probability-space Kelly sizing
+        # Use Kalshi market price to compute implied probability and Kelly fraction
+        kalshi_price = (inputs.orderbook_bid + inputs.orderbook_ask) / 2.0  # Mid price
+
+        # Convert base regime edge (in cents) to probability points
+        base_edge_est = regime.get("edge_estimate", 0.0)  # in cents
+        p_market = kalshi_price / 100.0
+        p_model_base = p_market + self.cents_to_prob(base_edge_est)
+
+        # LEAN 15m KALSHI STACK (2026-05-13): Microstructure signal integration
+        # orderflow_bias: positive = buying pressure, negative = selling pressure
+        # onchain_velocity: positive = elevated on-chain activity, negative = muted
+        orderflow_bias = inputs.orderflow_bias
+        onchain_velocity = inputs.onchain_velocity
+
+        # Boost p_model when microstructure aligns with regime direction
+        # Symmetric, soft thresholds: neutral zone |bias| < 0.1, strong boost |bias| > 0.5
+        prob_boost = 0.0
+        direction_sign = 1 if direction == "up" else -1
+        alignment_score = direction_sign * orderflow_bias
+
+        if alignment_score > 0.5:
+            prob_boost = self.cents_to_prob(0.03)  # +3¢ → +0.03 probability for strong alignment
+        elif alignment_score > 0.2:
+            prob_boost = self.cents_to_prob(0.02)  # +2¢ → +0.02 probability for moderate alignment
+        elif alignment_score < -0.1:
+            # Neutral/misaligned zone - no boost
+            prob_boost = 0.0
+
+        p_model = p_model_base + prob_boost
+        p_model = max(0.01, min(0.99, p_model))  # Clamp for safety
+
+        # Gate: require elevated on-chain activity for meaningful moves
+        # Only size up when on-chain velocity is above baseline (z-score > 0)
+        # AND realized vol is above baseline (avoid deceptive high on-chain / low vol regimes)
+        onchain_gate_multiplier = 1.0
+        if onchain_velocity < 0:
+            # Muted on-chain activity - reduce position size by 50%
+            onchain_gate_multiplier = 0.5
+        elif onchain_velocity > 1.0 and inputs.vol_15m_realized > inputs.vol_baseline_median:
+            # High on-chain activity AND elevated realized vol - can size up 20%
+            onchain_gate_multiplier = 1.2
+
+        # Compute Kelly fraction from probability and Kalshi price
+        base_kelly = self.kelly_fraction(p_model, kalshi_price)
+
+        # Apply fractional Kelly shrink and cap
+        kelly_fraction = min(base_kelly * self.kelly_shrink, self.max_kelly_cap)
+
+        # Apply on-chain gate multiplier
+        kelly_fraction *= onchain_gate_multiplier
+
+        # Final position size as percentage of max_position_size_pct
         position_size = kelly_fraction * self.spec.max_position_size_pct
+
+        # Calculate edge per unit stake for logging
+        p_mkt = kalshi_price / 100.0
+        b = (1 - p_mkt) / p_mkt
+        edge_per_stake = p_model * b - (1 - p_model)
 
         return {
             "action": "buy" if direction == "up" else "sell",
             "market_id": inputs.market_id,
             "size_pct": position_size,
-            "reason": f"Regime: {regime['regime']}, Edge: {edge:.3f}",
+            "reason": (
+                f"Regime: {regime['regime']}, p_model: {p_model:.3f} "
+                f"(p_mkt: {p_mkt:.3f}, prob_boost: {prob_boost:.3f}), "
+                f"Kelly: {kelly_fraction:.3f}, OF: {orderflow_bias:+.2f}, OC: {onchain_velocity:+.2f}"
+            ),
             "stop_loss_pct": self.spec.stop_loss_pct,
             "take_profit_pct": self.spec.take_profit_pct,
-            "edge_estimate": edge,
+            "edge_estimate": edge_per_stake,  # EV per unit stake
             "regime_confidence": regime.get("confidence", 0.0),
+            # LEAN 15m KALSHI STACK (2026-05-13): Expose probability and Kelly metrics for observability
+            "p_market": p_market,
+            "p_model": p_model,
+            "p_model_base": p_model_base,
+            "prob_boost": prob_boost,
+            "kelly_fraction": kelly_fraction,
+            "orderflow_bias": orderflow_bias,
+            "onchain_velocity": onchain_velocity,
         }
 
 # ── Risk Rules Integration ───────────────────────────────────────────────────

@@ -1,7 +1,8 @@
 """Bootstrap canonical agents into the registry.
 
-Registers all wired agents (research, strategy, risk, coordination, ops)
-into the CanonicalAgentRegistry for orchestrator use.
+LEAN 15m KALSHI STACK (2026-05-13): Pruned for BTC/ETH/SOL/XRP/DOGE trading.
+Only core agents: PredictionMarketAgent, StrategyDesignerAgent, RiskManagerAgent, CapitalAllocatorAgent, AnomalyDetectorAgent.
+Deleted agents (moved to legacy/): ConsensusCoordinatorAgent, ExplainabilityAgent, DebateCoordinatorAgent, GovernanceAgent, OpsRunbookAgent.
 """
 
 from merid.agents.base import get_canonical_registry
@@ -12,13 +13,14 @@ from merid.agents.risk_agents import (
     CapitalAllocatorAgent,
     AnomalyDetectorAgent,
 )
-from merid.agents.coordination import (
-    ConsensusCoordinatorAgent,
-    ExplainabilityAgent,
-    DebateCoordinatorAgent,
-    GovernanceAgent,
-)
-from merid.agents.ops import OpsRunbookAgent, BacktestAgent
+# LEAN 15m KALSHI STACK (2026-05-13): Coordination agents disabled
+# from merid.agents.coordination import (
+#     ConsensusCoordinatorAgent,
+#     ExplainabilityAgent,
+#     DebateCoordinatorAgent,
+#     GovernanceAgent,
+# )
+from merid.agents.ops import BacktestAgent  # BacktestAgent kept as CLI/offline tool
 
 from utils.logger import get_logger
 
@@ -30,17 +32,19 @@ def bootstrap_canonical_agents() -> int:
     registry = get_canonical_registry()
 
     _specs = [
-        # (label, factory)
+        # LEAN 15m KALSHI STACK (2026-05-13): Core agents only
         ("PredictionMarketAgent",    lambda: WiredPredictionMarketAgent(agent_id="pm-research-live")),
         ("StrategyDesignerAgent",    lambda: StrategyDesignerAgent(agent_id="strategy-designer")),
         ("RiskManagerAgent",         lambda: RiskManagerAgent(agent_id="risk-manager")),
         ("CapitalAllocatorAgent",    lambda: CapitalAllocatorAgent(agent_id="capital-allocator")),
         ("AnomalyDetectorAgent",     lambda: AnomalyDetectorAgent(agent_id="anomaly-detector")),
-        ("ConsensusCoordinatorAgent",lambda: ConsensusCoordinatorAgent(agent_id="consensus-coordinator")),
-        ("ExplainabilityAgent",      lambda: ExplainabilityAgent(agent_id="explainability")),
-        ("DebateCoordinatorAgent",   lambda: DebateCoordinatorAgent(agent_id="debate-coordinator")),
-        ("GovernanceAgent",          lambda: GovernanceAgent(agent_id="governance")),
-        ("OpsRunbookAgent",          lambda: OpsRunbookAgent(agent_id="ops-runbook")),
+        # LEAN 15m KALSHI STACK (2026-05-13): Coordination agents disabled
+        # ("ConsensusCoordinatorAgent",lambda: ConsensusCoordinatorAgent(agent_id="consensus-coordinator")),
+        # ("ExplainabilityAgent",      lambda: ExplainabilityAgent(agent_id="explainability")),
+        # ("DebateCoordinatorAgent",   lambda: DebateCoordinatorAgent(agent_id="debate-coordinator")),
+        # ("GovernanceAgent",          lambda: GovernanceAgent(agent_id="governance")),
+        # ("OpsRunbookAgent",          lambda: OpsRunbookAgent(agent_id="ops-runbook")),
+        # BacktestAgent kept as CLI/offline tool, not in runtime registry
         ("BacktestAgent",            lambda: BacktestAgent(agent_id="backtest")),
     ]
 

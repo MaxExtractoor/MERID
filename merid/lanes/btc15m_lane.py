@@ -3,9 +3,9 @@ BTC15MLane — End-to-end orchestration for BTC 15m Kalshi trading.
 
 Wires together:
   - Kalshi market discovery (KalshiMarketCatalog)
-  - Sentiment stack (SentimentBus → SentimentBundle + Fibonacci smoothing)
+  - Sentiment stack (SentimentBus → SentimentBundle + Fibonacci smoothing) [DISABLED for lean 15m]
   - Swarm consensus (SwarmConsensusAggregator)
-  - Risk evaluation (CryptoSwarmRiskBTC15m + BTCSentimentRiskDial)
+  - Risk evaluation (CryptoSwarmRiskBTC15m + BTCSentimentRiskDial) [DISABLED for lean 15m]
   - Order execution (KalshiExecutor, mode-guarded)
   - Observability (structured logging of every decision)
 
@@ -14,6 +14,8 @@ Phases unlock timeframes, assets, and live execution based on realised PnL
 performance (equity, drawdown, Sharpe, trade count).
 
 No execution path bypasses risk evaluation.
+
+LEAN 15m KALSHI STACK (2026-05-13): Sentiment stack disabled for microstructure-driven trading.
 """
 
 from __future__ import annotations
@@ -846,15 +848,28 @@ class BTC15MLane:
 
     # ------------------------------------------------------------------
     # Step 2 — Sentiment
+    # LEAN 15m KALSHI STACK (2026-05-13): Sentiment disabled for microstructure-driven trading
     # ------------------------------------------------------------------
-
     async def _update_sentiment(self) -> Dict[str, Any]:
-        """
-        Refresh sentiment if stale, else return cached.
+        """Refresh sentiment if stale, else return cached.
 
-        Combines: Twitter, Reddit, CFGI, news via SentimentBus,
-        then applies Fibonacci smoothing to the combined score.
+        LEAN 15m KALSHI STACK (2026-05-13): Sentiment disabled, returns neutral baseline.
         """
+        # LEAN 15m KALSHI STACK (2026-05-13): Check feature flag
+        import os
+        enable_sentiment = os.getenv("ENABLE_SENTIMENT_TRUTH", "false").lower() == "true"
+        if not enable_sentiment:
+            # Return neutral sentiment baseline for lean 15m stack
+            return {
+                "combined_raw": 0.0,
+                "combined_smoothed": 0.0,
+                "fg_index": 50,
+                "confidence": 0.0,
+                "fg_is_synthetic": True,
+                "vader_signal": "neutral",
+                "regime": "neutral",
+            }
+
         now = time.monotonic()
         if (
             self._cached_sentiment is not None
@@ -1792,6 +1807,8 @@ class LaneOrchestrator:
         ("ETH", "1h"):   "PHASE_2",
         ("BTC", "4h"):   "PHASE_2",
         ("SOL", "15m"):  "PHASE_3",
+        ("XRP", "15m"):  "PHASE_3",
+        ("DOGE", "15m"): "PHASE_3",
     }
 
     def __init__(self, base_equity: float = 0.0) -> None:
