@@ -3251,6 +3251,11 @@ async def _app_lifespan(application: FastAPI):
         startup_success = False
         logger.warning(f"⚠️  KalshiMarketCatalog failed to start: {e}")
         _startup_state["services"]["kalshi_market_catalog"] = {"status": "failed", "error": str(e)}
+    
+    # File-based debug
+    with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
+        f.write(f"[DEBUG] After KalshiMarketCatalog try/except block at {time.time()}\n")
+        f.flush()
 
     # KalshiMarketStateStore REST refresh — periodically feeds volume_24h/OI/expiry into
     # KalshiMarketState so CryptoAlertRouter and other consumers see up-to-date REST fields.
