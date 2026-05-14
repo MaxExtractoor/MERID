@@ -3243,6 +3243,10 @@ async def _app_lifespan(application: FastAPI):
                 _universe_exc
             )
         logger.info("[MARKET-CATALOG] post_refresh: market universe validation complete")
+        # File-based debug
+        with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
+            f.write(f"[DEBUG] After market universe validation complete at {time.time()}\n")
+            f.flush()
     except Exception as e:
         startup_success = False
         logger.warning(f"⚠️  KalshiMarketCatalog failed to start: {e}")
