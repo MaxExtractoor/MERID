@@ -3258,6 +3258,10 @@ async def _app_lifespan(application: FastAPI):
         f.flush()
 
     # KalshiMarketStateStore REST refresh — periodically feeds volume_24h/OI/expiry into
+    # File-based debug
+    with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
+        f.write(f"[DEBUG] Before KalshiMarketStateStore REST refresh at {time.time()}\n")
+        f.flush()
     # KalshiMarketState so CryptoAlertRouter and other consumers see up-to-date REST fields.
     # The WS bridge only updates book data; REST fields would otherwise stay at zero.
     # FIX: Defer first refresh to avoid blocking startup with 5000 markets
@@ -3310,6 +3314,10 @@ async def _app_lifespan(application: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️  KalshiMarketState REST refresh loop failed to start: {e}")
     logger.info("[MARKET-CATALOG] post_refresh: KalshiMarketState REST refresh loop started")
+    # File-based debug
+    with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
+        f.write(f"[DEBUG] After KalshiMarketState REST refresh at {time.time()}\n")
+        f.flush()
 
     logger.info("[MARKET-CATALOG] post_refresh: starting KalshiSentimentService")
     # KalshiSentimentService — background loop ingesting catalog → sentiment scores
