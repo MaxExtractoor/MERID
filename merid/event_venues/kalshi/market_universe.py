@@ -97,11 +97,32 @@ class MarketUniverse:
     
     @staticmethod
     def _get_asset(market: Any) -> Optional[str]:
-        """Extract asset name from market object/dict."""
+        """Extract asset name from market object/dict.
+        
+        For raw EventMarket objects, extract from ticker (e.g., KXBTC15M → BTC).
+        For enriched markets, use the asset field.
+        """
+        # First try direct asset/underlying fields (enriched markets)
         if isinstance(market, dict):
-            return market.get("asset") or market.get("underlying")
+            asset = market.get("asset") or market.get("underlying")
+            if asset:
+                return asset
+            ticker = market.get("ticker") or market.get("market_id")
         else:
-            return getattr(market, "asset", None) or getattr(market, "underlying", None)
+            asset = getattr(market, "asset", None) or getattr(market, "underlying", None)
+            if asset:
+                return asset
+            ticker = getattr(market, "ticker", None) or getattr(market, "market_id", None)
+        
+        # Fallback: extract from ticker (e.g., KXBTC15M → BTC)
+        if ticker and isinstance(ticker, str):
+            # Match KXBTC15M, KXETH15M, KXSOL15M, KXXRP15M, KXDOGE15M
+            import re
+            match = re.match(r"^KX(BTC|ETH|SOL|XRP|DOGE)", ticker, re.IGNORECASE)
+            if match:
+                return match.group(1).upper()
+        
+        return None
     
     @staticmethod
     def _get_ticker(market: Any) -> Optional[str]:
