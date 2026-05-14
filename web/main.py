@@ -3148,6 +3148,10 @@ async def _app_lifespan(application: FastAPI):
         _startup_state["services"]["kalshi_market_cache"] = {"status": "failed", "error": str(e)}
 
     # KalshiMarketCatalog — fetches + caches all active Kalshi markets (backbone for pipeline/agents)
+    # File-based debug
+    with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
+        f.write(f"[DEBUG] Before KalshiMarketCatalog at {time.time()}\n")
+        f.flush()
     try:
         from merid.event_venues.kalshi.market_catalog import get_market_catalog
         _catalog = get_market_catalog()
@@ -3515,6 +3519,10 @@ async def _app_lifespan(application: FastAPI):
             await _rti_feed_service.start()
             logger.info("✅ RTIFeedService started")
             _startup_state["services"]["rti_feed_service"] = {"status": "running", "started_at": time.time()}
+            # File-based debug
+            with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
+                f.write(f"[DEBUG] After RTIFeedService at {time.time()}\n")
+                f.flush()
         except Exception as e:
             logger.warning("⚠️  RTIFeedService failed to start: %s", e)
             _startup_state["services"]["rti_feed_service"] = {"status": "failed", "error": str(e)}
