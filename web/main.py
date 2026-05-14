@@ -2374,6 +2374,8 @@ async def _app_lifespan(application: FastAPI):
     - warn (75%): Proactive scope reduction warning
     - critical (90%): Immediate load shedding to essential tickers only
     - shutdown (98%): Aggressive load shedding, but NEVER auto-shutdown
+    """
+    logger.info("[LIFESPAN] _app_lifespan started")
 
     SHUTDOWN POLICY (24/7-HARDENING):
     - AUTOMATIC SHUTDOWN IS DISABLED - server runs continuously
