@@ -20,9 +20,8 @@ from merid.event_venues.kalshi.signal_universe_service import (
 from merid.event_venues.kalshi.allowed_market_policy import (
     is_market_allowed,
     filter_allowed_markets,
-    ALLOWED_ASSETS,
-    ALLOWED_TIMEFRAME,
-    ALLOWED_CATEGORY,
+    get_allowed_assets,
+    get_allowed_timeframes,
 )
 
 
@@ -33,14 +32,16 @@ def create_historical_markets_for_5_assets() -> List[Dict[str, Any]]:
     Returns:
         List of market dicts for BTC, ETH, SOL, XRP, DOGE 15m markets
     """
+    assets = list(get_allowed_assets())
+    timeframe = list(get_allowed_timeframes())[0] if get_allowed_timeframes() else "15m"
     markets = []
-    for asset in ALLOWED_ASSETS:
+    for i, asset in enumerate(assets):
         markets.append({
-            "ticker": f"KX{asset}15M-26JAN24-{5000 + ALLOWED_ASSETS.index(asset)}",
+            "ticker": f"KX{asset}{timeframe}-26JAN24-{5000 + i}",
             "asset": asset,
-            "category": ALLOWED_CATEGORY,
-            "timeframe": ALLOWED_TIMEFRAME,
-            "market_id": f"market_{asset.lower()}_15m",
+            "category": "crypto",
+            "timeframe": timeframe,
+            "market_id": f"market_{asset.lower()}_{timeframe}",
             "title": f"{asset} > $50000 on Jan 26, 2024",
         })
     return markets
@@ -57,13 +58,14 @@ def create_historical_markets_with_disallowed() -> List[Dict[str, Any]]:
     
     # Add disallowed markets
     disallowed_assets = ["ADA", "DOT", "AVAX", "MATIC", "LINK"]
-    for asset in disallowed_assets:
+    timeframe = list(get_allowed_timeframes())[0] if get_allowed_timeframes() else "15m"
+    for i, asset in enumerate(disallowed_assets):
         markets.append({
-            "ticker": f"KX{asset}15M-26JAN24-{6000 + disallowed_assets.index(asset)}",
+            "ticker": f"KX{asset}{timeframe}-26JAN24-{6000 + i}",
             "asset": asset,
-            "category": ALLOWED_CATEGORY,
-            "timeframe": ALLOWED_TIMEFRAME,
-            "market_id": f"market_{asset.lower()}_15m",
+            "category": "crypto",
+            "timeframe": timeframe,
+            "market_id": f"market_{asset.lower()}_{timeframe}",
             "title": f"{asset} > $50000 on Jan 26, 2024",
         })
     
@@ -90,11 +92,13 @@ class TestMarketUniverseReplay:
         # Validate universe
         assert universe.validate_universe()
         assert universe.get_market_count() == 5
-        assert universe.get_assets() == ALLOWED_ASSETS
+        assert universe.get_assets() == get_allowed_assets()
         
         # Verify all markets are allowed
         for market in universe.markets:
-            assert is_market_allowed(market)
+            ticker = market.get("ticker") if isinstance(market, dict) else getattr(market, "ticker", None)
+            asset = market.get("asset") if isinstance(market, dict) else getattr(market, "asset", None)
+            assert is_market_allowed(ticker=ticker, asset=asset)
 
     def test_catalog_filters_disallowed_markets(self):
         """
@@ -113,7 +117,7 @@ class TestMarketUniverseReplay:
         
         # Verify all remaining markets are for allowed assets
         for market in filtered_markets:
-            assert market["asset"] in ALLOWED_ASSETS
+            assert market["asset"] in get_allowed_assets()
 
     def test_market_universe_to_signal_service_pipeline(self):
         """
@@ -130,10 +134,10 @@ class TestMarketUniverseReplay:
         
         # Verify signal service only sees allowed assets
         assert signal_service.get_asset_count() == 5
-        assert signal_service.get_available_assets() == ALLOWED_ASSETS
+        assert signal_service.get_available_assets() == get_allowed_assets()
         
         # Verify signal service can query by asset
-        for asset in ALLOWED_ASSETS:
+        for asset in get_allowed_assets():
             markets = signal_service.get_markets_for_asset(asset)
             assert len(markets) == 1
             assert markets[0]["asset"] == asset
@@ -149,8 +153,9 @@ class TestMarketUniverseReplay:
         universe = MarketUniverse.from_markets(filtered_markets)
         signal_service = SignalUniverseService(universe)
         
-        # Test allowed ticker
-        assert signal_service.is_market_allowed("KXBTC15M-26JAN24-5000")
+        # Test allowed ticker (use actual ticker from universe)
+        allowed_ticker = list(universe.get_tickers())[0]
+        assert signal_service.is_market_allowed(allowed_ticker)
         
         # Test disallowed ticker
         assert not signal_service.is_market_allowed("KXADA15M-26JAN24-6000")
@@ -175,13 +180,13 @@ class TestMarketUniverseReplay:
         # Step 3: Create MarketUniverse
         universe = MarketUniverse.from_markets(filtered_markets)
         assert universe.get_market_count() == 5
-        assert universe.get_assets() == ALLOWED_ASSETS
+        assert universe.get_assets() == get_allowed_assets()
         
         # Step 4: Create SignalUniverseService
         signal_service = SignalUniverseService(universe)
         
         # Step 5: Verify no disallowed assets in signal service
-        assert signal_service.get_available_assets() == ALLOWED_ASSETS
+        assert signal_service.get_available_assets() == get_allowed_assets()
         
         # Step 6: Verify all tickers are allowed
         for ticker in signal_service.get_available_tickers():
@@ -252,7 +257,7 @@ class TestMarketUniverseReplay:
         signal_assets = signal_service.get_available_assets()
         
         # Verify consistency across all stages
-        assert catalog_assets == ALLOWED_ASSETS
-        assert filtered_assets == ALLOWED_ASSETS
-        assert universe_assets == ALLOWED_ASSETS
-        assert signal_assets == ALLOWED_ASSETS
+        assert catalog_assets == get_allowed_assets()
+        assert filtered_assets == get_allowed_assets()
+        assert universe_assets == get_allowed_assets()
+        assert signal_assets == get_allowed_assets()
