@@ -72,22 +72,24 @@ class MarketUniverse:
     def __post_init__(self):
         """Build indexes after initialization."""
         # Build asset index
+        _by_asset = {}
         for market in self.markets:
             asset = self._get_asset(market)
             if asset:
                 self.assets.add(asset)
-                if asset not in self.by_asset:
-                    object.__setattr__(self, 'by_asset', {})
-                    self.by_asset[asset] = []
-                self.by_asset[asset].append(market)
+                if asset not in _by_asset:
+                    _by_asset[asset] = []
+                _by_asset[asset].append(market)
+        object.__setattr__(self, 'by_asset', _by_asset)
         
         # Build ticker index
+        _by_ticker = {}
         for market in self.markets:
             ticker = self._get_ticker(market)
             if ticker:
                 self.tickers.add(ticker)
-                object.__setattr__(self, 'by_ticker', {})
-                self.by_ticker[ticker] = market
+                _by_ticker[ticker] = market
+        object.__setattr__(self, 'by_ticker', _by_ticker)
     
     @staticmethod
     def _get_asset(market: Any) -> Optional[str]:
