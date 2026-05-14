@@ -104,6 +104,39 @@ jobs:
           
           echo "✓ PR diff passes wiring regression checks"
 
+  # ── Kalshi deployment safety gate ───────────────────────────────────
+  kalshi-deployment-safety:
+    name: Kalshi Deployment Safety
+    runs-on: ubuntu-latest
+    needs: [swarm-integrity-gate, wiring-validation-gate]
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run magic numbers compliance test
+        run: |
+          python -m pytest tests/test_no_magic_numbers.py -v --tb=short
+
+      - name: Run blocker audit check
+        run: |
+          python scripts/ci_blocker_audit.py
+
+      - name: Run deployment safety check (dry-run)
+        run: |
+          python scripts/ci/kalshi_safety_check.py --check all --output summary
+
   # ── Backend golden path tests ─────────────────────────────────────
   backend-tests:
     name: Backend Tests
@@ -384,6 +417,10 @@ jobs:
         run: |
           mkdir -p reports
           python -m pytest \
+            tests/event_venues/kalshi/test_allowed_market_policy.py \
+            tests/event_venues/kalshi/test_market_catalog_filtering_integration.py \
+            tests/event_venues/kalshi/test_market_universe_replay.py \
+            tests/event_venues/kalshi/test_signal_universe_service.py \
             tests/event_venues/kalshi \
             tests/test_kalshi_crypto_multi_asset.py \
             tests/test_execution_audit_regressions.py \
