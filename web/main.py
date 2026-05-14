@@ -4709,6 +4709,9 @@ async def _app_lifespan(application: FastAPI):
 
 
 # Create app instance after all routes are defined
+import sys
+sys.stderr.write("[APP-CREATION-DEBUG] Creating app with _app_lifespan\n")
+sys.stderr.flush()
 app = create_app(lifespan=_app_lifespan)
 
 # Add health endpoints after app creation
