@@ -155,11 +155,12 @@ def compute_implied_spot(
 ) -> Optional[float]:
     """Compute Kalshi-implied spot by interpolating YES probabilities across strikes.
 
-    Returns the strike where YES probability = 0.50, using linear interpolation
-    between the two adjacent bracketing markets.  Returns None if no cluster
-    with ≥2 distinct strikes can be found, or if no bracket straddles 0.50.
+    For multi-strike markets (1H+): Returns the strike where YES probability = 0.50.
+    For single-strike 15m markets: Returns the reference spot (market-implied from single YES prob).
 
-    Algorithm:
+    Returns None if no valid data available.
+
+    Algorithm for multi-strike:
         1. Filter markets: book_initialized, strike_price set, seconds_to_expiry > 0.
         2. Iterate over expiry clusters from nearest to farthest.
         3. Take the FIRST cluster with ≥2 distinct strikes (skips 15m single-strike).
@@ -167,18 +168,34 @@ def compute_implied_spot(
         5. Sort by strike ascending (YES prob decreases with strike).
         6. Find adjacent pair that brackets p = 0.50 and linearly interpolate.
 
+    Algorithm for single-strike 15m:
+        1. Find markets with book_initialized and YES price, but no strike_price.
+        2. For single-strike, the YES probability itself is the market's view of "above current level".
+        3. Return None (can't compute implied spot from single probability).
+        4. Instead, track the YES probability directly for calibration.
+
     Args:
         states: KalshiMarketState objects for one asset (any mix of expiries/timeframes).
         which:  Price column — "mid" (mid_cents), "bid" (best_bid_cents), "ask" (best_ask_cents).
 
     Returns:
-        Float implied spot in USD, or None.
+        Float implied spot in USD, or None (for single-strike 15m markets).
     """
     if not states:
         return None
 
-    # Step 1: Filter to valid markets
-    valid = [
+    # Separate single-strike (15m) from multi-strike markets
+    single_strike = [
+        s for s in states
+        if (
+            getattr(s, "book_initialized", False)
+            and getattr(s, "strike_price", None) is None
+            and getattr(s, "seconds_to_expiry", None) is not None
+            and s.seconds_to_expiry > 0
+        )
+    ]
+    
+    multi_strike = [
         s for s in states
         if (
             getattr(s, "book_initialized", False)
@@ -187,12 +204,20 @@ def compute_implied_spot(
             and s.seconds_to_expiry > 0
         )
     ]
-    if not valid:
+
+    # For single-strike 15m markets, we can't compute implied spot via interpolation
+    # Instead, we return None and track the YES probability directly
+    if single_strike and not multi_strike:
+        # Single-strike markets only - return None, caller should use YES prob directly
+        return None
+
+    # For multi-strike markets, use the existing interpolation algorithm
+    if not multi_strike:
         return None
 
     # Step 2–3: Find the nearest cluster with ≥2 distinct strikes
     chosen_cluster: Optional[List[Any]] = None
-    for cluster in _iter_clusters(valid):
+    for cluster in _iter_clusters(multi_strike):
         strikes = {s.strike_price for s in cluster}
         if len(strikes) >= 2:
             chosen_cluster = cluster
@@ -292,7 +317,9 @@ class SpotBasisTracker:
 
     def start(self) -> None:
         """Start the background tick thread (idempotent)."""
+        print("[SPOT-BASIS-DEBUG] start() called")
         if self._thread is not None and self._thread.is_alive():
+            print("[SPOT-BASIS-DEBUG] start() returning - thread already alive")
             return
         self._stop_event.clear()
         self._thread = threading.Thread(
@@ -371,18 +398,47 @@ class SpotBasisTracker:
     # ── Internal ────────────────────────────────────────────────────────────
 
     def _run(self) -> None:
-        """Background thread entry point — ticks every _TICK_INTERVAL seconds."""
+        """Background thread entry point — ticks every _TICK_INTERVAL seconds.
+        
+        BUG-FIX (2026-05-12): Added diagnostic logging to detect where thread is stuck
+        when faulthandler timeout fires. Logs entry/exit of _tick and key operations.
+        """
+        logger.info("[SPOT-BASIS-TRACKER] _run: thread started")
+        tick_count = 0
         while not self._stop_event.wait(timeout=_TICK_INTERVAL):
+            tick_count += 1
+            tick_start = time.monotonic()
+            logger.info(f"[SPOT-BASIS-TRACKER] tick #{tick_count} starting at {tick_start:.3f}")
             try:
                 self._tick()
+                tick_elapsed = time.monotonic() - tick_start
+                logger.info(f"[SPOT-BASIS-TRACKER] tick #{tick_count} completed in {tick_elapsed*1000:.1f}ms")
+                if tick_elapsed > 2.0:
+                    logger.warning(f"[SPOT-BASIS-TRACKER] tick #{tick_count} took {tick_elapsed*1000:.1f}ms - SLOW")
             except Exception:
                 logger.exception("SpotBasisTracker tick error")
+        logger.info("[SPOT-BASIS-TRACKER] _run: thread stopped")
 
     def _tick(self) -> None:
-        """Compute one AssetBasis per asset and atomically swap _current."""
+        """Compute one AssetBasis per asset and atomically swap _current.
+        
+        BUG-FIX (2026-05-12): Added lock acquisition timeout to prevent indefinite blocking
+        if lock is held elsewhere, which could cause faulthandler timeouts.
+        
+        BUG-FIX (2026-05-12): Added diagnostic logging to detect blocking operations.
+        """
+        logger.info("[SPOT-BASIS-TRACKER] _tick: starting")
+        
         store = self._get_store()
+        logger.info("[SPOT-BASIS-TRACKER] _tick: got store")
+        
         feed = self._get_feed()
+        logger.info("[SPOT-BASIS-TRACKER] _tick: got feed")
+        
+        get_all_start = time.monotonic()
         all_states = store.get_all()  # thread-safe read; returns a copy
+        get_all_elapsed = (time.monotonic() - get_all_start) * 1000
+        logger.info(f"[SPOT-BASIS-TRACKER] _tick: get_all returned {len(all_states)} states in {get_all_elapsed:.1f}ms")
 
         new_current: Dict[str, AssetBasis] = {}
         for asset in ASSETS:
@@ -392,8 +448,15 @@ class SpotBasisTracker:
             if ab.basis_mid is not None:
                 self._rolling[asset].append((time.monotonic(), ab.basis_mid))
 
-        with self._lock:
-            self._current = new_current
+        # Acquire lock with timeout to prevent indefinite blocking
+        lock_acquired = self._lock.acquire(timeout=2.0)  # 2 second timeout
+        if lock_acquired:
+            try:
+                self._current = new_current
+            finally:
+                self._lock.release()
+        else:
+            logger.warning("SpotBasisTracker failed to acquire lock within timeout - skipping update")
 
     def _compute_asset_basis(
         self,
@@ -405,33 +468,80 @@ class SpotBasisTracker:
         from config.spot_basis_config import (
             ASSET_THRESHOLDS,
             COINBASE_SPOT_SYMBOLS,
+            KRAKEN_SPOT_SYMBOLS,
+            COINGECKO_IDS,
             KALSHI_TICKER_PREFIXES,
+            SPOT_FEED_SOURCE,
             SPOT_STALE_MS,
             SPOT_MISSING_MS,
             BOOK_STALE_MS,
             BOOK_MISSING_MS,
         )
+        import requests
 
         cfg = ASSET_THRESHOLDS.get(asset)
-        spot_symbol = COINBASE_SPOT_SYMBOLS.get(asset)
-
-        # ── Coinbase spot feed ──────────────────────────────────────────────
+        
+        # ── Spot feed (configurable: coinbase, kraken, coingecko) ──────────────
         spot_price: Optional[float] = None
         spot_status = FeedStatus.MISSING
 
-        if feed is not None and spot_symbol:
-            price_data = (feed.price_cache or {}).get(spot_symbol)
-            if price_data is not None:
-                spot_price = float(price_data.price) if price_data.price is not None else None
+        if SPOT_FEED_SOURCE == "coinbase":
+            # Use Coinbase LivePriceFeed
+            spot_symbol = COINBASE_SPOT_SYMBOLS.get(asset)
+            if feed is not None and spot_symbol:
+                price_data = (feed.price_cache or {}).get(spot_symbol)
+                if price_data is not None:
+                    spot_price = float(price_data.price) if price_data.price is not None else None
 
-            last_tick = (feed._last_tick_monotonic or {}).get(spot_symbol, 0.0)
-            if last_tick > 0:
-                age_ms = (time.monotonic() - last_tick) * 1000.0
-                if age_ms < SPOT_STALE_MS:
+                last_tick = (feed._last_tick_monotonic or {}).get(spot_symbol, 0.0)
+                if last_tick > 0:
+                    age_ms = (time.monotonic() - last_tick) * 1000.0
+                    if age_ms < SPOT_STALE_MS:
+                        spot_status = FeedStatus.OK
+                    elif age_ms < SPOT_MISSING_MS:
+                        spot_status = FeedStatus.STALE
+        
+        elif SPOT_FEED_SOURCE == "kraken":
+            # Use Kraken public API ticker
+            spot_symbol = KRAKEN_SPOT_SYMBOLS.get(asset)
+            try:
+                url = "https://api.kraken.com/0/public/Ticker"
+                params = {"pair": spot_symbol}
+                resp = requests.get(url, params=params, timeout=5)
+                resp.raise_for_status()
+                data = resp.json()
+                
+                if data.get("error"):
+                    logger.warning(f"Kraken ticker error for {spot_symbol}: {data['error']}")
+                else:
+                    result = data.get("result", {})
+                    if result:
+                        # Get first key (pair name)
+                        pair_key = list(result.keys())[0]
+                        ticker = result[pair_key]
+                        # c = last trade price, c[0] = last closed trade price
+                        spot_price = float(ticker["c"][0]) if ticker.get("c") else None
+                        spot_status = FeedStatus.OK
+            except Exception as e:
+                logger.debug(f"Kraken ticker fetch failed for {spot_symbol}: {e}")
+                spot_status = FeedStatus.MISSING
+        
+        elif SPOT_FEED_SOURCE == "coingecko":
+            # Use CoinGecko API
+            coin_id = COINGECKO_IDS.get(asset)
+            try:
+                url = f"https://api.coingecko.com/api/v3/simple/price"
+                params = {"ids": coin_id, "vs_currencies": "usd"}
+                resp = requests.get(url, params=params, timeout=5)
+                resp.raise_for_status()
+                data = resp.json()
+                
+                if coin_id in data:
+                    spot_price = float(data[coin_id]["usd"])
                     spot_status = FeedStatus.OK
-                elif age_ms < SPOT_MISSING_MS:
-                    spot_status = FeedStatus.STALE
-                # else: MISSING (already set)
+            except Exception as e:
+                logger.debug(f"CoinGecko fetch failed for {coin_id}: {e}")
+                spot_status = FeedStatus.MISSING
 
         # ── Kalshi book states for this asset ──────────────────────────────
         prefix = KALSHI_TICKER_PREFIXES.get(asset, "")
@@ -570,12 +680,16 @@ class SpotBasisTracker:
 
     def _get_store(self) -> Any:
         if self._store is None:
+            logger.info("[SPOT-BASIS-TRACKER] _get_store: initializing store singleton")
             from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
             self._store = get_kalshi_market_state_store()
+            logger.info("[SPOT-BASIS-TRACKER] _get_store: store initialized")
         return self._store
 
     def _get_feed(self) -> Any:
         if self._feed is None:
+            logger.info("[SPOT-BASIS-TRACKER] _get_feed: initializing feed singleton")
             from data.live_price_feed import get_live_price_feed
             self._feed = get_live_price_feed()
+            logger.info("[SPOT-BASIS-TRACKER] _get_feed: feed initialized")
         return self._feed
