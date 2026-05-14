@@ -2399,7 +2399,9 @@ async def _app_lifespan(application: FastAPI):
     3. Cancel background tasks
     4. Log structured shutdown metrics
     """
-    print("[LIFESPAN-DEBUG] _app_lifespan started")
+    import sys
+    sys.stderr.write("[LIFESPAN-DEBUG] _app_lifespan started\n")
+    sys.stderr.flush()
     logger.info("[LIFESPAN] _app_lifespan started")
     global _startup_state
     application.state.canonical_lifespan = "web.main._app_lifespan"
