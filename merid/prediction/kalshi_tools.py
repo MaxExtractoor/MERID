@@ -1,3 +1,4 @@
+
 """Typed Kalshi tools — registered into the guardrails ToolRegistry.
 
 Each tool wraps the existing KalshiVenueClient / KalshiTrader and returns
@@ -15,6 +16,7 @@ Tools:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from decimal import Decimal
@@ -95,6 +97,53 @@ async def _kalshi_list_markets(
                 markets = [m for m in markets if m.asset == asset]
         else:
             markets = catalog.get_markets_by_category(category, timeframe=timeframe, asset=asset)
+        
+        # BUG-FIX (2026-05-06): Filter out markets that are not yet open or are in the future
+        # The catalog may include scheduled markets that haven't opened yet on Kalshi's live API.
+        # These markets will return 404 when submitting orders. Filter by:
+        # 1. Market must be active (Kalshi status=open)
+        # 2. Market must have a valid end_date in the future
+        # 3. Market must have minutes_to_expiry > 0 (not already expired)
+        # 4. For 15m crypto markets, exclude markets with end_date > 24 hours in the future
+        #    (these are future scheduled markets not yet opened by Kalshi)
+        # 5. For 15m crypto markets, exclude threshold contracts (e.g., KXDOGE-26MAY0623-T0.2949999)
+        #    These are not 15-minute up/down contracts and will be rejected by order_router
+        from datetime import datetime, timezone
+        import re
+        now = datetime.now(timezone.utc)
+        filtered_markets = []
+        for m in markets:
+            # Must be active
+            if not m.market.active:
+                continue
+            
+            # Must have a valid end_date in the future
+            if not m.market.end_date:
+                continue
+            if m.market.end_date <= now:
+                continue
+            
+            # Must have positive minutes_to_expiry
+            if m.minutes_to_expiry is None or m.minutes_to_expiry <= 0:
+                continue
+            
+            # For 15m crypto markets, exclude markets > 24 hours in the future
+            # These are scheduled markets that Kalshi hasn't opened yet
+            if m.timeframe == "15m" and m.minutes_to_expiry > 24 * 60:
+                continue
+            
+            # BUG-FIX (2026-05-06): For 15m crypto markets, exclude threshold contracts
+            # Threshold contracts have ticker pattern like KXDOGE-26MAY0623-T0.2949999
+            # These are not 15-minute up/down contracts and will be rejected by order_router
+            if m.timeframe == "15m":
+                ticker = m.market.market_id.upper()
+                # Reject if ticker contains -T (threshold) pattern
+                if "-T" in ticker and re.search(r"-T\d+(?:\.\d+)?$", ticker):
+                    continue
+            
+            filtered_markets.append(m)
+        
+        markets = filtered_markets
         
         # Limit the results
         markets = markets[:limit]
@@ -243,6 +292,51 @@ async def _kalshi_place_order(
             ToolErrorCode.INVALID_INPUT, "ticker is required",
             tool_name="kalshi_place_order",
         )
+
+    # MARKET UNIVERSE GUARD: Reject orders for non-allowed markets
+    _orders_rejected_disallowed_market = 0
+    try:
+        from merid.event_venues.kalshi.market_catalog import get_market_catalog
+        from merid.event_venues.kalshi.allowed_market_policy import is_market_allowed
+        
+        catalog = get_market_catalog()
+        universe = catalog.get_market_universe()
+        
+        if universe is not None and not universe.is_market_allowed(ticker):
+            _orders_rejected_disallowed_market = 1
+            logger.warning(
+                "[MARKET-UNIVERSE-GUARD] Order rejected for disallowed market: ticker=%s agent=%s",
+                ticker, agent_name
+            )
+            return ToolResult.fail(
+                ToolErrorCode.POLICY_BLOCKED,
+                f"Market {ticker} is not in the allowed universe (BTC/ETH/SOL/XRP/DOGE 15m only)",
+                tool_name="kalshi_place_order",
+            )
+    except Exception as _universe_exc:
+        logger.debug("[MARKET-UNIVERSE-GUARD] Failed to validate market: %s", _universe_exc)
+    
+    # Log metrics for successful orders (passed universe guard)
+    if _orders_rejected_disallowed_market == 0:
+        try:
+            from merid.event_venues.kalshi.market_catalog import get_market_catalog
+            catalog = get_market_catalog()
+            universe = catalog.get_market_universe()
+            if universe is not None:
+                # Extract asset from ticker for metrics
+                _asset = None
+                for asset in universe.get_assets():
+                    if asset in ticker.upper():
+                        _asset = asset
+                        break
+                
+                if _asset:
+                    logger.info(
+                        "[MARKET-UNIVERSE-METRICS] order_allowed ticker=%s asset=%s agent=%s",
+                        ticker, _asset, agent_name
+                    )
+        except Exception as _metrics_exc:
+            logger.debug("[MARKET-UNIVERSE-METRICS] Failed to log order metrics: %s", _metrics_exc)
 
     # Venue gate check
     gate = get_venue_gate()
@@ -617,7 +711,7 @@ async def _kalshi_get_positions(asset: str = "") -> ToolResult:
     t0 = time.time()
     try:
         client = _get_client()
-
+        
         # Fast-path: skip API call if circuit breaker is open
         if client.is_circuit_open:
             return ToolResult.fail(
@@ -625,8 +719,13 @@ async def _kalshi_get_positions(asset: str = "") -> ToolResult:
                 "Kalshi circuit breaker is open — skipping get_positions",
                 tool_name="kalshi_get_positions",
             )
-
-        result = await client.get_positions_result()
+        
+        # LOOP LAG FIX: Add timeout to prevent blocking event loop on slow API calls
+        # OLD-HARDWARE FIX (2026-04-29): Increased to 8s for very spotty internet
+        # Positions fetch can be slower than balance due to pagination
+        # BUG-FIX: Removed asset= parameter - get_positions_result() doesn't accept it.
+        # Asset filtering is done client-side after fetching all positions.
+        result = await asyncio.wait_for(client.get_positions_result(), timeout=15.0)
 
         if not result.success:
             return ToolResult.fail(
@@ -692,7 +791,12 @@ async def _kalshi_get_balance() -> ToolResult:
                 tool_name="kalshi_get_balance",
             )
 
-        result = await client.get_balance_result()
+        # LOOP LAG FIX: Add timeout to prevent blocking event loop on slow API calls
+        # OLD-HARDWARE FIX (2026-04-29): Increased to 5s for spotty internet
+        # BUG-FIX (2026-05-07): Increased to 10s to tolerate event-loop lag spikes
+        # BUG-FIX (2026-05-11): Increased to 30s to tolerate network congestion + event-loop lag
+        # Typical balance call should complete in <500ms; 30s is generous for slow networks + lag
+        result = await asyncio.wait_for(client.get_balance_result(), timeout=30.0)
 
         if not result.success:
             return ToolResult.fail(
@@ -716,6 +820,13 @@ async def _kalshi_get_balance() -> ToolResult:
             latency_ms=round((time.time() - t0) * 1000, 2),
         )
 
+    except asyncio.TimeoutError:
+        logger.warning("kalshi_get_balance timed out after 30s — using cached/stale balance")
+        return ToolResult.fail(
+            ToolErrorCode.VENUE_TIMEOUT,
+            "Balance fetch timeout — consider using cached value",
+            tool_name="kalshi_get_balance",
+        )
     except Exception as exc:
         logger.error(f"kalshi_get_balance failed: {exc}")
         return ToolResult.fail(
@@ -733,8 +844,15 @@ def build_live_route_order_intent(
     *,
     correlation_id: Optional[str] = None,
     source: str = "kalshi_tools",
+    take_profit_price_cents: Optional[int] = None,
+    take_profit_r_multiple: Optional[float] = None,
+    stop_loss_price_cents: Optional[int] = None,
 ):
-    """Build a canonical ``OrderIntent`` for live-route / ``VenueOrder`` mapping tests."""
+    """Build a canonical ``OrderIntent`` for live-route / ``VenueOrder`` mapping tests.
+    
+    For 15m crypto entry orders (buy), exit targets (TP/SL) are required.
+    If not provided, default TP is computed using the dynamic TP engine.
+    """
     from merid.event_venues.kalshi.order_router import OrderIntent
 
     is_market = int(price_cents) == 0
@@ -745,6 +863,32 @@ def build_live_route_order_intent(
         pc = max(1, min(99, int(price_cents)))
         otype = "limit"
 
+    # Compute default TP/SL for 15m crypto entry orders if not provided
+    if action == "buy" and ticker.startswith(("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M")):
+        if take_profit_price_cents is None and take_profit_r_multiple is None:
+            try:
+                from merid.prediction.dynamic_takeprofit import DynamicTakeProfitEngine
+                engine = DynamicTakeProfitEngine()
+                
+                # Default SL: 5 cents below entry (conservative)
+                if stop_loss_price_cents is None:
+                    stop_loss_price_cents = max(1, pc - 5)
+                
+                # Compute dynamic TP with default confidence
+                tp_plan = engine.compute_tp(
+                    entry_price=pc / 100.0,
+                    stop_price=stop_loss_price_cents / 100.0,
+                    direction="LONG" if side == "yes" else "SHORT",
+                    confidence=0.5,  # Default medium confidence
+                )
+                
+                take_profit_r_multiple = tp_plan.tp_r_multiple
+            except Exception:
+                # Fallback to 1R if TP computation fails
+                take_profit_r_multiple = 1.0
+                if stop_loss_price_cents is None:
+                    stop_loss_price_cents = max(1, pc - 5)
+
     intent = OrderIntent(
         ticker=ticker,
         side=side,
@@ -754,6 +898,9 @@ def build_live_route_order_intent(
         mode=None,
         order_type=otype,
         source=source,
+        take_profit_price_cents=take_profit_price_cents,
+        take_profit_r_multiple=take_profit_r_multiple,
+        stop_loss_price_cents=stop_loss_price_cents,
     )
     if correlation_id:
         intent.client_tag = correlation_id
