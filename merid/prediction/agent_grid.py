@@ -185,13 +185,12 @@ class AgentGrid:
             from merid.agents.sol_15m_agent import Sol15mAgent
             from merid.agents.xrp_15m_agent import Xrp15mAgent
             from merid.agents.doge_15m_agent import Doge15mAgent
-            from merid.agents.btc_1h_agent import Btc1hAgent
+            # Btc1hAgent archived 2026-01-15 - focus on 15m timeframe only
             self._regime_agents = [
                 Eth15mAgent(_market_reg, _rti_monitor, self._portfolio_risk),
                 Sol15mAgent(_market_reg, _rti_monitor, self._portfolio_risk),
                 Xrp15mAgent(_market_reg, _rti_monitor, self._portfolio_risk),
                 Doge15mAgent(_market_reg, _rti_monitor, self._portfolio_risk),
-                Btc1hAgent(_market_reg, _rti_monitor, self._portfolio_risk),
             ]
             logger.info("✓ Regime agents initialised: %s", [a.agent_id for a in self._regime_agents])
         except Exception as _ra_exc:
@@ -534,6 +533,44 @@ class AgentGrid:
             _t_agents_elapsed = (_timing.time() - _t_agents_start) * 1000
             logger.info(f"[TIMING] All {len(_started_agents)} agents started in {_t_agents_elapsed:.0f}ms")
             self._agents_ready = True
+            
+            # MARKET UNIVERSE VALIDATION: Log agent grid universe and compare with catalog
+            try:
+                _universe = self._catalog.get_market_universe()
+                if _universe is not None:
+                    _catalog_assets = _universe.get_assets()
+                    _catalog_count = _universe.get_market_count()
+                    
+                    # Collect assets from agent configurations
+                    _agent_assets = set()
+                    for _agent in self._agents:
+                        if hasattr(_agent.config, 'assets') and _agent.config.assets:
+                            _agent_assets.update(_agent.config.assets)
+                    
+                    logger.info(
+                        "[MARKET-UNIVERSE-VALIDATION] Agent grid: %d agents, %d assets: %s",
+                        len(self._agents),
+                        len(_agent_assets),
+                        sorted(_agent_assets)
+                    )
+                    logger.info(
+                        "[MARKET-UNIVERSE-VALIDATION] Catalog vs Agent Grid: catalog=%s agents=%s",
+                        sorted(_catalog_assets),
+                        sorted(_agent_assets)
+                    )
+                    
+                    # Check for mismatch
+                    if _agent_assets != _catalog_assets:
+                        logger.warning(
+                            "[MARKET-UNIVERSE-VALIDATION] WARNING: Agent grid assets differ from catalog! "
+                            "Catalog has %s, agents have %s",
+                            sorted(_catalog_assets),
+                            sorted(_agent_assets)
+                        )
+                else:
+                    logger.warning("[MARKET-UNIVERSE-VALIDATION] MarketUniverse not available in catalog")
+            except Exception as _universe_exc:
+                logger.warning("[MARKET-UNIVERSE-VALIDATION] Failed to log agent grid universe: %s", _universe_exc)
         except Exception as _agent_exc:
             logger.error(
                 "AgentGrid.start() failed during concurrent agent startup — rolling back: %s",
@@ -1715,7 +1752,7 @@ class AgentGrid:
         # LEAN 15m KALSHI STACK (2026-05-13): Skip auto-promoter when ENABLE_AUTO_PROMOTER=false
         # to prevent loading thousands of promotion states on each agent grid init/cycle
         import os as _ap_os
-        _ap_disabled = _ap_os.getenv("ENABLE_AUTO_PROMOTER", "false").lower() == "false"
+        _ap_disabled = _ap_os.getenv("ENABLE_AUTO_PROMOTER", "true").lower() == "false"
         if _ap_disabled:
             logger.info("[LEAN KALSHI] AutoPromoter disabled (ENABLE_AUTO_PROMOTER=false)")
             return
