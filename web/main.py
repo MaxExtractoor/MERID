@@ -3467,11 +3467,19 @@ async def _app_lifespan(application: FastAPI):
             _basis_tracker.start()
             logger.info("✅ SpotBasisTracker started (1s tick, BTC/ETH/SOL/XRP/DOGE)")
             _startup_state["services"]["spot_basis_tracker"] = {"status": "running", "started_at": time.time()}
+            # File-based debug since stdout/stderr not appearing in uvicorn
+            with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
+                f.write(f"[DEBUG] SpotBasisTracker started at {time.time()}\n")
+                f.flush()
         except Exception as _basis_exc:
             logger.warning("⚠️  SpotBasisTracker failed to start (non-fatal): %s", _basis_exc)
             _startup_state["services"]["spot_basis_tracker"] = {"status": "failed", "error": str(_basis_exc)}
 
     # CryptoRTIMonitor + CryptoTermStructureModel lifecycle
+    # File-based debug
+    with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
+        f.write(f"[DEBUG] Before CryptoRTIMonitor at {time.time()}\n")
+        f.flush()
     # RTI monitor is registered as a singleton so TSM can call get_global_crypto_rti_monitor()
     _tsm = None
     try:
@@ -3486,6 +3494,10 @@ async def _app_lifespan(application: FastAPI):
         _tsm = _tsm_candidate  # only promote after successful start
         logger.info("✅ CryptoRTIMonitor registered + CryptoTermStructureModel started")
         _startup_state["services"]["crypto_term_structure"] = {"status": "running", "started_at": time.time()}
+        # File-based debug
+        with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
+            f.write(f"[DEBUG] After CryptoRTIMonitor at {time.time()}\n")
+            f.flush()
     except Exception as e:
         logger.warning("⚠️  CryptoTermStructureModel failed to start: %s", e)
         _startup_state["services"]["crypto_term_structure"] = {"status": "failed", "error": str(e)}
