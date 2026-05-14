@@ -3163,6 +3163,7 @@ async def _app_lifespan(application: FastAPI):
         logger.info("✅ KalshiMarketCatalog started (market data backbone)")
         _startup_state["services"]["kalshi_market_catalog"] = {"status": "running", "started_at": time.time()}
         
+        logger.info("[MARKET-CATALOG] post_refresh: starting market universe validation")
         # MARKET UNIVERSE VALIDATION: Ensure catalog, agent grid, and trading agent
         # all see the same filtered market universe (BTC/ETH/SOL/XRP/DOGE 15m only)
         try:
@@ -3199,6 +3200,7 @@ async def _app_lifespan(application: FastAPI):
                 "[MARKET-UNIVERSE-VALIDATION] Failed to validate market universe: %s",
                 _universe_exc
             )
+        logger.info("[MARKET-CATALOG] post_refresh: market universe validation complete")
     except Exception as e:
         startup_success = False
         logger.warning(f"⚠️  KalshiMarketCatalog failed to start: {e}")
@@ -3247,6 +3249,7 @@ async def _app_lifespan(application: FastAPI):
                 logger.debug("Market state REST refresh error: %s", _exc)
             await _asyncio.sleep(60)
 
+    logger.info("[MARKET-CATALOG] post_refresh: starting KalshiMarketState REST refresh loop")
     try:
         _rest_refresh_task = asyncio.create_task(
             _run_market_state_rest_refresh(), name="kalshi-state-rest-refresh"
@@ -3255,7 +3258,9 @@ async def _app_lifespan(application: FastAPI):
         logger.info("✅ KalshiMarketState REST refresh loop started (60s interval)")
     except Exception as e:
         logger.warning(f"⚠️  KalshiMarketState REST refresh loop failed to start: {e}")
+    logger.info("[MARKET-CATALOG] post_refresh: KalshiMarketState REST refresh loop started")
 
+    logger.info("[MARKET-CATALOG] post_refresh: starting KalshiSentimentService")
     # KalshiSentimentService — background loop ingesting catalog → sentiment scores
     # BUG-L13 FIX: Skip in VALIDATION_MODE to reduce startup lag
     # FIX: Defer start to avoid blocking startup with 5000 market ingest
@@ -3280,7 +3285,9 @@ async def _app_lifespan(application: FastAPI):
         except Exception as e:
             logger.warning(f"⚠️  KalshiSentimentService failed to start: {e}")
             _startup_state["services"]["kalshi_sentiment_service"] = {"status": "failed", "error": str(e)}
+    logger.info("[MARKET-CATALOG] post_refresh: KalshiSentimentService started")
 
+    logger.info("[MARKET-CATALOG] post_refresh: starting KalshiWebSocketBridge")
     # KalshiWebSocketBridge — pipes real-time Kalshi WS events into core event bus
     try:
         from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
@@ -3323,6 +3330,7 @@ async def _app_lifespan(application: FastAPI):
                 "reason": "validation_mode - will start in background task",
             }
         else:
+            logger.info("[MARKET-CATALOG] post_refresh: calling ws_bridge.start()")
             task = asyncio.create_task(
                 _ws_bridge.start(_active_tickers or None), name="kalshi-ws-bridge"
             )
@@ -3337,7 +3345,9 @@ async def _app_lifespan(application: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️  KalshiWebSocketBridge failed to start: {e}")
         _startup_state["services"]["kalshi_ws_bridge"] = {"status": "failed", "error": str(e)}
+    logger.info("[MARKET-CATALOG] post_refresh: KalshiWebSocketBridge started")
 
+    logger.info("[MARKET-CATALOG] post_refresh: starting KalshiFillsPoller")
     # KalshiFillsPoller — background HTTP polling + reconciliation for fills ledger
     # Must start AFTER WebSocketBridge for dual ingestion setup
     # BUG-L13 FIX: Skip in VALIDATION_MODE to prevent startup lag
@@ -3350,10 +3360,11 @@ async def _app_lifespan(application: FastAPI):
             from merid.event_venues.kalshi.fills_poller import get_fills_poller
             from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
             _fills_poller = get_fills_poller()
+            logger.info("[MARKET-CATALOG] post_refresh: calling fills_poller.start()")
             await _fills_poller.start()
             logger.info("✅ KalshiFillsPoller started (HTTP polling + reconciliation)")
             _startup_state["services"]["kalshi_fills_poller"] = {"status": "running", "started_at": time.time()}
-            
+
             # CRITICAL FIX: Clear incomplete/false fills from DB to remove phantom positions
             # These fills have count_fp <= 0 or missing price data and should not be counted as positions
             _ledger = get_fills_ledger()
@@ -3363,19 +3374,23 @@ async def _app_lifespan(application: FastAPI):
         except Exception as e:
             logger.warning(f"⚠️  KalshiFillsPoller failed to start: {e}")
             _startup_state["services"]["kalshi_fills_poller"] = {"status": "failed", "error": str(e)}
+    logger.info("[MARKET-CATALOG] post_refresh: KalshiFillsPoller started")
 
+    logger.info("[MARKET-CATALOG] post_refresh: starting OutcomeResolver")
     # OutcomeResolver — resolves settled Kalshi markets, updates KalshiRiskEngine bankroll P&L
     # BUG-1 FIX: was never started; OutcomeResolver.resolve_all() / record_trade_result() never fired
     if not _is_validation:
         try:
             from merid.metrics.outcome_resolver import get_outcome_resolver as _get_or
             _outcome_resolver = _get_or()
+            logger.info("[MARKET-CATALOG] post_refresh: calling outcome_resolver.start()")
             await _outcome_resolver.start(interval_s=300)
             logger.info("✅ OutcomeResolver started (interval=300s)")
             _startup_state["services"]["outcome_resolver"] = {"status": "running", "started_at": time.time()}
         except Exception as _ore:
             logger.warning("⚠️  OutcomeResolver failed to start: %s", _ore)
             _startup_state["services"]["outcome_resolver"] = {"status": "failed", "error": str(_ore)}
+    logger.info("[MARKET-CATALOG] post_refresh: OutcomeResolver started")
 
     # KalshiSettlementPoller — polls /portfolio/settlements for calibration grading pipeline
     # Must start AFTER FillsPoller (shares credential pattern)
