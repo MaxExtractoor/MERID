@@ -317,9 +317,7 @@ class SpotBasisTracker:
 
     def start(self) -> None:
         """Start the background tick thread (idempotent)."""
-        print("[SPOT-BASIS-DEBUG] start() called")
         if self._thread is not None and self._thread.is_alive():
-            print("[SPOT-BASIS-DEBUG] start() returning - thread already alive")
             return
         self._stop_event.clear()
         self._thread = threading.Thread(
