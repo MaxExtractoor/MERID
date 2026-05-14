@@ -9,6 +9,9 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+sys.stderr.write("[MODULE-DEBUG] web/main.py module loading\n")
+sys.stderr.flush()
+
 # ═══════════════════════════════════════════════════════════════════════
 # EMERGENCY FIX (2026-05-12): Force load safe modules before threading starts
 # Prevents import race condition causing Windows access violation crashes
