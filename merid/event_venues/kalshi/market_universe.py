@@ -73,23 +73,27 @@ class MarketUniverse:
         """Build indexes after initialization."""
         # Build asset index
         _by_asset = {}
+        _assets = set()
         for market in self.markets:
             asset = self._get_asset(market)
             if asset:
-                self.assets.add(asset)
+                _assets.add(asset)
                 if asset not in _by_asset:
                     _by_asset[asset] = []
                 _by_asset[asset].append(market)
         object.__setattr__(self, 'by_asset', _by_asset)
+        object.__setattr__(self, 'assets', _assets)
         
         # Build ticker index
         _by_ticker = {}
+        _tickers = set()
         for market in self.markets:
             ticker = self._get_ticker(market)
             if ticker:
-                self.tickers.add(ticker)
+                _tickers.add(ticker)
                 _by_ticker[ticker] = market
         object.__setattr__(self, 'by_ticker', _by_ticker)
+        object.__setattr__(self, 'tickers', _tickers)
     
     @staticmethod
     def _get_asset(market: Any) -> Optional[str]:
