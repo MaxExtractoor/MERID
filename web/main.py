@@ -3148,22 +3148,10 @@ async def _app_lifespan(application: FastAPI):
         _startup_state["services"]["kalshi_market_cache"] = {"status": "failed", "error": str(e)}
 
     # KalshiMarketCatalog — fetches + caches all active Kalshi markets (backbone for pipeline/agents)
-    # File-based debug
-    with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
-        f.write(f"[DEBUG] Before KalshiMarketCatalog start() at {time.time()}\n")
-        f.flush()
     try:
         from merid.event_venues.kalshi.market_catalog import get_market_catalog
         _catalog = get_market_catalog()
-        # File-based debug
-        with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
-            f.write(f"[DEBUG] About to call catalog.start() at {time.time()}\n")
-            f.flush()
         await _catalog.start()
-        # File-based debug
-        with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
-            f.write(f"[DEBUG] catalog.start() returned at {time.time()}\n")
-            f.flush()
         # BUG-L13 FIX: In VALIDATION_MODE, cancel the periodic 5-min refresh loop after the
         # initial load.  The refresh() method makes 20+ sequential Kalshi REST calls (~7s total)
         # which blocks the event loop for up to 1390ms per cycle — triggering lag profiles every
@@ -3174,46 +3162,18 @@ async def _app_lifespan(application: FastAPI):
             logger.info("[VALIDATION MODE] KalshiMarketCatalog periodic refresh cancelled (initial load retained)")
         logger.info("✅ KalshiMarketCatalog started (market data backbone)")
         _startup_state["services"]["kalshi_market_catalog"] = {"status": "running", "started_at": time.time()}
-        # File-based debug
-        with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
-            f.write(f"[DEBUG] After KalshiMarketCatalog at {time.time()}\n")
-            f.flush()
         
         logger.info("[MARKET-CATALOG] post_refresh: starting market universe validation")
-        # File-based debug
-        with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
-            f.write(f"[DEBUG] Before market universe validation at {time.time()}\n")
-            f.flush()
         # MARKET UNIVERSE VALIDATION: Ensure catalog, agent grid, and trading agent
         # all see the same filtered market universe (BTC/ETH/SOL/XRP/DOGE 15m only)
         try:
-            # File-based debug
-            with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
-                f.write(f"[DEBUG] About to call get_market_universe at {time.time()}\n")
-                f.flush()
             _universe = _catalog.get_market_universe()
-            # File-based debug
-            with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
-                f.write(f"[DEBUG] get_market_universe returned at {time.time()}\n")
-                f.flush()
             if _universe is None:
                 logger.warning("[MARKET-UNIVERSE-VALIDATION] MarketUniverse not available yet (catalog may still be loading) - skipping validation")
-                # File-based debug
-                with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
-                    f.write(f"[DEBUG] MarketUniverse is None - skipping validation at {time.time()}\n")
-                    f.flush()
                 # Continue without blocking - the catalog will load in the background
                 logger.info("[MARKET-CATALOG] Catalog started successfully, background refresh will populate universe")
             else:
-                # File-based debug
-                with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
-                    f.write(f"[DEBUG] About to call get_assets at {time.time()}\n")
-                    f.flush()
                 _catalog_assets = _universe.get_assets()
-                # File-based debug
-                with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
-                    f.write(f"[DEBUG] get_assets returned at {time.time()}\n")
-                    f.flush()
                 _catalog_count = _universe.get_market_count()
                 logger.info(
                     "[MARKET-UNIVERSE-VALIDATION] Catalog universe: %d markets, %d assets: %s",
@@ -3243,26 +3203,12 @@ async def _app_lifespan(application: FastAPI):
                 _universe_exc
             )
         logger.info("[MARKET-CATALOG] post_refresh: market universe validation complete")
-        # File-based debug
-        with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
-            f.write(f"[DEBUG] After market universe validation complete at {time.time()}\n")
-            f.flush()
     except Exception as e:
         startup_success = False
         logger.warning(f"⚠️  KalshiMarketCatalog failed to start: {e}")
         _startup_state["services"]["kalshi_market_catalog"] = {"status": "failed", "error": str(e)}
-    
-    # File-based debug
-    with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
-        f.write(f"[DEBUG] After KalshiMarketCatalog try/except block at {time.time()}\n")
-        f.flush()
 
     # KalshiMarketStateStore REST refresh — periodically feeds volume_24h/OI/expiry into
-    # File-based debug
-    with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
-        f.write(f"[DEBUG] Before KalshiMarketStateStore REST refresh at {time.time()}\n")
-        f.flush()
-    # KalshiMarketState so CryptoAlertRouter and other consumers see up-to-date REST fields.
     # The WS bridge only updates book data; REST fields would otherwise stay at zero.
     # FIX: Defer first refresh to avoid blocking startup with 5000 markets
     async def _run_market_state_rest_refresh():
@@ -3314,10 +3260,6 @@ async def _app_lifespan(application: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️  KalshiMarketState REST refresh loop failed to start: {e}")
     logger.info("[MARKET-CATALOG] post_refresh: KalshiMarketState REST refresh loop started")
-    # File-based debug
-    with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
-        f.write(f"[DEBUG] After KalshiMarketState REST refresh at {time.time()}\n")
-        f.flush()
 
     logger.info("[MARKET-CATALOG] post_refresh: starting KalshiSentimentService")
     # KalshiSentimentService — background loop ingesting catalog → sentiment scores
@@ -3526,19 +3468,11 @@ async def _app_lifespan(application: FastAPI):
             _basis_tracker.start()
             logger.info("✅ SpotBasisTracker started (1s tick, BTC/ETH/SOL/XRP/DOGE)")
             _startup_state["services"]["spot_basis_tracker"] = {"status": "running", "started_at": time.time()}
-            # File-based debug since stdout/stderr not appearing in uvicorn
-            with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
-                f.write(f"[DEBUG] SpotBasisTracker started at {time.time()}\n")
-                f.flush()
         except Exception as _basis_exc:
             logger.warning("⚠️  SpotBasisTracker failed to start (non-fatal): %s", _basis_exc)
             _startup_state["services"]["spot_basis_tracker"] = {"status": "failed", "error": str(_basis_exc)}
 
     # CryptoRTIMonitor + CryptoTermStructureModel lifecycle
-    # File-based debug
-    with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
-        f.write(f"[DEBUG] Before CryptoRTIMonitor at {time.time()}\n")
-        f.flush()
     # RTI monitor is registered as a singleton so TSM can call get_global_crypto_rti_monitor()
     _tsm = None
     try:
@@ -3553,10 +3487,6 @@ async def _app_lifespan(application: FastAPI):
         _tsm = _tsm_candidate  # only promote after successful start
         logger.info("✅ CryptoRTIMonitor registered + CryptoTermStructureModel started")
         _startup_state["services"]["crypto_term_structure"] = {"status": "running", "started_at": time.time()}
-        # File-based debug
-        with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
-            f.write(f"[DEBUG] After CryptoRTIMonitor at {time.time()}\n")
-            f.flush()
     except Exception as e:
         logger.warning("⚠️  CryptoTermStructureModel failed to start: %s", e)
         _startup_state["services"]["crypto_term_structure"] = {"status": "failed", "error": str(e)}
@@ -3574,10 +3504,6 @@ async def _app_lifespan(application: FastAPI):
             await _rti_feed_service.start()
             logger.info("✅ RTIFeedService started")
             _startup_state["services"]["rti_feed_service"] = {"status": "running", "started_at": time.time()}
-            # File-based debug
-            with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
-                f.write(f"[DEBUG] After RTIFeedService at {time.time()}\n")
-                f.flush()
         except Exception as e:
             logger.warning("⚠️  RTIFeedService failed to start: %s", e)
             _startup_state["services"]["rti_feed_service"] = {"status": "failed", "error": str(e)}
