@@ -9,9 +9,6 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-sys.stderr.write("[MODULE-DEBUG] web/main.py module loading\n")
-sys.stderr.flush()
-
 # ═══════════════════════════════════════════════════════════════════════
 # EMERGENCY FIX (2026-05-12): Force load safe modules before threading starts
 # Prevents import race condition causing Windows access violation crashes
@@ -2402,8 +2399,6 @@ async def _app_lifespan(application: FastAPI):
     3. Cancel background tasks
     4. Log structured shutdown metrics
     """
-    logger.warning("[LIFESPAN-DEBUG] _app_lifespan started - WARNING LEVEL")
-    logger.info("[LIFESPAN] _app_lifespan started")
     global _startup_state
     application.state.canonical_lifespan = "web.main._app_lifespan"
     application.state.test_mode = os.environ.get("MERID_TEST_MODE", "").strip() == "1"
@@ -3153,12 +3148,10 @@ async def _app_lifespan(application: FastAPI):
         _startup_state["services"]["kalshi_market_cache"] = {"status": "failed", "error": str(e)}
 
     # KalshiMarketCatalog — fetches + caches all active Kalshi markets (backbone for pipeline/agents)
-    logger.info("[MARKET-CATALOG] pre_start: calling _catalog.start()")
     try:
         from merid.event_venues.kalshi.market_catalog import get_market_catalog
         _catalog = get_market_catalog()
         await _catalog.start()
-        logger.info("[MARKET-CATALOG] post_start: _catalog.start() returned")
         # BUG-L13 FIX: In VALIDATION_MODE, cancel the periodic 5-min refresh loop after the
         # initial load.  The refresh() method makes 20+ sequential Kalshi REST calls (~7s total)
         # which blocks the event loop for up to 1390ms per cycle — triggering lag profiles every
@@ -4707,9 +4700,6 @@ async def _app_lifespan(application: FastAPI):
 
 
 # Create app instance after all routes are defined
-import sys
-sys.stderr.write("[APP-CREATION-DEBUG] Creating app with _app_lifespan\n")
-sys.stderr.flush()
 app = create_app(lifespan=_app_lifespan)
 
 # Add health endpoints after app creation

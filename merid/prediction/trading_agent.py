@@ -5217,9 +5217,7 @@ class KalshiTradingAgent:
                 from merid.event_venues.kalshi.market_catalog import get_market_catalog
                 catalog = get_market_catalog()
                 if not catalog.get_all_markets():
-                    logger.info("[MARKET-CATALOG] agent_init: calling catalog.refresh()")
                     await catalog.refresh()
-                    logger.info("[MARKET-CATALOG] agent_init: catalog.refresh() returned")
 
                 now = datetime.now(timezone.utc)
                 for cm in catalog.get_all_markets():
