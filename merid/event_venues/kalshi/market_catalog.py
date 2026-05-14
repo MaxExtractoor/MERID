@@ -38,7 +38,23 @@ from config.kalshi_universe import kalshi_agent_grid_catalog_series_tickers
 from merid.event_venues.base import EventMarket, MarketFilter
 from merid.event_venues.kalshi.client import KalshiVenueClient
 from merid.event_venues.kalshi.models import KalshiConfig
+from merid.event_venues.kalshi.allowed_market_policy import (
+    filter_allowed_markets,
+    get_allowed_assets,
+    is_market_allowed,
+)
+from merid.event_venues.kalshi.market_universe import MarketUniverse
 from utils.logger import get_logger
+
+# Production scope validation
+try:
+    from config.trading_scope import (
+        get_trading_scope,
+        is_15m_series_ticker,
+    )
+    TRADING_SCOPE_AVAILABLE = True
+except ImportError:
+    TRADING_SCOPE_AVAILABLE = False
 
 logger = get_logger("merid.event_venues.kalshi.market_catalog")
 
@@ -230,9 +246,30 @@ class KalshiMarketCatalog:
     def __init__(
         self,
         client: Optional[KalshiVenueClient] = None,
-        refresh_interval_s: float = 300.0,
+        refresh_interval_s: Optional[float] = None,
         max_markets: int = 5000,
     ):
+        # Configurable refresh interval (default 60s for 15m markets, reduced from 300s)
+        # Enforce minimum of 2s to prevent accidental self-DoS via misconfiguration
+        _MIN_REFRESH_INTERVAL_S = 2.0
+        if refresh_interval_s is None:
+            import os
+            refresh_interval_s = float(os.getenv("MERID_KALSHI_CATALOG_REFRESH_INTERVAL_S", "60.0"))
+        
+        if refresh_interval_s < _MIN_REFRESH_INTERVAL_S:
+            logger.warning(
+                "Catalog refresh interval %.1fs is below minimum %.1fs, clamping to minimum",
+                refresh_interval_s, _MIN_REFRESH_INTERVAL_S
+            )
+            refresh_interval_s = _MIN_REFRESH_INTERVAL_S
+        
+        # Calculate expected calls per hour for rate limit awareness
+        _calls_per_hour = 3600.0 / refresh_interval_s
+        logger.info(
+            "KalshiMarketCatalog config: refresh_interval=%.1fs (min=%.1fs), expected_calls/hour=%.1f",
+            refresh_interval_s, _MIN_REFRESH_INTERVAL_S, _calls_per_hour
+        )
+
         if client is None:
             from merid.event_venues.kalshi.client import get_kalshi_client
             client = get_kalshi_client()
@@ -245,6 +282,10 @@ class KalshiMarketCatalog:
         self._by_asset: Dict[str, List[CatalogMarket]] = defaultdict(list)
         self._by_timeframe: Dict[str, List[CatalogMarket]] = defaultdict(list)
         self._by_ticker: Dict[str, CatalogMarket] = {}
+
+        # MarketUniverse: canonical source of truth for allowed markets
+        # Created once from filtered catalog and injected into downstream components
+        self._market_universe: Optional[MarketUniverse] = None
 
         self._last_refresh: Optional[datetime] = None
         self._refresh_count: int = 0
@@ -269,13 +310,14 @@ class KalshiMarketCatalog:
         if self._task and not self._task.done():
             return
         self._shutdown.clear()
-        await self.refresh()
+        # FIX: Defer initial refresh to avoid blocking startup with 5000 market fetch
+        # Start refresh loop immediately, which will do initial refresh on first iteration
         self._task = asyncio.create_task(self._refresh_loop(), name="kalshi-catalog-refresh")
         def _task_done_cb(task: asyncio.Task) -> None:
             if not task.cancelled() and task.exception():
                 logger.error("KalshiMarketCatalog refresh task crashed: %s", task.exception())
         self._task.add_done_callback(_task_done_cb)
-        logger.info(f"KalshiMarketCatalog started — {len(self._markets)} markets cached")
+        logger.info(f"KalshiMarketCatalog started — refresh loop running (deferred initial load)")
 
     async def stop(self) -> None:
         """Stop periodic refresh."""
@@ -311,12 +353,19 @@ class KalshiMarketCatalog:
         lock = self._ensure_lock()
         async with lock:
             try:
-                # Priority series: full AgentGrid crypto band (includes monthly/annual) + macro.
-                # Single source: ``kalshi_agent_grid_catalog_series_tickers()`` in config.
+                # PRODUCTION AUDIT (Step 3): Priority series restricted to 15m only
+                # 5 assets (BTC, ETH, SOL, XRP, DOGE) x 15m timeframe only.
+                # All other timeframes are signal-only and excluded from trading catalog.
                 _PRIORITY_SERIES = list(
                     dict.fromkeys(
-                        [*kalshi_agent_grid_catalog_series_tickers(), "KXFED", "INXUSD", "NASDAQ100"]
+                        kalshi_agent_grid_catalog_series_tickers()
                     )
+                )
+                
+                # PRODUCTION AUDIT (Step 3): Log scope enforcement
+                logger.info(
+                    "[DISCOVERY_SCOPE] Catalog refresh using production whitelist: "
+                    f"series={_PRIORITY_SERIES} (BTC/ETH/SOL/XRP/DOGE 15m only)"
                 )
                 raw_markets: list = []
                 seen_tickers: set = set()
@@ -352,30 +401,44 @@ class KalshiMarketCatalog:
                                 raw_markets.append(m)
                                 seen_tickers.add(m.market_id)
 
-                # 2. Backfill with general fetch up to max_markets
-                remaining = self._max_markets - len(raw_markets)
-                if remaining > 0:
-                    result = await self._client.list_markets_result(
-                        MarketFilter(active_only=True, limit=remaining)
-                    )
-                    if result.success:
-                        for m in result.data:
-                            if m.market_id not in seen_tickers:
-                                raw_markets.append(m)
-                                seen_tickers.add(m.market_id)
-                    elif not raw_markets:
-                        logger.warning(
-                            "Failed to fetch markets: %s", result.error
-                        )
-                        return len(self._markets)
+                # 2. BACKFILL DISABLED: AllowedMarketPolicy filters at the edge
+                # We no longer fetch all 5000 markets and filter later.
+                # Instead, we only fetch the priority series (BTC/ETH/SOL/XRP/DOGE 15m)
+                # and filter those using the AllowedMarketPolicy.
+                # This prevents the system from processing 5000 markets.
+                logger.info(
+                    "[ALLOWED-MARKET-POLICY] Backfill disabled - using priority series only "
+                    f"(allowed_assets={get_allowed_assets()})"
+                )
             except Exception as exc:
                 logger.warning(f"Failed to fetch markets: {exc}")
                 return len(self._markets)
 
+            # Apply AllowedMarketPolicy filter at the edge
+            # This ensures only BTC/ETH/SOL/XRP/DOGE 15m markets proceed to enrichment
+            logger.info(
+                "[ALLOWED-MARKET-POLICY] Pre-filter: %d raw markets fetched",
+                len(raw_markets)
+            )
+            filtered_markets = filter_allowed_markets(raw_markets)
+            logger.info(
+                "[ALLOWED-MARKET-POLICY] Post-filter: %d markets allowed (BTC/ETH/SOL/XRP/DOGE 15m only)",
+                len(filtered_markets)
+            )
+
+            # Create MarketUniverse from filtered markets
+            # This is the canonical source of truth for allowed markets
+            self._market_universe = MarketUniverse.from_markets(filtered_markets)
+            if not self._market_universe.validate_universe():
+                logger.warning(
+                    "[MARKET-UNIVERSE] Universe validation failed - proceeding with empty universe"
+                )
+            self._market_universe.log_summary()
+
             now = datetime.now(timezone.utc)
 
-            # Offload the CPU-bound enrichment loop (5000 markets × regex/datetime/text)
-            # to a thread pool executor so it cannot block the event loop (~2s block observed).
+            # Offload the CPU-bound enrichment loop (now for filtered markets only)
+            # to a thread pool executor so it cannot block the event loop.
             loop = asyncio.get_running_loop()
             (
                 enriched,
@@ -385,7 +448,7 @@ class KalshiMarketCatalog:
                 ticker_idx,
                 categories_found,
                 assets_found,
-            ) = await loop.run_in_executor(None, self._build_indexes, raw_markets, now)
+            ) = await loop.run_in_executor(None, self._build_indexes, filtered_markets, now)
 
             # Debug logging for first refresh to see what's happening
             if self._refresh_count == 0 and enriched:
@@ -412,6 +475,16 @@ class KalshiMarketCatalog:
             _log(
                 f"Catalog refreshed: {len(enriched)} markets, "
                 f"{len(cat_idx)} categories, {len(asset_idx)} assets"
+            )
+
+            # STARTUP METRICS: Log market counts for observability
+            logger.info(
+                "[STARTUP-METRICS] kalshi_catalog_refresh "
+                f"markets_fetched={len(raw_markets)} "
+                f"markets_allowed={len(filtered_markets)} "
+                f"markets_enriched={len(enriched)} "
+                f"assets={sorted(assets_found)} "
+                f"categories={sorted(categories_found)}"
             )
 
             # Feed REST data into MarketStateStore so expiry/volume/OI/strikes are available
@@ -865,6 +938,19 @@ class KalshiMarketCatalog:
         """Return all cached markets."""
         return list(self._markets)
 
+    def get_market_universe(self) -> Optional[MarketUniverse]:
+        """
+        Return the MarketUniverse (canonical source of truth for allowed markets).
+        
+        This is the single source of truth that downstream components should use
+        to determine which markets are allowed. It is created once from the
+        filtered catalog after AllowedMarketPolicy is applied.
+        
+        Returns:
+            MarketUniverse instance, or None if catalog hasn't been refreshed yet
+        """
+        return self._market_universe
+
     def get_market(self, ticker: str) -> Optional[CatalogMarket]:
         """Look up a single market by ticker."""
         return self._by_ticker.get(ticker)
@@ -882,6 +968,14 @@ class KalshiMarketCatalog:
             results = [m for m in results if m.timeframe == timeframe]
         if asset:
             results = [m for m in results if m.asset == asset]
+        
+        # Production scope filter: only allow 15m crypto markets
+        if TRADING_SCOPE_AVAILABLE and category == "crypto":
+            results = [m for m in results if m.timeframe == "15m"]
+            logger.debug(
+                f"[SCOPE_FILTER] Filtered to 15m crypto markets only: {len(results)} results"
+            )
+        
         return results
 
     def get_markets_by_asset(
@@ -894,6 +988,14 @@ class KalshiMarketCatalog:
         results = self._by_asset.get(asset, [])
         if timeframe:
             results = [m for m in results if m.timeframe == timeframe]
+        
+        # Production scope filter: only allow 15m crypto markets
+        if TRADING_SCOPE_AVAILABLE and asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+            results = [m for m in results if m.timeframe == "15m"]
+            logger.debug(
+                f"[SCOPE_FILTER] Filtered {asset} to 15m markets only: {len(results)} results"
+            )
+        
         return results
 
     def get_markets_by_timeframe(self, timeframe: str) -> List[CatalogMarket]:
@@ -950,6 +1052,48 @@ class KalshiMarketCatalog:
             key=lambda m: float(m.market.volume) if m.market.volume else 0,
             reverse=descending,
         )
+
+    async def get_markets_for_series(self, series_ticker: str) -> List[CatalogMarket]:
+        """Query Kalshi REST API for markets belonging to a specific series.
+        
+        PRODUCTION FIX (2026-05-01): This method enables series-specific market discovery
+        when the cached catalog doesn't contain markets for the requested series.
+        
+        Args:
+            series_ticker: The Kalshi series ticker (e.g., "KXBTC", "KXETHD1")
+            
+        Returns:
+            List of CatalogMarket objects for markets in this series
+        """
+        try:
+            # Query Kalshi for markets matching this series
+            _filter = MarketFilter(
+                active_only=True,
+                limit=200,
+                search=series_ticker,
+            )
+            _result = await self._client.list_markets_result(_filter)
+            
+            if not _result.success:
+                logger.debug("Series query failed for %s: %s", series_ticker, _result.error)
+                return []
+            
+            # Convert to CatalogMarket objects
+            _markets: List[CatalogMarket] = []
+            for m in (_result.data or []):
+                # Enrich with metadata
+                cm = self._enrich_market(m)
+                _markets.append(cm)
+            
+            logger.debug(
+                "Series %s: discovered %d markets via REST API",
+                series_ticker, len(_markets)
+            )
+            return _markets
+            
+        except Exception as exc:
+            logger.debug("Error querying series %s: %s", series_ticker, exc)
+            return []
 
     def categories(self) -> List[str]:
         """List all known categories."""
