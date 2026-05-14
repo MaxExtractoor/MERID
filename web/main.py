@@ -3198,8 +3198,20 @@ async def _app_lifespan(application: FastAPI):
                 f.flush()
             if _universe is None:
                 logger.warning("[MARKET-UNIVERSE-VALIDATION] MarketUniverse not available yet (catalog may still be loading)")
+                # File-based debug
+                with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
+                    f.write(f"[DEBUG] MarketUniverse is None at {time.time()}\n")
+                    f.flush()
             else:
+                # File-based debug
+                with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
+                    f.write(f"[DEBUG] About to call get_assets at {time.time()}\n")
+                    f.flush()
                 _catalog_assets = _universe.get_assets()
+                # File-based debug
+                with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
+                    f.write(f"[DEBUG] get_assets returned at {time.time()}\n")
+                    f.flush()
                 _catalog_count = _universe.get_market_count()
                 logger.info(
                     "[MARKET-UNIVERSE-VALIDATION] Catalog universe: %d markets, %d assets: %s",
