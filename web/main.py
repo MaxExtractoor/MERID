@@ -2439,6 +2439,17 @@ async def _app_lifespan(application: FastAPI):
         logger.info(f"[STARTUP-PHASE] {phase_name}: {elapsed:.2f}s")
         _phase_start = time.time()
 
+    # MODE CONSISTENCY CHECK: Ensure TradeMode and Kalshi environment agree
+    # This must happen BEFORE any Kalshi client is created
+    try:
+        from merid.mode_resolver import ModeResolver
+        ModeResolver.assert_mode_consistency()
+        logger.info("✅ Mode consistency check passed")
+    except Exception as mode_exc:
+        logger.error("❌ Mode consistency check failed: %s", mode_exc)
+        # Fail-fast: don't start if mode is inconsistent
+        raise RuntimeError(f"Mode consistency check failed: {mode_exc}") from mode_exc
+
     def _log_startup_summary() -> None:
         """Log complete startup timing summary."""
         total = time.time() - _startup_state["started_at"]
@@ -3151,6 +3162,43 @@ async def _app_lifespan(application: FastAPI):
             logger.info("[VALIDATION MODE] KalshiMarketCatalog periodic refresh cancelled (initial load retained)")
         logger.info("✅ KalshiMarketCatalog started (market data backbone)")
         _startup_state["services"]["kalshi_market_catalog"] = {"status": "running", "started_at": time.time()}
+        
+        # MARKET UNIVERSE VALIDATION: Ensure catalog, agent grid, and trading agent
+        # all see the same filtered market universe (BTC/ETH/SOL/XRP/DOGE 15m only)
+        try:
+            _universe = _catalog.get_market_universe()
+            if _universe is None:
+                logger.warning("[MARKET-UNIVERSE-VALIDATION] MarketUniverse not available yet (catalog may still be loading)")
+            else:
+                _catalog_assets = _universe.get_assets()
+                _catalog_count = _universe.get_market_count()
+                logger.info(
+                    "[MARKET-UNIVERSE-VALIDATION] Catalog universe: %d markets, %d assets: %s",
+                    _catalog_count,
+                    len(_catalog_assets),
+                    sorted(_catalog_assets)
+                )
+                # Expected assets based on AllowedMarketPolicy
+                _expected_assets = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
+                if _catalog_assets != _expected_assets:
+                    logger.error(
+                        "[MARKET-UNIVERSE-VALIDATION] CRITICAL: Catalog assets mismatch! "
+                        "Expected %s, got %s",
+                        sorted(_expected_assets),
+                        sorted(_catalog_assets)
+                    )
+                    startup_success = False
+                if _catalog_count == 0:
+                    logger.error(
+                        "[MARKET-UNIVERSE-VALIDATION] CRITICAL: Catalog universe is empty! "
+                        "No markets available for trading."
+                    )
+                    startup_success = False
+        except Exception as _universe_exc:
+            logger.warning(
+                "[MARKET-UNIVERSE-VALIDATION] Failed to validate market universe: %s",
+                _universe_exc
+            )
     except Exception as e:
         startup_success = False
         logger.warning(f"⚠️  KalshiMarketCatalog failed to start: {e}")
@@ -3159,6 +3207,7 @@ async def _app_lifespan(application: FastAPI):
     # KalshiMarketStateStore REST refresh — periodically feeds volume_24h/OI/expiry into
     # KalshiMarketState so CryptoAlertRouter and other consumers see up-to-date REST fields.
     # The WS bridge only updates book data; REST fields would otherwise stay at zero.
+    # FIX: Defer first refresh to avoid blocking startup with 5000 markets
     async def _run_market_state_rest_refresh():
         import asyncio as _asyncio
         # IMPORTANT: keep this on the event loop (not asyncio.to_thread).
@@ -3168,6 +3217,8 @@ async def _app_lifespan(application: FastAPI):
         # At 5000 markets: 500 yields total, completing the full loop in ~3s spread
         # across many event-loop ticks — invisible to the LoopLagMonitor.
         _BATCH = 10
+        # Wait before first refresh to avoid blocking startup
+        await _asyncio.sleep(5)
         while True:
             try:
                 from merid.event_venues.kalshi.market_catalog import get_market_catalog as _get_cat
@@ -3207,6 +3258,7 @@ async def _app_lifespan(application: FastAPI):
 
     # KalshiSentimentService — background loop ingesting catalog → sentiment scores
     # BUG-L13 FIX: Skip in VALIDATION_MODE to reduce startup lag
+    # FIX: Defer start to avoid blocking startup with 5000 market ingest
     _is_validation = __import__("os").environ.get("MERID_VALIDATION_MODE", "") == "1"
     if _is_validation:
         logger.info("[VALIDATION MODE] KalshiSentimentService skipped (not needed for validation)")
@@ -3215,9 +3267,16 @@ async def _app_lifespan(application: FastAPI):
         try:
             from merid.event_venues.kalshi.sentiment import get_sentiment_service
             _sentiment_svc = get_sentiment_service()
-            await _sentiment_svc.start()
-            logger.info("✅ KalshiSentimentService started (sentiment refresh loop)")
-            _startup_state["services"]["kalshi_sentiment_service"] = {"status": "running", "started_at": time.time()}
+            # Start in background task to avoid blocking
+            async def _deferred_sentiment_start():
+                try:
+                    await _sentiment_svc.start()
+                    logger.info("✅ KalshiSentimentService started (sentiment refresh loop)")
+                except Exception as e:
+                    logger.warning(f"⚠️  KalshiSentimentService failed to start: {e}")
+            _sentiment_task = asyncio.create_task(_deferred_sentiment_start(), name="deferred-sentiment-start")
+            _startup_state["background_tasks"].append(_sentiment_task)
+            _startup_state["services"]["kalshi_sentiment_service"] = {"status": "starting", "started_at": time.time()}
         except Exception as e:
             logger.warning(f"⚠️  KalshiSentimentService failed to start: {e}")
             _startup_state["services"]["kalshi_sentiment_service"] = {"status": "failed", "error": str(e)}
@@ -3382,7 +3441,7 @@ async def _app_lifespan(application: FastAPI):
     # SpotBasisTracker — measures Coinbase spot vs Kalshi-implied spot basis per asset
     # LEAN 15m KALSHI STACK (2026-05-13): Skip when ENABLE_SPOT_BASIS_TRACKER=false to prevent hangs/timeout risk
     # Basis features from CryptoSignalsAgent/microstructure feed are sufficient for 15m direction bets
-    _basis_disabled = __import__("os").environ.get("ENABLE_SPOT_BASIS_TRACKER", "false").lower() == "false"
+    _basis_disabled = __import__("os").environ.get("ENABLE_SPOT_BASIS_TRACKER", "true").lower() == "false"
     if _basis_disabled:
         logger.info("[LEAN KALSHI] SpotBasisTracker skipped (ENABLE_SPOT_BASIS_TRACKER=false)")
         _startup_state["services"]["spot_basis_tracker"] = {"status": "skipped", "reason": "basis_disabled"}
@@ -3606,7 +3665,7 @@ async def _app_lifespan(application: FastAPI):
     # BUG-L13 FIX: Skip in VALIDATION_MODE to prevent extreme event-loop lag
     # LEAN 15m KALSHI STACK (2026-05-13): Skip when ENABLE_SENTIMENT_TRUTH=false to prevent native crashes
     _is_validation = __import__("os").environ.get("MERID_VALIDATION_MODE", "") == "1"
-    _sentiment_disabled = __import__("os").environ.get("ENABLE_SENTIMENT_TRUTH", "false").lower() == "false"
+    _sentiment_disabled = __import__("os").environ.get("ENABLE_SENTIMENT_TRUTH", "true").lower() == "false"
     if _is_validation:
         logger.info("[VALIDATION MODE] SentimentBus skipped (prevents 10s+ lag from Twitter/Reddit scraping)")
         _startup_state["services"]["sentiment_bus"] = {"status": "skipped", "reason": "validation_mode"}
@@ -3646,7 +3705,7 @@ async def _app_lifespan(application: FastAPI):
     # BUG-L13 FIX: Skip in VALIDATION_MODE — this causes 39+ second lag spikes during startup
     # LEAN 15m KALSHI STACK (2026-05-13): Skip when ENABLE_SENTIMENT_TRUTH=false to prevent native crashes
     _is_validation = __import__("os").environ.get("MERID_VALIDATION_MODE", "") == "1"
-    _sentiment_disabled = __import__("os").environ.get("ENABLE_SENTIMENT_TRUTH", "false").lower() == "false"
+    _sentiment_disabled = __import__("os").environ.get("ENABLE_SENTIMENT_TRUTH", "true").lower() == "false"
     if _is_validation:
         logger.info("[VALIDATION MODE] HashtagMonitor skipped (prevents 39s+ startup lag)")
         _startup_state["services"]["hashtag_monitor"] = {"status": "skipped", "reason": "validation_mode"}
@@ -4054,7 +4113,7 @@ async def _app_lifespan(application: FastAPI):
             BankrollServiceV2 + PositionCache + FillsLedger are sufficient for consistency.
             """
             import os as _recon_os
-            _recon_disabled = _recon_os.getenv("ENABLE_VENUE_RECONCILER", "false").lower() == "false"
+            _recon_disabled = _recon_os.getenv("ENABLE_VENUE_RECONCILER", "true").lower() == "false"
             if _recon_disabled:
                 logger.info("[LEAN KALSHI] Venue reconciler disabled (ENABLE_VENUE_RECONCILER=false)")
                 return
