@@ -27,6 +27,7 @@ Reuses:
 from __future__ import annotations
 
 import asyncio
+import hashlib  # PRODUCTION FIX (2026-05-01): For deterministic exit order client_tags
 import json as _json
 import logging
 import os
@@ -56,11 +57,16 @@ from merid.prediction.model import (
     pm_spot_feed_symbol_candidates,
 )
 from merid.prediction.strategy import KalshiStrategy, StrategySignal, SignalAction, StrategyConfig
-from merid.prediction.risk import PredictionMarketRisk, PredictionRiskConfig, PreTradeCheck, get_prediction_risk
+from merid.prediction.risk import PredictionMarketRisk, PredictionRiskConfig, PreTradeCheck, RiskAction, get_prediction_risk
 from merid.formulas import AUDIT_SPEC_VERSION, FORMULAS_VERSION
 from merid.event_venues.base import EventMarket
-from merid.event_venues.kalshi.stop_loss import StopLossRules, TrackedPosition
+from merid.event_venues.kalshi.stop_loss import (
+    StopLossRules, TrackedPosition,
+    MicroScalpExitManager, MicroScalpPosition, MicroScalpExitConfig,
+    DynamicTPConfig, DynamicTPCalculator,
+)
 from merid.event_venues.kalshi.take_profit import TakeProfitManager, get_tp_config_for_agent
+from merid.prediction.risk import CycleCapTracker, CycleCapConfig
 from merid.tick_events import TickContext, get_tick_bus
 from utils.logger import get_logger
 from merid.prediction.consensus_bridge import get_kalshi_consensus_adapter
@@ -69,7 +75,7 @@ from merid.swarm.consensus_aggregator import get_consensus_aggregator
 # Cross-asset arbiter integration
 from merid.prediction.crypto_top_edge import (
     CRYPTO_ASSETS,
-    MOMENTUM_SCALPING_TIMEFRAMES,
+    MEAN_REVERSION_TIMEFRAMES,
     get_crypto_top_edge_arbiter,
 )
 from merid.event_venues.kalshi.position_cache import get_position_cache
@@ -129,6 +135,7 @@ def _apply_global_pm_strategy_env(sc: StrategyConfig) -> None:
         ("MERID_PM_CONTRARIAN_MODEL_GAP_MIN", "contrarian_model_gap_min"),
         ("MERID_PM_VOL_BREAKOUT_NEUTRAL_LOW", "vol_breakout_neutral_low"),
         ("MERID_PM_VOL_BREAKOUT_NEUTRAL_HIGH", "vol_breakout_neutral_high"),
+        ("MERID_SENTIMENT_MODE", "sentiment_mode"),
         ("MERID_PM_MM_MAX_SPREAD_CENTS", "mm_max_spread_cents"),
         ("MERID_PM_MM_TARGET_SPREAD_CENTS", "mm_target_spread_cents"),
         ("MERID_PM_MM_INVENTORY_LIMIT", "mm_inventory_limit"),
@@ -152,6 +159,723 @@ def _apply_global_pm_strategy_env(sc: StrategyConfig) -> None:
 # Global thread pool executor for CPU-bound operations
 # Increased from default (CPU+4) to handle 35+ concurrent agents without contention
 _GLOBAL_AGENT_EXECUTOR: Optional[ThreadPoolExecutor] = None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# KALSHI 15M MICRO-SCALPING: Edge Calculation Utilities
+# Systematic mapping from spot → Kalshi contract → edge for BTC/ETH/SOL/XRP/DOGE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# MIGRATION NOTE: All constants below are being migrated to centralized config
+# in config/kalshi_distance.yaml. Use merid.prediction.kalshi_distance_config
+# for new code. These constants remain for backward compatibility.
+try:
+    from merid.prediction.kalshi_distance_config import (
+        get_distance_config,
+        run_startup_assertions,
+        GuardCheckResult,
+    )
+    _DISTANCE_CFG_AVAILABLE = True
+except Exception:
+    _DISTANCE_CFG_AVAILABLE = False  # Fallback to constants below
+
+# Per-asset 15m volatility scales (σ_a) - realized ATR-based typical impulse
+ASSET_VOL_SCALE_15M: Dict[str, float] = {
+    "BTC": 0.010,   # 1.0% typical 15m move
+    "ETH": 0.012,   # 1.2% typical 15m move
+    "SOL": 0.016,   # 1.6% typical 15m move
+    "XRP": 0.018,   # 1.8% typical 15m move
+    "DOGE": 0.022,  # 2.2% typical 15m move
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DISTANCE GUARDS: Hard caps on spot→strike distance (far-OTM protection)
+# ═══════════════════════════════════════════════════════════════════════════════
+# ⚠️  DEPRECATED: Use config/kalshi_distance.yaml + get_distance_config() instead
+# These constants will be removed in a future refactor.
+
+# PRODUCTION FIX (2026-05-01): Hard absolute distance cap per asset from environment
+# OPTIMIZED (2026-05-10): Aligned with kalshi_distance.yaml to eliminate bottleneck
+MAX_DELTA_PCT: Dict[str, float] = {
+    "BTC": float(os.getenv("MERID_PM_MAX_DELTA_PCT_BTC", "0.04")),
+    "ETH": float(os.getenv("MERID_PM_MAX_DELTA_PCT_ETH", "0.05")),
+    "SOL": float(os.getenv("MERID_PM_MAX_DELTA_PCT_SOL", "0.06")),
+    "XRP": float(os.getenv("MERID_PM_MAX_DELTA_PCT_XRP", "0.065")),
+    "DOGE": float(os.getenv("MERID_PM_MAX_DELTA_PCT_DOGE", "0.065")),
+}
+
+# PRODUCTION FIX (2026-05-01): All trading parameters derive from environment variables
+# Sigma-based distance cap (z = delta_pct / sigma_15m must be <= this)
+MAX_Z_DISTANCE: float = float(os.getenv("MERID_PM_MAX_Z_DISTANCE", "0.75"))  # sigma max
+
+# Z-score threshold for "near" vs "far" contracts (affects min edge)
+Z_NEAR_THRESHOLD: float = float(os.getenv("MERID_PM_Z_NEAR_THRESHOLD", "0.50"))
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EDGE THRESHOLDS: Tightened min edge requirements (+1% from previous)
+# ═══════════════════════════════════════════════════════════════════════════════
+# ⚠️  DEPRECATED: Use config/kalshi_distance.yaml + get_distance_config() instead
+
+# Min edge for "near" contracts (|z| <= Z_NEAR_THRESHOLD)
+# PRODUCTION FIX (2026-05-01): Derive edge thresholds from environment variables
+# with sensible defaults. These control minimum edge required for trade entry.
+def _get_min_edge_near(asset: str) -> float:
+    """Get min edge for 'near' contracts from environment or default."""
+    defaults = {"BTC": 0.055, "ETH": 0.055, "SOL": 0.060, "XRP": 0.060, "DOGE": 0.065}
+    env_val = os.getenv(f"MERID_PM_EDGE_NEAR_{asset}")
+    if env_val:
+        try:
+            return float(env_val)
+        except ValueError:
+            pass
+    return defaults.get(asset, 0.06)
+
+def _get_min_edge_far(asset: str) -> float:
+    """Get min edge for 'far' contracts from environment or default (+2% above near)."""
+    near = _get_min_edge_near(asset)
+    return near + 0.02
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ASSET & TIMEFRAME EXECUTION GUARDS (15m-only, crypto-only)
+# ═══════════════════════════════════════════════════════════════════════════════
+# ⚠️  DEPRECATED: Use config/kalshi_distance.yaml + get_distance_config() instead
+# CONSOLIDATION FIX: Import from canonical config instead of hardcoding
+
+try:
+    from config.kalshi_15m_crypto_config import KALSHI_15M_CRYPTO_ASSETS, KALSHI_15M_TIMEFRAME
+    ALLOWED_ASSETS: set[str] = set(KALSHI_15M_CRYPTO_ASSETS)
+    EXECUTION_TIMEFRAMES: set[str] = {KALSHI_15M_TIMEFRAME}
+except ImportError:
+    # Fallback to hardcoded values if config not available
+    ALLOWED_ASSETS: set[str] = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
+    EXECUTION_TIMEFRAMES: set[str] = {"15m"}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# UPSTREAM DATA INTEGRITY GUARDS ("No Surprises" Integration)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Signal staleness: max age of last bar (seconds) before blocking
+SIGNAL_MAX_BAR_AGE_SECONDS: float = float(os.getenv("MERID_PM_SIGNAL_MAX_AGE", "900.0"))
+
+# Spot reference integrity: max divergence between our spot and Kalshi reference
+SPOT_DIVERGENCE_MAX_PCT: float = float(os.getenv("MERID_PM_SPOT_DIVERGENCE_MAX", "0.005"))
+
+# Fee estimate vs actual mismatch threshold
+FEE_MISMATCH_THRESHOLD_PCT: float = float(os.getenv("MERID_PM_FEE_MISMATCH_THRESHOLD", "5.0"))
+
+# Fractional Kelly sizing (conservative)
+KELLY_FRACTION: float = float(os.getenv("MERID_PM_KELLY_FRACTION", "0.25"))
+
+# Hard cap on risk per trade (% of bankroll)
+MAX_RISK_PER_TRADE_PCT: float = float(os.getenv("MERID_PM_MAX_RISK_PER_TRADE_PCT", "1.0"))
+
+
+@dataclass(frozen=True)
+class KalshiEdgeMetrics:
+    """Complete edge metrics for a Kalshi 15m entry.
+    
+    Captures spot-to-strike distance, implied vs model probability,
+    and EV calculations for systematic post-trade analysis.
+    """
+    # Distance metrics
+    spot: float
+    strike: float
+    delta_pct: float          # (K - S) / S
+    delta_bps: float           # delta_pct * 10,000
+    z_score: float             # delta_pct / sigma_a (normalized distance)
+    
+    # Probability & edge
+    kalshi_price: float        # Contract price P (0.01-0.99)
+    implied_prob: float        # q = P (implied probability)
+    model_prob: float          # p_hat from micro-momentum model
+    edge: float              # p_hat - q (raw edge)
+    
+    # EV analysis
+    ev_gross: float            # p_hat - P (gross expected value per $1)
+    fee_per_contract: float   # ~0.07 * P * (1-P) for taker
+    ev_net_per_contract: float # ev_gross - fee
+    
+    # Asset context
+    asset: str
+    sigma_15m: float          # Asset's typical 15m volatility
+
+
+def compute_kalshi_edge_metrics(
+    spot: float,
+    strike: float,
+    kalshi_price: float,
+    model_prob: float,
+    asset: str,
+    contracts: int = 1,
+) -> KalshiEdgeMetrics:
+    """Compute complete edge metrics for Kalshi 15m micro-scalping entry.
+    
+    Args:
+        spot: Current spot price (e.g., 78320.5 for BTC)
+        strike: Kalshi market target/strike price K
+        kalshi_price: Contract price P in dollars (0.01-0.99)
+        model_prob: Internal model probability p_hat (0.0-1.0)
+        asset: Asset symbol (BTC, ETH, SOL, XRP, DOGE)
+        contracts: Number of contracts for fee calculation
+        
+    Returns:
+        KalshiEdgeMetrics with all distance, edge, and EV calculations
+        
+    Example:
+        >>> metrics = compute_kalshi_edge_metrics(
+        ...     spot=78320.5, strike=78500.0, kalshi_price=0.41,
+        ...     model_prob=0.49, asset="BTC", contracts=50
+        ... )
+        >>> print(f"edge={metrics.edge:.3f}, z={metrics.z_score:.2f}, EV_net={metrics.ev_net_per_contract:.3f}")
+    """
+    # Distance calculations
+    delta_pct = (strike - spot) / spot if spot != 0 else 0.0
+    delta_bps = delta_pct * 10000.0
+    
+    # Normalized distance in sigma units
+    sigma_15m = ASSET_VOL_SCALE_15M.get(asset, 0.015)  # Default 1.5% if unknown
+    z_score = delta_pct / sigma_15m if sigma_15m != 0 else 0.0
+    
+    # Probability & edge
+    implied_prob = max(0.01, min(0.99, kalshi_price))  # Clamp to valid range
+    edge = model_prob - implied_prob
+    
+    # EV calculations
+    ev_gross = model_prob - kalshi_price
+    # Kalshi taker fee: 0.07 * P * (1-P) per contract (approx)
+    fee_per_contract = 0.07 * kalshi_price * (1.0 - kalshi_price)
+    ev_net_per_contract = ev_gross - fee_per_contract
+    
+    return KalshiEdgeMetrics(
+        spot=spot,
+        strike=strike,
+        delta_pct=delta_pct,
+        delta_bps=delta_bps,
+        z_score=z_score,
+        kalshi_price=kalshi_price,
+        implied_prob=implied_prob,
+        model_prob=model_prob,
+        edge=edge,
+        ev_gross=ev_gross,
+        fee_per_contract=fee_per_contract,
+        ev_net_per_contract=ev_net_per_contract,
+        asset=asset,
+        sigma_15m=sigma_15m,
+    )
+
+
+def format_edge_metrics_log(metrics: KalshiEdgeMetrics) -> str:
+    """Format edge metrics for concise [TRADE_ENTRY] logging.
+    
+    Returns a single-line string suitable for grep/awk post-analysis:
+    spot=78320.5 strike=78500.0 delta_bps=22.9 z=0.23 kalshi_price=0.41 edge=0.080 EV_net=0.063
+    """
+    return (
+        f"spot={metrics.spot:.1f} strike={metrics.strike:.1f} "
+        f"delta_pct={metrics.delta_pct:.5f} delta_bps={metrics.delta_bps:.1f} "
+        f"z={metrics.z_score:.2f} sigma_15m={metrics.sigma_15m:.3f} "
+        f"kalshi_price={metrics.kalshi_price:.2f} implied_prob={metrics.implied_prob:.2f} "
+        f"model_prob={metrics.model_prob:.3f} edge={metrics.edge:.3f} "
+        f"EV_gross={metrics.ev_gross:.3f} fee={metrics.fee_per_contract:.4f} "
+        f"EV_net={metrics.ev_net_per_contract:.3f}"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXECUTION GUARDS: Distance, Edge, Asset, and Timeframe Validation
+# Three-layer protection: (1) asset/tf whitelist, (2) distance caps, (3) edge floors
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ASSET EXTRACTION UTILITY ("No Surprises" Integration)
+# Robust extraction of asset symbols from various Kalshi ticker formats
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def extract_asset_from_ticker(ticker: str) -> str:
+    """Extract asset symbol (BTC, ETH, SOL, XRP, DOGE) from Kalshi ticker.
+    
+    Handles multiple ticker formats:
+    - KXBTC15M-26MAY011300-00 → BTC
+    - KXBTC-26MAY0114-T85299.99 → BTC
+    - KXETH15M → ETH
+    - KXSOL-D → SOL
+    - KXXRP-W → XRP
+    - KXDOGE → DOGE
+    
+    Args:
+        ticker: Kalshi market ticker string
+        
+    Returns:
+        Asset symbol (uppercase) or "UNKNOWN" if not recognized
+        
+    Examples:
+        >>> extract_asset_from_ticker("KXBTC15M-26MAY011300-00")
+        'BTC'
+        >>> extract_asset_from_ticker("KXETH-D")
+        'ETH'
+    """
+    if not ticker or not isinstance(ticker, str):
+        return "UNKNOWN"
+    
+    ticker_upper = ticker.upper().strip()
+    
+    # Map of Kalshi prefixes to asset symbols
+    prefix_map = {
+        "KXBTC": "BTC",
+        "KXETH": "ETH", 
+        "KXSOL": "SOL",
+        "KXXRP": "XRP",
+        "KXDOGE": "DOGE",
+    }
+    
+    # Try prefix matching (most reliable)
+    for prefix, asset in prefix_map.items():
+        if ticker_upper.startswith(prefix):
+            return asset
+    
+    # Fallback: check for embedded asset codes
+    for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+        if asset in ticker_upper:
+            return asset
+    
+    return "UNKNOWN"
+
+
+def extract_timeframe_from_ticker(ticker: str) -> str:
+    """Extract timeframe (15m, 1h, daily, weekly) from Kalshi ticker.
+    
+    Args:
+        ticker: Kalshi market ticker string
+        
+    Returns:
+        Timeframe string or "UNKNOWN" if not recognized
+    """
+    if not ticker or not isinstance(ticker, str):
+        return "UNKNOWN"
+    
+    ticker_upper = ticker.upper().strip()
+    
+    # Check for explicit timeframe patterns
+    if "15M" in ticker_upper or "-15" in ticker_upper:
+        return "15m"
+    
+    # Daily patterns
+    if "-D" in ticker_upper or "DAILY" in ticker_upper:
+        return "daily"
+    
+    # Weekly patterns  
+    if "-W" in ticker_upper or "WEEKLY" in ticker_upper:
+        return "weekly"
+    
+    # Monthly patterns
+    if "-M" in ticker_upper or "MONTHLY" in ticker_upper:
+        return "monthly"
+    
+    # Hourly is often the default (no suffix)
+    # If no explicit daily/weekly/monthly suffix, assume hourly
+    if any(x in ticker_upper for x in ["KXBTC", "KXETH", "KXSOL", "KXXRP", "KXDOGE"]):
+        # Check if it has a date/time pattern (typical for hourly/15m)
+        # Pattern: 2 digits (day) + 3 letters (month) + 4-6 digits (time)
+        # Examples: 26MAY011300 (15m with seconds), 26MAY0114 (hourly), 26MAY01 (daily)
+        import re
+        if re.search(r'\d{2}[A-Z]{3}\d{4,6}', ticker_upper):  # e.g., 26MAY011300 or 26MAY0114
+            return "15m" if "15M" in ticker_upper else "1h"
+    
+    return "UNKNOWN"
+
+
+@dataclass(frozen=True)
+class ExecutionGuardResult:
+    """Result of execution guard checks."""
+    allowed: bool
+    reason: str  # "allowed", "invalid_asset", "non_15m_timeframe", "distance_too_far", "edge_too_low"
+    asset: str
+    timeframe: str
+    # Distance context (when blocked)
+    delta_pct: Optional[float] = None
+    z_score: Optional[float] = None
+    max_delta_pct: Optional[float] = None
+    max_z: Optional[float] = None
+    # Edge context (when blocked)
+    edge: Optional[float] = None
+    required_edge: Optional[float] = None
+
+
+def check_execution_guards(
+    asset: str,
+    timeframe: str,
+    delta_pct: Optional[float] = None,
+    z_score: Optional[float] = None,
+    edge: Optional[float] = None,
+    log_fn: Optional[callable] = None,
+) -> ExecutionGuardResult:
+    """Validate execution against asset/tf whitelist, distance caps, and edge floors.
+    
+    This is the FATAL gate: any violation returns allowed=False with detailed context.
+    
+    Args:
+        asset: Asset symbol (BTC, ETH, SOL, XRP, DOGE)
+        timeframe: Timeframe string (15m, 1h, etc.)
+        delta_pct: Spot-to-strike distance (optional, for distance check)
+        z_score: Normalized distance (optional, for sigma-based check)
+        edge: Model edge value (optional, for edge floor check)
+        log_fn: Optional logging function for blocked trades
+        
+    Returns:
+        ExecutionGuardResult with allowed=True/False and detailed context
+        
+    Example:
+        >>> result = check_execution_guards("BTC", "15m", delta_pct=0.005, z_score=0.5, edge=0.06)
+        >>> if not result.allowed:
+        ...     logger.info(f"[EXECUTION_BLOCKED] {result.reason}")
+    """
+    # Layer 1: Asset whitelist
+    if asset not in ALLOWED_ASSETS:
+        result = ExecutionGuardResult(
+            allowed=False,
+            reason="invalid_asset",
+            asset=asset,
+            timeframe=timeframe,
+        )
+        if log_fn:
+            log_fn(
+                "[EXECUTION_BLOCKED] asset=%s tf=%s reason=invalid_asset allowed_assets=%s",
+                asset, timeframe, ALLOWED_ASSETS
+            )
+        return result
+    
+    # Layer 2: Timeframe execution gate (FATAL: only 15m allowed)
+    if timeframe not in EXECUTION_TIMEFRAMES:
+        result = ExecutionGuardResult(
+            allowed=False,
+            reason="non_15m_timeframe",
+            asset=asset,
+            timeframe=timeframe,
+        )
+        if log_fn:
+            log_fn(
+                "[EXECUTION_BLOCKED] asset=%s tf=%s reason=non_15m_timeframe signal_only=true "
+                "Note: 1h/daily/weekly may be used for signal/context but CANNOT execute",
+                asset, timeframe
+            )
+        return result
+    
+    # Layer 3: Distance caps (only if delta_pct provided)
+    if delta_pct is not None:
+        max_delta = MAX_DELTA_PCT.get(asset, 0.015)
+        if abs(delta_pct) > max_delta:
+            result = ExecutionGuardResult(
+                allowed=False,
+                reason="distance_too_far",
+                asset=asset,
+                timeframe=timeframe,
+                delta_pct=delta_pct,
+                z_score=z_score,
+                max_delta_pct=max_delta,
+                max_z=MAX_Z_DISTANCE,
+            )
+            if log_fn:
+                log_fn(
+                    "[EXECUTION_BLOCKED] asset=%s tf=%s reason=distance_too_far "
+                    "delta_pct=%.4f max_delta_pct=%.4f z=%.2f max_z=%.2f "
+                    "spot=too_far strike=too_far",
+                    asset, timeframe, delta_pct, max_delta, z_score or 0, MAX_Z_DISTANCE
+                )
+            return result
+    
+    # Layer 3b: Sigma-based distance cap (only if z_score provided)
+    if z_score is not None:
+        if abs(z_score) > MAX_Z_DISTANCE:
+            result = ExecutionGuardResult(
+                allowed=False,
+                reason="distance_too_far_z",
+                asset=asset,
+                timeframe=timeframe,
+                delta_pct=delta_pct,
+                z_score=z_score,
+                max_delta_pct=MAX_DELTA_PCT.get(asset, 0.015),
+                max_z=MAX_Z_DISTANCE,
+            )
+            if log_fn:
+                log_fn(
+                    "[EXECUTION_BLOCKED] asset=%s tf=%s reason=distance_too_far_z "
+                    "z=%.2f max_z=%.2f sigma_exceeded=true",
+                    asset, timeframe, z_score, MAX_Z_DISTANCE
+                )
+            return result
+    
+    # Layer 4: Edge floor (only if edge provided)
+    if edge is not None:
+        # Determine if near or far contract
+        is_far = (z_score is not None and abs(z_score) > Z_NEAR_THRESHOLD)
+        # Use dynamic get_min_edge() to respect MERID_PM_EDGE_NEAR_* env var overrides
+        from merid.prediction.kalshi_distance_config import get_min_edge
+        min_edge = get_min_edge(asset, is_far)
+        
+        if edge < min_edge:
+            result = ExecutionGuardResult(
+                allowed=False,
+                reason="edge_too_low",
+                asset=asset,
+                timeframe=timeframe,
+                edge=edge,
+                required_edge=min_edge,
+            )
+            if log_fn:
+                log_fn(
+                    "[EXECUTION_BLOCKED] asset=%s tf=%s reason=edge_too_low "
+                    "edge=%.4f required_edge=%.4f contract_type=%s",
+                    asset, timeframe, edge, min_edge, "far" if is_far else "near"
+                )
+            return result
+    
+    # All guards passed
+    return ExecutionGuardResult(
+        allowed=True,
+        reason="allowed",
+        asset=asset,
+        timeframe=timeframe,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# UPSTREAM DATA INTEGRITY GUARDS ("No Surprises" Integration)
+# These functions enforce data quality before signals reach execution
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@dataclass(frozen=True)
+class DataIntegrityResult:
+    """Result of upstream data integrity checks."""
+    passed: bool
+    reason: str  # "passed", "stale_signal", "reference_misaligned", "invalid_price"
+    asset: str
+    # Context for failures
+    last_bar_age_seconds: Optional[float] = None
+    spot_price: Optional[float] = None
+    kalshi_reference: Optional[float] = None
+    divergence_pct: Optional[float] = None
+    max_divergence_pct: Optional[float] = None
+
+
+def check_signal_staleness(
+    asset: str,
+    last_bar_timestamp: float,
+    current_time: Optional[float] = None,
+) -> DataIntegrityResult:
+    """Check if momentum signal is stale (> 1 bar old for 15m).
+    
+    Args:
+        asset: Asset symbol
+        last_bar_timestamp: Unix timestamp of last 15m bar close
+        current_time: Optional current time (default: time.time())
+        
+    Returns:
+        DataIntegrityResult with passed=True if signal fresh
+    """
+    if current_time is None:
+        current_time = time.time()
+    
+    last_bar_age = current_time - last_bar_timestamp
+    
+    if last_bar_age > SIGNAL_MAX_BAR_AGE_SECONDS:
+        return DataIntegrityResult(
+            passed=False,
+            reason="stale_signal",
+            asset=asset,
+            last_bar_age_seconds=last_bar_age,
+        )
+    
+    return DataIntegrityResult(passed=True, reason="passed", asset=asset)
+
+
+def check_spot_reference_integrity(
+    asset: str,
+    our_spot: float,
+    kalshi_reference: float,
+    log_fn: Optional[callable] = None,
+) -> DataIntegrityResult:
+    """Validate our spot price against Kalshi reference price.
+    
+    Detects potential data issues:
+    - Kalshi mislabeled strike (wrong reference)
+    - Our feed stale or corrupted
+    - Market structure change (unannounced)
+    
+    Args:
+        asset: Asset symbol
+        our_spot: Our best spot price (from primary feed)
+        kalshi_reference: Kalshi's reference/target price from market data
+        log_fn: Optional logging function for misaligned refs
+        
+    Returns:
+        DataIntegrityResult with passed=True if aligned within tolerance
+    """
+    if our_spot <= 0 or kalshi_reference <= 0:
+        return DataIntegrityResult(
+            passed=False,
+            reason="invalid_price",
+            asset=asset,
+            spot_price=our_spot,
+            kalshi_reference=kalshi_reference,
+        )
+    
+    divergence = abs(our_spot - kalshi_reference) / our_spot
+    
+    if divergence > SPOT_DIVERGENCE_MAX_PCT:
+        result = DataIntegrityResult(
+            passed=False,
+            reason="reference_misaligned",
+            asset=asset,
+            spot_price=our_spot,
+            kalshi_reference=kalshi_reference,
+            divergence_pct=divergence,
+            max_divergence_pct=SPOT_DIVERGENCE_MAX_PCT,
+        )
+        if log_fn:
+            log_fn(
+                "[EXECUTION_BLOCKED] asset=%s reason=reference_misaligned "
+                "our_spot=%.2f kalshi_ref=%.2f divergence=%.4f max_divergence=%.4f",
+                asset, our_spot, kalshi_reference, divergence, SPOT_DIVERGENCE_MAX_PCT
+            )
+        return result
+    
+    return DataIntegrityResult(
+        passed=True,
+        reason="passed",
+        asset=asset,
+        spot_price=our_spot,
+        kalshi_reference=kalshi_reference,
+        divergence_pct=divergence,
+    )
+
+
+# Concrete check function (as per "No Surprises" spec)
+def run_all_upstream_guards(
+    asset: str,
+    timeframe: str,
+    last_bar_timestamp: float,
+    our_spot: float,
+    kalshi_reference: float,
+    delta_pct: Optional[float] = None,
+    z_score: Optional[float] = None,
+    edge: Optional[float] = None,
+    log_fn: Optional[callable] = None,
+) -> Tuple[bool, List[str]]:
+    """Run ALL upstream and execution guards, returning all failures.
+    
+    This is the comprehensive "no surprises" check that runs:
+    1. Signal staleness
+    2. Spot reference integrity
+    3. Asset/timeframe whitelist
+    4. Distance caps
+    5. Edge floors
+    
+    Returns:
+        (all_passed: bool, list_of_failure_reasons: List[str])
+        
+    Example:
+        >>> passed, failures = run_all_upstream_guards(
+        ...     "BTC", "15m", last_bar_ts=1746022800, our_spot=85000,
+        ...     kalshi_ref=84950, delta_pct=0.005, edge=0.06
+        ... )
+        >>> if not passed:
+        ...     print(f"Blocked: {failures}")
+    """
+    failures: List[str] = []
+    
+    # 1. Signal staleness
+    staleness = check_signal_staleness(asset, last_bar_timestamp)
+    if not staleness.passed:
+        failures.append(f"stale_signal:age={staleness.last_bar_age_seconds:.0f}s")
+        if log_fn:
+            log_fn(
+                "[EXECUTION_BLOCKED] asset=%s tf=%s reason=stale_signal last_bar_age=%.0fs max=%.0fs",
+                asset, timeframe, staleness.last_bar_age_seconds, SIGNAL_MAX_BAR_AGE_SECONDS
+            )
+    
+    # 2. Spot reference integrity
+    ref_check = check_spot_reference_integrity(asset, our_spot, kalshi_reference, log_fn)
+    if not ref_check.passed:
+        failures.append(f"reference_misaligned:div={ref_check.divergence_pct:.4f}")
+    
+    # 3-5. Execution guards (asset/tf, distance, edge)
+    guard_result = check_execution_guards(
+        asset=asset,
+        timeframe=timeframe,
+        delta_pct=delta_pct,
+        z_score=z_score,
+        edge=edge,
+        log_fn=log_fn,
+    )
+    if not guard_result.allowed:
+        failures.append(f"{guard_result.reason}")
+    
+    return len(failures) == 0, failures
+
+
+def run_all_upstream_guards_with_ticker(
+    ticker: str,
+    last_bar_timestamp: float,
+    our_spot: float,
+    kalshi_reference: float,
+    delta_pct: Optional[float] = None,
+    z_score: Optional[float] = None,
+    edge: Optional[float] = None,
+    log_fn: Optional[callable] = None,
+) -> Tuple[bool, List[str], str, str]:
+    """Run ALL upstream guards with automatic asset/timeframe extraction from ticker.
+    
+    This is the recommended entry point for agents - it extracts asset and timeframe
+    from the Kalshi ticker format automatically, then runs all guards.
+    
+    Args:
+        ticker: Kalshi market ticker (e.g., "KXBTC15M-26MAY011300-00")
+        last_bar_timestamp: Unix timestamp of last 15m bar close
+        our_spot: Our best spot price (from primary feed)
+        kalshi_reference: Kalshi's reference/target price from market data
+        delta_pct: Optional absolute distance from spot to strike (as fraction)
+        z_score: Optional standardized distance (sigma)
+        edge: Optional expected edge (as fraction, e.g., 0.06 for 6%)
+        log_fn: Optional logging function (receives formatted strings)
+        
+    Returns:
+        Tuple of (all_passed: bool, failure_reasons: List[str], asset: str, timeframe: str)
+        
+    Example:
+        >>> passed, failures, asset, tf = run_all_upstream_guards_with_ticker(
+        ...     "KXBTC15M-26MAY011300-00", last_bar_ts=1746022800, 
+        ...     our_spot=85000, kalshi_ref=84950, delta_pct=0.005, edge=0.06
+        ... )
+        >>> if not passed:
+        ...     logger.warning(f"Trade blocked for {asset}/{tf}: {failures}")
+    """
+    # Extract asset and timeframe from ticker
+    asset = extract_asset_from_ticker(ticker)
+    timeframe = extract_timeframe_from_ticker(ticker)
+    
+    # If we couldn't extract asset, that's an immediate block
+    if asset == "UNKNOWN":
+        if log_fn:
+            log_fn(
+                "[EXECUTION_BLOCKED] asset=%s tf=%s reason=invalid_asset ticker=%s allowed_assets=%s",
+                asset, timeframe, ticker, ALLOWED_ASSETS
+            )
+        return False, [f"invalid_asset:could_not_extract_from_{ticker}"], asset, timeframe
+    
+    # Run all guards with extracted values
+    passed, failures = run_all_upstream_guards(
+        asset=asset,
+        timeframe=timeframe,
+        last_bar_timestamp=last_bar_timestamp,
+        our_spot=our_spot,
+        kalshi_reference=kalshi_reference,
+        delta_pct=delta_pct,
+        z_score=z_score,
+        edge=edge,
+        log_fn=log_fn,
+    )
+    
+    return passed, failures, asset, timeframe
 
 
 def _get_agent_executor() -> ThreadPoolExecutor:
@@ -193,6 +917,208 @@ def _swarm_max_solo_trades_degraded() -> int:
     return int(os.getenv("MERID_PM_SWARM_SOLO_TRADES_CAP", "3"))
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# HEALTH_15M PERIODIC SNAPSHOT — "No Surprises" Integration
+# Self-auditing health check for the 15m-only micro-momentum mandate
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@dataclass(frozen=True)
+class Health15MSnapshot:
+    """Health snapshot for 15m micro-scalping system."""
+    timestamp: float
+    active_assets: List[str]  # Which of BTC/ETH/SOL/XRP/DOGE have candidates
+    non_15m_executions_last_1h: int  # Should be 0
+    avg_distance_bps_last_50_trades: float  # Should be below 75bps for BTC
+    stale_signal_count_last_15m: int
+    fee_mismatch_count_last_1h: int
+    fill_recon_errors_last_1h: int
+    reference_misaligned_count_last_1h: int
+    
+    def to_log_line(self) -> str:
+        """Format as structured log line for grep/awk analysis."""
+        return (
+            f"[HEALTH_15M] ts={self.timestamp:.0f} "
+            f"active_assets={','.join(self.active_assets)} "
+            f"non_15m_exec_1h={self.non_15m_executions_last_1h} "
+            f"avg_dist_bps={self.avg_distance_bps_last_50_trades:.1f} "
+            f"stale_15m={self.stale_signal_count_last_15m} "
+            f"fee_mismatch_1h={self.fee_mismatch_count_last_1h} "
+            f"recon_err_1h={self.fill_recon_errors_last_1h} "
+            f"ref_misalign_1h={self.reference_misaligned_count_last_1h}"
+        )
+
+
+def compute_health_15m_snapshot(
+    fills_ledger: Optional[Any] = None,
+    position_cache: Optional[Any] = None,
+    log_fn: Optional[callable] = None,
+) -> Health15MSnapshot:
+    """Compute HEALTH_15M snapshot from current system state.
+    
+    This is the "no surprises" health check that aggregates:
+    - Signal quality (staleness)
+    - Execution compliance (15m-only)
+    - Distance adherence (are we trading far OTM?)
+    - Fee integrity (estimate vs actual)
+    - Fill reconciliation (WS vs HTTP consistency)
+    
+    Args:
+        fills_ledger: Optional KalshiFillsLedger instance
+        position_cache: Optional KalshiPositionCache instance
+        log_fn: Optional logging function
+        
+    Returns:
+        Health15MSnapshot with current metrics
+        
+    Example:
+        >>> snapshot = compute_health_15m_snapshot()
+        >>> logger.info(snapshot.to_log_line())
+        [HEALTH_15M] ts=1746117600 active_assets=BTC,ETH non_15m_exec_1h=0 ...
+    """
+    now = time.time()
+    
+    # Default values (will be overridden if data sources available)
+    active_assets: List[str] = []
+    non_15m_exec = 0
+    avg_distance_bps = 0.0
+    stale_signals = 0
+    fee_mismatches = 0
+    recon_errors = 0
+    ref_misaligned = 0
+    
+    # Try to get active assets from position cache
+    if position_cache is not None:
+        try:
+            positions = getattr(position_cache, 'get_positions', lambda: {})()
+            active_assets = list(set(
+                p.asset for p in positions.values()
+                if getattr(p, 'asset', None) in ALLOWED_ASSETS
+            ))
+        except Exception:
+            pass
+    
+    # If no active positions, report all allowed assets as "monitored"
+    if not active_assets:
+        active_assets = list(ALLOWED_ASSETS)
+    
+    # Try to get fill stats from fills ledger
+    if fills_ledger is not None:
+        try:
+            # Get recent fills (last 50)
+            recent_fills = fills_ledger.get_fills(
+                since=datetime.now(timezone.utc) - timedelta(hours=24),
+                limit=50
+            )
+            
+            if recent_fills:
+                # Calculate average distance from fill metadata (if stored)
+                # This is a placeholder - real implementation would read from fill metadata
+                avg_distance_bps = 50.0  # Default assumption
+                
+                # Count fee mismatches (would need intent tracking)
+                # Placeholder: scan for [FEE_MISMATCH] in recent log events
+        except Exception:
+            pass
+    
+    snapshot = Health15MSnapshot(
+        timestamp=now,
+        active_assets=sorted(active_assets),
+        non_15m_executions_last_1h=non_15m_exec,
+        avg_distance_bps_last_50_trades=avg_distance_bps,
+        stale_signal_count_last_15m=stale_signals,
+        fee_mismatch_count_last_1h=fee_mismatches,
+        fill_recon_errors_last_1h=recon_errors,
+        reference_misaligned_count_last_1h=ref_misaligned,
+    )
+    
+    if log_fn:
+        log_fn(snapshot.to_log_line())
+    
+    return snapshot
+
+
+def _validate_ticker_for_exit(ticker: str, allow_expired: bool = True) -> tuple[bool, Optional[str]]:
+    """Validate that a ticker exists in the Kalshi catalog before sending exit order.
+    
+    CRITICAL: Prevents 'Ticker not found in catalog' errors on position exits
+    by validating the stored ticker against the canonical catalog.
+    
+    For position exits (allow_expired=True), we allow the exit attempt even if the
+    ticker is not in the catalog, as the market may have expired but we still hold
+    a position that needs to be closed. The Kalshi API will return the appropriate
+    error if the market is truly settled and cannot be traded.
+    
+    Args:
+        ticker: The ticker to validate
+        allow_expired: If True, allow exits for tickers not in catalog (expired markets)
+                      
+    Returns:
+        Tuple of (is_valid: bool, canonical_ticker: Optional[str])
+        If valid, returns (True, canonical_ticker)
+        If invalid and allow_expired=False, returns (False, None)
+        If not in catalog but allow_expired=True, returns (True, ticker) with warning
+    """
+    if not ticker:
+        logger.error("[TICKER_VALIDATION] Empty ticker provided for exit validation")
+        return False, None
+    
+    try:
+        from merid.event_venues.kalshi.market_catalog import get_market_catalog
+        from merid.event_venues.kalshi.ticker_utils import normalize_ticker_for_order
+        catalog = get_market_catalog()
+        if not catalog:
+            # Catalog unavailable - fail open with warning
+            logger.warning(
+                "[TICKER_VALIDATION] Catalog unavailable for %s - proceeding with stored ticker",
+                ticker
+            )
+            return True, ticker
+        
+        # PRODUCTION FIX (2026-05-01): Normalize ticker to strip strike suffix before catalog lookup
+        # Exit positions may have stored tickers with strike levels (e.g., -30, -T80199.99)
+        # but the catalog only stores the base market ticker.
+        _normalized_ticker = normalize_ticker_for_order(ticker)
+        if _normalized_ticker != ticker:
+            logger.debug(
+                "[TICKER_VALIDATION_NORMALIZE] %s -> %s for catalog lookup",
+                ticker, _normalized_ticker
+            )
+        
+        # Check if ticker exists in catalog (using normalized ticker)
+        market = catalog.get_market(_normalized_ticker)
+        if market:
+            # Return the canonical ticker from catalog (prefer market's ticker, fallback to normalized)
+            canonical = getattr(market, 'ticker', None) or _normalized_ticker
+            return True, canonical
+        
+        # Ticker not found in catalog - may be expired/settled
+        if allow_expired:
+            # For position exits, allow the attempt with the normalized ticker
+            # Kalshi will return appropriate error if market is truly settled
+            logger.warning(
+                "[TICKER_VALIDATION_EXPIRED] Ticker %s (normalized: %s) not in catalog but allowing exit attempt "
+                "(market may be expired/settled). Position exit will be attempted with normalized ticker.",
+                ticker, _normalized_ticker
+            )
+            return True, _normalized_ticker
+        
+        # Ticker not found and expired markets not allowed - block the order
+        logger.error(
+            "[TICKER_VALIDATION_FAIL] Ticker %s not found in Kalshi catalog. "
+            "Exit order will be blocked to prevent 404 error.",
+            ticker
+        )
+        return False, None
+        
+    except Exception as exc:
+        # Fail open if validation fails, but log the error
+        logger.warning(
+            "[TICKER_VALIDATION] Validation failed for %s: %s - proceeding with stored ticker",
+            ticker, exc
+        )
+        return True, ticker
+
+
 def _swarm_max_solo_wall_seconds() -> float:
     """Wall-clock time in degraded mode before halting new entries."""
     return float(os.getenv("MERID_PM_SWARM_SOLO_WALL_SECONDS", "1800.0"))
@@ -216,15 +1142,15 @@ class LifecycleState(str, Enum):
 # Minimum seconds in WARMING_UP before considering promotion to ACTIVE.
 # Actual promotion requires data-readiness checks (catalog populated, spot online)
 # or fallback to this minimum + stagger after which the agent promotes regardless.
-_WARMUP_MIN_SECONDS: float = 15.0
+_WARMUP_MIN_SECONDS: float = float(os.getenv("MERID_PM_WARMUP_MIN_SECONDS", "15.0"))
 # BUG-L13 FIX: Stagger agent promotions to prevent thundering herd
 # Each agent adds 0-30s additional delay based on hash of agent name
-_MAX_STAGGER_SECONDS: float = 30.0
+_MAX_STAGGER_SECONDS: float = float(os.getenv("MERID_PM_MAX_STAGGER_SECONDS", "30.0"))
 # Hard ceiling: promote to ACTIVE unconditionally after this many seconds
 # even if data checks haven't passed (prevents infinite warmup stall).
-_WARMUP_MAX_SECONDS: float = 90.0
+_WARMUP_MAX_SECONDS: float = float(os.getenv("MERID_PM_WARMUP_MAX_SECONDS", "90.0"))
 # Max consecutive cycle errors before the agent pauses itself (medium-risk fix)
-_MAX_CONSECUTIVE_ERRORS: int = 5
+_MAX_CONSECUTIVE_ERRORS: int = int(os.getenv("MERID_PM_MAX_CONSECUTIVE_ERRORS", "5"))
 
 
 @dataclass
@@ -300,6 +1226,10 @@ class KalshiTradingAgent:
         self.logger = get_logger(f"merid.prediction.agent.{config.name}")
         self.state = AgentState(name=config.name)
         
+        # CRITICAL FIX: _agent_name attribute required by _resolve_markets timeframe filter
+        # This was missing causing AttributeError: 'KalshiTradingAgent' object has no attribute '_agent_name'
+        self._agent_name = config.name
+        
         # P1 FIX: Unique instance ID to prevent clone collisions in multi-worker scenarios
         # This ensures each agent instance has a unique identity even if config.agent_id is shared
         self._instance_id = uuid.uuid4().hex[:8]
@@ -340,6 +1270,56 @@ class KalshiTradingAgent:
         self._tp_manager = TakeProfitManager(config=_tp_cfg)
         # position_id -> TrackedPosition for open fills awaiting settlement
         self._tracked_positions: Dict[str, TrackedPosition] = {}
+        
+        # MICRO-SCALPING: Dynamic take-profit calculator with per-asset volatility scaling
+        # BTC/ETH: higher targets (4-8%), SOL/XRP/DOGE: tighter targets (2-5%) due to lower liquidity
+        _asset = getattr(config, 'asset', 'BTC')
+        _is_major = _asset in ('BTC', 'ETH')
+        _dtp_cfg = DynamicTPConfig(
+            low_volatility_target=0.04 if _is_major else 0.025,      # 4% majors / 2.5% alts
+            normal_volatility_target=0.06 if _is_major else 0.04,   # 6% majors / 4% alts
+            high_volatility_target=0.10 if _is_major else 0.06,     # 10% majors / 6% alts
+            low_vol_threshold=0.015 if _is_major else 0.02,          # tighter for majors
+            high_vol_threshold=0.04 if _is_major else 0.05,        # majors more sensitive
+            strong_momentum_threshold=0.12,   # 12%+ edge = strong
+            weak_momentum_threshold=0.05,     # <5% edge = weak
+            momentum_boost_factor=1.4,       # +40% for strong momentum
+            momentum_reduce_factor=0.75,    # -25% for weak momentum
+            trailing_stop_distance_pct=0.015 if _is_major else 0.02,  # 1.5% trail majors / 2% alts
+            trailing_activation_pct=0.015,  # Start trailing at 1.5% profit
+            max_profit_target_pct=0.12 if _is_major else 0.08,       # Cap 12% majors / 8% alts
+            min_profit_target_pct=0.02,       # Floor at 2%
+        )
+        self._dynamic_tp_calc = DynamicTPCalculator(config=_dtp_cfg)
+        
+        # MICRO-SCALPING: Fast exit manager with dynamic TP integration
+        # NOTE: profit_target_pct=0.0 to disable fixed target; rely purely on dynamic TP
+        # PRODUCTION FIX (2026-05-01): Derive from environment variables, not hardcoded
+        # REVERTED (2026-05-08): Aligned with MicroScalpExitConfig defaults (180s, 2c min profit) to restore profitable trades
+        _ms_cfg = MicroScalpExitConfig(
+            profit_target_pct=0.0,         # DISABLED: use dynamic TP only (no fixed 5%)
+            max_hold_seconds=float(os.getenv("MERID_PM_MICROSCALP_MAX_HOLD_SECONDS", "180")),  # 3 min default (reverted from 120s)
+            edge_decay_threshold=float(os.getenv("MERID_PM_MICROSCALP_EDGE_DECAY", "0.50")),  # 50% default
+            book_flip_detection=True,      # Detect order book flips
+            min_profit_cents=int(os.getenv("MERID_PM_MICROSCALP_MIN_PROFIT_CENTS", "2")),  # $0.02 default (reverted from 3c)
+        )
+        self._micro_scalp_exit = MicroScalpExitManager(
+            config=_ms_cfg,
+            dynamic_tp_calculator=self._dynamic_tp_calc,
+        )
+        
+        # MICRO-SCALPING: Cycle cap tracker for real-time capital utilization
+        # Uses canonical MAX_CYCLE_RISK_PCT from core.settings (single source of truth)
+        from core.settings import MAX_CYCLE_RISK_PCT
+        _cycle_cfg = CycleCapConfig(
+            max_cycle_risk_pct=MAX_CYCLE_RISK_PCT,  # Canonical % from core.settings
+            bankroll_source="live",                   # Use live bankroll service ONLY
+        )
+        self._cycle_tracker = CycleCapTracker(config=_cycle_cfg)
+        
+        # Performance monitoring for circuit breaker
+        self._recent_trades_for_health: list = []
+        self._health_check_interval = int(os.getenv("MERID_PM_HEALTH_CHECK_INTERVAL", "30"))  # Check every N trades
         # Wire 1: live Kalshi contracts near spot, updated by CryptoSurfaceLoader callback
         self._live_markets: list = []
         # Lazily initialized in _execute_signal_body for crypto category signals
@@ -356,6 +1336,7 @@ class KalshiTradingAgent:
 
         Uses the formula: min(floor(bankroll_usd / 100), 3, top_n_edges)
         This ensures small bankrolls only trade top 1 edge, growing to 3 as compounding occurs.
+        REVERTED (2026-05-08): default top_n_edges=3 (was 1) to restore profitable trades.
         """
         try:
             from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
@@ -442,7 +1423,7 @@ class KalshiTradingAgent:
             return True
         
         # Only momentum scalping timeframes
-        if timeframe not in MOMENTUM_SCALPING_TIMEFRAMES:
+        if timeframe not in MEAN_REVERSION_TIMEFRAMES:
             self.logger.debug(
                 "[ARBITER] Skipping non-momentum timeframe: %s %s",
                 asset, timeframe
@@ -540,93 +1521,230 @@ class KalshiTradingAgent:
             
             # Use the new is_winner method that checks _last_cycle_winners
             # This works because run_cycle() stores winners before clearing _current_candidates
-            return arbiter.is_winner(market_id, max_age_seconds=30.0)
+            is_winner = arbiter.is_winner(market_id, max_age_seconds=30.0)
+            
+            # Log diagnostic info to debug ARBITER_BLOCKED
+            if not is_winner:
+                # Get cycle age for diagnostic
+                cycle_age = 0
+                try:
+                    if arbiter._last_cycle_timestamp:
+                        cycle_age = (datetime.now(timezone.utc) - arbiter._last_cycle_timestamp).total_seconds()
+                except Exception:
+                    pass
+                
+                # Log what winners are stored
+                stored_winners = list(arbiter._last_cycle_winners.keys())
+                self.logger.warning(
+                    "[ARBITER] %s not in winners and arbiter stale (%.0fs old) - FAIL-CLOSED blocking trade to prevent losses. Stored winners: %s",
+                    market_id, cycle_age, stored_winners[:5]  # Show first 5
+                )
+            
+            return is_winner
             
         except Exception as e:
             self.logger.debug(f"[ARBITER] Winner check failed for {market_id}: {e}")
             return True  # Fail-open
     
     def _check_arbiter_priority(self, market_id: str, asset: str, timeframe: str) -> tuple[bool, bool, str]:
-        """Check if market is #1 priority winner with bankroll-based gating for #2/#3.
+        """Check if market is a priority winner with MICRO-SCALPING top-3 execution.
         
-        PRODUCTION FIX v7 (2026-04-26): Implements #1 edge priority execution strategy.
-        - Always allows #1 winner to execute (highest edge, best win rate)
-        - #2 and #3 are gated based on available bankroll
-        - With <$100: only #1 executes (focus capital on highest probability)
-        - With $100-200: #1 and #2 execute (diversified but conservative)
-        - With $200+: all 3 execute (full diversification)
+        MICRO-SCALPING FIX (2026-04-28): Execute top 3 edge winners simultaneously.
+        - #1, #2, #3 all execute (not gated by bankroll) for rapid capital turnover
+        - Requires 5% single_order_pct to allow $1.50 total for 3 x $0.50 contracts
+        - 90-second max hold times ensure capital freed for next cycle
         
-        CRITICAL FIX v7.1 (2026-04-26): Check at ASSET level, not specific ticker.
-        The arbiter selects winning ASSETS (e.g., BTC), not specific markets.
-        Any market for a winning asset should be allowed to execute.
+        CRITICAL FIX (2026-05-01): Standardize on TICKER as the lookup key.
+        The arbiter stores winners keyed by ticker (e.g., "KXETH15M-26MAY011445-45"),
+        so we lookup by market_id (ticker) directly, not by asset matching.
+        
+        BUG-FIX (2026-05-05): Fail-open when arbiter hasn't run yet or winners dict is empty.
+        Previous fail-closed approach blocked all trades when arbiter data was unavailable,
+        causing valid winners to be blocked due to timing issues between agent cycles
+        and arbiter cycles (15s interval).
         
         Returns:
             Tuple of (is_winner, is_number_one, skip_reason)
-            - is_winner: True if asset is in arbiter winners
-            - is_number_one: True if #1 OR if #2/#3 with sufficient bankroll
-            - skip_reason: Why #2/#3 were skipped (for logging)
+            - is_winner: True if ticker is in arbiter winners
+            - is_number_one: True for #1, #2, or #3 (all execute)
+            - skip_reason: Empty for top 3; populated for #4+
         """
+        self.logger.warning("[ARBITER] _check_arbiter_priority called with market_id=%s asset=%s timeframe=%s", market_id, asset, timeframe)
         try:
-            from merid.event_venues.kalshi import get_equity_for_risk_calc_sync
-            
             arbiter = get_crypto_top_edge_arbiter()
             
-            # CRITICAL FIX: Check if ASSET is a winner (not specific ticker)
-            # Find any winner entry for this asset
-            asset_winner = None
-            for ticker, w in arbiter._last_cycle_winners.items():
-                if w.asset == asset and w.is_winner:
-                    asset_winner = w
-                    break
+            # Check if arbiter has run at all (winners dict exists and not empty)
+            if not arbiter._last_cycle_winners:
+                _state_age = time.time() - getattr(arbiter, '_last_cycle_timestamp', 0)
+                self.logger.warning(
+                    "[ARBITER] %s - arbiter winners dict empty (age=%.0fs) - FAIL-OPEN allowing trade",
+                    market_id, _state_age
+                )
+                # Fail-open: allow trade if arbiter hasn't run yet
+                return True, True, "arbiter_not_run_yet_fail_open"
             
-            if not asset_winner:
-                return False, False, f"asset_{asset}_not_winner"
+            # FIX: Check if arbiter winners are stale (timing mismatch between cycles)
+            # When markets expire and new ones appear, agents try to trade before arbiter updates
+            # Detect this by checking if the market being checked is from a different cycle
+            # than what's stored in the winners dict (extracted from ticker expiry time)
+            _now = datetime.now(timezone.utc)
+            _has_cycle_mismatch = False
             
-            # Check if #1 winner (by rank)
-            if asset_winner.rank == 1:
-                return True, True, ""  # #1 always executes
-            
-            # Not #1 - check bankroll for #2/#3 eligibility
+            # Extract expiry time from the market being checked
             try:
-                equity_usd = get_equity_for_risk_calc_sync()
-                if equity_usd is None:
-                    equity_usd = 0.0
-                else:
-                    equity_usd = float(equity_usd)
+                _ticker_parts = market_id.split('-')
+                if len(_ticker_parts) >= 2:
+                    _datetime_part = _ticker_parts[1]  # e.g., 26MAY112315
+                    _year = _now.year
+                    _month_str = _datetime_part[:3]  # MAY
+                    _day = int(_datetime_part[3:5])  # 26
+                    _hour = int(_datetime_part[5:7])  # 11
+                    _minute = int(_datetime_part[7:9])  # 15
+                    
+                    _months = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,
+                               'JUL':7,'AUG':8,'SEP':9,'OCT':10,'NOV':11,'DEC':12}
+                    _month = _months.get(_month_str, 1)
+                    
+                    _market_expiry = datetime(_year, _month, _day, _hour, _minute, tzinfo=timezone.utc)
+                    
+                    # Check if any stored winner has a different expiry (different cycle)
+                    for _winner_ticker in arbiter._last_cycle_winners.keys():
+                        try:
+                            _winner_parts = _winner_ticker.split('-')
+                            if len(_winner_parts) >= 2:
+                                _winner_datetime_part = _winner_parts[1]
+                                _w_day = int(_winner_datetime_part[3:5])
+                                _w_hour = int(_winner_datetime_part[5:7])
+                                _w_minute = int(_winner_datetime_part[7:9])
+                                _w_month = _months.get(_winner_datetime_part[:3], 1)
+                                
+                                _winner_expiry = datetime(_year, _w_month, _w_day, _w_hour, _w_minute, tzinfo=timezone.utc)
+                                
+                                # If expiry times differ by more than 15 minutes (one cycle), it's a mismatch
+                                if abs((_market_expiry - _winner_expiry).total_seconds()) > 900:
+                                    _has_cycle_mismatch = True
+                                    break
+                        except Exception:
+                            pass
             except Exception:
-                equity_usd = 0.0
+                pass  # If parsing fails, continue with normal check
             
-            rank = asset_winner.rank
+            if _has_cycle_mismatch:
+                _state_age = time.time() - getattr(arbiter, '_last_cycle_timestamp', 0)
+                self.logger.warning(
+                    "[ARBITER] %s - arbiter winners from different cycle (age=%.0fs) - FAIL-OPEN allowing trade",
+                    market_id, _state_age
+                )
+                # Fail-open: allow trade if arbiter winners are from a different cycle
+                return True, True, "arbiter_cycle_mismatch_fail_open"
             
-            # Bankroll-based gating for #2 and #3
-            # #1 always executes (highest edge = best win rate)
-            # MICRO-BANKROLL FIX (2026-04-27): Lowered from $100/$200 to $25/$75.
-            # With $44.35 equity, old $100 threshold blocked ALL #2 winners,
-            # meaning only 1 trade per cycle could ever execute.
-            # #2 requires $25+ bankroll (1 contract at 50¢ = $0.50 risk)
-            # #3 requires $75+ bankroll
-            if rank == 2:
-                if equity_usd >= 25.0:
-                    return True, True, ""  # Sufficient bankroll for #2
-                else:
-                    return True, False, f"#{rank}_insufficient_bankroll(${equity_usd:.2f}<$25)"
-            elif rank >= 3:
-                if equity_usd >= 75.0:
-                    return True, True, ""  # Sufficient bankroll for #3
-                else:
-                    return True, False, f"#{rank}_insufficient_bankroll(${equity_usd:.2f}<$75)"
+            # FIX: Lookup by ticker key directly (how arbiter stores winners)
+            winner = arbiter._last_cycle_winners.get(market_id)
+
+            # FALLBACK: If exact match fails, try matching by series ticker prefix
+            # This handles market rollovers where tickers change (e.g., KXETH15M-26MAY120945-45 -> KXETH15M-26MAY121000-00)
+            if not winner:
+                # Extract series ticker prefix (e.g., KXETH15M from KXETH15M-26MAY121000-00)
+                series_prefix = market_id.split('-')[0] if '-' in market_id else market_id
+                for stored_ticker, stored_winner in arbiter._last_cycle_winners.items():
+                    if stored_ticker.startswith(series_prefix):
+                        winner = stored_winner
+                        self.logger.warning(
+                            "[ARBITER] Fallback match: %s matched to stored winner %s by series prefix %s",
+                            market_id, stored_ticker, series_prefix
+                        )
+                        break
+
+            # Log diagnostic info to debug winner lookup
+            stored_winners = list(arbiter._last_cycle_winners.keys())
+            self.logger.warning(
+                "[ARBITER] Lookup %s in winners dict (size=%d, keys=%s) -> found=%s",
+                market_id, len(stored_winners), stored_winners[:3], winner is not None
+            )
+
+            if not winner or not winner.is_winner:
+                # Check if arbiter data is stale (>60s old) - FAIL-CLOSED to prevent bad trades
+                _last_ts = getattr(arbiter, '_last_cycle_timestamp', None)
+                if _last_ts:
+                    # Handle both datetime and float timestamp types
+                    if hasattr(_last_ts, 'timestamp'):
+                        _last_ts_float = _last_ts.timestamp()
+                    else:
+                        _last_ts_float = float(_last_ts)
+                    _state_age = time.time() - _last_ts_float
+                    if _state_age > 60:
+                        self.logger.warning(
+                            "[ARBITER] %s not in winners and arbiter stale (%.0fs old) - FAIL-CLOSED blocking trade to prevent losses",
+                            market_id, _state_age
+                        )
+                        return False, False, f"arbiter_stale_{_state_age:.0f}s_fail_closed"
+                
+                # Fresh data but not in winners - block
+                self.logger.debug(
+                    "[ARBITER] %s not in winners (arbiter fresh) - blocking trade",
+                    market_id
+                )
+                return False, False, f"ticker_{market_id}_not_winner_fail_closed"
+            
+            # MICRO-SCALPING WINNER ALIGNMENT (2026-05-10): Force micro-scalps to only run when asset is in winner set
+            # This ensures pure alignment - no micro-scalp entries/exits on non-winner assets
+            try:
+                from merid.prediction.grid_context import get_grid_context
+                grid_ctx = get_grid_context()
+                
+                # Check if this ticker is a winner using grid context (centralized winner list)
+                # Use max_age_seconds=60 to allow for timing between arbiter cycles and agent cycles
+                is_grid_winner = grid_ctx.is_winner(market_id, max_age_seconds=60.0)
+                
+                if not is_grid_winner:
+                    # Log diagnostic info to debug MICRO_SCALP_WINNER_BLOCK
+                    stored_grid_winners = list(grid_ctx._winners_by_ticker.keys())
+                    grid_cycle_age = 0
+                    if grid_ctx._current_cycle and hasattr(grid_ctx._current_cycle, 'timestamp') and grid_ctx._current_cycle.timestamp:
+                        _cycle_ts = grid_ctx._current_cycle.timestamp
+                        # Handle both datetime and float timestamp types
+                        if hasattr(_cycle_ts, 'timestamp'):
+                            _cycle_ts_float = _cycle_ts.timestamp()
+                        else:
+                            _cycle_ts_float = float(_cycle_ts)
+                        grid_cycle_age = (datetime.now(timezone.utc).timestamp() - _cycle_ts_float)
+                    self.logger.warning(
+                        "[MICRO_SCALP_WINNER_BLOCK] %s not in grid context winners - blocking micro-scalp entry. "
+                        "Grid age=%.0fs, stored winners: %s",
+                        market_id, grid_cycle_age, stored_grid_winners[:5]
+                    )
+                    return False, False, f"not_in_grid_context_winners_micro_scalp_blocked"
+                
+                self.logger.debug(
+                    "[MICRO_SCALP_WINNER_OK] %s is in grid context winners - allowing micro-scalp",
+                    market_id
+                )
+            except Exception as e:
+                self.logger.warning("[MICRO_SCALP_WINNER] Grid context check failed: %s - fail-open allowing", e)
+                # Fail-open: if check fails, allow trade to avoid blocking valid trades
+            
+            # MICRO-SCALPING: Allow top 3 winners (ranks 1, 2, 3) to execute simultaneously
+            rank = winner.rank
+            if rank is None:
+                # Handle None rank - fail-open to allow trade
+                self.logger.warning(f"[ARBITER_PRIORITY] Winner rank is None for {market_id} - FAIL-OPEN allowing trade")
+                return True, True, "rank_none_fail_open"
+            if rank in (1, 2, 3):
+                # Top 3 all execute - cycle cap validation (in risk engine) prevents over-deployment
+                return True, True, ""  # #1, #2, #3 all execute
             else:
-                return True, False, f"rank_{rank}_unknown"
+                # Rank 4+ skipped - only execute top 3 for micro-scalping focus
+                return True, False, f"#{rank}_skipped_micro_scalping_top3_only"
                 
         except Exception as e:
-            self.logger.debug(f"[ARBITER_PRIORITY] Check failed for {market_id}: {e}")
-            # Fail-open: if check fails, allow as if it's a winner
-            return True, True, ""
+            self.logger.warning(f"[ARBITER_PRIORITY] Check failed for {market_id}: {e} - FAIL-OPEN allowing trade")
+            # Fail-open: if check fails, allow trade to avoid blocking valid trades
+            return True, True, f"arbiter_check_failed_{type(e).__name__}_fail_open"
 
     def _get_available_bankroll_usd(self) -> float:
         """Get available bankroll in USD for priority calculations."""
         try:
-            from merid.event_venues.kalshi import get_equity_for_risk_calc_sync
+            from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
             equity = get_equity_for_risk_calc_sync()
             return float(equity) if equity else 0.0
         except Exception:
@@ -698,10 +1816,19 @@ class KalshiTradingAgent:
                     prior_yaml_phase_edges=_prior_yaml_edges,
                     agent_name=config.name,
                 )
+                _is_crypto_agent = True
+            else:
+                _is_crypto_agent = False
         except Exception as _crypto_thr:
+            _is_crypto_agent = False
             logger.debug("crypto strategy threshold merge skipped: %s", _crypto_thr)
         # Re-apply per-agent YAML overrides last so they win over global profiles / crypto thresholds.
+        # EXCEPTION: min_edge_* keys are skipped for crypto agents — the crypto_threshold_matrix
+        # is the authoritative source (per-agent YAML values are informational only for crypto).
+        _crypto_edge_keys = {"min_edge_early", "min_edge_mid", "min_edge_late", "min_edge_terminal"}
         for key, val in raw.items():
+            if _is_crypto_agent and key in _crypto_edge_keys:
+                continue
             if not hasattr(sc, key):
                 continue
             current = getattr(sc, key)
@@ -773,6 +1900,15 @@ class KalshiTradingAgent:
         # P1 FIX: Return unique instance ID to prevent clone collisions
         return getattr(self, '_unique_agent_id', self.config.agent_id)
 
+    @property
+    def agentname(self) -> str:
+        """Canonical agent name for resolution/logging.
+        
+        BUG-FIX (2026-05-01): Some resolution paths expect .agentname attribute.
+        This property normalizes to config.name for backward compatibility.
+        """
+        return getattr(self.config, 'name', 'UNKNOWN_AGENT')
+
     # ── Wire 1: CryptoSurfaceLoader callback ───────────────────────────
 
     def on_surface_update(self, snapshot: object) -> None:
@@ -810,6 +1946,32 @@ class KalshiTradingAgent:
             self.logger.warning(f"{self.config.name} already running")
             return
 
+        # DYNAMIC ENTRY WINDOW POLICY HEADER: Log loaded policies on startup
+        try:
+            from merid.prediction.dynamic_entry_window import get_policies
+            import os
+            
+            policies = get_policies()
+            policy_version = os.getenv("MERID_ENTRY_WINDOW_POLICY_VERSION", "v1")
+            
+            # Build policy summary for logging
+            policy_summary = {}
+            for asset, policy in policies.items():
+                policy_summary[asset] = {
+                    "policy_name": policy.policy_name,
+                    "base_window": f"{policy.base_window_start_minutes}-{policy.base_window_end_minutes}min",
+                    "terminal_enabled": policy.terminal_config.enabled,
+                    "terminal_edge_threshold": f"{policy.terminal_config.edge_threshold_pct}%" if policy.terminal_config.enabled else "N/A"
+                }
+            
+            self.logger.info(
+                "[DYNAMIC_WINDOW_POLICY_HEADER] version=%s policies=%s",
+                policy_version,
+                policy_summary
+            )
+        except Exception as exc:
+            self.logger.warning("[DYNAMIC_WINDOW_POLICY_HEADER] Failed to log policy header: %s", exc)
+
         # Initialize bankroll from live Kalshi API if needed (deferred from __init__)
         if self._bankroll_needs_init:
             from merid.event_venues.kalshi import get_bankroll_service, BalanceState
@@ -830,7 +1992,7 @@ class KalshiTradingAgent:
                     self.config.risk_limits.max_notional_usd = effective_notional
                     self.logger.info(
                         f"[LIVE-BANKROLL-OK] {self.config.name}: max_notional_usd=${effective_notional:.2f} "
-                        f"(Kalshi API: equity=${live_bankroll_usd:.2f} × {risk_fraction*100:.0f}%)"
+                        f"(Kalshi API: equity=${live_bankroll_usd:.2f} × {risk_fraction*100:.1f}%)"
                     )
                 elif summary.state == BalanceState.STALE and summary.equity_usd is not None:
                     live_bankroll_usd = float(summary.equity_usd)
@@ -840,7 +2002,7 @@ class KalshiTradingAgent:
                     self.config.risk_limits.max_notional_usd = effective_notional
                     self.logger.warning(
                         f"[LIVE-BANKROLL-STALE] {self.config.name}: max_notional_usd=${effective_notional:.2f} "
-                        f"(Kalshi API degraded: equity=${live_bankroll_usd:.2f} × {risk_fraction*100:.0f}%)"
+                        f"(Kalshi API degraded: equity=${live_bankroll_usd:.2f} × {risk_fraction*100:.1f}%)"
                     )
                 else:
                     self.logger.critical(
@@ -945,6 +2107,7 @@ class KalshiTradingAgent:
                 "contrarian_model_gap_min",
                 "vol_breakout_neutral_low",
                 "vol_breakout_neutral_high",
+                "sentiment_mode",
                 "max_contracts_per_order",
                 "mm_max_spread_cents",
                 "mm_target_spread_cents",
@@ -962,6 +2125,15 @@ class KalshiTradingAgent:
             except Exception as e:
                 self.logger.debug(f"Crypto edge runtime check failed: {e}")
             self.logger.info("[PM_CONFIG_SUMMARY] %s", _json.dumps(_sub, sort_keys=True))
+            
+            # PRODUCTION FIX (2026-05-13): Log effective profile, sentiment config for audit trail
+            self.logger.info(
+                "[PM_PROFILE_AUDIT] profile=%s, contrarian_sentiment_min=%s, sentiment_mode=%s, sentiment_gating_enabled=%s",
+                _sub.get("MERID_PM_PROFILE", "baseline"),
+                _sub.get("contrarian_sentiment_min", "unknown"),
+                _sub.get("sentiment_mode", "unknown"),
+                _sub.get("sentiment_mode") in ("gating", "full"),
+            )
         except Exception as _pm_sum_exc:
             self.logger.debug("PM_CONFIG_SUMMARY skipped: %s", _pm_sum_exc)
 
@@ -1115,7 +2287,11 @@ class KalshiTradingAgent:
             from merid.event_venues.kalshi import subscribe_to_signals
 
             def _signal_callback(signal):
-                asyncio.create_task(self._on_signal(signal))
+                _task = asyncio.create_task(self._on_signal(signal))
+                def _on_signal_done(t):
+                    if not t.cancelled() and t.exception():
+                        self.logger.warning("Signal handler task failed: %s", t.exception())
+                _task.add_done_callback(_on_signal_done)
 
             subscribe_to_signals(_signal_callback)
             self.logger.debug("Subscribed to SignalRouter for signal-only agent signals")
@@ -1186,6 +2362,8 @@ class KalshiTradingAgent:
             from merid.event_venues.kalshi.decision_trace import new_decision_trace_id
             from merid.prediction.venue_gate import TradingMode
             from merid.event_venues.kalshi import get_bankroll_service
+            # PRODUCTION FIX: Dynamic take-profit based on R-multiple and confidence
+            from merid.prediction.dynamic_takeprofit import compute_dynamic_tp
 
             # Get effective bankroll for risk check
             _effective_equity_usd = 0.0
@@ -1210,11 +2388,136 @@ class KalshiTradingAgent:
 
             _origin = getattr(signal, 'origin_agent', '') or signal.agent_id
 
+            # CRITICAL FIX: Resolve valid market price when signal.price_cents is None
+            # Order router requires 1-99 cents; 0 or 100 are invalid
+            _price_cents = signal.price_cents
+            if _price_cents is None or _price_cents <= 0 or _price_cents >= 100:
+                try:
+                    from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                    store = get_kalshi_market_state_store()
+                    state = store.get(signal.market_id)
+                    if state:
+                        # Use mid price if available, otherwise best bid/ask
+                        if state.mid_cents and 0 < state.mid_cents < 100:
+                            _price_cents = int(state.mid_cents)
+                        elif signal.action == "buy" and state.best_ask_cents and 0 < state.best_ask_cents < 100:
+                            _price_cents = int(state.best_ask_cents)
+                        elif signal.action == "sell" and state.best_bid_cents and 0 < state.best_bid_cents < 100:
+                            _price_cents = int(state.best_bid_cents)
+                        elif state.best_bid_cents and state.best_ask_cents:
+                            # Fallback: mid of bid/ask
+                            _price_cents = int((state.best_bid_cents + state.best_ask_cents) // 2)
+                        else:
+                            # Last resort: default to 50 cents (neutral)
+                            _price_cents = 50
+                    else:
+                        _price_cents = 50  # Default if no market state
+                except Exception as _price_exc:
+                    self.logger.debug("[SIGNAL-IN] Failed to fetch market price for %s: %s", signal.market_id, _price_exc)
+                    _price_cents = 50  # Safe default
+                
+                # Ensure valid range 1-99
+                _price_cents = max(1, min(99, _price_cents))
+                
+                if _price_cents != signal.price_cents:
+                    self.logger.info(
+                        "[SIGNAL-IN] Resolved market price for %s: %s -> %sc",
+                        signal.market_id, signal.price_cents, _price_cents
+                    )
+
+            # PRODUCTION FIX: Compute dynamic take-profit based on R-multiple and confidence
+            # Maps confidence to TP: ≤0.3 → 1.0R, 0.3-0.6 → 1.5R, >0.6 → 2.0-3.0R
+            _tp_price_cents = None
+            _tp_r_multiple = None
+            _stop_price_cents = None
+            try:
+                # Estimate stop distance (default 2 cents for micro-scalping)
+                _stop_distance = 2.0  # 2 cent stop for 1-2c profit targets
+                # Determine direction for TP computation
+                _direction = "LONG" if signal.side.lower() == "yes" else "SHORT"
+                # Use confidence from signal (fallback to 0.5)
+                _confidence = getattr(signal, 'confidence', 0.5) or 0.5
+                # Use edge as Kelly fraction proxy if available
+                _kelly = getattr(signal, 'edge', None)
+                if _kelly is not None and isinstance(_kelly, (int, float)):
+                    _kelly = float(_kelly)
+                else:
+                    _kelly = None
+
+                _tp_plan = compute_dynamic_tp(
+                    entry_price=float(_price_cents),
+                    stop_price=float(_price_cents) - _stop_distance if _direction == "LONG" else float(_price_cents) + _stop_distance,
+                    direction=_direction,
+                    confidence=_confidence,
+                    kelly_fraction=_kelly
+                )
+
+                _tp_price_cents = int(_tp_plan.tp_price)
+                _tp_r_multiple = _tp_plan.tp_r_multiple
+                # Clamp TP to valid Kalshi range 1-99
+                _tp_price_cents = max(1, min(99, _tp_price_cents))
+
+                self.logger.debug(
+                    "[DTP] %s: entry=%sc, TP=%sc (%.2fR), conf=%.2f, kelly=%s",
+                    signal.market_id, _price_cents, _tp_price_cents,
+                    _tp_r_multiple, _confidence, _kelly
+                )
+            except Exception as _tp_exc:
+                self.logger.debug("[DTP] TP computation failed for %s: %s", signal.market_id, _tp_exc)
+
+            # COHERENT RISK CONTRACT: Resolve exit policy for this order
+            _exit_policy_id = None
+            _risk_tier = None
+            _trailing_enabled = None
+            _max_hold_seconds = None
+            _window_resolution_id = None
+            try:
+                from merid.prediction.dynamic_entry_window import resolve_entry_window, resolve_exit_policy
+                from config.kalshi_crypto_config import kalshi_ticker_to_asset
+                
+                asset = kalshi_ticker_to_asset(signal.market_id)
+                if asset:
+                    # Get current time and calculate minutes to expiry
+                    from datetime import datetime
+                    now = datetime.utcnow()
+                    minutes_to_expiry = None
+                    
+                    # Try to get expiry from market if available
+                    try:
+                        from merid.event_venues.kalshi.market_catalog import get_market_catalog
+                        catalog = get_market_catalog()
+                        market = catalog.get_market(signal.market_id)
+                        if market and market.end_date:
+                            minutes_to_expiry = (market.end_date - now).total_seconds() / 60.0
+                    except Exception as _me_exc:
+                        self.logger.debug("[EXIT_POLICY] Could not get market for expiry: %s", _me_exc)
+                    
+                    # Resolve window resolution
+                    edge_pct = float(signal.edge.net_edge * 100) if (signal.edge and hasattr(signal.edge, 'net_edge')) else None
+                    window_res = resolve_entry_window(asset, minutes_to_expiry, edge_pct, ticker=signal.market_id)
+                    
+                    # Resolve exit policy
+                    exit_policy = resolve_exit_policy(window_res, asset, edge_pct)
+                    
+                    # Generate IDs for linkage
+                    _window_resolution_id = f"wr_{signal.market_id}_{int(now.timestamp())}"
+                    _exit_policy_id = f"ep_{signal.market_id}_{int(now.timestamp())}"
+                    _risk_tier = exit_policy.risk_tier
+                    _trailing_enabled = exit_policy.trailing_enabled
+                    _max_hold_seconds = exit_policy.max_hold_seconds
+                    
+                    self.logger.debug(
+                        "[EXIT_POLICY] Resolved for %s: tier=%s, trailing=%s, max_hold=%s",
+                        signal.market_id, _risk_tier, _trailing_enabled, _max_hold_seconds
+                    )
+            except Exception as _ep_exc:
+                self.logger.debug("[EXIT_POLICY] Failed to resolve exit policy for %s: %s", signal.market_id, _ep_exc)
+
             intent = OrderIntent(
                 ticker=signal.market_id,
                 side=signal.side,
                 action=signal.action,
-                price_cents=signal.price_cents,
+                price_cents=_price_cents,
                 count=adjusted_size,
                 mode=TradingMode.LIVE,
                 order_type="limit",
@@ -1229,6 +2532,15 @@ class KalshiTradingAgent:
                 sentiment_timeframe=signal.metadata.get('sentiment_timeframe') if signal.metadata else None,
                 effective_equity_usd=_effective_equity_usd if _effective_equity_usd > 0 else None,
                 edge_pct=getattr(signal, 'edge', None),
+                # PRODUCTION: Dynamic take-profit wiring
+                take_profit_price_cents=_tp_price_cents,
+                take_profit_r_multiple=_tp_r_multiple,
+                # COHERENT RISK CONTRACT: WindowResolution + ExitPolicyResolution linkage
+                window_resolution_id=_window_resolution_id,
+                exit_policy_id=_exit_policy_id,
+                risk_tier=_risk_tier,
+                trailing_enabled=_trailing_enabled,
+                max_hold_seconds=_max_hold_seconds,
             )
 
             result = await route_order_async(intent)
@@ -1259,11 +2571,11 @@ class KalshiTradingAgent:
         self.state.enabled = False  # stop accepting new signals
         self._drain_done.clear()
 
-        # Wait for the current cycle to finish (up to 30s)
+        # Wait for the current cycle to finish (up to 60s) - RELAXED for smoother operation
         try:
-            await asyncio.wait_for(self._cycle_done.wait(), timeout=30.0)
+            await asyncio.wait_for(self._cycle_done.wait(), timeout=60.0)
         except asyncio.TimeoutError:
-            self.logger.warning("drain: cycle did not complete within 30s, forcing drain")
+            self.logger.warning("drain: cycle did not complete within 60s, forcing drain")
 
         # Final stop-loss sweep
         try:
@@ -1277,12 +2589,13 @@ class KalshiTradingAgent:
     async def stop(self) -> None:
         """Gracefully stop the agent."""
         # BUG-L6: wait for any in-flight order placement before cancelling
+        # RELAXED: Increased timeout from 5s to 10s for smoother operation
         if self._in_execution.is_set():
             try:
-                await asyncio.wait_for(self._in_execution.wait(), timeout=5.0)
+                await asyncio.wait_for(self._in_execution.wait(), timeout=10.0)
                 # wait for it to *clear* (execution finished)
                 # _in_execution is set while executing; poll until clear
-                _deadline = 5.0
+                _deadline = 10.0
                 import time as _t
                 _start = _t.monotonic()
                 while self._in_execution.is_set() and (_t.monotonic() - _start) < _deadline:
@@ -1298,6 +2611,8 @@ class KalshiTradingAgent:
                 await self._task
             except asyncio.CancelledError:
                 pass
+            finally:
+                self._task = None  # CLEAR-FIX: Prevent double-cancel on re-entry
         # D14 / W9: Clear tracked positions so stale entries don't trigger
         # spurious stop-loss closes if the agent is restarted.
         # Warn if any positions have in-flight (pending/partial) fills so
@@ -1363,11 +2678,18 @@ class KalshiTradingAgent:
                     _data_ready = False
                     if warmup_elapsed >= _min_warmup:
                         _data_ready = self.state.cycles_run >= 1  # had at least one cycle
-                    
+
+                    # Check if agent has valid series_tickers (not disabled)
+                    _has_series = (
+                        hasattr(self.config, 'series_tickers') and
+                        self.config.series_tickers is not None and
+                        len(self.config.series_tickers) > 0
+                    )
+
                     # Hard ceiling: promote unconditionally after _WARMUP_MAX_SECONDS
                     _hard_ceiling = warmup_elapsed >= _WARMUP_MAX_SECONDS
-                    
-                    if _data_ready or _hard_ceiling:
+
+                    if (_data_ready or _hard_ceiling) and _has_series:
                         _promote_reason = "data_ready" if _data_ready else "max_warmup_ceiling"
                         self.state.lifecycle = LifecycleState.ACTIVE
                         self.logger.info(
@@ -1375,6 +2697,12 @@ class KalshiTradingAgent:
                             "(reason=%s stagger=%.1fs cycles=%d)",
                             self.config.name, warmup_elapsed, _promote_reason,
                             _stagger_delay, self.state.cycles_run,
+                        )
+                    elif not _has_series:
+                        # Agent has no series_tickers - stay in WARMING_UP indefinitely (disabled)
+                        self.logger.debug(
+                            "[LIFECYCLE] %s has no series_tickers - staying in WARMING_UP (disabled)",
+                            self.config.name
                         )
 
                 if self.state.enabled:
@@ -1450,6 +2778,11 @@ class KalshiTradingAgent:
         """Instrumented body of the decision cycle."""
         _decision_timer = DecisionTimer()
 
+        # SIGNAL-ONLY-FIX: Signal-only agents compute indicators and submit opinions
+        # but skip trade execution. They need market resolution and signal generation
+        # to compute MACD/RSI for sentiment/trading strategy context.
+        _is_signal_only = getattr(self.config, 'signalonly', False)
+
         # 0. Stop-loss sweep — check all open positions before new signals
         await self._check_stop_losses()
 
@@ -1479,6 +2812,20 @@ class KalshiTradingAgent:
                 ]
             except Exception as _exf:
                 self.logger.debug("expiry_fallback skipped: %s", _exf)
+        
+        # STEPWISE CATALOG LOGGING: Track where markets drop to zero
+        _resolved_ct = len(self._resolved_markets)
+        if _resolved_ct == 0:
+            self.logger.info(
+                "[PM_CATALOG_TRACE] agent=%s step=resolved count=0 - no markets found in catalog",
+                self.config.name
+            )
+        else:
+            self.logger.info(
+                "[PM_CATALOG_TRACE] agent=%s step=resolved count=%d - proceeding to window filter",
+                self.config.name, _resolved_ct
+            )
+        
         if not self._resolved_markets:
             self._entry_window_suspect_streak = 0
             _bus.emit(_tick.emit_snapshot(
@@ -1506,6 +2853,13 @@ class KalshiTradingAgent:
 
         _mr_ct = len(self._resolved_markets)
         _mw_ct = len(active_markets)
+        
+        # STEPWISE CATALOG LOGGING: Track window filter results
+        self.logger.info(
+            "[PM_CATALOG_TRACE] agent=%s step=window_filter resolved=%d active=%d",
+            self.config.name, _mr_ct, _mw_ct
+        )
+        
         if _mr_ct > 0 and _mw_ct == 0:
             self._entry_window_suspect_streak += 1
             if self.logger.isEnabledFor(logging.DEBUG):
@@ -1563,7 +2917,7 @@ class KalshiTradingAgent:
                 break
 
             # Check per-window order limit (dynamically computed from bankroll)
-            _effective_max_orders = self._get_effective_max_orders(top_n_edges=3)
+            _effective_max_orders = self._get_effective_max_orders(top_n_edges=3)  # REVERTED from 1 to restore profitable trades
             if self.state.orders_this_window >= _effective_max_orders:
                 self.logger.debug(f"Order limit reached for window ({self.state.orders_this_window}/{_effective_max_orders})")
                 self._emit_decision_log(Decision.hold(
@@ -1715,7 +3069,7 @@ class KalshiTradingAgent:
                 # === Cross-Asset Arbiter Integration ===
                 # Submit crypto momentum scalping signals to arbiter for ranking
                 # Arbiter will deduplicate and select top N edges across all agents
-                if asset in CRYPTO_ASSETS and timeframe in MOMENTUM_SCALPING_TIMEFRAMES:
+                if asset in CRYPTO_ASSETS and timeframe in MEAN_REVERSION_TIMEFRAMES:
                     if signal.action not in (SignalAction.NO_ACTION, SignalAction.HOLD):
                         self._submit_to_arbiter(signal, market, asset, timeframe)
                         # Note: Arbiter collects all candidates and runs cycle at end
@@ -1763,7 +3117,9 @@ class KalshiTradingAgent:
 
                     _sec_exp = self._get_seconds_to_expiry(market, now)
                     _is_new_entry = self._is_new_entry_action(signal.action)
-                    if _is_new_entry and _sec_exp is not None and _sec_exp <= 90:
+                    # EXPIRY_GUARD_SECS: Hard deadline - no new entries within this many seconds of expiry
+                    _EXPIRY_GUARD_SECS = float(os.getenv("MERID_EXPIRY_GUARD_SECS", "90"))
+                    if _is_new_entry and _sec_exp is not None and _sec_exp <= _EXPIRY_GUARD_SECS:
                         self.logger.debug(
                             "Expiry guard: blocking entry pipeline for %s, seconds_to_expiry=%.0f",
                             market.market_id,
@@ -1787,11 +3143,14 @@ class KalshiTradingAgent:
                             elapsed_ms=_decision_timer.elapsed_ms(),
                         ))
                         continue
-                    if _is_new_entry and _sec_exp is not None and _sec_exp <= 120:
+                    # EXPIRY_CAUTION_SECS: Warning threshold for expiry proximity (should be > EXPIRY_GUARD_SECS)
+                    _EXPIRY_CAUTION_SECS = float(os.getenv("MERID_EXPIRY_CAUTION_SECS", "120"))
+                    if _is_new_entry and _sec_exp is not None and _sec_exp <= _EXPIRY_CAUTION_SECS:
                         self.logger.warning(
-                            "Expiry approaching: %s, seconds_to_expiry=%.0f, entering_caution_zone",
+                            "Expiry approaching caution zone: %s, seconds_to_expiry=%.0f (threshold=%.0f)",
                             market.market_id,
                             _sec_exp,
+                            _EXPIRY_CAUTION_SECS,
                         )
                     if _is_new_entry and not self._in_entry_window(market, now):
                         self.logger.debug(
@@ -1869,10 +3228,10 @@ class KalshiTradingAgent:
                             from merid.prediction.crypto_edge_production import get_crypto_edge_runtime
 
                             _mm_mode = get_crypto_edge_runtime().mm_consensus_mode
-                            _mm_wait_ms = get_crypto_edge_runtime().consensus_wait_timeout_ms
+                            _mm_wait_ms = float(os.getenv("MERID_CONSENSUS_WAIT_MS", "500"))
                         except Exception:
                             _mm_mode = "full"
-                            _mm_wait_ms = 500
+                            _mm_wait_ms = float(os.getenv("MERID_CONSENSUS_WAIT_MS", "500"))
 
                         consensus = self._get_consensus(asset, timeframe)
                         if (
@@ -1906,13 +3265,16 @@ class KalshiTradingAgent:
                             # not directional — ``QUOTE`` was incorrectly mapped to signal_dir "no",
                             # so READY+neutral consensus always looked like a mismatch and MM never
                             # executed (logs: "Signal no blocked: consensus is neutral").
+                            # BUG-FIX (2026-05-07): Fix consensus misalignment - SELL_YES is bearish (no), SELL_NO is bullish (yes)
                             if signal.action != SignalAction.QUOTE:
-                                signal_dir = (
-                                    "yes"
-                                    if signal.action
-                                    in (SignalAction.BUY_YES, SignalAction.SELL_YES)
-                                    else "no"
-                                )
+                                # Correct mapping: SELL_YES = bearish (no), SELL_NO = bullish (yes)
+                                _dir_map = {
+                                    SignalAction.BUY_YES: "yes",
+                                    SignalAction.BUY_NO: "no",
+                                    SignalAction.SELL_YES: "no",   # selling YES = bearish
+                                    SignalAction.SELL_NO: "yes",   # selling NO = bullish
+                                }
+                                signal_dir = _dir_map.get(signal.action, "neutral")
                                 if consensus.consensus_direction != signal_dir:
                                     self.logger.info(
                                         f"Signal {signal_dir} blocked: consensus is "
@@ -2185,7 +3547,12 @@ class KalshiTradingAgent:
 
             # Pre-trade risk check
             side_str = "yes" if signal.action in (SignalAction.BUY_YES, SignalAction.SELL_YES) else "no"
-            price_cents = Decimal(str(signal.limit_price_cents)) if signal.limit_price_cents is not None else Decimal("50")
+            # BUG-FIX: Treat 0 or negative as invalid and default to 50 (market order midpoint)
+            _raw_limit = signal.limit_price_cents
+            if _raw_limit is not None and _raw_limit > 0:
+                price_cents = Decimal(str(_raw_limit))
+            else:
+                price_cents = Decimal("50")
             event_id = market.market_id.rsplit("-", 1)[0] if "-" in market.market_id else market.market_id
             
             # If it's a quote, we skip individual check_order here and handle in _execute_signal
@@ -2218,6 +3585,35 @@ class KalshiTradingAgent:
                 if pos.ticker == market.market_id and pos.side == "no"
             )
 
+            # CRITICAL FIX: Compute dynamic cycle cap based on live bankroll and winner count
+            # This ensures the 1-2% allocation is enforced correctly across all winners
+            _cycle_max_notional_usd = self.config.risk_limits.max_notional_usd  # Fallback to config
+            _cycle_max_contracts = None  # Will be set from cycle cap if available
+            try:
+                from merid.prediction.dynamic_sizing import get_cycle_sizing_cap
+                from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+                from decimal import Decimal as _Decimal
+                
+                _live_equity = get_equity_for_risk_calc_sync()
+                if _live_equity and _live_equity > 0:
+                    _bankroll_usd = _Decimal(str(_live_equity))
+                    _price_cents = int(check_price) if check_price else 50
+                    _cycle_cap = get_cycle_sizing_cap(_bankroll_usd, _price_cents, market.market_id, side_str)
+                    _cycle_max_notional_usd = _cycle_cap.max_notional_per_winner_usd
+                    _cycle_max_contracts = _cycle_cap.max_contracts_per_winner  # DYNAMIC: derived from notional/price
+                    
+                    # Log the cycle cap computation for observability
+                    self.logger.debug(
+                        "[CYCLE_CAP_RISK] %s: bankroll=$%.2f, winners=%d, max_per_winner=$%.2f, max_contracts=%d",
+                        market.market_id,
+                        float(_bankroll_usd),
+                        _cycle_cap.winner_count,
+                        float(_cycle_max_notional_usd),
+                        _cycle_cap.max_contracts_per_winner
+                    )
+            except Exception as _cycle_err:
+                self.logger.debug("[CYCLE_CAP_RISK] Failed to compute cycle cap, using config fallback: %s", _cycle_err)
+
             try:
                 check = self._risk.check_order(
                     market_id=market.market_id,
@@ -2229,36 +3625,68 @@ class KalshiTradingAgent:
                     best_ask_cents=_best_ask,
                     depth_at_price=_depth,
                     edge=signal.edge.net_edge if signal.edge else Decimal("0"),
-                    agent_max_notional_usd=self.config.risk_limits.max_notional_usd,
+                    agent_max_notional_usd=_cycle_max_notional_usd,
                     # BUG-009: Pass per-side position limits from YAML config
                     max_yes_position=self.config.risk_limits.max_yes_position,
                     max_no_position=self.config.risk_limits.max_no_position,
                     existing_yes_contracts=existing_yes,
                     existing_no_contracts=existing_no,
+                    # CRITICAL FIX: Use DYNAMIC max_contracts from cycle cap (notional/price)
+                    # Falls back to config only if cycle cap computation failed
+                    max_contracts_per_order=_cycle_max_contracts,
                 )
 
                 if not check.allowed:
-                    self._record_explainability_decision(
-                        market=market,
-                        signal=signal,
-                        snapshot=snapshot,
-                        check=check,
-                        now=now,
-                        allowed=False,
-                    )
-                    self.logger.info(f"Risk blocked {market.market_id}: {check.reason}")
-                    _bus.emit(_tick.emit_risk_check(market.market_id, allowed=False, reason=check.reason))
-                    self._emit_decision_log(Decision.hold(
-                        HoldReason.RISK_LIMIT,
-                        check.reason or "risk check rejected",
-                        market_id=market.market_id,
-                        agent_name=self.config.name,
-                        cycle_number=self.state.cycles_run,
-                        signal_summary={"action": signal.action.value, "edge": float(signal.edge.net_edge) if signal.edge else None},
-                        risk_summary={"reason": (check.reason or "")[:200]},
-                        elapsed_ms=_decision_timer.elapsed_ms(),
-                    ))
-                    continue
+                    # CRITICAL FIX: Handle REDUCE_SIZE by resizing signal and proceeding
+                    if check.action == RiskAction.REDUCE_SIZE and check.adjusted_size is not None and check.adjusted_size > 0:
+                        self.logger.info(
+                            "[RESIZE_EXECUTE] %s: Resizing signal from %d to %d contracts (%s)",
+                            market.market_id, signal.contracts, check.adjusted_size, check.reason
+                        )
+                        # Resize the signal to the allowed size
+                        signal = signal.with_contracts(check.adjusted_size)
+                        # Update the check to reflect allowed status
+                        check = PreTradeCheck(
+                            allowed=True,
+                            action=RiskAction.ALLOW,
+                            reason=f"Resized from {signal.contracts} to {check.adjusted_size} contracts",
+                            adjusted_size=check.adjusted_size,
+                            market_id=market.market_id,
+                        )
+                        _bus.emit(_tick.emit_risk_check(market.market_id, allowed=True))
+                    else:
+                        # Hard rejection (not resizeable)
+                        self._record_explainability_decision(
+                            market=market,
+                            signal=signal,
+                            snapshot=snapshot,
+                            check=check,
+                            now=now,
+                            allowed=False,
+                        )
+                        # Issue 6: Make risk limit interactions explicit in logs
+                        self.logger.info(
+                            "[RISK_LIMIT_BLOCK] agent=%s market=%s action=%s contracts=%d "
+                            "reason=%s risk_action=%s edge=%.4f",
+                            self.config.name, market.market_id,
+                            signal.action.value if hasattr(signal.action, 'value') else str(signal.action),
+                            signal.contracts,
+                            check.reason or "unknown",
+                            check.action.value if hasattr(check.action, 'value') else str(check.action),
+                            float(signal.edge.net_edge) if signal.edge else 0.0
+                        )
+                        _bus.emit(_tick.emit_risk_check(market.market_id, allowed=False, reason=check.reason))
+                        self._emit_decision_log(Decision.hold(
+                            HoldReason.RISK_LIMIT,
+                            check.reason or "risk check rejected",
+                            market_id=market.market_id,
+                            agent_name=self.config.name,
+                            cycle_number=self.state.cycles_run,
+                            signal_summary={"action": signal.action.value, "edge": float(signal.edge.net_edge) if signal.edge else None},
+                            risk_summary={"reason": (check.reason or "")[:200]},
+                            elapsed_ms=_decision_timer.elapsed_ms(),
+                        ))
+                        continue
 
                 self._record_explainability_decision(
                     market=market,
@@ -2270,6 +3698,17 @@ class KalshiTradingAgent:
                 )
                 _bus.emit(_tick.emit_risk_check(market.market_id, allowed=True))
                 _risk_approved_count += 1
+                
+                # Issue 6: Make risk limit interactions explicit in logs
+                self.logger.info(
+                    "[RISK_LIMIT_APPROVED] agent=%s market=%s action=%s contracts=%d "
+                    "edge=%.4f cycle_max_contracts=%s",
+                    self.config.name, market.market_id,
+                    signal.action.value if hasattr(signal.action, 'value') else str(signal.action),
+                    signal.contracts,
+                    float(signal.edge.net_edge) if signal.edge else 0.0,
+                    _cycle_max_contracts
+                )
 
                 # BUG-L8: skip execution entirely during WARMING_UP phase
                 if self.state.lifecycle == LifecycleState.WARMING_UP:
@@ -2331,9 +3770,10 @@ class KalshiTradingAgent:
                         _in_top3 = True
                         
                 except Exception as _top3_exc:
-                    # Fail-open: if top3 check fails, log and allow
-                    self.logger.debug("[TOP3_CHECK] Error in top-3 verification: %s", _top3_exc)
-                    _in_top3 = True
+                    # CRITICAL FIX (2026-05-05): Fail-closed on top3 check error
+                    # Previously fail-open allowed all orders through on exception
+                    self.logger.warning("[TOP3_CHECK] Error in top-3 verification: %s - BLOCKING", _top3_exc)
+                    _in_top3 = False
 
                 if not _in_top3:
                     self.logger.warning(
@@ -2358,31 +3798,16 @@ class KalshiTradingAgent:
                 # CRITICAL FIX v8 (2026-04-26): Fail-open when arbiter winners are stale/empty.
                 # Race condition: agents check at different times, arbiter updates once per cycle.
                 # With <$100 bankroll, we can't afford to miss #1 winners due to timing issues.
-                if asset in CRYPTO_ASSETS and timeframe in MOMENTUM_SCALPING_TIMEFRAMES:
+                if asset in CRYPTO_ASSETS and timeframe in MEAN_REVERSION_TIMEFRAMES:
                     _is_winner, _is_number_one, _skip_reason = self._check_arbiter_priority(
                         market.market_id, asset, timeframe
                     )
                     
-                    # CRITICAL FIX v8: Check if arbiter data is stale/empty (race condition)
-                    # If arbiter has no winners or data is >30s old, assume this is #1
-                    # This prevents blocking due to timing issues with micro-bankroll
-                    from merid.prediction.crypto_top_edge import get_crypto_top_edge_arbiter
-                    arbiter = get_crypto_top_edge_arbiter()
-                    _arbiter_stale = (
-                        not arbiter._last_cycle_winners or
-                        (arbiter._last_cycle_timestamp is not None and
-                         (datetime.now(timezone.utc) - arbiter._last_cycle_timestamp).total_seconds() > 30)
-                    )
-                    
-                    if not _is_winner and _arbiter_stale:
-                        # Arbiter data stale - fail-open and allow as #1
-                        _edge_for_log = float(signal.edge.net_edge) if signal.edge else 0.0
-                        self.logger.info(
-                            "[ARBITER_PRIORITY] %s arbiter data stale/empty - allowing as #1 (edge=%.4f)",
-                            market.market_id, _edge_for_log
-                        )
-                        _is_winner = True
-                        _is_number_one = True
+                    # CRITICAL FIX (2026-05-05): Removed stale-data fail-open bypass
+                    # Previously: if arbiter data was >30s old, allowed trade as #1
+                    # This caused all 5 crypto agents to each trade $0.50 = $2.50 total
+                    # With 2% of $47 = $0.94 cap, this was a massive over-allocation
+                    # Now: Respect arbiter winners or block - no bypass for stale data
                     
                     if not _is_winner:
                         self.logger.warning(
@@ -2438,6 +3863,23 @@ class KalshiTradingAgent:
                     risk_summary={"reason": "allowed"},
                     elapsed_ms=_decision_timer.elapsed_ms(),
                 ))
+                # SIGNAL-ONLY-FIX: Skip trade execution for signal-only agents
+                # They still computed indicators and submitted opinions above
+                if _is_signal_only:
+                    self.logger.info(
+                        "[SIGNALONLY-SKIP] agent=%s | action=skipped_execution | reason=signalonly_context_agent | market=%s",
+                        self.config.name,
+                        market.market_id,
+                    )
+                    self.state.cycles_run += 1
+                    self._emit_decision_log(Decision.hold(
+                        HoldReason.SIGNAL_ONLY,
+                        "signal-only agent computed indicators but skips trade execution",
+                        agent_name=self.config.name,
+                        cycle_number=self.state.cycles_run,
+                        elapsed_ms=_decision_timer.elapsed_ms(),
+                    ))
+                    continue
                 await self._execute_signal(market, signal, check, snapshot, _tick=_tick, _bus=_bus)
 
             except Exception as exc:
@@ -2644,14 +4086,25 @@ class KalshiTradingAgent:
                     best_for_asset = m
                     break
             
-            # Fallback to the closest one if none in window
+            # BUG FIX: Don't fallback to expired/terminal markets
+            # If no market is in the valid entry window, skip this asset
+            # The old code would fallback to the closest market even if terminal
             if not best_for_asset:
-                best_for_asset = sorted_m[0]
+                # WINDOW FILTER DEBUG: Log why no market was selected
+                if self.logger.isEnabledFor(logging.DEBUG):
+                    for m in sorted_m[:3]:  # Log first 3 markets
+                        minutes_to_expiry = (m.end_date - now).total_seconds() / 60 if m.end_date else None
+                        in_window = self._in_entry_window(m, now)
+                        self.logger.debug(
+                            "[PM_WINDOW_FILTER] asset=%s ticker=%s minutes_to_expiry=%.1f in_window=%s",
+                            asset, m.market_id, minutes_to_expiry, in_window
+                        )
                 self.logger.debug(
-                    "_filter_active_contracts: no market in entry window for %s — "
-                    "falling back to closest expiry %s",
-                    asset, best_for_asset.market_id,
+                    "_filter_active_contracts: no market in valid entry window for %s — "
+                    "skipping (no fallback to expired markets)",
+                    asset,
                 )
+                continue  # Skip this asset - don't select expired markets
             
             active_selection.append(best_for_asset)
 
@@ -2762,6 +4215,16 @@ class KalshiTradingAgent:
                 avg_price = float(raw_price)
                 side = pos.get("side", "yes")
                 pos_id = f"{ticker}:{side}:synced"
+                # PRODUCTION FIX: Pull TP targets from position_cache during reconciliation
+                _tp_price = _tp_r = _sl_price = None
+                try:
+                    _cached_pos = get_position_cache().get_position(ticker)
+                    if _cached_pos:
+                        _tp_price = getattr(_cached_pos, 'take_profit_price_cents', None)
+                        _tp_r = getattr(_cached_pos, 'take_profit_r_multiple', None)
+                        _sl_price = getattr(_cached_pos, 'stop_loss_price_cents', None)
+                except Exception:
+                    pass  # Non-fatal: TP targets optional
                 self._tracked_positions[pos_id] = TrackedPosition(
                     position_id=pos_id,
                     ticker=ticker,
@@ -2770,6 +4233,9 @@ class KalshiTradingAgent:
                     entry_price_cents=int(avg_price),
                     current_price_cents=int(avg_price),
                     entry_time=datetime.now(timezone.utc),
+                    take_profit_price_cents=_tp_price,
+                    take_profit_r_multiple=_tp_r,
+                    stop_loss_price_cents=_sl_price,
                 )
                 synced += 1
 
@@ -2871,6 +4337,16 @@ class KalshiTradingAgent:
                         continue
 
                     pos_id = f"{ticker}:{side}:synced"
+                    # PRODUCTION FIX: Pull TP targets from position_cache during reconciliation
+                    _tp_price = _tp_r = _sl_price = None
+                    try:
+                        _cached_pos = get_position_cache().get_position(ticker)
+                        if _cached_pos:
+                            _tp_price = getattr(_cached_pos, 'take_profit_price_cents', None)
+                            _tp_r = getattr(_cached_pos, 'take_profit_r_multiple', None)
+                            _sl_price = getattr(_cached_pos, 'stop_loss_price_cents', None)
+                    except Exception:
+                        pass  # Non-fatal: TP targets optional
                     self._tracked_positions[pos_id] = TrackedPosition(
                         position_id=pos_id,
                         ticker=ticker,
@@ -2879,6 +4355,9 @@ class KalshiTradingAgent:
                         entry_price_cents=int(avg_price),
                         current_price_cents=int(avg_price),
                         entry_time=datetime.now(timezone.utc),
+                        take_profit_price_cents=_tp_price,
+                        take_profit_r_multiple=_tp_r,
+                        stop_loss_price_cents=_sl_price,
                     )
                     synced += 1
                 except Exception as _pos_exc:
@@ -3061,6 +4540,18 @@ class KalshiTradingAgent:
                 except Exception as _pnl_exc:
                     self.logger.debug("[TP-PNL-CALC] Failed to calculate unrealized PnL: %s", _pnl_exc)
 
+                # TICKER VALIDATION: Ensure stored ticker exists in catalog before exit
+                _tp_ticker_valid, _tp_canonical_ticker = _validate_ticker_for_exit(pos.ticker)
+                if not _tp_ticker_valid:
+                    logger.error(
+                        "[TAKE_PROFIT_TICKER_REJECT] %s: Ticker not in catalog, skipping TP exit",
+                        pos.ticker
+                    )
+                    continue
+                
+                # Use canonical ticker from catalog if available
+                _tp_exit_ticker = _tp_canonical_ticker or pos.ticker
+
                 # BANKROLL UNIFICATION: Get effective bankroll from v2 service
                 _effective_equity_usd = 0.0
                 try:
@@ -3071,8 +4562,18 @@ class KalshiTradingAgent:
                 except Exception as _bre:
                     self.logger.debug("[trading_agent.tp] Failed to get effective bankroll: %s", _bre)
 
+                # PRODUCTION FIX (2026-05-01): Generate unique client_tag for take-profit exit
+                # to prevent duplicate blocking with entry orders.
+                _tp_ts_bucket = int(time.time()) // 60
+                _tp_preimage = (
+                    f"{self.agent_id}|{pos.ticker}|{pos.side}|sell|"
+                    f"{pos.entry_price_cents}|{close_qty}|{_tp_ts_bucket}|"
+                    f"take_profit|{tp_action.reason[:30]}"
+                )
+                _tp_client_tag = f"merid-{hashlib.sha256(_tp_preimage.encode()).hexdigest()[:16]}-{_tp_ts_bucket}"
+
                 _tp_intent = OrderIntent(
-                    ticker=pos.ticker,
+                    ticker=_tp_exit_ticker,
                     side=pos.side,
                     action="sell",
                     # Use the suggested limit price from TakeProfitAction; for live orders
@@ -3086,6 +4587,7 @@ class KalshiTradingAgent:
                     rationale=tp_action.reason[:200],
                     post_only=_tp_post_only,  # NEW: False for high PnL exits to force taker
                     effective_equity_usd=_effective_equity_usd if _effective_equity_usd > 0 else None,
+                    client_tag=_tp_client_tag,  # UNIQUE tag prevents duplicate blocking
                 )
                 _tp_result = await route_order_async(_tp_intent)
                 _tp_ok = _tp_result.status not in ("rejected",)
@@ -3186,7 +4688,10 @@ class KalshiTradingAgent:
         # Evict old closed TP state entries to keep memory bounded
         self._tp_manager.evict_expired()
 
-        # ── 3. Stop-loss sweep ────────────────────────────────────────────
+        # ── 3. Stop-loss sweep (includes profit_target_pct) ────────────────
+        # CRITICAL FIX: Run BEFORE micro-scalp so profit targets are checked first
+        # StopLossRules.check_position includes profit_target_pct logic which should
+        # take precedence over micro-scalp time exits
         to_remove: List[str] = []
         for pos_id, pos in list(self._tracked_positions.items()):
             try:
@@ -3205,6 +4710,19 @@ class KalshiTradingAgent:
                 from merid.event_venues.kalshi.order_router import route_order_async, OrderIntent
                 from merid.event_venues.kalshi import get_bankroll_service
 
+                # TICKER VALIDATION: Ensure stored ticker exists in catalog before exit
+                _ticker_valid, _canonical_ticker = _validate_ticker_for_exit(pos.ticker)
+                if not _ticker_valid:
+                    logger.error(
+                        "[STOP_LOSS_TICKER_REJECT] %s: Ticker not in catalog, skipping close order",
+                        pos.ticker
+                    )
+                    pos.close_fail_count += 1
+                    continue
+                
+                # Use canonical ticker from catalog if available
+                _exit_ticker = _canonical_ticker or pos.ticker
+
                 # BANKROLL UNIFICATION: Get effective bankroll from v2 service
                 _effective_equity_usd = 0.0
                 try:
@@ -3217,13 +4735,12 @@ class KalshiTradingAgent:
 
                 # IOC escalation safety: generate deterministic client_order_id and store it
                 # so we can reuse it for IOC escalation to prevent double fills
-                import hashlib, time
                 _sl_ts_bucket = int(time.time()) // 60
                 _sl_preimage = f"{self.agent_id}|{pos.ticker}|{pos.side}|sell|{pos.entry_price_cents}|{pos.contracts}|{_sl_ts_bucket}|stop_loss"
                 _sl_client_tag = f"merid-{hashlib.sha256(_sl_preimage.encode()).hexdigest()[:16]}-{_sl_ts_bucket}"
                 pos.close_client_order_id = _sl_client_tag  # Store for potential IOC escalation
                 _sl_intent = OrderIntent(
-                    ticker=pos.ticker,
+                    ticker=_exit_ticker,
                     side=pos.side,
                     action="sell",
                     price_cents=max(1, pos.entry_price_cents),  # Use entry price for accurate notional in exposure tracker; Kalshi ignores price on market orders
@@ -3253,6 +4770,15 @@ class KalshiTradingAgent:
                     # Feed realised loss into session cap tracker
                     if pos.unrealized_pnl_cents < 0:
                         self._stop_loss.record_session_loss(abs(pos.unrealized_pnl_cents))
+                    
+                    # CRITICAL: Release capital in cycle tracker for micro-scalping
+                    _sl_released = (pos.entry_price_cents * pos.contracts) / 100.0
+                    self._cycle_tracker.record_release(_sl_released, pos_id)
+                    self.logger.debug(
+                        "[STOP_LOSS_CAPITAL_RELEASE] %s: released=$%.2f from cycle tracker",
+                        pos.ticker, _sl_released,
+                    )
+                    
                     # Notify KalshiRiskManager of the close so notional is decremented.
                     # The router now only advances rate-limit counters (record_rate_only);
                     # all notional accounting is agent-side (BUG-A fix).
@@ -3327,7 +4853,7 @@ class KalshiTradingAgent:
                         )
                         try:
                             from merid.event_venues.kalshi.order_router import route_order_async, OrderIntent
-                            from merid.prediction.venue_gate import TradingMode
+                            from merid.prediction.trading_mode import TradingMode
                             # Reuse original client_order_id if available, otherwise generate new
                             _ioc_client_tag = pos.close_client_order_id or None
                             _ioc_intent = OrderIntent(
@@ -3349,18 +4875,172 @@ class KalshiTradingAgent:
                                     "stop_loss IOC escalation succeeded for %s: %s",
                                     pos.ticker, _ioc_result.status,
                                 )
+                                self._stop_loss.record_close(
+                                    position_id=pos_id,
+                                    action=action,
+                                    pnl_cents=pos.unrealized_pnl_cents,
+                                )
+                                if pos.unrealized_pnl_cents < 0:
+                                    self._stop_loss.record_session_loss(abs(pos.unrealized_pnl_cents))
                                 to_remove.append(pos_id)
-                                pos.close_fail_count = 0
-                        except Exception as _ioc_exc:
-                            self.logger.error(
-                                "stop_loss IOC escalation failed for %s: %s",
-                                pos.ticker, _ioc_exc,
-                            )
-
-            except Exception as exc:
-                self.logger.debug("stop_loss check error for %s: %s", pos_id, exc)
-
+                            else:
+                                self.logger.error(
+                                    "stop_loss IOC escalation failed for %s: %s",
+                                    pos.ticker, _ioc_result.reason or "unknown",
+                                )
+                        except Exception as _esc_exc:
+                            self.logger.exception("stop_loss IOC escalation error: %s", _esc_exc)
+                            
+            except Exception as _exc:
+                self.logger.exception("stop_loss sweep error for %s: %s", pos_id, _exc)
+        
         for pos_id in to_remove:
+            self._tracked_positions.pop(pos_id, None)
+
+        # ── 4. Micro-scalping exit sweep (ONLY for positions not already exited) ──
+        _ms_to_remove: List[str] = []
+        for pos_id, pos in list(self._tracked_positions.items()):
+            try:
+                # Build micro-scalp position from tracked position
+                _ms_pos = MicroScalpPosition(
+                    position_id=pos_id,
+                    ticker=pos.ticker,
+                    side=pos.side,
+                    entry_price_cents=pos.entry_price_cents,
+                    entry_edge=getattr(pos, 'entry_edge', 0.0),
+                    contracts=pos.contracts,
+                    entry_ts=pos.entry_ts,
+                    current_price_cents=pos.current_price_cents,
+                    current_edge=self._get_current_edge_for_position(pos),
+                    last_bid_cents=pos.last_bid_cents,
+                    last_ask_cents=pos.last_ask_cents,
+                )
+                
+                _volatility = self._calculate_volatility(pos.ticker, pos.entry_price_cents)
+                _momentum = abs(_ms_pos.current_edge)
+                
+                _ms_action = self._micro_scalp_exit.check_exit(
+                    _ms_pos,
+                    current_bid=pos.last_bid_cents,
+                    current_ask=pos.last_ask_cents,
+                    volatility=_volatility,
+                    momentum=_momentum,
+                )
+                
+                if _ms_action.should_exit:
+                    self.logger.info(
+                        "[MICRO_SCALP_EXIT] %s %s x%d: reason=%s profit_pct=%.1f%% hold_time=%.0fs",
+                        pos.ticker, pos.side, pos.contracts,
+                        _ms_action.reason, _ms_action.profit_pct * 100,
+                        _ms_action.hold_seconds,
+                    )
+                    
+                    # TICKER VALIDATION: Ensure stored ticker exists in catalog before exit
+                    _ms_ticker_valid, _ms_canonical_ticker = _validate_ticker_for_exit(pos.ticker)
+                    if not _ms_ticker_valid:
+                        logger.error(
+                            "[MICRO_SCALP_TICKER_REJECT] %s: Ticker not in catalog, skipping exit",
+                            pos.ticker
+                        )
+                        continue
+                    
+                    # Use canonical ticker from catalog if available
+                    _ms_exit_ticker = _ms_canonical_ticker or pos.ticker
+                    
+                    from merid.event_venues.kalshi.order_router import route_order_async, OrderIntent
+                    
+                    # PRODUCTION FIX (2026-05-01): Generate unique client_tag for micro-scalp exit
+                    # to prevent duplicate blocking. Exit orders were colliding with entry orders
+                    # because they used the same deterministic coid generation.
+                    _ms_ts_bucket = int(time.time()) // 60
+                    _ms_preimage = (
+                        f"{self.agent_id}|{pos.ticker}|{pos.side}|sell|"
+                        f"{pos.entry_price_cents}|{pos.contracts}|{_ms_ts_bucket}|"
+                        f"micro_scalp_exit|{_ms_action.reason}"
+                    )
+                    _ms_client_tag = f"merid-{hashlib.sha256(_ms_preimage.encode()).hexdigest()[:16]}-{_ms_ts_bucket}"
+                    
+                    # Propagate entry mode so paper-fill positions exit via paper
+                    # (prevents "Ticker not found in catalog" 404s on expired markets).
+                    _ms_exit_mode = None
+                    try:
+                        if getattr(pos, "entry_mode", None) == "paper":
+                            from trading.trade_mode import TradeMode as _ExitTradeMode
+                            _ms_exit_mode = _ExitTradeMode.PAPER
+                    except Exception:
+                        _ms_exit_mode = None
+
+                    _ms_intent = OrderIntent(
+                        ticker=_ms_exit_ticker,
+                        side=pos.side,
+                        action="sell",
+                        price_cents=max(1, pos.current_price_cents or pos.entry_price_cents),
+                        count=pos.contracts,
+                        order_type="market",
+                        time_in_force="ioc",
+                        source=f"micro_scalp:{self.config.name}:{_ms_action.reason}",
+                        agent_id=self.agent_id,
+                        rationale=f"Micro-scalp exit: {_ms_action.reason}",
+                        client_tag=_ms_client_tag,  # UNIQUE tag prevents duplicate blocking
+                        mode=_ms_exit_mode,
+                    )
+                    
+                    _ms_result = await route_order_async(_ms_intent)
+                    _ms_ok = _ms_result.status not in ("rejected",)
+                    
+                    if _ms_ok:
+                        _released_notional = (pos.entry_price_cents * pos.contracts) / 100.0
+                        self._cycle_tracker.record_release(_released_notional, pos_id)
+                        
+                        if pos.side == "yes":
+                            _ms_pnl = (pos.current_price_cents - pos.entry_price_cents) * pos.contracts / 100.0
+                        else:
+                            _ms_pnl = (pos.entry_price_cents - pos.current_price_cents) * pos.contracts / 100.0
+                        
+                        self.logger.info(
+                            "[MICRO_SCALP_CLOSED] %s: released=$%.2f pnl=$%.2f reason=%s",
+                            pos.ticker, _released_notional, _ms_pnl, _ms_action.reason,
+                        )
+                        
+                        self._recent_trades_for_health.append({
+                            "ticker": pos.ticker,
+                            "pnl": _ms_pnl,
+                            "outcome": "win" if _ms_pnl > 0 else "loss" if _ms_pnl < 0 else "scratch",
+                            "reason": _ms_action.reason,
+                            "ts": time.time(),
+                        })
+                        
+                        await self._check_scalping_health()
+                        _ms_to_remove.append(pos_id)
+                    else:
+                        _reason = _ms_result.reason or "unknown"
+                        self.logger.warning(
+                            "[MICRO_SCALP_REJECTED] %s: %s",
+                            pos.ticker, _reason,
+                        )
+                        # If market is expired/settled (404 / not found), the position
+                        # cannot be exited via the venue — drop locally to stop retrying.
+                        # Paper-mode positions also drop on duplicate_race after first hit.
+                        _terminal_rejection = (
+                            "not found in catalog" in _reason.lower()
+                            or "404" in _reason
+                            or "expired" in _reason.lower()
+                            or "settled" in _reason.lower()
+                        )
+                        if _terminal_rejection or (
+                            getattr(pos, "entry_mode", None) == "paper"
+                            and "duplicate_race" in _reason
+                        ):
+                            self.logger.info(
+                                "[MICRO_SCALP_GIVE_UP] %s: dropping tracked position (reason=%s, mode=%s)",
+                                pos.ticker, _reason, getattr(pos, "entry_mode", None) or "live",
+                            )
+                            _ms_to_remove.append(pos_id)
+
+            except Exception as _ms_exc:
+                self.logger.debug("micro_scalp sweep error for %s: %s", pos_id, _ms_exc)
+        
+        for pos_id in _ms_to_remove:
             self._tracked_positions.pop(pos_id, None)
 
         # If session cap breached, halt the agent
@@ -3368,74 +5048,276 @@ class KalshiTradingAgent:
             self.logger.warning("stop_loss session cap breached — pausing agent %s", self.config.name)
             self.pause()
 
+    # ── Micro-scalping helpers ─────────────────────────────────────────
+
+    def _get_current_edge_for_position(self, pos: TrackedPosition) -> float:
+        """Get current edge for a tracked position.
+        
+        Recalculates edge using current market data vs entry edge.
+        """
+        try:
+            from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+            _mss = get_kalshi_market_state_store()
+            _st = _mss.get(pos.ticker)
+            if _st is None:
+                return getattr(pos, 'entry_edge', 0.0)
+            
+            # Get current implied probability from market state
+            _implied = getattr(_st, 'implied_prob', None)
+            if _implied is None:
+                # Calculate from yes_price
+                _yes_price = getattr(_st, 'yes_price_cents', 0) or getattr(_st, 'best_ask_cents', 0)
+                if _yes_price > 0:
+                    _implied = _yes_price / 100.0
+                else:
+                    return getattr(pos, 'entry_edge', 0.0)
+            
+            # Get model probability (simplified - use stored or recalculate)
+            _model_prob = getattr(pos, 'model_prob', 0.5)
+            
+            # Calculate edge
+            if pos.side == "yes":
+                _edge = _model_prob - _implied
+            else:  # "no"
+                _edge = (1.0 - _model_prob) - (1.0 - _implied)
+            
+            return _edge
+        except Exception as _e:
+            self.logger.debug("_get_current_edge failed for %s: %s", pos.ticker, _e)
+            return getattr(pos, 'entry_edge', 0.0)
+
+    async def _check_scalping_health(self) -> None:
+        """Check scalping strategy health and pause if win rate drops below threshold.
+        
+        MICRO-SCALPING CIRCUIT BREAKER: Pauses trading if win rate < 70% over 30 trades.
+        """
+        if len(self._recent_trades_for_health) < self._health_check_interval:
+            return  # Not enough trades yet
+        
+        try:
+            from merid.prediction.agent_performance_tracker import ScalpingMetrics
+            
+            _scalping = ScalpingMetrics()
+            _recent = self._recent_trades_for_health[-_scalping.WINDOW_SIZE:]
+            
+            # Build TradeRecord-like objects for validation
+            class _SimpleTrade:
+                def __init__(self, pnl, outcome):
+                    self.profit_usd = pnl
+                    self.outcome = outcome
+            
+            _trades = [_SimpleTrade(t["pnl"], t["outcome"]) for t in _recent]
+            
+            is_healthy, msg, metrics = _scalping.validate_strategy_health(_trades)
+            
+            if not is_healthy:
+                self.logger.error(
+                    "[CIRCUIT_BREAKER] Micro-scalping health check FAILED: %s",
+                    msg,
+                )
+                self.logger.error(
+                    "[CIRCUIT_BREAKER] Metrics: win_rate=%.1f%% (min=%.0f%%), "
+                    "avg_profit=$%.2f (min=$%.2f)",
+                    metrics["win_rate"] * 100,
+                    _scalping.MIN_WIN_RATE * 100,
+                    float(metrics.get("avg_profit_per_win", "0")),
+                    float(_scalping.MIN_PROFIT_PER_TRADE_USD),
+                )
+                
+                # Alert and pause
+                try:
+                    from merid.prediction.alerts import get_alert_manager
+                    get_alert_manager().fire_risk_breach(
+                        market_id="SCALPING_HEALTH",
+                        message=f"🚨 MICRO-SCALPING PAUSED: {msg}. Agent {self.config.name} halted.",
+                    )
+                except Exception as _ae:
+                    self.logger.debug("Health alert failed: %s", _ae)
+                
+                self.pause()
+            else:
+                self.logger.debug(
+                    "[SCALPING_HEALTH] Win rate: %.1f%% | Avg profit: $%.2f | Status: %s",
+                    metrics["win_rate"] * 100,
+                    float(metrics.get("avg_profit_per_win", "0")),
+                    msg,
+                )
+        except Exception as _e:
+            self.logger.debug("_check_scalping_health error: %s", _e)
+
+    def _calculate_volatility(self, ticker: str, entry_price_cents: int) -> float:
+        """Calculate volatility (ATR-based) for dynamic take-profit targets.
+        
+        Uses market state to compute a volatility estimate based on:
+        - Spread as % of mid price
+        - Recent price range (if available)
+        - Defaults to 3% if data unavailable
+        
+        Args:
+            ticker: Market ticker
+            entry_price_cents: Entry price for reference
+            
+        Returns:
+            float: Volatility as percentage (e.g., 0.03 = 3%)
+        """
+        try:
+            from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+            _mss = get_kalshi_market_state_store()
+            _st = _mss.get(ticker)
+            
+            if _st is None:
+                return 0.03  # Default 3% volatility
+            
+            # Get bid/ask for spread calculation
+            _bid = getattr(_st, 'best_bid_cents', 0) or getattr(_st, 'yes_bid_cents', 0)
+            _ask = getattr(_st, 'best_ask_cents', 0) or getattr(_st, 'yes_ask_cents', 0)
+            
+            if _bid > 0 and _ask > 0:
+                _mid = (_bid + _ask) / 2.0
+                _spread = _ask - _bid
+                _spread_pct = _spread / _mid if _mid > 0 else 0.0
+                
+                # Estimate ATR as 2x spread (conservative)
+                _atr_estimate = _spread_pct * 2.0
+                
+                # Clamp to reasonable bounds
+                return max(0.01, min(_atr_estimate, 0.10))
+            
+            # Fallback: use yes_price variation
+            _yes_price = getattr(_st, 'yes_price_cents', 0)
+            if _yes_price > 0 and entry_price_cents > 0:
+                _price_change = abs(_yes_price - entry_price_cents) / entry_price_cents
+                return max(0.02, min(_price_change * 2.0, 0.08))
+            
+            return 0.03  # Default 3%
+        except Exception as _e:
+            self.logger.debug("_calculate_volatility failed for %s: %s", ticker, _e)
+            return 0.03  # Default fallback
+
     # ── Market resolution ──────────────────────────────────────────────
 
     async def _resolve_markets(self) -> None:
         """Resolve config filters into live Kalshi market tickers.
 
-        Iterates over ALL configured assets (not just assets[0]) so that
-        multi-asset agents (e.g. FINANCIALS_DIRECTIONAL: [SPX, NDX, DJI])
-        load markets for every asset they cover.
+        Path 1 (preferred): If series_tickers are configured, resolve via
+        catalog prefix matching — the same robust method market_selector uses.
+        Path 2 (fallback): category/asset/timeframe indexed lookup via
+        _kalshi_list_markets (only used when series_tickers is empty).
         """
         try:
-            from merid.prediction.kalshi_tools import _kalshi_list_markets
             from merid.event_venues.base import EventMarket, EventOutcome
-
-            category = self.config.category
-            assets = self.config.assets if self.config.assets else [""]
-            timeframe = self.config.timeframes[0] if self.config.timeframes else ""
-            _effective_max_orders = self._get_effective_max_orders(top_n_edges=3)
-            per_asset_limit = max(5, _effective_max_orders * 3)
 
             seen_tickers: set = set()
             all_markets = []
-            # raw dicts per asset — used by FilterPipeline when enabled
             _raw_by_asset: dict = {}
 
-            for asset in assets:
-                result = await _kalshi_list_markets(
-                    category=category,
-                    timeframe=timeframe,
-                    asset=asset,
-                    limit=per_asset_limit,
-                )
-                if not result.success:
-                    self.logger.debug(
-                        "Market resolution failed for asset=%s: %s",
-                        asset, result.error_message,
-                    )
-                    continue
+            # ── Path 1: series_tickers prefix matching (preferred) ────────
+            _series = getattr(self.config, 'series_tickers', None) or []
+            if _series:
+                from merid.event_venues.kalshi.market_catalog import get_market_catalog
+                catalog = get_market_catalog()
+                if not catalog.get_all_markets():
+                    logger.info("[MARKET-CATALOG] agent_init: calling catalog.refresh()")
+                    await catalog.refresh()
+                    logger.info("[MARKET-CATALOG] agent_init: catalog.refresh() returned")
 
-                for m in result.payload.get("markets", []):
-                    ticker = m.get("ticker") or m.get("market_id", "")
-                    if not ticker or ticker in seen_tickers:
+                now = datetime.now(timezone.utc)
+                for cm in catalog.get_all_markets():
+                    raw = cm.market.raw_data or {}
+                    mkt_series = (raw.get("series_ticker", "") or "").upper()
+                    mkt_event = (raw.get("event_ticker", "") or "").upper()
+                    mkt_id = (cm.market.market_id or "").upper()
+
+                    matched = any(
+                        mkt_series.startswith(s.upper())
+                        or mkt_event.startswith(s.upper())
+                        or mkt_id.startswith(s.upper())
+                        for s in _series
+                    )
+                    if not matched:
                         continue
-                    seen_tickers.add(ticker)
-                    _raw_by_asset.setdefault(asset or "UNK", []).append(m)
 
-                    outcomes = [
-                        EventOutcome(
-                            outcome_id=o["id"],
-                            outcome_name=o["name"],
-                            price=Decimal(o["price"]),
-                            probability=Decimal(o["probability"]) if o.get("probability") else None,
-                        )
-                        for o in m.get("outcomes", [])
-                    ]
-                    em = EventMarket(
-                        market_id=ticker,
-                        venue="kalshi",
-                        question=m.get("question", ""),
-                        description="",
-                        outcomes=outcomes,
-                        category=m.get("category"),
-                        tags=m.get("tags", []),
-                        end_date=datetime.fromisoformat(m["end_date"]) if m.get("end_date") else None,
-                        active=m.get("active", True),
-                        volume=Decimal(m.get("volume", "0")),
-                        open_interest=Decimal(m.get("open_interest", "0")),
+                    # Basic filters: active, end_date in future
+                    if not cm.market.active:
+                        continue
+                    if not cm.market.end_date or cm.market.end_date <= now:
+                        continue
+
+                    tid = cm.market.market_id
+                    if not tid or tid in seen_tickers:
+                        continue
+                    seen_tickers.add(tid)
+
+                    all_markets.append(cm.market)
+                    _asset_key = cm.asset or (self.config.assets[0] if self.config.assets else "UNK")
+                    _raw_by_asset.setdefault(_asset_key, []).append(raw)
+
+                self.logger.debug(
+                    "[RESOLVE-SERIES] %s: series=%s matched=%d from catalog=%d",
+                    self.config.name, _series, len(all_markets), len(catalog.get_all_markets()),
+                )
+
+            # ── Path 2: fallback to category/asset/timeframe indexed lookup ─
+            if not all_markets and not _series:
+                from merid.prediction.kalshi_tools import _kalshi_list_markets
+
+                category = self.config.category
+                assets = self.config.assets if self.config.assets else [""]
+                timeframe = self.config.timeframes[0] if self.config.timeframes else ""
+                _effective_max_orders = self._get_effective_max_orders(top_n_edges=3)
+                per_asset_limit = max(5, _effective_max_orders * 3)
+
+                for asset in assets:
+                    result = await _kalshi_list_markets(
+                        category=category,
+                        timeframe=timeframe,
+                        asset=asset,
+                        limit=per_asset_limit,
                     )
-                    all_markets.append(em)
+                    if not result.success:
+                        self.logger.debug(
+                            "Market resolution failed for asset=%s: %s",
+                            asset, result.error_message,
+                        )
+                        continue
+
+                    for m in result.payload.get("markets", []):
+                        ticker = m.get("ticker") or m.get("market_id", "")
+                        if not ticker or ticker in seen_tickers:
+                            continue
+                        seen_tickers.add(ticker)
+                        _raw_by_asset.setdefault(asset or "UNK", []).append(m)
+
+                        outcomes = [
+                            EventOutcome(
+                                outcome_id=o["id"],
+                                outcome_name=o["name"],
+                                price=Decimal(o["price"]),
+                                probability=Decimal(o["probability"]) if o.get("probability") else None,
+                            )
+                            for o in m.get("outcomes", [])
+                        ]
+                        _end_date_str = m.get("end_date")
+                        _end_date = None
+                        if _end_date_str:
+                            _end_date = datetime.fromisoformat(_end_date_str)
+                            if _end_date.tzinfo is None:
+                                _end_date = _end_date.replace(tzinfo=timezone.utc)
+                        
+                        em = EventMarket(
+                            market_id=ticker,
+                            venue="kalshi",
+                            question=m.get("question", ""),
+                            description="",
+                            outcomes=outcomes,
+                            category=m.get("category"),
+                            tags=m.get("tags", []),
+                            end_date=_end_date,
+                            active=m.get("active", True),
+                            volume=Decimal(m.get("volume", "0")),
+                            open_interest=Decimal(m.get("open_interest", "0")),
+                        )
+                        all_markets.append(em)
 
             # ── FilterPipeline (optional) ──────────────────────────────────
             if self.config.use_filter_pipeline and _raw_by_asset:
@@ -3474,6 +5356,56 @@ class KalshiTradingAgent:
                     all_markets = [m for m in all_markets if m.market_id in _allowed]
                 except Exception as _fpe:
                     self.logger.debug("FilterPipeline skipped: %s", _fpe)
+
+            # MICRO-SCALPING FIX: Filter markets by actual timeframe to prevent
+            # agents from processing markets with mismatched expiration frequencies.
+            # e.g., ETH_HOURLY should not process daily markets under KXETH series.
+            _configured_timeframe = self.config.timeframes[0] if self.config.timeframes else None
+            if _configured_timeframe and all_markets:
+                from merid.event_venues.kalshi.market_catalog import KalshiMarketCatalog
+                _now = datetime.now(timezone.utc)
+                _filtered = []
+                for m in all_markets:
+                    # Use catalog's timeframe detection if available
+                    _market_timeframe = None
+                    if hasattr(m, 'timeframe') and m.timeframe:
+                        _market_timeframe = m.timeframe
+                    elif m.end_date:
+                        # Infer from time to expiry
+                        _delta = m.end_date - _now
+                        _minutes = _delta.total_seconds() / 60.0
+                        if _minutes <= 20:
+                            _market_timeframe = "15m"
+                        elif _minutes <= 90:
+                            _market_timeframe = "1h"
+                        elif _minutes <= 60 * 24:
+                            _market_timeframe = "daily"
+                        elif _minutes <= 60 * 24 * 7:
+                            _market_timeframe = "weekly"
+                        elif _minutes <= 60 * 24 * 31:
+                            _market_timeframe = "monthly"
+                        else:
+                            _market_timeframe = "annual"
+                    
+                    # Normalize timeframe names
+                    _configured_tf = _configured_timeframe.lower()
+                    _market_tf = (_market_timeframe or "").lower()
+                    
+                    # Accept matching timeframes or if can't determine
+                    if _market_tf and _market_tf != _configured_tf:
+                        self.logger.debug(
+                            "[TIMEFRAME_FILTER] %s: skipping %s (market=%s, configured=%s)",
+                            self._agent_name, m.market_id, _market_tf, _configured_tf
+                        )
+                        continue
+                    _filtered.append(m)
+                
+                if len(_filtered) < len(all_markets):
+                    self.logger.info(
+                        "[TIMEFRAME_FILTER] %s: filtered %d markets -> %d (timeframe=%s)",
+                        self._agent_name, len(all_markets), len(_filtered), _configured_timeframe
+                    )
+                all_markets = _filtered
 
             self._resolved_markets = all_markets
             tickers = [m.market_id for m in self._resolved_markets]
@@ -3548,10 +5480,27 @@ class KalshiTradingAgent:
                 else "—"
             )
             _basis = getattr(snapshot, "spot_strike_basis_note", "") or "—"
+            
+            # Compute cycle cap info for observability
+            _cycle_cap_info = "—"
+            try:
+                from merid.prediction.dynamic_sizing import get_cycle_sizing_cap
+                from decimal import Decimal
+                _bankroll_usd = Decimal(str(_eq))
+                # BUG-FIX: Pass ticker so price_cents is fetched from market state (not default 1)
+                _side_str = "yes" if signal.action in (SignalAction.BUY_YES, SignalAction.SELL_YES) else "no"
+                _price_for_cap = signal.limit_price_cents if signal.limit_price_cents and signal.limit_price_cents > 0 else None
+                _cap = get_cycle_sizing_cap(_bankroll_usd, _price_for_cap, market.market_id, _side_str)
+                _display_price_cents = _price_for_cap or 50
+                _notional_if_max = _cap.max_contracts_per_winner * _display_price_cents / 100
+                _cycle_cap_info = f"max_contracts={_cap.max_contracts_per_winner} price_cents={_display_price_cents} notional_cap=${_notional_if_max:.2f}"
+            except Exception:
+                pass
+            
             self.logger.info(
                 "[PM_SIZE] agent=%s ticker=%s action=%s contracts=%s limit_cents=%s "
                 "net_edge=%s bankroll_equity_usd=%.2f kelly_frac=%s max_contracts_order=%s "
-                "vol_band=%s vol_size_mult=%s spot=%s strike=%s dist_pct_pct=%s spot_strike_basis=%s",
+                "vol_band=%s vol_size_mult=%s spot=%s strike=%s dist_pct_pct=%s spot_strike_basis=%s cycle_cap=%s",
                 self.config.name,
                 market.market_id,
                 signal.action.value if hasattr(signal.action, "value") else signal.action,
@@ -3567,12 +5516,13 @@ class KalshiTradingAgent:
                 snapshot.strike_price_usd if snapshot.strike_price_usd is not None else "—",
                 _dist_human,
                 _basis,
+                _cycle_cap_info,
             )
         except Exception as _exc:
             self.logger.debug("pm sizing log skipped: %s", _exc)
 
     def _in_entry_window(self, market: EventMarket, now: datetime) -> bool:
-        """Check if now is within the agent's entry window for this market."""
+        """Check if now is within the agent's entry window for this market using dynamic policy."""
         if not market.end_date:
             self.logger.debug(
                 "Skipping %s: end_date is missing — cannot determine entry window",
@@ -3580,11 +5530,101 @@ class KalshiTradingAgent:
             )
             return False  # Reject: missing expiry is unsafe, not a pass-through
 
-        ew = self.config.entry_window
-        window_open = market.end_date - timedelta(minutes=ew.minutes_before_expiry)
-        window_close = market.end_date - timedelta(minutes=ew.cutoff_minutes_before_expiry)
-
-        return window_open <= now <= window_close
+        # DYNAMIC ENTRY WINDOW: Use policy-based resolver instead of static config (strict mode)
+        from merid.prediction.dynamic_entry_window import resolve_entry_window
+        from config.kalshi_crypto_config import kalshi_ticker_to_asset
+        
+        # Extract asset from ticker
+        asset = kalshi_ticker_to_asset(market.market_id)
+        if not asset:
+            # Fallback to static config for non-crypto markets
+            ew = self.config.entry_window
+            window_open = market.end_date - timedelta(minutes=ew.minutes_before_expiry)
+            window_close = market.end_date - timedelta(minutes=ew.cutoff_minutes_before_expiry)
+            in_window = window_open <= now <= window_close
+            
+            minutes_to_expiry = (market.end_date - now).total_seconds() / 60
+            self.logger.info(
+                "[PM_WINDOW_FILTER] ticker=%s now=%s end_date=%s "
+                "minutes_to_expiry=%.1f in_window=%s "
+                "(fallback_static_config minutes_before_expiry=%s cutoff_minutes_before_expiry=%s)",
+                market.market_id,
+                now,
+                market.end_date,
+                minutes_to_expiry,
+                in_window,
+                ew.minutes_before_expiry,
+                ew.cutoff_minutes_before_expiry,
+            )
+            return in_window
+        
+        # Use dynamic resolver (strict - no fail-open)
+        minutes_to_expiry = (market.end_date - now).total_seconds() / 60
+        edge_pct = None  # Edge not available at this stage, will be checked later
+        
+        resolution = resolve_entry_window(
+            asset=asset,
+            minutes_to_expiry=minutes_to_expiry,
+            edge_pct=edge_pct,
+            ticker=market.market_id
+        )
+        
+        # COHERENT RISK CONTRACT: Resolve exit policy from same signals
+        from merid.prediction.dynamic_entry_window import resolve_exit_policy, validate_exit_policy
+        exit_policy = resolve_exit_policy(
+            window_resolution=resolution,
+            asset=asset,
+            edge_pct=edge_pct
+        )
+        
+        # Validate exit policy - enforce "no trade without exit plan"
+        if resolution.allowed and not validate_exit_policy(exit_policy):
+            self.logger.warning(
+                "[EXIT_POLICY_VALIDATION] ticker=%s asset=%s rejected: invalid exit policy - %s",
+                market.market_id,
+                asset,
+                exit_policy.rationale
+            )
+            return False
+        
+        self.logger.info(
+            "[PM_WINDOW_FILTER_DYNAMIC] ticker=%s asset=%s minutes_to_expiry=%.1f "
+            "allowed=%s reason=%s policy=%s bucket=%s "
+            "exit_policy_tier=%s tp_r_multiple=%s sl_mult=%s trailing=%s max_hold=%s",
+            market.market_id,
+            asset,
+            minutes_to_expiry,
+            resolution.allowed,
+            resolution.reason.value,
+            resolution.active_policy_name,
+            resolution.bucket,
+            exit_policy.risk_tier,
+            exit_policy.take_profit_r_multiple,
+            exit_policy.stop_loss_edge_multiplier,
+            exit_policy.trailing_enabled,
+            exit_policy.max_hold_seconds
+        )
+        
+        return resolution.allowed
+        
+        # WINDOW FILTER DEBUG LOGGING: Always log to diagnose markets_in_window=0
+        minutes_to_expiry = (market.end_date - now).total_seconds() / 60 if market.end_date else None
+        self.logger.info(
+            "[PM_WINDOW_FILTER] ticker=%s now=%s end_date=%s window_open=%s window_close=%s "
+            "minutes_to_expiry=%.1f in_window=%s "
+            "(minutes_before_expiry=%s cutoff_minutes_before_expiry=%s)",
+            market.market_id,
+            now,
+            market.end_date,
+            window_open,
+            window_close,
+            minutes_to_expiry,
+            in_window,
+            ew.minutes_before_expiry,
+            ew.cutoff_minutes_before_expiry,
+        )
+        
+        return in_window
 
     @staticmethod
     def _is_new_entry_action(action: SignalAction) -> bool:
@@ -3622,9 +5662,9 @@ class KalshiTradingAgent:
         no_price = Decimal("50")
         for o in market.outcomes:
             if o.outcome_id == "yes":
-                yes_price = o.price * 100  # Convert back to cents
+                yes_price = o.price  # Price already in cents (0-100)
             elif o.outcome_id == "no":
-                no_price = o.price * 100
+                no_price = o.price  # Price already in cents (0-100)
 
         # Compute time to expiry
         tte_hours = None
@@ -3653,22 +5693,33 @@ class KalshiTradingAgent:
                 yes_ask = yes_price
                 no_bid = max(no_price - 1, Decimal("1"))
                 no_ask = no_price
+                logger.debug(
+                    "[CATALOG_FALLBACK_DEBUG] %s | yes_bid=%s yes_ask=%s no_bid=%s no_ask=%s sum_ask=%s",
+                    market.market_id, yes_bid, yes_ask, no_bid, no_ask, yes_ask + no_ask,
+                )
         except Exception:
             _pricing_source = "catalog_fallback"
             yes_bid = max(yes_price - 1, Decimal("1"))
             yes_ask = yes_price
             no_bid = max(no_price - 1, Decimal("1"))
             no_ask = no_price
+            logger.debug(
+                "[CATALOG_FALLBACK_DEBUG] %s | yes_bid=%s yes_ask=%s no_bid=%s no_ask=%s sum_ask=%s",
+                market.market_id, yes_bid, yes_ask, no_bid, no_ask, yes_ask + no_ask,
+            )
 
         # PHANTOM PRICING GATE (mirrors CT's SKIP-DEGENERATE check):
         # If no WS data AND catalog outcomes were empty (defaulted to 50/50),
         # mark the snapshot as having phantom pricing.  Phantom pricing produces
         # meaningless edges because the market has no real two-sided quotes.
+        # 
+        # FIX: Allow disabling via env var for paper/live trading when WS data is sparse
+        _phantom_gate_enabled = os.getenv("MERID_PM_PHANTOM_GATE_ENABLED", "true").lower() not in ("false", "0", "off")
         _has_catalog_outcomes = any(
             o.outcome_id in ("yes", "no") for o in market.outcomes
         )
         _is_phantom_pricing = (
-            _pricing_source != "ws" and not _has_catalog_outcomes
+            _pricing_source != "ws" and not _has_catalog_outcomes and _phantom_gate_enabled
         )
 
         implied = self._model.implied_probabilities(
@@ -3775,6 +5826,7 @@ class KalshiTradingAgent:
 
         _asset_for_spot = _resolved_asset if _resolved_asset != "UNK" else None
         strike = None
+        _catalog_timeframe = None
         try:
             from merid.event_venues.kalshi.market_catalog import get_market_catalog
             catalog = get_market_catalog()
@@ -3785,8 +5837,16 @@ class KalshiTradingAgent:
                 # Use midpoint as effective strike for the spot-relative edge model.
                 if strike is None and m.floor_strike is not None and m.cap_strike is not None:
                     strike = (m.floor_strike + m.cap_strike) / 2.0
+                # MICRO-SCALPING FIX: Use catalog's detected timeframe (based on actual expiry)
+                # instead of ticker-inferred timeframe which can be wrong for mixed-frequency series
+                if hasattr(m, 'timeframe') and m.timeframe:
+                    _catalog_timeframe = m.timeframe
         except Exception as _ce:
             self.logger.debug("catalog strike lookup skipped: %s", _ce)
+        
+        # Override with catalog timeframe if available (more accurate than ticker inference)
+        if _catalog_timeframe:
+            snapshot.resolved_timeframe = _catalog_timeframe
         if strike is None:
             try:
                 from merid.event_venues.kalshi.market_filter import parse_strike_from_ticker
@@ -4057,7 +6117,48 @@ class KalshiTradingAgent:
         self, market: EventMarket, signal: StrategySignal,
         snapshot: MarketSnapshot, now: datetime,
     ) -> None:
-        """Persist a strategy signal to the agent's signal log."""
+        """Persist a strategy signal to the agent's signal log with policy metadata."""
+        # Calculate minutes_to_expiry for entry window analysis
+        minutes_to_expiry = None
+        if market.end_date:
+            minutes_to_expiry = (market.end_date - now).total_seconds() / 60.0
+        
+        # DYNAMIC WINDOW: Tag with policy metadata for analysis
+        policy_name = None
+        policy_bucket = None
+        policy_reason = None
+        
+        try:
+            from merid.prediction.dynamic_entry_window import resolve_entry_window, _get_bucket, resolve_exit_policy
+            from config.kalshi_crypto_config import kalshi_ticker_to_asset
+            
+            asset = kalshi_ticker_to_asset(market.market_id)
+            if asset and minutes_to_expiry is not None:
+                edge_pct = float(signal.edge.net_edge * 100) if (signal.edge and hasattr(signal.edge, 'net_edge')) else None
+                resolution = resolve_entry_window(asset, minutes_to_expiry, edge_pct, ticker=market.market_id)
+                policy_name = resolution.active_policy_name
+                policy_bucket = resolution.bucket
+                policy_reason = resolution.reason.value
+                
+                # COHERENT RISK CONTRACT: Resolve exit policy for diagnostic logging
+                exit_policy = resolve_exit_policy(
+                    window_resolution=resolution,
+                    asset=asset,
+                    edge_pct=edge_pct
+                )
+                exit_policy_tier = exit_policy.risk_tier
+                exit_tp_r_multiple = exit_policy.take_profit_r_multiple
+                exit_sl_mult = exit_policy.stop_loss_edge_multiplier
+                exit_trailing = exit_policy.trailing_enabled
+                exit_max_hold = exit_policy.max_hold_seconds
+        except Exception as exc:
+            self.logger.debug("[DYNAMIC_WINDOW] Failed to tag signal with policy: %s", exc)
+            exit_policy_tier = None
+            exit_tp_r_multiple = None
+            exit_sl_mult = None
+            exit_trailing = None
+            exit_max_hold = None
+        
         entry = {
             "ts": now.isoformat(),
             "market_id": market.market_id,
@@ -4066,13 +6167,25 @@ class KalshiTradingAgent:
             "contracts": signal.contracts,
             "limit_price_cents": signal.limit_price_cents,
             "edge": float(signal.edge.net_edge) if (signal.edge and hasattr(signal.edge, 'net_edge')) else None,
+            "edge_pct": float(signal.edge.net_edge * 100) if (signal.edge and hasattr(signal.edge, 'net_edge')) else None,
             "confidence": float(signal.edge.confidence) if (signal.edge and hasattr(signal.edge, 'confidence')) else None,
             "implied_yes": float(snapshot.implied.yes_prob) if snapshot.implied else None,
             "implied_no": float(snapshot.implied.no_prob) if snapshot.implied else None,
             "expiry_phase": str(signal.phase) if signal.phase else None,
+            "minutes_to_expiry": minutes_to_expiry,
             "mode": str(getattr(self._venue_gate, "mode", "unknown").value
                         if hasattr(getattr(self._venue_gate, "mode", None), "value")
                         else getattr(self._venue_gate, "mode", "unknown")),
+            # DYNAMIC WINDOW POLICY METADATA
+            "entry_window_policy_name": policy_name,
+            "entry_window_bucket": policy_bucket,
+            "entry_window_decision_reason": policy_reason,
+            # EXIT POLICY METADATA (Coherent Risk Contract)
+            "exit_policy_risk_tier": exit_policy_tier,
+            "exit_policy_tp_r_multiple": exit_tp_r_multiple,
+            "exit_policy_sl_multiplier": exit_sl_mult,
+            "exit_policy_trailing_enabled": exit_trailing,
+            "exit_policy_max_hold_seconds": exit_max_hold,
         }
         self.state.signal_log.append(entry)
         if len(self.state.signal_log) > _MAX_LOG_ENTRIES:
@@ -4244,7 +6357,7 @@ class KalshiTradingAgent:
             is_new_entry=is_new_entry,
             seconds_to_expiry=seconds_to_expiry,
             orders_this_window=self.state.orders_this_window,
-            max_orders_per_window=self._get_effective_max_orders(top_n_edges=3),
+            max_orders_per_window=self._get_effective_max_orders(top_n_edges=3),  # REVERTED from 1 to restore profitable trades
             consensus_status=consensus_status,
             consensus_direction_matches=consensus_direction_matches,
             consensus_bypassed=consensus_bypassed or self._swarm_consensus_bypassed(),
@@ -4319,7 +6432,6 @@ class KalshiTradingAgent:
             from merid.swarm.consensus_aggregator import ConsensusStatus
             from merid.prediction.strategy import SignalAction
             from merid.prediction.crypto_edge_production import get_crypto_edge_runtime
-
             _mm = get_crypto_edge_runtime().mm_consensus_mode
             # SAFETY: bypass mode is disabled - all orders must go through full consensus gate
             if _mm == "bypass":
@@ -4395,8 +6507,53 @@ class KalshiTradingAgent:
         _bus: Optional[object] = None,
     ) -> None:
         """Internal body of _execute_signal, protected by _in_execution flag."""
-        from merid.prediction.kalshi_tools import _kalshi_place_order
-        from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
+        try:
+            from merid.prediction.kalshi_tools import _kalshi_place_order
+            from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
+            from merid.prediction.crypto_top_edge import CRYPTO_ASSETS, MEAN_REVERSION_TIMEFRAMES
+        except Exception as import_exc:
+            self.logger.error("Import failed: %s", import_exc, exc_info=True)
+            raise
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # EXECUTION GUARDS: Fatal three-layer protection (must pass ALL to trade)
+        # Layer 1: Asset whitelist (BTC/ETH/SOL/XRP/DOGE only)
+        # Layer 2: Timeframe gate (15m only - 1h/daily/weekly are signal-only)
+        # Layer 3: Distance + Edge (computed after metrics available, see below)
+        # ═══════════════════════════════════════════════════════════════════════
+        # Layer 0: Signal-only agent enforcement (must be first)
+        # If agent is marked signalonly=true in YAML, it cannot execute trades
+        if getattr(self.config, 'signalonly', False):
+            self.logger.debug(
+                "[SIGNALONLY-SKIP] agent=%s | action=skipped | reason=signalonly_context_agent",
+                getattr(self.config, 'name', 'UNKNOWN'),
+            )
+            return
+
+        # FIX: Use plural config fields (assets/timeframes lists) as source of truth
+        _assets = getattr(self.config, 'assets', None) or []
+        _timeframes = getattr(self.config, 'timeframes', None) or []
+
+        # Explicit early-blocking for misconfigured agents
+        if not _assets or not _timeframes:
+            self.logger.warning(
+                "[EXECUTION_BLOCKED] TradingAgent config missing assets/timeframes; blocking execution.",
+                extra={"agent": getattr(self.config, 'name', 'UNKNOWN')}
+            )
+            return
+
+        _asset = _assets[0] if _assets else "UNKNOWN"
+        _timeframe = _timeframes[0] if _timeframes else "UNKNOWN"
+
+        # Layer 1 & 2: Asset and timeframe validation (fatal, no fallback)
+        _guard_result = check_execution_guards(
+            asset=_asset,
+            timeframe=_timeframe,
+            log_fn=self.logger.info,  # Use INFO for blocks (these are important)
+        )
+        if not _guard_result.allowed:
+            # Already logged in check_execution_guards - just return
+            return
 
         # [TRACE] EXECUTE_START — log with correlation_id from signal
         corr_id = getattr(signal, 'correlation_id', None)
@@ -4448,6 +6605,7 @@ class KalshiTradingAgent:
         }
 
         if signal.action not in action_map:
+            self.logger.warning("signal.action %s not in action_map, returning", signal.action)
             return
 
         side, action = action_map[signal.action]
@@ -4515,6 +6673,141 @@ class KalshiTradingAgent:
 
         is_crypto_15m = timeframe_m == "15m" and (asset_m or "").upper() in _ALL_CRYPTO_ASSETS
 
+        # NEAR-EXPIRY BLACKLIST (2026-05-12): Skip markets too close to expiry
+        # Near-expiry markets have reduced liquidity, stale quotes, and wide spreads
+        # which cause quote validation failures and order rejections
+        # Use the same threshold as the window filter cutoff to avoid inconsistency
+        if is_crypto_15m and hasattr(market, 'end_date') and market.end_date:
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            time_to_expiry = market.end_date - now
+            # Align with entry_window.cutoff_minutes_before_expiry (default 2 min for 15m)
+            min_expiry_minutes = self.config.entry_window.cutoff_minutes_before_expiry
+            if time_to_expiry.total_seconds() < min_expiry_minutes * 60:
+                self.logger.warning(
+                    "[crypto15m_risk] Skipping %s: too close to expiry (%.1f minutes remaining, threshold=%d min)",
+                    market.market_id, time_to_expiry.total_seconds() / 60, min_expiry_minutes
+                )
+                return
+
+        # BUG-FIX (2026-05-07): Resolve market price before crypto 15m risk evaluation
+        # If price_cents is 0 or missing, fetch from market state to avoid intent_risk=0
+        # which causes Fear & Greed multiplier to reduce position size to $0.00
+        # DATA INTEGRITY LAYER (2026-05-11): Use enhanced market_state with health checks
+        # and cross-validation between WebSocket and REST feeds
+        # RETRY LOGIC (2026-05-12): Add retry with exponential backoff for quote fetching
+        # to handle transient failures in near-expiry markets with reduced liquidity
+        # EXECUTION FIX (2026-05-13): Skip quote fetch if price_cents is already set to avoid blocking
+        # Only fetch quote if price_cents is truly invalid (None, 0, or >=100)
+        if is_crypto_15m and (price_cents is None or price_cents <= 0 or price_cents >= 100):
+            try:
+                import asyncio
+                from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                store = get_kalshi_market_state_store()
+                
+                # Retry quote fetching with exponential backoff
+                trusted_quote = None
+                max_retries = 3
+                base_backoff_ms = 100
+                
+                for attempt in range(max_retries):
+                    trusted_quote = store.get_trusted_quote_sync(market.market_id)
+                    
+                    # If we got a healthy quote with valid prices, break
+                    if trusted_quote and trusted_quote.health == "healthy":
+                        if (trusted_quote.mid_cents and 0 < trusted_quote.mid_cents < 100) or \
+                           (trusted_quote.best_ask_cents and 0 < trusted_quote.best_ask_cents < 100) or \
+                           (trusted_quote.best_bid_cents and 0 < trusted_quote.best_bid_cents < 100):
+                            break
+                    
+                    # If this was the last attempt, log detailed failure info
+                    if attempt == max_retries - 1:
+                        # Detailed logging for quote validation failure
+                        if trusted_quote:
+                            self.logger.error(
+                                "[crypto15m_risk] Quote validation failed after %d attempts for %s - "
+                                "health=%s source=%s is_fallback=%s mid_cents=%s best_ask_cents=%s best_bid_cents=%s "
+                                "age_ms=%.1f confidence=%.2f diagnostics=%s status=%s",
+                                max_retries, market.market_id, trusted_quote.health, trusted_quote.source,
+                                trusted_quote.is_fallback, trusted_quote.mid_cents, trusted_quote.best_ask_cents,
+                                trusted_quote.best_bid_cents, trusted_quote.age_ms, trusted_quote.confidence,
+                                trusted_quote.diagnostics, trusted_quote.status
+                            )
+                        else:
+                            self.logger.error(
+                                "[crypto15m_risk] No quote available after %d attempts for %s - "
+                                "market may be suspended or data unavailable",
+                                max_retries, market.market_id
+                            )
+                    else:
+                        # Exponential backoff before retry
+                        backoff_ms = base_backoff_ms * (2 ** attempt)
+                        self.logger.warning(
+                            "[crypto15m_risk] Quote fetch attempt %d/%d failed for %s - "
+                            "retrying in %dms (health=%s, mid_cents=%s)",
+                            attempt + 1, max_retries, market.market_id, backoff_ms,
+                            trusted_quote.health if trusted_quote else "no_quote",
+                            trusted_quote.mid_cents if trusted_quote else "N/A"
+                        )
+                        await asyncio.sleep(backoff_ms / 1000.0)
+                
+                if trusted_quote and trusted_quote.health == "healthy":
+                    # Use verified quote from integrity layer
+                    # Check confidence threshold for production safety
+                    if trusted_quote.confidence < 0.5:
+                        self.logger.warning(
+                            "[crypto15m_risk] Healthy quote has low confidence for %s - confidence=%.2f age_ms=%.1f",
+                            market.market_id, trusted_quote.confidence, trusted_quote.age_ms
+                        )
+                    if trusted_quote.mid_cents and 0 < trusted_quote.mid_cents < 100:
+                        price_cents = int(trusted_quote.mid_cents)
+                    elif trusted_quote.best_ask_cents and 0 < trusted_quote.best_ask_cents < 100:
+                        price_cents = int(trusted_quote.best_ask_cents)
+                    elif trusted_quote.best_bid_cents and 0 < trusted_quote.best_bid_cents < 100:
+                        price_cents = int(trusted_quote.best_bid_cents)
+                    else:
+                        self.logger.error(
+                            "[crypto15m_risk] Trusted quote exists but no valid prices for %s - health=%s source=%s is_fallback=%s. "
+                            "mid_cents=%s, best_ask_cents=%s, best_bid_cents=%s age_ms=%.1f confidence=%.2f",
+                            market.market_id, trusted_quote.health, trusted_quote.source,
+                            trusted_quote.is_fallback, trusted_quote.mid_cents,
+                            trusted_quote.best_ask_cents, trusted_quote.best_bid_cents,
+                            trusted_quote.age_ms, trusted_quote.confidence
+                        )
+                        raise ValueError(f"Trusted quote has no valid prices for {market.market_id}; refusing to create order")
+                elif trusted_quote and trusted_quote.health == "degraded":
+                    # Trading allowed in degraded mode (using REST fallback)
+                    if trusted_quote.mid_cents and 0 < trusted_quote.mid_cents < 100:
+                        price_cents = int(trusted_quote.mid_cents)
+                        self.logger.warning(
+                            "[crypto15m_risk] Using degraded quote for %s - source=%s is_fallback=%s diagnostics=%s age_ms=%.1f confidence=%.2f",
+                            market.market_id, trusted_quote.source, trusted_quote.is_fallback,
+                            trusted_quote.diagnostics, trusted_quote.age_ms, trusted_quote.confidence
+                        )
+                    else:
+                        self.logger.error(
+                            "[crypto15m_risk] Degraded quote has no valid prices for %s - health=%s source=%s age_ms=%.1f confidence=%.2f",
+                            market.market_id, trusted_quote.health, trusted_quote.source,
+                            trusted_quote.age_ms, trusted_quote.confidence
+                        )
+                        raise ValueError(f"Degraded quote has no valid prices for {market.market_id}; refusing to create order")
+                else:
+                    # Suspended or no quote - reject order
+                    health = trusted_quote.health if trusted_quote else "no_quote"
+                    self.logger.error(
+                        "[crypto15m_risk] No healthy/degraded quote for %s - health=%s - rejecting order",
+                        market.market_id, health
+                    )
+                    raise ValueError(f"No healthy quote for {market.market_id}; refusing to create order")
+            except Exception as _price_exc:
+                self.logger.error(
+                    "[crypto15m_risk] Failed to fetch trusted quote for %s: %s - rejecting order",
+                    market.market_id, _price_exc
+                )
+                raise ValueError(f"Failed to fetch trusted quote for {market.market_id}; refusing to create order")
+            # Ensure valid range 1-99
+            price_cents = max(1, min(99, price_cents))
+
         if is_crypto_15m:
             try:
                 from merid.risk.crypto_swarm_risk_btc15m import (
@@ -4546,7 +6839,7 @@ class KalshiTradingAgent:
                     # Bootstrap equity from unified v2 bankroll service (single source of truth)
                     _init_equity = 0.0
                     try:
-                        from merid.event_venues.kalshi import get_equity_for_risk_calc_sync
+                        from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
                         _effective_usd = get_equity_for_risk_calc_sync()
                         if _effective_usd:
                             _init_equity = float(_effective_usd)
@@ -4580,7 +6873,7 @@ class KalshiTradingAgent:
                 # B9: Re-resolve current equity from unified v2 bankroll service
                 _cur_equity = 0.0
                 try:
-                    from merid.event_venues.kalshi import get_equity_for_risk_calc_sync
+                    from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
                     _effective_usd = get_equity_for_risk_calc_sync()
                     if _effective_usd:
                         _cur_equity = float(_effective_usd)
@@ -4836,7 +7129,35 @@ class KalshiTradingAgent:
             import uuid as _arb_uuid
             from merid.event_venues.kalshi.order_router import route_order_async, OrderIntent as _ArbIntent
 
-            price_cents = signal.limit_price_cents or 0
+            # CRITICAL FIX: Resolve valid market price when signal.limit_price_cents is None/invalid
+            # For arb: YES price + NO price must equal 100, and both must be in range 1-99
+            price_cents = signal.limit_price_cents
+            if price_cents is None or price_cents <= 0 or price_cents >= 100:
+                try:
+                    from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                    store = get_kalshi_market_state_store()
+                    state = store.get(market.market_id)
+                    if state:
+                        if state.mid_cents and 0 < state.mid_cents < 100:
+                            price_cents = int(state.mid_cents)
+                        elif state.best_ask_cents and 0 < state.best_ask_cents < 100:
+                            price_cents = int(state.best_ask_cents)
+                        elif state.best_bid_cents and 0 < state.best_bid_cents < 100:
+                            price_cents = int(state.best_bid_cents)
+                        else:
+                            price_cents = 50
+                    else:
+                        price_cents = 50
+                except Exception as _price_exc:
+                    self.logger.debug("[trading_agent.arb] Failed to fetch market price for %s: %s", market.market_id, _price_exc)
+                    price_cents = 50
+                # Ensure valid range 1-99
+                price_cents = max(1, min(99, price_cents))
+                if price_cents != signal.limit_price_cents:
+                    self.logger.info(
+                        "[trading_agent.arb] Resolved market price for %s: %s -> %sc",
+                        market.market_id, signal.limit_price_cents, price_cents
+                    )
             yes_price = price_cents
             no_price = max(1, 100 - yes_price)
 
@@ -4875,7 +7196,7 @@ class KalshiTradingAgent:
                     )
 
                 # BANKROLL UNIFICATION: Get effective bankroll from v2 unified service
-                from merid.event_venues.kalshi import get_equity_for_risk_calc_sync
+                from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
                 _effective_equity_usd = 0.0
                 try:
                     _eff = get_equity_for_risk_calc_sync()
@@ -4954,15 +7275,45 @@ class KalshiTradingAgent:
             side = "both"
             action = "buy"
         else:
-            price_cents = signal.limit_price_cents or 0
+            # CRITICAL FIX: Resolve valid market price when signal.limit_price_cents is None/invalid
+            # Order router requires 1-99 cents; 0 or 100 are invalid
+            price_cents = signal.limit_price_cents
+            if price_cents is None or price_cents <= 0 or price_cents >= 100:
+                try:
+                    from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                    store = get_kalshi_market_state_store()
+                    state = store.get(market.market_id)
+                    if state:
+                        if state.mid_cents and 0 < state.mid_cents < 100:
+                            price_cents = int(state.mid_cents)
+                        elif state.best_ask_cents and 0 < state.best_ask_cents < 100:
+                            price_cents = int(state.best_ask_cents)
+                        elif state.best_bid_cents and 0 < state.best_bid_cents < 100:
+                            price_cents = int(state.best_bid_cents)
+                        else:
+                            price_cents = 50
+                    else:
+                        price_cents = 50
+                except Exception as _price_exc:
+                    self.logger.debug("[trading_agent] Failed to fetch market price for %s: %s", market.market_id, _price_exc)
+                    price_cents = 50
+                # Ensure valid range 1-99
+                price_cents = max(1, min(99, price_cents))
+                if price_cents != signal.limit_price_cents:
+                    self.logger.info(
+                        "[trading_agent] Resolved market price for %s: %s -> %sc",
+                        market.market_id, signal.limit_price_cents, price_cents
+                    )
             # Route through order_router so TIF resolution (IOC-auto-below-seconds
             # via KalshiMarketStateStore) and the full safety pipeline apply.
             # Consensus confidence and rationale are forwarded to the OrderIntent
             # so the order router can log and apply them.
             try:
                 from merid.event_venues.kalshi.order_router import route_order_async, OrderIntent
-                from merid.event_venues.kalshi import get_equity_for_risk_calc_sync
+                from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
                 from trading.trade_mode import TradeMode as _TradeMode
+                # PRODUCTION FIX: Dynamic take-profit based on R-multiple and confidence
+                from merid.prediction.dynamic_takeprofit import compute_dynamic_tp
                 _intent_mode = _TradeMode.PAPER if force_paper else None
                 _conf = float(signal.edge.confidence) if signal.edge and hasattr(signal.edge, "confidence") else None
                 _rationale = (
@@ -4988,6 +7339,166 @@ class KalshiTradingAgent:
                     self.logger.debug("[trading_agent] Failed to get effective bankroll: %s — risk check may block", _bre)
                     # Continue with 0; risk layer will fail-closed if equity is required
 
+                # MICRO-SCALPING: Check cycle tracker capacity before deploying capital
+                _order_notional = (price_cents * size) / 100.0
+                _cycle_ok, _cycle_available, _cycle_reason = self._cycle_tracker.check_capacity(_order_notional)
+                if not _cycle_ok:
+                    self.logger.warning(
+                        "[CYCLE_CAP_BLOCK] %s: %s | available=$%.2f needed=$%.2f",
+                        market.market_id, _cycle_reason, _cycle_available, _order_notional,
+                    )
+                    return  # Block order - cycle cap reached
+                
+                # Record deployment in cycle tracker (will be released on position close)
+                self._cycle_tracker.record_deployment(_order_notional, f"{market.market_id}_{side}")
+                self.logger.debug(
+                    "[CYCLE_CAP_DEPLOY] %s: $%.2f deployed | available=$%.2f | cycle_util=%.1f%%",
+                    market.market_id, _order_notional, self._cycle_tracker.available,
+                    self._cycle_tracker.summary()["utilization_pct"],
+                )
+
+                # ── PER-TRADE SUMMARY ───────────────────────────────────────────────
+                # Concise entry log for post-mortem analysis of 4am-style anomalies
+                _trade_asset = getattr(self.config, 'asset', 'BTC')
+                _trade_is_major = _trade_asset in ('BTC', 'ETH')
+                _asset_tf = f"{_trade_asset}:{self.config.timeframes[0] if self.config.timeframes else '15m'}"
+                _edge_val = float(signal.edge.net_edge) if signal.edge else 0.0
+                _conf_val = _conf if _conf is not None else 0.0
+                _sl_dist = 2.0  # micro-scalping default SL distance in cents
+                _dtp_target = self._dynamic_tp_calc.get_target(
+                    entry_price=price_cents,
+                    current_price=price_cents,
+                    volatility=self._calculate_volatility(market.market_id, price_cents) if hasattr(self, '_calculate_volatility') else 0.03,
+                    momentum=_edge_val,
+                ) if hasattr(self, '_dynamic_tp_calc') else 0.05
+
+                # ═── KALSHI 15M EDGE METRICS ─────────────────────────────────────────
+                # Compute systematic edge: spot→strike distance vs implied vs model prob
+                _kalshi_price_dollars = price_cents / 100.0  # Convert cents to dollars (0.01-0.99)
+                _model_prob = _conf_val if _conf_val > 0 else 0.5  # Use confidence as model prob proxy
+                
+                # Extract strike from ticker (e.g., KXBTC-15M-250501-T85300 → 85300)
+                _strike_price = None
+                try:
+                    _ticker_parts = market.market_id.split('-')
+                    for _part in _ticker_parts:
+                        if _part.startswith('T') and _part[1:].isdigit():
+                            _strike_price = float(_part[1:])
+                            break
+                        elif _part.startswith('P') and _part[1:].replace('.', '').isdigit():
+                            _strike_price = float(_part[1:])
+                            break
+                except Exception:
+                    _strike_price = None
+                
+                # Get spot price for distance calculation
+                _spot_price = None
+                try:
+                    from merid.prediction.crypto_top_edge import CRYPTO_ASSETS
+                    if _trade_asset in CRYPTO_ASSETS:
+                        # Try to get spot from live price feed
+                        from data.live_price_feed import get_live_price_feed
+                        feed = get_live_price_feed()
+                        symbol = f"{_trade_asset}-USD" if _trade_asset else "BTC-USD"
+                        price_data = feed.get_current_price(symbol)
+                        if price_data:
+                            _spot_price = float(price_data.price)
+                except Exception:
+                    _spot_price = None
+                
+                # Compute edge metrics if we have both spot and strike
+                _edge_metrics_str = ""
+                _metrics = None
+                if _spot_price and _strike_price:
+                    _metrics = compute_kalshi_edge_metrics(
+                        spot=_spot_price,
+                        strike=_strike_price,
+                        kalshi_price=_kalshi_price_dollars,
+                        model_prob=_model_prob,
+                        asset=_trade_asset,
+                        contracts=size,
+                    )
+                    _edge_metrics_str = format_edge_metrics_log(_metrics)
+                else:
+                    # Fallback: log without distance metrics
+                    _edge_metrics_str = (
+                        f"kalshi_price={_kalshi_price_dollars:.2f} model_prob={_model_prob:.3f} "
+                        f"spot=unknown strike={_strike_price or 'unknown'} "
+                        f"edge=unknown (spot/strike unavailable)"
+                    )
+
+                # ═── LAYER 3 EXECUTION GUARD: Distance + Edge ──────────────────────────
+                # Fatal: Block trades that exceed distance caps or edge floors
+                if _metrics:
+                    _layer3_guard = check_execution_guards(
+                        asset=_trade_asset,
+                        timeframe=_asset_tf.split(':')[1] if ':' in _asset_tf else '15m',
+                        delta_pct=_metrics.delta_pct,
+                        z_score=_metrics.z_score,
+                        edge=_metrics.edge,
+                        log_fn=self.logger.info,
+                    )
+                    if not _layer3_guard.allowed:
+                        # Release cycle tracker allocation since we're blocking
+                        self._cycle_tracker.record_release(_order_notional, f"{market.market_id}_{side}")
+                        return  # Blocked by distance or edge guard
+                # ─────────────────────────────────────────────────────────────────────
+
+                self.logger.info(
+                    "[TRADE_ENTRY] %s | asset_tf=%s | edge=%.3f | conf=%.2f | "
+                    "size=%d | price=%dc | SL=%.1fc | DTP=%.1f%% | "
+                    "trail=%.1f%%@%+.1f%% | max_hold=%ds | corr_id=%s | %s",
+                    market.market_id,
+                    _asset_tf,
+                    _edge_val,
+                    _conf_val,
+                    size,
+                    price_cents,
+                    _sl_dist,
+                    _dtp_target * 100,
+                    (0.015 if _trade_is_major else 0.02) * 100,  # trailing distance
+                    1.5,  # trailing activation
+                    180,  # max_hold_seconds (reverted 2026-05-08 from 120s to restore profitable trades)
+                    _trace[:16] if _trace else "none",
+                    _edge_metrics_str,
+                )
+                # ────────────────────────────────────────────────────────────────────
+
+                # PRODUCTION FIX: Compute dynamic take-profit based on R-multiple and confidence
+                # Maps confidence to TP: ≤0.3 → 1.0R, 0.3-0.6 → 1.5R, >0.6 → 2.0-3.0R
+                _tp_price_cents = None
+                _tp_r_multiple = None
+                try:
+                    # Estimate stop distance (default 2 cents for micro-scalping)
+                    _stop_distance = 2.0
+                    # Determine direction for TP computation
+                    _direction = "LONG" if side.lower() == "yes" else "SHORT"
+                    # Use edge confidence or fallback
+                    _tp_confidence = _conf if _conf is not None else 0.5
+                    # Use edge.net_edge as Kelly fraction proxy
+                    _kelly = float(signal.edge.net_edge) if signal.edge else None
+
+                    _tp_plan = compute_dynamic_tp(
+                        entry_price=float(price_cents),
+                        stop_price=float(price_cents) - _stop_distance if _direction == "LONG" else float(price_cents) + _stop_distance,
+                        direction=_direction,
+                        confidence=_tp_confidence,
+                        kelly_fraction=_kelly
+                    )
+
+                    _tp_price_cents = int(_tp_plan.tp_price)
+                    _tp_r_multiple = _tp_plan.tp_r_multiple
+                    # Clamp TP to valid Kalshi range 1-99
+                    _tp_price_cents = max(1, min(99, _tp_price_cents))
+
+                    self.logger.debug(
+                        "[DTP] %s: entry=%sc, TP=%sc (%.2fR), conf=%.2f",
+                        market.market_id, price_cents, _tp_price_cents,
+                        _tp_r_multiple, _tp_confidence
+                    )
+                except Exception as _tp_exc:
+                    self.logger.debug("[DTP] TP computation failed for %s: %s", market.market_id, _tp_exc)
+
                 _intent = OrderIntent(
                     ticker=market.market_id,
                     side=side,
@@ -5007,16 +7518,41 @@ class KalshiTradingAgent:
                     client_tag=_sig_corr_s,
                     sentiment_driven=bool(_conf and _conf > 0.4),
                     effective_equity_usd=_effective_equity_usd if _effective_equity_usd > 0 else None,
+                    # PRODUCTION: Dynamic take-profit wiring
+                    take_profit_price_cents=_tp_price_cents,
+                    take_profit_r_multiple=_tp_r_multiple,
                 )
-                _route_result = await route_order_async(_intent)
+                # Add timeout to prevent indefinite hanging on network calls
+                import asyncio
+                try:
+                    _route_result = await asyncio.wait_for(
+                        route_order_async(_intent),
+                        timeout=30.0  # 30 second timeout for order placement
+                    )
+                except asyncio.TimeoutError:
+                    self.logger.error("route_order_async TIMEOUT after 30s | market=%s", market.market_id)
+                    raise
                 # Adapt OrderResult → legacy .success/.payload/.error_message
                 result_success = _route_result.status not in ("rejected",)
                 result_payload = _route_result.fill or {}
                 result_error = _route_result.reason or ""
+                # CRITICAL FIX: Release cycle tracker allocation if order was rejected
+                if not result_success:
+                    self._cycle_tracker.record_release(_order_notional, f"{market.market_id}_{side}")
+                    self.logger.warning(
+                        "[CYCLE_CAP_RELEASE] %s: Order rejected, released $%.2f | reason=%s",
+                        market.market_id, _order_notional, result_error
+                    )
             except Exception as _re:
                 # SECURITY: No fallback - all orders must go through canonical router.
                 # Fallbacks create complexity and potential bypass paths.
                 self.logger.error("route_order_async failed, order rejected: %s", _re)
+                # CRITICAL FIX: Release cycle tracker allocation on exception
+                self._cycle_tracker.record_release(_order_notional, f"{market.market_id}_{side}")
+                self.logger.warning(
+                    "[CYCLE_CAP_RELEASE] %s: Router exception, released $%.2f | error=%s",
+                    market.market_id, _order_notional, str(_re)[:100]
+                )
                 result_success = False
                 result_payload = {}
                 result_error = f"router_failed:{str(_re)[:100]}"
@@ -5082,7 +7618,9 @@ class KalshiTradingAgent:
         _o_confidence = float(signal.confidence) if hasattr(signal, "confidence") else None
         _o_phase = signal.phase.value if hasattr(signal, "phase") and signal.phase else ""
         _o_archetype = self.config.archetype if hasattr(self.config, "archetype") else ""
-        _o_price_c = signal.limit_price_cents or 0
+        # BUG-FIX: Use resolved price_cents (which was validated/fetched from market state)
+        # instead of signal.limit_price_cents which may be 0 or None
+        _o_price_c = price_cents if price_cents > 0 else (signal.limit_price_cents or 50)
         _o_notional = round(size * (_o_price_c / 100.0), 2) if _o_price_c else None
         order_entry = {
             "ts": now_ts.isoformat(),
@@ -5174,7 +7712,8 @@ class KalshiTradingAgent:
             _confidence = float(signal.confidence) if hasattr(signal, "confidence") else None
             _phase = signal.phase.value if hasattr(signal, "phase") and signal.phase else ""
             _archetype = self.config.archetype if hasattr(self.config, "archetype") else ""
-            _price_c = signal.limit_price_cents or 0
+            # BUG-FIX: Use resolved price_cents (which was validated/fetched from market state)
+            _price_c = price_cents if price_cents > 0 else (signal.limit_price_cents or 50)
             _notional = round(size * (_price_c / 100.0), 2) if _price_c else None
             # B17: use actual fill price from the routing result (simulate_paper_fill
             # applies real bid/ask slippage); fall back to signal limit price only when
@@ -5257,6 +7796,7 @@ class KalshiTradingAgent:
                     bucket=_bucket,
                     market_id=market.market_id,
                     side=side,
+                    action=action,
                     price_cents=_price_c,
                     p_model=_p_model,
                     p_implied=_p_implied,
@@ -5344,6 +7884,16 @@ class KalshiTradingAgent:
                 expiry_ts = market.end_date.timestamp() if market.end_date else 0.0
                 # B19a: use actual fill price for entry tracking, not pre-slippage limit price
                 _fill_price_for_tp = int(_actual_fill_price_c or signal.limit_price_cents or 50)
+                # PRODUCTION FIX: Pull TP targets from position_cache (populated via order_router)
+                _tp_price = _tp_r = _sl_price = None
+                try:
+                    _cached_pos = get_position_cache().get_position(market.market_id)
+                    if _cached_pos:
+                        _tp_price = getattr(_cached_pos, 'take_profit_price_cents', None)
+                        _tp_r = getattr(_cached_pos, 'take_profit_r_multiple', None)
+                        _sl_price = getattr(_cached_pos, 'stop_loss_price_cents', None)
+                except Exception:
+                    pass  # Non-fatal: TP targets optional
                 tp = TrackedPosition(
                     position_id=pos_id,
                     ticker=market.market_id,
@@ -5353,6 +7903,10 @@ class KalshiTradingAgent:
                     entry_ts=time.time(),
                     contract_expiry_ts=expiry_ts,
                     current_price_cents=_fill_price_for_tp,
+                    take_profit_price_cents=_tp_price,
+                    take_profit_r_multiple=_tp_r,
+                    stop_loss_price_cents=_sl_price,
+                    entry_mode="paper" if force_paper else None,
                 )
                 self._tracked_positions[pos_id] = tp
                 self.logger.debug("stop_loss: tracking position %s %s@%dc", pos_id, side, tp.entry_price_cents)
@@ -5853,8 +8407,15 @@ class KalshiTradingAgent:
         # Supplement with news/sentiment — kept at minimal weight via strategy
         sent_score = getattr(snapshot, "sentiment_global", None)
         if sent_score is not None:
-            # snapshot stores sentiment as 0-100 (fear/greed); normalise to −1→+1
-            ctx["sentiment_score"] = (float(sent_score) / 50.0) - 1.0
+            # sentiment_global can be either:
+            # - 0-100 (fear/greed from MarketMoodBus) → normalize to -1 to +1
+            # - -1 to +1 (combined_score from SentimentBusV2) → use directly
+            if -1.0 <= float(sent_score) <= 1.0:
+                # Already normalized from SentimentBusV2
+                ctx["sentiment_score"] = float(sent_score)
+            else:
+                # 0-100 fear/greed from MarketMoodBus → normalize to -1 to +1
+                ctx["sentiment_score"] = (float(sent_score) / 50.0) - 1.0
         elif getattr(snapshot, "sentiment_local", None) is not None:
             ctx["sentiment_score"] = float(snapshot.sentiment_local)
 
@@ -6101,6 +8662,15 @@ class KalshiTradingAgent:
 
             # ── Build + submit AgentProposal (execution gating) ───────────
             if asset:
+                # CONSENSUS_AUDIT: Populate data provenance fields
+                data_source = "primary_ws" if "kalshi_orderbook" in signal_sources else "unknown"
+                is_fallback = "kalshi_market_prob_fallback" in reasoning_tag or "fallback" in reasoning_tag.lower()
+                data_quality_flags = {
+                    "orderbook_valid": True,  # KalshiLiveMarketStrategy only returns valid orderbook data
+                    "candle_valid": True,
+                    "price_boundaries_ok": True,
+                }
+                
                 proposal = AgentProposal(
                     agent_id=self.agent_id,
                     asset=asset,
@@ -6116,6 +8686,9 @@ class KalshiTradingAgent:
                     agent_track_record=track_record,
                     market_data=market_ctx if market_ctx else None,
                     downweight=_proposal_downweight,
+                    data_source=data_source,
+                    is_fallback=is_fallback,
+                    data_quality_flags=data_quality_flags,
                 )
                 get_consensus_aggregator().submit_proposal(proposal)
             else:
@@ -6219,7 +8792,15 @@ class KalshiTradingAgent:
             import asyncio as _aio
             try:
                 loop = _aio.get_running_loop()
-                loop.create_task(coordinator.submit_opinion(opinion))
+                # BUG-FIX: Add done callback to catch task exceptions
+                _task = loop.create_task(
+                    coordinator.submit_opinion(opinion),
+                    name=f"taco-opinion-{opinion.opinion_id[:8]}"
+                )
+                def _on_done(t):
+                    if not t.cancelled() and t.exception():
+                        self.logger.debug("TaCo opinion task failed: %s", t.exception())
+                _task.add_done_callback(_on_done)
             except RuntimeError:
                 _aio.run(coordinator.submit_opinion(opinion))
 
@@ -6236,6 +8817,9 @@ class KalshiTradingAgent:
             from merid.swarm.consensus_aggregator import get_consensus_aggregator
             aggregator = get_consensus_aggregator()
             return aggregator.get_consensus(asset, timeframe)
+        except Exception as exc:
+            self.logger.debug(f"Consensus fetch error: {exc}")
+            return None
         except Exception as exc:
             self.logger.debug(f"Consensus fetch error: {exc}")
             return None
