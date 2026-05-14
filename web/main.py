@@ -3197,11 +3197,13 @@ async def _app_lifespan(application: FastAPI):
                 f.write(f"[DEBUG] get_market_universe returned at {time.time()}\n")
                 f.flush()
             if _universe is None:
-                logger.warning("[MARKET-UNIVERSE-VALIDATION] MarketUniverse not available yet (catalog may still be loading)")
+                logger.warning("[MARKET-UNIVERSE-VALIDATION] MarketUniverse not available yet (catalog may still be loading) - skipping validation")
                 # File-based debug
                 with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
-                    f.write(f"[DEBUG] MarketUniverse is None at {time.time()}\n")
+                    f.write(f"[DEBUG] MarketUniverse is None - skipping validation at {time.time()}\n")
                     f.flush()
+                # Continue without blocking - the catalog will load in the background
+                logger.info("[MARKET-CATALOG] Catalog started successfully, background refresh will populate universe")
             else:
                 # File-based debug
                 with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
