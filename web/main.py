@@ -3180,10 +3180,22 @@ async def _app_lifespan(application: FastAPI):
             f.flush()
         
         logger.info("[MARKET-CATALOG] post_refresh: starting market universe validation")
+        # File-based debug
+        with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
+            f.write(f"[DEBUG] Before market universe validation at {time.time()}\n")
+            f.flush()
         # MARKET UNIVERSE VALIDATION: Ensure catalog, agent grid, and trading agent
         # all see the same filtered market universe (BTC/ETH/SOL/XRP/DOGE 15m only)
         try:
+            # File-based debug
+            with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
+                f.write(f"[DEBUG] About to call get_market_universe at {time.time()}\n")
+                f.flush()
             _universe = _catalog.get_market_universe()
+            # File-based debug
+            with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
+                f.write(f"[DEBUG] get_market_universe returned at {time.time()}\n")
+                f.flush()
             if _universe is None:
                 logger.warning("[MARKET-UNIVERSE-VALIDATION] MarketUniverse not available yet (catalog may still be loading)")
             else:
