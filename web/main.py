@@ -3150,12 +3150,20 @@ async def _app_lifespan(application: FastAPI):
     # KalshiMarketCatalog — fetches + caches all active Kalshi markets (backbone for pipeline/agents)
     # File-based debug
     with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
-        f.write(f"[DEBUG] Before KalshiMarketCatalog at {time.time()}\n")
+        f.write(f"[DEBUG] Before KalshiMarketCatalog start() at {time.time()}\n")
         f.flush()
     try:
         from merid.event_venues.kalshi.market_catalog import get_market_catalog
         _catalog = get_market_catalog()
+        # File-based debug
+        with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
+            f.write(f"[DEBUG] About to call catalog.start() at {time.time()}\n")
+            f.flush()
         await _catalog.start()
+        # File-based debug
+        with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
+            f.write(f"[DEBUG] catalog.start() returned at {time.time()}\n")
+            f.flush()
         # BUG-L13 FIX: In VALIDATION_MODE, cancel the periodic 5-min refresh loop after the
         # initial load.  The refresh() method makes 20+ sequential Kalshi REST calls (~7s total)
         # which blocks the event loop for up to 1390ms per cycle — triggering lag profiles every
@@ -3166,6 +3174,10 @@ async def _app_lifespan(application: FastAPI):
             logger.info("[VALIDATION MODE] KalshiMarketCatalog periodic refresh cancelled (initial load retained)")
         logger.info("✅ KalshiMarketCatalog started (market data backbone)")
         _startup_state["services"]["kalshi_market_catalog"] = {"status": "running", "started_at": time.time()}
+        # File-based debug
+        with open("c:\\Dev\\MERID\\debug_startup.log", "a") as f:
+            f.write(f"[DEBUG] After KalshiMarketCatalog at {time.time()}\n")
+            f.flush()
         
         logger.info("[MARKET-CATALOG] post_refresh: starting market universe validation")
         # MARKET UNIVERSE VALIDATION: Ensure catalog, agent grid, and trading agent
