@@ -88,6 +88,12 @@ class TwitterSentimentService:
         "FED": "(Federal Reserve OR Fed OR FOMC OR Powell OR interest rate)",
         "CPI": "(CPI OR inflation OR consumer price OR PCE)",
         "SPX": "(S&P 500 OR SPX OR stock market OR Nasdaq)",
+        # Energy assets (NEW)
+        "ERCOT": "(ERCOT OR Texas grid OR electricity price OR power outage OR grid failure)",
+        "OIL": "(oil price OR crude oil OR WTI OR Brent OR OPEC OR petroleum OR barrel)",
+        "GAS": "(natural gas OR LNG OR gas price OR natgas OR gas storage)",
+        "CARBON": "(carbon credit OR emission trading OR carbon price OR carbon market)",
+        "RENEWABLE": "(renewable energy OR solar power OR wind power OR green energy)",
     }
     
     def __new__(cls):

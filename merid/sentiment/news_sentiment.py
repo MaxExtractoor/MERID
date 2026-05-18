@@ -59,6 +59,8 @@ class NewsSentimentResult:
     confidence: float       # 0 to 1
     label: str              # 'positive', 'negative', 'neutral'
     raw_probs: Dict[str, float]  # raw probabilities from model
+    content_sentiment: Optional[float] = None  # NEW: content-based sentiment
+    content_confidence: Optional[float] = None  # NEW: content confidence
 
 
 class KalshiNewsSentiment:
@@ -82,9 +84,13 @@ class KalshiNewsSentiment:
         self,
         news_api_key: Optional[str] = None,
         min_confidence: float = 0.6,
+        process_content: bool = True,  # NEW: enable content processing
+        sentiment_threshold: float = 0.3,  # NEW: filter weak signals
     ):
         self.api_key = news_api_key or os.getenv("NEWS_API_KEY")
         self.min_confidence = min_confidence
+        self.process_content = process_content
+        self.sentiment_threshold = sentiment_threshold
         self._cache: Dict[str, Any] = {}
         self._cache_ttl = 300  # 5 minute cache
     
@@ -164,7 +170,178 @@ class KalshiNewsSentiment:
         except Exception as exc:
             logger.warning(f"FinBERT scoring failed: {exc}")
             return self._fallback_score(text)
-    
+
+    def score_content(self, content: str, max_tokens: int = 2048) -> Optional[NewsSentimentResult]:
+        """
+        Score article content using FinBERT with chunking for long texts.
+
+        For energy news, content often has higher predictive value than headlines.
+        Chunks long articles and aggregates sentiment across chunks.
+
+        Args:
+            content: Full article text
+            max_tokens: Maximum tokens per chunk (default 2048 for FinBERT)
+
+        Returns:
+            NewsSentimentResult with aggregated content sentiment
+        """
+        tokenizer, model = _get_finbert()
+
+        if tokenizer is None or model is None:
+            logger.warning("FinBERT not available for content scoring")
+            return self._fallback_score(content)
+
+        try:
+            import torch
+
+            # Chunk content if too long
+            words = content.split()
+            chunk_size = 400  # ~512 tokens accounting for special tokens
+            chunks = [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+
+            if len(chunks) > 10:
+                # Limit to first 10 chunks to avoid excessive computation
+                chunks = chunks[:10]
+                logger.debug(f"Truncated content to 10 chunks (~{chunk_size * 10} words)")
+
+            chunk_sentiments = []
+            chunk_confidences = []
+
+            for chunk in chunks:
+                if not chunk.strip():
+                    continue
+
+                # Tokenize
+                inputs = tokenizer(
+                    chunk,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=512,
+                    padding=True,
+                )
+
+                # Move to GPU if available
+                if torch.cuda.is_available():
+                    inputs = {k: v.cuda() for k, v in inputs.items()}
+
+                # Score
+                with torch.no_grad():
+                    outputs = model(**inputs)
+                    logits = outputs.logits[0]
+                    probs = torch.softmax(logits, dim=-1)
+
+                # FinBERT labels: [negative, neutral, positive]
+                probs = probs.cpu().numpy()
+
+                neg_prob = float(probs[0])
+                neu_prob = float(probs[1])
+                pos_prob = float(probs[2])
+
+                # Compute sentiment score: pos - neg, range [-1, 1]
+                sentiment = pos_prob - neg_prob
+                confidence = max(pos_prob, neg_prob, neu_prob)
+
+                chunk_sentiments.append(sentiment)
+                chunk_confidences.append(confidence)
+
+            if not chunk_sentiments:
+                return self._fallback_score(content)
+
+            # Aggregate: confidence-weighted average
+            total_weight = sum(chunk_confidences)
+            weighted_sentiment = sum(s * c for s, c in zip(chunk_sentiments, chunk_confidences)) / total_weight
+            avg_confidence = sum(chunk_confidences) / len(chunk_confidences)
+
+            # Determine label
+            if weighted_sentiment > 0.1:
+                label = "positive"
+            elif weighted_sentiment < -0.1:
+                label = "negative"
+            else:
+                label = "neutral"
+
+            return NewsSentimentResult(
+                headline=content[:100] + "...",  # Truncated for display
+                source="finbert_content",
+                timestamp=datetime.now(timezone.utc),
+                sentiment_score=weighted_sentiment,
+                confidence=avg_confidence,
+                label=label,
+                raw_probs={
+                    "chunks_processed": len(chunk_sentiments),
+                    "avg_sentiment": weighted_sentiment,
+                },
+                content_sentiment=weighted_sentiment,
+                content_confidence=avg_confidence,
+            )
+
+        except Exception as exc:
+            logger.warning(f"FinBERT content scoring failed: {exc}")
+            return self._fallback_score(content)
+
+    def score_article(
+        self,
+        headline: str,
+        content: Optional[str] = None,
+    ) -> NewsSentimentResult:
+        """
+        Score article with parallel headline + content processing.
+
+        Energy research shows content has higher predictive value than headlines.
+        Weights: 30% headline + 70% content for final sentiment.
+
+        Args:
+            headline: Article headline
+            content: Full article text (optional)
+
+        Returns:
+            NewsSentimentResult with blended sentiment
+        """
+        # Score headline
+        headline_result = self.score_headline(headline)
+
+        if not headline_result:
+            return self._fallback_score(headline)
+
+        # If no content or content processing disabled, return headline only
+        if not content or not self.process_content:
+            return headline_result
+
+        # Score content
+        content_result = self.score_content(content)
+
+        if not content_result:
+            # Fallback to headline only
+            return headline_result
+
+        # Blend: 30% headline + 70% content
+        blended_sentiment = 0.3 * headline_result.sentiment_score + 0.7 * content_result.sentiment_score
+        blended_confidence = 0.3 * headline_result.confidence + 0.7 * content_result.confidence
+
+        # Determine final label
+        if blended_sentiment > 0.1:
+            label = "positive"
+        elif blended_sentiment < -0.1:
+            label = "negative"
+        else:
+            label = "neutral"
+
+        return NewsSentimentResult(
+            headline=headline,
+            source="finbert_blended",
+            timestamp=datetime.now(timezone.utc),
+            sentiment_score=blended_sentiment,
+            confidence=blended_confidence,
+            label=label,
+            raw_probs={
+                "headline_sentiment": headline_result.sentiment_score,
+                "content_sentiment": content_result.sentiment_score,
+                "blend_ratio": "30% headline + 70% content",
+            },
+            content_sentiment=content_result.sentiment_score,
+            content_confidence=content_result.confidence,
+        )
+
     def _fallback_score(self, text: str) -> NewsSentimentResult:
         """Fallback sentiment scoring using VADER if FinBERT unavailable."""
         try:
@@ -255,6 +432,7 @@ class KalshiNewsSentiment:
                 if pub_time >= cutoff:
                     filtered.append({
                         "title": a.get("title", ""),
+                        "content": a.get("content", "") or a.get("description", ""),  # NEW: include content
                         "source": a.get("source", {}).get("name", "unknown"),
                         "timestamp": pub_time,
                         "url": a.get("url", ""),
@@ -324,9 +502,22 @@ class KalshiNewsSentiment:
         
         results = []
         for article in articles:
-            result = self.score_headline(article["title"])
+            # Use parallel processing: score both headline and content
+            result = self.score_article(
+                headline=article["title"],
+                content=article.get("content", ""),
+            )
+
+            # Filter by confidence and sentiment threshold
             if result and result.confidence >= self.min_confidence:
-                results.append(result)
+                # Only pass signals above threshold to swarm
+                if abs(result.sentiment_score) >= self.sentiment_threshold:
+                    results.append(result)
+                else:
+                    logger.debug(
+                        f"Filtered weak signal: sentiment={result.sentiment_score:.3f} "
+                        f"< threshold={self.sentiment_threshold}"
+                    )
         
         if not results:
             return {
