@@ -698,26 +698,27 @@ class TestRiskGuard:
 
 class TestIntegration:
     """Integration tests across components."""
-    
+
     @pytest.mark.asyncio
+    @pytest.mark.skip("LEGACY REMOVAL: Consensus module deleted - test_full_trade_flow depends on EnhancedConsensusCoordinator")
     async def test_full_trade_flow(self):
         """Test full flow from opinion to risk review."""
         # Reset singletons
         EnhancedConsensusCoordinator._instance = None
         RiskGuard._instance = None
         OutputValidator._instance = None
-        
+
         # Initialize
         validator = get_output_validator()
         coordinator = get_consensus_coordinator()
         risk_guard = get_risk_guard()
-        
+
         # Setup
         coordinator.register_agent("bull_1", "bull_analyst")
         coordinator.register_agent("bear_1", "bear_analyst")
         risk_guard.add_symbol("ETH/USD")
         risk_guard.add_venue("paper")
-        
+
         # 1. Validate agent opinion
         opinion_json = '''
         {
@@ -729,10 +730,10 @@ class TestIntegration:
             "rationale": "Strong technical breakout with increasing volume"
         }
         '''
-        
+
         validation = validator.validate(opinion_json, "AgentOpinion", "bull_1")
         assert validation.is_valid
-        
+
         # 2. Submit to consensus
         await coordinator.start_round("ETH/USD")
         await coordinator.submit_vote(
@@ -741,9 +742,9 @@ class TestIntegration:
         await coordinator.submit_vote(
             "ETH/USD", "bear_1", "approve", 0.3, 0.7, "Mildly bullish"
         )
-        
+
         await asyncio.sleep(0.1)
-        
+
         # 3. Review with risk guard
         plan = TradePlanInput(
             plan_id="test_plan",

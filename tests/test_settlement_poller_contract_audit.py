@@ -509,14 +509,14 @@ class TestDownstreamHealthEndpoints:
 class TestDownstreamOutcomePropagation:
     """
     Downstream Check: Outcome propagation
-    
-    Verify voided or invalid events are explicitly filtered from opinion
+
+    Verify voided or invalid events are explicitly filtered from
     aggregation and analytics models.
     """
     
     def test_voided_filtered_from_gradable_pool(self, sample_settlements):
         """
-        Only gradable settlements should reach opinion aggregation.
+        Only gradable settlements should reach aggregation.
         """
         gradable = [s for s in sample_settlements if s.is_gradable()]
         non_gradable = [s for s in sample_settlements if not s.is_gradable()]
