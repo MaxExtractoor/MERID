@@ -106,7 +106,7 @@ class Kalshi15mLoop:
     async def _on_tick_async(self) -> None:
         """Async tick handler (Windows ProactorEventLoop compatible)."""
         self._last_tick_time = time.time()
-        logger.debug("[15M-LOOP-TRACE] _on_tick_async ENTRY (self._running=%s)", self._running)
+        logger.info("[15M-LOOP] ON-TICK-ENTRY running=%s tick_before=%d", self._running, self._tick)
         if not self._running:
             logger.debug("[15M-LOOP-TRACE] _on_tick_async called but loop not running")
             return
@@ -115,16 +115,12 @@ class Kalshi15mLoop:
         logger.debug("[15M-LOOP-TRACE] _on_tick_async: loop.is_running()=%s, loop.time()=%.3f", loop.is_running(), loop.time())
         self._tick += 1
         cycle_id = self._tick
-        logger.debug(
-            "[15M-LOOP-TRACE] TICK %d at loop_time=%.3f (creating cycle task)",
-            cycle_id,
-            loop.time(),
-        )
+        logger.info("[15M-LOOP] ON-TICK-CREATE-CYCLE cycle=%d loop_time=%.3f", cycle_id, loop.time())
 
         try:
             # Launch the async cycle task (fire-and-forget with monitoring)
             task = asyncio.create_task(self._run_cycle_wrapper(cycle_id), name=f"cycle-{cycle_id}")
-            logger.debug("[15M-LOOP-TRACE] Cycle task %d created: %s", cycle_id, task.get_name())
+            logger.info("[15M-LOOP] CYCLE-TASK-CREATED cycle=%d name=%s", cycle_id, task.get_name())
             
             # Add done callback to detect silent failures
             def _cycle_done_cb(t: asyncio.Task) -> None:
@@ -144,6 +140,7 @@ class Kalshi15mLoop:
         """Async wrapper for cycle execution (called from callback)."""
         loop = asyncio.get_running_loop()
         start = loop.time()
+        logger.info("[15M-LOOP] CYCLE-WRAPPER-ENTER cycle=%d loop_time=%.3f", cycle_id, start)
         
         # Watchdog: check wall-clock time since last cycle
         current_wall_time = time.time()
@@ -180,6 +177,7 @@ class Kalshi15mLoop:
         finally:
             end = loop.time()
             duration = end - start
+            logger.info("[15M-LOOP] CYCLE-WRAPPER-EXIT cycle=%d duration=%.3fs completed=%s", cycle_id, duration, cycle_completed)
             logger.debug("[15M-LOOP-TRACE] CYCLE %d END at loop_time=%.3f (duration=%.3fs completed=%s)", cycle_id, end, duration, cycle_completed)
 
     async def run_forever(self) -> None:
@@ -223,15 +221,18 @@ class Kalshi15mLoop:
         # Keep this coroutine alive to track lifecycle
         try:
             while self._running:
-                logger.debug("[15M-LOOP-TRACE] Loop iteration start (self._running=%s)", self._running)
+                print(f"[PRINT-LOOP] Loop iteration start, self._running={self._running}, tick={self._tick}")
+                logger.info("[15M-LOOP-DEBUG] Loop iteration start (self._running=%s)", self._running)
                 # Run tick directly in this loop (not detached task)
                 await self._on_tick_async()
-                logger.debug("[15M-LOOP-TRACE] Loop iteration after _on_tick_async")
+                print(f"[PRINT-LOOP] Loop iteration after _on_tick_async, tick={self._tick}")
+                logger.info("[15M-LOOP-DEBUG] Loop iteration after _on_tick_async")
                 
                 # Wait for cadence before next tick
                 try:
-                    logger.debug("[15M-LOOP-TRACE] About to sleep for %.1fs", self.cadence_seconds)
+                    logger.info("[15M-LOOP-DEBUG] About to sleep for %.1fs", self.cadence_seconds)
                     await asyncio.sleep(self.cadence_seconds)
+                    logger.info("[15M-LOOP-DEBUG] Woke up from sleep")
                     logger.debug("[15M-LOOP-TRACE] Woke up from sleep")
                 except asyncio.CancelledError:
                     logger.debug("[15M-LOOP-TRACE] Sleep cancelled")
@@ -295,6 +296,7 @@ class Kalshi15mLoop:
         6) Let AgentGrid/TradingAgent issue orders via venue_adapter
         7) Log band transitions
         """
+        logger.info("[15M-LOOP-CYCLE] ENTER cycle=%d", tick)
         cycle_start = time.time()
         self._last_cycle_at = datetime.now(timezone.utc)
         
@@ -306,13 +308,17 @@ class Kalshi15mLoop:
             now.isoformat(),
         )
 
-        logger.debug("[15M-LOOP-TRACE]   phase=preconditions")
-        logger.debug("[15m-LOOP] Starting cycle %d", tick)
+        # REAL CYCLE LOGIC
+        logger.info("[15M-LOOP-TRACE]   phase=preconditions ENTER cycle=%d", tick)
+        logger.info("[15m-LOOP] Starting cycle %d", tick)
 
         # Update envelope equity once per cycle (not per order)
+        logger.info("[15M-LOOP-TRACE]   phase=risk-envelope-check ENTER cycle=%d", tick)
         if self._risk_envelope:
+            logger.info("[15M-LOOP-TRACE]   risk-envelope exists, calling safe_update_envelope_equity cycle=%d", tick)
             from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import safe_update_envelope_equity
             update_success = safe_update_envelope_equity(self._risk_envelope)
+            logger.info("[15M-LOOP-TRACE]   safe_update_envelope_equity returned=%s cycle=%d", update_success, tick)
             if update_success:
                 # Log band transitions
                 current_multiplier = self._risk_envelope.per_trade_risk_multiplier
@@ -326,6 +332,7 @@ class Kalshi15mLoop:
                     self._last_risk_multiplier = current_multiplier
             
             # Check if halted due to drawdown
+            logger.info("[15M-LOOP-TRACE]   checking is_halted cycle=%d", tick)
             if self._risk_envelope.is_halted:
                 logger.warning(
                     "[15m-LOOP] Cycle %d skipped: drawdown halt (drawdown=%.2f%% >= %.2f%%)",
@@ -337,45 +344,52 @@ class Kalshi15mLoop:
                     self._risk_envelope.current_drawdown_pct * 100,
                     self._risk_envelope.drawdown_halt_pct * 100
                 )
+                logger.info("[15M-LOOP-CYCLE] EXIT cycle=%d (halted)", tick)
                 return  # Skip cycle
+        logger.info("[15M-LOOP-TRACE]   phase=risk-envelope-check EXIT cycle=%d", tick)
 
-        logger.debug("[15M-LOOP-TRACE]   phase=agent-grid-cycle")
+        logger.info("[15M-LOOP-TRACE]   phase=agent-grid-cycle ENTER cycle=%d", tick)
 
         # Step 1: Run agent grid cycle
         # This will call each of the 5 agents to generate signals and place orders
         agent_count = len(self.agent_grid._agents) if hasattr(self.agent_grid, '_agents') else 0
-        logger.debug("[15M-LOOP-TRACE]   agent-grid-cycle starting n_agents=%d", agent_count)
+        logger.info("[15M-LOOP-TRACE]   agent-grid-cycle starting n_agents=%d cycle=%d", agent_count, tick)
         try:
             # Add timeout to prevent indefinite hanging
             # P1 FIX: Align timeout to 300s (5 agents × 60s per-agent timeout)
             try:
+                logger.info("[15M-LOOP-TRACE]   calling _run_agent_grid_with_timeout cycle=%d", tick)
                 await asyncio.wait_for(
                     self._run_agent_grid_with_timeout(tick),
                     timeout=300.0  # 300 second timeout for agent grid cycle (5 agents × 60s)
                 )
+                logger.info("[15M-LOOP-TRACE]   _run_agent_grid_with_timeout completed cycle=%d", tick)
             except asyncio.TimeoutError:
                 self._error_count += 1
-                logger.debug("[15M-LOOP-TRACE]   agent-grid-cycle TIMEOUT after 300s")
+                logger.info("[15M-LOOP-TRACE]   agent-grid-cycle TIMEOUT after 300s cycle=%d", tick)
                 logger.error("[15m-LOOP] Agent grid cycle timed out after 300s")
                 # Continue to next cycle even if timeout occurs
-            logger.debug("[15M-LOOP-TRACE]   agent-grid-cycle finished")
+            logger.info("[15M-LOOP-TRACE]   agent-grid-cycle finished cycle=%d", tick)
         except Exception as exc:
             self._error_count += 1
             logger.error("[15m-LOOP] Agent grid cycle failed: %s", exc, exc_info=True)
-            logger.error("[15M-LOOP-TRACE]   agent-grid-cycle failed error=%s", str(exc))
+            logger.error("[15M-LOOP-TRACE]   agent-grid-cycle failed error=%s cycle=%d", str(exc), tick)
             # FIX: Do NOT re-raise - continue running even if a cycle fails
             # The outer try block only catches CancelledError, so re-raising here
             # would break the loop instead of continuing to the next cycle
 
+        logger.info("[15M-LOOP-TRACE]   phase=agent-grid-cycle EXIT cycle=%d", tick)
+
         cycle_duration = time.time() - cycle_start
         self._cycle_count += 1
 
-        logger.debug("[15M-LOOP-TRACE]   phase=cycle-complete duration=%.3fs", cycle_duration)
-        logger.debug(
+        logger.info("[15M-LOOP-TRACE]   phase=cycle-complete duration=%.3fs cycle=%d", cycle_duration, tick)
+        logger.info(
             "[15m-LOOP] Cycle %d completed in %.3fs",
             tick,
             cycle_duration,
         )
+        logger.info("[15M-LOOP-CYCLE] EXIT cycle=%d duration=%.3fs", tick, cycle_duration)
 
         # Warn if cycle is taking too long (should be < 1s)
         if cycle_duration > 1.0:
@@ -387,11 +401,21 @@ class Kalshi15mLoop:
 
     async def _run_agent_grid_with_timeout(self, tick: int) -> None:
         """Run agent grid cycle with proper error handling."""
+        logger.info("[15M-LOOP] GRID-WITH-TIMEOUT-ENTER cycle=%d", tick)
+        logger.info("[15M-LOOP-TRACE] _run_agent_grid_with_timeout ENTER cycle=%d", tick)
         if hasattr(self.agent_grid, 'run_cycle'):
+            logger.info("[15M-LOOP] GRID-RUN-CYCLE-AWAIT ENTER cycle=%d", tick)
+            logger.info("[15M-LOOP-TRACE] calling agent_grid.run_cycle cycle=%d", tick)
             await self.agent_grid.run_cycle(tick)
+            logger.info("[15M-LOOP] GRID-RUN-CYCLE-AWAIT EXIT cycle=%d", tick)
+            logger.info("[15M-LOOP-TRACE] agent_grid.run_cycle returned cycle=%d", tick)
         else:
             # Fallback: run agents directly if run_cycle not implemented
+            logger.info("[15M-LOOP-TRACE] run_cycle not implemented, running agents directly cycle=%d", tick)
             await self._run_agents_directly(tick)
+            logger.info("[15M-LOOP-TRACE] _run_agents_directly returned cycle=%d", tick)
+        logger.info("[15M-LOOP-TRACE] _run_agent_grid_with_timeout EXIT cycle=%d", tick)
+        logger.info("[15M-LOOP] GRID-WITH-TIMEOUT-EXIT cycle=%d", tick)
 
     async def _run_agents_directly(self, tick: int) -> None:
         """Fallback: run agents directly if run_cycle not implemented."""
