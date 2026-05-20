@@ -365,44 +365,12 @@ describe.skip('FIX-08 — KalshiGridView fills table has order_id column [SKIPPE
 });
 
 // ─── FIX-09: SwarmConsensusMatrix emoji archetypes replaced ────────────────────
-describe.skip('FIX-09 — SwarmConsensusMatrix uses ArchetypeTag, not emoji [SKIPPED - implementation changed]', () => {
-  it('SwarmConsensusMatrix.tsx does NOT contain the old emoji archetype map', () => {
-    const matrix = read('views', 'SwarmConsensusMatrix.tsx');
-    // The old map used literal emoji as values
-    expect(matrix).not.toMatch(/ARCHETYPE_ICON/);
-  });
-
-  it('SwarmConsensusMatrix.tsx defines ARCHETYPE_META with lucide icon components', () => {
-    const matrix = read('views', 'SwarmConsensusMatrix.tsx');
-    expect(matrix).toMatch(/ARCHETYPE_META/);
-  });
-
-  it('SwarmConsensusMatrix.tsx defines ArchetypeTag component', () => {
-    const matrix = read('views', 'SwarmConsensusMatrix.tsx');
-    expect(matrix).toMatch(/function ArchetypeTag/);
-  });
-
-  it('SwarmConsensusMatrix.tsx renders <ArchetypeTag in proposal list', () => {
-    const matrix = read('views', 'SwarmConsensusMatrix.tsx');
-    expect(matrix).toMatch(/<ArchetypeTag/);
-  });
-
-  it('SwarmConsensusMatrix.tsx imports lucide-react icons for archetypes', () => {
-    const matrix = read('views', 'SwarmConsensusMatrix.tsx');
-    expect(matrix).toMatch(/TrendingUp/);
-    expect(matrix).toMatch(/RotateCcw|RefreshCw/);
-    expect(matrix).toMatch(/Zap/);
-    expect(matrix).toMatch(/MessageSquare/);
-    expect(matrix).toMatch(/Bot/);
-  });
-
-  it('SwarmConsensusMatrix.tsx React import is at the top of the file, not mid-file', () => {
-    const matrix = read('views', 'SwarmConsensusMatrix.tsx');
-    const lines = matrix.split('\n');
-    const reactImportLine = lines.findIndex(l => l.match(/^import React/));
-    // Must be in the first 15 lines (top of file)
-    expect(reactImportLine).toBeGreaterThanOrEqual(0);
-    expect(reactImportLine).toBeLessThan(15);
+// LEGACY REMOVAL: SwarmConsensusMatrix removed - consensus module deleted
+describe.skip('FIX-09 — SwarmConsensusMatrix uses ArchetypeTag, not emoji [SKIPPED - component deleted]', () => {
+  it('SwarmConsensusMatrix.tsx deleted - consensus module removed', () => {
+    // This test suite is skipped because SwarmConsensusMatrix was deleted
+    // as part of Phase 1: Safe Module Deletion
+    expect(true).toBe(true);
   });
 });
 

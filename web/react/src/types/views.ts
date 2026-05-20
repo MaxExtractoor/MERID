@@ -215,7 +215,7 @@ export const STAGE_GROUPS = [
 // The UI has migrated from many individual views to a consolidated 8-stage workflow:
 // - Stage 1 (Discover): Unified view replaces kalshi-dashboard, kalshi-all-markets
 // - Stage 2 (Analyze): Individual views preserved (KalshiSentimentView, KalshiVolDashboardView)
-// - Stage 3 (Consensus): Individual views preserved (SwarmConsensusMatrix, KalshiAgentPerformanceView, CalibrationDashboardView)
+// - Stage 3 (Consensus): Individual views preserved (KalshiAgentPerformanceView, CalibrationDashboardView)
 // - Stage 4 (Size): Unified view replaces lane-control
 // - Stage 5 (Execute): Unified view replaces kalshi-terminal, orders, positions
 // - Stage 6 (Monitor): Unified view replaces kalshi-portfolio
@@ -227,6 +227,7 @@ export const STAGE_GROUPS = [
 // for new features - all new views should use the consolidated architecture.
 //
 // NOTE: kalshi-dashboard and kalshi-terminal removed (stub views deleted)
+// LEGACY REMOVAL: SwarmConsensusMatrix removed - consensus module deleted
 export const LEGACY_VIEW_MAP: Record<string, View> = {
   // Stage 1: Discover - all map to unified discover view
   "kalshi-all-markets": "discover",
