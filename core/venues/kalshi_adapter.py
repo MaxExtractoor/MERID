@@ -111,7 +111,73 @@ class KalshiAdapter(VenueAdapter):
         amount: Decimal,
         price: Optional[Decimal] = None
     ) -> Dict[str, Any]:
-        """Place order via resilient client."""
+        """Place order via resilient client with Kalshi constraint validation."""
+        # Get market data to validate constraints
+        market_data = await self.get_market_data(symbol)
+        
+        # Validate order against Kalshi constraints before API call
+        try:
+            from merid.event_venues.kalshi.order_constraints import validate_kalshi_order
+            from datetime import datetime, timezone
+            
+            # Convert price to cents (Kalshi uses cents for binary markets)
+            price_cents = int(price * 100) if price is not None else 50  # Default to 50 cents
+            
+            # Get market status from market data if available
+            market_status = "active"  # Default to active if we can't determine
+            market_close_time = None
+            current_position = 0
+            
+            if market_data:
+                # Try to get market details from the catalog
+                try:
+                    from merid.event_venues.kalshi.market_catalog import get_market_catalog
+                    catalog = get_market_catalog()
+                    if catalog:
+                        market = catalog.get_market(symbol)
+                        if market:
+                            market_status = market.status
+                            market_close_time = market.close_time
+                except Exception as catalog_err:
+                    self.logger.warning("kalshi_adapter_catalog_fetch_failed", error=str(catalog_err))
+            
+            # Validate order
+            allowed, reason = validate_kalshi_order(
+                market_id=symbol,
+                market_status=market_status,
+                market_close_time=market_close_time,
+                side="yes" if side == OrderSide.BUY else "no",
+                price_cents=price_cents,
+                quantity=int(amount),
+                current_position=current_position,
+                market_halted=False,
+            )
+            
+            if not allowed:
+                self.logger.warning(
+                    "kalshi_adapter_order_rejected",
+                    ticker=symbol,
+                    reason=reason,
+                    price_cents=price_cents,
+                    quantity=int(amount),
+                )
+                return {
+                    "status": "rejected",
+                    "message": f"Order rejected by Kalshi constraints: {reason}",
+                    "venue": "kalshi",
+                }
+                
+        except ImportError:
+            self.logger.warning("kalshi_adapter_constraints_not_available")
+        except Exception as constraint_err:
+            self.logger.error("kalshi_adapter_constraint_check_failed", error=str(constraint_err))
+            # Fail-closed: reject order if constraint check fails
+            return {
+                "status": "error",
+                "message": f"Order constraint validation failed: {constraint_err}",
+                "venue": "kalshi",
+            }
+        
         # Convert merid.core side to Kalshi side (YES is usually the long side in our logic)
         # In prediction markets, side is often about the outcome.
         # Here we assume OrderSide.BUY targets 'yes' and OrderSide.SELL targets 'no' 

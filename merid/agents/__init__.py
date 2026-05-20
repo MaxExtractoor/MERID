@@ -15,11 +15,20 @@ from merid.agents.base import (
     CanonicalAgentRegistry,
     get_canonical_registry,
 )
-from merid.agents.sports_odds import (
-    OddsAwareSportsAgent,
-    SportsOddsStrategy,
-    get_sports_odds_agent,
-)
+
+# Sports odds module moved to legacy - import with graceful fallback
+try:
+    from merid.agents.sports_odds import (
+        OddsAwareSportsAgent,
+        SportsOddsStrategy,
+        get_sports_odds_agent,
+    )
+    _sports_odds_available = True
+except ImportError:
+    _sports_odds_available = False
+    OddsAwareSportsAgent = None
+    SportsOddsStrategy = None
+    get_sports_odds_agent = None
 
 __all__ = [
     "AgentCategory",
@@ -28,7 +37,12 @@ __all__ = [
     "CanonicalAgent",
     "CanonicalAgentRegistry",
     "get_canonical_registry",
-    "OddsAwareSportsAgent",
-    "SportsOddsStrategy",
-    "get_sports_odds_agent",
 ]
+
+# Only add sports odds exports if available
+if _sports_odds_available:
+    __all__.extend([
+        "OddsAwareSportsAgent",
+        "SportsOddsStrategy",
+        "get_sports_odds_agent",
+    ])

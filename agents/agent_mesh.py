@@ -2,21 +2,26 @@
 Agent Mesh — CANONICAL production agent orchestration layer.
 
 This is the single source of truth for which agents run in production.
-All 8 agents run as independent async tasks, subscribing to event
+All agents run as independent async tasks, subscribing to event
 streams and emitting outputs.  Do NOT use agents/registry.py or
 agents/manifest.py for production agent initialization — those are
 legacy/reference modules only (see T-004 Zero-Trust Audit).
 
-8 mandatory agents per spec:
+4 active agents (others moved to legacy):
 1. MarketAnalystAgent  — TA + momentum
-2. NewsAnalystAgent    — Narrative impact
-3. RiskAgent           — Exposure & liquidation (VETO power)
-4. SkepticAgent        — Adversarial check (can force re-round)
-5. SynthesizerAgent    — Cross-agent merge
-6. StrategyAgent       — Trade structuring
-7. ArchivistAgent      — State memory
-8. MetaAuditAgent      — Agent performance & trust
+2. RiskAgent           — Exposure & liquidation (VETO power)
+3. SkepticAgent        — Adversarial check (can force re-round)
+4. StrategyAgent       — Trade structuring
+
+Legacy agents (moved to legacy/agents/):
+- NewsAnalystAgent, SynthesizerAgent, ArchivistAgent, MetaAuditAgent
 """
+
+# DEPRECATION NOTICE:
+# This module is part of the legacy LLM/mesh risk system.
+# It is NOT used in the kalshi_crypto_15m_v2 profile and MUST NOT
+# be wired into any production trading or execution path.
+LEGACY_EXPERIMENTAL_ONLY = True
 
 from __future__ import annotations
 
@@ -25,13 +30,13 @@ from typing import List, Dict, Any
 
 from agents.streaming import (
     MarketAnalystAgent,
-    NewsAnalystAgent,
+    # NewsAnalystAgent,  # PRODUCTION FIX (2026-05-13): Moved to legacy, commenting out
     RiskAgent,
     SkepticAgent,
-    SynthesizerAgent,
+    # SynthesizerAgent,  # PRODUCTION FIX (2026-05-13): Moved to legacy, commenting out
     StrategyAgent,
-    ArchivistAgent,
-    MetaAuditAgent
+    # ArchivistAgent,  # PRODUCTION FIX (2026-05-13): Moved to legacy, commenting out
+    # MetaAuditAgent  # PRODUCTION FIX (2026-05-13): Moved to legacy, commenting out
 )
 from utils.logger import get_logger
 
@@ -45,15 +50,11 @@ class AgentMesh:
     All agents run as independent async tasks,
     subscribing to event streams and emitting outputs.
     
-    8 mandatory agents per production spec:
+    4 active agents (others moved to legacy):
     1. Analyst (Market) - TA + momentum
-    2. News Agent - Narrative impact
-    3. Risk Agent - Exposure & liquidation (VETO power)
-    4. Skeptic - Adversarial check (can force re-round)
-    5. Synthesizer - Cross-agent merge
-    6. Archivist - State memory
-    7. Meta-Audit - Agent performance & trust
-    8. Strategy - Trade structuring
+    2. Risk Agent - Exposure & liquidation (VETO)
+    3. Skeptic - Adversarial check (can force re-round)
+    4. Strategy - Trade structuring
     """
     
     def __init__(self):
@@ -61,22 +62,28 @@ class AgentMesh:
         self.running = False
         
     async def initialize(self):
-        """Initialize all 8 streaming agents."""
-        logger.info("Initializing agent mesh with 8 mandatory agents...")
+        """Initialize all 4 active streaming agents (others moved to legacy)."""
+        # INSTRUMENTATION: Track initialization timing
+        import time
+        import os
+        init_start_ts = time.time()
         
-        # Create all 8 mandatory streaming agents
+        logger.info("Initializing agent mesh with 4 active agents...")
+        
+        # Create 4 active streaming agents (others moved to legacy)
         self.agents = [
             MarketAnalystAgent("market-analyst-01"),      # 1. Analyst
-            NewsAnalystAgent("news-analyst-01"),          # 2. News Agent
-            RiskAgent("risk-agent-01"),                   # 3. Risk (VETO)
-            SkepticAgent("skeptic-agent-01"),             # 4. Skeptic (re-round)
-            SynthesizerAgent("synthesizer-agent-01"),     # 5. Synthesizer
-            StrategyAgent("strategy-agent-01"),           # 6. Strategy
-            ArchivistAgent("archivist-agent-01"),         # 7. Archivist
-            MetaAuditAgent("meta-audit-agent-01"),        # 8. Meta-Audit
+            RiskAgent("risk-agent-01"),                   # 2. Risk (VETO)
+            SkepticAgent("skeptic-agent-01"),             # 3. Skeptic (re-round)
+            StrategyAgent("strategy-agent-01"),           # 4. Strategy
         ]
         
-        logger.info(f"Agent mesh initialized with {len(self.agents)} agents")
+        duration_ms = (time.time() - init_start_ts) * 1000
+        logger.info(
+            f"Agent mesh initialized with {len(self.agents)} agents "
+            f"[AGENT-MESH] init profile={os.environ.get('MERID_PROFILE', 'unknown')} "
+            f"agents={len(self.agents)} duration_ms={duration_ms:.2f}"
+        )
     
     async def start(self):
         """Start all agents."""

@@ -436,6 +436,64 @@ jobs:
           name: kalshi-contract-pipeline-report
           path: reports/kalshi-contract-pipeline.xml
 
+  # ── Kalshi reconciliation + gate tests (path-filtered) ──────────────
+  # Only runs when files under merid/event_venues/kalshi, merid/reconciliation, or core/execution_gate change.
+  # Runs kalshi_unit, kalshi_recon, and kalshi_e2e marked tests.
+  kalshi-recon-gate-tests:
+    name: Kalshi Recon & Gate Tests
+    runs-on: ubuntu-latest
+    needs: [swarm-integrity-gate]
+    timeout-minutes: 15
+
+    # Path filter: only run when Kalshi/recon/gate files change
+    if: |
+      contains(github.event.head_commit.modified, 'merid/event_venues/kalshi/') ||
+      contains(github.event.head_commit.modified, 'merid/reconciliation/') ||
+      contains(github.event.head_commit.modified, 'core/execution_gate.py')
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Kalshi unit tests
+        run: |
+          mkdir -p reports
+          python -m pytest tests/event_venues/kalshi/test_btc_15m_reconciliation_e2e.py \
+            -m kalshi_unit \
+            -v --tb=short \
+            --junitxml=reports/kalshi-unit.xml
+
+      - name: Run Kalshi reconciliation tests
+        run: |
+          python -m pytest tests/event_venues/kalshi/test_btc_15m_reconciliation_e2e.py \
+            -m kalshi_recon \
+            -v --tb=short \
+            --junitxml=reports/kalshi-recon.xml
+
+      - name: Run Kalshi E2E tests
+        run: |
+          python -m pytest tests/event_venues/kalshi/test_btc_15m_reconciliation_e2e.py \
+            -m kalshi_e2e \
+            -v --tb=short \
+            --junitxml=reports/kalshi-e2e.xml
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kalshi-recon-gate-reports
+          path: reports/
+
   # ── Track B: informational — quarantined kalshi_enhanced (detect accidental greens)
   kalshi-enhanced-quarantine-signal:
     name: Kalshi enhanced quarantine (informational)

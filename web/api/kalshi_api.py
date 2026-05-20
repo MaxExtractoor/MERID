@@ -819,7 +819,7 @@ async def stream_order_group_updates(
       - heartbeat_interval: Seconds between heartbeats
 
     Example:
-      curl -N "http://localhost:8000/api/v1/kalshi/order-groups/stream?group_ids=og-1,og-2"
+      curl -N "http://localhost:8011/api/v1/kalshi/order-groups/stream?group_ids=og-1,og-2"
     """
     from merid.event_venues.kalshi.ws import KalshiWebSocket
 
@@ -1293,7 +1293,7 @@ async def swarm_sentiment_grid() -> Dict[str, Any]:
     """5×4 mood × swarm consensus for terminal UI (BTC–DOGE × 15m–weekly)."""
     from config.kalshi_crypto_config import WS_TIMEFRAME_TO_MOOD_LABEL, active_crypto_asset_mood_timeframe_grid
     from merid.swarm.consensus_aggregator import get_consensus_aggregator
-    from merid.swarm.market_mood_bus import get_market_mood_bus
+    from merid.sentiment.market_mood_bus import get_market_mood_bus
 
     mood = get_market_mood_bus()
     agg = get_consensus_aggregator()
@@ -3203,7 +3203,8 @@ async def place_order(
 
     # Compute default TP/SL for 15m crypto entry orders if not provided
     # This ensures the "no trade without exit" invariant is satisfied
-    if action == "buy" and ticker.startswith(("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M")):
+    # NOTE: Kalshi API uses base series tickers (KXBTC, KXETH, etc.) without timeframe suffix
+    if action == "buy" and ticker.startswith(("KXBTC", "KXETH", "KXXRP", "KXDOGE")):
         # Check if we need to compute default TP
         if take_profit_price_cents is None and take_profit_r_multiple is None:
             try:
@@ -4527,6 +4528,142 @@ async def health_check() -> Dict[str, Any]:
 
 # ── Production Self-Test Endpoint ───────────────────────────────────────────
 
+@router.get("/internal/green_path_diagnostic",
+    summary="Green Path Diagnostic - All Blocking Conditions",
+    description="Comprehensive diagnostic endpoint that checks all conditions required for live 15m trading. Returns JSON snapshot of risk, venue, loop, and execution guard states.",
+    response_description="Full diagnostic snapshot including profile, risk controller, execution guard, market state, WS bridge, and agent grid states",
+    tags=["kalshi", "internal", "health"],
+)
+async def green_path_diagnostic() -> Dict[str, Any]:
+    """Comprehensive green path diagnostic for kalshi_crypto_15m_v2.
+
+    Returns a JSON snapshot of all blocking conditions:
+      - profile: current MERID_PROFILE
+      - risk_controller_state: manual, daily_loss, circuit_breaker, rti_feed_stale, loop_lag, portfolio_integrity, dependency_health, error_threshold, position_limit
+      - execution_guard_state: global_can_trade, domain_allows_trade, local_killswitch
+      - market_state_summary: total_states, total_books, healthy, stale, trading_enabled
+      - ws_bridge_state: connected, shutdown_flag, running_tasks
+      - agent_grid_state: started, last_cycle_ts, errors_last_cycle
+    """
+    import os
+    import time
+    from datetime import datetime, timezone
+
+    result = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "profile": os.getenv("MERID_PROFILE", ""),
+        "risk_controller_state": {},
+        "execution_guard_state": {},
+        "market_state_summary": {},
+        "ws_bridge_state": {},
+        "agent_grid_state": {},
+    }
+
+    # Risk controller state
+    try:
+        from merid.risk.kill_switches import risk_controller
+        rc_status = risk_controller.get_status()
+        result["risk_controller_state"] = {
+            "can_trade": rc_status.get("can_trade", False),
+            "manual": rc_status.get("kill_reason") == "MANUAL" if rc_status.get("kill_reason") else False,
+            "daily_loss": rc_status.get("kill_reason") == "DAILY_LOSS" if rc_status.get("kill_reason") else False,
+            "circuit_breaker": rc_status.get("kill_reason") == "CIRCUIT_BREAKER" if rc_status.get("kill_reason") else False,
+            "rti_feed_stale": rc_status.get("kill_reason") == "RTI_FEED_STALE" if rc_status.get("kill_reason") else False,
+            "loop_lag": rc_status.get("kill_reason") == "LOOP_LAG_HALT" if rc_status.get("kill_reason") else False,
+            "portfolio_integrity": rc_status.get("kill_reason") == "PORTFOLIO_INTEGRITY" if rc_status.get("kill_reason") else False,
+            "dependency_health": rc_status.get("kill_reason") == "DEPENDENCY_HEALTH" if rc_status.get("kill_reason") else False,
+            "error_threshold": rc_status.get("kill_reason") == "ERROR_THRESHOLD" if rc_status.get("kill_reason") else False,
+            "position_limit": rc_status.get("kill_reason") == "POSITION_LIMIT" if rc_status.get("kill_reason") else False,
+            "kill_reason": rc_status.get("kill_reason"),
+            "daily_pnl": rc_status.get("daily_pnl"),
+        }
+    except Exception as exc:
+        result["risk_controller_state"] = {"error": str(exc)}
+
+    # Execution guard state
+    try:
+        from merid.execution_guard import get_execution_guard
+        guard = get_execution_guard()
+        result["execution_guard_state"] = {
+            "global_can_trade": guard.can_trade(),
+            "domain_allows_trade": guard.can_trade_domain("kalshi"),
+            "local_killswitch": guard._local_killswitch_active if hasattr(guard, '_local_killswitch_active') else None,
+        }
+    except Exception as exc:
+        result["execution_guard_state"] = {"error": str(exc)}
+
+    # Market state summary
+    try:
+        from merid.event_venues.kalshi.market_state import (
+            get_kalshi_market_state_store,
+            _ALLOWED_UNDERLYINGS,
+            _ALLOWED_TIMEFRAMES,
+            _parse_market_ticker,
+            MAX_BOOK_STALENESS_MS,
+            MIN_HEALTHY_BOOKS_FOR_TRADING,
+        )
+        store = get_kalshi_market_state_store()
+        now = time.monotonic()
+        total_states = 0
+        total_books = 0
+        healthy_books = 0
+        stale_books = 0
+
+        with store._lock:
+            total_states = len(store._states)
+            for ticker, state in store._states.items():
+                underlying, timeframe = _parse_market_ticker(ticker)
+                if underlying not in _ALLOWED_UNDERLYINGS or timeframe not in _ALLOWED_TIMEFRAMES:
+                    continue
+                total_books += 1
+                last_update = state.last_book_update_ts or state.last_rest_update_ts or 0
+                age_ms = (now - last_update) * 1000 if last_update > 0 else float('inf')
+                if age_ms < MAX_BOOK_STALENESS_MS and state.book_initialized:
+                    healthy_books += 1
+                else:
+                    stale_books += 1
+
+        result["market_state_summary"] = {
+            "total_states": total_states,
+            "total_books": total_books,
+            "healthy": healthy_books,
+            "stale": stale_books,
+            "trading_enabled": healthy_books >= MIN_HEALTHY_BOOKS_FOR_TRADING,
+        }
+    except Exception as exc:
+        result["market_state_summary"] = {"error": str(exc)}
+
+    # WS bridge state
+    try:
+        from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
+        bridge = get_ws_bridge()
+        result["ws_bridge_state"] = {
+            "connected": bridge.is_running() if bridge else False,
+            "shutdown_flag": bridge._shutdown.is_set() if bridge else None,
+            "running_tasks": {
+                "forward": bridge._forward_task and not bridge._forward_task.done() if bridge else False,
+                "ui_coalesce": bridge._ui_coalesce_task and not bridge._ui_coalesce_task.done() if bridge else False,
+                "health_logger": bridge._health_logger_task and not bridge._health_logger_task.done() if bridge else False,
+            } if bridge else {},
+        }
+    except Exception as exc:
+        result["ws_bridge_state"] = {"error": str(exc)}
+
+    # Agent grid state
+    try:
+        from merid.prediction.agent_grid import get_agent_grid
+        grid = get_agent_grid()
+        result["agent_grid_state"] = {
+            "started": grid.is_running,
+            "last_cycle_ts": grid._last_cycle_ts if hasattr(grid, '_last_cycle_ts') else None,
+            "errors_last_cycle": grid._errors_last_cycle if hasattr(grid, '_errors_last_cycle') else None,
+        }
+    except Exception as exc:
+        result["agent_grid_state"] = {"error": str(exc)}
+
+    return result
+
+
 @router.get("/internal/kalshi_health",
     summary="Production Orderbook Health Self-Test",
     description="Returns detailed book health metrics for all 5 crypto 15m markets. Used for production monitoring and validation.",
@@ -5527,7 +5664,7 @@ async def get_market_mood(
     trend scores, volatility regime, and Kalshi market data.
     """
     try:
-        from merid.swarm.market_mood_bus import get_market_mood_bus
+        from merid.sentiment.market_mood_bus import get_market_mood_bus
         bus = get_market_mood_bus()
         context = bus.get_context(asset, timeframe)
         
@@ -5574,7 +5711,7 @@ async def get_market_mood(
 async def get_all_market_moods() -> Dict[str, Any]:
     """Get all current market mood contexts."""
     try:
-        from merid.swarm.market_mood_bus import get_market_mood_bus
+        from merid.sentiment.market_mood_bus import get_market_mood_bus
         bus = get_market_mood_bus()
         contexts = bus.get_all_contexts()
         
@@ -5601,7 +5738,7 @@ async def get_all_market_moods() -> Dict[str, Any]:
 async def get_mood_fear_greed(asset: str) -> Dict[str, Any]:
     """Get current fear/greed index for an asset from the MarketMoodBus."""
     try:
-        from merid.swarm.market_mood_bus import get_market_mood_bus
+        from merid.sentiment.market_mood_bus import get_market_mood_bus
         bus = get_market_mood_bus()
         ctx = bus.get_context(asset.upper(), "15m")
         if ctx:
@@ -5636,7 +5773,7 @@ async def update_fear_greed(
 ) -> Dict[str, Any]:
     """Update fear/greed index for an asset."""
     try:
-        from merid.swarm.market_mood_bus import get_market_mood_bus
+        from merid.sentiment.market_mood_bus import get_market_mood_bus
         bus = get_market_mood_bus()
         bus.update_fear_greed(asset, value)
         return {"updated": True, "asset": asset, "fg_index": value}
@@ -5753,7 +5890,7 @@ async def get_swarm_insights(
     market context at decision time, and outcomes.
     """
     try:
-        from merid.swarm.market_mood_bus import get_market_mood_bus
+        from merid.sentiment.market_mood_bus import get_market_mood_bus
         bus = get_market_mood_bus()
         insights = bus.get_recent_insights(
             asset=asset,
@@ -6790,16 +6927,19 @@ async def get_lane_sentiment_snapshot() -> Dict[str, Any]:
     fg_synthetic = False
 
     # Fast path: only read the lane if the singleton already exists (no blocking init)
+    # MIGRATION: Use Crypto15MLane instead of legacy BTC15MLane (2026-05-15)
     try:
-        from merid.lanes.btc15m_lane import _btc15m_lane
-        if _btc15m_lane is not None:
-            status = _btc15m_lane.get_status()
+        from merid.lanes.registry import get_lane_registry
+        registry = get_lane_registry()
+        lane = registry.get_lane("BTC_15M")
+        if lane is not None:
+            status = lane.get_status()
             cached = status.get("cached_sentiment") or {}
             age = status.get("sentiment_age_seconds")
             stale = status.get("sentiment_stale", True)
             fg_synthetic = status.get("fg_is_synthetic", False)
     except Exception as exc:
-        logger.debug("sentiment/lane-snapshot: lane not ready — %s", exc)
+        logger.debug("sentiment/lane-snapshot: Crypto15MLane not ready — %s", exc)
 
     # Fallback: build snapshot from the SentimentBundle (with timeout guard)
     if not cached:
@@ -7102,6 +7242,14 @@ async def decide_btc_15m_endpoint(
     base_prob: float = Query(..., ge=0.01, le=0.99),
 ) -> Dict[str, Any]:
     """Get BTC 15m decision with sentiment."""
+    # PROFILE-GUARD: Disable for kalshi_crypto_15m_v2 (sentiment is research-only)
+    profile = os.getenv("MERID_PROFILE", "").lower()
+    if profile == "kalshi_crypto_15m_v2":
+        raise HTTPException(
+            403,
+            "Sentiment decision endpoint is disabled for kalshi_crypto_15m_v2 profile (sentiment is research-only)"
+        )
+    
     try:
         from merid.sentiment import decide_btc_15m
         result = decide_btc_15m(None, base_prob)
@@ -7275,12 +7423,14 @@ async def get_lane_status() -> Dict[str, Any]:
     Includes: mode, lane_live, lifecycle state, equity, DD, FG, ATR regime,
     loss streak, Kalman state, promotion phase, kill switch, and last sentiment.
     """
+    # MIGRATION: Use Crypto15MLane instead of legacy BTC15MLane (2026-05-15)
     try:
-        from merid.lanes.btc15m_lane import get_btc15m_lane
-        lane = get_btc15m_lane()
-        status = lane.get_status()
+        from merid.lanes.registry import get_lane_registry
+        registry = get_lane_registry()
+        lane = registry.get_lane("BTC_15M")
+        status = lane.get_status() if lane else {}
     except Exception as exc:
-        logger.warning("lane/status: could not get lane — %s", exc)
+        logger.warning("lane/status: could not get Crypto15MLane — %s", exc)
         status = {}
 
     try:
@@ -7365,17 +7515,20 @@ async def lane_control(body: Dict[str, Any]) -> Dict[str, Any]:
     result: Dict[str, Any] = {"action": action, "ok": False, "detail": ""}
 
     try:
+        # MIGRATION: Use Crypto15MLane instead of legacy BTC15MLane (2026-05-15)
+        from merid.lanes.registry import get_lane_registry
+        registry = get_lane_registry()
+        lane = registry.get_lane("BTC_15M")
+
         if action == "start":
-            from merid.lanes.btc15m_lane import get_btc15m_lane
-            lane = get_btc15m_lane()
-            if not getattr(lane, 'running', getattr(lane, '_running', False)):
+            if lane is not None and not lane.is_running():
                 import asyncio
                 # Fire-and-forget; attach a done-callback so startup crashes
                 # surface in the logs instead of being swallowed by the GC.
                 _start_task = asyncio.create_task(lane.start(), name="btc15m-lane-start")
                 _start_task.add_done_callback(
                     lambda t: logger.error(
-                        "btc15m lane start task failed: %s", t.exception()
+                        "Crypto15MLane start task failed: %s", t.exception()
                     ) if not t.cancelled() and t.exception() else None
                 )
                 result.update(ok=True, detail="lane start task created")
@@ -7383,10 +7536,11 @@ async def lane_control(body: Dict[str, Any]) -> Dict[str, Any]:
                 result.update(ok=True, detail="lane already running")
 
         elif action == "stop":
-            from merid.lanes.btc15m_lane import get_btc15m_lane
-            lane = get_btc15m_lane()
-            await lane.stop()
-            result.update(ok=True, detail="lane stopped")
+            if lane is not None:
+                await lane.stop()
+                result.update(ok=True, detail="lane stopped")
+            else:
+                result.update(ok=False, detail="lane not found")
 
         elif action == "kill_switch_on":
             from merid.risk.kill_switches import risk_controller
@@ -7402,12 +7556,13 @@ async def lane_control(body: Dict[str, Any]) -> Dict[str, Any]:
             result.update(ok=True, detail="kill switch reset")
 
         elif action == "set_paper":
-            from merid.lanes.btc15m_lane import get_btc15m_lane
-            lane = get_btc15m_lane()
-            lane.lane_live = False
-            lane.config.paper_mode = True
-            logger.warning("Lane forced to PAPER mode via API")
-            result.update(ok=True, detail="lane forced to paper mode")
+            # MIGRATION: Use Crypto15MLane instead of legacy BTC15MLane (2026-05-15)
+            if lane is not None:
+                lane.cfg.paper = True
+                logger.warning("Crypto15MLane forced to PAPER mode via API")
+                result.update(ok=True, detail="lane set to paper mode")
+            else:
+                result.update(ok=False, detail="lane not found")
 
         elif action == "set_trade_mode":
             mode_str = body.get("mode", "paper").lower()
@@ -8387,7 +8542,19 @@ async def get_bracket_risk() -> Dict[str, Any]:
         return br.summary()
     except Exception as e:
         logger.warning(f"Bracket risk unavailable: {e}")
-        # Return safe default structure
+        # Derive max_notional from config sizing policy (fail-safe fallback)
+        try:
+            from merid.event_venues.kalshi.kalshi_risk import KalshiRiskConfig
+            # Use config-based sizing: per_trade_cap × max_concurrent_trades
+            per_trade_max_notional = KalshiRiskConfig().max_single_order_notional_usd
+            max_concurrent_trades = 3
+            max_notional_usd = per_trade_max_notional * max_concurrent_trades
+            max_notional_cents = int(max_notional_usd * 100)
+        except Exception:
+            # Fail-safe: conservative $500 cap if config unavailable
+            max_notional_cents = 50000
+        
+        # Return safe default structure with config-based max_notional
         return {
             "halted": False,
             "halt_reason": None,
@@ -8407,7 +8574,7 @@ async def get_bracket_risk() -> Dict[str, Any]:
                 "max_loss_per_contract_pct": 1.0,
                 "max_loss_per_bracket_cents": 5000.0,
                 "max_contracts_per_hour": 50,
-                "max_notional_per_hour_cents": 25000.0,
+                "max_notional_per_hour_cents": float(max_notional_cents),  # Derived from config sizing policy
                 "max_consecutive_losers": 5,
                 "max_unhedged_delta": 100,
                 "max_open_brackets": 20,
@@ -8580,13 +8747,75 @@ async def get_risk_projection_api(
         projection = await get_risk_projection(force_new=force_new)
         
         return {
-            "success": True,
-            "data": projection.to_dict(),
-            "pipeline_type": "new" if force_new or settings.USE_NEW_RISK_PIPELINE else "legacy",
+            "projection": projection,
+            "pipeline_type": "new" if force_new or os.getenv("USE_NEW_RISK_PIPELINE", "false").lower() == "true" else "legacy",
         }
     except Exception as e:
-        logger.error(f"Failed to get risk projection: {e}")
+        logger.error(f"[RISK-PROJECTION-API] Failed to get risk projection: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get risk projection: {str(e)}")
+
+
+@router.get("/risk/envelope")
+async def get_risk_envelope_api() -> Dict[str, Any]:
+    """Get risk envelope for kalshi_crypto_15m_v2 profile.
+    
+    This endpoint returns the current risk envelope state including:
+    - Drawdown tracking (peak equity, current equity, current drawdown %)
+    - Adaptive risk bands and current multiplier
+    - Halt status
+    - Distance to halt threshold
+    
+    Returns:
+        Risk envelope state with profile dimension
+    """
+    import os
+    profile = os.getenv("MERID_PROFILE", "").lower()
+    
+    if profile != "kalshi_crypto_15m_v2":
+        return {
+            "profile": profile,
+            "envelope_enabled": False,
+            "message": "Risk envelope only available for kalshi_crypto_15m_v2 profile",
+        }
+    
+    try:
+        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import (
+            get_kalshi_crypto_15m_risk_envelope,
+            safe_update_envelope_equity,
+        )
+        
+        envelope = get_kalshi_crypto_15m_risk_envelope()
+        
+        # Update envelope with current equity
+        safe_update_envelope_equity(envelope)
+        
+        return {
+            "profile": profile,
+            "envelope_enabled": True,
+            "drawdown": {
+                "peak_equity_usd": envelope.peak_equity_usd,
+                "current_equity_usd": envelope.current_equity_usd,
+                "current_drawdown_pct": envelope.current_drawdown_pct,
+                "halt_pct": envelope.drawdown_halt_pct,
+                "unwind_pct": envelope.drawdown_unwind_pct,
+                "distance_to_halt_pct": envelope.distance_to_halt_pct(),
+            },
+            "adaptive_risk": {
+                "bands": envelope.adaptive_risk_bands,
+                "current_multiplier": envelope.per_trade_risk_multiplier,
+                "is_halted": envelope.is_halted,
+            },
+            "kelly": {
+                "kelly_fraction": envelope.kelly_fraction,
+            },
+            "effective_risk": {
+                "per_trade_risk_pct": envelope.get_per_trade_risk_pct(),
+                "effective_per_trade_risk_usd": envelope.get_effective_per_trade_risk_usd(),
+            },
+        }
+    except Exception as e:
+        logger.error(f"[RISK-ENVELOPE-API] Failed to get risk envelope: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get risk envelope: {str(e)}")
 
 
 @router.get("/risk/diff")

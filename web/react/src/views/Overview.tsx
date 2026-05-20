@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   DollarSign,
   Activity,
@@ -229,6 +229,11 @@ function KalshiBalanceHero({ balance, pnl }: { balance: KalshiBalance | null; pn
 
   const dayPnl = pnl?.daily_pnl_usd ?? 0;
   const pnlPos = dayPnl >= 0;
+  // Use total_value_cents (cash + portfolio) for balance display, fallback to available for backward compatibility
+  const balanceCents = (balance as any)?.total_value_cents ?? (balance?.available ?? 0) * 100;
+  const balanceUsd = balanceCents / 100;
+  const portfolioCents = (balance as any)?.portfolio_cents ?? 0;
+  const portfolioUsd = portfolioCents / 100;
 
   return (
     <div className="bg-gradient-to-br from-slate-900 via-orange-950/20 to-slate-900 rounded-2xl border border-orange-500/20 p-6 relative overflow-hidden">
@@ -236,22 +241,22 @@ function KalshiBalanceHero({ balance, pnl }: { balance: KalshiBalance | null; pn
       <div className="relative">
         <div className="flex items-center gap-2 mb-1">
           <div className="p-1.5 bg-orange-500/20 rounded-lg"><Wallet className="w-4 h-4 text-orange-400" /></div>
-          <span className="text-sm text-slate-400 font-medium">Kalshi Balance</span>
+          <span className="text-sm text-slate-400 font-medium">Total Value</span>
           <span className="flex items-center gap-1 text-xs text-emerald-400">
             <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" /> Live
           </span>
         </div>
         <div className="text-4xl font-bold text-white tracking-tight mb-3">
-          {fmtUsd(balance.available)}
+          {fmtUsd(balanceUsd)}
         </div>
         <div className="grid grid-cols-3 gap-4 pt-3 border-t border-slate-700/50">
           <div>
-            <div className="text-xs text-slate-500 mb-0.5 flex items-center gap-1"><DollarSign className="w-3 h-3" />Available</div>
-            <div className="text-base font-semibold text-slate-200">{fmtUsd(balance.available)}</div>
+            <div className="text-xs text-slate-500 mb-0.5 flex items-center gap-1"><DollarSign className="w-3 h-3" />Cash</div>
+            <div className="text-base font-semibold text-slate-200">{fmtUsd(balanceUsd - portfolioUsd)}</div>
           </div>
           <div>
-            <div className="text-xs text-slate-500 mb-0.5 flex items-center gap-1"><Shield className="w-3 h-3" />Locked</div>
-            <div className="text-base font-semibold text-slate-200">{fmtUsd(balance.locked)}</div>
+            <div className="text-xs text-slate-500 mb-0.5 flex items-center gap-1"><Shield className="w-3 h-3" />Portfolio</div>
+            <div className="text-base font-semibold text-slate-200">{fmtUsd(portfolioUsd)}</div>
           </div>
           <div>
             <div className="text-xs text-slate-500 mb-0.5 flex items-center gap-1"><Activity className="w-3 h-3" />Day P&L</div>
@@ -267,15 +272,16 @@ function KalshiBalanceHero({ balance, pnl }: { balance: KalshiBalance | null; pn
 
 /* ── Kalshi Positions Card ────────────────────────── */
 function KalshiPositionsCard({ positions, isPortfolioEmpty }: { positions: KalshiPosition[]; isPortfolioEmpty?: boolean }) {
+  const openPositions = positions.filter(p => p.size > 0);
   return (
     <div className="bg-slate-900/70 rounded-2xl border border-slate-800 p-5">
       <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2 mb-3">
         <FileText className="w-4 h-4 text-blue-400" />
         Open Positions
-        <span className="ml-auto text-xs text-slate-500">{positions.length}</span>
+        <span className="ml-auto text-xs text-slate-500">{openPositions.length}</span>
       </h3>
       <div className="space-y-1 max-h-64 overflow-y-auto">
-        {positions.map(p => (
+        {openPositions.map(p => (
           <div key={p.ticker} className="flex items-center justify-between py-2 px-3 rounded-lg hover:bg-slate-800/50">
             <div>
               <div className="text-sm font-medium text-slate-200 truncate max-w-[200px]">{p.ticker}</div>
@@ -289,13 +295,13 @@ function KalshiPositionsCard({ positions, isPortfolioEmpty }: { positions: Kalsh
             </div>
           </div>
         ))}
-        {positions.length === 0 && isPortfolioEmpty && (
+        {openPositions.length === 0 && isPortfolioEmpty && (
           <div className="text-center py-6">
             <div className="text-slate-500 text-sm mb-2">No positions discovered yet</div>
             <div className="text-xs text-slate-600">Trading not yet active — discovery OK</div>
           </div>
         )}
-        {positions.length === 0 && !isPortfolioEmpty && (
+        {openPositions.length === 0 && !isPortfolioEmpty && (
           <div className="text-center py-6 text-slate-500 text-sm">No open positions</div>
         )}
       </div>
@@ -373,9 +379,11 @@ export default function Overview() {
   const { data: pnl } = useApiData<KalshiPnL>(API_ENDPOINTS.KALSHI_PNL, {
     pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD,
   });
-  const { data: posData } = useApiData<{ positions: KalshiPosition[] }>(API_ENDPOINTS.KALSHI_POSITIONS, {
-    pollingInterval: DEFAULTS.POLLING_INTERVALS.POSITIONS,
-  });
+  
+  // Legacy positions fetch for backward compatibility (will be removed)
+  // const { data: posData } = useApiData<{ positions: KalshiPosition[] }>(API_ENDPOINTS.KALSHI_POSITIONS, {
+  //   pollingInterval: DEFAULTS.POLLING_INTERVALS.POSITIONS,
+  // });
   const { data: ordData } = useApiData<{ orders: KalshiOrder[] }>(API_ENDPOINTS.KALSHI_ORDERS, {
     pollingInterval: DEFAULTS.POLLING_INTERVALS.ORDERS,
   });
@@ -503,7 +511,10 @@ export default function Overview() {
           <KalshiBalanceHero balance={balance} pnl={pnl} />
         </div>
         <div className="lg:col-span-2">
-          <KalshiPositionsCard positions={posData?.positions ?? []} isPortfolioEmpty={isPortfolioEmpty} />
+          <KalshiPositionsCard 
+            positions={[]} 
+            isPortfolioEmpty={isPortfolioEmpty} 
+          />
         </div>
       </section>
 

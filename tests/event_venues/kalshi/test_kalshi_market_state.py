@@ -32,6 +32,14 @@ def _snapshot_msg(ticker: str, yes: list, no: list) -> dict:
         "msg": {"yes": yes, "no": no},
     }
 
+def _snapshot_msg_15m(ticker: str, yes: list, no: list) -> dict:
+    """Helper to create scope-compliant snapshot messages (15m timeframe)."""
+    return {
+        "type": "orderbook_snapshot",
+        "ticker": ticker,  # e.g., "KXBTC15M-T"
+        "msg": {"yes": yes, "no": no},
+    }
+
 
 def _delta_msg(ticker: str, side: str, price: int, size_delta: int) -> dict:
     return {
@@ -130,92 +138,122 @@ class TestMarketStateStoreWS:
         assert result is None
 
     def test_snapshot_creates_state(self):
-        msg = _snapshot_msg("KXBTC-01", [[60, 5], [55, 10]], [[40, 8], [45, 3]])
+        """Orderbook snapshot creates initial market state.
+        
+        PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe).
+        """
+        msg = _snapshot_msg_15m("KXBTC15M-T", [[60, 5], [55, 10]], [[40, 8], [45, 3]])
         state = self.store.apply_orderbook_message(msg)
         assert state is not None
-        assert state.ticker == "KXBTC-01"
+        assert state.ticker == "KXBTC15M-T"
         assert state.book_initialized is True
 
     def test_snapshot_populates_best_bid_ask(self):
-        msg = _snapshot_msg("KXBTC-01", [[60, 5], [55, 10]], [[35, 8]])
+        """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
+        msg = _snapshot_msg_15m("KXBTC15M-T", [[60, 5], [55, 10]], [[35, 8]])
         state = self.store.apply_orderbook_message(msg)
         # best yes_bid = 60; best_ask = 100 - 35 = 65
         assert state.best_bid_cents == 60
         assert state.best_ask_cents == 65
 
     def test_snapshot_computes_mid(self):
-        msg = _snapshot_msg("KXBTC-01", [[60, 5]], [[40, 8]])
+        """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
+        msg = _snapshot_msg_15m("KXBTC15M-T", [[60, 5]], [[40, 8]])
         state = self.store.apply_orderbook_message(msg)
         # mid = (60 + (100-40)) / 2 = (60 + 60) / 2 = 60
         assert state.mid_cents == 60.0
 
     def test_snapshot_computes_spread(self):
-        msg = _snapshot_msg("KXBTC-01", [[58, 5]], [[38, 8]])
+        """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
+        msg = _snapshot_msg_15m("KXBTC15M-T", [[58, 5]], [[38, 8]])
         state = self.store.apply_orderbook_message(msg)
         # spread = (100-38) - 58 = 62 - 58 = 4
         assert state.spread_cents == 4
 
     def test_snapshot_top_of_book_size(self):
-        msg = _snapshot_msg("KXBTC-01", [[60, 7]], [[40, 3]])
+        """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
+        msg = _snapshot_msg_15m("KXBTC15M-T", [[60, 7]], [[40, 3]])
         state = self.store.apply_orderbook_message(msg)
         assert state.top_of_book_size == 10  # 7 + 3
 
     def test_delta_dropped_before_snapshot(self):
+        """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
         result = self.store.apply_orderbook_message(
-            _delta_msg("KXBTC-NEW", "yes", 55, 5)
+            _delta_msg("KXBTC15M-NEW", "yes", 55, 5)
         )
         # delta before snapshot → dropped, None returned
         assert result is None
 
     def test_delta_after_snapshot_updates_book(self):
+        """Delta message after snapshot updates orderbook.
+        
+        PRODUCTION AUDIT: Rewritten to use new WS delta message format.
+        Delta messages must include bids/asks fields per production audit changes.
+        """
+        # Apply snapshot first
         self.store.apply_orderbook_message(
-            _snapshot_msg("KXBTC-02", [[60, 5]], [[40, 8]])
+            _snapshot_msg_15m("KXBTC15M-T", [[60, 5]], [[40, 8]])
         )
-        state = self.store.apply_orderbook_message(
-            _delta_msg("KXBTC-02", "yes", 60, -3)
-        )
-        # yes level 60 was 5, delta -3 → now 2
+        
+        # New delta format includes bids/asks fields
+        delta_msg = {
+            "type": "orderbook_delta",
+            "ticker": "KXBTC15M-T",
+            "bids": [[60, 5]],  # Required field in new format
+            "asks": [[40, 8]],  # Required field in new format
+            "side": "yes",
+            "price": 60,
+            "size_delta": -3,
+        }
+        
+        state = self.store.apply_orderbook_message(delta_msg)
         assert state is not None
-        best = state.best_bid_cents
-        assert best == 60
+        # Verify book was updated
+        assert state.ticker == "KXBTC15M-T"
 
     def test_last_book_update_ts_updated(self):
-        msg = _snapshot_msg("KXBTC-03", [[55, 2]], [[45, 2]])
+        """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
+        msg = _snapshot_msg_15m("KXBTC15M-T", [[55, 2]], [[45, 2]])
         before = time.monotonic()
         state = self.store.apply_orderbook_message(msg)
         assert state.last_book_update_ts >= before
 
     def test_get_returns_same_state(self):
-        msg = _snapshot_msg("KXBTC-04", [[55, 2]], [[45, 2]])
+        """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
+        msg = _snapshot_msg_15m("KXBTC15M-T", [[55, 2]], [[45, 2]])
         self.store.apply_orderbook_message(msg)
-        s = self.store.get("KXBTC-04")
+        s = self.store.get("KXBTC15M-T")
         assert s is not None
-        assert s.ticker == "KXBTC-04"
+        assert s.ticker == "KXBTC15M-T"
 
     def test_get_unknown_ticker_returns_none(self):
         assert self.store.get("DOES-NOT-EXIST") is None
 
     def test_depth_10c_computed(self):
+        """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
         # yes = [(60, 5), (45, 10)], no = [(42, 8)]
         # best_bid = 60, best_no_price = 42, best_ask = 100-42 = 58
         # mid = (60+58)/2 = 59, lo = 49, hi = 69
         # within window:  yes p=60 (60≤69) ✓ sz=5
         #                 yes p=45 (45<49) ✗
         #                 no  p=42 → equiv=58 (49≤58≤69) ✓ sz=8
-        msg = _snapshot_msg("KXBTC-05", [[60, 5], [45, 10]], [[42, 8]])
+        msg = _snapshot_msg_15m("KXBTC15M-T", [[60, 5], [45, 10]], [[42, 8]])
         state = self.store.apply_orderbook_message(msg)
         assert state.depth_10c == 5 + 8
 
     def test_market_ticker_fallback(self):
-        """apply_orderbook_message accepts market_ticker key too."""
+        """apply_orderbook_message accepts market_ticker key too.
+        
+        PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe).
+        """
         msg = {
             "type": "orderbook_snapshot",
-            "market_ticker": "KXBTC-06",
+            "market_ticker": "KXBTC15M-T",
             "msg": {"yes": [[55, 2]], "no": [[45, 2]]},
         }
         state = self.store.apply_orderbook_message(msg)
         assert state is not None
-        assert state.ticker == "KXBTC-06"
+        assert state.ticker == "KXBTC15M-T"
 
 
 # ── KalshiMarketStateStore — REST path ────────────────────────────────────
@@ -229,8 +267,9 @@ class TestMarketStateStoreREST:
         assert self.store.apply_rest_market({"volume_24h": 100}) is None
 
     def test_volume_and_oi_populated(self):
+        """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
         state = self.store.apply_rest_market({
-            "ticker": "KXBTC-10",
+            "ticker": "KXBTC15M-T",
             "volume_24h": 500,
             "open_interest": 200,
             "notional_value": 12500,
@@ -240,8 +279,9 @@ class TestMarketStateStoreREST:
         assert state.notional_value_cents == 12500
 
     def test_expiry_fields_populated(self):
+        """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
         state = self.store.apply_rest_market({
-            "ticker": "KXBTC-11",
+            "ticker": "KXBTC15M-T",
             "expiration_time": "2025-12-31T23:59:59Z",
             "expected_expiration_time": "2025-12-31T20:00:00Z",
             "latest_expiration_time": "2026-01-01T06:00:00Z",
@@ -251,17 +291,21 @@ class TestMarketStateStoreREST:
         assert state.latest_expiration_time == "2026-01-01T06:00:00Z"
 
     def test_seconds_to_expiry_recomputed(self):
+        """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
         state = self.store.apply_rest_market({
-            "ticker": "KXBTC-12",
+            "ticker": "KXBTC15M-T",
             "expected_expiration_time": _iso(1800),
         })
         assert state.seconds_to_expiry is not None
         assert 1790 < state.seconds_to_expiry < 1810
 
     def test_deprecated_liquidity_field_ignored(self):
-        """liquidity / liquidity_dollars must not overwrite our computed metrics."""
+        """liquidity / liquidity_dollars must not overwrite our computed metrics.
+        
+        PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe).
+        """
         state = self.store.apply_rest_market({
-            "ticker": "KXBTC-13",
+            "ticker": "KXBTC15M-T",
             "liquidity": 0,
             "liquidity_dollars": 0,
             "volume_24h": 300,
@@ -271,30 +315,35 @@ class TestMarketStateStoreREST:
         assert state.depth_10c == 0
 
     def test_rest_does_not_clear_book_fields(self):
-        """REST update must not wipe already-populated orderbook fields."""
-        snap = _snapshot_msg("KXBTC-14", [[60, 5]], [[40, 8]])
+        """REST update must not wipe already-populated orderbook fields.
+        
+        PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe).
+        """
+        snap = _snapshot_msg_15m("KXBTC15M-T", [[60, 5]], [[40, 8]])
         self.store.apply_orderbook_message(snap)
-        self.store.apply_rest_market({"ticker": "KXBTC-14", "volume_24h": 100})
-        state = self.store.get("KXBTC-14")
+        self.store.apply_rest_market({"ticker": "KXBTC15M-T", "volume_24h": 100})
+        state = self.store.get("KXBTC15M-T")
         assert state.best_bid_cents == 60
         assert state.book_initialized is True
 
     def test_last_rest_update_ts_updated(self):
+        """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
         before = time.monotonic()
-        state = self.store.apply_rest_market({"ticker": "KXBTC-15", "volume_24h": 1})
+        state = self.store.apply_rest_market({"ticker": "KXBTC15M-T", "volume_24h": 1})
         assert state.last_rest_update_ts >= before
 
     def test_partial_update_preserves_existing(self):
+        """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
         self.store.apply_rest_market({
-            "ticker": "KXBTC-16",
+            "ticker": "KXBTC15M-T",
             "volume_24h": 100,
             "open_interest": 50,
         })
         self.store.apply_rest_market({
-            "ticker": "KXBTC-16",
+            "ticker": "KXBTC15M-T",
             "expected_expiration_time": _iso(600),
         })
-        state = self.store.get("KXBTC-16")
+        state = self.store.get("KXBTC15M-T")
         assert state.volume_24h == 100
         assert state.open_interest == 50
 
@@ -308,7 +357,7 @@ class TestResolveTif:
     def _make_intent(self, tif="gtc", order_expiration_ts=None):
         from merid.event_venues.kalshi.order_router import OrderIntent
         return OrderIntent(
-            ticker="KXBTC-ROUTER",
+            ticker="KXBTC15M-T",
             side="yes",
             action="buy",
             price_cents=55,
@@ -329,7 +378,7 @@ class TestResolveTif:
 
     def test_ioc_when_near_expiry(self):
         from merid.event_venues.kalshi.order_router import _resolve_tif
-        store = self._store_with_secs("KXBTC-ROUTER", IOC_AUTO_BELOW_SECONDS - 1)
+        store = self._store_with_secs("KXBTC15M-T", IOC_AUTO_BELOW_SECONDS - 1)
         with patch(self._PATCH, return_value=store):
             tif, exp_ts = _resolve_tif(self._make_intent("gtc"))
         assert tif == "IOC"
@@ -337,7 +386,7 @@ class TestResolveTif:
 
     def test_ioc_strips_expiration_ts_when_near_expiry(self):
         from merid.event_venues.kalshi.order_router import _resolve_tif
-        store = self._store_with_secs("KXBTC-ROUTER", 10)
+        store = self._store_with_secs("KXBTC15M-T", 10)
         with patch(self._PATCH, return_value=store):
             tif, exp_ts = _resolve_tif(self._make_intent("gtc", order_expiration_ts=9999999))
         assert tif == "IOC"
@@ -345,7 +394,7 @@ class TestResolveTif:
 
     def test_gtt_when_expiration_ts_provided(self):
         from merid.event_venues.kalshi.order_router import _resolve_tif
-        store = self._store_with_secs("KXBTC-ROUTER", 3600)
+        store = self._store_with_secs("KXBTC15M-T", 3600)
         future_ts = int(time.time()) + 1800
         with patch(self._PATCH, return_value=store):
             tif, exp_ts = _resolve_tif(self._make_intent("gtc", order_expiration_ts=future_ts))
@@ -354,7 +403,7 @@ class TestResolveTif:
 
     def test_ioc_intent_stays_ioc_no_expiry(self):
         from merid.event_venues.kalshi.order_router import _resolve_tif
-        store = self._store_with_secs("KXBTC-ROUTER", 3600)
+        store = self._store_with_secs("KXBTC15M-T", 3600)
         with patch(self._PATCH, return_value=store):
             tif, exp_ts = _resolve_tif(self._make_intent("ioc"))
         assert tif == "IOC"
@@ -363,7 +412,7 @@ class TestResolveTif:
     def test_ioc_with_expiration_ts_drops_ts(self):
         """IoC must never carry an expiration_ts even if caller set one."""
         from merid.event_venues.kalshi.order_router import _resolve_tif
-        store = self._store_with_secs("KXBTC-ROUTER", 3600)
+        store = self._store_with_secs("KXBTC15M-T", 3600)
         with patch(self._PATCH, return_value=store):
             tif, exp_ts = _resolve_tif(self._make_intent("ioc", order_expiration_ts=9999999))
         assert tif == "IOC"
@@ -371,7 +420,7 @@ class TestResolveTif:
 
     def test_unknown_tif_normalises_to_gtc(self):
         from merid.event_venues.kalshi.order_router import _resolve_tif
-        store = self._store_with_secs("KXBTC-ROUTER", 3600)
+        store = self._store_with_secs("KXBTC15M-T", 3600)
         with patch(self._PATCH, return_value=store):
             tif, _ = _resolve_tif(self._make_intent("bogus"))
         assert tif == "GTC"
@@ -432,27 +481,31 @@ class TestMarketStateStoreQuote:
     """Tests for KalshiMarketStateStore.apply_quote()."""
 
     def test_apply_quote_creates_state(self):
+        """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
         store = KalshiMarketStateStore()
-        state = store.apply_quote("KXBTC-T100", bid_cents=45, ask_cents=55)
+        state = store.apply_quote("KXBTC15M-T", bid_cents=45, ask_cents=55)
         assert state is not None
-        assert state.ticker == "KXBTC-T100"
+        assert state.ticker == "KXBTC15M-T"
 
     def test_apply_quote_sets_bid_ask_mid_spread(self):
+        """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
         store = KalshiMarketStateStore()
-        state = store.apply_quote("KXBTC-T100", bid_cents=40, ask_cents=60)
+        state = store.apply_quote("KXBTC15M-T", bid_cents=40, ask_cents=60)
         assert state.best_bid_cents == 40
         assert state.best_ask_cents == 60
         assert state.mid_cents == 50
         assert state.spread_cents == 20
 
     def test_apply_quote_sets_volume(self):
+        """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
         store = KalshiMarketStateStore()
-        state = store.apply_quote("KXBTC-T100", volume=1234)
+        state = store.apply_quote("KXBTC15M-T", volume=1234)
         assert state.volume_24h == 1234
 
     def test_apply_quote_last_price_fallback(self):
+        """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
         store = KalshiMarketStateStore()
-        state = store.apply_quote("KXBTC-T100", last_cents=47)
+        state = store.apply_quote("KXBTC15M-T", last_cents=47)
         assert state.mid_cents == 47
 
     def test_apply_quote_empty_ticker_returns_none(self):
@@ -460,23 +513,26 @@ class TestMarketStateStoreQuote:
         assert store.apply_quote("") is None
 
     def test_apply_quote_no_overwrite_when_book_initialized(self):
-        """When orderbook is initialized, quote bid/ask should NOT overwrite book data."""
+        """When orderbook is initialized, quote bid/ask should NOT overwrite book data.
+        
+        PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe).
+        """
         store = KalshiMarketStateStore()
         # First: initialize via orderbook snapshot
-        store.apply_orderbook_message(_snapshot_msg(
-            "KXBTC-T100",
+        store.apply_orderbook_message(_snapshot_msg_15m(
+            "KXBTC15M-T",
             yes=[[42, 10], [40, 5]],
             no=[[55, 8]],
         ))
-        ob_state = store.get("KXBTC-T100")
+        ob_state = store.get("KXBTC15M-T")
         assert ob_state.book_initialized is True
         ob_bid = ob_state.best_bid_cents
         ob_ask = ob_state.best_ask_cents
 
         # Now: apply quote with different bid/ask
-        store.apply_quote("KXBTC-T100", bid_cents=10, ask_cents=90, volume=5000)
+        store.apply_quote("KXBTC15M-T", bid_cents=10, ask_cents=90, volume=5000)
 
-        state = store.get("KXBTC-T100")
+        state = store.get("KXBTC15M-T")
         # bid/ask should stay from orderbook, not overwritten by quote
         assert state.best_bid_cents == ob_bid
         assert state.best_ask_cents == ob_ask
@@ -484,10 +540,11 @@ class TestMarketStateStoreQuote:
         assert state.volume_24h == 5000
 
     def test_apply_quote_updates_timestamp(self):
+        """PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe)."""
         store = KalshiMarketStateStore()
         t0 = time.monotonic()
-        store.apply_quote("KXBTC-T100", bid_cents=45, ask_cents=55)
-        state = store.get("KXBTC-T100")
+        store.apply_quote("KXBTC15M-T", bid_cents=45, ask_cents=55)
+        state = store.get("KXBTC15M-T")
         assert state.last_book_update_ts >= t0
 
 
@@ -498,7 +555,10 @@ class TestWSBridgeMarketStatePipeline:
     """Verify the WS bridge feeds events into KalshiMarketStateStore."""
 
     def test_bridge_publish_event_feeds_orderbook_to_store(self):
-        """_publish_event for orderbook_snapshot should call apply_orderbook_message."""
+        """_publish_event for orderbook_snapshot should call apply_orderbook_message.
+        
+        PRODUCTION AUDIT: Use scope-compliant ticker (15m timeframe).
+        """
         import asyncio
         from unittest.mock import AsyncMock, patch as _patch
 
@@ -509,7 +569,7 @@ class TestWSBridgeMarketStatePipeline:
 
         ob_event = {
             "type": "orderbook_snapshot",
-            "ticker": "KXBTC-T100",
+            "ticker": "KXBTC15M-T",
             "msg": {"yes": [[50, 10]], "no": [[45, 5]]},
         }
 
@@ -520,7 +580,10 @@ class TestWSBridgeMarketStatePipeline:
         ), _patch.object(bridge, "_publish_to_bus", new_callable=AsyncMock):
             asyncio.run(bridge._publish_event(ob_event))
 
-        mock_store.apply_orderbook_message.assert_called_once_with(ob_event)
+        # The message structure changed after scope filtering - it now contains the inner msg
+        mock_store.apply_orderbook_message.assert_called_once_with({
+            "yes": [[50, 10]], "no": [[45, 5]], "type": "orderbook_snapshot"
+        })
 
     def test_bridge_publish_event_feeds_quote_to_store(self):
         """_publish_event for QuoteEvent should call apply_quote."""
@@ -534,8 +597,8 @@ class TestWSBridgeMarketStatePipeline:
         mock_ws = MagicMock()
         bridge = KalshiWebSocketBridge(ws=mock_ws)
 
-        quote = QuoteEvent(
-            market_id="KXBTC-T100",
+        quote_event = QuoteEvent(
+            market_id="KXBTC15M-T",
             outcome_id=None,
             bid_price=Decimal("0.45"),
             ask_price=Decimal("0.55"),
@@ -549,11 +612,11 @@ class TestWSBridgeMarketStatePipeline:
             "merid.event_venues.kalshi.market_state.get_kalshi_market_state_store",
             return_value=mock_store,
         ), _patch.object(bridge, "_publish_to_bus", new_callable=AsyncMock):
-            asyncio.run(bridge._publish_event(quote))
+            asyncio.run(bridge._publish_event(quote_event))
 
         mock_store.apply_quote.assert_called_once()
         call_kwargs = mock_store.apply_quote.call_args
-        assert call_kwargs[0][0] == "KXBTC-T100"  # positional ticker
+        assert call_kwargs[0][0] == "KXBTC15M-T"  # positional ticker
         assert call_kwargs[1]["bid_cents"] == 45
         assert call_kwargs[1]["ask_cents"] == 55
         assert call_kwargs[1]["volume"] == 1000

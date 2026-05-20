@@ -8,6 +8,7 @@ using the official Kalshi client and market classification.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
@@ -319,14 +320,25 @@ class KalshiUniverseSync:
 
 # Singleton instance
 _kalshi_universe_sync: Optional[KalshiUniverseSync] = None
-_kalshi_universe_sync_lock = asyncio.Lock()
+_kalshi_universe_sync_lock: Optional[asyncio.Lock] = None
+_kalshi_universe_sync_lock_init = threading.Lock()
+
+
+def _ensure_universe_sync_lock() -> asyncio.Lock:
+    """Lazy-initialize the universe sync lock in the current event loop."""
+    global _kalshi_universe_sync_lock
+    if _kalshi_universe_sync_lock is None:
+        with _kalshi_universe_sync_lock_init:
+            if _kalshi_universe_sync_lock is None:
+                _kalshi_universe_sync_lock = asyncio.Lock()
+    return _kalshi_universe_sync_lock
 
 
 async def get_kalshi_universe_sync() -> KalshiUniverseSync:
     """Get singleton Kalshi universe sync instance"""
     global _kalshi_universe_sync
     if _kalshi_universe_sync is None:
-        async with _kalshi_universe_sync_lock:
+        async with _ensure_universe_sync_lock():
             if _kalshi_universe_sync is None:
                 _kalshi_universe_sync = KalshiUniverseSync()
     return _kalshi_universe_sync

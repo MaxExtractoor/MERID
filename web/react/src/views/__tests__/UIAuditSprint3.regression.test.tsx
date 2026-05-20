@@ -109,16 +109,6 @@ jest.mock('../../hooks/useDashboard', () => ({
 jest.mock('../../api/auth', () => ({
   authHeaders: jest.fn(() => ({ 'Content-Type': 'application/json' })),
 }));
-jest.mock('../../hooks/useDebateContext', () => ({
-  __esModule: true,
-  useDebateContext: () => ({
-    getDebateStatus: jest.fn(),
-    hasCriticalAlerts: false,
-    hasWarnings: false,
-    getTotalAlerts: jest.fn(() => 0),
-    getTopAlert: jest.fn(() => null),
-  }),
-}));
 jest.mock('../../config/modeColors', () => ({
   MODE_COLORS: {},
   resolveModeKey: jest.fn(() => 'paper'),

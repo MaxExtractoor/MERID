@@ -337,7 +337,7 @@ class TestSettlementGuardIntegration:
                 
                 # Attempt buy at T-45s (within 60s guard)
                 result = evaluate_settlement_order(
-                    ticker="KXBTC-20250115-15M",
+                    ticker="KXBTC15M-20250115",
                     action="buy",
                     seconds_to_expiry=45.0,
                     count=10
@@ -368,7 +368,7 @@ class TestSettlementGuardIntegration:
                 with patch.dict(os.environ, {"MERID_RTI_SETTLEMENT_ORDER_POLICY": "reduce_ok"}):
                     # Attempt sell at T-45s
                     result = evaluate_settlement_order(
-                        ticker="KXBTC-20250115-15M",
+                        ticker="KXBTC15M-20250115",
                         action="sell",
                         seconds_to_expiry=45.0,
                         count=10

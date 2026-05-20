@@ -13,7 +13,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 
 from merid.sentiment.news_sentiment import KalshiNewsSentiment
-from merid.sentiment.sentiment_bus import get_sentiment_bus
+# CRITICAL FIX (2026-05-07): Use SentimentBusV2 instead of old SentimentBus
+# The old SentimentBus wraps MarketMoodBus, but NewsIngestionAgent and HashtagAgent
+# write to SentimentBusV2. This was causing a disconnect where sentiment data
+# was being written but never consumed.
+from merid.sentiment.sentiment_bus_v2 import get_sentiment_bus_v2
 from merid.signals.unified_manager import get_unified_signal_manager
 from utils.logger import get_logger
 
@@ -53,7 +57,11 @@ class SentimentSignalIntegrator:
     
     def __init__(self):
         self._unified_manager = get_unified_signal_manager()
-        self._sentiment_bus = get_sentiment_bus()
+        # CRITICAL FIX (2026-05-07): Use SentimentBusV2 instead of old SentimentBus
+        # The old SentimentBus wraps MarketMoodBus, but NewsIngestionAgent and HashtagAgent
+        # write to SentimentBusV2. This was causing a disconnect where sentiment data
+        # was being written but never consumed.
+        self._sentiment_bus = get_sentiment_bus_v2()
         self._news_analyzer: Optional[KalshiNewsSentiment] = None  # Lazy init to avoid FinBERT blocking
         self._symbol_mapping = self._create_symbol_mapping()
         self._cache: Dict[str, SentimentMetrics] = {}
@@ -148,12 +156,15 @@ class SentimentSignalIntegrator:
             )
             
             # Calculate confidence
+            # PRODUCTION FIX (2026-05-10): Handle None intensity values safely
             confidence = self._calculate_confidence(
-                news_intensity, social_intensity
+                news_intensity or 0.0,
+                social_intensity or 0.0
             )
             
             # Calculate overall intensity score
-            intensity_score = (news_intensity + social_intensity) / 2.0
+            # PRODUCTION FIX (2026-05-10): Handle None intensity values safely
+            intensity_score = ((news_intensity or 0.0) + (social_intensity or 0.0)) / 2.0
             
             return SentimentMetrics(
                 symbol=symbol,
@@ -200,7 +211,8 @@ class SentimentSignalIntegrator:
                     if articles_scored > 0:
                         article_count += articles_scored
                         # Use the pre-computed aggregate sentiment directly
-                        agg_sentiment = news_result.get("sentiment", 0.0)
+                        # PRODUCTION FIX (2026-05-10): Require real sentiment data, no 0.0 fallback
+                        agg_sentiment = news_result.get("sentiment")
                         if agg_sentiment is not None:
                             # Weight by article count so larger batches contribute more
                             sentiment_scores.extend([agg_sentiment] * articles_scored)
@@ -215,51 +227,63 @@ class SentimentSignalIntegrator:
                 # Normalize intensity (0-1 scale, where 1 = high activity)
                 intensity = min(1.0, article_count / 50.0)  # 50 articles = max intensity
             else:
-                avg_sentiment = 0.0
-                intensity = 0.0
+                # PRODUCTION FIX (2026-05-10): Return None instead of 0.0 fake fallback
+                return None, None
             
             return avg_sentiment, intensity
             
         except Exception as e:
             logger.warning(f"Failed to get news sentiment for {symbol}: {e}")
-            return 0.0, 0.0
+            # PRODUCTION FIX (2026-05-10): Return None instead of 0.0 fake fallback
+            return None, None
     
     def _get_social_sentiment(self, symbol: str) -> Tuple[float, float]:
-        """Get social sentiment (X/Reddit) for a symbol"""
-        try:
-            # Map symbol to base asset (strip -USD suffix if present)
-            asset = symbol.split("-")[0]
+        """Get social sentiment (X/Reddit) for a symbol
+        
+        CRITICAL FIX (2026-05-07): Use SentimentBusV2 API (get_asset_context) instead of
+        old SentimentBus API (get_sentiment). The old bus wraps MarketMoodBus but
+        NewsIngestionAgent and HashtagAgent write to SentimentBusV2.
+        """
+        # Map symbol to base asset (strip -USD suffix if present)
+        asset = symbol.split("-0")[0] if "-0" in symbol else symbol.split("-")[0]
 
-            # get_sentiment() returns UnifiedSentiment dataclass (or None)
-            unified = self._sentiment_bus.get_sentiment(asset)
+        # SentimentBusV2 uses get_asset_context which returns AssetSentimentContext
+        ctx = self._sentiment_bus.get_asset_context(asset)
 
-            if unified is not None:
-                sentiment = unified.combined_social_sentiment
-                # Use twitter_volume as intensity proxy (capped at 1000 tweets)
-                intensity = min(1.0, unified.twitter_volume / 1000.0)
-                return sentiment, intensity
-            else:
-                return 0.0, 0.0
-
-        except Exception as e:
-            logger.warning(f"Failed to get social sentiment for {symbol}: {e}")
-            return 0.0, 0.0
+        if ctx is not None:
+            # AssetSentimentContext has combined_score, not combined_social_sentiment
+            sentiment = ctx.combined_score
+            # Use hashtag score as intensity proxy (approximate volume)
+            intensity = min(1.0, abs(ctx.hashtag_score) + 0.1)
+            return sentiment, intensity
+        else:
+            # PRODUCTION FIX (2026-05-10): Return None instead of 0.0 fake fallback
+            return None, None
     
     def _combine_sentiment(
         self,
-        news_sentiment: float, news_intensity: float,
-        social_sentiment: float, social_intensity: float
-    ) -> float:
-        """Combine news and social sentiment with intensity weighting"""
+        news_sentiment: Optional[float], news_intensity: Optional[float],
+        social_sentiment: Optional[float], social_intensity: Optional[float]
+    ) -> Optional[float]:
+        """Combine news and social sentiment with intensity weighting
+        
+        PRODUCTION FIX (2026-05-10): Returns None instead of 0.0 fake fallback.
+        Requires at least one valid sentiment source.
+        """
+        # If both sources are None, return None instead of fake 0.0
+        if news_sentiment is None and social_sentiment is None:
+            return None
+        
         # Weight by intensity (higher intensity = more influence)
-        total_intensity = news_intensity + social_intensity
+        total_intensity = (news_intensity or 0.0) + (social_intensity or 0.0)
         if total_intensity == 0:
-            return 0.0
+            # No intensity data - return None instead of fake 0.0
+            return None
         
-        news_weight = news_intensity / total_intensity
-        social_weight = social_intensity / total_intensity
+        news_weight = (news_intensity or 0.0) / total_intensity
+        social_weight = (social_intensity or 0.0) / total_intensity
         
-        combined = news_weight * news_sentiment + social_weight * social_sentiment
+        combined = news_weight * (news_sentiment or 0.0) + social_weight * (social_sentiment or 0.0)
         
         # Clamp to -1 to 1 range
         return max(-1.0, min(1.0, combined))

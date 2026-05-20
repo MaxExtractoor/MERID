@@ -263,7 +263,11 @@ class RobustKalshiClient:
                         await self._reconnect_with_backoff()
                     except Exception as _re_exc:
                         logger.error("Background reconnect failed: %s", _re_exc)
-                asyncio.create_task(_bg_reconnect())
+                _bg_task = asyncio.create_task(_bg_reconnect())
+                def _on_bg_reconnect_done(t):
+                    if not t.cancelled() and t.exception():
+                        logger.error("Background reconnect task failed: %s", t.exception())
+                _bg_task.add_done_callback(_on_bg_reconnect_done)
             else:
                 logger.error(f"Error during {operation_name}: {exc}")
             

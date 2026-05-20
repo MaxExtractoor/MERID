@@ -264,10 +264,16 @@ class KalshiInsightPipeline:
         # list_markets returns List[EventMarket] — build dicts for _normalize_market
         markets_raw = []
         for em in (event_markets or []):
-            d = dict(em.raw_data) if em.raw_data else {}
-            d.setdefault("ticker", em.market_id)
-            d.setdefault("title", em.question)
-            d.setdefault("category", em.category)
+            # CRITICAL FIX: Handle CatalogMarket wrapping EventMarket
+            if hasattr(em, "market") and hasattr(em.market, "raw_data"):
+                d = dict(em.market.raw_data) if em.market.raw_data else {}
+            elif hasattr(em, "raw_data"):
+                d = dict(em.raw_data) if em.raw_data else {}
+            else:
+                d = {}
+            d.setdefault("ticker", em.market_id if hasattr(em, "market_id") else getattr(em.market, "market_id", "") if hasattr(em, "market") else "")
+            d.setdefault("title", em.question if hasattr(em, "question") else getattr(em.market, "question", "") if hasattr(em, "market") else "")
+            d.setdefault("category", em.category if hasattr(em, "category") else getattr(em.market, "category", "") if hasattr(em, "market") else "")
             d.setdefault("volume", int(em.volume or 0))
             d.setdefault("open_interest", int(em.open_interest or 0))
             d.setdefault("status", "open" if em.active else "closed")

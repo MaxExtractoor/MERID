@@ -1,16 +1,25 @@
-"""Loader for config/trade_hold_config.yaml — trade-vs-hold thresholds.
+"""Loader for config/trade_hold_config.yaml — Trade-vs-Hold Decision Configuration — Centralized risk gating.
 
-Provides a thread-safe singleton ``get_trade_hold_config()`` that:
-1. Reads config/trade_hold_config.yaml once at first call.
-2. Allows env-var overrides (``MERID_TH_<KEY>``).
-3. Falls back to sane defaults if the YAML is missing or malformed.
+LEGACY CONFIGURATION - For non-crypto, non-15m agents only.
 
-Usage::
+For Kalshi 15m crypto agents (BTC_15M, ETH_15M, SOL_15M, XRP_15M, DOGE_15M):
+  - Edge thresholds: Use config/crypto_threshold_matrix.yaml (SINGLE SOURCE OF TRUTH)
+  - Risk limits: Use config/profiles/kalshi_crypto_15m.yaml (SINGLE SOURCE OF TRUTH)
+  - Drawdown limits: Use config/profiles/kalshi_crypto_15m.yaml (SINGLE SOURCE OF TRUTH)
+  - This file's constants are NOT used by 15m crypto agents
 
-    from merid.prediction.trade_hold_config import get_trade_hold_config
-    cfg = get_trade_hold_config()
-    if cfg.enabled:
-        ...
+This module provides a singleton accessor for trade-vs-hold decision thresholds.
+All values are loaded from config/trade_hold_config.yaml and can be overridden
+via environment variables (MERID_TH_<KEY>).
+
+The config controls:
+- Warmup/session windows (how long to wait before trading)
+- Entry windows (time before expiry to start/stop trading)
+- Strategy thresholds (minimum edge, consensus requirements)
+- Risk limits (max position, notional caps)
+- Order limits (max orders per window, max order size)
+- Error handling (max consecutive errors)
+- Logging verbosity
 """
 
 from __future__ import annotations
@@ -46,11 +55,11 @@ class EntryWindowConfig:
 @dataclass
 class StrategyThresholds:
     min_edge_early: Decimal = Decimal("0.08")
-    min_edge_mid: Decimal = Decimal("0.07")
-    min_edge_late: Decimal = Decimal("0.06")
-    min_edge_terminal: Decimal = Decimal("0.06")
+    min_edge_mid: Decimal = Decimal("0.06")
+    min_edge_late: Decimal = Decimal("0.05")
+    min_edge_terminal: Decimal = Decimal("0.10")
     min_arb_edge: Decimal = Decimal("0.005")
-    min_confidence: Decimal = Decimal("0.60")
+    min_confidence: Decimal = Decimal("0.60")  # Increased from 0.45 to stop low-conviction trades (2026-05-07)
     min_volume: Decimal = Decimal("0")
     min_open_interest: Decimal = Decimal("0")
     snapshot_stale_seconds: int = 120
@@ -66,18 +75,37 @@ class ConsensusConfig:
 
 @dataclass
 class RiskThresholds:
-    max_contracts_per_order: int = 50
-    max_contracts_per_market: int = 500
-    min_order_size: int = 1
-    max_order_size: int = 100
-    max_notional_per_market_usd: Decimal = Decimal("500.0")
-    max_notional_per_event_usd: Decimal = Decimal("1000.0")
-    max_total_notional_usd: Decimal = Decimal("5000.0")
-    max_daily_loss_usd: Decimal = Decimal("500.0")
-    max_open_markets: int = 50
+    # CRITICAL FIX: All defaults changed to 0 = derive from live bankroll + risk profile
+    # Previous hardcoded values ($500-$5000) were catastrophic for micro bankrolls
+    
+    # 1-2% ALLOCATION STRATEGY (per MERID_RISK_PROFILE env var):
+    # - Conservative (conservative): 1% total allocation (0.5% per market × 2 markets)
+    # - Balanced (balanced): 1.5% total allocation (0.5% per market × 3 markets)  
+    # - Functional/Easy (functional): 2% total allocation (0.67% per market × 3 markets)
+    # Set via MERID_RISK_PROFILE=conservative|balanced|functional
+    
+    # Core position limits - 0 = derive from risk profile + bankroll
+    max_contracts_per_order: int = 0  # 0 = derive: min(25, allocation% / price)
+    max_contracts_per_market: int = 0  # 0 = derive: allocation% / price
+    max_notional_per_market_usd: Decimal = Decimal("0")  # 0 = derive from risk profile
+    max_notional_per_event_usd: Decimal = Decimal("0")  # 0 = derive: 2× per-market
+    
+    # THE KEY 1-2% TOTAL ALLOCATION CAP
+    # 0 = derive from risk profile (conservative: 1%, balanced: 1.5%, functional: 2%)
+    max_total_notional_usd: Decimal = Decimal("0")
+    
+    # Safety limits (separate from allocation strategy)
+    max_daily_loss_usd: Decimal = Decimal("0")  # 0 = derive: 5% of bankroll
+    max_open_markets: int = 0  # 0 = derive: 1 per $50 of bankroll, max 50
+    
+    # Rate limits (not bankroll-scaled)
     max_orders_per_minute: int = 30
     max_orders_per_hour: int = 200
-    min_post_fee_edge: Decimal = Decimal("0.01")
+    
+    # Execution guards
+    min_order_size: int = 1
+    max_order_size: int = 0  # 0 = derive from allocation%
+    min_post_fee_edge: Decimal = Decimal("0.05")  # CONSERVATIVE: 5% min edge after fees
     tick_size_cents: int = 1
     max_spread_cents: int = 10
     max_slippage_cents: int = 3
@@ -186,7 +214,10 @@ def _build_config() -> TradeHoldConfig:
     return cfg
 
 
-_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _lock = threading.Lock()
+_lock = None  # Disabled to prevent startup hang
 _singleton: Optional[TradeHoldConfig] = None
 
 
@@ -195,22 +226,26 @@ def get_trade_hold_config() -> TradeHoldConfig:
     global _singleton
     if _singleton is not None:
         return _singleton
-    with _lock:
-        if _singleton is not None:
+    if _lock is not None:
+        with _lock:
+            if _singleton is not None:
+                return _singleton
+            _singleton = _build_config()
             return _singleton
+    else:
+        # Lock disabled - direct initialization (startup workaround)
         _singleton = _build_config()
-        logger.info(
-            "trade_hold_config loaded: enabled=%s warmup_min=%.0fs strategy_min_edge_early=%s",
-            _singleton.enabled,
-            _singleton.warmup.min_seconds,
-            _singleton.strategy.min_edge_early,
-        )
         return _singleton
 
 
 def reload_trade_hold_config() -> TradeHoldConfig:
     """Force-reload (for tests or hot-reload)."""
     global _singleton
-    with _lock:
+    if _lock is not None:
+        with _lock:
+            _singleton = _build_config()
+            return _singleton
+    else:
+        # Lock disabled - direct access (startup workaround)
         _singleton = _build_config()
         return _singleton

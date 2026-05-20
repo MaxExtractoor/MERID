@@ -91,7 +91,7 @@ class PredictionMarketAgent(DomainAgent):
         self,
         agent_id: str = "pm-agent-01",
         venue: str = "kalshi",
-        min_edge: Decimal = Decimal("0.03"),
+        min_edge: Decimal = Decimal("0.05"),  # CONSERVATIVE: 5% minimum edge
         max_contracts: int = 25,
     ):
         super().__init__(agent_id, TradeDomain.PREDICTION)

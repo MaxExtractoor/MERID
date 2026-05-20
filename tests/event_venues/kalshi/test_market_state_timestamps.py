@@ -292,7 +292,7 @@ def test_store_apply_external_index_edge_basis_set_when_data_available():
     )
 
     store = KalshiMarketStateStore()
-    ticker = "KXBTCD-26APR-T70000"
+    ticker = "KXBTC15M-26APR-T70000"
 
     # Wire in external snapshot with a fair_prob duck-typed attribute
     ext = ExternalIndexSnapshot(asset="BTC", price_usd=72000.0, ts=time.time(), source="stub")
@@ -325,7 +325,7 @@ def test_store_apply_candle_dict_updates_unified_state():
     from merid.event_venues.kalshi.market_state import KalshiMarketStateStore
 
     store = KalshiMarketStateStore()
-    ticker = "KXBTCD-26APR-T70000"
+    ticker = "KXBTC15M-26APR-T70000"
     now = time.time()
 
     bar = {
@@ -362,7 +362,7 @@ def test_one_sided_orderbook_yes_only_does_not_set_book():
     from merid.event_venues.kalshi.market_state import KalshiMarketStateStore
 
     store = KalshiMarketStateStore()
-    ticker = "KXBTCD-26APR-T70000"
+    ticker = "KXBTC15M-26APR-T70000"
 
     # Push a WS orderbook_snapshot with YES bids only (no_bids is empty)
     snap_msg = {
@@ -394,7 +394,7 @@ def test_one_sided_orderbook_no_only_does_not_set_book():
     from merid.event_venues.kalshi.market_state import KalshiMarketStateStore
 
     store = KalshiMarketStateStore()
-    ticker = "KXBTCD-26APR-T70000"
+    ticker = "KXBTC15M-26APR-T70000"
 
     snap_msg = {
         "type": "orderbook_snapshot",
@@ -421,7 +421,7 @@ def test_two_sided_orderbook_does_set_book():
     from merid.event_venues.kalshi.market_state import KalshiMarketStateStore
 
     store = KalshiMarketStateStore()
-    ticker = "KXBTCD-26APR-T70000"
+    ticker = "KXBTC15M-26APR-T70000"
 
     snap_msg = {
         "type": "orderbook_snapshot",
@@ -457,7 +457,7 @@ def test_is_stale_returns_true_when_ts_is_zero_sentinel():
     from merid.event_venues.kalshi.models import KalshiMarketState
 
     store = KalshiMarketStateStore()
-    ticker = "KXBTCD-26APR-T70000"
+    ticker = "KXBTC15M-26APR-T70000"
 
     # Manufacture a state that is initialized but has the 0.0 sentinel ts
     with store._lock:
@@ -481,7 +481,7 @@ def test_is_stale_zero_ts_treated_as_infinite_age_not_finite():
     from merid.event_venues.kalshi.market_state import KalshiMarketStateStore
 
     store = KalshiMarketStateStore()
-    ticker = "KXBTCD-26APR-T70000"
+    ticker = "KXBTC15M-26APR-T70000"
 
     with store._lock:
         state = store._get_or_create(ticker)
@@ -506,7 +506,7 @@ def test_is_stale_returns_false_when_recently_updated():
     from merid.event_venues.kalshi.market_state import KalshiMarketStateStore
 
     store = KalshiMarketStateStore()
-    ticker = "KXBTCD-26APR-T70000"
+    ticker = "KXBTC15M-26APR-T70000"
 
     with store._lock:
         state = store._get_or_create(ticker)

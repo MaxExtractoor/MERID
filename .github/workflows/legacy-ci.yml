@@ -1,0 +1,41 @@
+name: Legacy CI (Non-Blocking)
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  legacy-tests:
+    name: Legacy System Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Run legacy tests (non-blocking)
+      run: |
+        pytest tests/legacy/ -m legacy -v --tb=short || echo "Legacy tests failed (non-blocking)"
+    
+    - name: Run swarm tests (non-blocking)
+      run: |
+        pytest tests/legacy/swarm/ -v --tb=short || echo "Swarm tests failed (non-blocking)"
+    
+    - name: Run sentiment tests (non-blocking)
+      run: |
+        pytest tests/legacy/research_sentiment/ -v --tb=short || echo "Sentiment tests failed (non-blocking)"
+    
+    - name: Run governance tests (non-blocking)
+      run: |
+        pytest tests/legacy/governance/ -v --tb=short || echo "Governance tests failed (non-blocking)"

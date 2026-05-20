@@ -20,10 +20,10 @@ export type DiscoverView = "discover";
 export type DiscoverTab = "focus" | "universe" | "trending";
 
 // Stage 2: ANALYZE - Technical Analysis
-export type AnalyzeView = "analyze-edge" | "analyze-sentiment" | "analyze-vol";
+export type AnalyzeView = "analyze-sentiment" | "analyze-vol";
 
 // Stage 3: CONSENSUS - Swarm Intelligence
-export type ConsensusView = "consensus-swarm" | "consensus-debates" | "consensus-performance" | "consensus-calibration";
+export type ConsensusView = "consensus-swarm" | "consensus-performance" | "consensus-calibration";
 
 // Stage 4: SIZE - Position Sizing (consolidated into unified SizeView)
 export type SizeView = "size";
@@ -51,9 +51,12 @@ export type SystemView = "overview" | "operator" | "logs" | "settings";
 // Legacy view keys still referenced by the sidebar manifest and some tests.
 // Keep as part of the View union until the manifest is migrated to the
 // consolidated view names.
+//
+// DEPRECATED: These legacy view names are maintained only for backward compatibility.
+// Do not add new entries to this type. Use the consolidated View types instead.
+//
+// NOTE: KalshiDashboardView and KalshiTerminalView removed (stub views, functionality moved to consolidated views)
 export type LegacyView =
-  | "kalshi-terminal"
-  | "kalshi-dashboard"
   | "kalshi-all-markets"
   | "kalshi-portfolio"
   | "positions"
@@ -87,13 +90,11 @@ export const VIEW_STAGES: Record<string, { label: string; color: string; icon: s
   discover: { label: "Discover", color: "text-blue-400", icon: "search" },
   
   // Stage 2: Analyze (Purple)
-  "analyze-edge": { label: "Edge Signals", color: "text-purple-400", icon: "target" },
   "analyze-sentiment": { label: "Sentiment", color: "text-purple-400", icon: "activity" },
   "analyze-vol": { label: "Vol & ATR", color: "text-purple-400", icon: "gauge" },
   
   // Stage 3: Consensus (Cyan)
   "consensus-swarm": { label: "Swarm Matrix", color: "text-cyan-400", icon: "grid" },
-  "consensus-debates": { label: "Debates", color: "text-cyan-400", icon: "messageSquare" },
   "consensus-performance": { label: "Performance", color: "text-cyan-400", icon: "award" },
   "consensus-calibration": { label: "Calibration", color: "text-cyan-400", icon: "crosshair" },
   
@@ -136,13 +137,13 @@ export const STAGE_GROUPS = [
     id: "analyze", 
     label: "2. Analyze", 
     color: "purple", 
-    views: ["analyze-edge", "analyze-sentiment", "analyze-vol"] as View[] 
+    views: ["analyze-sentiment", "analyze-vol"] as View[] 
   },
   { 
     id: "consensus", 
     label: "3. Consensus", 
     color: "cyan", 
-    views: ["consensus-swarm", "consensus-debates", "consensus-performance", "consensus-calibration"] as View[] 
+    views: ["consensus-swarm", "consensus-performance", "consensus-calibration"] as View[] 
   },
   { 
     id: "size", 
@@ -208,10 +209,26 @@ export const STAGE_GROUPS = [
 ] as const;
 
 // Legacy View Mapping (for backward compatibility during transition)
-// All legacy views now map to consolidated unified views
+//
+// TRANSITIONAL ARCHITECTURE:
+// ==========================
+// The UI has migrated from many individual views to a consolidated 8-stage workflow:
+// - Stage 1 (Discover): Unified view replaces kalshi-dashboard, kalshi-all-markets
+// - Stage 2 (Analyze): Individual views preserved (KalshiSentimentView, KalshiVolDashboardView)
+// - Stage 3 (Consensus): Individual views preserved (SwarmConsensusMatrix, KalshiAgentPerformanceView, CalibrationDashboardView)
+// - Stage 4 (Size): Unified view replaces lane-control
+// - Stage 5 (Execute): Unified view replaces kalshi-terminal, orders, positions
+// - Stage 6 (Monitor): Unified view replaces kalshi-portfolio
+// - Stage 7 (Promote): Unified view replaces kalshi-grid
+// - Stage 8 (Protect): Unified view replaces kill-switch, kalshi-risk-context
+//
+// This LEGACY_VIEW_MAP allows deep links and old navigation to continue working
+// by redirecting to the appropriate consolidated view. It should NOT be extended
+// for new features - all new views should use the consolidated architecture.
+//
+// NOTE: kalshi-dashboard and kalshi-terminal removed (stub views deleted)
 export const LEGACY_VIEW_MAP: Record<string, View> = {
   // Stage 1: Discover - all map to unified discover view
-  "kalshi-dashboard": "discover",
   "kalshi-all-markets": "discover",
   "discover-all-markets": "discover",
   "discover-trending": "discover",
@@ -232,7 +249,6 @@ export const LEGACY_VIEW_MAP: Record<string, View> = {
   "size-sizing": "size",
   
   // Stage 5: Execute - all map to unified execute view
-  "kalshi-terminal": "execute",
   "execute-terminal": "execute",
   "execute-orders": "execute",
   "execute-positions": "execute",

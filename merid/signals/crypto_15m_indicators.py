@@ -16,12 +16,8 @@ Computes from a rolling 1-minute price buffer (fed by spot price proxies):
 IMPORTANT: This stack uses spot price feeds (CoinGecko/Coinbase/Binance) as PROXIES
 for market context. Kalshi contracts settle on CF Benchmarks Real-Time Indices (RTIs),
 not these single-exchange spot prices. Use these indicators for directional bias only,
-not as predictions of settlement values.
 
 Reference: https://www.cfbenchmarks.com/blog/kalshi-leads-surging-crypto-event-contract-market-powered-by-cf-benchmarks
-
-The stack outputs an ``IndicatorSnapshot`` dataclass consumed by the strategy
-layer to adjust edge thresholds, filter trades, and size positions.
 
 Usage::
 
@@ -59,14 +55,27 @@ logger = get_logger("merid.signals.crypto_15m_indicators")
 
 @dataclass
 class IndicatorConfig:
-    """Tunable parameters for the 15-minute indicator stack."""
+    """Tunable parameters for the 15-minute indicator stack.
+    
+    OPTIMIZED (2026-05-10): Asset-specific configurations for EMA, ATR, and chop filters.
+    Hybrid approach: BTC/ETH use faster EMAs (9/21), SOL/XRP/DOGE use slower EMAs (13/34).
+    """
 
-    # ── Trend baseline ────────────────────────────────────────────────
-    # EMA(50) = primary trend filter (price above/below = regime)
-    # EMA(5)/EMA(20) = crossover signal for timing entries
-    ema_trend_period: int = 50
-    ema_fast_period: int = 5
-    ema_slow_period: int = 20
+    # ── Asset identifier for parameter lookup ─────────────────────────
+    asset: str = "BTC"  # BTC, ETH, SOL, XRP, DOGE
+
+    # ── Trend Baselines (EMA crossovers) ──────────────────────────────────
+    # NOTE: 21/34 EMA used for trend direction (bullish/bearish crossover)
+    # This is DIFFERENT from the 50 EMA in band_strategy_15m.py which is used for regime classification
+    # 21/34 EMA: Determines trend direction (bullish/bearish) via crossover
+    # 50 EMA: Determines if market is in range (ADX < 20) or trend (ADX >= 20)
+    # These serve different purposes and are not contradictory
+    # Per-asset EMA periods: BTC/ETH use 9/21, SOL/XRP/DOGE use 13/34
+    # Faster for liquid assets, slower for higher-beta assets
+    # Asset-specific: BTC/ETH use 21/9-21, SOL/XRP/DOGE use 34/13-34
+    ema_trend_period: int = 21
+    ema_fast_period: int = 9
+    ema_slow_period: int = 21
 
     # ── Momentum / overextension ──────────────────────────────────────
     rsi_period: int = 8
@@ -81,7 +90,8 @@ class IndicatorConfig:
     macd_signal: int = 5
 
     # ── Chop filters ─────────────────────────────────────────────────
-    # Consecutive closes above/below EMA to confirm trend (min 3)
+    # Consecutive closes above/below EMA to confirm trend
+    # Asset-specific: BTC/ETH strict (3), SOL/XRP/DOGE relaxed (2)
     consecutive_closes_required: int = 3
     # MACD histogram must stay same sign for N bars before acting
     macd_persistence_bars: int = 3
@@ -101,8 +111,8 @@ class IndicatorConfig:
     # ── Volatility gate ───────────────────────────────────────────────
     atr_period: int = 14
     # ATR minimum-move gate: skip when ATR/price < threshold
-    # (dead market → odds cluster at 0.5 → poor EV after fees)
-    atr_min_move_pct: float = 0.0003   # 0.03% of price = minimum ATR
+    # Asset-specific: BTC lowest (0.0002), DOGE highest (0.0005)
+    atr_min_move_pct: float = 0.0002   # 0.02% of price (BTC default)
     vol_window_bars: int = 30          # realized vol lookback (1m bars)
     vol_low_threshold: float = 0.15    # annualized; below = dead market
     vol_high_threshold: float = 1.20   # above = chaos, stay out
@@ -125,6 +135,72 @@ class IndicatorConfig:
     fvg_pressure_weight: float = 0.30      # Weight in composite signals
     fvg_relevance_distance_atr: float = 3.0  # Distance to consider zone relevant
     fvg_ignore_immediate_fill: bool = True  # Skip gaps filled by next candle
+    
+    # ── FVG Pullback logic (OPTIMIZED 2026-05-10) ───────────────────────
+    fvg_pullback_enabled: bool = True
+    fvg_pullback_atr_threshold: float = 1.0  # 1 ATR from FVG zone
+    
+    # ── Momentum pre-entry check (OPTIMIZED 2026-05-10) ────────────────
+    momentum_lookback_bars: int = 3  # 45 minutes
+    min_momentum_threshold: float = 0.002  # 0.2%
+
+    def __post_init__(self):
+        """Apply asset-specific parameter overrides based on asset field."""
+        asset = self.asset.upper()
+        
+        # Asset-specific EMA configurations (hybrid approach)
+        if asset in ["BTC", "ETH"]:
+            # Low vol assets: faster EMAs for responsiveness
+            self.ema_trend_period = 21
+            self.ema_fast_period = 9
+            self.ema_slow_period = 21
+            self.consecutive_closes_required = 3  # Strict chop filter
+            self.atr_min_move_pct = 0.0002  # 0.02% - lowest threshold
+        elif asset in ["SOL", "XRP", "DOGE"]:
+            # High vol assets: slower EMAs to reduce noise
+            self.ema_trend_period = 34
+            self.ema_fast_period = 13
+            self.ema_slow_period = 34
+            self.consecutive_closes_required = 2  # Relaxed chop filter
+            # ATR thresholds scale with volatility
+            if asset == "DOGE":
+                self.atr_min_move_pct = 0.0005  # 0.05% - highest threshold
+            elif asset == "SOL":
+                self.atr_min_move_pct = 0.0004  # 0.04%
+            else:  # XRP
+                self.atr_min_move_pct = 0.00035  # 0.035%
+    
+    def get_ema_params(self, asset: str = None) -> dict:
+        """Get EMA parameters for a specific asset."""
+        asset = (asset or self.asset).upper()
+        if asset in ["BTC", "ETH"]:
+            return {"trend_period": 21, "fast_period": 9, "slow_period": 21}
+        else:  # SOL, XRP, DOGE
+            return {"trend_period": 34, "fast_period": 13, "slow_period": 34}
+    
+    def get_atr_min_move(self, asset: str = None) -> float:
+        """Get ATR min-move threshold for a specific asset."""
+        asset = (asset or self.asset).upper()
+        thresholds = {
+            "BTC": 0.0002,
+            "ETH": 0.00025,
+            "SOL": 0.0004,
+            "XRP": 0.00035,
+            "DOGE": 0.0005,
+        }
+        return thresholds.get(asset, 0.0003)
+    
+    def get_chop_filter(self, asset: str = None) -> dict:
+        """Get chop filter parameters for a specific asset."""
+        asset = (asset or self.asset).upper()
+        if asset in ["BTC", "ETH"]:
+            return {"consecutive_closes_required": 3}
+        else:  # SOL, XRP, DOGE
+            return {"consecutive_closes_required": 2}
+
+
+# Default configuration for regression tests
+DEFAULT_15M_CONFIG = IndicatorConfig(asset="BTC")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

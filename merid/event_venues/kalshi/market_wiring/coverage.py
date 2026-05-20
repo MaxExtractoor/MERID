@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 import asyncio
+import threading
 from typing import Dict, List, Set, Any, Optional
 from dataclasses import dataclass
 
@@ -345,14 +346,25 @@ class KalshiCoverageChecker:
 
 # Singleton instance
 _coverage_checker: Optional[KalshiCoverageChecker] = None
-_coverage_checker_lock = asyncio.Lock()
+_coverage_checker_lock: Optional[asyncio.Lock] = None
+_coverage_checker_lock_init = threading.Lock()
+
+
+def _ensure_coverage_checker_lock() -> asyncio.Lock:
+    """Lazy-initialize the coverage checker lock in the current event loop."""
+    global _coverage_checker_lock
+    if _coverage_checker_lock is None:
+        with _coverage_checker_lock_init:
+            if _coverage_checker_lock is None:
+                _coverage_checker_lock = asyncio.Lock()
+    return _coverage_checker_lock
 
 
 async def get_kalshi_coverage_checker() -> KalshiCoverageChecker:
     """Get singleton coverage checker instance"""
     global _coverage_checker
     if _coverage_checker is None:
-        async with _coverage_checker_lock:
+        async with _ensure_coverage_checker_lock():
             if _coverage_checker is None:
                 _coverage_checker = KalshiCoverageChecker()
     return _coverage_checker

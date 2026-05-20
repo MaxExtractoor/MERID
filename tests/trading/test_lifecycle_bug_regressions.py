@@ -1079,6 +1079,7 @@ class TestD05RealizedEdgeNoDuplicateCounting:
             bucket="crypto",
             market_id="KXBTC-TEST",
             side="yes",
+            action="buy",
             price_cents=55,
             p_model=0.62,
             p_implied=0.55,
@@ -1099,13 +1100,13 @@ class TestD05RealizedEdgeNoDuplicateCounting:
         store = RealizedEdgeStore(":memory:")
         store.record_trade_entry(
             trade_id="ord_dup_002", forecaster_id="agent_a", bucket="crypto",
-            market_id="KXBTC-TEST", side="yes", price_cents=55,
+            market_id="KXBTC-TEST", side="yes", action="buy", price_cents=55,
             p_model=0.62, p_implied=0.55, contracts=10, fee_cents=31, timestamp=1000.0,
         )
         # Attempt overwrite with different p_model
         store.record_trade_entry(
             trade_id="ord_dup_002", forecaster_id="agent_a", bucket="crypto",
-            market_id="KXBTC-TEST", side="yes", price_cents=55,
+            market_id="KXBTC-TEST", side="yes", action="buy", price_cents=55,
             p_model=0.99, p_implied=0.55, contracts=10, fee_cents=31, timestamp=2000.0,
         )
         row = store._conn.execute(

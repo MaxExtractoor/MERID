@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from streams.market_data_stream_simple import MarketDataStream
 from agents.crypto_prediction_agent import CryptoPredictionAgent
-from oracles.coingecko_oracle import CoinGeckoOracle
+from data.binanceus_oracle import BinanceUSOracle
 from agents.interface import MarketState, Proposal, Outcome
 from utils.logger import get_logger
 

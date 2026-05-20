@@ -59,13 +59,19 @@ class AugurTradingLayer:
             outcomes = market.get("outcomes", []) or []
             yes_price = self._extract_yes_price(outcomes)
             no_price = 1 - yes_price if yes_price is not None else None
+            
+            # REMOVED: No fallback to 0.5 - require explicit prices
+            if yes_price is None or no_price is None:
+                logger.error("[augur] Missing price data - cannot construct market")
+                raise ValueError("Missing yes_price or no_price for Augur market")
+            
             normalized.append(
                 {
                     "id": market.get("id"),
                     "description": market.get("description"),
                     "volume": float(market.get("volume") or 0),
-                    "yes_price": yes_price if yes_price is not None else 0.5,
-                    "no_price": no_price if no_price is not None else 0.5,
+                    "yes_price": yes_price,
+                    "no_price": no_price,
                 }
             )
         return normalized

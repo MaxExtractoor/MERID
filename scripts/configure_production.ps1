@@ -51,13 +51,13 @@ Write-Host ""
 # ═══════════════════════════════════════════════════════════════════════════
 # PER-TRADE RISK LIMITS
 # ═══════════════════════════════════════════════════════════════════════════
-$env:KALSHI_TRADER_RISK_PCT = "0.015"
+$env:KALSHI_TRADER_RISK_PCT = "0.02"
 $env:KALSHI_TRADER_KELLY_FRAC = "0.20"
 $env:KALSHI_TRADER_MAX_PRICE = "65"
 $env:KALSHI_TRADER_MIN_PRICE = "2"
 
 Write-Host "[✓] Per-Trade Limits: Configured" -ForegroundColor Green
-Write-Host "    Risk per trade: 1.5% of effective equity" -ForegroundColor Gray
+Write-Host "    Risk per trade: 2% of effective equity (unified cycle risk)" -ForegroundColor Gray
 Write-Host "    Kelly fraction: 20% (fifth-Kelly conservative)" -ForegroundColor Gray
 Write-Host "    Price range: 2¢ - 65¢" -ForegroundColor Gray
 Write-Host ""

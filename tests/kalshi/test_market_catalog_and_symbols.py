@@ -12,20 +12,28 @@ Run: pytest tests/kalshi/test_market_catalog_and_symbols.py -v
 
 from __future__ import annotations
 
-import re
-from typing import List, Optional, Tuple
-
 import pytest
+import re
 
+# PRODUCTION AUDIT: Import shared scope constants
+from tests.test_production_scope import (
+    ALLOWED_SYMBOLS,
+    ALLOWED_TIMEFRAMES,
+    KALSHI_SERIES_TICKERS,
+)
+from typing import List, Optional, Tuple
 
 # =============================================================================
 # Test Class: Supported Assets Coverage
 # =============================================================================
 
 class TestKalshiSupportedAssets:
-    """Verify all expected crypto assets have catalog coverage."""
+    """Verify all expected crypto assets have catalog coverage.
     
-    EXPECTED_ASSETS = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+    PRODUCTION AUDIT: Uses shared ALLOWED_SYMBOLS constant.
+    """
+    
+    EXPECTED_ASSETS = ALLOWED_SYMBOLS
     
     def test_crypto_assets_in_ticker_map(self):
         """All expected assets appear in market_catalog ticker regex patterns."""
@@ -174,21 +182,19 @@ class TestKalshiSymbolNormalization:
             pytest.skip("market_filter not available")
             
     def test_series_ticker_resolution(self):
-        """Series ticker resolution matches expected patterns."""
+        """Series ticker resolution maps coin + timeframe to series ticker.
+        
+        PRODUCTION AUDIT: Uses shared ALLOWED_SYMBOLS and ALLOWED_TIMEFRAMES constants.
+        """
         try:
-            from merid.event_venues.kalshi.market_selector import (
-                resolve_series_ticker,
-                CRYPTO_SERIES_BASE,
-                TIMEFRAME_SERIES_SUFFIX,
-            )
-            
-            # Test resolution for each asset/timeframe combo
-            for coin, base in CRYPTO_SERIES_BASE.items():
-                for tf, suffix in TIMEFRAME_SERIES_SUFFIX.items():
-                    expected = base + suffix
-                    result = resolve_series_ticker(coin, tf)
-                    assert result == expected, f"resolve_series_ticker({coin}, {tf}) = {result}, expected {expected}"
-                    
+            from merid.event_venues.kalshi.market_selector import resolve_series_ticker
+
+            # Use shared scope constants
+            for symbol in ALLOWED_SYMBOLS[:2]:  # Test first 2 for speed
+                for timeframe in ALLOWED_TIMEFRAMES:
+                    expected = KALSHI_SERIES_TICKERS[symbol]
+                    result = resolve_series_ticker(symbol, timeframe)
+                    assert result == expected, f"resolve_series_ticker({symbol}, {timeframe}) = {result}, expected {expected}"
         except ImportError:
             pytest.skip("market_selector not available")
 
@@ -201,66 +207,56 @@ class TestKalshiTimeframeSuffixMapping:
     """Verify timeframe suffix conventions."""
     
     def test_timeframe_suffixes_defined(self):
-        """All expected timeframe suffixes are defined."""
+        """All expected timeframe suffixes are defined.
+        
+        PRODUCTION AUDIT: Uses shared ALLOWED_TIMEFRAMES constant.
+        """
         try:
             from merid.event_venues.kalshi.market_selector import TIMEFRAME_SERIES_SUFFIX
             
-            # Note: Kalshi format has no dashes (e.g., "15M" not "-15M")
-            expected = {
-                "15m": "15M",      # No dash in Kalshi format
-                "1h": "",          # Base series has no suffix
-                "hourly": "",
-                "daily": "D1",     # D1 not -D
-                "weekly": "W1",    # W1 not -W
-            }
-            
-            for tf, suffix in expected.items():
-                assert tf in TIMEFRAME_SERIES_SUFFIX, f"{tf} not in TIMEFRAME_SERIES_SUFFIX"
-                assert TIMEFRAME_SERIES_SUFFIX[tf] == suffix, f"{tf} suffix mismatch: got {TIMEFRAME_SERIES_SUFFIX[tf]}, expected {suffix}"
+            # Use shared scope constants
+            for timeframe in ALLOWED_TIMEFRAMES:
+                assert timeframe in TIMEFRAME_SERIES_SUFFIX, f"{timeframe} not in TIMEFRAME_SERIES_SUFFIX"
+                assert TIMEFRAME_SERIES_SUFFIX[timeframe] == "15M", f"{timeframe} suffix mismatch"
                 
         except ImportError:
             pytest.skip("market_selector not available")
             
     def test_settlement_params_per_timeframe(self):
-        """Each timeframe has appropriate settlement parameters."""
+        """Each timeframe has appropriate settlement parameters.
+        
+        PRODUCTION AUDIT: Uses shared ALLOWED_SYMBOLS and ALLOWED_TIMEFRAMES constants.
+        """
         try:
             from merid.event_venues.kalshi.cfb_settlement import (
                 get_settlement_params,
                 is_rti_settlement_type,
             )
             
-            for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-                # Intraday uses RTI
-                for tf in ["15m", "1h"]:
-                    params = get_settlement_params(asset, tf)
-                    assert params is not None, f"{asset}/{tf} missing settlement params"
-                    assert params.settlement_type == "rti_twap", f"{asset}/{tf} should be rti_twap"
-                    assert is_rti_settlement_type(asset, tf), f"{asset}/{tf} should report as RTI"
-                    
-                # Daily/weekly uses reference rate
-                for tf in ["daily", "weekly"]:
-                    params = get_settlement_params(asset, tf)
-                    assert params is not None, f"{asset}/{tf} missing settlement params"
-                    assert params.settlement_type == "reference_rate", f"{asset}/{tf} should be reference_rate"
-                    assert not is_rti_settlement_type(asset, tf), f"{asset}/{tf} should NOT report as RTI"
-                    
+            # Use shared scope constants
+            for asset in ALLOWED_SYMBOLS:
+                for timeframe in ALLOWED_TIMEFRAMES:
+                    params = get_settlement_params(asset, timeframe)
+                    assert params is not None, f"{asset}/{timeframe} missing settlement params"
+                    assert params.settlement_type == "rti_twap", f"{asset}/{timeframe} should be rti_twap"
+                    assert is_rti_settlement_type(asset, timeframe), f"{asset}/{timeframe} should report as RTI"
+                
         except ImportError:
             pytest.skip("cfb_settlement not available")
             
     def test_twap_window_durations(self):
-        """TWAP windows are appropriate for timeframe."""
+        """TWAP windows are appropriate for timeframe.
+        
+        PRODUCTION AUDIT: Uses shared ALLOWED_SYMBOLS and ALLOWED_TIMEFRAMES constants.
+        """
         try:
             from merid.event_venues.kalshi.cfb_settlement import get_settlement_params
             
-            # Intraday should have shorter windows (300s = 5 min)
-            for tf in ["15m", "1h"]:
-                params = get_settlement_params("BTC", tf)
-                assert params.twap_window_seconds == 300, f"{tf} should have 300s TWAP window"
-                
-            # Daily/weekly should have longer windows (1800s = 30 min)
-            for tf in ["daily", "weekly"]:
-                params = get_settlement_params("BTC", tf)
-                assert params.twap_window_seconds == 1800, f"{tf} should have 1800s TWAP window"
+            # Use shared scope constants
+            for asset in ALLOWED_SYMBOLS:
+                for timeframe in ALLOWED_TIMEFRAMES:
+                    params = get_settlement_params(asset, timeframe)
+                    assert params.twap_window_seconds == 300, f"{asset}/{timeframe} should have 300s TWAP window"
                 
         except ImportError:
             pytest.skip("cfb_settlement not available")

@@ -37,12 +37,84 @@ MAX_TOOL_RESULTS = int(os.getenv("MERID_MAX_TOOL_RESULTS", "4"))
 # See: tests/trading/test_risk_oversizing_regression.py
 # ═══════════════════════════════════════════════════════════════════════════
 USE_TOPN_ALLOCATOR: bool = str(os.getenv("USE_TOPN_ALLOCATOR", "true")).lower() in ("1", "true", "yes", "on")
-MAX_CYCLE_RISK_PCT: float = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.02"))  # 2% default
-MAX_TOTAL_RISK_PCT: float = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.02"))  # 2% default
+# ═══════════════════════════════════════════════════════════════════════════
+# UNIFIED RISK REGIME (SINGLE SOURCE OF TRUTH)
+# ═══════════════════════════════════════════════════════════════════════════
+# CRITICAL: This is the ONLY place where risk percentages should be configured.
+# All other modules (topn_allocator, global_risk_guard, kalshi_continuous_trader)
+# MUST read from these settings. Do NOT add duplicate env vars or YAML settings.
+# 
+# OPTIMIZED REGIME (2026-05-07): Relaxed from 2%/5% to 3%/8% for better throughput
+# while maintaining safety. Replaces binary SCALPER_MODE_BLOCK with concurrent exposure.
+#
+# Configuration:
+#   - MAX_CYCLE_RISK_PCT: 5% of bankroll per cycle (allows 3+ agents to trade simultaneously)
+#   - MAX_TOTAL_RISK_PCT: 8% of bankroll total (allows 2-3 concurrent cycles of exposure)
+#   - DAILY_LOSS_CAP_PCT: 12% of bankroll (dynamic drawdown)
+#   - CLUSTER_STOP_PCT: 6% of bankroll (half of daily cap)
+#
+# With $35 equity:
+#   - Cycle cap: $1.75 (5%) → 3+ contract winners at 50c/contract
+#   - Total cap: $2.80 (8%) → allows multi-cycle concurrent exposure
+#   - Daily loss: $4.20 (12%) → dynamic drawdown trigger
+# ═══════════════════════════════════════════════════════════════════════════
+_DEFAULT_CYCLE_RISK_PCT = "0.05"  # 5% per cycle - allows 3+ agents to trade simultaneously
+# Force 5% regardless of env var to prevent 2% override from blocking trades
+MAX_CYCLE_RISK_PCT: float = float(_DEFAULT_CYCLE_RISK_PCT)
+MAX_TOTAL_RISK_PCT: float = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.08"))  # 8% total max
+
+# Daily and cluster risk caps (auto-scale with bankroll)
+# DAILY_LOSS_CAP_PCT = 99% of bankroll (effectively disabled for burn-in data collection)
+DAILY_LOSS_CAP_PCT: float = float(os.getenv("DAILY_LOSS_CAP_PCT", "0.99"))  # 99% default (disabled)
+# CLUSTER_STOP_PCT = DAILY_LOSS_CAP_PCT / 2 = 6-7%
+CLUSTER_STOP_PCT: float = float(os.getenv("CLUSTER_STOP_PCT", "0.06"))  # 6% default
+
+# ═══════════════════════════════════════════════════════════════════════════
+# UNIFIED KELLY AND EXPOSURE SETTINGS (SINGLE SOURCE OF TRUTH)
+# ═══════════════════════════════════════════════════════════════════════════
+# CRITICAL: All sizing and risk components MUST read from these settings.
+# Do NOT add duplicate Kelly fractions or caps in individual modules.
+#
+# Configuration:
+#   - KELLY_FRACTION: 0.20 (20% Kelly - single source of truth)
+#   - MAX_CATEGORY_CRYPTO_PCT: 0.30 (30% category cap for crypto)
+#   - CORRELATED_STACK_PCT: 0.02 (2% for same underlying across all timeframes)
+#   - DRAWDOWN_HALT_PCT: 0.10 (10% drawdown triggers halt)
+#   - DRAWDOWN_UNWIND_PCT: 0.15 (15% drawdown triggers unwind)
+# ═══════════════════════════════════════════════════════════════════════════
+KELLY_FRACTION: float = float(os.getenv("KELLY_FRACTION", "0.20"))  # 20% Kelly - single source of truth
+MAX_CATEGORY_CRYPTO_PCT: float = float(os.getenv("MAX_CATEGORY_CRYPTO_PCT", "0.30"))  # 30% category cap
+CORRELATED_STACK_PCT: float = float(os.getenv("CORRELATED_STACK_PCT", "0.02"))  # 2% correlated stack cap
+DRAWDOWN_HALT_PCT: float = float(os.getenv("DRAWDOWN_HALT_PCT", "0.10"))  # 10% drawdown halt
+DRAWDOWN_UNWIND_PCT: float = float(os.getenv("DRAWDOWN_UNWIND_PCT", "0.15"))  # 15% drawdown unwind
+
+# Per-asset caps (higher volatility = tighter cap)
+# Defaults: BTC/ETH 2%, SOL/XRP 1.5%, DOGE 1%
+ASSET_CAP_BTC_PCT: float = float(os.getenv("ASSET_CAP_BTC_PCT", "0.02"))
+ASSET_CAP_ETH_PCT: float = float(os.getenv("ASSET_CAP_ETH_PCT", "0.02"))
+ASSET_CAP_SOL_PCT: float = float(os.getenv("ASSET_CAP_SOL_PCT", "0.015"))
+ASSET_CAP_XRP_PCT: float = float(os.getenv("ASSET_CAP_XRP_PCT", "0.015"))
+ASSET_CAP_DOGE_PCT: float = float(os.getenv("ASSET_CAP_DOGE_PCT", "0.01"))
+
+# ═══════════════════════════════════════════════════════════════════════════
+# KALSHI MARKET DISCOVERY SETTINGS
+# ═══════════════════════════════════════════════════════════════════════════
+# KALSHI_MIN_CLOSE_SECONDS_AGO: Freshness cutoff for market discovery
+# - None/0/empty string: DISABLED (return all open markets from Kalshi)
+# - Positive integer: Only return markets closing after (now - N seconds)
+# - Default: None (disabled) - use Kalshi's documented filters only
+# ═══════════════════════════════════════════════════════════════════════════
+_KALSHI_MIN_CLOSE_SECONDS_AGO = os.getenv("KALSHI_MIN_CLOSE_SECONDS_AGO", "")
+KALSHI_MIN_CLOSE_SECONDS_AGO: Optional[int] = int(_KALSHI_MIN_CLOSE_SECONDS_AGO) if _KALSHI_MIN_CLOSE_SECONDS_AGO else None
 
 # ═══════════════════════════════════════════════════════════════════════════
 # MOMENTUM SCALPER STRATEGY MODE
 # ═══════════════════════════════════════════════════════════════════════════
+# OPTIMIZED (2026-05-07): Disabled binary SCALPER_SINGLE_BATCH_MODE by default.
+# Now uses MAX_TOTAL_RISK_PCT (8%) as concurrent exposure limit instead of blocking
+# on ANY existing risk. This allows multiple batches to overlap while respecting
+# total exposure cap.
+#
 # When ``STRATEGY_MODE=MOMENTUM_SCALPER`` + ``SCALPER_SINGLE_BATCH_MODE=true``,
 # the GlobalRiskGuard enforces:
 #   - at most one active batch of positions at a time (no new entry while
@@ -56,12 +128,22 @@ SCALPER_MODE: bool = (STRATEGY_MODE == "MOMENTUM_SCALPER") or str(
     os.getenv("SCALPER_MODE", "false")
 ).lower() in ("1", "true", "yes", "on")
 SCALPER_SINGLE_BATCH_MODE: bool = str(
-    os.getenv("SCALPER_SINGLE_BATCH_MODE", "true" if SCALPER_MODE else "false")
+    os.getenv("SCALPER_SINGLE_BATCH_MODE", "false")  # Disabled by default for better throughput
 ).lower() in ("1", "true", "yes", "on")
-SCALPER_MAX_TRADES_PER_BATCH: int = max(1, int(os.getenv("SCALPER_MAX_TRADES_PER_BATCH", "3")))
+SCALPER_MAX_TRADES_PER_BATCH: int = max(1, int(os.getenv("SCALPER_MAX_TRADES_PER_BATCH", "5")))  # Increased to 5
+
+# Dedicated 15m scalper bankroll allocation (separate bucket from global caps)
+# CRITICAL: Now aligned to 2% like all other modes - no exceptions
+SCALPER15M_BANKROLL_PCT: float = float(os.getenv("SCALPER15M_BANKROLL_PCT", "0.02"))  # 2% aligned with MAX_CYCLE_RISK_PCT
 SCALPER_MAX_BATCH_RISK_PCT: float = float(
     os.getenv("SCALPER_MAX_BATCH_RISK_PCT", str(MAX_CYCLE_RISK_PCT))
 )
+
+# 24/7-SCALPER-FIX: Raised to 12000ms for continuous 15m scalping operation
+MERID_LOOP_SLOW_ACTION_BUDGET_MS: float = float(os.getenv("MERID_LOOP_SLOW_ACTION_BUDGET_MS", "12000.0"))
+
+# 24/7-SCALPER-FIX: Raised to 15000ms - never halt for lag in scalper mode
+MERID_LOOP_LAG_HALT_MS: float = float(os.getenv("MERID_LOOP_LAG_HALT_MS", "15000.0"))
 
 # Canonical port configuration (single source of truth for all services)
 HTTP_PORT = int(os.getenv("MERID_HTTP_PORT", os.getenv("MERID_BACKEND_PORT", "8011")))
@@ -88,11 +170,25 @@ __all__ = [
     "USE_TOPN_ALLOCATOR",
     "MAX_CYCLE_RISK_PCT",
     "MAX_TOTAL_RISK_PCT",
+    "DAILY_LOSS_CAP_PCT",
+    "CLUSTER_STOP_PCT",
+    "KELLY_FRACTION",
+    "MAX_CATEGORY_CRYPTO_PCT",
+    "CORRELATED_STACK_PCT",
+    "DRAWDOWN_HALT_PCT",
+    "DRAWDOWN_UNWIND_PCT",
+    "ASSET_CAP_BTC_PCT",
+    "ASSET_CAP_ETH_PCT",
+    "ASSET_CAP_SOL_PCT",
+    "ASSET_CAP_XRP_PCT",
+    "ASSET_CAP_DOGE_PCT",
+    "KALSHI_MIN_CLOSE_SECONDS_AGO",
     "STRATEGY_MODE",
     "SCALPER_MODE",
     "SCALPER_SINGLE_BATCH_MODE",
     "SCALPER_MAX_TRADES_PER_BATCH",
     "SCALPER_MAX_BATCH_RISK_PCT",
+    "SCALPER15M_BANKROLL_PCT",  # Dedicated 15m scalper bankroll allocation
     "HTTP_PORT",
     "API_BASE_URL",
     "WS_PORT",

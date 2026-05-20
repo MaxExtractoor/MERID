@@ -1,0 +1,292 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tiered Profit-Taking Strategy Configuration (40% / 40% / 20% Ladder)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# This template provides the canonical configuration for the dynamic profit-taking
+# strategy across BTC, ETH, SOL, XRP, and DOGE markets on Kalshi.
+#
+# Copy this file and adjust per-asset parameters as needed.
+# All numeric values can be overridden via environment variables (see below).
+#
+# Reference: trademetria.com/blog/what-are-r-multiples-the-key-metric-every-trader-should-know/
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GLOBAL DEFAULTS (applied to all assets unless overridden)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+defaults:
+  # Tier 1: Exit 40% of position at 0.7R
+  tier1:
+    r_multiple: 0.70          # Target: 70% of risk captured
+    scale_out_fraction: 0.40    # Exit 40% of position
+    min_edge_after_fees_cents: 2.0  # Minimum 2c profit after fees
+  
+  # Tier 2: Exit 40% of remaining position (24% of original) at 1.0R
+  tier2:
+    r_multiple: 1.00            # Activate trailing stop at 1.0R
+    trailing_giveback_cents: 5  # Allow 5c pullback from peak (~50% of profit)
+    min_edge_after_fees_cents: 2.0
+  
+  # Tier 3: Exit final 20% at 1.5R via hard TP or wide trailing
+  tier3:
+    r_multiple: 1.50           # Target 1.5R on final tranche
+    min_unrealized_pct_hard_tp: 150.0  # Hard exit at 150% unrealized PnL
+    trailing_giveback_cents: 8  # Wider trail for final run
+    min_edge_after_fees_cents: 2.0
+  
+  # Anti-round-trip protection
+  max_round_trips_per_contract: 2      # Max 2 cycles per contract
+  min_price_move_for_reentry_cents: 5  # Require 5c move before re-entry
+  round_trips_reset_daily: true          # Reset counters daily at UTC midnight
+  
+  # Fee awareness
+  min_absolute_profit_cents: 5  # Never exit for less than 5c gross
+  
+  # Entry/exit timing precision (regression protection)
+  max_entry_latency_seconds: 5.0   # Reject entries delayed >5s from signal
+  max_exit_latency_seconds: 3.0    # Alert on exits delayed >3s from trigger
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ASSET-SPECIFIC CONFIGURATIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Each asset inherits from defaults and can override specific parameters.
+# Timeframe-specific configs (15m, 1h, daily, weekly) are nested under each asset.
+
+assets:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # BTC — Major asset, tightest trails
+  # ═══════════════════════════════════════════════════════════════════════════
+  BTC:
+    timeframes:
+      15m:
+        inherits: defaults
+        tier1:
+          r_multiple: 0.70
+          scale_out_fraction: 0.40
+        tier2:
+          r_multiple: 1.00
+          trailing_giveback_cents: 4  # Tight for BTC liquidity
+        tier3:
+          r_multiple: 1.50
+          trailing_giveback_cents: 6
+          min_unrealized_pct_hard_tp: 150.0
+      
+      1h:
+        inherits: defaults
+        tier1:
+          r_multiple: 0.75  # Slightly wider for longer timeframe
+          scale_out_fraction: 0.40
+        tier2:
+          r_multiple: 1.10
+          trailing_giveback_cents: 5
+        tier3:
+          r_multiple: 1.75
+          trailing_giveback_cents: 8
+      
+      daily:
+        inherits: defaults
+        tier1:
+          r_multiple: 0.80
+          scale_out_fraction: 0.40
+        tier2:
+          r_multiple: 1.20
+          trailing_giveback_cents: 6
+        tier3:
+          r_multiple: 2.00
+          trailing_giveback_cents: 10
+          min_unrealized_pct_hard_tp: 200.0
+        max_round_trips_per_contract: 1  # Fewer cycles for daily
+      
+      weekly:
+        inherits: daily  # Same as daily but with even wider targets
+        tier1:
+          r_multiple: 0.85
+        tier2:
+          r_multiple: 1.30
+          trailing_giveback_cents: 8
+        tier3:
+          r_multiple: 2.50
+          trailing_giveback_cents: 12
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # ETH — Major asset, similar to BTC with slightly wider trails
+  # ═══════════════════════════════════════════════════════════════════════════
+  ETH:
+    timeframes:
+      15m:
+        inherits: defaults
+        tier2:
+          trailing_giveback_cents: 5  # Slightly wider than BTC (more volatile)
+        tier3:
+          trailing_giveback_cents: 7
+      
+      1h:
+        inherits: defaults
+        tier2:
+          trailing_giveback_cents: 6
+        tier3:
+          trailing_giveback_cents: 9
+      
+      daily:
+        inherits: assets.BTC.timeframes.daily
+      
+      weekly:
+        inherits: assets.BTC.timeframes.weekly
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # SOL — Higher volatility, wider trails required
+  # ═══════════════════════════════════════════════════════════════════════════
+  SOL:
+    timeframes:
+      15m:
+        inherits: defaults
+        tier1:
+          r_multiple: 0.75  # Require more profit before first exit
+          scale_out_fraction: 0.40
+        tier2:
+          r_multiple: 1.10
+          trailing_giveback_cents: 7  # Wider trail for volatility
+        tier3:
+          r_multiple: 1.75
+          trailing_giveback_cents: 10
+          min_unrealized_pct_hard_tp: 175.0
+        min_price_move_for_reentry_cents: 6
+      
+      1h:
+        inherits: defaults
+        tier1:
+          r_multiple: 0.80
+        tier2:
+          r_multiple: 1.20
+          trailing_giveback_cents: 8
+        tier3:
+          r_multiple: 2.00
+          trailing_giveback_cents: 12
+      
+      daily:
+        inherits: assets.BTC.timeframes.daily
+        tier1:
+          r_multiple: 0.85
+        tier3:
+          trailing_giveback_cents: 12
+      
+      weekly:
+        inherits: assets.BTC.timeframes.weekly
+        tier3:
+          trailing_giveback_cents: 15
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # XRP — Similar volatility to SOL
+  # ═══════════════════════════════════════════════════════════════════════════
+  XRP:
+    timeframes:
+      15m:
+        inherits: assets.SOL.timeframes.15m
+        tier1:
+          r_multiple: 0.80  # Even more conservative than SOL
+        tier2:
+          trailing_giveback_cents: 8
+      
+      1h:
+        inherits: assets.SOL.timeframes.1h
+      
+      daily:
+        inherits: assets.SOL.timeframes.daily
+      
+      weekly:
+        inherits: assets.SOL.timeframes.weekly
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # DOGE — Highest volatility, widest trails
+  # ═══════════════════════════════════════════════════════════════════════════
+  DOGE:
+    timeframes:
+      15m:
+        inherits: defaults
+        tier1:
+          r_multiple: 0.85
+          scale_out_fraction: 0.40
+        tier2:
+          r_multiple: 1.20
+          trailing_giveback_cents: 10
+        tier3:
+          r_multiple: 2.00
+          trailing_giveback_cents: 15
+          min_unrealized_pct_hard_tp: 200.0
+        min_price_move_for_reentry_cents: 8
+        max_round_trips_per_contract: 1  # Single cycle only (high volatility)
+      
+      1h:
+        inherits: assets.DOGE.timeframes.15m
+        tier1:
+          r_multiple: 0.90
+        tier3:
+          r_multiple: 2.50
+      
+      daily:
+        inherits: assets.DOGE.timeframes.1h
+        tier1:
+          r_multiple: 1.00
+      
+      weekly:
+        inherits: assets.DOGE.timeframes.daily
+        max_round_trips_per_contract: 1
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENVIRONMENT VARIABLE OVERRIDES
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# All parameters above can be overridden via environment variables at runtime.
+# This enables production tuning without config file changes.
+#
+# Naming convention: MERID_TP_{ASSET}_{TIMEFRAME}_{PARAM}
+#
+# Examples:
+#   MERID_TP_BTC_15M_TIER1_R=0.75                    # Override BTC 15m Tier 1 R
+#   MERID_TP_ETH_1H_TIER2_GIVEBACK=7               # Override ETH 1h Tier 2 trail
+#   MERID_TP_SOL_DAILY_TIER3_HARD_PCT=175          # Override SOL daily hard TP
+#   MERID_TP_MAX_ROUNDTRIPS_BTC=3                  # Override BTC max round trips
+#   MERID_TP_GLOBAL_MIN_EDGE_CENTS=3               # Global minimum edge floor
+#
+# Note: Environment variables take precedence over YAML config.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# OBSERVABILITY AND METRICS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+observability:
+  # Emit structured logs for every tier completion
+  log_tier_completions: true
+  
+  # Emit metrics for dashboard consumption
+  emit_metrics: true
+  metric_prefix: "merid.tp"
+  
+  # Alert thresholds (PnL in cents)
+  alert_on_large_exit_pnl_cents: 1000  # Alert if single exit > $10
+  alert_on_consecutive_losses: 3        # Alert after 3 consecutive loss exits
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# INTEGRATION SETTINGS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+integration:
+  # How often to run the profit-taking pass (in CT cycles)
+  # 1 = every cycle, 2 = every other cycle, etc.
+  evaluate_every_n_cycles: 1
+  
+  # Maximum positions to evaluate per pass (for latency control)
+  max_positions_per_pass: 50
+  
+  # Client tag prefix for idempotency
+  client_tag_prefix: "tp"
+  
+  # Order routing
+  use_order_router: true  # Always true in production
+  exit_order_time_in_force: "gtc"  # gtc, ioc, or fok
+  
+  # Fill handling
+  confirm_fills_async: true
+  fill_confirmation_timeout_seconds: 30

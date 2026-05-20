@@ -56,7 +56,7 @@ class RiskConfigViolationError(RuntimeError):
 
 def _get_current_trade_mode() -> str:
     """Get current trade mode from environment or settings."""
-    from merid.trading.trade_mode import get_trade_mode
+    from trading.trade_mode import get_trade_mode
     try:
         return get_trade_mode()
     except Exception:
@@ -175,7 +175,7 @@ def enforce_unified_risk_model(
     # ═══════════════════════════════════════════════════════════════════════
     # Invariant 4: Per-trade sub-caps ≤ 1% (to achieve 1-2% TOTAL across 3 edges)
     # CRITICAL: 1-2% is the TOTAL across all edges, NOT per-edge.
-    # 3 edges × 2% = 6% is STRICTLY FORBIDDEN.
+    # 3 edges × 3% = 9% is STRICTLY FORBIDDEN.
     # ═══════════════════════════════════════════════════════════════════════
 
     per_trade = _get_config_value(config_sources, "max_risk_pct_per_trade", 0.01)

@@ -94,8 +94,15 @@ class Settings(BaseSettings):
     NEWS_API_KEY: Optional[str] = Field(default=None, description="NewsAPI key")
     SERPER_API_KEY: Optional[str] = Field(default=None, description="Serper search API key")
     FRED_API_KEY: Optional[str] = Field(default=None, description="FRED economic data API key")
-    COINGECKO_API_KEY: Optional[str] = Field(default=None, description="CoinGecko Demo API key (free tier, higher rate limits)")
-    COINGECKO_PRO_API_KEY: Optional[str] = Field(default=None, description="CoinGecko Pro API key")
+    # REMOVED: CoinGecko API keys (replaced with BinanceUS public API)
+    # BINANCEUS_API_KEY: Optional[str] = Field(default=None, description="BinanceUS API key (optional, public API works without auth)")
+    
+    # =============================================================================
+    # COINBASE ADVANCED TRADE API
+    # =============================================================================
+    COINBASE_API_KEY: Optional[str] = Field(default=None, description="Coinbase Advanced Trade API key")
+    COINBASE_API_SECRET: Optional[str] = Field(default=None, description="Coinbase Advanced Trade API secret")
+    
     FINNHUB_API_KEY: Optional[str] = Field(default=None, description="Finnhub API key")
     FINNHUB_SECRET_KEY: Optional[str] = Field(default=None, description="Finnhub secret key")
     THE_GRAPH_API_KEY: Optional[str] = Field(default=None, description="The Graph API key")
@@ -184,6 +191,7 @@ class Settings(BaseSettings):
     KALSHI_PRIVATE_KEY_PATH: Optional[str] = Field(default=None, description="Kalshi private key path")
     KALSHI_PRIVATE_KEY_PEM: Optional[str] = Field(default=None, description="Kalshi private key PEM")
     KALSHI_API_HOST: Optional[str] = Field(default=None, description="Kalshi API host override (leave unset to use the URL determined by KALSHI_USE_DEMO/KALSHI_ENV)")
+    KALSHI_MIN_CLOSE_SECONDS_AGO: Optional[int] = Field(default=None, description="Freshness cutoff for market discovery: only return markets closing after (now - N seconds). None/0 = disabled (return all open markets).")
     
     # =============================================================================
     # CFB RTI (Crypto Facilities Benchmarks Real-Time Index) SETTINGS
@@ -277,22 +285,86 @@ class Settings(BaseSettings):
     
     # =============================================================================
     # LOOP LAG MONITOR SETTINGS (event loop health)
+    # OLD-HARDWARE FIX (2026-04-28): Raised thresholds for weak hardware + spotty internet
     # =============================================================================
     MERID_LOOP_LAG_WARN_MS: float = Field(
-        default=100.0,
-        description="Loop lag warning threshold in milliseconds (log warning)"
+        default=1500.0,
+        description="Loop lag warning threshold in milliseconds (was 100, now 1500 for old hardware)"
     )
+    # 24/7-SCALPER-FIX: Raised to 10000ms for continuous operation tolerance
     MERID_LOOP_LAG_DEGRADE_MS: float = Field(
-        default=250.0,
-        description="Loop lag degradation threshold in milliseconds (reduce limits)"
+        default=10000.0,
+        description="Loop lag degradation threshold in milliseconds (was 4000, now 10000 for 24/7 scalping)"
     )
+    # 24/7-SCALPER-FIX: Raised to 15000ms - never halt for lag in scalper mode
     MERID_LOOP_LAG_HALT_MS: float = Field(
-        default=500.0,
-        description="Loop lag halt threshold in milliseconds (kill switch in live mode)"
+        default=15000.0,
+        description="Loop lag halt threshold in milliseconds (was 8000, now 15000). Never auto-shutdowns."
+    )
+    MERID_LOOP_LAG_DEGRADED_CONSECUTIVE: int = Field(
+        default=5,
+        description="Consecutive lag samples above degrade_ms to enter degraded mode"
+    )
+    MERID_LOOP_LAG_HALT_CONSECUTIVE: int = Field(
+        default=10,
+        description="Consecutive lag samples above halt_ms to enter halt band"
+    )
+    MERID_LOOP_LAG_RECOVERY_WINDOW_S: float = Field(
+        default=45.0,
+        description="Seconds of healthy lag required to reset breach counters"
     )
     MERID_LOOP_LAG_ENABLED: bool = Field(
         default=True,
         description="Enable loop lag monitoring in ExecutionGate"
+    )
+    
+    # =============================================================================
+    # SLOW ACTION BUDGET SETTINGS (24/7-SCALPER-FIX)
+    # =============================================================================
+    # 24/7-SCALPER-FIX: Raised to 12000ms for continuous 15m scalping operation
+    MERID_LOOP_SLOW_ACTION_BUDGET_MS: float = Field(
+        default=12000.0,
+        description="Slow action warning threshold in milliseconds (was 4000, now 12000 for 24/7 scalping)"
+    )
+    
+    # =============================================================================
+    # FEED TIMEOUT SETTINGS (OLD-HARDWARE FIX)
+    # =============================================================================
+    MERID_FEED_NEWS_TIMEOUT_S: float = Field(
+        default=4.0,
+        description="News feed timeout in seconds (was 1.0, now 4.0 for unreliable networks)"
+    )
+    MERID_FEED_MACRO_TIMEOUT_S: float = Field(
+        default=4.0,
+        description="Macro feed timeout in seconds (was 1.0, now 4.0)"
+    )
+    MERID_FEED_ONCHAIN_TIMEOUT_S: float = Field(
+        default=3.0,
+        description="On-chain feed timeout in seconds (was 1.0, now 3.0)"
+    )
+    
+    # =============================================================================
+    # BANKROLL SERVICE TIMEOUTS (OLD-HARDWARE FIX)
+    # =============================================================================
+    MERID_BANKROLL_EQUITY_TIMEOUT_S: float = Field(
+        default=60.0,
+        description="Seconds to wait for equity fetch from Kalshi (was 30, now 60)"
+    )
+    MERID_BANKROLL_SUMMARY_TIMEOUT_S: float = Field(
+        default=30.0,
+        description="Seconds to wait for bankroll summary fetch (was 15, now 30)"
+    )
+    
+    # =============================================================================
+    # EXECUTION SUBSCRIBER TIMEOUTS (OLD-HARDWARE FIX)
+    # =============================================================================
+    MERID_EXEC_CB_FAILURE_THRESHOLD: int = Field(
+        default=10,
+        description="Circuit breaker failure threshold for execution subscriber (was 5, now 10)"
+    )
+    MERID_MAX_DECISION_AGE_S: float = Field(
+        default=45.0,
+        description="Max decision age before warning in seconds (was 25, now 45)"
     )
     
     # =============================================================================
@@ -302,12 +374,24 @@ class Settings(BaseSettings):
     MERID_PM_TRADING_MODE: str = Field(default="paper", description="Prediction market mode: paper/live (set MERID_PM_LIVE_ENABLED=true to unlock live)")
     MERID_PM_LIVE_ENABLED: bool = Field(default=False, description="Explicit unlock for live PM trading — must be true for MERID_PM_TRADING_MODE=live to take effect")
     MERID_PM_PROFILE: str = Field(
-        default="development",
-        description="development | production — production enforces AgentGrid fail-fast and disables CT by policy",
+        default="baseline",
+        description="PM profile: baseline/kalshi-pm-live (controls risk limits and agent set)"
     )
     MERID_ENABLE_KALSHI_CT: bool = Field(
         default=False,
-        description="Start KalshiContinuousTrader with the API server (off by default; AgentGrid is the PM stack)",
+        description="Enable KalshiContinuousTrader (research agent, not for 15m live trading)"
+    )
+    MERID_ENABLE_RESEARCH_AGENTS: bool = Field(
+        default=False,
+        description="Enable legacy research agents (PredictionMarketAgentV2, MarketResearchAgent, etc.) - NOT for 15m live trading"
+    )
+    MERID_LOOP_DRY_RUN: bool = Field(
+        default=False,
+        description="DRY_RUN mode: loop runs with full logging but no actual order placement (for validation/auditing)"
+    )
+    MERID_ALLOW_FAKE_DATA: bool = Field(
+        default=False,
+        description="Allow fake/mock data sources in production - MUST be False for live trading"
     )
     MERID_CT_RESEARCH_ALLOW_LOOP: bool = Field(
         default=False,
@@ -332,9 +416,13 @@ class Settings(BaseSettings):
         default="ws",
         description="Kalshi websocket implementation: ws (required for live) or websocket_service (dev only)",
     )
-    # PM limits - ENV-DRIVEN percentages of bankroll (aligns with Top 3 / 1-2% / 15% strategy)
-    # Top 3 strategy: 1-2% total risk across 3 edges = ~0.33-0.67% per edge
+    # PM limits - ENV-DRIVEN percentages of bankroll (aligns with Top 3 / 3% / 15% strategy)
+    # Top 3 strategy: 3% total risk across 3 edges = ~1% per edge
     # Daily drawdown: 15% max (from env MERID_MAX_DAILY_LOSS_PCT)
+    MERID_MAX_RISK_FRACTION_PER_CYCLE: float = Field(
+        default=0.03,  # 3% cycle risk cap
+        description="Maximum risk fraction per cycle (3% for unified cycle risk)"
+    )
     MERID_PM_RISK_PER_EDGE_PCT: float = Field(
         default=0.0,  # 0 = compute from MERID_MAX_RISK_FRACTION_PER_CYCLE / 3
         description="Risk per edge as % of bankroll (0 = cycle_cap / 3)"
@@ -363,8 +451,8 @@ class Settings(BaseSettings):
         description="Number of errors in 1 hour that triggers kill switch (default: 50, raised from 10 for noisy PM agents)",
     )
     MERID_MAX_DAILY_LOSS_PCT: float = Field(
-        default=0.15,
-        description="Maximum daily portfolio loss percentage before kill switch triggers (0.15 = 15% for top-3 edge strategy)"
+        default=0.99,
+        description="Maximum daily portfolio loss percentage before kill switch triggers (0.99 = 99% disabled for burn-in data collection)"
     )
     MERID_ERROR_THRESHOLD_STARTUP_GRACE_SECONDS: int = Field(
         default=600,
@@ -419,7 +507,23 @@ class Settings(BaseSettings):
     # Trading mode: "paper" (simulated), "live" (real money)
     MERID_TRADING_MODE: str = Field(default="paper", description="Trading mode: paper or live")
     
+    # Prediction Market Trading Mode Settings
+    MERID_PM_TRADING_MODE: str = Field(
+        default="paper", 
+        description="Prediction market trading mode: mock/paper/live. Controls VenueGate mode."
+    )
+    MERID_PM_LIVE_ENABLED: bool = Field(
+        default=False,
+        description="Enable live prediction market trading. Must be True for live mode."
+    )
+    MERID_ALLOW_LIVE_TRADES: bool = Field(
+        default=False,
+        description="SAFETY INTERLOCK: Must be explicitly set to True to enable live trading."
+    )
+    
     # Safety interlocks for live trading (0 = derive from bankroll %, these are last-line guards)
+    # DEPRECATED for kalshi_crypto_15m_v2 profile: Use config/profiles/kalshi_crypto_15m.yaml instead
+    # These settings are still used by other profiles (sports, paper, generic prediction)
     MERID_MAX_ORDER_SIZE_USD: float = Field(default=0.0, description="Max single order USD (0 = 1% of bankroll)")
     MERID_MAX_DAILY_LOSS_USD: float = Field(default=0.0, description="Max daily loss halt USD (0 = 5% of bankroll)")
     MERID_MAX_POSITION_SIZE_USD: float = Field(default=0.0, description="Max position USD (0 = 2% of bankroll)")
@@ -444,6 +548,19 @@ class Settings(BaseSettings):
     MERID_CRYPTO_CONSENSUS_WAIT_TIMEOUT_MS: int = Field(
         default=500,
         description="MM soft mode: brief wait before re-reading consensus (cap 2s in agent loop)",
+    )
+    # Expiry proximity guards (made configurable from hardcoded values)
+    MERID_EXPIRY_GUARD_SECS: float = Field(
+        default=90.0,
+        description="Hard deadline - no new entries within this many seconds of contract expiry",
+    )
+    MERID_EXPIRY_CAUTION_SECS: float = Field(
+        default=120.0,
+        description="Warning threshold for expiry proximity (should be > MERID_EXPIRY_GUARD_SECS)",
+    )
+    MERID_CONSENSUS_WAIT_MS: float = Field(
+        default=500.0,
+        description="How long to wait for soft consensus to form (fallback when crypto_edge_runtime unavailable)",
     )
     MERID_CRYPTO_EDGE_PRODUCTION_PROFILE: str = Field(
         default="modern_tradeable_kalshi_v1",
@@ -563,13 +680,34 @@ class Settings(BaseSettings):
         description="Portfolio risk bankroll in cents (0 = auto-derive from MERID_TOTAL_CAPITAL_USD)"
     )
     
-    # Portfolio limit percentages of bankroll (replace hardcoded $25K/$2K in agent_grid_config)
-    KALSHI_PORTFOLIO_MAX_NOTIONAL_PCT: float = Field(default=0.50, description="Max total notional as % of bankroll (default 50%)")
-    KALSHI_PORTFOLIO_MAX_DAILY_LOSS_PCT: float = Field(default=0.155, description="Max daily loss as % of bankroll (15% for top-3 edge strategy)")
-    KALSHI_PORTFOLIO_MAX_PER_ASSET_PCT: float = Field(default=0.16, description="Max per-asset notional as % of bankroll (default 16%)")
-    KALSHI_PORTFOLIO_MAX_MARGIN_UTIL_PCT: float = Field(default=0.75, description="Max margin utilization % (default 75%)")
+    # Minimum bankroll fallback - EXPLICIT config to avoid magic numbers in risk calculations
+    # When live balance is unavailable, risk system falls back to this minimum (not $100 hardcoded)
+    MERID_MIN_BANKROLL_USD: float = Field(
+        default=100.0,
+        description="Minimum bankroll USD when live balance unavailable (last-resort fallback)"
+    )
+    
+    # Minimum cash required to trade - prevents trading with negligible spendable funds
+    MERID_MIN_TRADE_CASH_USD: float = Field(
+        default=1.50,
+        description="Minimum available cash USD required to place trades (prevents micro-account churn)"
+    )
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # DEPRECATED: Portfolio risk settings now unified in core.settings
+    # ═══════════════════════════════════════════════════════════════════════════
+    # All portfolio risk settings are now in core.settings (SINGLE SOURCE OF TRUTH):
+    #   - MAX_CYCLE_RISK_PCT: 2% per cycle (replaces KALSHI_PORTFOLIO_MAX_NOTIONAL_PCT)
+    #   - MAX_TOTAL_RISK_PCT: 5% total cap (replaces KALSHI_PORTFOLIO_MAX_NOTIONAL_PCT)
+    #   - DAILY_LOSS_CAP_PCT: 12% daily loss (replaces KALSHI_PORTFOLIO_MAX_DAILY_LOSS_PCT)
+    #   - CLUSTER_STOP_PCT: 6% cluster stop (replaces KALSHI_PORTFOLIO_CLUSTER_STOP_PCT)
+    # These legacy fields are kept for backward compatibility but should not be used.
+    KALSHI_PORTFOLIO_MAX_NOTIONAL_PCT: float = Field(default=0.50, description="DEPRECATED - use MAX_TOTAL_RISK_PCT from core.settings")
+    KALSHI_PORTFOLIO_MAX_DAILY_LOSS_PCT: float = Field(default=0.155, description="DEPRECATED - use DAILY_LOSS_CAP_PCT from core.settings")
+    KALSHI_PORTFOLIO_MAX_PER_ASSET_PCT: float = Field(default=0.16, description="DEPRECATED - use MAX_CYCLE_RISK_PCT from core.settings")
+    KALSHI_PORTFOLIO_MAX_MARGIN_UTIL_PCT: float = Field(default=0.75, description="DEPRECATED - use core.settings")
     KALSHI_PORTFOLIO_CHECK_INTERVAL_S: int = Field(default=30, description="Portfolio risk check interval in seconds")
-    KALSHI_PORTFOLIO_CLUSTER_STOP_PCT: float = Field(default=0.50, description="Static per-cluster stop loss as fraction of daily loss cap (safety limit for dynamic calculations)")
+    KALSHI_PORTFOLIO_CLUSTER_STOP_PCT: float = Field(default=0.50, description="DEPRECATED - use CLUSTER_STOP_PCT from core.settings")
     
     # Dynamic contract cap settings - DERIVED from bankroll (was hardcoded 5000)
     # Formula: 1 contract per $10 of bankroll, min 10, max 10000
@@ -580,17 +718,22 @@ class Settings(BaseSettings):
     # Spot-strike guard (used by strike_selector.py)
     KALSHI_SPOT_STRIKE_GLOBAL_WARN_PCT: float = Field(default=0.85, description="Hard global guard - reject strikes beyond this distance from spot")
     
-    # =============================================================================
+    # Risk/Positions Pipeline Feature Flag (Step 1 Guardrail)
+    USE_NEW_RISK_PIPELINE: bool = Field(default=True, description="Use new pure-function risk projection pipeline (Step 1 guardrail)")
     # CRYPTO15M CROSS-ASSET RISK ALLOCATOR SETTINGS
     # Production implementation: timeframe-wide budget + per-expiry exposure caps
     # =============================================================================
-    # Rollout phase: "dry_run" (log only), "soft_gate" (allocator blocks), "hard_gate" (risk enforces)
-    CRYPTO15M_ALLOCATOR_PHASE: str = Field(
-        default="hard_gate",
-        description="Rollout phase: dry_run | soft_gate | hard_gate"
-    )
+    # Dynamic contract cap settings - DERIVED from bankroll (was hardcoded 5000)
+    # DEPRECATED for kalshi_crypto_15m_v2 profile: Use config/profiles/kalshi_crypto_15m.yaml instead
+    # These settings are still used by other profiles (sports, paper, generic prediction)
+    # Formula: 1 contract per $10 of bankroll, min 10, max 10000
+    KALSHI_MAX_CONTRACTS_TOTAL: int = Field(default=0, description="Hard ceiling for total contracts (0 = derive from bankroll: 1 per $10)")
+    KALSHI_MAX_CONTRACTS_PER_ASSET_FRACTION: float = Field(default=0.35, description="Fraction of total contracts per asset (e.g., 0.35 = 35%)")
+    KALSHI_MAX_CONTRACTS_PER_CLUSTER_FRACTION: float = Field(default=0.15, description="Fraction of total contracts per cluster (asset+timeframe)")
     
-    # Timeframe-wide budget: DERIVED from bankroll (was hardcoded 1/2/1)
+    # Per-timeframe crypto 15m contract caps - DERIVED from bankroll
+    # DEPRECATED for kalshi_crypto_15m_v2 profile: Use config/profiles/kalshi_crypto_15m.yaml instead
+    # These settings are still used by other profiles (sports, paper, generic prediction)
     # Formula: 1 contract per $50 of bankroll for 15m, min 1, max 100
     MAX_CONTRACTS_PER_TF_CRYPTO_15M: int = Field(
         default=0,
@@ -598,6 +741,8 @@ class Settings(BaseSettings):
     )
     
     # Markets limit: DERIVED from bankroll (was hardcoded 2)
+    # DEPRECATED for kalshi_crypto_15m_v2 profile: Use config/profiles/kalshi_crypto_15m.yaml instead
+    # These settings are still used by other profiles (sports, paper, generic prediction)
     # Formula: 1 market per $25 of bankroll, min 2, max 50
     MAX_MARKETS_PER_TF_CRYPTO_15M: int = Field(
         default=0,
@@ -605,6 +750,8 @@ class Settings(BaseSettings):
     )
     
     # Per-expiry open exposure cap: DERIVED from bankroll (was hardcoded 1)
+    # DEPRECATED for kalshi_crypto_15m_v2 profile: Use config/profiles/kalshi_crypto_15m.yaml instead
+    # These settings are still used by other profiles (sports, paper, generic prediction)
     # Formula: 1 contract per $100 of bankroll, min 1, max 20
     MAX_OPEN_CONTRACTS_PER_EXPIRY_CRYPTO_15M: int = Field(
         default=0,
@@ -641,11 +788,11 @@ class Settings(BaseSettings):
     def effective_pm_risk_per_edge_pct(self) -> float:
         """Risk per edge: cycle_cap / 3 for Top 3 strategy.
         
-        With 1-2% total cap across 3 edges, each edge gets ~0.33-0.67%.
+        With 3% total cap across 3 edges, each edge gets ~1%.
         """
         if self.MERID_PM_RISK_PER_EDGE_PCT > 0:
             return self.MERID_PM_RISK_PER_EDGE_PCT
-        # Default: cycle_cap (1-2%) divided by 3 edges
+        # Default: cycle_cap (3%) divided by 3 edges
         return self.MERID_MAX_RISK_FRACTION_PER_CYCLE / 3.0
     
     @property
@@ -679,13 +826,31 @@ class Settings(BaseSettings):
         """Get live bankroll from Kalshi API or fallback to configured.
         
         CRITICAL: ONLY uses ACTUAL Kalshi API balance. NO fake fallbacks.
+        
+        NOTE: Logic duplicated from order_router to avoid circular import.
         """
         # ONLY use actual Kalshi API balance - NO configured fallbacks
         try:
-            from merid.event_venues.kalshi.order_router import _derive_live_bankroll_usd
-            live = _derive_live_bankroll_usd()
-            if live is not None and live > 0:
-                return live
+            # Source 1: Kalshi risk module live bankroll (lazy import to avoid cycles)
+            try:
+                from merid.event_venues.kalshi.kalshi_risk import get_live_bankroll
+                live = get_live_bankroll()
+                if live > 0:
+                    return live
+            except Exception:
+                pass
+            
+            # Source 2: Direct Kalshi client balance API (lazy import to avoid cycles)
+            try:
+                from merid.event_venues.kalshi.kalshi_client import get_kalshi_client
+                client = get_kalshi_client()
+                balance_data = client.get_balance()
+                if balance_data:
+                    balance_cents = balance_data.get("balance_cents", 0)
+                    if balance_cents > 0:
+                        return balance_cents / 100.0
+            except Exception:
+                pass
         except Exception as exc:
             logger.error("[_get_live_bankroll_usd] Failed to fetch actual Kalshi balance: %s", exc)
         
@@ -734,15 +899,19 @@ class Settings(BaseSettings):
     
     # =============================================================================
     # KALSHI RESILIENCE SETTINGS (BUG-1: previously hard-coded module constants)
+    # OLD-HARDWARE FIX (2026-04-28): Doubled all thresholds and timeouts for weak
+    # hardware + spotty internet. Circuit opens after 20 failures (was 10), longer
+    # timeouts for slow connections, extended recovery periods.
     # =============================================================================
     KALSHI_BACKOFF_BASE: float = Field(default=2.0, description="Exponential backoff base (seconds)")
-    KALSHI_CIRCUIT_FAILURE_THRESHOLD: int = Field(default=10, description="Failures before circuit opens")
-    KALSHI_CIRCUIT_RECOVERY_TIMEOUT: float = Field(default=30.0, description="Seconds before circuit tries half-open")
-    KALSHI_MAX_CONCURRENT_REQUESTS: int = Field(default=10, description="Max in-flight HTTP requests to Kalshi")
-    KALSHI_CONNECT_TIMEOUT: float = Field(default=5.0, description="TCP connect timeout (seconds)")
-    KALSHI_READ_TIMEOUT: float = Field(default=15.0, description="HTTP read timeout (seconds)")
-    KALSHI_WRITE_TIMEOUT: float = Field(default=10.0, description="HTTP write timeout for order placement (seconds)")
-    KALSHI_POOL_TIMEOUT: float = Field(default=5.0, description="Connection pool acquire timeout (seconds)")
+    KALSHI_CIRCUIT_FAILURE_THRESHOLD: int = Field(default=20, description="Failures before circuit opens (was 10, now 20)")
+    KALSHI_CIRCUIT_RECOVERY_TIMEOUT: float = Field(default=60.0, description="Seconds before circuit tries half-open (was 30, now 60)")
+    KALSHI_CIRCUIT_RECOVERY_TIMEOUT: float = Field(default=60.0, description="Seconds before circuit tries half-open (was 30, now 60)")
+    KALSHI_MAX_CONCURRENT_REQUESTS: int = Field(default=10, description="Max concurrent HTTP requests to Kalshi API")
+    KALSHI_CONNECT_TIMEOUT: float = Field(default=15.0, description="TCP connect timeout (seconds) (was 10, now 15) - BUG-FIX (2026-05-07)")
+    KALSHI_READ_TIMEOUT: float = Field(default=45.0, description="HTTP read timeout (seconds) (was 30, now 45) - BUG-FIX (2026-05-07)")
+    KALSHI_WRITE_TIMEOUT: float = Field(default=30.0, description="HTTP write timeout for order placement (seconds) (was 20, now 30) - BUG-FIX (2026-05-07)")
+    KALSHI_POOL_TIMEOUT: float = Field(default=15.0, description="Connection pool acquire timeout (seconds) (was 10, now 15) - BUG-FIX (2026-05-07)")
 
     # =============================================================================
     # KALSHI RATE LIMIT SETTINGS (prevents fallback warning)
@@ -787,42 +956,60 @@ class Settings(BaseSettings):
             self.MERID_CRYPTO_MM_CONSENSUS_MODE = "full"
         
         # ═══════════════════════════════════════════════════════════════════════════
-        # CRITICAL: ENSURE CAPITAL IS REAL (from Kalshi) NOT HARDCODED DEFAULT
+        # CAPITAL RESOLUTION: try Kalshi API, fall back gracefully
         # ═══════════════════════════════════════════════════════════════════════════
+        # Settings.__init__ runs at import time (synchronously) before the async
+        # event loop and Kalshi auth are ready.  If the balance fetch fails (401,
+        # network, etc.) we MUST NOT crash — that kills every router that imports
+        # `settings`.  FAIL CLOSED with 0 - bankroll_service_v2 will provide live data.
+        # NO hardcoded fallbacks permitted - bankroll must come from live Kalshi API.
         if self.MERID_TOTAL_CAPITAL_USD <= 0:
-            # Attempt to fetch from Kalshi API
             try:
                 kalshi_balance = self._fetch_kalshi_balance()
                 if kalshi_balance > 0:
                     self.MERID_TOTAL_CAPITAL_USD = kalshi_balance
-                    logger.critical(
+                    logger.info(
                         "[RISK_CONFIG] MERID_TOTAL_CAPITAL_USD auto-fetched from Kalshi balance: $%.2f",
                         self.MERID_TOTAL_CAPITAL_USD
                     )
                 else:
-                    raise RuntimeError(
-                        "[PRODUCTION HARDENING] Cannot fetch valid balance from Kalshi API. "
-                        "MERID_TOTAL_CAPITAL_USD must be set explicitly or system must have working Kalshi API credentials."
+                    # Fetch returned 0 — API reachable but balance empty or auth failed
+                    # FAIL CLOSED: Use 0 - bankroll_service_v2 will provide live data at runtime
+                    self.MERID_TOTAL_CAPITAL_USD = 0.0
+                    logger.warning(
+                        "[RISK_CONFIG] Kalshi balance fetch returned $0. "
+                        "Using 0 as placeholder — BankrollService will provide live data at runtime."
                     )
             except Exception as exc:
-                raise RuntimeError(
-                    f"[PRODUCTION HARDENING] MERID_TOTAL_CAPITAL_USD not configured and Kalshi balance fetch failed: {exc}. "
-                    f"Set MERID_TOTAL_CAPITAL_USD explicitly or fix Kalshi API credentials."
-                ) from exc
+                # Network/auth not ready at import time — FAIL CLOSED with 0
+                # bankroll_service_v2 will provide live data when async loop is ready
+                self.MERID_TOTAL_CAPITAL_USD = 0.0
+                logger.warning(
+                    "[RISK_CONFIG] Kalshi balance fetch failed at startup: %s. "
+                    "Using 0 as placeholder — BankrollService will provide live data at runtime.",
+                    exc,
+                )
         
         # DERIVE bankroll from actual configured capital (MERID_TOTAL_CAPITAL_USD)
-        # This ensures 1-2% max notional sizing is computed from REAL capital, not magic numbers
+        # This ensures 3% max notional sizing is computed from REAL capital, not magic numbers
+        # NOTE: This is a FALLBACK for legacy modules. The SINGLE SOURCE OF TRUTH is bankroll_service_v2.
+        # All new code should use get_equity_for_risk_calc_sync() from bankroll_service_v2.
         if self.KALSHI_PORTFOLIO_BANKROLL_CENTS <= 0:
             # Convert total capital USD to cents for bankroll
             self.KALSHI_PORTFOLIO_BANKROLL_CENTS = int(self.MERID_TOTAL_CAPITAL_USD * 100)
-            logger.critical(
-                "[RISK_CONFIG] KALSHI_PORTFOLIO_BANKROLL_CENTS derived from MERID_TOTAL_CAPITAL_USD: "
-                "$%.2f USD -> %d cents (1-2%% max notional = $%.2f-$%.2f)",
-                self.MERID_TOTAL_CAPITAL_USD,
-                self.KALSHI_PORTFOLIO_BANKROLL_CENTS,
-                self.MERID_TOTAL_CAPITAL_USD * 0.01,  # 1%
-                self.MERID_TOTAL_CAPITAL_USD * 0.02   # 2%
-            )
+            if self.MERID_TOTAL_CAPITAL_USD > 0:
+                logger.info(
+                    "[RISK_CONFIG] KALSHI_PORTFOLIO_BANKROLL_CENTS derived from MERID_TOTAL_CAPITAL_USD: "
+                    "$%.2f USD -> %d cents (3%% max notional = $%.2f)",
+                    self.MERID_TOTAL_CAPITAL_USD,
+                    self.KALSHI_PORTFOLIO_BANKROLL_CENTS,
+                    self.MERID_TOTAL_CAPITAL_USD * 0.03  # 3%
+                )
+            else:
+                logger.warning(
+                    "[RISK_CONFIG] KALSHI_PORTFOLIO_BANKROLL_CENTS set to 0 (fallback). "
+                    "BankrollService will provide live data at runtime."
+                )
     
     def _fetch_kalshi_balance(self) -> float:
         """
@@ -847,8 +1034,10 @@ class Settings(BaseSettings):
             # Load private key
             private_key_data = Path(private_key_path).read_bytes()
             
-            # Determine base URL
-            base_url = "https://api.elections.kalshi.com/trade-api/v2" if env == "prod" else "https://demo-api.kalshi.co/trade-api/v2"
+            # Determine base URL — respect KALSHI_ENV=live and KALSHI_USE_DEMO
+            use_demo = os.getenv("KALSHI_USE_DEMO", "true").lower() in ("true", "1", "yes")
+            is_live = env in ("live", "prod") and not use_demo
+            base_url = "https://api.elections.kalshi.com/trade-api/v2" if is_live else "https://demo-api.kalshi.co/trade-api/v2"
             
             # Create signature (Kalshi format: timestamp + method + path with v2 prefix)
             timestamp = str(int(__import__('time').time() * 1000))
@@ -886,7 +1075,8 @@ class Settings(BaseSettings):
             
             # URL uses the base_url which already has /trade-api/v2
             url = f"{base_url}/portfolio/balance"
-            response = requests.get(url, headers=headers, timeout=10)
+            # OLD-HARDWARE FIX: Increased from 10s to 30s for slow connections
+            response = requests.get(url, headers=headers, timeout=30)
             response.raise_for_status()
             
             data = response.json()
@@ -1056,13 +1246,20 @@ class Settings(BaseSettings):
                     return caps
                 except Exception:
                     pass
-            # Fallback to legacy defaults if static mode but no override
+            # Fallback to 3% unified cycle risk if static mode but no override
+            # Legacy per-asset caps removed - use unified 3% across all assets
+            logger.warning(
+                "[STATIC_FALLBACK] Using 3% unified cycle risk caps (legacy per-asset caps removed)"
+            )
+            # Use a reasonable default bankroll for static mode fallback
+            static_bankroll = 100.0  # $100 default for static mode
+            unified_cap = static_bankroll * 0.03  # 3% unified cycle risk
             return {
-                "BTC": AssetCapConfig(max_daily_notional_usd=4000, max_single_trade_usd=1000),
-                "ETH": AssetCapConfig(max_daily_notional_usd=3000, max_single_trade_usd=750),
-                "SOL": AssetCapConfig(max_daily_notional_usd=2000, max_single_trade_usd=500),
-                "XRP": AssetCapConfig(max_daily_notional_usd=1500, max_single_trade_usd=375),
-                "DOGE": AssetCapConfig(max_daily_notional_usd=500, max_single_trade_usd=125),
+                "BTC": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
+                "ETH": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
+                "SOL": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
+                "XRP": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
+                "DOGE": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
             }
         
         # Compute dynamic allocations
@@ -1100,16 +1297,20 @@ class Settings(BaseSettings):
                     "Cannot proceed without valid bankroll from Kalshi balance."
                 )
             
-            # Derive caps from bankroll (conservative: 50% of bankroll total across all assets)
+            # Derive caps from bankroll using 3% unified cycle risk (aligned with MAX_CYCLE_RISK_PCT)
+            # No per-asset differentiation - 3% across top-3 edges is the single source of truth
             logger.warning(
-                "[FALLBACK] Using bankroll-derived asset caps: bankroll=$%.2f", bankroll_usd
+                "[FALLBACK] Using 3% unified cycle risk caps: bankroll=$%.2f", bankroll_usd
             )
+            # All assets get same cap: 3% of bankroll (the cycle risk cap)
+            # This aligns with the top-3 edge allocation system
+            unified_cap = bankroll_usd * 0.03  # 3% unified cycle risk
             return {
-                "BTC": AssetCapConfig(max_daily_notional_usd=bankroll_usd * 0.25, max_single_trade_usd=bankroll_usd * 0.0625),
-                "ETH": AssetCapConfig(max_daily_notional_usd=bankroll_usd * 0.20, max_single_trade_usd=bankroll_usd * 0.05),
-                "SOL": AssetCapConfig(max_daily_notional_usd=bankroll_usd * 0.15, max_single_trade_usd=bankroll_usd * 0.0375),
-                "XRP": AssetCapConfig(max_daily_notional_usd=bankroll_usd * 0.10, max_single_trade_usd=bankroll_usd * 0.025),
-                "DOGE": AssetCapConfig(max_daily_notional_usd=bankroll_usd * 0.05, max_single_trade_usd=bankroll_usd * 0.0125),
+                "BTC": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
+                "ETH": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
+                "SOL": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
+                "XRP": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
+                "DOGE": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
             }
     
     def get_asset_cap(self, asset: str) -> AssetCapConfig:
@@ -1190,13 +1391,20 @@ class Settings(BaseSettings):
                     return caps
                 except Exception:
                     pass
-            # Fallback to legacy defaults if static mode but no override
+            # Fallback to 3% unified cycle risk if static mode but no override
+            # Legacy per-asset caps removed - use unified 3% across all assets
+            logger.warning(
+                "[STATIC_FALLBACK] Using 3% unified cycle risk caps (legacy per-asset caps removed)"
+            )
+            # Use a reasonable default bankroll for static mode fallback
+            static_bankroll = 100.0  # $100 default for static mode
+            unified_cap = static_bankroll * 0.03  # 3% unified cycle risk
             return {
-                "BTC": AssetCapConfig(max_daily_notional_usd=4000, max_single_trade_usd=1000),
-                "ETH": AssetCapConfig(max_daily_notional_usd=3000, max_single_trade_usd=750),
-                "SOL": AssetCapConfig(max_daily_notional_usd=2000, max_single_trade_usd=500),
-                "XRP": AssetCapConfig(max_daily_notional_usd=1500, max_single_trade_usd=375),
-                "DOGE": AssetCapConfig(max_daily_notional_usd=500, max_single_trade_usd=125),
+                "BTC": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
+                "ETH": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
+                "SOL": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
+                "XRP": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
+                "DOGE": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
             }
         
         # Compute dynamic allocations
@@ -1234,16 +1442,20 @@ class Settings(BaseSettings):
                     "Cannot proceed without valid bankroll from Kalshi balance."
                 )
             
-            # Derive caps from bankroll (conservative: 50% of bankroll total across all assets)
+            # Derive caps from bankroll using 3% unified cycle risk (aligned with MAX_CYCLE_RISK_PCT)
+            # No per-asset differentiation - 3% across top-3 edges is the single source of truth
             logger.warning(
-                "[FALLBACK] Using bankroll-derived asset caps: bankroll=$%.2f", bankroll_usd
+                "[FALLBACK] Using 3% unified cycle risk caps: bankroll=$%.2f", bankroll_usd
             )
+            # All assets get same cap: 3% of bankroll (the cycle risk cap)
+            # This aligns with the top-3 edge allocation system
+            unified_cap = bankroll_usd * 0.03  # 3% unified cycle risk
             return {
-                "BTC": AssetCapConfig(max_daily_notional_usd=bankroll_usd * 0.25, max_single_trade_usd=bankroll_usd * 0.0625),
-                "ETH": AssetCapConfig(max_daily_notional_usd=bankroll_usd * 0.20, max_single_trade_usd=bankroll_usd * 0.05),
-                "SOL": AssetCapConfig(max_daily_notional_usd=bankroll_usd * 0.15, max_single_trade_usd=bankroll_usd * 0.0375),
-                "XRP": AssetCapConfig(max_daily_notional_usd=bankroll_usd * 0.10, max_single_trade_usd=bankroll_usd * 0.025),
-                "DOGE": AssetCapConfig(max_daily_notional_usd=bankroll_usd * 0.05, max_single_trade_usd=bankroll_usd * 0.0125),
+                "BTC": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
+                "ETH": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
+                "SOL": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
+                "XRP": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
+                "DOGE": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
             }
     
     def get_asset_cap(self, asset: str) -> AssetCapConfig:

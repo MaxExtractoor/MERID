@@ -80,7 +80,8 @@ class SizeReconciler:
         
         if capital_engine is None:
             from merid.risk.capital_engine import CapitalEngine
-            capital_engine = CapitalEngine()
+            from merid.settings import settings as _s
+            capital_engine = CapitalEngine(total_equity=max(1.0, _s.MERID_TOTAL_CAPITAL_USD))
         
         budget = capital_engine.get_risk_budget(asset, timeframe)
         if budget:
@@ -100,7 +101,8 @@ class SizeReconciler:
         """Add CapitalEngine per-asset limit."""
         if capital_engine is None:
             from merid.risk.capital_engine import CapitalEngine
-            capital_engine = CapitalEngine()
+            from merid.settings import settings as _s
+            capital_engine = CapitalEngine(total_equity=max(1.0, _s.MERID_TOTAL_CAPITAL_USD))
         
         # Get the max allocation for this asset
         max_alloc = capital_engine.allocate_to_trade(

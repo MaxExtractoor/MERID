@@ -166,8 +166,8 @@ class BracketRiskManager:
                 f"{cfg.max_loss_per_contract_pct}% equity cap ({max_loss_allowed:.0f}c)"
             )
 
-        # 4. Per-bracket absolute loss cap
-        if order.max_loss_cents > cfg.max_loss_per_bracket_cents:
+        # 4. Per-bracket absolute loss cap (skip if 0 = derive from bankroll)
+        if cfg.max_loss_per_bracket_cents > 0 and order.max_loss_cents > cfg.max_loss_per_bracket_cents:
             return False, (
                 f"Bracket loss {order.max_loss_cents:.0f}c exceeds "
                 f"absolute cap {cfg.max_loss_per_bracket_cents:.0f}c"
@@ -181,10 +181,10 @@ class BracketRiskManager:
                 f"exceeds cap {cfg.max_contracts_per_hour}"
             )
 
-        # 6. Cross-bracket: notional per hour
+        # 6. Cross-bracket: notional per hour (skip if 0 = derive from bankroll)
         notional = order.contracts * order.price_cents
         hour_notional = st.notional_by_hour.get(order.hour_key, 0.0) + notional
-        if hour_notional > cfg.max_notional_per_hour_cents:
+        if cfg.max_notional_per_hour_cents > 0 and hour_notional > cfg.max_notional_per_hour_cents:
             return False, (
                 f"Hour {order.hour_key}: notional {hour_notional:.0f}c "
                 f"exceeds cap {cfg.max_notional_per_hour_cents:.0f}c"

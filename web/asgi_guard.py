@@ -494,7 +494,7 @@ class MERIDUvicornServer(uvicorn.Server):
 def run_merid_guarded(
     app: str,
     host: str = "0.0.0.0",
-    port: int = 8000,
+    port: int = 8011,
     **kwargs,
 ) -> None:
     """

@@ -44,27 +44,23 @@ class KalshiPredictionAdapter(TradingVenueAdapterBase):
     # ------------------------------------------------------------------ #
     def _get_balances_live(self) -> List[BalanceSnapshot]:
         """Fetch actual balances from Kalshi REST API.
-        
-        Uses asyncio.run_coroutine_threadsafe to avoid deadlocks when called
-        from a sync context inside a running event loop.
+
+        Schedules the coroutine on the registered main loop via
+        ``run_coroutine_threadsafe``.  Calling ``asyncio.run`` here (or in a
+        thread-pool worker) creates a fresh event loop that the venue
+        client's HTTP/socket resources don't belong to — corrupting Windows
+        IOCP state and producing InvalidStateError + WinError 995.
         """
         if not self._venue_client:
             return []
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # Called from inside running loop - use run_coroutine_threadsafe
-                # This requires the loop to be running in a different thread
-                # or we need to use a thread pool to avoid deadlock
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(
-                        asyncio.run,
-                        self._venue_client.get_balance()
-                    )
-                    bal = future.result(timeout=10)
-            else:
-                bal = loop.run_until_complete(self._venue_client.get_balance())
+            from core.event_loop_registry import run_on_main_loop, get_main_loop
+            if get_main_loop() is None:
+                logger.debug(
+                    "Kalshi balance fetch skipped: main loop not yet registered"
+                )
+                return []
+            bal = run_on_main_loop(self._venue_client.get_balance(), timeout=10)
         except Exception as exc:
             logger.error("Kalshi balance fetch failed: %s", exc, exc_info=True)
             return []
@@ -81,39 +77,51 @@ class KalshiPredictionAdapter(TradingVenueAdapterBase):
 
     def _get_positions_live(self) -> List[PositionSnapshot]:
         """Fetch actual positions from Kalshi REST API.
-        
-        Uses thread pool execution to avoid deadlocks when called
-        from a sync context inside a running event loop.
+
+        Schedules the coroutine on the registered main loop via
+        ``run_coroutine_threadsafe``.  Calling ``asyncio.run`` here creates
+        a fresh event loop the venue client's resources don't belong to,
+        corrupting Windows IOCP state (InvalidStateError + WinError 995).
+
+        OPTIMIZATION (2026-05-11): Reduced timeout from 15s to 8s and improved fallback.
+        Use position cache as primary fallback with faster timeout to reduce main loop blocking.
         """
         if not self._venue_client:
             return []
         try:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop is not None and loop.is_running():
-                # Called from a sync context inside a running event loop
-                # (e.g. a thread pool worker). Use run_coroutine_threadsafe
-                # so we can block the calling thread without deadlocking.
-                import concurrent.futures as _cf
-                fut = _cf.Future()
-
-                async def _fetch() -> None:
-                    try:
-                        fut.set_result(await self._venue_client.get_positions())
-                    except Exception as _e:
-                        fut.set_exception(_e)
-
-                loop.call_soon_threadsafe(
-                    lambda: asyncio.ensure_future(_fetch(), loop=loop)
+            from core.event_loop_registry import run_on_main_loop, get_main_loop
+            if get_main_loop() is None:
+                logger.debug(
+                    "Kalshi positions fetch skipped: main loop not yet registered"
                 )
-                positions = fut.result(timeout=15)
-            else:
-                positions = asyncio.run(self._venue_client.get_positions())
+                return []
+            # Reduced timeout from 15s to 8s to minimize main loop blocking
+            positions = run_on_main_loop(
+                self._venue_client.get_positions(), timeout=8
+            )
         except Exception as exc:
-            logger.error("Kalshi positions fetch failed: %s", exc, exc_info=True)
+            logger.debug("Kalshi positions fetch timed out (%s) - using position cache", type(exc).__name__)
+            # FALLBACK: Use position cache when REST API times out
+            try:
+                from merid.event_venues.kalshi.position_cache import get_position_cache
+                cache = get_position_cache()
+                cached_positions = cache.get_all_positions(validate_freshness=False)
+                
+                if cached_positions:
+                    results = []
+                    for market_id, pos in cached_positions.items():
+                        results.append(PositionSnapshot(
+                            symbol=market_id,
+                            quantity=float(pos.contracts),
+                            entry_price=float(pos.avg_price_cents) / 100.0 if pos.avg_price_cents else 0.0,
+                            mark_price=float(pos.avg_price_cents) / 100.0 if pos.avg_price_cents else 0.0,  # CachedPosition doesn't have current_price_cents
+                            unrealized_pnl=float(pos.unrealized_pnl_usd) if pos.unrealized_pnl_usd else 0.0,
+                            metadata={"venue": "kalshi", "outcome": pos.side or "", "source": "position_cache"},
+                        ))
+                    logger.debug("Kalshi positions: using %d positions from cache", len(results))
+                    return results
+            except Exception as cache_exc:
+                logger.error("Position cache fallback failed: %s", cache_exc)
             return []
         results = []
         for vp in positions:
@@ -156,30 +164,12 @@ class KalshiPredictionAdapter(TradingVenueAdapterBase):
 
         adapter = KalshiVenueAdapter()
         try:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop is not None and loop.is_running():
-                # Called from a sync context inside a running event loop
-                # (e.g. a thread pool worker).  Use run_coroutine_threadsafe
-                # so we can block the calling thread without deadlocking.
-                import concurrent.futures as _cf
-                fut = _cf.Future()
-
-                async def _submit() -> None:
-                    try:
-                        fut.set_result(await adapter.submit_order(order))
-                    except Exception as _e:
-                        fut.set_exception(_e)
-
-                loop.call_soon_threadsafe(
-                    lambda: asyncio.ensure_future(_submit(), loop=loop)
+            from core.event_loop_registry import run_on_main_loop, get_main_loop
+            if get_main_loop() is None:
+                raise RuntimeError(
+                    "main loop not registered; cannot submit live order"
                 )
-                placed = fut.result(timeout=30.0)
-            else:
-                placed = asyncio.run(adapter.submit_order(order))
+            placed = run_on_main_loop(adapter.submit_order(order), timeout=30.0)
         except Exception as exc:
             logger.error("Kalshi _submit_order_live failed: %s", exc)
             return OrderResult(

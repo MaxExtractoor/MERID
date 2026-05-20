@@ -41,7 +41,7 @@ class TestBankrollCapFixes:
 
         # Create intent without effective_equity_usd set
         intent = OrderIntent(
-            ticker="KXBTC-15M-TEST",
+            ticker="KXBTC15M-TEST",
             side="yes",
             action="buy",
             count=10,
@@ -230,7 +230,7 @@ class TestOrderRouterBankrollCheck:
         intent.effective_equity_usd = 100.0  # Small equity - cap would be $2 (2%)
 
         # Just verify the intent is created correctly
-        assert intent.ticker == "KXBTC-15M-TEST"
+        assert intent.ticker == "KXBTC15M-TEST"
         assert intent.count == 1000
         assert intent.price_cents == 50
         # Notional = 1000 * 50 / 100 = $500

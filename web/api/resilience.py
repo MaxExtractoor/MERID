@@ -223,7 +223,7 @@ async def resilience_metrics() -> Response:
         - job_name: merid_resilience
           metrics_path: /api/v1/resilience/metrics
           static_configs:
-            - targets: ['localhost:8000']
+            - targets: ['localhost:8011']
     """
     try:
         from merid.resilience.metrics import get_metrics_text

@@ -163,7 +163,11 @@ class OrderGroupRiskManager:
             try:
                 loop = _asyncio.get_event_loop()
                 if loop.is_running():
-                    loop.create_task(self.refresh_all())
+                    _refresh_task = loop.create_task(self.refresh_all())
+                    def _on_refresh_done(t):
+                        if not t.cancelled() and t.exception():
+                            logger.error("Order group refresh task failed: %s", t.exception())
+                    _refresh_task.add_done_callback(_on_refresh_done)
             except Exception as e:
                 logger.debug(f"Refresh scheduling failed: {e}")
             logger.debug(

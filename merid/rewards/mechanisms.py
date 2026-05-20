@@ -62,8 +62,12 @@ class RewardMechanism:
         self.config = config or {}
 
     def evaluate(self, event: RewardEvent) -> List[PointAward]:
-        """Evaluate an event and return zero or more point awards."""
-        raise NotImplementedError
+        """Evaluate an event and return zero or more point awards.
+        
+        Base implementation returns empty list. Subclasses should override
+        to provide specific evaluation logic for their reward type.
+        """
+        return []
 
     def applies_to(self, event: RewardEvent) -> bool:
         """Return True if this mechanism should process this event."""

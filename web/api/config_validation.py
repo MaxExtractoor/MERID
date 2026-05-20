@@ -26,7 +26,7 @@ router = APIRouter(prefix="/api/v1/config", tags=["config"])
 class RiskConfigInput(BaseModel):
     """Risk configuration input for validation."""
     max_risk_pct_global: float = Field(
-        default=0.02,
+        default=0.03,
         description="Maximum total basket risk as decimal (e.g., 0.02 = 2%)",
         ge=0,
         le=1

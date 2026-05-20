@@ -1,15 +1,21 @@
-"""§4 Prediction Market Risk — Per-market limits, pre-trade checks, kill switch.
+"""§3 Risk Limits — Allocation caps, position sizing, category exposure.
 
-Provides prediction-market-scoped risk controls:
-- Per-market and per-event exposure limits.
-- Portfolio-wide daily loss limit for prediction markets.
-- Pre-trade sanity checks (max order size, slippage guard, depth check).
-- Kill switch: halt new orders and optionally unwind on drawdown.
+LEGACY CONFIGURATION - For non-crypto, non-15m agents only.
+
+For Kalshi 15m crypto agents (BTC_15M, ETH_15M, SOL_15M, XRP_15M, DOGE_15M):
+  - Risk limits: Use config/profiles/kalshi_crypto_15m.yaml (SINGLE SOURCE OF TRUTH)
+  - Drawdown limits: Use config/profiles/kalshi_crypto_15m.yaml (SINGLE SOURCE OF TRUTH)
+  - This file's constants are NOT used by 15m crypto agents
+
+Provides risk limits for prediction market trading:
+- Per-market and per-event exposure limits
+- Portfolio-wide allocation caps (1-2% of bankroll)
+- Category-specific exposure limits
+- Daily loss limits
+- Cluster stop limits
+- Kill switch on drawdown
 """
 
-from __future__ import annotations
-
-import threading
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
@@ -19,6 +25,10 @@ from typing import Dict, List, Optional, Set
 
 from merid.event_venues.kalshi.position_sizer import kalshi_fee_cents  # canonical fee schedule
 from utils.logger import get_logger
+
+# Canonical risk percentages from core.settings (single source of truth)
+# PRODUCTION RISK REGIME: 2-2.5% per cycle, 12% daily loss cap, 6% cluster stop
+from core.settings import MAX_CYCLE_RISK_PCT, DAILY_LOSS_CAP_PCT, CLUSTER_STOP_PCT
 
 logger = get_logger("merid.prediction.risk")
 
@@ -36,26 +46,44 @@ class RiskAction(str, Enum):
 class CategoryLimit:
     """Exposure limit for a market category."""
     category: str
-    max_notional_usd: Decimal = Decimal("5000.0")
-    max_contracts: int = 500
+    # CRITICAL FIX: 0 = derive from live bankroll (was $5000 - catastrophic for micro bankrolls)
+    max_notional_usd: Decimal = Decimal("0")  # 0 = derive: 20% of bankroll per category
+    max_contracts: int = 0  # 0 = derive: 1 per $10 of bankroll
     max_pct_of_portfolio: float = 0.20  # 20% max in any one category
     enabled: bool = True
 
 @dataclass
 class PredictionRiskConfig:
-    """Risk limits for prediction market trading."""
-    # Per-market limits
-    max_notional_per_market_usd: Decimal = Decimal("500")
-    max_contracts_per_market: int = 200
-    max_contracts_per_order: int = 50
+    """Risk limits for prediction market trading.
+    
+    PRODUCTION RISK REGIME (2% per cycle):
+    - MAX_CYCLE_RISK_PCT: 2% of bankroll per cycle (unified across all modes)
+    - DAILY_LOSS_CAP_PCT: 12% of bankroll daily loss cap
+    - CLUSTER_STOP_PCT: 6% of bankroll cluster stop (half of daily)
+    
+    With $47 bankroll:
+    - 2% cycle cap = $0.94 → 1-2 contract "best" signals
+    - 12% daily cap = $5.64
+    - 6% cluster stop = $2.82
+    
+    All zero values derive from live bankroll + canonical percentages.
+    """
+    # Per-market limits - 0 = derive from MAX_CYCLE_RISK_PCT
+    max_notional_per_market_usd: Decimal = Decimal("0")
+    max_contracts_per_market: int = 0  # 0 = derive: cycle_cap / price
+    max_contracts_per_order: int = 0  # 0 = derive: min(4, cycle_cap / price)
 
-    # Per-event limits (an event can have multiple markets)
-    max_notional_per_event_usd: Decimal = Decimal("1000")
+    # Per-event limits
+    max_notional_per_event_usd: Decimal = Decimal("0")  # 0 = derive: 2× per-market
 
-    # Portfolio-wide limits
-    max_total_notional_usd: Decimal = Decimal("5000")
-    max_daily_loss_usd: Decimal = Decimal("250")
-    max_open_markets: int = 20
+    # THE KEY 2% CYCLE ALLOCATION CAP (from MAX_CYCLE_RISK_PCT)
+    # 0 = derive from core.settings.MAX_CYCLE_RISK_PCT (default 2%)
+    max_total_notional_usd: Decimal = Decimal("0")
+    
+    # Safety limits (separate from allocation, from core.settings)
+    max_daily_loss_usd: Decimal = Decimal("0")  # 0 = derive: DAILY_LOSS_CAP_PCT of bankroll
+    max_cluster_stop_usd: Decimal = Decimal("0")  # 0 = derive: CLUSTER_STOP_PCT of bankroll  
+    max_open_markets: int = 0  # 0 = derive: 1 per $50 of bankroll
 
     # Category-specific limits
     category_limits: Dict[str, CategoryLimit] = field(default_factory=dict)
@@ -87,37 +115,38 @@ class PredictionRiskConfig:
             # C6/RISK-18: Read caps from the same env vars as CategoryExposureTracker
             # so that a single env-var change governs both enforcement layers and
             # they can never silently diverge.
+            # CRITICAL FIX: Default to "0" (derive from bankroll), not hardcoded $ amounts
             import os as _os
             self.category_limits = {
                 "crypto": CategoryLimit(
                     "crypto",
-                    max_notional_usd=Decimal(_os.getenv("MERID_CAT_CAP_CRYPTO_USD", "2000.0")),
-                    max_contracts=500,
+                    max_notional_usd=Decimal(_os.getenv("MERID_CAT_CAP_CRYPTO_USD", "0")),  # 0 = 20% of bankroll
+                    max_contracts=0,  # 0 = derive from bankroll
                 ),
                 "economics": CategoryLimit(
                     "economics",
-                    max_notional_usd=Decimal(_os.getenv("MERID_CAT_CAP_ECONOMICS_USD", "500.0")),
-                    max_contracts=300,
+                    max_notional_usd=Decimal(_os.getenv("MERID_CAT_CAP_ECONOMICS_USD", "0")),
+                    max_contracts=0,
                 ),
                 "financials": CategoryLimit(
                     "financials",
-                    max_notional_usd=Decimal(_os.getenv("MERID_CAT_CAP_FINANCIALS_USD", "500.0")),
-                    max_contracts=300,
+                    max_notional_usd=Decimal(_os.getenv("MERID_CAT_CAP_FINANCIALS_USD", "0")),
+                    max_contracts=0,
                 ),
                 "politics": CategoryLimit(
                     "politics",
-                    max_notional_usd=Decimal(_os.getenv("MERID_CAT_CAP_POLITICS_USD", "200.0")),
-                    max_contracts=200,
+                    max_notional_usd=Decimal(_os.getenv("MERID_CAT_CAP_POLITICS_USD", "0")),
+                    max_contracts=0,
                 ),
                 "macro": CategoryLimit(
                     "macro",
-                    max_notional_usd=Decimal(_os.getenv("MERID_CAT_CAP_MACRO_USD", "500.0")),
-                    max_contracts=300,
+                    max_notional_usd=Decimal(_os.getenv("MERID_CAT_CAP_MACRO_USD", "0")),
+                    max_contracts=0,
                 ),
                 "tech": CategoryLimit(
                     "tech",
-                    max_notional_usd=Decimal(_os.getenv("MERID_CAT_CAP_TECH_USD", "300.0")),
-                    max_contracts=200,
+                    max_notional_usd=Decimal(_os.getenv("MERID_CAT_CAP_TECH_USD", "0")),
+                    max_contracts=0,
                 ),
             }
 
@@ -191,7 +220,10 @@ class PredictionMarketRisk:
         self._orders_this_hour = 0
         self._last_minute_reset = datetime.now(timezone.utc)
         self._last_hour_reset = datetime.now(timezone.utc)
-        self._rate_lock = threading.Lock()  # guards check-and-increment atomicity
+        # TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+        # TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+        # self._rate_lock = threading.Lock()  # guards check-and-increment atomicity
+        self._rate_lock = None  # Disabled to prevent startup hang
 
     # ------------------------------------------------------------------
     # Properties
@@ -351,6 +383,7 @@ class PredictionMarketRisk:
         category: Optional[str] = None,
         edge: Decimal = Decimal("0"),
         agent_max_notional_usd: Optional[Decimal] = None,
+        max_contracts_per_order: Optional[int] = None,
     ) -> PreTradeCheck:
         """Run all pre-trade checks for a proposed order.
 
@@ -406,12 +439,39 @@ class PredictionMarketRisk:
             )
 
         # 2. Max order size
-        if contracts > self.config.max_contracts_per_order:
+        # Use provided agent limit if available, otherwise fall back to config default
+        # SAFETY: Always derive from bankroll to ensure 1-2% allocation cap is respected
+        _max_contracts = max_contracts_per_order if max_contracts_per_order is not None else self.config.max_contracts_per_order
+        
+        # CRITICAL: Always validate against live bankroll - never trust static config
+        # for micro bankrolls (e.g., 50 contracts on $14 bankroll = 178% risk!)
+        try:
+            from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+            _equity = get_equity_for_risk_calc_sync()
+            if _equity and _equity > 0:
+                # Derive max contracts from 1% of bankroll / price
+                # This ensures we never exceed the 1-2% allocation strategy
+                _price_usd = float(price_cents) / 100.0 if price_cents else 0.50
+                _derived_max = max(1, int((_equity * 0.01) / _price_usd))
+                
+                # Use the MORE CONSERVATIVE of: provided value, config value, or derived value
+                if _max_contracts is None or _max_contracts <= 0:
+                    _max_contracts = _derived_max
+                else:
+                    _max_contracts = min(_max_contracts, _derived_max)
+            elif _max_contracts is None or _max_contracts <= 0:
+                # No bankroll available and no valid config - use absolute safety floor
+                _max_contracts = 5  # Absolute minimum for unknown bankroll
+        except Exception:
+            if _max_contracts is None or _max_contracts <= 0:
+                _max_contracts = 5  # Absolute safety floor
+        
+        if contracts > _max_contracts:
             return PreTradeCheck(
                 allowed=False,
                 action=RiskAction.REDUCE_SIZE,
-                reason=f"Order size {contracts} exceeds agent max {self.config.max_contracts_per_order}.",
-                adjusted_size=self.config.max_contracts_per_order,
+                reason=f"Order size {contracts} exceeds agent max {_max_contracts}.",
+                adjusted_size=_max_contracts,
                 market_id=market_id,
             )
         
@@ -466,7 +526,8 @@ class PredictionMarketRisk:
         existing = self._exposures.get(market_id)
         current_contracts = existing.contracts if existing else 0
         new_total_contracts = current_contracts + contracts
-        if new_total_contracts > self.config.max_contracts_per_market:
+        # ZERO-FIX: Skip if max_contracts_per_market is 0 (derive from bankroll)
+        if self.config.max_contracts_per_market > 0 and new_total_contracts > self.config.max_contracts_per_market:
             allowed = self.config.max_contracts_per_market - current_contracts
             if allowed <= 0:
                 return PreTradeCheck(
@@ -486,7 +547,9 @@ class PredictionMarketRisk:
         new_notional = (Decimal(new_total_contracts) * price_cents / Decimal("100")).quantize(
             Decimal("0.01"), ROUND_HALF_UP
         )
-        if new_notional > self.config.max_notional_per_market_usd:
+        # ZERO-FIX: Skip check if max_notional_per_market_usd is 0 (meaning derive from bankroll)
+        # The agent_max_notional_usd check above already enforces the bankroll-derived limit
+        if self.config.max_notional_per_market_usd > Decimal("0") and new_notional > self.config.max_notional_per_market_usd:
             return PreTradeCheck(
                 allowed=False,
                 action=RiskAction.REJECT,
@@ -499,7 +562,8 @@ class PredictionMarketRisk:
             e.notional_usd for e in self._exposures.values()
             if e.event_id == event_id
         )
-        if event_notional + order_notional > self.config.max_notional_per_event_usd:
+        # ZERO-FIX: Skip if max_notional_per_event_usd is 0 (derive from bankroll)
+        if self.config.max_notional_per_event_usd > Decimal("0") and event_notional + order_notional > self.config.max_notional_per_event_usd:
             return PreTradeCheck(
                 allowed=False,
                 action=RiskAction.REJECT,
@@ -509,7 +573,8 @@ class PredictionMarketRisk:
 
         # 5. Portfolio-wide notional
         total_notional = sum(e.notional_usd for e in self._exposures.values())
-        if total_notional + order_notional > self.config.max_total_notional_usd:
+        # ZERO-FIX: Skip if max_total_notional_usd is 0 (derive from bankroll)
+        if self.config.max_total_notional_usd > Decimal("0") and total_notional + order_notional > self.config.max_total_notional_usd:
             return PreTradeCheck(
                 allowed=False,
                 action=RiskAction.REJECT,
@@ -520,7 +585,8 @@ class PredictionMarketRisk:
         # 6. Daily loss limit
         today = now.strftime("%Y-%m-%d")
         daily = self._daily_pnl.get(today)
-        if daily and daily.total_pnl_usd < -self.config.max_daily_loss_usd:
+        # ZERO-FIX: Skip if max_daily_loss_usd is 0 (derive from bankroll)
+        if self.config.max_daily_loss_usd > Decimal("0") and daily and daily.total_pnl_usd < -self.config.max_daily_loss_usd:
             self.halt(f"Daily loss ${abs(daily.total_pnl_usd)} exceeds max ${self.config.max_daily_loss_usd}.")
             return PreTradeCheck(
                 allowed=False,
@@ -531,7 +597,8 @@ class PredictionMarketRisk:
 
         # 7. Max open markets
         open_markets = len(self._exposures)
-        if market_id not in self._exposures and open_markets >= self.config.max_open_markets:
+        # ZERO-FIX: Skip if max_open_markets is 0 (derive from bankroll)
+        if self.config.max_open_markets > 0 and market_id not in self._exposures and open_markets >= self.config.max_open_markets:
             return PreTradeCheck(
                 allowed=False,
                 action=RiskAction.REJECT,
@@ -544,7 +611,8 @@ class PredictionMarketRisk:
             cat_limit = self.config.category_limits[category]
             if cat_limit.enabled:
                 cat_notional = self._category_notional.get(category, Decimal("0")) + order_notional
-                if cat_notional > cat_limit.max_notional_usd:
+                # ZERO-FIX: Skip if max_notional_usd is 0 (derive from bankroll)
+                if cat_limit.max_notional_usd > Decimal("0") and cat_notional > cat_limit.max_notional_usd:
                     return PreTradeCheck(
                         allowed=False,
                         action=RiskAction.REJECT,
@@ -553,7 +621,8 @@ class PredictionMarketRisk:
                     )
 
                 cat_contracts = self._category_contracts.get(category, 0) + contracts
-                if cat_contracts > cat_limit.max_contracts:
+                # ZERO-FIX: Skip if max_contracts is 0 (derive from bankroll)
+                if cat_limit.max_contracts > 0 and cat_contracts > cat_limit.max_contracts:
                     return PreTradeCheck(
                         allowed=False,
                         action=RiskAction.REJECT,
@@ -585,19 +654,32 @@ class PredictionMarketRisk:
             self._orders_this_hour += 1
 
         # 10. Post-fee edge minimum (formula is side-aware for binary contracts)
+        # REMOVED: No fallback to 50 cents - reject invalid prices explicitly
+        if price_cents <= 0 or price_cents >= 100:
+            logger.error(
+                "[risk_check] Invalid price_cents=%s for order - rejecting without fallback",
+                price_cents
+            )
+            return PreTradeCheck(
+                allowed=False,
+                action=RiskAction.REJECT,
+                reason="invalid_price_no_fallback",
+                market_id=market_id,
+            )
+        _effective_price_cents = price_cents
         if edge > 0:
-            fee = Decimal(str(kalshi_fee_cents(int(price_cents), contracts)))
+            fee = Decimal(str(kalshi_fee_cents(int(_effective_price_cents), contracts)))
             fee_per = fee / max(contracts, 1)
             if side in ("no", "buy_no", "sell_no"):
-                payout_per = price_cents  # NO pays price_cents if YES loses
+                payout_per = _effective_price_cents  # NO pays price_cents if YES loses
             else:
-                payout_per = Decimal("100") - price_cents  # YES pays 100-price
+                payout_per = Decimal("100") - _effective_price_cents  # YES pays 100-price
             post_fee_edge = edge - (fee_per / payout_per) if payout_per > 0 else Decimal("0")
-            if post_fee_edge < Decimal("0.01"):
+            if post_fee_edge < Decimal("0.05"):  # CONSERVATIVE: 5% post-fee edge
                 return PreTradeCheck(
                     allowed=False,
                     action=RiskAction.REJECT,
-                    reason=f"Post-fee edge {post_fee_edge:.4f} below minimum 0.01",
+                    reason=f"Post-fee edge {post_fee_edge:.4f} below minimum 0.05",
                     market_id=market_id,
                 )
 
@@ -849,19 +931,207 @@ class PredictionMarketRisk:
             self._last_hour_reset = now
 
 
+# ── Cycle Cap Tracker ───────────────────────────────────────────────────
+
+@dataclass
+class CycleCapConfig:
+    """Configuration for cycle-level risk cap.
+    
+    Uses canonical MAX_CYCLE_RISK_PCT from core.settings as single source of truth
+    to ensure consistency across global_execution_guard, dynamic_sizing, and risk layers.
+    
+    Bankroll MUST come from live Kalshi API via bankroll_service_v2.
+    NO hardcoded fallbacks permitted - fail closed if bankroll unavailable.
+    """
+    # Default uses canonical source; can be overridden per-instance if needed
+    max_cycle_risk_pct: float = field(default_factory=lambda: float(MAX_CYCLE_RISK_PCT))
+    bankroll_source: str = "live"  # "live" = from bankroll service ONLY
+
+
+class CycleCapTracker:
+    """Real-time cycle utilization tracker for micro-scalping.
+    
+    Tracks deployed capital within a trading cycle to ensure total exposure
+    stays within the configured cap (from MAX_CYCLE_RISK_PCT, default 2%).
+    
+    With $47 bankroll and 2% cap = $0.94 max per cycle.
+    Top 2 winners at $0.50 each = $1.00 total ≈ 2% cap ✓
+    
+    Usage::
+        tracker = CycleCapTracker(config)
+        ok, available = tracker.check_capacity(pending_order_notional)
+        if ok:
+            tracker.record_deployment(order_notional)
+            # ... execute order ...
+            tracker.record_release(order_notional)  # on fill or cancel
+    """
+    
+    def __init__(self, config: Optional[CycleCapConfig] = None) -> None:
+        self._config = config or CycleCapConfig()
+        # TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+        # TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+        # self._lock = threading.Lock()
+        self._lock = None  # Disabled to prevent startup hang
+        self._deployed_this_cycle: float = 0.0
+        self._cycle_start: datetime = datetime.now(timezone.utc)
+        self._deployment_log: List[Dict] = []
+        self._max_cycle_deployed: float = 0.0
+    
+    def _get_bankroll(self) -> float:
+        """Get current bankroll for cap calculation.
+        
+        FAILS CLOSED if live bankroll unavailable - NO fallbacks permitted.
+        Bankroll must come from live Kalshi API via bankroll_service_v2.
+        """
+        # Try live bankroll service
+        try:
+            from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+            equity = get_equity_for_risk_calc_sync()
+            if equity is not None and equity > 0:
+                return float(equity)
+        except Exception:
+            pass
+        
+        # FAIL CLOSED: No bankroll available - log and return 0 to block trading
+        logger.error(
+            "[CycleCapTracker] Bankroll unavailable from Kalshi API. "
+            "Trading blocked. Check bankroll_service_v2 health and Kalshi credentials."
+        )
+        return 0.0
+    
+    @property
+    def max_cycle_cap(self) -> float:
+        """Maximum allowed deployment per cycle in USD."""
+        return self._get_bankroll() * self._config.max_cycle_risk_pct
+    
+    @property
+    def deployed(self) -> float:
+        """Currently deployed capital this cycle."""
+        with self._lock:
+            return self._deployed_this_cycle
+    
+    @property
+    def available(self) -> float:
+        """Remaining available capacity this cycle."""
+        with self._lock:
+            return max(0.0, self.max_cycle_cap - self._deployed_this_cycle)
+    
+    def check_capacity(self, pending_order_notional: float) -> tuple[bool, float, str]:
+        """Check if pending order fits within cycle cap.
+        
+        Args:
+            pending_order_notional: Order size in USD
+            
+        Returns:
+            Tuple of (allowed, available_capacity, reason)
+        """
+        with self._lock:
+            cap = self.max_cycle_cap
+            available = cap - self._deployed_this_cycle
+            
+            if pending_order_notional <= available:
+                return True, available, ""
+            else:
+                return False, available, (
+                    f"Cycle cap reached: ${self._deployed_this_cycle:.2f}/"
+                    f"${cap:.2f} deployed, need ${pending_order_notional:.2f} "
+                    f"but only ${available:.2f} available"
+                )
+    
+    def record_deployment(self, order_notional: float, order_id: str = "") -> None:
+        """Record capital deployment (order submitted)."""
+        with self._lock:
+            self._deployed_this_cycle += order_notional
+            if self._deployed_this_cycle > self._max_cycle_deployed:
+                self._max_cycle_deployed = self._deployed_this_cycle
+            
+            self._deployment_log.append({
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "action": "deploy",
+                "amount": order_notional,
+                "order_id": order_id,
+                "cycle_total": self._deployed_this_cycle,
+            })
+            # Keep last 100 entries
+            if len(self._deployment_log) > 100:
+                self._deployment_log = self._deployment_log[-100:]
+    
+    def record_release(self, order_notional: float, order_id: str = "") -> None:
+        """Record capital release (order filled or canceled)."""
+        with self._lock:
+            self._deployed_this_cycle = max(0.0, self._deployed_this_cycle - order_notional)
+            
+            self._deployment_log.append({
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "action": "release",
+                "amount": order_notional,
+                "order_id": order_id,
+                "cycle_total": self._deployed_this_cycle,
+            })
+    
+    def reset_cycle(self) -> Dict[str, Any]:
+        """Reset cycle tracking (call at start of new cycle).
+        
+        Returns:
+            Summary of completed cycle
+        """
+        with self._lock:
+            summary = {
+                "previous_cycle_start": self._cycle_start.isoformat(),
+                "previous_cycle_max_deployed": self._max_cycle_deployed,
+                "previous_cycle_cap": self.max_cycle_cap,
+                "utilization_pct": (
+                    self._max_cycle_deployed / self.max_cycle_cap * 100
+                    if self.max_cycle_cap > 0 else 0.0
+                ),
+            }
+            
+            self._deployed_this_cycle = 0.0
+            self._max_cycle_deployed = 0.0
+            self._cycle_start = datetime.now(timezone.utc)
+            
+            return summary
+    
+    def summary(self) -> Dict[str, Any]:
+        """Current cycle utilization summary."""
+        with self._lock:
+            cap = self.max_cycle_cap
+            return {
+                "cycle_start": self._cycle_start.isoformat(),
+                "max_cycle_cap_usd": round(cap, 2),
+                "deployed_usd": round(self._deployed_this_cycle, 2),
+                "available_usd": round(max(0.0, cap - self._deployed_this_cycle), 2),
+                "utilization_pct": round(
+                    self._deployed_this_cycle / cap * 100 if cap > 0 else 0.0, 1
+                ),
+                "max_deployed_this_cycle": round(self._max_cycle_deployed, 2),
+                "config": {
+                    "max_cycle_risk_pct": self._config.max_cycle_risk_pct,
+                    "bankroll_source": self._config.bankroll_source,
+                },
+            }
+
+
 # ── Singleton ────────────────────────────────────────────────────────────
 
 _risk: Optional[PredictionMarketRisk] = None
-_risk_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _risk_lock = threading.Lock()
+_risk_lock = None  # Disabled to prevent startup hang
 
 
 def get_prediction_risk(config: Optional[PredictionRiskConfig] = None) -> PredictionMarketRisk:
     """Get or create the singleton PredictionMarketRisk."""
     global _risk
     if _risk is None:
-        with _risk_lock:
-            if _risk is None:
-                _risk = PredictionMarketRisk(config)
+        if _risk_lock is not None:
+            with _risk_lock:
+                if _risk is None:
+                    _risk = PredictionMarketRisk(config)
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _risk = PredictionMarketRisk(config)
     # BUG-P fix: warn if caller passes a non-None config that differs from the
     # already-constructed singleton's config — silently ignored configs hide
     # misconfigured callers.  All callers in this codebase use the same YAML

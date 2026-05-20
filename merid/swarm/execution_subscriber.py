@@ -20,6 +20,7 @@ Usage::
 
 from __future__ import annotations
 
+import os
 import threading
 import asyncio
 import time
@@ -31,7 +32,8 @@ from utils.logger import get_logger
 
 logger = get_logger("merid.swarm.execution_subscriber")
 
-_MAX_DECISION_AGE_S: float = 25.0  # Warn when routing decisions older than this
+# OLD-HARDWARE FIX (2026-04-28): Configurable via env var, was 25s, now 45s for slow hardware
+_MAX_DECISION_AGE_S: float = float(os.getenv("MERID_MAX_DECISION_AGE_S", "45.0"))
 
 
 @dataclass
@@ -76,7 +78,8 @@ class ExecutionSubscriber:
         self._decisions_routed = 0
         self._decisions_skipped = 0
         self._consecutive_failures = 0
-        self._CB_FAILURE_THRESHOLD = 5
+        # OLD-HARDWARE FIX (2026-04-28): Configurable via env var, was 5, now 10
+        self._CB_FAILURE_THRESHOLD = int(os.getenv("MERID_EXEC_CB_FAILURE_THRESHOLD", "10"))
 
     async def start(self) -> None:
         """Subscribe to the bus and start processing decisions and orderbook events."""
@@ -108,6 +111,8 @@ class ExecutionSubscriber:
                 await self._task
             except asyncio.CancelledError:
                 pass
+            finally:
+                self._task = None
         if self._queue:
             try:
                 from core.streaming_bus import get_streaming_bus
@@ -133,8 +138,9 @@ class ExecutionSubscriber:
                     continue
 
                 try:
+                    # FIX: Increased timeout from 1.0s to 5.0s to prevent missed execution messages during heavy load
                     event = await asyncio.wait_for(
-                        self._queue.get(), timeout=1.0
+                        self._queue.get(), timeout=5.0
                     )
                 except asyncio.TimeoutError:
                     # Periodically check for stale pending decisions and execute them anyway
@@ -221,6 +227,9 @@ class ExecutionSubscriber:
             record.route_reason = f"Action is {action}"
             self._decisions_skipped += 1
             self._history.append(record)
+            # Cap _history at 1000 entries to prevent memory leaks
+            if len(self._history) > 1000:
+                self._history = self._history[-1000:]
             return
 
         # Skip if not risk-approved
@@ -228,6 +237,9 @@ class ExecutionSubscriber:
             record.route_reason = "Not risk-approved"
             self._decisions_skipped += 1
             self._history.append(record)
+            # Cap _history at 1000 entries to prevent memory leaks
+            if len(self._history) > 1000:
+                self._history = self._history[-1000:]
             logger.debug(f"Decision {decision_id} skipped: not risk-approved")
             return
 
@@ -236,6 +248,9 @@ class ExecutionSubscriber:
             record.route_reason = "Zero size"
             self._decisions_skipped += 1
             self._history.append(record)
+            # Cap _history at 1000 entries to prevent memory leaks
+            if len(self._history) > 1000:
+                self._history = self._history[-1000:]
             return
 
         # Staleness guard — discard decisions whose price signal is too old
@@ -251,6 +266,9 @@ class ExecutionSubscriber:
             record.route_reason = f"stale_decision:{age_s:.1f}s"
             self._decisions_skipped += 1
             self._history.append(record)
+            # Cap _history at 1000 entries to prevent memory leaks
+            if len(self._history) > 1000:
+                self._history = self._history[-1000:]
             return
 
         # Circuit breaker guard — skip if consecutive failures have tripped the breaker
@@ -269,6 +287,9 @@ class ExecutionSubscriber:
                     f"(consecutive_failures={self._consecutive_failures})"
                 )
                 self._history.append(record)
+            # Cap _history at 1000 entries to prevent memory leaks
+            if len(self._history) > 1000:
+                self._history = self._history[-1000:]
                 return
         except Exception:
             pass  # CB check failure is non-fatal — proceed to routing

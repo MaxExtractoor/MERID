@@ -1,9 +1,11 @@
-"""Startup grid validator — assert all 30 asset×timeframe cells are wired.
+"""Startup grid validator — assert 5 asset × 15m timeframe cells are wired.
 
 Call ``validate_kalshi_grid()`` once at startup (before first trade cycle) to
-guarantee the 5×6 grid (BTC/ETH/SOL/XRP/DOGE × 15m/1h/daily/weekly/monthly/annual)
+guarantee the 5×1 grid (BTC/ETH/SOL/XRP/DOGE × 15m)
 is fully configured.  Any dead cell raises ``GridValidationError`` in strict mode
 so the process fails fast with a clear diagnostic instead of silently skipping markets.
+
+FOCUS: 15m timeframe only for trading. All other timeframes are signal-only.
 
 Usage (web/main.py startup)::
 
@@ -26,17 +28,15 @@ logger = get_logger("merid.event_venues.kalshi.grid_validator")
 
 # ── Canonical grid dimensions ──────────────────────────────────────────────
 
+# FOCUS: 5 assets (BTC, ETH, SOL, XRP, DOGE) x 15m timeframe only for trading
+# All other timeframes are signal-only
 REQUIRED_ASSETS: tuple = ("BTC", "ETH", "SOL", "XRP", "DOGE")
-REQUIRED_TIMEFRAMES: tuple = ("15m", "1h", "daily", "weekly", "monthly", "annual")
+REQUIRED_TIMEFRAMES: tuple = ("15m",)
 
 # Map YAML timeframe label → expected market_filter.frequency value
+# FOCUS: 15m timeframe only for trading
 TIMEFRAME_TO_MF_FREQ: Dict[str, str] = {
     "15m":     "fifteen_min",
-    "1h":      "hourly",
-    "daily":   "daily",
-    "weekly":  "weekly",
-    "monthly": "monthly",
-    "annual":  "annual",
 }
 
 
@@ -73,15 +73,18 @@ class CellStatus:
 
 
 def validate_kalshi_grid(strict: bool = True) -> Dict[str, CellStatus]:
-    """Validate the full 30-cell asset×timeframe grid.
+    """Validate the 5-cell asset×15m timeframe grid.
 
-    For each of the 30 cells the check verifies:
+    For each of the 5 cells the check verifies:
       1. An ``AgentConfig`` entry exists in ``kalshi_agent_grid.yaml``.
       2. ``risk_limits.max_notional_usd > 0`` — agent can actually size trades.
       3. ``market_filter.frequency`` matches the expected Kalshi frequency string
-         for the timeframe (e.g. "fifteen_min" for 15m, "annual" for annual).
+         for the timeframe (e.g. "fifteen_min" for 15m).
       4. (Warning only) An explicit ``strategy:`` block is present — if absent the
          agent falls back to ``StrategyConfig`` defaults which may be too aggressive.
+
+    FOCUS: 5 assets (BTC, ETH, SOL, XRP, DOGE) x 15m timeframe only for trading.
+    All other timeframes are signal-only.
 
     Args:
         strict: If ``True`` (default), raises ``GridValidationError`` when any cell
@@ -89,7 +92,7 @@ def validate_kalshi_grid(strict: bool = True) -> Dict[str, CellStatus]:
                 status map for programmatic inspection without raising.
 
     Returns:
-        ``Dict[str, CellStatus]`` mapping ``"ASSET/TF"`` → status for all 30 cells.
+        ``Dict[str, CellStatus]`` mapping ``"ASSET/TF"`` → status for all 5 cells.
 
     Raises:
         GridValidationError: When ``strict=True`` and any cell fails a required check.
@@ -144,20 +147,19 @@ def validate_kalshi_grid(strict: bool = True) -> Dict[str, CellStatus]:
 
             # ── Check 2: risk limits ──────────────────────────────────
             notional = float(agent.risk_limits.max_notional_usd)
-            # If 0, derive from real Kalshi bankroll (1-2% for top-3 edge strategy)
+            # If 0, derive from live bankroll via bankroll_service_v2 (3% for top-3 edge strategy)
             if notional == 0:
                 try:
-                    from merid.settings import settings
-                    # Use KALSHI_PORTFOLIO_BANKROLL_CENTS (canonical real bankroll)
-                    bankroll_cents = getattr(settings, 'KALSHI_PORTFOLIO_BANKROLL_CENTS', 0)
-                    if bankroll_cents > 0:
-                        bankroll_usd = bankroll_cents / 100.0
+                    from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+                    bankroll_usd = get_equity_for_risk_calc_sync()
+                    if bankroll_usd is None or bankroll_usd <= 0:
+                        # Fail closed - no bankroll available
+                        notional = 0.0
                     else:
-                        bankroll_usd = getattr(settings, 'MERID_TOTAL_CAPITAL_USD', 10000.0)
-                    risk_fraction = getattr(settings, 'MERID_MAX_RISK_FRACTION_PER_CYCLE', 0.02)
-                    notional = bankroll_usd * risk_fraction
+                        risk_fraction = getattr(settings, 'MERID_MAX_RISK_FRACTION_PER_CYCLE', 0.03)
+                        notional = bankroll_usd * risk_fraction
                 except Exception:
-                    notional = 200.0  # Default $200 if settings fail
+                    notional = 0.0  # Fail closed on error
             cell.max_notional_usd = notional
             if notional < 0:
                 cell.errors.append(

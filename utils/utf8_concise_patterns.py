@@ -130,7 +130,7 @@ class QueueGunicornLogger(GunicornLogger):
 def create_concise_gunicorn_config(
     config_path: Union[str, pathlib.Path] = "gunicorn_concise_conf.py",
     logger_class_path: str = "my_gunicorn_logger.QueueGunicornLogger",
-    bind: str = "0.0.0.0:8000",
+    bind: str = "0.0.0.0:8011",
     workers: int = 4,
     worker_class: str = "sync"
 ) -> pathlib.Path:

@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react';
 import { Shield, ShieldCheck, ShieldAlert, Wifi, Activity, Tag, ToggleLeft, ToggleRight } from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
-import { API_BASE_URL, DEFAULTS } from '../config/constants';
+import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
 
 interface ContractHealthData {
   api_v1_route_count: number;
@@ -14,7 +14,7 @@ interface ContractHealthData {
 
 export default function ContractHealthPanel() {
   const { data, loading, error } = useApiData<ContractHealthData>(
-    '/api/v1/system/contract-health',
+    API_ENDPOINTS.SYSTEM_CONTRACT_HEALTH,
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
   );
 
@@ -26,7 +26,7 @@ export default function ContractHealthPanel() {
     setToggling(name);
     setFlagOverrides(prev => ({ ...prev, [name]: newEnabled }));
     try {
-      const resp = await fetch(`${API_BASE_URL}/api/v1/system/feature-flags/${name}`, {
+      const resp = await fetch(`${API_BASE_URL}${API_ENDPOINTS.SYSTEM_FEATURE_FLAGS}/${name}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: newEnabled }),

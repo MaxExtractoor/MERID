@@ -71,6 +71,8 @@ class CriticAgent:
                 await self._task
             except asyncio.CancelledError:
                 pass
+            finally:
+                self._task = None
         logger.info("Critic agent stopped")
 
     async def _run_loop(self) -> None:

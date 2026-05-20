@@ -167,20 +167,27 @@ def get_kalshi_base_url() -> str:
     This is the SINGLE SOURCE OF TRUTH for all Kalshi HTTP clients.
     Every Kalshi client should import this function instead of reading env vars directly.
 
+    Priority:
+        1. KALSHI_API_BASE_URL (escape valve for custom host)
+        2. KALSHI_ENV (demo/live) → Kalshi's recommended URLs
+        3. Fail fast if neither is set
+
     Returns:
         The Kalshi API base URL (always ends with /trade-api/v2, no trailing slash).
 
-    Validation:
-        - Raises ValueError in dev if URL doesn't end with /trade-api/v2
-        - Normalizes trailing slashes to avoid double slashes in path construction
+    Kalshi's documented URLs:
+        - Live (recommended): https://external-api.kalshi.com/trade-api/v2
+        - Live (supported): https://api.elections.kalshi.com/trade-api/v2
+        - Demo: https://external-api.demo.kalshi.co/trade-api/v2
+        - Demo (legacy): https://demo-api.kalshi.co/trade-api/v2
 
     Example::
         from merid.event_venues.kalshi.invariants import get_kalshi_base_url
         BASE = get_kalshi_base_url()
         response = requests.get(f"{BASE}/markets")
     """
+    # Priority 1: Explicit KALSHI_API_BASE_URL override (escape valve)
     base_url = os.getenv(KALSHI_API_BASE_URL_ENV)
-
     if base_url:
         # Validate against known hosts (exact hostname; not substring)
         if _kalshi_url_hostname_allowed(base_url):
@@ -206,11 +213,41 @@ def get_kalshi_base_url() -> str:
         else:
             logger.warning(
                 f"{KALSHI_API_BASE_URL_ENV}='{base_url}' does not match known "
-                f"Kalshi patterns: {VALID_KALSHI_API_PATTERNS}. Using demo default."
+                f"Kalshi patterns: {VALID_KALSHI_API_PATTERNS}. Deriving from KALSHI_ENV."
             )
 
-    # Demo default (already normalized)
-    return "https://demo-api.kalshi.co/trade-api/v2"
+    # Priority 2: Derive from KALSHI_ENV using Kalshi's recommended URLs
+    kalshi_env = os.getenv("KALSHI_ENV", "").lower()
+    if kalshi_env == "live":
+        # Kalshi's recommended production URL for public data and trade API
+        return "https://external-api.kalshi.com/trade-api/v2"
+    elif kalshi_env == "demo":
+        # Kalshi's recommended demo URL
+        return "https://external-api.demo.kalshi.co/trade-api/v2"
+    elif kalshi_env == "elections":
+        # Alias for live (Kalshi's elections API host)
+        return "https://api.elections.kalshi.com/trade-api/v2"
+    elif kalshi_env:
+        logger.warning(
+            f"Unknown KALSHI_ENV={kalshi_env!r}. Valid values: demo, live, elections. "
+            f"Falling back to demo default."
+        )
+        return "https://external-api.demo.kalshi.co/trade-api/v2"
+
+    # Priority 3: Check legacy KALSHI_USE_DEMO as compatibility shim
+    use_demo = os.getenv("KALSHI_USE_DEMO", "false").lower() in ("true", "1", "yes")
+    if use_demo:
+        logger.warning(
+            "KALSHI_USE_DEMO is deprecated. Use KALSHI_ENV=demo instead. "
+            "Treating KALSHI_USE_DEMO=true as KALSHI_ENV=demo."
+        )
+        return "https://external-api.demo.kalshi.co/trade-api/v2"
+    else:
+        logger.warning(
+            "KALSHI_USE_DEMO is deprecated. Use KALSHI_ENV=live instead. "
+            "Treating KALSHI_USE_DEMO=false as KALSHI_ENV=live."
+        )
+        return "https://external-api.kalshi.com/trade-api/v2"
 
 
 def get_kalshi_ws_url() -> str:

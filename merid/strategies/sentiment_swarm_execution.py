@@ -55,7 +55,7 @@ def _direction_to_side(view: ConsensusView) -> str:
 def plan_swarm_orders_for_catalog(
     catalog: KalshiCryptoCatalog,
     *,
-    bankroll_cents: int = 500_000,
+    bankroll_cents: int = 0,  # 0 = use live bankroll from service
     default_price_cents: int = 55,
     min_edge_pct: float = 0.5,
 ) -> List[SwarmOrderPlan]:
@@ -64,10 +64,30 @@ def plan_swarm_orders_for_catalog(
     Skips pairs with no candidate tickers in *catalog*. Respects
     ``usable``, ``MERID_SWARM_CONFIDENCE_MIN``, and position sizer (which
     applies the same swarm floor when ``swarm_confidence`` is passed).
+    
+    CRITICAL: bankroll_cents=0 means derive from live bankroll service.
+    Previous default (500_000 = $5,000) was dangerous for micro bankrolls.
     """
     agg = get_consensus_aggregator()
     sizer = get_position_sizer()
     floor = get_merid_swarm_confidence_min()
+    
+    # CRITICAL FIX: If bankroll_cents is 0, fetch live bankroll from service
+    if bankroll_cents <= 0:
+        try:
+            from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+            live_equity = get_equity_for_risk_calc_sync()
+            if live_equity is not None and live_equity > 0:
+                bankroll_cents = int(live_equity * 100)
+                logger.debug("[swarm-exec] Using live bankroll: $%.2f", live_equity)
+            else:
+                # Fail-closed: if no live bankroll, use conservative $100 minimum
+                bankroll_cents = 10000  # $100 minimum
+                logger.warning("[swarm-exec] Live bankroll unavailable, using conservative $100 minimum")
+        except Exception as e:
+            bankroll_cents = 10000  # $100 minimum on error
+            logger.warning("[swarm-exec] Bankroll service error: %s, using $100 minimum", e)
+    
     out: List[SwarmOrderPlan] = []
 
     for asset, timeframe in active_crypto_asset_mood_timeframe_grid():

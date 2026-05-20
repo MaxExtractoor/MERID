@@ -2,7 +2,6 @@
 Kalshi-Only Shim Endpoints (Audit 2026-03-19)
 
 All endpoints in this file are now backed by real implementations.
-See docs/kalshi_wiring_todo.md for promotion status.
 
 Removed shims (promoted or deleted as duplicates):
   - /reconciliation/run, /reconciliation/status → system_endpoints.py (duplicates)

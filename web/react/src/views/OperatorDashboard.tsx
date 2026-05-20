@@ -1,13 +1,8 @@
 import { useOperatorSummary } from '../hooks/useOperatorSummary';
-import { OperatorStatusBar } from './OperatorStatusBar';
-import { OperatorControlPlane } from './OperatorControlPlane';
-import { OperatorActivityStream } from './OperatorActivityStream';
 import MetricCard from '../components/MetricCard';
 import { StalenessIndicator } from '../components/StalenessIndicator';
 import { DataAgeBadge } from '../components/DataAgeBadge';
-import VenueHealthGrid from '../components/VenueHealthGrid';
 import DataFreshnessPanel from '../components/DataFreshnessPanel';
-import ModeControlPanel from '../components/ModeControlPanel';
 import ExplainabilityTimeline from '../components/ExplainabilityTimeline';
 import TickTimeline from '../components/TickTimeline';
 import TelegramLogViewer from '../components/TelegramLogViewer';
@@ -17,6 +12,7 @@ import ModeSafetyPanel from '../components/ModeSafetyPanel';
 import SessionLogPanel from '../components/SessionLogPanel';
 import CryptoAlertStatusPanel from '../components/CryptoAlertStatusPanel';
 import SpotBasisPanel from '../components/SpotBasisPanel';
+import ContractHealthPanel from '../components/ContractHealthPanel';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import type { OperatorRiskState } from '../types/risk';
@@ -28,15 +24,10 @@ export default function OperatorDashboard() {
     data,
     loading,
     error,
-    refetch,
     lastUpdated,
-    pauseSwarm,
-    resumeSwarm,
-    switchMode,
-    toggleKillSwitch,
-  } = useOperatorSummary(15000);
+  } = useOperatorSummary();
 
-  const { data: kalshiBalance } = useApiData<{ available?: number; usd?: number; usd_dollars?: number }>(
+  const { data: kalshiBalance } = useApiData<{ total_value_cents?: number; balance_cents?: number; portfolio_cents?: number; available?: number; usd?: number; usd_dollars?: number }>(
     API_ENDPOINTS.KALSHI_BALANCE,
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
   );
@@ -77,9 +68,9 @@ export default function OperatorDashboard() {
 
   const kalshiBalanceUsd = (() => {
     if (!kalshiBalance) return null;
-    if (typeof kalshiBalance.available === 'number') return kalshiBalance.available;
-    if (typeof kalshiBalance.usd === 'number') return kalshiBalance.usd;
-    return null;
+    // Use total_value_cents (cash + portfolio) for balance display, fallback to available/usd for backward compatibility
+    const balanceCents = kalshiBalance.total_value_cents ?? (kalshiBalance.available ?? kalshiBalance.usd ?? 0) * 100;
+    return balanceCents / 100;
   })();
 
   const kalshiDayPnlUsd = (() => {
@@ -120,9 +111,6 @@ export default function OperatorDashboard() {
 
       {/* Trading Halt Banner */}
       <TradingHaltBanner />
-
-      {/* Status Bar */}
-      <OperatorStatusBar summary={data} lastUpdated={lastUpdated} />
 
       {/* Kalshi Key Metrics */}
       <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-8 gap-3">
@@ -170,6 +158,9 @@ export default function OperatorDashboard() {
 
       {/* Mode Safety */}
       <ModeSafetyPanel />
+
+      {/* Contract Health */}
+      <ContractHealthPanel />
 
       {/* Risk State + Agent Activity */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -387,34 +378,18 @@ export default function OperatorDashboard() {
       <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-5">
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-semibold text-slate-300">Execution Guard</h3>
-          <button
-            type="button"
-            onClick={() => {
-              const next = !data?.guard?.kill_switch_active;
-              const msg = next
-                ? 'Activate KILL SWITCH? This will halt ALL execution immediately.'
-                : 'Deactivate kill switch and resume execution?';
-              if (window.confirm(msg)) toggleKillSwitch(next);
-            }}
-            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
-              data?.guard?.kill_switch_active
-                ? 'bg-red-600 hover:bg-red-500 text-white'
-                : 'bg-green-600/20 hover:bg-green-600/40 text-green-400 border border-green-500/30'
-            }`}
-          >
-            {data?.guard?.kill_switch_active ? 'KILL SWITCH ON — Click to Deactivate' : 'Execution Enabled'}
-          </button>
+          <div className={`px-3 py-1.5 rounded-lg text-xs font-bold ${
+            data?.guard?.kill_switch_active
+              ? 'bg-red-600/20 text-red-400 border border-red-500/30'
+              : 'bg-green-600/20 text-green-400 border border-green-500/30'
+          }`}>
+            {data?.guard?.kill_switch_active ? 'KILL SWITCH ON' : 'Execution Enabled'}
+          </div>
         </div>
         {data?.guard && (
           <p className="text-xs text-slate-500">{data.guard.recent_verdicts_count} recent verdicts</p>
         )}
       </div>
-
-      {/* Mode Control */}
-      <ModeControlPanel />
-
-      {/* Venue Health */}
-      <VenueHealthGrid />
 
       {/* Crypto Alert Router */}
       <CryptoAlertStatusPanel />
@@ -427,20 +402,6 @@ export default function OperatorDashboard() {
 
       {/* Tick Timeline */}
       <TickTimeline />
-
-      {/* Activity Stream + Control Plane */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2">
-          <OperatorActivityStream />
-        </div>
-        <OperatorControlPlane
-          summary={data}
-          onPauseSwarm={pauseSwarm}
-          onResumeSwarm={resumeSwarm}
-          onSwitchMode={switchMode}
-          onRefresh={refetch}
-        />
-      </div>
 
       {/* Data Freshness + Alert History */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

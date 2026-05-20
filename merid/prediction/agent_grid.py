@@ -40,7 +40,7 @@ from merid.prediction.agent_grid_config import (
     get_agent_grid_config,
 )
 from merid.prediction.kalshi_tools import register_kalshi_tools
-from merid.prediction.portfolio_risk_agent import PortfolioRiskAgent
+# REMOVED: PortfolioRiskAgent - not used in 15m stack
 from merid.prediction.session_guard import SessionGuard, get_session_guard
 from merid.prediction.trading_agent import KalshiTradingAgent
 from merid.prediction.social_broadcaster import KalshiSocialBroadcaster, get_social_broadcaster
@@ -110,11 +110,8 @@ class AgentGrid:
         # Agents paused solely due to FeedStalenessMonitor — resumed on on_recovered only
         self._feed_stale_paused_names: set[str] = set()
 
-        # Create portfolio risk agent
-        self._portfolio_risk = PortfolioRiskAgent(
-            config=self._config.portfolio_risk,
-            trading_agents=self._agents,
-        )
+        # REMOVED: PortfolioRiskAgent - not used in 15m stack
+        self._portfolio_risk = None
 
         # Wire 1: CryptoSurfaceLoader → subscribe each crypto agent for live
         # near-spot Kalshi market updates.  Non-crypto agents are unaffected.
@@ -145,20 +142,13 @@ class AgentGrid:
         # BUG-019: Auto-graduation task handle (started in start())
         self._auto_graduation_task: Optional[asyncio.Task] = None
 
-        # Sentiment service (fear/greed index)
-        from merid.event_venues.kalshi.sentiment import get_sentiment_service
-        self._sentiment = get_sentiment_service()
-
-        # Market Mood Bus (unified sentiment aggregation)
-        from merid.swarm.market_mood_bus import get_market_mood_bus
-        self._mood_bus = get_market_mood_bus()
-
-        # Insight Pipeline (Kalshi → insights → social)
-        from merid.publishing.kalshi_insight_pipeline import get_insight_pipeline
-        from merid.publishing.kalshi_news_agent import KalshiNewsAgent
-        self._insight_pipeline = get_insight_pipeline()
-        self._news_agent = KalshiNewsAgent()
-        self._insight_pipeline.add_consumer(self._news_agent.handle_insight)
+        # REMOVED: Sentiment service - not used in 15m stack
+        self._sentiment = None
+        # REMOVED: Market Mood Bus - not used in 15m stack
+        self._mood_bus = None
+        # REMOVED: Insight Pipeline - not used in 15m stack
+        self._insight_pipeline = None
+        self._news_agent = None
 
         # Alert Manager with Twitter/Telegram sinks
         from merid.prediction.alerts import get_alert_manager
@@ -170,40 +160,9 @@ class AgentGrid:
         self._auto_promoter = get_auto_promoter()
         self._register_promotion_callbacks()
 
-        # Per-asset regime agents (ETH/SOL/XRP/DOGE/BTC1H) — produce opinions for TaCo consensus
+        # REMOVED: Regime agents (consensus) - not used in 15m stack
         self._regime_agents: list = []
         self._opinion_loop_task: Optional[asyncio.Task] = None
-        try:
-            from merid.event_venues.kalshi.client import get_kalshi_client
-            from merid.kalshi.market_registry import KalshiMarketRegistry
-            from merid.risk.crypto_rti_monitor import CryptoRTIMonitor
-            from core.event_bus import event_stream
-            _client = get_kalshi_client()
-            _market_reg = KalshiMarketRegistry(_client)
-            _rti_monitor = CryptoRTIMonitor(event_stream, self._portfolio_risk)
-            from merid.agents.eth_15m_agent import Eth15mAgent
-            from merid.agents.sol_15m_agent import Sol15mAgent
-            from merid.agents.xrp_15m_agent import Xrp15mAgent
-            from merid.agents.doge_15m_agent import Doge15mAgent
-            # Btc1hAgent archived 2026-01-15 - focus on 15m timeframe only
-            self._regime_agents = [
-                Eth15mAgent(_market_reg, _rti_monitor, self._portfolio_risk),
-                Sol15mAgent(_market_reg, _rti_monitor, self._portfolio_risk),
-                Xrp15mAgent(_market_reg, _rti_monitor, self._portfolio_risk),
-                Doge15mAgent(_market_reg, _rti_monitor, self._portfolio_risk),
-            ]
-            logger.info("✓ Regime agents initialised: %s", [a.agent_id for a in self._regime_agents])
-        except Exception as _ra_exc:
-            # Regime agents are REQUIRED for crypto PM mode - fail-closed
-            _is_crypto_pm = any(
-                getattr(a.config, 'category', '').lower() == 'crypto' 
-                for a in self._agents
-            ) if self._agents else False
-            if _is_crypto_pm:
-                raise RuntimeError(
-                    f"Regime agents required for crypto PM mode but failed to initialize: {_ra_exc}"
-                ) from _ra_exc
-            logger.warning("Regime agents unavailable (non-crypto mode): %s", _ra_exc)
 
         self._running = False
         self._start_lock = asyncio.Lock()
@@ -433,19 +392,7 @@ class AgentGrid:
             logger.critical("[AGENT_GRID] BankrollServiceV2 failed to start: %s", _be)
             raise RuntimeError(f"BankrollServiceV2 startup failed: {_be}") from _be
 
-        # Start portfolio risk agent first, then wait for its first snapshot
-        # before allowing any trading agent to execute orders. (BUG-L1)
-        await self._portfolio_risk.start()
-        # 15m scalper: shorter timeout (5s vs 15s) for faster startup
-        _timeout = 5.0 if os.getenv("STRATEGY_MODE", "").upper() == "MOMENTUM_SCALPER" else 15.0
-        _risk_ready = await self._portfolio_risk.wait_ready(timeout=_timeout)
-        if _risk_ready:
-            logger.info("✓ PortfolioRiskAgent: first snapshot complete — safe to start agents")
-        else:
-            logger.warning(
-                "PortfolioRiskAgent did not complete first check within 15s — "
-                "continuing with caution (positions may be unknown)"
-            )
+        # REMOVED: PortfolioRiskAgent startup - not used in 15m stack
 
         # Purge stale consensus opinions from before this startup (BUG-L8)
         try:
@@ -1065,8 +1012,7 @@ class AgentGrid:
         for agent in self._agents:
             await agent.stop()
 
-        # Then portfolio risk — runs one final check after all agents are drained
-        await self._portfolio_risk.stop()
+        # REMOVED: PortfolioRiskAgent stop - not used in 15m stack
         self._draining = False
 
         # Stop bankroll service v2 (after all agents stopped, before catalog)
@@ -1637,12 +1583,14 @@ class AgentGrid:
     # ── Portfolio risk controls ────────────────────────────────────────
 
     def reset_kill_switch(self) -> None:
-        """Reset the portfolio kill switch and resume agents."""
-        self._portfolio_risk.reset_kill_switch()
+        """Reset the portfolio kill switch (NOOP - not used in 15m stack)."""
+        # REMOVED: PortfolioRiskAgent - not used in 15m stack
+        pass
 
     @property
     def kill_switch_active(self) -> bool:
-        return self._portfolio_risk.kill_switch_active
+        # REMOVED: PortfolioRiskAgent - not used in 15m stack
+        return False
 
     # ── Status / introspection ─────────────────────────────────────────
 
@@ -1886,7 +1834,7 @@ class AgentGrid:
             "assets": self._catalog.assets() if self._catalog else self._config.all_assets,
             "session": self._session_guard.summary(),
             "agents": [a.summary() for a in self._agents],
-            "portfolio_risk": self._portfolio_risk.summary(),
+            "portfolio_risk": None,  # REMOVED: PortfolioRiskAgent - not used in 15m stack
             "social_broadcaster": self._broadcaster.summary(),
             "paper_session": paper_session_data,
         }

@@ -21,6 +21,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 import logging
 import threading
+
+# PROFILE-GUARD: Skip for kalshi_crypto_15m_v2 (surface loader not needed for sealed 15m profile)
+_profile = os.getenv("MERID_PROFILE", "").lower()
+if _profile == "kalshi_crypto_15m_v2":
+    logger = logging.getLogger(__name__)
+    logger.warning("[PROFILE-GUARD] CryptoSurfaceLoader skipped for kalshi_crypto_15m_v2 (sealed 15m profile uses market_catalog directly)")
+    raise ImportError("CryptoSurfaceLoader is disabled for kalshi_crypto_15m_v2 profile")
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List, Callable
 from dataclasses import dataclass, field

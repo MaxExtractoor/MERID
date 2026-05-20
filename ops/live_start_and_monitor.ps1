@@ -227,16 +227,26 @@ function Start-Backend {
     $env:MERID_PROFILE = "kalshi-only"
     $env:MERID_ENV = "production"
     $env:MERID_LOG_LEVEL = "INFO"
+
+    # Risk Management Configuration (Optimized Regime 2026-05-07)
+    $env:MAX_CYCLE_RISK_PCT = "0.03"  # 3% per cycle (was 2%)
+    $env:MAX_TOTAL_RISK_PCT = "0.08"  # 8% total max (was 5%)
+    $env:SCALPER_SINGLE_BATCH_MODE = "false"  # Allow multi-batch (was true)
+    $env:SCALPER_MAX_TRADES_PER_BATCH = "5"  # Increased from 3
     
     # Start server in background job
     $jobScript = {
-        param($Root, $Port)
+        param($Root, $Port, $CycleRiskPct, $TotalRiskPct, $ScalperSingleBatch, $ScalperMaxTrades)
         Set-Location $Root
+        $env:MAX_CYCLE_RISK_PCT = $CycleRiskPct
+        $env:MAX_TOTAL_RISK_PCT = $TotalRiskPct
+        $env:SCALPER_SINGLE_BATCH_MODE = $ScalperSingleBatch
+        $env:SCALPER_MAX_TRADES_PER_BATCH = $ScalperMaxTrades
         & py -m uvicorn web.main:app --host "0.0.0.0" --port $Port --workers 2 --log-level info 2>&1
     }
     
     $port = $env:PORT -or 8011
-    $script:ServerJob = Start-Job -ScriptBlock $jobScript -ArgumentList $MeridRoot, $port
+    $script:ServerJob = Start-Job -ScriptBlock $jobScript -ArgumentList $MeridRoot, $port, "0.03", "0.08", "false", "5"
     $script:ServerJob | Export-Clixml -Path $PidFile
     
     Write-LogInfo "Server started (Job ID: $($script:ServerJob.Id))"

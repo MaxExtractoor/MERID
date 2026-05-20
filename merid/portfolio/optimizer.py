@@ -20,7 +20,7 @@ Usage:
         "min_risk_pct_per_trade": 0.005,  # 0.5%
         "max_risk_pct_per_trade": 0.02,   # 2.0%
         "max_risk_pct_global": 0.06,      # 6%
-        "enforce_momentum_scalping_only": True,
+        "enforce_mean_reversion_only": True,
         "risk_free_rate": 0.0,
         "lookback_days": 60,
     }
@@ -328,26 +328,19 @@ class PortfolioOptimizer:
         self.min_risk_pct = self.config.get("min_risk_pct_per_trade", 0.005)
         self.max_risk_pct = self.config.get("max_risk_pct_per_trade", 0.02)
         
-        # Legacy USD caps (deprecated but kept for rollback compatibility)
-        self.min_risk_usd = self.config.get("min_risk_usd_per_trade", 0)
-        self.max_risk_usd = self.config.get("max_risk_usd_per_trade", 0)
-        
         self.risk_free_rate = self.config.get("risk_free_rate", 0.0)
         self.lookback_days = self.config.get("lookback_days", 60)
         self.num_frontier_points = self.config.get("num_frontier_points", 50)
         
-        # Global risk budget as percent of equity (default: 3 assets × 2% = 6%)
+        # Global risk budget as percent of equity (default: 3 assets × 3% = 9%)
         self.max_risk_pct_global = self.config.get("max_risk_pct_global", 
                                                     self.max_concurrent_assets * self.max_risk_pct)
-        
-        # Legacy global budget in USD (deprecated)
-        self.global_risk_budget = self.config.get("global_risk_budget", 0)
         
         # Current equity for percent-based calculations (must be set via set_equity)
         self._current_equity: float = 0.0
         
         # Momentum scalping enforcement (no hold-to-expiry)
-        self.enforce_momentum_scalping = self.config.get("enforce_momentum_scalping_only", True)
+        self.enforce_mean_reversion = self.config.get("enforce_mean_reversion_only", True)
         self.momentum_scalp_config = self.config.get("momentum_scalp_config", {
             "max_hold_minutes": 60,
             "profit_target_pct": 0.15,
@@ -391,31 +384,18 @@ class PortfolioOptimizer:
     
     def _log_startup_caps(self):
         """Log key caps at INFO level for production observability."""
-        # Determine which mode is active
-        if self.min_risk_usd > 0 or self.max_risk_usd > 0:
-            # Legacy USD mode (deprecated)
-            logger.info(
-                "[PORTFOLIO_OPTIMIZER] Runtime caps initialized (USD mode - DEPRECATED) | "
-                f"assets={self.assets} | "
-                f"max_concurrent={self.max_concurrent_assets} | "
-                f"risk_range_usd=[{self.min_risk_usd}, {self.max_risk_usd}] | "
-                f"global_budget_usd={self.global_risk_budget} | "
-                f"lookback_days={self.lookback_days} | "
-                f"objective={self.config.get('objective', 'sharpe')}"
-            )
-        else:
-            # Percent-of-equity mode (new default)
-            mode_tag = "MOMENTUM-ONLY" if self.enforce_momentum_scalping else "STANDARD"
-            logger.info(
-                "[PORTFOLIO_OPTIMIZER] Runtime caps initialized (percent-of-equity mode) | "
-                f"mode={mode_tag} | "
-                f"assets={self.assets} | "
-                f"max_concurrent={self.max_concurrent_assets} | "
-                f"risk_range_pct=[{self.min_risk_pct*100:.2f}%, {self.max_risk_pct*100:.2f}%] | "
-                f"global_budget_pct={self.max_risk_pct_global*100:.2f}% | "
-                f"lookback_days={self.lookback_days} | "
-                f"objective={self.config.get('objective', 'sharpe')}"
-            )
+        # Percent-of-equity mode (only mode)
+        mode_tag = "MOMENTUM-ONLY" if self.enforce_mean_reversion else "STANDARD"
+        logger.info(
+            "[PORTFOLIO_OPTIMIZER] Runtime caps initialized (percent-of-equity mode) | "
+            f"mode={mode_tag} | "
+            f"assets={self.assets} | "
+            f"max_concurrent={self.max_concurrent_assets} | "
+            f"risk_range_pct=[{self.min_risk_pct*100:.2f}%, {self.max_risk_pct*100:.2f}%] | "
+            f"global_budget_pct={self.max_risk_pct_global*100:.2f}% | "
+            f"lookback_days={self.lookback_days} | "
+            f"objective={self.config.get('objective', 'sharpe')}"
+        )
     
     def is_strategy_allowed(self, strategy_name: str, strategy_tags: Optional[List[str]] = None) -> bool:
         """Check if a strategy is allowed under momentum-only enforcement.
@@ -427,7 +407,7 @@ class PortfolioOptimizer:
         Returns:
             True if strategy is allowed, False otherwise
         """
-        if not self.enforce_momentum_scalping:
+        if not self.enforce_mean_reversion:
             return True  # No enforcement
         
         # Check blocked patterns
@@ -681,10 +661,7 @@ class PortfolioOptimizer:
         """
         weights = portfolio["weights"]
         
-        # Determine sizing mode
-        use_percent_mode = (self.min_risk_usd <= 0 and self.max_risk_usd <= 0) or equity is not None
-        
-        # Calculate per-asset risk allocation
+        # Calculate per-asset risk allocation (percent-of-equity mode only)
         asset_risks = {}
         feasible = True
         total_risk = 0.0
@@ -693,25 +670,17 @@ class PortfolioOptimizer:
             if weight < MIN_WEIGHT_EPSILON:
                 continue
             
-            if use_percent_mode and equity is not None and equity > 0:
+            if equity is not None and equity > 0:
                 # Percent-of-equity mode with edge-aware sizing
                 edge = edge_by_asset.get(asset, 0.05) if edge_by_asset else 0.05  # Default 5% edge
                 risk_usd = self.compute_risk_amount(equity, edge)
                 
                 # Scale by portfolio weight
                 risk_usd = risk_usd * weight
-                
             else:
-                # Legacy USD mode
-                budget = global_budget or self.global_risk_budget
-                risk_usd = budget * weight
-                
-                # Check against USD caps
-                if self.min_risk_usd > 0 and risk_usd < self.min_risk_usd:
-                    feasible = False
-                    break
-                elif self.max_risk_usd > 0 and risk_usd > self.max_risk_usd:
-                    risk_usd = self.max_risk_usd
+                # No equity provided, cannot size
+                feasible = False
+                break
             
             asset_risks[asset] = risk_usd
             total_risk += risk_usd
@@ -720,7 +689,7 @@ class PortfolioOptimizer:
             return None
         
         # Check global budget constraint
-        if use_percent_mode and equity is not None:
+        if equity is not None:
             max_total = equity * self.max_risk_pct_global
             if total_risk > max_total:
                 # Scale down proportionally
@@ -893,10 +862,8 @@ class PortfolioOptimizer:
                 action_type = "hold"
                 reason = "Allocation within tolerance"
             
-            # Calculate trade risk
-            use_percent_mode = (self.min_risk_usd <= 0 and self.max_risk_usd <= 0)
-            
-            if use_percent_mode and current_value > 0:
+            # Calculate trade risk (percent-of-equity mode only)
+            if current_value > 0:
                 # Percent-of-equity mode: use compute_risk_amount for edge-aware sizing
                 # Default 5% edge for rebalancing (conservative)
                 trade_risk = self.compute_risk_amount(current_value, 0.05) * abs(target_w - current_w)
@@ -905,13 +872,8 @@ class PortfolioOptimizer:
                 max_trade = current_value * self.max_risk_pct
                 trade_risk = max(min_trade, min(max_trade, trade_risk))
             else:
-                # Legacy USD mode
-                if action_type == "exit":
-                    trade_risk = current_w * budget
-                else:
-                    trade_risk = abs(target_w - current_w) * budget
-                # Clip to USD risk caps
-                trade_risk = max(self.min_risk_usd, min(self.max_risk_usd, trade_risk))
+                # No current value, skip sizing
+                trade_risk = 0
             
             actions.append(RebalanceAction(
                 asset=asset,
@@ -1029,14 +991,11 @@ class PortfolioOptimizer:
             "max_risk_pct_per_trade": self.max_risk_pct,
             "max_risk_pct_global": self.max_risk_pct_global,
             # Momentum scalping enforcement
-            "enforce_momentum_scalping_only": self.enforce_momentum_scalping,
+            "enforce_mean_reversion_only": self.enforce_mean_reversion,
             "momentum_scalp_config": self.momentum_scalp_config,
             "allowed_strategy_tags": list(self.allowed_strategy_tags),
             "blocked_strategy_patterns": self.blocked_strategy_patterns,
             # Legacy fields (deprecated)
-            "min_risk_usd_per_trade": self.min_risk_usd,
-            "max_risk_usd_per_trade": self.max_risk_usd,
-            "global_risk_budget": self.global_risk_budget,
             "risk_free_rate": self.risk_free_rate,
             "lookback_days": self.lookback_days,
             "num_frontier_points": self.num_frontier_points,
@@ -1093,17 +1052,12 @@ class PortfolioOptimizer:
             "open_assets_count": open_count,
             "max_concurrent_assets": self.max_concurrent_assets,
             "at_capacity": at_capacity,
-            "effective_min_risk_usd": self.min_risk_usd,
-            "effective_max_risk_usd": self.max_risk_usd,
-            "global_risk_budget_usd": self.global_risk_budget,
             "position_details": position_risks if position_risks else None,
             "constraint_compliance": "ok" if not at_capacity else "at_limit"
         }
         
         logger.info(
             f"[PORTFOLIO_CAPS] open={open_count}/{self.max_concurrent_assets} | "
-            f"risk_range=[{self.min_risk_usd}, {self.max_risk_usd}] | "
-            f"budget=${self.global_risk_budget:.2f} | "
             f"status={'AT_LIMIT' if at_capacity else 'OK'}"
         )
         

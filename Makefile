@@ -1,7 +1,7 @@
 # MERID Makefile
 # Common development commands
 
-.PHONY: help test coverage run-paper-demo smoke-test lint golden-path preflight risk-context serve swarm-integrity-check
+.PHONY: help test coverage run-paper-demo smoke-test lint golden-path preflight risk-context serve swarm-integrity-check test-kalshi-15m
 
 help:
 	@echo "MERID Development Commands"
@@ -12,6 +12,7 @@ help:
 	@echo "  make run-paper-demo  - Run paper trading demo"
 	@echo "  make smoke-test      - Run smoke tests (fast sanity check)"
 	@echo "  make lint            - Run linters"
+	@echo "  make test-kalshi-15m - Run Kalshi 15m crypto critical path tests"
 	@echo ""
 
 # Run all tests
@@ -29,6 +30,10 @@ run-paper-demo:
 # Run smoke tests for critical paths
 smoke-test:
 	pytest tests/ -m "smoke or e2e" -q --tb=short -x
+
+# Run Kalshi 15m crypto critical path tests
+test-kalshi-15m:
+	pytest tests/ -m "kalshi_15m_critical" -v --tb=short
 
 # Run linters
 lint:

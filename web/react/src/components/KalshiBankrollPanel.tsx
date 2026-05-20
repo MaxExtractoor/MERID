@@ -13,7 +13,8 @@ import {
   ChevronDown, ChevronUp, StopCircle,
 } from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
-import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY } from '../config/constants';
+import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { getAuthToken } from '../services/auth';
 
 /* ═══════════════════════════════════════════════════════════════════
    Types
@@ -228,16 +229,17 @@ export default function KalshiBankrollPanel() {
   const [expanded, setExpanded] = useState(true);
   const [stopping, setStopping] = useState(false);
 
+  // Use FAST_REFRESH (5s) for real-time bankroll updates - critical for trading UI
   const { data, loading } = useApiData<TraderStatus>(
     API_ENDPOINTS.KALSHI_CONTINUOUS_TRADER_STATUS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
+    { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH }
   );
 
   const handleStop = useCallback(async () => {
     if (!confirm('Stop the continuous trader? It will finish its current cycle.')) return;
     setStopping(true);
     try {
-      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      const token = getAuthToken();
       await fetch(`${API_BASE_URL}${API_ENDPOINTS.KALSHI_CONTINUOUS_TRADER_STOP}`, {
         method: 'POST',
         headers: {
@@ -262,7 +264,9 @@ export default function KalshiBankrollPanel() {
     );
   }
 
-  if (!data || !data.available) {
+  // Use total_value_cents (cash + portfolio) for availability check, fallback to available for backward compatibility
+  const totalValueCents = (data as any)?.total_value_cents ?? ((data?.available ?? 0) as number) * 100;
+  if (!data || totalValueCents <= 0) {
     return (
       <div className="rounded-xl border border-slate-700/50 bg-slate-900/60 p-4">
         <div className="flex items-center gap-2 text-slate-500 text-sm">
@@ -379,9 +383,15 @@ export default function KalshiBankrollPanel() {
           {/* Row 1: Bankroll */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             <Stat
-              label="Balance"
+              label="Cash Balance"
               value={money(d.balance_cents)}
               icon={DollarSign}
+              color="text-slate-200"
+            />
+            <Stat
+              label="Portfolio"
+              value={money(d.portfolio_cents)}
+              icon={TrendingUp}
               color="text-slate-200"
             />
             <Stat

@@ -101,15 +101,8 @@ async def _get_reconciliation_snapshot() -> Dict[str, Any]:
 
 
 def _get_kalshi_adapter_for_risk():
-    """Select Kalshi adapter respecting the enhanced adapter feature flag."""
-    if getattr(settings, "MERID_KALSHI_ENHANCED_ADAPTER", False):
-        from merid.event_venues.kalshi.venue_adapter_enhanced import (
-            get_enhanced_kalshi_adapter)
-
-        return get_enhanced_kalshi_adapter()
-
+    """Select Kalshi adapter - enhanced adapter removed, use standard adapter."""
     from merid.event_venues.kalshi.venue_adapter import get_kalshi_venue_adapter
-
     return get_kalshi_venue_adapter()
 
 

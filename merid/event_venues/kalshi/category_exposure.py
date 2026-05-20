@@ -47,34 +47,39 @@ logger = get_logger("merid.event_venues.kalshi.category_exposure")
 
 
 # ── Default caps (overridden by env vars) ─────────────────────────────────
+# NOTE: Now reads from core.settings for unified single source of truth
+# If env vars are set, they override settings (for backward compatibility)
 
+# CRITICAL: For crypto 15-minute trading (BTC, ETH, SOL, XRP, DOGE only), disable category caps
+# These assets trade on 15-minute timeframe with position limits enforced elsewhere
 _DEFAULT_CATEGORY_CAPS: Dict[str, float] = {
-    "cross_category": float(os.getenv("MERID_CAT_CAP_CROSS_CATEGORY_USD", "0.0")),  # 0 = derive from bankroll
-    # 0.0 = derive from actual Kalshi bankroll (was $2000/$500/$200 hardcoded)
-    "crypto":     float(os.getenv("MERID_CAT_CAP_CRYPTO_USD",    "0.0")),
-    "macro":      float(os.getenv("MERID_CAT_CAP_MACRO_USD",     "0.0")),
-    "economics":  float(os.getenv("MERID_CAT_CAP_ECONOMICS_USD", "0.0")),
-    "financials": float(os.getenv("MERID_CAT_CAP_FINANCIALS_USD","0.0")),
-    "politics":   float(os.getenv("MERID_CAT_CAP_POLITICS_USD",   "0.0")),
-    "climate":    float(os.getenv("MERID_CAT_CAP_CLIMATE_USD",    "0.0")),
-    "sports":     float(os.getenv("MERID_CAT_CAP_SPORTS_USD",     "0.0")),
-    "tech":       float(os.getenv("MERID_CAT_CAP_TECH_USD",       "0.0")),
-    "culture":    float(os.getenv("MERID_CAT_CAP_CULTURE_USD",    "0.0")),
-    "science":    float(os.getenv("MERID_CAT_CAP_SCIENCE_USD",    "0.0")),
-    "equities":   float(os.getenv("MERID_CAT_CAP_EQUITIES_USD",   "0.0")),
-    "other":      float(os.getenv("MERID_CAT_CAP_OTHER_USD",      "0.0")),
+    "cross_category": float(os.getenv("MERID_CAT_CAP_CROSS_CATEGORY_USD", "500.0")),  # $500 default
+    # 0.0 = derive from actual Kalshi bankroll using core.settings.MAX_CATEGORY_CRYPTO_PCT
+    "crypto":     float(os.getenv("MERID_CAT_CAP_CRYPTO_USD",    "999999.0")),  # DISABLED for 15m crypto
+    "macro":      float(os.getenv("MERID_CAT_CAP_MACRO_USD",     "500.0")),   # $500 default
+    "economics":  float(os.getenv("MERID_CAT_CAP_ECONOMICS_USD", "500.0")),   # $500 default
+    "financials": float(os.getenv("MERID_CAT_CAP_FINANCIALS_USD","1000.0")),  # $1000 default
+    "politics":   float(os.getenv("MERID_CAT_CAP_POLITICS_USD",   "500.0")),   # $500 default
+    "climate":    float(os.getenv("MERID_CAT_CAP_CLIMATE_USD",    "300.0")),   # $300 default
+    "sports":     float(os.getenv("MERID_CAT_CAP_SPORTS_USD",     "300.0")),   # $300 default
+    "tech":       float(os.getenv("MERID_CAT_CAP_TECH_USD",       "300.0")),   # $300 default
+    "culture":    float(os.getenv("MERID_CAT_CAP_CULTURE_USD",    "200.0")),   # $200 default
+    "science":    float(os.getenv("MERID_CAT_CAP_SCIENCE_USD",    "200.0")),   # $200 default
+    "equities":   float(os.getenv("MERID_CAT_CAP_EQUITIES_USD",   "1000.0")),  # $1000 default
+    "other":      float(os.getenv("MERID_CAT_CAP_OTHER_USD",      "200.0")),   # $200 default
 }
 
-# 0.0 = derive from actual Kalshi bankroll (was $800 hardcoded)
+# 0.0 = derive from actual Kalshi bankroll using core.settings.CORRELATED_STACK_PCT (2%)
 _DEFAULT_CORR_CAP_USD: float = float(os.getenv("MERID_CORR_STACK_CAP_USD", "0.0"))
 
-# Per-asset USD caps for correlated-stack checks. 0.0 from env = unset (use _corr_cap).
+# Per-asset USD caps for correlated-stack checks. 0.0 from env = use settings-based per-asset caps.
+# NOTE: Now reads from core.settings.ASSET_CAP_*_PCT for unified single source of truth
 _DEFAULT_ASSET_CAPS_USD: Dict[str, float] = {
-    "BTC":  float(os.getenv("MERID_ASSET_CAP_BTC_USD",  "0.0")),
-    "ETH":  float(os.getenv("MERID_ASSET_CAP_ETH_USD",  "0.0")),
-    "SOL":  float(os.getenv("MERID_ASSET_CAP_SOL_USD",  "0.0")),
-    "XRP":  float(os.getenv("MERID_ASSET_CAP_XRP_USD",  "0.0")),
-    "DOGE": float(os.getenv("MERID_ASSET_CAP_DOGE_USD", "0.0")),
+    "BTC":  float(os.getenv("MERID_ASSET_CAP_BTC_USD",  "0.0")),  # 0 = derive from settings
+    "ETH":  float(os.getenv("MERID_ASSET_CAP_ETH_USD",  "0.0")),  # 0 = derive from settings
+    "SOL":  float(os.getenv("MERID_ASSET_CAP_SOL_USD",  "0.0")),  # 0 = derive from settings
+    "XRP":  float(os.getenv("MERID_ASSET_CAP_XRP_USD",  "0.0")),  # 0 = derive from settings
+    "DOGE": float(os.getenv("MERID_ASSET_CAP_DOGE_USD", "0.0")),  # 0 = derive from settings
 }
 _DEFAULT_ASSET_CAPS_USD = {k: v for k, v in _DEFAULT_ASSET_CAPS_USD.items() if v > 0.0}
 
@@ -329,6 +334,11 @@ class CategoryExposureTracker:
 
         Silently ignored when balance_cents <= 0.
 
+        NOTE: Now reads from core.settings for unified single source of truth.
+        - crypto category uses core.settings.MAX_CATEGORY_CRYPTO_PCT (default 30%)
+        - correlated stack uses core.settings.CORRELATED_STACK_PCT (default 2%)
+        - per-asset caps use core.settings.ASSET_CAP_*_PCT (BTC/ETH 2%, SOL/XRP 1.5%, DOGE 1%)
+
         Note: ``max_single_order_contracts`` and ``CategoryLimit.max_contracts``
         (if any) are not touched — they represent fixed venue-level limits.
 
@@ -337,6 +347,7 @@ class CategoryExposureTracker:
             category_fractions: Override map {category: fraction}.  Defaults
                 to the standard fractions below.
             corr_fraction: Fraction for the default correlated-stack cap.
+                NOTE: Now defaults to core.settings.CORRELATED_STACK_PCT (2%)
             asset_fractions: Optional {underlying: fraction} for per-asset corr caps.
                 Merged with live balance; non-zero caps from env/constructor
                 (``_asset_caps_env``) override the calibrated value for the same key.
@@ -344,21 +355,73 @@ class CategoryExposureTracker:
         if balance_cents <= 0:
             return
         balance_usd = balance_cents / 100.0
-        fractions = category_fractions or {
-            "crypto":     0.30,
-            "economics":  0.10,
-            "financials": 0.10,
-            "politics":   0.08,
-            "climate":    0.05,
-            "tech":       0.08,
-            "sports":     0.05,
-            "culture":    0.05,
-            "science":    0.05,
-            "equities":   0.10,
-            "weather":    0.05,
-            "macro":      0.05,
-            "other":      0.05,
-        }
+        
+        # NOTE: Read from core.settings for unified single source of truth
+        try:
+            from core.settings import (
+                MAX_CATEGORY_CRYPTO_PCT,
+                CORRELATED_STACK_PCT,
+                ASSET_CAP_BTC_PCT,
+                ASSET_CAP_ETH_PCT,
+                ASSET_CAP_SOL_PCT,
+                ASSET_CAP_XRP_PCT,
+                ASSET_CAP_DOGE_PCT,
+            )
+            # Use settings defaults if not overridden by category_fractions
+            fractions = category_fractions or {
+                "crypto":     MAX_CATEGORY_CRYPTO_PCT,  # 30% from settings
+                "economics":  0.10,
+                "financials": 0.10,
+                "politics":   0.08,
+                "climate":    0.05,
+                "tech":       0.08,
+                "sports":     0.05,
+                "culture":    0.05,
+                "science":    0.05,
+                "equities":   0.10,
+                "weather":    0.05,
+                "macro":      0.05,
+                "other":      0.05,
+            }
+            # Use settings default for corr_fraction if not overridden
+            if corr_fraction == 0.20:  # Default value, use settings
+                corr_fraction = CORRELATED_STACK_PCT  # 2% from settings
+            
+            # Use settings defaults for per-asset caps if not overridden by asset_fractions
+            asset_fractions = asset_fractions or {
+                "BTC":  ASSET_CAP_BTC_PCT,   # 2% from settings
+                "ETH":  ASSET_CAP_ETH_PCT,   # 2% from settings
+                "SOL":  ASSET_CAP_SOL_PCT,   # 1.5% from settings
+                "XRP":  ASSET_CAP_XRP_PCT,   # 1.5% from settings
+                "DOGE": ASSET_CAP_DOGE_PCT,  # 1% from settings
+            }
+        except Exception as e:
+            logger.warning("CategoryExposureTracker: failed to read from core.settings, using defaults: %s", e)
+            fractions = category_fractions or {
+                "crypto":     0.30,
+                "economics":  0.10,
+                "financials": 0.10,
+                "politics":   0.08,
+                "climate":    0.05,
+                "tech":       0.08,
+                "sports":     0.05,
+                "culture":    0.05,
+                "science":    0.05,
+                "equities":   0.10,
+                "weather":    0.05,
+                "macro":      0.05,
+                "other":      0.05,
+            }
+            if corr_fraction == 0.20:
+                corr_fraction = 0.02  # 2% default
+            asset_fractions = asset_fractions or {
+                "BTC":  0.02,
+                "ETH":  0.02,
+                "SOL":  0.015,
+                "XRP":  0.015,
+                "DOGE": 0.01,
+            }
+        
         with self._lock:
             for cat, frac in fractions.items():
                 # Apply minimum floor to prevent impossibly small caps

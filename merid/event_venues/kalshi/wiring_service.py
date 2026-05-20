@@ -8,6 +8,7 @@ universe sync → mapping registry → context resolution → signal generation
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from typing import Dict, List, Optional, Any
 
@@ -313,14 +314,25 @@ class KalshiWiringService:
 
 # Singleton instance
 _wiring_service: Optional[KalshiWiringService] = None
-_wiring_service_lock = asyncio.Lock()
+_wiring_service_lock: Optional[asyncio.Lock] = None
+_wiring_service_lock_init = threading.Lock()
+
+
+def _ensure_wiring_service_lock() -> asyncio.Lock:
+    """Lazy-initialize the wiring service lock in the current event loop."""
+    global _wiring_service_lock
+    if _wiring_service_lock is None:
+        with _wiring_service_lock_init:
+            if _wiring_service_lock is None:
+                _wiring_service_lock = asyncio.Lock()
+    return _wiring_service_lock
 
 
 async def get_kalshi_wiring_service() -> KalshiWiringService:
     """Get singleton wiring service instance"""
     global _wiring_service
     if _wiring_service is None:
-        async with _wiring_service_lock:
+        async with _ensure_wiring_service_lock():
             if _wiring_service is None:
                 _wiring_service = KalshiWiringService()
                 await _wiring_service.initialize()

@@ -37,7 +37,7 @@ class USCompliantDataAggregator:
     Aggregates free, unrestricted data sources that work in the US.
     
     Sources included:
-    1. CoinGecko (free tier, no API key required)
+    1. BinanceUS (public API, no API key required)
     2. CoinMarketCap (free tier, limited but functional)
     3. CryptoCompare (free tier, no API key required)
     4. Kraken (public API, no restrictions)
@@ -54,18 +54,15 @@ class USCompliantDataAggregator:
         self.last_update: Dict[str, float] = {}
         
         # Symbol mappings for different APIs
+        # Keys are our internal USD format (BTC/USD, ETH/USD, etc.)
+        # Values are API-specific symbols
         self.symbol_mappings = {
-            'coingecko': {
-                'BTC': 'bitcoin',
-                'ETH': 'ethereum',
-                'SOL': 'solana',
-                'AVAX': 'avalanche-2',
-                'MATIC': 'polygon',
-                'DOT': 'polkadot',
-                'LINK': 'chainlink',
-                'UNI': 'uniswap',
-                'AAVE': 'aave',
-                'COMP': 'compound-governance'
+            'binanceus': {
+                'BTC/USD': 'BTCUSDT',  # BinanceUS uses USDT pairs internally
+                'ETH/USD': 'ETHUSDT',
+                'SOL/USD': 'SOLUSDT',
+                'XRP/USD': 'XRPUSDT',
+                'DOGE/USD': 'DOGEUSDT',
             },
             'coinmarketcap': {
                 'BTC': '1',
@@ -83,7 +80,7 @@ class USCompliantDataAggregator:
         
         # Base URLs for APIs
         self.api_endpoints = {
-            'coingecko': 'https://api.coingecko.com/api/v3',
+            'binanceus': 'https://api.binance.us/api/v3',
             'coinmarketcap': 'https://pro-api.coinmarketcap.com/v1',
             'cryptocompare': 'https://min-api.cryptocompare.com/data/v2',
             'kraken': 'https://api.kraken.com/0/public',
@@ -108,57 +105,48 @@ class USCompliantDataAggregator:
         if self.session:
             await self.session.close()
     
-    async def fetch_coingecko_data(self, symbols: List[str]) -> Dict[str, MarketData]:
-        """Fetch data from CoinGecko (free tier, no API key required)."""
+    async def fetch_binanceus_data(self, symbols: List[str]) -> Dict[str, MarketData]:
+        """Fetch data from BinanceUS (public API, no API key required).
+        
+        Args:
+            symbols: List of symbols in USD format (e.g., BTC/USD, ETH/USD)
+        """
+        results = {}
         try:
-            # Map symbols to CoinGecko IDs
-            coin_ids = []
-            for symbol in symbols:
-                if symbol in self.symbol_mappings['coingecko']:
-                    coin_ids.append(self.symbol_mappings['coingecko'][symbol])
+            # Fetch all 24h ticker data from BinanceUS
+            url = f"{self.api_endpoints['binanceus']}/ticker/24hr"
             
-            if not coin_ids:
-                return {}
-            
-            # Simple price endpoint (no API key required)
-            url = f"{self.api_endpoints['coingecko']}/simple/price"
-            params = {
-                'ids': ','.join(coin_ids),
-                'vs_currencies': 'usd',
-                'include_24hr_change': 'true',
-                'include_24hr_vol': 'true',
-                'include_market_cap': 'true'
-            }
-            
-            async with self.session.get(url, params=params) as response:
+            async with self.session.get(url) as response:
                 if response.status == 200:
                     data = await response.json()
-                    results = {}
                     
-                    # Map back to original symbols
-                    for symbol in symbols:
-                        if symbol in self.symbol_mappings['coingecko']:
-                            coin_id = self.symbol_mappings['coingecko'][symbol]
-                            if coin_id in data:
-                                coin_data = data[coin_id]
-                                results[symbol] = MarketData(
-                                    symbol=symbol,
-                                    price=coin_data.get('usd', 0),
-                                    volume_24h=coin_data.get('usd_24h_vol', 0),
-                                    change_24h_pct=coin_data.get('usd_24h_change', 0),
-                                    timestamp=datetime.now(),
-                                    source='coingecko',
-                                    market_cap=coin_data.get('usd_market_cap', 0)
-                                )
+                    # Build reverse mapping from BinanceUS symbol to our USD symbol
+                    binanceus_to_symbol = {v: k for k, v in self.symbol_mappings['binanceus'].items()}
                     
-                    logger.info(f"CoinGecko: fetched {len(results)} symbols")
+                    for ticker in data:
+                        binanceus_symbol = ticker.get('symbol')
+                        if binanceus_symbol in binanceus_to_symbol:
+                            usd_symbol = binanceus_to_symbol[binanceus_symbol]
+                            if usd_symbol in symbols:
+                                price = float(ticker.get('lastPrice', 0))
+                                if price > 0:
+                                    results[usd_symbol] = MarketData(
+                                        symbol=usd_symbol,
+                                        price=price,
+                                        volume_24h=float(ticker.get('quoteVolume', 0)),
+                                        change_24h_pct=float(ticker.get('priceChangePercent', 0)),
+                                        timestamp=datetime.now(),
+                                        source='binanceus'
+                                    )
+                    
+                    logger.info(f"BinanceUS: fetched {len(results)} symbols")
                     return results
                 else:
-                    logger.warning(f"CoinGecko API error: {response.status}")
+                    logger.warning(f"BinanceUS API error: {response.status}")
                     return {}
                     
         except Exception as e:
-            logger.error(f"CoinGecko fetch error: {e}")
+            logger.error(f"BinanceUS fetch error: {e}")
             return {}
     
     async def fetch_cryptocompare_data(self, symbols: List[str]) -> Dict[str, MarketData]:
@@ -367,7 +355,7 @@ class USCompliantDataAggregator:
         
         # Fetch from all sources concurrently
         tasks = [
-            self.fetch_coingecko_data(symbols),
+            self.fetch_binanceus_data(symbols),
             self.fetch_cryptocompare_data(symbols),
             self.fetch_kraken_data(symbols),
             self.fetch_poloniex_data(symbols),
@@ -381,7 +369,7 @@ class USCompliantDataAggregator:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
         # Aggregate results with source priority
-        source_priority = ['coingecko', 'kraken', 'cryptocompare', 'poloniex', 'coinbase', 'blockchain']
+        source_priority = ['binanceus', 'kraken', 'cryptocompare', 'poloniex', 'coinbase', 'blockchain']
         
         for result in results:
             if isinstance(result, dict):

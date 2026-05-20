@@ -1,0 +1,176 @@
+# MERID Alert Rules
+# Prometheus alert rules for critical, high, and medium severity alerts
+
+groups:
+  - name: merid_critical_alerts
+    interval: 30s
+    rules:
+      # Kill switch engaged in production
+      - alert: KillSwitchEngaged
+        expr: merid_kill_switch_state == 0
+        for: 0m
+        labels:
+          severity: critical
+          channel: pagerduty
+        annotations:
+          summary: "Kill switch engaged in production"
+          description: "Kill switch is in TRIGGERED state. Trading is halted. Reason: {{ $labels.reason }}"
+          runbook_url: "https://docs.merid.dev/runbooks/kill-switch"
+      
+      # Kalshi spec mismatch detected
+      - alert: KalshiSpecMismatch
+        expr: merid_kalshi_spec_validation_status == 0
+        for: 0m
+        labels:
+          severity: critical
+          channel: pagerduty
+        annotations:
+          summary: "Kalshi API specification mismatch detected"
+          description: "Kalshi spec validation failed. Risk-relevant fields have changed. Review spec validation results."
+          runbook_url: "https://docs.merid.dev/runbooks/kalshi-spec-mismatch"
+      
+      # Determinism mismatch rate above threshold
+      - alert: DeterminismMismatchSpike
+        expr: rate(merid_determinism_mismatch_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+          channel: pagerduty
+        annotations:
+          summary: "Determinism mismatches detected"
+          description: "Determinism replay job detected {{ $value }} mismatches in the last 5 minutes. Strategy logic may be non-deterministic."
+          runbook_url: "https://docs.merid.dev/runbooks/determinism-mismatch"
+      
+      # Large PnL drawdown
+      - alert: LargePnLDrawdown
+        expr: merid_max_drawdown < -1000
+        for: 1m
+        labels:
+          severity: critical
+          channel: pagerduty
+        annotations:
+          summary: "Large PnL drawdown detected"
+          description: "Maximum drawdown is ${{ $value }}. Risk limits may be breached."
+          runbook_url: "https://docs.merid.dev/runbooks/pnl-drawdown"
+      
+      # Risk envelope halted
+      - alert: RiskEnvelopeHalted
+        expr: kalshi_risk_envelope_band{profile="kalshi_crypto_15m_v2"} == 0.0
+        for: 5m
+        labels:
+          severity: critical
+          channel: pagerduty
+        annotations:
+          summary: "Risk envelope halted for kalshi_crypto_15m_v2"
+          description: "Risk envelope band is 0.0 (halted) for 5 consecutive minutes. Trading is blocked by drawdown."
+          runbook_url: "https://docs.merid.dev/runbooks/risk-envelope-halt"
+
+  - name: merid_high_alerts
+    interval: 1m
+    rules:
+      # Risk envelope never halts despite large drawdown
+      - alert: RiskEnvelopeNeverHalts
+        expr: kalshi_risk_envelope_band{profile="kalshi_crypto_15m_v2"} == 1.0 and kalshi_drawdown_percentage > 0.05
+        for: 1h
+        labels:
+          severity: high
+          channel: slack
+        annotations:
+          summary: "Risk envelope never halts despite 5% drawdown"
+          description: "Risk envelope band is still 1.0 (full) after 1 hour with 5%+ drawdown. Envelope may not be responding to losses."
+          runbook_url: "https://docs.merid.dev/runbooks/risk-envelope-not-responding"
+      
+      # Sudden equity/drawdown jump
+      - alert: RiskEnvelopeEquityJump
+        expr: abs(rate(kalshi_drawdown_percentage[5m])) > 0.02
+        for: 2m
+        labels:
+          severity: high
+          channel: slack
+        annotations:
+          summary: "Sudden equity/drawdown jump detected"
+          description: "Drawdown changed by more than 2% in 5 minutes. Current rate: {{ $value }}% per second. May indicate envelope miscomputation or bankroll issue."
+          runbook_url: "https://docs.merid.dev/runbooks/risk-envelope-equity-jump"
+      
+      # Sizing validation mismatches above threshold
+      - alert: SizingValidationMismatches
+        expr: rate(merid_sizing_mismatch_total[5m]) > 0.1
+        for: 10m
+        labels:
+          severity: high
+          channel: slack
+        annotations:
+          summary: "Sizing validation mismatches detected"
+          description: "Sizing validation detected {{ $value }} mismatches per second in the last 5 minutes. Sizing logic may have drifted."
+          runbook_url: "https://docs.merid.dev/runbooks/sizing-mismatch"
+      
+      # Reconciliation job failing
+      - alert: ReconciliationJobFailing
+        expr: merid_reconciliation_job_success == 0
+        for: 15m
+        labels:
+          severity: high
+          channel: slack
+        annotations:
+          summary: "Reconciliation job failing"
+          description: "Reconciliation job has not succeeded in the last 15 minutes. Portfolio state may be inconsistent."
+          runbook_url: "https://docs.merid.dev/runbooks/reconciliation-failure"
+      
+      # Safety jobs not running on schedule
+      - alert: SafetyJobNotRunning
+        expr: time() - merid_safety_job_last_run_timestamp > 3600
+        for: 5m
+        labels:
+          severity: high
+          channel: slack
+        annotations:
+          summary: "Safety job not running on schedule"
+          description: "Safety job {{ $labels.job_name }} has not run in over 1 hour. Risk monitoring may be degraded."
+          runbook_url: "https://docs.merid.dev/runbooks/safety-job-schedule"
+
+  - name: merid_medium_alerts
+    interval: 1m
+    rules:
+      # Metrics export lagging
+      - alert: MetricsExportLagging
+        expr: time() - merid_metrics_last_export_timestamp > 300
+        for: 5m
+        labels:
+          severity: medium
+          channel: slack
+        annotations:
+          summary: "Metrics export lagging"
+          description: "Metrics have not been exported in over 5 minutes. Observability may be degraded."
+      
+      # Non-prod environment issues
+      - alert: NonProdEnvironmentIssue
+        expr: merid_environment != "production"
+        for: 0m
+        labels:
+          severity: medium
+          channel: slack
+        annotations:
+          summary: "Non-production environment issue detected"
+          description: "Alert triggered in {{ $labels.environment }} environment. Review if action needed."
+      
+      # API error rate elevated
+      - alert: APIErrorRateElevated
+        expr: rate(merid_api_errors_total[5m]) > 0.1
+        for: 10m
+        labels:
+          severity: medium
+          channel: slack
+        annotations:
+          summary: "API error rate elevated"
+          description: "API error rate is {{ $value }} errors per second. Venue may be experiencing issues."
+      
+      # Terminal phase guard blocking rate elevated
+      - alert: TerminalPhaseGuardBlockingElevated
+        expr: rate(merid_terminal_guard_block_total[5m]) > 0.5
+        for: 10m
+        labels:
+          severity: medium
+          channel: slack
+        annotations:
+          summary: "Terminal phase guard blocking rate elevated"
+          description: "Terminal phase guard is blocking {{ $value }} trades per second. Review if edge thresholds are appropriate."

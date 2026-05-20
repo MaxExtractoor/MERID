@@ -14,7 +14,7 @@ class TestMeridExecutionAdapter:
 
     @pytest.fixture
     def adapter(self):
-        return MeridExecutionAdapter(execution_service_url="http://test:8012")
+        return MeridExecutionAdapter(execution_service_url="http://test:8011")
 
     @pytest.mark.asyncio
     async def test_connect_success(self, adapter, mocker):
@@ -299,7 +299,7 @@ class TestMeridPaperTradingEngine:
 
     @pytest.fixture
     def engine(self):
-        return MeridPaperTradingEngine(execution_service_url="http://test:8012")
+        return MeridPaperTradingEngine(execution_service_url="http://test:8011")
 
     @pytest.mark.asyncio
     async def test_start_engine(self, engine, mocker):
@@ -443,6 +443,6 @@ class TestIsExecutionServiceAvailable:
         """Test service available check when exception occurs."""
         mocker.patch("aiohttp.ClientSession", side_effect=Exception("Connection refused"))
 
-        result = await is_execution_service_available("http://test:8012")
+        result = await is_execution_service_available("http://test:8011")
 
         assert result is False

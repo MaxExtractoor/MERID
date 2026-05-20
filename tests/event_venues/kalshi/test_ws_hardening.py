@@ -254,7 +254,7 @@ class TestReconnect:
 
 class TestBackpressure:
     def test_queue_has_bounded_size(self, ws):
-        assert ws._msg_queue.maxsize == 4096
+        assert ws._msg_queue.maxsize == 32768  # Increased from 16384 to handle burst traffic
 
     def test_queue_accepts_messages(self, ws):
         ws._msg_queue.put_nowait({"type": "ticker"})

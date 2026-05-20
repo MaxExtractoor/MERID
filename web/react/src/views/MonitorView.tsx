@@ -12,25 +12,29 @@
  *   - Real-time portfolio tracking
  *   - PnL visualization with charts
  *   - System health dashboard
- *   - Risk feed integration
  */
 
-import React, { useState, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo } from 'react';
+import { subscribeToPortfolio, PortfolioSnapshot, PositionSnapshot } from '../lib/portfolioClient';
 import {
-  Briefcase, DollarSign, Heart, TrendingUp, TrendingDown,
-  RefreshCw, AlertTriangle, CheckCircle, XCircle,
-  Activity, Zap, Clock
+  Briefcase,
+  Activity,
+  Zap,
+  AlertTriangle,
+  DollarSign,
+  TrendingUp,
+  Heart,
+  CheckCircle,
+  XCircle
 } from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
-import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
-import { authHeaders } from '../api/auth';
-import { Card, CardHeader, CardTitle, CardContent } from '../ui/Card';
-import { Badge } from '../ui/Badge';
-import { Button } from '../ui/Button';
+import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { Card, CardContent, CardHeader, CardTitle } from '../ui/Card';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
 import KalshiPnlChart from '../components/KalshiPnlChart';
 import KalshiRiskFeed from '../components/KalshiRiskFeed';
-import type { KalshiBalance, KalshiPosition, KalshiOrder, KalshiRiskSummary } from '../types/kalshi';
+import { fmtTimestamp } from '../utils/formatters';
+import type { KalshiOrder, KalshiRiskSummary } from '../types/kalshi';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -41,12 +45,6 @@ interface HealthStatus {
   services: Record<string, { ok: boolean; latency_ms: number; error?: string }>;
   overall_latency_ms: number;
   timestamp: string;
-}
-
-interface CircuitStatus {
-  state: 'closed' | 'open' | 'half-open';
-  failure_count: number;
-  last_failure: string | null;
   next_retry: string | null;
 }
 
@@ -97,19 +95,31 @@ const MetricCard: React.FC<MetricCardProps> = ({ label, value, subtext, color = 
 const MonitorView: React.FC = () => {
   const [activeTab, setActiveTab] = useState<MonitorTab>('portfolio');
   
-  // Data fetching
-  const posRes = useApiData<{ positions: KalshiPosition[] }>(
-    API_ENDPOINTS.KALSHI_POSITIONS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
-  );
+  // Data fetching - using portfolio service (event-driven)
+  const [portfolio, setPortfolio] = useState<PortfolioSnapshot | null>(null);
+  
+  // Subscribe to portfolio updates on mount
+  useEffect(() => {
+    const unsubscribe = subscribeToPortfolio((update) => {
+      try {
+        setPortfolio(update as PortfolioSnapshot);
+      } catch (error) {
+        console.error('[MonitorView] Portfolio update error:', error);
+        // Don't crash on malformed updates
+      }
+    });
+    
+    return unsubscribe;
+  }, []);
+  
+  // Legacy positions fetch for backward compatibility (will be removed)
+  // const posRes = useApiData<{ positions: KalshiPosition[] }>(
+  //   `${API_ENDPOINTS.KALSHI_POSITIONS}?fresh=true`,
+  //   { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
+  // );
   
   const ordRes = useApiData<{ orders: KalshiOrder[] }>(
     API_ENDPOINTS.KALSHI_ORDERS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
-  );
-  
-  const balRes = useApiData<KalshiBalance>(
-    API_ENDPOINTS.KALSHI_BALANCE,
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );
   
@@ -129,27 +139,34 @@ const MonitorView: React.FC = () => {
   );
   
   const pnlRes = useApiData<PnlHistory>(
-    API_ENDPOINTS.KALSHI_GRID_PNL,
+    API_ENDPOINTS.KALSHI_PNL_HISTORY,
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
   );
 
-  const positions = posRes.data?.positions || [];
+  const positions = portfolio?.positions.map((p: PositionSnapshot) => ({
+    ...p,
+    // Add legacy compatibility fields
+    size: Math.abs(p.quantity),
+    avg_price: p.avg_entry_price_cents / 100,
+    unrealized_pnl: p.unrealized_pnl_usd,
+    outcome: p.side,
+  })) || [];
   const orders = ordRes.data?.orders || [];
   const fills = fillsRes.data?.fills || [];
   
   // Derived metrics
   const totalExposure = useMemo(() => 
-    positions.reduce((acc, p) => acc + Math.abs(p.contracts || 0), 0),
+    positions.reduce((acc: number, p: PositionSnapshot) => acc + Math.abs(p.quantity || 0), 0),
     [positions]
   );
   
   const totalUnrealizedPnl = useMemo(() => 
-    positions.reduce((acc, p) => acc + (p.unrealized_pnl_cents || 0), 0),
+    positions.reduce((acc: number, p: PositionSnapshot) => acc + (p.unrealized_pnl_cents || 0), 0),
     [positions]
   );
   
   const totalRealizedPnl = useMemo(() => 
-    fills.reduce((acc, f) => acc + (f.pnl_cents || 0), 0),
+    fills.reduce((acc: number, f: any) => acc + (f.pnl_cents || 0) / 100, 0),
     [fills]
   );
 
@@ -182,7 +199,7 @@ const MonitorView: React.FC = () => {
           <div className="text-right">
             <div className="text-xs text-slate-500">Unrealized PnL</div>
             <div className={`text-lg font-bold ${totalUnrealizedPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-              ${(totalUnrealizedPnl / 100).toFixed(2)}
+              ${totalUnrealizedPnl.toFixed(2)}
             </div>
           </div>
         </div>
@@ -220,13 +237,13 @@ const MonitorView: React.FC = () => {
               />
               <MetricCard 
                 label="Unrealized PnL" 
-                value={`$${(totalUnrealizedPnl / 100).toFixed(2)}`}
+                value={`$${totalUnrealizedPnl.toFixed(2)}`}
                 color={totalUnrealizedPnl >= 0 ? 'text-green-400' : 'text-red-400'}
                 icon={<TrendingUp className="w-4 h-4 text-slate-500" />}
               />
               <MetricCard 
                 label="Realized PnL" 
-                value={`$${(totalRealizedPnl / 100).toFixed(2)}`}
+                value={`$${totalRealizedPnl.toFixed(2)}`}
                 color={totalRealizedPnl >= 0 ? 'text-green-400' : 'text-red-400'}
                 icon={<DollarSign className="w-4 h-4 text-slate-500" />}
               />
@@ -263,28 +280,26 @@ const MonitorView: React.FC = () => {
                         </tr>
                       </thead>
                       <tbody>
-                        {positions.map(pos => (
-                          <tr key={pos.id} className="border-b border-slate-800/50 hover:bg-slate-800/30">
+                        {positions.map((pos, idx: number) => (
+                          <tr key={pos.ticker || idx} className="border-b border-slate-800/50 hover:bg-slate-800/30">
                             <td className="p-3">
                               <div className="font-medium text-white">{pos.ticker}</div>
-                              {pos.market_question && (
-                                <div className="text-xs text-slate-500 line-clamp-1">{pos.market_question}</div>
-                              )}
+                              <div className="text-xs text-slate-500">{pos.outcome}</div>
                             </td>
                             <td className="p-3">
                               <span className={`font-medium ${
-                                pos.side === 'yes' ? 'text-green-400' : 'text-red-400'
+                                pos.outcome === 'yes' ? 'text-green-400' : 'text-red-400'
                               }`}>
-                                {pos.side.toUpperCase()}
+                                {pos.outcome.toUpperCase()}
                               </span>
                             </td>
-                            <td className="p-3 text-right">{pos.contracts}</td>
-                            <td className="p-3 text-right font-mono">¢{pos.avg_price_cents}</td>
-                            <td className="p-3 text-right font-mono">¢{pos.current_price_cents}</td>
+                            <td className="p-3 text-right">{pos.size}</td>
+                            <td className="p-3 text-right font-mono">¢{Math.round(pos.avg_price * 100)}</td>
+                            <td className="p-3 text-right font-mono">—</td>
                             <td className={`p-3 text-right font-mono ${
-                              (pos.unrealized_pnl_cents || 0) >= 0 ? 'text-green-400' : 'text-red-400'
+                              (pos.unrealized_pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400'
                             }`}>
-                              ${((pos.unrealized_pnl_cents || 0) / 100).toFixed(2)}
+                              ${(pos.unrealized_pnl || 0).toFixed(2)}
                             </td>
                           </tr>
                         ))}
@@ -322,7 +337,7 @@ const MonitorView: React.FC = () => {
                         {fills.slice(0, 10).map(fill => (
                           <tr key={fill.fill_id} className="border-b border-slate-800/50 hover:bg-slate-800/30">
                             <td className="p-3 text-xs text-slate-400">
-                              {new Date(fill.filled_at).toLocaleTimeString()}
+                              {fmtTimestamp(fill.filled_at, { timeOnly: true })}
                             </td>
                             <td className="p-3">
                               <div className="font-medium text-white">{fill.ticker}</div>

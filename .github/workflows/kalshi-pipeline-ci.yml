@@ -72,12 +72,44 @@ jobs:
         "
 
   # ═══════════════════════════════════════════════════════════════════════════
+  # Kalshi Risk Infrastructure Tests
+  # ═══════════════════════════════════════════════════════════════════════════
+  kalshi-risk:
+    name: Kalshi Risk Infrastructure
+    runs-on: ubuntu-latest
+    needs: [formula-checks, version-drift]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install pytest pytest-cov
+    
+    - name: Run Kalshi risk infrastructure tests
+      run: |
+        pytest tests/ -v -m kalshi_risk --cov=merid.event_venues.kalshi --cov-report=xml
+    
+    - name: Upload coverage
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: kalshi-risk
+        name: kalshi-risk-coverage
+
+  # ═══════════════════════════════════════════════════════════════════════════
   # Full Test Suite
   # ═══════════════════════════════════════════════════════════════════════════
   test-suite:
     name: Full Test Suite
     runs-on: ubuntu-latest
-    needs: [formula-checks, version-drift]  # Only run if checks pass
+    needs: [formula-checks, version-drift, kalshi-risk]  # Only run if checks pass
     
     steps:
     - uses: actions/checkout@v4

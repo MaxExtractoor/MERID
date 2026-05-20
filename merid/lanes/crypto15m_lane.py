@@ -743,6 +743,23 @@ class Crypto15MLane:
     def last_cycle(self) -> Optional[LaneCycleResult]:
         return self._last_cycle
 
+    def get_regime_signal(self, signal_key: str) -> Optional[float]:
+        """
+        Get regime signal for a given signal key.
+        
+        For lean 15m Kalshi stack, regime signals are not used in the hot path.
+        This method exists for API compatibility with Btc15mAgent but returns None.
+        
+        Args:
+            signal_key: Signal identifier (e.g., "BTC_15M_KALSHI")
+            
+        Returns:
+            None (regime signals not used in lean 15m path)
+        """
+        # LEAN 15m KALSHI STACK: Regime signals not used in hot path
+        # This method exists for API compatibility with Btc15mAgent
+        return None
+
     async def start(self) -> None:
         """Start the lane's main loop."""
         if self._running:
@@ -824,13 +841,14 @@ class Crypto15MLane:
                 blocked_reason="no_markets_found"
             )
         
-        # 2. Sentiment aggregation
-        sentiment_bundle = await self._aggregate_sentiment()
-        
-        # 3. Swarm consensus
+        # SENTIMENT ISOLATION (2026-05-14): Sentiment is telemetry-only for 15m crypto path per SENTIMENT_ISOLATION_15M.md.
+        # Sentiment aggregation removed from hot path - execution decisions driven purely by EV/edge, volatility, risk.
+        sentiment_bundle = None
+
+        # 3. Swarm consensus (sentiment-free)
         consensus = await self._get_consensus(markets, sentiment_bundle)
-        
-        # 4. Risk evaluation
+
+        # 4. Risk evaluation (sentiment-free)
         risk_decision = await self._evaluate_risk(consensus, sentiment_bundle)
         
         # 5. Order execution
@@ -901,27 +919,9 @@ class Crypto15MLane:
     async def _aggregate_sentiment(self) -> Optional[Dict[str, Any]]:
         """Aggregate sentiment data optimized for 15m crypto trading.
 
-        LEAN 15m KALSHI STACK (2026-05-13): Sentiment disabled, returns neutral baseline.
+        SENTIMENT DECOUPLING (2026-05-14): ENABLE_SENTIMENT_TRUTH removed from trading logic.
+        Sentiment is now feature-only; flag only controls ingestion services.
         """
-        # LEAN 15m KALSHI STACK (2026-05-13): Check feature flag
-        import os
-        enable_sentiment = os.getenv("ENABLE_SENTIMENT_TRUTH", "false").lower() == "true"
-        if not enable_sentiment:
-            # Return neutral sentiment baseline for lean 15m stack
-            return {
-                "fear_greed": {
-                    "fg_index": 50,
-                    "contrarian_signal": 0.0,
-                },
-                "asset_sentiment_15m": {
-                    "sentiment_score_5m": 0.5,
-                    "sentiment_score_15m": 0.5,
-                    "sentiment_score_30m": 0.5,
-                    "sentiment_trend": "neutral",
-                    "news_sentiment": 0.0,
-                },
-                "weight": 0.0,
-            }
 
         try:
             # Optimized 15m sentiment features per asset
@@ -973,35 +973,11 @@ class Crypto15MLane:
     async def _get_asset_sentiment_15m(self) -> Dict[str, Any]:
         """Get fast, per-asset sentiment optimized for 15m horizons.
         
-        CRITICAL FIX (2026-05-07): Use SentimentBusV2 instead of old SentimentBus.
-        The old SentimentBus wraps MarketMoodBus, but NewsIngestionAgent and HashtagAgent
-        write to SentimentBusV2. This was causing a disconnect where sentiment data
-        was being written but never consumed.
-        """
-        try:
-            # Try to pull real per-asset sentiment from SentimentBusV2
-            try:
-                from merid.sentiment.sentiment_bus_v2 import get_sentiment_bus_v2
-                bus = get_sentiment_bus_v2()
-                ctx = bus.get_asset_context(self.cfg.symbol)
-                if ctx:
-                    return {
-                        "symbol": self.cfg.symbol,
-                        "sentiment_score_5m": float(ctx.combined_score),
-                        "sentiment_score_15m": float(ctx.combined_score),
-                        "sentiment_score_30m": float(ctx.kalman_smoothed),
-                        "sentiment_trend": ctx.fg_regime,
-                        "social_volume": int(ctx.news_score * 100),  # Approximate from news score
-                        "news_sentiment": float(ctx.news_score),
-                        "technical_signal": float(ctx.hashtag_score),
-                        "confidence": float(ctx.confidence),
-                    }
-            except Exception as exc:
-                logger.debug("%s: sentiment bus unavailable: %s", self.lane_id, exc)
+        # REMOVED: SentimentBusV2 integration - sentiment components not used in 15m stack
 
-            # Honest zeros — no fake bullish bias
-            return {
-                "symbol": self.cfg.symbol,
+        # Honest zeros — no fake bullish bias
+        return {
+            "symbol": self.cfg.symbol,
                 "sentiment_score_5m": 0.0,
                 "sentiment_score_15m": 0.0,
                 "sentiment_score_30m": 0.0,
@@ -1017,54 +993,37 @@ class Crypto15MLane:
             return {}
 
     async def _get_consensus(self, markets: List[Dict[str, Any]], sentiment_bundle: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """Get swarm consensus for trading decision with proper bps math."""
+        """Get swarm consensus for trading decision with proper bps math.
+
+        SENTIMENT ISOLATION (2026-05-14): sentiment_bundle parameter kept for API compatibility but not used.
+        Edge computation driven purely by market prices, volatility regime, and risk config per SENTIMENT_ISOLATION_15M.md.
+        """
         try:
             if not markets:
                 return None
-            
+
             # Select best market (simplified - would use edge calculations in production)
             best_market = markets[0]
-            
-            # Apply Fear & Greed contrarian signal (global risk dial)
+
+            # SENTIMENT ISOLATION: No Fear & Greed or asset sentiment adjustments
+            # Edge driven by market microstructure, volatility, and risk parameters only
             edge_adjustment = 0.0
-            if sentiment_bundle and "fear_greed" in sentiment_bundle:
-                fg = sentiment_bundle["fear_greed"]
-                edge_adjustment = fg["contrarian_signal"] * sentiment_bundle.get("weight", 0.5)
-            
-            # Apply per-asset sentiment adjustments for 15m trading
             asset_adj = 0.0
-            if sentiment_bundle and "asset_sentiment_15m" in sentiment_bundle:
-                asset = sentiment_bundle["asset_sentiment_15m"]
-                # Use 15m sentiment score as additional edge signal
-                asset_score = asset.get("sentiment_score_15m", 0.5)
-                asset_adj = (asset_score - 0.5) * 0.3  # Scale down asset sentiment impact
-                
-                # Boost confidence for high-volume assets
-                if asset.get("social_volume", 0) > 100:
-                    asset_adj *= 1.2
-            
+
             # Advanced p_true estimation with vig adjustment and Bayesian updating
             yes_price_cents = best_market.get("yes_price_cents", 50)
             no_price_cents = 100 - yes_price_cents  # NO price is complement of YES price
-            
-            # Extract features for p_true estimation
+
+            # Extract features for p_true estimation (sentiment-free)
             features = {
                 "rti_signal": 0.0,           # RTI directional signal (placeholder)
-                "fg_contrarian": 0.0,         # Fear & Greed contrarian signal
+                "fg_contrarian": 0.0,         # Fear & Greed contrarian signal (disabled)
                 "flow_imbalance": 0.5,        # Order flow imbalance (placeholder)
-                "asset_sentiment": 0.5,       # Per-asset sentiment
+                "asset_sentiment": 0.5,       # Per-asset sentiment (disabled - neutral baseline)
             }
-            
-            # Add Fear & Greed contrarian signal
-            if sentiment_bundle and "fear_greed" in sentiment_bundle:
-                fg = sentiment_bundle["fear_greed"]
-                features["fg_contrarian"] = fg.get("contrarian_signal", 0.0)
-            
-            # Add per-asset sentiment from 15m optimized features
-            if sentiment_bundle and "asset_sentiment_15m" in sentiment_bundle:
-                asset = sentiment_bundle["asset_sentiment_15m"]
-                features["asset_sentiment"] = asset.get("sentiment_score_15m", 0.5)
-                features["flow_imbalance"] = 0.5 + (asset.get("social_volume", 0) / 200.0)  # Normalize volume
+
+            # SENTIMENT ISOLATION: No sentiment-based feature enrichment
+            # Features derived from market data only
             
             # Get historical performance data
             historical_wins = getattr(self, '_historical_wins', 0)
@@ -1127,7 +1086,11 @@ class Crypto15MLane:
             return None
 
     async def _evaluate_risk(self, consensus: Optional[Dict[str, Any]], sentiment_bundle: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """Evaluate risk and decide whether to trade with Kelly sizing."""
+        """Evaluate risk and decide whether to trade with Kelly sizing.
+
+        SENTIMENT ISOLATION (2026-05-14): sentiment_bundle parameter kept for API compatibility but not used.
+        Risk evaluation driven purely by edge, volatility regime, and Kelly sizing per SENTIMENT_ISOLATION_15M.md.
+        """
         try:
             if not consensus:
                 return None
@@ -1213,17 +1176,9 @@ class Crypto15MLane:
             # Position sizing with RCK
             kelly_size = bankroll * f_used
             position_size = max(self.cfg.base_trade_size, kelly_size)
-            
-            # Optional Fear & Greed scaling (as size modifier, not directional)
+
+            # SENTIMENT ISOLATION: No Fear & Greed scaling - sizing driven by Kelly and risk constraints only
             fg_multiplier = 1.0
-            if sentiment_bundle and "fear_greed" in sentiment_bundle:
-                fg = sentiment_bundle["fear_greed"]
-                if fg["is_extreme_fear"]:
-                    fg_multiplier = 1.05  # Very small increase in RCK mode
-                elif fg["is_extreme_greed"]:
-                    fg_multiplier = 0.95  # Very small decrease in RCK mode
-            
-            position_size *= fg_multiplier
             
             risk_decision = {
                 "approved": True,
@@ -1239,7 +1194,7 @@ class Crypto15MLane:
                 "kelly_fraction_used": f_used,
                 "bankroll": bankroll,
                 "kelly_size": kelly_size,
-                "fear_greed_applied": sentiment_bundle is not None,
+                "fear_greed_applied": False,  # SENTIMENT ISOLATION: Always False
                 "fg_multiplier": fg_multiplier,
                 # Advanced RCK solver details
                 "risk_constrained_kelly": {
@@ -1278,7 +1233,7 @@ class Crypto15MLane:
                 "edge_bps": risk_decision["edge_bps"],
                 "probability": risk_decision.get("p_true", 0.5),
                 "direction": risk_decision["direction"],
-                "fear_greed_weight": consensus.get("sentiment_weight", 0.0),
+                "fear_greed_weight": 0.0,  # SENTIMENT ISOLATION: Always 0
             }
             
             allowed = await self.risk_bus.check_lane_order(self.lane_id, order, ctx)

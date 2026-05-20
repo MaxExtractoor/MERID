@@ -8,6 +8,8 @@ Every canonical agent has:
 
 from __future__ import annotations
 
+import json
+import logging
 import threading
 import time
 import uuid
@@ -15,7 +17,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from utils.logger import get_logger
 
@@ -66,28 +68,40 @@ class AgentOutput:
 
 
 class CanonicalAgent(ABC):
-    """Abstract base for all canonical MERID agents."""
+    """Base class for canonical agents.
 
-    def __init__(self, agent_id: str, category: AgentCategory):
+    Canonical agents are the core decision-making entities in the system.
+    They produce structured outputs (AgentOutput) that can be consumed
+    by downstream components like consensus, execution, or risk management.
+
+    Lifecycle:
+        - Registered in CanonicalAgentRegistry at startup
+        - Run periodically by the orchestrator/loop
+        - Produce outputs via _execute() method
+
+    Domain Metadata:
+        - assets: Set of assets this agent operates on (e.g., {"BTC", "ETH"})
+        - venues: Set of venues this agent uses (e.g., {"KALSHI"})
+        - tenors: Set of timeframes this agent handles (e.g., {"15m"})
+    """
+
+    # Domain metadata - override in subclasses
+    assets: set = set()
+    venues: set = set()
+    tenors: set = set()
+
+    def __init__(
+        self,
+        agent_id: str,
+        category: AgentCategory,
+        is_active: bool = False,
+    ):
         self.agent_id = agent_id
         self.category = category
-        self.status = AgentStatus.IDLE
-        self._run_count: int = 0
-        self._error_count: int = 0
-        self._last_run: Optional[datetime] = None
+        self._is_active = is_active
         self._last_output: Optional[AgentOutput] = None
+        self._last_run_time: Optional[datetime] = None
         self.logger = get_logger(f"merid.agents.{agent_id}")
-
-    # ── Lifecycle ────────────────────────────────────────────────────
-
-    def pause(self) -> None:
-        self.status = AgentStatus.PAUSED
-
-    def resume(self) -> None:
-        self.status = AgentStatus.IDLE
-
-    def retire(self) -> None:
-        self.status = AgentStatus.RETIRED
 
     @property
     def is_active(self) -> bool:
@@ -100,6 +114,18 @@ class CanonicalAgent(ABC):
             self.resume()
         else:
             self.pause()
+        self.logger.info(f"Agent {self.agent_id} is_active set to {value}")
+
+    # ── Lifecycle ────────────────────────────────────────────────────
+
+    def pause(self) -> None:
+        self.status = AgentStatus.PAUSED
+
+    def resume(self) -> None:
+        self.status = AgentStatus.IDLE
+
+    def retire(self) -> None:
+        self.status = AgentStatus.RETIRED
 
     # ── Core run ─────────────────────────────────────────────────────
 
@@ -361,9 +387,95 @@ class CanonicalAgentRegistry:
     async def run_all(self, context: Dict[str, Any] = None) -> List[AgentOutput]:
         """Run all active agents concurrently and collect outputs."""
         import asyncio
+        
+        # CANONICAL_REGISTRY_INCOMPLETE check
         agents = list(self.active())
+        
+        # Log registry composition for debugging (structured JSON for log queries)
+        agent_counts = {}
+        agent_domains = {}
+        from merid.settings import settings as _settings
+        env = _settings.MERID_ENV if hasattr(_settings, 'MERID_ENV') else "development"
+        dry_run = _settings.MERID_LOOP_DRY_RUN if hasattr(_settings, 'MERID_LOOP_DRY_RUN') else False
+        
+        for agent in agents:
+            agent_type = agent.__class__.__name__
+            agent_counts[agent_type] = agent_counts.get(agent_type, 0) + 1
+            agent_domains[agent.agent_id] = {
+                "assets": list(agent.assets),
+                "venues": list(agent.venues),
+                "tenors": list(agent.tenors),
+            }
+        
+        logger.info(
+            "CANONICAL_REGISTRY_SUMMARY: %s",
+            json.dumps({
+                "env": env,
+                "dry_run": dry_run,
+                "total_agents": len(agents),
+                "composition": agent_counts,
+                "domains": agent_domains,
+            })
+        )
+        
+        # Check for legacy agents that shouldn't be in production registry
+        legacy_agent_types = [
+            "PredictionMarketAgentV2",
+            "MarketResearchAgent",
+            "CryptoSignalsAgent",
+        ]
+        legacy_agents_found = [a for a in agents if a.__class__.__name__ in legacy_agent_types]
+        
+        if legacy_agents_found:
+            from merid.settings import settings as _settings
+            if not _settings.MERID_ENABLE_RESEARCH_AGENTS:
+                logger.error(
+                    "CANONICAL_REGISTRY_LEGACY_AGENTS_BLOCKED: count=%d agents=%s - legacy research agents present but MERID_ENABLE_RESEARCH_AGENTS=False. "
+                    "Set MERID_ENABLE_RESEARCH_AGENTS=True in .env or settings.yaml to allow research agents. "
+                    "These agents are NOT for 15m Kalshi live trading.",
+                    len(legacy_agents_found),
+                    [a.agent_id for a in legacy_agents_found]
+                )
+                # Fail hard - don't run with legacy agents in production
+                return []
+            else:
+                logger.warning(
+                    "CANONICAL_REGISTRY_LEGACY_AGENTS_ALLOWED: count=%d agents=%s - legacy research agents present with MERID_ENABLE_RESEARCH_AGENTS=True. "
+                    "These agents are NOT for 15m Kalshi live trading.",
+                    len(legacy_agents_found),
+                    [a.agent_id for a in legacy_agents_found]
+                )
+        
+        # Ensure at least one canonical Kalshi 15m trader agent is registered
+        canonical_15m_agent_types = [
+            "KalshiTradingAgent",
+        ]
+        canonical_15m_agents = [a for a in agents if a.__class__.__name__ in canonical_15m_agent_types]
+        
+        if not canonical_15m_agents:
+            logger.error(
+                "CANONICAL_REGISTRY_INCOMPLETE: no canonical Kalshi 15m trading agents found. "
+                "Registry must contain at least one KalshiTradingAgent for BTC/ETH/SOL/XRP/DOGE 15m contracts."
+            )
+            # In production, this should fail hard. For now, log and continue with empty results.
+            # TODO: Make this a hard assertion once enable_research_agents flag is implemented
+            return []
+        
+        # Domain validation: ensure no illegal Kalshi agents (non-15m tenors)
+        from merid.settings import settings as _settings
+        for agent in agents:
+            if "KALSHI" in agent.venues and "15m" not in agent.tenors:
+                logger.error(
+                    "REGISTRY_ILLEGAL_KALSHI_AGENT: agent=%s assets=%s tenors=%s - Kalshi agent with non-15m tenor not allowed for 15m stack",
+                    agent.agent_id,
+                    list(agent.assets),
+                    list(agent.tenors)
+                )
+                return []
+        
         if not agents:
             return []
+        
         results = await asyncio.gather(
             *(a.run(context) for a in agents),
             return_exceptions=True,

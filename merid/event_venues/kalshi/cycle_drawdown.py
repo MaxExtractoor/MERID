@@ -58,19 +58,25 @@ class CycleStatus(Enum):
 
 @dataclass
 class CycleDrawdownConfig:
-    """Configuration for cycle drawdown manager."""
+    """Configuration for cycle drawdown manager.
+    
+    ALIGNED: Uses UnifiedDrawdownConfig as single source of truth for thresholds.
+    Unified thresholds: warning=3%, hedge_active=5%, scalp_halt=10%, full_halt=15%
+    
+    Cycle drawdown maps to hedge_active_pct (5%) as the RESTRICTED threshold.
+    """
     
     # Cycle timing
     cycle_duration_seconds: int = 900  # 15 minutes
     
-    # Drawdown thresholds (dynamic based on equity/bankroll ratio)
-    cycle_drawdown_pct_small: float = 0.07   # < $70 bankroll equivalent
-    cycle_drawdown_pct_medium: float = 0.05  # $70 - $100
-    cycle_drawdown_pct_large: float = 0.03   # > $100
+    # Drawdown thresholds — now sourced from UnifiedDrawdownConfig
+    # These are set dynamically based on unified config in __post_init__
+    cycle_drawdown_pct_small: float = 0.05   # Will be overridden by unified.hedge_active_pct
+    cycle_drawdown_pct_medium: float = 0.05  # Will be overridden by unified.hedge_active_pct
+    cycle_drawdown_pct_large: float = 0.05   # Will be overridden by unified.hedge_active_pct
     
-    # Bankroll thresholds for regime selection (in cents)
-    small_bankroll_threshold_cents: int = 7000    # $70
-    medium_bankroll_threshold_cents: int = 10000  # $100
+    # Absolute halt threshold from unified config (full_halt_pct = 15%)
+    absolute_halt_pct: float = 0.15  # Will be overridden by unified.full_halt_pct
     
     # Minimum notional to consider for profit reset (ignore dust)
     cycle_min_notional_to_reset_usd: float = 0.50  # 50 cents
@@ -88,6 +94,33 @@ class CycleDrawdownConfig:
     
     # Epsilon for floating point comparisons
     epsilon: float = 0.0001
+    
+    def __post_init__(self):
+        """Load thresholds from UnifiedDrawdownConfig for consistency."""
+        try:
+            from merid.risk.drawdown_config import get_drawdown_config
+            unified = get_drawdown_config()
+            
+            # Cycle drawdown uses hedge_active_pct (5%) as RESTRICTED threshold
+            # This is when hedging should activate within a cycle
+            _aligned_pct = unified.hedge_active_pct  # 5%
+            self.cycle_drawdown_pct_small = _aligned_pct
+            self.cycle_drawdown_pct_medium = _aligned_pct
+            self.cycle_drawdown_pct_large = _aligned_pct
+            
+            # Absolute halt uses full_halt_pct (15%)
+            self.absolute_halt_pct = unified.full_halt_pct  # 15%
+            
+            logger.debug(
+                "[cycle-drawdown] Aligned with unified config: "
+                "cycle_dd=%.1f%%, absolute_halt=%.1f%%",
+                _aligned_pct * 100, unified.full_halt_pct * 100
+            )
+        except Exception as exc:
+            logger.warning(
+                "[cycle-drawdown] Could not load unified config: %s. "
+                "Using defaults (cycle=5%%, halt=15%%).", exc
+            )
 
 
 @dataclass

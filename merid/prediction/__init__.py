@@ -23,18 +23,9 @@ from merid.prediction.strategy import (
     StrategyConfig,
     StrategySignal,
 )
-from merid.prediction.venue_gate import (
-    TradingMode,
-    VenueGate,
-)
-from merid.prediction.consensus import (
-    PredictionConsensusStore,
-    PredictionInstrument,
-    PredictionOpinion,
-    PredictionPlan,
-    ResolvedMarket,
-    get_prediction_consensus_store,
-)
+from merid.prediction.venue_gate import VenueGate
+from merid.prediction.trading_mode import TradingMode
+# REMOVED: consensus imports - not used in 15m stack
 from merid.prediction.debate import (
     AgentTeam,
     DebateArgument,
@@ -63,6 +54,16 @@ from merid.prediction.kalshi_tools import register_kalshi_tools
 from merid.prediction.social_broadcaster import (
     KalshiSocialBroadcaster,
     get_social_broadcaster,
+)
+from merid.prediction.crypto_top_edge import (
+    CandidateSignal,
+    CrossAssetCycleResult,
+    CryptoTopEdgeArbiter,
+    CRYPTO_ASSETS,
+    MEAN_REVERSION_TIMEFRAMES,
+    get_crypto_top_edge_arbiter,
+    reset_crypto_top_edge_arbiter,
+    select_top_edges,
 )
 
 __all__ = [
@@ -94,12 +95,34 @@ __all__ = [
     "AgentGrid",
     "AgentGridConfig",
     "KalshiTradingAgent",
-    "PortfolioRiskAgent",
+    # REMOVED: PortfolioRiskAgent - not used in 15m stack
     "SessionGuard",
     "get_agent_grid",
     "get_agent_grid_config",
     "get_session_guard",
     "register_kalshi_tools",
     "KalshiSocialBroadcaster",
+    # REMOVED: PortfolioRiskAgent - not used in 15m stack
     "get_social_broadcaster",
+    # Cross-asset top edge arbiter
+    "CandidateSignal",
+    "CrossAssetCycleResult",
+    "CryptoTopEdgeArbiter",
+    "CRYPTO_ASSETS",
+    "MEAN_REVERSION_TIMEFRAMES",
+    "get_crypto_top_edge_arbiter",
+    "reset_crypto_top_edge_arbiter",
+    "select_top_edges",
+    # "No Surprises" execution guards
+    "check_execution_guards",
+    "check_signal_staleness",
+    "check_spot_reference_integrity",
+    "run_all_upstream_guards",
+    "run_all_upstream_guards_with_ticker",
+    "extract_asset_from_ticker",
+    "extract_timeframe_from_ticker",
+    "ExecutionGuardResult",
+    "DataIntegrityResult",
+    "Health15MSnapshot",
+    "compute_health_15m_snapshot",
 ]

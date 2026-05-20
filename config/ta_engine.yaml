@@ -132,7 +132,7 @@ ta_engine:
   # Signal Score Thresholds
   # ═══════════════════════════════════════════════════════════════════════
   thresholds:
-    min_confidence_to_trade: 0.6
+    min_confidence_to_trade: 0.45  # Lowered from 0.6 for live trading
     min_quality_to_trade: 0.5
     min_divergence_strength: 0.5
 

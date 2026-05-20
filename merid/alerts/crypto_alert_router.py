@@ -503,7 +503,13 @@ class CryptoAlertRouter:
                 if not ticker:
                     continue
                 # series_ticker lives in EventMarket.raw_data injected by _to_event_market()
-                raw = getattr(m, "raw_data", None) or {}
+                # CRITICAL FIX: Handle CatalogMarket wrapping EventMarket
+                if hasattr(m, "market") and hasattr(m.market, "raw_data"):
+                    raw = m.market.raw_data or {}
+                elif hasattr(m, "raw_data"):
+                    raw = m.raw_data or {}
+                else:
+                    raw = {}
                 series_ticker = raw.get("series_ticker", "") or ""
                 # EventMarket uses .question for the market title
                 title = getattr(m, "question", "") or ""

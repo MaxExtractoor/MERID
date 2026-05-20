@@ -125,51 +125,8 @@ class ExternalSentimentForecaster(Forecaster):
             if abs(avg_score) > 0.1:
                 adjustments.append(avg_score * 0.05 * avg_conf)
 
-        # ── 2. MarketMoodBus sentiment context ──────────────────────
-        mood_score = self._get_mood_sentiment(asset or "unknown", timeframe or "15m")
-        components["mood_score"] = round(mood_score, 3)
-        if abs(mood_score) > 0.1:
-            adjustments.append(mood_score * 0.03)
-
-        # ── 3. Fear/Greed from kwargs or MarketMoodBus ──────────────
-        fg = kwargs.get("fear_greed_index", None)
-        if fg is None:
-            fg = self._get_fear_greed(asset or "unknown")
-        if fg is not None:
-            # Normalize 0-100 → -1 to +1
-            fg_norm = (fg - 50) / 50
-            components["fear_greed_norm"] = round(fg_norm, 3)
-            # Contrarian: extreme fear → bullish, extreme greed → bearish
-            if abs(fg_norm) > 0.4:
-                contrarian = -fg_norm * 0.04  # ±4% max
-                adjustments.append(contrarian)
-                components["contrarian_signal"] = round(contrarian, 4)
-
-        # ── 4. Sentiment Divergence ─────────────────────────────────
-        # Compare external sentiment with orderflow sentiment
-        orderflow_sent = kwargs.get("sentiment_score", 0.0)
-        if ext_signals and abs(orderflow_sent) > 0.1:
-            avg_ext = sum(s["score"] for s in ext_signals) / len(ext_signals)
-            divergence = avg_ext - orderflow_sent
-            components["sentiment_divergence"] = round(divergence, 3)
-            if abs(divergence) > 0.3:
-                # Large divergence → external might lead orderflow
-                adjustments.append(divergence * 0.02)
-
-        # ── 5. Sentiment momentum ───────────────────────────────────
-        combined = sum(adjustments) if adjustments else 0.0
-        history = _sentiment_history[market_id]
-        history.append((time.time(), combined))
-        if len(history) > _MAX_HISTORY:
-            history[:] = history[-_MAX_HISTORY:]
-
-        if len(history) >= 5:
-            recent = [h[1] for h in history[-5:]]
-            older = [h[1] for h in history[-10:-5]] if len(history) >= 10 else [0.0]
-            momentum = sum(recent) / len(recent) - sum(older) / len(older)
-            components["sentiment_momentum"] = round(momentum, 4)
-            if abs(momentum) > 0.005:
-                adjustments.append(momentum * 0.5)
+        # ── SENTIMENT DECOUPLING (2026-05-14): Removed MarketMoodBus, Fear/Greed, and sentiment adjustments.
+        # Sentiment should not modify trading edge. Removed mood_score, fear_greed_index, sentiment_score adjustments.
 
         # ── Combine ─────────────────────────────────────────────────
         if not adjustments:
@@ -185,7 +142,7 @@ class ExternalSentimentForecaster(Forecaster):
         p_model = max(0.02, min(0.98, p_model))
 
         # Confidence: number of sources and agreement
-        n_sources = len(ext_signals) + (1 if abs(mood_score) > 0.05 else 0) + (1 if fg is not None else 0)
+        n_sources = len(ext_signals)
         confidence = min(0.80, 0.15 + n_sources * 0.12)
 
         edge_estimate = abs(p_model - implied_yes) * 100
@@ -201,7 +158,7 @@ class ExternalSentimentForecaster(Forecaster):
     def _get_mood_sentiment(self, asset: str, timeframe: str) -> float:
         """Pull sentiment from MarketMoodBus context."""
         try:
-            from merid.swarm.market_mood_bus import get_market_mood_bus
+            from merid.sentiment.market_mood_bus import get_market_mood_bus
             bus = get_market_mood_bus()
             ctx = bus.get_context(asset.upper(), timeframe)
             if ctx and hasattr(ctx, "sentiment_score"):
@@ -213,7 +170,7 @@ class ExternalSentimentForecaster(Forecaster):
     def _get_fear_greed(self, asset: str) -> Optional[float]:
         """Pull fear/greed index from MarketMoodBus."""
         try:
-            from merid.swarm.market_mood_bus import get_market_mood_bus
+            from merid.sentiment.market_mood_bus import get_market_mood_bus
             bus = get_market_mood_bus()
             ctx = bus.get_context(asset.upper(), "daily")
             if ctx and hasattr(ctx, "fear_greed"):

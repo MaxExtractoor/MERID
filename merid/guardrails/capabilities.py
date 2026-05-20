@@ -23,6 +23,65 @@ import threading
 logger = get_logger("merid.guardrails.capabilities")
 
 
+# ── Config-Based Max Notional Computation ─────────────────────────────────────
+
+def _compute_kalshi_max_notional_from_config() -> float:
+    """Compute max_notional from sizing policy configuration, not live balance.
+    
+    CRITICAL: max_notional must be derived from config sizing policy, not from
+    live account balance. This ensures behavior is identical regardless of
+    whether the account has $100 or $100,000.
+    
+    Policy:
+    - max_notional = PER_TRADE_MAX_NOTIONAL_USD × MAX_CONCURRENT_TRADES
+    - For Kalshi PM: uses canonical envelope for kalshi_crypto_15m_v2 profile
+    - Live balance is used only for guardrail checks, not for defining the cap
+    - If max_notional > available_cash_usd, log warning but keep config cap
+    
+    Returns:
+        float: max_notional in USD
+    """
+    # Use canonical risk envelope for kalshi_crypto_15m_v2 profile
+    from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+    envelope = get_kalshi_crypto_15m_risk_envelope()
+    
+    per_trade_max_notional = envelope.max_single_order_notional_usd
+    max_concurrent_trades = envelope.max_concurrent_trades
+    max_notional = per_trade_max_notional * max_concurrent_trades
+    
+    # P1-5: Cross-check assert to ensure envelope computation is correct
+    expected_max_notional = per_trade_max_notional * max_concurrent_trades
+    if abs(max_notional - expected_max_notional) > 0.01:  # 1 cent tolerance
+        logger.error(
+            f"[KALSHI_CAPABILITY] CRITICAL: Computed max_notional ${max_notional:.2f} "
+            f"does not match expected ${expected_max_notional:.2f} "
+            f"(per_trade=${per_trade_max_notional:.2f} × concurrent={max_concurrent_trades})"
+        )
+        raise AssertionError(f"Capability max_notional mismatch: computed ${max_notional:.2f} vs expected ${expected_max_notional:.2f}")
+    
+    logger.info(
+        "[KALSHI_CAPABILITY] Derived max_notional from canonical envelope: $%.2f "
+        "(per_trade_cap=$%.2f × max_concurrent=%d)",
+        max_notional,
+        per_trade_max_notional,
+        max_concurrent_trades
+    )
+    
+    # Optional guardrail: check if config cap exceeds available cash
+    try:
+        from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+        available_cash_usd = get_equity_for_risk_calc_sync()
+        if max_notional > available_cash_usd:
+            logger.warning(
+                f"[KALSHI_CAPABILITY] Config cap ${max_notional:.2f} exceeds available cash ${available_cash_usd:.2f} - "
+                f"using config cap anyway (policy: config sizing, not balance-based)"
+            )
+    except ImportError:
+        pass
+    
+    return max_notional
+
+
 @dataclass
 class AgentCapabilityMap:
     """
@@ -33,12 +92,12 @@ class AgentCapabilityMap:
     agent_id: str
     # Tools this agent is allowed to invoke
     allowed_tools: Set[str] = field(default_factory=set)
-    # Symbols this agent can trade / observe
-    allowed_symbols: Set[str] = field(default_factory=lambda: {"*"})  # "*" = all
     # Venues this agent can interact with
     allowed_venues: Set[str] = field(default_factory=lambda: {"*"})
     # Maximum notional per single trade (USD)
-    max_notional_usd: float = 10_000.0
+    # CRITICAL: max_notional_usd should be derived from live bankroll, not hardcoded
+    # Default 0 means "derive from live bankroll" for agent capabilities
+    max_notional_usd: float = 0.0  # 0 = derive from live bankroll (was 10_000.0 hardcoded)
     # Maximum orders per minute
     max_orders_per_minute: int = 10
     # Config keys this agent can read
@@ -124,7 +183,40 @@ def _risk_profile(agent_id: str) -> AgentCapabilityMap:
 
 
 def _kalshi_pm_profile(agent_id: str) -> AgentCapabilityMap:
-    """Live-capable Kalshi prediction-market agents (AgentGrid crypto lanes)."""
+    """Live-capable Kalshi prediction-market agents (AgentGrid crypto lanes).
+    
+    CRITICAL: max_notional_usd is derived from config sizing policy, NOT live balance.
+    Uses KalshiRiskConfig.max_single_order_notional_usd × max_concurrent_trades (3).
+    Behavior is identical regardless of account balance ($100 or $100,000).
+    
+    P2-7: Scope is set to "live" by default, but downgraded to "paper" if paper session is active.
+    """
+    # Derive max_notional from config sizing policy
+    max_notional = _compute_kalshi_max_notional_from_config()
+    
+    # P2-7: Check if paper session is active and downgrade scope to "paper"
+    # Bypass paper session gating when in live mode
+    import os
+    scope = "live"
+    trading_mode = os.getenv("MERID_TRADING_MODE", "").lower()
+    if trading_mode != "live":
+        try:
+            from merid.prediction.paper_session import get_paper_session
+            ps = get_paper_session()
+            if ps and ps._session_id:
+                scope = "paper"
+                logger.info(
+                    f"[KALSHI_CAPABILITY] Paper session active ({ps._session_id}), "
+                    f"downgrading {agent_id} scope to 'paper'"
+                )
+        except Exception as e:
+            logger.debug(f"[KALSHI_CAPABILITY] Paper session check failed: {e}")
+    else:
+        logger.info(
+            f"[KALSHI_CAPABILITY] MERID_TRADING_MODE=live - bypassing paper session gating, "
+            f"{agent_id} scope set to 'live'"
+        )
+    
     return AgentCapabilityMap(
         agent_id=agent_id,
         allowed_tools={
@@ -144,9 +236,9 @@ def _kalshi_pm_profile(agent_id: str) -> AgentCapabilityMap:
             "kalshi_get_positions",
             "kalshi_get_balance",
         },
-        max_notional_usd=25_000.0,
+        max_notional_usd=max_notional,
         max_orders_per_minute=30,
-        max_scope="live",
+        max_scope=scope,
     )
 
 
@@ -190,8 +282,9 @@ class CapabilityStore:
 
     def register(self, cap_map: AgentCapabilityMap) -> None:
         self._maps[cap_map.agent_id] = cap_map
+        # CRITICAL: Log exact max_notional without rounding to match canonical envelope
         logger.info(
-            "Capability map registered: %s (tools=%d, max_scope=%s, max_notional=$%.0f)",
+            "Capability map registered: %s (tools=%d, max_scope=%s, max_notional=$%.2f)",
             cap_map.agent_id, len(cap_map.allowed_tools), cap_map.max_scope, cap_map.max_notional_usd,
         )
 

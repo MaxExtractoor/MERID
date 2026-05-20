@@ -13,7 +13,7 @@ import base64
 import json
 import random
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, TypeVar
 
@@ -42,6 +42,7 @@ from merid.event_venues.kalshi.models import (
     KalshiPosition,
     KalshiTrade,
 )
+from merid.event_venues.kalshi.api_metrics import emit_api_metrics
 from merid.resilience import (
     CircuitBreaker,
     CircuitOpenError,
@@ -151,15 +152,16 @@ try:
     _KALSHI_WRITE_TIMEOUT: float = _s.KALSHI_WRITE_TIMEOUT
     _KALSHI_POOL_TIMEOUT: float = _s.KALSHI_POOL_TIMEOUT
 except Exception:
+    # OLD-HARDWARE FIX: Fallback defaults match relaxed settings
     KALSHI_MAX_RETRIES = 3
     KALSHI_BACKOFF_BASE = 2.0
-    KALSHI_CIRCUIT_FAILURE_THRESHOLD = 10
-    KALSHI_CIRCUIT_RECOVERY_TIMEOUT = 30.0
-    KALSHI_MAX_CONCURRENT_REQUESTS = 10
-    _KALSHI_CONNECT_TIMEOUT = 5.0
-    _KALSHI_READ_TIMEOUT = 15.0
-    _KALSHI_WRITE_TIMEOUT = 10.0
-    _KALSHI_POOL_TIMEOUT = 5.0
+    KALSHI_CIRCUIT_FAILURE_THRESHOLD = 20  # was 10, now 20
+    KALSHI_CIRCUIT_RECOVERY_TIMEOUT = 60.0  # was 30, now 60
+    KALSHI_MAX_CONCURRENT_REQUESTS = 10  # BUG-FIX (2026-05-07): Added missing fallback
+    _KALSHI_CONNECT_TIMEOUT = 15.0  # was 10, now 15 - BUG-FIX (2026-05-07)
+    _KALSHI_READ_TIMEOUT = 45.0  # was 30, now 45 - BUG-FIX (2026-05-07)
+    _KALSHI_WRITE_TIMEOUT = 30.0  # was 20, now 30 - BUG-FIX (2026-05-07)
+    _KALSHI_POOL_TIMEOUT = 15.0  # was 10, now 15 - BUG-FIX (2026-05-07)
 
 KALSHI_RETRY_STATUSES = {429, 500, 502, 503, 504}
 
@@ -365,6 +367,10 @@ class KalshiVenueClient(EventVenueClient):
         self._http_client: Optional[httpx.AsyncClient] = None
         self._auth_token: Optional[str] = None
         self._member_id: Optional[str] = None
+
+        # NEW: inject public data client for series discovery and market data
+        from .client_public import KalshiPublicDataClient
+        self._public = KalshiPublicDataClient(self.config)
 
         # BUG-3: instance-level RSA key cache — prevents cross-instance contamination
         # when demo and live clients coexist in the same process.
@@ -683,7 +689,8 @@ class KalshiVenueClient(EventVenueClient):
             raise
 
     def _sign_headers(self, method: str, path: str) -> Dict[str, str]:
-        """Generate Kalshi RSA auth headers for a single request.
+        """
+        Generate RSA authentication headers for Kalshi API v2.
 
         Args:
             method: HTTP method (GET, POST, DELETE)
@@ -694,13 +701,15 @@ class KalshiVenueClient(EventVenueClient):
 
         Note: Kalshi v2 signs timestamp + METHOD + path only (no request body).
         """
-        if not hasattr(self, "_private_key") or self._private_key is None:
-            raise RuntimeError("RSA private key not loaded. Check credentials and private_key_path.")
-
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.asymmetric import padding
 
-        ts_ms = str(int(time.time() * 1000))
+        if not hasattr(self, "_private_key") or self._private_key is None:
+            raise RuntimeError("RSA private key not loaded. Check credentials and private_key_path.")
+
+        # Timestamp in milliseconds (Kalshi requires this)
+        # Add 5000ms buffer to prevent "header timestamp expired" errors
+        ts_ms = str(int(time.time() * 1000) + 5000)
         message = ts_ms + method.upper() + path
         signature = self._private_key.sign(
             message.encode(),
@@ -739,7 +748,15 @@ class KalshiVenueClient(EventVenueClient):
                 "KalshiVenueClient garbage-collected without close(). "
                 "Use 'async with client:' or call 'await client.close()' explicitly."
             )
-    
+
+    async def __aenter__(self) -> "KalshiVenueClient":
+        """Enter async context manager."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Exit async context manager - ensures client is properly closed."""
+        await self.close()
+
     # ------------------------------------------------------------------------
     # Resilient Request Infrastructure
     # ------------------------------------------------------------------------
@@ -774,19 +791,23 @@ class KalshiVenueClient(EventVenueClient):
 
         for attempt in range(KALSHI_MAX_RETRIES + 1):
             try:
-                client = await self._ensure_client()
-                # Initialize/re-initialize network resources AFTER _ensure_client
-                # to handle case where _reset_http_client_after_loop_error() cleared them
+                # Initialize network resources FIRST - they may have been cleared by
+                # event loop mismatch errors or other coroutines
                 self._ensure_async_network_resources()
+                
                 # Token bucket: self-limit before hitting 429s
                 is_write = method.upper() in ("POST", "PUT", "DELETE", "PATCH")
-                assert self._rate_limiter is not None and self._request_semaphore is not None
+                if self._rate_limiter is None or self._request_semaphore is None:
+                    raise RuntimeError("Rate limiter or request semaphore not initialized")
                 await self._rate_limiter.acquire(is_write=is_write)
 
                 # Check circuit breaker before making request
                 # Also apply concurrency semaphore to limit in-flight requests
                 async with self._request_semaphore:
                     async with self._circuit_breaker:
+                        # FIX: Move client acquisition inside semaphore to prevent race
+                        # where client gets closed by another coroutine after we get it
+                        client = await self._ensure_client()
                         # RSA per-request signing: generate timestamp as late as
                         # possible so it doesn't expire while queued behind the
                         # semaphore or circuit breaker.
@@ -839,6 +860,16 @@ class KalshiVenueClient(EventVenueClient):
                                 request=response.request,
                                 response=response,
                             )
+                            
+                            # Emit API metrics for failed request
+                            emit_api_metrics(
+                                endpoint=path,
+                                method=method,
+                                duration_seconds=latency_ms / 1000,
+                                status_code=response.status_code,
+                                success=False,
+                            )
+                            
                             return OperationResult.fail(
                                 error,
                                 latency_ms=latency_ms,
@@ -874,6 +905,16 @@ class KalshiVenueClient(EventVenueClient):
                             request=response.request,
                             response=response,
                         )
+                        
+                        # Emit API metrics for auth error
+                        emit_api_metrics(
+                            endpoint=path,
+                            method=method,
+                            duration_seconds=latency_ms / 1000,
+                            status_code=response.status_code,
+                            success=False,
+                        )
+                        
                         return OperationResult.fail(
                             error,
                             latency_ms=latency_ms,
@@ -893,6 +934,16 @@ class KalshiVenueClient(EventVenueClient):
                             body_text,
                             status_code=response.status_code,
                         )
+                        
+                        # Emit API metrics for business error
+                        emit_api_metrics(
+                            endpoint=path,
+                            method=method,
+                            duration_seconds=latency_ms / 1000,
+                            status_code=response.status_code,
+                            success=False,
+                        )
+                        
                         return OperationResult.fail(
                             error,
                             latency_ms=latency_ms,
@@ -908,6 +959,16 @@ class KalshiVenueClient(EventVenueClient):
                             request=response.request,
                             response=response,
                         )
+                        
+                        # Emit API metrics for client error
+                        emit_api_metrics(
+                            endpoint=path,
+                            method=method,
+                            duration_seconds=latency_ms / 1000,
+                            status_code=response.status_code,
+                            success=False,
+                        )
+                        
                         return OperationResult.fail(
                             error,
                             latency_ms=latency_ms,
@@ -919,6 +980,15 @@ class KalshiVenueClient(EventVenueClient):
                     # Success
                     response.raise_for_status()
                     data = response.json()
+                    
+                    # Emit API metrics for successful request
+                    emit_api_metrics(
+                        endpoint=path,
+                        method=method,
+                        duration_seconds=latency_ms / 1000,
+                        status_code=response.status_code,
+                        success=True,
+                    )
                     
                     # Reset circuit-open log suppression on success
                     if self._circuit_open_log_count > 0:
@@ -948,6 +1018,16 @@ class KalshiVenueClient(EventVenueClient):
                     )
                 else:
                     logger.debug(f"[kalshi] Circuit open for {operation_name} (suppressed #{self._circuit_open_log_count})")
+                
+                # Emit API metrics for circuit open
+                emit_api_metrics(
+                    endpoint=path,
+                    method=method,
+                    duration_seconds=latency_ms / 1000,
+                    status_code=503,  # Service Unavailable for circuit open
+                    success=False,
+                )
+                
                 return OperationResult.fail(
                     e,
                     latency_ms=latency_ms,
@@ -1080,6 +1160,16 @@ class KalshiVenueClient(EventVenueClient):
                 logger.warning(
                     f"[kalshi] {operation_name} unexpected error: {error_type}: {error_detail}"
                 )
+                
+                # Emit API metrics for unexpected error
+                emit_api_metrics(
+                    endpoint=path,
+                    method=method,
+                    duration_seconds=latency_ms / 1000,
+                    status_code=500,  # Internal server error for unexpected errors
+                    success=False,
+                )
+                
                 return OperationResult.fail(
                     e,
                     latency_ms=latency_ms,
@@ -1088,6 +1178,16 @@ class KalshiVenueClient(EventVenueClient):
                 )
         
         # Max retries exhausted
+        latency_ms = (time.time() - start_time) * 1000
+        
+        # Emit API metrics for max retries exhausted
+        emit_api_metrics(
+            endpoint=path,
+            method=method,
+            duration_seconds=latency_ms / 1000,
+            status_code=503,  # Service Unavailable
+            success=False,
+        )
         latency_ms = (time.time() - start_time) * 1000
         error = last_error or RuntimeError(f"Max retries exceeded for {operation_name}")
         return OperationResult.fail(
@@ -1114,6 +1214,123 @@ class KalshiVenueClient(EventVenueClient):
     # Market Data
     # ------------------------------------------------------------------------
     
+    # --- NEW helper: convert PublicMarketInfo → EventMarket via existing parsers ---
+    def _from_public_market(self, m) -> Optional[EventMarket]:
+        """Convert PublicMarketInfo to EventMarket using existing parsers.
+        
+        DEBUGGING: This method now fails loud with detailed logging to diagnose
+        why Kalshi API returns markets_count=1 but catalog reports count=0.
+        """
+        from .client_public import PublicMarketInfo
+        
+        # Log the raw payload for debugging
+        ticker = getattr(m, 'market_id', 'UNKNOWN') if hasattr(m, 'market_id') else 'UNKNOWN'
+        series_ticker = getattr(m, 'series_ticker', 'UNKNOWN') if hasattr(m, 'series_ticker') else 'UNKNOWN'
+        logger.debug(
+            "[PUBLIC-MARKET-PARSE-ENTRY] ticker=%s series_ticker=%s payload=%s",
+            ticker,
+            series_ticker,
+            m.raw if hasattr(m, 'raw') else str(m)
+        )
+        
+        # Validate required fields before parsing
+        if not hasattr(m, 'raw') or not m.raw:
+            logger.error(
+                "[PUBLIC-MARKET-PARSE-ERROR] ticker=%s series_ticker=%s reason='missing raw payload' payload=%s",
+                ticker,
+                series_ticker,
+                str(m)
+            )
+            return None
+        
+        raw = m.raw
+        # Kalshi API returns 'ticker' (not 'market_ticker') and 'close_time' (ISO string, not 'close_ts')
+        required_fields = ['ticker', 'close_time', 'status']
+        missing_fields = [f for f in required_fields if f not in raw or raw[f] is None]
+        if missing_fields:
+            logger.error(
+                "[PUBLIC-MARKET-PARSE-ERROR] ticker=%s series_ticker=%s reason='missing required fields: %s' payload=%s",
+                ticker,
+                series_ticker,
+                missing_fields,
+                raw
+            )
+            return None
+        
+        # Reuse existing _parse_market / _to_event_market
+        try:
+            parsed = self._parse_market(raw)
+            if not parsed:
+                logger.error(
+                    "[PUBLIC-MARKET-PARSE-ERROR] ticker=%s series_ticker=%s reason='_parse_market returned None' payload=%s",
+                    ticker,
+                    series_ticker,
+                    raw
+                )
+                return None
+        except Exception as exc:
+            logger.error(
+                "[PUBLIC-MARKET-PARSE-ERROR] ticker=%s series_ticker=%s reason='_parse_market raised exception: %s' payload=%s",
+                ticker,
+                series_ticker,
+                exc,
+                raw,
+                exc_info=True
+            )
+            raise  # Re-raise to surface the error
+        
+        # Force series_ticker from market_id (existing fix), but only if needed.
+        try:
+            em = self._to_event_market(parsed)
+            if not em:
+                logger.error(
+                    "[PUBLIC-MARKET-PARSE-ERROR] ticker=%s series_ticker=%s reason='_to_event_market returned None' parsed=%s",
+                    ticker,
+                    series_ticker,
+                    parsed
+                )
+                return None
+        except Exception as exc:
+            logger.error(
+                "[PUBLIC-MARKET-PARSE-ERROR] ticker=%s series_ticker=%s reason='_to_event_market raised exception: %s' parsed=%s",
+                ticker,
+                series_ticker,
+                exc,
+                parsed,
+                exc_info=True
+            )
+            raise  # Re-raise to surface the error
+        
+        # Apply series_ticker override from market_id
+        if hasattr(em, "raw_data") and em.raw_data:
+            import re
+            mid = em.market_id.upper()
+            series_match = re.match(
+                r"^(KX[A-Z]+15M|KX[A-Z]+H1|KX[A-Z]+D1|KX[A-Z]+W1|KX[A-Z]+1M|KX[A-Z]+Y|KX[A-Z]+)",
+                mid,
+            )
+            if series_match:
+                extracted_series = series_match.group(1)
+                em.raw_data["series_ticker"] = extracted_series
+                logger.debug(
+                    "[SERIES-TICKER-OVERRIDE] market_id=%s extracted_series=%s",
+                    em.market_id,
+                    extracted_series
+                )
+            else:
+                logger.warning(
+                    "[SERIES-TICKER-OVERRIDE-FAILED] market_id=%s no series match",
+                    em.market_id
+                )
+        
+        logger.info(
+            "[PUBLIC-MARKET-PARSE-SUCCESS] ticker=%s series_ticker=%s market_id=%s",
+            ticker,
+            em.raw_data.get("series_ticker") if hasattr(em, "raw_data") and em.raw_data else series_ticker,
+            em.market_id
+        )
+        return em
+    
     async def list_markets(self, filter_params: Optional[MarketFilter] = None) -> List[EventMarket]:
         """List Kalshi markets.
         
@@ -1124,71 +1341,66 @@ class KalshiVenueClient(EventVenueClient):
         return result.unwrap_or([])
     
     async def list_markets_result(
-        self, filter_params: Optional[MarketFilter] = None
+        self,
+        filter_params: Optional[MarketFilter] = None
     ) -> OperationResult[List[EventMarket]]:
-        """List Kalshi markets with explicit result.
-
-        Supports cursor-based pagination to fetch beyond the 200-item page
-        limit.  Set ``filter_params.limit`` to the *total* number of markets
-        you want; this method pages through automatically.
-
-        Returns:
-            OperationResult containing list of markets or error details
-        """
+        """List Kalshi markets (public discovery path, hardened)."""
         filter_params = filter_params or MarketFilter()
         desired = filter_params.limit
-        page_size = min(desired, 200)  # Kalshi max per page
 
-        params: Dict[str, Any] = {
-            "limit": page_size,
-            "status": "open" if filter_params.active_only else None,
-        }
-        if filter_params.category:
-            params["category"] = filter_params.category
-        if filter_params.search:
-            params["series_ticker"] = filter_params.search
-        if filter_params.event_ticker:
-            params["event_ticker"] = filter_params.event_ticker
-
-        all_markets: List[EventMarket] = []
-        cursor: Optional[str] = None
-        total_latency = 0.0
-        total_retries = 0
-        max_pages = max(1, (desired + page_size - 1) // page_size)
-
-        for _ in range(max_pages):
-            if cursor:
-                params["cursor"] = cursor
-
-            result = await self._request_with_resilience(
-                "GET", "/markets", params=params, operation_name="list_markets"
+        # Discovery only supports `search` as series_ticker + active_only (status=open).
+        if not filter_params.search:
+            return OperationResult.fail(
+                "list_markets_result requires search=series_ticker for public discovery",
+                latency_ms=0.0,
+                retries=0,
             )
-            total_latency += result.latency_ms or 0
-            total_retries += result.retries or 0
 
-            if not result.success:
-                if all_markets:
-                    # Return what we have so far on partial failure
-                    break
-                return OperationResult.fail(
-                    result.error,
-                    latency_ms=total_latency,
-                    retries=total_retries,
-                )
+        series_ticker = filter_params.search
 
-            for market_data in result.data.get("markets", []):
-                market = self._parse_market(market_data)
-                if market:
-                    all_markets.append(self._to_event_market(market))
+        # Freshness cutoff: configurable via settings, disabled by default
+        # Only apply if KALSHI_MIN_CLOSE_SECONDS_AGO is set in config
+        from merid.settings import settings as _settings
+        min_close_ts = None
+        if _settings.KALSHI_MIN_CLOSE_SECONDS_AGO is not None and _settings.KALSHI_MIN_CLOSE_SECONDS_AGO > 0:
+            now = datetime.now(timezone.utc)
+            cutoff = now - timedelta(seconds=_settings.KALSHI_MIN_CLOSE_SECONDS_AGO)
+            min_close_ts = int(cutoff.timestamp())
+            logger.info(
+                "list_markets_result: applying freshness cutoff series=%s min_close_ts=%s (KALSHI_MIN_CLOSE_SECONDS_AGO=%s)",
+                series_ticker,
+                min_close_ts,
+                _settings.KALSHI_MIN_CLOSE_SECONDS_AGO
+            )
+        else:
+            logger.info(
+                "list_markets_result: freshness cutoff disabled series=%s (KALSHI_MIN_CLOSE_SECONDS_AGO=%s)",
+                series_ticker,
+                _settings.KALSHI_MIN_CLOSE_SECONDS_AGO
+            )
 
-            cursor = result.data.get("cursor")
-            if not cursor or len(all_markets) >= desired:
-                break
+        try:
+            public_markets = await self._public.list_open_markets_for_series(
+                series_ticker=series_ticker,
+                min_close_ts=min_close_ts,
+            )
+        except Exception as exc:
+            return OperationResult.fail(str(exc), latency_ms=0.0, retries=0)
 
+        total = len(public_markets)
+
+        # Adapt to your EventMarket type.
+        event_markets: List[EventMarket] = []
+        for m in public_markets:
+            em = self._from_public_market(m)
+            if em:
+                event_markets.append(em)
+
+        # Respect desired limit.
         return OperationResult.ok(
-            all_markets[:desired],
-            latency_ms=total_latency,
-            retries=total_retries,
+            event_markets[:desired],
+            latency_ms=0.0,
+            retries=0,
         )
     
     async def get_market(self, market_id: str) -> Optional[EventMarket]:
@@ -1555,13 +1767,17 @@ class KalshiVenueClient(EventVenueClient):
         try:
             from merid.guards.global_execution_guard import get_global_execution_guard
             _guard = get_global_execution_guard()
-            _price_cents = int((order.price or 0.50) * 100)
+            # PRODUCTION-FIX: Use actual order price if available, fallback to default only if None
+            # At this point, order.price should always be set (fixed in order_router.py and trading.py)
+            from merid.event_venues.kalshi.risk_parameters import DEFAULT_KALSHI_PRICE_CENTS
+            _price_cents = int(order.price * 100) if order.price is not None else DEFAULT_KALSHI_PRICE_CENTS
             _allowed, _reason = _guard.check_order(
                 ticker=order.market_id,
                 contracts=int(order.size),
                 price_cents=_price_cents,
                 source="kalshi_client_final_net",
                 asset=order.metadata.get("asset") if hasattr(order, "metadata") else None,
+                action=order.side,  # "buy" or "sell" - critical for exit handling
             )
             if not _allowed:
                 logger.critical(
@@ -1611,9 +1827,51 @@ class KalshiVenueClient(EventVenueClient):
             "client_order_id": order.client_order_id or f"merid_{datetime.now(timezone.utc).timestamp()}",
         }
 
-        if order.order_type == "limit" and order.price:
-            # Kalshi uses {side}_price: yes_price or no_price (cents, integer)
-            kalshi_order[f"{outcome}_price"] = int(order.price * 100)
+        # CRITICAL: Kalshi API requires exactly one price field for ALL orders
+        # (including market orders - the price is accepted but ignored for market orders)
+        if order.price is not None:
+            _price_cents = int(order.price * 100)
+            # CRITICAL: Reject zero or negative prices
+            if _price_cents <= 0:
+                logger.error(
+                    "[KALSHI_ORDER_VALIDATION] Invalid price for order: %s cents | "
+                    "ticker=%s outcome=%s type=%s",
+                    _price_cents, ticker, outcome, order.order_type
+                )
+                return OperationResult.fail(
+                    f"Invalid order price: {_price_cents} cents (must be > 0)",
+                    latency_ms=0.0,
+                    retries=0,
+                )
+            # Kalshi API uses {side}_price: yes_price or no_price (cents, integer)
+            # API error: "exactly one of yes_price, no_price, yes_price_dollars, or no_price_dollars"
+            price_field = f"{outcome}_price"  # yes_price or no_price
+            kalshi_order[price_field] = _price_cents
+        else:
+            # BUG-FIX: If no price provided, use midpoint (default) as fallback
+            # Kalshi requires a price field even for market orders
+            from merid.event_venues.kalshi.risk_parameters import DEFAULT_KALSHI_PRICE_CENTS
+            logger.warning(
+                "[KALSHI_ORDER_VALIDATION] No price provided for %s order on %s, using default fallback",
+                order.order_type, ticker
+            )
+            price_field = f"{outcome}_price"
+            kalshi_order[price_field] = DEFAULT_KALSHI_PRICE_CENTS  # Midpoint fallback
+        
+        # VALIDATION: Ensure exactly one price field is set
+        price_fields = ["yes_price", "no_price", "yes_price_dollars", "no_price_dollars"]
+        set_prices = [f for f in price_fields if f in kalshi_order]
+        if len(set_prices) != 1:
+            logger.error(
+                "[KALSHI_ORDER_VALIDATION] Invalid price fields in order: %s | "
+                "outcome=%s ticker=%s",
+                set_prices, outcome, ticker
+            )
+            return OperationResult.fail(
+                f"Invalid order: exactly one price field required, got {set_prices}",
+                latency_ms=0.0,
+                retries=0,
+            )
 
         # Kalshi Trade API v2: enum is good_till_canceled | immediate_or_cancel | fill_or_kill
         kalshi_order["time_in_force"] = merid_time_in_force_to_kalshi_api(
@@ -1795,10 +2053,22 @@ class KalshiVenueClient(EventVenueClient):
                 "count": spec["count"],
             }
 
-            if "yes_price" in spec:
-                order["yes_price"] = spec["yes_price"]
-            if "no_price" in spec:
-                order["no_price"] = spec["no_price"]
+            # Kalshi API expects yesprice/noprice (without underscore)
+            if "yesprice" in spec or "yes_price" in spec:
+                order["yesprice"] = spec.get("yesprice") or spec.get("yes_price")
+            if "noprice" in spec or "no_price" in spec:
+                order["noprice"] = spec.get("noprice") or spec.get("no_price")
+            
+            # VALIDATION: Ensure at most one price field is set per order
+            price_fields = ["yesprice", "noprice", "yespricedollars", "nopricedollars"]
+            set_prices = [f for f in price_fields if f in order]
+            if len(set_prices) > 1:
+                logger.error(
+                    "[KALSHI_BATCH_ORDER_VALIDATION] Multiple price fields in order: %s | "
+                    "ticker=%s",
+                    set_prices, spec.get("ticker")
+                )
+                continue  # Skip this order, don't fail entire batch
             if "subaccount" in spec:
                 order["subaccount_number"] = spec["subaccount"]
             if "time_in_force" in spec:
@@ -1866,12 +2136,19 @@ class KalshiVenueClient(EventVenueClient):
             ValueError: If no amendments provided
         """
         body: Dict[str, Any] = {}
+        # Kalshi API expects yesprice/noprice (without underscore)
         if yes_price is not None:
-            body["yes_price"] = yes_price
+            body["yesprice"] = yes_price
         if no_price is not None:
-            body["no_price"] = no_price
+            body["noprice"] = no_price
         if new_count is not None:
             body["count"] = str(new_count)
+
+        # VALIDATION: Ensure at most one price field is set
+        price_fields = ["yesprice", "noprice", "yespricedollars", "nopricedollars"]
+        set_prices = [f for f in price_fields if f in body]
+        if len(set_prices) > 1:
+            raise ValueError(f"Cannot set multiple price fields: {set_prices}")
 
         if not body:
             raise ValueError("Nothing to amend - provide yes_price, no_price, or new_count")
@@ -3517,11 +3794,31 @@ class KalshiVenueClient(EventVenueClient):
 
         bal_data = balance_result.data or {}
         balance_cents = bal_data.get("balance", 0)
-        portfolio_value_cents = bal_data.get("portfolio_value", balance_cents)
+        
+        # FIX: Kalshi API doesn't return portfolio_value field
+        # Calculate portfolio value from position cache instead
+        portfolio_value_cents = 0
+        try:
+            from merid.event_venues.kalshi.position_cache import get_position_cache
+            cache = get_position_cache()
+            positions = cache.get_all_positions(validate_freshness=False)
+            
+            total_portfolio_cents = 0
+            for pos in positions.values():
+                if pos.contracts > 0:
+                    cost_basis = pos.contracts * pos.avg_price_cents
+                    unrealized_cents = int(float(pos.unrealized_pnl_usd) * 100)
+                    total_portfolio_cents += cost_basis + unrealized_cents
+            
+            if total_portfolio_cents > 0:
+                portfolio_value_cents = total_portfolio_cents
+        except Exception as exc:
+            logger.warning("[client] Failed to fetch portfolio value from cache: %s", exc)
+            # Fallback to balance_cents if cache unavailable
+            portfolio_value_cents = balance_cents
 
         if isinstance(balance_cents, dict):
             balance_cents = balance_cents.get("balance", 0)
-            portfolio_value_cents = bal_data.get("portfolio_value", balance_cents)
 
         # Process positions aggregation
         by_event: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
@@ -3639,7 +3936,7 @@ class KalshiVenueClient(EventVenueClient):
                 close_time=self._parse_datetime(data.get("close_time")),
                 expiration_time=self._parse_datetime(data.get("expiration_time")),
                 settlement_time=self._parse_datetime(data.get("settlement_time")),
-                active=data.get("status") == "active",
+                active=data.get("status") in ("active", "open"),
                 status=data.get("status", "active"),
                 volume=Decimal(str(data.get("volume", 0))),
                 volume_24h=Decimal(str(data.get("volume_24h", 0))) if data.get("volume_24h") is not None else None,
@@ -4017,6 +4314,7 @@ def handle_fix_reject(msg: Dict[str, str]) -> Optional[Exception]:
 
 _client: Optional[KalshiVenueClient] = None
 _client_lock = threading.Lock()
+_client_shutting_down: bool = False  # SHUTDOWN-FIX: Prevent new client creation after shutdown starts
 
 
 def get_kalshi_client(config: Optional[KalshiConfig] = None) -> KalshiVenueClient:
@@ -4025,9 +4323,36 @@ def get_kalshi_client(config: Optional[KalshiConfig] = None) -> KalshiVenueClien
     Rate tier is read from KALSHI_RATE_TIER env var (default "basic").
     Set to "advanced", "premier", or "prime" to lift the self-imposed throttle.
     """
-    global _client
+    global _client, _client_shutting_down
+    
+    # MODE CONSISTENCY CHECK: Ensure config matches TradeMode before creating client
+    try:
+        from merid.mode_resolver import ModeResolver, KalshiEnvironment
+        ModeResolver.assert_mode_consistency()
+        # Additional validation: if config provided, verify use_demo matches mode
+        if config is not None:
+            kalshi_env = ModeResolver.get_kalshi_environment()
+            if kalshi_env == KalshiEnvironment.LIVE and config.use_demo:
+                raise RuntimeError(
+                    f"MODE_MISMATCH: KalshiEnvironment=LIVE but config.use_demo=True. "
+                    f"Set use_demo=False for live trading."
+                )
+            elif kalshi_env == KalshiEnvironment.DEMO and not config.use_demo:
+                raise RuntimeError(
+                    f"MODE_MISMATCH: KalshiEnvironment=DEMO but config.use_demo=False. "
+                    f"Set use_demo=True for demo trading."
+                )
+    except Exception as mode_exc:
+        logger.error("get_kalshi_client mode validation failed: %s", mode_exc)
+        raise
+    
+    # SHUTDOWN-FIX: Don't create new client if shutdown has started
+    if _client_shutting_down:
+        raise RuntimeError("Cannot create KalshiVenueClient: shutdown in progress")
     if _client is None:
         with _client_lock:
+            if _client_shutting_down:
+                raise RuntimeError("Cannot create KalshiVenueClient: shutdown in progress")
             if _client is None:
                 import os as _os
                 _rate_tier = _os.getenv("KALSHI_RATE_TIER", "basic")
@@ -4043,8 +4368,9 @@ async def close_kalshi_client() -> None:
     This should be called during application shutdown (e.g., in lifespan cleanup)
     to properly close the HTTP client and prevent the garbage-collection warning.
     """
-    global _client
+    global _client, _client_shutting_down
     with _client_lock:
+        _client_shutting_down = True  # SHUTDOWN-FIX: Prevent any new client creation
         if _client is not None:
             try:
                 await _client.close()

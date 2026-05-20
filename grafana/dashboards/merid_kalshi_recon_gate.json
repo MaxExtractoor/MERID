@@ -1,0 +1,474 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "MERID Kalshi Reconciliation & Gate",
+    "tags": ["merid", "kalshi", "reconciliation", "gate", "crypto"],
+    "timezone": "browser",
+    "refresh": "30s",
+    "time": {
+      "from": "now-24h",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Critical Discrepancy Count (Current)",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 8, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "merid_recon_discrepancy_critical_count{venue=\"kalshi\"}",
+            "legendFormat": "Critical Count",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 1},
+                {"color": "red", "value": 5}
+              ]
+            },
+            "mappings": []
+          }
+        },
+        "options": {
+          "colorMode": "value",
+          "graphMode": "area",
+          "justifyMode": "auto"
+        }
+      },
+      {
+        "id": 2,
+        "title": "Warning Discrepancy Count (Current)",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 8, "x": 8, "y": 0},
+        "targets": [
+          {
+            "expr": "merid_recon_discrepancy_warning_count{venue=\"kalshi\"}",
+            "legendFormat": "Warning Count",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 3},
+                {"color": "orange", "value": 10}
+              ]
+            }
+          }
+        },
+        "options": {
+          "colorMode": "value",
+          "graphMode": "area",
+          "justifyMode": "auto"
+        }
+      },
+      {
+        "id": 3,
+        "title": "Gate State (Current)",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 8, "x": 16, "y": 0},
+        "targets": [
+          {
+            "expr": "merid_gate_state{venue=\"kalshi\"}",
+            "legendFormat": "Gate State",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              {
+                "type": "value",
+                "options": {
+                  "clear": {"color": "green", "text": "CLEAR"},
+                  "limited": {"color": "yellow", "text": "LIMITED"},
+                  "blocked": {"color": "red", "text": "BLOCKED"}
+                }
+              }
+            ]
+          }
+        },
+        "options": {
+          "colorMode": "background",
+          "graphMode": "none",
+          "justifyMode": "auto"
+        }
+      },
+      {
+        "id": 4,
+        "title": "Reconciliation Duration (Kalshi)",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+        "targets": [
+          {
+            "expr": "rate(merid_recon_run_duration_seconds_sum{venue=\"kalshi\"}[5m]) / rate(merid_recon_run_duration_seconds_count{venue=\"kalshi\"}[5m])",
+            "legendFormat": "Avg Duration (5m)",
+            "refId": "A"
+          },
+          {
+            "expr": "histogram_quantile(0.95, merid_recon_run_duration_seconds{venue=\"kalshi\"})",
+            "legendFormat": "95th Percentile",
+            "refId": "B"
+          },
+          {
+            "expr": "histogram_quantile(0.99, merid_recon_run_duration_seconds{venue=\"kalshi\"})",
+            "legendFormat": "99th Percentile",
+            "refId": "C"
+          }
+        ],
+        "yaxes": [
+          {"format": "s", "label": "Duration (seconds)"},
+          {"format": "short"}
+        ],
+        "alert": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [10],
+                "type": "gt"
+              },
+              "operator": {
+                "type": "and"
+              },
+              "query": {
+                "params": ["A", "5m", "now"]
+              },
+              "reducer": {
+                "params": [],
+                "type": "avg"
+              },
+              "type": "query"
+            }
+          ],
+          "executionErrorState": "alerting",
+          "frequency": "1m",
+          "handler": 1,
+          "name": "Recon Duration Alert",
+          "noDataState": "no_data",
+          "notifications": []
+        }
+      },
+      {
+        "id": 5,
+        "title": "Discrepancy Counts by Asset",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+        "targets": [
+          {
+            "expr": "sum by (asset) (merid_recon_discrepancy_count{venue=\"kalshi\"})",
+            "legendFormat": "{{asset}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "short", "label": "Discrepancy Count"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 6,
+        "title": "Critical Discrepancies by Asset",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+        "targets": [
+          {
+            "expr": "sum by (asset) (merid_recon_discrepancy_critical_count{venue=\"kalshi\"})",
+            "legendFormat": "{{asset}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "short", "label": "Critical Count"},
+          {"format": "short"}
+        ],
+        "alert": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [0],
+                "type": "gt"
+              },
+              "operator": {
+                "type": "and"
+              },
+              "query": {
+                "params": ["A", "5m", "now"]
+              },
+              "reducer": {
+                "params": [],
+                "type": "sum"
+              },
+              "type": "query"
+            }
+          ],
+          "executionErrorState": "alerting",
+          "frequency": "1m",
+          "handler": 1,
+          "name": "Critical Discrepancy Alert",
+          "noDataState": "no_data",
+          "notifications": []
+        }
+      },
+      {
+        "id": 7,
+        "title": "Warning Discrepancies by Asset",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+        "targets": [
+          {
+            "expr": "sum by (asset) (merid_recon_discrepancy_warning_count{venue=\"kalshi\"})",
+            "legendFormat": "{{asset}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "short", "label": "Warning Count"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 8,
+        "title": "Gate State Timeline",
+        "type": "state-timeline",
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 20},
+        "targets": [
+          {
+            "expr": "merid_gate_state{venue=\"kalshi\"}",
+            "legendFormat": "{{state}}",
+            "refId": "A"
+          }
+        ],
+        "options": {
+          "showValue": "auto",
+          "legend": {
+            "showLegend": true,
+            "displayMode": "list",
+            "placement": "bottom",
+            "calcs": []
+          }
+        }
+      },
+      {
+        "id": 9,
+        "title": "Block Reason Sources (Top 10)",
+        "type": "piechart",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 28},
+        "targets": [
+          {
+            "expr": "topk(10, sum by (source) (merid_gate_block_reason_count{venue=\"kalshi\"}))",
+            "legendFormat": "{{source}}",
+            "refId": "A"
+          }
+        ],
+        "options": {
+          "legend": {
+            "showLegend": true,
+            "displayMode": "table",
+            "placement": "right"
+          },
+          "pieType": "pie"
+        }
+      },
+      {
+        "id": 10,
+        "title": "Block Reasons by Severity",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 28},
+        "targets": [
+          {
+            "expr": "sum by (severity) (merid_gate_block_reason_count{venue=\"kalshi\"})",
+            "legendFormat": "{{severity}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "short", "label": "Reason Count"},
+          {"format": "short"}
+        ],
+        "options": {
+          "displayMode": "stacked"
+        }
+      },
+      {
+        "id": 11,
+        "title": "Reconciliation Run Rate",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 36},
+        "targets": [
+          {
+            "expr": "rate(merid_recon_runs_total{venue=\"kalshi\"}[5m])",
+            "legendFormat": "Runs/sec (5m)",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "ops", "label": "Runs/sec"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 12,
+        "title": "Gate State Transitions",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 36},
+        "targets": [
+          {
+            "expr": "rate(merid_gate_state_transitions_total{venue=\"kalshi\"}[5m])",
+            "legendFormat": "{{from_state}} → {{to_state}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "ops", "label": "Transitions/sec"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 13,
+        "title": "Recon Health Summary",
+        "type": "table",
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 44},
+        "targets": [
+          {
+            "expr": "merid_recon_discrepancy_critical_count{venue=\"kalshi\"}",
+            "legendFormat": "Critical",
+            "refId": "A",
+            "format": "table"
+          },
+          {
+            "expr": "merid_recon_discrepancy_warning_count{venue=\"kalshi\"}",
+            "legendFormat": "Warning",
+            "refId": "B",
+            "format": "table"
+          },
+          {
+            "expr": "merid_recon_run_duration_seconds{venue=\"kalshi\"}",
+            "legendFormat": "Duration",
+            "refId": "C",
+            "format": "table"
+          }
+        ],
+        "transformations": [
+          {
+            "id": "organize",
+            "options": {
+              "excludeByName": {"Time": true, "__name__": true},
+              "indexByName": {},
+              "renameByName": {
+                "asset": "Asset",
+                "Critical": "Critical Count",
+                "Warning": "Warning Count",
+                "Duration": "Last Duration (s)"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": 14,
+        "title": "Kalshi API Request Rate (per endpoint)",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 52},
+        "targets": [
+          {
+            "expr": "rate(kalshi_api_requests_total{endpoint=~\"/.*\"}[5m])",
+            "legendFormat": "{{endpoint}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "reqps", "label": "Requests/sec"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 15,
+        "title": "Kalshi API Error Rate (per endpoint)",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 52},
+        "targets": [
+          {
+            "expr": "rate(kalshi_api_errors_total{endpoint=~\"/.*\"}[5m])",
+            "legendFormat": "{{endpoint}} ({{status_code}})",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "reqps", "label": "Errors/sec"},
+          {"format": "short"}
+        ],
+        "alert": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [0.1],
+                "type": "gt"
+              },
+              "operator": {
+                "type": "and"
+              },
+              "query": {
+                "params": ["A", "5m", "now"]
+              },
+              "reducer": {
+                "params": [],
+                "type": "avg"
+              },
+              "type": "query"
+            }
+          ],
+          "executionErrorState": "alerting",
+          "frequency": "1m",
+          "handler": 1,
+          "name": "API Error Rate Alert",
+          "noDataState": "no_data",
+          "notifications": []
+        }
+      },
+      {
+        "id": 16,
+        "title": "Kalshi API Latency (p95 by endpoint)",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 60},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, kalshi_api_latency_seconds{endpoint=~\"/.*\"})",
+            "legendFormat": "{{endpoint}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "s", "label": "Latency (seconds)"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 17,
+        "title": "Kalshi API Error Rate %",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 60},
+        "targets": [
+          {
+            "expr": "rate(kalshi_api_errors_total{endpoint=~\"/.*\"}[5m]) / rate(kalshi_api_requests_total{endpoint=~\"/.*\"}[5m]) * 100",
+            "legendFormat": "{{endpoint}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "percent", "label": "Error Rate %"},
+          {"format": "short"
+          }
+        ]
+      }
+    ]
+  }
+}

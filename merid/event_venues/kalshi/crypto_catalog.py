@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
+from logging import getLogger
 from typing import Iterable, List, Optional, Sequence, Tuple, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -17,6 +18,8 @@ from config.kalshi_crypto_config import ACTIVE_CRYPTO_FREQS
 from config.kalshi_universe import ACTIVE_CRYPTO_WS_TIMEFRAMES, KALSHI_CRYPTO_ASSETS
 from merid.event_venues.kalshi.constants import ALL_CRYPTO_ASSETS
 from merid.event_venues.kalshi.market_catalog import CatalogMarket, KalshiMarketCatalog
+
+logger = getLogger(__name__)
 
 _TIMEFRAME_TO_FREQ: dict[str, str] = {
     "15m": "15M",
@@ -67,10 +70,27 @@ def catalog_market_to_kalshi_market_info(cm: CatalogMarket) -> Optional[KalshiMa
     freq = _TIMEFRAME_TO_FREQ.get(cm.timeframe)
     if not freq or freq not in _ACTIVE_FREQ_SET:
         return None
-    tid = cm.market.market_id
+    
+    # CRITICAL FIX: market_id is on nested EventMarket
+    if hasattr(cm, "market") and hasattr(cm.market, "market_id"):
+        tid = cm.market.market_id
+    elif hasattr(cm, "market_id"):
+        tid = cm.market_id
+    else:
+        return None
+    
     if not tid:
         return None
-    exp = cm.expires_at or cm.market.end_date
+    
+    # CRITICAL FIX: end_date is on nested EventMarket
+    if hasattr(cm, "market") and hasattr(cm.market, "end_date"):
+        nested_end_date = cm.market.end_date
+    elif hasattr(cm, "end_date"):
+        nested_end_date = cm.end_date
+    else:
+        nested_end_date = None
+    
+    exp = cm.expires_at or nested_end_date
     if exp and exp.tzinfo is None:
         exp = exp.replace(tzinfo=timezone.utc)
     strike_dec: Optional[Decimal] = None
@@ -168,14 +188,24 @@ def collect_crypto_ws_subscription_tickers(
     tf_set = set(timeframes or ACTIVE_CRYPTO_WS_TIMEFRAMES)
     rows: List[CatalogMarket] = []
     for cm in catalog.get_all_markets():
-        if active_only and not cm.market.active:
-            continue
-        if cm.category != "crypto":
-            continue
         if not cm.asset or cm.asset not in asset_set:
             continue
-        if cm.timeframe not in tf_set:
-            continue
+        # CRITICAL FIX: active is on nested EventMarket
+        if active_only:
+            if hasattr(cm, "market") and hasattr(cm.market, "active"):
+                if not cm.market.active:
+                    continue
+            elif hasattr(cm, "active"):
+                if not cm.active:
+                    continue
+        # CRITICAL FIX: Don't filter by category since Kalshi API returns category=None for crypto markets
+        # Instead, rely on asset detection from ticker patterns (KXBTC, KXETH, KXSOL, etc.)
+        # if cm.category != "crypto":
+        #     continue
+        # CRITICAL FIX: Don't filter by timeframe since Kalshi API doesn't set it consistently
+        # Instead, rely on series ticker suffix (KXBTC15M → 15m) which is already parsed in enrichment
+        # if cm.timeframe not in tf_set:
+        #     continue
         rows.append(cm)
 
     crypto_cat = build_kalshi_crypto_catalog_from_catalog_markets(rows)
@@ -189,7 +219,13 @@ def summarize_crypto_ws_coverage(tickers: Sequence[str], catalog: KalshiMarketCa
     by_asset: dict[str, int] = {a: 0 for a in KALSHI_CRYPTO_ASSETS}
     tick_set = set(tickers)
     for cm in catalog.get_all_markets():
-        tid = cm.market.market_id
+        # CRITICAL FIX: market_id is on nested EventMarket
+        if hasattr(cm, "market") and hasattr(cm.market, "market_id"):
+            tid = cm.market.market_id
+        elif hasattr(cm, "market_id"):
+            tid = cm.market_id
+        else:
+            continue
         if tid not in tick_set or not cm.asset:
             continue
         if cm.asset in by_asset:

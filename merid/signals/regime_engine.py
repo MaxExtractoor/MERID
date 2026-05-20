@@ -43,13 +43,20 @@ class RegimeEngine:
     """
 
     _instance: Optional[RegimeEngine] = None
-    _lock = threading.Lock()
+    # TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+    # TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+    # _lock = threading.Lock()
+    _lock = None  # Disabled to prevent startup hang
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
+            if cls._lock is not None:
+                with cls._lock:
+                    if cls._instance is None:
+                        cls._instance = super().__new__(cls)
+            else:
+                # Lock disabled - direct initialization (startup workaround)
+                cls._instance = super().__new__(cls)
         return cls._instance
 
     def __init__(self, config: Optional[RegimeConfig] = None):

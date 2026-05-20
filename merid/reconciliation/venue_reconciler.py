@@ -19,6 +19,14 @@ from utils.logger import get_logger
 
 logger = get_logger("merid.reconciliation.venue")
 
+# Import metrics emission (defensive import in case module not available)
+try:
+    from merid.reconciliation.reconciliation_metrics import emit_recon_metrics
+    _METRICS_AVAILABLE = True
+except ImportError:
+    _METRICS_AVAILABLE = False
+    logger.debug("Reconciliation metrics module not available - metrics will not be emitted")
+
 # Persist last reconciliation report for debugging
 _REPORT_PATH = Path("data/reconciliation_report.json")
 
@@ -289,6 +297,7 @@ def clear_phantom_kill_switch(operator: str = "system", reason: str = "") -> Dic
 def reconcile_venue(venue_name: str) -> List[VenuePositionDiscrepancy]:
     """Reconcile MERID positions against a single venue."""
     discrepancies: List[VenuePositionDiscrepancy] = []
+    start_time = time.monotonic()
 
     # Kalshi-specific: try the dedicated venue adapter first (fail-closed in live).
     if venue_name == "kalshi":
@@ -375,6 +384,11 @@ def reconcile_venue(venue_name: str) -> List[VenuePositionDiscrepancy]:
         v = venue_map.get(symbol, {"qty": 0.0, "entry_price": 0.0})
         m = merid_map.get(symbol, {"qty": 0.0, "entry_price": 0.0})
 
+        # Skip false positives: if both quantities are 0 (or within tolerance), there's no discrepancy
+        # This prevents reporting phantom positions that don't exist in either system
+        if abs(v["qty"]) < 0.001 and abs(m["qty"]) < 0.001:
+            continue
+
         if abs(v["qty"] - m["qty"]) > 0.001 or symbol not in venue_map or symbol not in merid_map:
             disc = VenuePositionDiscrepancy(
                 venue=venue_name,
@@ -389,12 +403,31 @@ def reconcile_venue(venue_name: str) -> List[VenuePositionDiscrepancy]:
     if discrepancies:
         n_crit = sum(1 for d in discrepancies if d.severity == "critical")
         n_warn = sum(1 for d in discrepancies if d.severity == "warning")
-        logger.warning(
-            f"Reconciliation {venue_name}: {len(discrepancies)} discrepancies "
-            f"({n_crit} critical, {n_warn} warning)"
-        )
+        n_info = len(discrepancies) - n_crit - n_warn
+        # NOISE-FIX: Only log at warning if there are actual issues; info-level drifts go to debug
+        if n_crit > 0 or n_warn > 0:
+            logger.warning(
+                f"Reconciliation {venue_name}: {len(discrepancies)} discrepancies "
+                f"({n_crit} critical, {n_warn} warning, {n_info} info)"
+            )
+        else:
+            logger.debug(
+                f"Reconciliation {venue_name}: {n_info} minor drifts (info-level only)"
+            )
     else:
         logger.info(f"Reconciliation {venue_name}: all positions match")
+
+    # Emit reconciliation metrics if available
+    if _METRICS_AVAILABLE:
+        duration_seconds = time.monotonic() - start_time
+        try:
+            emit_recon_metrics(
+                venue=venue_name,
+                duration_seconds=duration_seconds,
+                discrepancies=discrepancies,
+            )
+        except Exception as e:
+            logger.debug(f"Failed to emit reconciliation metrics: {e}")
 
     return discrepancies
 
@@ -567,7 +600,17 @@ def force_align_from_venue(venue_name: str, user_id: str = "operator") -> Dict[s
                 pass
 
             k_ad = get_kalshi_venue_adapter()
-            raw_positions = _asyncio.run(k_ad.get_positions())
+            try:
+                from core.event_loop_registry import run_on_main_loop, get_main_loop
+                if get_main_loop() is not None:
+                    raw_positions = run_on_main_loop(k_ad.get_positions(), timeout=15)
+                else:
+                    # No main loop registered (e.g. CLI / tests) — fall back to
+                    # a fresh asyncio.run.  Safe ONLY if the venue client has
+                    # no resources bound to another loop.
+                    raw_positions = _asyncio.run(k_ad.get_positions())
+            except ImportError:
+                raw_positions = _asyncio.run(k_ad.get_positions())
             venue_positions = [
                 PositionSnapshot(
                     symbol=vp.market_id,

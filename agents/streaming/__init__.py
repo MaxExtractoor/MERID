@@ -6,21 +6,21 @@ Production autonomous agents that subscribe to event streams.
 """
 
 from agents.streaming.market_analyst import MarketAnalystAgent
-from agents.streaming.news_analyst import NewsAnalystAgent
+# NewsAnalystAgent moved to legacy (PRODUCTION FIX 2026-05-13)
 from agents.streaming.risk_agent import RiskAgent
 from agents.streaming.skeptic_agent import SkepticAgent
-from agents.streaming.synthesizer_agent import SynthesizerAgent
+# SynthesizerAgent moved to legacy (PRODUCTION FIX 2026-05-13)
 from agents.streaming.strategy_agent import StrategyAgent
-from agents.streaming.archivist_agent import ArchivistAgent
-from agents.streaming.meta_audit_agent import MetaAuditAgent
+# ArchivistAgent moved to legacy (PRODUCTION FIX 2026-05-13)
+# MetaAuditAgent moved to legacy (PRODUCTION FIX 2026-05-13)
 
 __all__ = [
     'MarketAnalystAgent',
-    'NewsAnalystAgent',
+    # 'NewsAnalystAgent',  # Moved to legacy
     'RiskAgent',
     'SkepticAgent',
-    'SynthesizerAgent',
+    # 'SynthesizerAgent',  # Moved to legacy
     'StrategyAgent',
-    'ArchivistAgent',
-    'MetaAuditAgent'
+    # 'ArchivistAgent',  # Moved to legacy
+    # 'MetaAuditAgent',  # Moved to legacy
 ]

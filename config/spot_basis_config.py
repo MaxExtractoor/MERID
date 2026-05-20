@@ -59,6 +59,12 @@ BOOK_MISSING_MS: float = float(os.getenv("KALSHI_BASIS_BOOK_MISSING_MS", "60000"
 # Rolling stats window — default 1 hour (3600 samples at 1s tick)
 ROLLING_WINDOW_SECONDS: int = int(os.getenv("KALSHI_BASIS_ROLLING_WINDOW_SECS", "3600"))
 
+# Spot feed source configuration
+# "coinbase" - uses Coinbase LivePriceFeed (BTC/USD, ETH/USD, etc.)
+# "kraken" - uses Kraken public API ticker (XBTUSD, ETHUSD, etc.)
+# "coingecko" - uses CoinGecko API (bitcoin, ethereum, etc.)
+SPOT_FEED_SOURCE: str = os.getenv("MERID_SPOT_FEED_SOURCE", "coinbase")
+
 # Coinbase price-cache symbol map (must match LivePriceFeed.price_cache keys)
 # LivePriceFeed stores under "BTC/USD" format (CCXT-style, USD-denominated)
 COINBASE_SPOT_SYMBOLS: Dict[str, str] = {
@@ -67,6 +73,25 @@ COINBASE_SPOT_SYMBOLS: Dict[str, str] = {
     "SOL":  "SOL/USD",
     "XRP":  "XRP/USD",
     "DOGE": "DOGE/USD",
+}
+
+# Kraken ticker symbol map (must match Kraken public API)
+# Kraken uses XBT for Bitcoin, not BTC
+KRAKEN_SPOT_SYMBOLS: Dict[str, str] = {
+    "BTC":  "XBTUSD",
+    "ETH":  "ETHUSD",
+    "SOL":  "SOLUSD",
+    "XRP":  "XRPUSD",
+    "DOGE": "DOGEUSD",
+}
+
+# CoinGecko ID map (must match CoinGecko API)
+COINGECKO_IDS: Dict[str, str] = {
+    "BTC":  "bitcoin",
+    "ETH":  "ethereum",
+    "SOL":  "solana",
+    "XRP":  "ripple",
+    "DOGE": "dogecoin",
 }
 
 # Kalshi ticker prefixes used for fallback asset inference when `underlying` field is None

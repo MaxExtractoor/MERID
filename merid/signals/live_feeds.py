@@ -29,6 +29,32 @@ from utils.logger import get_logger
 logger = get_logger("merid.signals.live_feeds")
 
 
+# PRODUCTION FIX (2026-05-13): Finnhub symbol normalization
+# Handles format mismatches like "BTC-USD" vs "BTC" in related fields
+def _normalize_finnhub_symbol(symbol: str) -> str:
+    """Normalize Finnhub symbol to base ticker format.
+    
+    Handles common variations:
+    - "BTC-USD" -> "BTC"
+    - "ETH-USD" -> "ETH"
+    - "BTC/USD" -> "BTC"
+    - "BTC:USD" -> "BTC"
+    """
+    if not symbol:
+        return symbol
+    
+    # Remove common suffixes and separators
+    for sep in ["-USD", "/USD", ":USD", "-USDT", "/USDT", ":USDT", "-USDC", "/USDC", ":USDC"]:
+        if symbol.endswith(sep):
+            symbol = symbol[:-len(sep)]
+            break
+    
+    # Remove any remaining separators
+    symbol = symbol.replace("-", "").replace("/", "").replace(":", "")
+    
+    return symbol.upper()
+
+
 def _build_coingecko_ids() -> dict:
     """Build base→coingecko_id map from the top-50 asset universe."""
     try:
@@ -77,31 +103,37 @@ class LiveFeedManager:
     async def refresh_all(self, symbols: List[str], now: Optional[float] = None):
         """Refresh all feeds for the given symbols (concurrently).
         
-        P1-HARDENING: Per-feed timeouts (1.0s) prevent single slow feed from blocking.
+        OLD-HARDWARE FIX (2026-04-28): Increased timeouts for weak hardware + spotty internet.
+        - Non-critical feeds (news, macro, on-chain): 4s timeout (was 1s)
+        - Uses cached/synthetic fallback on timeout - never fatal
         """
         import asyncio
         now = now or time.time()
         
-        # P1-HARDENING: Per-feed timeouts to stay within features budget
+        # OLD-HARDWARE FIX: Increased per-feed timeouts for unreliable networks
+        _NEWS_TIMEOUT = float(os.getenv("MERID_FEED_NEWS_TIMEOUT_S", "4.0"))  # was 1.0, now 4.0
+        _MACRO_TIMEOUT = float(os.getenv("MERID_FEED_MACRO_TIMEOUT_S", "4.0"))  # was 1.0, now 4.0
+        _ONCHAIN_TIMEOUT = float(os.getenv("MERID_FEED_ONCHAIN_TIMEOUT_S", "3.0"))  # was 1.0, now 3.0
+        
         async def _timed_refresh_news():
             try:
-                await asyncio.wait_for(self.refresh_news(symbols, now), timeout=1.0)
+                await asyncio.wait_for(self.refresh_news(symbols, now), timeout=_NEWS_TIMEOUT)
             except asyncio.TimeoutError:
-                logger.warning("[BUDGET] News feed refresh timed out after 1.0s")
+                logger.warning(f"[BUDGET] News feed refresh timed out after {_NEWS_TIMEOUT}s — using cached/synthetic")
                 self._stats["errors"] += 1
         
         async def _timed_refresh_macro():
             try:
-                await asyncio.wait_for(self.refresh_macro(now), timeout=1.0)
+                await asyncio.wait_for(self.refresh_macro(now), timeout=_MACRO_TIMEOUT)
             except asyncio.TimeoutError:
-                logger.warning("[BUDGET] Macro feed refresh timed out after 1.0s")
+                logger.warning(f"[BUDGET] Macro feed refresh timed out after {_MACRO_TIMEOUT}s — using cached/synthetic")
                 self._stats["errors"] += 1
         
         async def _timed_refresh_onchain():
             try:
-                await asyncio.wait_for(self.refresh_onchain(symbols, now), timeout=1.0)
+                await asyncio.wait_for(self.refresh_onchain(symbols, now), timeout=_ONCHAIN_TIMEOUT)
             except asyncio.TimeoutError:
-                logger.warning("[BUDGET] On-chain feed refresh timed out after 1.0s")
+                logger.warning(f"[BUDGET] On-chain feed refresh timed out after {_ONCHAIN_TIMEOUT}s — using cached/synthetic")
                 self._stats["errors"] += 1
         
         await asyncio.gather(
@@ -226,6 +258,7 @@ class LiveFeedManager:
         }
 
     async def close(self):
+        """Close the HTTP client to prevent resource leaks."""
         await self._client.aclose()
 
     # ── Finnhub news ──────────────────────────────────────────────────
@@ -253,11 +286,16 @@ class LiveFeedManager:
             
             count = 0
             matched_symbols = set()
+            normalization_attempts = 0
             for article in articles[:50]:  # Cap at 50
                 headline = article.get("headline", "")
                 summary = article.get("summary", "")
                 ts = article.get("datetime", now)
                 related = article.get("related", "").upper()
+                
+                # PRODUCTION FIX: Normalize Finnhub symbols to handle format mismatches
+                # e.g., "BTC-USD" in related field vs "BTC" in our symbol list
+                normalized_related = _normalize_finnhub_symbol(related)
 
                 # Simple sentiment heuristic from headline keywords
                 sentiment = self._headline_sentiment(headline + " " + summary)
@@ -265,11 +303,15 @@ class LiveFeedManager:
                 # Ingest for matching symbols or as general market news
                 matched = False
                 for sym in symbols:
-                    if sym.upper() in related or sym.upper() in headline.upper():
+                    sym_upper = sym.upper()
+                    # Try both original and normalized matching
+                    if sym_upper in related or sym_upper in normalized_related or sym_upper in headline.upper():
                         self._fs.news.ingest(sym, sentiment, headline, ts=float(ts))
                         matched = True
                         count += 1
                         matched_symbols.add(sym)
+                        if sym_upper not in related and sym_upper in normalized_related:
+                            normalization_attempts += 1
 
                 if not matched:
                     # General market news — ingest for all active symbols with lower weight
@@ -279,13 +321,21 @@ class LiveFeedManager:
 
             self._stats["news_fetched"] += count
             
+            # PRODUCTION FIX: Log normalization metrics
+            if normalization_attempts > 0:
+                logger.info(
+                    f"Finnhub: Symbol normalization matched {normalization_attempts} articles "
+                    f"(format mismatch: 'BTC-USD' vs 'BTC')"
+                )
+            
             # Enhanced logging to distinguish API response vs filtering results
             if api_articles_received == 0:
                 logger.warning(f"Finnhub: API returned 0 articles (check API key/category)")
             elif count == 0:
                 logger.warning(
                     f"Finnhub: API returned {api_articles_received} articles but 0 matched "
-                    f"symbols {symbols[:5]}{'...' if len(symbols) > 5 else ''}"
+                    f"symbols {symbols[:5]}{'...' if len(symbols) > 5 else ''} - "
+                    f"Check symbol names in Finnhub 'related' field (e.g. 'BTC' vs 'BTC-USD')"
                 )
             else:
                 logger.info(
@@ -544,13 +594,20 @@ class LiveFeedManager:
 # ── Singleton ─────────────────────────────────────────────────────────
 
 _live_feed_mgr: Optional[LiveFeedManager] = None
-_live_feed_mgr_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _live_feed_mgr_lock = threading.Lock()
+_live_feed_mgr_lock = None  # Disabled to prevent startup hang
 
 
 def get_live_feed_manager() -> LiveFeedManager:
     global _live_feed_mgr
     if _live_feed_mgr is None:
-        with _live_feed_mgr_lock:
-            if _live_feed_mgr is None:
-                _live_feed_mgr = LiveFeedManager()
+        if _live_feed_mgr_lock is not None:
+            with _live_feed_mgr_lock:
+                if _live_feed_mgr is None:
+                    _live_feed_mgr = LiveFeedManager()
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _live_feed_mgr = LiveFeedManager()
     return _live_feed_mgr

@@ -99,13 +99,22 @@ start_server() {
     
     export MERID_ENV="$ENVIRONMENT"
     
+    # Determine entrypoint based on MERID_PROFILE
+    if [ "${MERID_PROFILE:-}" = "kalshi_crypto_15m_v2" ]; then
+        ENTRYPOINT="web.main_15m:app"
+        log_info "Using 15m entrypoint (web.main_15m:app) for kalshi_crypto_15m_v2 profile"
+    else
+        ENTRYPOINT="web.main:app"
+        log_info "Using legacy entrypoint (web.main:app)"
+    fi
+    
     if [ "$ENVIRONMENT" = "production" ]; then
         # Production: Use gunicorn with uvicorn workers
-        export MERID_PROFILE="kalshi-only"
+        export MERID_PROFILE="${MERID_PROFILE:-kalshi-only}"
         export MERID_LOG_LEVEL="INFO"
         export RELOAD="false"
         
-        exec gunicorn web.main:app \
+        exec gunicorn $ENTRYPOINT \
             --bind "${HOST:-0.0.0.0}:${PORT:-8011}" \
             --workers 4 \
             --worker-class uvicorn.workers.UvicornWorker \
@@ -119,11 +128,11 @@ start_server() {
             --enable-stdio-inheritance
     else
         # Development: Use uvicorn directly with auto-reload
-        export MERID_PROFILE="full"
+        export MERID_PROFILE="${MERID_PROFILE:-full}"
         export MERID_LOG_LEVEL="DEBUG"
         export RELOAD="true"
         
-        exec python -m uvicorn web.main:app \
+        exec python -m uvicorn $ENTRYPOINT \
             --host "${HOST:-127.0.0.1}" \
             --port "${PORT:-8011}" \
             --reload \

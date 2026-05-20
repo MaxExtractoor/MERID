@@ -234,7 +234,10 @@ class BtcAnchoredMoveModel:
         self._cache: Dict[Tuple[str, str], BetaEstimate] = {}
         self._cache_ts: float = 0.0
 
-        self._lock = threading.Lock()
+        # TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+        # TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+        # self._lock = threading.Lock()
+        self._lock = None  # Disabled to prevent startup hang
 
     # ── Data ingestion ────────────────────────────────────────────────────
 
@@ -254,7 +257,25 @@ class BtcAnchoredMoveModel:
             ts: Optional timestamp; defaults to now.
         """
         ts = ts or time.time()
-        with self._lock:
+        if self._lock is not None:
+            with self._lock:
+                for asset, ret in returns.items():
+                    asset = asset.upper()
+                    if asset not in SUPPORTED_ASSETS:
+                        continue
+                    buf = self._returns[timeframe][asset]
+                    buf.append(ret)
+                    if len(buf) > self._window:
+                        self._returns[timeframe][asset] = buf[-self._window:]
+
+                self._timestamps[timeframe].append(ts)
+                if len(self._timestamps[timeframe]) > self._window:
+                    self._timestamps[timeframe] = self._timestamps[timeframe][-self._window:]
+
+                # Invalidate cache
+                self._cache_ts = 0.0
+        else:
+            # Lock disabled - direct update (startup workaround)
             for asset, ret in returns.items():
                 asset = asset.upper()
                 if asset not in SUPPORTED_ASSETS:
@@ -673,18 +694,96 @@ def _bucket_label(lo: float, hi: float) -> str:
 # ═══════════════════════════════════════════════════════════════════════════
 
 _model: Optional[BtcAnchoredMoveModel] = None
-_model_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _model_lock = threading.Lock()
+_model_lock = None  # Disabled to prevent startup hang
 
 
 def get_btc_anchored_model() -> BtcAnchoredMoveModel:
     """Get or create the singleton BtcAnchoredMoveModel."""
     global _model
     if _model is None:
-        with _model_lock:
-            if _model is None:
-                _model = BtcAnchoredMoveModel()
-                logger.info(
-                    "BtcAnchoredMoveModel initialized (window=%d, min_obs=%d)",
-                    DEFAULT_WINDOW, MIN_OBSERVATIONS,
-                )
+        if _model_lock is not None:
+            with _model_lock:
+                if _model is None:
+                    _model = BtcAnchoredMoveModel()
+                    logger.info(
+                        "BtcAnchoredMoveModel singleton initialized (window=%d, min_obs=%d)",
+                        _model._window,
+                        _model._min_obs,
+                    )
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _model = BtcAnchoredMoveModel()
+            logger.info(
+                "BtcAnchoredMoveModel singleton initialized (lock disabled) (window=%d, min_obs=%d)",
+                _model._window,
+                _model._min_obs,
+            )
     return _model
+
+
+def get_dynamic_beta(
+    asset: str,
+    timeframe: str = "15m",
+    min_observations: int = 20,
+    fallback_to_static: bool = True,
+) -> float:
+    """Get real-time beta for an asset vs BTC from the anchored model.
+
+    This provides dynamic beta estimates based on recent price action,
+    falling back to static config values if insufficient data.
+
+    Args:
+        asset: Asset symbol (e.g., "SOL", "ETH", "DOGE")
+        timeframe: Timeframe for beta calculation (default "15m")
+        min_observations: Minimum observations required for valid beta
+        fallback_to_static: If True, return static beta from config when
+            dynamic beta unavailable; if False, return 1.0
+
+    Returns:
+        Beta value (float). Default 1.0 if unavailable and fallback_to_static=False.
+
+    Usage:
+        from merid.signals.btc_anchored_move import get_dynamic_beta
+
+        # Get dynamic beta for SOL
+        beta = get_dynamic_beta("SOL", "15m")
+
+        # Use in position sizing (inverse beta scaling)
+        size_multiplier = 1.0 / max(beta, 0.5)
+    """
+    try:
+        model = get_btc_anchored_model()
+        beta_estimate = model.get_beta(asset, timeframe)
+
+        # Check if we have enough observations
+        if beta_estimate.n_obs >= min_observations:
+            logger.debug(
+                "[DYNAMIC-BETA] %s/%s: beta=%.2f (n=%d, r2=%.2f)",
+                asset, timeframe, beta_estimate.beta, beta_estimate.n_obs, beta_estimate.r_squared
+            )
+            return beta_estimate.beta
+
+        # Not enough data, use fallback
+        if fallback_to_static:
+            from merid.signals.asset_configs import get_asset_config
+            static_beta = get_asset_config(asset).beta_15m
+            logger.debug(
+                "[DYNAMIC-BETA] %s/%s: insufficient data (n=%d), using static beta=%.2f",
+                asset, timeframe, beta_estimate.n_obs, static_beta
+            )
+            return static_beta
+        else:
+            return 1.0
+
+    except Exception as exc:
+        logger.debug("[DYNAMIC-BETA] %s/%s: error getting beta: %s", asset, timeframe, exc)
+        if fallback_to_static:
+            try:
+                from merid.signals.asset_configs import get_asset_config
+                return get_asset_config(asset).beta_15m
+            except Exception:
+                pass
+        return 1.0

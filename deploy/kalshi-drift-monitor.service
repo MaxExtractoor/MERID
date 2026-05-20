@@ -1,0 +1,33 @@
+[Unit]
+Description=Kalshi Live Drift Monitor — periodic reconciliation drift detection
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=merid
+WorkingDirectory=/opt/merid
+ExecStart=/opt/merid/.venv/bin/python scripts/kalshi_live_drift_monitor.py --once --minutes=10
+
+# ── Environment ──────────────────────────────────────────────────────────
+# Option A: inline (replace ... with real values)
+#Environment="KALSHI_API_KEY_ID=..."
+#Environment="KALSHI_PRIVATE_KEY_PATH=/opt/merid/kalshi.key"
+
+# Option B: env file (recommended — keeps secrets out of unit file)
+EnvironmentFile=-/opt/merid/.env
+
+# ── Tuning ───────────────────────────────────────────────────────────────
+# Time window for fills replay (minutes); default 10 for conservative API load
+Environment="DRIFT_MONITOR_MINUTES=10"
+# Subaccount to monitor (optional; defaults to main subaccount)
+#Environment="DRIFT_MONITOR_SUBACCOUNT=..."
+
+# ── Hardening ────────────────────────────────────────────────────────────
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/merid
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

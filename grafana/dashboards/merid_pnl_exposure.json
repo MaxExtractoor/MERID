@@ -1,0 +1,207 @@
+{
+  "dashboard": {
+    "title": "MERID PnL & Exposure",
+    "uid": "merid-pnl-exposure",
+    "tags": ["merid", "pnl", "exposure"],
+    "timezone": "browser",
+    "refresh": "1m",
+    "time": {
+      "from": "now-24h",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Total PnL",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "merid_total_pnl",
+            "legendFormat": "Total PnL"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "currencyUSD"
+          }
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 0,
+          "y": 0
+        }
+      },
+      {
+        "id": 2,
+        "title": "Daily PnL",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "merid_daily_pnl",
+            "legendFormat": "Daily PnL"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "currencyUSD"
+          }
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 6,
+          "y": 0
+        }
+      },
+      {
+        "id": 3,
+        "title": "Max Drawdown",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "merid_max_drawdown",
+            "legendFormat": "Max Drawdown"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "currencyUSD",
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "yellow",
+                  "value": -100
+                },
+                {
+                  "color": "red",
+                  "value": -500
+                }
+              ]
+            }
+          }
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 12,
+          "y": 0
+        }
+      },
+      {
+        "id": 4,
+        "title": "Net Exposure",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "merid_net_exposure",
+            "legendFormat": "Net Exposure"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "currencyUSD"
+          }
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 18,
+          "y": 0
+        }
+      },
+      {
+        "id": 5,
+        "title": "PnL by Asset",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum by (asset) (merid_pnl)",
+            "legendFormat": "{{asset}}"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 4
+        }
+      },
+      {
+        "id": 6,
+        "title": "PnL by Strategy",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum by (strategy) (merid_pnl)",
+            "legendFormat": "{{strategy}}"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 4
+        }
+      },
+      {
+        "id": 7,
+        "title": "Exposure by Asset",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum by (asset) (merid_exposure)",
+            "legendFormat": "{{asset}}"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 12
+        }
+      },
+      {
+        "id": 8,
+        "title": "Exposure by Timeframe",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum by (timeframe) (merid_exposure)",
+            "legendFormat": "{{timeframe}}"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 12
+        }
+      },
+      {
+        "id": 9,
+        "title": "PnL Curve",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "merid_cumulative_pnl",
+            "legendFormat": "Cumulative PnL"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 24,
+          "x": 0,
+          "y": 20
+        }
+      }
+    ]
+  }
+}

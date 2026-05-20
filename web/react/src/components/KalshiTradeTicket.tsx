@@ -17,10 +17,24 @@ import {
   ArrowRight, Loader2, RefreshCw, WifiOff, Clock,
 } from '../ui/icons';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY } from '../config/constants';
+
 import { useApiData } from '../hooks/useApiData';
 import { logUxEvent } from '../utils/uxTelemetry';
 import { SentimentBundleCard } from './SentimentBundleCard';
 import { useFillToast } from '../hooks/useFillToast';
+
+// AbortSignal.timeout polyfill for Safari <16.5, Firefox <127
+function abortSignalTimeout(ms: number): AbortSignal {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), ms);
+  // Clean up timer if signal is already aborted externally
+  if (controller.signal.aborted) {
+    clearTimeout(id);
+  } else {
+    controller.signal.addEventListener('abort', () => clearTimeout(id), { once: true });
+  }
+  return controller.signal;
+}
 
 interface Outcome {
   id: string;
@@ -55,7 +69,10 @@ interface TradeTicketProps {
 type Side = 'yes' | 'no';
 type SizeMode = 'contracts' | 'dollars';
 
-const KALSHI_FEE_RATE = 0.07; // 7% of profit (Kalshi standard)
+// UI DISPLAY ONLY - Simplified 7% fee rate for display purposes
+// Backend uses canonical tiered fee calculation: merid/event_venues/kalshi/fees.py
+// Tiered rates: 1-99 contracts (7%), 100-999 (5%), 1000+ (3%) with parabolic formula
+const KALSHI_FEE_RATE = 0.07;
 
 const ProgressBar = memo(function ProgressBar({ pct, color }: { pct: number; color: string }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -162,7 +179,7 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
       try {
         const response = await fetch(`${API_BASE_URL}/api/v1/health`, { 
           method: 'HEAD',
-          signal: AbortSignal.timeout(3000)
+          signal: abortSignalTimeout(3000)
         });
         setNetworkStatus(response.ok ? 'online' : 'slow');
       } catch {
@@ -178,7 +195,9 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
     if (effectiveContracts <= 0) return 'Size must be at least 1 contract';
     if (priceCents <= 0 || priceCents >= 100) return 'Price must be between 1¢ and 99¢';
     if (useLimit && limitPrice == null) return 'Enter a limit price';
-    if (enhanced && balance && balance.available < cost) return 'Insufficient balance';
+    // Use total_value_cents (cash + portfolio) for balance check, fallback to available for backward compatibility
+    const balanceCents = (balance as any)?.total_value_cents ?? (balance?.available ?? 0) * 100;
+    if (enhanced && balance && balanceCents < cost * 100) return 'Insufficient balance';
     return null;
   }, [effectiveContracts, priceCents, useLimit, limitPrice, enhanced, balance, cost]);
 
@@ -251,7 +270,7 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}`, 'X-Session-ID': token } : {}),
         },
-        ...(enhanced ? { signal: AbortSignal.timeout(12000) } : {}),
+        ...(enhanced ? { signal: abortSignalTimeout(12000) } : {}),
       });
 
       if (submitTimeoutRef.current) {
@@ -494,8 +513,8 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
         <div className="flex justify-between text-xs">
           <span className="text-gray-400">
             Fee
-            <span className="ml-1 text-[10px] text-gray-600" title="Kalshi charges 7% of profit on winning trades">
-              (7% of profit)
+            <span className="ml-1 text-[10px] text-gray-600" title="Estimated fee assuming taker order. Actual fees depend on maker/taker status, fill price, and contract count. Kalshi uses a tiered parabolic formula (7%/5%/3% tiers).">
+              (est. taker)
             </span>
           </span>
           <span className="text-yellow-400 font-mono">-${(fee ?? 0).toFixed(2)}</span>

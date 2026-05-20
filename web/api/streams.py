@@ -19,6 +19,7 @@ from typing import Dict, List, Optional, Set
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from utils.logger import get_logger
 from data.live_price_feed import get_live_price_feed
+from trading.paper_trading import get_paper_engine
 
 router = APIRouter(prefix="/ws", tags=["websocket"])
 logger = get_logger("web.api.streams")

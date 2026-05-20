@@ -170,6 +170,19 @@ class KalshiRateLimitedClient:
         
         logger.info("Kalshi rate-limited client initialized")
     
+    def close(self) -> None:
+        """Close the requests session to free resources. Call on shutdown."""
+        if self.session is not None:
+            try:
+                self.session.close()
+                logger.debug("KalshiRateLimitedClient: requests session closed")
+            except Exception as e:
+                logger.warning("KalshiRateLimitedClient: error closing session: %s", e)
+    
+    def __del__(self) -> None:
+        """Cleanup on garbage collection (fallback if close() not called)."""
+        self.close()
+    
     @rate_limit_decorator(max_retries=3, backoff_factor=1.0)
     def get(self, path: str, params: Optional[Dict[str, Any]] = None, timeout: int = 10) -> requests.Response:
         """

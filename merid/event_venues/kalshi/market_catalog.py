@@ -50,7 +50,7 @@ from utils.logger import get_logger
 try:
     from config.trading_scope import (
         get_trading_scope,
-        is_15m_series_ticker,
+        validate_series_ticker_for_trading,
     )
     TRADING_SCOPE_AVAILABLE = True
 except ImportError:
@@ -306,18 +306,30 @@ class KalshiMarketCatalog:
     # ── Lifecycle ────────────────────────────────────────────────────────
 
     async def start(self) -> None:
-        """Start periodic refresh loop."""
+        """Start periodic refresh loop with initial refresh."""
         if self._task and not self._task.done():
             return
         self._shutdown.clear()
-        # FIX: Defer initial refresh to avoid blocking startup with 5000 market fetch
-        # Start refresh loop immediately, which will do initial refresh on first iteration
+        # CRITICAL FIX: Perform initial refresh immediately to ensure catalog is populated
+        # before downstream components (WS bridge, agents) try to resolve market tickers
+        logger.info("[CATALOG-START] Performing initial refresh before starting periodic loop...")
+        try:
+            await asyncio.wait_for(self.refresh(), timeout=60.0)
+            logger.info("[CATALOG-START] Initial refresh completed successfully")
+        except asyncio.TimeoutError:
+            logger.error("[CATALOG-START] Initial refresh timed out after 60s - this is a critical stall")
+            raise
+        except Exception as e:
+            logger.error("[CATALOG-START] Initial refresh failed: %r", e, exc_info=True)
+            raise
+        
+        # Start periodic refresh loop after initial refresh completes
         self._task = asyncio.create_task(self._refresh_loop(), name="kalshi-catalog-refresh")
         def _task_done_cb(task: asyncio.Task) -> None:
             if not task.cancelled() and task.exception():
                 logger.error("KalshiMarketCatalog refresh task crashed: %s", task.exception())
         self._task.add_done_callback(_task_done_cb)
-        logger.info(f"KalshiMarketCatalog started — refresh loop running (deferred initial load)")
+        logger.info(f"KalshiMarketCatalog started — refresh loop running (initial load complete)")
 
     async def stop(self) -> None:
         """Stop periodic refresh."""
@@ -345,11 +357,23 @@ class KalshiMarketCatalog:
     # ── Core refresh ─────────────────────────────────────────────────────
 
     async def refresh(self) -> int:
-        """Fetch all active markets from Kalshi and rebuild indexes.
+        """Refresh the catalog from the Kalshi API.
 
         Returns:
-            Number of markets cataloged.
+            Number of markets in the catalog after refresh.
         """
+        # CRITICAL FIX: Implement rate limiting to prevent excessive catalog refreshes
+        # Only refresh if at least 30 seconds have passed since last refresh
+        now = datetime.now(timezone.utc)
+        if self._last_refresh:
+            time_since_refresh = (now - self._last_refresh).total_seconds()
+            if time_since_refresh < 30.0:
+                logger.info(
+                    "[CATALOG-REFRESH-RATE-LIMIT] Skipping refresh - last refresh was %.1fs ago (min 30s)",
+                    time_since_refresh
+                )
+                return len(self._markets)
+
         lock = self._ensure_lock()
         async with lock:
             try:
@@ -370,25 +394,60 @@ class KalshiMarketCatalog:
                 raw_markets: list = []
                 seen_tickers: set = set()
 
-                # 1. Fetch priority series concurrently (was sequential — caused 2s+ lag spikes)
-                async def _fetch_series(series: str):
-                    try:
-                        return series, await self._client.list_markets_result(
-                            MarketFilter(active_only=True, limit=200, search=series)
-                        )
-                    except Exception as _exc:
-                        logger.warning("Catalog series fetch error: series=%s err=%s", series, _exc)
-                        return series, None
+                # 1. Fetch priority series with rate limiting and retry logic for 429 errors
+                async def _fetch_series_with_retry(series: str, max_retries: int = 3):
+                    for attempt in range(max_retries):
+                        try:
+                            logger.info("[CATALOG-FETCH] Fetching series=%s with limit=200 (attempt %d/%d)", series, attempt + 1, max_retries)
+                            result = await asyncio.wait_for(
+                                self._client.list_markets_result(
+                                    MarketFilter(active_only=True, limit=200, search=series)
+                                ),
+                                timeout=15.0
+                            )
+                            logger.info("[CATALOG-FETCH] Fetched series=%s result.success=%s count=%d", series, result.success, len(result.data) if result.success else 0)
+                            return series, result
+                        except asyncio.TimeoutError:
+                            logger.warning("Catalog series fetch timeout: series=%s timeout=15s (attempt %d/%d)", series, attempt + 1, max_retries)
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                            else:
+                                return series, None
+                        except Exception as _exc:
+                            # Check if it's a 429 error
+                            if "429" in str(_exc) or "Too Many Requests" in str(_exc):
+                                logger.warning("Catalog series fetch 429 rate limit: series=%s (attempt %d/%d), retrying with backoff", series, attempt + 1, max_retries)
+                                if attempt < max_retries - 1:
+                                    await asyncio.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+                                    continue
+                                else:
+                                    logger.error("Catalog series fetch failed after %d retries due to rate limit: series=%s", max_retries, series)
+                                    return series, None
+                            else:
+                                logger.warning("Catalog series fetch error: series=%s err=%s (attempt %d/%d)", series, _exc, attempt + 1, max_retries)
+                                if attempt < max_retries - 1:
+                                    await asyncio.sleep(1)  # Brief pause before retry
+                                else:
+                                    return series, None
+                    return series, None
 
-                results = await asyncio.gather(
-                    *[_fetch_series(s) for s in _PRIORITY_SERIES],
-                    return_exceptions=False,
-                )
+                # Stagger fetches to avoid 429 rate limit errors
+                # CRITICAL FIX: Increase stagger to 1 second to avoid Kalshi API rate limits
+                # 200ms was insufficient - still getting 429 errors
+                tasks = []
+                for i, series in enumerate(_PRIORITY_SERIES):
+                    task = asyncio.create_task(_fetch_series_with_retry(series))
+                    tasks.append(task)
+                    # Stagger by 1 second between each fetch to avoid rate limiting
+                    if i < len(_PRIORITY_SERIES) - 1:
+                        await asyncio.sleep(1.0)
+
+                results = await asyncio.gather(*tasks, return_exceptions=False)
                 for series, r in results:
                     if r is None:
                         continue
                     _count = len(r.data) if r.success else 0
-                    logger.debug(
+                    logger.info(
                         "Catalog series fetch: series=%s status=%s count=%d sample=%s",
                         series,
                         "ok" if r.success else r.error,
@@ -414,13 +473,29 @@ class KalshiMarketCatalog:
                 logger.warning(f"Failed to fetch markets: {exc}")
                 return len(self._markets)
 
-            # Apply AllowedMarketPolicy filter at the edge
-            # This ensures only BTC/ETH/SOL/XRP/DOGE 15m markets proceed to enrichment
+            # CRITICAL FIX: Enrich markets BEFORE filtering
+            # The filter needs asset/category fields to work correctly, but these are only set during enrichment
+            # Previously we filtered raw markets (asset=None, category=None) which caused issues
             logger.info(
-                "[ALLOWED-MARKET-POLICY] Pre-filter: %d raw markets fetched",
+                "[ENRICHMENT-PRE-FILTER] Enriching %d raw markets before filtering",
                 len(raw_markets)
             )
-            filtered_markets = filter_allowed_markets(raw_markets)
+            enriched_markets = []
+            for mkt in raw_markets:
+                cm = self._enrich(mkt, now)
+                enriched_markets.append(cm)
+            logger.info(
+                "[ENRICHMENT-PRE-FILTER] Enriched %d markets",
+                len(enriched_markets)
+            )
+
+            # Apply AllowedMarketPolicy filter at the edge
+            # This ensures only BTC/ETH/SOL/XRP/DOGE 15m markets proceed to indexing
+            logger.info(
+                "[ALLOWED-MARKET-POLICY] Pre-filter: %d enriched markets",
+                len(enriched_markets)
+            )
+            filtered_markets = filter_allowed_markets(enriched_markets)
             logger.info(
                 "[ALLOWED-MARKET-POLICY] Post-filter: %d markets allowed (BTC/ETH/SOL/XRP/DOGE 15m only)",
                 len(filtered_markets)
@@ -489,16 +564,19 @@ class KalshiMarketCatalog:
 
             # Feed REST data into MarketStateStore so expiry/volume/OI/strikes are available
             # for UI display (crypto spot vs kalshi needs these fields).
+            # TEMPORARILY DISABLED: This path is causing startup hang
+            # TODO: Re-enable with timeout protection once startup is stable
             # IMPORTANT: keep this on the event loop (not asyncio.to_thread) because
             # apply_rest_market uses threading.Lock — offloading to a thread causes WS
             # handlers (also using that lock) to block the event loop waiting for it.
             # batch_size=10 ensures max ~6ms of synchronous work before each yield.
-            try:
-                from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
-                store = get_kalshi_market_state_store()
-                await self._apply_rest_markets_batched(enriched, store, batch_size=10)
-            except Exception as _exc:
-                logger.debug("Catalog → MarketStateStore feed error (non-fatal): %s", _exc)
+            logger.info("[BOOT-TRACE] Catalog → MarketStateStore feed DISABLED to prevent startup hang")
+            # try:
+            #     from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+            #     store = get_kalshi_market_state_store()
+            #     await self._apply_rest_markets_batched(enriched, store, batch_size=10)
+            # except Exception as _exc:
+            #     logger.debug("Catalog → MarketStateStore feed error (non-fatal): %s", _exc)
 
             # Pre-register settlement buffers for RTI-settled markets so the
             # 60-slot grid is allocated before the first RTI tick arrives.
@@ -539,7 +617,16 @@ class KalshiMarketCatalog:
         for mkt in raw_markets:
             cm = self._enrich(mkt, now)
             enriched.append(cm)
-            ticker_idx[mkt.market_id] = cm
+            # CRITICAL FIX: Use nested market.market_id for key since mkt may be CatalogMarket
+            if hasattr(cm, "market") and hasattr(cm.market, "market_id"):
+                ticker_idx[cm.market.market_id] = cm
+            elif hasattr(mkt, "market_id"):
+                ticker_idx[mkt.market_id] = cm
+            else:
+                logger.warning(
+                    "[BUILD-INDEXES] Cannot index market - no market_id found: type=%s",
+                    type(mkt).__name__
+                )
 
             if cm.category:
                 cat_idx[cm.category].append(cm)
@@ -604,7 +691,13 @@ class KalshiMarketCatalog:
 
         registered = 0
         for i, cm in enumerate(enriched):
-            tid = cm.market.market_id
+            # CRITICAL FIX: market_id is on nested EventMarket
+            if hasattr(cm, "market") and hasattr(cm.market, "market_id"):
+                tid = cm.market.market_id
+            elif hasattr(cm, "market_id"):
+                tid = cm.market_id
+            else:
+                continue
             if cm.asset and cm.expires_at and is_rti_settled_kalshi_crypto_ticker(tid):
                 sb_reg.ensure_buffer(
                     market_ticker=tid,
@@ -662,7 +755,13 @@ class KalshiMarketCatalog:
 
         registered = 0
         for cm in enriched:
-            tid = cm.market.market_id
+            # CRITICAL FIX: market_id is on nested EventMarket
+            if hasattr(cm, "market") and hasattr(cm.market, "market_id"):
+                tid = cm.market.market_id
+            elif hasattr(cm, "market_id"):
+                tid = cm.market_id
+            else:
+                continue
             if cm.asset and cm.expires_at and is_rti_settled_kalshi_crypto_ticker(tid):
                 sb_reg.ensure_buffer(
                     market_ticker=tid,
@@ -678,13 +777,49 @@ class KalshiMarketCatalog:
 
     def _enrich(self, mkt: EventMarket, now: datetime) -> CatalogMarket:
         """Tag a raw EventMarket with asset, timeframe, type, and strikes."""
+        # CRITICAL FIX: Check if mkt is already a CatalogMarket (from previous enrichment)
+        # If so, extract the nested EventMarket
+        if hasattr(mkt, "market") and isinstance(mkt.market, EventMarket):
+            # Already a CatalogMarket, extract the nested EventMarket
+            mkt = mkt.market
+        elif not isinstance(mkt, EventMarket):
+            logger.warning(
+                "[ENRICH] Unexpected market type: %s, skipping enrichment",
+                type(mkt).__name__
+            )
+            # Return as-is if it's already a CatalogMarket
+            if hasattr(mkt, "market"):
+                return mkt
+            raise TypeError(f"Expected EventMarket, got {type(mkt).__name__}")
+
         # Extract event_ticker / series_ticker from raw_data
         raw = mkt.raw_data or {}
         event_ticker = raw.get("event_ticker", "") or ""
         series_ticker = raw.get("series_ticker", "") or ""
+        
+        # CRITICAL FIX: Override series_ticker from market_id if API returns incorrect value
+        # Kalshi API returns KXBTC instead of KXBTC15M for series_ticker field
+        # Extract full series ticker: KXBTC15M, KXBTCH1, KXBTCD1, KXBTCW1, etc.
+        import re
+        series_match = re.match(r"^(KX[A-Z]+15M|KX[A-Z]+H1|KX[A-Z]+D1|KX[A-Z]+W1|KX[A-Z]+1M|KX[A-Z]+Y|KX[A-Z]+)", mkt.market_id.upper())
+        if series_match:
+            extracted_series = series_match.group(1)
+            if series_ticker != extracted_series:
+                series_ticker = extracted_series
+                # CRITICAL: Update raw_data so downstream code reads the correct value
+                if mkt.raw_data is None:
+                    mkt.raw_data = {}
+                mkt.raw_data["series_ticker"] = extracted_series
+                logger.debug(
+                    "[SERIES-TICKER-OVERRIDE] market_id=%s api_series=%s extracted_series=%s (updated raw_data)",
+                    mkt.market_id, raw.get("series_ticker", ""), extracted_series
+                )
 
         # 1. Primary detection: ticker prefix → category + asset
-        ticker_category, ticker_asset = self._detect_from_ticker(event_ticker or mkt.market_id)
+        # CRITICAL FIX: Use series_ticker if available (canonical for 15m contracts like KXBTC15M)
+        # Fall back to event_ticker, then market_id if series_ticker is empty
+        ticker_for_detection = series_ticker or event_ticker or mkt.market_id
+        ticker_category, ticker_asset = self._detect_from_ticker(ticker_for_detection)
 
         # 2. Secondary detection: text-based patterns
         text = f"{mkt.market_id} {event_ticker} {mkt.question or ''} {mkt.description or ''} {mkt.category or ''}"

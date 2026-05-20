@@ -15,34 +15,24 @@ def load_trading_agents() -> List:
     """
     Load trading-specific agents for Kalshi 15m crypto operations.
 
-    All 8 agents extend BaseAgent and implement process(energy) — the
-    interface required by KalshiCore._execute_agent().
+    LEAN 15m KALSHI STACK (2026-05-13): Pruned for BTC/ETH/SOL/XRP/DOGE trading.
+    Only Skeptic, RiskAgent, and StrategyAgent - edge comes from microstructure.
 
     Returns:
         List of trading agent instances
     """
     try:
-        from agents.analyst_gemma import AnalystGemma
-        from agents.analyst_llama import AnalystLlama
         from agents.skeptic import Skeptic
         from agents.risk import RiskAgent
-        from agents.synthesizer import Synthesizer
-        from agents.archivist import Archivist
         from agents.strategy_agent import StrategyAgent
-        from agents.meta_agent import MetaAuditAgent
 
         trading_agents = [
-            AnalystGemma(),
-            AnalystLlama(),
-            Skeptic(),
-            RiskAgent(),
-            Synthesizer(),
-            Archivist(),
-            StrategyAgent(),
-            MetaAuditAgent(),
+            Skeptic(agent_id="skeptic-01"),
+            RiskAgent(agent_id="risk-01"),
+            StrategyAgent(agent_id="strategy-agent-01"),
         ]
 
-        logger.info("Loaded %d trading agents for Kalshi operations", len(trading_agents))
+        logger.info("Loaded %d trading agents for Kalshi operations (lean 15m stack)", len(trading_agents))
         for agent in trading_agents:
             logger.info("  • %s (%s)", agent.agent_id, type(agent).__name__)
 

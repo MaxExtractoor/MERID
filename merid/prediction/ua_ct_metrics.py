@@ -16,7 +16,10 @@ import threading
 import time
 from typing import Any, Dict, Optional
 
-_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _lock = threading.Lock()
+_lock = None  # Disabled to prevent startup hang
 
 _ct_cycles: int = 0
 _evaluated: int = 0
@@ -28,7 +31,16 @@ _last_updated: float = 0.0
 
 def reset_for_tests() -> None:
     global _ct_cycles, _evaluated, _orders_accepted, _orders_rejected, _last_trace, _last_updated
-    with _lock:
+    if _lock is not None:
+        with _lock:
+            _ct_cycles = 0
+            _evaluated = 0
+            _orders_accepted = 0
+            _orders_rejected = 0
+            _last_trace = {}
+            _last_updated = 0.0
+    else:
+        # Lock disabled - direct access (startup workaround)
         _ct_cycles = 0
         _evaluated = 0
         _orders_accepted = 0
@@ -40,26 +52,31 @@ def reset_for_tests() -> None:
 def record_ct_cycle(
     *,
     cycle: int,
-    catalog_markets: int,
-    universe_markets: int,
-    evaluated: int,
-    approved: int,
-    vetoed: int,
-    orders_submitted: int,
+    evaluated: bool,
+    trace: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Called after each CT cycle (from ``KalshiContinuousTrader``)."""
     global _ct_cycles, _evaluated, _last_trace, _last_updated
-    with _lock:
+    if _lock is not None:
+        with _lock:
+            _ct_cycles = max(_ct_cycles, cycle)
+            _evaluated += int(evaluated)
+            _last_trace = {
+                "cycle": cycle,
+                "evaluated": evaluated,
+                "trace": trace,
+                "updated": time.time(),
+            }
+            _last_updated = time.time()
+    else:
+        # Lock disabled - direct access (startup workaround)
         _ct_cycles = max(_ct_cycles, cycle)
         _evaluated += int(evaluated)
         _last_trace = {
             "cycle": cycle,
-            "catalog_markets": catalog_markets,
-            "universe_markets": universe_markets,
             "evaluated": evaluated,
-            "approved": approved,
-            "vetoed": vetoed,
-            "orders_submitted": orders_submitted,
+            "trace": trace,
+            "updated": time.time(),
         }
         _last_updated = time.time()
 
@@ -70,13 +87,21 @@ record_cycle = record_ct_cycle
 
 def record_order_accept() -> None:
     global _orders_accepted
-    with _lock:
+    if _lock is not None:
+        with _lock:
+            _orders_accepted += 1
+    else:
+        # Lock disabled - direct access (startup workaround)
         _orders_accepted += 1
 
 
 def record_order_reject() -> None:
     global _orders_rejected
-    with _lock:
+    if _lock is not None:
+        with _lock:
+            _orders_rejected += 1
+    else:
+        # Lock disabled - direct access (startup workaround)
         _orders_rejected += 1
 
 
@@ -90,7 +115,18 @@ def record_router_result(status: str, reason: Optional[str] = None) -> None:
 
 
 def snapshot() -> Dict[str, Any]:
-    with _lock:
+    if _lock is not None:
+        with _lock:
+            return {
+                "ct_cycles": _ct_cycles,
+                "evaluated": _evaluated,
+                "orders_accepted": _orders_accepted,
+                "orders_rejected": _orders_rejected,
+                "last_trace": dict(_last_trace),
+                "last_updated": _last_updated,
+            }
+    else:
+        # Lock disabled - direct access (startup workaround)
         return {
             "ct_cycles": _ct_cycles,
             "evaluated": _evaluated,

@@ -51,6 +51,37 @@ class CrossAssetPairConfig:
 
 
 @dataclass(frozen=True)
+class AssetTakeProfitConfig:
+    """Take profit levels for a single asset."""
+
+    tp_1: float = 2.0  # First take profit level (%)
+    tp_2: float = 4.0  # Second take profit level (%)
+    stop_loss: float = 1.5  # Hard stop loss (%)
+
+
+@dataclass(frozen=True)
+class TakeProfitConfig:
+    """Take profit configuration per asset."""
+
+    enabled: bool = True
+    levels: Dict[str, AssetTakeProfitConfig] = field(default_factory=dict)
+
+    def get_levels(self, asset: str) -> AssetTakeProfitConfig:
+        """Return TP config for *asset*, falling back to conservative default."""
+        return self.levels.get(asset.upper(), AssetTakeProfitConfig())
+
+
+@dataclass(frozen=True)
+class AutoExitConfig:
+    """Auto-exit configuration for hedge positions."""
+
+    enabled: bool = True
+    close_hedge_when_alpha_closed: bool = True
+    max_hedge_hold_minutes: int = 120
+    reduce_on_exposure_flip: bool = True
+
+
+@dataclass(frozen=True)
 class HedgeConfig:
     """Top-level hedge configuration — immutable after load."""
 
@@ -66,6 +97,10 @@ class HedgeConfig:
     cross_asset_max_pair_correlation: float = 0.85
     cross_asset_max_hedge_pct_of_base: float = 0.20
     cross_asset_pairs: Tuple[CrossAssetPairConfig, ...] = ()
+
+    # Take profit / auto-exit section
+    take_profit: TakeProfitConfig = field(default_factory=TakeProfitConfig)
+    auto_exit: AutoExitConfig = field(default_factory=AutoExitConfig)
 
     # ── Helpers ────────────────────────────────────────────────────────
 
@@ -138,6 +173,30 @@ def load_hedge_config(path: Optional[str] = None) -> HedgeConfig:
         for p in (ca.get("pairs") or [])
     )
 
+    # Parse take profit config
+    tp_cfg = h.get("take_profit") or {}
+    tp_levels = {}
+    for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+        asset_tp = tp_cfg.get(asset) or {}
+        tp_levels[asset] = AssetTakeProfitConfig(
+            tp_1=float(asset_tp.get("tp_1", 2.0)),
+            tp_2=float(asset_tp.get("tp_2", 4.0)),
+            stop_loss=float(asset_tp.get("stop_loss", 1.5)),
+        )
+    take_profit = TakeProfitConfig(
+        enabled=bool(tp_cfg.get("enabled", True)),
+        levels=tp_levels,
+    )
+
+    # Parse auto exit config
+    ae_cfg = h.get("auto_exit") or {}
+    auto_exit = AutoExitConfig(
+        enabled=bool(ae_cfg.get("enabled", True)),
+        close_hedge_when_alpha_closed=bool(ae_cfg.get("close_hedge_when_alpha_closed", True)),
+        max_hedge_hold_minutes=int(ae_cfg.get("max_hedge_hold_minutes", 120)),
+        reduce_on_exposure_flip=bool(ae_cfg.get("reduce_on_exposure_flip", True)),
+    )
+
     return HedgeConfig(
         enabled=bool(h.get("enabled", True)),
         use_cross_asset_hedging=bool(h.get("use_cross_asset_hedging", False)),
@@ -148,6 +207,8 @@ def load_hedge_config(path: Optional[str] = None) -> HedgeConfig:
         cross_asset_max_pair_correlation=float(ca.get("max_pair_correlation", 0.85)),
         cross_asset_max_hedge_pct_of_base=float(ca.get("max_cross_hedge_pct_of_base", 0.20)),
         cross_asset_pairs=pairs,
+        take_profit=take_profit,
+        auto_exit=auto_exit,
     )
 
 

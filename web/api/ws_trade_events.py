@@ -317,7 +317,7 @@ async def trade_events_stream(websocket: WebSocket) -> None:
     - PnL updates
     - Mode changes
     
-    Connect to: ws://localhost:8000/ws/trades
+    Connect to: ws://localhost:8011/ws/trades
     """
     await websocket.accept()
     logger.info("[WS] Trade events client connected")

@@ -119,6 +119,7 @@ metadata:
   namespace: merid
 data:
   MERID_ENV: "production"
+  MERID_PROFILE: "kalshi_crypto_15m_v2"
   MERID_LOG_LEVEL: "INFO"
   SIMULATION_MODE: ""
   TLS_ENABLED: "true"

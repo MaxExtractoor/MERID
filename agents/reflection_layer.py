@@ -9,21 +9,41 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
+import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from core.time_authority import current_time
-from core.persistence_manager import get_persistence_manager
-from utils.logger import get_logger
+# PROFILE-GUARD: Skip reflection loading for kalshi_crypto_15m_v2 (sealed 15m stack doesn't need LLM reflection)
+_is_15m_crypto = os.getenv("MERID_PROFILE", "") == "kalshi_crypto_15m_v2"
 
-logger = get_logger("agents.reflection")
+if not _is_15m_crypto:
+    from core.time_authority import current_time
+    from core.persistence_manager import get_persistence_manager
+    from utils.logger import get_logger
 
-REFLECTION_PATH = Path("logs/agent_reflections.json")
-REFLECTION_PATH.parent.mkdir(parents=True, exist_ok=True)
+    logger = get_logger("agents.reflection")
+
+    REFLECTION_PATH = Path("logs/agent_reflections.json")
+    REFLECTION_PATH.parent.mkdir(parents=True, exist_ok=True)
+else:
+    # Create stub logger for kalshi_crypto_15m_v2 to prevent import errors
+    class StubLogger:
+        def info(self, *args, **kwargs):
+            pass
+        def warning(self, *args, **kwargs):
+            pass
+        def error(self, *args, **kwargs):
+            pass
+        def debug(self, *args, **kwargs):
+            pass
+    
+    logger = StubLogger()
+    REFLECTION_PATH = None
 
 
 @dataclass
@@ -44,30 +64,41 @@ class Reflection:
 
 
 class ReflectionLayer:
-    """
-    Perpetual self-learning system for agents.
+    """V1 reflection layer — loads reflections from disk, records decisions."""
     
-    Tracks:
-    - Decision history per agent
-    - Outcome validation (correct/incorrect predictions)
-    - Pattern recognition (what works, what doesn't)
-    - Adaptive confidence calibration
-    """
-    
-    def __init__(self, storage_path: Optional[Path] = None) -> None:
-        self._path = storage_path or REFLECTION_PATH
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, path: Optional[Path] = None) -> None:
+        # PROFILE-GUARD: Skip reflection loading for kalshi_crypto_15m_v2 (sealed 15m stack doesn't need LLM reflection)
+        if _is_15m_crypto:
+            self._path = None
+            self._reflections: List[Reflection] = []
+            self._agent_stats: Dict[str, Dict[str, int]] = defaultdict(
+                lambda: {"total_decisions": 0, "correct_predictions": 0, "incorrect_predictions": 0}
+            )
+            self._lock = threading.Lock()
+            self._loaded = True  # Mark as loaded to prevent background thread
+            self._reflection_tick_stats: Dict[str, Dict[str, int]] = defaultdict(
+                lambda: {"reads": 0, "writes": 0}
+            )
+            self._tick_window_start = time.time()
+            self._tick_window_seconds = 60
+            logger.info("[PROFILE-GUARD] Reflection layer disabled for kalshi_crypto_15m_v2")
+            return
+        
+        self._path = path or Path(REFLECTION_PATH)
         self._reflections: List[Reflection] = []
-        self._agent_stats: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
-            "total_decisions": 0,
-            "correct_predictions": 0,
-            "incorrect_predictions": 0,
-            "avg_confidence": 0.0,
-            "avg_reality_gap": 0.0,
-            "learnings": []
-        })
+        self._agent_stats: Dict[str, Dict[str, int]] = defaultdict(
+            lambda: {"total_decisions": 0, "correct_predictions": 0, "incorrect_predictions": 0}
+        )
         self._lock = threading.Lock()
         self._loaded = False
+        
+        # INSTRUMENTATION: Tick counter for read/write tracking
+        self._reflection_tick_stats: Dict[str, Dict[str, int]] = defaultdict(
+            lambda: {"reads": 0, "writes": 0}
+        )
+        self._tick_window_start = time.time()
+        self._tick_window_seconds = 60  # Log every 60 seconds
+        
         # Load reflections in a background thread — works whether or not
         # the asyncio event loop is already running at construction time.
         threading.Thread(target=self._bg_load, daemon=True).start()
@@ -89,6 +120,10 @@ class ReflectionLayer:
         reasoning: str
     ) -> None:
         """Record agent decision for future reflection."""
+        # INSTRUMENTATION: Track write tick
+        self._reflection_tick_stats[agent_id]["writes"] += 1
+        self._log_tick_stats_if_needed()
+        
         reflection = Reflection(
             agent_id=agent_id,
             energy_id=energy_id,
@@ -215,6 +250,10 @@ class ReflectionLayer:
         
         Returns recent learnings and performance stats to inform future decisions.
         """
+        # INSTRUMENTATION: Track read tick
+        self._reflection_tick_stats[agent_id]["reads"] += 1
+        self._log_tick_stats_if_needed()
+        
         with self._lock:
             stats = self._agent_stats.get(agent_id, {})
             if not stats or stats.get("total_decisions", 0) == 0:
@@ -240,6 +279,10 @@ class ReflectionLayer:
     
     def get_agent_stats(self, agent_id: str) -> Dict[str, Any]:
         """Get complete stats for an agent."""
+        # INSTRUMENTATION: Track read tick
+        self._reflection_tick_stats[agent_id]["reads"] += 1
+        self._log_tick_stats_if_needed()
+        
         with self._lock:
             return dict(self._agent_stats.get(agent_id, {}))
     
@@ -250,6 +293,39 @@ class ReflectionLayer:
             if agent_id:
                 reflections = [r for r in reflections if r.agent_id == agent_id]
             return [r.to_dict() for r in reflections[-limit:]]
+    
+    def _log_tick_stats_if_needed(self) -> None:
+        """Log tick stats if window has elapsed.
+        
+        Logs read/write counts per agent type for the time window.
+        This helps identify which agents are using reflection heavily.
+        """
+        import os
+        profile = os.environ.get('MERID_PROFILE', '')
+        
+        # Only log for 15m crypto profiles
+        if profile not in ('kalshi_crypto_15m', 'kalshi_crypto_15m_v2'):
+            return
+        
+        now = time.time()
+        window_elapsed = now - self._tick_window_start
+        
+        if window_elapsed >= self._tick_window_seconds:
+            # Log stats for each agent type
+            for agent_id, stats in self._reflection_tick_stats.items():
+                reads = stats.get("reads", 0)
+                writes = stats.get("writes", 0)
+                
+                if reads > 0 or writes > 0:
+                    logger.info(
+                        "[REFLECTION-TICK] agent_type=%s classification=research_only "
+                        "reads=%d writes=%d in last_window=%.0f sec profile=%s",
+                        agent_id, reads, writes, window_elapsed, profile
+                    )
+            
+            # Reset window
+            self._tick_window_start = now
+            self._reflection_tick_stats.clear()
     
     def flush(self) -> None:
         """Force immediate persistence of all reflections."""
@@ -289,6 +365,10 @@ class ReflectionLayer:
 
     def _load_sync(self) -> None:
         """Load reflections from disk — runs in thread pool to avoid blocking event loop."""
+        # INSTRUMENTATION: Track load timing
+        import time
+        load_start_ts = time.time()
+        
         v2_path = self._path.parent / "agent_reflections_v2.json"
         load_path = v2_path if v2_path.exists() else self._path
         
@@ -345,6 +425,27 @@ class ReflectionLayer:
                 len(self._reflections),
                 len(self._agent_stats),
                 source,
+            )
+            
+            # INSTRUMENTATION: Log timing and sample of loaded agents
+            duration_ms = (time.time() - load_start_ts) * 1000
+            logger.info(
+                "[REFLECTION-TRACE] load_complete profile=%s source=%s "
+                "reflection_count=%d agent_count=%d duration_ms=%.2f",
+                os.environ.get('MERID_PROFILE', 'unknown'),
+                source,
+                len(self._reflections),
+                len(self._agent_stats),
+                duration_ms
+            )
+            
+            # Sample first 10 agent IDs for visibility
+            sampled_agents = list(self._agent_stats.keys())[:10]
+            logger.info(
+                "[REFLECTION-TRACE] sampled_agents=%s total_sampled=%d of %d",
+                sampled_agents,
+                len(sampled_agents),
+                len(self._agent_stats)
             )
         except (json.JSONDecodeError, TypeError) as exc:
             logger.warning("Failed to load reflections: %s", exc)

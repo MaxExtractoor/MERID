@@ -9,6 +9,10 @@ export interface KalshiBalance {
   locked: number;
   available: number;
   mock?: boolean;
+  // New fields for separated cash and portfolio tracking
+  balance_cents?: number;
+  portfolio_cents?: number;
+  total_value_cents?: number;
 }
 
 export interface KalshiPosition {

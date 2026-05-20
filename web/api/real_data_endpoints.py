@@ -134,7 +134,8 @@ async def get_consensus_status() -> Dict[str, Any]:
 
         # If no symbols tracked, show defaults
         if not symbol_statuses:
-            for sym in ["BTC", "ETH", "SOL"]:
+            from merid.constants import CRYPTO_15M_ASSETS
+            for sym in CRYPTO_15M_ASSETS:
                 symbol_statuses.append({
                     "symbol": sym,
                     "has_consensus": False,
@@ -385,46 +386,11 @@ async def get_agents_real() -> List[Dict[str, Any]]:
 def _get_fallback_agents() -> List[Dict[str, Any]]:
     """Fallback agent list when framework registry is empty.
 
-    Sources agent definitions from agents.registry.load_agents() first,
-    then falls back to a complete hardcoded roster of all 8 agents.
+    For kalshi_crypto_15m_v2 profile, AgentGrid is used instead of legacy agents,
+    so the framework registry will always be empty. Return static list immediately
+    to avoid blocking on slow load_agents() call.
     """
-    # Try loading from the canonical agent registry module
-    try:
-        from agents.registry import load_agents as _load
-        _AGENT_DISPLAY = {
-            "analyst-gemma-01": ("Analyst Gemma", "analyst"),
-            "analyst-llama-01": ("Analyst Llama", "analyst"),
-            "skeptic-01": ("Skeptic Agent", "risk_manager"),
-            "risk-01": ("Risk Agent", "risk_manager"),
-            "synthesizer-01": ("Synthesizer", "coordinator"),
-            "archivist-01": ("Archivist", "researcher"),
-            "strategy-agent-01": ("Strategy Agent", "trader"),
-            "meta-audit-01": ("Meta Auditor", "governance"),
-        }
-        now = datetime.now(timezone.utc)
-        agents = []
-        for agent in _load():
-            aid = agent.agent_id
-            display_name, role = _AGENT_DISPLAY.get(aid, (aid, "analyst"))
-            agents.append({
-                "id": aid,
-                "name": display_name,
-                "role": role,
-                "status": "online",
-                "confidence": 85,
-                "pnl": 0,
-                "winRate": 0,
-                "totalTrades": 0,
-                "lastDecision": "Monitoring",
-                "lastDecisionTime": now.isoformat() + "Z",
-                "charter": role,
-            })
-        if agents:
-            return agents
-    except Exception as exc:
-        logger.debug("operation_suppressed", error=str(exc))
-
-    # Hard fallback: all 8 agents from the roster — marked as NOT_STARTED
+    # Static fallback: all 8 agents from the roster — marked as NOT_STARTED
     now = datetime.now(timezone.utc)
     return [
         {"id": "analyst-gemma-01", "name": "Analyst Gemma", "role": "analyst", "status": "not_started", "confidence": 0, "pnl": 0, "winRate": 0, "totalTrades": 0, "lastDecision": "", "lastDecisionTime": now.isoformat() + "Z", "charter": "analyst", "_stub": True, "data_mode": "offline"},
@@ -849,7 +815,7 @@ async def get_api_status() -> List[Dict[str, Any]]:
             import time as _t
             t0 = _t.monotonic()
             import os as _os
-            _api_base = _os.getenv("MERID_API_BASE", "http://127.0.0.1:8000")
+            _api_base = _os.getenv("MERID_API_BASE", "http://127.0.0.1:8011")
             async with session.request(
                 method, f"{_api_base}{endpoint}",
                 timeout=aiohttp.ClientTimeout(total=2),

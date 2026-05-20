@@ -1,6 +1,11 @@
 # MERID PM strategy profiles — merged after per-agent YAML ``strategy:`` overrides.
 # Activate with: MERID_PM_PROFILE=<name>
 #
+# DEPRECATION NOTICE (2026-05-17):
+# For kalshi_crypto_15m_v2 profile, edge thresholds come from config/profiles/kalshi_crypto_15m.yaml.
+# This file is NOT used for 15m crypto agents when MERID_PROFILE=kalshi_crypto_15m_v2.
+# The profile YAML is the single source of truth for 15m crypto edge thresholds.
+#
 # crypto_low_edge_dev — tiny sizes + lower min-edge bars for proving end-to-end
 # execution in development. Does NOT make negative net_edge tradable; use synthetic
 # tests or wait for positive edge from the model.
@@ -8,6 +13,40 @@
 # Env vars MERID_PM_MIN_EDGE_* still override profile values (highest ops priority).
 
 profiles:
+  baseline:
+    # BASELINE PROFILE: Fire-and-forget mode (2026-05-13)
+    # Relaxed edge thresholds for 15m crypto (2-3% realistic thin edges)
+    # Timing relaxed: 30s lag warning, 90-180s circuit breaker recovery
+    # DEPRECATED for kalshi_crypto_15m_v2: Use profile YAML edge thresholds instead
+    min_edge_early: ${MERID_PM_MIN_EDGE_EARLY:-0.02}
+    min_edge_mid: ${MERID_PM_MIN_EDGE_MID:-0.02}
+    min_edge_late: ${MERID_PM_MIN_EDGE_LATE:-0.02}
+    min_edge_terminal: ${MERID_PM_MIN_EDGE_TERMINAL:-0.02}
+    min_arb_edge: ${MERID_PM_MIN_ARB_EDGE:-1.0}
+    min_confidence: ${MERID_PM_MIN_CONFIDENCE:-0.50}
+    max_contracts_per_order: ${MERID_PM_MAX_CONTRACTS_PER_ORDER:-10}
+    vol_breakout_neutral_low: ${MERID_PM_VOL_BREAKOUT_LOW:-35}
+    vol_breakout_neutral_high: ${MERID_PM_VOL_BREAKOUT_HIGH:-65}
+    # MM (15m crypto — standard quotes; ENV-DRIVEN)
+    mm_max_spread_cents: ${MERID_PM_MM_MAX_SPREAD_CENTS:-10}
+    mm_target_spread_cents: ${MERID_PM_MM_TARGET_SPREAD_CENTS:-2}
+    mm_inventory_limit: ${MERID_PM_MM_INVENTORY_LIMIT:-50}
+  production:
+    # PRODUCTION PROFILE: Conservative "sure bet" mode (2026-05-13)
+    # Uses conservative edge thresholds aligned with crypto_threshold_matrix.yaml
+    min_edge_early: ${MERID_PM_MIN_EDGE_EARLY:-0.08}
+    min_edge_mid: ${MERID_PM_MIN_EDGE_MID:-0.06}
+    min_edge_late: ${MERID_PM_MIN_EDGE_LATE:-0.05}
+    min_edge_terminal: ${MERID_PM_MIN_EDGE_TERMINAL:-0.10}
+    min_arb_edge: ${MERID_PM_MIN_ARB_EDGE:-1.0}
+    min_confidence: ${MERID_PM_MIN_CONFIDENCE:-0.58}
+    max_contracts_per_order: ${MERID_PM_MAX_CONTRACTS_PER_ORDER:-50}
+    vol_breakout_neutral_low: ${MERID_PM_VOL_BREAKOUT_LOW:-35}
+    vol_breakout_neutral_high: ${MERID_PM_VOL_BREAKOUT_HIGH:-65}
+    # MM (15m crypto — standard quotes; ENV-DRIVEN)
+    mm_max_spread_cents: ${MERID_PM_MM_MAX_SPREAD_CENTS:-10}
+    mm_target_spread_cents: ${MERID_PM_MM_TARGET_SPREAD_CENTS:-2}
+    mm_inventory_limit: ${MERID_PM_MM_INVENTORY_LIMIT:-50}
   crypto_low_edge_dev:
     # ENV-DRIVEN: Edge thresholds (all dynamically configurable)
     min_edge_early: ${MERID_PM_MIN_EDGE_EARLY:-0.01}
@@ -17,7 +56,6 @@ profiles:
     min_arb_edge: ${MERID_PM_MIN_ARB_EDGE:-0.002}
     min_confidence: ${MERID_PM_MIN_CONFIDENCE:-0.35}
     max_contracts_per_order: ${MERID_PM_MAX_CONTRACTS_PER_ORDER:-3}
-    contrarian_sentiment_min: ${MERID_PM_CONTRARIAN_SENTIMENT_MIN:-75}
     vol_breakout_neutral_low: ${MERID_PM_VOL_BREAKOUT_LOW:-35}
     vol_breakout_neutral_high: ${MERID_PM_VOL_BREAKOUT_HIGH:-65}
     # MM (15m crypto — tiny quotes; ENV-DRIVEN)

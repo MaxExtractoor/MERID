@@ -40,7 +40,8 @@ class ResolutionEventRequest(BaseModel):
     question: str
     scheduled_resolution: float
     category: str = ""
-    yes_price: float = 0.5
+    # REMOVED: No default - require explicit value from caller
+    yes_price: float
 
 
 class ProbabilitySnapshotRequest(BaseModel):

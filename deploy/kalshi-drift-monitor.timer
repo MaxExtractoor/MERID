@@ -1,0 +1,14 @@
+[Unit]
+Description=Kalshi Live Drift Monitor Timer — runs every 10 minutes
+Requires=kalshi-drift-monitor.service
+
+[Timer]
+# Run every 10 minutes (conservative interval to respect Kalshi rate limits)
+OnCalendar=*:0/10
+# Randomize start time by up to 60 seconds to avoid thundering herd
+RandomizedDelaySec=60
+# Run immediately on first boot if missed
+Persistent=true
+
+[Install]
+WantedBy=timers.target

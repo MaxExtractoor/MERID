@@ -12,13 +12,18 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
-from merid.agents.base import AgentOutput
-from merid.agents.research import PredictionMarketAgentV2
+from merid.agents.base import AgentOutput, CanonicalAgent
 from merid.prediction.model import PredictionMarketModel
-
 from utils.logger import get_logger
 
 logger = get_logger("merid.agents.wiring")
+
+# Try to import legacy PredictionMarketAgentV2
+PredictionMarketAgentV2 = CanonicalAgent  # Default fallback
+try:
+    from legacy.merid.agents.research import PredictionMarketAgentV2
+except ImportError:
+    logger.warning("PredictionMarketAgentV2 not found in legacy.merid.agents.research - WiredPredictionMarketAgent will use CanonicalAgent as base")
 
 
 # ======================================================================

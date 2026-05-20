@@ -26,7 +26,9 @@ logger = get_logger(__name__)
 
 _AV_KEY   = os.getenv("ALPHA_VANTAGE_API_KEY", "")
 _BASE     = "https://www.alphavantage.co/query"
-_CACHE_TTL = 86400.0   # 24-hour cache — AV free tier: 25 req/day
+# 15m scalper: shorter cache (1 hour vs 24 hours) for fresher data
+_is_scalper = os.getenv("STRATEGY_MODE", "").upper() == "MOMENTUM_SCALPER"
+_CACHE_TTL = 3600.0 if _is_scalper else 86400.0   # 1 hour for scalper, 24 hours default
 
 
 # ── Dataclasses ────────────────────────────────────────────────────────────────

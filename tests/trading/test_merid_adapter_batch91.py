@@ -10,7 +10,7 @@ class TestMeridExecutionAdapter:
 
     def test_adapter_initialization_default(self):
         adapter = MeridExecutionAdapter()
-        assert adapter.execution_service_url == "http://127.0.0.1:8012"
+        assert adapter.execution_service_url == "http://127.0.0.1:8011"
         assert adapter.account_id == "merid_sim_account"
         assert adapter._connected is False
 

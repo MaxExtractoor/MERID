@@ -8,6 +8,7 @@ import uuid
 from typing import Any, Optional
 
 from merid.agents.base import BaseKalshiAgent, AgentOpinion
+from merid.agents.loop_tracing import trace_agent_step
 from merid.kalshi.market_registry import KalshiMarketRegistry
 from merid.kalshi.rti import CryptoRTIMonitor
 from merid.portfolio.risk import PortfolioRiskAgent
@@ -37,6 +38,12 @@ class Doge15mAgent(BaseKalshiAgent):
         self.crypto_rti_monitor = crypto_rti_monitor
         self.portfolio_risk_agent = portfolio_risk_agent
         self.params = params or Doge15mParams()
+        
+        # Log risk limits at startup for audit trail
+        from config.kalshi_15m_crypto_config import log_risk_limits_for_agent
+        from merid.prediction.venue_gate import get_venue_gate
+        mode = get_venue_gate().mode.value.upper()
+        log_risk_limits_for_agent("DOGE", mode)
 
     async def configure_dependencies(self, container: Any) -> None:
         """DI hook used by KalshiGrid bootstrap."""
@@ -87,6 +94,7 @@ class Doge15mAgent(BaseKalshiAgent):
             current_exposure_pct=exposure_pct,
         )
 
+    @trace_agent_step()
     async def get_opinion(
         self,
         trace_id: Optional[str] = None,
@@ -105,6 +113,32 @@ class Doge15mAgent(BaseKalshiAgent):
         if inputs is None:
             self.logger.debug("trace_id=%s: no inputs, skipping opinion", _trace_id)
             return None
+
+        # WINNER ALIGNMENT FIX (2026-05-10): Check if DOGE is an arbiter winner before generating opinion
+        # This ensures 15m agents only trade when their asset is in the winner set
+        try:
+            from merid.prediction.grid_context import get_grid_context
+            grid_ctx = get_grid_context()
+            
+            # Get the current market ticker
+            market = self.market_registry.get_active_doge_15m()
+            if market:
+                is_winner = grid_ctx.is_winner(market.ticker)
+                
+                if not is_winner:
+                    self.logger.info(
+                        "[ARBITERBLOCKED] DOGE15M %s not in arbiter winners - skipping opinion generation",
+                        market.ticker
+                    )
+                    return None
+                
+                self.logger.debug(
+                    "[ARBITEROK] DOGE15M %s is in arbiter winners - proceeding with opinion generation",
+                    market.ticker
+                )
+        except Exception as e:
+            self.logger.warning("[ARBITER] Winner check failed for DOGE15M: %s - fail-open allowing", e)
+            # Fail-open: if check fails, allow opinion generation to avoid blocking valid signals
 
         signal = should_trade_doge_15m(inputs, self.params)
         if signal is None:

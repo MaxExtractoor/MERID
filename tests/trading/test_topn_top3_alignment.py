@@ -19,8 +19,8 @@ import unittest
 from pathlib import Path
 
 os.environ["USE_TOPN_ALLOCATOR"] = "true"
-os.environ["MAX_CYCLE_RISK_PCT"] = "0.02"
-os.environ["MAX_TOTAL_RISK_PCT"] = "0.02"
+os.environ["MAX_CYCLE_RISK_PCT"] = "0.03"
+os.environ["MAX_TOTAL_RISK_PCT"] = "0.08"
 
 # Force settings reload so env vars take effect
 for _mod in ("core.settings",):
@@ -44,7 +44,7 @@ CT_PATH = Path("merid/trading/kalshi_continuous_trader.py")
 
 
 def _fresh_allocator(
-    max_cycle_risk_pct: float = 0.02,
+    max_cycle_risk_pct: float = 0.03,
     min_cycle_risk_pct: float = 0.02,
     min_contracts: int = 1,
     min_notional_usd: float = 1.0,
@@ -94,21 +94,22 @@ class TestBankrollSourceAlignment(unittest.TestCase):
         not balance_cents (cash only)."""
         source = CT_PATH.read_text(encoding="utf-8")
 
-        # TopN call site
+        # TopN call site - accepts either total_value_cents or effective_total_cents
+        # (effective_total_cents is derived from total_value_cents with caps applied)
         topn_block = re.search(
-            r"_bankroll_cents\s*=\s*total_value_cents"
+            r"_bankroll_cents\s*=\s*(?:effective_total_cents|total_value_cents)"
             r".*?self\._topn_allocator\.compute_allocations\("
             r"[^)]*equity_cents\s*=\s*_bankroll_cents",
             source, re.DOTALL,
         )
         self.assertIsNotNone(
             topn_block,
-            "TopN allocator must receive equity_cents = total_value_cents",
+            "TopN allocator must receive equity_cents = total_value_cents or effective_total_cents",
         )
 
-        # GlobalRiskGuard call site
+        # GlobalRiskGuard call site - accepts either total_value_cents or effective_total_cents
         guard_block = re.search(
-            r"_guard_equity_cents\s*=\s*total_value_cents"
+            r"_guard_equity_cents\s*=\s*(?:effective_total_cents|total_value_cents)"
             r".*?self\._risk_guard\.check_order\("
             r"[^)]*equity_cents\s*=\s*_guard_equity_cents",
             source, re.DOTALL,
@@ -141,8 +142,8 @@ class TestBankrollSourceAlignment(unittest.TestCase):
         # CT must obtain the singleton, not construct its own guard.
         self.assertIn("_get_global_risk_guard()", source)
         # Canonical pct values are still enforced by core.settings.
-        self.assertEqual(MAX_CYCLE_RISK_PCT, 0.02)
-        self.assertEqual(MAX_TOTAL_RISK_PCT, 0.02)
+        self.assertEqual(MAX_CYCLE_RISK_PCT, 0.03)
+        self.assertEqual(MAX_TOTAL_RISK_PCT, 0.08)
         self.assertTrue(USE_TOPN_ALLOCATOR)
         # The shared singleton reads those same canonical values at init.
         from merid.guards.global_risk_guard import (
@@ -167,13 +168,13 @@ class TestTopNSelectionScenarios(unittest.TestCase):
     def test_scenario_A_small_bankroll_only_T1(self):
         """Scenario A: bankroll so small only T1 fits.
 
-        $100 equity, 2% cap → $2 budget. At 50¢ long, T1 gets ~$2 ≈ 4 contracts;
+        $100 equity, 3% cap → $3 budget. At 50¢ long, T1 gets ~$3 ≈ 6 contracts;
         T2/T3 would need more than the remaining budget + min_contracts.
         """
-        allocator = _fresh_allocator(max_cycle_risk_pct=0.02,
+        allocator = _fresh_allocator(max_cycle_risk_pct=0.03,
                                      min_cycle_risk_pct=0.02,
                                      min_contracts=4)
-        # equity $2 → 2% = 4¢ → only 1 candidate can possibly get min 1 contract
+        # equity $2 → 3% = 6¢ → only 1 candidate can possibly get min 1 contract
         cycle = allocator.compute_allocations(
             equity_cents=200,  # $2.00
             candidates=_five_asset_candidates(),
@@ -185,11 +186,11 @@ class TestTopNSelectionScenarios(unittest.TestCase):
     def test_scenario_B_medium_bankroll_T1_and_T2(self):
         """Scenario B: bankroll fits T1+T2 but T3 would break the cap."""
         allocator = _fresh_allocator(
-            max_cycle_risk_pct=0.02,
+            max_cycle_risk_pct=0.03,
             min_cycle_risk_pct=0.02,
             min_contracts=5,  # force each trade to be non-trivial
         )
-        # Budget = 2% of $20 = 40¢. Two trades of 5 contracts @ (edge-weighted
+        # Budget = 3% of $20 = 60¢. Two trades of 5 contracts @ (edge-weighted
         # budgets) can fit; three cannot (would require 15 contracts * ~13c = $2).
         cycle = allocator.compute_allocations(
             equity_cents=2000,  # $20
@@ -302,7 +303,7 @@ class TestTopNInvariants(unittest.TestCase):
         cycle = allocator.compute_allocations(
             equity_cents=1_000_000, candidates=_five_asset_candidates(),
         )
-        budget = 1_000_000 * 0.02 / 100  # $200
+        budget = 1_000_000 * 0.03 / 100  # $300 (3% cycle risk)
         self.assertLessEqual(cycle.sum_risk_usd, budget + 0.01)
 
     def test_edges_descending_in_allocations(self):

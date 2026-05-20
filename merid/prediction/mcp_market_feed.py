@@ -289,14 +289,21 @@ class MCPMarketFeed:
 # ── Singleton ────────────────────────────────────────────────────────────
 
 _feed: Optional[MCPMarketFeed] = None
-_feed_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _feed_lock = threading.Lock()
+_feed_lock = None  # Disabled to prevent startup hang
 
 
 def get_mcp_market_feed() -> MCPMarketFeed:
     """Get or create the singleton MCPMarketFeed."""
     global _feed
     if _feed is None:
-        with _feed_lock:
-            if _feed is None:
-                _feed = MCPMarketFeed()
+        if _feed_lock is not None:
+            with _feed_lock:
+                if _feed is None:
+                    _feed = MCPMarketFeed()
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _feed = MCPMarketFeed()
     return _feed

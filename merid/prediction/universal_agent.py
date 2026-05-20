@@ -36,7 +36,8 @@ from merid.event_venues.kalshi.universe import (
     get_category_mode,
     get_kalshi_universe,
 )
-from merid.prediction.venue_gate import TradingMode, get_venue_gate
+from merid.prediction.venue_gate import get_venue_gate
+from merid.prediction.trading_mode import TradingMode
 from utils.logger import get_logger
 
 
@@ -60,9 +61,10 @@ class UniversalAgentConfig:
     categories: List[str] = field(default_factory=list)
     max_markets: int = 50
     cycle_secs: float = 60.0
-    min_edge: float = 0.02
-    max_contracts: int = 50
-    max_notional: float = 500.0
+    min_edge: float = 0.05  # CONSERVATIVE: 5% minimum edge
+    # CRITICAL FIX: 0 = derive from live bankroll (was 50/$500 - dangerous for micro bankrolls)
+    max_contracts: int = 0  # 0 = derive: 1% of bankroll / price
+    max_notional: float = 0.0  # 0 = derive: 1% of bankroll
     dry_run: bool = False
 
 
@@ -187,6 +189,8 @@ class KalshiUniversalAgent:
                 await self._task
             except asyncio.CancelledError:
                 pass
+            finally:
+                self._task = None
         self.logger.info("Stopped %s", self.config.name)
 
     def pause(self) -> None:
@@ -393,7 +397,11 @@ class KalshiUniversalAgent:
         )
         from decimal import Decimal
         mkt = cm.market
-        raw = mkt.raw_data or {}
+        # CRITICAL FIX: CatalogMarket wraps EventMarket, so raw_data is on nested market.market
+        if hasattr(mkt, "raw_data"):
+            raw = mkt.raw_data or {}
+        else:
+            raw = {}
 
         bid = int(raw.get("yes_bid", 0) or 0)
         ask = int(raw.get("yes_ask", 0) or 0)
@@ -453,18 +461,28 @@ class KalshiUniversalAgent:
 import threading as _threading
 
 _agents: Dict[str, KalshiUniversalAgent] = {}
-_agents_lock = _threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _agents_lock = threading.Lock()
+_agents_lock = None  # Disabled to prevent startup hang
 
 
 def get_universal_agent(name: str = "default") -> Optional[KalshiUniversalAgent]:
     """Return a registered universal agent by name."""
-    with _agents_lock:
+    if _agents_lock is not None:
+        with _agents_lock:
+            return _agents.get(name)
+    else:
         return _agents.get(name)
 
 
 def register_universal_agent(agent: KalshiUniversalAgent) -> None:
     """Register a universal agent by its config name."""
-    with _agents_lock:
+    if _agents_lock is not None:
+        with _agents_lock:
+            _agents[agent.config.name] = agent
+    else:
+        # Lock disabled - direct access (startup workaround)
         _agents[agent.config.name] = agent
 
 
@@ -473,7 +491,14 @@ def get_or_create_universal_agent(
     config: Optional[UniversalAgentConfig] = None,
 ) -> KalshiUniversalAgent:
     """Return existing agent or create and register a new one."""
-    with _agents_lock:
+    if _agents_lock is not None:
+        with _agents_lock:
+            if name not in _agents:
+                cfg = config or UniversalAgentConfig(name=name)
+                _agents[name] = KalshiUniversalAgent(cfg)
+            return _agents[name]
+    else:
+        # Lock disabled - direct access (startup workaround)
         if name not in _agents:
             cfg = config or UniversalAgentConfig(name=name)
             _agents[name] = KalshiUniversalAgent(cfg)

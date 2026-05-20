@@ -228,7 +228,8 @@ def load_latest_verdict(agent_id: str, config_hash: str) -> Optional[AgentGauntl
         return None
     try:
         lines = _VERDICT_LOG.read_text().splitlines()
-    except Exception:
+    except Exception as exc:
+        logger.debug("gauntlet: failed to read verdict log: %s", exc)
         return None
     for line in reversed(lines):
         try:
@@ -254,7 +255,8 @@ def load_latest_verdict(agent_id: str, config_hash: str) -> Optional[AgentGauntl
                     total_rejections=d.get("total_rejections", 0),
                 )
                 return v
-        except Exception:
+        except Exception as exc:
+            logger.debug("gauntlet: failed to parse verdict line: %s", exc)
             continue
     return None
 
@@ -778,7 +780,13 @@ if __name__ == "__main__":
 
     # Ensure agents are registered
     try:
-        from merid.agents.research import PredictionMarketAgentV2, CryptoSignalsAgent, MarketResearchAgent
+        try:
+            from legacy.merid.agents.research import PredictionMarketAgentV2, CryptoSignalsAgent, MarketResearchAgent
+        except ImportError:
+            # Fallback if legacy module structure differs
+            PredictionMarketAgentV2 = None
+            CryptoSignalsAgent = None
+            MarketResearchAgent = None
         from merid.agents.strategy import StrategyDesignerAgent, ArbitrageAgent
         from merid.agents.risk_agents import RiskManagerAgent
         from merid.agents.coordination import ConsensusCoordinatorAgent

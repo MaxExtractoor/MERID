@@ -31,10 +31,10 @@ class Xrp15mInputs:
 class Xrp15mParams:
     """Configurable XRP 15m parameters (config-only tuning)."""
 
-    min_edge_threshold: float = 0.02
+    min_edge_threshold: float = 0.012  # 1.2¢ for aggressive micro-scalping (just above 2¢ fee, rely on volume)
     max_vol_ratio: float = 3.0
-    min_time_to_expiry_sec: int = 60
-    max_time_to_expiry_sec: int = 14 * 60
+    min_time_to_expiry: int = 120  # Don't enter last 2 minutes (aggressive)
+    max_time_to_expiry: int = 900  # Trade first 15 minutes (wider window)
     max_exposure_pct: float = 0.05
 
 

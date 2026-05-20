@@ -376,13 +376,20 @@ class DriftDetector:
 # ── Singleton ─────────────────────────────────────────────────────────
 
 _detector: Optional[DriftDetector] = None
-_detector_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _detector_lock = threading.Lock()
+_detector_lock = None  # Disabled to prevent startup hang
 
 
 def get_drift_detector() -> DriftDetector:
     global _detector
     if _detector is None:
-        with _detector_lock:
-            if _detector is None:
-                _detector = DriftDetector()
+        if _detector_lock is not None:
+            with _detector_lock:
+                if _detector is None:
+                    _detector = DriftDetector()
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _detector = DriftDetector()
     return _detector

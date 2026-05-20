@@ -117,7 +117,7 @@ export function useWebSocket<TMessage = unknown>(
           const maxRetries = 10;
           if (autoReconnect && mountedRef.current && !intentionalCloseRef.current) {
             retriesRef.current += 1;
-            if (retriesRef.current > maxRetries) {
+            if (retriesRef.current >= maxRetries) {
               setStatus('error');
               setError(new Error(`WebSocket reconnection failed after ${maxRetries} attempts — service unavailable`));
               return;

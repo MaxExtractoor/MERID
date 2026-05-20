@@ -3,6 +3,7 @@
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Dict, Any
 
@@ -13,20 +14,18 @@ logger = get_logger("merid.kalshi.btc_15m_reconciliation")
 
 
 def load_backtest_summary() -> Dict[str, Any]:
-    """Load BTC 15m backtest summary from file or return mock data."""
-    # TODO: Replace with actual backtest data loading
-    return {
-        "hit_rate": 0.58,
-        "expected_edge": 0.024,
-        "max_drawdown": 0.087,
-        "trade_rate_by_regime": {
-            "trending": 0.12,
-            "choppy": 0.05,
-            "volatile": 0.09,
-        },
-        "avg_confidence": 0.72,
-        "sharpe": 1.34,
-    }
+    """Load BTC 15m backtest summary from file."""
+    # BUG-FIX #37: Removed nested import os - moved to module level
+    backtest_path = os.getenv("MERID_BACKTEST_SUMMARY_PATH", "data/backtests/btc_15m_summary.json")
+    try:
+        with open(backtest_path, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        logger.warning(f"[BACKTEST-DATA-MISSING] No backtest summary found at {backtest_path}")
+        return {}
+    except json.JSONDecodeError as e:
+        logger.error(f"[BACKTEST-DATA-ERROR] Invalid JSON in backtest summary: {e}")
+        return {}
 
 
 def get_shadow_metrics() -> Dict[str, Any]:

@@ -1,0 +1,162 @@
+# Kalshi 15m Micro-Scalping: Distance & Edge Configuration
+# Single Source of Truth for all distance guards, edge thresholds, and validation
+# 
+# WARNING: This file is the canonical configuration used by:
+#   - kalshi_strike_selector.py (contract selection)
+#   - trading_agent.py (execution guards)
+#   - order_router.py (final validation)
+#   - startup assertions (config consistency checks)
+#
+# Any changes here automatically propagate. DO NOT hardcode these values elsewhere.
+
+meta:
+  version: "1.0.0"
+  last_updated: "2026-05-01"
+  mandate: "15m_mean_reversion"
+  assets: [BTC, ETH, SOL, XRP, DOGE]
+  # CONSERVATIVE SURE BET MODE: 5%+ edge minimum for production trading
+  env_override: true  # Allow MERID_PM_EDGE_NEAR_* env vars to override min_edge values
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LAYER 1: Asset & Timeframe Whitelist
+# ═══════════════════════════════════════════════════════════════════════════════
+
+allowed_assets:
+  - BTC
+  - ETH
+  - SOL
+  - XRP
+  - DOGE
+
+execution_timeframes:
+  - "15m"  # ONLY 15m allowed for direct execution
+
+signal_only_timeframes:
+  - "1h"
+  - "1H"
+  - "hourly"
+  - "daily"
+  - "weekly"
+# NOTE: These timeframes are CONTEXT ONLY - used for regime classification and trend bias
+# NO EXECUTION SIGNALS are generated from these timeframes
+# Only 15m timeframe is used for trade execution
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LAYER 2: Distance Caps (Hard & Sigma-based)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Hard distance cap: max |spot - strike| / spot as percentage
+# These are calibrated per-asset based on 15m volatility patterns
+# OPTIMIZED (2026-05-10): Aligned with strike selector to eliminate bottleneck
+max_delta_pct:
+  BTC: 0.04     # 4.0% - aligned with strike selector (was 0.75%)
+  ETH: 0.05     # 5.0% - aligned with strike selector (was 1.00%)
+  SOL: 0.06     # 6.0% - aligned with strike selector (was 1.25%)
+  XRP: 0.065    # 6.5% - aligned with strike selector (was 1.50%)
+  DOGE: 0.065   # 6.5% - aligned with strike selector (was 1.75%)
+
+# Sigma-based distance cap: max |z-score| (normalized by asset volatility)
+# Auto-tightens in low-vol regimes, gives room in high-vol
+max_z_distance: 0.75
+
+# Threshold for "near" vs "far" contract classification (affects edge floor)
+z_near_threshold: 0.50
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LAYER 3: Edge Floors (Near vs Far Contracts)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Near contracts: |z| <= z_near_threshold
+# FIXED (2026-05-11): Aligned to crypto_threshold_matrix.yaml baseline (2-3% for 15m)
+# Mean-reversion scalping with tighter edges for high-frequency execution
+# NOTE: Can be overridden via env: MERID_PM_EDGE_NEAR_BTC, etc.
+min_edge_near:
+  BTC: 0.020   # 2.0% - most liquid, tightest threshold
+  ETH: 0.020   # 2.0%
+  SOL: 0.025   # 2.5% - less liquid
+  XRP: 0.025   # 2.5%
+  DOGE: 0.030  # 3.0% - most volatile, highest threshold
+
+# Far contracts: |z| > z_near_threshold
+# FIXED (2026-05-11): Aligned to crypto_threshold_matrix.yaml baseline (2.5-3.5% for far contracts)
+# Slightly higher edge for far-from-spot contracts due to higher uncertainty
+min_edge_far:
+  BTC: 0.025   # 2.5%
+  ETH: 0.025   # 2.5%
+  SOL: 0.030   # 3.0%
+  XRP: 0.030   # 3.0%
+  DOGE: 0.035  # 3.5%
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LAYER 4: Signal Quality & Data Integrity
+# ═══════════════════════════════════════════════════════════════════════════════
+
+signal_staleness:
+  max_bar_age_seconds: 900  # 15 minutes = 1 bar for 15m timeframe
+  block_on_stale: true
+
+spot_reference_integrity:
+  # Max divergence between our spot feed and Kalshi reference price
+  max_divergence_pct: 0.005  # 0.5%
+  block_on_misaligned: true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LAYER 5: Fee & EV Consistency
+# ═══════════════════════════════════════════════════════════════════════════════
+
+fee_validation:
+  # Use canonical tiered fee schedule (7%/5%/3%)
+  use_tiered_schedule: true
+  
+  # Compare pre-trade estimate with actual fee on fill
+  mismatch_threshold_pct: 5.0  # Alert if |estimate - actual| / estimate > 5%
+
+  # Minimum fee-aware edge required (after all costs)
+  # FIXED (2026-05-11): Lowered to 1.5% to align with 2-3% baseline
+  min_ev_after_fees_pct: 0.015  # 1.5%
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LAYER 6: Sizing & Risk Constraints
+# ═══════════════════════════════════════════════════════════════════════════════
+
+sizing_constraints:
+  # Fractional Kelly (conservative sizing)
+  kelly_fraction: 0.20  # FIXED (2026-05-11): Aligned with risk engine (20%)
+
+  # Hard caps per trade (percent of bankroll)
+  # FIXED (2026-05-11): Unified to 1% max per trade (aligned with risk engine)
+  # NOTE: Value is decimal (0.01 = 1%), not percentage (1.0 = 100%)
+  max_risk_per_trade_pct: 0.01  # 1% max per trade (unified)
+  # Total exposure across all 15m markets
+  max_15m_positions_per_asset: 2
+  max_15m_exposure_pct: 0.08  # 8% of bankroll across all 15m markets
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONFIG INVARIANTS (Startup Assertions)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+invariants:
+  # Strike selector must be <= execution guard (can't select what we can't trade)
+  selector_leq_guard: true
+  
+  # YAML configs must match code defaults (or code must override)
+  yaml_matches_canonical: true
+  
+  # All assets must have all required parameters
+  required_params:
+    - max_delta_pct
+    - min_edge_near
+    - min_edge_far
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LOGGING & OBSERVABILITY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+logging:
+  # Log line prefixes for grep/awk analysis
+  execution_blocked_prefix: "[EXECUTION_BLOCKED]"
+  trade_entry_prefix: "[TRADE_ENTRY]"
+  health_snapshot_prefix: "[HEALTH_15M]"
+  fee_mismatch_prefix: "[FEE_MISMATCH]"
+  recon_mismatch_prefix: "[RECON_MISMATCH]"
+  config_error_prefix: "[CONFIG_ERROR]"

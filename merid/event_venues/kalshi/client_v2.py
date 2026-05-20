@@ -33,6 +33,7 @@ from typing import Any, Dict, Optional
 import httpx
 
 from utils.logger import get_logger
+from utils.http_client import get_shared_ssl_context
 from merid.event_venues.kalshi.types import (
     BalanceSuccess, BalanceTemporaryError, BalancePermanentError,
     MarketSuccess, MarketTemporaryError, MarketPermanentError,
@@ -119,6 +120,7 @@ class KalshiClientV2:
                             pool=10.0,
                         ),
                         limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+                        verify=get_shared_ssl_context(),
                     )
         return self._client
     
@@ -164,7 +166,8 @@ class KalshiClientV2:
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.asymmetric import padding
         
-        ts_ms = str(int(time.time() * 1000))
+        # Add 5000ms buffer to prevent "header timestamp expired" errors
+        ts_ms = str(int(time.time() * 1000) + 5000)
         message = ts_ms + method.upper() + path
         
         try:
@@ -272,8 +275,10 @@ class KalshiClientV2:
             raw_balance = RawVenueBalance.from_kalshi_response(data)
             
             # Build canonical internal bankroll
+            # Bankroll split: equity = portfolio_value + cash_available
             bankroll = InternalBankroll(
-                equity_usd=raw_balance.total_equity,
+                equity_usd=raw_balance.total_equity,  # portfolio_value + cash
+                available_cash_usd=raw_balance.cash_available,  # spendable cash only
                 max_riskable_frac=self._max_riskable_frac,
                 as_of=raw_balance.as_of,
                 source=raw_balance.source,
@@ -281,7 +286,8 @@ class KalshiClientV2:
             )
             
             logger.info(
-                f"[{operation}] Success: equity=${bankroll.equity_usd}, "
+                f"[{operation}] Success: equity=${bankroll.equity_usd} "
+                f"(cash=${bankroll.available_cash_usd}, positions=${bankroll.locked_cash_usd}), "
                 f"max_position=${bankroll.max_position_usd}, latency={latency_ms:.1f}ms"
             )
             

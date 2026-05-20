@@ -1,0 +1,323 @@
+I now have sufficient information to produce the full audit. Let me compile the complete findings:
+
+---
+
+## Frontend Data Population Audit — MERID Kalshi Trading Platform
+
+This audit covers all specified views and components. Issues are organized by severity: Critical (data never populates), High (data may silently be 0/empty), Medium (type mismatches/incorrect endpoints), Low (minor issues).
+
+---
+
+### Issue 1 — CRITICAL: `KalshiRiskScreen` `RISK_SUMMARY` response shape mismatch — overview cards always show fallback values
+
+**File:** `web/react/src/views/KalshiRiskScreen.tsx:21-33, 65-68`
+
+The component declares this TypeScript interface for `RiskSummary`:
+```
+overall_risk_level, margin_usage_pct, position_risk_amount, position_risk_pct, leverage_ratio,
+connectivity_status: { rest_api, ws_risk, ws_positions, ws_orderbook }
+```
+
+The actual backend handler at `web/api/risk_metrics_api.py:374` (`GET /api/v1/risk/summary`) returns:
+```
+{ can_trade, halt, staleness, portfolio_risk, active_stops, monitoring_active }
+```
+
+None of the fields the component expects (`overall_risk_level`, `margin_usage_pct`, `position_risk_amount`, `leverage_ratio`, `connectivity_status`) exist in the backend response. Every one of the four summary cards falls through to `|| 0` / `?? 'unknown'`, always displaying `UNKNOWN`, `0.0%`, `$0`, `0.0x`. The connectivity panel renders an empty `Object.entries({})` loop — nothing is shown.
+
+**Fix:** Either update `risk_metrics_api.py:374` to return the fields the component expects (deriving them from the fills ledger, KalshiRiskManager state, and WS bridge latency), or change the component to read the actual fields from the `halt`/`portfolio_risk` sub-objects the endpoint does return.
+
+---
+
+### Issue 2 — CRITICAL: `KalshiRiskScreen` `RISK_ALERTS` response shape mismatch — alerts table always empty
+
+**File:** `web/react/src/views/KalshiRiskScreen.tsx:69-73, 81-99`
+
+The component expects `{ alerts: RiskAlert[] }` where each `RiskAlert` has fields `id, timestamp, severity, type, description, source, status`.
+
+The backend handler at `web/api/real_data_endpoints.py:1043` (`GET /api/v1/risk/alerts`) returns a **bare array** `List[Dict]`, not a wrapped object `{ alerts: [...] }`. Each element uses the key `level` (not `severity`), `message` (not `description`), `timestamp` (not ISO string — it uses `now_iso` which is `.isoformat()+"Z"`), and lacks a `source` or `status` field entirely.
+
+Result: `polledAlerts?.alerts?.forEach` always iterates zero items because `polledAlerts` is an array, not `{ alerts: [...] }`. The alert table is always empty unless WS alerts arrive.
+
+**Fix:** Either wrap the backend return value: `return {"alerts": alerts}` in `real_data_endpoints.py:1107`, or change the component to handle the bare array.
+
+---
+
+### Issue 3 — CRITICAL: `KalshiPortfolioView` reconciliation endpoint uses string concatenation that produces a wrong path
+
+**File:** `web/react/src/views/KalshiPortfolioView.tsx:80`
+
+```
+API_ENDPOINTS.KALSHI_HEALTH + '/reconciliation'
+```
+
+`KALSHI_HEALTH = "/api/v1/kalshi/health"` so this resolves to `/api/v1/kalshi/health/reconciliation`.
+
+The backend does serve `GET /health/reconciliation` in `kalshi_api.py:921` under the `/api/v1/kalshi` router prefix, so the full path `/api/v1/kalshi/health/reconciliation` is correct and exists. **However**, the same pattern is used in `KalshiTerminalView.tsx:229` and `GlobalModeBanner.tsx:36`. This is fragile — if `KALSHI_HEALTH` changes, all three will break silently. The fix is to add a `KALSHI_HEALTH_RECONCILIATION` constant.
+
+---
+
+### Issue 4 — HIGH: `KalshiPortfolioView` "Unrealized" card always shows `$0.00`
+
+**File:** `web/react/src/views/KalshiPortfolioView.tsx:523-526`
+
+The card reads `risk?.total_unrealized_pnl_usd`. The `/api/v1/kalshi/risk` endpoint (`kalshi_api.py:3480`) sets `unrealized_pnl_usd` in the base dict (line 3498: `"unrealized_pnl_usd": 0.0`), but the fills ledger only supplies `daily_realized_pnl_usd` (line 3526). The unrealized field is never updated by any code path — it stays at `0.0` because the backend never queries Kalshi's live position mark-to-market.
+
+Additionally, the component reads `risk?.total_unrealized_pnl_usd` but the backend key is `unrealized_pnl_usd` (no `total_` prefix). That field name mismatch means even if a value were computed, it would not appear.
+
+**Fix:** Either compute unrealized PnL from live positions in the backend (requires mark-to-market), or rename the backend field to `total_unrealized_pnl_usd`, or add an alias in the response. If unrealized P&L genuinely cannot be computed, the card should display "N/A" rather than `$0.00`.
+
+---
+
+### Issue 5 — HIGH: `KalshiPortfolioView` "Realized PnL" card uses two different field names with a fallback chain that may silently pick zero
+
+**File:** `web/react/src/views/KalshiPortfolioView.tsx:541-544`
+
+```tsx
+(gridPortfolio?.daily_pnl_usd ?? risk?.daily_realized_pnl_usd ?? 0).toFixed(2)
+```
+
+The `KalshiRiskSummary` type (imported from `../types/kalshi`) uses `daily_pnl_usd`. The backend `/api/v1/kalshi/risk` response sets `daily_pnl_usd` from the fills ledger (confirmed in `kalshi_api.py:3526`). The fallback key `daily_realized_pnl_usd` does not exist in the response schema — it was a field name from an older version of the backend. If `gridPortfolio` returns `null`, the `daily_realized_pnl_usd` fallback always reads `undefined`, and the entire expression falls to `0`. The value shown in the "Realized PnL" card when gridPortfolio is unavailable will always be `$0.00` even if `risk.daily_pnl_usd` has a non-zero value.
+
+**Fix:** Change the fallback to `risk?.daily_pnl_usd ?? 0`.
+
+---
+
+### Issue 6 — HIGH: `OperatorDashboard` Day P&L always shows `--`
+
+**File:** `web/react/src/views/OperatorDashboard.tsx:42-44, 84-89`
+
+The component fetches `API_ENDPOINTS.KALSHI_PNL` (`/api/v1/kalshi/pnl`) and expects `{ daily_pnl_usd?, daily_total_pnl_usd? }`. The backend at `kalshi_api.py:3413` returns `daily_pnl_usd` (confirmed). However, the resolution logic in `OperatorDashboard.tsx:84-89` is:
+
+```tsx
+if (typeof kalshiPnl.daily_pnl_usd === 'number') return kalshiPnl.daily_pnl_usd;
+if (typeof kalshiPnl.daily_total_pnl_usd === 'number') return kalshiPnl.daily_total_pnl_usd;
+return null;
+```
+
+If `daily_pnl_usd` is `0.0` (zero), `typeof 0.0 === 'number'` is `true`, so it correctly returns `0`. That is fine. But if the `/api/v1/kalshi/pnl` endpoint fails (e.g., fills ledger not initialized), the entire backend returns a fallback of `{"daily_pnl_usd": 0}` (line 3444) — not an HTTP error — so the card will show `$0.00` when the fills ledger is empty, but `--` only if the fetch itself fails. The `--` symptom means the fetch is failing (e.g., 401 or 500) or `kalshiPnl` is null. Check backend startup logs for fills ledger initialization.
+
+The `MetricCard` for Day P&L at line 135 passes `delta={kalshiDayPnlUsd ?? undefined}`. When `kalshiDayPnlUsd` is `null`, `delta` is `undefined`, so no delta indicator is shown. This is correct behavior but can mask zero vs null.
+
+---
+
+### Issue 7 — HIGH: `ExecutionGateStrip` reads `daily_pnl` and `max_daily_loss` from `KALSHI_RISK` but the field names differ from what the backend returns
+
+**File:** `web/react/src/components/ExecutionGateStrip.tsx:23-28, 85-87`
+
+The component's local `RiskData` interface has `daily_pnl` and `max_daily_loss`. The backend `/api/v1/kalshi/risk` response provides those as aliased fields (`base.setdefault("daily_pnl", ...)` and `base.setdefault("max_daily_loss", ...)` at `kalshi_api.py:3626-3627`). These aliases were added in Phase 20. This should work, but the `max_daily_loss` alias is set to `base.get("limits", {}).get("daily_loss_limit", 0.0)` — which will be `0.0` if `KalshiRiskManager` is not initialized. When `max_daily_loss = 0`, `dailyLossPct` divides by zero (guarded by `> 0` check at line 86), resulting in `0`, so the Daily Loss bar shows `0%` permanently. The fix is to default `max_daily_loss` to a non-zero configured value at startup.
+
+---
+
+### Issue 8 — HIGH: `KalshiVolDashboardView` `KALSHI_CONSENSUS_SIGNALS` endpoint does not exist in the backend
+
+**File:** `web/react/src/views/KalshiVolDashboardView.tsx:132-136`
+
+The constant is `KALSHI_CONSENSUS_SIGNALS = "/api/v1/kalshi/consensus-signals"`. A grep of all backend Python files finds no `@router.get("/consensus-signals")` under any `/api/v1/kalshi` router. The consensus signals feature in the view always renders the empty state (`consensusSigs = []`, `consensusRate = 0`, `engine_running = false`). This entire panel is dead.
+
+**Fix:** Either implement the endpoint in `kalshi_api.py`, or wire it to the existing swarm consensus API (`/api/v1/kalshi/swarm/matrix` or `/api/v1/kalshi/consensus/{asset}/{timeframe}`).
+
+---
+
+### Issue 9 — HIGH: `KalshiSentimentView` `KALSHI_GRID_SENTIMENT` endpoint is not implemented
+
+**File:** `web/react/src/config/constants.ts:137` — `KALSHI_GRID_SENTIMENT = "/api/v1/kalshi-grid/sentiment"`
+
+A grep of `kalshi_grid_api.py` finds no `@router.get("/sentiment")` handler. Any component that calls this endpoint (currently used by `KalshiGridView.tsx` or `KalshiSentimentView`) will get a 404. From the view code read, `KalshiSentimentView` actually uses `KALSHI_GRID_SENTIMENT` indirectly via the sentiment-related fetches. The global sentiment data fetched at `SENTIMENT_ASSETS_ALL` (`/api/v1/sentiment/assets`) is served by `sentiment_api.py` which exists, so that part works. But the grid-sentiment endpoint itself is a stub.
+
+---
+
+### Issue 10 — HIGH: Debate endpoints use no `/api/v1/` prefix — missing from backend router
+
+**File:** `web/react/src/config/constants.ts:312-316`
+
+```
+DEBATE_ALERTS: "/debates/alerts"
+DEBATE_CORRELATION: "/debates/correlation"
+DEBATE_HISTORICAL_CONTRIBUTION: "/debates/historical-contribution"
+DEBATE_ROLLUPS: "/debates/rollups"
+KALSHI_DEBATE_STATS: "/debates/health/overview"
+```
+
+The backend debate router uses prefix `"/debates"` (confirmed in `debate_data_api.py:16`). These paths are NOT under `/api/v1/` — they are root-level. However, the frontend has `API_BASE_URL = "http://localhost:8011"` and fetches `http://localhost:8011/debates/alerts`. The backend is registered without `/api/v1/` prefix, which means the routes DO resolve — but only if the FastAPI app is running on port 8011 and the `debate_data_router` import succeeds. The risk is that `_si("web.api.debate_data_api")` logs a warning and returns `None` if the debate module has an import error, silently dropping these routes.
+
+Additionally, `DEBATE_HISTORICAL_CONTRIBUTION = "/debates/historical-contribution"` — checking `debate_data_api.py` for this route specifically:
+
+**File:** `web/react/src/config/constants.ts:314` — the route `/debates/historical-contribution` is defined in the constant but may not have a corresponding handler. Verify in `debate_data_api.py`.
+
+---
+
+### Issue 11 — HIGH: `KalshiRiskScreen` `RISK_ALERT_ACKNOWLEDGE` is POSTed but the backend route does not exist
+
+**File:** `web/react/src/views/KalshiRiskScreen.tsx:115`
+
+```tsx
+fetch(`${API_BASE_URL}${API_ENDPOINTS.RISK_ALERT_ACKNOWLEDGE(alertId)}`, { method: 'POST' })
+```
+
+`RISK_ALERT_ACKNOWLEDGE = (alertId) => /api/v1/risk/alerts/${alertId}/acknowledge`
+
+Searching `risk_metrics_api.py` finds no `@router.post("/alerts/{alertId}/acknowledge")`. Only `RISK_ALERTS_ACKNOWLEDGE_ALL` (`POST /api/v1/risk/alerts/acknowledge-all`) is implemented at line 328. Individual alert acknowledge POSTs always return 404, and the component's error handler sets `ackError`, showing the error banner.
+
+**Fix:** Add `@router.post("/alerts/{alert_id}/acknowledge")` to `risk_metrics_api.py`.
+
+---
+
+### Issue 12 — MEDIUM: `KalshiPortfolioView` reads `risk.daily_trades` but backend PnL endpoint field is `daily_trades` only when fills ledger is initialized
+
+**File:** `web/react/src/views/KalshiPortfolioView.tsx:546`
+
+```tsx
+<p className="text-xs text-gray-500">{risk?.daily_trades ?? 0} trades today</p>
+```
+
+The backend `get_risk()` returns `"daily_trades": 0` as the base default, then sets it from fills ledger `total_fills`. When the fills ledger is empty (paper mode, fresh start), this always shows `0 trades today`. That is functionally correct but may confuse operators who placed paper orders. The key is that `daily_trades` counts **fills** from the fills ledger, not orders. An order that was placed but not yet filled shows as 0.
+
+---
+
+### Issue 13 — MEDIUM: `KalshiVolDashboardView` PnL history panel likely always empty
+
+**File:** `web/react/src/views/KalshiVolDashboardView.tsx:126`
+
+The component fetches `KALSHI_PNL_HISTORY = "/api/v1/kalshi/pnl-history"` and reads `pnlRes.data?.points`. The backend handler at `kalshi_api.py:4153` calls `risk.get_pnl_history(limit=limit)`. If `KalshiRiskManager` does not have a `get_pnl_history` method (this would be caught by the `AttributeError` at line 4174 and return an empty list), then `points = []` always. The `latestPnlPoint` will be `null`, meaning the equity and volatility display in the vol dashboard shows dashes.
+
+The chart also uses `realized_vol` and `target_vol` from each point, which are synthesized by the backend only if the risk manager records equity snapshots. In paper demo mode, these are likely `0.0`. **The entire PnL equity curve in the vol dashboard is probably empty in demo mode.**
+
+---
+
+### Issue 14 — MEDIUM: `KalshiPortfolioView` `KALSHI_GRID_PORTFOLIO` — field name `open_interest` vs `open_market_count`
+
+**File:** `web/react/src/views/KalshiPortfolioView.tsx:55, 555`
+
+The component expects `{ equity_usd, daily_pnl_usd, open_interest, position_count, kill_switch_active, margin_utilization }`. In `kalshi_grid_api.py:419`, the `/pnl` endpoint (used as a portfolio snapshot) should return these fields. The mixed use of `open_interest` (component) vs `open_market_count` (risk endpoint) means line 555 shows:
+
+```tsx
+OI: {gridPortfolio?.open_interest ?? risk?.open_market_count ?? 0}
+```
+
+This could display OI from grid portfolio when available and fall back to open market count from risk, which are different metrics. Need to verify `kalshi_grid_api.py:419` actually returns `open_interest`.
+
+---
+
+### Issue 15 — MEDIUM: `KalshiRiskScreen` uses `loadingSummary` as sole loading gate — if `RISK_SUMMARY` 500s, the entire screen renders "Loading" forever
+
+**File:** `web/react/src/views/KalshiRiskScreen.tsx:145-158`
+
+```tsx
+if (loadingSummary) { return <skeleton> }
+```
+
+The `useApiData` hook's `loading` flag only stays `true` until the first response (success or error). If the endpoint returns 500, `loading` becomes `false` and `riskSummary` is `null`. The view then renders all cards with `?? 'unknown'` / `?? 0` fallbacks — no error state is shown. This is a silent data failure.
+
+**Fix:** Add an error render branch: `if (riskSummaryError && !riskSummary) return <ErrorAlert />`.
+
+---
+
+### Issue 16 — MEDIUM: `KalshiVolDashboardView` `risk.category_notional` and `risk.limits` field access
+
+**File:** `web/react/src/views/KalshiVolDashboardView.tsx:186-194`
+
+```tsx
+const assetExposure = Object.entries(risk.category_notional).map(([asset, notional]) => ({
+  cap: risk.limits?.[`max_${asset}_notional_usd`] ?? risk.limits?.max_total_notional_usd ?? 1000,
+}))
+```
+
+The backend `/api/v1/kalshi/risk` returns `limits` as `{ max_notional_usd, max_open_markets, daily_loss_limit, max_drawdown_pct, max_orders_per_minute, max_orders_per_hour }`. There is no `max_${asset}_notional_usd` key (e.g., no `max_BTC_notional_usd`). The per-asset cap always falls back to `max_total_notional_usd` (if `risk.limits.max_total_notional_usd` exists — it actually doesn't; the key is `max_notional_usd`). So the cap always falls to the hardcoded `1000`. The utilization bars will render using `1000` as the denominator even if the real limit is different.
+
+---
+
+### Issue 17 — MEDIUM: `KalshiTradeTicket` order submission uses query params, not request body
+
+**File:** `web/react/src/components/KalshiTradeTicket.tsx:178-189`
+
+```tsx
+const params = new URLSearchParams({ ticker, side, action, count, price_cents, order_type, mode, ... });
+const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.KALSHI_ORDERS}?${params}`, { method: 'POST' ... });
+```
+
+The backend `POST /api/v1/kalshi/orders` handler at `kalshi_api.py` — need to verify whether it expects query params or a JSON body. If the backend handler uses `Query()` parameters (FastAPI), this will work. If it uses a Pydantic body model, the request will fail with 422. The `Content-Type: application/json` header is set but no JSON body is sent (`body` is absent from the `fetch` call). This is a potential order submission failure for all live and paper trades.
+
+---
+
+### Issue 18 — MEDIUM: `KalshiGridView` fills/P&L data uses manual `fetch` with `setInterval` instead of `useApiData`
+
+**File:** `web/react/src/views/KalshiGridView.tsx:347-375, 395-399`
+
+The view uses a hand-rolled `fetchStatus` → `Promise.allSettled` + `setInterval` loop at 10s. Unlike `useApiData`, this does not hook into the cancellation, deduplication, or loading state management of the canonical hook. If the component unmounts and remounts (e.g., route navigation), multiple intervals accumulate until cleanup. The `fetchStatus` dep array includes `fetchJson`, which is stable (useCallback), so this should not loop — but any failure in `fetchStatus` causes silent stale data with no error indicator shown.
+
+Also: fills data `setFills(Array.isArray(payload) ? payload : (payload.fills ?? []))` — the backend at `kalshi_grid_api.py` returns fills — need to verify whether it wraps in `{ fills: [...] }` or returns a bare array. The component handles both shapes, which is correct.
+
+---
+
+### Issue 19 — LOW: `DataSourceBadges.tsx` does not track any specific API endpoints
+
+**File:** `web/react/src/components/DataSourceBadges.tsx`
+
+The component takes `synthetic`, `manualOrExternal`, `source` as props — it renders badge UI only. It does not itself call any API endpoints. The concern in the audit brief about "what endpoints does it track" — the answer is: none. It is purely a presentational component driven by props passed by parent components. **No data pipeline issue here.**
+
+---
+
+### Issue 20 — LOW: `KalshiPortfolioView` has dead `WS_PORTFOLIO_URL` comment but does use `useKalshiRiskStream`
+
+**File:** `web/react/src/views/KalshiPortfolioView.tsx:68`
+
+The hook `useKalshiRiskStream` is used and correctly consumed. The WS-triggered refetch pattern (lines 136-146) is sound. The `summaryReceivedAt` is used for `DataAgeBadge`. No issue here.
+
+---
+
+### Issue 21 — LOW: `SWARM_VERDICTS` constant maps to `/api/v1/loop/guard/verdicts` but should be `/api/v1/kalshi/swarm/verdicts`
+
+**File:** `web/react/src/config/constants.ts:338` and Memory (`MEMORY.md`, Phase 13b)
+
+The memory states the endpoint added in Phase 13b was `GET /api/v1/kalshi/swarm/verdicts` in `swarm_bus_api.py`. But the constant is:
+```
+SWARM_VERDICTS: "/api/v1/loop/guard/verdicts"
+```
+
+The `loop_api.py` file header mentions `GET /api/v1/loop/guard/verdicts`. If both endpoints exist and return the same data, no problem. But if `SwarmVerdictFeed` calls `SWARM_VERDICTS` and the loop guard endpoint doesn't return the same verdict format as the swarm bus endpoint, the feed renders incorrectly.
+
+---
+
+### Summary Table
+
+| # | File | Location | Severity | Issue |
+|---|------|----------|----------|-------|
+| 1 | KalshiRiskScreen.tsx | L21-33, L65 | Critical | RISK_SUMMARY response shape mismatch — all metric cards show fallback |
+| 2 | KalshiRiskScreen.tsx | L69-73 | Critical | RISK_ALERTS returns bare array; component expects `{alerts:[]}` wrapper |
+| 3 | KalshiPortfolioView.tsx | L80 | Critical | `/reconciliation` suffix concatenation is fragile (works but brittle); same bug in KalshiTerminalView.tsx:229 and GlobalModeBanner.tsx:36 |
+| 4 | KalshiPortfolioView.tsx | L523 | High | `total_unrealized_pnl_usd` field doesn't exist in API — always `$0.00` |
+| 5 | KalshiPortfolioView.tsx | L541-544 | High | `daily_realized_pnl_usd` fallback key doesn't exist; should be `daily_pnl_usd` |
+| 6 | OperatorDashboard.tsx | L42-44, L84 | High | Day P&L MetricCard shows `--` when fetch fails; no fills ledger = `$0.00` |
+| 7 | ExecutionGateStrip.tsx | L85-87 | High | `max_daily_loss = 0` causes dailyLossPct always 0%; limits not initialized |
+| 8 | KalshiVolDashboardView.tsx | L132 | High | `/api/v1/kalshi/consensus-signals` endpoint does not exist in backend |
+| 9 | KalshiSentimentView + constants.ts | L137 | High | `/api/v1/kalshi-grid/sentiment` endpoint not implemented |
+| 10 | constants.ts | L312-316 | High | Debate endpoints lack `/api/v1/` prefix; route silently missing if import fails |
+| 11 | KalshiRiskScreen.tsx | L115 | High | `RISK_ALERT_ACKNOWLEDGE` individual POST returns 404 — endpoint not implemented |
+| 12 | KalshiPortfolioView.tsx | L546 | Medium | `daily_trades` shows fill count not order count; always 0 in fresh paper mode |
+| 13 | KalshiVolDashboardView.tsx | L126 | Medium | PnL history panel always empty if `get_pnl_history` AttributeError in backend |
+| 14 | KalshiPortfolioView.tsx | L555 | Medium | `open_interest` vs `open_market_count` mixed — OI display may be wrong metric |
+| 15 | KalshiRiskScreen.tsx | L145 | Medium | Silent failure — no error state rendered when RISK_SUMMARY returns 500 |
+| 16 | KalshiVolDashboardView.tsx | L186-194 | Medium | Per-asset cap keys don't exist in limits response; always falls to `1000` |
+| 17 | KalshiTradeTicket.tsx | L178-189 | Medium | Order sent as query params with `Content-Type: application/json` but no body |
+| 18 | KalshiGridView.tsx | L347-399 | Medium | Manual `setInterval` instead of `useApiData`; no error indicator on failure |
+| 19 | constants.ts | L338 | Low | SWARM_VERDICTS points to loop guard endpoint, not swarm bus endpoint from Phase 13b |
+
+---
+
+### Files Absolutely Essential for Understanding This Topic
+
+- `c:/Dev/MERID/web/react/src/config/constants.ts` — all endpoint constants
+- `c:/Dev/MERID/web/react/src/views/KalshiPortfolioView.tsx` — primary portfolio/PnL/positions view
+- `c:/Dev/MERID/web/react/src/views/KalshiRiskScreen.tsx` — risk metrics + alerts view
+- `c:/Dev/MERID/web/react/src/views/KalshiVolDashboardView.tsx` — vol dashboard with PnL chart
+- `c:/Dev/MERID/web/react/src/views/OperatorDashboard.tsx` — operator key metrics panel
+- `c:/Dev/MERID/web/react/src/components/ExecutionGateStrip.tsx` — execution gate + near-limit strip
+- `c:/Dev/MERID/web/react/src/components/KalshiTradeTicket.tsx` — order submission component
+- `c:/Dev/MERID/web/api/kalshi_api.py` — backend `/api/v1/kalshi/*` (PnL, risk, positions, balance, fills, pnl-history, consensus-signals MISSING)
+- `c:/Dev/MERID/web/api/risk_metrics_api.py` — backend `/api/v1/risk/*` (summary, alerts, halt-status, acknowledge-all)
+- `c:/Dev/MERID/web/api/real_data_endpoints.py` — wires `/api/v1/risk/alerts` (bare array, not wrapped)
+- `c:/Dev/MERID/web/api/operator_endpoints.py` — `/api/v1/operator/risk-state`, `/api/v1/operator/agent-activity`
+- `c:/Dev/MERID/web/api/kalshi_grid_api.py` — `/api/v1/kalshi-grid/*`
+- `c:/Dev/MERID/web/react/src/hooks/useOrderGroupStream.ts` — SSE order group stream hook
+- `c:/Dev/MERID/web/react/src/types/risk.ts` — `OperatorRiskState` type

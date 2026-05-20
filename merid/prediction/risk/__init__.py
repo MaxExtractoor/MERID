@@ -11,6 +11,8 @@ continue to work unchanged.  Also exports the new shared Kalshi risk engine.
 # ── Original prediction-market risk layer (was risk.py) ───────────────
 from merid.prediction.risk._prediction_risk import (  # noqa: F401
     CategoryLimit,
+    CycleCapConfig,
+    CycleCapTracker,
     DailyPnL,
     MarketExposure,
     PredictionMarketRisk,

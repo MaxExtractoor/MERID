@@ -81,7 +81,8 @@ class TestPriceFloor:
     def test_price_at_floor_triggers(self):
         cfg = StopLossConfig(price_floor_cents=10)
         rules = StopLossRules(cfg)
-        pos = _pos(current_price=10)
+        # Use non-crypto ticker to avoid per-asset floor overrides
+        pos = _pos(ticker="KXECON-H-55-60", current_price=10)
         action = rules.check_position(pos)
         assert action.should_close
         assert action.rule == "price_floor"

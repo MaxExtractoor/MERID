@@ -201,7 +201,7 @@ class KalshiUnifiedAdapter(UnifiedVenueAdapter):
         except ImportError:
             pass  # risk_controller not available in test environments
 
-        # UNIFIED GUARD CHECK — 2% bankroll cap enforcement
+        # UNIFIED GUARD CHECK — 3% cycle / 8% total bankroll cap enforcement
         # This blocks orders that would exceed the global portfolio limit
         _guard = get_global_execution_guard()
         _price_cents = int((proposal.price or 50) * 100)  # Default to 50 cents if no price

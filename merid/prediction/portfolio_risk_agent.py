@@ -10,6 +10,9 @@ Reuses:
 - PredictionMarketRisk for kill-switch / drawdown logic
 - PredictionAlertManager for breach notifications
 - kalshi_get_positions / kalshi_get_balance tools
+
+Risk limits now use core.settings (MAX_TOTAL_RISK_PCT, MAX_CYCLE_RISK_PCT, DAILY_LOSS_CAP_PCT)
+instead of deprecated KALSHI_PORTFOLIO_MAX_* fields.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
+from core.settings import MAX_TOTAL_RISK_PCT, DAILY_LOSS_CAP_PCT, MAX_CYCLE_RISK_PCT
 from merid.prediction.agent_grid_config import PortfolioRiskConfig
 from utils.logger import get_logger
 
@@ -81,6 +85,7 @@ class PortfolioRiskAgent:
         self._task: Optional[asyncio.Task] = None
         self._shutdown = asyncio.Event()
         self._running = False
+        self._start_stop_lock = asyncio.Lock()  # RACE-FIX: Protect start/stop from concurrent calls
         # Set after the first successful _check_portfolio() completes.
         # AgentGrid.start() waits on this before activating trading agents.
         self._ready_event = asyncio.Event()
@@ -112,14 +117,15 @@ class PortfolioRiskAgent:
         Use MERID_RISK_LIMIT_OVERRIDE=1 with explicit operator acknowledgment
         to bypass (logged as audit event).
         """
-        if self._running:
-            return
-        self._shutdown.clear()
-        self._ready_event.clear()
-        self._task = asyncio.create_task(
-            self._run_loop(), name="kalshi-portfolio-risk"
-        )
-        self._running = True
+        async with self._start_stop_lock:
+            if self._running:
+                return
+            self._shutdown.clear()
+            self._ready_event.clear()
+            self._running = True  # Set BEFORE creating task to prevent double-start
+            self._task = asyncio.create_task(
+                self._run_loop(), name="kalshi-portfolio-risk"
+            )
         
         # Import settings for bankroll context in logs
         from merid.settings import settings
@@ -166,15 +172,27 @@ class PortfolioRiskAgent:
                 self._startup_blocked_reason = error_msg
                 raise RuntimeError(error_msg) from exc
         
-        bankroll_cents = settings.KALSHI_PORTFOLIO_BANKROLL_CENTS
-        notional_pct = settings.KALSHI_PORTFOLIO_MAX_NOTIONAL_PCT * 100
-        daily_loss_pct = settings.KALSHI_PORTFOLIO_MAX_DAILY_LOSS_PCT * 100
-        per_asset_pct = settings.KALSHI_PORTFOLIO_MAX_PER_ASSET_PCT * 100
+        # CRITICAL FIX: Use live bankroll for self-check, not static settings
+        from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+        live_equity_usd = get_equity_for_risk_calc_sync()
+        
+        if live_equity_usd is not None and live_equity_usd > 0:
+            bankroll_cents = int(live_equity_usd * 100)
+            logger.info("[PORTFOLIO_RISK_SELF_CHECK] Using live bankroll: $%.2f", live_equity_usd)
+        else:
+            # Fail closed - no bankroll available from bankroll_service_v2
+            logger.error("[PORTFOLIO_RISK_SELF_CHECK] Bankroll unavailable from bankroll_service_v2. Trading blocked.")
+            bankroll_cents = 0
+            
+        # Use unified risk settings from core.settings (SINGLE SOURCE OF TRUTH)
+        notional_pct = MAX_TOTAL_RISK_PCT * 100
+        daily_loss_pct = DAILY_LOSS_CAP_PCT * 100
+        per_asset_pct = MAX_CYCLE_RISK_PCT * 100
         
         # Self-check: verify derived values match expected bankroll * percentage
-        expected_notional = int(bankroll_cents * settings.KALSHI_PORTFOLIO_MAX_NOTIONAL_PCT)
-        expected_daily_loss = int(bankroll_cents * settings.KALSHI_PORTFOLIO_MAX_DAILY_LOSS_PCT)
-        expected_per_asset = int(bankroll_cents * settings.KALSHI_PORTFOLIO_MAX_PER_ASSET_PCT)
+        expected_notional = int(bankroll_cents * MAX_TOTAL_RISK_PCT)
+        expected_daily_loss = int(bankroll_cents * DAILY_LOSS_CAP_PCT)
+        expected_per_asset = int(bankroll_cents * MAX_CYCLE_RISK_PCT)
         
         actual_notional = int(self._config.max_total_notional_usd * 100)
         actual_daily_loss = int(self._config.max_daily_loss_usd * 100)
@@ -244,10 +262,10 @@ class PortfolioRiskAgent:
             "=" * 60 + "\n"
             "PORTFOLIO RISK AGENT STARTUP - CONFIG SELF-CHECK\n"
             f"  Mode: {'LIVE' if is_live_mode else 'PAPER/DEMO'}\n"
-            f"  Raw env: KALSHI_PORTFOLIO_BANKROLL_CENTS={bankroll_cents} (${bankroll_cents/100:.2f})\n"
-            f"  Raw env: KALSHI_PORTFOLIO_MAX_NOTIONAL_PCT={settings.KALSHI_PORTFOLIO_MAX_NOTIONAL_PCT} ({notional_pct:.0f}%)\n"
-            f"  Raw env: KALSHI_PORTFOLIO_MAX_DAILY_LOSS_PCT={settings.KALSHI_PORTFOLIO_MAX_DAILY_LOSS_PCT} ({daily_loss_pct:.0f}%)\n"
-            f"  Raw env: KALSHI_PORTFOLIO_MAX_PER_ASSET_PCT={settings.KALSHI_PORTFOLIO_MAX_PER_ASSET_PCT} ({per_asset_pct:.0f}%)\n"
+            f"  Bankroll: ${bankroll_cents/100:.2f}\n"
+            f"  MAX_TOTAL_RISK_PCT (core.settings): {MAX_TOTAL_RISK_PCT} ({notional_pct:.0f}%)\n"
+            f"  DAILY_LOSS_CAP_PCT (core.settings): {DAILY_LOSS_CAP_PCT} ({daily_loss_pct:.0f}%)\n"
+            f"  MAX_CYCLE_RISK_PCT (core.settings): {MAX_CYCLE_RISK_PCT} ({per_asset_pct:.0f}%)\n"
             f"  Derived: max_notional_cents={expected_notional} (bankroll × {notional_pct:.0f}%)\n"
             f"  Derived: max_daily_loss_cents={expected_daily_loss} (bankroll × {daily_loss_pct:.0f}%)\n"
             f"  Derived: max_per_asset_cents={expected_per_asset} (bankroll × {per_asset_pct:.0f}%)\n"
@@ -261,11 +279,16 @@ class PortfolioRiskAgent:
 
     async def stop(self) -> None:
         """Stop the monitoring loop."""
-        self._shutdown.set()
-        self._running = False
-        self._ready_event.set()  # unblock any waiters so they don't hang on shutdown
+        async with self._start_stop_lock:
+            if not self._running:
+                return  # Already stopped
+            self._shutdown.set()
+            self._running = False
+            self._ready_event.set()  # unblock any waiters so they don't hang on shutdown
+            if self._task and not self._task.done() and not self._task.cancelled():
+                self._task.cancel()
+        # Wait outside lock to avoid deadlock
         if self._task and not self._task.done():
-            self._task.cancel()
             try:
                 await self._task
             except asyncio.CancelledError:
@@ -378,7 +401,10 @@ class PortfolioRiskAgent:
             from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
             _ledger = get_fills_ledger()
             _s = _ledger.summary()
-            snapshot.daily_pnl_usd = Decimal(str(round(float(_s.get("daily_realized_pnl_usd", 0)), 4)))
+            # FIX: Include both realized and unrealized PnL for daily PnL to show mark-to-market performance
+            daily_realized = float(_s.get("daily_realized_pnl_usd", 0))
+            total_unrealized = float(_s.get("total_unrealized_pnl_usd", 0))
+            snapshot.daily_pnl_usd = Decimal(str(round(daily_realized + total_unrealized, 4)))
         except Exception:
             try:
                 from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
@@ -480,15 +506,25 @@ class PortfolioRiskAgent:
         """Check portfolio against configured limits. Returns list of breach descriptions."""
         breaches: List[str] = []
         
-        # Import settings for bankroll context
-        from merid.settings import settings
-        bankroll_cents = settings.KALSHI_PORTFOLIO_BANKROLL_CENTS
-        bankroll_usd = bankroll_cents / 100
+        # CRITICAL FIX: Use live bankroll from bankroll_service_v2, not static settings
+        from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+        live_equity_usd = get_equity_for_risk_calc_sync()
+        
+        if live_equity_usd is not None and live_equity_usd > 0:
+            bankroll_usd = float(live_equity_usd)
+            bankroll_cents = int(bankroll_usd * 100)
+            logger.debug("[PORTFOLIO_RISK] Using live bankroll: $%.2f", bankroll_usd)
+        else:
+            # Fail closed - no bankroll available from bankroll_service_v2
+            logger.error("[PORTFOLIO_RISK] Bankroll unavailable from bankroll_service_v2. Trading blocked.")
+            bankroll_cents = 0
+            bankroll_usd = 0.0
 
         # Total notional
         if snapshot.total_notional_usd > self._config.max_total_notional_usd:
             notional_pct = (float(snapshot.total_notional_usd) / bankroll_usd * 100) if bankroll_usd > 0 else 0
-            limit_pct = settings.KALSHI_PORTFOLIO_MAX_NOTIONAL_PCT * 100
+            from core.settings import MAX_TOTAL_RISK_PCT
+            limit_pct = MAX_TOTAL_RISK_PCT * 100
             breaches.append(
                 f"Total notional ${snapshot.total_notional_usd} ({notional_pct:.1f}% of bankroll) > "
                 f"limit ${self._config.max_total_notional_usd} ({limit_pct:.0f}% of bankroll)"
@@ -497,7 +533,8 @@ class PortfolioRiskAgent:
         # Per-asset notional (with correlation-adjusted caps)
         for asset, notional in snapshot.notional_per_asset.items():
             if notional > self._config.max_notional_per_asset_usd:
-                per_asset_pct = settings.KALSHI_PORTFOLIO_MAX_PER_ASSET_PCT * 100
+                from core.settings import MAX_CYCLE_RISK_PCT
+                per_asset_pct = MAX_CYCLE_RISK_PCT * 100
                 breaches.append(
                     f"{asset} notional ${notional} > "
                     f"limit ${self._config.max_notional_per_asset_usd} ({per_asset_pct:.0f}% of bankroll per asset)"
@@ -539,7 +576,7 @@ class PortfolioRiskAgent:
         # Daily loss
         if snapshot.daily_pnl_usd < -self._config.max_daily_loss_usd:
             loss_pct = (float(abs(snapshot.daily_pnl_usd)) / bankroll_usd * 100) if bankroll_usd > 0 else 0
-            limit_pct = settings.KALSHI_PORTFOLIO_MAX_DAILY_LOSS_PCT * 100
+            limit_pct = DAILY_LOSS_CAP_PCT * 100
             breaches.append(
                 f"Daily loss ${abs(snapshot.daily_pnl_usd)} ({loss_pct:.1f}% of bankroll) > "
                 f"limit ${self._config.max_daily_loss_usd} ({limit_pct:.0f}% of bankroll)"
@@ -1075,8 +1112,17 @@ class PortfolioRiskAgent:
 
     def summary(self) -> Dict[str, Any]:
         """JSON-serialisable summary with bankroll context."""
+        # CRITICAL FIX: Use live bankroll for summary
+        from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
         from merid.settings import settings
-        bankroll_cents = settings.KALSHI_PORTFOLIO_BANKROLL_CENTS
+        
+        live_equity_usd = get_equity_for_risk_calc_sync()
+        
+        if live_equity_usd is not None and live_equity_usd > 0:
+            bankroll_cents = int(live_equity_usd * 100)
+        else:
+            # Fail closed - no bankroll available
+            bankroll_cents = 0
         return {
             "running": self._running,
             "kill_switch_active": self._kill_switch_active,
@@ -1085,12 +1131,12 @@ class PortfolioRiskAgent:
             "config": {
                 "bankroll_cents": bankroll_cents,
                 "max_total_notional_usd": str(self._config.max_total_notional_usd),
-                "max_total_notional_pct": settings.KALSHI_PORTFOLIO_MAX_NOTIONAL_PCT,
+                "max_total_notional_pct": MAX_TOTAL_RISK_PCT,
                 "max_notional_per_asset_usd": str(self._config.max_notional_per_asset_usd),
-                "max_notional_per_asset_pct": settings.KALSHI_PORTFOLIO_MAX_PER_ASSET_PCT,
+                "max_notional_per_asset_pct": MAX_CYCLE_RISK_PCT,
                 "max_open_markets": self._config.max_open_markets,
                 "max_daily_loss_usd": str(self._config.max_daily_loss_usd),
-                "max_daily_loss_pct": settings.KALSHI_PORTFOLIO_MAX_DAILY_LOSS_PCT,
+                "max_daily_loss_pct": DAILY_LOSS_CAP_PCT,
                 "max_margin_utilization_pct": str(self._config.max_margin_utilization_pct),
                 "check_interval_s": self._config.rebalance_check_interval_seconds,
             },

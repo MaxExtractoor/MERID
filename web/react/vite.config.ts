@@ -6,7 +6,7 @@ export default defineConfig(({ mode }) => {
   const rootDir = path.resolve(__dirname, '../..')
   const env = loadEnv(mode, rootDir, '')
   const backendHost = env.MERID_BACKEND_HOST || '127.0.0.1'
-  const backendPort = env.MERID_BACKEND_PORT || '8000'
+  const backendPort = env.MERID_BACKEND_PORT || '8011'
   const backendHttp = `http://${backendHost}:${backendPort}`
   const backendWs = `ws://${backendHost}:${backendPort}`
 

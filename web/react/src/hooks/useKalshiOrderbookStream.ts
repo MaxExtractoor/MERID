@@ -181,16 +181,11 @@ export function useKalshiOrderbookStream(
         }
       });
 
-      eventSource.addEventListener('heartbeat', (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          // Heartbeat received - no action needed
-        } catch (error) {
-          // Heartbeat parsing errors are not critical
-        }
+      eventSource.addEventListener('heartbeat', () => {
+        // Heartbeat received - no action needed
       });
 
-      eventSource.addEventListener('error', (event) => {
+      eventSource.addEventListener('error', (_event) => {
         log.error('Orderbook stream error', { ticker, type: 'sse' });
         setState(prev => ({
           ...prev,
@@ -208,7 +203,7 @@ export function useKalshiOrderbookStream(
         }, 5000);
       });
 
-      eventSource.addEventListener('closed', (event) => {
+      eventSource.addEventListener('closed', (_event) => {
         if (DEBUG) log.debug('Orderbook stream closed', { ticker });
         setState(prev => ({
           ...prev,

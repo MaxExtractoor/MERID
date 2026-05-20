@@ -57,9 +57,14 @@ def _get_cycle_drawdown_manager() -> Optional[Any]:
 
 
 # ── Fee schedule ─────────────────────────────────────────────────────────
+# DELEGATED to unified fees module: merid.event_venues.kalshi.fees
+# Note: Original signature is (price_cents, contracts), unified is (contracts, price_cents)
+from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
 
 def kalshi_fee_cents(price_cents: int, contracts: int) -> int:
     """Calculate Kalshi fee in cents for a trade.
+
+    DELEGATED to unified fees module: merid.event_venues.kalshi.fees
 
     Uses the official Kalshi parabolic formula:
         fee = ceil(rate × C × P × (1 − P))
@@ -77,23 +82,16 @@ def kalshi_fee_cents(price_cents: int, contracts: int) -> int:
     Returns:
         Total fee in cents (integer, rounded up)
     """
-    if contracts <= 0 or price_cents <= 0 or price_cents >= 100:
-        return 0
-
-    rate = kalshi_fee_rate(contracts)
-    p = price_cents / 100.0
-    raw = rate * contracts * p * (1.0 - p)
-    # Minimum fee: 2¢ total
-    return max(2, math.ceil(raw * 100))
+    return calculate_kalshi_fee_cents(contracts, price_cents)
 
 
 def kalshi_fee_rate(contracts: int) -> float:
-    """Return the fee rate for a given contract count."""
-    if contracts < 100:
-        return 0.07
-    elif contracts < 1000:
-        return 0.05
-    return 0.03
+    """Return the fee rate for a given contract count.
+
+    DELEGATED to unified fees module: merid.event_venues.kalshi.fees
+    """
+    from merid.event_venues.kalshi.fees import _get_rate_for_contracts
+    return float(_get_rate_for_contracts(contracts))
 
 
 # ── Kelly sizing ─────────────────────────────────────────────────────────
@@ -178,21 +176,18 @@ def kelly_size_kalshi(
     kelly_fraction: float = 0.25,
     max_contracts: int = 250,
     min_edge: float = 0.05,  # CONSERVATIVE: 5.0% minimum edge
-    sentiment_score: Optional[float] = None,
-    volatility_regime: Optional[str] = None,
 ) -> int:
-    """Fee-aware Kelly position sizing for Kalshi binary contracts with sentiment adjustment.
+    """Fee-aware Kelly position sizing for Kalshi binary contracts.
+
+    SENTIMENT ISOLATION (2026-05-15): Removed sentiment_score and volatility_regime parameters.
+    For 15m Kalshi crypto profile, sizing is based purely on edge, price, and bankroll.
+    No sentiment or regime adjustments applied.
 
     Kelly fraction f* = (p * b - q) / b
     where:
       p = implied probability + edge
       q = 1 - p
       b = (100 - price - fee_per) / price  (net odds after fees)
-
-    Sentiment adjustment:
-      - Extreme fear/greed (score <20 or >80): reduce size by 50%
-      - High volatility regime: reduce size by 30%
-      - Normal conditions: no adjustment
 
     Args:
         edge: Estimated edge (e.g. 0.08 for 8%)
@@ -201,8 +196,6 @@ def kelly_size_kalshi(
         kelly_fraction: Fraction of full Kelly to use (default quarter-Kelly)
         max_contracts: Hard cap on position size
         min_edge: Minimum edge to trade
-        sentiment_score: Fear/greed index 0-100 (None = no adjustment)
-        volatility_regime: "calm", "normal", "hot" (None = no adjustment)
 
     Returns:
         Number of contracts to buy (0 if edge insufficient)
@@ -231,25 +224,8 @@ def kelly_size_kalshi(
     # Apply fractional Kelly
     fraction = kelly_f * kelly_fraction
 
-    # Sentiment-based sizing adjustment
-    sentiment_multiplier = 1.0
-
-    if sentiment_score is not None:
-        if sentiment_score <= 20 or sentiment_score >= 80:
-            # Extreme fear/greed: reduce size significantly
-            sentiment_multiplier *= 0.5
-        elif sentiment_score <= 30 or sentiment_score >= 70:
-            # Moderate fear/greed: slight reduction
-            sentiment_multiplier *= 0.75
-
-    if volatility_regime == "hot":
-        # High volatility: reduce position size
-        sentiment_multiplier *= 0.7
-    elif volatility_regime == "calm":
-        # Low volatility: can size up slightly
-        sentiment_multiplier *= 1.1
-
-    fraction *= sentiment_multiplier
+    # SENTIMENT ISOLATION (2026-05-15): Removed sentiment-based sizing adjustment.
+    # For 15m Kalshi crypto profile, sizing is based purely on edge, price, and bankroll.
 
     # Convert to contracts
     contracts = int(fraction * bankroll_cents / price_cents)
@@ -540,16 +516,22 @@ def edge_from_prediction(
 ) -> float:
     """Compute edge (%) from Kalman-smoothed price vs current market price.
 
+    For Kalshi 15-minute crypto contracts, prices represent probabilities of YES:
+    - Price in cents (0-100) = P(YES) × 100
+    - Example: 62 cents = 62% probability of YES
+    - Edge = P(YES)_model - P(YES)_market, expressed as percentage
+
     Positive if the filter says fair price > current price (buy signal).
 
     Safety checks:
-    - Rejects prices outside (0, 100) cents range
+    - Rejects prices outside (0, 100) cents range (probability space)
     - Rejects edges based on unrealistic price differences (>50 cents jump)
     - Logs warnings for rejected inputs
+    - PROFILE-GUARD: For kalshi_crypto_15m_v2, validates probability semantics
 
     Args:
-        smoothed_price: Kalman-estimated fair price (cents)
-        current_price: Current market price (cents)
+        smoothed_price: Kalman-estimated fair price (cents, must be in 0-100 range representing P(YES))
+        current_price: Current market price (cents, must be in 0-100 range representing P(YES))
         fee_cents: Fee per contract in cents (default 0)
         config: Risk config with validation parameters
 
@@ -557,6 +539,29 @@ def edge_from_prediction(
         Edge as a percentage (e.g. 2.5 means 2.5% edge), or 0 if invalid
     """
     cfg = config or KalshiRiskConfig()
+
+    # PROFILE-GUARD: For kalshi_crypto_15m_v2, enforce probability semantics
+    import os
+    merid_profile = os.getenv("MERID_PROFILE", "").lower()
+    if merid_profile == "kalshi_crypto_15m_v2":
+        # Validate that inputs are in probability space (0-100 cents)
+        # This prevents accidental use of raw spot prices (e.g., BTC price in USD)
+        if not (0 <= smoothed_price <= 100):
+            logger.error(
+                "[PROFILE-GUARD] edge_from_prediction rejected for kalshi_crypto_15m_v2: "
+                "smoothed_price=%.2f is not in probability space (0-100 cents). "
+                "This function requires P(YES) in cents, not raw spot prices.",
+                smoothed_price
+            )
+            return 0.0
+        if not (0 <= current_price <= 100):
+            logger.error(
+                "[PROFILE-GUARD] edge_from_prediction rejected for kalshi_crypto_15m_v2: "
+                "current_price=%.2f is not in probability space (0-100 cents). "
+                "This function requires P(YES) in cents, not raw spot prices.",
+                current_price
+            )
+            return 0.0
 
     # Validate prices are in valid range (0, 100)
     if not (cfg.valid_price_cents_min < smoothed_price < cfg.valid_price_cents_max):
@@ -585,6 +590,8 @@ def edge_from_prediction(
     if current_price <= 0:
         return 0.0
 
+    # Edge = (P(YES)_model - P(YES)_market - fee) / P(YES)_market
+    # This is the correct edge calculation for Kalshi binary contracts
     edge_frac = (smoothed_price - current_price - fee_cents) / current_price
     edge_pct = edge_frac * 100.0
 
@@ -711,9 +718,13 @@ def kelly_size_from_kalman(
 
 @dataclass
 class CategoryLimit:
-    """Exposure limit for a market category."""
+    """Exposure limit for a market category.
+    
+    CRITICAL: max_notional_usd should be derived from live Kalshi balance, not hardcoded.
+    Default 0 means "derive from live bankroll" (20% of bankroll per category).
+    """
     category: str
-    max_notional_usd: float = 5000.0
+    max_notional_usd: float = 0.0  # 0 = derive from live bankroll (was 5000.0 hardcoded)
     max_contracts: int = 500
     max_pct_of_portfolio: float = 0.20  # 20% max in any one category
     enabled: bool = True
@@ -721,14 +732,18 @@ class CategoryLimit:
 
 @dataclass
 class KalshiRiskConfig:
-    """Full risk configuration for Kalshi trading."""
+    """Full risk configuration for Kalshi trading.
+    
+    CRITICAL: max_total_notional_usd should be derived from live Kalshi balance, not hardcoded.
+    Default 0 means "derive from live bankroll" (50% of bankroll for total notional).
+    """
     # Global limits
-    max_total_notional_usd: float = 25000.0
+    max_total_notional_usd: float = 0.0  # 0 = derive from live bankroll (was 25000.0 hardcoded)
     max_daily_loss_usd: float = 1000.0
     max_stop_loss_usd_per_cluster: float = 500.0  # Per-cluster (asset+timeframe) stop loss cap
     # 15m scalper: smaller max order size (10 vs 250) to prevent oversized orders for small bankroll
     max_single_order_contracts: int = int(os.getenv("KALSHI_MAX_ORDER_CONTRACTS", "10"))  # 10 for scalper, was 250
-    max_single_order_notional_usd: float = 2500.0
+    max_single_order_notional_usd: float = 2500.0  # Default - overridden by profile when active (see get_kalshi_risk())
     max_position_per_contract: int = 500  # Kalshi typical retail limit
 
     # ── Kelly sizing safety limits ────────────────────────────────────────
@@ -900,7 +915,40 @@ class KalshiRiskConfig:
         NOTE: These are INTERNAL risk caps that must be MORE CONSERVATIVE than Kalshi's venue caps.
         Kalshi's venue caps are typically much higher (e.g., $10,000+ for crypto), so our internal
         caps should be a fraction of those to ensure we never hit venue limits.
+        
+        PROFILE GATING (2026-05-13): If kalshi_crypto_15m_v2 profile is active, use profile-based
+        category limits instead of bankroll-derived computation. This ensures balance independence.
         """
+        # Check if kalshi_crypto_15m_v2 profile is active
+        try:
+            from merid.risk.profiles.crypto_15m_profile import is_profile_active, get_active_profile
+            if is_profile_active():
+                adapter = get_active_profile()
+                if adapter is None:
+                    raise RuntimeError("MERID_PROFILE=kalshi_crypto_15m_v2 is set but adapter failed to initialize")
+                profile_limits = adapter.to_category_limits()
+                logger.info(
+                    "[CATEGORY-LIMITS-PROFILE] Using profile-based category limits (kalshi_crypto_15m_v2): "
+                    f"crypto=${profile_limits['crypto']['max_notional_usd']:.2f}"
+                )
+                # Convert profile limits to CategoryLimit objects
+                limits = {}
+                for category, limit_dict in profile_limits.items():
+                    limits[category] = CategoryLimit(
+                        category=limit_dict['category'],
+                        max_notional_usd=limit_dict['max_notional_usd'],
+                        max_contracts=limit_dict['max_contracts'],
+                        max_pct_of_portfolio=limit_dict['max_pct_of_portfolio'],
+                        enabled=limit_dict['enabled']
+                    )
+                return limits
+        except Exception as e:
+            raise RuntimeError(
+                f"MERID_PROFILE=kalshi_crypto_15m_v2 is active but failed to load profile limits: {e}. "
+                "This is a hard error - profile-based risk governance is required when the profile is active."
+            )
+        
+        # Legacy bankroll-derived computation (profile not active or failed to load)
         try:
             from core.settings import MAX_TOTAL_RISK_PCT
             from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
@@ -1286,7 +1334,8 @@ class KalshiRiskManager:
                     resolution = resolve_entry_window(
                         asset=asset,
                         minutes_to_expiry=minutes_to_expiry,
-                        edge_pct=edge_pct
+                        edge_pct=edge_pct,
+                        ticker=ticker
                     )
                     
                     if not resolution.allowed:
@@ -1396,7 +1445,8 @@ class KalshiRiskManager:
             if group_id and self._config.group_limits_enabled:
                 # Normalize group_id to string for consistent key lookup
                 gid = str(group_id)
-                assert isinstance(gid, str), f"group_id must normalize to str, got {type(gid)}"
+                if not isinstance(gid, str):
+                    raise TypeError(f"group_id must normalize to str, got {type(gid)}")
                 # Check per-group notional cap
                 # ZERO-FIX: Skip if group_notional_cap_usd is 0 (meaning derive from bankroll)
                 group_notional = self._state.group_notional.get(gid, 0.0) + notional_usd
@@ -2373,6 +2423,10 @@ class KalshiRiskManager:
 
         Dynamic risk is now the primary path. Static caps act as hard safety limits.
 
+        PROFILE GATING: When kalshi_crypto_15m_v2 profile is active, this method
+        returns static values from the profile instead of computing dynamic values
+        based on bankroll. This ensures contract caps are config-only for 15m crypto.
+
         Returns:
             Tuple of (
                 max_notional_usd_total,
@@ -2385,6 +2439,53 @@ class KalshiRiskManager:
                 ratio
             )
         """
+        # PROFILE GATING: Return static profile values for kalshi_crypto_15m_v2
+        # MARKET-AWARE: Calculate per-asset caps based on actual assets with markets in catalog
+        try:
+            from merid.risk.profiles.crypto_15m_profile import is_profile_active, get_active_profile
+            if is_profile_active():
+                adapter = get_active_profile()
+                if adapter:
+                    profile = adapter.profile
+                    # Get actual assets with markets from catalog for market-aware risk caps
+                    from merid.event_venues.kalshi.market_catalog import get_market_catalog
+                    catalog = get_market_catalog()
+                    assets_with_markets = set()
+                    for cm in catalog.get_all_markets():
+                        if cm.asset:
+                            assets_with_markets.add(cm.asset.upper())
+                    
+                    # Use actual asset count, default to 3 if catalog empty (fallback)
+                    asset_count = max(len(assets_with_markets), 3)
+                    cluster_count = max(asset_count // 2, 2)  # Clusters are half of assets, min 2
+                    
+                    # Calculate market-aware per-asset and per-cluster caps
+                    max_notional_per_asset = profile.venue_max_total_notional_usd / asset_count
+                    max_notional_per_cluster = profile.venue_max_total_notional_usd / cluster_count
+                    
+                    logger.info(
+                        "[MARKET-AWARE-RISK] asset_count=%d cluster_count=%d max_notional_per_asset=%.2f max_notional_per_cluster=%.2f",
+                        asset_count,
+                        cluster_count,
+                        max_notional_per_asset,
+                        max_notional_per_cluster,
+                    )
+                    
+                    # Return market-aware values from profile
+                    return (
+                        profile.venue_max_total_notional_usd,  # max_notional_usd_total
+                        max_notional_per_asset,  # market-aware per-asset cap
+                        max_notional_per_cluster,  # market-aware per-cluster cap
+                        5000,  # max_contracts_total (fixed from profile)
+                        1750 // max(3, asset_count),  # max_contracts_per_asset (scaled by asset count)
+                        750 // max(2, cluster_count),  # max_contracts_per_cluster (scaled by cluster count)
+                        "PROFILE_STATIC_MARKET_AWARE",  # regime
+                        1.0,  # ratio (static)
+                    )
+        except ImportError:
+            # Profile module not available, proceed with legacy behavior
+            pass
+
         bankroll_usd = bankroll_cents / 100.0 if bankroll_cents > 0 else 0.0
         if bankroll_usd <= 0:
             return (0.0, 0.0, 0.0, 0, 0, 0, "NO_BANKROLL", 0.0)
@@ -2459,7 +2560,24 @@ class KalshiRiskManager:
         Note: ``max_single_order_contracts`` and ``CategoryLimit.max_contracts``
         are intentionally not updated — they represent fixed venue-level limits,
         not balance-relative caps.
+
+        PROFILE GATING: When kalshi_crypto_15m_v2 profile is active, this method
+        is short-circuited to preserve profile values. The profile is applied
+        at initialization time in get_kalshi_risk(), and this skip prevents
+        overwriting those fixed profile values with balance-derived computations.
         """
+        # PROFILE GATING: Short-circuit for kalshi_crypto_15m_v2 profile
+        # Profile values are already set at initialization in get_kalshi_risk()
+        # This skip prevents overwriting profile values with balance-derived caps
+        try:
+            from merid.risk.profiles.crypto_15m_profile import is_profile_active
+            if is_profile_active():
+                logger.debug("[KalshiRiskConfig] calibrate_from_balance() skipped for kalshi_crypto_15m_v2 profile (preserving profile values)")
+                return
+        except ImportError:
+            # Profile module not available, proceed with legacy behavior
+            pass
+
         if balance_cents <= 0:
             return
         balance_usd = balance_cents / 100.0
@@ -3147,12 +3265,38 @@ _risk_lock = threading.Lock()
 
 
 def get_kalshi_risk() -> KalshiRiskManager:
-    """Get or create the singleton KalshiRiskManager."""
+    """Get or create the singleton KalshiRiskManager.
+    
+    PROFILE WIRING: When MERID_PROFILE=kalshi_crypto_15m_v2 is active,
+    applies profile-based risk configuration from kalshi_crypto_15m.yaml.
+    """
     global _risk
     if _risk is None:
         with _risk_lock:
             if _risk is None:
-                _risk = KalshiRiskManager()
+                # Check if profile is active and apply profile config
+                config = None
+                try:
+                    from merid.risk.profiles.crypto_15m_profile import is_profile_active, get_active_profile
+                    if is_profile_active():
+                        adapter = get_active_profile()
+                        if adapter:
+                            profile_config_dict = adapter.to_kalshi_risk_config()
+                            # Create KalshiRiskConfig from profile values
+                            config = KalshiRiskConfig(**profile_config_dict)
+                            logger.info(
+                                "[PROFILE_WIRING] Applied kalshi_crypto_15m_v2 profile to KalshiRiskConfig: "
+                                "max_single_order_notional_usd=%.2f, max_total_notional_usd=%.2f",
+                                config.max_single_order_notional_usd,
+                                config.max_total_notional_usd
+                            )
+                except ImportError:
+                    # Profile module not available, use default config
+                    pass
+                except Exception as e:
+                    logger.warning("[PROFILE_WIRING] Failed to apply profile config: %s. Using default config.", e)
+                
+                _risk = KalshiRiskManager(config=config)
     return _risk
 
 

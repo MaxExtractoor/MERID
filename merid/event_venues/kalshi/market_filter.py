@@ -38,47 +38,48 @@ logger = get_logger("merid.event_venues.kalshi.market_filter")
 
 # Shorter timeframes and noisier assets (SOL/XRP/DOGE) get higher min-edges.
 # Longer tenors can tolerate slightly lower min-edges.
+# TIGHTENED: Increased edge thresholds for higher conviction trades only
 # Global hard floor: 0.08 (nothing slips below this).
 MIN_EDGE_GRID: Dict[str, Dict[str, Decimal]] = {
     "BTC": {
-        "15m":     Decimal("0.10"),
-        "1h":      Decimal("0.08"),  # Default hourly
-        "daily":   Decimal("0.08"),
-        "weekly":  Decimal("0.07"),
-        "monthly": Decimal("0.06"),
-        "annual":  Decimal("0.05"),  # Annual: lowest noise, longest tenor
+        "15m":     Decimal("0.12"),  # Increased from 0.10 for higher conviction
+        "1h":      Decimal("0.10"),  # Increased from 0.08
+        "daily":   Decimal("0.09"),  # Increased from 0.08
+        "weekly":  Decimal("0.08"),  # Increased from 0.07
+        "monthly": Decimal("0.07"),  # Increased from 0.06
+        "annual":  Decimal("0.06"),  # Increased from 0.05
     },
     "ETH": {
-        "15m":     Decimal("0.11"),
-        "1h":      Decimal("0.09"),
-        "daily":   Decimal("0.09"),
-        "weekly":  Decimal("0.08"),
-        "monthly": Decimal("0.07"),
-        "annual":  Decimal("0.06"),
+        "15m":     Decimal("0.13"),  # Increased from 0.11
+        "1h":      Decimal("0.11"),  # Increased from 0.09
+        "daily":   Decimal("0.10"),  # Increased from 0.09
+        "weekly":  Decimal("0.09"),  # Increased from 0.08
+        "monthly": Decimal("0.08"),  # Increased from 0.07
+        "annual":  Decimal("0.07"),  # Increased from 0.06
     },
     "SOL": {
-        "15m":     Decimal("0.13"),
-        "1h":      Decimal("0.10"),
-        "daily":   Decimal("0.10"),
-        "weekly":  Decimal("0.09"),
-        "monthly": Decimal("0.08"),
-        "annual":  Decimal("0.07"),
+        "15m":     Decimal("0.15"),  # Increased from 0.13
+        "1h":      Decimal("0.12"),  # Increased from 0.10
+        "daily":   Decimal("0.11"),  # Increased from 0.10
+        "weekly":  Decimal("0.10"),  # Increased from 0.09
+        "monthly": Decimal("0.09"),  # Increased from 0.08
+        "annual":  Decimal("0.08"),  # Increased from 0.07
     },
     "XRP": {
-        "15m":     Decimal("0.14"),
-        "1h":      Decimal("0.11"),
-        "daily":   Decimal("0.11"),
-        "weekly":  Decimal("0.10"),
-        "monthly": Decimal("0.09"),
-        "annual":  Decimal("0.08"),
+        "15m":     Decimal("0.16"),  # Increased from 0.14
+        "1h":      Decimal("0.13"),  # Increased from 0.11
+        "daily":   Decimal("0.12"),  # Increased from 0.11
+        "weekly":  Decimal("0.11"),  # Increased from 0.10
+        "monthly": Decimal("0.10"),  # Increased from 0.09
+        "annual":  Decimal("0.09"),  # Increased from 0.08
     },
     "DOGE": {
-        "15m":     Decimal("0.15"),
-        "1h":      Decimal("0.12"),
-        "daily":   Decimal("0.12"),
-        "weekly":  Decimal("0.11"),
-        "monthly": Decimal("0.10"),
-        "annual":  Decimal("0.09"),
+        "15m":     Decimal("0.17"),  # Increased from 0.15
+        "1h":      Decimal("0.14"),  # Increased from 0.12
+        "daily":   Decimal("0.13"),  # Increased from 0.12
+        "weekly":  Decimal("0.12"),  # Increased from 0.11
+        "monthly": Decimal("0.11"),  # Increased from 0.10
+        "annual":  Decimal("0.10"),  # Increased from 0.09
     },
 }
 
@@ -1233,6 +1234,7 @@ def select_near_spot_best_edge(
     use_tiered_max_price: bool = False,
     use_price_bands: bool = False,
     per_asset_max_distance_pct: Optional[Dict[Tuple[str, str], float]] = None,
+    dynamic_max_price_calc: Optional[Any] = None,  # DYNAMIC PRICING v10: Real-time calculator
 ) -> List[MarketCandidate]:
     """Select nearest-to-spot markets with best edge per (underlying, timeframe, direction).
 
@@ -1243,7 +1245,7 @@ def select_near_spot_best_edge(
     - per_asset_max_distance_pct: per-(asset,tf) distance dict (e.g. {("BTC","15m"):0.20}).
       Falls back to max_distance_pct when key missing; None = no global limit.
     - max_distance_pct: global fallback when per_asset_max_distance_pct is None/missing.
-    - min_edge: drop candidates with edge below threshold (e.g. Decimal("0.02"))
+    - min_edge: drop candidates with edge below threshold (e.g. Decimal("0.05"))
     - use_tiered_min_edge: when True, uses per-(asset,timeframe) thresholds from MIN_EDGE_GRID
     - use_tiered_max_price: when True, uses per-(asset,timeframe) max prices from MAX_PRICE_GRID
     - use_price_bands: when True, applies per-(asset,tf) PRICE_BANDS (min/max contract price)
@@ -1385,15 +1387,31 @@ def select_near_spot_best_edge(
             )
 
         # Max price filter: tiered max price cap (legacy upper bound, still active)
+        # DYNAMIC PRICING v10: Use real-time calculator if provided, else fall back to static grid
         if use_tiered_max_price:
-            max_price_cents = get_tiered_max_price(e.underlying, e.candidate.ticker)
+            # Try dynamic calculator first (WebSocket-driven, ATR-adjusted)
+            if dynamic_max_price_calc is not None:
+                try:
+                    max_price_cents = dynamic_max_price_calc.calculate(
+                        asset=e.underlying,
+                        ticker=e.candidate.ticker,
+                        timeframe=tf_bucket,
+                    )
+                except Exception:
+                    # Fallback to static grid on calculator error
+                    max_price_cents = get_tiered_max_price(e.underlying, e.candidate.ticker)
+            else:
+                # Static tiered pricing (no WebSocket data available)
+                max_price_cents = get_tiered_max_price(e.underlying, e.candidate.ticker)
+            
             mid_price = e.candidate.mid_price_cents
             if mid_price > 0 and mid_price > max_price_cents:
                 dropped_price += 1
                 logger.debug(
-                    "Dropping %s: mid_price %dc > tiered max %dc (%s/%s)",
+                    "Dropping %s: mid_price %dc > max %dc (%s/%s) [dynamic=%s]",
                     e.candidate.ticker, mid_price, max_price_cents,
                     e.underlying.upper(), tf_bucket,
+                    dynamic_max_price_calc is not None,
                 )
                 continue
 

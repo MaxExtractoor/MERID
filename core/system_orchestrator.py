@@ -243,7 +243,7 @@ class SystemOrchestrator:
         except Exception as e:
             logger.error("Failed to initialize TREASURY: %s", e)
         
-        # Import and initialize ARCHIVE
+        # Import and initialize ARCHIVE (optional for Kalshi-only mode)
         try:
             from archive import get_audit_ledger, get_decision_logger, get_replay_engine
             self._archive_engine = {
@@ -254,8 +254,13 @@ class SystemOrchestrator:
             self._system_health[MeridSystem.ARCHIVE].healthy = True
             self._system_health[MeridSystem.ARCHIVE].last_heartbeat = time.time()
             logger.info("ARCHIVE system initialized")
+        except ImportError:
+            # Archive module not available - optional for Kalshi-only mode
+            logger.warning("ARCHIVE module not available - skipping (optional for Kalshi-only mode)")
+            self._archive_engine = None
         except Exception as e:
             logger.error("Failed to initialize ARCHIVE: %s", e)
+            self._archive_engine = None
         
         # FIN is initialized on-demand for execution
         self._system_health[MeridSystem.FIN].healthy = True

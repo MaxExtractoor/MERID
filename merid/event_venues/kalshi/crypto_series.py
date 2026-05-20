@@ -34,8 +34,9 @@ logger = get_logger("merid.event_venues.kalshi.crypto_series")
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
-CRYPTO_FREQUENCIES = ["15m", "hourly", "daily", "weekly", "monthly", "annual"]
-"""Supported crypto market frequencies."""
+# PRODUCTION AUDIT (Step 3): Only 15m timeframe allowed for trading
+CRYPTO_FREQUENCIES = ["15m"]
+"""Supported crypto market frequencies (production: 15m only)."""
 
 # Series ticker prefixes for crypto assets
 CRYPTO_SERIES_PREFIXES = {
@@ -381,11 +382,22 @@ async def _fetch_series_from_api(category: str) -> List[CryptoSeries]:
             total_oi = 0
 
             for cm in catalog.get_all_markets():
-                raw = cm.market.raw_data or {}
+                # CRITICAL FIX: CatalogMarket wraps EventMarket, so raw_data is on nested market.market
+                if hasattr(cm, "market") and hasattr(cm.market, "raw_data"):
+                    raw = cm.market.raw_data or {}
+                elif hasattr(cm, "raw_data"):
+                    raw = cm.raw_data or {}
+                else:
+                    raw = {}
+                
                 mkt_series = raw.get("series_ticker", "")
                 if mkt_series and mkt_series.upper() == series.series_ticker.upper():
                     count += 1
-                    total_volume += float(cm.market.volume or 0)
+                    # CRITICAL FIX: volume is on nested EventMarket
+                    if hasattr(cm, "market") and hasattr(cm.market, "volume"):
+                        total_volume += float(cm.market.volume or 0)
+                    elif hasattr(cm, "volume"):
+                        total_volume += float(cm.volume or 0)
                     total_oi += int(raw.get("open_interest", 0) or 0)
 
             series.market_count = count
@@ -488,20 +500,38 @@ async def _fetch_markets_from_api(
         all_markets = catalog.get_all_markets()
 
         for cm in all_markets:
-            raw = cm.market.raw_data or {}
+            # CRITICAL FIX: CatalogMarket wraps EventMarket, so raw_data is on nested market.market
+            if hasattr(cm, "market") and hasattr(cm.market, "raw_data"):
+                raw = cm.market.raw_data or {}
+            elif hasattr(cm, "raw_data"):
+                raw = cm.raw_data or {}
+            else:
+                raw = {}
+            
             mkt_series = raw.get("series_ticker", "")
 
             # Match series ticker
             if not mkt_series or mkt_series.upper() != series_ticker.upper():
                 continue
 
-            mkt_id = cm.market.market_id or ""
+            # CRITICAL FIX: market_id is on nested EventMarket
+            if hasattr(cm, "market") and hasattr(cm.market, "market_id"):
+                mkt_id = cm.market.market_id or ""
+            elif hasattr(cm, "market_id"):
+                mkt_id = cm.market_id or ""
+            else:
+                continue
 
             # Determine status
             mkt_status = "open"
-            if hasattr(cm.market, "resolved") and cm.market.resolved:
+            # CRITICAL FIX: resolved and active are on nested EventMarket
+            if hasattr(cm, "market") and hasattr(cm.market, "resolved") and cm.market.resolved:
                 mkt_status = "settled"
-            elif hasattr(cm.market, "active") and not cm.market.active:
+            elif hasattr(cm, "resolved") and cm.resolved:
+                mkt_status = "settled"
+            elif hasattr(cm, "market") and hasattr(cm.market, "active") and not cm.market.active:
+                mkt_status = "closed"
+            elif hasattr(cm, "active") and not cm.active:
                 mkt_status = "closed"
 
             # Apply status filter
@@ -511,21 +541,48 @@ async def _fetch_markets_from_api(
             # Extract prices
             yes_price = None
             no_price = None
-            if hasattr(cm.market, "yes_price"):
+            # CRITICAL FIX: yes_price and no_price are on nested EventMarket
+            if hasattr(cm, "market") and hasattr(cm.market, "yes_price"):
                 yes_price = int(cm.market.yes_price) if cm.market.yes_price is not None else None
-            if hasattr(cm.market, "no_price"):
+            elif hasattr(cm, "yes_price"):
+                yes_price = int(cm.yes_price) if cm.yes_price is not None else None
+            if hasattr(cm, "market") and hasattr(cm.market, "no_price"):
                 no_price = int(cm.market.no_price) if cm.market.no_price is not None else None
+            elif hasattr(cm, "no_price"):
+                no_price = int(cm.no_price) if cm.no_price is not None else None
+
+            # CRITICAL FIX: volume, question, and end_date are on nested EventMarket
+            if hasattr(cm, "market") and hasattr(cm.market, "volume"):
+                volume = int(cm.market.volume) if cm.market.volume else None
+            elif hasattr(cm, "volume"):
+                volume = int(cm.volume) if cm.volume else None
+            else:
+                volume = None
+
+            if hasattr(cm, "market") and hasattr(cm.market, "question"):
+                title = cm.market.question
+            elif hasattr(cm, "question"):
+                title = cm.question
+            else:
+                title = mkt_id
+
+            if hasattr(cm, "market") and hasattr(cm.market, "end_date"):
+                end_date = cm.market.end_date
+            elif hasattr(cm, "end_date"):
+                end_date = cm.end_date
+            else:
+                end_date = None
 
             market_info = MarketInfo(
                 market_id=mkt_id,
                 series_ticker=mkt_series,
-                title=getattr(cm.market, "question", mkt_id),
+                title=title,
                 status=mkt_status,
                 yes_price=yes_price,
                 no_price=no_price,
-                volume=int(cm.market.volume) if cm.market.volume else None,
+                volume=volume,
                 open_interest=raw.get("open_interest"),
-                expiration_time=raw.get("expiration_time") or getattr(cm.market, "end_date", None),
+                expiration_time=raw.get("expiration_time") or end_date,
             )
 
             result.append(market_info)

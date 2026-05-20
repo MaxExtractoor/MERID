@@ -14,6 +14,7 @@ This is the main entry point for the cross-domain signal system.
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
@@ -534,6 +535,18 @@ def get_unified_orchestrator(config: Optional[OrchestratorConfig] = None) -> Uni
     """Get the singleton unified signal orchestrator"""
     global _orchestrator
     if _orchestrator is None:
+        # SENTIMENT ISOLATION (2026-05-15): Disable sentiment integration for 15m Kalshi crypto profile
+        if config is None:
+            config = OrchestratorConfig()
+        
+        # Check if running with kalshi_crypto_15m_v2 profile
+        profile = os.getenv("MERID_PROFILE", "")
+        if profile == "kalshi_crypto_15m_v2":
+            config.enable_sentiment_integration = False
+            logger.info(
+                "[SENTIMENT-ISOLATION] UnifiedSignalOrchestrator: sentiment integration disabled for kalshi_crypto_15m_v2 profile"
+            )
+        
         _orchestrator = UnifiedSignalOrchestrator(config)
     return _orchestrator
 

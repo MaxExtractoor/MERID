@@ -214,11 +214,12 @@ class MeridHttpClient:
         """Return the shared client, or create a one-shot client if not in context manager."""
         if self._client is not None:
             return self._client
-        # One-shot client (not using context manager)
+        # One-shot client (not using context manager) - still use shared SSL context
         return httpx.AsyncClient(
             base_url=self._base_url,
             timeout=self._timeout,
             headers=self._build_headers(),
+            verify=get_shared_ssl_context(),
         )
 
     def _build_headers(self) -> Dict[str, str]:

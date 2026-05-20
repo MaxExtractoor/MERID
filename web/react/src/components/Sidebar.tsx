@@ -2,31 +2,18 @@ import React from 'react';
 import { 
   LayoutDashboard, 
   ShieldAlert,
-  Shield,
   Terminal,
   Search,
-  Globe,
-  Flame,
-  Target,
   Activity,
   Gauge,
   Grid,
   Award,
   Crosshair,
-  Wallet,
-  GitBranch,
   Sliders,
   Briefcase,
-  DollarSign,
-  Heart,
   Rocket,
-  LayoutGrid,
-  Bell,
   Settings as SettingsIcon,
   FileText,
-  TrendingUp,
-  ClipboardList,
-  MessageSquare,
 } from '../ui/icons';
 import type { View } from '../types/views';
 import { useKalshiMode } from '../context/KalshiModeContext';
@@ -60,7 +47,6 @@ const STAGE_NAV = [
     color: 'purple',
     accent: 'from-purple-500 to-purple-600',
     items: [
-      { name: 'Edge', href: 'analyze-edge', icon: Target },
       { name: 'Sentiment', href: 'analyze-sentiment', icon: Activity },
       { name: 'Volatility', href: 'analyze-vol', icon: Gauge },
     ],
@@ -72,7 +58,6 @@ const STAGE_NAV = [
     accent: 'from-cyan-500 to-cyan-600',
     items: [
       { name: 'Swarm', href: 'consensus-swarm', icon: Grid },
-      { name: 'Debates', href: 'consensus-debates', icon: MessageSquare },
       { name: 'Agents', href: 'consensus-performance', icon: Award },
       { name: 'Calibration', href: 'consensus-calibration', icon: Crosshair },
     ],

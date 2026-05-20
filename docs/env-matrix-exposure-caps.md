@@ -67,7 +67,7 @@ Prevents micro-account lockout when bankroll × exposure_pct would round to <$1.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `KALSHI_TRADER_BANKROLL` | 574 | Initial bankroll in cents ($5.74) |
+| `KALSHI_TRADER_BANKROLL` | 0 | **Optional** static reference bankroll in cents for performance reporting only. Live trading uses bankroll_service_v2. If not set (0), performance % returns will be relative to 0. |
 | `KALSHI_TRADER_RISK_PCT` | 0.02 | Max 2% bankroll risk per trade |
 | `KALSHI_TRADER_KELLY_FRAC` | 0.25 | Quarter-Kelly sizing (survival-first) |
 | `KALSHI_TRADER_MAX_EXPOSURE` | 0.20 | Legacy single-asset exposure cap |
@@ -128,7 +128,7 @@ KALSHI_TRADER_KELLY_FRAC=0.35
 ### Testing/Simulation
 ```bash
 KALSHI_TRADER_DRY_RUN=true
-KALSHI_TRADER_BANKROLL=10000  # $100 test bankroll
+KALSHI_TRADER_BANKROLL=10000  # $100 static reference for performance reporting (OPTIONAL - not required for trading)
 KALSHI_TRADER_EXPOSURE_BTC=0.50
 KALSHI_TRADER_GLOBAL_EXPOSURE=1.00
 KALSHI_TRADER_SMOKE_TEST=true

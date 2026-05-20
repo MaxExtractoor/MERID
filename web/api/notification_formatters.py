@@ -156,7 +156,12 @@ def aggregate_similar_alerts(alerts: list[AlertItem]) -> list[Dict[str, Any]]:
             aggregated.append({"type": "single", "alert": group_alerts[0]})
         else:
             # Multiple similar alerts, aggregate
-            metric_id, severity = key.split('_')
+            parts = key.split('_')
+            if len(parts) >= 2:
+                metric_id, severity = parts[0], parts[1]
+            else:
+                metric_id = key
+                severity = "unknown"
             agent_ids = [alert["agent_id"] for alert in group_alerts]
             avg_utilization = sum(alert["utilization_pct"] for alert in group_alerts) / len(group_alerts)
             

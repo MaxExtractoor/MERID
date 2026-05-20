@@ -169,6 +169,18 @@ class TickerCollector:
         self._buffer.append(record.to_dict())
         self._ticks_ingested += 1
         self._last_tick_ts = record.ts
+        
+        # Session-based PnL tracking: notify fills_ledger of price update
+        try:
+            from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+            ledger = get_fills_ledger()
+            market_ticker = payload.get("ticker", payload.get("market_id", ""))
+            last_price_cents = int(payload.get("last", 0) * 100) if payload.get("last") else 0
+            if market_ticker and last_price_cents > 0:
+                ledger.on_market_price_update(market_ticker, last_price_cents)
+        except Exception as exc:
+            # Don't let PnL tracking errors break price updates
+            pass
 
     # ── Query interface ────────────────────────────────────────────────────
 

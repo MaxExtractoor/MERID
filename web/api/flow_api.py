@@ -61,7 +61,7 @@ class MemePlanRequest(BaseModel):
     contract_address: str = ""
     entry_size_usd: float = 50.0
     max_slippage_bps: int = 300
-    max_price_impact: float = 0.05
+    max_price_impact: float = 0.10
     min_liquidity_usd: float = 10000.0
     take_profit_pct: float = 50.0
     stop_loss_pct: float = 30.0

@@ -9,6 +9,7 @@ Usage::
     from merid.event_venues.kalshi.backtest import (
         MarketSnapshot, BacktestState, TradeDecision, backtest,
     )
+    from merid.event_venues.kalshi.risk_parameters import DEFAULT_KALSHI_PRICE_CENT
 
     def my_strategy(snap: MarketSnapshot, state: BacktestState) -> list[TradeDecision]:
         ...
@@ -24,6 +25,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from merid.event_venues.kalshi.risk_parameters import DEFAULT_KALSHI_PRICE_CENTS
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.backtest")
@@ -200,7 +202,7 @@ def backtest(
         # Mark-to-market
         mtm = 0
         for ticker, pos in state.positions.items():
-            price = latest_prices.get(ticker, 50)
+            price = latest_prices.get(ticker, DEFAULT_KALSHI_PRICE_CENTS)
             mtm += pos * price
         state.pnl_history.append(state.cash_cents + mtm)
 

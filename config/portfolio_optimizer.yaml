@@ -19,15 +19,15 @@ portfolio_optimizer:
   max_concurrent_assets: 3
   
   # ═══════════════════════════════════════════════════════════════════════════
-  # CRITICAL: 1-2% TOTAL CYCLE RISK CAP (Pass 8 Invariant)
-  # 6% is STRICTLY FORBIDDEN. This is TOTAL across top 3 edges, NOT per-edge.
-  # Top edge gets priority fill, then 2nd, then 3rd with remaining budget.
+  # UNIFIED 3% RISK REGIME: All modes use 3% cycle risk / 5% total max
+  # 3% of $47 = $1.41 cycle cap → allows 1-2 contract winners per signal
+  # Aligned with drawdown protection: 12% daily / 6% cluster / 3% cycle
   # ═══════════════════════════════════════════════════════════════════════════
-  min_risk_pct_per_trade: ${MERID_MIN_RISK_PCT_PER_TRADE:-0.0033}  # 0.33% (1% / 3)
-  max_risk_pct_per_trade: ${MERID_MAX_RISK_PCT_PER_TRADE:-0.01}    # 1.0% max per edge
+  min_risk_pct_per_trade: ${MERID_MIN_RISK_PCT_PER_TRADE:-0.01}   # 1% min per trade
+  max_risk_pct_per_trade: ${MERID_MAX_RISK_PCT_PER_TRADE:-0.03}   # 3% max per edge (unified)
 
-  # Global risk budget: 1-2% TOTAL across all edges (NOT 3 × per-trade)
-  max_risk_pct_global: ${MERID_MAX_RISK_PCT_GLOBAL:-0.02}       # 2% MAX TOTAL (env-driven)
+  # Global risk budget: 3% TOTAL across all edges (unified regime)
+  max_risk_pct_global: ${MERID_MAX_RISK_PCT_GLOBAL:-0.03}       # 3% MAX TOTAL (unified)
   
   # ═══════════════════════════════════════════════════════════════════════════
   # MOMENTUM SCALPING ENFORCEMENT (No Hold-to-Expiry)
@@ -37,7 +37,7 @@ portfolio_optimizer:
   # 
   # This flag is enforced at the portfolio optimizer level and should be wired
   # into strategy selection to ensure only momentum-scalping strategies are used.
-  enforce_momentum_scalping_only: true  # Block hold-to-expiry strategies
+  enforce_mean_reversion_only: true  # Block hold-to-expiry strategies
   
   # Exit configuration for momentum scalping (ENV-DRIVEN)
   momentum_scalp_config:
@@ -139,16 +139,16 @@ profiles:
   paper:
     portfolio_optimizer:
       enabled: true
-      # 1-2% TOTAL budget for paper (NOT 3 × 2% = 6%). See Pass 8 Invariant.
-      max_risk_pct_global: 0.02
+      # 3% TOTAL budget for paper (NOT 3 × 3% = 9%). See Pass 8 Invariant.
+      max_risk_pct_global: 0.03
       data:
         primary_source: "paper_trading"
   
   live:
     portfolio_optimizer:
       enabled: true
-      # 1-2% TOTAL budget for live (NOT 6%). See Pass 8 Invariant.
-      max_risk_pct_global: 0.015
+      # 3% TOTAL budget for live (NOT 9%). See Pass 8 Invariant.
+      max_risk_pct_global: 0.03
       rebalance:
         min_minutes_between_rebalances: 60  # Less frequent in live
       data:

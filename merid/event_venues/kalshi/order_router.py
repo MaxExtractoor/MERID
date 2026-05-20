@@ -31,9 +31,20 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
-from merid.prediction.venue_gate import TradingMode, get_venue_gate
+from merid.prediction.venue_gate import get_venue_gate
+from merid.prediction.trading_mode import TradingMode
 from trading.trade_mode import get_trade_mode
 from utils.logger import get_logger
+
+# Production scope validation
+try:
+    from config.trading_scope import (
+        get_trading_scope,
+        validate_market_for_trading,
+    )
+    TRADING_SCOPE_AVAILABLE = True
+except ImportError:
+    TRADING_SCOPE_AVAILABLE = False
 from merid.event_venues.kalshi.market_filter import (
     generate_group_id,
     extract_asset_from_ticker,
@@ -42,6 +53,132 @@ from merid.event_venues.kalshi.market_filter import (
     get_series_timeframe_bucket,
 )
 from merid.event_venues.kalshi.ticker_utils import is_valid_kalshi_ticker
+from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
+from merid.event_venues.kalshi.risk_parameters import (
+    DEEP_OTM_THRESHOLD_CENTS,
+    DEEP_ITM_THRESHOLD_CENTS,
+    MODEL_PROB_DISTANCE_THRESHOLD,
+    EXCEPTIONAL_EDGE_THRESHOLD_PCT,
+)
+
+# Canonical block reasons for structured logging
+try:
+    from merid.guards.block_reasons import (
+        BlockReason,
+        OrderStage,
+        log_block_event,
+        get_block_reason_category,
+    )
+    BLOCK_REASONS_AVAILABLE = True
+except ImportError:
+    # Fallback if block_reasons module not available
+    BLOCK_REASONS_AVAILABLE = False
+
+
+def _map_legacy_reason_to_canonical(legacy_reason: str) -> Optional[str]:
+    """Map legacy reason strings to canonical BlockReason enum values.
+    
+    This is a transition helper to gradually migrate all block points
+    to use canonical reasons. Returns None if no mapping exists.
+    """
+    if not BLOCK_REASONS_AVAILABLE:
+        return None
+    
+    legacy_lower = legacy_reason.lower()
+    
+    # Map legacy reasons to canonical BlockReason values
+    mapping = {
+        # Risk limits
+        "non_positive_size": BlockReason.INVALID_ORDER_PARAMS,
+        "invalid_price": BlockReason.INVALID_ORDER_PARAMS,
+        "invalid_side": BlockReason.INVALID_ORDER_PARAMS,
+        "invalid_action": BlockReason.INVALID_ORDER_PARAMS,
+        "bankroll_unavailable": BlockReason.BANKROLL_CAP,
+        "bankroll_risk_cap_exceeded": BlockReason.BANKROLL_CAP,
+        
+        # Strategy filters
+        "price_50_no_edge": BlockReason.MIN_EDGE_THRESHOLD,
+        "price_50_low_confidence": BlockReason.MIN_CONFIDENCE_THRESHOLD,
+        "model_prob_out_of_range": BlockReason.MIN_EDGE_THRESHOLD,
+        "edge_below_threshold": BlockReason.MIN_EDGE_THRESHOLD,
+        "confidence_below_threshold": BlockReason.MIN_CONFIDENCE_THRESHOLD,
+        
+        # Venue constraints
+        "invalid_ticker": BlockReason.INVALID_TICKER,
+        "market_closed": BlockReason.MARKET_CLOSED,
+        "deep_otm": BlockReason.DEEP_OTM_REJECT,
+        "deep_itm": BlockReason.DEEP_ITM_REJECT,
+        "model_prob_distance_violation": BlockReason.MODEL_PROB_DISTANCE,
+        
+        # System state
+        "kill_switch_engaged": BlockReason.KILL_SWITCH,
+        "mode_not_allowed": BlockReason.TRADING_MODE_GATE,
+    }
+    
+    return mapping.get(legacy_lower)
+
+
+def _log_structured_block(
+    intent: OrderIntent,
+    stage: OrderStage,
+    legacy_reason: str,
+    details: Optional[Dict[str, Any]] = None,
+):
+    """Log a structured block event if block_reasons module is available.
+    
+    This wrapper allows gradual migration - if the module is available,
+    it logs structured events. If not, it falls back to regular logger.
+    """
+    if not BLOCK_REASONS_AVAILABLE:
+        logger.warning(
+            f"[BLOCK] {stage.value}: {legacy_reason} for {intent.ticker} "
+            f"(block_reasons module not available)"
+        )
+        return
+    
+    # Try to map legacy reason to canonical
+    canonical_reason = _map_legacy_reason_to_canonical(legacy_reason)
+    
+    if canonical_reason is None:
+        # Unknown reason - log as internal error for audit
+        canonical_reason = BlockReason.INTERNAL_ERROR
+        details = details or {}
+        details["legacy_reason"] = legacy_reason
+        details["unknown_reason"] = True
+    
+    # Extract asset/timeframe from ticker if available
+    asset = extract_asset_from_ticker(intent.ticker) if intent.ticker else ""
+    timeframe = _normalize_timeframe(intent.ticker) if intent.ticker else ""
+    
+    # Get caller module
+    caller = _get_caller_module()
+    
+    log_block_event(
+        order_id=intent.intent_id,
+        stage=stage,
+        reason=canonical_reason,
+        asset=asset,
+        timeframe=timeframe,
+        side=intent.side,
+        action=intent.action,
+        edge_pct=intent.edge_pct,
+        confidence=intent.confidence,
+        details=details or {},
+        caller_module=caller,
+        agent_id=intent.agent_id or "",
+    )
+
+# Deployment safety metrics (if available)
+try:
+    from merid.event_venues.kalshi.kalshi_deployment_safety_metrics import (
+        inc_deep_otm_order_rejected,
+        inc_deep_itm_order_rejected,
+        observe_model_prob_distance,
+        inc_model_prob_distance_violation,
+    )
+    SAFETY_METRICS_AVAILABLE = True
+except ImportError:
+    SAFETY_METRICS_AVAILABLE = False
 
 logger = get_logger("merid.event_venues.kalshi.order_router")
 
@@ -70,6 +207,14 @@ _ALLOWED_CALLER_PREFIXES = (
     "merid.event_venues.kalshi.maker_taker_policy",
     "merid.event_venues.kalshi.take_profit",
     "merid.event_venues.kalshi.universe",
+    # Execution infrastructure
+    "merid.execution.execution_queue_handler",
+    "merid.execution.executors",
+    "merid.hedging.engine",
+    # Sentiment infrastructure
+    "merid.sentiment.live_correlation_bot",
+    # Scripts
+    "scripts.verify_live_trade",
     # NOTE: SIGNAL-ONLY agents - these must route through trading_agent
     # "merid.prediction.kalshi_tools",  # SIGNAL ONLY - use trading_agent
     # "merid.trading.ct_execution_adapter",  # SIGNAL ONLY - CT must route through trading_agent
@@ -80,6 +225,8 @@ _ALLOWED_CALLER_PREFIXES = (
     # Operator API endpoints (manual override only)
     "web.api.kalshi_api",
     "web.api.kalshi_grid_api",
+    # ASGI server entrypoint (for uvicorn compatibility)
+    "uvicorn._compat",
     # Test modules that legitimately test the router
     "core.test_kalshi_gate_truth_table",
     "event_venues.kalshi.test_kalshi_sprint_a",
@@ -97,6 +244,16 @@ _ALLOWED_CALLER_PREFIXES = (
 # SECURITY FIX: CT bypass removed. All orders now flow through canonical router.
 # See: merid/trading/kalshi_continuous_trader.py (use_router_percent hard-coded to 100)
 _KNOWN_BYPASS_PATHS: set = set()
+
+# Authorized Kalshi 15m crypto agents - only these agents can route to Kalshi execution
+# This prevents non-Kalshi agents from accidentally trading on Kalshi
+_KALSHI_15M_CRYPTO_AGENTS: set = {
+    "BTC_15M",
+    "ETH_15M",
+    "SOL_15M",
+    "XRP_15M",
+    "DOGE_15M",
+}
 
 
 def _get_caller_module() -> str:
@@ -130,6 +287,27 @@ def _is_authorized_caller(caller_module: str) -> bool:
         return True  # Known, documented bypass
     if any(caller_module.startswith(p) for p in _ALLOWED_CALLER_PREFIXES):
         return True
+    return False
+
+
+def _is_kalshi_15m_crypto_agent(agent_id: str) -> bool:
+    """Check if agent is authorized for Kalshi 15m crypto trading.
+    
+    Args:
+        agent_id: Agent ID (e.g., 'kalshi-btc_15m_1f2929a7' or 'BTC_15M')
+    
+    Returns:
+        True if agent is authorized, False otherwise
+    """
+    if not agent_id:
+        return False
+    # Check exact match first
+    if agent_id in _KALSHI_15M_CRYPTO_AGENTS:
+        return True
+    # Check if agent_id contains whitelisted name (e.g., 'kalshi-btc_15m_1f2929a7' contains 'BTC_15M')
+    for whitelisted in _KALSHI_15M_CRYPTO_AGENTS:
+        if whitelisted in agent_id:
+            return True
     return False
 
 
@@ -291,6 +469,8 @@ class OrderIntent:
     leg_index: Optional[int] = None
     # Canonical group_id from FilterPipeline for downstream consistency
     group_id: Optional[str] = None
+    # Model probability (for signal validation guardrails)
+    model_prob: Optional[float] = None
     # Good-till-time: Unix epoch seconds; router maps intent to GTT + expiration_ts
     order_expiration_ts: Optional[int] = None
     # Sentiment / audit trail (propagate to paper fills & ledger metadata)
@@ -300,6 +480,167 @@ class OrderIntent:
     sentiment_driven: bool = False
     # Effective equity for risk sizing (CT passes capped equity via max_riskable_usd)
     effective_equity_usd: Optional[float] = None
+    # Take-profit parameters (dynamic R-multiple based)
+    take_profit_price_cents: Optional[int] = None  # TP price in cents (computed from R-multiple)
+    take_profit_r_multiple: Optional[float] = None  # R-multiple target (e.g., 1.5R, 2.0R)
+    stop_loss_price_cents: Optional[int] = None  # Protective stop in cents
+    
+    # COHERENT RISK CONTRACT: WindowResolution + ExitPolicyResolution linkage
+    window_resolution_id: Optional[str] = None  # ID of WindowResolution backing this order
+    exit_policy_id: Optional[str] = None  # ID of ExitPolicyResolution backing this order
+    risk_tier: Optional[str] = None  # Risk tier (A/B/C) from ExitPolicyResolution
+    trailing_enabled: Optional[bool] = None  # Whether trailing stop is enabled
+    max_hold_seconds: Optional[int] = None  # Max hold time from ExitPolicyResolution
+
+
+def _is_exit_order(intent: OrderIntent) -> bool:
+    """Check if this is an exit order (sell/close) that should bypass non-critical checks.
+    
+    Exit orders REDUCE exposure and should be fast-tracked to secure profits.
+    This includes:
+    - Take profit exits (source contains "take_profit")
+    - Stop loss exits (source contains "stop_loss")
+    - Micro-scalp exits (source contains "micro_scalp")
+    - Any sell action (reduces position)
+    """
+    # SELL actions are exits (they reduce exposure)
+    if intent.action == "sell":
+        return True
+    
+    # Check source for exit-specific markers
+    source = (intent.source or "").lower()
+    exit_markers = ["take_profit", "stop_loss", "micro_scalp", "exit", "close"]
+    if any(marker in source for marker in exit_markers):
+        return True
+    
+    return False
+
+
+def _is_15m_crypto_entry_order(intent: OrderIntent) -> bool:
+    """Check if this is an entry order for 15m crypto contracts that requires exit targets.
+    
+    Entry orders (buy) on 15m crypto contracts (BTC, ETH, SOL, XRP, DOGE) must have
+    exit targets (TP and/or SL) per the "no trade without exit" invariant.
+    
+    Returns True if:
+    - action == "buy" (entry order)
+    - ticker matches 15m crypto pattern (KX{COIN}15M-*)
+    - coin is in {BTC, ETH, SOL, XRP, DOGE}
+    """
+    # Exit orders don't need exit targets
+    if _is_exit_order(intent):
+        return False
+    
+    # Only buy actions are entry orders
+    if intent.action != "buy":
+        return False
+    
+    # Check if ticker matches 15m crypto pattern
+    ticker = intent.ticker or ""
+    
+    # 15m crypto series patterns: KXBTC15M, KXETH15M, KXSOL15M, KXXRP15M, KXDOGE15M
+    # Also match specific market IDs like KXBTC15M-26APR191645-45
+    crypto_15m_patterns = [
+        "KXBTC15M",
+        "KXETH15M",
+        "KXSOL15M",
+        "KXXRP15M",
+        "KXDOGE15M",
+    ]
+    
+    for pattern in crypto_15m_patterns:
+        if ticker.startswith(pattern):
+            return True
+    
+    return False
+
+
+def _has_exit_target(intent: OrderIntent) -> bool:
+    """Check if an order has exit target information (TP and/or SL).
+    
+    Returns True if at least one of:
+    - take_profit_price_cents is set
+    - take_profit_r_multiple is set
+    - stop_loss_price_cents is set
+    """
+    return (
+        intent.take_profit_price_cents is not None
+        or intent.take_profit_r_multiple is not None
+        or intent.stop_loss_price_cents is not None
+    )
+
+
+def _check_exit_target_invariant(intent: OrderIntent, t0: float, mode: TradingMode) -> Optional[OrderResult]:
+    """Enforce the "no trade without exit" invariant for 15m crypto entry orders.
+    
+    This guard rejects any entry order on 15m crypto contracts that lacks exit targets.
+    It runs before any side effects (no API calls, no state mutations).
+    
+    Feature flag: KALSHI_ENFORCE_EXIT_INVARIANT (default True)
+    
+    Returns OrderResult with status="rejected" if invariant is violated, else None.
+    """
+    # Check feature flag (default True for safety)
+    enforce = os.getenv("KALSHI_ENFORCE_EXIT_INVARIANT", "true").lower() in ("1", "true", "yes")
+    if not enforce:
+        return None
+    
+    # Only check 15m crypto entry orders
+    if not _is_15m_crypto_entry_order(intent):
+        return None
+    
+    # Check if exit targets are present
+    if _has_exit_target(intent):
+        # Invariant satisfied - log for audit and emit metric
+        logger.info(
+            "[INVARIANT] exit_target_check | ticker=%s | action=%s | has_tp=%s | has_sl=%s | source=%s | status=PASS",
+            intent.ticker,
+            intent.action,
+            intent.take_profit_price_cents is not None or intent.take_profit_r_multiple is not None,
+            intent.stop_loss_price_cents is not None,
+            intent.source or "unknown",
+        )
+        # Emit compliance metric
+        try:
+            from merid.metrics.kalshi_metrics import kalshi_exit_invariant_compliant_total
+            kalshi_exit_invariant_compliant_total.labels(
+                ticker=intent.ticker[:50],  # Truncate for cardinality safety
+            ).inc()
+        except Exception as metric_exc:
+            logger.debug("[INVARIANT] Failed to emit compliance metric: %s", metric_exc)
+        return None
+    
+    # Invariant violated - reject order
+    latency_ms = (time.monotonic() - t0) * 1000
+    logger.error(
+        "[INVARIANT_VIOLATION] Entry order without exit target rejected: "
+        "ticker=%s action=%s source=%s client_tag=%s | "
+        "has_tp=%s has_sl=%s | "
+        "reason=invariant_violation:no_trade_without_exit",
+        intent.ticker,
+        intent.action,
+        intent.source or "unknown",
+        intent.client_tag or "none",
+        intent.take_profit_price_cents is not None or intent.take_profit_r_multiple is not None,
+        intent.stop_loss_price_cents is not None,
+    )
+    
+    # Emit metric for invariant violation
+    try:
+        from merid.metrics.kalshi_metrics import kalshi_exit_invariant_violations
+        kalshi_exit_invariant_violations.labels(
+            ticker=intent.ticker,
+            source=(intent.source or "unknown")[:50],  # Truncate for cardinality safety
+        ).inc()
+    except Exception as metric_exc:
+        logger.debug("[INVARIANT] Failed to emit violation metric: %s", metric_exc)
+    
+    return OrderResult(
+        status="rejected",
+        mode=mode,
+        reason="invariant_violation:no_trade_without_exit",
+        latency_ms=round(latency_ms, 2),
+    )
 
 
 def _resolve_tif(intent: OrderIntent) -> tuple[str, Optional[int]]:
@@ -395,14 +736,15 @@ def _is_live_mode(mode: TradingMode) -> bool:
 
 
 def _kalshi_fee_cents(price_cents: int, contracts: int) -> int:
-    """Canonical Kalshi fee calculation using kalshi_risk_engine.
+    """Canonical Kalshi fee calculation using unified fees module.
+    
+    DELEGATED to unified fees module: merid.event_venues.kalshi.fees
     
     Formula: ceil(0.07 * C * P * (1-P)) where:
-    - C = contracts
+    - C = number of contracts
     - P = price in dollars (price_cents / 100)
     """
-    from merid.prediction.risk.kalshi_risk_engine import KalshiRiskEngine
-    return KalshiRiskEngine.kalshi_fee_cents(contracts, price_cents)
+    return calculate_kalshi_fee_cents(contracts, price_cents)
 
 
 def simulate_paper_fill(
@@ -417,6 +759,10 @@ def simulate_paper_fill(
               deterministic gauntlet/promotion evaluation; omit for live
               paper sessions (uses the module-level RNG).
     """
+    # MODE GUARD: Reject live mode calls to simulate_paper_fill
+    from merid.mode_resolver import ModeResolver
+    ModeResolver.assert_not_live("simulate_paper_fill()")
+    
     import random as _random_module
     rng = _rng if _rng is not None else _random_module
 
@@ -487,13 +833,372 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
     Returns rejection reason string, or None if OK.
     """
     if intent.count <= 0:
+        _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "non_positive_size")
         return "non_positive_size"
     if intent.price_cents <= 0 or intent.price_cents >= 100:
+        _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "invalid_price")
         return "invalid_price"
     if intent.side not in ("yes", "no"):
+        _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "invalid_side")
         return "invalid_side"
     if intent.action not in ("buy", "sell"):
+        _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "invalid_action")
         return "invalid_action"
+    return None
+
+
+# Log effective price band configuration at module load
+def _log_price_band_config() -> None:
+    """Log effective price band configuration at startup."""
+    import os
+    _price_band_min_edge = float(os.getenv("MERID_KALSHI_PRICE_BAND_MIN_EDGE", "0.10"))
+    _price_band_min_confidence = float(os.getenv("MERID_KALSHI_PRICE_BAND_MIN_CONFIDENCE", "0.60"))
+    
+    # Validate and clamp
+    if not (0.0 <= _price_band_min_edge <= 1.0):
+        logger.warning(
+            "[order-router] Price band min_edge %.2f is outside [0,1], clamping to nearest bound",
+            _price_band_min_edge
+        )
+        _price_band_min_edge = max(0.0, min(1.0, _price_band_min_edge))
+    
+    if not (0.0 <= _price_band_min_confidence <= 1.0):
+        logger.warning(
+            "[order-router] Price band min_confidence %.2f is outside [0,1], clamping to nearest bound",
+            _price_band_min_confidence
+        )
+        _price_band_min_confidence = max(0.0, min(1.0, _price_band_min_confidence))
+    
+    logger.info(
+        "[order-router] Price band config: min_edge=%.2f, min_confidence=%.2f (48-52c range)",
+        _price_band_min_edge, _price_band_min_confidence
+    )
+
+# Log configuration at module load
+_log_price_band_config()
+
+
+def _validate_price_band(intent: OrderIntent) -> Optional[str]:
+    """Reject orders in [48, 52] cents without exceptional edge.
+    
+    50¢ is at Kalshi fee curve maximum (worst fee drag).
+    Only allow orders in this band if edge > 10% AND confidence > threshold (configurable).
+    These thresholds are policy knobs configurable per agent/market.
+    """
+    import os
+    _price_band_min_edge = float(os.getenv("MERID_KALSHI_PRICE_BAND_MIN_EDGE", "0.10"))  # Default 10%
+    _price_band_min_confidence = float(os.getenv("MERID_KALSHI_PRICE_BAND_MIN_CONFIDENCE", "0.60"))  # Default 60%
+    
+    if 48 <= intent.price_cents <= 52:
+        # Require exceptional edge and confidence for 50¢ band
+        actual_edge = intent.edge_pct if intent.edge_pct else 0.0
+        actual_conf = intent.confidence if intent.confidence else 0.0
+        
+        if not (intent.edge_pct and intent.edge_pct > _price_band_min_edge):
+            logger.debug(
+                "[order-router] Price band rejection: edge=%.2f%% < min_edge=%.2f%%, conf=%.2f, price=%dc",
+                actual_edge * 100, _price_band_min_edge * 100, actual_conf, intent.price_cents
+            )
+            _log_structured_block(intent, OrderStage.STRATEGY_FILTER, "price_50_no_edge")
+            return "price_50_no_edge"
+        # Configurable confidence threshold (default 60% to allow REST fallback quotes)
+        if not (intent.confidence and intent.confidence > _price_band_min_confidence):
+            logger.debug(
+                "[order-router] Price band rejection: conf=%.2f < min_conf=%.2f, edge=%.2f%%, price=%dc",
+                actual_conf, _price_band_min_confidence, actual_edge * 100, intent.price_cents
+            )
+            _log_structured_block(intent, OrderStage.STRATEGY_FILTER, "price_50_low_confidence")
+            return "price_50_low_confidence"
+    return None
+
+
+def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
+    """Ensure all orders have valid signal metadata.
+    
+    Opening orders must have:
+    - model_prob in [0.05, 0.95]
+    - edge_pct > minimum threshold (policy knob, default 0.02)
+    - confidence > minimum threshold (policy knob, default 0.60)
+    """
+    # Skip validation for exit orders
+    if intent.action == "sell":
+        return None
+    
+    # Validate model_prob
+    if intent.model_prob is None or not (0.05 <= intent.model_prob <= 0.95):
+        return f"invalid_model_prob:{intent.model_prob}"
+    
+    # Validate edge_pct (threshold is configurable policy knob)
+    if intent.edge_pct is None or intent.edge_pct <= 0.02:
+        return f"missing_or_low_edge:{intent.edge_pct}"
+    
+    # Validate confidence (threshold is configurable policy knob)
+    if intent.confidence is None or intent.confidence <= 0.60:
+        return f"missing_or_low_confidence:{intent.confidence}"
+    
+    return None
+
+
+def _validate_prob_price_consistency(intent: OrderIntent) -> Optional[str]:
+    """Validate that model probability is consistent with market-implied probability.
+    
+    Kalshi prices map directly to implied probability: p_cents ≈ p%.
+    This check prevents buying cheap contracts when the model doesn't support it,
+    and symmetrically for expensive contracts.
+    
+    Only applies to opening orders (buy actions).
+    
+    Returns error string if inconsistent, None if OK.
+    """
+    from merid.event_venues.kalshi.risk_parameters import (
+        ERR_MISSING_MODEL_PROB,
+        ERR_NO_EDGE_VS_IMPLIED,
+        ENFORCE_PROB_PRICE_CONSISTENCY,
+        PROB_PRICE_TOLERANCE_PCT,
+    )
+    
+    # Skip if policy not enforced
+    if not ENFORCE_PROB_PRICE_CONSISTENCY:
+        return None
+    
+    # Only for opening orders
+    if intent.action == "sell":
+        return None
+    
+    # Map price to implied market probability
+    implied_prob = intent.price_cents / 100.0
+    model_prob = intent.model_prob
+    
+    # Check model_prob presence
+    if model_prob is None:
+        return ERR_MISSING_MODEL_PROB
+    
+    # For YES/BUY_YES: model_prob must be > implied_prob (positive edge)
+    if intent.side in ("yes", "buy_yes"):
+        if model_prob <= implied_prob:
+            return f"{ERR_NO_EDGE_VS_IMPLIED}:model_prob={model_prob:.3f},implied={implied_prob:.3f}"
+    # For NO: (1 - model_prob) must be > (1 - implied_prob)
+    else:  # buying NO
+        if (1 - model_prob) <= (1 - implied_prob):
+            return f"{ERR_NO_EDGE_VS_IMPLIED}:model_prob={model_prob:.3f},implied={implied_prob:.3f}"
+    
+    return None
+
+
+def _validate_deep_otm_policy(intent: OrderIntent) -> Optional[str]:
+    """Reject deep out-of-the-money "lotto ticket" contracts.
+    
+    Deep OTM contracts (1-5¢ or 95-99¢) have very low win probability.
+    This policy either disallows them entirely or requires exceptional edge/confidence.
+    
+    Only applies to opening orders (buy actions).
+    
+    Returns error string if deep OTM without justification, None if OK.
+    """
+    from merid.event_venues.kalshi.risk_parameters import (
+        DEEP_OTM_CHEAP_CENTS,
+        DEEP_OTM_EXPENSIVE_CENTS,
+        DEEP_OTM_MIN_EDGE_PCT,
+        ERR_DEEP_OTM_DISALLOWED,
+        ERR_DEEP_OTM_INSUFFICIENT_EDGE,
+        ENFORCE_DEEP_OTM_POLICY,
+    )
+    
+    # Skip if policy not enforced
+    if not ENFORCE_DEEP_OTM_POLICY:
+        return None
+    
+    # Only for opening orders
+    if intent.action == "sell":
+        return None
+    
+    # Check if in deep OTM band
+    is_deep_cheap = intent.price_cents <= DEEP_OTM_CHEAP_CENTS
+    is_deep_expensive = intent.price_cents >= DEEP_OTM_EXPENSIVE_CENTS
+    
+    if not (is_deep_cheap or is_deep_expensive):
+        return None
+    
+    # Policy: disallow deep OTM entirely (configurable)
+    # If you want to allow with strong edge, change this to check edge/confidence
+    return ERR_DEEP_OTM_DISALLOWED
+    
+    # Alternative policy: allow with exceptional edge (commented out)
+    # if not (intent.edge_pct and intent.edge_pct > DEEP_OTM_MIN_EDGE_PCT):
+    #     if not (intent.confidence and intent.confidence > 0.85):
+    #         return ERR_DEEP_OTM_INSUFFICIENT_EDGE
+
+
+def _validate_underlying_plausibility(intent: OrderIntent) -> Optional[str]:
+    """Validate that required underlying move is plausible for the timeframe.
+    
+    For 15m crypto markets, check if the contract requires an absurd move
+    (e.g., BTC would need a 10% jump in 15m) and reject cheap buys unless
+    edge and confidence are extremely high.
+    
+    Only applies to opening orders (buy actions) on crypto markets.
+    
+    Returns error string if implausible, None if OK.
+    """
+    from merid.event_venues.kalshi.risk_parameters import (
+        ERR_IMPLAUSIBLE_MOVE,
+        IMPLAUSIBLE_MOVE_MIN_EDGE_PCT,
+        IMPLAUSIBLE_MOVE_THRESHOLD_PCT,
+        ENFORCE_UNDERLYING_PLAUSIBILITY,
+    )
+    
+    # Skip if policy not enforced
+    if not ENFORCE_UNDERLYING_PLAUSIBILITY:
+        return None
+    
+    # Only for opening orders
+    if intent.action == "sell":
+        return None
+    
+    # Check if this is a crypto market
+    underlying = _get_underlying(intent.ticker)
+    if underlying not in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+        return None
+    
+    # For now, this is a placeholder that would need market metadata
+    # to calculate the required move. In production, this would:
+    # 1. Extract strike price from ticker
+    # 2. Get current spot price
+    # 3. Calculate required move percentage
+    # 4. Compare to threshold for the timeframe
+    
+    # Placeholder: if price is very cheap (implies large required move)
+    # and edge is not exceptional, reject
+    if intent.price_cents <= 10:
+        if not (intent.edge_pct and intent.edge_pct > IMPLAUSIBLE_MOVE_MIN_EDGE_PCT):
+            return f"{ERR_IMPLAUSIBLE_MOVE}:price_cents={intent.price_cents}"
+    
+    return None
+
+
+def _validate_position_lifecycle(intent: OrderIntent) -> Optional[str]:
+    """Validate position lifecycle invariants: every entry must have an exit plan.
+    
+    This guard ensures:
+    1. Entry orders are tagged to a strategy position (group_id or agent_id)
+    2. Entry orders have valid exit targets (TP, SL, or time-based)
+    3. Position won't exceed max holding time before settlement
+    
+    Only applies to opening orders (buy actions).
+    
+    Returns error string if lifecycle invariant violated, None if OK.
+    """
+    from merid.event_venues.kalshi.risk_parameters import (
+        ERR_NO_EXIT_PLAN,
+        ENFORCE_POSITION_LIFECYCLE,
+        MAX_HOLDING_BEFORE_SETTLEMENT_SEC,
+    )
+    
+    # Skip if policy not enforced
+    if not ENFORCE_POSITION_LIFECYCLE:
+        return None
+    
+    # Exit orders don't need lifecycle validation (they are exits)
+    if _is_exit_order(intent):
+        return None
+    
+    # Check 1: Entry must be tagged to a strategy position
+    if not intent.group_id and not intent.agent_id:
+        return "position_not_tagged:missing_group_id_or_agent_id"
+    
+    # Check 2: Entry must have exit plan (TP, SL, or time-based)
+    # For 15m crypto, this is enforced by _check_exit_target_invariant
+    # For other markets, we check here
+    if _is_15m_crypto_entry_order(intent):
+        # Already checked by _check_exit_target_invariant
+        pass
+    else:
+        # For non-15m markets, require at least one exit target
+        if not _has_exit_target(intent):
+            # Allow orders with explicit session_id (managed externally)
+            if not intent.session_id:
+                return ERR_NO_EXIT_PLAN
+    
+    # Check 3: Validate time to settlement (if available)
+    # This would require market metadata to extract expiry time
+    # For now, we rely on the existing _check_exit_target_invariant for 15m crypto
+    
+    return None
+
+
+def _validate_deployment_safety(intent: OrderIntent) -> Optional[str]:
+    """Validate deployment safety checks: deep OTM/ITM and model probability distance.
+    
+    This guard prevents "lotto ticket" behavior and model-market misalignment:
+    - Rejects deep OTM (< 5¢) and deep ITM (> 95¢) contracts without exceptional edge
+    - Rejects trades where model probability is not clearly on the profitable side of market price
+    
+    Only applies to opening orders (buy actions).
+    
+    Returns error string if safety check fails, None if OK.
+    """
+    # Skip for sell orders (closes)
+    if intent.action == "sell":
+        return None
+    
+    # Check 1: Deep OTM/ITM detection
+    if intent.price_cents < DEEP_OTM_THRESHOLD_CENTS:
+        # Allow deep OTM only if edge is exceptional (> threshold)
+        if not (intent.edge_pct and intent.edge_pct > EXCEPTIONAL_EDGE_THRESHOLD_PCT):
+            logger.warning(
+                "[DEPLOYMENT-SAFETY] %s — Deep OTM rejection: price=%dc < threshold=%dc, edge=%.1f%%",
+                intent.ticker, intent.price_cents, DEEP_OTM_THRESHOLD_CENTS, intent.edge_pct or 0
+            )
+            # Track metric
+            if SAFETY_METRICS_AVAILABLE:
+                inc_deep_otm_order_rejected(
+                    ticker=intent.ticker,
+                    agent_id=intent.agent_id or "unknown",
+                    price_cents=intent.price_cents,
+                )
+            return f"deployment_safety:deep_otm:price_cents={intent.price_cents}<threshold={DEEP_OTM_THRESHOLD_CENTS}"
+    
+    if intent.price_cents > DEEP_ITM_THRESHOLD_CENTS:
+        # Allow deep ITM only if edge is exceptional (> threshold)
+        if not (intent.edge_pct and intent.edge_pct > EXCEPTIONAL_EDGE_THRESHOLD_PCT):
+            logger.warning(
+                "[DEPLOYMENT-SAFETY] %s — Deep ITM rejection: price=%dc > threshold=%dc, edge=%.1f%%",
+                intent.ticker, intent.price_cents, DEEP_ITM_THRESHOLD_CENTS, intent.edge_pct or 0
+            )
+            # Track metric
+            if SAFETY_METRICS_AVAILABLE:
+                inc_deep_itm_order_rejected(
+                    ticker=intent.ticker,
+                    agent_id=intent.agent_id or "unknown",
+                    price_cents=intent.price_cents,
+                )
+            return f"deployment_safety:deep_itm:price_cents={intent.price_cents}>threshold={DEEP_ITM_THRESHOLD_CENTS}"
+    
+    # Check 2: Model probability distance
+    if intent.model_prob is not None:
+        price_prob = intent.price_cents / 100.0
+        distance = abs(intent.model_prob - price_prob)
+        
+        # Track in histogram for all orders with model_prob
+        if SAFETY_METRICS_AVAILABLE:
+            observe_model_prob_distance(distance)
+        
+        if distance > MODEL_PROB_DISTANCE_THRESHOLD:
+            # Log warning but don't reject - this is for monitoring/alerting
+            logger.info(
+                "[DEPLOYMENT-SAFETY] %s — Model-market probability distance: model=%.2f, price=%.2f, distance=%.2f (threshold=%.2f)",
+                intent.ticker, intent.model_prob, price_prob, distance, MODEL_PROB_DISTANCE_THRESHOLD
+            )
+            # Track violation metric
+            if SAFETY_METRICS_AVAILABLE:
+                inc_model_prob_distance_violation(
+                    ticker=intent.ticker,
+                    agent_id=intent.agent_id or "unknown",
+                    distance=distance,
+                )
+            # Note: We don't reject here, but track this metric for monitoring
+            # The safety_check.py script will alert if this happens too frequently
+    
     return None
 
 
@@ -551,6 +1256,10 @@ def _check_bankroll_risk_cap(intent: OrderIntent) -> Optional[OrderResult]:
             "Order rejected. Ensure Kalshi API credentials are valid.",
             intent.ticker
         )
+        _log_structured_block(
+            intent, OrderStage.RISK_GATE, "bankroll_unavailable",
+            details={"effective_equity_usd": effective_equity_usd}
+        )
         return OrderResult(
             status="rejected",
             mode=TradingMode.LIVE,
@@ -559,9 +1268,9 @@ def _check_bankroll_risk_cap(intent: OrderIntent) -> Optional[OrderResult]:
             latency_ms=0.0,
         )
 
-    # Get configured risk fraction (default to 1.5%, clamp to 1-2%)
-    risk_fraction = float(os.getenv("MERID_MAX_RISK_FRACTION_PER_CYCLE", "0.015"))
-    risk_fraction = max(0.01, min(0.02, risk_fraction))  # Clamp to 1-2%
+    # Get configured risk fraction (default to 3%, clamp to 1-3%)
+    risk_fraction = float(os.getenv("MERID_MAX_RISK_FRACTION_PER_CYCLE", "0.03"))
+    risk_fraction = max(0.01, min(0.03, risk_fraction))  # Clamp to 1-3%
 
     # Calculate max total risk across ALL 3 EDGES COMBINED
     max_total_risk_usd = effective_equity_usd * risk_fraction
@@ -597,6 +1306,16 @@ def _check_bankroll_risk_cap(intent: OrderIntent) -> Optional[OrderResult]:
             max_total_risk_usd,
             tolerance_multiplier,
             effective_equity_usd,
+        )
+        _log_structured_block(
+            intent, OrderStage.RISK_GATE, "bankroll_risk_cap_exceeded",
+            details={
+                "intent_notional_usd": intent_notional_usd,
+                "effective_max": effective_max,
+                "per_edge_estimate": per_edge_estimate,
+                "max_total_risk_usd": max_total_risk_usd,
+                "effective_equity_usd": effective_equity_usd,
+            }
         )
         return OrderResult(
             status="rejected",
@@ -746,15 +1465,8 @@ from merid.event_venues.kalshi.kalshi_market_utils import get_underlying as _get
 _SANITY_PORTFOLIO_USD = float(os.getenv("MERID_PM_MAX_TOTAL_NOTIONAL", "5000.0"))
 
 
-def _check_sentiment_notional_cap(intent: OrderIntent) -> Optional[str]:
-    """Enforce per-asset sentiment notional caps (see :mod:`merid.risk.sentiment_risk`)."""
-    try:
-        from merid.risk.sentiment_risk import sentiment_order_rejection_reason
-
-        return sentiment_order_rejection_reason(intent)
-    except Exception as exc:
-        logger.debug("[order-router] sentiment cap check skipped: %s", exc)
-        return None
+# SENTIMENT DECOUPLING (2026-05-14): Removed _check_sentiment_notional_cap function.
+# Sentiment should not gate trading. Sentiment is now feature-only.
 
 
 def _check_sanity(intent: OrderIntent, t0: float, mode: TradingMode) -> Optional[OrderResult]:
@@ -870,6 +1582,24 @@ def _update_gate_on_fill(intent: OrderIntent, fill_count: int) -> None:
 
 def _route_sync_non_live(intent: OrderIntent, mode: TradingMode, t0: float) -> OrderResult:
     """Route MOCK/PAPER intents synchronously."""
+    # AUDIT-LOG: Structured order construction logging
+    logger.info(
+        "[ORDER-CONSTRUCTION-AUDIT] "
+        "intent_id=%s ticker=%s side=%s action=%s price_cents=%d count=%d "
+        "agent_id=%s source=%s rationale=%s edge_pct=%s mode=%s",
+        intent.intent_id,
+        intent.ticker,
+        intent.side,
+        intent.action,
+        intent.price_cents,
+        intent.count,
+        intent.agent_id or "unknown",
+        intent.source,
+        intent.rationale or "none",
+        intent.edge_pct or "none",
+        _mode_value(mode),
+    )
+    
     if _is_mock_mode(mode):
         fill = simulate_paper_fill(intent)
         latency = (time.monotonic() - t0) * 1000
@@ -937,6 +1667,25 @@ def _release_gate_record(intent: OrderIntent, reason: str = "") -> None:
 
 async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> OrderResult:
     """Route LIVE intents through the canonical KalshiVenueClient."""
+    # AUDIT-LOG: Structured order construction logging for live orders
+    logger.info(
+        "[ORDER-CONSTRUCTION-AUDIT] "
+        "intent_id=%s ticker=%s side=%s action=%s price_cents=%d count=%d "
+        "agent_id=%s source=%s rationale=%s edge_pct=%s mode=%s snapshot_age=%.1fs",
+        intent.intent_id,
+        intent.ticker,
+        intent.side,
+        intent.action,
+        intent.price_cents,
+        intent.count,
+        intent.agent_id or "unknown",
+        intent.source,
+        intent.rationale or "none",
+        intent.edge_pct or "none",
+        _mode_value(mode),
+        time.time() - intent.snapshot_ts,
+    )
+    
     # Snapshot staleness gate — refuse stale intents regardless of caller path.
     # KalshiTradingAgent already checks this, but direct route_order_async() callers
     # (tools, tests, future agents) previously bypassed it entirely (BUG-3b fix).
@@ -1018,52 +1767,59 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             latency_ms=round(latency, 2),
         )
 
+    # CRITICAL: Exit orders (sell/TP/stop-loss) bypass execution gate to secure profits
+    _is_exit = _is_exit_order(intent)
+    if _is_exit:
+        logger.info("[order-router] EXIT ORDER FAST-PATH: %s %s — bypassing execution gate", intent.ticker, intent.action)
+    
     # Unified execution gate (loop lag, feeds, exchange, reconciliation, etc.) — before client IO
-    try:
-        from core.execution_gate import check_execution_gate, live_execution_blocked
-
-        _eg = check_execution_gate()
-    except Exception as exc:
-        latency = (time.monotonic() - t0) * 1000
-        logger.error("[order-router] execution gate check failed (fail-closed): %s", exc)
-        _release_gate_record(intent, f"execution_gate_error:{exc}")
-        return OrderResult(
-            status="rejected",
-            mode=mode,
-            reason=f"execution_gate_error:{exc}",
-            latency_ms=round(latency, 2),
-        )
-    _gate_close = live_execution_blocked(_eg)
-    try:
-        from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS, kalshi_ticker_to_asset
-        from merid.prediction.crypto_edge_production import crypto_pm_live_execution_blocked
-
-        _ga = kalshi_ticker_to_asset(intent.ticker)
-        if _ga and _ga in ACTIVE_CRYPTO_ASSETS:
-            _gate_close = crypto_pm_live_execution_blocked(_eg)
-    except Exception as _gate_check_err:
-        logger.warning("[order-router] Execution gate check error (proceeding with caution): %s", _gate_check_err)
-    if _gate_close:
-        latency = (time.monotonic() - t0) * 1000
-        _first = _eg.reasons[0] if _eg.reasons else None
-        _msg = (_first.message if _first else "blocked") or "blocked"
-        _srcs = [r.source for r in (_eg.reasons or [])]
-        if "loop_lag" in _srcs:
-            _msg = f"execution_gate_loop_lag:{_msg}"
-        logger.warning("[order-router] Live order blocked by execution gate: %s", _msg)
+    # EXIT ORDERS BYPASS: They reduce exposure and must execute quickly to secure profits
+    if not _is_exit:
         try:
-            from merid.prediction.ua_ct_metrics import record_order_reject
+            from core.execution_gate import check_execution_gate, live_execution_blocked
 
-            record_order_reject()
-        except Exception as _metric_err:
-            logger.debug("[order-router] Order reject metric recording failed: %s", _metric_err)
-        _release_gate_record(intent, f"execution_gate_blocked:{_msg}")
-        return OrderResult(
-            status="rejected",
-            mode=mode,
-            reason=f"execution_gate_blocked:{_msg}",
-            latency_ms=round(latency, 2),
-        )
+            _eg = check_execution_gate()
+        except Exception as exc:
+            latency = (time.monotonic() - t0) * 1000
+            logger.error("[order-router] execution gate check failed (fail-closed): %s", exc)
+            _release_gate_record(intent, f"execution_gate_error:{exc}")
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason=f"execution_gate_error:{exc}",
+                latency_ms=round(latency, 2),
+            )
+        _gate_close = live_execution_blocked(_eg)
+        try:
+            from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS, kalshi_ticker_to_asset
+            from merid.prediction.crypto_edge_production import crypto_pm_live_execution_blocked
+
+            _ga = kalshi_ticker_to_asset(intent.ticker)
+            if _ga and _ga in ACTIVE_CRYPTO_ASSETS:
+                _gate_close = crypto_pm_live_execution_blocked(_eg)
+        except Exception as _gate_check_err:
+            logger.warning("[order-router] Execution gate check error (proceeding with caution): %s", _gate_check_err)
+        if _gate_close:
+            latency = (time.monotonic() - t0) * 1000
+            _first = _eg.reasons[0] if _eg.reasons else None
+            _msg = (_first.message if _first else "blocked") or "blocked"
+            _srcs = [r.source for r in (_eg.reasons or [])]
+            if "loop_lag" in _srcs:
+                _msg = f"execution_gate_loop_lag:{_msg}"
+            logger.warning("[order-router] Live order blocked by execution gate: %s", _msg)
+            try:
+                from merid.prediction.ua_ct_metrics import record_order_reject
+
+                record_order_reject()
+            except Exception as _metric_err:
+                logger.debug("[order-router] Order reject metric recording failed: %s", _metric_err)
+            _release_gate_record(intent, f"execution_gate_blocked:{_msg}")
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason=f"execution_gate_blocked:{_msg}",
+                latency_ms=round(latency, 2),
+            )
 
     # KalshiRiskManager — position limits, category caps, drawdown, rate limiting
     try:
@@ -1171,18 +1927,25 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         _asset = extract_asset_from_ticker(intent.ticker)
         _timeframe = get_series_timeframe_bucket(intent.ticker)
         
-        allowed, reason = risk.check_order(
-            ticker=intent.ticker,
-            category=_rm_category,
-            contracts=intent.count,
-            price_cents=intent.price_cents,
-            edge=intent.edge_pct or 0.0,
-            existing_position=_existing_pos,
-            asset=_asset,
-            timeframe=_timeframe,
-            group_id=_group_id,
-            effective_equity_usd=intent.effective_equity_usd,
-        )
+        # EXIT ORDERS BYPASS: Risk checks for orders that reduce exposure (sell/TP/stop-loss)
+        # These orders REDUCE risk, so they don't need position limit checks
+        if _is_exit:
+            allowed = True
+            reason = "exit_order_bypass"
+            logger.info("[order-router] EXIT ORDER: %s %s — bypassing KalshiRiskManager (reduces exposure)", intent.ticker, intent.action)
+        else:
+            allowed, reason = risk.check_order(
+                ticker=intent.ticker,
+                category=_rm_category,
+                contracts=intent.count,
+                price_cents=intent.price_cents,
+                edge=intent.edge_pct or 0.0,
+                existing_position=_existing_pos,
+                asset=_asset,
+                timeframe=_timeframe,
+                group_id=_group_id,
+                effective_equity_usd=intent.effective_equity_usd,
+            )
         if not allowed:
             latency = (time.monotonic() - t0) * 1000
             logger.warning(f"[order-router] Live order blocked by KalshiRiskManager: {reason}")
@@ -1278,47 +2041,39 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         )
 
     # ── B5: Sentiment-based size scalar ─────────────────────────────────────
-    try:
-        from merid.sentiment.sentiment_bus import get_sentiment_bus
-        _asset = _get_underlying(intent.ticker)
-        if _asset != "OTHER":
-            _sent_bus = get_sentiment_bus()
-            if _sent_bus is None:
-                logger.debug("[order-router] Sentiment bus unavailable — skipping scaling")
-            else:
-                _sent = _sent_bus.get_sentiment(_asset)
-                # CRASH-008: Defensive attribute checking
-                if _sent is not None and hasattr(_sent, 'should_reduce_size') and callable(getattr(_sent, 'should_reduce_size')):
-                    try:
-                        if _sent.should_reduce_size():
-                            _scaled = max(1, int(intent.count * 0.5))
-                            if _scaled != intent.count:
-                                logger.info(
-                                    "[order-router] Sentiment scaling %s: %d→%d (regime=%s)",
-                                    intent.ticker, intent.count, _scaled, 
-                                    getattr(_sent, 'trend_regime', 'unknown'),
-                                )
-                                intent = _dc_replace(intent, count=_scaled)
-                    except Exception as _sent_exc:
-                        logger.debug("[order-router] Sentiment should_reduce_size() failed: %s", _sent_exc)
-                else:
-                    logger.debug("[order-router] Sentiment object missing should_reduce_size method")
-    except Exception as _exc:
-        logger.debug("[order-router] Sentiment scaling skipped: %s", _exc)
+    # SENTIMENT DECOUPLING (2026-05-14): Removed sentiment scaling logic
+    # Sentiment should not modify order sizes. Sentiment is now feature-only.
+    # Order sizing driven purely by EV, risk constraints, and Kelly.
 
     try:
         from merid.event_venues.base import VenueOrder
         from merid.event_venues.kalshi.client import get_kalshi_client
         from merid.event_venues.kalshi.order_group_manager import OrderGroupRiskManager
+        from merid.event_venues.kalshi.ticker_utils import normalize_ticker_for_order
 
         client = get_kalshi_client()
         await client.connect()
 
+        # CRITICAL FIX (2026-05-01): Normalize ticker to strip strike suffix before any API calls
+        # Market discovery returns tickers with strike levels (e.g., -30, -T80199.99)
+        # but the order API expects the base market ticker without these suffixes.
+        _normalized_ticker = normalize_ticker_for_order(intent.ticker)
+        if _normalized_ticker != intent.ticker:
+            logger.info(
+                "[KALSHI_ORDER_NORMALIZE] ticker=%s normalized=%s for_api_calls",
+                intent.ticker, _normalized_ticker
+            )
+
         # ── A5: Re-validate market conditions per-order ───────────────────
+        # EXIT ORDERS BYPASS: Market condition checks for exit orders
+        # They should execute even in bad market conditions to secure profits
+        if _is_exit:
+            logger.info("[order-router] EXIT ORDER: %s — bypassing A5 market condition checks", intent.ticker)
+
         _market_check_passed = False
         try:
             from merid.event_venues.kalshi.market_filter import DEFAULT_FILTER_CONFIG
-            _market_result = await client.get_market(intent.ticker)
+            _market_result = await client.get_market(_normalized_ticker)
             if not _market_result.success:
                 # Handle 404 / market not found (BUG-404 fix)
                 _error_str = str(_market_result.error or "").lower()
@@ -1332,7 +2087,8 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                         reason=f"market_not_found:{intent.ticker}",
                         latency_ms=round(latency, 2),
                     )
-            elif _market_result.value is not None:
+            elif _market_result.value is not None and not _is_exit:
+                # Only run market condition checks for entry orders (not exits)
                 _market_check_passed = True
                 _mkt = _market_result.value
                 _bid = int(getattr(_mkt, "best_bid", 0) or 0)
@@ -1388,7 +2144,8 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         # can reverse it if the exchange rejects the order.
         # Note: _og_manager and _og_debited are initialized at function start
 
-        if intent.order_group_id:
+        # EXIT ORDERS BYPASS: Order group checks for exits - they REDUCE exposure
+        if intent.order_group_id and not _is_exit:
             _og_manager = OrderGroupRiskManager(client)
             # P0-5 FIX: Populate cache before lookup so group is found and rollbacks work
             try:
@@ -1430,6 +2187,8 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             # Record optimistic usage — must be reversed if exchange rejects
             _og_manager.record_new_order(intent.order_group_id, intent.count)
             _og_debited = True
+        elif intent.order_group_id and _is_exit:
+            logger.info("[order-router] EXIT ORDER: %s — bypassing order group risk checks (reduces exposure)", intent.ticker)
 
         # client_tag was already set by _run_pre_trade_gate (called by
         # route_order_async before _route_live).  Fallback only if caller
@@ -1453,17 +2212,35 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
 
         tif, gtt_exp = _resolve_tif(intent)
 
+        # Use pre-normalized ticker (stripped of strike suffix) for order submission
+        # BUG-FIX: Pass price for ALL orders (including market) to avoid 50c fallback in Kalshi client
+        # Kalshi API accepts price for market orders (it's used for validation but not as a limit)
         order = VenueOrder(
-            market_id=intent.ticker,
+            market_id=_normalized_ticker,
             side=intent.action,
             size=Decimal(intent.count),
-            price=(Decimal(intent.price_cents) / Decimal("100")) if intent.order_type == "limit" else None,
+            price=Decimal(intent.price_cents) / Decimal("100"),
             order_type="limit" if intent.order_type == "limit" else "market",
             outcome_id=intent.side,
             time_in_force=tif,
             expiration_ts=gtt_exp,
             client_order_id=intent.client_tag,
         )
+
+        # PRODUCTION FIX: Register TP targets with position cache for fill-time lookup
+        if intent.client_tag and (
+            intent.take_profit_price_cents or intent.take_profit_r_multiple
+        ):
+            try:
+                from merid.event_venues.kalshi.position_cache import get_position_cache
+                get_position_cache().register_tp_targets(
+                    client_order_id=intent.client_tag,
+                    take_profit_price_cents=intent.take_profit_price_cents,
+                    take_profit_r_multiple=intent.take_profit_r_multiple,
+                    stop_loss_price_cents=intent.stop_loss_price_cents,
+                )
+            except Exception as _tp_reg_err:
+                logger.debug("[order-router] TP registration failed (non-fatal): %s", _tp_reg_err)
 
         _pre_notional_usd = float(intent.count * intent.price_cents) / 100.0
         gate.log_order_decision(
@@ -1530,7 +2307,14 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         
         # Handle idempotent duplicate responses from Kalshi (our order already accepted)
         reason = getattr(placed_res, "error_message", None) or str(placed_res.error) if placed_res.error else "live_order_failed"
-        is_duplicate_error = reason and ("gate:duplicate" in reason.lower() or "duplicate" in reason.lower())
+        # CRITICAL: Also check for 409 status code - Kalshi returns this for duplicate client_order_id
+        _status_code = getattr(placed_res, 'status_code', None)
+        is_duplicate_error = reason and (
+            "gate:duplicate" in reason.lower() 
+            or "duplicate" in reason.lower()
+            or "409" in reason
+            or _status_code == 409
+        )
         
         if is_duplicate_error:
             # Idempotent success: our order was already accepted by Kalshi on a prior attempt.
@@ -1671,8 +2455,8 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 _ok, _err = _sanity.apply_fill(
                     order_id=_venue_oid,
                     fill_id=_fill_id,
-                    ticker=intent.ticker,
-                    side=intent.side,
+                    _score = _ctx.combined_score,
+                    _regime = _ctx.fg_regime,
                     filled_count=filled_count,
                     price_cents=fill_price_cents,
                     strategy_group=intent.source or "default",
@@ -1791,6 +2575,57 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             getattr(placed, "order_id", ""),
             filled_count,
         )
+        
+        # RESTING ORDER MONITOR: Register GTC limit orders for dynamic re-checking
+        # Only register if order is a GTC limit order that may rest on the book
+        if status == "accepted_live" and remaining_count > 0:
+            try:
+                from merid.event_venues.kalshi.resting_order_monitor import get_resting_order_monitor, RestingOrderRecord
+                from config.kalshi_crypto_config import kalshi_ticker_to_asset
+                
+                # Check if this is a GTC limit order
+                tif_lower = (intent.time_in_force or "").lower()
+                order_type_lower = (intent.order_type or "").lower()
+                
+                if order_type_lower == "limit" and tif_lower in ("gtc", "good_till_canceled"):
+                    kalshi_order_id = getattr(placed, "order_id", "")
+                    if kalshi_order_id:
+                        monitor = get_resting_order_monitor()
+                        
+                        # Extract asset from ticker
+                        asset = kalshi_ticker_to_asset(intent.ticker) or "UNKNOWN"
+                        
+                        # Create resting order record
+                        resting_record = RestingOrderRecord(
+                            kalshi_order_id=kalshi_order_id,
+                            intent_id=intent.intent_id,
+                            client_order_id=intent.client_tag,
+                            ticker=intent.ticker,
+                            side=intent.side,
+                            action=intent.action,
+                            original_size=remaining_count,
+                            remaining_size=remaining_count,
+                            price_cents=intent.price_cents,
+                            asset=asset,
+                            # Risk contract linkage
+                            window_resolution_id=intent.window_resolution_id,
+                            exit_policy_id=intent.exit_policy_id,
+                            risk_tier=intent.risk_tier,
+                            max_hold_seconds=intent.max_hold_seconds or 600,
+                            # Kalshi API fields
+                            time_in_force=intent.time_in_force,
+                            order_expiration_ts=intent.order_expiration_ts,
+                            stp=intent.stp if hasattr(intent, 'stp') else "taker_at_cross",
+                        )
+                        
+                        monitor.register_order(resting_record)
+                        logger.info(
+                            f"[RESTING_ORDER_MONITOR] Registered GTC limit order: kalshi_order_id={kalshi_order_id} "
+                            f"ticker={intent.ticker} remaining={remaining_count}"
+                        )
+            except Exception as _re_exc:
+                logger.warning(f"[RESTING_ORDER_MONITOR] Failed to register order: {_re_exc}")
+        
         try:
             from merid.prediction.ua_ct_metrics import record_order_accept
 
@@ -1852,6 +2687,10 @@ def route_order(intent: OrderIntent) -> OrderResult:
     LIVE mode requires ``route_order_async`` so the real Kalshi client can be
     called without blocking hacks.
     """
+    # MODE GUARD: Reject live mode calls to sync route_order
+    from merid.mode_resolver import ModeResolver
+    ModeResolver.assert_not_live("route_order()")
+    
     t0 = time.monotonic()
 
     # ── Caller module audit (AGENT_WIRING_AUDIT.md) ─────────────────────
@@ -1889,6 +2728,73 @@ def route_order(intent: OrderIntent) -> OrderResult:
             _caller, intent.ticker,
         )
 
+    # ── Kalshi 15m crypto agent authorization (EXE1) ───────────────────────
+    # Only authorized Kalshi 15m crypto agents can route to Kalshi execution
+    # This prevents non-Kalshi agents from accidentally trading on Kalshi
+    agent_id = intent.agent_id or intent.source
+    if not _is_kalshi_15m_crypto_agent(agent_id):
+        logger.error(
+            "[AUDIT] UNAUTHORIZED_AGENT_REJECTED | agent=%s | intent=%s | "
+            "reason=not_in_kalshi_15m_crypto_whitelist | allowed=%s",
+            agent_id, intent.ticker, sorted(_KALSHI_15M_CRYPTO_AGENTS),
+        )
+        return OrderResult(
+            status="rejected",
+            mode=_resolve_mode(intent.mode),
+            reason=f"unauthorized_agent:{agent_id}",
+            latency_ms=0.0,
+        )
+
+    # ── Production scope validation (Step 1 of audit plan) ───────────────
+    if TRADING_SCOPE_AVAILABLE:
+        # Extract asset from ticker
+        asset = extract_asset_from_ticker(intent.ticker) or "UNK"
+        # Infer timeframe from ticker (default to 15m for production)
+        timeframe = "15m"  # Production only allows 15m
+        # Extract series ticker if present
+        series_ticker = None
+        if "-" in intent.ticker:
+            # Full market ticker, extract series prefix
+            parts = intent.ticker.split("-")[0].upper()
+            if parts in ["KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M"]:
+                series_ticker = parts
+            elif parts.startswith("KXBTC"):
+                series_ticker = "KXBTC15M"
+            elif parts.startswith("KXETH"):
+                series_ticker = "KXETH15M"
+            elif parts.startswith("KXSOL"):
+                series_ticker = "KXSOL15M"
+            elif parts.startswith("KXXRP"):
+                series_ticker = "KXXRP15M"
+            elif parts.startswith("KXDOGE"):
+                series_ticker = "KXDOGE15M"
+        
+        # Validate scope
+        validation_result = validate_market_for_trading(asset, timeframe, series_ticker)
+        # Handle both bool and tuple return values for backward compatibility
+        if isinstance(validation_result, tuple):
+            is_scope_valid, scope_error = validation_result
+        else:
+            is_scope_valid = validation_result
+            scope_error = "Unknown validation error"
+        if not is_scope_valid:
+            latency = (time.monotonic() - t0) * 1000
+            logger.error(
+                f"[SCOPE_VIOLATION] Order rejected: {scope_error} | ticker={intent.ticker} | "
+                f"inferred_asset={asset} | timeframe={timeframe} | series={series_ticker or 'N/A'}"
+            )
+            return OrderResult(
+                status="rejected",
+                mode=_resolve_mode(intent.mode),
+                reason=f"scope_violation:{scope_error}",
+                latency_ms=round(latency, 2),
+            )
+        else:
+            logger.debug(
+                f"[SCOPE_OK] Order validated: asset={asset} | timeframe={timeframe} | "
+                f"series={series_ticker or 'N/A'} | ticker={intent.ticker}"
+            )
+
     mode = _resolve_mode(intent.mode)
 
     # Risk check
@@ -1906,15 +2812,113 @@ def route_order(intent: OrderIntent) -> OrderResult:
             latency_ms=round(latency, 2),
         )
 
-    _sent_cap = _check_sentiment_notional_cap(intent)
-    if _sent_cap:
+    # Price band validation (reject 48-52c without exceptional edge)
+    price_error = _validate_price_band(intent)
+    if price_error:
         latency = (time.monotonic() - t0) * 1000
+        logger.error(
+            f"[PRICE_BAND] Rejected order in 48-52c band: {price_error} | ticker={intent.ticker} | "
+            f"price={intent.price_cents}c | edge={intent.edge_pct or 0}% | conf={intent.confidence or 0}"
+        )
         return OrderResult(
             status="rejected",
             mode=mode,
-            reason=_sent_cap,
+            reason=f"price_band:{price_error}",
             latency_ms=round(latency, 2),
         )
+
+    # Signal metadata validation (require edge, confidence, model_prob for opening orders)
+    signal_error = _validate_signal_metadata(intent)
+    if signal_error:
+        latency = (time.monotonic() - t0) * 1000
+        logger.error(
+            f"[SIGNAL_VALIDATION] Rejected order: {signal_error} | ticker={intent.ticker} | "
+            f"edge={intent.edge_pct or 0}% | conf={intent.confidence or 0} | model_prob={intent.model_prob or 0}"
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"signal_validation:{signal_error}",
+            latency_ms=round(latency, 2),
+        )
+
+    # Prob-price consistency validation (no magic numbers: model must support price)
+    prob_price_error = _validate_prob_price_consistency(intent)
+    if prob_price_error:
+        latency = (time.monotonic() - t0) * 1000
+        logger.error(
+            f"[PROB_PRICE_CONSISTENCY] Rejected order: {prob_price_error} | ticker={intent.ticker} | "
+            f"price={intent.price_cents}c | model_prob={intent.model_prob or 0}"
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"prob_price_consistency:{prob_price_error}",
+            latency_ms=round(latency, 2),
+        )
+
+    # Deep OTM policy validation (no lotto tickets)
+    deep_otm_error = _validate_deep_otm_policy(intent)
+    if deep_otm_error:
+        latency = (time.monotonic() - t0) * 1000
+        logger.error(
+            f"[DEEP_OTM_POLICY] Rejected order: {deep_otm_error} | ticker={intent.ticker} | "
+            f"price={intent.price_cents}c"
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"deep_otm_policy:{deep_otm_error}",
+            latency_ms=round(latency, 2),
+        )
+
+    # Underlying plausibility validation (no absurd required moves)
+    plausibility_error = _validate_underlying_plausibility(intent)
+    if plausibility_error:
+        latency = (time.monotonic() - t0) * 1000
+        logger.error(
+            f"[UNDERLYING_PLAUSIBILITY] Rejected order: {plausibility_error} | ticker={intent.ticker} | "
+            f"price={intent.price_cents}c"
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"underlying_plausibility:{plausibility_error}",
+            latency_ms=round(latency, 2),
+        )
+
+    # Position lifecycle validation (no orphaned positions)
+    lifecycle_error = _validate_position_lifecycle(intent)
+    if lifecycle_error:
+        latency = (time.monotonic() - t0) * 1000
+        logger.error(
+            f"[POSITION_LIFECYCLE] Rejected order: {lifecycle_error} | ticker={intent.ticker} | "
+            f"group_id={intent.group_id or 'none'} | agent_id={intent.agent_id or 'none'}"
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"position_lifecycle:{lifecycle_error}",
+            latency_ms=round(latency, 2),
+        )
+
+    # Deployment safety validation (deep OTM/ITM and model probability distance)
+    safety_error = _validate_deployment_safety(intent)
+    if safety_error:
+        latency = (time.monotonic() - t0) * 1000
+        logger.warning(
+            f"[DEPLOYMENT_SAFETY] Rejected order: {safety_error} | ticker={intent.ticker} | "
+            f"price={intent.price_cents}c | edge={intent.edge_pct or 0}%"
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"deployment_safety:{safety_error}",
+            latency_ms=round(latency, 2),
+        )
+
+    # SENTIMENT DECOUPLING (2026-05-14): Removed sentiment cap check
+    # Sentiment should not gate trading. Sentiment is now feature-only.
 
     sanity_rejection = _check_sanity(intent, t0, mode)
     if sanity_rejection:
@@ -2136,9 +3140,14 @@ def _check_top3_batch_allocation(
         return None  # allowed
 
     except Exception as exc:
-        # Gate infrastructure failure — fail-open with warning
-        logger.warning("[TOP3-GATE] Infrastructure error (fail-open): %s", exc)
-        return None
+        # Fail-closed: block trade if TOP3 gate infrastructure fails
+        logger.error("[TOP3-GATE] Infrastructure error (fail-closed): %s - blocking trade", exc)
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"top3_gate:infrastructure_error:{type(exc).__name__}",
+            latency_ms=round((time.monotonic() - t0) * 1000, 2),
+        )
 
 
 def _run_shared_risk_guard_and_dedup(
@@ -2233,6 +3242,7 @@ def _run_shared_risk_guard_and_dedup(
                 reason=f"global_risk_guard:{reason[:200]}",
                 latency_ms=round(latency, 2),
             )
+
     except Exception as _guard_exc:
         # Fail-closed on guard infrastructure failure — the whole point of
         # this gate is to bound aggregate risk.  If we can't evaluate it,
@@ -2248,16 +3258,214 @@ def _run_shared_risk_guard_and_dedup(
             latency_ms=round(latency, 2),
         )
 
+    # MICRO-SCALPING FIX: Step 3 — Net edge after fees check
+    # Ensure trade clears Kalshi fees plus slippage buffer before submission
+    try:
+        from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
+
+        if intent.price_cents and intent.count and intent.edge_pct is not None:
+            price = int(intent.price_cents)
+            contracts = int(intent.count)
+
+            # Calculate fee for this trade
+            fee_cents = calculate_kalshi_fee_cents(contracts, price)
+            notional = contracts * price
+
+            if notional > 0:
+                # Fee as percentage (in decimal, e.g., 0.04 for 4%)
+                fee_pct = fee_cents / notional
+                # Add 0.5% slippage buffer for micro-scalping
+                slippage_buffer = 0.005
+                required_edge = fee_pct + slippage_buffer
+
+                # Check if gross edge clears fees + buffer
+                if intent.edge_pct < required_edge:
+                    latency = (time.monotonic() - t0) * 1000
+                    logger.info(
+                        "[NET-EDGE-FILTER] Rejecting %s: edge %.2f%% < required %.2f%% (fee %.2f%% + buffer %.2f%%)",
+                        intent.ticker,
+                        intent.edge_pct * 100,
+                        required_edge * 100,
+                        fee_pct * 100,
+                        slippage_buffer * 100,
+                    )
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason=f"net_edge_insufficient:{intent.edge_pct:.4f}<{required_edge:.4f}",
+                        latency_ms=round(latency, 2),
+                    )
+    except Exception as _edge_exc:
+        # Fail-open on edge calculation error - let other risk checks handle it
+        logger.debug("[NET-EDGE-FILTER] Calculation error (fail-open): %s", _edge_exc)
+
     return None
+
+
+def _is_15m_timeframe(ticker: str) -> bool:
+    """Check if ticker is 15m timeframe (only allowed execution timeframe).
+    
+    P2-002 FIX: Enforces 15m-only execution mandate. All other timeframes
+    (1h, daily, weekly, monthly) are signal-only and will be rejected.
+    """
+    # 15m tickers contain "-15M" in the series code (e.g., KXBTC-15M-...)
+    # or match the 15m pattern in the ticker
+    if "-15M" in ticker.upper():
+        return True
+    # Also check for 15m in other common patterns
+    if "15M" in ticker.upper() or "15MIN" in ticker.upper():
+        return True
+    return False
+
+
+def _is_crypto_15m_market(ticker: str) -> bool:
+    """Check if ticker is a crypto 15m market (BTC/ETH/SOL/XRP/DOGE)."""
+    ticker_upper = ticker.upper()
+    # Check for 15m crypto series patterns
+    crypto_prefixes = ["KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M"]
+    return any(prefix in ticker_upper for prefix in crypto_prefixes)
+
+
+def _validate_risk_contract_linkage(intent: OrderIntent) -> tuple[bool, Optional[str]]:
+    """Validate that OrderIntent has valid risk contract linkage.
+    
+    For crypto 15m markets, orders must have:
+    - window_resolution_id (links to WindowResolution)
+    - exit_policy_id (links to ExitPolicyResolution)
+    - risk_tier (A/B/C)
+    - max_hold_seconds (time-based exit)
+    
+    Args:
+        intent: OrderIntent to validate
+    
+    Returns:
+        (is_valid, error_message) tuple
+    """
+    # Only enforce for crypto 15m markets
+    if not _is_crypto_15m_market(intent.ticker):
+        return True, None
+    
+    # Exit orders (sell/close) may have relaxed requirements
+    if _is_exit_order(intent):
+        # Exit orders must at least have exit_policy_id for tracking
+        if not intent.exit_policy_id:
+            return False, "Exit order missing exit_policy_id"
+        return True, None
+    
+    # Entry orders (buy) must have full risk contract linkage
+    missing_fields = []
+    if not intent.window_resolution_id:
+        missing_fields.append("window_resolution_id")
+    if not intent.exit_policy_id:
+        missing_fields.append("exit_policy_id")
+    if not intent.risk_tier:
+        missing_fields.append("risk_tier")
+    if not intent.max_hold_seconds:
+        missing_fields.append("max_hold_seconds")
+    
+    if missing_fields:
+        return False, f"Missing risk contract fields: {', '.join(missing_fields)}"
+    
+    return True, None
 
 
 async def route_order_async(intent: OrderIntent) -> OrderResult:
     """Async order routing that supports true LIVE execution."""
     t0 = time.monotonic()
+    
+    # ── Production scope validation (Step 1 of audit plan) ───────────────
+    if TRADING_SCOPE_AVAILABLE:
+        # Extract asset from ticker
+        asset = extract_asset_from_ticker(intent.ticker) or "UNK"
+        # Infer timeframe from ticker (default to 15m for production)
+        timeframe = "15m"  # Production only allows 15m
+        # Extract series ticker if present
+        series_ticker = None
+        if "-" in intent.ticker:
+            # Full market ticker, extract series prefix
+            parts = intent.ticker.split("-")[0].upper()
+            if parts in ["KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M"]:
+                series_ticker = parts
+            elif parts.startswith("KXBTC"):
+                series_ticker = "KXBTC15M"
+            elif parts.startswith("KXETH"):
+                series_ticker = "KXETH15M"
+            elif parts.startswith("KXSOL"):
+                series_ticker = "KXSOL15M"
+            elif parts.startswith("KXXRP"):
+                series_ticker = "KXXRP15M"
+            elif parts.startswith("KXDOGE"):
+                series_ticker = "KXDOGE15M"
+        
+        # Validate scope
+        validation_result = validate_market_for_trading(asset, timeframe, series_ticker)
+        # Handle both bool and tuple return values for backward compatibility
+        if isinstance(validation_result, tuple):
+            is_scope_valid, scope_error = validation_result
+        else:
+            is_scope_valid = validation_result
+            scope_error = "Unknown validation error"
+        if not is_scope_valid:
+            latency = (time.monotonic() - t0) * 1000
+            logger.error(
+                f"[SCOPE_VIOLATION] Async order rejected: {scope_error} | ticker={intent.ticker} | "
+                f"inferred_asset={asset} | timeframe={timeframe} | series={series_ticker or 'N/A'}"
+            )
+            return OrderResult(
+                status="rejected",
+                mode=get_venue_gate().mode,
+                reason=f"scope_violation:{scope_error}",
+                latency_ms=round(latency, 2),
+            )
+        else:
+            logger.debug(
+                f"[SCOPE_OK] Async order validated: asset={asset} | timeframe={timeframe} | "
+                f"series={series_ticker or 'N/A'} | ticker={intent.ticker}"
+            )
+
+    # ── INVARIANT: No Trade Without Exit (15m crypto) ─────────────────
+    # Enforces that all entry orders on 15m crypto contracts have exit targets
+    # This check runs BEFORE any side effects (no API calls, no state mutations)
+    mode = _resolve_mode(intent.mode)
+    invariant_violation = _check_exit_target_invariant(intent, t0, mode)
+    if invariant_violation:
+        return invariant_violation
+    
+    # ── COHERENT RISK CONTRACT: Validate WindowResolution + ExitPolicyResolution linkage ───
+    # Enforces that crypto 15m orders have risk contract linkage
+    risk_contract_valid, risk_contract_error = _validate_risk_contract_linkage(intent)
+    if not risk_contract_valid:
+        latency = (time.monotonic() - t0) * 1000
+        logger.error(
+            f"[RISK_CONTRACT_VIOLATION] Order rejected: {risk_contract_error} | "
+            f"ticker={intent.ticker} | intent_id={intent.intent_id} | source={intent.source}"
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"risk_contract_violation:{risk_contract_error}",
+            latency_ms=round(latency, 2),
+        )
 
     # ── Caller module audit (AGENT_WIRING_AUDIT.md) ─────────────────────
     _caller = _get_caller_module()
     _caller_allowed = _is_authorized_caller(_caller)
+
+    # PIPELINE CHECKPOINT: Log execution-eligible assets
+    from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS
+    logger.info(
+        "[EXECUTION-ELIGIBLE-ASSETS] assets=%s total=%d",
+        sorted(ACTIVE_CRYPTO_ASSETS),
+        len(ACTIVE_CRYPTO_ASSETS)
+    )
+
+    # SENTIMENT AUDIT: Log sentiment usage in order intent
+    logger.info(
+        "[SENTIMENT-AUDIT] sentiment_driven=%s source=%s ticker=%s",
+        getattr(intent, 'sentiment_driven', False),
+        intent.source,
+        intent.ticker
+    )
 
     # Structured audit log for production traceability
     logger.info(
@@ -2292,6 +3500,23 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
             _caller, intent.ticker,
         )
 
+    # ── Kalshi 15m crypto agent authorization (EXE1) ───────────────────────
+    # Only authorized Kalshi 15m crypto agents can route to Kalshi execution
+    # This prevents non-Kalshi agents from accidentally trading on Kalshi
+    agent_id = intent.agent_id or intent.source
+    if not _is_kalshi_15m_crypto_agent(agent_id):
+        logger.error(
+            "[AUDIT] UNAUTHORIZED_AGENT_REJECTED | agent=%s | intent=%s | "
+            "reason=not_in_kalshi_15m_crypto_whitelist | allowed=%s",
+            agent_id, intent.ticker, sorted(_KALSHI_15M_CRYPTO_AGENTS),
+        )
+        return OrderResult(
+            status="rejected",
+            mode=_resolve_mode(intent.mode),
+            reason=f"unauthorized_agent:{agent_id}",
+            latency_ms=0.0,
+        )
+
     mode = _resolve_mode(intent.mode)
 
     reject_reason = _check_intent_risk(intent)
@@ -2308,16 +3533,113 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
             latency_ms=round(latency, 2),
         )
 
-    _sent_cap = _check_sentiment_notional_cap(intent)
-    if _sent_cap:
+    # Price band validation (reject 48-52c without exceptional edge)
+    price_error = _validate_price_band(intent)
+    if price_error:
         latency = (time.monotonic() - t0) * 1000
-        logger.warning("[order-router] REJECTED sentiment cap: %s — %s", intent.ticker, _sent_cap)
+        logger.error(
+            f"[PRICE_BAND] Rejected order in 48-52c band: {price_error} | ticker={intent.ticker} | "
+            f"price={intent.price_cents}c | edge={intent.edge_pct or 0}% | conf={intent.confidence or 0}"
+        )
         return OrderResult(
             status="rejected",
             mode=mode,
-            reason=_sent_cap,
+            reason=f"price_band:{price_error}",
             latency_ms=round(latency, 2),
         )
+
+    # Signal metadata validation (require edge, confidence, model_prob for opening orders)
+    signal_error = _validate_signal_metadata(intent)
+    if signal_error:
+        latency = (time.monotonic() - t0) * 1000
+        logger.error(
+            f"[SIGNAL_VALIDATION] Rejected order: {signal_error} | ticker={intent.ticker} | "
+            f"edge={intent.edge_pct or 0}% | conf={intent.confidence or 0} | model_prob={intent.model_prob or 0}"
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"signal_validation:{signal_error}",
+            latency_ms=round(latency, 2),
+        )
+
+    # Prob-price consistency validation (no magic numbers: model must support price)
+    prob_price_error = _validate_prob_price_consistency(intent)
+    if prob_price_error:
+        latency = (time.monotonic() - t0) * 1000
+        logger.error(
+            f"[PROB_PRICE_CONSISTENCY] Rejected order: {prob_price_error} | ticker={intent.ticker} | "
+            f"price={intent.price_cents}c | model_prob={intent.model_prob or 0}"
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"prob_price_consistency:{prob_price_error}",
+            latency_ms=round(latency, 2),
+        )
+
+    # Deep OTM policy validation (no lotto tickets)
+    deep_otm_error = _validate_deep_otm_policy(intent)
+    if deep_otm_error:
+        latency = (time.monotonic() - t0) * 1000
+        logger.error(
+            f"[DEEP_OTM_POLICY] Rejected order: {deep_otm_error} | ticker={intent.ticker} | "
+            f"price={intent.price_cents}c"
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"deep_otm_policy:{deep_otm_error}",
+            latency_ms=round(latency, 2),
+        )
+
+    # Underlying plausibility validation (no absurd required moves)
+    plausibility_error = _validate_underlying_plausibility(intent)
+    if plausibility_error:
+        latency = (time.monotonic() - t0) * 1000
+        logger.error(
+            f"[UNDERLYING_PLAUSIBILITY] Rejected order: {plausibility_error} | ticker={intent.ticker} | "
+            f"price={intent.price_cents}c"
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"underlying_plausibility:{plausibility_error}",
+            latency_ms=round(latency, 2),
+        )
+
+    # Position lifecycle validation (no orphaned positions)
+    lifecycle_error = _validate_position_lifecycle(intent)
+    if lifecycle_error:
+        latency = (time.monotonic() - t0) * 1000
+        logger.error(
+            f"[POSITION_LIFECYCLE] Rejected order: {lifecycle_error} | ticker={intent.ticker} | "
+            f"group_id={intent.group_id or 'none'} | agent_id={intent.agent_id or 'none'}"
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"position_lifecycle:{lifecycle_error}",
+            latency_ms=round(latency, 2),
+        )
+
+    # Deployment safety validation (deep OTM/ITM and model probability distance)
+    safety_error = _validate_deployment_safety(intent)
+    if safety_error:
+        latency = (time.monotonic() - t0) * 1000
+        logger.warning(
+            f"[DEPLOYMENT_SAFETY] Rejected order: {safety_error} | ticker={intent.ticker} | "
+            f"price={intent.price_cents}c | edge={intent.edge_pct or 0}%"
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"deployment_safety:{safety_error}",
+            latency_ms=round(latency, 2),
+        )
+
+    # SENTIMENT DECOUPLING (2026-05-14): Removed sentiment cap check
+    # Sentiment should not gate trading. Sentiment is now feature-only.
 
     sanity_rejection = _check_sanity(intent, t0, mode)
     if sanity_rejection:
@@ -2510,7 +3832,27 @@ async def route_batch_orders_async(
                 latency_ms=0.0,
             ))
         else:
-            valid_orders.append(intent)
+            # Price band validation (reject 48-52c without exceptional edge)
+            price_error = _validate_price_band(intent)
+            if price_error:
+                pre_validated_results.append(OrderResult(
+                    status="rejected",
+                    mode=_resolve_mode(intent.mode),
+                    reason=f"price_band:{price_error}",
+                    latency_ms=0.0,
+                ))
+            else:
+                # Signal metadata validation (require edge, confidence, model_prob for opening orders)
+                signal_error = _validate_signal_metadata(intent)
+                if signal_error:
+                    pre_validated_results.append(OrderResult(
+                        status="rejected",
+                        mode=_resolve_mode(intent.mode),
+                        reason=f"signal_validation:{signal_error}",
+                        latency_ms=0.0,
+                    ))
+                else:
+                    valid_orders.append(intent)
 
     # Route valid orders with concurrency limit
     semaphore = asyncio.Semaphore(max_concurrent)

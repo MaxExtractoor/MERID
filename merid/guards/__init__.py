@@ -42,6 +42,11 @@ from utils.logger import get_logger
 
 logger = get_logger("merid.guards")
 
+# Import order dedup registry to expose its singleton getter
+from merid.guards.order_dedup_registry import (
+    OrderDedupRegistry,
+    get_order_dedup_registry,
+)
 
 # =============================================================================
 # Status Enums
@@ -398,9 +403,11 @@ class TradingGuardian:
         logger.info("[CAPITAL-ENGINE] Initial Balances & Budget Caps")
         logger.info("=" * 70)
         
-        # Create a temp engine to show initial balances
+        # Create a temp engine to show initial balances (use live capital, not hardcoded $10K)
         from merid.risk.capital_engine import CapitalEngine
-        engine = CapitalEngine(total_equity=10_000.0)
+        from merid.settings import settings as _merid_settings
+        _live_equity = max(1.0, _merid_settings.MERID_TOTAL_CAPITAL_USD)
+        engine = CapitalEngine(total_equity=_live_equity)
         snap = engine.snapshot()
         
         logger.info("Global: core=%.2f risk=%.2f growth=%.2f mult=%.2f",
@@ -843,9 +850,6 @@ class TradingGuardian:
                 if not config:
                     missing_assets.append(asset)
                     continue
-                
-                # TODO: Check actual data age from spot feeds
-                # For now, assume config presence means asset is registered
             
             if missing_assets:
                 return GuardCheckResult(

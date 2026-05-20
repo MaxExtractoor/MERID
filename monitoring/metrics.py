@@ -471,6 +471,31 @@ def _initialize_default_metrics(registry: MetricsRegistry) -> None:
         ["asset"],
     )
 
+    # 50¢ order guardrail metrics (production audit)
+    registry.counter(
+        "kalshi_price_50_rejected_total",
+        "Total orders rejected in 48-52c band",
+        ["ticker", "reason"],
+    )
+
+    registry.counter(
+        "kalshi_fallback_averted_total",
+        "Total times 0.50 fallback was prevented",
+        ["location"],
+    )
+
+    registry.counter(
+        "kalshi_signal_validation_failed_total",
+        "Total orders failing signal validation",
+        ["reason"],
+    )
+
+    registry.counter(
+        "kalshi_invalid_price_rejected_total",
+        "Total orders rejected due to invalid price",
+        ["price_cents"],
+    )
+
 
 def record_agent_observation(agent_id: str) -> None:
     """Record an agent observation."""

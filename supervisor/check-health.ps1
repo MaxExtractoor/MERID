@@ -2,7 +2,7 @@
 # Returns 0 if healthy, 1 if unhealthy
 
 param(
-    [string]$BaseUrl = "http://127.0.0.1:8012",
+    [string]$BaseUrl = "http://127.0.0.1:8011",
     [int]$TimeoutSec = 5
 )
 

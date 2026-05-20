@@ -1,46 +1,6 @@
 {
-  "timestamp": 1777219167.316052,
-  "count": 3,
+  "timestamp": 1779252490.7919025,
+  "count": 0,
   "critical": 0,
-  "discrepancies": [
-    {
-      "venue": "kalshi",
-      "symbol": "",
-      "merid_qty": 0.0,
-      "venue_qty": 0.0,
-      "delta_qty": 0.0,
-      "merid_entry_price": 0.0,
-      "venue_entry_price": 0.0,
-      "delta_price": 0.0,
-      "severity": "info",
-      "reason": "minor drift",
-      "timestamp": 1777219167.3117206
-    },
-    {
-      "venue": "kalshi",
-      "symbol": "KXFED-27APR-T3.25",
-      "merid_qty": 0.0,
-      "venue_qty": 0.0,
-      "delta_qty": 0.0,
-      "merid_entry_price": 0.0,
-      "venue_entry_price": 0.0,
-      "delta_price": 0.0,
-      "severity": "info",
-      "reason": "minor drift",
-      "timestamp": 1777219167.3117206
-    },
-    {
-      "venue": "kalshi",
-      "symbol": "KXNBAMVP-26-JBRO",
-      "merid_qty": 0.0,
-      "venue_qty": 0.0,
-      "delta_qty": 0.0,
-      "merid_entry_price": 0.0,
-      "venue_entry_price": 0.0,
-      "delta_price": 0.0,
-      "severity": "info",
-      "reason": "minor drift",
-      "timestamp": 1777219167.3117206
-    }
-  ]
+  "discrepancies": []
 }

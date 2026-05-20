@@ -113,18 +113,24 @@ class CryptoSwarmRiskBTC15m:
     PER_TRADE_BASE = 0.25
     PER_TRADE_HARD_CAP = 0.30
     
-    DAILY_SOFT_STOP = -0.50
-    DAILY_HARD_STOP = -1.00
+    # ALIGNED: Daily loss now percentage-based like rest of system (15% of equity hard stop, 10% soft)
+    # Was: DAILY_SOFT_STOP = -0.50, DAILY_HARD_STOP = -1.00 (legacy hardcoded values)
+    DAILY_SOFT_STOP_PCT = 0.10  # 10% of equity - soft stop triggers sizing reduction
+    DAILY_HARD_STOP_PCT = 0.15  # 15% of equity - hard stop blocks new trades
     
     MAX_OPEN_EXPOSURE_LIVE = 0.50
     
     # Fear/greed multipliers
     FEAR_GREED_NORMAL_MULT = 1.0
-    FEAR_GREED_EXTREME_MULT = 0.6  # 0.15/0.25 = 0.6
+    FEAR_GREED_EXTREME_MULT = 1.0  # Disabled - was 0.6 (crushing position sizes by 40%)
     
-    # BTC 15m filters
+    # BTC 15m filters - use canonical config if available
     MAX_SPREAD_TICKS = 4
-    MIN_MINUTES_TO_EXPIRY = 3
+    try:
+        from config.kalshi_15m_crypto_config import KALSHI_15M_TIMEFRAME_SECONDS
+        MIN_MINUTES_TO_EXPIRY = int(KALSHI_15M_TIMEFRAME_SECONDS / 60)  # 15m = 900s = 15 min
+    except ImportError:
+        MIN_MINUTES_TO_EXPIRY = 3  # Fallback to legacy value
     
     def __init__(
         self,
@@ -285,19 +291,37 @@ class CryptoSwarmRiskBTC15m:
             reason="crypto 15m eligible for live",
         )
     
+    def _get_daily_loss_thresholds(self) -> tuple[float, float]:
+        """Calculate daily loss thresholds based on current equity.
+        
+        Returns (soft_stop_threshold, hard_stop_threshold) in dollars.
+        Negative values represent losses.
+        """
+        # Use effective equity for threshold calculation
+        equity = max(self.current_equity, 0.0)
+        
+        # Calculate from percentage constants (aligns with settings.py approach)
+        soft_stop = -1 * equity * self.DAILY_SOFT_STOP_PCT
+        hard_stop = -1 * equity * self.DAILY_HARD_STOP_PCT
+        
+        return soft_stop, hard_stop
+    
     def _check_daily_loss_limits(self) -> Optional[str]:
         """Check if daily loss limits are breached."""
         total_pnl = self.daily_state.realized_pnl + self.daily_state.unrealized_pnl
         
+        # Calculate dynamic thresholds based on current equity
+        soft_stop, hard_stop = self._get_daily_loss_thresholds()
+        
         # Hard stop check
-        if total_pnl <= self.DAILY_HARD_STOP:
+        if total_pnl <= hard_stop:
             self.daily_state.hard_stop_triggered = True
-            return f"Daily hard stop breached: ${total_pnl:.2f} <= ${self.DAILY_HARD_STOP:.2f}"
+            return f"Daily hard stop breached: ${total_pnl:.2f} <= ${hard_stop:.2f}"
         
         # Soft stop check (only trigger once)
-        if total_pnl <= self.DAILY_SOFT_STOP and not self.daily_state.soft_stop_triggered:
+        if total_pnl <= soft_stop and not self.daily_state.soft_stop_triggered:
             self.daily_state.soft_stop_triggered = True
-            logger.warning(f"Daily soft stop triggered: ${total_pnl:.2f}")
+            logger.warning(f"Daily soft stop triggered: ${total_pnl:.2f} <= ${soft_stop:.2f}")
         
         return None
     
@@ -345,43 +369,10 @@ class CryptoSwarmRiskBTC15m:
         
         return None
     
+    # SENTIMENT DECOUPLING (2026-05-14): Removed _get_fear_greed_multiplier function.
+    # Sentiment should not modify order sizes. Always returns 1.0 (no adjustment).
     def _get_fear_greed_multiplier(self, proposal: TradeProposal) -> float:
-        """
-        Calculate fear/greed size multiplier.
-        
-        Logic:
-        - 20-80 (normal): base multiplier 1.0
-        - 0-20 (extreme fear) or 80-100 (extreme greed): 0.6 multiplier
-        - Exception: contrarian trades in extremes keep 1.0
-        """
-        fg_value = proposal.fear_greed
-        if fg_value is None and self.fear_greed_cache:
-            fg_value = self.fear_greed_cache.value
-        
-        if fg_value is None:
-            return self.FEAR_GREED_NORMAL_MULT
-        
-        # Normal zone
-        if 20 <= fg_value <= 80:
-            return self.FEAR_GREED_NORMAL_MULT
-        
-        # Extreme zone - check for contrarian
-        is_extreme = fg_value <= 20 or fg_value >= 80
-        
-        if is_extreme:
-            # Determine if this is contrarian
-            # Extreme fear (0-20): crowd is fearful, "yes" is contrarian (bullish)
-            # Extreme greed (80-100): crowd is greedy, "no" is contrarian (bearish)
-            if fg_value <= 20 and proposal.side == "yes":
-                # Contrarian bullish in extreme fear - full size OK
-                return self.FEAR_GREED_NORMAL_MULT
-            elif fg_value >= 80 and proposal.side == "no":
-                # Contrarian bearish in extreme greed - full size OK
-                return self.FEAR_GREED_NORMAL_MULT
-            else:
-                # Pro-trend in extremes - reduce size
-                return self.FEAR_GREED_EXTREME_MULT
-        
+        """Return 1.0 (no sentiment-based size adjustment)."""
         return self.FEAR_GREED_NORMAL_MULT
     
     def evaluate_arb_proposal(self, proposal: TradeProposal) -> RiskDecision:

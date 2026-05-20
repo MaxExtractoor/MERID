@@ -147,7 +147,7 @@ class Crypto15MStrategy:
         self.momentum_period = 20  # 20 periods for momentum
         self.mean_reversion_period = 50  # 50 periods for mean reversion
         self.volatility_window = 30  # 30 periods for volatility
-        self.risk_per_trade = 0.02  # 2% risk per trade
+        self.risk_per_trade = 0.03  # 3% risk per trade (optimized 2026-05-07)
         
         # Target tickers — one 15m series per canonical asset unless overridden
         if target_tickers:
@@ -736,12 +736,8 @@ class Crypto15MStrategy:
             "last_signal_time": max([s.timestamp for s in self.signals]) if self.signals else None
         }
 
-    def plan_swarm_orders(self, catalog: Any, *, bankroll_cents: int = 500_000) -> List[Any]:
-        """Build swarm + sizer plans for every (asset, timeframe) on the mood grid."""
-        from merid.strategies.sentiment_swarm_execution import plan_swarm_orders_for_catalog
+    # REMOVED: plan_swarm_orders() - sentiment swarm execution not used in 15m stack
 
-        return plan_swarm_orders_for_catalog(catalog, bankroll_cents=bankroll_cents)
-    
     def run_strategy_cycle(self):
         """Run one complete strategy cycle."""
         try:

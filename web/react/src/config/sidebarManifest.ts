@@ -33,8 +33,8 @@ export const SIDEBAR_MANIFEST: SidebarSection[] = [
     key: 'live-trading',
     items: [
       { name: 'Overview',     href: 'overview',            icon: 'LayoutDashboard', color: 'text-blue-400' },
-      { name: 'Terminal',     href: 'kalshi-terminal',     icon: 'Monitor',         color: 'text-orange-400' },
-      { name: 'Markets',      href: 'kalshi-dashboard',    icon: 'Search',          color: 'text-orange-300' },
+      { name: 'Terminal',     href: 'execute',             icon: 'Monitor',         color: 'text-orange-400' },
+      { name: 'Markets',      href: 'discover',            icon: 'Search',          color: 'text-orange-300' },
       { name: 'All Markets',  href: 'kalshi-all-markets',  icon: 'Globe',           color: 'text-sky-400' },
       { name: 'Portfolio',    href: 'kalshi-portfolio',    icon: 'Briefcase',       color: 'text-orange-300' },
       { name: 'Positions',    href: 'positions',           icon: 'TrendingUp',      color: 'text-cyan-400' },

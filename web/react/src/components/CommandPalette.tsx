@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { Search, ArrowRight, LayoutDashboard, ShieldAlert, Shield, Terminal, Settings, Monitor, BarChart3, Briefcase, Gauge, Activity, GitBranch, Grid, Target, Globe, TrendingUp, ClipboardList, Flame, MessageSquare, Wallet, Sliders, DollarSign, Heart, Rocket, Bell, FileText, Crosshair, Award, LayoutGrid } from '../ui/icons';
+import { Search, ArrowRight, LayoutDashboard, ShieldAlert, Terminal, Settings, Briefcase, Gauge, Activity, Grid, Sliders, Rocket, FileText, Crosshair, Award } from '../ui/icons';
 import type { View } from '../types/views';
 import { DEFAULTS } from '../config/constants';
 import { useFeatureFlags } from '../config/featureFlags';
@@ -18,13 +18,11 @@ const COMMANDS: CommandItem[] = [
   { id: 'discover', label: 'Discover Markets', section: 'Discover', icon: Search, keywords: ['kalshi', 'markets', 'catalog', 'discovery', 'trade', 'all', 'universe', 'trending', 'focus'] },
   
   // Stage 2: Analyze
-  { id: 'analyze-edge', label: 'Edge Signals', section: 'Analyze', icon: Target, keywords: ['edge', 'alpha', 'signal', 'opportunity'] },
   { id: 'analyze-sentiment', label: 'Sentiment', section: 'Analyze', icon: Activity, keywords: ['fear', 'greed', 'sentiment', 'regime', 'index'] },
   { id: 'analyze-vol', label: 'Vol & ATR', section: 'Analyze', icon: Gauge, keywords: ['volatility', 'atr', 'sizing', 'kelly', 'sharpe'] },
   
   // Stage 3: Consensus
   { id: 'consensus-swarm', label: 'Swarm Matrix', section: 'Consensus', icon: Grid, keywords: ['swarm', 'consensus', 'matrix', 'agents', 'voting', 'direction'] },
-  { id: 'consensus-debates', label: 'Debates', section: 'Consensus', icon: MessageSquare, keywords: ['debate', 'argument', 'bull', 'bear', 'discussion'] },
   { id: 'consensus-performance', label: 'Performance', section: 'Consensus', icon: Award, keywords: ['performance', 'agent', 'win', 'sharpe', 'calibration', 'pnl'] },
   { id: 'consensus-calibration', label: 'Calibration', section: 'Consensus', icon: Crosshair, keywords: ['calibration', 'brier', 'forecaster', 'weight', 'accuracy'] },
   

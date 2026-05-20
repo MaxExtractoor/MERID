@@ -390,7 +390,7 @@ class DataImporter:
                 files.append({
                     "path": str(file_path),
                     "name": file_path.name,
-                    "format": file_path.suffix.lower()[1:],
+                    "format": file_path.suffix.lower()[1:] if len(file_path.suffix.lower()) > 1 else file_path.suffix.lower(),
                     "size_bytes": file_path.stat().st_size,
                     "modified": file_path.stat().st_mtime,
                 })

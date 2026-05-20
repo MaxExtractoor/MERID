@@ -1583,8 +1583,12 @@ async def get_brier_metrics(agent: str = "all") -> Dict[str, Any]:
     ]
 
     scores = [a["overall_score"] for a in agents]
-    best = min(agents, key=lambda a: a["overall_score"])
-    worst = max(agents, key=lambda a: a["overall_score"])
+    if agents:
+        best = min(agents, key=lambda a: a["overall_score"])
+        worst = max(agents, key=lambda a: a["overall_score"])
+    else:
+        best = None
+        worst = None
 
     return _stub({
         "agent_scores": agents,

@@ -1,5 +1,12 @@
 """Trading Constants — Canonical source for all financial / risk magic numbers.
 
+LEGACY CONFIGURATION - For non-crypto, non-15m agents only.
+
+For Kalshi 15m crypto agents (BTC_15M, ETH_15M, SOL_15M, XRP_15M, DOGE_15M):
+  - Edge thresholds: Use config/crypto_threshold_matrix.yaml (SINGLE SOURCE OF TRUTH)
+  - Risk limits: Use config/profiles/kalshi_crypto_15m.yaml (SINGLE SOURCE OF TRUTH)
+  - This file's constants are NOT used by 15m crypto agents
+
 Import from here instead of using inline literals anywhere in the codebase.
 
 Usage::
@@ -23,9 +30,9 @@ KELLY_MAX_FRACTION: float = float(os.getenv("MERID_KELLY_MAX_FRACTION", "0.20"))
 # Hard cap on adjusted Kelly after all multipliers (50% of bankroll absolute max)
 KELLY_ABSOLUTE_CAP: float = float(os.getenv("MERID_KELLY_ABSOLUTE_CAP", "0.50"))
 
-# Minimum edge (probability points) — aligned to modern profile's lowest threshold
-# BTC 15m = 0.011; setting floor at 0.011 ensures profile drives behavior, not this constant
-EDGE_MIN_THRESHOLD: float = float(os.getenv("MERID_EDGE_MIN_THRESHOLD", "0.011"))
+# Minimum edge (probability points) — aligned to top edge arbiter floor for consistency
+# REVERTED (2026-05-08): 0.0 to allow lower-edge trades and restore profitable trading volume
+EDGE_MIN_THRESHOLD: float = float(os.getenv("MERID_EDGE_MIN_THRESHOLD", "0.0"))
 
 # Per-phase edge floors — used by StrategyConfig defaults and any sanity callers that
 # want to check the canonical threshold without importing the strategy module.
@@ -43,8 +50,8 @@ CONFIDENCE_MIN_THRESHOLD: float = float(os.getenv("MERID_PM_MIN_CONFIDENCE", "0.
 POSITION_MAX_PCT: float = float(os.getenv("MERID_POSITION_MAX_PCT", "0.075"))  # tightened from 0.10
 
 # Max simultaneous open positions across the entire portfolio.
-# Runtime default matches CT (KALSHI_TRADER_MAX_OPEN=3) and risk engine (KALSHI_MAX_OPEN_POSITIONS=3).
-MAX_OPEN_POSITIONS: int = int(os.getenv("MERID_MAX_OPEN_POSITIONS", "3"))  # tightened from 5
+# Runtime default matches CT (KALSHI_TRADER_MAX_OPEN=5) and risk engine (KALSHI_MAX_OPEN_POSITIONS=5).
+MAX_OPEN_POSITIONS: int = int(os.getenv("MERID_MAX_OPEN_POSITIONS", "5"))  # REVERTED from 3 to restore profitable trades
 
 # Max open positions sharing the same underlying asset/category
 MAX_CORRELATED_POSITIONS: int = int(os.getenv("MERID_MAX_CORRELATED_POSITIONS", "3"))  # tightened from 5
@@ -166,7 +173,8 @@ SWARM_MATRIX_CACHE_TTL_S: int = 10           # 10 seconds
 KALSHI_FEE_RATE: float = float(os.getenv("MERID_KALSHI_FEE_RATE", "0.07"))
 
 # Default primary TP R-multiple for 15m crypto contracts
-TP_DEFAULT_R_MULTIPLE_15M: float = float(os.getenv("MERID_TP_R_MULTIPLE_15M", "0.5"))
+# OPTIMIZED (2026-05-10): Now time-based (0.4/0.25/0.15), this is fallback
+TP_DEFAULT_R_MULTIPLE_15M: float = float(os.getenv("MERID_TP_R_MULTIPLE_15M", "0.4"))
 
 # Default primary TP R-multiple for hourly+ contracts
 TP_DEFAULT_R_MULTIPLE_HOURLY: float = float(os.getenv("MERID_TP_R_MULTIPLE_HOURLY", "0.6"))

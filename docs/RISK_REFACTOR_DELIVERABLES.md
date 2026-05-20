@@ -33,7 +33,7 @@ portfolio_optimizer:
   # ═══════════════════════════════════════════════════════════════════════════
   # MOMENTUM SCALPING ENFORCEMENT (No Hold-to-Expiry)
   # ═══════════════════════════════════════════════════════════════════════════
-  enforce_momentum_scalping_only: true  # Block hold-to-expiry strategies
+  enforce_mean_reversion_only: true  # Block hold-to-expiry strategies
   
   momentum_scalp_config:
     max_hold_minutes: 60
@@ -80,10 +80,10 @@ To adjust risk without code changes, edit `config/portfolio_optimizer.yaml`:
 
 ```yaml
 # To enable momentum-only (current requirement)
-enforce_momentum_scalping_only: true
+enforce_mean_reversion_only: true
 
 # To disable (for testing/rollback)
-enforce_momentum_scalping_only: false
+enforce_mean_reversion_only: false
 ```
 
 When enabled, strategies must have one of the `allowed_strategy_tags` and must not match `blocked_strategy_patterns`.

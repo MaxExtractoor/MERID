@@ -830,6 +830,42 @@ async def reconciliation_status() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@router.get("/api/v1/reconciliation/metrics")
+async def reconciliation_metrics() -> Dict[str, Any]:
+    """Return reconciliation and gate metrics for observability."""
+    try:
+        from merid.reconciliation.reconciliation_metrics import get_reconciliation_metrics_collector
+        
+        collector = get_reconciliation_metrics_collector()
+        summary = await collector.get_summary()
+        
+        return {
+            "timestamp": time.time(),
+            "metrics": summary,
+        }
+    except Exception as exc:
+        logger.debug("Reconciliation metrics failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/api/v1/kalshi/api/metrics")
+async def kalshi_api_metrics() -> Dict[str, Any]:
+    """Return Kalshi API performance metrics for observability."""
+    try:
+        from merid.event_venues.kalshi.api_metrics import get_api_metrics_collector
+        
+        collector = get_api_metrics_collector()
+        summary = collector.get_summary()
+        
+        return {
+            "timestamp": time.time(),
+            "metrics": summary,
+        }
+    except Exception as exc:
+        logger.debug("Kalshi API metrics failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @router.get("/api/v1/reconciliation/unified-status")
 async def unified_reconciliation_status() -> Dict[str, Any]:
     """Unified reconciliation status merging trading/ and merid/ modules."""

@@ -1,14 +1,28 @@
 """
 Kalshi Universe Configuration
 
-Defines filters, caps, and thresholds for Kalshi-only mode.
-The actual active markets are dynamically selected from the Kalshi catalog API
-using pinned markets + auto-selection algorithm.
+Defines the universe of Kalshi markets for trading, including:
+- Pinned markets (must-trade list)
+- Allowed categories
+- Volume and expiry limits
+- Crypto products and series tickers
+
+NOTE: For 15m crypto trading canonical configuration, see config.kalshi_15m_crypto_config.
+This module remains for broader universe definition beyond 15m crypto.
 """
+from __future__ import annotations
+
 import os
-from typing import List, Literal, TypedDict, Dict
+from typing import Dict, List, Literal, TypedDict, Set
 
 from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS, ACTIVE_CRYPTO_WS_TIMEFRAMES
+
+# Import from canonical 15m config for consistency
+# NOTE: This import is required for 15m crypto trading. If it fails, startup should fail.
+from config.kalshi_15m_crypto_config import (
+    KALSHI_15M_CRYPTO_ASSETS,
+    KALSHI_15M_SERIES_TICKERS,
+)
 
 
 def _env_int(env_key: str, default: int) -> int:
@@ -72,91 +86,107 @@ KALSHI_INCLUDED_SERIES_PREFIXES: List[str] = [
     "KXSP500",    # S&P 500 / indices
     "KXBTC",      # BTC-related
     "KXETH",      # ETH-related
-    "KXSOL",      # SOL-related
+    # KXSOL removed - no markets available on Kalshi
     "KXXRP",      # XRP-related
     "KXDOGE",     # DOGE-related
 ]
 
-# Real Kalshi series tickers — verified from kalshi.com/category/crypto
-# 15m format: KX{COIN}15M (e.g. KXBTC15M)
-# Hourly format: KX{COIN} (e.g. KXBTC) — no suffix
-# See: https://kalshi.com/markets/kxbtc15m/
-KALSHI_CRYPTO_PRODUCTS = {
-    "BTC_15M":     ["KXBTC15M"],
-    "BTC_1H":      ["KXBTC"],
-    "BTC_DAILY":   ["KXBTCD1"],
-    "BTC_WEEKLY":  ["KXBTCW1"],
-    "BTC_MONTHLY": ["KXBTC1M"],
-    "BTC_ANNUAL":  ["KXBTCY"],
-    "ETH_15M":     ["KXETH15M"],
-    "ETH_1H":      ["KXETH"],
-    "ETH_DAILY":   ["KXETHD1"],
-    "ETH_WEEKLY":  ["KXETHW1"],
-    "ETH_MONTHLY": ["KXETH1M"],
-    "ETH_ANNUAL":  ["KXETHY"],
-    "SOL_15M":     ["KXSOL15M"],
-    "SOL_1H":      ["KXSOL"],
-    "SOL_DAILY":   ["KXSOLD1"],
-    "SOL_WEEKLY":  ["KXSOLW1"],
-    "SOL_MONTHLY": ["KXSOL1M"],
-    "SOL_ANNUAL":  ["KXSOLY"],
-    "XRP_15M":     ["KXXRP15M"],
-    "XRP_1H":      ["KXXRP"],
-    "XRP_DAILY":   ["KXXRPD1"],
-    "XRP_WEEKLY":  ["KXXRPW1"],
-    "XRP_MONTHLY": ["KXXRP1M"],
-    "XRP_ANNUAL":  ["KXXRPY"],
-    "DOGE_15M":    ["KXDOGE15M"],
-    "DOGE_1H":     ["KXDOGE"],
-    "DOGE_DAILY":  ["KXDOGED1"],
-    "DOGE_WEEKLY": ["KXDOGEW1"],
-    "DOGE_MONTHLY":["KXDOGE1M"],
-    "DOGE_ANNUAL": ["KXDOGEY"],
+# ═══════════════════════════════════════════════════════════════════════════
+# Crypto Products (Series Tickers)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Crypto series tickers for different assets and timeframes
+# Keys are in format "ASSET_TIMEFRAME" (e.g., "BTC_15M", "ETH_1H")
+# NOTE: 15m timeframe always uses 15M series tickers (KXBTC15M, KXETH15M, etc.) from canonical config
+# No fallback to base tickers - this prevents silent misalignment
+KALSHI_CRYPTO_PRODUCTS: Dict[str, List[str]] = {
+    # BTC
+    "BTC_15M": [KALSHI_15M_SERIES_TICKERS["BTC"]],
+    "BTC_1H": ["KXBTC"],
+    "BTC_D": ["KXBTC-D"],
+    "BTC_W": ["KXBTC-W"],
+    # ETH
+    "ETH_15M": [KALSHI_15M_SERIES_TICKERS["ETH"]],
+    "ETH_1H": ["KXETH"],
+    "ETH_D": ["KXETH-D"],
+    "ETH_W": ["KXETH-W"],
+    # SOL
+    "SOL_15M": [KALSHI_15M_SERIES_TICKERS["SOL"]],
+    "SOL_1H": ["KXSOL"],
+    "SOL_D": ["KXSOL-D"],
+    "SOL_W": ["KXSOL-W"],
+    # XRP
+    "XRP_15M": [KALSHI_15M_SERIES_TICKERS["XRP"]],
+    "XRP_1H": ["KXXRP"],
+    "XRP_D": ["KXXRP-D"],
+    "XRP_W": ["KXXRP-W"],
+    # DOGE
+    "DOGE_15M": [KALSHI_15M_SERIES_TICKERS["DOGE"]],
+    "DOGE_1H": ["KXDOGE"],
+    "DOGE_D": ["KXDOGE-D"],
+    "DOGE_W": ["KXDOGE-W"],
 }
 
 
 def kalshi_ct_default_series_tickers() -> List[str]:
     """Series tickers the Continuous Trader scans by default.
 
-    Subset of ``KALSHI_CRYPTO_PRODUCTS``: 15m through weekly only (excludes
-    monthly and annual). Keep in sync with ``TraderConfig.series_tickers`` and
-    tests in ``test_invariants_crypto_universe``.
+    FOCUS: 5 assets (BTC, ETH, SOL, XRP, DOGE) x 15m timeframe only.
+    All other timeframes (1h, daily, weekly, monthly, annual) are signal-only.
+
+    Updated 2026-05-11: Returns 15M series tickers (KXBTC15M, etc.) instead of base tickers.
+    The 15m timeframe is now explicit in the series ticker for consistency with
+    agent grid configuration and catalog discovery.
     """
-    tickers: List[str] = []
-    for key, series_list in KALSHI_CRYPTO_PRODUCTS.items():
-        if key.endswith("_MONTHLY") or key.endswith("_ANNUAL"):
-            continue
-        tickers.extend(series_list)
-    return tickers
+    # 15M series tickers for all 5 trading assets
+    return [
+        "KXBTC15M",
+        "KXETH15M",
+        "KXSOL15M",
+        "KXXRP15M",
+        "KXDOGE15M",
+    ]
 
 
 def kalshi_agent_grid_catalog_series_tickers() -> List[str]:
-    """All crypto series tickers AgentGrid / market catalog should prioritize on refresh.
+    """Series tickers AgentGrid / market catalog should prioritize on refresh.
 
-    Includes monthly and annual keys from ``KALSHI_CRYPTO_PRODUCTS`` (REST fetch
-    per series). CT continues to use :func:`kalshi_ct_default_series_tickers`
-    only.
+    FOCUS: 5 assets (BTC, ETH, SOL, XRP, DOGE) x 15m timeframe only.
+    All other timeframes (1h, daily, weekly, monthly, annual) are signal-only.
+
+    NOTE: For 15-minute crypto markets, use the 15M series tickers (KXBTC15M, KXETH15M, KXSOL15M, etc.)
+    These are the actual series tickers for 15-minute contracts on Kalshi.
     """
-    out: List[str] = []
-    for series_list in KALSHI_CRYPTO_PRODUCTS.values():
-        out.extend(series_list)
-    # Dedupe preserving order
-    return list(dict.fromkeys(out))
+    # 15-minute series tickers for the 5 trading assets
+    series_tickers = [
+        "KXBTC15M",
+        "KXETH15M",
+        "KXSOL15M",
+        "KXXRP15M",
+        "KXDOGE15M",
+    ]
+    
+    # PIPELINE CHECKPOINT: Log series tickers being returned
+    from utils.logger import get_logger
+    logger = get_logger("config.kalshi_universe")
+    logger.info("[SERIES-TICKERS] series=%s", sorted(series_tickers))
+    
+    return series_tickers
 
 
 # Allowed value suffixes for keys in KALSHI_CRYPTO_PRODUCTS (ASSET_VALUE).
 # New tenors (e.g. QUARTERLY) must be added here and documented so CI fails on drift.
 KALSHI_CRYPTO_PRODUCT_VALUE_SUFFIXES = frozenset(
-    {"15M", "1H", "DAILY", "WEEKLY", "MONTHLY", "ANNUAL"}
+    {"15M", "1H", "D", "W", "DAILY", "WEEKLY", "MONTHLY", "ANNUAL"}
 )
 
 # Fallback active markets list for when catalog fetch fails
 KALSHI_ACTIVE_MARKETS_FALLBACK = [
-    "KXBTC15M",
-    "KXETH15M",
-    "KXSOL15M",
-    "KXXRP15M",
-    "KXDOGE15M",
+    "KXBTC",
+    "KXETH",
+    "KXSOL",
+    "KXXRP",
+    "KXDOGE",
 ]
 
 # Backward compatibility alias
@@ -164,7 +194,6 @@ KALSHI_ACTIVE_MARKETS = KALSHI_ACTIVE_MARKETS_FALLBACK
 
 # Backward compatibility: excluded markets (empty list)
 KALSHI_EXCLUDED_MARKETS = []
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Canonical 5-Asset Crypto Universe (for Continuous Trader wiring validation)
@@ -176,21 +205,12 @@ KALSHI_CRYPTO_ASSETS = ACTIVE_CRYPTO_ASSETS
 # Expected set for equality checks in _validate_asset_wiring()
 EXPECTED_CRYPTO_UNIVERSE = set(KALSHI_CRYPTO_ASSETS)
 
-# All supported timeframe series tickers (15m, hourly, daily, etc.)
-# Used by continuous trader to build per-asset series maps
+# All supported timeframe series tickers (15m only for trading)
+# FOCUS: 5 assets (BTC, ETH, SOL, XRP, DOGE) x 15m timeframe only.
+# All other timeframes (1h, daily, weekly, monthly, annual) are signal-only.
 KALSHI_CRYPTO_SERIES_TICKERS = [
     # 15-minute series (primary trading)
     "KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M",
-    # Hourly series
-    "KXBTC", "KXETH", "KXSOL", "KXXRP", "KXDOGE",
-    # Daily series
-    "KXBTCD1", "KXETHD1", "KXSOLD1", "KXXRPD1", "KXDOGED1",
-    # Weekly series
-    "KXBTCW1", "KXETHW1", "KXSOLW1", "KXXRPW1", "KXDOGEW1",
-    # Monthly series
-    "KXBTC1M", "KXETH1M", "KXSOL1M", "KXXRP1M", "KXDOGE1M",
-    # Annual series
-    "KXBTCY", "KXETHY", "KXSOLY", "KXXRPY", "KXDOGEY",
 ]
 
 # Set for fast membership tests

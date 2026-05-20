@@ -22,7 +22,7 @@ import hashlib
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from utils.logger import get_logger
 
@@ -83,6 +83,12 @@ class CryptoHedgeEngine:
         self._total_orders_generated: int = 0
         self._total_skipped: int = 0
         self._lock = threading.Lock()
+        # P2 Task 8: auto-exit loop health surface
+        self._auto_exit_last_check_ts: float = 0.0
+        self._auto_exit_total_exits_submitted: int = 0
+        self._auto_exit_total_iterations: int = 0
+        self._auto_exit_last_error: Optional[str] = None
+        self._auto_exit_last_error_ts: float = 0.0
 
     # ── Public API ────────────────────────────────────────────────────
 
@@ -118,12 +124,49 @@ class CryptoHedgeEngine:
             return HedgeResult()
 
         result = HedgeResult()
-        from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS
+        from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS, TOP_N_EDGE_ASSETS
 
         all_assets = list(ACTIVE_CRYPTO_ASSETS)
         all_tfs = list(config.timeframes.keys())
 
+        # Hedge assets are picked by exposure magnitude. This is for hedging
+        # (defense), not alpha sizing — so ANY asset with non-zero exposure
+        # must be hedgeable. Rank by edge but always include assets with
+        # non-zero exposure even if it pushes us above TOP_N.
+        asset_edges = []
         for asset in all_assets:
+            total_edge = 0
+            for tf in all_tfs:
+                total_edge += abs(exposure.net_delta_cents(asset, tf))
+            asset_edges.append((asset, total_edge))
+
+        # Sort by edge descending. Always include any asset with non-zero
+        # exposure; pad up to TOP_N_EDGE_ASSETS with the highest-ranked even
+        # if their exposure is zero (lets the engine warm up correctly).
+        asset_edges.sort(key=lambda x: x[1], reverse=True)
+        non_zero = [a for a, e in asset_edges if e > 0]
+        top_n_padded = [a for a, _ in asset_edges[:TOP_N_EDGE_ASSETS]]
+        # Union preserving rank order: non-zero exposures first, then any
+        # remaining slots filled by top-ranked (likely zero-edge) assets.
+        seen: set = set()
+        top_assets: List[str] = []
+        for a in non_zero + top_n_padded:
+            if a not in seen:
+                top_assets.append(a)
+                seen.add(a)
+
+        if len(top_assets) > TOP_N_EDGE_ASSETS and non_zero:
+            logger.info(
+                "[hedge-engine] Hedging %d assets (TOP_N=%d) — extras have non-zero exposure: %s",
+                len(top_assets), TOP_N_EDGE_ASSETS, ', '.join(top_assets),
+            )
+        elif len(all_assets) > TOP_N_EDGE_ASSETS:
+            logger.info(
+                "[hedge-engine] Hedging top %d of %d assets by edge: %s",
+                len(top_assets), len(all_assets), ', '.join(top_assets),
+            )
+
+        for asset in top_assets:
             for tf in all_tfs:
                 orders = self._compute_cell(
                     asset, tf, exposure, config, bankroll_cents, market_catalog,
@@ -148,6 +191,22 @@ class CryptoHedgeEngine:
                 "total_calls": self._total_calls,
                 "total_orders_generated": self._total_orders_generated,
                 "total_skipped": self._total_skipped,
+                # P2 Task 8: auto-exit loop health
+                "auto_exit": {
+                    "last_check_ts": self._auto_exit_last_check_ts,
+                    "last_check_age_seconds": (
+                        time.time() - self._auto_exit_last_check_ts
+                        if self._auto_exit_last_check_ts > 0 else None
+                    ),
+                    "total_iterations": self._auto_exit_total_iterations,
+                    "total_exits_submitted": self._auto_exit_total_exits_submitted,
+                    "last_error": self._auto_exit_last_error,
+                    "last_error_ts": self._auto_exit_last_error_ts,
+                    "healthy": (
+                        self._auto_exit_last_check_ts > 0
+                        and (time.time() - self._auto_exit_last_check_ts) < 60
+                    ),
+                },
             }
 
     # ── Cell-level computation ────────────────────────────────────────
@@ -210,13 +269,20 @@ class CryptoHedgeEngine:
         # Step 7: Build deterministic client_tag
         tag = self._deterministic_tag(asset, tf, hedge_side, count, mid_price_cents)
 
+        # Step 10: FVG-Aware Hedge Timing (P1-7)
+        # Try to enter hedge at FVG zone midpoint for better price
+        fvg_optimized_price = self._resolve_fvg_price(
+            asset, tf, hedge_side, mid_price_cents
+        )
+        final_price_cents = fvg_optimized_price if fvg_optimized_price else mid_price_cents
+        
         orders = [
             HedgeOrder(
                 asset=asset,
                 timeframe=tf,
                 side=hedge_side,
                 action="buy",
-                price_cents=mid_price_cents,
+                price_cents=final_price_cents,
                 count=count,
                 hedge_reason="same_asset_same_horizon",
                 target_ticker=ticker,
@@ -251,6 +317,12 @@ class CryptoHedgeEngine:
                     )
                     break  # one adjacent horizon per cell
 
+        # Step 9: Cross-asset hedging hook — currently disabled.
+        # `TimeframeHedgeRule` has no `cross_asset_enabled` attribute and there is
+        # no `_compute_cross_asset_hedge` method. The YAML default is also
+        # `cross_asset.enabled: false`. When cross-asset hedging is wired in,
+        # gate it on `config.cross_asset_enabled` (top-level) and implement the
+        # method properly. Leaving as no-op to keep same-asset hedging stable.
         return orders
 
     # ── Helpers ───────────────────────────────────────────────────────
@@ -292,19 +364,87 @@ class CryptoHedgeEngine:
             from merid.event_venues.kalshi.market_selector import resolve_series_ticker
             return resolve_series_ticker(asset, tf)
         except Exception as e:
-            logger.debug(f"Series ticker resolution failed: {e}")
+            logger.debug(f"Ticker resolution fallback failed for %s/%s: %s", asset, tf, e)
             return None
 
     @staticmethod
     def _deterministic_tag(
-        asset: str, tf: str, side: str, count: int, price: int,
+        asset: str, tf: str, side: str, count: int, price_cents: int
     ) -> str:
-        """Build a deterministic HEDGE_ prefixed client_order_id."""
-        # Bucket to 60s so same exposure within a minute → same tag → dedup
-        bucket = int(time.time()) // 60
-        preimage = f"{asset}:{tf}:{side}:{count}:{price}:{bucket}"
-        digest = hashlib.sha256(preimage.encode()).hexdigest()[:12]
-        return f"{HEDGE_CLIENT_TAG_PREFIX}{asset}_{tf}_{digest}"
+        """Build a deterministic client_tag for a hedge order.
+        
+        Same (asset, tf, side, count, price) bucket within the same 60s window
+        → same tag → exchange-level dedup. Prefix with HEDGE_ for visibility.
+        """
+        bucket = int(time.time() // 60)
+        preimage = f"{asset}|{tf}|{side}|{count}|{price_cents}|{bucket}".encode("utf-8")
+        digest = hashlib.sha256(preimage).hexdigest()[:16]
+        return f"{HEDGE_CLIENT_TAG_PREFIX}{digest}"
+
+    def _resolve_fvg_price(
+        self,
+        asset: str,
+        timeframe: str,
+        hedge_side: str,
+        current_price_cents: int,
+    ) -> Optional[int]:
+        """Resolve FVG-optimized price for hedge entry (P1-7).
+        
+        If an active FVG zone exists in hedge direction, return zone midpoint
+        for better entry pricing. Otherwise return None (use market price).
+        
+        P1-001 FIX: Now uses FVG forecaster from prediction module for consistent
+        FVG detection across alpha and hedge paths.
+        
+        Args:
+            asset: Asset symbol
+            timeframe: Timeframe (e.g., "15m")
+            hedge_side: "yes" (bullish) or "no" (bearish)
+            current_price_cents: Current market price in cents
+            
+        Returns:
+            FVG-optimized price in cents or None
+        """
+        try:
+            # P1-001: Use FVG forecaster from prediction module (unified FVG source)
+            from merid.prediction.forecasters.fvg import get_fvg_store
+            
+            store = get_fvg_store()
+            active_fvgs = store.get_active_fvgs(asset, timeframe)
+            
+            if not active_fvgs:
+                return None
+            
+            # Find FVG in hedge direction
+            # hedge_side="yes" means we want to buy YES (bullish) → look for bullish FVG
+            # hedge_side="no" means we want to buy NO (bearish) → look for bearish FVG
+            target_direction = "bullish" if hedge_side == "yes" else "bearish"
+            
+            matching_fvgs = [f for f in active_fvgs if f.direction == target_direction]
+            if not matching_fvgs:
+                return None
+            
+            # Get nearest FVG to current price
+            current_price = current_price_cents / 100.0
+            nearest_fvg = min(matching_fvgs, key=lambda f: abs(f.midpoint() - current_price))
+            
+            # Check if price is within fill distance of FVG
+            if not nearest_fvg.is_within_fill_distance(current_price):
+                return None
+            
+            # Use FVG midpoint as optimized price
+            fvg_price = nearest_fvg.midpoint()
+            price_cents = int(fvg_price * 100)
+            logger.debug(
+                "[FVG-HEDGE] %s/%s/%s: FVG price=%d¢ vs market=%d¢",
+                asset, timeframe, hedge_side, price_cents, current_price_cents
+            )
+            return price_cents
+            
+        except Exception as e:
+            logger.debug("[FVG-HEDGE] Failed to resolve FVG price: %s", e)
+        
+        return None
 
     def to_order_intents(self, result: HedgeResult) -> list:
         """Convert HedgeResult into OrderIntent objects ready for routing.
@@ -329,6 +469,126 @@ class CryptoHedgeEngine:
             )
             intents.append(intent)
         return intents
+
+    async def execute_take_profit_exits(
+        self,
+        config: HedgeConfig,
+        current_prices: Dict[str, int],
+    ) -> HedgeResult:
+        """Execute take profit and stop loss exits for active hedge positions.
+
+        This method checks all active hedges against configured TP/SL levels
+        and generates exit orders for any positions that have hit their targets.
+
+        Args:
+            config: HedgeConfig with take_profit settings
+            current_prices: Dict mapping asset to current price in cents
+
+        Returns:
+            HedgeResult containing any exit orders needed
+        """
+        result = HedgeResult()
+        from merid.hedging.pnl_tracker import get_hedge_pnl_tracker
+
+        tracker = get_hedge_pnl_tracker()
+
+        # Check take profit and stop loss levels
+        tp_orders = tracker.check_take_profit_levels(config, current_prices)
+        for order in tp_orders:
+            # Look up the original PnL record to determine the correct exit side.
+            # An exit is a SELL on the same side that was originally bought
+            # (Kalshi: closing a YES long = sell YES; closing a NO long = sell NO).
+            rec = tracker._records.get(order["record_id"])
+            if rec is None:
+                continue
+            exit_side = rec.hedge_side  # close on same side that was bought
+            result.orders.append(HedgeOrder(
+                asset=order["asset"],
+                timeframe=rec.hedge_ticker.split("-")[-1] if "-" in rec.hedge_ticker else "exit",
+                hedge_reason=f"tp_exit:{order['reason']}",
+                side=exit_side,
+                action="sell",
+                count=order["exit_count"],
+                price_cents=order["exit_price_cents"],
+                target_ticker=rec.hedge_ticker,
+                client_tag=f"tp_exit:{order['reason']}:{order['record_id']}",
+            ))
+            logger.info(
+                "[TP-EXEC] %s exit for %s ticker=%s side=%s: %d @ %d¢",
+                order["reason"], order["asset"], rec.hedge_ticker, exit_side,
+                order["exit_count"], order["exit_price_cents"]
+            )
+
+        # Check max hold time — close at market
+        hold_orders = tracker.get_hedges_past_hold_time(config)
+        for order in hold_orders:
+            rec = tracker._records.get(order["record_id"])
+            if rec is None:
+                continue
+            result.orders.append(HedgeOrder(
+                asset=order["asset"],
+                timeframe="exit",
+                hedge_reason="max_hold_time",
+                side=rec.hedge_side,
+                action="sell",
+                count=rec.hedge_entry_count,
+                price_cents=0,  # Market order
+                target_ticker=rec.hedge_ticker,
+                client_tag=f"max_hold:{order['record_id']}",
+            ))
+
+        return result
+
+    async def run_auto_exit_loop(
+        self,
+        config: HedgeConfig,
+        price_provider: Callable[[], Dict[str, int]],
+        interval_seconds: float = 5.0,
+    ):
+        """Continuously monitor and execute auto-exits.
+
+        This is a long-running task that should be started with asyncio.create_task().
+
+        Args:
+            config: HedgeConfig with auto_exit settings
+            price_provider: Callable that returns current prices dict
+            interval_seconds: How often to check for exits
+        """
+        import asyncio
+        from merid.event_venues.kalshi.order_router import route_order_async
+
+        while True:
+            try:
+                current_prices = price_provider()
+                result = await self.execute_take_profit_exits(config, current_prices)
+                # P2 Task 8: track loop health
+                with self._lock:
+                    self._auto_exit_last_check_ts = time.time()
+                    self._auto_exit_total_iterations += 1
+                if result.orders:
+                    intents = self.to_order_intents(result)
+                    logger.info(
+                        "[AUTO-EXIT-LOOP] Submitting %d hedge exit orders",
+                        len(intents),
+                    )
+                    submitted = 0
+                    for intent in intents:
+                        try:
+                            await route_order_async(intent)
+                            submitted += 1
+                        except Exception as submit_exc:
+                            logger.error(
+                                "[AUTO-EXIT-LOOP] route_order_async failed: %s | intent=%s",
+                                submit_exc, intent.client_tag,
+                            )
+                    with self._lock:
+                        self._auto_exit_total_exits_submitted += submitted
+            except Exception as e:
+                logger.error("[AUTO-EXIT-LOOP] Error in TP/SL check: %s", e)
+                with self._lock:
+                    self._auto_exit_last_error = str(e)
+                    self._auto_exit_last_error_ts = time.time()
+            await asyncio.sleep(interval_seconds)
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────

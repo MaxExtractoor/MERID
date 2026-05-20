@@ -1,0 +1,294 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "MERID 15m Pipeline Health",
+    "tags": ["merid", "kalshi", "15m", "crypto"],
+    "timezone": "browser",
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Pipeline Status Overview",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 24, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "sum(merid_pipeline_cycles_total)",
+            "legendFormat": "Total Cycles"
+          },
+          {
+            "expr": "sum(merid_pipeline_decisions_total)",
+            "legendFormat": "Total Decisions"
+          },
+          {
+            "expr": "avg(merid_pipeline_success_rate)",
+            "legendFormat": "Avg Success Rate"
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "title": "Decision Rate by Asset (5m)",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+        "targets": [
+          {
+            "expr": "rate(merid_pipeline_decisions_total[5m])",
+            "legendFormat": "{{asset}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "ops", "label": "Decisions/sec"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Pipeline Success Rate by Asset",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+        "targets": [
+          {
+            "expr": "merid_pipeline_success_rate",
+            "legendFormat": "{{asset}} - {{pipeline_id}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "percentunit", "label": "Success Rate"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 4,
+        "title": "Decision Confidence Distribution (95th Percentile)",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, merid_pipeline_decisions_confidence)",
+            "legendFormat": "{{asset}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "percentunit", "label": "Confidence"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 5,
+        "title": "Edge Estimate Distribution (95th Percentile)",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, merid_pipeline_decisions_edge_estimate)",
+            "legendFormat": "{{asset}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "short", "label": "Edge Estimate"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 6,
+        "title": "Feature Namespace Sparsity",
+        "type": "heatmap",
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 20},
+        "targets": [
+          {
+            "expr": "merid_feature_namespace_sparsity",
+            "legendFormat": "{{asset}} - {{namespace}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "percentunit", "label": "Sparsity"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 7,
+        "title": "Pipeline Latency Breakdown (95th Percentile)",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 28},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, merid_pipeline_feature_build_duration_seconds)",
+            "legendFormat": "Feature Build - {{asset}}",
+            "refId": "A"
+          },
+          {
+            "expr": "histogram_quantile(0.95, merid_pipeline_decision_duration_seconds)",
+            "legendFormat": "Decision - {{asset}}",
+            "refId": "B"
+          },
+          {
+            "expr": "histogram_quantile(0.95, merid_pipeline_risk_check_duration_seconds)",
+            "legendFormat": "Risk Check - {{asset}}",
+            "refId": "C"
+          },
+          {
+            "expr": "histogram_quantile(0.95, merid_pipeline_execution_duration_seconds)",
+            "legendFormat": "Execution - {{asset}}",
+            "refId": "D"
+          }
+        ],
+        "yaxes": [
+          {"format": "s", "label": "Duration (seconds)"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 8,
+        "title": "Risk Check Veto Rate",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 36},
+        "targets": [
+          {
+            "expr": "merid_risk_check_veto_rate",
+            "legendFormat": "{{asset}} - {{check_name}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "percentunit", "label": "Veto Rate"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 9,
+        "title": "Risk Check Failure Count",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 36},
+        "targets": [
+          {
+            "expr": "rate(merid_risk_check_failed[5m])",
+            "legendFormat": "{{asset}} - {{check_name}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "ops", "label": "Failures/sec"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 10,
+        "title": "Execution Success Rate",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 44},
+        "targets": [
+          {
+            "expr": "merid_execution_success_rate",
+            "legendFormat": "{{asset}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "percentunit", "label": "Success Rate"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 11,
+        "title": "Cumulative PnL",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 44},
+        "targets": [
+          {
+            "expr": "merid_execution_pnl",
+            "legendFormat": "{{asset}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "currencyUSD", "label": "PnL ($)"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 12,
+        "title": "Feature Agent Health Status",
+        "type": "table",
+        "gridPos": {"h": 10, "w": 24, "x": 0, "y": 52},
+        "targets": [
+          {
+            "expr": "merid_feature_agent_healthy",
+            "legendFormat": "{{agent_name}}",
+            "refId": "A",
+            "format": "table"
+          }
+        ],
+        "transformations": [
+          {
+            "id": "organize",
+            "options": {
+              "excludeByName": {"Time": true, "__name__": true},
+              "indexByName": {},
+              "renameByName": {
+                "asset": "Asset",
+                "agent_name": "Agent",
+                "Value": "Healthy"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": 13,
+        "title": "Feature Agent Invocation Duration (95th Percentile)",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 62},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, merid_feature_agent_invocation_duration_seconds)",
+            "legendFormat": "{{agent_name}} ({{namespace}})",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "s", "label": "Duration (seconds)"},
+          {"format": "short"}
+        ]
+      },
+      {
+        "id": 14,
+        "title": "Pipeline Healthy Status",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 24, "x": 0, "y": 70},
+        "targets": [
+          {
+            "expr": "min(merid_pipeline_healthy)",
+            "legendFormat": "All Pipelines Healthy",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "green", "value": 1}
+              ]
+            },
+            "mappings": [
+              {
+                "type": "value",
+                "options": {
+                  "0": {"text": "UNHEALTHY"},
+                  "1": {"text": "HEALTHY"}
+                }
+              }
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

@@ -66,9 +66,11 @@ class ForecasterRegistry:
         """Register the default heterogeneous forecasters."""
         from merid.prediction.forecasters.momentum import MomentumForecaster
         from merid.prediction.forecasters.mean_reversion import MeanReversionForecaster
+        from merid.prediction.forecasters.fvg import FVGForecaster
 
         self._forecasters.append(MomentumForecaster())
         self._forecasters.append(MeanReversionForecaster())
+        self._forecasters.append(FVGForecaster())
         logger.info(
             f"ForecasterRegistry: {len(self._forecasters)} forecasters registered "
             f"({', '.join(f.forecaster_id for f in self._forecasters)})"
@@ -232,35 +234,75 @@ class ForecasterRegistry:
             logger.debug(f"Forecast message publish failed: {exc}")
 
     def _get_calibration_weight(self, forecaster_id: str, bucket: str) -> float:
-        """Get calibration-based weight for a forecaster (Sprint C)."""
+        """Get calibration-based weight for a forecaster (Sprint C).
+        
+        Includes FVG-specific weight adjustments based on environment config.
+        """
         try:
             from merid.metrics.calibration import get_calibration_store
             store = get_calibration_store()
-            return store.get_weight(forecaster_id, bucket)
+            base_weight = store.get_weight(forecaster_id, bucket)
+            
+            # FVG-specific weight adjustments from environment
+            if forecaster_id.startswith("fvg"):
+                import os
+                fvg_ensemble_weight = float(os.getenv("MERID_FVG_ENSEMBLE_WEIGHT", "0.25"))
+                fvg_confluence_bonus = float(os.getenv("MERID_FVG_CONFLUENCE_BONUS_WEIGHT", "0.15"))
+                
+                # Check if FVG result has high confluence for bonus weight
+                # This is checked at prediction time via the result components
+                # For now, apply base ensemble weight
+                adjusted_weight = base_weight * fvg_ensemble_weight
+                
+                return adjusted_weight
+            
+            return base_weight
         except Exception:
+            # Default weights by forecaster type
+            import os
+            if forecaster_id.startswith("fvg"):
+                return float(os.getenv("MERID_FVG_ENSEMBLE_WEIGHT", "0.25"))
             return 1.0  # Default weight if calibration unavailable
 
 
 # ── Singleton ────────────────────────────────────────────────────────────
 
 _registry: Optional[ForecasterRegistry] = None
-_registry_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _registry_lock = threading.Lock()
+_registry_lock = None  # Disabled to prevent startup hang
 
 
 def get_forecaster_registry() -> ForecasterRegistry:
     """Get or create the singleton ForecasterRegistry."""
     global _registry
     if _registry is None:
-        with _registry_lock:
-            if _registry is None:
-                from merid.prediction.forecasters.macro_regime import MacroRegimeForecaster
-                from merid.prediction.forecasters.orderbook import OrderbookForecaster
-                from merid.prediction.forecasters.time_series import TimeSeriesForecaster
-                from merid.prediction.forecasters.sentiment import ExternalSentimentForecaster
-                reg = ForecasterRegistry()  # __init__ auto-registers momentum + mean_reversion
-                reg.register(MacroRegimeForecaster())
-                reg.register(OrderbookForecaster())
-                reg.register(TimeSeriesForecaster())
-                reg.register(ExternalSentimentForecaster())
-                _registry = reg  # assign atomically after full init
+        if _registry_lock is not None:
+            with _registry_lock:
+                if _registry is None:
+                    from merid.prediction.forecasters.macro_regime import MacroRegimeForecaster
+                    from merid.prediction.forecasters.orderbook import OrderbookForecaster
+                    from merid.prediction.forecasters.volatility import VolatilityForecaster
+                    from merid.prediction.forecasters.momentum import MomentumForecaster
+                    from merid.prediction.forecasters.fvg import FVGForecaster
+                    _registry = ForecasterRegistry()
+                    _registry.register(MacroRegimeForecaster())
+                    _registry.register(OrderbookForecaster())
+                    _registry.register(VolatilityForecaster())
+                    _registry.register(MomentumForecaster())
+                    _registry.register(FVGForecaster())
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            from merid.prediction.forecasters.macro_regime import MacroRegimeForecaster
+            from merid.prediction.forecasters.orderbook import OrderbookForecaster
+            from merid.prediction.forecasters.volatility import VolatilityForecaster
+            from merid.prediction.forecasters.momentum import MomentumForecaster
+            from merid.prediction.forecasters.fvg import FVGForecaster
+            _registry = ForecasterRegistry()
+            _registry.register(MacroRegimeForecaster())
+            _registry.register(OrderbookForecaster())
+            _registry.register(VolatilityForecaster())
+            _registry.register(MomentumForecaster())
+            _registry.register(FVGForecaster())
     return _registry

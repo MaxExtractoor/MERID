@@ -283,6 +283,93 @@ class TradeNotifier:
             immediate=True,
         )
 
+    def notify_state_change(
+        self, from_state: str, to_state: str, reason: str, cycle: int = 0
+    ) -> None:
+        """Send state machine transition notification.
+
+        Args:
+            from_state: Previous trading state (e.g., "scalp_only")
+            to_state: New trading state (e.g., "scalp_hedge")
+            reason: Transition reason code (e.g., "drawdown_hedge_active")
+            cycle: Current cycle number
+        """
+        icons = {
+            "scalp_only": "📈",
+            "scalp_hedge": "🛡️",
+            "hedge_only": "⚠️",
+            "flat": "🛑",
+        }
+        from_icon = icons.get(from_state, "ℹ️")
+        to_icon = icons.get(to_state, "ℹ️")
+        ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
+        cycle_str = f" (cycle {cycle})" if cycle else ""
+
+        # Format reason for readability
+        reason_display = reason.replace("_", " ").upper()
+
+        text = (
+            f"{to_icon} <b>STATE CHANGE</b>{cycle_str}\n"
+            f"{from_icon} {from_state} → {to_icon} {to_state}\n"
+            f"<i>Reason: {reason_display}</i>\n"
+            f"🕐 {ts}"
+        )
+        _fire_and_forget(text, immediate=True)
+
+    def notify_hedge_fill(
+        self,
+        ticker: str,
+        side: str,
+        count: int,
+        price_cents: int,
+        hedge_reason: str,
+        related_alpha_ticker: Optional[str] = None,
+        cycle: int = 0,
+    ) -> None:
+        """Send hedge fill notification with differentiated formatting (Task 4).
+        
+        Hedge fills are visually distinct from alpha fills to prevent confusion.
+        
+        Args:
+            ticker: Market ticker (e.g., "KXBTC-15M")
+            side: "yes" or "no"
+            count: Number of contracts filled
+            price_cents: Fill price in cents
+            hedge_reason: Reason for hedge (e.g., "cross_asset_SOL_to_BTC")
+            related_alpha_ticker: The alpha position being hedged (optional)
+            cycle: Current cycle number
+        """
+        from datetime import timezone
+        
+        ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
+        cycle_str = f" (cycle {cycle})" if cycle else ""
+        
+        # Format price as dollars.cents
+        price_dollars = price_cents / 100.0
+        
+        # Determine direction emoji
+        if side == "yes":
+            direction = "📈 LONG"  # Buying YES = bullish hedge
+        else:
+            direction = "📉 SHORT"  # Buying NO = bearish hedge
+        
+        # Format reason for readability
+        reason_display = hedge_reason.replace("_", " ").upper()
+        
+        text = (
+            f"🛡️ <b>HEDGE FILL</b>{cycle_str}\n"
+            f"{direction} {ticker}\n"
+            f"Size: {count} @ ${price_dollars:.2f}\n"
+            f"<i>Reason: {reason_display}</i>\n"
+        )
+        
+        if related_alpha_ticker:
+            text += f"<i>Hedging: {related_alpha_ticker}</i>\n"
+        
+        text += f"🕐 {ts}"
+        
+        _fire_and_forget(text, immediate=True)
+
     def notify_error(self, error: str, cycle: int = 0) -> None:
         """Send error notification."""
         _fire_and_forget(

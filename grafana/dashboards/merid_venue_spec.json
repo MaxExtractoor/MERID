@@ -1,0 +1,185 @@
+{
+  "dashboard": {
+    "title": "MERID Venue & Spec",
+    "uid": "merid-venue-spec",
+    "tags": ["merid", "kalshi", "venue", "spec"],
+    "timezone": "browser",
+    "refresh": "5m",
+    "time": {
+      "from": "now-24h",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Kalshi Spec Validation Status",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "merid_kalshi_spec_validation_status",
+            "legendFormat": "Status"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 1
+                },
+                {
+                  "color": "red",
+                  "value": 0
+                }
+              ]
+            },
+            "mappings": [
+              {
+                "type": "value",
+                "options": {
+                  "0": {
+                    "text": "Mismatch",
+                    "color": "red"
+                  },
+                  "1": {
+                    "text": "OK",
+                    "color": "green"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 0,
+          "y": 0
+        }
+      },
+      {
+        "id": 2,
+        "title": "API Error Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum by (venue) (rate(merid_api_errors_total[5m]))",
+            "legendFormat": "{{venue}}"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 9,
+          "x": 6,
+          "y": 0
+        }
+      },
+      {
+        "id": 3,
+        "title": "Retry Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum by (venue) (rate(merid_api_retries_total[5m]))",
+            "legendFormat": "{{venue}}"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 9,
+          "x": 15,
+          "y": 0
+        }
+      },
+      {
+        "id": 4,
+        "title": "Order Latency (p50)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.5, sum(rate(merid_order_latency_seconds_bucket[5m])) by (le, venue))",
+            "legendFormat": "{{venue}}"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 8
+        }
+      },
+      {
+        "id": 5,
+        "title": "Order Latency (p95)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(merid_order_latency_seconds_bucket[5m])) by (le, venue))",
+            "legendFormat": "{{venue}}"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 8
+        }
+      },
+      {
+        "id": 6,
+        "title": "Order Success Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum by (venue) (rate(merid_orders_success_total[5m])) / sum by (venue) (rate(merid_orders_total[5m]))",
+            "legendFormat": "{{venue}}"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 16
+        }
+      },
+      {
+        "id": 7,
+        "title": "WebSocket Connection Status",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "merid_websocket_connected",
+            "legendFormat": "{{venue}}"
+          }
+        ],
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 12,
+          "y": 16
+        }
+      },
+      {
+        "id": 8,
+        "title": "Market Data Update Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum by (venue) (rate(merid_market_data_updates_total[5m]))",
+            "legendFormat": "{{venue}}"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 20
+        }
+      }
+    ]
+  }
+}

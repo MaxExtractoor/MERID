@@ -3,6 +3,10 @@
 Computes and monitors the spread between Coinbase live spot price and the
 Kalshi-implied spot price per crypto asset every second in a background thread.
 
+NOTE: This module produces analytics for UI/monitoring purposes. 15m Kalshi agents
+do not consume this data for edge computation — 15m signals are driven purely by
+market prices, volatility regime, and risk config.
+
 How implied spot is computed
 -----------------------------
 Kalshi crypto binary markets are YES/NO contracts where YES = "asset ends above
@@ -47,6 +51,16 @@ from utils.logger import get_logger
 logger = get_logger("merid.alignment.spot_basis_tracker")
 
 ASSETS: Tuple[str, ...] = ("BTC", "ETH", "SOL", "XRP", "DOGE")
+
+# Import composite and alignment modules (optional)
+try:
+    from data.spot_models import Asset, SpotAlignment
+    from data.spot_composite import get_spot_composite
+    from data.cfb_rti_client import get_cfb_rti_client
+    _COMPOSITE_AVAILABLE = True
+except ImportError:
+    _COMPOSITE_AVAILABLE = False
+    logger.debug("Composite/CFB modules not available - running in legacy mode")
 
 # Seconds between tracker ticks
 _TICK_INTERVAL: float = 1.0
@@ -95,6 +109,8 @@ class AssetBasis:
     breach_count: int                     # Consecutive ticks in breach
     markets_used: int                     # Markets contributing to implied spot
     nearest_expiry_secs: Optional[float]  # Seconds to nearest eligible cluster
+    spot_source: Optional[str] = None        # Feed source: coinbase, kraken, coingecko
+    cfb_rti_alignment: Optional[str] = None  # CFB/RTI alignment state
     computed_at: float = field(default_factory=time.monotonic)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -113,6 +129,8 @@ class AssetBasis:
             "breach_count":         self.breach_count,
             "markets_used":         self.markets_used,
             "nearest_expiry_secs":  self.nearest_expiry_secs,
+            "spot_source":          self.spot_source,
+            "cfb_rti_alignment":    self.cfb_rti_alignment,
             "computed_at":          self.computed_at,
         }
 
@@ -482,6 +500,7 @@ class SpotBasisTracker:
         # ── Spot feed (configurable: coinbase, kraken, coingecko) ──────────────
         spot_price: Optional[float] = None
         spot_status = FeedStatus.MISSING
+        spot_source: Optional[str] = SPOT_FEED_SOURCE
 
         if SPOT_FEED_SOURCE == "coinbase":
             # Use Coinbase LivePriceFeed
@@ -633,6 +652,8 @@ class SpotBasisTracker:
             breach_count=self._breach_counts[asset],
             markets_used=markets_used,
             nearest_expiry_secs=nearest_expiry,
+            spot_source=spot_source,
+            cfb_rti_alignment=cfb_alignment if 'cfb_alignment' in locals() else None,
         )
 
     @staticmethod

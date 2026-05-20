@@ -44,6 +44,12 @@ class BacktestConfig:
     # commission_pct.  Must be set for any Kalshi prediction-market backtest
     # so that fee drag matches live execution.
     use_kalshi_fees: bool = False
+    # Walk-forward analysis configuration
+    use_walk_forward: bool = True  # Use walk-forward analysis by default
+    train_bars: int = 500  # Number of bars in training window
+    test_bars: int = 100  # Number of bars in test window
+    min_windows: int = 3  # Minimum number of windows required
+    param_grid: List[Dict[str, Any]] = field(default_factory=list)  # Parameter grid for optimization
 
 
 @dataclass
@@ -201,7 +207,11 @@ class BacktestEngine:
         return list(self._strategies.keys())
     
     async def run_backtest(self, config: BacktestConfig) -> BacktestResult:
-        """Run a backtest with the given configuration."""
+        """Run a backtest with the given configuration.
+        
+        Uses walk-forward analysis by default when sufficient data is available
+        and param_grid is provided. Falls back to simple backtest otherwise.
+        """
         logger.info(f"Starting backtest {config.backtest_id}: {config.strategy_name}")
 
         # Blind-spot fix: refuse to run backtests that hit the live price feed
@@ -236,6 +246,14 @@ class BacktestEngine:
             
             if not ohlcv_data:
                 raise ValueError("No historical data available")
+            
+            # Use walk-forward analysis if enabled and param_grid is provided
+            if config.use_walk_forward and config.param_grid:
+                logger.info(f"Using walk-forward analysis for {config.backtest_id}")
+                return await self._run_walk_forward_backtest(config, ohlcv_data)
+            
+            # Fall back to simple backtest
+            logger.info(f"Using simple backtest for {config.backtest_id}")
             
             # Run strategy
             strategy_fn = self._strategies.get(config.strategy_name)
@@ -284,6 +302,166 @@ class BacktestEngine:
             )
             self._results[config.backtest_id] = result
             return result
+    
+    async def _run_walk_forward_backtest(
+        self, 
+        config: BacktestConfig, 
+        ohlcv_data: List[Dict[str, Any]]
+    ) -> BacktestResult:
+        """Run walk-forward analysis backtest.
+        
+        Args:
+            config: Backtest configuration
+            ohlcv_data: Historical OHLCV data
+            
+        Returns:
+            BacktestResult with walk-forward metrics
+        """
+        try:
+            from merid.backtesting.walk_forward import walk_forward_analysis
+            
+            # Convert OHLCV data to walk-forward format
+            bars = [{"close": bar.get("close", 0)} for bar in ohlcv_data]
+            
+            # Create strategy wrapper for walk-forward
+            def wfa_strategy(bars_slice: List[Dict[str, Any]], params: Dict[str, Any]) -> List[float]:
+                """Strategy wrapper for walk-forward analysis."""
+                # Run strategy with given parameters
+                strategy_fn = self._strategies.get(config.strategy_name)
+                if not strategy_fn:
+                    return []
+                
+                # Create temporary config with these parameters
+                temp_config = BacktestConfig(
+                    backtest_id=config.backtest_id,
+                    strategy_name=config.strategy_name,
+                    symbols=config.symbols,
+                    start_date=config.start_date,
+                    end_date=config.end_date,
+                    initial_capital=config.initial_capital,
+                    commission_pct=config.commission_pct,
+                    slippage_pct=config.slippage_pct,
+                    timeframe=config.timeframe,
+                    parameters=params,
+                    use_kalshi_fees=config.use_kalshi_fees,
+                    use_walk_forward=False  # Disable recursion
+                )
+                
+                # Run strategy on this slice
+                trades, equity_curve = strategy_fn(temp_config, bars_slice)
+                
+                # Calculate returns from equity curve
+                if equity_curve and len(equity_curve) > 1:
+                    returns = []
+                    for i in range(1, len(equity_curve)):
+                        prev_val = equity_curve[i-1].get("equity", config.initial_capital)
+                        curr_val = equity_curve[i].get("equity", config.initial_capital)
+                        if prev_val > 0:
+                            returns.append((curr_val - prev_val) / prev_val)
+                    return returns
+                
+                return []
+            
+            # Run walk-forward analysis
+            wfa_result = walk_forward_analysis(
+                bars=bars,
+                param_grid=config.param_grid,
+                train_bars=config.train_bars,
+                test_bars=config.test_bars,
+                strategy_fn=wfa_strategy,
+                min_windows=config.min_windows
+            )
+            
+            if not wfa_result:
+                logger.warning(f"Walk-forward analysis failed for {config.backtest_id}, falling back to simple backtest")
+                # Fall back to simple backtest
+                strategy_fn = self._strategies.get(config.strategy_name)
+                if not strategy_fn:
+                    raise ValueError(f"Unknown strategy: {config.strategy_name}")
+                
+                trades, equity_curve = await strategy_fn(config, ohlcv_data)
+                return self._calculate_metrics(config, trades, equity_curve)
+            
+            # Convert walk-forward results to BacktestResult
+            oos_returns = wfa_result.get("oos_returns", [])
+            equity_curve = wfa_result.get("equity_curve", [])
+            
+            # Build equity curve from walk-forward results
+            wf_equity_curve = []
+            cumulative_equity = config.initial_capital
+            for i, ret in enumerate(oos_returns):
+                cumulative_equity *= (1 + ret)
+                wf_equity_curve.append({
+                    "timestamp": config.start_date + timedelta(hours=i),
+                    "equity": cumulative_equity
+                })
+            
+            # Calculate metrics from walk-forward results
+            total_return_pct = (cumulative_equity / config.initial_capital - 1) * 100
+            total_return = cumulative_equity - config.initial_capital
+            
+            duration_days = (config.end_date - config.start_date).total_seconds() / 86400
+            annualized_return = (cumulative_equity / config.initial_capital) ** (365 / duration_days) - 1 if duration_days > 0 else 0
+            
+            # Calculate drawdown from equity curve
+            max_drawdown = 0
+            peak = config.initial_capital
+            for point in wf_equity_curve:
+                equity = point["equity"]
+                if equity > peak:
+                    peak = equity
+                drawdown = (peak - equity) / peak if peak > 0 else 0
+                max_drawdown = max(max_drawdown, drawdown)
+            
+            max_drawdown_pct = max_drawdown * 100
+            
+            # Calculate Sharpe ratio from OOS returns
+            if oos_returns:
+                import numpy as np
+                mean_return = np.mean(oos_returns)
+                std_return = np.std(oos_returns)
+                sharpe_ratio = (mean_return / std_return) * np.sqrt(252) if std_return > 0 else 0
+            else:
+                sharpe_ratio = 0
+            
+            result = BacktestResult(
+                backtest_id=config.backtest_id,
+                strategy_name=config.strategy_name,
+                status=BacktestStatus.COMPLETED,
+                start_date=config.start_date,
+                end_date=config.end_date,
+                duration_days=duration_days,
+                initial_capital=config.initial_capital,
+                final_capital=cumulative_equity,
+                total_return=total_return,
+                total_return_pct=total_return_pct,
+                annualized_return=annualized_return,
+                max_drawdown=max_drawdown,
+                max_drawdown_pct=max_drawdown_pct,
+                sharpe_ratio=sharpe_ratio,
+                sortino_ratio=0,  # Would need downside deviation calculation
+                calmar_ratio=annualized_return / max_drawdown if max_drawdown > 0 else 0,
+                total_trades=0,  # Walk-forward doesn't track individual trades
+                winning_trades=0,
+                losing_trades=0,
+                win_rate=0,
+                profit_factor=0,
+                avg_win=0,
+                avg_loss=0,
+                largest_win=0,
+                largest_loss=0,
+                avg_trade_duration=0,
+                equity_curve=wf_equity_curve,
+                trades=[]
+            )
+            
+            self._results[config.backtest_id] = result
+            logger.info(f"Walk-forward backtest {config.backtest_id} completed: {total_return_pct:.2f}% return")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Walk-forward backtest {config.backtest_id} failed: {e}")
+            raise
     
     # Candle-limit cap for historical OHLCV fetches.  Callers that request a
     # date range longer than this many candles will receive a WARNING so that

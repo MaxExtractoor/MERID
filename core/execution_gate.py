@@ -22,6 +22,14 @@ from utils.logger import get_logger
 
 logger = get_logger("core.execution_gate")
 
+# Import gate metrics emission (defensive import in case module not available)
+try:
+    from merid.reconciliation.reconciliation_metrics import emit_gate_state_change
+    _GATE_METRICS_AVAILABLE = True
+except ImportError:
+    _GATE_METRICS_AVAILABLE = False
+    logger.debug("Gate metrics module not available - gate state changes will not be emitted")
+
 # WS hysteresis state — must be at module level (used as globals in check_execution_gate)
 _ws_stale_count: int = 0
 _ws_healthy_count: int = 0
@@ -532,6 +540,24 @@ def check_execution_gate() -> ExecutionGateStatus:
     else:
         gate_state = GateState.CLEAR.value
 
+    # Emit gate state change metrics if available
+    if _GATE_METRICS_AVAILABLE:
+        global _last_gate_state
+        if gate_state != _last_gate_state:
+            try:
+                # Extract block reasons for metrics
+                critical_sources = tuple(r.source for r in reasons if r.severity == "critical")
+                warning_sources = tuple(r.source for r in reasons if r.severity == "warning")
+                emit_gate_state_change(
+                    old_state=_last_gate_state,
+                    new_state=gate_state,
+                    critical_sources=critical_sources,
+                    warning_sources=warning_sources,
+                )
+                _last_gate_state = gate_state
+            except Exception as e:
+                logger.debug(f"Failed to emit gate state change metrics: {e}")
+
     _log_gate_state_diagnostic(gate_state, reasons)
 
     # ── Gate transition logging + session event ──
@@ -577,6 +603,7 @@ def check_execution_gate() -> ExecutionGateStatus:
 
 # ── Internal state tracking ─────────────────────────────────────────
 _was_blocked: bool = True  # start blocked until first check passes
+_last_gate_state: str = GateState.BLOCKED.value  # track previous gate state for metrics
 
 
 def _update_blocked_state(blocked: bool) -> None:

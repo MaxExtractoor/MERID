@@ -54,7 +54,14 @@ class CoinDeskFeed:
     RSS_URL = "https://www.coindesk.com/arc/outboundfeeds/rss"
     
     def __init__(self):
-        self.client = httpx.Client(timeout=15.0, follow_redirects=True)
+        self._client = None  # Lazy initialization to prevent SSL blocking during startup
+    
+    @property
+    def client(self):
+        """Lazy initialize httpx client to prevent SSL context blocking during startup."""
+        if self._client is None:
+            self._client = httpx.Client(timeout=15.0, follow_redirects=True)
+        return self._client
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
     def fetch_articles(self, limit: int = 10) -> List[NewsArticle]:
@@ -149,7 +156,14 @@ class CoinTelegraphFeed:
     RSS_URL = "https://cointelegraph.com/rss"
     
     def __init__(self):
-        self.client = httpx.Client(timeout=15.0, follow_redirects=True)
+        self._client = None  # Lazy initialization to prevent SSL blocking during startup
+    
+    @property
+    def client(self):
+        """Lazy initialize httpx client to prevent SSL context blocking during startup."""
+        if self._client is None:
+            self._client = httpx.Client(timeout=15.0, follow_redirects=True)
+        return self._client
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
     def fetch_articles(self, limit: int = 10) -> List[NewsArticle]:
@@ -240,13 +254,18 @@ class BinanceAnnouncementsFeed:
     RSS_URL = "https://blog.binance.us/feed/"
     
     def __init__(self):
-        self.client = httpx.Client(
-            timeout=15.0,
-            follow_redirects=True,
-            headers={"User-Agent": "MERID/1.0 NewsAggregator"},
-        )
-        self._permanently_failed = False
-        self._fail_reason: Optional[str] = None
+        self._client = None  # Lazy initialization to prevent SSL blocking during startup
+    
+    @property
+    def client(self):
+        """Lazy initialize httpx client to prevent SSL context blocking during startup."""
+        if self._client is None:
+            self._client = httpx.Client(
+                timeout=15.0,
+                follow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0"}
+            )
+        return self._client
     
     @retry(
         stop=stop_after_attempt(2),
@@ -333,7 +352,14 @@ class CryptoCompareFeed:
     
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or os.getenv("CRYPTOCOMPARE_API_KEY")
-        self.client = httpx.Client(timeout=15.0, follow_redirects=True)
+        self._client = None  # Lazy initialization to prevent SSL blocking during startup
+    
+    @property
+    def client(self):
+        """Lazy initialize httpx client to prevent SSL context blocking during startup."""
+        if self._client is None:
+            self._client = httpx.Client(timeout=15.0, follow_redirects=True)
+        return self._client
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
     def fetch_articles(self, limit: int = 10) -> List[NewsArticle]:

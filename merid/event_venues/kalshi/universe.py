@@ -36,6 +36,12 @@ from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, Optional
 
 from merid.event_venues.kalshi.market_catalog import CatalogMarket, get_market_catalog
+from merid.event_venues.kalshi.risk_parameters import (
+    UNIVERSE_MIN_VOLUME_DEFAULT,
+    UNIVERSE_MIN_OPEN_INTEREST_DEFAULT,
+    UNIVERSE_MAX_SPREAD_CENTS_DEFAULT,
+    UNIVERSE_MAX_PER_AGENT_DEFAULT,
+)
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.universe")
@@ -50,14 +56,14 @@ class UniverseConfig:
     Defaults are set to non-zero values so illiquid and no-book markets are
     rejected at the universe layer rather than silently propagating to the
     strategy (BUG-07 fix).  Override via env vars:
-      MERID_UNIVERSE_MIN_VOLUME       (default 50)
-      MERID_UNIVERSE_MIN_OI           (default 10)
-      MERID_UNIVERSE_MAX_SPREAD_CENTS (default 15)
+      MERID_UNIVERSE_MIN_VOLUME       (default from risk_parameters)
+      MERID_UNIVERSE_MIN_OI           (default from risk_parameters)
+      MERID_UNIVERSE_MAX_SPREAD_CENTS (default from risk_parameters)
     """
-    min_volume: int = int(os.getenv("MERID_UNIVERSE_MIN_VOLUME", "50"))
-    min_open_interest: int = int(os.getenv("MERID_UNIVERSE_MIN_OI", "10"))
-    max_spread_cents: int = int(os.getenv("MERID_UNIVERSE_MAX_SPREAD_CENTS", "15"))
-    max_per_agent: int = int(os.getenv("MERID_UNIVERSE_MAX_PER_AGENT", "50"))
+    min_volume: int = int(os.getenv("MERID_UNIVERSE_MIN_VOLUME", str(UNIVERSE_MIN_VOLUME_DEFAULT)))
+    min_open_interest: int = int(os.getenv("MERID_UNIVERSE_MIN_OI", str(UNIVERSE_MIN_OPEN_INTEREST_DEFAULT)))
+    max_spread_cents: int = int(os.getenv("MERID_UNIVERSE_MAX_SPREAD_CENTS", str(UNIVERSE_MAX_SPREAD_CENTS_DEFAULT)))
+    max_per_agent: int = int(os.getenv("MERID_UNIVERSE_MAX_PER_AGENT", str(UNIVERSE_MAX_PER_AGENT_DEFAULT)))
     allowed_categories: List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -115,7 +121,8 @@ def _passes_liquidity(cm: CatalogMarket, cfg: UniverseConfig) -> bool:
     if cfg.min_open_interest > 0 and oi < cfg.min_open_interest:
         return False
 
-    raw = mkt.raw_data or {}
+    # CRITICAL FIX: Handle nested raw_data access safely
+    raw = getattr(mkt, "raw_data", None) or {}
     bid = int(raw.get("yes_bid", 0) or 0)
     ask = int(raw.get("yes_ask", 0) or 0)
     if bid > 0 and ask > 0:

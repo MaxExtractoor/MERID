@@ -56,6 +56,57 @@ REJECT_ASSET_NOT_IN_TOP3 = "ASSET_NOT_IN_TOP3"
 REJECT_NOTIONAL_LIMIT_REACHED = "BATCH_NOTIONAL_LIMIT_REACHED"
 REJECT_BATCH_ALREADY_ACTIVE = "BATCH_ALREADY_ACTIVE"
 
+# CIRCUIT BREAKER: Cache failure tracking to prevent cascading failures
+# When Redis is down, repeated attempts waste resources and spam logs
+_CIRCUIT_BREAKER_FAILURES = 0
+_CIRCUIT_BREAKER_LAST_FAILURE = 0.0
+_CIRCUIT_BREAKER_THRESHOLD = 3  # Open after 3 consecutive failures
+_CIRCUIT_BREAKER_RESET_SEC = 60  # Reset after 60 seconds of no failures
+_CIRCUIT_BREAKER_LOCK = threading.Lock()
+
+
+def _is_cache_circuit_open() -> bool:
+    """Check if circuit breaker is open (cache operations should be skipped).
+
+    Circuit opens after _CIRCUIT_BREAKER_THRESHOLD consecutive failures.
+    Auto-resets after _CIRCUIT_BREAKER_RESET_SEC seconds of no failures.
+    """
+    global _CIRCUIT_BREAKER_FAILURES, _CIRCUIT_BREAKER_LAST_FAILURE
+    with _CIRCUIT_BREAKER_LOCK:
+        if _CIRCUIT_BREAKER_FAILURES >= _CIRCUIT_BREAKER_THRESHOLD:
+            # Check if enough time has passed to try again
+            now = time.time()
+            if now - _CIRCUIT_BREAKER_LAST_FAILURE > _CIRCUIT_BREAKER_RESET_SEC:
+                # Reset circuit to half-open (will try once)
+                _CIRCUIT_BREAKER_FAILURES = 0
+                logger.info("[TOP3-BATCH] Cache circuit breaker reset after cooldown")
+                return False
+            return True  # Circuit still open
+        return False  # Circuit closed
+
+
+def _record_cache_success() -> None:
+    """Record successful cache operation - resets failure count."""
+    global _CIRCUIT_BREAKER_FAILURES
+    with _CIRCUIT_BREAKER_LOCK:
+        if _CIRCUIT_BREAKER_FAILURES > 0:
+            _CIRCUIT_BREAKER_FAILURES = 0
+            logger.debug("[TOP3-BATCH] Cache circuit breaker reset after success")
+
+
+def _record_cache_failure() -> None:
+    """Record cache operation failure - increments failure count."""
+    global _CIRCUIT_BREAKER_FAILURES, _CIRCUIT_BREAKER_LAST_FAILURE
+    with _CIRCUIT_BREAKER_LOCK:
+        _CIRCUIT_BREAKER_FAILURES += 1
+        _CIRCUIT_BREAKER_LAST_FAILURE = time.time()
+        if _CIRCUIT_BREAKER_FAILURES >= _CIRCUIT_BREAKER_THRESHOLD:
+            logger.warning(
+                "[TOP3-BATCH] Cache circuit breaker OPENED after %d failures - "
+                "skipping cache operations for %d seconds",
+                _CIRCUIT_BREAKER_FAILURES, _CIRCUIT_BREAKER_RESET_SEC
+            )
+
 
 class Top3BatchManager:
     """Manages top-3 batch lifecycle and enforces batch regime.
@@ -93,36 +144,84 @@ class Top3BatchManager:
         return _cache
     
     def _load_state(self) -> None:
-        """Load batch state from cache."""
+        """Load batch state from cache with phantom batch detection."""
+        # CIRCUIT BREAKER: Skip cache if circuit is open (Redis likely down)
+        if _is_cache_circuit_open():
+            logger.debug("[TOP3-BATCH] Cache circuit open, using in-memory state only")
+            self._current_batch = self._memory_batch
+            return
+
         cache = self._get_cache()
         if cache is None:
             logger.debug("[TOP3-BATCH] No cache available, using in-memory state only")
             self._current_batch = self._memory_batch
             return
-        
+
         try:
             data = cache.get_json(_CACHE_KEY_ACTIVE_BATCH)
+            _record_cache_success()
             if data:
-                self._current_batch = Top3Batch.from_dict(data)
+                loaded_batch = Top3Batch.from_dict(data)
+                
+                # PRODUCTION FIX v6 (2026-04-26): Auto-detect and clear phantom batches
+                # Phantom batch = ACTIVE but no fills and older than 5 minutes
+                is_phantom = (
+                    loaded_batch.status == BatchStatus.ACTIVE and
+                    not loaded_batch.filled_assets and  # No positions ever filled
+                    not loaded_batch.closed_assets       # No positions ever closed
+                )
+                
+                if is_phantom:
+                    batch_age_seconds = (
+                        __import__('datetime').datetime.now(__import__('datetime').timezone.utc) - 
+                        loaded_batch.cycle_ts
+                    ).total_seconds()
+                    
+                    # Clear phantom batches older than 5 minutes (they're stuck)
+                    if batch_age_seconds > 300:  # 5 minutes
+                        logger.critical(
+                            "[TOP3-BATCH] PHANTOM BATCH DETECTED: batch %s is ACTIVE but "
+                            "has no fills after %d seconds. Auto-clearing to unblock execution. "
+                            "This indicates a previous crash during order placement.",
+                            loaded_batch.batch_id,
+                            int(batch_age_seconds)
+                        )
+                        cache.delete(_CACHE_KEY_ACTIVE_BATCH)
+                        self._current_batch = None
+                        return
+                    else:
+                        logger.warning(
+                            "[TOP3-BATCH] Potentially phantom batch %s (age=%ds, no fills). "
+                            "Will auto-clear if still empty after 300s.",
+                            loaded_batch.batch_id,
+                            int(batch_age_seconds)
+                        )
+                
+                self._current_batch = loaded_batch
                 logger.info(
-                    "[TOP3-BATCH] Loaded active batch %s (status=%s)",
+                    "[TOP3-BATCH] Loaded active batch %s (status=%s, filled=%s)",
                     self._current_batch.batch_id,
-                    self._current_batch.status.value
+                    self._current_batch.status.value,
+                    list(self._current_batch.filled_assets) if self._current_batch.filled_assets else "none"
                 )
         except Exception as exc:
+            _record_cache_failure()
             logger.warning("[TOP3-BATCH] Failed to load state from cache: %s", exc)
             self._current_batch = None
     
     def _save_state(self) -> None:
         """Persist batch state to cache."""
-        cache = self._get_cache()
-        
         # Always update in-memory fallback
         self._memory_batch = self._current_batch
-        
+
+        # CIRCUIT BREAKER: Skip cache if circuit is open (Redis likely down)
+        if _is_cache_circuit_open():
+            return
+
+        cache = self._get_cache()
         if cache is None:
             return
-        
+
         try:
             if self._current_batch:
                 cache.set_json(
@@ -132,12 +231,27 @@ class Top3BatchManager:
                 )
             else:
                 cache.delete(_CACHE_KEY_ACTIVE_BATCH)
+            _record_cache_success()
         except Exception as exc:
+            _record_cache_failure()
             logger.warning("[TOP3-BATCH] Failed to save state to cache: %s", exc)
     
     # ═════════════════════════════════════════════════════════════════
     # Public API: Batch Management
     # ═════════════════════════════════════════════════════════════════
+    
+    def has_active_batch(self) -> bool:
+        """Check if there's an active batch (convenience method).
+        
+        Returns:
+            True if a batch exists and is not fully reconciled
+        """
+        with self._lock:
+            batch = self._current_batch
+            if batch is None:
+                return False
+            # ACTIVE or CLOSED (not yet reconciled) counts as "active" for trading
+            return batch.status in (BatchStatus.ACTIVE, BatchStatus.CLOSED)
     
     def get_current_batch(self) -> Optional[Top3Batch]:
         """Get the currently active batch, if any.
@@ -251,6 +365,9 @@ class Top3BatchManager:
             # Archive previous batch if exists
             if self._current_batch:
                 self._batch_history.append(self._current_batch.batch_id)
+                # Cap _batch_history at 1000 entries to prevent memory leaks
+                if len(self._batch_history) > 1000:
+                    self._batch_history = self._batch_history[-1000:]
                 logger.info(
                     "[TOP3-BATCH] Archived previous batch %s, creating new batch %s",
                     self._current_batch.batch_id,
@@ -692,6 +809,57 @@ class Top3BatchManager:
                 REJECT_ASSET_NOT_IN_TOP3: 0,
                 REJECT_NOTIONAL_LIMIT_REACHED: 0,
             }
+    
+    def force_clear_phantom_batch(self, reason: str = "emergency") -> bool:
+        """Emergency clear of phantom/stuck batches.
+        
+        PRODUCTION-SAFE: Only clears batches that have no filled positions.
+        This is for recovery when a crash left an ACTIVE batch with no actual positions.
+        
+        Args:
+            reason: Reason for clearing (logged for audit)
+            
+        Returns:
+            True if a phantom batch was cleared, False if no phantom batch found
+        """
+        with self._lock:
+            if not self._current_batch:
+                return False
+            
+            # Only clear if batch has no filled positions (phantom check)
+            if self._current_batch.filled_assets:
+                logger.error(
+                    "[TOP3-BATCH] EMERGENCY CLEAR BLOCKED: batch %s has filled positions %s. "
+                    "Use normal close_batch() or wait for positions to close.",
+                    self._current_batch.batch_id,
+                    list(self._current_batch.filled_assets)
+                )
+                return False
+            
+            batch_id = self._current_batch.batch_id
+            batch_status = self._current_batch.status.value
+            
+            # Clear from cache and memory
+            cache = self._get_cache()
+            if cache and not _is_cache_circuit_open():
+                try:
+                    cache.delete(_CACHE_KEY_ACTIVE_BATCH)
+                    _record_cache_success()
+                except Exception as exc:
+                    _record_cache_failure()
+                    logger.warning("[TOP3-BATCH] Failed to clear cache: %s", exc)
+            
+            self._current_batch = None
+            self._memory_batch = None
+            
+            logger.critical(
+                "[TOP3-BATCH] EMERGENCY PHANTOM CLEAR: batch %s (status=%s) cleared. "
+                "Reason: %s. Execution unblocked.",
+                batch_id,
+                batch_status,
+                reason
+            )
+            return True
 
 
 # Singleton instance
@@ -730,10 +898,15 @@ def reset_top3_batch_manager() -> None:
     
     with _batch_manager_lock:
         # Clear cache first to prevent stale state from being reloaded
-        try:
-            cache = _cache
-            if cache:
-                cache.delete(_CACHE_KEY_ACTIVE_BATCH)
-        except Exception:
-            pass
+        # CIRCUIT BREAKER: Skip if circuit is open, but still clear instance
+        if not _is_cache_circuit_open():
+            try:
+                cache = _cache
+                if cache:
+                    cache.delete(_CACHE_KEY_ACTIVE_BATCH)
+                    _record_cache_success()
+            except Exception as e:
+                logger.warning("[TOP3-BATCH] Failed to delete cache on shutdown: %s", e)
+                _record_cache_failure()
+                pass
         _batch_manager_instance = None

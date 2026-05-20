@@ -254,13 +254,20 @@ class SentimentProcessor:
 # ── Module singleton ─────────────────────────────────────────────────
 
 _processor: Optional[SentimentProcessor] = None
-_processor_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _processor_lock = threading.Lock()
+_processor_lock = None  # Disabled to prevent startup hang
 
 
 def get_sentiment_processor() -> SentimentProcessor:
     global _processor
     if _processor is None:
-        with _processor_lock:
-            if _processor is None:
-                _processor = SentimentProcessor()
+        if _processor_lock is not None:
+            with _processor_lock:
+                if _processor is None:
+                    _processor = SentimentProcessor()
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _processor = SentimentProcessor()
     return _processor

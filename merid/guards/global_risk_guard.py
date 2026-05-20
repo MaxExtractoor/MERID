@@ -31,7 +31,11 @@ import threading
 from dataclasses import dataclass
 from typing import Callable, Optional, Tuple
 
-logger = logging.getLogger("merid.guards.global_risk_guard")
+from utils.logger import get_logger
+from utils.logging_helpers import log_guardrail_check, log_risk_check, log_trading_operation
+from utils.alerting import send_alert_sync, AlertSeverity, AlertContext
+
+logger = get_logger("merid.guards.global_risk_guard")
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -161,6 +165,23 @@ class GlobalRiskGuard:
                     f"GLOBAL RISK GUARD BLOCK: non-positive equity "
                     f"equity_cents={equity_cents} — fail-closed"
                 )
+                log_risk_check(
+                    "non_positive_equity",
+                    logger,
+                    current_value=float(equity_cents),
+                    limit_value=0.0,
+                    action="reject",
+                )
+                send_alert_sync(
+                    condition="non_positive_equity",
+                    severity=AlertSeverity.CRITICAL,
+                    message=f"Non-positive equity detected: {equity_cents} cents",
+                    context=AlertContext(
+                        source="merid.guards.global_risk_guard",
+                        current_value=float(equity_cents),
+                        threshold_value=0.0,
+                    ),
+                )
                 logger.critical(reason)
                 self._rejections += 1
                 self._last_reject_reason = reason
@@ -181,6 +202,33 @@ class GlobalRiskGuard:
                     f"would_be_total=${new_cycle_total/100:.2f} | "
                     f"ticker={pending_order.ticker} | asset={pending_order.asset}"
                 )
+                log_risk_check(
+                    "cycle_risk_cap",
+                    logger,
+                    current_value=float(new_cycle_total),
+                    limit_value=float(cycle_risk_cents),
+                    action="reject",
+                    equity_usd=float(equity_cents) / 100,
+                    already_approved_cents=self._cycle_new_risk_cents,
+                    this_order_cents=pending_order.max_loss_cents,
+                    ticker=pending_order.ticker,
+                    asset=pending_order.asset,
+                )
+                send_alert_sync(
+                    condition="cycle_risk_cap",
+                    severity=AlertSeverity.CRITICAL,
+                    message=f"Cycle risk cap exceeded: ${new_cycle_total/100:.2f} > ${cycle_risk_cents/100:.2f}",
+                    context=AlertContext(
+                        source="merid.guards.global_risk_guard",
+                        current_value=float(new_cycle_total) / 100,
+                        threshold_value=float(cycle_risk_cents) / 100,
+                        additional_fields={
+                            "ticker": pending_order.ticker,
+                            "asset": pending_order.asset,
+                            "equity_usd": float(equity_cents) / 100,
+                        },
+                    ),
+                )
                 logger.critical(reason)
                 self._rejections += 1
                 self._last_reject_reason = reason
@@ -197,6 +245,31 @@ class GlobalRiskGuard:
                     f"new_cycle=${new_cycle_total/100:.2f} | "
                     f"would_be_total=${new_total_risk/100:.2f}"
                 )
+                log_risk_check(
+                    "total_risk_cap",
+                    logger,
+                    current_value=float(new_total_risk),
+                    limit_value=float(max_total_risk_cents),
+                    action="reject",
+                    equity_usd=float(equity_cents) / 100,
+                    existing_risk_cents=existing_risk_cents,
+                    new_cycle_risk_cents=new_cycle_total,
+                )
+                send_alert_sync(
+                    condition="total_risk_cap",
+                    severity=AlertSeverity.CRITICAL,
+                    message=f"Total risk cap exceeded: ${new_total_risk/100:.2f} > ${max_total_risk_cents/100:.2f}",
+                    context=AlertContext(
+                        source="merid.guards.global_risk_guard",
+                        current_value=float(new_total_risk) / 100,
+                        threshold_value=float(max_total_risk_cents) / 100,
+                        additional_fields={
+                            "equity_usd": float(equity_cents) / 100,
+                            "existing_risk_cents": existing_risk_cents,
+                            "new_cycle_risk_cents": new_cycle_total,
+                        },
+                    ),
+                )
                 logger.critical(reason)
                 self._rejections += 1
                 self._last_reject_reason = reason
@@ -206,6 +279,20 @@ class GlobalRiskGuard:
             self._cycle_new_risk_cents = new_cycle_total
             self._cycle_approved_count += 1
             self._approvals += 1
+            log_trading_operation(
+                "risk_guard_approved",
+                logger,
+                market_id=pending_order.ticker,
+                contracts=pending_order.contracts,
+                price_cents=pending_order.entry_price_cents,
+                notional_usd=float(pending_order.max_loss_cents) / 100,
+                max_loss_usd=float(pending_order.max_loss_cents) / 100,
+                cycle_risk_usd=float(new_cycle_total) / 100,
+                cycle_cap_usd=float(cycle_risk_cents) / 100,
+                total_risk_usd=float(new_total_risk) / 100,
+                asset=pending_order.asset,
+                edge=pending_order.edge,
+            )
             logger.info(
                 "[GLOBAL-RISK-GUARD] APPROVED | ticker=%s | max_loss=$%.2f | "
                 "cycle_used=$%.2f / $%.2f | total_would_be=$%.2f",
@@ -247,17 +334,33 @@ _existing_risk_provider: Optional[Callable[[], int]] = None
 
 
 def _load_canonical_pcts() -> Tuple[float, float]:
-    """Load the canonical 1-2% caps from ``core.settings`` with env fallback."""
+    """Load canonical risk percentages from core.settings.
+    
+    OPTIMIZED RISK REGIME (2026-05-07): 3% cycle / 8% total for better throughput while maintaining safety.
+    With $35 equity: 3% = $1.05 cycle cap for 2-3 contract winners (was $0.70 with 2%).
+    """
     try:
         from core.settings import MAX_CYCLE_RISK_PCT, MAX_TOTAL_RISK_PCT  # type: ignore
-        return float(MAX_CYCLE_RISK_PCT), float(MAX_TOTAL_RISK_PCT)
+        cycle_pct = float(MAX_CYCLE_RISK_PCT)
+        total_pct = float(MAX_TOTAL_RISK_PCT)
+        logger.info(
+            "[GLOBAL-RISK-GUARD] Loaded canonical pcts: cycle=%.4f (%.2f%%) total=%.4f (%.2f%%)",
+            cycle_pct, cycle_pct * 100, total_pct, total_pct * 100
+        )
+        return cycle_pct, total_pct
     except Exception:
         try:
-            cycle = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.02"))
-            total = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.02"))
+            # OPTIMIZED RISK REGIME: 3% cycle / 8% total
+            cycle = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.03"))  # 3% default
+            total = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.08"))  # 8% default
+            logger.warning(
+                "[GLOBAL-RISK-GUARD] core.settings import failed, using env/defaults: cycle=%.4f total=%.4f",
+                cycle, total
+            )
             return cycle, total
         except Exception:
-            return 0.02, 0.02
+            logger.error("[GLOBAL-RISK-GUARD] Failed to load risk pcts, using safe defaults: 3%/8%")
+            return 0.03, 0.08  # Safe defaults 3%/8%
 
 
 def _load_scalper_config() -> Tuple[bool, int]:
@@ -338,39 +441,17 @@ def set_existing_risk_provider(fn: Optional[Callable[[], int]]) -> None:
 
 
 def default_equity_cents() -> int:
-    """Fallback equity lookup when no provider is registered.
+    """Hard-fail equity lookup when no provider is registered.
 
-    Tries, in order:
-      1. ``KalshiPositionCache.total_value_cents()``
-      2. ``MERID_INITIAL_CAPITAL`` env var (dollars → cents)
-      3. ``0`` (causes guard to fail-closed)
+    PRODUCTION AUDIT (Step 2): NO fallbacks - must use Kalshi Portfolio get_balance.
+    Returns 0 to cause guard to fail-closed with clear error.
     """
-    # 1. Canonical position cache
-    try:
-        from merid.event_venues.kalshi.position_cache import (  # type: ignore
-            get_kalshi_position_cache,
-        )
-        cache = get_kalshi_position_cache()
-        val = getattr(cache, "total_value_cents", None)
-        if callable(val):
-            v = int(val() or 0)
-            if v > 0:
-                return v
-        if isinstance(val, (int, float)) and val and val > 0:
-            return int(val)
-    except Exception as _e:
-        logger.debug("default_equity_cents: position cache unavailable: %s", _e)
-
-    # 2. Env fallback (dollars)
-    try:
-        raw = os.getenv("MERID_INITIAL_CAPITAL")
-        if raw:
-            dollars = float(raw)
-            if dollars > 0:
-                return int(round(dollars * 100))
-    except Exception:
-        pass
-
+    logger.critical(
+        "[BANKROLL_ALIGNMENT] No equity provider registered to GlobalRiskGuard. "
+        "This violates the single-source-of-truth requirement. "
+        "Bankroll must come from KalshiPortfolio.get_balance via bankroll_service_v2. "
+        "Failing closed to prevent trading without real balance."
+    )
     return 0
 
 

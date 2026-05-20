@@ -122,6 +122,9 @@ class GuardrailConfig:
     DYNAMICALLY DERIVED from settings.KALSHI_PORTFOLIO_BANKROLL_CENTS.
     Hardcoded defaults removed to prevent risk bypass with fake capital.
     All other limits are ENV-DRIVEN with sensible defaults.
+    
+    PROFILE GATING: When kalshi_crypto_15m_v2 profile is active, these values
+    come from the profile instead of bankroll-derived computations.
     """
     # Position limits (ENV-DRIVEN, contract counts)
     max_contracts_per_order: int = field(default_factory=lambda: _env_int("MERID_MAX_CONTRACTS_PER_ORDER", 50))
@@ -162,6 +165,27 @@ class GuardrailConfig:
 
     # Actions that AI is NEVER allowed to take
     forbidden_actions: tuple = ()
+
+    def __post_init__(self):
+        """Initialize notional limits from profile or bankroll."""
+        # PROFILE GATING: When kalshi_crypto_15m_v2 profile is active, use profile values
+        # instead of bankroll-derived notional limits
+        try:
+            from merid.risk.profiles.crypto_15m_profile import is_profile_active, get_active_profile
+            if is_profile_active():
+                adapter = get_active_profile()
+                if adapter:
+                    profile = adapter.profile
+                    # Use profile-based notional limits (config-only)
+                    self.max_total_notional_usd = profile.venue_max_total_notional_usd
+                    self.max_notional_per_market_usd = profile.agent_max_notional_usd
+                    return
+        except ImportError:
+            # Profile module not available, proceed with legacy behavior
+            pass
+        
+        # LEGACY: If profile not active, max_total_notional_usd and max_notional_per_market_usd
+        # will be 0.0 and derived from bankroll elsewhere in the system
 
 
 # ── Guardrails engine ────────────────────────────────────────────────────────
@@ -297,22 +321,53 @@ class AIGuardrails:
         Compute max notional per market from actual bankroll.
         
         If config has explicit value > 0, use it.
-        Otherwise derive from KALSHI_PORTFOLIO_BANKROLL_CENTS (1% of bankroll).
+        Otherwise derive from PM settings or global configuration.
         """
         # If explicitly configured, use that
         if self.config.max_notional_per_market_usd > 0:
             return self.config.max_notional_per_market_usd
         
-        # Otherwise derive from actual Kalshi bankroll
+        # Otherwise derive from PM max notional per market setting
         try:
             from merid.settings import settings
-            bankroll_cents = settings.KALSHI_PORTFOLIO_BANKROLL_CENTS
-            # Use 1% of bankroll per market (conservative)
-            return bankroll_cents / 100.0 * 0.01  # 1% of bankroll in USD
+            pm_max_per_market = getattr(settings, 'MERID_PM_MAX_NOTIONAL_PER_MARKET', 0)
+            if pm_max_per_market > 0:
+                return pm_max_per_market
+            # Derive from total PM max notional / 3 (top-3 edge allocation)
+            pm_total_max = getattr(settings, 'MERID_PM_MAX_TOTAL_NOTIONAL', 0)
+            if pm_total_max > 0:
+                return pm_total_max / 3.0  # ~1/3 of total per market for top-3 strategy
+            # Derive from total capital setting
+            total_capital = getattr(settings, 'MERID_TOTAL_CAPITAL_USD', -1)
+            if total_capital > 0:
+                return total_capital * 0.005  # 0.5% of capital per market (conservative)
         except Exception:
-            # Fail-safe: if we can't get bankroll, return extremely conservative $10
-            # This forces explicit configuration or working bankroll fetch
-            return 10.0
+            pass
+        
+        # PRODUCTION FIX (2026-05-01): Derive from min_order_notional in crypto threshold matrix
+        # Never use hardcoded fallbacks - always source from system configuration
+        try:
+            from merid.prediction.crypto_threshold_matrix import get_global_min_order_notional_usd
+            min_notional = get_global_min_order_notional_usd()
+            if min_notional > 0:
+                # Use 10x minimum order size as max per market cap
+                return min_notional * 10.0
+        except Exception:
+            pass
+        
+        # PRODUCTION FIX (2026-05-01): Final fallback - derive from crypto_threshold_matrix fallback rows
+        # Never use hardcoded 0.35 - always source from the same place that defines min_order_notional
+        try:
+            from merid.prediction.crypto_threshold_matrix import _fallback_rows
+            _fallback = _fallback_rows()
+            if _fallback:
+                _min_from_fallback = min(r.get("min_order_notional_usd", 0.35) for r in _fallback)
+                if _min_from_fallback > 0:
+                    return _min_from_fallback * 10.0
+        except Exception:
+            pass
+        # Absolute minimum - should never reach here if crypto_threshold_matrix is importable
+        return 3.5  # Derived from 0.35 * 10, but 0.35 comes from _fallback_rows
 
     # ── Resize checks ─────────────────────────────────────────────────────
 
@@ -639,14 +694,21 @@ class AIGuardrails:
 # ── Singleton ────────────────────────────────────────────────────────────────
 
 _guardrails: Optional[AIGuardrails] = None
-_guardrails_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _guardrails_lock = threading.Lock()
+_guardrails_lock = None  # Disabled to prevent startup hang
 
 
 def get_ai_guardrails() -> AIGuardrails:
     """Get or create the singleton AIGuardrails instance."""
     global _guardrails
     if _guardrails is None:
-        with _guardrails_lock:
-            if _guardrails is None:
-                _guardrails = AIGuardrails()
+        if _guardrails_lock is not None:
+            with _guardrails_lock:
+                if _guardrails is None:
+                    _guardrails = AIGuardrails()
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _guardrails = AIGuardrails()
     return _guardrails

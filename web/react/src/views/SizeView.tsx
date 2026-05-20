@@ -22,8 +22,8 @@ import {
 } from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
-import { DRAWDOWN_TIER_CONFIG, getDrawdownTierConfig } from '../shared/config/riskConfig';
-import { authHeaders } from '../api/auth';
+import { DRAWDOWN_TIER_CONFIG } from '../shared/config/riskConfig';
+import { getAuthHeaders } from '../services/auth';
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/Card';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
@@ -179,10 +179,13 @@ const SizeView: React.FC = () => {
   const togglePromoter = useCallback(async () => {
     setPromoterLoading(true);
     try {
-      // Auto-promoter toggle via generic operator endpoint
-      const res = await fetch(`${API_BASE_URL}/api/v1/operator/auto-promoter/${promoter?.running ? 'stop' : 'start'}`, {
+      // Auto-promoter toggle via operator endpoint constants
+      const endpoint = promoter?.running
+        ? API_ENDPOINTS.OPERATOR_AUTO_PROMOTER_STOP
+        : API_ENDPOINTS.OPERATOR_AUTO_PROMOTER_START;
+      const res = await fetch(`${API_BASE_URL}${endpoint}`, {
         method: 'POST',
-        headers: authHeaders(),
+        headers: getAuthHeaders(),
       });
       if (!res.ok) throw new Error('Failed to toggle promoter');
       promoterRes.refetch();
@@ -215,7 +218,6 @@ const SizeView: React.FC = () => {
         
         {sizing && (
           <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg ${tier.bg} border border-opacity-30 ${tier.color.replace('text-', 'border-').replace('400', '500')}`}>
-            {tier.icon}
             <span className={`text-sm font-medium ${tier.color}`}>{tier.label}</span>
             <span className="text-xs text-slate-400">({sizing.drawdown_pct.toFixed(1)}% DD)</span>
           </div>

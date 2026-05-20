@@ -128,6 +128,11 @@ class MarketMakerIntegration:
     # Signal-based spread adjustments
     MAX_SPREAD_WIDENING = 3  # Cents to add in defensive/crisis
     
+    # BUG-FIX: Made configurable constants for skew calculations (were hardcoded)
+    MACRO_SKEW_MULTIPLIER = 5  # Contracts multiplier for macro conviction
+    INVENTORY_SKEW_DIVISOR = 5  # Divisor for inventory-based position reduction
+    MAX_INVENTORY_SKEW_RATIO = 0.5  # Max skew as ratio of base contracts (was // 2)
+    
     def __init__(
         self,
         tracked_tickers: Optional[List[str]] = None,
@@ -215,7 +220,9 @@ class MarketMakerIntegration:
             # Compute spread with regime adjustment
             base_spread = config.base_spread_cents
             if regime_state.is_defensive:
-                base_spread += 1  # Widen in defensive
+                # BUG-FIX: Made configurable instead of hardcoded +1 cent
+                defensive_widening = int(os.getenv("MERID_MM_DEFENSIVE_SPREAD_WIDENING", "1"))
+                base_spread += defensive_widening
             spread = max(config.min_spread_cents, min(config.max_spread_cents, base_spread))
             
             # Get macro conviction for directional skew
@@ -293,9 +300,10 @@ class MarketMakerIntegration:
         # Strong bullish = skew toward bids (more aggressive on bid)
         # Strong bearish = skew toward asks
         if conviction.is_bullish:
-            return int(5 * conviction.confidence)  # +0 to +5 contracts
+            # BUG-FIX: Use configurable constant instead of hardcoded 5
+            return int(self.MACRO_SKEW_MULTIPLIER * conviction.confidence)
         elif conviction.is_bearish:
-            return -int(5 * conviction.confidence)  # -0 to -5 contracts
+            return -int(self.MACRO_SKEW_MULTIPLIER * conviction.confidence)
         
         return 0
     
@@ -311,14 +319,16 @@ class MarketMakerIntegration:
         # If long, reduce bid size / increase ask size
         # If short, increase bid size / reduce ask size
         
-        max_skew = config.base_contracts_per_side // 2
+        # BUG-FIX: Use configurable ratio instead of hardcoded // 2
+        max_skew = int(config.base_contracts_per_side * self.MAX_INVENTORY_SKEW_RATIO)
         
         if inventory.net_position > 0:
             # We're long, skew toward selling (negative offset for bid)
-            return -min(max_skew, inventory.net_position // 5)
+            # BUG-FIX: Use configurable divisor instead of hardcoded 5
+            return -min(max_skew, inventory.net_position // self.INVENTORY_SKEW_DIVISOR)
         else:
             # We're short, skew toward buying (positive offset for bid)
-            return min(max_skew, abs(inventory.net_position) // 5)
+            return min(max_skew, abs(inventory.net_position) // self.INVENTORY_SKEW_DIVISOR)
     
     def _extract_asset(self, ticker: str) -> Optional[str]:
         """Extract asset symbol from Kalshi ticker."""

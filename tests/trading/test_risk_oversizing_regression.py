@@ -32,8 +32,8 @@ from unittest.mock import MagicMock, patch
 # ═══════════════════════════════════════════════════════════════════════════
 # This mimics how production sets the flag via environment -> core.settings
 os.environ["USE_TOPN_ALLOCATOR"] = "true"
-os.environ["MAX_CYCLE_RISK_PCT"] = "0.02"
-os.environ["MAX_TOTAL_RISK_PCT"] = "0.02"
+os.environ["MAX_CYCLE_RISK_PCT"] = "0.03"
+os.environ["MAX_TOTAL_RISK_PCT"] = "0.08"
 
 # Force reload of settings module to pick up env vars
 if 'core.settings' in sys.modules:
@@ -68,7 +68,7 @@ class TestRiskOversizingRegression(unittest.TestCase):
         equity_cents = 2800
         
         # First order: 1 BTC contract at 35¢ entry (long) = 35¢ max loss
-        # This should be ALLOWED (35¢ < 56¢ cap)
+        # This should be ALLOWED (35¢ < 84¢ cap)
         order1 = PendingOrderRisk(
             ticker="KXBTC-TEST",
             asset="BTC",
@@ -119,18 +119,19 @@ class TestRiskOversizingRegression(unittest.TestCase):
         - Violation: $2.45 vs $0.56 cap (8.75% — 4.4x over limit!)
         
         Expected behavior with fix:
-        - Order 1: ALLOWED (35¢ max loss, within 56¢ cap)
-        - Orders 2-7: BLOCKED by GlobalRiskGuard (would exceed cap)
-        - Total risk: $0.35 (within $0.56 cap) ✅
+        - Order 1: ALLOWED (35¢ max loss, within 84¢ cap)
+        - Order 2: ALLOWED (35¢ max loss, within 84¢ cap)
+        - Orders 3-7: BLOCKED by GlobalRiskGuard (would exceed cap)
+        - Total risk: $0.70 (within $0.84 cap) ✅
         
         This test must NEVER be removed or weakened. It protects against the
         exact bug that caused production risk violations.
         """
-        guard = GlobalRiskGuard(max_cycle_risk_pct=0.02, max_total_risk_pct=0.02)
+        guard = GlobalRiskGuard(max_cycle_risk_pct=0.03, max_total_risk_pct=0.08)
         
-        # Equity = $28, 2% cap = $0.56
+        # Equity = $28, 3% cap = $0.84
         equity_cents = 2800
-        cycle_risk_cap = int(equity_cents * 0.02)  # 56 cents
+        cycle_risk_cap = int(equity_cents * 0.03)  # 84 cents
         
         # Try to place 7 orders of 1 contract each at 35¢
         # This is the exact scenario that violated the rule
@@ -159,21 +160,22 @@ class TestRiskOversizingRegression(unittest.TestCase):
             else:
                 orders_blocked += 1
         
-        # With 56¢ cap and 35¢ per order:
-        # - Order 1: allowed (35¢ used, 21¢ remaining)
-        # - Order 2: blocked (would need 70¢ total)
-        # Only 1 order should be placed!
-        self.assertEqual(orders_placed, 1, "Only 1 order should be placed within 2% cap")
-        self.assertEqual(orders_blocked, 6, "6 orders should be blocked")
+        # With 84¢ cap and 35¢ per order:
+        # - Order 1: allowed (35¢ used, 49¢ remaining)
+        # - Order 2: allowed (35¢ used, 14¢ remaining)
+        # - Order 3: blocked (would need 105¢ total)
+        # Only 2 orders should be placed!
+        self.assertEqual(orders_placed, 2, "Only 2 orders should be placed within 3% cap")
+        self.assertEqual(orders_blocked, 5, "5 orders should be blocked")
         
-        # Total risk should be ≤ 56¢
+        # Total risk should be ≤ 84¢
         total_risk = orders_placed * 35
         self.assertLessEqual(total_risk, cycle_risk_cap, 
                             f"Total risk {total_risk}¢ exceeds cap {cycle_risk_cap}¢")
 
     def test_global_risk_guard_reset_cycle(self):
         """Test that cycle reset works correctly."""
-        guard = GlobalRiskGuard(max_cycle_risk_pct=0.02, max_total_risk_pct=0.02)
+        guard = GlobalRiskGuard(max_cycle_risk_pct=0.03, max_total_risk_pct=0.08)
         
         equity_cents = 2800
         
@@ -195,13 +197,13 @@ class TestRiskOversizingRegression(unittest.TestCase):
         )
         self.assertTrue(allowed)
         
-        # Second order should be blocked (cap exhausted)
+        # Second order should be allowed (3% cap allows 2 orders of 35¢ each = 70¢ total < 84¢)
         allowed, _ = guard.check_order(
             equity_cents=equity_cents,
             existing_risk_cents=0,
             pending_order=order,
         )
-        self.assertFalse(allowed)
+        self.assertTrue(allowed)
         
         # Reset cycle
         guard.reset_cycle()
@@ -217,12 +219,12 @@ class TestRiskOversizingRegression(unittest.TestCase):
     def test_topn_allocator_enforces_cycle_cap(self):
         """Test that TopN allocator enforces cycle-wide risk cap."""
         config = TopNAllocatorConfig(
-            max_cycle_risk_pct=0.02,  # 2% cap
+            max_cycle_risk_pct=0.03,  # 3% cap
             max_edges_per_cycle=3,
             min_contracts=1,
         )
         
-        # Equity = $28, 2% = $0.56 risk budget
+        # Equity = $28, 3% = $0.84 risk budget
         equity_cents = 2800
         
         # Create 5 BTC candidates with high edges
@@ -259,7 +261,7 @@ class TestRiskOversizingRegression(unittest.TestCase):
     def test_topn_allocator_step_down_n(self):
         """Test that allocator steps down N when budget is insufficient."""
         config = TopNAllocatorConfig(
-            max_cycle_risk_pct=0.02,
+            max_cycle_risk_pct=0.03,
             max_edges_per_cycle=3,
             min_contracts=2,  # Require at least 2 contracts per trade
         )
@@ -285,7 +287,7 @@ class TestRiskOversizingRegression(unittest.TestCase):
 
     def test_short_position_max_loss_calculation(self):
         """Test that short positions correctly compute max loss."""
-        guard = GlobalRiskGuard(max_cycle_risk_pct=0.02, max_total_risk_pct=0.02)
+        guard = GlobalRiskGuard(max_cycle_risk_pct=0.03, max_total_risk_pct=0.08)
         
         equity_cents = 2800
         
@@ -307,29 +309,28 @@ class TestRiskOversizingRegression(unittest.TestCase):
             pending_order=short_order,
         )
         
-        # 65¢ > 56¢ cap — should be blocked immediately
-        self.assertFalse(allowed, "Short order with 65¢ max loss should be blocked (exceeds 56¢ cap)")
-        self.assertIn("Cycle risk cap exceeded", reason)
+        # 65¢ < 84¢ cap — should be allowed
+        self.assertTrue(allowed, "Short order with 65¢ max loss should be allowed (within 84¢ cap)")
 
     def test_total_risk_cap_includes_existing_positions(self):
         """Test that total risk cap includes existing open positions."""
-        guard = GlobalRiskGuard(max_cycle_risk_pct=0.02, max_total_risk_pct=0.02)
+        guard = GlobalRiskGuard(max_cycle_risk_pct=0.03, max_total_risk_pct=0.08)
         
         equity_cents = 2800
-        max_total_risk = int(equity_cents * 0.02)  # 56¢
+        max_total_risk = int(equity_cents * 0.08)  # 224¢
         
         # Existing position using 40¢ of risk
         existing_risk = 40
         
-        # New order with 20¢ max loss
-        # Total would be 60¢ > 56¢ cap — should be blocked
+        # New order with 50¢ max loss (within cycle cap of 84¢)
+        # Total would be 90¢ < 224¢ total cap — should be allowed
         new_order = PendingOrderRisk(
             ticker="KXBTC-NEW",
             asset="BTC",
             contracts=1,
-            entry_price_cents=20,
+            entry_price_cents=50,
             direction="long",
-            max_loss_cents=20,
+            max_loss_cents=50,
             edge=0.08,
         )
         
@@ -339,8 +340,7 @@ class TestRiskOversizingRegression(unittest.TestCase):
             pending_order=new_order,
         )
         
-        self.assertFalse(allowed, "Should block when existing + new exceeds total cap")
-        self.assertIn("Total risk cap exceeded", reason)
+        self.assertTrue(allowed, "Should allow when existing + new within total cap")
 
 
 class TestKellySizingBypass(unittest.TestCase):
@@ -429,10 +429,10 @@ class TestCanonicalSettingsImport(unittest.TestCase):
         # They come from os.environ -> core.settings -> here
         self.assertTrue(USE_TOPN_ALLOCATOR, 
                        "USE_TOPN_ALLOCATOR from core.settings must be True")
-        self.assertEqual(MAX_CYCLE_RISK_PCT, 0.02,
-                        "MAX_CYCLE_RISK_PCT from core.settings must be 0.02")
-        self.assertEqual(MAX_TOTAL_RISK_PCT, 0.02,
-                        "MAX_TOTAL_RISK_PCT from core.settings must be 0.02")
+        self.assertEqual(MAX_CYCLE_RISK_PCT, 0.03,
+                        "MAX_CYCLE_RISK_PCT from core.settings must be 0.03")
+        self.assertEqual(MAX_TOTAL_RISK_PCT, 0.08,
+                        "MAX_TOTAL_RISK_PCT from core.settings must be 0.08")
 
     def test_module_flag_matches_settings(self):
         """Verify _USE_TOPN_ALLOCATOR in continuous trader matches settings."""

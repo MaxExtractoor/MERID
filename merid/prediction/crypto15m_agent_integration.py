@@ -258,12 +258,37 @@ class Crypto15MIntentPublisher:
                 if hasattr(signal.edge, 'confidence'):
                     confidence = float(signal.edge.confidence)
             
-            # Extract limit price
-            limit_price_cents = 50
-            if hasattr(signal, 'limit_price_cents'):
+            # Extract limit price - fetch from market state if not in signal
+            # BUG-FIX (2026-05-06): Use 1 cent fallback instead of 50 to prevent zero contract sizing
+            # with small bankrolls. The 50 cent default was causing max_contracts_per_winner=0.
+            limit_price_cents = 1  # Safe fallback
+            if hasattr(signal, 'limit_price_cents') and signal.limit_price_cents:
                 limit_price_cents = int(signal.limit_price_cents)
-            elif hasattr(signal, 'price_cents'):
+            elif hasattr(signal, 'price_cents') and signal.price_cents:
                 limit_price_cents = int(signal.price_cents)
+            else:
+                # BUG-FIX: Fetch actual price from market state instead of defaulting to 50
+                try:
+                    from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                    store = get_kalshi_market_state_store()
+                    state = store.get(ticker)
+                    if state:
+                        if side.upper() == "YES":
+                            if state.yes_ask and state.yes_bid:
+                                limit_price_cents = int((state.yes_ask + state.yes_bid) // 2)
+                            elif state.mid_cents:
+                                limit_price_cents = int(state.mid_cents)
+                            elif state.best_ask_cents:
+                                limit_price_cents = int(state.best_ask_cents)
+                        else:  # NO
+                            if state.no_ask and state.no_bid:
+                                limit_price_cents = int((state.no_ask + state.no_bid) // 2)
+                            elif state.mid_cents:
+                                limit_price_cents = int(state.mid_cents)
+                            elif state.best_ask_cents:
+                                limit_price_cents = int(state.best_ask_cents)
+                except Exception as e:
+                    logger.debug("[CRYPTO15M-PUBLISHER] Could not fetch market price for %s: %s", ticker, e)
             
             # Get consensus confidence if available
             consensus_confidence = None
@@ -320,8 +345,8 @@ def should_use_allocator_for_agent(agent_id: str) -> bool:
         "BTC15M", "ETH15M", "SOL15M", "XRP15M", "DOGE15M"
     ]
     
-    # Market maker
-    mm_agents = ["CRYPTO15MMM", "CRYPTO_15M_MM"]
+    # Market maker (CRYPTO_15M_MM removed - superseded by kalshi_crypto_15m_v2 profile)
+    mm_agents = ["CRYPTO15MMM"]
     
     if any(a in aid for a in directional_agents):
         return True

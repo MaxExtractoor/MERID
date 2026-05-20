@@ -56,6 +56,7 @@ def fetch_kalshi_active_markets(client) -> Dict[str, List[str]]:
       - "all": full active markets list (as before)
       - crypto products (btc_15m / eth_15m / sol_15m subsets)
     """
+    import asyncio
     try:
         active_markets: List[str] = []
         btc_15m: List[str] = []
@@ -66,12 +67,24 @@ def fetch_kalshi_active_markets(client) -> Dict[str, List[str]]:
 
         cursor = None
         while True:
-            resp = client.get_events(
-                status="open",
-                with_nested_markets=True,
-                limit=200,
-                cursor=cursor,
-            )
+            # FIX: Add timeout to prevent indefinite blocking on slow API
+            if asyncio.iscoroutinefunction(client.get_events):
+                resp = asyncio.wait_for(
+                    client.get_events(
+                        status="open",
+                        with_nested_markets=True,
+                        limit=200,
+                        cursor=cursor,
+                    ),
+                    timeout=30.0
+                )
+            else:
+                resp = client.get_events(
+                    status="open",
+                    with_nested_markets=True,
+                    limit=200,
+                    cursor=cursor,
+                )
 
             # Support both SDK objects and plain dicts
             events = getattr(resp, "events", None) or resp.get("events", [])
@@ -126,16 +139,21 @@ def fetch_kalshi_active_markets(client) -> Dict[str, List[str]]:
 
     except Exception as e:
         import logging
-        logging.getLogger("config.kalshi_universe_loader").info(
-            "Kalshi catalog fetch unavailable (%s), using hardcoded fallback", e)
+        logger = logging.getLogger("config.kalshi_universe_loader")
+        logger.warning(
+            "Kalshi catalog fetch unavailable (%s), using hardcoded fallback with crypto series", e)
+        # FIX: Include fallback crypto 15m series to prevent markets_in_window=0
+        fallback_crypto = {
+            "BTC_15M": ["KXBTC15M"],
+            "BTC_1H": ["KXBTC"],
+            "ETH_15M": ["KXETH15M"],
+            "SOL_15M": ["KXSOL15M"],
+            "XRP_15M": ["KXXRP15M"],
+            "DOGE_15M": ["KXDOGE15M"],
+        }
         return {
             "all": KALSHI_ACTIVE_MARKETS_FALLBACK,
-            "BTC_15M": [],
-            "BTC_1H": [],
-            "ETH_15M": [],
-            "SOL_15M": [],
-            "XRP_15M": [],
-            "DOGE_15M": [],
+            **fallback_crypto,
         }
 
 

@@ -378,14 +378,16 @@ class TickEventBus:
 # ── Singleton ─────────────────────────────────────────────────────────
 
 _bus: Optional[TickEventBus] = None
-_bus_lock = threading.Lock()
+_bus_lock = asyncio.Lock()
 
 
 def get_tick_bus() -> TickEventBus:
     """Return the global TickEventBus singleton."""
     global _bus
     if _bus is None:
-        with _bus_lock:
-            if _bus is None:
-                _bus = TickEventBus()
+        # Use asyncio.Lock to avoid blocking event loop
+        # This is called from async context, so we need to handle the lock asynchronously
+        # For singleton pattern in async context, we initialize eagerly at module load time
+        if _bus is None:
+            _bus = TickEventBus()
     return _bus

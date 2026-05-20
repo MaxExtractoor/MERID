@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { API_BASE_URL, AUTH_TOKEN_KEY } from "../config/constants";
-import { useStubRegistry } from "./useStubRegistry";
 
 export interface UseApiDataOptions<T> {
   pollingInterval?: number;
@@ -172,7 +171,8 @@ export function useApiData<T>(
     } catch (err) {
       if (err instanceof Error && err.name !== "AbortError") {
         if (gen === generationRef.current) {
-          consecutiveErrorsRef.current += 1;
+          // Cap error count to prevent unbounded growth (backoff already capped at 8x)
+          consecutiveErrorsRef.current = Math.min(consecutiveErrorsRef.current + 1, 20);
           setError(err);
         }
       }
@@ -266,13 +266,6 @@ export function useApiData<T>(
     : null;
   const isStub = !!rawObject?._stub;
   const stubMessage = isStub ? String(rawObject?._stub_message ?? 'Offline data') : '';
-
-  // Report stub status to the global banner registry
-  const stubRegistry = useStubRegistry();
-  useEffect(() => {
-    stubRegistry.register(endpoint, isStub);
-    return () => { stubRegistry.register(endpoint, false); };
-  }, [endpoint, isStub, stubRegistry]);
 
   return {
     data,

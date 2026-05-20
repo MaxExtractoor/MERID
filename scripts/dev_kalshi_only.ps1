@@ -29,8 +29,10 @@ $env:MERID_ENV = "development"
 # Regresssion test: tests/trading/test_risk_oversizing_regression.py
 # ═══════════════════════════════════════════════════════════════════════════
 $env:USE_TOPN_ALLOCATOR = "true"
-$env:MAX_CYCLE_RISK_PCT = "0.02"
-$env:MAX_TOTAL_RISK_PCT = "0.02"
+$env:MAX_CYCLE_RISK_PCT = "0.03"  # 3% per cycle (was 2%)
+$env:MAX_TOTAL_RISK_PCT = "0.08"  # 8% total max (was 5%)
+$env:SCALPER_SINGLE_BATCH_MODE = "false"  # Allow multi-batch (was true)
+$env:SCALPER_MAX_TRADES_PER_BATCH = "5"  # Increased from 3
 
 if ($FreshStart) {
     $env:MERID_FRESH_START = "1"

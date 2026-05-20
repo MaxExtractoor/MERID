@@ -228,7 +228,8 @@ async def publish_forecast(forecast: Forecast) -> None:
             data=forecast.to_dict(),
             timestamp=forecast.timestamp,
         ))
-    except Exception:
+    except Exception as exc:
+        logger.debug("swarm messages: failed to publish forecast (bus unavailable): %s", exc)
         pass  # Bus unavailable — non-fatal
 
 
@@ -244,7 +245,8 @@ async def publish_critique(critique: Critique) -> None:
             data=critique.to_dict(),
             timestamp=critique.timestamp,
         ))
-    except Exception:
+    except Exception as exc:
+        logger.debug("swarm messages: failed to publish critique (bus unavailable): %s", exc)
         pass  # Bus unavailable — non-fatal
 
 
@@ -260,7 +262,8 @@ async def publish_risk_view(risk_view: RiskView) -> None:
             data=risk_view.to_dict(),
             timestamp=risk_view.timestamp,
         ))
-    except Exception:
+    except Exception as exc:
+        logger.debug("swarm messages: failed to publish risk_view (bus unavailable): %s", exc)
         pass  # Bus unavailable — non-fatal
 
 
@@ -276,5 +279,6 @@ async def publish_decision(decision: Decision) -> None:
             data=decision.to_dict(),
             timestamp=decision.timestamp,
         ))
-    except Exception:
+    except Exception as exc:
+        logger.debug("swarm messages: failed to publish decision (bus unavailable): %s", exc)
         pass  # Bus unavailable — non-fatal

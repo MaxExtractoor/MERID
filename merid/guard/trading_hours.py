@@ -2,7 +2,7 @@
 
 Kalshi trading hours:
 - Generally 24/7 for crypto markets
-- Scheduled maintenance: Thursday 3:00–5:00 AM ET
+- Scheduled maintenance: Configured via SessionConfig from agent grid YAML
 
 This guard ensures:
 - Live orders are blocked during maintenance windows
@@ -21,18 +21,15 @@ logger = get_logger("merid.guard.trading_hours")
 # Kalshi operates on Eastern Time
 ET = ZoneInfo("America/New_York")
 
-# Scheduled maintenance window: Thursday 3:00–5:00 AM ET
-MAINTENANCE_DAY = 3  # Thursday (0=Monday, 3=Thursday, 6=Sunday)
-MAINTENANCE_START = time(3, 0)  # 3:00 AM
-MAINTENANCE_END = time(5, 0)   # 5:00 AM
-
 
 class KalshiTradingHoursGuard:
     """Enforces Kalshi trading hours and maintenance windows.
-    
+
     Usage:
-        guard = KalshiTradingHoursGuard()
-        
+        from merid.prediction.agent_grid_config import SessionConfig
+        config = SessionConfig(maintenance_day=3, maintenance_start_et="03:00", maintenance_end_et="05:00")
+        guard = KalshiTradingHoursGuard(config)
+
         # Check if live trading allowed
         if guard.is_live_trading_allowed():
             place_live_order()
@@ -40,11 +37,30 @@ class KalshiTradingHoursGuard:
             # Fallback to paper or reject
             log_maintenance_window()
     """
-    
-    def __init__(self):
-        self._maintenance_day = MAINTENANCE_DAY
-        self._maintenance_start = MAINTENANCE_START
-        self._maintenance_end = MAINTENANCE_END
+
+    def __init__(self, session_config):
+        """Initialize with SessionConfig from agent grid YAML.
+
+        Args:
+            session_config: SessionConfig object with maintenance window settings (required).
+                           This ensures single source of truth for maintenance window configuration.
+
+        Raises:
+            ValueError: If session_config is None or missing required fields.
+        """
+        if session_config is None:
+            raise ValueError(
+                "KalshiTradingHoursGuard requires SessionConfig from agent grid YAML. "
+                "Hardcoded maintenance window values have been removed to ensure single source of truth. "
+                "Pass SessionConfig(maintenance_day, maintenance_start_et, maintenance_end_et)."
+            )
+
+        self._maintenance_day = session_config.maintenance_day
+        # Parse "HH:MM" format to time objects
+        start_parts = session_config.maintenance_start_et.split(":")
+        self._maintenance_start = time(int(start_parts[0]), int(start_parts[1]))
+        end_parts = session_config.maintenance_end_et.split(":")
+        self._maintenance_end = time(int(end_parts[0]), int(end_parts[1]))
     
     def get_current_et_time(self) -> datetime:
         """Get current time in Eastern Time."""
@@ -187,10 +203,16 @@ _guard: Optional[KalshiTradingHoursGuard] = None
 
 
 def get_trading_hours_guard() -> KalshiTradingHoursGuard:
-    """Get the singleton trading hours guard."""
+    """Get the singleton trading hours guard.
+
+    Loads SessionConfig from agent grid YAML to ensure single source of truth
+    for maintenance window configuration.
+    """
     global _guard
     if _guard is None:
-        _guard = KalshiTradingHoursGuard()
+        from merid.prediction.agent_grid_config import load_agent_grid_config
+        config = load_agent_grid_config()
+        _guard = KalshiTradingHoursGuard(config.session)
     return _guard
 
 

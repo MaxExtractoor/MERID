@@ -63,6 +63,41 @@ hedging:
       prefer_same_timeframe: true
       allow_adjacent_horizons: ["weekly"]
 
+  # ── Take Profit / Auto-Exit Configuration ────────────────────────────
+  # These are applied when hedges are profitable or stop-loss hit
+  take_profit:
+    enabled: true
+    # TP levels per asset (percent from entry)
+    BTC:
+      tp_1: 2.0      # Take 50% off at 2% profit
+      tp_2: 4.0      # Take remaining at 4% profit
+      stop_loss: 1.5 # Hard stop at 1.5% loss
+    ETH:
+      tp_1: 2.0
+      tp_2: 4.0
+      stop_loss: 1.5
+    SOL:
+      tp_1: 3.0      # Higher vol = wider TP for alts
+      tp_2: 6.0
+      stop_loss: 2.0
+    XRP:
+      tp_1: 3.0
+      tp_2: 6.0
+      stop_loss: 2.0
+    DOGE:
+      tp_1: 5.0      # Meme coins need even wider bands
+      tp_2: 10.0
+      stop_loss: 3.0
+
+  auto_exit:
+    enabled: true
+    # Close hedges if alpha position closed
+    close_hedge_when_alpha_closed: true
+    # Max time to hold hedge (minutes)
+    max_hedge_hold_minutes: 120
+    # Auto-reduce if exposure flips sign
+    reduce_on_exposure_flip: true
+
   # ── Optional cross-asset (disabled by default) ────────────────────────
   cross_asset:
     enabled: false

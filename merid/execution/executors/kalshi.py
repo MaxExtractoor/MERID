@@ -45,15 +45,56 @@ class KalshiExecutor:
         action: str,
         price_cents: int,
         count: int,
+        take_profit_price_cents: Optional[int] = None,
+        take_profit_r_multiple: Optional[float] = None,
+        stop_loss_price_cents: Optional[int] = None,
         **kwargs
     ) -> OrderResult:
-        """Place an order via the canonical order router."""
+        """Place an order via the canonical order router.
+        
+        For 15m crypto entry orders (buy), exit targets (TP/SL) are required.
+        If not provided, default TP is computed using the dynamic TP engine.
+        """
+        # Compute default TP/SL for 15m crypto entry orders if not provided
+        if action == "buy" and ticker.startswith(("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M")):
+            if take_profit_price_cents is None and take_profit_r_multiple is None:
+                try:
+                    from merid.prediction.dynamic_takeprofit import DynamicTakeProfitEngine
+                    engine = DynamicTakeProfitEngine()
+                    
+                    # Default SL: 5 cents below entry (conservative)
+                    if stop_loss_price_cents is None:
+                        stop_loss_price_cents = max(1, price_cents - 5)
+                    
+                    # Compute dynamic TP with default confidence
+                    tp_plan = engine.compute_tp(
+                        entry_price=price_cents / 100.0,
+                        stop_price=stop_loss_price_cents / 100.0,
+                        direction="LONG" if side == "yes" else "SHORT",
+                        confidence=0.5,  # Default medium confidence
+                    )
+                    
+                    take_profit_r_multiple = tp_plan.tp_r_multiple
+                    logger.info(
+                        "[EXECUTOR-TP] Computed default TP for %s: R=%.2f",
+                        ticker, tp_plan.tp_r_multiple
+                    )
+                except Exception as tp_exc:
+                    logger.warning("[EXECUTOR-TP] Failed to compute default TP: %s", tp_exc)
+                    # Fallback to 1R
+                    take_profit_r_multiple = 1.0
+                    if stop_loss_price_cents is None:
+                        stop_loss_price_cents = max(1, price_cents - 5)
+        
         intent = OrderIntent(
             ticker=ticker,
             side=side,
             action=action,
             price_cents=price_cents,
             count=count,
+            take_profit_price_cents=take_profit_price_cents,
+            take_profit_r_multiple=take_profit_r_multiple,
+            stop_loss_price_cents=stop_loss_price_cents,
             **kwargs
         )
         return await route_order_async(intent)

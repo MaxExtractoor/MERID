@@ -48,6 +48,7 @@ class HoldReason(str, Enum):
     SESSION_CLOSED = "session_closed"            # Outside Kalshi trading hours
     WARMUP = "warmup"                            # Agent in WARMING_UP lifecycle
     VENUE_BLOCKED = "venue_blocked"              # VenueGate blocks non-Kalshi venues
+    SIGNAL_ONLY = "signal_only"                  # Signal-only agent skips execution
 
     # ── Market resolution ─────────────────────────────────────────────
     NO_MARKETS = "no_markets"                    # No markets resolved for this agent

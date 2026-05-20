@@ -12,6 +12,7 @@ import os
 import sys
 import pytest
 from decimal import Decimal
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -293,7 +294,8 @@ class TestHPIntegration:
         assert is_hp_mode_enabled()
         assert os.getenv("MERID_HP_WIN_RATE_TARGET") == "85"
     
-    def test_position_size_calculation_with_sentiment(self):
+    @patch('merid.event_venues.kalshi.bankroll_service_v2.get_equity_for_risk_calc_sync', return_value=10000.0)
+    def test_position_size_calculation_with_sentiment(self, mock_get_equity):
         """Position size should adjust based on sentiment (contrarian)."""
         from merid.prediction.hp_integration import calculate_hp_position_size
         
@@ -306,7 +308,8 @@ class TestHPIntegration:
         
         assert size_fear > size_greed, f"Sentiment adjustment failed: fear={size_fear} should be > greed={size_greed}"
     
-    def test_position_size_calculation_with_confidence(self):
+    @patch('merid.event_venues.kalshi.bankroll_service_v2.get_equity_for_risk_calc_sync', return_value=10000.0)
+    def test_position_size_calculation_with_confidence(self, mock_get_equity):
         """Position size should adjust based on consensus confidence."""
         from merid.prediction.hp_integration import calculate_hp_position_size
         
@@ -320,7 +323,8 @@ class TestHPIntegration:
         assert size_low_conf < size_high_conf, \
             f"Confidence adjustment failed: low={size_low_conf}, high={size_high_conf}"
     
-    def test_win_streak_boosts_size(self):
+    @patch('merid.event_venues.kalshi.bankroll_service_v2.get_equity_for_risk_calc_sync', return_value=10000.0)
+    def test_win_streak_boosts_size(self, mock_get_equity):
         """Win streaks should increase position size."""
         from merid.prediction.hp_integration import calculate_hp_position_size
         
@@ -332,7 +336,8 @@ class TestHPIntegration:
         assert size_win_streak > size_no_streak, \
             f"Win streak failed: no_streak={size_no_streak}, streak={size_win_streak}"
     
-    def test_lose_streak_reduces_size(self):
+    @patch('merid.event_venues.kalshi.bankroll_service_v2.get_equity_for_risk_calc_sync', return_value=10000.0)
+    def test_lose_streak_reduces_size(self, mock_get_equity):
         """Lose streaks should decrease position size."""
         from merid.prediction.hp_integration import calculate_hp_position_size
         

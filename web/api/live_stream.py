@@ -165,11 +165,16 @@ async def websocket_live_stream(websocket: WebSocket):
     await subscribe_by_id(subscriber_id, all_channels)
     event_queue = _subscriber_queues.get(subscriber_id)
 
-    await websocket.send_json({
-        "type": "connected",
-        "message": "Live stream connected",
-        "channels": "all"
-    })
+    try:
+        await websocket.send_json({
+            "type": "connected",
+            "message": "Live stream connected",
+            "channels": "all"
+        })
+    except Exception as e:
+        logger.warning(f"Failed to send initial connected message: {e}")
+        # Continue anyway - the connection is still valid
+    
     await _run_ws_endpoint(websocket, event_queue, "Live stream")
 
 

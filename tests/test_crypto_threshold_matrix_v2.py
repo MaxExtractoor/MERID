@@ -191,6 +191,35 @@ class TestSchemaV2Profile(unittest.TestCase):
         )
         # max_price_cents may be None if not in grid, or a value
         self.assertIn("max_price_cents", row)
+        self.assertEqual(row["max_price_cents"], 55)  # BTC 15m cap from config
+
+    def test_v2_quick_win_max_price_cents_grid(self):
+        """V2 profile resolves quick_win_max_price_cents for high-probability trades."""
+        row = resolve_merged_row(
+            asset="BTC",
+            timeframe="15m",
+            archetype="directional",
+            profile_key="modern_tradeable_kalshi_v1",
+        )
+        # quick_win_max_price_cents should be present for 15m timeframe
+        self.assertIn("quick_win_max_price_cents", row)
+        self.assertEqual(row["quick_win_max_price_cents"], 48)  # BTC 15m quick_win cap from config
+
+    def test_v2_quick_win_band_in_confidence_bands(self):
+        """V2 profile includes quick_win band in confidence_bands."""
+        row = resolve_merged_row(
+            asset="BTC",
+            timeframe="15m",
+            archetype="directional",
+            profile_key="modern_tradeable_kalshi_v1",
+        )
+        confidence_bands = row.get("confidence_bands", [])
+        self.assertIsInstance(confidence_bands, list)
+        quick_win_band = next((b for b in confidence_bands if b.get("name") == "quick_win"), None)
+        self.assertIsNotNone(quick_win_band)
+        self.assertEqual(quick_win_band["min_conf"], 0.80)
+        self.assertEqual(quick_win_band["max_conf"], 0.92)
+        self.assertEqual(quick_win_band["kelly_multiplier"], 0.6)
 
 
 class TestSchemaV1Profiles(unittest.TestCase):

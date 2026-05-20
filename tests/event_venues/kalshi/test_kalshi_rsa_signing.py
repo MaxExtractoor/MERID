@@ -75,7 +75,7 @@ class TestKalshiRSASigning(unittest.TestCase):
         hdrs = self.client._sign_headers("GET", "/trade-api/v2/portfolio/balance")
         ts = int(hdrs["KALSHI-ACCESS-TIMESTAMP"])
         # Within 5 seconds of now
-        self.assertLess(abs(ts - now_ms), 5000)
+        self.assertLessEqual(abs(ts - now_ms), 5000)
         # Must be ~13 digits (ms), not ~10 digits (seconds)
         self.assertGreater(ts, 1_000_000_000_000)
 

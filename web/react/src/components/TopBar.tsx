@@ -21,7 +21,7 @@ function TopBar({ onMenuClick }: TopBarProps) {
     API_ENDPOINTS.KALSHI_PNL,
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
   );
-  const { data: balData } = useApiData<{ available?: number }>(
+  const { data: balData } = useApiData<{ total_value_cents?: number; balance_cents?: number; portfolio_cents?: number; available?: number }>(
     API_ENDPOINTS.KALSHI_BALANCE,
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
   );
@@ -29,6 +29,9 @@ function TopBar({ onMenuClick }: TopBarProps) {
 
   const dailyPnl = pnlData?.daily_pnl_usd ?? 0;
   const pnlPositive = dailyPnl >= 0;
+  // Use total_value_cents (cash + portfolio) for balance display, fallback to available for backward compatibility
+  const balanceCents = balData?.total_value_cents ?? (balData?.available ?? 0) * 100;
+  const balanceUsd = balanceCents / 100;
 
   return (
     <header className="h-16 bg-gradient-to-r from-slate-900/95 via-slate-800/95 to-slate-900/95 backdrop-blur-md border-b border-slate-700/50 shadow-xl shadow-black/20 flex items-center justify-between px-4 lg:px-6">
@@ -75,12 +78,12 @@ function TopBar({ onMenuClick }: TopBarProps) {
               ? 'from-emerald-500/10 via-green-500/10 to-teal-500/10 border border-emerald-500/30 shadow-emerald-500/20'
               : 'from-red-500/10 via-red-500/10 to-rose-500/10 border border-red-500/30 shadow-red-500/20'
           }`}>
-            {balData?.available != null && (
+            {balData != null && (
               <span className="text-slate-300 text-sm font-medium">
-                {(balData.available ?? 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' })}
+                {balanceUsd.toLocaleString('en-US', { style: 'currency', currency: 'USD' })}
               </span>
             )}
-            {balData?.available != null && <span className="text-slate-600">·</span>}
+            {balData != null && <span className="text-slate-600">·</span>}
             <span className="text-slate-300 text-sm font-medium">P&L:</span>
             <span className={`font-bold text-lg ${pnlPositive ? 'text-emerald-400' : 'text-red-400'}`}>
               {pnlPositive ? '+' : ''}{(dailyPnl ?? 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' })}

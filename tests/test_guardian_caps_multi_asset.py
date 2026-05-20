@@ -203,7 +203,8 @@ class TestGetSizeCapForAsset:
         """BUG-4 regression: no guardian available → 0.0 (not None)."""
         from merid.prediction.strategy import KalshiStrategy
 
-        with patch("merid.trading.kalshi_continuous_trader.get_continuous_trader", return_value=None):
+        with patch("merid.trading.kalshi_continuous_trader.get_continuous_trader", return_value=None), \
+             patch.dict("os.environ", {"MERID_ENABLE_KALSHI_CT": "true"}):
             strat = object.__new__(KalshiStrategy)
             cap = strat._get_size_cap_for_asset("BTC")
             assert cap == 0.0
@@ -214,14 +215,16 @@ class TestGetSizeCapForAsset:
         mock_trader._guardian = None
 
         from merid.prediction.strategy import KalshiStrategy
-        with patch("merid.trading.kalshi_continuous_trader.get_continuous_trader", return_value=mock_trader):
+        with patch("merid.trading.kalshi_continuous_trader.get_continuous_trader", return_value=mock_trader), \
+             patch.dict("os.environ", {"MERID_ENABLE_KALSHI_CT": "true"}):
             strat = object.__new__(KalshiStrategy)
             cap = strat._get_size_cap_for_asset("ETH")
             assert cap == 0.0
 
     def test_import_error_returns_zero(self):
         from merid.prediction.strategy import KalshiStrategy
-        with patch("merid.trading.kalshi_continuous_trader.get_continuous_trader", side_effect=ImportError("nope")):
+        with patch("merid.trading.kalshi_continuous_trader.get_continuous_trader", side_effect=ImportError("nope")), \
+             patch.dict("os.environ", {"MERID_ENABLE_KALSHI_CT": "true"}):
             strat = object.__new__(KalshiStrategy)
             cap = strat._get_size_cap_for_asset("SOL")
             assert cap == 0.0
@@ -400,11 +403,12 @@ class TestCTPerAssetCapEnforcement:
     """Verify the CT order path respects guardian per-asset caps."""
 
     def test_ct_has_per_asset_cap_code(self):
-        """BUG-7 regression: CT must check live_size_caps before placing orders."""
+        """BUG-7 regression: CT must check guardian caps before placing orders."""
         source = open("merid/trading/kalshi_continuous_trader.py", encoding="utf-8").read()
-        assert "live_size_caps.get(_candidate_asset" in source, \
+        # Updated: CT now uses get_effective_live_caps() then effective_caps.get()
+        assert "effective_caps.get(_candidate_asset" in source, \
             "CT missing per-asset cap check from guardian"
-        assert "guardian cap=0 (OBSERVATION)" in source, \
+        assert "guardian cap=0 (OBSERVATION or computed cap is zero)" in source, \
             "CT missing per-asset OBSERVATION skip log"
         assert "[SIZE-CAP-CT]" in source, \
             "CT missing per-asset cap reduction log tag"

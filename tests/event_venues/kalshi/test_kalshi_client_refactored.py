@@ -59,6 +59,23 @@ def _bypass_pre_send_ticker_catalog(monkeypatch):
     monkeypatch.setattr(_client_mod, "_validate_ticker_exists", _validator)
 
 
+@pytest.fixture(autouse=True)
+def _bypass_global_execution_guard(monkeypatch):
+    """Bypass GlobalExecutionGuard for unit tests.
+
+    The guard requires a full system setup that isn't available in unit tests.
+    """
+    try:
+        from merid.guards import global_execution_guard as _guard_mod
+        # Patch the get_global_execution_guard to return a mock that allows all orders
+        class _MockGuard:
+            def check_order(self, **kwargs):
+                return True, "OK"
+        monkeypatch.setattr(_guard_mod, "get_global_execution_guard", lambda: _MockGuard())
+    except ImportError:
+        pass  # Guard module not available
+
+
 # =============================================================================
 # Initialization Tests
 # =============================================================================

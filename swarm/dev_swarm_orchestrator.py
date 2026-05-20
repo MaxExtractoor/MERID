@@ -498,7 +498,11 @@ Include necessary imports, error handling, and documentation.
                     continue
                 
                 task_id = self._task_queue[0]
-                task = self._tasks[task_id]
+                task = self._tasks.get(task_id)
+                
+                if not task:
+                    self._task_queue.pop(0)
+                    continue
                 
                 if task.status == TaskStatus.PENDING:
                     agent = self._select_agent(task)
@@ -515,6 +519,8 @@ Include necessary imports, error handling, and documentation.
                     if success:
                         self._task_queue.pop(0)
                         self._task_queue.append(task_id)
+                    else:
+                        await asyncio.sleep(2.0)
                 
                 elif task.status == TaskStatus.TESTING:
                     success = await self._test_task(task)

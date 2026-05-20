@@ -50,16 +50,18 @@ class TestCoinbaseSpotAdapter:
                 adapter = CoinbaseSpotAdapter()
                 assert adapter.exchange_id == "coinbase"
 
-    def test_initialization_with_passphrase(self):
+    def test_initialization_without_passphrase(self):
+        """Test that adapter works with only key + secret (no passphrase)."""
         env_vars = {
             "MERID_COINBASE_API_KEY": "test_key",
             "MERID_COINBASE_API_SECRET": "test_secret",
-            "MERID_COINBASE_API_PASSPHRASE": "test_passphrase",
         }
         with patch.dict(os.environ, env_vars, clear=True):
             with patch.object(CoinbaseSpotAdapter, '_build_exchange', return_value=None):
                 adapter = CoinbaseSpotAdapter()
-                assert adapter.passphrase == "test_passphrase"
+                assert adapter.api_key == "test_key"
+                assert adapter.api_secret == "test_secret"
+                # No passphrase attribute should exist
 
     def test_build_exchange_mock_mode(self, adapter):
         # When use_mock is True, _exchange should be None

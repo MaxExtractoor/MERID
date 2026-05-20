@@ -57,21 +57,25 @@ DECISION_BUCKET_WIDTH_S: int = 60
 
 @dataclass
 class Crypto15MAllocatorConfig:
-    """Configuration for 15m crypto cross-asset allocation."""
+    """Configuration for 15m crypto cross-asset allocation.
     
-    # Timeframe-wide budget controls
-    max_contracts_per_tf_crypto_15m: int = 1
-    max_markets_per_tf_crypto_15m: int = 2
+    For 15m scalper mode: Set MAX_CONTRACTS_PER_TF_CRYPTO_15M env var.
+    """
     
-    # Per-expiry open exposure cap
-    max_open_contracts_per_expiry_crypto_15m: int = 1
+    # Timeframe-wide budget controls - UNIFIED 3%/8% RISK REGIME
+    # With $47 bankroll, 3% = $1.41 → max 2-3 contracts at $0.50 each
+    max_contracts_per_tf_crypto_15m: int = int(os.getenv("MAX_CONTRACTS_PER_TF_CRYPTO_15M", "2"))  # 2 for unified risk
+    max_markets_per_tf_crypto_15m: int = int(os.getenv("MAX_MARKETS_PER_TF_CRYPTO_15M", "2"))  # 2 markets max
+    
+    # Per-expiry open exposure cap - UNIFIED 3%/8% RISK REGIME
+    max_open_contracts_per_expiry_crypto_15m: int = int(os.getenv("MAX_OPEN_CONTRACTS_PER_EXPIRY_CRYPTO_15M", "2"))  # 2 for unified risk
     
     # Bankroll scaling function (linear or constant)
     contract_budget_scale_crypto_15m: str = "constant"  # "constant" | "linear"
-    contract_budget_scale_factor: float = 1.0  # multiplier for linear scaling
+    contract_budget_scale_factor: float = float(os.getenv("SCALER15M_SCALE_FACTOR", "1.0"))  # multiplier for linear scaling
     
     # Rollout phase control
-    rollout_phase: str = "dry_run"  # "dry_run" | "soft_gate" | "hard_gate"
+    rollout_phase: str = os.getenv("CRYPTO15M_ROLLOUT_PHASE", "soft_gate")  # "dry_run" | "soft_gate" | "hard_gate"
     
     # Minimum equity threshold for scaling
     min_bankroll_for_scaling_usd: float = 100.0
@@ -870,7 +874,10 @@ class Crypto15MAllocator:
 # =============================================================================
 
 _allocator_instance: Optional[Crypto15MAllocator] = None
-_allocator_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _allocator_lock = threading.Lock()
+_allocator_lock = None  # Disabled to prevent startup hang
 
 
 def get_crypto15m_allocator() -> Crypto15MAllocator:
@@ -879,16 +886,25 @@ def get_crypto15m_allocator() -> Crypto15MAllocator:
     if _allocator_instance is not None:
         return _allocator_instance
     
-    with _allocator_lock:
-        if _allocator_instance is None:
-            _allocator_instance = Crypto15MAllocator()
-        return _allocator_instance
+    if _allocator_lock is not None:
+        with _allocator_lock:
+            if _allocator_instance is None:
+                _allocator_instance = Crypto15MAllocator()
+    else:
+        # Lock disabled - direct initialization (startup workaround)
+        _allocator_instance = Crypto15MAllocator()
+    
+    return _allocator_instance
 
 
 def reset_crypto15m_allocator_for_testing() -> None:
     """Reset the global singleton (testing only)."""
     global _allocator_instance
-    with _allocator_lock:
+    if _allocator_lock is not None:
+        with _allocator_lock:
+            _allocator_instance = None
+    else:
+        # Lock disabled - direct reset (startup workaround)
         _allocator_instance = None
 
 

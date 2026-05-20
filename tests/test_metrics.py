@@ -240,7 +240,7 @@ class TestRealizedEdgeStore(unittest.TestCase):
         """Recording a trade increments trade count."""
         self.store.record_trade_entry(
             trade_id="T1", forecaster_id="m", bucket="crypto",
-            market_id="MKT1", side="yes", price_cents=55,
+            market_id="MKT1", side="yes", action="buy", price_cents=55,
             p_model=0.62, p_implied=0.55, contracts=10, fee_cents=31,
         )
         stats = self.store.get_edge_stats("m", "crypto")
@@ -251,7 +251,7 @@ class TestRealizedEdgeStore(unittest.TestCase):
         """YES buyer wins: correct PnL and realized edge."""
         self.store.record_trade_entry(
             trade_id="T1", forecaster_id="m", bucket="crypto",
-            market_id="MKT1", side="yes", price_cents=55,
+            market_id="MKT1", side="yes", action="buy", price_cents=55,
             p_model=0.62, p_implied=0.55, contracts=10, fee_cents=31,
         )
         ok = self.store.resolve_trade("T1", outcome=1)
@@ -269,7 +269,7 @@ class TestRealizedEdgeStore(unittest.TestCase):
         """YES buyer loses: PnL = -price * contracts."""
         self.store.record_trade_entry(
             trade_id="T1", forecaster_id="m", bucket="crypto",
-            market_id="MKT1", side="yes", price_cents=55,
+            market_id="MKT1", side="yes", action="buy", price_cents=55,
             p_model=0.62, p_implied=0.55, contracts=10, fee_cents=31,
         )
         ok = self.store.resolve_trade("T1", outcome=0)
@@ -279,11 +279,71 @@ class TestRealizedEdgeStore(unittest.TestCase):
         # PnL = -55 * 10 = -550
         self.assertEqual(trade.realized_pnl_cents, -550)
 
+    def test_resolve_trade_yes_sell_wins(self):
+        """YES seller wins (NO wins): receive price, pay 0."""
+        self.store.record_trade_entry(
+            trade_id="T1", forecaster_id="m", bucket="crypto",
+            market_id="MKT1", side="yes", action="sell", price_cents=55,
+            p_model=0.62, p_implied=0.55, contracts=10, fee_cents=31,
+        )
+        ok = self.store.resolve_trade("T1", outcome=0)
+        self.assertTrue(ok)
+
+        trade = self.store.get_trade("T1")
+        # YES seller wins: received 55*10 = 550, pay 0, fee 31
+        # PnL = 550 - 0 - 31 = 519
+        self.assertEqual(trade.realized_pnl_cents, 519)
+
+    def test_resolve_trade_yes_sell_loses(self):
+        """YES seller loses (YES wins): receive price, pay 100."""
+        self.store.record_trade_entry(
+            trade_id="T1", forecaster_id="m", bucket="crypto",
+            market_id="MKT1", side="yes", action="sell", price_cents=55,
+            p_model=0.62, p_implied=0.55, contracts=10, fee_cents=31,
+        )
+        ok = self.store.resolve_trade("T1", outcome=1)
+        self.assertTrue(ok)
+
+        trade = self.store.get_trade("T1")
+        # YES seller loses: received 55*10 = 550, pay 100*10 = 1000, fee 31
+        # PnL = 550 - 1000 - 31 = -481
+        self.assertEqual(trade.realized_pnl_cents, -481)
+
+    def test_resolve_trade_no_sell_wins(self):
+        """NO seller wins (YES wins): receive price, pay 100."""
+        self.store.record_trade_entry(
+            trade_id="T1", forecaster_id="m", bucket="crypto",
+            market_id="MKT1", side="no", action="sell", price_cents=45,
+            p_model=0.38, p_implied=0.45, contracts=10, fee_cents=31,
+        )
+        ok = self.store.resolve_trade("T1", outcome=1)
+        self.assertTrue(ok)
+
+        trade = self.store.get_trade("T1")
+        # NO seller wins: received 45*10 = 450, pay 100*10 = 1000, fee 31
+        # PnL = 450 - 1000 - 31 = -581
+        self.assertEqual(trade.realized_pnl_cents, -581)
+
+    def test_resolve_trade_no_sell_loses(self):
+        """NO seller loses (NO wins): receive price, pay 0."""
+        self.store.record_trade_entry(
+            trade_id="T1", forecaster_id="m", bucket="crypto",
+            market_id="MKT1", side="no", action="sell", price_cents=45,
+            p_model=0.38, p_implied=0.45, contracts=10, fee_cents=31,
+        )
+        ok = self.store.resolve_trade("T1", outcome=0)
+        self.assertTrue(ok)
+
+        trade = self.store.get_trade("T1")
+        # NO seller loses: received 45*10 = 450, pay 0, fee 31
+        # PnL = 450 - 0 - 31 = 419
+        self.assertEqual(trade.realized_pnl_cents, 419)
+
     def test_resolve_trade_no_wins(self):
         """NO buyer wins when outcome=0."""
         self.store.record_trade_entry(
             trade_id="T1", forecaster_id="m", bucket="crypto",
-            market_id="MKT1", side="no", price_cents=45,
+            market_id="MKT1", side="no", action="buy", price_cents=45,
             p_model=0.38, p_implied=0.45, contracts=10, fee_cents=31,
         )
         ok = self.store.resolve_trade("T1", outcome=0)
@@ -297,7 +357,7 @@ class TestRealizedEdgeStore(unittest.TestCase):
         """NO buyer loses when outcome=1."""
         self.store.record_trade_entry(
             trade_id="T1", forecaster_id="m", bucket="crypto",
-            market_id="MKT1", side="no", price_cents=45,
+            market_id="MKT1", side="no", action="buy", price_cents=45,
             p_model=0.38, p_implied=0.45, contracts=10, fee_cents=31,
         )
         ok = self.store.resolve_trade("T1", outcome=1)
@@ -311,7 +371,7 @@ class TestRealizedEdgeStore(unittest.TestCase):
         """Resolving the same trade twice returns False."""
         self.store.record_trade_entry(
             trade_id="T1", forecaster_id="m", bucket="crypto",
-            market_id="MKT1", side="yes", price_cents=50,
+            market_id="MKT1", side="yes", action="buy", price_cents=50,
             p_model=0.6, p_implied=0.5, contracts=5, fee_cents=17,
         )
         self.store.resolve_trade("T1", outcome=1)
@@ -328,7 +388,7 @@ class TestRealizedEdgeStore(unittest.TestCase):
         for i in range(5):
             self.store.record_trade_entry(
                 trade_id=f"T{i}", forecaster_id="m", bucket="crypto",
-                market_id="MKT1", side="yes", price_cents=50,
+                market_id="MKT1", side="yes", action="buy", price_cents=50,
                 p_model=0.6, p_implied=0.5, contracts=5, fee_cents=17,
             )
         resolved = self.store.resolve_market("MKT1", outcome=1)
@@ -338,12 +398,12 @@ class TestRealizedEdgeStore(unittest.TestCase):
         """Edge stats aggregate across multiple trades."""
         self.store.record_trade_entry(
             trade_id="T1", forecaster_id="m", bucket="crypto",
-            market_id="MKT1", side="yes", price_cents=50,
+            market_id="MKT1", side="yes", action="buy", price_cents=50,
             p_model=0.6, p_implied=0.5, contracts=10, fee_cents=35,
         )
         self.store.record_trade_entry(
             trade_id="T2", forecaster_id="m", bucket="crypto",
-            market_id="MKT2", side="yes", price_cents=60,
+            market_id="MKT2", side="yes", action="buy", price_cents=60,
             p_model=0.7, p_implied=0.6, contracts=5, fee_cents=14,
         )
         self.store.resolve_trade("T1", outcome=1)
@@ -375,12 +435,12 @@ class TestRealizedEdgeStore(unittest.TestCase):
         """Unresolved markets list from edge store."""
         self.store.record_trade_entry(
             trade_id="T1", forecaster_id="m", bucket="c",
-            market_id="MKT1", side="yes", price_cents=50,
+            market_id="MKT1", side="yes", action="buy", price_cents=50,
             p_model=0.6, p_implied=0.5, contracts=5, fee_cents=17,
         )
         self.store.record_trade_entry(
             trade_id="T2", forecaster_id="m", bucket="c",
-            market_id="MKT2", side="yes", price_cents=50,
+            market_id="MKT2", side="yes", action="buy", price_cents=50,
             p_model=0.6, p_implied=0.5, contracts=5, fee_cents=17,
         )
         self.store.resolve_trade("T1", outcome=1)
@@ -403,7 +463,7 @@ class TestRealizedEdgeStore(unittest.TestCase):
         """reset() clears edge data."""
         self.store.record_trade_entry(
             trade_id="T1", forecaster_id="m", bucket="c",
-            market_id="MKT1", side="yes", price_cents=50,
+            market_id="MKT1", side="yes", action="buy", price_cents=50,
             p_model=0.6, p_implied=0.5, contracts=5, fee_cents=17,
         )
         self.store.reset()
@@ -431,7 +491,7 @@ class TestOutcomeResolver(unittest.TestCase):
         self.cal.record_forecast("m", "c", "MKT1", 0.7)
         self.edge.record_trade_entry(
             trade_id="T1", forecaster_id="m", bucket="c",
-            market_id="MKT1", side="yes", price_cents=50,
+            market_id="MKT1", side="yes", action="buy", price_cents=50,
             p_model=0.7, p_implied=0.5, contracts=5, fee_cents=17,
         )
 
@@ -461,7 +521,7 @@ class TestOutcomeResolver(unittest.TestCase):
         self.cal.record_forecast("m", "c", "MKT1", 0.5)
         self.edge.record_trade_entry(
             trade_id="T1", forecaster_id="m", bucket="c",
-            market_id="MKT2", side="yes", price_cents=50,
+            market_id="MKT2", side="yes", action="buy", price_cents=50,
             p_model=0.6, p_implied=0.5, contracts=5, fee_cents=17,
         )
         status = self.resolver.status()
@@ -506,6 +566,7 @@ class TestIntegrationBrierAndEdge(unittest.TestCase):
             bucket="crypto",
             market_id="MKT1",
             side="yes",
+            action="buy",
             price_cents=55,
             p_model=0.80,
             p_implied=0.55,
@@ -556,7 +617,7 @@ class TestIntegrationBrierAndEdge(unittest.TestCase):
         # Place trade with estimated 10% edge
         self.edge.record_trade_entry(
             trade_id="T1", forecaster_id="m", bucket="c",
-            market_id="M1", side="yes", price_cents=50,
+            market_id="M1", side="yes", action="buy", price_cents=50,
             p_model=0.60, p_implied=0.50, contracts=10, fee_cents=35,
         )
         # Market resolves NO — we lose

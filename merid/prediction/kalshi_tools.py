@@ -17,6 +17,7 @@ Tools:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from decimal import Decimal
@@ -41,7 +42,10 @@ logger = get_logger("merid.prediction.kalshi_tools")
 
 _client = None
 _trader = None
-_trader_lock = threading.Lock()  # FPA-02: protect singleton init
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _trader_lock = threading.Lock()  # FPA-02: protect singleton init
+_trader_lock = None  # Disabled to prevent startup hang
 
 
 def _get_client():
@@ -54,10 +58,15 @@ def _get_trader():
     """Lazy-init the KalshiTrader singleton."""
     global _trader
     if _trader is None:
-        with _trader_lock:
-            if _trader is None:  # double-checked locking
-                from merid.event_venues.kalshi.trading import KalshiTrader
-                _trader = KalshiTrader(_get_client())
+        if _trader_lock is not None:
+            with _trader_lock:
+                if _trader is None:  # double-checked locking
+                    from merid.event_venues.kalshi.trading import KalshiTrader
+                    _trader = KalshiTrader(_get_client())
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            from merid.event_venues.kalshi.trading import KalshiTrader
+            _trader = KalshiTrader(_get_client())
     return _trader
 
 
@@ -293,6 +302,98 @@ async def _kalshi_place_order(
             tool_name="kalshi_place_order",
         )
 
+    # PRODUCTION DATA GUARDS (2026-05-14): Validate market_id against live catalog before order execution
+    try:
+        from merid.event_venues.kalshi.market_catalog import get_market_catalog
+        from merid.settings import settings as _settings
+        env = _settings.MERID_ENV if hasattr(_settings, 'MERID_ENV') else "development"
+        pm_profile = _settings.MERID_PM_PROFILE if hasattr(_settings, 'MERID_PM_PROFILE') else "baseline"
+        is_production = env == "production" or pm_profile == "production"
+        
+        if is_production:
+            catalog = get_market_catalog()
+            # Check if ticker exists in catalog
+            catalog_markets = catalog.get_all_markets() if hasattr(catalog, 'get_all_markets') else []
+            # CRITICAL FIX: CatalogMarket wraps EventMarket, so market_id is on nested market.market
+            catalog_tickers = set()
+            for m in catalog_markets:
+                if hasattr(m, "market") and hasattr(m.market, "market_id"):
+                    catalog_tickers.add(m.market.market_id)
+                elif hasattr(m, "market_id"):
+                    catalog_tickers.add(m.market_id)
+            
+            if ticker not in catalog_tickers:
+                logger.error(
+                    "[PRODUCTION_DATA_GUARD] ILLEGAL_MARKET_ID: ticker=%s not found in live catalog. "
+                    "Order rejected - market does not exist in production catalog. "
+                    "This prevents orders against fake/hardcoded/non-existent markets.",
+                    ticker
+                )
+                return ToolResult.fail(
+                    ToolErrorCode.INVALID_INPUT,
+                    f"ILLEGAL_MARKET_ID: ticker {ticker} not found in live Kalshi catalog. "
+                    "Orders only allowed for markets in production catalog.",
+                    tool_name="kalshi_place_order",
+                )
+            logger.debug("[PRODUCTION_DATA_GUARD] Market ID validated: %s exists in live catalog", ticker)
+    except Exception as e:
+        # If catalog validation fails, log warning but don't block (may be dev/test mode)
+        logger.warning("[PRODUCTION_DATA_GUARD] Could not validate market_id against catalog: %s", e)
+
+    # PRODUCTION DATA GUARDS (2026-05-14): DRY_RUN mode - log but do not execute
+    from merid.settings import settings as _settings
+    dry_run = _settings.MERID_LOOP_DRY_RUN if hasattr(_settings, 'MERID_LOOP_DRY_RUN') else False
+    
+    if dry_run:
+        # Extract asset from ticker for structured logging
+        _asset = None
+        try:
+            from merid.event_venues.kalshi.market_catalog import get_market_catalog
+            catalog = get_market_catalog()
+            universe = catalog.get_market_universe()
+            if universe is not None:
+                for asset in universe.get_assets():
+                    if asset in ticker.upper():
+                        _asset = asset
+                        break
+        except Exception:
+            pass
+        
+        logger.info(
+            "WOULD_EXECUTE_ORDER: %s",
+            json.dumps({
+                "env": env,
+                "dry_run": dry_run,
+                "ticker": ticker,
+                "asset": _asset,
+                "side": side,
+                "action": action,
+                "price_cents": price_cents,
+                "count": count,
+                "agent_name": agent_name,
+            })
+        )
+        # Return success without actually placing the order
+        return ToolResult(
+            success=True,
+            payload={
+                "dry_run": True,
+                "would_execute": {
+                    "ticker": ticker,
+                    "side": side,
+                    "action": action,
+                    "price_cents": price_cents,
+                    "count": count,
+                    "agent_name": agent_name,
+                },
+                "message": "DRY_RUN mode - order logged but not executed"
+            },
+            source="kalshi_dry_run",
+            validity=ToolValidity.FRESH,
+            tool_name="kalshi_place_order",
+            latency_ms=round((time.time() - t0) * 1000, 2),
+        )
+    
     # MARKET UNIVERSE GUARD: Reject orders for non-allowed markets
     _orders_rejected_disallowed_market = 0
     try:

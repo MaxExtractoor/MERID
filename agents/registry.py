@@ -27,10 +27,13 @@ def get_registry():
 
 
 def load_agents():
-    """LEGACY/REFERENCE: Instantiate 8 non-streaming agents.
+    """LEGACY/REFERENCE: Instantiate lean 15m Kalshi agents.
+
+    LEAN 15m KALSHI STACK (2026-05-13): Pruned for BTC/ETH/SOL/XRP/DOGE trading.
+    Only Skeptic, RiskAgent, and StrategyAgent - edge comes from microstructure.
 
     WARNING: These are NOT the production agents.  Production uses
-    agents.agent_mesh.AgentMesh which runs 8 streaming agents.
+    agents.agent_mesh.AgentMesh which runs streaming agents.
     This function is retained only for tests and reference.
     """
     from utils.logger import get_logger
@@ -38,22 +41,12 @@ def load_agents():
         "load_agents() called — these are LEGACY non-streaming agents. "
         "Production uses agents.agent_mesh.AgentMesh."
     )
-    from agents.analyst_gemma import AnalystGemma
-    from agents.analyst_llama import AnalystLlama
     from agents.skeptic import Skeptic
     from agents.risk import RiskAgent
-    from agents.synthesizer import Synthesizer
-    from agents.archivist import Archivist
     from agents.strategy_agent import StrategyAgent
-    from agents.meta_agent import MetaAuditAgent
 
     return [
-        AnalystGemma(),
-        AnalystLlama(),
-        Skeptic(),
-        RiskAgent(),
-        Synthesizer(),
-        Archivist(),
-        StrategyAgent(),
-        MetaAuditAgent(),
+        Skeptic(agent_id="skeptic-01"),
+        RiskAgent(agent_id="risk-01"),
+        StrategyAgent(agent_id="strategy-agent-01"),
     ]

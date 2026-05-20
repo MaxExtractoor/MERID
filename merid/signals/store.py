@@ -562,13 +562,20 @@ class SignalStore:
 # ── Singleton ─────────────────────────────────────────────────────────
 
 _store: Optional[SignalStore] = None
-_store_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _store_lock = threading.Lock()
+_store_lock = None  # Disabled to prevent startup hang
 
 
 def get_signal_store() -> SignalStore:
     global _store
     if _store is None:
-        with _store_lock:
-            if _store is None:
-                _store = SignalStore()
+        if _store_lock is not None:
+            with _store_lock:
+                if _store is None:
+                    _store = SignalStore()
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _store = SignalStore()
     return _store

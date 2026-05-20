@@ -762,9 +762,10 @@ async def run_canary_trade() -> Dict[str, Any]:
             decision_trace_id=new_decision_trace_id("canary"),
             sentiment_driven=False,
         )
+        # OLD-HARDWARE FIX: Increased from 5s to 15s for slow execution
         result = await asyncio.wait_for(
             route_order_async(intent),
-            timeout=5.0,
+            timeout=15.0,
         )
         latency_ms = round((_time.monotonic() - start) * 1000, 1)
         fill_confirmed = getattr(result, "filled", False) or getattr(result, "success", False)
@@ -791,6 +792,140 @@ async def get_trading_mode() -> Dict[str, Any]:
     if not gate:
         return {"mode": "unknown", "is_live": False, "live_enabled": False}
     return gate.summary()
+
+
+@router.get("/performance/agents")
+async def performance_agents() -> Dict[str, Any]:
+    """Get performance metrics for all agents."""
+    try:
+        from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
+        tracker = get_agent_performance_tracker()
+        all_metrics = tracker.get_all_metrics()
+        
+        agents_dict = {}
+        for agent_id, metrics in all_metrics.items():
+            agents_dict[agent_id] = metrics.to_dict()
+        
+        return {
+            "agents": agents_dict,
+            "count": len(agents_dict)
+        }
+    except Exception as e:
+        logger.warning("performance_agents failed: %s", e)
+        return {"agents": {}, "count": 0, "error": str(e)}
+
+
+@router.get("/performance/agents/{agentId}")
+async def performance_agent(agentId: str) -> Dict[str, Any]:
+    """Get performance metrics for a specific agent."""
+    try:
+        from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
+        tracker = get_agent_performance_tracker()
+        metrics = tracker.get_agent_metrics(agentId)
+        return metrics.to_dict()
+    except Exception as e:
+        logger.warning("performance_agent failed for %s: %s", agentId, e)
+        return {"error": str(e)}
+
+
+@router.get("/performance/summary")
+async def performance_summary() -> Dict[str, Any]:
+    """Get system-wide performance summary."""
+    try:
+        from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
+        tracker = get_agent_performance_tracker()
+        summary = tracker.get_system_summary()
+        return summary
+    except Exception as e:
+        logger.warning("performance_summary failed: %s", e)
+        return {"error": str(e)}
+
+
+@router.get("/performance/top")
+async def performance_top(
+    metric: str = Query("win_rate", description="Sort by: win_rate, total_pnl_usd, sharpe_ratio"),
+    limit: int = Query(10, ge=1, le=50)
+) -> Dict[str, Any]:
+    """Get top performing agents by specified metric."""
+    try:
+        from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
+        tracker = get_agent_performance_tracker()
+        top_agents = tracker.get_top_agents(metric=metric, limit=limit)
+        return {"top": top_agents}
+    except Exception as e:
+        logger.warning("performance_top failed: %s", e)
+        return {"top": [], "error": str(e)}
+
+
+@router.get("/performance/calibration")
+async def performance_calibration() -> Dict[str, Any]:
+    """Get calibration metrics for all agents."""
+    try:
+        from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
+        tracker = get_agent_performance_tracker()
+        all_metrics = tracker.get_all_metrics()
+        
+        calibration_entries = []
+        for agent_id, metrics in all_metrics.items():
+            calibration_entries.append({
+                "agent_id": agent_id,
+                "calibration_error": metrics.calibration_error,
+                "avg_confidence": metrics.avg_confidence,
+                "brier_score": None,  # Not tracked in AgentMetrics currently
+                "well_calibrated": metrics.calibration_error < 0.1  # Threshold for well-calibrated
+            })
+        
+        return {"agents": calibration_entries}
+    except Exception as e:
+        logger.warning("performance_calibration failed: %s", e)
+        return {"agents": [], "error": str(e)}
+
+
+@router.post("/performance/export")
+async def performance_export() -> Dict[str, Any]:
+    """Export all performance metrics as CSV."""
+    try:
+        from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
+        tracker = get_agent_performance_tracker()
+        all_metrics = tracker.get_all_metrics()
+        
+        import csv
+        import io
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        # Header
+        writer.writerow(["agent_id", "total_fills", "total_closes", "wins", "losses", "win_rate", 
+                       "total_pnl_usd", "avg_profit_per_trade", "avg_predicted_edge", "avg_realized_edge",
+                       "edge_accuracy", "avg_confidence", "calibration_error", "sharpe_ratio", "last_updated"])
+        
+        # Data rows
+        for agent_id, metrics in all_metrics.items():
+            writer.writerow([
+                agent_id,
+                metrics.total_fills,
+                metrics.total_closes,
+                metrics.wins,
+                metrics.losses,
+                metrics.win_rate,
+                str(metrics.total_pnl_usd),
+                str(metrics.avg_profit_per_trade),
+                metrics.avg_predicted_edge,
+                metrics.avg_realized_edge,
+                metrics.edge_accuracy,
+                metrics.avg_confidence,
+                metrics.calibration_error,
+                metrics.sharpe_ratio,
+                metrics.last_updated.isoformat()
+            ])
+        
+        return {
+            "csv": output.getvalue(),
+            "count": len(all_metrics)
+        }
+    except Exception as e:
+        logger.warning("performance_export failed: %s", e)
+        return {"error": str(e)}
 
 
 @router.get("/crypto/rti")
