@@ -11,7 +11,8 @@ from typing import Dict, List, Optional
 
 from observability.swarm_telemetry import get_swarm_telemetry
 from execution.execution_coordinator import get_execution_coordinator
-from consensus.consensus_coordinator import get_consensus_coordinator
+# LEGACY REMOVAL: consensus.consensus_coordinator import removed - consensus module deleted
+# from consensus.consensus_coordinator import get_consensus_coordinator
 from agents.watchdog_agents import get_watchdog_coordinator
 from schemas.swarm_events import TradingMode
 from utils.logger import get_logger
@@ -129,25 +130,17 @@ async def get_consensus_stats() -> Dict:
     
     Returns consensus round counts and success rates.
     """
-    try:
-        consensus = get_consensus_coordinator()
-        
-        # Get basic stats (these would be added to ConsensusCoordinator)
-        return {
-            "total_rounds": getattr(consensus, "_total_rounds", 0),
-            "successful_rounds": getattr(consensus, "_successful_rounds", 0),
-            "timeout_rounds": getattr(consensus, "_timeout_rounds", 0),
-            "vetoed_rounds": getattr(consensus, "_vetoed_rounds", 0),
-            "active_rounds": len(getattr(consensus, "_rounds", {})),
-            "pending_opinions": sum(
-                len(opinions) 
-                for opinions in getattr(consensus, "_pending_opinions", {}).values()
-            ),
-        }
-    
-    except Exception as e:
-        logger.error(f"Failed to get consensus stats: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    # LEGACY REMOVAL: Consensus module deleted - endpoint disabled
+    logger.debug("Consensus stats disabled - consensus module deleted")
+    return {
+        "total_rounds": 0,
+        "successful_rounds": 0,
+        "timeout_rounds": 0,
+        "vetoed_rounds": 0,
+        "active_rounds": 0,
+        "pending_opinions": 0,
+        "message": "Consensus module deleted"
+    }
 
 
 @router.get("/watchdog/alerts")
