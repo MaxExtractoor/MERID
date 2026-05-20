@@ -6994,6 +6994,8 @@ class KalshiTradingAgent:
                 )
             except Exception as _kc_exc:
                 self.logger.debug("kalshi_core_fire_and_forget: %s", _kc_exc)
+        except Exception as _sce_exc:
+            self.logger.debug("swarm_engine_gate (fail-open): %s", _sce_exc)
 
         if action == "quote":
             # For quotes, place a buy and sell limit order pair
