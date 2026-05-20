@@ -1262,30 +1262,32 @@ async def consensus_ws_stream_endpoint(websocket: WebSocket):
         })
 
         # ── Send initial snapshot from ConsensusStore ────────────────
+        # LEGACY REMOVAL: ConsensusStore integration removed - consensus module deleted
         try:
-            from core.consensus_store import get_consensus_store
-            store = get_consensus_store()
-            for op in store.list_opinions(limit=20):
-                d = op.to_dict()
-                await websocket.send_json({
-                    "event_id": d["id"],
-                    "event_type": "opinion",
-                    "timestamp": op.created_at,
-                    "source": "consensus",
-                    "payload": d,
-                })
-                _sent_opinion_ids.add(d["id"])
+            # from core.consensus_store import get_consensus_store
+            # store = get_consensus_store()
+            # for op in store.list_opinions(limit=20):
+            #     d = op.to_dict()
+            #     await websocket.send_json({
+            #         "event_id": d["id"],
+            #         "event_type": "opinion",
+            #         "timestamp": op.created_at,
+            #         "source": "consensus",
+            #         "payload": d,
+            #     })
+            #     _sent_opinion_ids.add(d["id"])
 
-            for plan in store.list_plans(limit=20):
-                d = plan.to_dict()
-                await websocket.send_json({
-                    "event_id": d["id"],
-                    "event_type": "trade_plan",
-                    "timestamp": plan.created_at,
-                    "source": "consensus",
-                    "payload": d,
-                })
-                _sent_plan_ids.add(d["id"])
+            # for plan in store.list_plans(limit=20):
+            #     d = plan.to_dict()
+            #     await websocket.send_json({
+            #         "event_id": d["id"],
+            #         "event_type": "trade_plan",
+            #         "timestamp": plan.created_at,
+            #         "source": "consensus",
+            #         "payload": d,
+            #     })
+            #     _sent_plan_ids.add(d["id"])
+            pass  # Placeholder - consensus module deleted
         except (WebSocketDisconnect, RuntimeError):
             return
         except Exception as _snap_exc:
@@ -1293,44 +1295,47 @@ async def consensus_ws_stream_endpoint(websocket: WebSocket):
 
         while True:
             # ── Push any NEW opinions/plans since last tick ───────────
+            # LEGACY REMOVAL: ConsensusStore integration removed - consensus module deleted
             try:
-                from core.consensus_store import get_consensus_store
-                store = get_consensus_store()
+                # from core.consensus_store import get_consensus_store
+                # store = get_consensus_store()
+                # new_opinions = [op for op in store.list_opinions(limit=50) if op.id not in _sent_opinion_ids]
+                # new_plans = [plan for plan in store.list_plans(limit=50) if plan.id not in _sent_plan_ids]
+                new_opinions = []
+                new_plans = []
+                for op in new_opinions:
+                    d = op.to_dict()
+                    await websocket.send_json({
+                        "event_id": d["id"],
+                        "event_type": "opinion",
+                        "timestamp": op.created_at,
+                        "source": "consensus",
+                        "payload": d,
+                    })
+                    _sent_opinion_ids.add(op.id)
 
-                for op in store.list_opinions(limit=10):
-                    if op.id not in _sent_opinion_ids:
-                        d = op.to_dict()
-                        await websocket.send_json({
-                            "event_id": d["id"],
-                            "event_type": "opinion",
-                            "timestamp": op.created_at,
-                            "source": "consensus",
-                            "payload": d,
-                        })
-                        _sent_opinion_ids.add(op.id)
-
-                for plan in store.list_plans(limit=10):
-                    if plan.id not in _sent_plan_ids:
-                        d = plan.to_dict()
-                        await websocket.send_json({
-                            "event_id": d["id"],
-                            "event_type": "trade_plan",
-                            "timestamp": plan.created_at,
-                            "source": "consensus",
-                            "payload": d,
-                        })
-                        _sent_plan_ids.add(plan.id)
+                for plan in new_plans:
+                    d = plan.to_dict()
+                    await websocket.send_json({
+                        "event_id": d["id"],
+                        "event_type": "trade_plan",
+                        "timestamp": plan.created_at,
+                        "source": "consensus",
+                        "payload": d,
+                    })
+                    _sent_plan_ids.add(plan.id)
             except (WebSocketDisconnect, RuntimeError):
                 break
             except Exception as _poll_exc:
                 logger.debug("consensus_ws: poll error (non-fatal): %s", _poll_exc)
 
             # ── Coordinator status heartbeat ─────────────────────────
+            # LEGACY REMOVAL: TacoConsensus integration removed - consensus module deleted
             try:
-                from consensus.taco_consensus import get_consensus_coordinator
-                coord = get_consensus_coordinator()
-                status = coord.get_status() if hasattr(coord, "get_status") else {}
-                phase = status.get("phase", "idle") if isinstance(status, dict) else "idle"
+                # from consensus.taco_consensus import get_consensus_coordinator
+                # coord = get_consensus_coordinator()
+                # status = coord.get_status() if hasattr(coord, "get_status") else {}
+                # phase = status.get("phase", "idle") if isinstance(status, dict) else "idle"
 
                 await websocket.send_json({
                     "event_id": str(uuid.uuid4()),
@@ -1338,8 +1343,8 @@ async def consensus_ws_stream_endpoint(websocket: WebSocket):
                     "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
                     "source": "taco_consensus",
                     "payload": {
-                        "phase": phase,
-                        "status": status if isinstance(status, dict) else {},
+                        "phase": "idle",
+                        "status": {},
                     },
                 })
             except (WebSocketDisconnect, RuntimeError):
@@ -3708,20 +3713,21 @@ async def _app_lifespan(application: FastAPI):
     # EnhancedConsensusCoordinator opinion subscriber — listens for strategy_opinion events
     # on core.event_bus and triggers consensus rounds when quorum is reached
     # BUG-L13 FIX: Skip in VALIDATION_MODE to prevent 4s+ startup lag
+    # LEGACY REMOVAL: EnhancedConsensusCoordinator removed - consensus module deleted
     _is_validation = os.environ.get("MERID_VALIDATION_MODE", "") == "1"
     if _is_validation:
-        logger.info("[VALIDATION MODE] EnhancedConsensusCoordinator opinion subscriber skipped (prevents 4s+ lag)")
-        _startup_state["services"]["enhanced_consensus_coordinator"] = {"status": "skipped", "reason": "validation_mode"}
+        logger.info("[VALIDATION MODE] EnhancedConsensusCoordinator opinion subscriber skipped (prevents 4s+ lag) - consensus module deleted")
+        _startup_state["services"]["enhanced_consensus_coordinator"] = {"status": "skipped", "reason": "validation_mode_consensus_deleted"}
     else:
         try:
-            from consensus.consensus_coordinator import EnhancedConsensusCoordinator
-            _enhanced_consensus = EnhancedConsensusCoordinator.get_instance()
-            await _enhanced_consensus.start_opinion_subscriber()
-            logger.info("✅ EnhancedConsensusCoordinator opinion subscriber started")
-            _startup_state["services"]["enhanced_consensus_coordinator"] = {"status": "running", "started_at": time.time()}
+            # from consensus.consensus_coordinator import EnhancedConsensusCoordinator
+            # _enhanced_consensus = EnhancedConsensusCoordinator.get_instance()
+            # await _enhanced_consensus.start_opinion_subscriber()
+            logger.info("✅ EnhancedConsensusCoordinator opinion subscriber skipped - consensus module deleted")
+            _startup_state["services"]["enhanced_consensus_coordinator"] = {"status": "skipped", "reason": "consensus_module_deleted"}
         except Exception as e:
-            logger.warning(f"⚠️  EnhancedConsensusCoordinator opinion subscriber failed to start: {e}")
-            _startup_state["services"]["enhanced_consensus_coordinator"] = {"status": "failed", "error": str(e)}
+            logger.warning(f"⚠️  EnhancedConsensusCoordinator opinion subscriber skipped - consensus module deleted: {e}")
+            _startup_state["services"]["enhanced_consensus_coordinator"] = {"status": "skipped", "error": str(e), "reason": "consensus_module_deleted"}
 
     # OrchestratorAgentManager — already started at Phase 0.6 above
     # (do NOT call start_all() again — would double-start all agents)
@@ -4696,12 +4702,13 @@ async def _app_lifespan(application: FastAPI):
         logger.debug("SpotBasisTracker stop skipped: %s", exc)
 
     # 2. Stop ConsensusCoordinator opinion subscriber
+    # LEGACY REMOVAL: EnhancedConsensusCoordinator removed - consensus module deleted
     try:
-        from consensus.consensus_coordinator import EnhancedConsensusCoordinator as _ECC
-        await _ECC.get_instance().stop_opinion_subscriber()
-        logger.info("✅ EnhancedConsensusCoordinator opinion subscriber stopped")
+        # from consensus.consensus_coordinator import EnhancedConsensusCoordinator as _ECC
+        # await _ECC.get_instance().stop_opinion_subscriber()
+        logger.info("✅ EnhancedConsensusCoordinator opinion subscriber stop skipped - consensus module deleted")
     except Exception as exc:
-        logger.warning("EnhancedConsensusCoordinator stop failed: %s", exc)
+        logger.warning("EnhancedConsensusCoordinator stop skipped - consensus module deleted: %s", exc)
 
     # 3. OrchestratorAgentManager — stops AgentMesh, NewsMonitor, SocialBroadcaster,
     #    LaneOrchestrator, ReflectionSystem, MarketMoodBus, InsightPipeline.
