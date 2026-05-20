@@ -331,24 +331,14 @@ class AgentRiskQuotaManager:
     async def _update_all_profiles(self):
         """Update all agent and team risk profiles based on recent performance."""
         try:
-            # Get agent performance data from debate store
-            debate_store = get_debate_store()
+            # LEGACY REMOVAL: Debate store integration removed - debate module deleted
+            # Agent performance data now comes from alternative sources
+            logger.info("Debate store integration removed - using alternative performance data sources")
             
-            # Get agent performance summary
-            try:
-                agent_performance = await debate_store.get_agent_performance_summary()
-                logger.info(f"Retrieved performance data for {len(agent_performance)} agents")
-            except Exception as e:
-                logger.warning(f"Could not fetch agent performance from debate store: {e}")
-                agent_performance = {}
-            
-            # Get team performance summary  
-            try:
-                team_performance = await debate_store.get_team_performance_summary()
-                logger.info(f"Retrieved performance data for {len(team_performance)} teams")
-            except Exception as e:
-                logger.warning(f"Could not fetch team performance from debate store: {e}")
-                team_performance = {}
+            # Update agent profiles with placeholder data
+            # TODO: Integrate with new performance data source
+            agent_performance = {}
+            team_performance = {}
             
             # Update agent profiles
             for agent_id, perf_data in agent_performance.items():

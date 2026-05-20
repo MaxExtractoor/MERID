@@ -40,57 +40,8 @@ async def get_critic_history() -> Dict[str, Any]:
     except Exception as exc:
         logger.debug(f"Critic agent unavailable: {exc}")
 
-    # Fallback: derive critiques from debate store — use full debate metadata
-    critiques = []
-    try:
-        from merid.prediction.debate import get_debate_store
-        store = get_debate_store()
-        for debate in store.list_debates(limit=20):
-            # First try rounds_data for granular critique entries
-            for rnd in getattr(debate, "rounds_data", []):
-                if rnd.get("role") in ("challenger", "critic", "reviewer"):
-                    critiques.append({
-                        "debate_id": debate.id,
-                        "agent_id": rnd.get("agent_id", rnd.get("role", "unknown")),
-                        "role": rnd.get("role", "critic"),
-                        "argument": rnd.get("argument", rnd.get("text", ""))[:200],
-                        "score_delta": rnd.get("score_delta", 0),
-                        "timestamp": rnd.get("timestamp", str(getattr(debate, "created_at", ""))),
-                    })
-            # If no rounds_data, derive a critique summary from the debate itself
-            if not getattr(debate, "rounds_data", []):
-                pre = getattr(debate, "pre_debate_prob", 0.5)
-                post = getattr(debate, "post_debate_prob", 0.5)
-                shift = post - pre
-                critiques.append({
-                    "debate_id": debate.id,
-                    "agent_id": getattr(debate, "team_id", None) or "swarm",
-                    "role": "debate_review",
-                    "argument": f"Debate on {getattr(debate, 'symbol', '?')}: {getattr(debate, 'rounds', 0)} rounds, prob shifted {pre:.0%}→{post:.0%} ({shift:+.0%})",
-                    "score_delta": round(shift, 3),
-                    "timestamp": str(getattr(debate, "created_at", "")),
-                })
-    except Exception as exc2:
-        logger.debug(f"Debate store critic fallback: {exc2}")
-
-    # Also include consensus opinions as analytical critiques
-    try:
-        from merid.prediction.consensus import get_prediction_consensus_store
-        ops = get_prediction_consensus_store()
-        for op in ops.list_opinions(limit=30):
-            prob = getattr(op, "probability", 0.5)
-            conf = getattr(op, "confidence", 0.5)
-            symbol = getattr(op, "symbol", "")
-            critiques.append({
-                "agent_id": getattr(op, "agent_id", "unknown"),
-                "role": "analyst",
-                "argument": f"Opinion on {symbol}: prob={prob:.0%}, confidence={conf:.0%}",
-                "score_delta": round(prob - 0.5, 3),
-                "timestamp": str(getattr(op, "timestamp", "")),
-            })
-    except Exception as exc3:
-        logger.debug(f"Opinion store critic fallback: {exc3}")
-
+    # LEGACY REMOVAL: Debate store fallback removed - debate module deleted
+    # LEGACY REMOVAL: Consensus opinion fallback removed - consensus module deleted
     critiques.sort(key=lambda c: str(c.get("timestamp", "")), reverse=True)
     return {"critiques": critiques[:50], "count": len(critiques)}
 

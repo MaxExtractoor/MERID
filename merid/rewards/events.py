@@ -347,7 +347,7 @@ class SportsDebateEvent(RewardEvent):
     outcome_label: str = ""
     sport: str = ""
     role: str = ""                       # proposer, challenger, arbiter
-    debate_lift: Optional[float] = None  # Brier improvement from debate
+    # LEGACY REMOVAL: debate_lift removed - debate module deleted
     pre_debate_prob: float = 0.5
     post_debate_prob: Optional[float] = None
     disagreement_width: float = 0.0

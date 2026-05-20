@@ -40,16 +40,16 @@ class TradeRecord:
     final_kelly_fraction: float = 0.0
     debate_recommendation: Optional[str] = None
     exit_reason: Optional[str] = None
-    
+
     # Attribution fields (calculated later)
     base_position_size: float = 0.0  # What position size would have been with base Kelly
     debate_position_size: float = 0.0  # Actual position size with debate multiplier
-    debate_risk_amount: float = 0.0  # Additional risk from debate multiplier
-    
+    # LEGACY REMOVAL: debate_risk_amount field removed - debate module deleted
+
     # PnL fields (filled later)
     realized_pnl: Optional[float] = None
     base_pnl: Optional[float] = None  # Counterfactual PnL with base Kelly
-    debate_pnl_impact: Optional[float] = None  # PnL difference from debate sizing
+    # LEGACY REMOVAL: debate_pnl_impact field removed - debate module deleted
     exit_pnl_impact: Optional[float] = None  # PnL difference from debate exit
 
 

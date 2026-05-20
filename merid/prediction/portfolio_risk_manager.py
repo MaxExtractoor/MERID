@@ -37,11 +37,11 @@ class RiskLimit:
 
 @dataclass
 class DebateRiskAllocation:
-    """Risk allocation tracking for debate-driven positions."""
+    """LEGACY REMOVAL: Risk allocation tracking for debate-driven positions - debate module deleted."""
     symbol: str
     base_risk: float  # Risk at base Kelly
     debate_multiplier: float  # Applied multiplier
-    debate_risk: float  # Additional risk from debate boost
+    # LEGACY REMOVAL: debate_risk field removed - debate module deleted
     total_risk: float  # Combined risk
     timestamp: float
 
@@ -52,14 +52,15 @@ class PortfolioRiskSnapshot:
     total_equity: float
     total_var: float
     base_risk_total: float  # Risk without debate multipliers
-    debate_risk_total: float  # Additional risk from debate boosts
+    # LEGACY REMOVAL: debate_risk_total field removed - debate module deleted
     total_risk: float  # Combined portfolio risk
-    debate_boost_share: float  # % of total risk from debate boosts
+    # LEGACY REMOVAL: debate_boost_share field removed - debate module deleted
     active_positions: int
     boosted_positions: int
     reduced_positions: int
     timestamp: float
     risk_limits_status: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
 
 
 class PortfolioRiskManager:
