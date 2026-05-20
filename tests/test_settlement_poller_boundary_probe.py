@@ -448,10 +448,10 @@ class TestDownstreamHealthEndpointBoundary:
 
 class TestDownstreamVoidPropagationBoundary:
     """
-    PROBE-6: Voided settlement isolation from opinions/PnL/exposure.
-    
+    PROBE-6: Voided settlement isolation from PnL/exposure.
+
     CANCELLED/INVALID must never propagate to:
-    - Opinion aggregation
+    - PnL aggregation
     - PnL calculations
     - Exposure caps
     """
