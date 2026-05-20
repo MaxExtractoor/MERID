@@ -251,28 +251,29 @@ class HistoricalReplayHarness:
     
     async def _configure_for_mode(self, mode: ReplayMode) -> None:
         """Configure coordinator for baseline or tuned mode."""
-        from consensus.consensus_coordinator import get_consensus_coordinator
-        
-        coord = get_consensus_coordinator()
-        
-        if mode == ReplayMode.BASELINE:
-            # Disable social advisory and incentives
-            coord.config.social_advisory_max_nudge = 0.0
-            # Reset all social weights to 0
-            for source in coord.config.social_advisory_weights:
-                coord.config.social_advisory_weights[source] = 0.0
-            logger.debug("Configured for BASELINE: incentives disabled")
-        
-        else:  # INCENTIVE_TUNED
-            # Enable social advisory with conservative defaults
-            coord.config.social_advisory_max_nudge = 0.05
-            coord.config.social_advisory_weights = {
-                "twitter": 0.1,
-                "reddit": 0.1,
-                "newsapi": 0.05,
-            }
-            logger.debug("Configured for INCENTIVE_TUNED: incentives enabled")
-    
+        # LEGACY REMOVAL: Consensus module deleted - configuration disabled
+        # from consensus.consensus_coordinator import get_consensus_coordinator
+        # coord = get_consensus_coordinator()
+        #
+        # if mode == ReplayMode.BASELINE:
+        #     # Disable social advisory and incentives
+        #     coord.config.social_advisory_max_nudge = 0.0
+        #     # Reset all social weights to 0
+        #     for source in coord.config.social_advisory_weights:
+        #         coord.config.social_advisory_weights[source] = 0.0
+        #     logger.debug("Configured for BASELINE: incentives disabled")
+        #
+        # else:  # INCENTIVE_TUNED
+        #     # Enable social advisory with conservative defaults
+        #     coord.config.social_advisory_max_nudge = 0.05
+        #     coord.config.social_advisory_weights = {
+        #         "twitter": 0.1,
+        #         "reddit": 0.1,
+        #         "newsapi": 0.05,
+        #     }
+        #     logger.debug("Configured for INCENTIVE_TUNED: incentives enabled")
+        logger.debug(f"Replay mode configuration disabled - consensus module deleted: {mode}")
+
     async def _load_historical_events(self, scenario: ReplayScenario) -> List[Dict[str, Any]]:
         """Load historical market events for the scenario window."""
         # Try to load from fixtures first
@@ -353,24 +354,28 @@ class HistoricalReplayHarness:
     
     async def _collect_results(self, result: ReplayRunResult) -> ReplayRunResult:
         """Collect final metrics from coordinator and ledger."""
-        from consensus.consensus_coordinator import get_consensus_coordinator
-        
-        coord = get_consensus_coordinator()
-        
-        # Get leaderboard snapshot
-        result.agent_leaderboard = coord.incentive_ledger.leaderboard(top_n=25)
-        
-        # Calculate synthetic PnL based on agent performance
-        total_pnl = 0.0
-        for agent in result.agent_leaderboard:
-            total_pnl += agent.get("pnl", 0.0)
-        
-        result.total_pnl = total_pnl
-        
-        # Synthetic hit rate (would come from actual market resolutions)
-        if result.agent_leaderboard:
-            accuracies = [a.get("accuracy", 0) for a in result.agent_leaderboard]
-            result.hit_rate = sum(accuracies) / len(accuracies)
+        # LEGACY REMOVAL: Consensus module deleted - metrics collection disabled
+        # from consensus.consensus_coordinator import get_consensus_coordinator
+        # coord = get_consensus_coordinator()
+        #
+        # # Get leaderboard snapshot
+        # result.agent_leaderboard = coord.incentive_ledger.leaderboard(top_n=25)
+        #
+        # # Calculate synthetic PnL based on agent performance
+        # total_pnl = 0.0
+        # for agent in result.agent_leaderboard:
+        #     total_pnl += agent.get("pnl", 0.0)
+        #
+        # result.total_pnl = total_pnl
+        #
+        # # Synthetic hit rate (would come from actual market resolutions)
+        # if result.agent_leaderboard:
+        #     accuracies = [a.get("accuracy", 0) for a in result.agent_leaderboard]
+        #     result.hit_rate = sum(accuracies) / len(accuracies)
+        logger.debug("Results collection disabled - consensus module deleted")
+        result.agent_leaderboard = []
+        result.total_pnl = 0.0
+        result.hit_rate = 0.0
         
         result.resolved_markets = len(result.agent_leaderboard)
         result.total_markets = max(result.resolved_markets, 10)
