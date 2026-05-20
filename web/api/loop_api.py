@@ -181,24 +181,26 @@ def get_guard_verdicts(
         logger.debug(f"guard_verdicts guard unavailable: {e}")
 
     # Fallback: derive verdicts from consensus blocks
+    # LEGACY REMOVAL: Consensus module deleted - consensus fallback disabled
     verdicts = []
     try:
-        from merid.prediction.consensus import get_prediction_consensus_store
-        _cs = get_prediction_consensus_store()
-        for op in _cs.list_opinions(limit=limit):
-            prob = getattr(op, "probability", 0.5)
-            conf = getattr(op, "confidence", 0.5)
-            sym = getattr(op, "symbol", "")
-            verdicts.append({
-                "ts": str(getattr(op, "timestamp", "")),
-                "ticker": sym,
-                "action": "approve" if prob > 0.6 else ("reject" if prob < 0.4 else "hold"),
-                "allowed": prob > 0.4,
-                "reason": f"Opinion by {getattr(op, 'agent_id', '?')}: prob={prob:.0%}, conf={conf:.0%} on {sym}",
-                "source": "consensus_opinion",
-            })
+        # from merid.prediction.consensus import get_prediction_consensus_store
+        # _cs = get_prediction_consensus_store()
+        # for op in _cs.list_opinions(limit=limit):
+        #     prob = getattr(op, "probability", 0.5)
+        #     conf = getattr(op, "confidence", 0.5)
+        #     sym = getattr(op, "symbol", "")
+        #     verdicts.append({
+        #         "ts": str(getattr(op, "timestamp", "")),
+        #         "ticker": sym,
+        #         "action": "approve" if prob > 0.6 else ("reject" if prob < 0.4 else "hold"),
+        #         "allowed": prob > 0.4,
+        #         "reason": f"Opinion by {getattr(op, 'agent_id', '?')}: prob={prob:.0%}, conf={conf:.0%} on {sym}",
+        #         "source": "consensus_opinion",
+        #     })
+        logger.debug("guard_verdicts consensus fallback disabled - consensus module deleted")
     except Exception as exc2:
-        logger.debug(f"guard_verdicts consensus fallback: {exc2}")
+        logger.debug(f"guard_verdicts consensus fallback disabled - consensus module deleted: {exc2}")
 
     # Also include agent cycle scan verdicts
     try:
