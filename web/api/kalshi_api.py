@@ -2088,26 +2088,28 @@ async def get_order_lineage(order_id: str) -> Dict[str, Any]:
         lineage["warnings"].append(f"Agent grid lookup failed: {exc}")
     
     # 3. Check consensus
+    # LEGACY REMOVAL: Consensus module deleted - consensus lookup disabled
     try:
-        from consensus.taco_consensus import get_consensus_coordinator
-        consensus = get_consensus_coordinator()
-        
-        # Check if this order was consensus-approved
-        for decision in getattr(consensus, "recent_decisions", []):
-            if decision.get("order_id") == order_id:
-                lineage["chain"]["consensus"] = {
-                    "consensus_id": decision.get("decision_id"),
-                    "approved": decision.get("approved"),
-                    "timestamp": decision.get("timestamp"),
-                    "participating_agents": decision.get("agents", []),
-                    "confidence": decision.get("confidence"),
-                }
-                break
-        
-        if "consensus" not in lineage["chain"]:
-            lineage["chain"]["consensus"] = {"note": "No consensus record - single-agent decision or pre-consensus routing"}
+        # from consensus.taco_consensus import get_consensus_coordinator
+        # consensus = get_consensus_coordinator()
+        #
+        # # Check if this order was consensus-approved
+        # for decision in getattr(consensus, "recent_decisions", []):
+        #     if decision.get("order_id") == order_id:
+        #         lineage["chain"]["consensus"] = {
+        #             "consensus_id": decision.get("decision_id"),
+        #             "approved": decision.get("approved"),
+        #             "timestamp": decision.get("timestamp"),
+        #             "participating_agents": decision.get("agents", []),
+        #             "confidence": decision.get("confidence"),
+        #         }
+        #         break
+        #
+        # if "consensus" not in lineage["chain"]:
+        #     lineage["chain"]["consensus"] = {"note": "No consensus record - single-agent decision or pre-consensus routing"}
+        lineage["chain"]["consensus"] = {"note": "Consensus module deleted - single-agent decision"}
     except Exception as exc:
-        lineage["warnings"].append(f"Consensus lookup failed: {exc}")
+        lineage["warnings"].append(f"Consensus lookup disabled - consensus module deleted: {exc}")
     
     # 4. Check risk decision
     try:
