@@ -20,7 +20,7 @@ const ProtectView = lazy(() => import("./views/ProtectView"));
 const KalshiAgentPerformanceView = lazy(() => import("./views/KalshiAgentPerformanceView"));
 const KalshiSentimentView = lazy(() => import("./views/KalshiSentimentView"));
 const KalshiVolDashboardView = lazy(() => import("./views/KalshiVolDashboardView"));
-const SwarmConsensusMatrix = lazy(() => import("./views/SwarmConsensusMatrix"));
+// LEGACY REMOVAL: SwarmConsensusMatrix removed - consensus module deleted
 const CalibrationDashboardView = lazy(() => import("./views/CalibrationDashboardView"));
 const OperatorDashboard = lazy(() => import("./views/OperatorDashboard"));
 
@@ -59,7 +59,7 @@ const VIEW_COMPONENTS: Record<string, React.LazyExoticComponent<React.ComponentT
   "analyze-vol": KalshiVolDashboardView,  // Also used for edge signals
   
   // Stage 3: Consensus (Individual Views)
-  "consensus-swarm": SwarmConsensusMatrix,  // Also shows debates
+  // LEGACY REMOVAL: consensus-swarm (SwarmConsensusMatrix) removed - consensus module deleted
   "consensus-performance": KalshiAgentPerformanceView,
   "consensus-calibration": CalibrationDashboardView,
   
