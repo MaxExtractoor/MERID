@@ -426,35 +426,35 @@ class TestNetworkPartition:
 
     def test_consensus_timeout_escalation_tracking(self):
         """Test consensus timeout escalation tracking structure."""
-        from consensus.consensus_coordinator import ConsensusCoordinator
-        coord = ConsensusCoordinator.__new__(ConsensusCoordinator)
-        coord._consecutive_timeouts = {}
-        coord._consecutive_timeouts["SYM1"] = 0
-        for _ in range(3):
-            coord._consecutive_timeouts["SYM1"] += 1
-        assert coord._consecutive_timeouts["SYM1"] == 3
+        # LEGACY REMOVAL: Consensus module deleted - test disabled
+        # from consensus.consensus_coordinator import ConsensusCoordinator
+        # coord = ConsensusCoordinator.__new__(ConsensusCoordinator)
+        # coord._consecutive_timeouts = {}
+        # coord._consecutive_timeouts["SYM1"] = 0
+        # for _ in range(3):
+        #     coord._consecutive_timeouts["SYM1"] += 1
+        # assert coord._consecutive_timeouts["SYM1"] == 3
+        self.skipTest("Consensus module deleted")
 
     def test_heartbeat_deadman_switch_levels(self):
         """Test heartbeat dead-man's switch at all severity levels."""
-        from consensus.consensus_coordinator import ConsensusCoordinator
-        coord = ConsensusCoordinator.__new__(ConsensusCoordinator)
-        coord._rounds = {}
-        coord._round_history = []
-        coord._pending_opinions = {}
-        coord._registered_agents = {}
-        coord._limp_mode = False
-
-        # Fresh heartbeat → ok
-        coord._last_heartbeat = time.time()
-        assert coord.check_heartbeat() == "ok"
-
-        # 2 min stale → defensive
-        coord._last_heartbeat = time.time() - 130
-        assert coord.check_heartbeat() == "defensive"
-
-        # 5+ min stale → kill
-        coord._last_heartbeat = time.time() - 310
-        assert coord.check_heartbeat() == "kill"
+        # LEGACY REMOVAL: Consensus module deleted - test disabled
+        # from consensus.consensus_coordinator import ConsensusCoordinator
+        # coord = ConsensusCoordinator.__new__(ConsensusCoordinator)
+        # coord._rounds = {}
+        # coord._round_history = []
+        # coord._pending_opinions = {}
+        # coord._registered_agents = {}
+        # coord._limp_mode = False
+        #
+        # # Fresh heartbeat → ok
+        # coord._last_heartbeat = time.time()
+        # assert coord.check_heartbeat() == "ok"
+        #
+        # # 2 min stale → defensive
+        # coord._last_heartbeat = time.time() - 130
+        # assert coord.check_heartbeat() == "defensive"
+        self.skipTest("Consensus module deleted")
 
     def test_partial_fill_metadata(self):
         """Test partial fill detection metadata structure."""
