@@ -504,43 +504,21 @@ class TestKalshiDomainE2E(unittest.TestCase):
 
     def test_prediction_opinion_to_plan(self):
         """Submit prediction-domain opinions through consensus."""
-        from consensus.taco_consensus import TaCoConsensusCoordinator, AgentOpinion
-        from merid.signals.decay import DecayEnvelope, SignalSnapshot
-
-        TaCoConsensusCoordinator._instance = None
-        coordinator = TaCoConsensusCoordinator(min_opinions_for_consensus=2)
-        now = time.time()
-
-        snap = SignalSnapshot(
-            snapshot_id="kalshi-snap",
-            timestamp=now,
-            signals=[
-                DecayEnvelope.create(0.7, now - 60, "prediction", "kalshi_edge", now),
-            ],
-        )
-
-        loop = asyncio.new_event_loop()
-        loop.run_until_complete(coordinator.submit_opinion(AgentOpinion(
-            opinion_id="k1", agent_id="prediction_agent", role="prediction_analyst",
-            symbol="KXBTC-100K", venue="kalshi", stance="bull", score=0.75,
-            confidence=0.85, rationale="BTC to 100K by March — 65 cent yes, edge 12%",
-            signal_snapshot_id=snap.snapshot_id,
-            signal_freshness=snap.avg_freshness(),
-            decay_metadata={"prediction": 0.95},
-        )))
-        loop.run_until_complete(coordinator.submit_opinion(AgentOpinion(
-            opinion_id="k2", agent_id="risk_agent", role="risk_manager",
-            symbol="KXBTC-100K", venue="kalshi", stance="bull", score=0.5,
-            confidence=0.7, rationale="Within limits, spread acceptable",
-            signal_freshness=0.9,
-        )))
-        loop.close()
-
-        plans = list(coordinator._active_plans.values())
-        self.assertGreater(len(plans), 0)
-        plan = plans[0]
-        self.assertEqual(plan.symbol, "KXBTC-100K")
-        self.assertGreater(plan.avg_signal_freshness, 0.8)
+        # LEGACY REMOVAL: Consensus module deleted - test disabled
+        # from consensus.taco_consensus import TaCoConsensusCoordinator, AgentOpinion
+        # from merid.signals.decay import DecayEnvelope, SignalSnapshot
+        #
+        # TaCoConsensusCoordinator._instance = None
+        # coordinator = TaCoConsensusCoordinator(min_opinions_for_consensus=2)
+        # now = time.time()
+        #
+        # snap = SignalSnapshot(
+        #     snapshot_id="kalshi-snap",
+        #     timestamp=now,
+        #     signals=[
+        #         DecayEnvelope.create(0.7, now - 60, "prediction", "kalshi_edge", now),
+        #     ],
+        self.skipTest("Consensus module deleted")
 
     def test_prediction_guard_applies_prediction_caps(self):
         """Prediction domain should have tighter caps than crypto."""
@@ -590,44 +568,46 @@ class TestFlowDomainE2E(unittest.TestCase):
 
     def test_flow_opinion_to_plan(self):
         """Submit flow-domain opinions through consensus."""
-        from consensus.taco_consensus import TaCoConsensusCoordinator, AgentOpinion
-        from merid.signals.decay import DecayEnvelope, SignalSnapshot
-
-        TaCoConsensusCoordinator._instance = None
-        coordinator = TaCoConsensusCoordinator(min_opinions_for_consensus=2)
-        now = time.time()
-
-        snap = SignalSnapshot(
-            snapshot_id="flow-snap",
-            timestamp=now,
-            signals=[
-                DecayEnvelope.create(0.9, now - 5, "social", "kol_mention", now),
-                DecayEnvelope.create(0.8, now - 10, "meme", "whale_buy", now),
-            ],
-        )
-
-        loop = asyncio.new_event_loop()
-        loop.run_until_complete(coordinator.submit_opinion(AgentOpinion(
-            opinion_id="f1", agent_id="flow_detector", role="flow_analyst",
-            symbol="BONK", venue="jupiter", stance="strong_bull", score=0.9,
-            confidence=0.7, rationale="KOL mention + whale buy detected, fresh token",
-            signal_snapshot_id=snap.snapshot_id,
-            signal_freshness=snap.avg_freshness(),
-            signal_stale_count=0,
-            decay_metadata={"social": 0.99, "meme": 0.98},
-        )))
-        loop.run_until_complete(coordinator.submit_opinion(AgentOpinion(
-            opinion_id="f2", agent_id="risk_agent", role="risk_manager",
-            symbol="BONK", venue="jupiter", stance="bull", score=0.4,
-            confidence=0.6, rationale="High risk but within meme allocation",
-            signal_freshness=0.95,
-        )))
-        loop.close()
-
-        plans = list(coordinator._active_plans.values())
-        self.assertGreater(len(plans), 0)
-        plan = plans[0]
-        self.assertEqual(plan.symbol, "BONK")
+        # LEGACY REMOVAL: Consensus module deleted - test disabled
+        # from consensus.taco_consensus import TaCoConsensusCoordinator, AgentOpinion
+        # from merid.signals.decay import DecayEnvelope, SignalSnapshot
+        #
+        # TaCoConsensusCoordinator._instance = None
+        # coordinator = TaCoConsensusCoordinator(min_opinions_for_consensus=2)
+        # now = time.time()
+        #
+        # snap = SignalSnapshot(
+        #     snapshot_id="flow-snap",
+        #     timestamp=now,
+        #     signals=[
+        #         DecayEnvelope.create(0.9, now - 5, "social", "kol_mention", now),
+        #         DecayEnvelope.create(0.8, now - 10, "meme", "whale_buy", now),
+        #     ],
+        # )
+        #
+        # loop = asyncio.new_event_loop()
+        # loop.run_until_complete(coordinator.submit_opinion(AgentOpinion(
+        #     opinion_id="f1", agent_id="flow_detector", role="flow_analyst",
+        #     symbol="BONK", venue="jupiter", stance="strong_bull", score=0.9,
+        #     confidence=0.7, rationale="KOL mention + whale buy detected, fresh token",
+        #     signal_snapshot_id=snap.snapshot_id,
+        #     signal_freshness=snap.avg_freshness(),
+        #     signal_stale_count=0,
+        #     decay_metadata={"social": 0.99, "meme": 0.98},
+        # )))
+        # loop.run_until_complete(coordinator.submit_opinion(AgentOpinion(
+        #     opinion_id="f2", agent_id="risk_agent", role="risk_manager",
+        #     symbol="BONK", venue="jupiter", stance="bull", score=0.4,
+        #     confidence=0.6, rationale="High risk but within meme allocation",
+        #     signal_freshness=0.95,
+        # )))
+        # loop.close()
+        #
+        # plans = list(coordinator._active_plans.values())
+        # self.assertGreater(len(plans), 0)
+        # plan = plans[0]
+        # self.assertEqual(plan.symbol, "BONK")
+        self.skipTest("Consensus module deleted")
 
     def test_flow_guard_respects_crypto_caps(self):
         """Meme/flow trades should fall under crypto domain caps."""
