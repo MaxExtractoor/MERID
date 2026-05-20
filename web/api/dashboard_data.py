@@ -56,29 +56,29 @@ async def get_agents_status():
 @router.get("/consensus/recent")
 async def get_recent_consensus():
     """Get recent consensus rounds from consensus engine."""
+    # LEGACY REMOVAL: ConsensusEngine integration removed - consensus module deleted
     try:
-        from core.consensus_engine import ConsensusEngine
-        from core.consensus_logging import get_consensus_logger
-        
-        logger = get_consensus_logger()
-        recent = logger.get_recent_rounds(limit=10)
-        
+        # from core.consensus_engine import ConsensusEngine
+        # from core.consensus_logging import get_consensus_logger
+        # logger = get_consensus_logger()
+        # recent = logger.get_recent_rounds(limit=10)
+        # rounds_data = []
+        # for round_data in recent:
+        #     rounds_data.append({
+        #         'round_id': round_data.round_id,
+        #         'signal': round_data.outcome.signal if round_data.outcome else None,
+        #         'confidence': round_data.outcome.confidence if round_data.outcome else 0,
+        #         'votes_for': len([v for v in round_data.votes if v.vote_value > 0.5]),
+        #         'votes_against': len([v for v in round_data.votes if v.vote_value <= 0.5]),
+        #         'timestamp': round_data.started_at.isoformat(),
+        #         'duration_ms': round_data.duration_ms
+        #     })
         rounds_data = []
-        for round_data in recent:
-            rounds_data.append({
-                'round_id': round_data.round_id,
-                'signal': round_data.outcome.signal if round_data.outcome else None,
-                'confidence': round_data.outcome.confidence if round_data.outcome else 0,
-                'votes_for': len([v for v in round_data.votes if v.vote_value > 0.5]),
-                'votes_against': len([v for v in round_data.votes if v.vote_value <= 0.5]),
-                'timestamp': round_data.started_at.isoformat(),
-                'duration_ms': round_data.duration_ms
-            })
-        
         return {
             'status': 'success',
             'rounds': rounds_data,
-            'count': len(rounds_data)
+            'count': len(rounds_data),
+            'message': 'Consensus module deleted'
         }
     except Exception as e:
         return {
