@@ -69,8 +69,9 @@ from merid.event_venues.kalshi.take_profit import TakeProfitManager, get_tp_conf
 from merid.prediction.risk import CycleCapTracker, CycleCapConfig
 from merid.tick_events import TickContext, get_tick_bus
 from utils.logger import get_logger
-from merid.prediction.consensus_bridge import get_kalshi_consensus_adapter
-from merid.swarm.consensus_aggregator import get_consensus_aggregator
+# LEGACY REMOVAL: Consensus modules deleted - imports removed
+# from merid.prediction.consensus_bridge import get_kalshi_consensus_adapter
+# from merid.swarm.consensus_aggregator import get_consensus_aggregator
 
 # Cross-asset arbiter integration
 from merid.prediction.crypto_top_edge import (
@@ -6390,9 +6391,11 @@ class KalshiTradingAgent:
             if not asset or asset == "UNK":
                 asset = self.config.assets[0] if self.config.assets else ""
             timeframe = self.config.timeframes[0] if self.config.timeframes else ""
-            consensus = get_consensus_aggregator().get_consensus(asset, timeframe)
+            # LEGACY REMOVAL: Consensus module deleted - consensus check disabled
+            # consensus = get_consensus_aggregator().get_consensus(asset, timeframe)
+            consensus = None
 
-            if consensus is None or consensus.status == ConsensusStatus.STALE:
+            if consensus is None or (consensus and consensus.status == ConsensusStatus.STALE):
                 self._apply_solo_trade_cap(signal)
                 # Return the mutated (capped) contracts, not the original order_contracts
                 capped = getattr(signal, "contracts", None)
@@ -6951,47 +6954,14 @@ class KalshiTradingAgent:
             ]
 
             # Peer votes: map ConsensusAggregator raw_proposals → approve/reject/abstain
-            try:
-                from merid.swarm.consensus_aggregator import get_consensus_aggregator as _get_ca
-                _peer_asset = self._strategy._extract_asset_from_market_id(market.market_id) if (self._strategy and market) else ""
-                if not _peer_asset or _peer_asset == "UNK":
-                    _peer_asset = self.config.assets[0] if self.config.assets else ""
-                _peer_tf = self.config.timeframes[0] if self.config.timeframes else ""
-                _cv = _get_ca().get_consensus(_peer_asset, _peer_tf)
-                if _cv is not None:
-                    for _rp in _cv.raw_proposals:
-                        if _rp.agent_id == self.agent_id:
-                            continue  # already counted in base votes above
-                        _peer_decision = (
-                            "approve" if _rp.direction == side
-                            else "reject" if _rp.direction in ("yes", "no") and _rp.direction != side
-                            else "abstain"
-                        )
-                        _sce_votes.append(_AgentVote(
-                            agent_id=_rp.agent_id,
-                            decision=_peer_decision,
-                            confidence=_rp.confidence,
-                            reasoning=f"peer direction={_rp.direction}",
-                            weight=0.5 if _rp.downweight else 1.0,
-                        ))
-            except Exception as _cv_err:
-                self.logger.debug("swarm_engine_peer_votes: %s", _cv_err)
+            # LEGACY REMOVAL: Consensus module deleted - peer votes disabled
+            pass
 
-            _sce_result = await asyncio.wait_for(
-                _get_sce().run_consensus([_sce_proposal], {_sce_pid: _sce_votes}),
-                timeout=3.0,
-            )
-            if not _sce_result:
-                self.logger.info(
-                    "swarm_engine_vetoed: %s side=%s action=%s size=%s",
-                    market.market_id, side, action, size,
-                )
-                return
+            # Apply solo trade cap if no consensus
+            # LEGACY REMOVAL: Consensus module deleted - swarm engine disabled
+            pass
 
-        except Exception as _sce_exc:
-            self.logger.debug("swarm_engine_gate (fail-open): %s", _sce_exc)
-
-        # === KalshiCore Agent Pipeline ===
+            # === KalshiCore Agent Pipeline ===
         # Fire all 8 LLM-based reasoning agents against this trade proposal in the
         # background.  Results are recorded in Neo4j + the reflection system so agents
         # learn over time.  Never blocks trade execution — always fail-open.
@@ -7507,19 +7477,20 @@ class KalshiTradingAgent:
             _safe = bool(getattr(_eg, "safe_to_trade", True) and not getattr(_eg, "blocked", False))
             _eg_sources = [r.source for r in (_eg.reasons or [])]
             _cv = None
-            try:
-                _ca = get_consensus_aggregator().get_consensus(
-                    self.config.assets[0] if self.config.assets else "",
-                    self.config.timeframes[0] if self.config.timeframes else "",
-                )
-                if _ca:
-                    _cv = {
-                        "direction": _ca.consensus_direction,
-                        "p": _ca.consensus_probability,
-                        "status": _ca.status.value,
-                    }
-            except Exception as e:
-                self.logger.debug(f"Silent error suppressed: {e}")
+            # LEGACY REMOVAL: Consensus module deleted - consensus check disabled
+            # try:
+            #     _ca = get_consensus_aggregator().get_consensus(
+            #         self.config.assets[0] if self.config.assets else "",
+            #         self.config.timeframes[0] if self.config.timeframes else "",
+            #     )
+            #     if _ca:
+            #         _cv = {
+            #             "direction": _ca.consensus_direction,
+            #             "p": _ca.consensus_probability,
+            #             "status": _ca.status.value,
+            #         }
+            # except Exception as e:
+            #     self.logger.debug(f"Silent error suppressed: {e}")
             log_execution_decision(
                 market=market.market_id,
                 side=str(side),
@@ -7766,11 +7737,13 @@ class KalshiTradingAgent:
                 self.logger.debug(f"Performance tracker record error (ignored): {exc}")
 
             # Wire 3 audit: write ConsensusBlock for replay/audit trail
+            # LEGACY REMOVAL: Consensus module deleted - consensus integration disabled
             try:
                 from merid.lanes.consensus_integration import create_consensus_block_from_lane
                 _audit_asset = self.config.assets[0] if self.config.assets else ""
                 _audit_tf = self.config.timeframes[0] if self.config.timeframes else ""
-                _audit_consensus = get_consensus_aggregator().get_consensus(_audit_asset, _audit_tf)
+                # _audit_consensus = get_consensus_aggregator().get_consensus(_audit_asset, _audit_tf)
+                _audit_consensus = None
                 create_consensus_block_from_lane(
                     market_data={
                         "ticker": market.market_id,
@@ -8422,19 +8395,19 @@ class KalshiTradingAgent:
                 )
                 return
 
-            proposal = get_kalshi_consensus_adapter().signal_to_proposal(
-                signal=signal,
-                agent_id=self.config.agent_id,
-                asset=asset,
-                timeframe=timeframe,
-                archetype=self.config.archetype,
-                live_markets=self._live_markets,
-                track_record=getattr(self, "_track_record", None),
-            )
-            get_consensus_aggregator().submit_proposal(proposal)
+            # LEGACY REMOVAL: Consensus module deleted - proposal submission disabled
+            # proposal = get_kalshi_consensus_adapter().signal_to_proposal(
+            #     signal=signal,
+            #     agent_id=self.config.agent_id,
+            #     asset=asset,
+            #     timeframe=timeframe,
+            #     archetype=self.config.archetype,
+            #     live_markets=self._live_markets,
+            #     track_record=getattr(self, "_track_record", None),
+            # )
+            # get_consensus_aggregator().submit_proposal(proposal)
             self.logger.debug(
-                "consensus_proposal_submitted: %s %s->%s conf=%.2f",
-                self.config.name, asset, proposal.direction, proposal.confidence,
+                "consensus_proposal_submitted disabled - consensus module deleted",
             )
         except Exception as exc:
             self.logger.warning("consensus_proposal_failed (non-fatal): %s", exc)
@@ -8620,7 +8593,9 @@ class KalshiTradingAgent:
                     is_fallback=is_fallback,
                     data_quality_flags=data_quality_flags,
                 )
-                get_consensus_aggregator().submit_proposal(proposal)
+                # LEGACY REMOVAL: Consensus module deleted - proposal submission disabled
+                # get_consensus_aggregator().submit_proposal(proposal)
+                self.logger.debug("Consensus proposal submission disabled - consensus module deleted")
             else:
                 self.logger.debug(
                     "_submit_to_consensus: skip AgentProposal (unresolved asset) agent=%s market=%s",
@@ -8647,13 +8622,6 @@ class KalshiTradingAgent:
         timeframe: str,
     ) -> Optional[Any]:
         """Get current consensus view from SwarmConsensusAggregator."""
-        try:
-            from merid.swarm.consensus_aggregator import get_consensus_aggregator
-            aggregator = get_consensus_aggregator()
-            return aggregator.get_consensus(asset, timeframe)
-        except Exception as exc:
-            self.logger.debug(f"Consensus fetch error: {exc}")
-            return None
-        except Exception as exc:
-            self.logger.debug(f"Consensus fetch error: {exc}")
-            return None
+        # LEGACY REMOVAL: Consensus module deleted - consensus fetch disabled
+        self.logger.debug("Consensus fetch disabled - consensus module deleted")
+        return None
