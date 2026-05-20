@@ -183,13 +183,9 @@ class SnapshotManager:
         
         # Consensus state collector
         def collect_consensus() -> Dict[str, Any]:
-            try:
-                from consensus.consensus_engine import get_consensus_engine
-                engine = get_consensus_engine()
-                return engine.get_status()
-            except Exception as _ce_exc:
-                logger.debug("Consensus state collection failed: %s", _ce_exc)
-                return {}
+            # LEGACY REMOVAL: Consensus module deleted - collector disabled
+            logger.debug("Consensus state collection disabled - consensus module deleted")
+            return {}
         
         self.register_collector("config", collect_config)
         self.register_collector("agents", collect_agents)
