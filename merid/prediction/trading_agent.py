@@ -8628,18 +8628,7 @@ class KalshiTradingAgent:
                     market.market_id,
                 )
 
-            # ── Submit AgentOpinion to TaCoConsensusCoordinator ───────────
-            # This feeds the debate-orchestration loop which scans _opinions
-            # for high-disagreement Kalshi symbols.
-            self._submit_taco_opinion(
-                ticker=market.market_id,
-                prob=prob,
-                conf=conf,
-                direction=direction,
-                reasoning_tag=reasoning_tag,
-                signal_sources=signal_sources,
-                market_ctx=market_ctx,
-            )
+            # LEGACY REMOVAL: TaCoConsensusCoordinator opinion submission removed
 
             self.logger.debug(
                 "Submitted Kalshi-market-driven consensus: %s @ %.1f%% "
@@ -8651,91 +8640,6 @@ class KalshiTradingAgent:
         except Exception as exc:
             self.logger.debug("Consensus submission error: %s", exc)
             return False
-
-    def _submit_taco_opinion(
-        self,
-        ticker: str,
-        prob: float,
-        conf: float,
-        direction: str,
-        reasoning_tag: str,
-        signal_sources: list,
-        market_ctx: dict,
-    ) -> None:
-        """Submit an AgentOpinion to TaCoConsensusCoordinator.
-
-        The debate-orchestration loop reads ``coordinator._opinions`` keyed by
-        symbol to find Kalshi markets with high inter-agent disagreement and
-        create debate sessions.  Without this submission, debates are never
-        triggered from real Kalshi market data.
-
-        ``score`` maps agent probability → −1..+1:
-          - P(YES) = 1.0 → score = +1.0 (strong YES)
-          - P(YES) = 0.5 → score =  0.0 (neutral)
-          - P(YES) = 0.0 → score = −1.0 (strong NO)
-        """
-        try:
-            import uuid
-            from consensus.taco_consensus import AgentOpinion, Stance, get_consensus_coordinator
-
-            score = round((prob - 0.5) * 2.0, 4)  # map 0-1 → -1..+1
-
-            if score >= 0.6:
-                stance = Stance.STRONG_BULL.value
-            elif score >= 0.3:
-                stance = Stance.BULL.value
-            elif score <= -0.6:
-                stance = Stance.STRONG_BEAR.value
-            elif score <= -0.3:
-                stance = Stance.BEAR.value
-            else:
-                stance = Stance.NEUTRAL.value
-
-            # Horizon from seconds_to_expiry
-            secs = market_ctx.get("seconds_to_expiry")
-            if secs is not None:
-                if secs < 3_600:
-                    horizon = "short"
-                elif secs < 86_400:
-                    horizon = "medium"
-                else:
-                    horizon = "long"
-            else:
-                horizon = "short"
-
-            opinion = AgentOpinion(
-                opinion_id=f"op_{uuid.uuid4().hex[:12]}",
-                agent_id=self.agent_id,
-                role=getattr(self.config, "archetype", "trader"),
-                symbol=ticker,
-                venue="kalshi",
-                stance=stance,
-                score=score,
-                confidence=conf,
-                rationale=reasoning_tag,
-                horizon=horizon,
-                data_sources=signal_sources,
-                supporting_data={k: v for k, v in market_ctx.items() if v is not None},
-            )
-
-            coordinator = get_consensus_coordinator()
-            import asyncio as _aio
-            try:
-                loop = _aio.get_running_loop()
-                # BUG-FIX: Add done callback to catch task exceptions
-                _task = loop.create_task(
-                    coordinator.submit_opinion(opinion),
-                    name=f"taco-opinion-{opinion.opinion_id[:8]}"
-                )
-                def _on_done(t):
-                    if not t.cancelled() and t.exception():
-                        self.logger.debug("TaCo opinion task failed: %s", t.exception())
-                _task.add_done_callback(_on_done)
-            except RuntimeError:
-                _aio.run(coordinator.submit_opinion(opinion))
-
-        except Exception as _te:
-            self.logger.debug("TaCo opinion submission skipped: %s", _te)
 
     def _get_consensus(
         self,

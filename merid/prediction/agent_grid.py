@@ -394,13 +394,7 @@ class AgentGrid:
 
         # REMOVED: PortfolioRiskAgent startup - not used in 15m stack
 
-        # Purge stale consensus opinions from before this startup (BUG-L8)
-        try:
-            from consensus.consensus_coordinator import EnhancedConsensusCoordinator
-            EnhancedConsensusCoordinator.get_instance().clear_stale_opinions(max_age_s=60)
-            logger.info("✓ Stale consensus opinions purged (>60s)")
-        except Exception as _cce:
-            logger.error("[STALE_OPINION_PURGE_FAILED] Stale consensus opinion purge failed: %s", _cce)
+        # LEGACY REMOVAL: Consensus opinion purge removed - consensus module deleted
 
         # L6: Register all agents with DeploymentController (starts each in PAPER mode)
         try:
@@ -1311,66 +1305,6 @@ class AgentGrid:
 
         except Exception as exc:
             logger.warning(f"Failed to feed mood bus: {exc}")
-
-    async def _opinion_loop(self) -> None:
-        """Background loop: collect per-asset regime opinions and submit to TaCo consensus."""
-        import asyncio as _aio
-        while self._running:
-            try:
-                await self._collect_regime_opinions()
-            except Exception as _exc:
-                logger.debug("Opinion loop error (ignored): %s", _exc)
-            try:
-                # 15m scalper: faster opinion collection (15s vs 60s)
-                _sleep = 15 if os.getenv("STRATEGY_MODE", "").upper() == "MOMENTUM_SCALPER" else 60
-                await _aio.wait_for(_aio.sleep(_sleep), timeout=_sleep + 5)
-            except (_aio.TimeoutError, _aio.CancelledError):
-                break
-
-    async def _collect_regime_opinions(self) -> None:
-        """Call get_opinion() on every regime agent and submit non-None results to TaCo."""
-        try:
-            from consensus.taco_consensus import get_consensus_coordinator
-            coordinator = get_consensus_coordinator()
-        except Exception as _exc:
-            logger.debug("TaCo coordinator unavailable: %s", _exc)
-            return
-
-        for agent in self._regime_agents:
-            try:
-                opinion = await agent.get_opinion()
-                if opinion is None:
-                    continue
-                # Yield control after each agent to prevent blocking
-                await asyncio.sleep(0)
-                # Map AgentOpinion → TaCo opinion and submit
-                from consensus.taco_consensus import AgentOpinion as TaCoOpinion, Stance
-                import uuid as _uuid
-                score = round((opinion.edge_estimate), 4)
-                if score >= 0.3:
-                    stance = Stance.BULL.value
-                elif score <= -0.3:
-                    stance = Stance.BEAR.value
-                else:
-                    stance = Stance.NEUTRAL.value
-                taco_op = TaCoOpinion(
-                    opinion_id=f"op_{_uuid.uuid4().hex[:12]}",
-                    agent_id=opinion.agent_id,
-                    role="regime",
-                    symbol=opinion.market_id,
-                    venue="kalshi",
-                    stance=stance,
-                    score=score,
-                    confidence=opinion.confidence,
-                    rationale=f"regime_signal:{opinion.side}",
-                    horizon=opinion.horizon,
-                    data_sources=["rti", "vol"],
-                    supporting_data=opinion.metadata,
-                )
-                await coordinator.submit_opinion(taco_op)
-                logger.debug("Regime opinion submitted: %s → %s (%.3f)", agent.agent_id, stance, score)
-            except Exception as _aexc:
-                logger.debug("Regime agent %s error: %s", agent.agent_id, _aexc)
 
     def _apply_regime_gating(self) -> None:
         """Tighten or relax agent activity based on global sentiment regime.

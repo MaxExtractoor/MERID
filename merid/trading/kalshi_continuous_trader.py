@@ -3888,82 +3888,10 @@ class KalshiContinuousTrader:
         else:
             logger.debug("[TOP3-BATCH] Top-3 selector disabled or no tradeable candidates")
 
-        # [BUG-007] Swarm consensus integration — query TaCo consensus for each
-        # tradeable candidate and apply a consensus-weighted score adjustment.
-        # Markets vetoed by consensus (score < threshold) are dropped entirely.
-        _CONSENSUS_VETO_THRESHOLD = float(os.getenv("KALSHI_CT_CONSENSUS_VETO", "0.0"))
-        _CONSENSUS_WEIGHT = float(os.getenv("KALSHI_CT_CONSENSUS_WEIGHT", "0.20"))
-        _consensus_applied = False
-        try:
-            from consensus.consensus_coordinator import EnhancedConsensusCoordinator
-            from schemas.swarm_events import OpinionDirection as _OpDir
-            _coordinator = EnhancedConsensusCoordinator.get_instance()
-            _post_consensus: list = []
-            for _tc in tradeable:
-                _asset_key = (_tc.asset or _CT_ASSET_KEY_FALLBACK).upper()
-                _ticker_key = _tc.ticker
-                _opinions = _coordinator.get_pending_opinions_for_symbol(_asset_key)
-                if not _opinions:
-                    # No consensus opinions — fall through (edge-only ranking)
-                    _post_consensus.append(_tc)
-                    continue
-                # Aggregate: convert direction+confidence → YES-side probability signal.
-                # LONG/UP/BULLISH → p > 0.5; SHORT/DOWN/BEARISH → p < 0.5; FLAT → 0.5
-                # Use confidence as the weight (0.0–1.0, default 1.0 if zero).
-                _sum_w = 0.0
-                _sum_wp = 0.0
-                for _op in _opinions:
-                    _dir = getattr(_op, "direction", _OpDir.FLAT)
-                    _conf = float(getattr(_op, "confidence", 0.5) or 0.5)
-                    _op_w = max(_conf, 0.1)  # never zero weight
-                    # Map direction to an implied YES probability
-                    _dir_val = (_dir.value if hasattr(_dir, "value") else str(_dir)).lower()
-                    if _dir_val == "long":
-                        _op_p = 0.5 + 0.5 * _conf  # scales 0.5 → 1.0 with confidence
-                    elif _dir_val == "short":
-                        _op_p = 0.5 - 0.5 * _conf  # scales 0.5 → 0.0 with confidence
-                    else:
-                        _op_p = 0.5  # FLAT
-                    _sum_w += _op_w
-                    _sum_wp += _op_w * _op_p
-                _consensus_p = _sum_wp / _sum_w if _sum_w > 0 else 0.5
-                # Compute consensus-adjusted edge: blend edge with consensus signal
-                _raw_edge = float(_tc.best_edge) if _tc.best_edge else 0.0
-                # Side-aware: YES consensus boosts YES-side edge, penalises NO-side
-                if _tc.best_side == "yes":
-                    _side_signal = _consensus_p - 0.5  # positive = consensus agrees
-                else:
-                    _side_signal = 0.5 - _consensus_p  # positive = consensus agrees with NO
-                _adj_edge = _raw_edge + _CONSENSUS_WEIGHT * _side_signal
-                if _adj_edge < _CONSENSUS_VETO_THRESHOLD:
-                    logger.info(
-                        "  [CONSENSUS-VETO] %s: adj_edge=%.4f < threshold=%.4f "
-                        "(raw=%.4f consensus_p=%.3f side=%s opinions=%d)",
-                        _ticker_key, _adj_edge, _CONSENSUS_VETO_THRESHOLD,
-                        _raw_edge, _consensus_p, _tc.best_side, len(_opinions),
-                    )
-                    try:
-                        from merid.metrics.cell_metrics import record_veto as _rcm_veto
-                        _tc_tf = _tc.timeframe if hasattr(_tc, "timeframe") and _tc.timeframe else "15m"
-                        _rcm_veto(_tc.asset or "unknown", _tc_tf, "consensus_veto")
-                    except Exception:
-                        pass
-                    continue
-                # Persist adjusted edge back onto candidate for downstream sizing.
-                # Clamp to 0 so a consensus-penalised edge cannot go negative and
-                # slip past the min_edge check as a near-zero positive.
-                _tc.best_edge = max(0.0, _adj_edge)  # type: ignore[assignment]
-                _post_consensus.append(_tc)
-                logger.debug(
-                    "  [CONSENSUS-PASS] %s: adj_edge=%.4f (raw=%.4f, consensus_p=%.3f)",
-                    _ticker_key, _adj_edge, _raw_edge, _consensus_p,
-                )
-            tradeable = _post_consensus
-            _consensus_applied = True
-        except Exception as _cons_exc:
-            logger.debug("[BUG-007] Consensus integration skipped (non-fatal): %s", _cons_exc)
+        # LEGACY REMOVAL: Swarm consensus integration removed - consensus module deleted
+        # Markets now use edge-only ranking without consensus veto
 
-        # Re-sort after consensus adjustments
+        # Re-sort after consensus adjustments (no-op since consensus removed)
         tradeable.sort(key=lambda c: c.best_edge, reverse=True)
 
         # [CT-TRACE] consensus
