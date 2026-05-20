@@ -25,17 +25,17 @@ from merid.prediction.strategy import (
 )
 from merid.prediction.venue_gate import VenueGate
 from merid.prediction.trading_mode import TradingMode
-# REMOVED: consensus imports - not used in 15m stack
-from merid.prediction.debate import (
-    AgentTeam,
-    DebateArgument,
-    DebateBacktester,
-    DebateSession,
-    DebateStore,
-    RewardEntry,
-    RewardParameterSweep,
-    get_debate_store,
-)
+# LEGACY REMOVAL: Debate module deleted - imports removed
+# from merid.prediction.debate import (
+#     AgentTeam,
+#     DebateArgument,
+#     DebateBacktester,
+#     DebateSession,
+#     DebateStore,
+#     RewardEntry,
+#     RewardParameterSweep,
+#     get_debate_store,
+# )
 from merid.prediction.agent_grid_config import (
     AgentGridConfig,
     get_agent_grid_config,
@@ -67,42 +67,29 @@ from merid.prediction.crypto_top_edge import (
 )
 
 __all__ = [
-    "AgentTeam",
+    # LEGACY REMOVAL: Debate module deleted - removed AgentTeam, DebateArgument, DebateBacktester, DebateSession, DebateStore, RewardEntry, RewardParameterSweep, get_debate_store
+    # LEGACY REMOVAL: Consensus module deleted - removed PredictionConsensusStore, PredictionInstrument, PredictionOpinion, PredictionPlan, get_prediction_consensus_store
     "ContractState",
-    "DebateArgument",
-    "DebateBacktester",
-    "DebateSession",
-    "DebateStore",
     "KalshiStrategy",
     "MarketSnapshot",
-    "PredictionConsensusStore",
-    "PredictionInstrument",
     "PredictionMarketModel",
     "PredictionMarketRisk",
-    "PredictionOpinion",
-    "PredictionPlan",
     "PredictionRiskConfig",
     "PreTradeCheck",
     "ResolvedMarket",
-    "RewardEntry",
-    "RewardParameterSweep",
     "StrategyConfig",
     "StrategySignal",
     "TradingMode",
     "VenueGate",
-    "get_debate_store",
-    "get_prediction_consensus_store",
     "AgentGrid",
     "AgentGridConfig",
     "KalshiTradingAgent",
-    # REMOVED: PortfolioRiskAgent - not used in 15m stack
     "SessionGuard",
     "get_agent_grid",
     "get_agent_grid_config",
     "get_session_guard",
     "register_kalshi_tools",
     "KalshiSocialBroadcaster",
-    # REMOVED: PortfolioRiskAgent - not used in 15m stack
     "get_social_broadcaster",
     # Cross-asset top edge arbiter
     "CandidateSignal",
