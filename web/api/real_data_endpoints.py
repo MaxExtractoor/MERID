@@ -71,8 +71,10 @@ def _get_paper_engine():
 
 
 def _get_consensus():
-    from consensus.taco_consensus import get_consensus_coordinator
-    return get_consensus_coordinator()
+    # LEGACY REMOVAL: Consensus module deleted - function disabled
+    # from consensus.taco_consensus import get_consensus_coordinator
+    # return get_consensus_coordinator()
+    return None
 
 
 def _get_agent_registry():
@@ -319,26 +321,9 @@ async def get_trade_floor_active_trades() -> Dict[str, Any]:
 @router.get("/api/v1/trade-floor/signals")
 async def get_trade_floor_signals() -> Dict[str, Any]:
     """Get recent trade signals from consensus."""
-    try:
-        cc = _get_consensus()
-        plans = cc.get_active_plans()
-        signals = []
-        for p in plans:
-            signals.append({
-                "signal_id": p.get("plan_id", ""),
-                "symbol": p.get("symbol", ""),
-                "direction": p.get("direction", "flat"),
-                "confidence": p.get("confidence", 0),
-                "consensus_score": p.get("consensus_score", 0),
-                "status": p.get("status", "pending"),
-                "timestamp": p.get("timestamp", time.time()),
-            })
-        return {"signals": signals, "count": len(signals)}
-    except ImportError:
-        return _offline({"signals": [], "count": 0}, reason="Consensus module unavailable")
-    except (RuntimeError, AttributeError) as e:
-        logger.debug("Consensus coordinator not ready: %s", e)
-        return _offline({"signals": [], "count": 0}, reason="Consensus coordinator unavailable")
+    # LEGACY REMOVAL: Consensus module deleted - endpoint disabled
+    logger.debug("Trade floor signals disabled - consensus module deleted")
+    return _offline({"signals": [], "count": 0}, reason="Consensus module deleted")
 
 
 # ════════════════════════════════════════════════
@@ -1493,22 +1478,9 @@ async def get_signals_sentiment_real() -> Dict[str, Any]:
 @router.get("/api/v1/system/decisions/recent")
 async def get_recent_decisions_real(limit: int = 10) -> Dict[str, Any]:
     """Get recent system decisions from consensus engine."""
-    try:
-        cc = _get_consensus()
-        plans = cc.get_active_plans()
-        decisions = []
-        for p in plans[:limit]:
-            decisions.append({
-                "id": p.get("plan_id", ""),
-                "type": "trade_plan",
-                "summary": f"{p.get('direction', 'flat').upper()} {p.get('symbol', '?')} — confidence {p.get('confidence', 0):.0%}",
-                "agents": p.get("supporting_agents", []),
-                "confidence": p.get("confidence", 0),
-                "timestamp": datetime.fromtimestamp(p.get("timestamp", time.time()), tz=timezone.utc).isoformat(),
-            })
-        return {"decisions": decisions}
-    except Exception:
-        return {"decisions": []}
+    # LEGACY REMOVAL: Consensus module deleted - endpoint disabled
+    logger.debug("Recent system decisions disabled - consensus module deleted")
+    return {"decisions": [], "message": "Consensus module deleted"}
 
 
 # ════════════════════════════════════════════════
