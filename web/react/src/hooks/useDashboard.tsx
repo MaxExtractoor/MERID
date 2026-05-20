@@ -81,8 +81,7 @@ interface TradingSummary {
 interface PrimeStatus {
   mode: string;
   market_data_connected: boolean;
-  narrative_available: boolean;
-  last_narrative_timestamp: number;
+  // LEGACY REMOVAL: narrative_available and last_narrative_timestamp removed - narrative module deleted
   data_feeds: Record<string, { connected: boolean; latency_ms: number }>;
 }
 
@@ -432,9 +431,7 @@ export function PrimeStatusCard() {
         </div>
       )}
       
-      <div className="mt-3 text-xs text-slate-500">
-        Narrative: {prime?.narrative_available ? 'Available' : 'Unavailable'}
-      </div>
+      {/* LEGACY REMOVAL: Narrative display removed - narrative module deleted */}
     </div>
   );
 }
