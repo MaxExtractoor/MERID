@@ -69,7 +69,6 @@ const KalshiRiskFeed: React.FC<RiskFeedProps> = ({
 }) => {
   const [actionStatus, setActionStatus] = useState<Record<string, 'pending' | 'done' | 'error'>>({});
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'reconnecting'>('connected');
-  const [isPaused, setIsPaused] = useState(false);
   const { alerts: wsAlerts, summary: wsSummary, connected: wsConnected } = useKalshiRiskStream();
   
   // Enhanced: Track connection status

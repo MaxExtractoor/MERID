@@ -185,7 +185,10 @@ class StrikeCalibrator:
         self._calibration_path = calibration_path
         self._observations_path = observations_path
 
-        self._lock = threading.Lock()
+        # TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+        # TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+        # self._lock = threading.Lock()
+        self._lock = None  # Disabled to prevent startup hang
         self._calibrated: Dict[Tuple[str, str], float] = {}
         self._observation_count: Dict[Tuple[str, str], int] = {}
         self._calibrated_at: Optional[float] = None
@@ -236,7 +239,11 @@ class StrikeCalibrator:
 
         # Update in-memory count
         key = (obs.asset, obs.timeframe)
-        with self._lock:
+        if self._lock is not None:
+            with self._lock:
+                self._observation_count[key] = self._observation_count.get(key, 0) + 1
+        else:
+            # Lock disabled - direct access (startup workaround)
             self._observation_count[key] = self._observation_count.get(key, 0) + 1
 
     def get_max_distance(self, asset: str, timeframe: str) -> float:
@@ -249,7 +256,34 @@ class StrikeCalibrator:
         """
         key = (asset.upper(), timeframe.lower())
 
-        with self._lock:
+        if self._lock is not None:
+            with self._lock:
+                # 1. Calibrated value available?
+                if key in self._calibrated:
+                    count = self._observation_count.get(key, 0)
+                    if count >= self._min_obs:
+                        return self._calibrated[key]
+
+                # 2. Bootstrap default
+                if key in self._bootstrap:
+                    return self._bootstrap[key]
+
+                # 3. Fallback to similar timeframe (same asset)
+                asset_prefix = key[0]
+                for k, v in self._bootstrap.items():
+                    if k[0] == asset_prefix:
+                        return v
+
+                # 4. Fallback to similar asset (same timeframe)
+                timeframe_suffix = key[1]
+                for k, v in self._bootstrap.items():
+                    if k[1] == timeframe_suffix:
+                        return v
+
+                # 5. Hard cap fallback
+                return self._hard_caps.get(asset_prefix, 1.0)
+        else:
+            # Lock disabled - direct access (startup workaround)
             # 1. Calibrated value available?
             if key in self._calibrated:
                 count = self._observation_count.get(key, 0)
@@ -260,22 +294,20 @@ class StrikeCalibrator:
             if key in self._bootstrap:
                 return self._bootstrap[key]
 
-        # 3. Fallback: try to find closest timeframe for same asset
-        asset_upper = asset.upper()
-        fallback_order = ["15m", "1h", "daily", "weekly", "monthly", "annual"]
-        tf_lower = timeframe.lower()
-        if tf_lower in fallback_order:
-            idx = fallback_order.index(tf_lower)
-            # Try earlier timeframes (tighter), then later (wider)
-            for offset in [-1, 1]:
-                new_idx = idx + offset
-                if 0 <= new_idx < len(fallback_order):
-                    fallback_key = (asset_upper, fallback_order[new_idx])
-                    if fallback_key in self._bootstrap:
-                        return self._bootstrap[fallback_key]
+            # 3. Fallback to similar timeframe (same asset)
+            asset_prefix = key[0]
+            for k, v in self._bootstrap.items():
+                if k[0] == asset_prefix:
+                    return v
 
-        # 4. Global fallback
-        return 0.25
+            # 4. Fallback to similar asset (same timeframe)
+            timeframe_suffix = key[1]
+            for k, v in self._bootstrap.items():
+                if k[1] == timeframe_suffix:
+                    return v
+
+            # 5. Hard cap fallback
+            return self._hard_caps.get(asset_prefix, 1.0)
 
     def calibrate(self) -> Dict[Tuple[str, str], float]:
         """Run calibration: compute d90 per (asset, tenor) from observations.
@@ -322,7 +354,15 @@ class StrikeCalibrator:
                 f"{key[0]}/{key[1]}: d90={d90:.4f} margin={margin_applied:.4f} cap={hard_cap:.2f} final={final_value:.4f} n={count}"
             )
 
-        with self._lock:
+        if self._lock is not None:
+            with self._lock:
+                self._calibrated = new_calibrated
+                self._calibrated_at = now
+                # Update observation counts
+                for key, dists in grouped.items():
+                    self._observation_count[key] = len(dists)
+        else:
+            # Lock disabled - direct access (startup workaround)
             self._calibrated = new_calibrated
             self._calibrated_at = now
             # Update observation counts
@@ -341,7 +381,20 @@ class StrikeCalibrator:
 
     def get_calibration_summary(self) -> dict:
         """Return current calibration state for diagnostics."""
-        with self._lock:
+        if self._lock is not None:
+            with self._lock:
+                return {
+                    "calibrated_at": self._calibrated_at,
+                    "calibrated_pairs": list(self._calibrated.keys()),
+                    "observation_counts": dict(self._observation_count),
+                    "min_observations_required": self._min_obs,
+                    "using_calibration": [
+                        k for k in self._calibrated
+                        if self._observation_count.get(k, 0) >= self._min_obs
+                    ],
+                }
+        else:
+            # Lock disabled - direct access (startup workaround)
             return {
                 "calibrated_at": self._calibrated_at,
                 "calibrated_pairs": list(self._calibrated.keys()),
@@ -355,7 +408,13 @@ class StrikeCalibrator:
 
     def reset(self) -> None:
         """Reset calibration (testing only)."""
-        with self._lock:
+        if self._lock is not None:
+            with self._lock:
+                self._calibrated.clear()
+                self._observation_count.clear()
+                self._calibrated_at = None
+        else:
+            # Lock disabled - direct access (startup workaround)
             self._calibrated.clear()
             self._observation_count.clear()
             self._calibrated_at = None

@@ -158,7 +158,7 @@ class KalshiTrader:
 
     async def connect(self) -> None:
         """Initialize connections."""
-        await self.client.connect()
+        await asyncio.wait_for(self.client.connect(), timeout=10.0)
     
     async def close(self) -> None:
         """Close connections."""
@@ -166,91 +166,107 @@ class KalshiTrader:
     
     async def buy_yes(self, ticker: str, count: int, price: Optional[int] = None) -> Optional[PlacedOrder]:
         """Buy YES contracts in a market."""
+        from merid.event_venues.kalshi.risk_parameters import DEFAULT_KALSHI_PRICE_CENTS
+        
         if not self._is_live_trading_allowed():
             logger.debug("buy_yes: skipped (paper/sim mode) ticker=%s", ticker)
             return None
-        allowed, reason = self._pre_order_check(ticker, count, price or 50)
+        allowed, reason = self._pre_order_check(ticker, count, price or DEFAULT_KALSHI_PRICE_CENTS)
         if not allowed:
             logger.warning("buy_yes blocked: %s ticker=%s", reason, ticker)
             return None
+        # BUG-FIX: Pass price for ALL orders (including market) to avoid fallback in Kalshi client
+        # Kalshi API accepts price for market orders (it's used for validation but not as a limit)
         order = VenueOrder(
             market_id=ticker,
             side="buy",
             size=Decimal(count),
-            price=Decimal(price) / 100 if price else None,
+            price=Decimal(price or DEFAULT_KALSHI_PRICE_CENTS) / 100,
             order_type="limit" if price else "market",
             outcome_id="yes"
         )
         logger.debug(f"buy_yes: {ticker} count={count} price={price}")
         result = await self.client.place_order(order)
         if result:
-            self._record_order("crypto", count, price or 50, ticker=ticker)
+            self._record_order("crypto", count, price or DEFAULT_KALSHI_PRICE_CENTS, ticker=ticker)
         return result
     
     async def buy_no(self, ticker: str, count: int, price: Optional[int] = None) -> Optional[PlacedOrder]:
         """Buy NO contracts in a market."""
+        from merid.event_venues.kalshi.risk_parameters import DEFAULT_KALSHI_PRICE_CENTS
+        
         if not self._is_live_trading_allowed():
             logger.debug("buy_no: skipped (paper/sim mode) ticker=%s", ticker)
             return None
-        allowed, reason = self._pre_order_check(ticker, count, price or 50)
+        allowed, reason = self._pre_order_check(ticker, count, price or DEFAULT_KALSHI_PRICE_CENTS)
         if not allowed:
             logger.warning("buy_no blocked: %s ticker=%s", reason, ticker)
             return None
+        # BUG-FIX: Pass price for ALL orders (including market) to avoid fallback in Kalshi client
+        # Kalshi API accepts price for market orders (it's used for validation but not as a limit)
         order = VenueOrder(
             market_id=ticker,
             side="buy",
             size=Decimal(count),
-            price=Decimal(price) / 100 if price else None,
+            price=Decimal(price or DEFAULT_KALSHI_PRICE_CENTS) / 100,
             order_type="limit" if price else "market",
             outcome_id="no"
         )
         result = await self.client.place_order(order)
         if result:
-            self._record_order("crypto", count, price or 50, ticker=ticker)
+            self._record_order("crypto", count, price or DEFAULT_KALSHI_PRICE_CENTS, ticker=ticker)
         return result
     
     async def sell_yes(self, ticker: str, count: int, price: Optional[int] = None) -> Optional[PlacedOrder]:
         """Sell YES contracts (or close YES position)."""
+        from merid.event_venues.kalshi.risk_parameters import DEFAULT_KALSHI_PRICE_CENTS
+        
         if not self._is_live_trading_allowed():
             logger.debug("sell_yes: skipped (paper/sim mode) ticker=%s", ticker)
             return None
-        allowed, reason = self._pre_order_check(ticker, count, price or 50)
+        allowed, reason = self._pre_order_check(ticker, count, price or DEFAULT_KALSHI_PRICE_CENTS)
         if not allowed:
             logger.warning("sell_yes blocked: %s ticker=%s", reason, ticker)
             return None
+        # BUG-FIX: Pass price for ALL orders (including market) to avoid fallback in Kalshi client
+        # Kalshi API accepts price for market orders (it's used for validation but not as a limit)
         order = VenueOrder(
             market_id=ticker,
             side="sell",
             size=Decimal(count),
-            price=Decimal(price) / 100 if price else None,
+            price=Decimal(price or DEFAULT_KALSHI_PRICE_CENTS) / 100,
             order_type="limit" if price else "market",
             outcome_id="yes"
         )
         result = await self.client.place_order(order)
         if result:
-            self._record_order("crypto", count, price or 50, ticker=ticker)
+            self._record_order("crypto", count, price or DEFAULT_KALSHI_PRICE_CENTS, ticker=ticker)
         return result
     
     async def sell_no(self, ticker: str, count: int, price: Optional[int] = None) -> Optional[PlacedOrder]:
         """Sell NO contracts (or close NO position)."""
+        from merid.event_venues.kalshi.risk_parameters import DEFAULT_KALSHI_PRICE_CENTS
+        
         if not self._is_live_trading_allowed():
             logger.debug("sell_no: skipped (paper/sim mode) ticker=%s", ticker)
             return None
-        allowed, reason = self._pre_order_check(ticker, count, price or 50)
+        allowed, reason = self._pre_order_check(ticker, count, price or DEFAULT_KALSHI_PRICE_CENTS)
         if not allowed:
             logger.warning("sell_no blocked: %s ticker=%s", reason, ticker)
             return None
+        # BUG-FIX: Pass price for ALL orders (including market) to avoid fallback in Kalshi client
+        # Kalshi API accepts price for market orders (it's used for validation but not as a limit)
         order = VenueOrder(
             market_id=ticker,
             side="sell",
             size=Decimal(count),
-            price=Decimal(price) / 100 if price else None,
+            price=Decimal(price or DEFAULT_KALSHI_PRICE_CENTS) / 100,
             order_type="limit" if price else "market",
             outcome_id="no"
         )
         result = await self.client.place_order(order)
         if result:
-            self._record_order("crypto", count, price or 50, ticker=ticker)
+            self._record_order("crypto", count, price or DEFAULT_KALSHI_PRICE_CENTS, ticker=ticker)
         return result
     
     async def close_position(self, ticker: str) -> List[PlacedOrder]:
@@ -279,17 +295,28 @@ class KalshiTrader:
             size = abs(pos.size)
             outcome = pos.outcome_id or "yes"
             
-            price_est = 50  # Market order — use mid-price estimate for risk check
+            # PRODUCTION-FIX: Use actual market price from KalshiMarketStateStore instead of hardcoded 50c
+            price_est = 50  # Fallback if market state unavailable
+            try:
+                from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                state = get_kalshi_market_state_store().get_state(ticker)
+                if state and state.mid_cents > 0:
+                    price_est = state.mid_cents
+            except Exception as _exc:
+                logger.debug("close_position: failed to fetch market state for %s, using 50c fallback: %s", ticker, _exc)
+            
             allowed, reason = self._pre_order_check(ticker, int(size), price_est)
             if not allowed:
                 logger.warning("close_position order blocked: %s ticker=%s", reason, ticker)
                 continue
 
+            # BUG-FIX: Pass price for ALL orders (including market) to avoid 50c fallback in Kalshi client
+            # Kalshi API accepts price for market orders (it's used for validation but not as a limit)
             order = VenueOrder(
                 market_id=ticker,
                 side=side,
                 size=size,
-                price=None,  # Market order
+                price=Decimal(price_est) / 100,
                 order_type="market",
                 outcome_id=outcome
             )

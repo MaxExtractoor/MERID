@@ -18,14 +18,22 @@ def sign(method, path):
 
 # Fills
 r = requests.get(base + "/portfolio/fills", headers=sign("GET", "/portfolio/fills"), params={"limit": 25}, timeout=15)
-fills = r.json().get("fills", [])
+response_data = r.json()
+fills = response_data.get("fills", [])
 print(f"=== RECENT FILLS ({len(fills)}) ===")
+if fills:
+    print(f"Sample fill fields: {list(fills[0].keys())}")
+    print(f"\nFirst fill (full):")
+    import json
+    print(json.dumps(fills[0], indent=2, default=str))
+    print(f"\nSecond fill (full):")
+    print(json.dumps(fills[1], indent=2, default=str))
 for f in fills[:20]:
     t = f.get("created_time", "?")[:19]
     ticker = f.get("ticker", "?")
     side = f.get("side", "?")
-    count = f.get("count", 0)
-    yp = f.get("yes_price", 0)
+    count = f.get("count_fp", f.get("count", 0))
+    yp = f.get("yes_price_dollars", f.get("yes_price", 0))
     taker = f.get("is_taker", "?")
     print(f"  {t}  {ticker}  {side} {count}x @ {yp}c  taker={taker}")
 

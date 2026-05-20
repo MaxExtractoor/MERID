@@ -208,7 +208,7 @@ class KalshiWebSocketService:
         try:
             # Initialize WebSocket
             self._ws = KalshiWebSocket(self.config)
-            await self._ws.connect()
+            await asyncio.wait_for(self._ws.connect(), timeout=10.0)
 
             # Derive and set essential tickers for load shedding protection
             # This prevents queue overflow by protecting active position tickers
@@ -243,7 +243,7 @@ class KalshiWebSocketService:
                     await asyncio.sleep(5)  # Backoff
                     
                     self._ws = KalshiWebSocket(self.config)
-                    await self._ws.connect()
+                    await asyncio.wait_for(self._ws.connect(), timeout=10.0)
                     
                     # CRITICAL-FIX: Re-derive essential tickers on reconnect
                     try:

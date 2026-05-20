@@ -1,0 +1,149 @@
+name: Kill Switch CI Tests
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'merid/risk/kill_switches.py'
+      - 'tests/risk/**'
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'merid/risk/kill_switches.py'
+      - 'tests/risk/**'
+  schedule:
+    # Run nightly at 1 AM UTC
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+
+jobs:
+  kill-switch-unit-tests:
+    name: Kill Switch Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install -e .
+      
+      - name: Run kill switch unit tests
+        run: |
+          python -m pytest tests/risk/test_kill_switch_ci.py::TestKillSwitchUnitTests -v
+      
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: kill-switch-unit-test-results
+          path: test-results/
+          retention-days: 30
+
+  kill-switch-integration-tests:
+    name: Kill Switch Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install -e .
+      
+      - name: Run kill switch integration tests
+        run: |
+          python -m pytest tests/risk/test_kill_switch_ci.py::TestKillSwitchIntegrationTests -v
+      
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: kill-switch-integration-test-results
+          path: test-results/
+          retention-days: 30
+
+  kill-switch-programmatic-interface:
+    name: Kill Switch Programmatic Interface Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install -e .
+      
+      - name: Run programmatic interface tests
+        run: |
+          python -m pytest tests/risk/test_kill_switch_ci.py::TestKillSwitchProgrammaticInterface -v
+      
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: kill-switch-interface-test-results
+          path: test-results/
+          retention-days: 30
+
+  kill-switch-full-pipeline:
+    name: Kill Switch Full Pipeline Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install -e .
+      
+      - name: Run all kill switch tests
+        run: |
+          python -m pytest tests/risk/test_kill_switch_ci.py -v
+      
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: kill-switch-full-test-results
+          path: test-results/
+          retention-days: 30
+      
+      - name: Emit kill switch test metrics
+        if: always()
+        run: |
+          # TODO: Push test results to Prometheus
+          echo "Kill switch test metrics would be pushed to Prometheus here"

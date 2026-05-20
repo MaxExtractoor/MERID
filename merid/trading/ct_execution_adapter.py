@@ -12,9 +12,10 @@ Phase 3 (Removal): Delete direct HTTP path, CT becomes pure strategy driver.
 """
 
 import os
+import threading
 import time
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional, Set, Tuple
 
 from utils.logger import get_logger
 
@@ -63,6 +64,11 @@ class CTExecutionAdapter:
         self._shadow_calls = 0
         self._parity_matches = 0
         self._parity_mismatches = 0
+        
+        # BUG-3 FIX: Pending orders tracking to prevent race conditions
+        # Track tickers with in-flight orders to prevent duplicate submissions
+        self._pending_orders: Dict[str, Dict[str, Any]] = {}  # ticker -> order_info
+        self._pending_lock = threading.Lock()
 
     def _order_dict_to_intent(
         self,
@@ -91,6 +97,38 @@ class CTExecutionAdapter:
         order_type = "limit"
         time_in_force = "gtc"
 
+        # Compute default TP/SL for 15m crypto entry orders if not provided
+        take_profit_price_cents = None
+        take_profit_r_multiple = None
+        stop_loss_price_cents = None
+        
+        if action == "buy" and ticker.startswith(("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M")):
+            try:
+                from merid.prediction.dynamic_takeprofit import DynamicTakeProfitEngine
+                engine = DynamicTakeProfitEngine()
+                
+                # Default SL: 5 cents below entry (conservative)
+                stop_loss_price_cents = max(1, price_cents - 5)
+                
+                # Compute dynamic TP with default confidence
+                tp_plan = engine.compute_tp(
+                    entry_price=price_cents / 100.0,
+                    stop_price=stop_loss_price_cents / 100.0,
+                    direction="LONG" if side == "yes" else "SHORT",
+                    confidence=0.5,  # Default medium confidence
+                )
+                
+                take_profit_r_multiple = tp_plan.tp_r_multiple
+                logger.info(
+                    "[CT-ADAPTER-TP] Computed default TP for %s: R=%.2f",
+                    ticker, tp_plan.tp_r_multiple
+                )
+            except Exception as tp_exc:
+                logger.warning("[CT-ADAPTER-TP] Failed to compute default TP: %s", tp_exc)
+                # Fallback to 1R
+                take_profit_r_multiple = 1.0
+                stop_loss_price_cents = max(1, price_cents - 5)
+
         # Build canonical OrderIntent
         intent = OrderIntent(
             ticker=ticker,
@@ -109,6 +147,9 @@ class CTExecutionAdapter:
             agent_id="kalshi_ct",
             snapshot_ts=time.time(),  # Current snapshot
             effective_equity_usd=effective_equity_usd,
+            take_profit_price_cents=take_profit_price_cents,
+            take_profit_r_multiple=take_profit_r_multiple,
+            stop_loss_price_cents=stop_loss_price_cents,
         )
         return intent
 
@@ -252,12 +293,37 @@ class CTExecutionAdapter:
         from merid.event_venues.kalshi.order_router import OrderResult
 
         ticker = order_data.get("ticker", "")
-        side = order_data.get("side", "yes")
-        action = order_data.get("action", "buy")
-        count = int(order_data.get("count", 1))
-        price_cents = int(order_data.get("yes_price", order_data.get("no_price", 50)))
+        
+        # BUG-3 FIX: Check for pending orders on the same ticker
+        # to prevent race conditions and duplicate submissions
+        with self._pending_lock:
+            if ticker in self._pending_orders:
+                pending = self._pending_orders[ticker]
+                logger.warning(
+                    "[CT-ADAPTER] Rejecting order for %s: Pending order already in flight "
+                    "(submitted %s ago)",
+                    ticker, pending.get("time_ago", "unknown")
+                )
+                return OrderResult(
+                    status="rejected",
+                    reason=f"pending_order_conflict:ticker={ticker}",
+                    latency_ms=0.0,
+                )
+            # Track this order as pending
+            self._pending_orders[ticker] = {
+                "action": order_data.get("action", "buy"),
+                "side": order_data.get("side", "yes"),
+                "count": int(order_data.get("count", 1)),
+                "submitted_at": time.time(),
+            }
+        
+        try:
+            side = order_data.get("side", "yes")
+            action = order_data.get("action", "buy")
+            count = int(order_data.get("count", 1))
+            price_cents = int(order_data.get("yes_price", order_data.get("no_price", 50)))
 
-        signal = submit_signal(
+            signal = submit_signal(
             agent_id="kalshi_continuous_trader",
             agent_type="ct_execution_adapter",
             market_id=ticker,
@@ -276,26 +342,31 @@ class CTExecutionAdapter:
             risk_bucket="ct_automated",
         )
 
-        logger.info(
-            "[CT-ADAPTER] signal_submitted | ticker=%s | signal_id=%s | side=%s | count=%d",
-            ticker, signal.signal_id, side, count,
-        )
+            logger.info(
+                "[CT-ADAPTER] signal_submitted | ticker=%s | signal_id=%s | side=%s | count=%d",
+                ticker, signal.signal_id, side, count,
+            )
 
-        # Return a synthetic OrderResult indicating signal submission
-        # trading_agent will receive the signal and execute via route_order_async
-        return OrderResult(
-            status="submitted_signal",
-            fill={
-                "signal_id": signal.signal_id,
-                "ticker": ticker,
-                "side": side,
-                "count": count,
-                "price_cents": price_cents,
-                "action": action,
-            },
-            latency_ms=0.0,
-            reason="Signal submitted to trading_agent for execution",
-        )
+            # Return a synthetic OrderResult indicating signal submission
+            # trading_agent will receive the signal and execute via route_order_async
+            return OrderResult(
+                status="submitted_signal",
+                fill={
+                    "signal_id": signal.signal_id,
+                    "ticker": ticker,
+                    "side": side,
+                    "count": count,
+                    "price_cents": price_cents,
+                    "action": action,
+                },
+                latency_ms=0.0,
+                reason="Signal submitted to trading_agent for execution",
+            )
+        finally:
+            # BUG-3 FIX: Clean up pending order tracking
+            with self._pending_lock:
+                if ticker in self._pending_orders:
+                    del self._pending_orders[ticker]
 
     def get_stats(self) -> Dict[str, Any]:
         """Return adapter statistics for monitoring."""

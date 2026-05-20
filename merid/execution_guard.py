@@ -684,6 +684,10 @@ class ExecutionGuard:
         try:
             from merid.risk.kill_switches import risk_controller as _rc
             if not _rc.can_trade():
+                logger.warning(
+                    "[EXECUTION-GUARD] can_trade DENIED by risk_controller: reason=%s domain=%s plan_id=%s",
+                    _rc.get_kill_reason() or 'kill_switch_active', domain, plan_id
+                )
                 verdict.allowed = False
                 verdict.reason = f"risk_controller: {_rc.get_kill_reason() or 'kill_switch_active'}"
                 verdict.adjusted_size_usd = 0
@@ -694,7 +698,7 @@ class ExecutionGuard:
                 return verdict
             passed.append("risk_controller_kill")
         except Exception as _rc_exc:
-            logger.warning("risk_controller check failed (fail-closed): %s", _rc_exc)
+            logger.warning("[EXECUTION-GUARD] risk_controller check failed (fail-closed): %s", _rc_exc)
             verdict.allowed = False
             verdict.reason = f"risk_controller_unavailable: {_rc_exc}"
             verdict.adjusted_size_usd = 0
@@ -706,6 +710,10 @@ class ExecutionGuard:
 
         # 1. Global kill switch
         if self._global_kill_switch:
+            logger.warning(
+                "[EXECUTION-GUARD] can_trade DENIED by global kill switch: reason=%s domain=%s plan_id=%s",
+                self._global_kill_reason, domain, plan_id
+            )
             verdict.allowed = False
             verdict.reason = f"global kill switch: {self._global_kill_reason}"
             verdict.adjusted_size_usd = 0
@@ -719,6 +727,10 @@ class ExecutionGuard:
         # 2. Per-domain kill switch
         cap = self._domain_caps.get(domain)
         if cap and cap.kill_switch:
+            logger.warning(
+                "[EXECUTION-GUARD] can_trade DENIED by domain kill switch: domain=%s plan_id=%s",
+                domain, plan_id
+            )
             verdict.allowed = False
             verdict.reason = f"domain kill switch active for {domain}"
             verdict.adjusted_size_usd = 0
@@ -731,6 +743,10 @@ class ExecutionGuard:
 
         # 3. Domain enabled
         if cap and not cap.enabled:
+            logger.warning(
+                "[EXECUTION-GUARD] can_trade DENIED by domain disabled: domain=%s plan_id=%s",
+                domain, plan_id
+            )
             verdict.allowed = False
             verdict.reason = f"domain {domain} is disabled"
             verdict.adjusted_size_usd = 0

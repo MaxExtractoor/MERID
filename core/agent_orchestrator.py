@@ -15,9 +15,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
-from agents.twitter_agent import get_twitter_agent
-from agents.telegram_agent import get_telegram_agent
-from agents.news_monitor_agent import get_news_monitor_agent
+# SOCIAL-TRUTH (2026-05-13): Twitter/Telegram agents disabled for lean 15m Kalshi trading
+# For 15-minute binary markets, social signals are redundant with microstructure
+# from agents.twitter_agent import get_twitter_agent
+# from agents.telegram_agent import get_telegram_agent
+get_twitter_agent = None  # type: ignore
+get_telegram_agent = None  # type: ignore
+# NEWS-TRUTH (2026-05-13): news_monitor_agent disabled for lean 15m Kalshi trading
+# For 15-minute binary markets, edge comes from microstructure, not news headlines
+# from agents.news_monitor_agent import get_news_monitor_agent
+get_news_monitor_agent = None  # type: ignore
 from data.live_price_feed import get_live_price_feed
 from trading.agents.arbitrage_agent import get_arbitrage_agent
 from trading.agents.execution_agent import get_execution_agent
@@ -71,10 +78,10 @@ class AgentOrchestrator:
     
     def __init__(self):
         """Initialize agent orchestrator."""
-        # Initialize all agents
-        self.twitter_agent = get_twitter_agent()
-        self.telegram_agent = get_telegram_agent()
-        self.news_monitor = get_news_monitor_agent()
+        # Initialize all agents (handle disabled agents in lean Kalshi mode)
+        self.twitter_agent = get_twitter_agent() if callable(get_twitter_agent) else None
+        self.telegram_agent = get_telegram_agent() if callable(get_telegram_agent) else None
+        self.news_monitor = get_news_monitor_agent() if callable(get_news_monitor_agent) else None
         self.price_feed = get_live_price_feed()
         self.arbitrage_agent = get_arbitrage_agent()
         self.execution_agent = get_execution_agent()
@@ -96,7 +103,9 @@ class AgentOrchestrator:
         self.recent_decisions: List[AgentDecision] = []
         self.consensus_history: List[ConsensusResult] = []
         
-        logger.info("Agent Orchestrator initialized with 7 agents")
+        # Count active agents (exclude None)
+        active_count = sum(1 for a in self.agents.values() if a is not None)
+        logger.info(f"Agent Orchestrator initialized with {active_count} active agents")
     
     async def start(self):
         """Start all agents and orchestration."""
@@ -160,6 +169,17 @@ class AgentOrchestrator:
             
             # Check for arbitrage (simplified - real implementation would check cross-venue)
             for symbol, price_data in prices.items():
+                # PROFILE-GUARD: Skip arbitrage checks for kalshi_crypto_15m (single-venue mode)
+                import os
+                profile = os.getenv("MERID_PROFILE", "").lower()
+                if profile == "kalshi_crypto_15m_v2":
+                    return  # Kalshi-only mode doesn't need cross-venue arbitrage
+                
+                # Defensive: Check for None values before arithmetic
+                if price_data.bid is None or price_data.ask is None:
+                    logger.warning(f"Price data missing bid/ask for {symbol}: bid={price_data.bid}, ask={price_data.ask}")
+                    continue
+                
                 # Calculate spread
                 spread = (price_data.ask - price_data.bid) / price_data.bid * 10000  # in bps
                 

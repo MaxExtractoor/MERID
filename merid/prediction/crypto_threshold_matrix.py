@@ -34,7 +34,7 @@ def normalize_crypto_timeframe(timeframe: str) -> str:
         return "1h"
     if t in ("daily", "d1", "day", "1d"):
         return "daily"
-    if t in ("weekly", "w1", "week"):
+    if t in ("weekly", "w1", "week", "1w"):
         return "weekly"
     if t in ("monthly", "1m", "month", "mo"):
         return "monthly"
@@ -67,7 +67,10 @@ def _get_threshold_mode() -> str:
     return "legacy"
 
 
-_matrix_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _matrix_lock = threading.Lock()
+_matrix_lock = None  # Disabled to prevent startup hang
 _cached_path: Optional[str] = None
 _cached_doc: Optional[Dict[str, Any]] = None
 
@@ -102,8 +105,36 @@ def _float(val: Any, default: Optional[float] = None) -> Optional[float]:
 
 def load_matrix_document(force: bool = False) -> Dict[str, Any]:
     global _cached_path, _cached_doc
+    
+    # NOTE: For kalshi_crypto_15m_v2, edge thresholds come from kalshi_crypto_15m.yaml.
+    # This matrix is still loaded for other profiles (baseline, production, crypto_low_edge_dev).
+    # The profile YAML is the single source of truth for 15m crypto edge thresholds.
+    profile = os.getenv("MERID_PROFILE", "").lower()
+    if profile == "kalshi_crypto_15m_v2":
+        logger.debug("Crypto threshold matrix not used for kalshi_crypto_15m_v2 (uses profile YAML)")
+    
     path = matrix_document_path()
-    with _matrix_lock:
+    if _matrix_lock is not None:
+        with _matrix_lock:
+            if not force and _cached_doc is not None and _cached_path == path:
+                return _cached_doc
+            if not os.path.isfile(path):
+                logger.warning("Crypto threshold matrix missing at %s — using embedded fallbacks", path)
+                _cached_path = path
+                _cached_doc = _embedded_fallback_document()
+                return _cached_doc
+            with open(path, "rb") as f:
+                raw = yaml.safe_load(f.read())
+            if not isinstance(raw, dict) or "profiles" not in raw:
+                logger.error("Invalid crypto_threshold_matrix.yaml — expected top-level 'profiles'")
+                _cached_path = path
+                _cached_doc = _embedded_fallback_document()
+                return _cached_doc
+            _cached_path = path
+            _cached_doc = raw
+            return _cached_doc
+    else:
+        # Lock disabled - direct access (startup workaround)
         if not force and _cached_doc is not None and _cached_path == path:
             return _cached_doc
         if not os.path.isfile(path):
@@ -120,7 +151,6 @@ def load_matrix_document(force: bool = False) -> Dict[str, Any]:
             return _cached_doc
         _cached_path = path
         _cached_doc = raw
-        logger.info("Loaded crypto threshold matrix from %s", path)
         return _cached_doc
 
 
@@ -141,22 +171,23 @@ def _embedded_fallback_document() -> Dict[str, Any]:
 
 def _fallback_rows(mode: str) -> List[Dict[str, Any]]:
     if mode == "modern":
+        # Conservative "sure bet" fallbacks (2026-05-10)
         tf_map = {
-            "15m": ("0.01", "0.01", "58", "40", "40", "0.005"),
-            "1h": ("0.0125", "0.0125", "58", "40", "40", "0.005"),
-            "daily": ("0.015", "0.015", "58", "40", "40", "0.005"),
-            "weekly": ("0.02", "0.02", "58", "40", "40", "0.005"),
-            "monthly": ("0.02", "0.02", "58", "40", "40", "0.005"),
-            "annual": ("0.02", "0.02", "58", "40", "40", "0.005"),
+            "15m": ("0.050", "0.050", "58", "40", "40", "0.05"),
+            "1h": ("0.060", "0.060", "58", "40", "40", "0.06"),
+            "daily": ("0.070", "0.070", "58", "40", "40", "0.07"),
+            "weekly": ("0.080", "0.080", "58", "40", "40", "0.08"),
+            "monthly": ("0.085", "0.085", "58", "40", "40", "0.085"),
+            "annual": ("0.090", "0.090", "58", "40", "40", "0.09"),
         }
     else:
         tf_map = {
-            "15m": ("0.04", "0.04", "75", "10", "10", "0.08"),
-            "1h": ("0.04", "0.04", "75", "10", "10", "0.08"),
-            "daily": ("0.035", "0.035", "75", "10", "10", "0.08"),
-            "weekly": ("0.03", "0.03", "75", "10", "10", "0.08"),
-            "monthly": ("0.03", "0.03", "75", "10", "10", "0.08"),
-            "annual": ("0.03", "0.03", "75", "10", "10", "0.08"),
+            "15m": ("0.05", "0.05", "75", "10", "10", "0.08"),
+            "1h": ("0.06", "0.06", "75", "10", "10", "0.08"),
+            "daily": ("0.07", "0.07", "75", "10", "10", "0.08"),
+            "weekly": ("0.08", "0.08", "75", "10", "10", "0.08"),
+            "monthly": ("0.085", "0.085", "75", "10", "10", "0.08"),
+            "annual": ("0.09", "0.09", "75", "10", "10", "0.09"),
         }
     rows = []
     for tf, (
@@ -226,12 +257,17 @@ def _row_matches(
 
 def _coerce_row_types(merged: Dict[str, Any], path: str) -> Dict[str, Any]:
     out = dict(merged)
-    out["directional_min_edge"] = _decimal(out.get("directional_min_edge"), Decimal("0.04"))
+    out["directional_min_edge"] = _decimal(out.get("directional_min_edge"), Decimal("0.05"))
     out["sentiment_vol_regime_min_edge"] = _decimal(
         out.get("sentiment_vol_regime_min_edge"),
         out["directional_min_edge"],
     )
-    out["contrarian_sentiment_min"] = float(out.get("contrarian_sentiment_min") or 75.0)
+    # PRODUCTION FIX (2026-05-13): Don't override contrarian_sentiment_min with hardcoded default
+    # Allow pm_profiles.yaml to set the value (baseline=35, production=75)
+    if "contrarian_sentiment_min" in out and out["contrarian_sentiment_min"] is not None:
+        out["contrarian_sentiment_min"] = float(out["contrarian_sentiment_min"])
+    else:
+        out["contrarian_sentiment_min"] = 75.0  # Fallback only if not set
     gap = out.get("contrarian_model_gap_min")
     out["contrarian_model_gap_min"] = float(gap) if gap is not None else None
     out["mm_max_spread_cents"] = _decimal(out.get("mm_max_spread_cents"), Decimal("10"))
@@ -288,7 +324,7 @@ def _resolve_v2_profile(
     if isinstance(asset_grid, dict):
         edge_val = asset_grid.get(tf_n)
         if edge_val is not None:
-            base_edge = _decimal(edge_val, Decimal("0.04"))
+            base_edge = _decimal(edge_val, Decimal("0.05"))
     
     # Try wildcard asset if exact failed
     if base_edge is None:
@@ -296,13 +332,13 @@ def _resolve_v2_profile(
         if isinstance(wildcard_grid, dict):
             edge_val = wildcard_grid.get(tf_n)
             if edge_val is not None:
-                base_edge = _decimal(edge_val, Decimal("0.04"))
+                base_edge = _decimal(edge_val, Decimal("0.05"))
     
     # Try wildcard timeframe if still not found
     if base_edge is None and asset_grid:
         edge_val = asset_grid.get("*")
         if edge_val is not None:
-            base_edge = _decimal(edge_val, Decimal("0.04"))
+            base_edge = _decimal(edge_val, Decimal("0.05"))
     
     # Final fallback to modern profile if edge not found
     if base_edge is None:
@@ -347,6 +383,13 @@ def _resolve_v2_profile(
     if isinstance(asset_price_grid, dict):
         max_price_cents = asset_price_grid.get(tf_n)
     
+    # Extract quick_win_max_price_cents_grid if present (stricter caps for high-probability trades)
+    quick_win_max_price_grid = fee_settings.get("quick_win_max_price_cents_grid", {})
+    quick_win_max_price_cents = None
+    quick_win_asset_price_grid = quick_win_max_price_grid.get(asset_u, {})
+    if isinstance(quick_win_asset_price_grid, dict):
+        quick_win_max_price_cents = quick_win_asset_price_grid.get(tf_n)
+    
     # Build result dict matching v1 structure where possible
     out: Dict[str, Any] = {
         # Core v1-compatible fields
@@ -378,6 +421,7 @@ def _resolve_v2_profile(
         "confidence_tier_multiplier": confidence_tier_mult if isinstance(confidence_tier_mult, dict) else {},
         "effective_kelly_by_band": {k: str(v) for k, v in effective_kelly_by_band.items()},
         "max_price_cents": max_price_cents,
+        "quick_win_max_price_cents": quick_win_max_price_cents,
         # Identity
         "asset": asset_u,
         "timeframe": tf_n,
@@ -552,6 +596,7 @@ class EffectiveCryptoConfig:
     min_notional: Optional[Dict[str, Any]] = None
     base_kelly_fraction: Optional[Decimal] = None
     confidence_tier_multiplier: Optional[Dict[str, float]] = None
+    quick_win_max_price_cents: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -635,12 +680,14 @@ def get_effective_crypto_config(
         archetype=arch,
         asset=asset_u,
         timeframe=tf,
-        directional_min_edge=_decimal(row.get("directional_min_edge"), Decimal("0.04")),
+        directional_min_edge=_decimal(row.get("directional_min_edge"), Decimal("0.05")),
         sentiment_vol_regime_min_edge=_decimal(
             row.get("sentiment_vol_regime_min_edge"),
-            _decimal(row.get("directional_min_edge"), Decimal("0.04")),
+            _decimal(row.get("directional_min_edge"), Decimal("0.05")),
         ),
-        contrarian_sentiment_min=float(row.get("contrarian_sentiment_min") or 75.0),
+        # PRODUCTION FIX (2026-05-13): Don't override contrarian_sentiment_min with hardcoded default
+        # Allow pm_profiles.yaml to set the value (baseline=35, production=75)
+        contrarian_sentiment_min=float(row.get("contrarian_sentiment_min") if row.get("contrarian_sentiment_min") is not None else 75.0),
         contrarian_model_gap_min=_float(row.get("contrarian_model_gap_min")),
         mm_max_spread_cents=_decimal(row.get("mm_max_spread_cents"), Decimal("10")),
         pm_risk_max_spread_cents=_decimal(row.get("pm_risk_max_spread_cents"), Decimal("10")),
@@ -667,6 +714,7 @@ def get_effective_crypto_config(
         if row.get("base_kelly_fraction") is not None
         else None,
         confidence_tier_multiplier=row.get("confidence_tier_multiplier"),
+        quick_win_max_price_cents=_float(row.get("quick_win_max_price_cents")),
     )
 
 
@@ -678,6 +726,53 @@ def get_min_order_notional_for_intent(agent_id: Optional[str], ticker: str) -> O
     if eff is None:
         return None
     return eff.min_order_notional_usd
+
+
+def get_global_min_order_notional_usd() -> float:
+    """Get the global minimum order notional from threshold matrix configuration.
+    
+    PRODUCTION (2026-05-01): This value is sourced from the system configuration
+    (config/crypto_threshold_matrix.yaml) and is used as the base unit for risk
+    calculations when explicit settings are unavailable.
+    
+    Returns:
+        Minimum order notional in USD (default 0.35 from matrix config)
+    """
+    try:
+        doc = load_matrix_document()
+        # Try to extract from profiles -> modern -> min_notional -> usd
+        profiles = doc.get("profiles", {})
+        modern = profiles.get("modern", {})
+        
+        # Try v2 schema first (min_notional at profile level)
+        min_notional = modern.get("min_notional", {})
+        if min_notional and "usd" in min_notional:
+            usd_val = min_notional.get("usd")
+            if usd_val is not None and float(usd_val) > 0:
+                return float(usd_val)
+        
+        # Try v1 schema (rows with min_order_notional_usd)
+        rows = modern.get("rows", [])
+        for row in rows:
+            if row.get("min_order_notional_usd") is not None:
+                val = float(row["min_order_notional_usd"])
+                if val > 0:
+                    return val
+        
+        # Check legacy profile
+        legacy = profiles.get("legacy", {})
+        legacy_rows = legacy.get("rows", [])
+        for row in legacy_rows:
+            if row.get("min_order_notional_usd") is not None:
+                val = float(row["min_order_notional_usd"])
+                if val > 0:
+                    return val
+    except Exception:
+        pass
+    
+    # Return embedded fallback value (from _fallback_rows function)
+    # This is the system's canonical minimum notional when config unavailable
+    return 0.35
 
 
 def enumerate_effective_rows_for_grid() -> List[Dict[str, Any]]:
@@ -819,7 +914,8 @@ def get_crypto_matrix_fingerprint() -> str:
         try:
             row = resolve_merged_row(asset=asset, timeframe=tf, archetype="directional")
             fingerprint_data[f"{asset}_{tf}_edge"] = str(row.get("directional_min_edge"))
-        except Exception:
+        except Exception as exc:
+            logger.debug("crypto_threshold_matrix: failed to resolve edge for fingerprint %s/%s: %s", asset, tf, exc)
             fingerprint_data[f"{asset}_{tf}_edge"] = "error"
     
     # Hash the deterministic JSON

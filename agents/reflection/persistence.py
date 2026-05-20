@@ -227,11 +227,20 @@ class PersistenceLayer:
         logger.info("Flush loop started")
         
         while self._running:
-            time.sleep(self.flush_interval)
-            
-            with self._buffer_lock:
-                if self._write_buffer:
-                    self._flush_buffer()
+            try:
+                # BUG-FIX (2026-05-12): Use short sleep intervals to prevent blocking
+                # Sleep in 1-second chunks instead of one long sleep
+                for _ in range(int(self.flush_interval)):
+                    if not self._running:
+                        break
+                    time.sleep(1.0)
+                
+                with self._buffer_lock:
+                    if self._write_buffer:
+                        self._flush_buffer()
+            except Exception as e:
+                logger.error("Flush loop error: %s", e, exc_info=True)
+                # Continue loop despite errors to avoid blocking
         
         logger.info("Flush loop stopped")
     

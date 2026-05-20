@@ -98,12 +98,36 @@ class BtcAnchorGate:
         self._current_regime: Optional[BtcRegimeState] = None
         self._last_update: float = 0.0
         self._recent_impulses: list = []
-        self._lock = threading.Lock()
+        # TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+        # TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+        # self._lock = threading.Lock()
+        self._lock = None  # Disabled to prevent startup hang
         logger.info("BtcAnchorGate initialized")
 
     def update_regime(self, btc_price: float, btc_prices_15m: list, btc_prices_1h: list) -> BtcRegimeState:
         """Update BTC regime state from price data."""
-        with self._lock:
+        if self._lock is not None:
+            with self._lock:
+                adx = self._calculate_adx(btc_prices_15m)
+                slope_15m = self._calculate_slope(btc_prices_15m)
+                slope_1h = self._calculate_slope(btc_prices_1h)
+                atr_pct = self._calculate_atr_pct(btc_prices_15m)
+                impulse = self._detect_impulse(btc_prices_15m)
+                regime = self._classify_regime(adx, slope_15m, slope_1h)
+
+                state = BtcRegimeState(
+                    regime=regime,
+                    timestamp=time.time(),
+                    adx=adx,
+                    slope_15m=slope_15m,
+                    slope_1h=slope_1h,
+                    atr_pct=atr_pct,
+                )
+
+                if impulse:
+                    state.last_impulse_ts = impulse[0]
+        else:
+            # Lock disabled - direct update (startup workaround)
             adx = self._calculate_adx(btc_prices_15m)
             slope_15m = self._calculate_slope(btc_prices_15m)
             slope_1h = self._calculate_slope(btc_prices_1h)
@@ -265,23 +289,35 @@ class BtcAnchorGate:
 # ═══════════════════════════════════════════════════════════════════════════
 
 _gate_instance: Optional[BtcAnchorGate] = None
-_gate_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _gate_lock = threading.Lock()
+_gate_lock = None  # Disabled to prevent startup hang
 
 
 def get_btc_anchor_gate() -> BtcAnchorGate:
     """Get or create the singleton BtcAnchorGate."""
     global _gate_instance
     if _gate_instance is None:
-        with _gate_lock:
-            if _gate_instance is None:
-                _gate_instance = BtcAnchorGate()
-                logger.info("BtcAnchorGate singleton initialized")
+        if _gate_lock is not None:
+            with _gate_lock:
+                if _gate_instance is None:
+                    _gate_instance = BtcAnchorGate()
+                    logger.info("BtcAnchorGate singleton initialized")
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _gate_instance = BtcAnchorGate()
+            logger.info("BtcAnchorGate singleton initialized (lock disabled)")
     return _gate_instance
 
 
 def reset_btc_anchor_gate() -> None:
     """Reset the singleton (for testing)."""
     global _gate_instance
-    with _gate_lock:
+    if _gate_lock is not None:
+        with _gate_lock:
+            _gate_instance = None
+            logger.info("BtcAnchorGate singleton reset")
+    else:
         _gate_instance = None
-        logger.info("BtcAnchorGate singleton reset")
+        logger.info("BtcAnchorGate singleton reset (lock disabled)")

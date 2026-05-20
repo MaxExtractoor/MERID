@@ -101,6 +101,7 @@ class MarketUniverse:
         
         For raw EventMarket objects, extract from ticker (e.g., KXBTC15M → BTC).
         For enriched markets, use the asset field.
+        For CatalogMarket objects, asset is on the outer object.
         """
         # First try direct asset/underlying fields (enriched markets)
         if isinstance(market, dict):
@@ -113,6 +114,13 @@ class MarketUniverse:
             if asset:
                 return asset
             ticker = getattr(market, "ticker", None) or getattr(market, "market_id", None)
+            
+            # CRITICAL FIX: CatalogMarket wraps EventMarket, so asset is on outer object
+            # If we still don't have a ticker, check nested EventMarket
+            if not ticker and hasattr(market, "market"):
+                nested = getattr(market, "market", None)
+                if nested:
+                    ticker = getattr(nested, "ticker", None) or getattr(nested, "market_id", None)
         
         # Fallback: extract from ticker (e.g., KXBTC15M → BTC)
         if ticker and isinstance(ticker, str):
@@ -122,15 +130,43 @@ class MarketUniverse:
             if match:
                 return match.group(1).upper()
         
+        # CRITICAL DEBUG: Log why asset extraction failed
+        logger.warning(
+            "[MARKET-UNIVERSE] Failed to extract asset from market: type=%s has_asset=%s has_ticker=%s asset=%s ticker=%s",
+            type(market).__name__,
+            hasattr(market, "asset"),
+            hasattr(market, "ticker"),
+            getattr(market, "asset", None),
+            getattr(market, "ticker", None),
+        )
+        
         return None
     
     @staticmethod
     def _get_ticker(market: Any) -> Optional[str]:
-        """Extract ticker from market object/dict."""
+        """Extract ticker from market object/dict.
+        
+        For CatalogMarket objects, use event_ticker or series_ticker fields,
+        or fall back to nested EventMarket.market_id.
+        """
         if isinstance(market, dict):
-            return market.get("ticker")
+            return market.get("ticker") or market.get("market_id")
         else:
-            return getattr(market, "ticker", None) or getattr(market, "market_id", None)
+            # CRITICAL FIX: CatalogMarket has event_ticker and series_ticker fields, not ticker
+            ticker = (
+                getattr(market, "event_ticker", None) or 
+                getattr(market, "series_ticker", None) or 
+                getattr(market, "ticker", None) or 
+                getattr(market, "market_id", None)
+            )
+            
+            # CRITICAL FIX: CatalogMarket wraps EventMarket, so market_id is on nested market.market
+            if not ticker and hasattr(market, "market"):
+                nested = getattr(market, "market", None)
+                if nested:
+                    ticker = getattr(nested, "market_id", None)
+            
+            return ticker
     
     @classmethod
     def from_markets(cls, markets: List[Any]) -> "MarketUniverse":

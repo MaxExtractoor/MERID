@@ -98,10 +98,15 @@ class AutoPromoter:
         self._state_file = Path("data/promotion_states.json")
         self._state_file.parent.mkdir(parents=True, exist_ok=True)
         
-        self._load_states()
+        # BUG-FIX (2026-05-12): Defer state load to avoid blocking startup
+        # Load states lazily on first access instead of during __init__
+        self._states_loaded = False
     
     def _load_states(self):
-        """Load persisted promotion states."""
+        """Load persisted promotion states (lazy-loaded on first access)."""
+        if self._states_loaded:
+            return
+        
         if self._state_file.exists():
             try:
                 with open(self._state_file) as f:
@@ -147,7 +152,8 @@ class AutoPromoter:
                 logger.warning(f"Promotion callback error: {e}")
     
     def get_status(self, agent_id: str) -> Optional[AgentPromotionStatus]:
-        """Get promotion status for an agent."""
+        """Get promotion status for an agent (triggers lazy load if needed)."""
+        self._load_states()  # Lazy load on first access
         with self._lock:
             return self._statuses.get(agent_id)
     

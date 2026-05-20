@@ -72,6 +72,43 @@ order_latency_seconds = Histogram(
 )
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Exit Target Invariant Metrics (15m Crypto)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+kalshi_exit_invariant_compliant_total = Counter(
+    'kalshi_exit_invariant_compliant_total',
+    'Total entry orders on 15m crypto with properly defined exit targets (TP/SL)',
+    ['ticker']
+)
+"""
+Exit target invariant compliance counter.
+
+Labels:
+    ticker: Market ticker (truncated to 50 chars for cardinality safety)
+
+Example alert:
+    rate(kalshi_exit_invariant_compliant_total[5m]) == 0
+    => No compliant orders in 5m, check if system is stuck
+"""
+
+kalshi_exit_invariant_violations = Counter(
+    'kalshi_exit_invariant_violations',
+    'Total entry orders on 15m crypto rejected due to missing exit targets',
+    ['ticker', 'source']
+)
+"""
+Exit target invariant violation counter.
+
+Labels:
+    ticker: Market ticker (truncated to 50 chars for cardinality safety)
+    source: Order source module (truncated to 50 chars for cardinality safety)
+
+Example alert:
+    kalshi_exit_invariant_violations > 0 in 5m
+    => CRITICAL: Bypass path attempting orders without exits, investigate immediately
+"""
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Risk Metrics
 # ═══════════════════════════════════════════════════════════════════════════════
 

@@ -319,7 +319,8 @@ class MockSentimentSource(SentimentSource):
     
     def __init__(self, config: IngestionConfig):
         super().__init__(config)
-        self._symbols = ["BTC", "ETH", "SOL"]
+        from merid.constants import CRYPTO_15M_ASSETS
+        self._symbols = list(CRYPTO_15M_ASSETS)
     
     async def connect(self) -> bool:
         self.status = IngestionStatus.ACTIVE

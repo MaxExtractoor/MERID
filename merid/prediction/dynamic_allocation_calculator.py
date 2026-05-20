@@ -91,7 +91,10 @@ class DynamicAllocationCalculator:
         self._risk_metrics: Dict[str, AssetRiskMetrics] = {}
         self._last_recompute = 0.0
         self._cached_allocations: Dict[str, Decimal] = {}
-        self._cache_lock = threading.Lock()
+        # TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+        # TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+        # self._cache_lock = threading.Lock()
+        self._cache_lock = None  # Disabled to prevent startup hang
         self._cache_ttl_seconds = 600  # 10 minute TTL
         
     def _fetch_risk_metrics(self, asset: str) -> AssetRiskMetrics:
@@ -263,7 +266,12 @@ class DynamicAllocationCalculator:
         else:
             weights = self._compute_risk_parity_weights(assets, total_portfolio_value_usd)
         
-        with self._cache_lock:
+        if self._cache_lock is not None:
+            with self._cache_lock:
+                self._cached_allocations = weights
+                self._last_recompute = time.time()
+        else:
+            # Lock disabled - direct access (startup workaround)
             self._cached_allocations = weights
             self._last_recompute = time.time()
         
@@ -290,12 +298,20 @@ class DynamicAllocationCalculator:
             return self.config.static_caps_usd[asset]
         
         # Check cache freshness
-        with self._cache_lock:
+        if self._cache_lock is not None:
+            with self._cache_lock:
+                cache_age = time.time() - self._last_recompute
+                if cache_age < self._cache_ttl_seconds and self._cached_allocations:
+                    cached = self._cached_allocations.get(asset)
+                    if cached is not None:
+                        return cached
+        else:
+            # Lock disabled - direct access (startup workaround)
             cache_age = time.time() - self._last_recompute
             if cache_age < self._cache_ttl_seconds and self._cached_allocations:
                 cached = self._cached_allocations.get(asset)
-                if cached:
-                    return float(cached) * total_portfolio_value_usd
+                if cached is not None:
+                    return cached
         
         # Compute fresh allocations
         allocations = self.compute_allocations(total_portfolio_value_usd, strategy)
@@ -372,16 +388,23 @@ class DynamicAllocationCalculator:
 
 # Singleton instance
 _calculator_instance: Optional[DynamicAllocationCalculator] = None
-_calculator_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _calculator_lock = threading.Lock()
+_calculator_lock = None  # Disabled to prevent startup hang
 
 
 def get_dynamic_allocation_calculator() -> DynamicAllocationCalculator:
     """Get the singleton DynamicAllocationCalculator instance."""
     global _calculator_instance
     if _calculator_instance is None:
-        with _calculator_lock:
-            if _calculator_instance is None:
-                _calculator_instance = DynamicAllocationCalculator()
+        if _calculator_lock is not None:
+            with _calculator_lock:
+                if _calculator_instance is None:
+                    _calculator_instance = DynamicAllocationCalculator()
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _calculator_instance = DynamicAllocationCalculator()
     return _calculator_instance
 
 

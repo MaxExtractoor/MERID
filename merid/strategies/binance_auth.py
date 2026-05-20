@@ -58,6 +58,19 @@ class BinanceAuthClient:
             'Content-Type': 'application/x-www-form-urlencoded'
         })
     
+    def close(self) -> None:
+        """Close the requests session to free resources. Call on shutdown."""
+        if self.session is not None:
+            try:
+                self.session.close()
+                logger.debug("BinanceAuth: requests session closed")
+            except Exception as e:
+                logger.warning("BinanceAuth: error closing session: %s", e)
+    
+    def __del__(self) -> None:
+        """Cleanup on garbage collection (fallback if close() not called)."""
+        self.close()
+    
     def sign_params(self, params: Dict) -> str:
         """
         Sign parameters with HMAC SHA256.

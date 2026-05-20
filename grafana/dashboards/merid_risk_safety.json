@@ -1,0 +1,153 @@
+{
+  "dashboard": {
+    "title": "MERID Risk & Safety",
+    "uid": "merid-risk-safety",
+    "tags": ["merid", "risk", "safety"],
+    "timezone": "browser",
+    "refresh": "1m",
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Kill Switch Status",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "merid_kill_switch_state",
+            "legendFormat": "{{state}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "red",
+                  "value": 1
+                }
+              ]
+            }
+          }
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 0,
+          "y": 0
+        }
+      },
+      {
+        "id": 2,
+        "title": "Blocked Trades by Reason",
+        "type": "piechart",
+        "targets": [
+          {
+            "expr": "sum by (reason) (rate(merid_blocked_trades_total[5m]))",
+            "legendFormat": "{{reason}}"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 6,
+          "x": 6,
+          "y": 0
+        }
+      },
+      {
+        "id": 3,
+        "title": "Terminal Phase Guard Blocks",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum by (asset) (rate(merid_terminal_guard_block_total[5m]))",
+            "legendFormat": "{{asset}}"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 0
+        }
+      },
+      {
+        "id": 4,
+        "title": "Determinism Mismatches",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum by (asset, strategy) (rate(merid_determinism_mismatch_total[5m]))",
+            "legendFormat": "{{asset}}/{{strategy}}"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 8
+        }
+      },
+      {
+        "id": 5,
+        "title": "Sizing Mismatches",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum by (asset, strategy) (rate(merid_sizing_mismatch_total[5m]))",
+            "legendFormat": "{{asset}}/{{strategy}}"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 8
+        }
+      },
+      {
+        "id": 6,
+        "title": "Daily PnL",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "merid_daily_pnl",
+            "legendFormat": "Daily PnL"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 16
+        }
+      },
+      {
+        "id": 7,
+        "title": "Error Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(merid_errors_total[5m])",
+            "legendFormat": "Error Rate"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 16
+        }
+      }
+    ]
+  }
+}

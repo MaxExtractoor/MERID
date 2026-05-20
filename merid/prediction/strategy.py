@@ -16,6 +16,18 @@ from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+# PRODUCTION FIX: Sentiment gating mode - controls whether sentiment blocks trades
+# Options: "gating" (sentiment can block), "feature_only" (sentiment only for model features), "disabled" (ignore sentiment)
+# PRODUCTION FIX (2026-05-13): Changed default to "disabled" to hard-separate sentiment from execution
+# Sentiment subsystem is currently unhealthy (all zeros, broken agents, degraded Redis)
+# Set MERID_SENTIMENT_MODE=gating to re-enable when sentiment is fixed
+_SENTIMENT_MODE_DEFAULT = "disabled"
+SENTIMENT_MODE = os.getenv("MERID_SENTIMENT_MODE", _SENTIMENT_MODE_DEFAULT).lower()
+# 15m STACK FIX (2026-05-16): Force sentiment gating disabled for kalshi_crypto_15m_v2 profile
+if os.getenv("MERID_PROFILE") == "kalshi_crypto_15m_v2":
+    SENTIMENT_MODE = "disabled"
+SENTIMENT_GATING_ENABLED = SENTIMENT_MODE in ("gating", "full")
+
 from merid.prediction.model import (
     ContractState,
     EdgeEstimate,
@@ -33,11 +45,80 @@ from merid.prediction.crypto_top_edge import (
 )
 
 # PRODUCTION FIX v5 (2026-04-26): Import calibration config for probability gate
-from merid.sentiment.crypto_registry import get_calibration_config
+# SENTIMENT DISABLED FOR 15M STACK: Calibration config not needed for single-agent system
+# from merid.sentiment.crypto_registry import get_calibration_config
 
 # P0-001 FIX: Use helper function instead of constant for consistency across all PM paths.
 # This ensures MERID_PM_MAX_SPOT_AGE_SECONDS env var is respected everywhere.
 SNAPSHOT_STALE_SECONDS = max_spot_age_seconds()
+
+# P0-002 FIX: Load edge thresholds from canonical YAML config
+from typing import Dict
+import yaml
+from pathlib import Path
+
+
+def _load_distance_config() -> Dict[str, Any]:
+    """Load edge thresholds from kalshi_distance.yaml as single source of truth."""
+    try:
+        config_path = Path(__file__).parent.parent.parent / "config" / "kalshi_distance.yaml"
+        if config_path.exists():
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+            return config or {}
+    except Exception:
+        # Cannot use logger here as it may not be initialized yet at module load time
+        pass
+    return {}
+
+
+def _get_min_edge_for_phase(phase: ExpiryPhase) -> Decimal:
+    """Get min edge from YAML config with env override.
+    
+    Priority:
+    1. MERID_PM_MIN_EDGE_* env vars
+    2. kalshi_distance.yaml min_edge_near values
+    3. Code defaults (conservative fallback)
+    """
+    # Check env var first (highest priority)
+    env_map = {
+        ExpiryPhase.EARLY: "MERID_PM_MIN_EDGE_EARLY",
+        ExpiryPhase.MID: "MERID_PM_MIN_EDGE_MID", 
+        ExpiryPhase.LATE: "MERID_PM_MIN_EDGE_LATE",
+        ExpiryPhase.TERMINAL: "MERID_PM_MIN_EDGE_TERMINAL",
+    }
+    env_var = env_map.get(phase)
+    if env_var:
+        env_val = os.getenv(env_var)
+        if env_val:
+            try:
+                return Decimal(str(env_val))
+            except:
+                pass
+    
+    # Load from YAML config
+    config = _load_distance_config()
+    min_edge_near = config.get("min_edge_near", {})
+    
+    # Use BTC as the base threshold (most liquid, tightest edge)
+    base_edge = min_edge_near.get("BTC", 0.05)  # CONSERVATIVE: 5% fallback
+    
+    # Phase adjustments — conservative "sure bet" (2026-05-10):
+    # Terminal has HIGHEST threshold (most risk near expiry), Late = base, Early/Mid wider
+    phase_multipliers = {
+        ExpiryPhase.EARLY: 1.6,      # 8% with BTC base 5% — high uncertainty at open
+        ExpiryPhase.MID: 1.2,        # 6% — most liquid phase
+        ExpiryPhase.LATE: 1.0,       # 5% — base edge (approaching close)
+        ExpiryPhase.TERMINAL: 2.0,   # 10% — very close to expiry, highest risk
+    }
+    multiplier = phase_multipliers.get(phase, 1.0)
+    
+    return Decimal(str(round(base_edge * multiplier, 4)))
+
+
+# Validate config loaded at module import time
+_distance_config = _load_distance_config()
+
 from merid.formulas import (
     FORMULAS_VERSION,
     AUDIT_SPEC_VERSION,
@@ -86,21 +167,20 @@ class ExpiryPhase(str, Enum):
 class StrategyConfig:
     """Tunable parameters for KalshiStrategy."""
     # Edge thresholds (as probability fraction, e.g. 0.04 = 4 %)
-    # PRODUCTION FIX v5 (2026-04-26): Calibrated for live trading with 80%+ win rate.
-    # Previous 6-8% thresholds were too strict - blocked all signals. New 4-5% thresholds
-    # allow valid signals through while maintaining win rate via Kelly sizing and risk controls.
-    # Per-agent YAML overrides (kalshi_agent_grid.yaml ``strategy:`` block) can adjust further.
-    # MERID_PM_MIN_EDGE_* env vars override for runtime ops tuning.
-    min_edge_early: Decimal = Decimal("0.05")      # 5% — Kalshi EARLY phase (>24h to expiry); was 8%
-    min_edge_mid: Decimal = Decimal("0.04")       # 4% — MID (4-24h); was 7%
-    min_edge_late: Decimal = Decimal("0.04")      # 4% — LATE (1-4h); was 6%
-    min_edge_terminal: Decimal = Decimal("0.05")  # 5% — TERMINAL (<1h); was 6%, now slightly tighter due to noise
-    min_arb_edge: Decimal = Decimal("0.003")      # 0.3% for pure arb (risk-free); was 0.5%
+    # P0-003 FIX: Now loaded from kalshi_distance.yaml via _get_min_edge_for_phase()
+    # Keeping dataclass fields for backwards compatibility but values are computed from YAML
+    min_edge_early: Decimal = field(default_factory=lambda: _get_min_edge_for_phase(ExpiryPhase.EARLY))
+    min_edge_mid: Decimal = field(default_factory=lambda: _get_min_edge_for_phase(ExpiryPhase.MID))
+    min_edge_late: Decimal = field(default_factory=lambda: _get_min_edge_for_phase(ExpiryPhase.LATE))
+    min_edge_terminal: Decimal = field(default_factory=lambda: _get_min_edge_for_phase(ExpiryPhase.TERMINAL))
+    min_arb_edge: Decimal = Decimal("1.0")        # MICRO-BANKROLL: Disabled (1.0 = 100% edge required). Arb buys both sides causing duplicate race and requires 2x capital.
 
-    # Position sizing
-    max_contracts_per_market: int = 100
-    max_contracts_per_order: int = 25
-    kelly_fraction: Decimal = Decimal("0.25")       # Quarter-Kelly
+    # Position sizing - CRITICAL FIX: 0 = derive from live bankroll
+    # Previous hardcoded values (100/25) were dangerous for micro bankrolls
+    max_contracts_per_market: int = 0  # 0 = derive: 1 per $10 of bankroll, max 100
+    max_contracts_per_order: int = 0  # 0 = derive: 1% of bankroll / price, max 25
+    # P2-001 FIX: Aligned to 0.20 to match trading_constants.py
+    kelly_fraction: Decimal = Decimal("0.20")       # Fifth-Kelly (conservative)
 
     # Exit rules
     profit_target_pct: Decimal = Decimal("0.15")    # Take profit at 15 %
@@ -120,17 +200,20 @@ class StrategyConfig:
     mm_inventory_limit: int = 50                     # Max contracts to hold per side
     mm_skew_factor: Decimal = Decimal("0.5")         # How much to lean based on inventory
 
-    # Confidence — PRODUCTION FIX v5 (2026-04-26): Lowered to 0.45 for live trading.
-    # Previous 0.60 was too strict - blocked all signals. Win rate is maintained via
-    # Kelly sizing (lower confidence = smaller size) and risk controls, not gating.
-    # Override per-agent via YAML ``strategy: min_confidence: 0.50`` or env MERID_PM_MIN_CONFIDENCE.
-    min_confidence: Decimal = Decimal("0.45")  # Was 0.60 - allow more signals, size down for low confidence
+    # Confidence — CONSERVATIVE SURE BET (2026-05-10): Raised to 0.58.
+    # With 5-10% edge thresholds, model must have genuine conviction (58%+) to trade.
+    # Below 53.5% is negative EV after Kalshi's ~7% total cost (fees + spread).
+    # Override per-agent via YAML ``strategy: min_confidence: 0.60`` or env MERID_PM_MIN_CONFIDENCE.
+    min_confidence: Decimal = Decimal("0.58")  # 58% — minimum for profitability after fees
 
     # Archetype sentiment / regime tunables (YAML ``strategy:`` + pm_profiles + env)
-    contrarian_sentiment_min: float = 75.0
+    # PRODUCTION FIX v8 (2026-04-30): Lowered to 15.0 to match realistic market sentiment (was 35.0)
+    # This aligns with observed local sentiment of 15.0 in logs - allowing contrarian trades to execute
+    contrarian_sentiment_min: float = 15.0  # Lowered from 35.0 - allow realistic contrarian signals
     contrarian_model_gap_min: float = 0.10
     vol_breakout_neutral_low: float = 35.0
     vol_breakout_neutral_high: float = 65.0
+    sentiment_mode: str = "gating"  # PRODUCTION FIX (2026-05-13): Configurable sentiment gating mode
 
 
 @dataclass
@@ -152,6 +235,25 @@ class StrategySignal:
     eval_context: Dict[str, Any] = field(default_factory=dict)
     # Behavioral exploitation adjustments for logging
     behavioral_adjustments: Dict[str, Any] = field(default_factory=dict)
+
+    def with_contracts(self, new_contracts: int) -> "StrategySignal":
+        """Return a new signal with resized contract count."""
+        return StrategySignal(
+            market_id=self.market_id,
+            action=self.action,
+            side=self.side,
+            contracts=new_contracts,
+            limit_price_cents=self.limit_price_cents,
+            bid_price_cents=self.bid_price_cents,
+            ask_price_cents=self.ask_price_cents,
+            edge=self.edge,
+            phase=self.phase,
+            reason=f"{self.reason} (resized from {self.contracts} to {new_contracts})",
+            timestamp=self.timestamp,
+            correlation_id=self.correlation_id,
+            eval_context=dict(self.eval_context),
+            behavioral_adjustments=dict(self.behavioral_adjustments),
+        )
 
     def to_dict(self) -> dict:
         return {
@@ -229,36 +331,124 @@ class KalshiStrategy:
     # ------------------------------------------------------------------
 
     def _sentiment_size_factor(self, snapshot: "MarketSnapshot") -> float:
-        """Compute a 0.35–1.0 size_factor from fear/greed and vol regime.
+        """Compute size_factor from fear/greed and vol regime.
 
-        This is deliberately downside-only (max 1.0) so the PositionSizer
-        hourly exposure cap is never bypassed by sentiment boosting.
+        For 15m scalper mode: Relaxed multipliers (0.70/0.85 vs 0.50/0.75)
+        to allow larger positions during volatile periods when scalping
+        opportunities are best.
         """
+        import os
+        is_scalper = os.getenv("STRATEGY_MODE", "").upper() == "MOMENTUM_SCALPER"
+        
         factor = 1.0
 
         if snapshot.sentiment_global is not None:
             fg_score = snapshot.sentiment_global
             if fg_score <= 20 or fg_score >= 80:
-                factor *= 0.5
+                # 15m scalper: 0.70 (was 0.50) - allow larger positions at extremes
+                factor *= 0.70 if is_scalper else 0.5
             elif fg_score <= 30 or fg_score >= 70:
-                factor *= 0.75
+                # 15m scalper: 0.85 (was 0.75) - moderate reduction
+                factor *= 0.85 if is_scalper else 0.75
 
         if snapshot.sentiment_regime:
             regime = snapshot.sentiment_regime.lower()
             if "extreme" in regime:
-                factor *= 0.7
+                # 15m scalper: 0.85 (was 0.70) - less penalty in extreme regimes
+                factor *= 0.85 if is_scalper else 0.7
 
-        return max(0.35, min(1.0, factor))
+        # 15m scalper: higher floor (0.50 vs 0.35) for minimum position sizing
+        min_factor = 0.50 if is_scalper else 0.35
+        return max(min_factor, min(1.0, factor))
 
     def _pm_vol_band_size_factor(self, snapshot: "MarketSnapshot") -> float:
-        """Shrink/expand contracts from PM ``crypto_pm_vol_bridge`` (low/mid/high band)."""
-        m = getattr(snapshot, "crypto_vol_size_mult", None)
-        if m is None:
-            return 1.0
+        """Return volatility-band based size multiplier.
+        
+        For 15m scalper mode: Relaxed high-vol penalty (0.85 vs 0.70)
+        since volatility creates scalping opportunities.
+        """
+        import os
+        is_scalper = os.getenv("STRATEGY_MODE", "").upper() == "MOMENTUM_SCALPER"
+        
+        # FIX: Use correct attribute name 'crypto_vol_band' (string: low|mid|high)
+        band = getattr(snapshot, "crypto_vol_band", None) or getattr(snapshot, "volatility_band", None)
+        
+        # 15m scalper: higher high-vol multiplier (0.85 vs 0.70)
+        high_vol_mult = 0.85 if is_scalper else 0.70
+        
+        factor_map: Dict[str, float] = {
+            "high": high_vol_mult,   # High vol = moderate reduction (less for scalper)
+            "mid": 1.0,              # Normal
+            "low": 1.0,              # Low vol = full size
+        }
+        factor = factor_map.get(band, 1.0)
+        
+        # SAFETY: Ensure factor is never 0 (prevents zero size_factor)
+        if factor <= 0:
+            logger.warning("[PM_VOL_BAND] Invalid factor=%.4f for band=%s, defaulting to 1.0", factor, band)
+            factor = 1.0
+        
+        return factor
+
+    def _apply_cycle_cap(
+        self,
+        size: int,
+        snapshot: MarketSnapshot,
+        side: str,
+        net_edge: Optional[float] = None,
+    ) -> int:
+        """Apply cycle-level MAX_CYCLE_RISK_PCT bankroll allocation cap to contract size.
+        
+        For 15m scalper mode: MAX_CYCLE_RISK_PCT = 2% (unified across all modes, top-3 edge rule).
+
+        Args:
+            size: Current proposed contract count
+            snapshot: Market snapshot for price/bankroll info
+            side: "yes" or "no"
+            net_edge: Edge value for logging
+
+        Returns:
+            int: Capped contract count
+        """
         try:
-            return max(0.1, min(1.5, float(m)))
-        except (TypeError, ValueError):
-            return 1.0
+            from merid.prediction.dynamic_sizing import apply_cycle_cap_to_kelly_size
+            from decimal import Decimal
+
+            # Get bankroll in USD
+            bankroll_cents = getattr(snapshot, 'bankroll_cents', None)
+            if bankroll_cents is None:
+                return size  # Can't cap without bankroll info
+
+            bankroll_usd = Decimal(bankroll_cents) / Decimal("100")
+
+            # Get price from snapshot
+            price_cents = None
+            if side == "yes" and hasattr(snapshot, 'implied') and snapshot.implied:
+                price_cents = int(snapshot.implied.yes_ask or snapshot.implied.yes_bid or 50)
+            elif side == "no" and hasattr(snapshot, 'implied') and snapshot.implied:
+                price_cents = int(snapshot.implied.no_ask or snapshot.implied.no_bid or 50)
+
+            # Apply cycle cap
+            capped_size, reason = apply_cycle_cap_to_kelly_size(
+                kelly_contracts=size,
+                bankroll_usd=bankroll_usd,
+                price_cents=price_cents,
+                ticker=snapshot.market_id,
+                side=side,
+                edge=Decimal(str(net_edge)) if net_edge else None,
+            )
+
+            if capped_size < size:
+                logger.info(
+                    "[CYCLE-CAP-APPLIED] %s | %d -> %d contracts (bankroll=$%.2f, price=%dc, %s)",
+                    snapshot.market_id, size, capped_size,
+                    float(bankroll_usd), price_cents or 50, reason
+                )
+                return capped_size
+        except Exception as e:
+            logger.debug("Cycle cap not applied for %s: %s", snapshot.market_id, e)
+
+        return size
 
     def _kelly_size_with_sentiment(
         self,
@@ -330,7 +520,69 @@ class KalshiStrategy:
             # Convert edge fields to sizer inputs
             edge_pct = float(edge.net_edge) * 100.0  # fraction → percent
             market_prob = float(edge.market_prob)
-            price_cents = max(1, min(99, int(round(market_prob * 100))))
+            
+            # FIX: Fetch actual contract price from market state instead of using probability-derived price
+            # This fixes Kelly sizing returning 0 contracts when actual price differs from implied probability
+            price_cents = None
+            try:
+                from merid.prediction.dynamic_sizing import get_actual_contract_price_cents
+                price_cents = get_actual_contract_price_cents(edge.market_id, side="yes", market_prob=market_prob)
+                if price_cents is None or price_cents <= 0:
+                    price_cents = max(1, min(99, int(round(market_prob * 100))))
+            except Exception:
+                price_cents = max(1, min(99, int(round(market_prob * 100))))
+
+            # FIX: Validate actual price against max_price_cents from threshold matrix
+            # This prevents momentum scalping from trading high-priced (low-edge) contracts
+            # Uses quick_win_max_price_cents for high-probability (80%+) trades in 15m timeframe
+            try:
+                from merid.prediction.crypto_threshold_matrix import resolve_merged_row
+                _asset = self._extract_asset_from_market_id(edge.market_id)
+                _tf = self._resolve_timeframe_from_agent_name()
+                if _asset and _tf:
+                    _row = resolve_merged_row(asset=_asset, timeframe=_tf, archetype="directional")
+                    
+                    # Determine confidence band based on model probability
+                    _confidence_bands = _row.get("confidence_bands", [])
+                    _current_band = None
+                    _confidence_tier_multiplier = 1.0
+                    if _confidence_bands and market_prob is not None:
+                        for band in _confidence_bands:
+                            min_conf = band.get("min_conf", 0.0)
+                            max_conf = band.get("max_conf", 1.0)
+                            if min_conf <= market_prob <= max_conf:
+                                _current_band = band.get("name")
+                                break
+                    
+                    # Get confidence tier multiplier from resolved row
+                    _confidence_tier_mult = _row.get("confidence_tier_multiplier", {})
+                    if _current_band and _confidence_tier_mult:
+                        _confidence_tier_multiplier = _confidence_tier_mult.get(_current_band, 1.0)
+                    
+                    # Select appropriate price cap based on band and timeframe
+                    _max_price_cents = _row.get("max_price_cents")
+                    if _current_band == "quick_win" and _tf == "15m":
+                        _quick_win_max_price_cents = _row.get("quick_win_max_price_cents")
+                        if _quick_win_max_price_cents:
+                            _max_price_cents = _quick_win_max_price_cents
+                            logger.debug(
+                                "[PRICE-GATE] using quick_win cap: %s | band=%s | price_cap=%dc | asset=%s tf=%s",
+                                edge.market_id, _current_band, _max_price_cents, _asset, _tf
+                            )
+                    
+                    if _max_price_cents and price_cents > _max_price_cents:
+                        logger.warning(
+                            "[PRICE-GATE] rejected: %s | actual_price=%dc > max=%dc | band=%s | asset=%s tf=%s",
+                            edge.market_id, price_cents, _max_price_cents, _current_band, _asset, _tf
+                        )
+                        return 0
+            except Exception as e:
+                logger.debug("Could not validate max_price_cents for %s: %s", edge.market_id, e)
+                _current_band = None
+                _confidence_tier_multiplier = 1.0
+            
+            # Apply confidence tier multiplier to size_factor for PositionSizer path
+            size_factor = size_factor * _confidence_tier_multiplier
 
             # Phase-based vol proxy: terminal contracts are noisier
             local_vol_pct = {
@@ -339,6 +591,11 @@ class KalshiStrategy:
                 ExpiryPhase.LATE: 20.0,
                 ExpiryPhase.TERMINAL: 35.0,
             }.get(phase, 15.0)
+
+            logger.warning(
+                "[KELLY_DEBUG] _kelly_size called: agent=%s edge_pct=%.2f phase=%s price_cents=%d",
+                self._agent_name, edge_pct, phase.value if phase else None, price_cents
+            )
 
             # CRITICAL FIX: Use unified v2 bankroll service for consistent sizing/risk
             # PM SIZING WIRING: All position sizing must use unified bankroll as single source of truth
@@ -427,7 +684,7 @@ class KalshiStrategy:
             # current open contracts, so the hourly exposure cap actually fires.
             _current_exposure = 0
             try:
-                _underlying = self._agent_name.split("_")[0].upper()
+                _underlying = (self._agent_name.split("_")[0].upper() if "_" in self._agent_name else self._agent_name.upper())
                 from merid.event_venues.kalshi.category_exposure import (
                     get_category_exposure_tracker,
                 )
@@ -459,7 +716,14 @@ class KalshiStrategy:
                 # Governance factor (1.0 / 0.5 / 0.0) multiplied into the
                 # caller-supplied sentiment size_factor so the session halt/
                 # downsize state propagates all the way into position sizing.
-                _gov = _ps.get_size_factor(self._agent_name)
+                # BASELINE OVERRIDE (2026-05-11): Allow disabling halt/downsize via env var
+                # for fire-and-forget baseline profile operation.
+                import os
+                if os.getenv("DISABLE_PAPER_SESSION_HALT", "").lower() in ("1", "true", "yes"):
+                    _gov = 1.0  # Ignore halt/downsize state
+                    logger.debug("[KELLY] Paper session halt/downsize disabled via env var for %s", self._agent_name)
+                else:
+                    _gov = _ps.get_size_factor(self._agent_name)
                 size_factor = size_factor * _gov
             except Exception:
                 pass
@@ -476,7 +740,13 @@ class KalshiStrategy:
                 expectancy_cents=_expectancy_cents,
                 total_trades=_total_trades,
             )
-            return min(size, self.config.max_contracts_per_order)
+            # Apply cycle-level 1-3% bankroll cap across all winners
+            _bankroll_usd = Decimal(_bankroll_cents) / Decimal("100")
+            from merid.prediction.dynamic_sizing import get_cycle_sizing_cap
+            # FIX: Pass ticker (market_id) to fetch actual price from market state instead of using fallback
+            _cycle_cap = get_cycle_sizing_cap(_bankroll_usd, price_cents, ticker=edge.market_id if edge else None)
+            _hard_cap = min(self.config.max_contracts_per_order, _cycle_cap.max_contracts_per_winner)
+            return min(size, _hard_cap)
         except Exception as _sze:
             logger.warning(
                 "position sizer unavailable — falling back to un-gated Kelly "
@@ -489,10 +759,76 @@ class KalshiStrategy:
             # Convert edge to float for formulas module
             edge_float = float(edge.net_edge)
             market_prob_float = float(edge.market_prob)
-            price_cents = max(1, min(99, int(round(market_prob_float * 100))))
+            
+            # FIX: Fetch actual contract price from market state instead of using probability-derived price
+            price_cents = None
+            try:
+                from merid.prediction.dynamic_sizing import get_actual_contract_price_cents
+                price_cents = get_actual_contract_price_cents(edge.market_id, side="yes", market_prob=market_prob_float)
+                # BUG-FIX: Use 50c safe default instead of probability-derived fallback which can return 1
+                # When market state is unavailable, 50c is the midpoint for binary options
+                # This prevents price_cents=1 which causes Kelly sizing to return 0 contracts
+                if price_cents is None or price_cents <= 0:
+                    price_cents = 50
+            except Exception:
+                # Same safe default on exception
+                price_cents = 50
+
+            # FIX: Validate actual price against max_price_cents from threshold matrix
+            # This prevents momentum scalping from trading high-priced (low-edge) contracts
+            # Uses quick_win_max_price_cents for high-probability (80%+) trades in 15m timeframe
+            try:
+                from merid.prediction.crypto_threshold_matrix import resolve_merged_row
+                _asset = self._extract_asset_from_market_id(edge.market_id)
+                _tf = self._resolve_timeframe_from_agent_name()
+                if _asset and _tf:
+                    _row = resolve_merged_row(asset=_asset, timeframe=_tf, archetype="directional")
+                    
+                    # Determine confidence band based on model probability
+                    _confidence_bands = _row.get("confidence_bands", [])
+                    _current_band = None
+                    _confidence_tier_multiplier = 1.0
+                    if _confidence_bands and market_prob is not None:
+                        for band in _confidence_bands:
+                            min_conf = band.get("min_conf", 0.0)
+                            max_conf = band.get("max_conf", 1.0)
+                            if min_conf <= market_prob <= max_conf:
+                                _current_band = band.get("name")
+                                break
+                    
+                    # Get confidence tier multiplier from resolved row
+                    _confidence_tier_mult = _row.get("confidence_tier_multiplier", {})
+                    if _current_band and _confidence_tier_mult:
+                        _confidence_tier_multiplier = _confidence_tier_mult.get(_current_band, 1.0)
+                    
+                    # Select appropriate price cap based on band and timeframe
+                    _max_price_cents = _row.get("max_price_cents")
+                    if _current_band == "quick_win" and _tf == "15m":
+                        _quick_win_max_price_cents = _row.get("quick_win_max_price_cents")
+                        if _quick_win_max_price_cents:
+                            _max_price_cents = _quick_win_max_price_cents
+                            logger.debug(
+                                "[PRICE-GATE] using quick_win cap: %s | band=%s | price_cap=%dc | asset=%s tf=%s",
+                                edge.market_id, _current_band, _max_price_cents, _asset, _tf
+                            )
+                    
+                    if _max_price_cents and price_cents > _max_price_cents:
+                        logger.warning(
+                            "[PRICE-GATE] rejected: %s | actual_price=%dc > max=%dc | band=%s | asset=%s tf=%s",
+                            edge.market_id, price_cents, _max_price_cents, _current_band, _asset, _tf
+                        )
+                        return 0
+            except Exception as e:
+                logger.debug("Could not validate max_price_cents for %s: %s", edge.market_id, e)
+                _current_band = None
+                _confidence_tier_multiplier = 1.0
             
             # Determine fractional Kelly based on phase
             fractional_kelly = float(self.config.kelly_fraction)  # 0.25 default
+            
+            # Apply confidence tier multiplier from threshold matrix
+            fractional_kelly *= _confidence_tier_multiplier
+            
             if phase == ExpiryPhase.EARLY:
                 fractional_kelly *= 1.5
             elif phase == ExpiryPhase.MID:
@@ -535,8 +871,13 @@ class KalshiStrategy:
             if warning:
                 logger.debug("quarter_kelly_size warning: %s", warning)
             
-            # Apply max contracts per order cap
-            return min(contracts, self.config.max_contracts_per_order)
+            # Apply cycle-level 1-3% bankroll cap across all winners
+            _bankroll_usd = Decimal(_bankroll_cents) / Decimal("100")
+            from merid.prediction.dynamic_sizing import get_cycle_sizing_cap
+            # FIX: Pass ticker (market_id) to fetch actual price from market state instead of using fallback
+            _cycle_cap = get_cycle_sizing_cap(_bankroll_usd, price_cents, ticker=edge.market_id if edge else None)
+            _hard_cap = min(self.config.max_contracts_per_order, _cycle_cap.max_contracts_per_winner)
+            return min(contracts, _hard_cap)
             
         except Exception as _formula_err:
             logger.error(
@@ -893,6 +1234,14 @@ class KalshiStrategy:
             parts.append(f"volume {snapshot.volume} < {self.config.min_volume}")
         if self.config.min_open_interest > 0 and snapshot.open_interest < self.config.min_open_interest:
             parts.append(f"OI {snapshot.open_interest} < {self.config.min_open_interest}")
+        
+        # MICRO-SCALPING: Spread check for directional signals (aligns with MM behavior)
+        # Wide spreads erode micro-edges; skip if spread exceeds MM max
+        if (
+            snapshot.implied.spread_cents is not None and
+            snapshot.implied.spread_cents > self.config.mm_max_spread_cents
+        ):
+            parts.append(f"spread {snapshot.implied.spread_cents}c > {self.config.mm_max_spread_cents}c")
 
         if not parts:
             return signal
@@ -1019,8 +1368,9 @@ class KalshiStrategy:
                     correlation_id=correlation_id,
                 )
 
-        # 4. Best speculative edge
-        spec_edges = [e for e in snapshot.edges if e.edge_type == "speculative"]
+        # 4. Best speculative edge (include both speculative, sentiment_driven, AND arb that didn't meet threshold)
+        # PRODUCTION FIX: When catalog fallback makes all edges appear as "arb", still use them as speculative
+        spec_edges = [e for e in snapshot.edges if e.edge_type in ("speculative", "sentiment_driven", "arb")]
         if not spec_edges:
             return StrategySignal(
                 market_id=snapshot.market_id,
@@ -1028,11 +1378,23 @@ class KalshiStrategy:
                 side="none",
                 contracts=0,
                 phase=phase,
-                reason="No actionable edge found.",
+                reason="No speculative edges available for this market.",
                 correlation_id=correlation_id,
             )
 
         best = max(spec_edges, key=lambda e: e.net_edge)
+        
+        # SOFT-BAND LOGGING: Log near-misses for observability (no new config)
+        min_edge = self._min_edge_for_phase(phase)
+        _edge_ratio = float(best.net_edge) / float(min_edge) if min_edge > 0 else 1.0
+        if 0.5 <= _edge_ratio < 1.0:
+            # Edge is in soft band (50-100% of threshold) - log near-miss
+            logger.debug(
+                "[PM_SIGNAL_SOFT_REJECT] agent=%s market=%s net_edge=%.4f min_edge=%.4f "
+                "ratio=%.2f phase=%s reason=soft_reject_edge",
+                self._agent_name, snapshot.market_id, float(best.net_edge),
+                float(min_edge), _edge_ratio, phase.value
+            )
 
         # 5. Edge threshold
         min_edge = self._min_edge_for_phase(phase)
@@ -1044,18 +1406,28 @@ class KalshiStrategy:
             os.getenv("MERID_CROSS_ASSET_TOP_EDGE", "true").lower() in ("1", "true", "yes", "on")
         )
         
+        # GRADUATED-SIZING-FIX: Compute size factor based on edge proximity to threshold
+        # Instead of hard wall at threshold, use graduated sizing 0.0-1.0
+        _edge_ratio = float(best.net_edge) / float(min_edge) if min_edge > 0 else 1.0
+        
+        # SWEET SPOT: Shadow threshold lowered to 30% of min_edge for live trading
+        # This allows more trades through while still filtering out noise
+        _shadow_threshold_ratio = 0.30
+        
+        # Initialize graduated factor - will be overridden if in shadow zone
+        _edge_graduated_factor = 1.0
+        
         if best.net_edge < min_edge:
             if use_cross_asset_arbiter:
                 # Cross-asset mode: Log diagnostic but continue for arbiter evaluation
-                # The local threshold is now informational, not decisive
                 logger.debug(
                     "[PM_SIGNAL_CROSS_ASSET] agent=%s asset=%s local_edge=%.4f below_local_threshold=%s "
                     "submitting_to_arbiter_for_relative_ranking",
                     self._agent_name, asset, float(best.net_edge), str(min_edge)
                 )
                 # Continue to confidence gate - signal will be submitted to arbiter downstream
-            else:
-                # Legacy mode: Hard threshold for non-crypto assets or when cross-asset disabled
+            elif _edge_ratio < _shadow_threshold_ratio:
+                # Below shadow threshold: hard block (not enough edge)
                 return StrategySignal(
                     market_id=snapshot.market_id,
                     action=SignalAction.NO_ACTION,
@@ -1063,18 +1435,73 @@ class KalshiStrategy:
                     contracts=0,
                     edge=best,
                     phase=phase,
-                    reason=f"Edge {best.net_edge:.4f} below {phase.value} threshold {min_edge}.",
+                    reason=f"Edge {best.net_edge:.4f} below shadow threshold {float(min_edge) * _shadow_threshold_ratio:.4f}.",
                     correlation_id=correlation_id,
                     eval_context={
                         "min_edge_threshold": str(min_edge),
+                        "shadow_threshold": str(float(min_edge) * _shadow_threshold_ratio),
                         "phase": phase.value,
                         "archetype": "directional",
-                        "block": "edge_below_threshold",
+                        "block": "edge_below_shadow_threshold",
                     },
                 )
+            else:
+                # Between shadow threshold and min_edge: graduated sizing (shadow mode)
+                # SWEET SPOT: Start sizing at 20% below threshold, scale up to full size
+                _graduated_factor = max(0.20, (_edge_ratio - _shadow_threshold_ratio) / (1.0 - _shadow_threshold_ratio))
+                _graduated_factor = max(0.0, min(1.0, _graduated_factor))  # Clamp to [0, 1]
+                logger.debug(
+                    "[GRADUATED-SIZING] %s edge=%.4f below threshold=%.4f but above shadow — "
+                    "using reduced size factor=%.2f (shadow mode)",
+                    snapshot.market_id, float(best.net_edge), float(min_edge), _graduated_factor
+                )
+                # Store graduated factor for sizing calculation later
+                _edge_graduated_factor = _graduated_factor
+        else:
+            # Above threshold: full size
+            _edge_graduated_factor = 1.0
 
+        # FVG ENTRY TIMING: Check FVG signal for optimal entry timing
+        fvg_timing = None
+        fvg_entry_boost = 1.0
+        try:
+            from merid.prediction.fvg_integration import get_fvg_entry_exit_timing, is_fvg_enabled
+            if is_fvg_enabled() and snapshot.implied:
+                bid = (snapshot.implied.yes_bid or 50) / 100.0
+                ask = (snapshot.implied.yes_ask or 50) / 100.0
+                fvg_timing = get_fvg_entry_exit_timing(
+                    ticker=snapshot.market_id,
+                    bid=bid,
+                    ask=ask,
+                    asset=asset,
+                    timeframe=_resolved_tf,
+                )
+                if fvg_timing:
+                    # Boost confidence for good FVG entry timing
+                    if fvg_timing.should_enter and fvg_timing.entry_urgency >= 0.5:
+                        fvg_entry_boost = 1.0 + (fvg_timing.entry_urgency * 0.15)
+                        logger.debug(
+                            "[FVG-ENTRY-BOOST] %s | entry_urgency=%.2f confidence_boost=%.3f",
+                            snapshot.market_id, fvg_timing.entry_urgency, fvg_entry_boost
+                        )
+        except Exception as e:
+            logger.debug("FVG entry timing check skipped for %s: %s", snapshot.market_id, e)
+        
+        # Apply FVG entry boost to confidence check
+        boosted_confidence = min(1.0, float(best.confidence) * fvg_entry_boost)
+        
         # Confidence filter
-        if best.confidence < self.config.min_confidence:
+        # SOFT-BAND LOGGING: Log near-miss confidence for observability
+        _conf_ratio = boosted_confidence / float(self.config.min_confidence) if self.config.min_confidence > 0 else 1.0
+        if 0.9 <= _conf_ratio < 1.0:
+            logger.debug(
+                "[PM_SIGNAL_SOFT_REJECT] agent=%s market=%s confidence=%.3f min_confidence=%.3f "
+                "ratio=%.2f reason=soft_reject_confidence",
+                self._agent_name, snapshot.market_id, boosted_confidence,
+                float(self.config.min_confidence), _conf_ratio
+            )
+        
+        if boosted_confidence < self.config.min_confidence:
             return StrategySignal(
                 market_id=snapshot.market_id,
                 action=SignalAction.NO_ACTION,
@@ -1082,10 +1509,15 @@ class KalshiStrategy:
                 contracts=0,
                 edge=best,
                 phase=phase,
-                reason=f"Confidence {best.confidence} below minimum {self.config.min_confidence}.",
+                reason=f"Below thresholds: confidence={best.confidence:.3f} < min={self.config.min_confidence} "
+                       f"net_edge={best.net_edge:.4f} min_edge={min_edge} phase={phase.value}",
                 correlation_id=correlation_id,
                 eval_context={
                     "min_confidence": str(self.config.min_confidence),
+                    "actual_confidence": str(best.confidence),
+                    "min_edge": str(min_edge),
+                    "actual_net_edge": str(best.net_edge),
+                    "phase": phase.value,
                     "block": "confidence_below_minimum",
                 },
             )
@@ -1111,31 +1543,45 @@ class KalshiStrategy:
         # Pre-gate logging: always log gate inputs for observability
         _pre_asset = self._extract_asset_from_market_id(snapshot.market_id)
         _pre_calib = get_calibration_config(_pre_asset)
+        
+        # Extract kalshi_price for EV calculation
+        _pre_kalshi_price = float(best.market_prob) if best and hasattr(best, 'market_prob') else 0.5
+        
+        # EV-BASED GATE PARAMETERS (for logging)
+        _pre_k_base = float(os.getenv("MERID_EV_K_BASE", "1.5"))
+        _pre_k_extreme = float(os.getenv("MERID_EV_K_EXTREME", "2.5"))
+        _pre_k_terminal = float(os.getenv("MERID_EV_K_TERMINAL", "2.0"))
+        
+        # Compute EV metrics for logging
+        from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
+        _pre_price_cents = round(_pre_kalshi_price * 100)  # Use round() to preserve sub-cent precision (fixes int() truncation bug)
+        _pre_fee_cents = calculate_kalshi_fee_cents(1, _pre_price_cents)
+        _pre_fee_per_contract = _pre_fee_cents / 100.0
+        _pre_ev_gross = float(p) - _pre_kalshi_price if p is not None else 0.0
+        _pre_ev_net = _pre_ev_gross - _pre_fee_per_contract - 0.0001  # 1 bps slippage
+        
+        # For backward compatibility, still compute prob_edge (but not used for gating)
         _pre_prob_edge = abs(p - 0.5) if p is not None else None
-        # PRODUCTION FIX v7 (2026-04-26): Lower probability gate for 15m momentum scalping
-        # to allow more quality signals through while maintaining 80%+ win rate target
-        # Previous: 0.15 low TF, 0.12 high TF - was blocking 95%+ of signals
-        # v7.1 (2026-04-26): Further lower to 0.02 for 15m to allow micro-edge signals (50.5% vs 50%)
-        # New: 0.02 for 15m (micro-edge scalping), 0.06 for 1h, 0.10 for daily+
-        if _resolved_tf == "15m":
-            _pre_min_edge = 0.02  # 2% edge for 15m (52% vs 50% baseline) - micro scalping
-        elif _resolved_tf in {"1h", "hourly"}:
-            _pre_min_edge = 0.06  # 6% edge for hourly (56% vs 50% baseline)
-        elif is_high_tf:
-            _pre_min_edge = _pre_calib.min_prob_edge_high_tf if _pre_calib else 0.10  # 10% for daily+
-        else:
-            _pre_min_edge = _pre_calib.min_prob_edge_low_tf if _pre_calib else 0.06  # 6% default
+        
+        # Conviction thresholds (still used for sizing, not gating)
         _pre_veto = _pre_calib.conviction_veto_threshold if _pre_calib else 0.4
         _pre_strict = _pre_calib.conviction_strict_threshold if _pre_calib else 0.6
-        _pre_boost = _pre_calib.prob_edge_boost_for_low_conviction if _pre_calib else 0.10
+        
         logger.info(
-            "[PROB-GATE-IN] %s | asset=%s tf=%s | model_prob=%.4f prob_edge=%.4f | "
-            "min_edge=%.4f veto=%.2f strict=%.2f boost=%.2f | net_edge=%.4f confidence=%.2f",
+            "[EV-GATE-IN] %s | asset=%s tf=%s | model_prob=%.4f kalshi_price=%.4f | "
+            "ev_gross=%.4f ev_net=%.4f fee=%.4f | k_base=%.2f k_extreme=%.2f k_terminal=%.2f | "
+            "conviction_veto=%.2f conviction_strict=%.2f | confidence=%.2f",
             snapshot.market_id, _pre_asset, _resolved_tf or "unknown",
             p if p is not None else -1.0,
-            _pre_prob_edge if _pre_prob_edge is not None else -1.0,
-            _pre_min_edge, _pre_veto, _pre_strict, _pre_boost,
-            float(best.net_edge) if best.net_edge else 0.0,
+            _pre_kalshi_price,
+            _pre_ev_gross,
+            _pre_ev_net,
+            _pre_fee_per_contract,
+            _pre_k_base,
+            _pre_k_extreme,
+            _pre_k_terminal,
+            _pre_veto,
+            _pre_strict,
             float(best.confidence) if best.confidence else 0.0
         )
         
@@ -1153,36 +1599,64 @@ class KalshiStrategy:
                 correlation_id=correlation_id,
             )
         
-        # Compute probability edge = |p - 0.5|
+        # EV-BASED GATE REFACTOR (2026-05-13): Replace prob_edge proxy with economic edge
+        # The old prob_edge = abs(p - 0.5) was misaligned with profitability.
+        # New framework: use ev_net (expected value after fees) as primary gate.
+        # This is asset-agnostic and directly tied to Kalshi contract economics.
+        
+        def compute_ev_net(
+            model_prob: float,
+            kalshi_price: float,
+            contracts: int = 1,
+            slippage: float = 0.0001  # Default 1 bps slippage
+        ) -> tuple[float, float]:
+            """Compute expected value net of Kalshi fees.
+            
+            Returns:
+                (ev_net, fee_per_contract) where:
+                - ev_net = model_prob - kalshi_price - fee_per_contract - slippage
+                - fee_per_contract = Kalshi tiered fee per contract
+                
+            This uses the canonical Kalshi fee schedule from fees.py.
+            """
+            from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
+            
+            price_cents = round(kalshi_price * 100)  # Use round() to preserve sub-cent precision (fixes int() truncation bug)
+            fee_cents = calculate_kalshi_fee_cents(contracts, price_cents)
+            fee_per_contract = fee_cents / 100.0 / contracts
+            
+            ev_gross = model_prob - kalshi_price
+            ev_net = ev_gross - fee_per_contract - slippage
+            
+            return ev_net, fee_per_contract
+        
+        # Extract kalshi_price from market_prob (EdgeEstimate has market_prob field)
+        kalshi_price = float(best.market_prob) if best and hasattr(best, 'market_prob') else 0.5
+        
+        # Compute EV metrics
+        ev_net, fee_per_contract = compute_ev_net(float(p), kalshi_price, contracts=1)
+        
+        # For backward compatibility and logging, compute prob_edge (but not used for gating)
         prob_edge = abs(p - 0.5)
-
+        
         # Re-use variables from pre-gate logging (already computed above)
         asset = _pre_asset
         calib = _pre_calib
-        # min_prob_edge was already determined in pre-gate logging
-        min_prob_edge = _pre_min_edge
         
         # Structural conviction computation (needed for both gate and sizing)
         structural_factor = 1.0
         conviction_details = {}
         conviction = 0.5  # default
-        
+
+        # SENTIMENT DISABLED FOR 15M STACK: Skip structural conviction from crypto_registry
+        # The 15m stack is a single-agent system and doesn't need multi-agent sentiment-based conviction
         if hasattr(snapshot, 'fvg_context') and snapshot.fvg_context:
-            from merid.sentiment.crypto_registry import get_crypto_registry
-            
-            conviction_result = get_crypto_registry().compute_structural_conviction(
-                symbol=asset,
-                fvg_pressure=snapshot.fvg_pressure,
-                fvg_confluence=snapshot.has_local_fvg_confluence if hasattr(snapshot, 'has_local_fvg_confluence') else False,
-                trend_aligned=snapshot.trend_aligned if hasattr(snapshot, 'trend_aligned') else False,
-                sentiment_regime=snapshot.sentiment_regime or "neutral",
-                nearest_fvg_distance_atr=snapshot.nearest_fvg_distance_atr,
-            )
-            conviction = conviction_result["conviction"]
-            conviction_details = conviction_result
-            
-            # Map conviction (0.2-1.0) to size factor (0.4-1.2)
-            structural_factor = 0.4 + (conviction * 0.8)
+            # from merid.sentiment.crypto_registry import get_crypto_registry
+            # conviction_result = get_crypto_registry().compute_structural_conviction(...)
+            # conviction = conviction_result["conviction"]
+            # conviction_details = conviction_result
+            # structural_factor = 0.4 + (conviction * 0.8)
+            pass
         
         # CONVICTION FLOOR VETO
         # If conviction < veto threshold, absolute NO_ACTION
@@ -1199,19 +1673,117 @@ class KalshiStrategy:
                 correlation_id=correlation_id,
             )
         
-        # CONVICTION-MODULATED PROBABILITY EDGE
-        # If conviction is borderline, require higher prob edge
-        # Use pre-computed values from pre-gate logging
+        # EV-BASED GATE PARAMETERS (2026-05-13): Global, asset-agnostic thresholds
+        # These replace asset-specific min_prob_edge thresholds with EV-based safety margins
+        k_base = float(os.getenv("MERID_EV_K_BASE", "1.5"))  # Baseline safety margin (1.5x fee)
+        k_extreme = float(os.getenv("MERID_EV_K_EXTREME", "2.5"))  # Extreme probability margin (2.5x fee)
+        k_terminal = float(os.getenv("MERID_EV_K_TERMINAL", "2.0"))  # Terminal phase margin (2.0x fee)
+        
+        # CONVICTION MODULATION: Still used for sizing, but no longer gates EV directly
+        # Low conviction trades are allowed if EV is positive, but sized smaller
         strict_threshold = _pre_strict
-        prob_edge_boost = _pre_boost
         
-        effective_min_prob_edge = min_prob_edge
-        if conviction < strict_threshold:
-            # Borderline conviction: require higher probability edge
-            effective_min_prob_edge += prob_edge_boost
+        # TERMINAL PHASE GUARD - Now EV-based instead of prob_edge-based
+        # CRITICAL: Hard rule independent of sentiment - sentiment MUST NOT relax expiry-phase edge thresholds
+        # This rule prevents bad trades at tail end of contracts due to time decay and liquidity issues
+        # Fail closed: if context is broken, do not loosen risk
         
-        # HARD PROBABILITY GATE CHECK
-        if prob_edge < effective_min_prob_edge:
+        def _terminal_phase_guard(
+            current_phase: ExpiryPhase,
+            current_ev_net: float,
+            current_fee_per_contract: float,
+            market_id: str,
+            current_asset: str
+        ) -> Optional[StrategySignal]:
+            """Terminal phase guard - EV-based, independent of sentiment, fail closed."""
+            if current_phase != ExpiryPhase.TERMINAL:
+                return None
+            
+            # Fail closed: block if ev_net is None or invalid
+            if current_ev_net is None:
+                logger.error(
+                    "[RISK] Terminal phase guard active: ev_net is None in TERMINAL phase. "
+                    "Blocking trade %s | asset=%s",
+                    market_id, current_asset
+                )
+                return StrategySignal(
+                    market_id=market_id,
+                    action=SignalAction.NO_ACTION,
+                    side=best.side,
+                    contracts=0,
+                    edge=best,
+                    phase=current_phase,
+                    reason="blocked: terminal_phase_guard_no_ev",
+                    correlation_id=correlation_id,
+                    eval_context={
+                        "ev_net": "None",
+                        "phase": str(current_phase),
+                        "block": "terminal_phase_guard_no_ev",
+                    },
+                )
+            
+            # Block if EV below terminal threshold (k_terminal * fee)
+            min_ev_terminal = k_terminal * current_fee_per_contract
+            if current_ev_net < min_ev_terminal:
+                logger.warning(
+                    "[RISK] Blocking trade in TERMINAL phase: %s | ev_net=%.4f < %.4f (k=%.1f) | asset=%s",
+                    market_id, current_ev_net, min_ev_terminal, k_terminal, current_asset
+                )
+                return StrategySignal(
+                    market_id=market_id,
+                    action=SignalAction.NO_ACTION,
+                    side=best.side,
+                    contracts=0,
+                    edge=best,
+                    phase=current_phase,
+                    reason=f"blocked: terminal_phase_guard_low_ev (ev_net={current_ev_net:.4f} < {min_ev_terminal:.4f})",
+                    correlation_id=correlation_id,
+                    eval_context={
+                        "ev_net": str(current_ev_net),
+                        "fee_per_contract": str(current_fee_per_contract),
+                        "k_terminal": str(k_terminal),
+                        "min_ev_terminal": str(min_ev_terminal),
+                        "phase": str(current_phase),
+                        "block": "terminal_phase_guard_low_ev",
+                    },
+                )
+            
+            # Allow trade
+            return None
+        
+        # Apply terminal phase guard (EV-based)
+        guard_signal = _terminal_phase_guard(phase, ev_net, fee_per_contract, snapshot.market_id, asset)
+        if guard_signal is not None:
+            return guard_signal
+
+        # WINNER ALIGNMENT FIX (2026-05-10): Relax EV gate for arbiter winners
+        # If this ticker is an arbiter winner, use a relaxed threshold to ensure
+        # the winner always has an executable path (no "winner but blocked" scenario)
+        is_arbiter_winner = False
+        winner_k_multiplier = k_base  # Default to baseline
+        
+        try:
+            from merid.prediction.grid_context import get_grid_context
+            grid_ctx = get_grid_context()
+            is_arbiter_winner = grid_ctx.is_winner(snapshot.market_id)
+            
+            if is_arbiter_winner:
+                # Use relaxed threshold for winners (from grid context config)
+                winner_k_multiplier = k_base * 0.7  # 30% relaxation for winners
+                logger.info(
+                    "[EV-GATE-WINNER] %s | is_winner=true | relaxed_k=%.2f (was %.2f)",
+                    snapshot.market_id, winner_k_multiplier, k_base
+                )
+        except Exception as e:
+            logger.debug("[EV-GATE] Winner check failed: %s (using standard threshold)", e)
+        
+        # PRIMARY EV GATE: ev_net must be positive (hard constraint)
+        # This is the fundamental profitability check - never take negative EV trades
+        if ev_net <= 0.0:
+            logger.info(
+                "[EV-GATE] blocked: %s | ev_net=%.4f <= 0 (negative expected value) | asset=%s | model_prob=%.4f kalshi_price=%.4f",
+                snapshot.market_id, ev_net, asset, float(p), kalshi_price
+            )
             return StrategySignal(
                 market_id=snapshot.market_id,
                 action=SignalAction.NO_ACTION,
@@ -1219,34 +1791,202 @@ class KalshiStrategy:
                 contracts=0,
                 edge=best,
                 phase=phase,
-                reason=f"blocked: prob_edge={prob_edge:.3f} < required={effective_min_prob_edge:.3f} (conviction={conviction:.2f})",
+                reason=f"blocked: ev_net={ev_net:.4f} <= 0 (negative expected value)",
                 correlation_id=correlation_id,
+                eval_context={
+                    "ev_net": str(ev_net),
+                    "model_prob": str(p),
+                    "kalshi_price": str(kalshi_price),
+                    "fee_per_contract": str(fee_per_contract),
+                    "block": "ev_not_positive",
+                },
             )
         
-        # PASSED ALL GATES - log clear reason for allowed trade
+        # SAFETY MARGIN GATE: ev_net must exceed k * fee_per_contract
+        # This compensates for model error and provides a buffer against estimation uncertainty
+        min_ev_safety = winner_k_multiplier * fee_per_contract
+        if ev_net < min_ev_safety:
+            logger.info(
+                "[EV-GATE] blocked: %s | ev_net=%.4f < %.4f (k=%.2f * fee=%.4f) | asset=%s | insufficient safety margin",
+                snapshot.market_id, ev_net, min_ev_safety, winner_k_multiplier, fee_per_contract, asset
+            )
+            return StrategySignal(
+                market_id=snapshot.market_id,
+                action=SignalAction.NO_ACTION,
+                side=best.side,
+                contracts=0,
+                edge=best,
+                phase=phase,
+                reason=f"blocked: ev_net={ev_net:.4f} < {min_ev_safety:.4f} (insufficient safety margin, k={winner_k_multiplier:.2f})",
+                correlation_id=correlation_id,
+                eval_context={
+                    "ev_net": str(ev_net),
+                    "fee_per_contract": str(fee_per_contract),
+                    "k_multiplier": str(winner_k_multiplier),
+                    "min_ev_safety": str(min_ev_safety),
+                    "is_arbiter_winner": str(is_arbiter_winner),
+                    "block": "ev_insufficient_margin",
+                },
+            )
+        
+        # EXTREME PROBABILITY GUARD: Extra caution when model is very confident
+        # Probabilistic models are often least calibrated in extremes (p < 0.10 or p > 0.90)
+        # Require stricter EV threshold in these regions
+        if p < 0.10 or p > 0.90:
+            min_ev_extreme = k_extreme * fee_per_contract
+            if ev_net < min_ev_extreme:
+                logger.warning(
+                    "[EV-GATE-EXTREME] blocked: %s | model_prob=%.4f in extreme region | ev_net=%.4f < %.4f (k=%.2f) | asset=%s | calibration risk",
+                    snapshot.market_id, p, ev_net, min_ev_extreme, k_extreme, asset
+                )
+                return StrategySignal(
+                    market_id=snapshot.market_id,
+                    action=SignalAction.NO_ACTION,
+                    side=best.side,
+                    contracts=0,
+                    edge=best,
+                    phase=phase,
+                    reason=f"blocked: model_prob={p:.4f} in extreme region, ev_net={ev_net:.4f} < {min_ev_extreme:.4f} (insufficient margin for calibration risk)",
+                    correlation_id=correlation_id,
+                    eval_context={
+                        "ev_net": str(ev_net),
+                        "model_prob": str(p),
+                        "fee_per_contract": str(fee_per_contract),
+                        "k_extreme": str(k_extreme),
+                        "min_ev_extreme": str(min_ev_extreme),
+                        "block": "extreme_probability_insufficient_ev",
+                    },
+                )
+            else:
+                logger.info(
+                    "[EV-GATE-EXTREME] allowed: %s | model_prob=%.4f in extreme region but ev_net=%.4f >= %.4f (k=%.2f) | asset=%s",
+                    snapshot.market_id, p, ev_net, min_ev_extreme, k_extreme, asset
+                )
+
+        # PASSED ALL EV GATES - log clear reason for allowed trade
         logger.info(
-            "[PROB-GATE] allowed: %s | prob_edge=%.3f (min=%.3f) | conviction=%.2f | asset=%s",
+            "[EV-GATE] allowed: %s | ev_net=%.4f (safety_k=%.2f * fee=%.4f = %.4f) | conviction=%.2f | model_prob=%.4f kalshi_price=%.4f | asset=%s",
             snapshot.market_id,
-            prob_edge,
-            effective_min_prob_edge,
+            ev_net,
+            winner_k_multiplier,
+            fee_per_contract,
+            min_ev_safety,
             conviction,
+            float(p),
+            kalshi_price,
             asset
         )
 
-        # 7. Size calculation with structural conviction and behavioral exploitation
+        # 7. Size calculation with structural conviction, FVG timing, and behavioral exploitation
         # Layer 2: Base size from Kelly + sentiment regime
         base_size = self._kelly_size_with_sentiment(best, phase, snapshot, correlation_id=correlation_id)
         
         # Apply structural factor to base size
         size = int(base_size * structural_factor)
         
+        # FVG POSITION SIZING: Adjust size based on FVG signal strength
+        fvg_size_factor = 1.0
+        try:
+            from merid.prediction.fvg_integration import get_fvg_position_size_factor
+            if snapshot.implied:
+                bid = (snapshot.implied.yes_bid or 50) / 100.0
+                ask = (snapshot.implied.yes_ask or 50) / 100.0
+                fvg_size_factor = get_fvg_position_size_factor(
+                    ticker=snapshot.market_id,
+                    bid=bid,
+                    ask=ask,
+                    asset=asset,
+                    timeframe=_resolved_tf,
+                )
+                if fvg_size_factor != 1.0:
+                    _orig_size = size
+                    size = int(size * fvg_size_factor)
+                    logger.info(
+                        "[FVG-SIZE-ADJUST] %s | size adjusted: %d -> %d (factor=%.2f)",
+                        snapshot.market_id, _orig_size, size, fvg_size_factor
+                    )
+        except Exception as e:
+            logger.debug("FVG position sizing skipped for %s: %s", snapshot.market_id, e)
+        
+        # GRADUATED-SIZING-FIX: Apply edge graduated factor for shadow-mode signals
+        # Signals between shadow_threshold and min_edge get reduced size (0.0-1.0 factor)
+        if _edge_graduated_factor < 1.0:
+            _orig_size = size
+            size = int(size * _edge_graduated_factor)
+            logger.info(
+                "[GRADUATED-SIZING] %s | edge=%.4f below threshold — reducing size %d -> %d "
+                "(factor=%.2f, shadow mode)",
+                snapshot.market_id, float(best.net_edge), _orig_size, size, _edge_graduated_factor
+            )
+            # Mark this as a shadow trade for downstream tracking
+            _is_shadow_trade = True
+        else:
+            _is_shadow_trade = False
+        
         # Layer 3: Behavioral exploitation adjustments
         # Detect and exploit behavioral biases (longshot, panic, FOMO, recency, etc.)
         model_prob = float(best.model_prob) if best.model_prob else None
         behavioral_adj = self._behavioral_exploitation_adjustments(snapshot, model_prob)
         
+        # FAVORITE LONG SHOT BIAS EXPLOITATION
+        # Override side if behavioral detector recommends contrarian position
+        # This allows us to:
+        # - Buy YES on underpriced favorites (>80% prob) when fear drives them below fair value
+        # - Sell YES (or buy NO) on overpriced longshots (<20% prob) when greed inflates them
+        recommended_side = behavioral_adj.get("recommended_side")
+        if recommended_side and recommended_side in ("yes", "no"):
+            # Check if this is a longshot or favorite opportunity
+            patterns = behavioral_adj.get("patterns_detected", [])
+            has_longshot = "longshot_inflated" in patterns
+            has_favorite = "contrarian_opportunity" in patterns
+            
+            if has_longshot and recommended_side == "no":
+                # Overpriced longshot - switch to NO (or sell YES)
+                if best.side == "yes" and best.action == "buy":
+                    logger.info(
+                        "[LONGSHOT-BIAS-EXPLOIT] %s | switching from BUY_YES to BUY_NO | "
+                        "market_prob=%.1f%% model_prob=%.1f%% | longshot overpriced",
+                        snapshot.market_id,
+                        snapshot.implied.yes_prob * 100 if snapshot.implied and snapshot.implied.yes_prob else 0,
+                        model_prob * 100 if model_prob else 0
+                    )
+                    best.side = "no"
+                elif best.side == "yes" and best.action == "sell":
+                    # Already selling YES, which is equivalent to buying NO
+                    logger.info(
+                        "[LONGSHOT-BIAS-EXPLOIT] %s | confirming SELL_YES (equiv to BUY_NO) | "
+                        "market_prob=%.1f%% model_prob=%.1f%% | longshot overpriced",
+                        snapshot.market_id,
+                        snapshot.implied.yes_prob * 100 if snapshot.implied and snapshot.implied.yes_prob else 0,
+                        model_prob * 100 if model_prob else 0
+                    )
+            
+            elif has_favorite and recommended_side == "yes":
+                # Underpriced favorite - ensure we're buying YES
+                market_prob = snapshot.implied.yes_prob if snapshot.implied and snapshot.implied.yes_prob else 0.5
+                if market_prob > 0.80:  # Only for >80% favorites
+                    if best.side == "no":
+                        logger.info(
+                            "[FAVORITE-BIAS-EXPLOIT] %s | switching from NO to YES | "
+                            "market_prob=%.1f%% > 80%% | favorite underpriced",
+                            snapshot.market_id,
+                            market_prob * 100
+                        )
+                        best.side = "yes"
+                    elif best.side == "yes" and best.action == "buy":
+                        logger.info(
+                            "[FAVORITE-BIAS-EXPLOIT] %s | confirming BUY_YES on favorite | "
+                            "market_prob=%.1f%% > 80%% | locking in small consistent profits",
+                            snapshot.market_id,
+                            market_prob * 100
+                        )
+        
         # Apply behavioral size multiplier (reduces size for risky behavioral patterns)
         behavioral_size_mult = behavioral_adj.get("size_multiplier", 1.0)
+        # 15m scalper: floor at 0.5x to prevent excessive size reduction from stacked penalties
+        is_scalper_sizing = os.getenv("STRATEGY_MODE", "").upper() == "MOMENTUM_SCALPER"
+        min_behavioral_mult = 0.50 if is_scalper_sizing else 0.25
+        behavioral_size_mult = max(min_behavioral_mult, behavioral_size_mult)
         if behavioral_size_mult != 1.0 and behavioral_size_mult > 0:
             size = int(size * behavioral_size_mult)
             logger.debug(
@@ -1270,6 +2010,26 @@ class KalshiStrategy:
                 )
                 size = max_contracts
         
+        # Apply cycle-level cap (1-2% bankroll allocation across all winners)
+        try:
+            from merid.prediction.dynamic_sizing import apply_cycle_cap_to_kelly_size
+            cycle_capped_size, cycle_reason = apply_cycle_cap_to_kelly_size(
+                kelly_contracts=size,
+                bankroll_usd=Decimal(str(bankroll_usd)) if bankroll_usd else Decimal("100"),
+                price_cents=int(price_cents) if price_cents else None,
+                ticker=snapshot.market_id,
+                side=best.side,
+                edge=Decimal(str(net_edge)) if net_edge else None,
+            )
+            if cycle_capped_size < size:
+                logger.info(
+                    "[CYCLE-CAP] %s | size reduced: %d -> %d (reason=%s)",
+                    snapshot.market_id, size, cycle_capped_size, cycle_reason
+                )
+                size = cycle_capped_size
+        except Exception as e:
+            logger.debug("Cycle cap not applied for %s: %s", snapshot.market_id, e)
+        
         if size <= 0:
             return StrategySignal(
                 market_id=snapshot.market_id,
@@ -1288,18 +2048,63 @@ class KalshiStrategy:
         else:
             action = SignalAction.SELL_YES if best.side == "yes" else SignalAction.SELL_NO
 
+        # SPOT PRICE MOMENTUM ALIGNMENT
+        # Check if trade aligns with spot price momentum
+        # When spot is trending up, prefer YES on bullish contracts
+        # When spot is trending down, prefer NO (or sell YES) on bearish contracts
+        trend_aligned = getattr(snapshot, 'trend_aligned', None)
+        if trend_aligned is not None:
+            if trend_aligned and best.side == "no":
+                # Spot trending up but we're betting NO - consider flipping
+                # This helps exploit lag between spot moves and prediction market pricing
+                logger.info(
+                    "[SPOT-MOMENTUM-LAG] %s | spot trending up but betting NO | "
+                    "consider flipping to YES to exploit market lag",
+                    snapshot.market_id
+                )
+            elif not trend_aligned and best.side == "yes":
+                # Spot trending down but we're betting YES - consider flipping
+                logger.info(
+                    "[SPOT-MOMENTUM-LAG] %s | spot trending down but betting YES | "
+                    "consider flipping to NO to exploit market lag",
+                    snapshot.market_id
+                )
+
+        # ORDER BOOK QUEUE STRATEGY FOR MAKER REBATES
+        # Prefer limit orders (maker) over market orders (taker) to earn rebates
+        # Kalshi maker fee is 25% of taker fee, so we save costs by providing liquidity
+        # For favorites (>80% prob), use limit orders at mid or slightly below to earn maker rebates
+        market_prob = snapshot.implied.yes_prob if snapshot.implied and snapshot.implied.yes_prob else 0.5
+        use_limit_order = True  # Default to limit orders for maker rebates
+        post_only = False  # Only use post_only for NEUTRAL_MM mode
+        
         # Limit price: use the ask for buys, bid for sells
         limit_cents = None
-        if best.side == "yes":
-            if best.action == "buy" and snapshot.implied.yes_ask is not None:
-                limit_cents = int(snapshot.implied.yes_ask)
-            elif best.action == "sell" and snapshot.implied.yes_bid is not None:
+        
+        if market_prob > 0.80 and best.side == "yes" and best.action == "buy":
+            # Favorite >80%: use limit order at bid or mid to earn maker rebate
+            # This locks in small consistent profits while earning rebates
+            if snapshot.implied.yes_bid is not None:
                 limit_cents = int(snapshot.implied.yes_bid)
-        else:
-            if best.action == "buy" and snapshot.implied.no_ask is not None:
-                limit_cents = int(snapshot.implied.no_ask)
-            elif best.action == "sell" and snapshot.implied.no_bid is not None:
-                limit_cents = int(snapshot.implied.no_bid)
+                logger.info(
+                    "[MAKER-REBATE-STRATEGY] %s | favorite >80%% | using limit order at bid %d¢ | "
+                    "earning maker rebate (25%% of taker fee)",
+                    snapshot.market_id, limit_cents
+                )
+            # If yes_bid is None, fall through to standard logic below
+        
+        # Standard limit price logic (used when not in favorite rebate strategy or bid unavailable)
+        if limit_cents is None:
+            if best.side == "yes":
+                if best.action == "buy" and snapshot.implied.yes_ask is not None:
+                    limit_cents = int(snapshot.implied.yes_ask)
+                elif best.action == "sell" and snapshot.implied.yes_bid is not None:
+                    limit_cents = int(snapshot.implied.yes_bid)
+            else:
+                if best.action == "buy" and snapshot.implied.no_ask is not None:
+                    limit_cents = int(snapshot.implied.no_ask)
+                elif best.action == "sell" and snapshot.implied.no_bid is not None:
+                    limit_cents = int(snapshot.implied.no_bid)
 
         # Build detailed reason with conviction components
         reason_parts = [
@@ -1318,6 +2123,14 @@ class KalshiStrategy:
                 f"sent:{conviction_details['sentiment_component']:.2f})"
             )
         
+        # Add FVG context to reason
+        if fvg_timing:
+            reason_parts.append(
+                f"FVG_entry={fvg_timing.should_enter}:{fvg_timing.entry_urgency:.2f}"
+            )
+            if fvg_timing.target_price_cents:
+                reason_parts.append(f"FVG_target={fvg_timing.target_price_cents:.1f}c")
+        
         # Build eval context with cross-asset information for crypto assets
         eval_context = {
             "archetype": "directional",
@@ -1325,6 +2138,29 @@ class KalshiStrategy:
             "structural_factor": structural_factor,
             "conviction": conviction,
         }
+        
+        # Add FVG context to eval context
+        if fvg_timing:
+            eval_context.update({
+                "fvg_enabled": True,
+                "fvg_should_enter": fvg_timing.should_enter,
+                "fvg_entry_urgency": round(fvg_timing.entry_urgency, 2),
+                "fvg_should_exit": fvg_timing.should_exit,
+                "fvg_exit_urgency": round(fvg_timing.exit_urgency, 2),
+                "fvg_target_price": fvg_timing.target_price_cents,
+                "fvg_stop_price": fvg_timing.stop_price_cents,
+                "fvg_size_factor": round(fvg_size_factor, 2),
+            })
+        
+        # GRADUATED-SIZING-FIX: Add shadow trade info to eval_context
+        if _is_shadow_trade:
+            eval_context.update({
+                "shadow_trade": True,
+                "edge_graduated_factor": round(_edge_graduated_factor, 2),
+                "edge_threshold": str(min_edge),
+                "shadow_threshold": str(float(min_edge) * _shadow_threshold_ratio),
+                "edge_ratio": round(_edge_ratio, 2),
+            })
         
         # Add cross-asset context for crypto assets
         if use_cross_asset_arbiter:
@@ -1398,6 +2234,44 @@ class KalshiStrategy:
             return "DOGE"
         
         return "UNK"
+
+    def _resolve_timeframe_from_agent_name(self) -> str:
+        """Extract timeframe from agent name.
+        
+        PRODUCTION AUDIT (Step 5): Only 15m timeframe allowed for trading.
+        
+        Examples:
+        - BTC_15M -> 15m
+        - ETH_1H -> 1h (REJECTED in production)
+        - SOL_DAILY -> daily (REJECTED in production)
+        """
+        if not self._agent_name:
+            return "unknown"
+        
+        # Split by underscore and get last part
+        parts = self._agent_name.split("_")
+        if len(parts) >= 2:
+            tf = parts[-1].lower()
+            # Normalize common variations
+            if tf in {"1h", "hourly"}:
+                tf = "1h"
+            elif tf in {"daily", "d1"}:
+                tf = "daily"
+            elif tf in {"weekly", "w1"}:
+                tf = "weekly"
+            elif tf in {"monthly", "1m"}:
+                tf = "monthly"
+            elif tf in {"annual", "y"}:
+                tf = "annual"
+            
+            # PRODUCTION AUDIT (Step 5): Reject non-15m timeframes
+            if tf != "15m" and tf != "15min":
+                logger.warning(
+                    f"[STRATEGY_SCOPE] Agent {self._agent_name} using timeframe '{tf}' "
+                    f"- not allowed in production (only 15m permitted). Trading will be blocked."
+                )
+            return tf
+        return "unknown"
 
     def _get_size_cap_for_asset(self, asset: str) -> float:
         """Get size cap for asset from TradingGuardian (legacy CT) when its loop runs.
@@ -1481,47 +2355,26 @@ class KalshiStrategy:
         - recommended_side: Optional contrarian side recommendation
         - urgency: immediate, normal, delayed, avoid
         """
+        # SENTIMENT DISABLED FOR 15M STACK: Skip behavioral exploitation analysis
+        # The 15m stack is a single-agent system and doesn't need sentiment-based behavioral analysis
         try:
-            from merid.sentiment.behavioral_exploitation import (
-                get_behavioral_engine,
-                MarketMicrostructure,
-                SentimentContext,
-            )
-            
-            engine = get_behavioral_engine()
-            
-            # Build market microstructure from snapshot
-            micro = MarketMicrostructure(
-                ticker=snapshot.market_id,
-                asset=snapshot.resolved_asset or "UNKNOWN",
-                timeframe=snapshot.resolved_timeframe or "15m",
-                yes_price_cents=int(snapshot.yes_price * 100) if snapshot.yes_price else 50,
-                no_price_cents=int(snapshot.no_price * 100) if snapshot.no_price else 50,
-                mid_cents=float(snapshot.mid_price * 100) if snapshot.mid_price else 50.0,
-                spread_cents=float(snapshot.spread * 100) if snapshot.spread else 2.0,
-                volume_24h=int(snapshot.volume_24h) if snapshot.volume_24h else 0,
-                open_interest=int(snapshot.open_interest) if snapshot.open_interest else 0,
-                seconds_to_expiry=int(snapshot.time_to_expiry_hours * 3600) if snapshot.time_to_expiry_hours else 3600,
-            )
-            
-            # Build sentiment context from snapshot
-            sentiment = SentimentContext(
-                fg_index=int(snapshot.sentiment_global) if snapshot.sentiment_global else 50,
-                social_sentiment=0.0,  # Could be enriched from sentiment bus
-                twitter_mention_velocity=0.0,
-            )
-            
-            # Run behavioral analysis
-            signals = engine.analyze(micro, sentiment, model_prob)
-            composite = engine.get_composite_signal(signals)
-            
+            # from merid.sentiment.behavioral_exploitation import (
+            #     get_behavioral_engine,
+            #     MarketMicrostructure,
+            #     SentimentContext,
+            # )
+            #
+            # engine = get_behavioral_engine()
+            pass
+
+            # SENTIMENT DISABLED: Return default behavioral analysis values
             return {
-                "edge_boost_bps": composite.get("behavioral_edge_boost_bps", 0),
-                "size_multiplier": composite.get("position_size_mult", 1.0),
-                "patterns_detected": composite.get("patterns", []),
-                "recommended_side": composite.get("primary_recommendation"),
-                "urgency": composite.get("urgency", "normal"),
-                "raw_signals": signals,
+                "edge_boost_bps": 0,
+                "size_multiplier": 1.0,
+                "patterns_detected": [],
+                "recommended_side": None,
+                "urgency": "normal",
+                "raw_signals": [],
             }
         except Exception as e:
             logger.debug("Behavioral exploitation analysis skipped: %s", e)
@@ -1544,23 +2397,56 @@ class KalshiStrategy:
         phase: ExpiryPhase,
         correlation_id: Optional[str] = None,
     ) -> StrategySignal:
-        """Contrarian: only trades when local fear/greed >= 75 AND model disagrees by ≥10pp."""
+        """Contrarian: only trades when local fear/greed >= threshold AND model disagrees significantly."""
         _cmin = float(self.config.contrarian_sentiment_min)
         local = snapshot.sentiment_local
-        if local is None or local < _cmin:
-            return StrategySignal(
-                market_id=snapshot.market_id,
-                action=SignalAction.NO_ACTION,
-                side="none", contracts=0, phase=phase,
-                reason=f"Contrarian requires local sentiment ≥{_cmin:.0f}; got {local}.",
-                correlation_id=correlation_id,
+        
+        # PRODUCTION FIX v8 (2026-04-30): Track 24h contrarian statistics
+        from merid.prediction.sentiment_floor_tracker import get_sentiment_floor_tracker
+        _tracker = get_sentiment_floor_tracker()
+        
+        # PRODUCTION FIX: Sentiment gating can be disabled via MERID_SENTIMENT_MODE env var
+        if SENTIMENT_GATING_ENABLED:
+            if local is None or local < _cmin:
+                # Record the floor block for 24h statistics
+                _tracker.record_attempt(
+                    market_id=snapshot.market_id,
+                    local_sentiment=local,
+                    sentiment_min=_cmin,
+                    blocked=True,
+                    block_reason="sentiment_below_contrarian_floor",
+                )
+                
+                # Log clear rejection reason with exact values
+                logger.info(
+                    "[CONTRARIAN_REJECT] agent=%s market=%s local_sentiment=%s min_required=%.1f "
+                    "reason=sentiment_floor_block (track this with MERID_PM_CONTRARIAN_SENTIMENT_MIN env)",
+                    self._agent_name, snapshot.market_id, 
+                    f"{local:.1f}" if local is not None else "None", _cmin
+                )
+                
+                return StrategySignal(
+                    market_id=snapshot.market_id,
+                    action=SignalAction.NO_ACTION,
+                    side="none", contracts=0, phase=phase,
+                    reason=f"Contrarian requires local sentiment ≥{_cmin:.0f}; got {local}.",
+                    correlation_id=correlation_id,
                 eval_context={
                     "contrarian_sentiment_min": _cmin,
+                    "actual_local_sentiment": local,
                     "block": "sentiment_below_contrarian_floor",
                 },
             )
+        else:
+            # Sentiment gating disabled - log and proceed with EV-only evaluation
+            logger.debug(
+                "[CONTRARIAN] agent=%s market=%s sentiment_gating=disabled "
+                "local_sentiment=%s min_required=%.1f - proceeding based on EV only",
+                self._agent_name, snapshot.market_id,
+                f"{local:.1f}" if local is not None else "None", _cmin
+            )
 
-        spec_edges = [e for e in snapshot.edges if e.edge_type == "speculative"]
+        spec_edges = [e for e in snapshot.edges if e.edge_type in ("speculative", "sentiment_driven")]
         if not spec_edges:
             return StrategySignal(
                 market_id=snapshot.market_id,
@@ -1606,8 +2492,13 @@ class KalshiStrategy:
         size_factor = max(0.35, min(1.5, float(mult))) * self._pm_vol_band_size_factor(snapshot)
         size = self._kelly_size(best, phase, size_factor=size_factor, correlation_id=correlation_id)
         size = max(1, min(size, self.config.max_contracts_per_order))
+        
+        # Apply cycle-level cap (1-2% bankroll allocation)
+        size = self._apply_cycle_cap(size, snapshot, best.side, best.net_edge)
 
-        limit_cents = int(snapshot.implied.yes_ask or 50) if best.side == "yes" else int(snapshot.implied.no_ask or 50)
+        # BUG-FIX (2026-05-06): Use 1 cent fallback instead of 50 to prevent zero contract sizing
+        # with small bankrolls. The 50 cent default was causing max_contracts_per_winner=0.
+        limit_cents = int(snapshot.implied.yes_ask or 1) if best.side == "yes" else int(snapshot.implied.no_ask or 1)
 
         return StrategySignal(
             market_id=snapshot.market_id,
@@ -1639,7 +2530,7 @@ class KalshiStrategy:
         # Momentum regime: category is greed/extreme_greed → ride YES momentum
         # Fear regime: category is fear/extreme_fear → ride NO momentum (things going lower)
         regime = snapshot.sentiment_regime or "greed"
-        spec_edges = [e for e in snapshot.edges if e.edge_type == "speculative"]
+        spec_edges = [e for e in snapshot.edges if e.edge_type in ("speculative", "sentiment_driven")]
         if not spec_edges:
             return StrategySignal(
                 market_id=snapshot.market_id,
@@ -1688,7 +2579,13 @@ class KalshiStrategy:
         size_factor = max(0.35, min(1.5, float(mult))) * self._pm_vol_band_size_factor(snapshot)
         size = self._kelly_size(best, phase, size_factor=size_factor, correlation_id=correlation_id)
         size = max(1, min(size, self.config.max_contracts_per_order))
-        limit_cents = int(snapshot.implied.yes_ask or 50) if best.side == "yes" else int(snapshot.implied.no_ask or 50)
+        
+        # Apply cycle-level cap (1-2% bankroll allocation)
+        size = self._apply_cycle_cap(size, snapshot, best.side, best.net_edge)
+        
+        # BUG-FIX (2026-05-06): Use 1 cent fallback instead of 50 to prevent zero contract sizing
+        # with small bankrolls. The 50 cent default was causing max_contracts_per_winner=0.
+        limit_cents = int(snapshot.implied.yes_ask or 1) if best.side == "yes" else int(snapshot.implied.no_ask or 1)
 
         return StrategySignal(
             market_id=snapshot.market_id,
@@ -1716,23 +2613,33 @@ class KalshiStrategy:
         if local is None:
             return self._evaluate_directional(snapshot, phase, correlation_id)
 
-        # Require elevated sentiment (either direction) to signal vol breakout
-        lo, hi = float(self.config.vol_breakout_neutral_low), float(self.config.vol_breakout_neutral_high)
-        if lo <= local <= hi:
-            return StrategySignal(
-                market_id=snapshot.market_id,
-                action=SignalAction.NO_ACTION,
-                side="none", contracts=0, phase=phase,
-                reason=f"Vol-breakout requires sentiment outside {lo:.0f}–{hi:.0f}; got {local:.0f}.",
-                correlation_id=correlation_id,
-                eval_context={
-                    "vol_breakout_neutral_low": lo,
-                    "vol_breakout_neutral_high": hi,
-                    "block": "sentiment_in_neutral_band",
-                },
+        # PRODUCTION FIX: Sentiment gating can be disabled via MERID_SENTIMENT_MODE env var
+        if SENTIMENT_GATING_ENABLED:
+            # Require elevated sentiment (either direction) to signal vol breakout
+            lo, hi = float(self.config.vol_breakout_neutral_low), float(self.config.vol_breakout_neutral_high)
+            if lo <= local <= hi:
+                return StrategySignal(
+                    market_id=snapshot.market_id,
+                    action=SignalAction.NO_ACTION,
+                    side="none", contracts=0, phase=phase,
+                    reason=f"Vol-breakout requires sentiment outside {lo:.0f}–{hi:.0f}; got {local:.0f}.",
+                    correlation_id=correlation_id,
+                    eval_context={
+                        "vol_breakout_neutral_low": lo,
+                        "vol_breakout_neutral_high": hi,
+                        "block": "sentiment_in_neutral_band",
+                    },
+                )
+        else:
+            # Sentiment gating disabled - log and proceed with EV-only evaluation
+            lo, hi = float(self.config.vol_breakout_neutral_low), float(self.config.vol_breakout_neutral_high)
+            logger.debug(
+                "[VOL_BREAKOUT] agent=%s market=%s sentiment_gating=disabled "
+                "local_sentiment=%.0f neutral_band=[%.0f,%.0f] - proceeding based on EV only",
+                self._agent_name, snapshot.market_id, local, lo, hi
             )
 
-        spec_edges = [e for e in snapshot.edges if e.edge_type == "speculative"]
+        spec_edges = [e for e in snapshot.edges if e.edge_type in ("speculative", "sentiment_driven")]
         if not spec_edges:
             return StrategySignal(
                 market_id=snapshot.market_id,
@@ -1767,9 +2674,14 @@ class KalshiStrategy:
         )
         scaled = self._kelly_size(best, phase, size_factor=size_factor, correlation_id=correlation_id)
         scaled = max(1, min(scaled, self.config.max_contracts_per_order))
+        
+        # Apply cycle-level cap (1-2% bankroll allocation)
+        scaled = self._apply_cycle_cap(scaled, snapshot, best.side, best.net_edge)
 
         action = SignalAction.BUY_YES if best.side == "yes" else SignalAction.BUY_NO
-        limit_cents = int(snapshot.implied.yes_ask or 50) if best.side == "yes" else int(snapshot.implied.no_ask or 50)
+        # BUG-FIX (2026-05-06): Use 1 cent fallback instead of 50 to prevent zero contract sizing
+        # with small bankrolls. The 50 cent default was causing max_contracts_per_winner=0.
+        limit_cents = int(snapshot.implied.yes_ask or 1) if best.side == "yes" else int(snapshot.implied.no_ask or 1)
 
         return StrategySignal(
             market_id=snapshot.market_id,

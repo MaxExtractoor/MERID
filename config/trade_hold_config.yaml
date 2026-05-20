@@ -1,6 +1,13 @@
 # ═══════════════════════════════════════════════════════════════════════
 # Trade-vs-Hold Decision Configuration
 # ═══════════════════════════════════════════════════════════════════════
+# LEGACY CONFIGURATION - For non-crypto, non-15m agents only.
+#
+# For Kalshi 15m crypto agents (BTC_15M, ETH_15M, SOL_15M, XRP_15M, DOGE_15M):
+#   - Edge thresholds: Use config/crypto_threshold_matrix.yaml (SINGLE SOURCE OF TRUTH)
+#   - Risk limits: Use config/profiles/kalshi_crypto_15m.yaml (SINGLE SOURCE OF TRUTH)
+#   - This file's edge/risk values are NOT used by 15m crypto agents
+#
 # Single source of truth for all gating thresholds that determine whether
 # the system trades or holds on any given cycle.  Every value here was
 # previously a hard-coded constant scattered across trading_agent.py,
@@ -44,7 +51,7 @@ strategy:
   min_edge_late: ${MERID_MIN_EDGE_LATE:-0.06}
   min_edge_terminal: ${MERID_MIN_EDGE_TERMINAL:-0.06}
   min_arb_edge: ${MERID_MIN_ARB_EDGE:-0.005}
-  min_confidence: ${MERID_MIN_CONFIDENCE:-0.60}
+  min_confidence: ${MERID_MIN_CONFIDENCE:-0.45}  # Lowered from 0.60 for live trading
   min_volume: ${MERID_MIN_VOLUME:-0}
   min_open_interest: ${MERID_MIN_OPEN_INTEREST:-0}
   snapshot_stale_seconds: ${MERID_SNAPSHOT_STALE_SECONDS:-120}

@@ -77,11 +77,25 @@ class PortfolioRiskManager:
         self._initialize_default_limits()
     
     def _initialize_default_limits(self):
-        """Set up default portfolio risk limits from settings (bankroll-driven)."""
-        from merid.settings import settings
+        """Set up default portfolio risk limits from core.settings (SINGLE SOURCE OF TRUTH)."""
+        from core.settings import MAX_TOTAL_RISK_PCT
+        # Use live bankroll from bankroll_service_v2 (single source of truth)
+        try:
+            from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+            equity = get_equity_for_risk_calc_sync()
+            if equity is not None and equity > 0:
+                bankroll_cents = int(equity * 100)
+            else:
+                # Fail closed - no bankroll available
+                logger.error("[PortfolioRiskManager] Bankroll unavailable from bankroll_service_v2")
+                bankroll_cents = 0
+        except Exception:
+            # Fail closed on error
+            logger.error("[PortfolioRiskManager] Failed to get bankroll from bankroll_service_v2")
+            bankroll_cents = 0
         
         # Derive absolute limit from bankroll (2x max notional as hard ceiling)
-        absolute_limit = float(settings.kalshi_portfolio_max_notional_cents) / 100 * 2.0
+        absolute_limit = float(bankroll_cents * MAX_TOTAL_RISK_PCT) / 100 * 2.0
         
         self.risk_limits = {
             "max_equity_risk": RiskLimit(
@@ -106,7 +120,7 @@ class PortfolioRiskManager:
                 limit_type=RiskLimitType.ABSOLUTE_DOLLAR,
                 threshold=absolute_limit,  # Derived from bankroll, was hardcoded $100K
                 action="stop",
-                description=f"Maximum absolute risk in dollars (derived: 2x max notional = ${absolute_limit:,.0f})"
+                description=f"Maximum absolute risk in dollars (derived: 3x max notional = ${absolute_limit:,.0f})"
             )
         }
     

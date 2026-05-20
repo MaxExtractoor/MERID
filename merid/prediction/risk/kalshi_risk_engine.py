@@ -13,6 +13,16 @@ the same leak-proof bankroll management rules:
   - Volatility-adaptive fee-drag window
   - Effective limit reduction under fee stress
 
+DEPRECATION NOTICE:
+====================
+This module contains a duplicate KalshiRiskConfig dataclass. The canonical
+single source of truth for Kalshi risk configuration is:
+    merid.event_venues.kalshi.kalshi_risk.KalshiRiskConfig
+
+The PM-specific KalshiRiskConfig in this file is deprecated and should only
+be used by tests. Live trading code should use the venue config from:
+    from merid.event_venues.kalshi.kalshi_risk import KalshiRiskConfig
+
 Usage::
 
     from merid.prediction.risk.kalshi_risk_engine import KalshiRiskEngine, KalshiRiskConfig

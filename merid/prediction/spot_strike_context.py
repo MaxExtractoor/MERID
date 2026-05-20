@@ -30,7 +30,10 @@ from utils.logger import get_logger
 
 logger = get_logger("merid.prediction.spot_strike")
 
-_trace_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _trace_lock = threading.Lock()
+_trace_lock = None  # Disabled to prevent startup hang
 _trace_counters: Dict[str, int] = {}
 
 

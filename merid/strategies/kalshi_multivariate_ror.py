@@ -301,7 +301,7 @@ def compare_portfolio_risk(returns_df: pd.DataFrame,
                 risk_diff = metrics["risk_of_ruin"] - best_metrics["risk_of_ruin"]
                 sharpe_diff = metrics["sharpe_ratio"] - best_metrics["sharpe_ratio"]
                 
-                if risk_diff > 0.02:  # 2% higher risk
+                if risk_diff > 0.03:  # 3% higher risk (optimized 2026-05-07)
                     comparison["recommendations"].append(
                         f"⚠️ {name} has {risk_diff:.1%} higher risk of ruin"
                     )

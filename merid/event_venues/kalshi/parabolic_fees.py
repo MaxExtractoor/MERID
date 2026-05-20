@@ -1,49 +1,64 @@
-"""Kalshi Parabolic Fee Logic — Maker/Taker fee calculation per Kalshi's fee schedule.
+"""Parabolic Kalshi Fee Calculator — Precise fee computation.
 
-Ground truth fee spec:
-- Taker fee: fee_cents = ceil(0.07 * C * P * (1 - P))
-- Maker fee: fee_cents = ceil(0.0175 * C * P * (1 - P))
-- P ∈ (0.01, 0.99) dollars — contract price in dollars (0.40, not 40)
-- C: contract count
-- Maximum taker fee: 1.75¢/contract at P = 0.5
-- Maximum maker fee: 0.4375¢/contract at P = 0.5
+Kalshi uses a parabolic fee schedule based on contract price P (in dollars):
+- Taker fee: fee_cents = ceil(TAKER_FEE_RATE * C * P * (1 - P))
+- Maker fee: fee_cents = ceil(MAKER_FEE_RATE * C * P * (1 - P))
+- P ∈ (FEE_MIN_PRICE_DOLLARS, FEE_MAX_PRICE_DOLLARS) dollars — contract price in dollars (0.40, not 40)
 
-References:
-- https://kalshi.com/docs/kalshi-fee-schedule.pdf
-- https://betherosports.com/calculators/prediction-markets
+Maximum taker fee: MAX_TAKER_FEE_PER_CONTRACT_CENTS¢/contract at P = 0.5
+Maximum maker fee: MAX_MAKER_FEE_PER_CONTRACT_CENTS¢/contract at P = 0.5
+
+This module provides exact fee calculation without approximation errors
+by using Decimal arithmetic and the canonical parabolic formula.
 
 Usage::
 
     from merid.event_venues.kalshi.parabolic_fees import (
         kalshi_taker_fee_cents_parabolic,
-        kalshi_maker_fee_cents,
+        kalshi_maker_fee_cents_parabolic,
     )
 
     # Price is in dollars (e.g., 0.55 for 55 cents)
     taker_fee = kalshi_taker_fee_cents_parabolic(price_dollars=0.55, contracts=10)
-    maker_fee = kalshi_maker_fee_cents(price_dollars=0.55, contracts=10)
+    maker_fee = kalshi_maker_fee_cents_parabolic(price_dollars=0.55, contracts=10)
 """
 
 from __future__ import annotations
 
 import math
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal, ROUND_CEILING, getcontext
 from typing import TYPE_CHECKING, Literal, Optional
 
 if TYPE_CHECKING:
     from config.kalshi_fee_schedule import KalshiFeeSchedule
 
-# Fee rate constants per Kalshi spec
-TAKER_FEE_RATE = 0.07
-MAKER_FEE_RATE = 0.0175
+from merid.event_venues.kalshi.risk_parameters import (
+    TAKER_FEE_RATE,
+    MAKER_FEE_RATE,
+    FEE_MIN_PRICE_DOLLARS,
+    FEE_MAX_PRICE_DOLLARS,
+    MAX_TAKER_FEE_PER_CONTRACT_CENTS,
+    MAX_MAKER_FEE_PER_CONTRACT_CENTS,
+)
 
-# Valid price bounds in dollars
-MIN_PRICE_DOLLARS = 0.01
-MAX_PRICE_DOLLARS = 0.99
+# Set Decimal precision for exact fee calculations
+getcontext().prec = 28
 
-# Maximum fees per contract at P = 0.5
-MAX_TAKER_FEE_PER_CONTRACT_CENTS = 1.75
-MAX_MAKER_FEE_PER_CONTRACT_CENTS = 0.4375
+# ============================================================================
+# Constants (canonical Kalshi fee parameters)
+# ============================================================================
+
+# Fee rates (from Kalshi fee schedule)
+_TAKER_FEE_RATE = Decimal(str(TAKER_FEE_RATE))
+_MAKER_FEE_RATE = Decimal(str(MAKER_FEE_RATE))
+
+# Valid price range in dollars (cents / 100)
+_MIN_PRICE_DOLLARS = Decimal(str(FEE_MIN_PRICE_DOLLARS))
+_MAX_PRICE_DOLLARS = Decimal(str(FEE_MAX_PRICE_DOLLARS))
+
+# Maximum fees per contract at P = 0.5 (theoretical maximum)
+_MAX_TAKER_FEE_PER_CONTRACT_CENTS = Decimal(str(MAX_TAKER_FEE_PER_CONTRACT_CENTS))
+_MAX_MAKER_FEE_PER_CONTRACT_CENTS = Decimal(str(MAX_MAKER_FEE_PER_CONTRACT_CENTS))
 
 
 def _validate_price(price_dollars: float) -> float:
@@ -58,9 +73,9 @@ def _validate_price(price_dollars: float) -> float:
     Raises:
         ValueError: If price is outside valid range (logged but clamped)
     """
-    if price_dollars < MIN_PRICE_DOLLARS or price_dollars > MAX_PRICE_DOLLARS:
+    if price_dollars < _MIN_PRICE_DOLLARS or price_dollars > _MAX_PRICE_DOLLARS:
         # Clamp to valid range for safety
-        clamped = max(MIN_PRICE_DOLLARS, min(price_dollars, MAX_PRICE_DOLLARS))
+        clamped = max(_MIN_PRICE_DOLLARS, min(price_dollars, _MAX_PRICE_DOLLARS))
         return clamped
     return price_dollars
 

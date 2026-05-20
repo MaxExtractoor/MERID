@@ -93,12 +93,34 @@ class KalshiResponsibleTradingClient:
         try:
             from merid.event_venues.kalshi.client import get_kalshi_client
             client = get_kalshi_client()
-            await client.connect()
+            await asyncio.wait_for(client.connect(), timeout=10.0)
             balance_result = await client.get_balance()
             if balance_result.success and balance_result.value is not None:
                 bal = balance_result.value
                 snap.balance_cents = int(getattr(bal, "balance", 0) or 0)
-                snap.portfolio_value_cents = int(getattr(bal, "portfolio_value", snap.balance_cents) or snap.balance_cents)
+                
+                # FIX: Kalshi API doesn't return portfolio_value field
+                # Calculate portfolio value from position cache instead
+                portfolio_value_cents = 0
+                try:
+                    from merid.event_venues.kalshi.position_cache import get_position_cache
+                    cache = get_position_cache()
+                    positions = cache.get_all_positions(validate_freshness=False)
+                    
+                    total_portfolio_cents = 0
+                    for pos in positions.values():
+                        if pos.contracts > 0:
+                            cost_basis = pos.contracts * pos.avg_price_cents
+                            unrealized_cents = int(float(pos.unrealized_pnl_usd) * 100)
+                            total_portfolio_cents += cost_basis + unrealized_cents
+                    
+                    if total_portfolio_cents > 0:
+                        portfolio_value_cents = total_portfolio_cents
+                except Exception as exc:
+                    logger.warning("[responsible_trading] Failed to fetch portfolio value from cache: %s", exc)
+                    portfolio_value_cents = snap.balance_cents
+                
+                snap.portfolio_value_cents = portfolio_value_cents
                 snap.available_funds_cents = int(getattr(bal, "available_balance", snap.balance_cents) or snap.balance_cents)
                 snap.source = "live"
         except Exception as exc:

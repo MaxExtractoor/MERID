@@ -577,10 +577,23 @@ class OrderManager:
                 flatten_placed = None
                 if _allow_flatten:
                     from merid.event_venues.base import VenueOrder
+                    # BUG-FIX: Pass price for ALL orders (including market) to avoid 50c fallback in Kalshi client
+                    # PRODUCTION-FIX: Use actual market price from KalshiMarketStateStore instead of hardcoded 50c
+                    price_est = 50  # Fallback if market state unavailable
+                    try:
+                        from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                        state = get_kalshi_market_state_store().get_state(tracked.ticker)
+                        if state and state.mid_cents > 0:
+                            price_est = state.mid_cents
+                    except Exception as _exc:
+                        logger.debug("flatten_order: failed to fetch market state for %s, using 50c fallback: %s", tracked.ticker, _exc)
+                    
+                    # Kalshi API accepts price for market orders (it's used for validation but not as a limit)
                     flatten_order = VenueOrder(
                         market_id=tracked.ticker,
                         side=opposite_side,
                         size=filled_before_cancel,
+                        price=Decimal(price_est) / 100,
                         order_type="market",
                         outcome_id=tracked.outcome,
                     )

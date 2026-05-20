@@ -11,7 +11,6 @@ def executor(monkeypatch):
     """Create CoinbaseExecutor with mocked environment."""
     monkeypatch.setenv("COINBASE_API_KEY", "test_api_key")
     monkeypatch.setenv("COINBASE_API_SECRET", "test_api_secret")
-    monkeypatch.setenv("COINBASE_PASSPHRASE", "test_passphrase")
     
     executor = CoinbaseExecutor()
     return executor
@@ -27,19 +26,16 @@ class TestCoinbaseExecutorInit:
     def test_init_with_credentials(self, monkeypatch):
         monkeypatch.setenv("COINBASE_API_KEY", "api_key")
         monkeypatch.setenv("COINBASE_API_SECRET", "api_secret")
-        monkeypatch.setenv("COINBASE_PASSPHRASE", "passphrase")
         
         executor = CoinbaseExecutor()
         
         assert executor.venue == "coinbase"
         assert executor.api_key == "api_key"
         assert executor.api_secret == "api_secret"
-        assert executor.passphrase == "passphrase"
 
     def test_init_defaults(self, monkeypatch):
         monkeypatch.delenv("COINBASE_API_KEY", raising=False)
         monkeypatch.delenv("COINBASE_API_SECRET", raising=False)
-        monkeypatch.delenv("COINBASE_PASSPHRASE", raising=False)
         
         executor = CoinbaseExecutor()
         
@@ -63,13 +59,11 @@ class TestSign:
         assert "CB-ACCESS-KEY" in headers
         assert "CB-ACCESS-SIGN" in headers
         assert "CB-ACCESS-TIMESTAMP" in headers
-        assert "CB-ACCESS-PASSPHRASE" in headers
 
     def test_sign_with_body(self, executor):
         headers = executor._sign("POST", "/v2/orders", '{"side":"buy"}')
         
         assert headers["CB-ACCESS-KEY"] == "test_api_key"
-        assert headers["CB-ACCESS-PASSPHRASE"] == "test_passphrase"
 
 
 # =============================================================================

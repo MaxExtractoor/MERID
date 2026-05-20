@@ -124,6 +124,12 @@ class EmailChannel(NotificationChannel):
         import os
         super().__init__(ChannelType.EMAIL)
         
+        # DISABLED: Email channel causing Windows access violation crashes
+        # BUG-FIX (2026-05-12): Disabled email channel to prevent access violation in email.message module
+        # This is causing fatal exceptions during server startup on Windows
+        self.enabled = False
+        return
+        
         # SMTP configuration from environment
         self.smtp_host = os.getenv("SMTP_HOST", "")
         self.smtp_port = int(os.getenv("SMTP_PORT", "587"))

@@ -1,0 +1,55 @@
+{
+  "timestamp": "20260519_153934",
+  "signature": {
+    "max_single_order_notional_usd": 1.83,
+    "max_total_notional_usd": 10.97,
+    "max_concurrent_trades": 3,
+    "max_daily_loss_usd": Infinity,
+    "drawdown_halt_pct": 0.15,
+    "drawdown_unwind_pct": 0.2,
+    "asset_caps": {
+      "BTC": 2.93,
+      "ETH": 2.19,
+      "SOL": 1.83,
+      "XRP": 1.83,
+      "DOGE": 1.46
+    },
+    "edge_thresholds": {
+      "BTC": {
+        "early": 0.02,
+        "mid": 0.02,
+        "late": 0.02,
+        "terminal": 0.025
+      },
+      "ETH": {
+        "early": 0.02,
+        "mid": 0.02,
+        "late": 0.02,
+        "terminal": 0.025
+      },
+      "SOL": {
+        "early": 0.025,
+        "mid": 0.025,
+        "late": 0.025,
+        "terminal": 0.03
+      },
+      "XRP": {
+        "early": 0.025,
+        "mid": 0.025,
+        "late": 0.025,
+        "terminal": 0.03
+      },
+      "DOGE": {
+        "early": 0.03,
+        "mid": 0.03,
+        "late": 0.03,
+        "terminal": 0.035
+      }
+    },
+    "kelly": {
+      "hard_cap": 0.3,
+      "min_edge": 1.0,
+      "max_edge": 25.0
+    }
+  }
+}

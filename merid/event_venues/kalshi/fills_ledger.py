@@ -19,29 +19,104 @@ import asyncio
 import hashlib
 import json
 import numbers
+import os
 import sqlite3
 import threading
 import time
+
+from merid.event_venues.kalshi.risk_parameters import (
+    DEFAULT_KALSHI_PRICE_CENTS,
+    DEEP_OTM_THRESHOLD_CENTS,
+    DEEP_ITM_THRESHOLD_CENTS,
+)
+
+# Deployment safety metrics (if available)
+try:
+    from merid.event_venues.kalshi.kalshi_deployment_safety_metrics import (
+        inc_deep_otm_fill,
+        inc_deep_itm_fill,
+    )
+    SAFETY_METRICS_AVAILABLE = True
+except ImportError:
+    SAFETY_METRICS_AVAILABLE = False
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 from enum import Enum
 
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.fills_ledger")
 
+
+def _is_test_ticker(ticker: str) -> bool:
+    """Check if a ticker is a test market ticker.
+    
+    Test tickers are identified by patterns like:
+    - Contains "TEST" or "KXTEST"
+    - Short codes like "KX-SK", "KX-DUP", "KX-TK"
+    - Timeframe-based test tickers like "KXBTC-15M", "KXETH-15M" (if they are test-related)
+    
+    Args:
+        ticker: The market ticker to check
+        
+    Returns:
+        True if the ticker is a test market, False otherwise
+    """
+    if not ticker:
+        return False
+    
+    ticker_upper = ticker.upper()
+    
+    # Explicit test markers
+    if "TEST" in ticker_upper or "KXTEST" in ticker_upper:
+        return True
+    
+    # Short codes (test development tickers)
+    if ticker_upper.startswith("KX-") and len(ticker_upper) <= 6:
+        return True
+    
+    # Timeframe-based tickers for crypto (may be test-related)
+    # These patterns are used for test markets in development
+    if ticker_upper.startswith(("KXBTC-", "KXETH-", "KXSOL-", "KXXRP-", "KXDOGE-")):
+        parts = ticker_upper.split("-")
+        if len(parts) >= 2:
+            last_part = parts[-1]
+            # Check for timeframe suffixes that indicate test markets
+            if last_part in ("15M", "1H", "H", "D", "W", "M", "A"):
+                return True
+    
+    return False
+
+if TYPE_CHECKING:
+    from merid.hedging.pnl_tracker import HedgePnLTracker
+    from merid.event_venues.kalshi.fills_persistence import HedgePersistenceManager
+
+# PRODUCTION FIX (2026-05-01): DB configuration from environment
+_FILLS_DB_BUSY_TIMEOUT_MS: int = int(os.getenv("MERID_FILLS_DB_BUSY_TIMEOUT_MS", "30000"))  # 30s default
+_FILLS_DB_RETRY_ATTEMPTS: int = int(os.getenv("MERID_FILLS_DB_RETRY_ATTEMPTS", "3"))
+_FILLS_DB_RETRY_DELAY_INITIAL: float = float(os.getenv("MERID_FILLS_DB_RETRY_DELAY_INITIAL", "0.05"))
+_FILLS_DB_RETRY_DELAY_MAX: float = float(os.getenv("MERID_FILLS_DB_RETRY_DELAY_MAX", "0.5"))
+_FILLS_WRITER_QUEUE_TIMEOUT: float = float(os.getenv("MERID_FILLS_WRITER_QUEUE_TIMEOUT", "0.5"))
+_FILLS_WRITER_ERROR_SLEEP: float = float(os.getenv("MERID_FILLS_WRITER_ERROR_SLEEP", "0.05"))
+_FILLS_SHUTDOWN_TIMEOUT: float = float(os.getenv("MERID_FILLS_SHUTDOWN_TIMEOUT", "5.0"))
+
 # Test fixture fill ID prefixes — never from real Kalshi API
 _TEST_FILL_PREFIXES = (
     "fill_integrity_", "fill_a_", "fill_b_", "fill_ghost_",
     "fill_immutable_", "fill_legit_", "fill_test_", "test_fill_",
-    "fill_dup_", "fill_stale_",
+    "fill_dup_", "fill_stale_", "ws-fill-", "fill-",
 )
+
+# Exact match test fill IDs (single IDs like f1, f2, etc.)
+_TEST_FILL_EXACT = {"f1", "f2", "f3", "f4", "f5", "test", "mock", "sample"}
 
 def _is_test_fixture_fill(fill_id: str) -> bool:
     """Return True if fill_id looks like a test fixture, not a real Kalshi fill."""
     if not fill_id:
+        return True
+    if fill_id in _TEST_FILL_EXACT:
         return True
     return any(fill_id.startswith(p) for p in _TEST_FILL_PREFIXES)
 
@@ -52,6 +127,70 @@ class ReconciliationStatus(Enum):
     DEGRADED = "degraded"  # Minor discrepancies (< 5%)
     BROKEN = "broken"      # Significant divergence
     UNKNOWN = "unknown"    # Haven't run yet
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FEE VALIDATION — "No Surprises" Integration
+# Compare pre-trade fee estimates with actual Kalshi fee_cost
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# PRODUCTION FIX (2026-05-01): Fee mismatch threshold from environment
+FEE_MISMATCH_THRESHOLD_PCT: float = float(os.getenv("MERID_FEE_MISMATCH_THRESHOLD_PCT", "5.0"))  # 5% default
+
+
+def validate_fee_vs_estimate(
+    actual_fee_cents: Decimal,
+    estimated_fee_cents: Optional[Decimal],
+    fill_id: str,
+    ticker: str,
+    contracts: int,
+    price_cents: float,
+) -> Tuple[bool, Optional[str]]:
+    """Validate actual fee against pre-trade estimate.
+    
+    Detects:
+    - Kalshi fee schedule changes (unexpected tier changes)
+    - Incorrect fee estimation in sizing logic
+    - Data corruption or API changes
+    
+    Args:
+        actual_fee_cents: Fee from Kalshi fill (fee_cost field)
+        estimated_fee_cents: Our pre-trade estimate (from intent, if available)
+        fill_id: For logging context
+        ticker: Market ticker for logging
+        contracts: Number of contracts (for context)
+        price_cents: Fill price in cents (for context)
+        
+    Returns:
+        (is_valid, alert_message_if_mismatch)
+    """
+    if estimated_fee_cents is None or estimated_fee_cents <= 0:
+        # No estimate to compare against - skip validation
+        return True, None
+    
+    if actual_fee_cents <= 0:
+        # Invalid actual fee - this is a problem
+        return False, f"[FEE_INVALID] fill={fill_id} ticker={ticker} actual_fee={actual_fee_cents}"
+    
+    # Calculate percentage deviation
+    estimated = float(estimated_fee_cents)
+    actual = float(actual_fee_cents)
+    
+    if estimated == 0:
+        return True, None
+    
+    deviation_pct = abs(actual - estimated) / estimated * 100
+    
+    if deviation_pct > FEE_MISMATCH_THRESHOLD_PCT:
+        alert = (
+            f"[FEE_MISMATCH] fill={fill_id} ticker={ticker} "
+            f"contracts={contracts} price={price_cents}c "
+            f"estimated_fee={estimated:.2f}c actual_fee={actual:.2f}c "
+            f"deviation={deviation_pct:.1f}% threshold={FEE_MISMATCH_THRESHOLD_PCT}%"
+        )
+        return False, alert
+    
+    return True, None
 
 
 @dataclass
@@ -92,6 +231,12 @@ class KalshiFill:
     intent_id: Optional[str] = None  # Link to our intent record
     decision_trace_id: Optional[str] = None  # End-to-end audit: swarm → sizer → order
     
+    # P1-9: Hedge Order Lifecycle Tracking
+    fill_source: str = ""  # "alpha", "hedge", "manual" — distinguishes hedge fills
+    hedge_reason: Optional[str] = None  # e.g., "cross_asset_SOL_to_BTC", "same_asset_same_horizon"
+    hedge_pnl_cents: int = 0  # Separate PnL tracking for hedge positions
+    related_alpha_fill_id: Optional[str] = None  # Links hedge to originating alpha position
+    
     # Reconciliation tracking
     reconciled: bool = False  # Has been matched to position ledger
     reconciliation_ts: Optional[datetime] = None
@@ -99,6 +244,11 @@ class KalshiFill:
     # Strict mode tracking (production safety)
     derived_id: bool = False  # True if fill_id was synthesized (not from Kalshi)
     confirmed_by_rest: bool = False  # True if this fill was later confirmed by HTTP REST API
+    
+    # LIVE vs PAPER tracking (CRITICAL for bankroll reconciliation)
+    is_live: bool = False  # True if this was a LIVE trade with real money
+    # Note: is_live is determined at ingestion time based on process trade mode
+    # In strict mode, live trades MUST have derived_id=False (real Kalshi fill ID)
     
     def resolved_asset(self) -> Optional[str]:
         """Crypto asset code (BTC, ETH, …) from market ticker via canonical prefix map."""
@@ -129,6 +279,7 @@ class KalshiFill:
         for key in ["created_time", "ingested_at", "reconciliation_ts"]:
             if d.get(key) is not None:
                 d[key] = d[key].isoformat() if isinstance(d[key], datetime) else d[key]
+        # is_live is already bool, no conversion needed
         return d
     
     @property
@@ -161,7 +312,7 @@ class OrderIntent:
     market_ticker: str
     side: str  # "yes" or "no"
     action: str  # "buy" or "sell"
-    count: int
+    count: int  # Total intended count
     price_cents: int
     agent_id: Optional[str] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -169,6 +320,45 @@ class OrderIntent:
     order_id: Optional[str] = None  # Kalshi order ID once submitted
     fill_ids: List[str] = field(default_factory=list)  # Linked fills
     last_update: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    
+    # BUG-6 FIX: Partial fill tracking
+    # Track filled quantity to handle partial fills correctly
+    filled_count: int = 0  # Total contracts filled so far
+    
+    def add_fill(self, fill_id: str, fill_count: int) -> None:
+        """Add a fill to this intent and update status.
+        
+        This handles partial fills by tracking the cumulative filled quantity.
+        Status transitions from 'submitted' -> 'partially_filled' -> 'filled'.
+        
+        Args:
+            fill_id: The fill ID to add
+            fill_count: Number of contracts in this fill
+        """
+        if fill_id not in self.fill_ids:
+            self.fill_ids.append(fill_id)
+            self.filled_count += fill_count
+            self.last_update = datetime.now(timezone.utc)
+            
+            # Update status based on fill completeness
+            if self.filled_count >= self.count:
+                self.status = "filled"
+            elif self.filled_count > 0:
+                self.status = "partially_filled"
+            else:
+                self.status = "pending"
+    
+    @property
+    def remaining_count(self) -> int:
+        """Number of contracts still to be filled."""
+        return max(0, self.count - self.filled_count)
+    
+    @property
+    def fill_progress_pct(self) -> float:
+        """Percentage of the order that has been filled (0-100)."""
+        if self.count == 0:
+            return 0.0
+        return min(100.0, (self.filled_count / self.count) * 100)
 
 
 class KalshiFillsLedger:
@@ -261,6 +451,30 @@ class KalshiFillsLedger:
         self._dlq_db_path = "data/kalshi_fills_dlq.db"
         self._dlq_buffer: List[Dict[str, Any]] = []
         self._dlq_buffer_max = 50  # Flush buffer at this size
+        
+        # Task 4: PnL tracker integration for hedge fill callbacks
+        self._pnl_tracker: Optional["HedgePnLTracker"] = None
+        
+        # Task 7: Persistence manager for auto-save triggers
+        self._persistence_manager: Optional["HedgePersistenceManager"] = None
+        self._auto_save_interval_minutes = int(os.getenv("MERID_HEDGE_AUTO_SAVE_MINUTES", "5"))
+        self._last_auto_save: Optional[datetime] = None
+        
+        # EOD snapshot storage for daily unrealized PnL change calculation
+        # Key: account_id -> EODSnapshot
+        self._eod_snapshots: Dict[str, "EODSnapshot"] = {}
+        self._last_eod_snapshot_date: Optional[str] = None  # Track last EOD snapshot date
+        
+        # Session-based PnL tracking
+        self._last_session_start_date: Optional[str] = None
+        self._session_realized_pnl: Decimal = Decimal("0")
+        self._session_unrealized_pnl: Decimal = Decimal("0")
+        self._cumulative_realized_pnl: Decimal = Decimal("0")
+        self._open_positions: Dict[str, Dict[str, Any]] = {}  # instrument_key -> position state
+        self._processed_fill_ids: Set[str] = set()
+        
+        # Load session metadata on startup
+        self._load_session_metadata()
         
         logger.info("KalshiFillsLedger initialized")
     
@@ -584,6 +798,49 @@ class KalshiFillsLedger:
             self._loaded_count = await self.load_from_db()
         return self._loaded_count
     
+    async def clear_incomplete_fills(self) -> int:
+        """Remove incomplete/false fills from the fills ledger DB.
+        
+        Incomplete fills are those with count_fp <= 0 or price_cents <= 0.
+        These are phantom fills that should not be counted as positions.
+        
+        Returns:
+            Number of fills removed.
+        """
+        try:
+            import aiosqlite
+            
+            removed = 0
+            async with aiosqlite.connect(self._db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                # Delete incomplete fills (count_fp <= 0 or price data missing)
+                async with db.execute("""
+                    DELETE FROM kalshi_fills
+                    WHERE count_fp <= 0
+                    OR (yes_price_dollars IS NULL AND no_price_dollars IS NULL)
+                    OR yes_price_dollars <= 0
+                    OR no_price_dollars <= 0
+                """) as cursor:
+                    removed = cursor.rowcount
+                
+                await db.commit()
+            
+            if removed > 0:
+                logger.warning(f"Cleared {removed} incomplete/false fills from DB (phantom fills)")
+                # Clear in-memory cache too
+                async with self._mutex:
+                    to_remove = [fill_id for fill_id, fill in self._fills.items() if fill.is_incomplete()]
+                    for fill_id in to_remove:
+                        del self._fills[fill_id]
+                    logger.info(f"Cleared {len(to_remove)} incomplete fills from in-memory cache")
+            
+            return removed
+            
+        except Exception as e:
+            logger.error(f"Failed to clear incomplete fills: {e}")
+            return 0
+    
     async def ingest_http_fills(self, fills: List[Dict[str, Any]], 
                                 agent_map: Optional[Dict[str, str]] = None) -> Tuple[int, List[str]]:
         """Ingest fills from HTTP /portfolio/fills endpoint.
@@ -619,20 +876,37 @@ class KalshiFillsLedger:
                         existing.count_fp = fill.count_fp
                     elif existing.count_fp <= 0:
                         existing.count_fp = fill.count_fp
-                    # Prices: upgrade missing/zero only; do not overwrite positive with zero
-                    def _merge_px(cur: Optional[Decimal], inc: Optional[Decimal]) -> Optional[Decimal]:
-                        if inc is None:
-                            return cur
-                        try:
-                            if float(inc) <= 0:
-                                return cur
-                        except Exception:
-                            return cur
-                        if cur is None or float(cur) <= 0:
-                            return inc
-                        return cur
-                    existing.yes_price_dollars = _merge_px(existing.yes_price_dollars, fill.yes_price_dollars)
-                    existing.no_price_dollars = _merge_px(existing.no_price_dollars, fill.no_price_dollars)
+                    
+                    # FIX: Derive count from proceeds if count is missing but proceeds exists
+                    # This handles cases where Kalshi API returns proceeds but not count
+                    if existing.count_fp <= 0 and fill.proceeds_dollars is not None and fill.proceeds_dollars != 0:
+                        # Derive count from proceeds: proceeds = price * count - fees
+                        # Approximate: count ≈ proceeds / price (ignoring fees for estimation)
+                        price = fill.yes_price_dollars if fill.yes_price_dollars else fill.no_price_dollars
+                        if price and price > 0:
+                            derived_count = int(abs(float(fill.proceeds_dollars)) / float(price))
+                            if derived_count > 0:
+                                existing.count_fp = derived_count
+                                logger.info(
+                                    "Fill %s: derived count_fp=%d from proceeds=%s price=%s",
+                                    fill.fill_id, derived_count, fill.proceeds_dollars, price
+                                )
+                    # Prices: HTTP source is authoritative - upgrade even if existing has value
+                    # This ensures WebSocket incomplete fills get completed by HTTP poller
+                    if fill.yes_price_dollars is not None and float(fill.yes_price_dollars) > 0:
+                        existing.yes_price_dollars = fill.yes_price_dollars
+                        logger.debug("Fill %s: upgraded yes_price from HTTP: %s", fill.fill_id, fill.yes_price_dollars)
+                    if fill.no_price_dollars is not None and float(fill.no_price_dollars) > 0:
+                        existing.no_price_dollars = fill.no_price_dollars
+                        logger.debug("Fill %s: upgraded no_price from HTTP: %s", fill.fill_id, fill.no_price_dollars)
+                    
+                    # Log if fill is still incomplete after HTTP upsert
+                    if existing.is_incomplete():
+                        logger.warning(
+                            "Fill %s still incomplete after HTTP upsert: count_fp=%s price_cents=%s yes_price=%s no_price=%s",
+                            fill.fill_id, existing.count_fp, existing.price_cents,
+                            existing.yes_price_dollars, existing.no_price_dollars
+                        )
                     if fill.order_id and not existing.order_id:
                         existing.order_id = fill.order_id
                     if fill.client_order_id and not existing.client_order_id:
@@ -643,7 +917,7 @@ class KalshiFillsLedger:
                     self._duplicates_dropped += 1
                     continue
 
-                # Link to intent if we have it
+                # Link to intent and resolve action
                 if fill.client_order_id and fill.client_order_id in self._intents:
                     intent = self._intents[fill.client_order_id]
                     intent.fill_ids.append(fill.fill_id)
@@ -654,13 +928,57 @@ class KalshiFillsLedger:
                     # Resolve action from intent when fill has no explicit action.
                     if intent.action in ("buy", "sell") and fill.action not in ("buy", "sell"):
                         fill.action = intent.action
+                    # Task 5: Check intent tags for hedge fills
+                    if hasattr(intent, 'tags') and intent.tags:
+                        if 'hedge' in intent.tags:
+                            fill.fill_source = "hedge"
+                            fill.hedge_reason = intent.tags.get('hedge_reason', 'unknown')
                 elif agent_map and fill.client_order_id in agent_map:
                     fill.agent_id = agent_map[fill.client_order_id]
+                
+                # Task 5: Detect hedge fills by client_order_id prefix
+                if fill.client_order_id and fill.client_order_id.startswith('HEDGE_'):
+                    fill.fill_source = "hedge"
+                    # Extract hedge reason from client_order_id (format: HEDGE_reason_timestamp)
+                    parts = fill.client_order_id.split('_')
+                    if len(parts) >= 2:
+                        fill.hedge_reason = parts[1]
+                elif not fill.fill_source:
+                    fill.fill_source = "alpha"  # Default to alpha if not hedge
                 
                 self._fills[fill.fill_id] = fill
                 self._index_fill(fill)
                 new_count += 1
                 new_fill_ids.append(fill.fill_id)
+                
+                # CRITICAL FIX: Call on_fill to update position state for HTTP fills
+                # Without this, _open_positions is not updated when fills come via HTTP polling
+                self.on_fill(fill)
+                
+                # Track deep OTM/ITM fills for deployment safety monitoring
+                if fill.price_cents < DEEP_OTM_THRESHOLD_CENTS:
+                    logger.warning(
+                        "[DEPLOYMENT-SAFETY] Deep OTM fill detected (HTTP): ticker=%s price=%dc threshold=%dc fill_id=%s",
+                        fill.market_ticker, fill.price_cents, DEEP_OTM_THRESHOLD_CENTS, fill.fill_id
+                    )
+                    if SAFETY_METRICS_AVAILABLE:
+                        inc_deep_otm_fill(
+                            ticker=fill.market_ticker,
+                            source="http_poller",
+                            price_cents=fill.price_cents,
+                        )
+                elif fill.price_cents > DEEP_ITM_THRESHOLD_CENTS:
+                    logger.warning(
+                        "[DEPLOYMENT-SAFETY] Deep ITM fill detected (HTTP): ticker=%s price=%dc threshold=%dc fill_id=%s",
+                        fill.market_ticker, fill.price_cents, DEEP_ITM_THRESHOLD_CENTS, fill.fill_id
+                    )
+                    if SAFETY_METRICS_AVAILABLE:
+                        inc_deep_itm_fill(
+                            ticker=fill.market_ticker,
+                            source="http_poller",
+                            price_cents=fill.price_cents,
+                        )
+                
                 logger.info(
                     "fills_ledger http_ingest fill_id=%s order_id=%s ticker=%s side=%s action=%s size=%s src=http_poller",
                     fill.fill_id,
@@ -677,6 +995,15 @@ class KalshiFillsLedger:
             if new_count > 0:
                 logger.info(f"Ingested {new_count} new fills from HTTP (total: {len(self._fills)})")
             await self._persist()
+            
+            # Task 4: Notify PnL tracker of any new hedge fills
+            for fill_id in new_fill_ids:
+                fill = self._fills.get(fill_id)
+                if fill and fill.fill_source == "hedge":
+                    await self._notify_pnl_tracker_of_hedge_fill(fill)
+            
+            # Task 7: Trigger auto-save if interval elapsed
+            await self._maybe_trigger_auto_save()
             
         return new_count, new_fill_ids
     
@@ -712,6 +1039,21 @@ class KalshiFillsLedger:
                 # Resolve action from intent when fill has no explicit action
                 if intent.action in ("buy", "sell") and fill.action not in ("buy", "sell"):
                     fill.action = intent.action
+                # Task 5: Check intent tags for hedge fills
+                if hasattr(intent, 'tags') and intent.tags:
+                    if 'hedge' in intent.tags:
+                        fill.fill_source = "hedge"
+                        fill.hedge_reason = intent.tags.get('hedge_reason', 'unknown')
+            
+            # Task 5: Detect hedge fills by client_order_id prefix
+            if fill.client_order_id and fill.client_order_id.startswith('HEDGE_'):
+                fill.fill_source = "hedge"
+                # Extract hedge reason from client_order_id (format: HEDGE_reason_timestamp)
+                parts = fill.client_order_id.split('_')
+                if len(parts) >= 2:
+                    fill.hedge_reason = parts[1]
+            elif not fill.fill_source:
+                fill.fill_source = "alpha"  # Default to alpha if not hedge
             
             # Leave action blank when the wire omits it — HTTP ``/portfolio/fills``
             # upserts canonical buy/sell (see ingest_http_fills duplicate branch).
@@ -734,8 +1076,35 @@ class KalshiFillsLedger:
             self._index_fill(fill)
             self._ws_ingested += 1
             
+            # Track deep OTM/ITM fills for deployment safety monitoring
+            if fill.price_cents < DEEP_OTM_THRESHOLD_CENTS:
+                logger.warning(
+                    "[DEPLOYMENT-SAFETY] Deep OTM fill detected: ticker=%s price=%dc threshold=%dc fill_id=%s",
+                    fill.market_ticker, fill.price_cents, DEEP_OTM_THRESHOLD_CENTS, fill.fill_id
+                )
+                if SAFETY_METRICS_AVAILABLE:
+                    inc_deep_otm_fill(
+                        ticker=fill.market_ticker,
+                        source="websocket",
+                        price_cents=fill.price_cents,
+                    )
+            elif fill.price_cents > DEEP_ITM_THRESHOLD_CENTS:
+                logger.warning(
+                    "[DEPLOYMENT-SAFETY] Deep ITM fill detected: ticker=%s price=%dc threshold=%dc fill_id=%s",
+                    fill.market_ticker, fill.price_cents, DEEP_ITM_THRESHOLD_CENTS, fill.fill_id
+                )
+                if SAFETY_METRICS_AVAILABLE:
+                    inc_deep_itm_fill(
+                        ticker=fill.market_ticker,
+                        source="websocket",
+                        price_cents=fill.price_cents,
+                    )
+            
+            # Session-based PnL tracking: call on_fill() for new fills
+            self.on_fill(fill)
+            
         logger.info(
-            "fills_ledger ws_ingest fill_id=%s order_id=%s ticker=%s side=%s action=%s size=%s asset=%s src=websocket",
+            "fills_ledger ws_ingest fill_id=%s order_id=%s ticker=%s side=%s action=%s size=%s asset=%s src=websocket fill_source=%s",
             fill.fill_id,
             fill.order_id,
             fill.market_ticker,
@@ -743,8 +1112,27 @@ class KalshiFillsLedger:
             fill.action,
             fill.count_fp,
             fill.resolved_asset(),
+            fill.fill_source or "alpha",
         )
         await self._persist()
+        
+        # Task 4: Notify PnL tracker if this is a hedge fill
+        if fill.fill_source == "hedge":
+            await self._notify_pnl_tracker_of_hedge_fill(fill)
+        
+        # Task 7: Trigger auto-save if interval elapsed
+        await self._maybe_trigger_auto_save()
+        
+        # Task 5: Validate hedge fill consistency
+        if fill.fill_source == "hedge":
+            validation_errors = self._validate_hedge_fill(fill)
+            if validation_errors:
+                logger.warning(
+                    "fills_ledger hedge_fill_validation_failed fill_id=%s errors=%s",
+                    fill.fill_id,
+                    validation_errors
+                )
+        
         return True
     
     def record_intent(self, intent: OrderIntent) -> None:
@@ -754,6 +1142,142 @@ class KalshiFillsLedger:
         # Prune stale intents to prevent unbounded growth (runs every 100 adds)
         if len(self._intents) % 100 == 0:
             self._prune_stale_intents()
+    
+    def _validate_hedge_fill(self, fill: KalshiFill) -> List[str]:
+        """Validate a hedge fill for consistency.
+        
+        Task 5: Check hedge fill metadata for consistency.
+        
+        Args:
+            fill: The KalshiFill to validate
+            
+        Returns:
+            List of validation error messages (empty if valid)
+        """
+        errors = []
+        
+        # Check for missing hedge_reason
+        if not fill.hedge_reason:
+            errors.append("missing_hedge_reason")
+        
+        # Check for invalid hedge_reason format
+        if fill.hedge_reason and not any(
+            prefix in fill.hedge_reason 
+            for prefix in ["cross_asset", "direct", "timeframe", "unwind"]
+        ):
+            errors.append(f"unrecognized_hedge_reason_format: {fill.hedge_reason}")
+        
+        # Check client_order_id has HEDGE_ prefix
+        if fill.client_order_id and not fill.client_order_id.startswith("HEDGE_"):
+            errors.append("client_order_id_missing_HEDGE_prefix")
+        
+        # Check for orphaned hedge (no related_alpha_fill_id when expected)
+        if fill.hedge_reason and "cross_asset" in fill.hedge_reason:
+            # Cross-asset hedges should have a related alpha fill
+            if not fill.related_alpha_fill_id:
+                # This might be a new hedge, so only warn if it's old
+                age_hours = (datetime.now(timezone.utc) - fill.created_time).total_seconds() / 3600
+                if age_hours > 1:
+                    errors.append(f"orphaned_cross_asset_hedge_age_{age_hours:.1f}h")
+        
+        return errors
+    
+    # Task 4: PnL tracker integration methods
+    def set_pnl_tracker(self, tracker: "HedgePnLTracker") -> None:
+        """Set the PnL tracker for hedge fill callbacks.
+        
+        Task 4: Enables automatic PnL tracking when hedge fills are recorded.
+        """
+        self._pnl_tracker = tracker
+        logger.info("PnL tracker registered with fills ledger")
+    
+    # Task 7: Persistence manager integration methods
+    def set_persistence_manager(self, manager: "HedgePersistenceManager") -> None:
+        """Set the persistence manager for auto-save triggers.
+        
+        Task 7: Enables automatic persistence of hedge fills.
+        """
+        self._persistence_manager = manager
+        logger.info("Persistence manager registered with fills ledger")
+    
+    async def _maybe_trigger_auto_save(self) -> None:
+        """Trigger auto-save if interval has elapsed.
+        
+        Task 7: Periodic auto-save of hedge state for recovery.
+        """
+        if not self._persistence_manager or not self._pnl_tracker:
+            return
+        
+        now = datetime.now(timezone.utc)
+        if self._last_auto_save is None:
+            self._last_auto_save = now
+            return
+        
+        elapsed_minutes = (now - self._last_auto_save).total_seconds() / 60
+        if elapsed_minutes >= self._auto_save_interval_minutes:
+            try:
+                # Get hedge fills only
+                hedge_fills = self.get_hedge_fills(limit=10000)
+                # BUG-FIX: Call save_all() instead of non-existent methods
+                # HedgePersistenceManager.save_all() handles both fills and tracker
+                self._persistence_manager.save_all(hedge_fills, self._pnl_tracker)
+                self._last_auto_save = now
+                logger.debug(f"Auto-saved {len(hedge_fills)} hedge fills and PnL state")
+            except Exception as e:
+                logger.warning(f"Auto-save failed: {e}")
+    
+    async def _notify_pnl_tracker_of_hedge_fill(self, fill: KalshiFill) -> None:
+        """Notify PnL tracker of a new hedge fill.
+        
+        Task 4: Creates PnL record when hedge fill is ingested.
+        """
+        if not self._pnl_tracker:
+            return
+        
+        try:
+            # Check if this fill is linked to an alpha fill
+            if fill.related_alpha_fill_id:
+                # This is a closing hedge fill - record the exit
+                # BUG-FIX: Extract price_cents and count from fill, not pass fill object
+                self._pnl_tracker.record_hedge_exit(
+                    hedge_fill_id=fill.fill_id,
+                    exit_price_cents=fill.price_cents,
+                    exit_count=int(fill.count_fp),
+                )
+            else:
+                # This is an opening hedge fill - create a new record
+                # Need to find the related alpha fill from hedge_reason
+                # Format: "cross_asset_SOL_to_BTC" or "direct_BTC"
+                alpha_fill_id = None
+                if fill.hedge_reason and "cross_asset" in fill.hedge_reason:
+                    # Extract source asset from reason
+                    parts = fill.hedge_reason.split("_")
+                    if len(parts) >= 3:
+                        # Find recent alpha fills for that asset
+                        source_asset = parts[2]  # e.g., "SOL" from "cross_asset_SOL_to_BTC"
+                        alpha_fills = self.get_alpha_fills(limit=100)
+                        for alpha_fill in alpha_fills:
+                            if source_asset in alpha_fill.market_ticker:
+                                alpha_fill_id = alpha_fill.fill_id
+                                break
+                
+                if alpha_fill_id:
+                    # BUG-FIX: Match create_record signature exactly (no notional params)
+                    self._pnl_tracker.create_record(
+                        alpha_fill_id=alpha_fill_id,
+                        alpha_ticker=fill.market_ticker,  # Use hedge ticker as proxy for alpha
+                        alpha_side=fill.side,
+                        alpha_entry_price_cents=fill.price_cents,
+                        alpha_entry_count=int(fill.count_fp),
+                        hedge_fill_id=fill.fill_id,
+                        hedge_ticker=fill.market_ticker,
+                        hedge_side=fill.side,
+                        hedge_entry_price_cents=fill.price_cents,
+                        hedge_entry_count=int(fill.count_fp),
+                        hedge_reason=fill.hedge_reason or "unknown",
+                    )
+        except Exception as e:
+            logger.warning(f"Failed to notify PnL tracker of hedge fill {fill.fill_id}: {e}")
 
     def _prune_stale_intents(self) -> None:
         """Remove intents that are terminal+old or just very old."""
@@ -804,6 +1328,160 @@ class KalshiFillsLedger:
     def get_fill_by_id(self, fill_id: str) -> Optional[KalshiFill]:
         """Get a single fill by ID."""
         return self._fills.get(fill_id)
+    
+    # Task 9: Optimized hedge fill query methods
+    def get_hedge_fills(
+        self,
+        since: Optional[datetime] = None,
+        hedge_reason: Optional[str] = None,
+        related_alpha_fill_id: Optional[str] = None,
+        limit: int = 500,
+    ) -> List[KalshiFill]:
+        """Query hedge fills with optimized filtering.
+        
+        Task 9: Uses in-memory filter but designed for DB-backed partial indexes.
+        With partial indexes, this would query: WHERE fill_source = 'hedge'
+        
+        Args:
+            since: Only returns fills after this timestamp
+            hedge_reason: Filter by specific hedge reason (e.g., "cross_asset_SOL_to_BTC")
+            related_alpha_fill_id: Find hedge linked to specific alpha fill
+            limit: Maximum results to return
+            
+        Returns:
+            List of hedge KalshiFill objects
+        """
+        # Use fill_source index hint: WHERE fill_source = 'hedge'
+        hedge_fills = [
+            f for f in self._fills.values()
+            if f.fill_source == "hedge"
+        ]
+        
+        if since:
+            hedge_fills = [f for f in hedge_fills if f.created_time >= since]
+        if hedge_reason:
+            hedge_fills = [f for f in hedge_fills if f.hedge_reason == hedge_reason]
+        if related_alpha_fill_id:
+            hedge_fills = [f for f in hedge_fills if f.related_alpha_fill_id == related_alpha_fill_id]
+        
+        # Sort by created_time descending
+        hedge_fills.sort(key=lambda f: f.created_time, reverse=True)
+        return hedge_fills[:limit]
+    
+    def get_alpha_fills(
+        self,
+        since: Optional[datetime] = None,
+        market_ticker: Optional[str] = None,
+        limit: int = 500,
+    ) -> List[KalshiFill]:
+        """Query alpha (non-hedge) fills with optimized filtering.
+        
+        Task 9: Uses in-memory filter but designed for DB-backed partial index.
+        With partial index: WHERE fill_source = 'alpha' OR fill_source IS NULL
+        
+        Args:
+            since: Only returns fills after this timestamp
+            market_ticker: Filter by market ticker
+            limit: Maximum results to return
+            
+        Returns:
+            List of alpha KalshiFill objects
+        """
+        # Query where fill_source is 'alpha' or NULL (defaults to alpha)
+        alpha_fills = [
+            f for f in self._fills.values()
+            if f.fill_source in ("alpha", None)
+        ]
+        
+        if since:
+            alpha_fills = [f for f in alpha_fills if f.created_time >= since]
+        if market_ticker:
+            alpha_fills = [f for f in alpha_fills if f.market_ticker == market_ticker]
+        
+        # Sort by created_time descending
+        alpha_fills.sort(key=lambda f: f.created_time, reverse=True)
+        return alpha_fills[:limit]
+    
+    def get_fill_source_stats(self) -> Dict[str, int]:
+        """Get counts by fill_source for monitoring.
+        
+        Task 9: Quick aggregation for dashboard/analytics.
+        
+        Returns:
+            Dict with counts: {"alpha": N, "hedge": N, "unknown": N}
+        """
+        stats = {"alpha": 0, "hedge": 0, "unknown": 0}
+        
+        for fill in self._fills.values():
+            source = fill.fill_source
+            if source == "alpha":
+                stats["alpha"] += 1
+            elif source == "hedge":
+                stats["hedge"] += 1
+            else:
+                stats["unknown"] += 1
+        
+        return stats
+    
+    def get_hedge_metrics(self) -> Dict[str, Any]:
+        """Get comprehensive hedge metrics for health monitoring.
+        
+        Task 2: Quick health check endpoint for hedge system status.
+        
+        Returns:
+            Dict with hedge system metrics including:
+            - fill_counts: alpha/hedge/unknown breakdown
+            - recent_hedge_fills: count in last hour
+            - hedge_fill_rate: fills per minute
+            - unlinked_hedges: fills without related_alpha_fill_id
+        """
+        from datetime import datetime, timezone, timedelta
+        
+        now = datetime.now(timezone.utc)
+        one_hour_ago = now - timedelta(hours=1)
+        
+        # Basic counts
+        stats = self.get_fill_source_stats()
+        
+        # Recent hedge fills
+        recent_hedge_fills = [
+            f for f in self._fills.values()
+            if f.fill_source == "hedge" and f.created_time >= one_hour_ago
+        ]
+        
+        # Unlinked hedge fills (orphaned hedges)
+        unlinked_hedges = [
+            f for f in self._fills.values()
+            if f.fill_source == "hedge" and not f.related_alpha_fill_id
+        ]
+        
+        # Calculate rate (fills per minute in last hour)
+        hedge_fill_rate = len(recent_hedge_fills) / 60.0 if recent_hedge_fills else 0.0
+        
+        # Time since last hedge fill
+        last_hedge_fill = None
+        for fill in self._fills.values():
+            if fill.fill_source == "hedge":
+                if last_hedge_fill is None or fill.created_time > last_hedge_fill:
+                    last_hedge_fill = fill.created_time
+        
+        seconds_since_last_hedge = None
+        if last_hedge_fill:
+            seconds_since_last_hedge = (now - last_hedge_fill).total_seconds()
+        
+        return {
+            "timestamp": now.isoformat(),
+            "fill_counts": stats,
+            "recent_hedge_fills_1h": len(recent_hedge_fills),
+            "hedge_fill_rate_per_min": round(hedge_fill_rate, 3),
+            "unlinked_hedge_fills": len(unlinked_hedges),
+            "seconds_since_last_hedge_fill": int(seconds_since_last_hedge) if seconds_since_last_hedge else None,
+            "is_healthy": (
+                stats["hedge"] > 0 and  # Has hedge fills
+                len(unlinked_hedges) < 10 and  # Not too many orphaned hedges
+                (seconds_since_last_hedge is None or seconds_since_last_hedge < 3600)  # Recent activity
+            ),
+        }
     
     def get_intent(self, intent_id: str) -> Optional[OrderIntent]:
         """Get an intent by ID."""
@@ -894,16 +1572,62 @@ class KalshiFillsLedger:
     def compute_net_positions(self) -> Dict[str, Dict[str, Any]]:
         """Compute positions for all markets from fills ledger.
         
+        PRODUCTION FIX (2026-05-10): Filter out test positions to prevent bleeding into production.
+        
         Returns:
             Dict mapping market_ticker -> position dict (same format as compute_position_from_fills)
         """
         positions: Dict[str, Dict[str, Any]] = {}
         # Iterate over all markets that have fills
         for market_ticker in self._fills_by_market.keys():
+            # PRODUCTION FIX (2026-05-10): Skip test tickers
+            if _is_test_ticker(market_ticker):
+                logger.debug(f"Skipping test ticker in compute_net_positions: {market_ticker}")
+                continue
+            
             pos = self.compute_position_from_fills(market_ticker)
             if pos:  # Only include non-zero positions
                 positions[market_ticker] = pos
         return positions
+    
+    def get_open_exposure_usd(self) -> float:
+        """Compute total open notional exposure in USD from fills ledger.
+        
+        CRITICAL for GlobalRiskGuard: Returns sum of all open position notionals
+        so the guard can enforce 2% cycle cap across all agents.
+        
+        DEPRECATED FOR RISK CALC: Use position_cache.get_all_positions() instead.
+        This method includes stale/test fills and manually closed positions which
+        incorrectly inflate existing risk beyond actual Kalshi positions.
+        
+        Returns:
+            Total open exposure in USD (cents / 100)
+        """
+        try:
+            # Filter out manually closed positions (those detected in reconciliation)
+            positions = self.compute_net_positions()
+            total = 0.0
+            for ticker, pos in positions.items():
+                # Skip markets marked as manually closed in reconciliation
+                if hasattr(self, '_manually_closed_logged') and ticker in self._manually_closed_logged:
+                    continue
+                contracts = pos.get("contracts", 0)
+                # PRODUCTION-FIX: Try to get avg_price_cents from market state if not in position data
+                avg_price_cents = pos.get("avg_price_cents")
+                if avg_price_cents is None:
+                    try:
+                        from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                        state = get_kalshi_market_state_store().get_state(ticker)
+                        if state and state.mid_cents > 0:
+                            avg_price_cents = state.mid_cents
+                    except Exception as _exc:
+                        logger.debug("[FILLS_LEDGER] failed to fetch market state for %s, using 50c fallback: %s", ticker, _exc)
+                avg_price_cents = avg_price_cents or DEFAULT_KALSHI_PRICE_CENTS
+                total += contracts * (avg_price_cents / 100.0)
+            return total
+        except Exception as e:
+            logger.debug(f"[FILLS_LEDGER] get_open_exposure_usd failed: {e}")
+            return 0.0
     
     async def reconcile_with_kalshi_positions(self, 
                                               kalshi_positions: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1086,8 +1810,12 @@ class KalshiFillsLedger:
         STRICT MODE: In production (MERID_STRICT_FILL_ID=1), derived fills
         (those without canonical Kalshi IDs) are excluded from PnL until
         confirmed by REST API reconciliation.
+        
+        Prior day close tracking for daily unrealized PnL change is deferred to future work.
+        Current implementation tracks daily realized PnL and total unrealized PnL.
+        For daily unrealized PnL change, would need: daily_pnl = daily_realized + (current_unrealized - prior_close_unrealized).
+        This requires tracking unrealized_pnl_at_prior_close across process restarts.
         """
-        import os
         now = datetime.now(timezone.utc)
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -1098,32 +1826,87 @@ class KalshiFillsLedger:
         daily_realized_pnl = Decimal("0")
         total_unrealized_pnl = Decimal("0")
         total_fees = Decimal("0")
+        
+        # LIVE vs PAPER tracking (CRITICAL for bankroll reconciliation)
+        live_realized_pnl = Decimal("0")  # Real money trades only
+        live_fees = Decimal("0")  # Fees from live trades
+        live_fills_count = 0  # Count of live fills
+        paper_realized_pnl = Decimal("0")  # Paper/simulated trades
+        paper_fills_count = 0  # Count of paper fills
 
         # Track derived-only fills for reporting
         derived_fills_excluded = 0
         derived_fills_pending = 0
 
-        # Determine which markets have CLOSED positions (net position == 0 from fills).
-        # Only closed markets contribute to REALIZED PnL; open positions are UNREALIZED.
-        # This prevents open buy fills from appearing as negative "realized PnL" in the UI.
+        # Determine which markets have CLOSED positions.
+        # BUG-FIX: Use position_cache (which syncs with Kalshi REST) as PRIMARY source
+        # instead of compute_position_from_fills(). This ensures manually closed positions
+        # and settled markets are correctly identified as closed.
         closed_markets: set = set()
         open_markets: set = set()
-        for ticker in self._fills_by_market:
-            net_pos = self.compute_position_from_fills(ticker)
-            if net_pos and net_pos.get("contracts", 0) > 0:
-                open_markets.add(ticker)
-                # Approximate unrealized: cost basis of open position (negative of entry cost)
-                avg_p = Decimal(str(net_pos.get("avg_price_cents", 50))) / Decimal("100")
-                contracts = Decimal(str(net_pos.get("contracts", 0)))
-                total_unrealized_pnl += avg_p * contracts  # cost basis held
-            else:
-                closed_markets.add(ticker)
+        manually_closed_detected: List[str] = []
+        
+        # Get current positions from position_cache (Kalshi REST-synced)
+        try:
+            from merid.event_venues.kalshi.position_cache import get_position_cache
+            cache = get_position_cache()
+            cached_positions = cache.get_all_positions()
+            
+            # Build set of markets with actual positions from Kalshi
+            markets_with_kalshi_position: set = set()
+            for pos in cached_positions:
+                ticker = getattr(pos, 'market_id', None) or getattr(pos, 'ticker', None)
+                contracts = getattr(pos, 'contracts', 0) or getattr(pos, 'size', 0)
+                if ticker and contracts > 0:
+                    markets_with_kalshi_position.add(ticker.upper())
+                    open_markets.add(ticker.upper())
+                    # Track unrealized PnL from cache
+                    unrealized = getattr(pos, 'unrealized_pnl_cents', 0) or 0
+                    total_unrealized_pnl += Decimal(str(unrealized)) / Decimal("100")
+            
+            # Markets with fills but no Kalshi position are CLOSED (manually settled or expired)
+            # Track which manually closed positions we've already logged to prevent spam
+            if not hasattr(self, '_manually_closed_logged'):
+                self._manually_closed_logged: set = set()
+            
+            for ticker in self._fills_by_market:
+                # PRODUCTION FIX (2026-05-18): Skip test tickers in reconciliation to prevent log spam
+                if _is_test_ticker(ticker):
+                    logger.debug(f"Skipping test ticker in reconciliation: {ticker}")
+                    continue
+                    
+                if ticker.upper() not in markets_with_kalshi_position:
+                    closed_markets.add(ticker.upper())
+                    if self.compute_position_from_fills(ticker):
+                        # We have fills showing a position, but Kalshi says none - manually closed
+                        manually_closed_detected.append(ticker)
+                        # Only log once per session to prevent log spam
+                        if ticker not in self._manually_closed_logged:
+                            logger.info(f"Detected manually closed position: {ticker} (fills show position, Kalshi shows none)")
+                            self._manually_closed_logged.add(ticker)
+            
+            logger.debug(f"Position cache: {len(open_markets)} open, {len(closed_markets)} closed markets")
+            
+        except Exception as e:
+            # SINGLE SOURCE OF TRUTH: Do NOT fall back to fills-based computation
+            # If position cache is unavailable, return empty sets - Kalshi API is the only source of truth
+            logger.debug(f"Position cache unavailable for summary (will retry): {e}")
+            # Return empty sets - will retry when position cache is available
+            # This prevents phantom positions from fills-based computation
 
         # Take snapshot under lock to avoid dict mutation during iteration
         fills_snapshot = list(self._fills.values())
 
         for fill in fills_snapshot:
             total_fees += fill.fee_cost
+
+            # SKIP TEST FIXTURE FILLS: These are fake test data that leak into production
+            if _is_test_fixture_fill(fill.fill_id):
+                continue
+
+            # SKIP INVALID FILLS: Zero count or None notional means corrupted/incomplete data
+            if fill.count_fp <= 0 or fill.notional_usd is None or fill.notional_usd <= 0:
+                continue
 
             # STRICT MODE SAFETY: Skip derived fills not confirmed by REST
             if strict_mode and fill.derived_id and not fill.confirmed_by_rest:
@@ -1140,10 +1923,32 @@ class KalshiFillsLedger:
             if fill.market_ticker and fill.market_ticker not in closed_markets:
                 continue
 
-            # Net cash flow for this fill (sell = +notional, buy = -notional)
-            sign = Decimal("1") if fill.action == "sell" else Decimal("-1")
-            pnl_contribution = sign * fill.notional_usd - fill.fee_cost
-            total_realized_pnl += pnl_contribution
+            # FIX: Skip PnL calculation for markets without settlement data
+            # Binary options require settlement outcome to calculate true PnL
+            # Without settlement data, we cannot determine actual profit/loss
+            # For now, only count fills that have proceeds_dollars from Kalshi
+            if fill.proceeds_dollars is not None:
+                # BUG-FIX: Use proceeds_dollars correctly for PnL (Reddit post pitfall: "counting notional as loss")
+                # proceeds_dollars is net cash flow: negative for buys (cost), positive for sells (proceeds)
+                # For closed markets with both buys and sells, summing all proceeds gives correct PnL:
+                #   Buy at 70¢, 10 contracts: proceeds = -7.00 - fees (cost)
+                #   Sell at 60¢, 10 contracts: proceeds = +6.00 - fees (proceeds)
+                #   Total PnL = -7.00 + 6.00 = -1.00 (correct)
+                # This works because proceeds_dollars already includes fees and proper sign convention
+                pnl_contribution = fill.proceeds_dollars
+                total_realized_pnl += pnl_contribution
+            else:
+                # Skip fills without proceeds - they're not settled yet
+                continue
+
+            # LIVE vs PAPER split (CRITICAL for bankroll reconciliation)
+            if fill.is_live:
+                live_realized_pnl += pnl_contribution
+                live_fees += fill.fee_cost
+                live_fills_count += 1
+            else:
+                paper_realized_pnl += pnl_contribution
+                paper_fills_count += 1
 
             if fill.created_time >= today_start:
                 daily_realized_pnl += pnl_contribution
@@ -1156,15 +1961,81 @@ class KalshiFillsLedger:
             )
 
         from merid.event_venues.kalshi.kalshi_ledger_metrics import snapshot as _metrics_snap
+        # Calculate daily unrealized change if prior close snapshot exists
+        # Formula: daily_pnl = daily_realized + (current_unrealized - prior_close_unrealized)
+        daily_unrealized_change_usd = 0.0
+        has_prior_snapshot = False
+        try:
+            # For now, use a default account_id (should be parameterized in production)
+            account_id = "default"
+            snapshot = self._eod_snapshots.get(account_id)
+            
+            if snapshot is None:
+                # Edge case: New user or first day - no prior snapshot
+                logger.debug("No prior EOD snapshot found for account=%s, using daily_realized only", account_id)
+                daily_unrealized_change_usd = 0.0
+            else:
+                # Check if snapshot is stale (older than 2 days)
+                snapshot_date = datetime.fromisoformat(snapshot.snapshot_date)
+                current_date = datetime.now(timezone.utc).date()
+                snapshot_age = (current_date - snapshot_date.date()).days
+                
+                if snapshot_age > 2:
+                    # Edge case: Stale snapshot (missed EOD)
+                    logger.warning(
+                        "Stale EOD snapshot for account=%s (age=%d days), using daily_realized only. "
+                        "Consider recording fresh EOD snapshot.",
+                        account_id, snapshot_age
+                    )
+                    daily_unrealized_change_usd = 0.0
+                else:
+                    # Normal case: Calculate daily unrealized change
+                    has_prior_snapshot = True
+                    prior_close_unrealized_cents = snapshot.unrealized_pnl_eod_cents
+                    current_unrealized_cents = int(total_unrealized_pnl * 100)
+                    daily_unrealized_change_cents = current_unrealized_cents - prior_close_unrealized_cents
+                    daily_unrealized_change_usd = float(daily_unrealized_change_cents) / 100.0
+                    
+                    logger.debug(
+                        "Daily unrealized change: prior_close=%dc current=%dc change=%dc (%.2f USD) snapshot_age=%d days",
+                        prior_close_unrealized_cents, current_unrealized_cents, 
+                        daily_unrealized_change_cents, daily_unrealized_change_usd, snapshot_age
+                    )
+        except Exception as e:
+            logger.debug("Failed to calculate daily unrealized change: %s", e)
+            daily_unrealized_change_usd = 0.0
+        
+        # FIX: Use open_markets_count from position_cache as canonical open_positions_count
+        # _open_positions internal state may not be synchronized correctly
+        canonical_open_positions_count = len(open_markets)
+        
         return {
             # Keys expected by kalshi_api.py risk endpoint
             "daily_realized_pnl_usd": float(daily_realized_pnl),
             "total_realized_pnl_usd": float(total_realized_pnl),
             "total_unrealized_pnl_usd": float(total_unrealized_pnl),
+            "daily_unrealized_change_usd": daily_unrealized_change_usd,  # NEW: change in unrealized PnL since prior close
+            # Session-based PnL metrics (NEW)
+            # session_total_pnl_usd = session_realized_pnl_usd + session_unrealized_pnl_usd (this session only)
+            # cumulative_realized_pnl_usd = sum of all closed trades across all sessions
+            "session_realized_pnl_usd": float(self._session_realized_pnl),
+            "session_unrealized_pnl_usd": float(self._session_unrealized_pnl),
+            "session_total_pnl_usd": float(self._session_realized_pnl + self._session_unrealized_pnl),
+            "cumulative_realized_pnl_usd": float(self._cumulative_realized_pnl),
+            "session_date": self._last_session_start_date,
+            "open_positions_count": canonical_open_positions_count,
+            # Original fields
             "open_markets_count": len(open_markets),
             "closed_markets_count": len(closed_markets),
             "total_fees_usd": float(total_fees),
             "total_fills": len(self._fills),
+            # LIVE vs PAPER breakdown (CRITICAL for bankroll reconciliation)
+            "live_realized_pnl_usd": float(live_realized_pnl),
+            "live_fees_usd": float(live_fees),
+            "live_fills_count": live_fills_count,
+            "paper_realized_pnl_usd": float(paper_realized_pnl),
+            "paper_fills_count": paper_fills_count,
+            "current_trade_mode": os.getenv("MERID_PM_TRADING_MODE", "unknown"),
             # Original metadata
             "fills_total": len(self._fills),
             "fills_from_http": self._http_ingested,
@@ -1178,9 +2049,649 @@ class KalshiFillsLedger:
             "strict_mode": strict_mode,
             "derived_fills_excluded": derived_fills_excluded,
             "derived_fills_pending": derived_fills_pending,
+            # Position tracking
+            "manually_closed_detected": manually_closed_detected,
+            "open_markets_list": sorted(list(open_markets)),
+            "closed_markets_list": sorted(list(closed_markets)),
             # Observability counters from kalshi_ledger_metrics
             **_metrics_snap(),
         }
+    
+    def record_eod_snapshot(self, account_id: str, cash_eod_cents: int, 
+                           portfolio_value_eod_cents: int, unrealized_pnl_eod_cents: int) -> None:
+        """Record end-of-day snapshot for daily PnL change calculation.
+        
+        Args:
+            account_id: Account identifier
+            cash_eod_cents: Cash balance at end of day
+            portfolio_value_eod_cents: Portfolio value at end of day
+            unrealized_pnl_eod_cents: Unrealized PnL at end of day
+        """
+        from merid.event_venues.kalshi.portfolio_models import EODSnapshot
+        from datetime import datetime, timezone
+        
+        snapshot_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        snapshot = EODSnapshot(
+            account_id=account_id,
+            snapshot_date=snapshot_date,
+            cash_eod_cents=cash_eod_cents,
+            portfolio_value_eod_cents=portfolio_value_eod_cents,
+            unrealized_pnl_eod_cents=unrealized_pnl_eod_cents,
+        )
+        self._eod_snapshots[account_id] = snapshot
+        logger.info(
+            "EOD snapshot recorded for account=%s date=%s cash=%dc portfolio=%dc unrealized=%dc",
+            account_id, snapshot_date, cash_eod_cents, portfolio_value_eod_cents, unrealized_pnl_eod_cents
+        )
+    
+    def get_prior_close_unrealized(self, account_id: str) -> int:
+        """Get unrealized PnL at prior day close for daily change calculation.
+        
+        Args:
+            account_id: Account identifier
+            
+        Returns:
+            Unrealized PnL at prior close in cents, or 0 if no snapshot exists
+        """
+        snapshot = self._eod_snapshots.get(account_id)
+        if snapshot is None:
+            return 0
+        return snapshot.unrealized_pnl_eod_cents
+    
+    def _get_current_session_date(self) -> str:
+        """Get current session date (YYYY-MM-DD)."""
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    
+    def start_new_session(self, session_date: Optional[str] = None) -> None:
+        """Start a new trading session, resetting session state.
+        
+        Args:
+            session_date: Session date (YYYY-MM-DD), defaults to current date
+        """
+        if session_date is None:
+            session_date = self._get_current_session_date()
+        
+        # Only reset if session boundary changed
+        if self._last_session_start_date == session_date:
+            logger.debug("Session boundary unchanged: %s", session_date)
+            return
+        
+        logger.info("Starting new session: %s (previous: %s)", session_date, self._last_session_start_date)
+        
+        self._last_session_start_date = session_date
+        self._session_realized_pnl = Decimal("0")
+        self._session_unrealized_pnl = Decimal("0")
+        # Note: Do NOT reset cumulative_realized_pnl - it persists across sessions
+        # Do NOT reset open_positions or processed_fill_ids - they persist for reconciliation
+        # These are cleared only on full system reset
+        
+        self._persist_session_metadata(session_date)
+    
+    def _persist_session_metadata(self, session_date: str) -> None:
+        """Persist session metadata to storage.
+        
+        Args:
+            session_date: Session date (YYYY-MM-DD)
+        """
+        try:
+            metadata = {
+                "session_date": session_date,
+                "session_realized_pnl": str(self._session_realized_pnl),
+                "session_unrealized_pnl": str(self._session_unrealized_pnl),
+                "cumulative_realized_pnl": str(self._cumulative_realized_pnl),
+                "processed_fill_ids": list(self._processed_fill_ids),  # Persist for restart safety
+                "last_eod_snapshot_date": self._last_eod_snapshot_date,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            
+            # Store in data directory
+            import json
+            from pathlib import Path
+            session_file = Path("data") / "kalshi_session_metadata.json"
+            session_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            with open(session_file, "w") as f:
+                json.dump(metadata, f, indent=2)
+            
+            logger.debug("Session metadata persisted: %s (fills=%d)", session_date, len(self._processed_fill_ids))
+        except Exception as e:
+            logger.warning("Failed to persist session metadata: %s", e)
+    
+    def maybe_record_eod_snapshot(self, account_id: str = "default") -> bool:
+        """Record EOD snapshot if day has changed since last snapshot.
+        
+        This should be called periodically (e.g., every minute) to automatically
+        record EOD snapshots at market close for accurate daily PnL calculation.
+        
+        Args:
+            account_id: Account identifier
+            
+        Returns:
+            True if snapshot was recorded, False if already recorded for today
+        """
+        current_date = self._get_current_session_date()
+        
+        # Check if we already recorded a snapshot for today
+        if self._last_eod_snapshot_date == current_date:
+            return False
+        
+        # Get current unrealized PnL from summary
+        try:
+            s = self.summary()
+            unrealized_pnl_cents = int(float(s.get("total_unrealized_pnl_usd", 0)) * 100)
+            
+            # Get current balance from bankroll service v2 (single source of truth)
+            cash_eod_cents = 0
+            portfolio_value_eod_cents = 0
+            try:
+                from merid.event_venues.kalshi.bankroll_service_v2 import get_summary_sync, get_bankroll_service
+                summary = get_summary_sync(caller_module="fills_ledger")
+                if summary and summary.available_cash_usd is not None:
+                    cash_eod_cents = int(float(summary.available_cash_usd) * 100)
+                    # Use portfolio value from v2 summary if available, otherwise fall back to cash + unrealized PnL
+                    if summary.portfolio_value_usd is not None:
+                        portfolio_value_eod_cents = int(float(summary.portfolio_value_usd) * 100)
+                    else:
+                        portfolio_value_eod_cents = cash_eod_cents + unrealized_pnl_cents
+            except Exception:
+                # Fallback: use unrealized PnL as proxy for portfolio value
+                portfolio_value_eod_cents = unrealized_pnl_cents
+            
+            # Record the snapshot
+            self.record_eod_snapshot(
+                account_id=account_id,
+                cash_eod_cents=cash_eod_cents,
+                portfolio_value_eod_cents=portfolio_value_eod_cents,
+                unrealized_pnl_eod_cents=unrealized_pnl_cents
+            )
+            
+            self._last_eod_snapshot_date = current_date
+            self._persist_session_metadata(current_date)
+            
+            logger.info(
+                "Automatic EOD snapshot recorded for date=%s account=%s unrealized=%dc",
+                current_date, account_id, unrealized_pnl_cents
+            )
+            return True
+            
+        except Exception as e:
+            logger.warning("Failed to record automatic EOD snapshot: %s", e)
+            return False
+    
+    def _load_session_metadata(self) -> None:
+        """Load session metadata from storage on startup.
+        
+        BUG-FIX (2026-05-12): Skip file I/O if called from async context to prevent
+        event loop blocking. Session metadata is best-effort for PnL tracking,
+        not critical for fill processing.
+        """
+        try:
+            # Check if we're in an async context - if so, skip file I/O
+            try:
+                asyncio.get_running_loop()
+                logger.debug(
+                    "Skipping session metadata load in async context to avoid blocking event loop. "
+                    "Session PnL tracking will start fresh."
+                )
+                return
+            except RuntimeError:
+                # No event loop, safe to do blocking I/O
+                pass
+            
+            from pathlib import Path
+            session_file = Path("data") / "kalshi_session_metadata.json"
+            
+            if not session_file.exists():
+                logger.debug("No session metadata file found, starting fresh")
+                return
+            
+            import json
+            with open(session_file, "r") as f:
+                metadata = json.load(f)
+            
+            self._last_session_start_date = metadata.get("session_date")
+            self._session_realized_pnl = Decimal(metadata.get("session_realized_pnl", "0"))
+            self._session_unrealized_pnl = Decimal(metadata.get("session_unrealized_pnl", "0"))
+            self._cumulative_realized_pnl = Decimal(metadata.get("cumulative_realized_pnl", "0"))
+            self._last_eod_snapshot_date = metadata.get("last_eod_snapshot_date")
+            
+            logger.info(
+                "Session metadata loaded: date=%s session_realized=%s cumulative_realized=%s last_eod=%s",
+                self._last_session_start_date, self._session_realized_pnl, self._cumulative_realized_pnl, self._last_eod_snapshot_date
+            )
+        except Exception as e:
+            logger.warning("Failed to load session metadata: %s", e)
+    
+    def _update_cumulative_realized_pnl(self, trade_pnl: Decimal) -> None:
+        """Update cumulative realized PnL when a trade closes.
+        
+        Args:
+            trade_pnl: Realized PnL from closed trade
+        """
+        self._cumulative_realized_pnl += trade_pnl
+        logger.debug("Cumulative realized PnL updated: %s (trade_pnl=%s)", self._cumulative_realized_pnl, trade_pnl)
+        # Persist immediately to avoid loss on crash
+        self._persist_session_metadata(self._get_current_session_date())
+    
+    def _get_instrument_key(self, fill: KalshiFill) -> str:
+        """Get instrument key for position tracking.
+        
+        Args:
+            fill: KalshiFill object
+            
+        Returns:
+            Instrument key (e.g., "market_ticker:side")
+        """
+        return f"{fill.market_ticker}:{fill.side}"
+    
+    def _create_new_position(self, fill: KalshiFill) -> Dict[str, Any]:
+        """Create new position state from fill.
+        
+        Args:
+            fill: KalshiFill object
+            
+        Returns:
+            Position state dictionary
+        """
+        return {
+            "market_ticker": fill.market_ticker,
+            "side": fill.side,
+            "total_contracts": fill.count_fp,
+            "avg_price_cents": fill.price_cents,
+            "total_cost_cents": fill.count_fp * fill.price_cents,
+            "fees_cents": int(fill.fee_cost * 100) if fill.fee_cost else 0,
+            "fills": [fill.fill_id],
+            "created_at": fill.created_time.isoformat(),
+        }
+    
+    def _update_position_with_fill(self, position: Dict[str, Any], fill: KalshiFill) -> None:
+        """Update position state with new fill.
+        
+        Args:
+            position: Existing position state
+            fill: New fill to apply
+        """
+        position["fills"].append(fill.fill_id)
+        
+        # Update weighted average price
+        old_contracts = position["total_contracts"]
+        old_cost = position["total_cost_cents"]
+        new_contracts = fill.count_fp
+        new_cost = new_contracts * fill.price_cents
+        
+        total_contracts = old_contracts + new_contracts
+        if total_contracts > 0:
+            position["avg_price_cents"] = (old_cost + new_cost) // total_contracts
+            position["total_contracts"] = total_contracts
+            position["total_cost_cents"] = old_cost + new_cost
+        
+        # Add fees
+        position["fees_cents"] += int(fill.fee_cost * 100) if fill.fee_cost else 0
+    
+    def _position_is_closed(self, position: Dict[str, Any]) -> bool:
+        """Check if position is closed (net contracts = 0).
+        
+        Args:
+            position: Position state
+            
+        Returns:
+            True if position is closed
+        """
+        return position["total_contracts"] == 0
+    
+    def _compute_realized_pnl(self, position: Dict[str, Any]) -> Decimal:
+        """Compute realized PnL from closed position.
+        
+        Args:
+            position: Closed position state
+            
+        Returns:
+            Realized PnL in USD
+        """
+        # For Kalshi binary options, realized PnL is calculated from fill proceeds
+        # Sum proceeds from all closing fills minus cost basis and fees
+        total_proceeds = Decimal("0")
+        total_cost = Decimal("0")
+        total_fees = Decimal("0")
+        
+        # Iterate through fills in position to calculate total proceeds
+        for fill_id in position["fills"]:
+            fill = self._fills.get(fill_id)
+            if fill:
+                # For sells, proceeds_dollars is the cash received
+                # For buys, proceeds_dollars is negative (cash spent)
+                if fill.proceeds_dollars is not None:
+                    if fill.action == "sell":
+                        total_proceeds += fill.proceeds_dollars
+                    else:
+                        total_cost += fill.proceeds_dollars  # Cost is negative for buys
+                total_fees += fill.fee_cost if fill.fee_cost else Decimal("0")
+        
+        # Realized PnL = total proceeds - total cost - total fees
+        realized_pnl = total_proceeds - total_cost - total_fees
+        return realized_pnl
+    
+    def on_fill(self, fill: KalshiFill) -> None:
+        """Handle fill event with position state machine.
+        
+        Args:
+            fill: KalshiFill object
+        """
+        # Deduplicate fills
+        if fill.fill_id in self._processed_fill_ids:
+            return
+        
+        self._processed_fill_ids.add(fill.fill_id)
+        
+        # CRITICAL FIX: Notify agent_performance_tracker of fill for wins/losses tracking
+        if fill.agent_id and fill.action in ("buy", "sell"):
+            try:
+                from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
+                tracker = get_agent_performance_tracker()
+                
+                # Calculate predicted edge from price (if not provided)
+                # For YES: edge = (1 - price) if we expect YES to resolve true
+                # For NO: edge = price if we expect NO to resolve false
+                predicted_edge = 0.0
+                confidence = 0.5
+                if fill.side == "yes":
+                    predicted_edge = (1.0 - float(fill.price_cents) / 100.0)
+                elif fill.side == "no":
+                    predicted_edge = float(fill.price_cents) / 100.0
+                
+                tracker.record_fill(
+                    agent_id=fill.agent_id,
+                    market_id=fill.market_ticker,
+                    side=fill.side,
+                    price_cents=fill.price_cents,
+                    contracts=fill.count_fp,
+                    predicted_edge=predicted_edge,
+                    confidence=confidence
+                )
+                logger.debug(
+                    "Recorded fill in agent_performance_tracker: agent=%s market=%s side=%s price=%dc contracts=%d",
+                    fill.agent_id, fill.market_ticker, fill.side, fill.price_cents, fill.count_fp
+                )
+            except Exception as e:
+                logger.debug("Failed to record fill in agent_performance_tracker: %s", e)
+        
+        # Get or create position
+        instrument_key = self._get_instrument_key(fill)
+        position = self._open_positions.get(instrument_key)
+        
+        if position is None:
+            position = self._create_new_position(fill)
+            self._open_positions[instrument_key] = position
+        else:
+            # Calculate PnL for partial exit before updating position
+            old_contracts = position["total_contracts"]
+            self._update_position_with_fill(position, fill)
+            new_contracts = position["total_contracts"]
+            
+            # If this fill reduced position size, realize PnL incrementally
+            if new_contracts < old_contracts:
+                # Partial exit - realize PnL for the exited portion
+                exited_contracts = old_contracts - new_contracts
+                partial_pnl = self._compute_partial_exit_pnl(position, fill, exited_contracts)
+                if partial_pnl != 0:
+                    self._session_realized_pnl += partial_pnl
+                    self._update_cumulative_realized_pnl(partial_pnl)
+                    logger.debug(
+                        "Partial exit realized: %s exited=%d pnl=%s session_realized=%s cumulative_realized=%s",
+                        instrument_key, exited_contracts, partial_pnl, self._session_realized_pnl, self._cumulative_realized_pnl
+                    )
+        
+        # Check if position is now closed
+        if self._position_is_closed(position):
+            trade_pnl = self._compute_realized_pnl(position)
+            self._session_realized_pnl += trade_pnl
+            self._update_cumulative_realized_pnl(trade_pnl)
+            del self._open_positions[instrument_key]
+            logger.info(
+                "Position closed: %s pnl=%s session_realized=%s cumulative_realized=%s",
+                instrument_key, trade_pnl, self._session_realized_pnl, self._cumulative_realized_pnl
+            )
+            
+            # CRITICAL FIX: Notify agent_performance_tracker of position close
+            if fill.agent_id:
+                try:
+                    from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
+                    tracker = get_agent_performance_tracker()
+                    tracker.record_close(
+                        agent_id=fill.agent_id,
+                        market_id=fill.market_ticker,
+                        exit_price_cents=fill.price_cents,
+                        profit_usd=trade_pnl
+                    )
+                    logger.debug(
+                        "Recorded close in agent_performance_tracker: agent=%s market=%s pnl=%s",
+                        fill.agent_id, fill.market_ticker, trade_pnl
+                    )
+                except Exception as e:
+                    logger.debug("Failed to record close in agent_performance_tracker: %s", e)
+        
+        # Recompute unrealized PnL
+        self._session_unrealized_pnl = self._recompute_unrealized_pnl()
+        
+        # Persist state
+        self._persist_session_metadata(self._get_current_session_date())
+    
+    def _compute_partial_exit_pnl(self, position: Dict[str, Any], fill: KalshiFill, exited_contracts: int) -> Decimal:
+        """Compute PnL for partial exit from position.
+        
+        Args:
+            position: Position state
+            fill: Exit fill
+            exited_contracts: Number of contracts exited
+            
+        Returns:
+            Realized PnL for partial exit
+        """
+        # For partial exit, PnL = (exit_price - avg_entry_price) * exited_contracts - fees
+        # Use the fill's proceeds if available, otherwise calculate from prices
+        if fill.action == "sell" and fill.proceeds_dollars is not None:
+            # Proceeds already account for price and quantity
+            exit_proceeds = fill.proceeds_dollars
+            # Calculate cost basis for exited portion
+            avg_entry_price = position["avg_price_cents"] / 100.0
+            exit_cost = avg_entry_price * exited_contracts
+            exit_fees = fill.fee_cost if fill.fee_cost else Decimal("0")
+            return exit_proceeds - exit_cost - exit_fees
+        elif fill.action == "buy":
+            # Adding to position, no PnL realization
+            return Decimal("0")
+        else:
+            # Fallback calculation
+            exit_price_cents = fill.price_cents
+            avg_entry_price_cents = position["avg_price_cents"]
+            price_diff_cents = exit_price_cents - avg_entry_price_cents
+            pnl_cents = price_diff_cents * exited_contracts
+            pnl_usd = Decimal(pnl_cents) / Decimal("100")
+            # Subtract fees
+            exit_fees = fill.fee_cost if fill.fee_cost else Decimal("0")
+            return pnl_usd - exit_fees
+    
+    def _recompute_unrealized_pnl(self) -> Decimal:
+        """Recompute unrealized PnL from all open positions.
+        
+        Returns:
+            Total unrealized PnL in USD
+        """
+        total = Decimal("0")
+        
+        # Try to get current market prices from KalshiPositionCache
+        try:
+            from merid.event_venues.kalshi.position_cache import get_kalshi_position_cache
+            position_cache = get_kalshi_position_cache()
+        except Exception:
+            position_cache = None
+        
+        for position in self._open_positions.values():
+            contracts = position["total_contracts"]
+            if contracts == 0:
+                continue
+            
+            avg_entry_price_cents = position["avg_price_cents"]
+            
+            # Try to get current market price
+            current_price_cents = avg_entry_price_cents  # Default to entry price if no current price
+            
+            if position_cache:
+                try:
+                    # Get current price from position cache
+                    current_state = position_cache.get(position["market_ticker"])
+                    if current_state and hasattr(current_state, "last_yes_price"):
+                        if position["side"] == "yes":
+                            current_price_cents = int(current_state.last_yes_price * 100)
+                        else:
+                            current_price_cents = int(current_state.last_no_price * 100)
+                except Exception:
+                    pass
+            
+            # Calculate unrealized PnL = (current_price - avg_entry_price) * contracts
+            price_diff_cents = current_price_cents - avg_entry_price_cents
+            unrealized_cents = price_diff_cents * contracts
+            unrealized_usd = Decimal(unrealized_cents) / Decimal("100")
+            total += unrealized_usd
+        
+        return total
+    
+    def on_market_settlement(self, market_ticker: str, outcome: str) -> None:
+        """Handle market settlement event for open positions.
+        
+        Args:
+            market_ticker: Market ticker that settled
+            outcome: Settlement outcome ("yes" or "no")
+        """
+        # Find all open positions for this market
+        positions_to_close = []
+        for instrument_key, position in list(self._open_positions.items()):
+            if position["market_ticker"] == market_ticker:
+                positions_to_close.append((instrument_key, position))
+        
+        if not positions_to_close:
+            return
+        
+        logger.info(
+            "Market settlement: %s outcome=%s closing %d positions",
+            market_ticker, outcome, len(positions_to_close)
+        )
+        
+        # Close each position and realize PnL based on outcome
+        for instrument_key, position in positions_to_close:
+            # Calculate settlement PnL based on outcome
+            settlement_pnl = self._compute_settlement_pnl(position, outcome)
+            
+            self._session_realized_pnl += settlement_pnl
+            self._update_cumulative_realized_pnl(settlement_pnl)
+            
+            del self._open_positions[instrument_key]
+            
+            logger.info(
+                "Position settled: %s outcome=%s pnl=%s session_realized=%s cumulative_realized=%s",
+                instrument_key, outcome, settlement_pnl, self._session_realized_pnl, self._cumulative_realized_pnl
+            )
+        
+        # Recompute unrealized PnL
+        self._session_unrealized_pnl = self._recompute_unrealized_pnl()
+        
+        # Persist state
+        self._persist_session_metadata(self._get_current_session_date())
+    
+    def _compute_settlement_pnl(self, position: Dict[str, Any], outcome: str) -> Decimal:
+        """Compute PnL from market settlement.
+        
+        Args:
+            position: Position state
+            outcome: Settlement outcome ("yes" or "no")
+            
+        Returns:
+            Realized PnL from settlement
+        """
+        # For Kalshi binary options:
+        # YES contracts pay $1 if YES wins, $0 if NO wins
+        # NO contracts pay $1 if NO wins, $0 if YES wins
+        # Settlement PnL = (payout - cost_basis) - fees
+        
+        contracts = position["total_contracts"]
+        avg_entry_price_cents = position["avg_price_cents"]
+        fees_cents = position["fees_cents"]
+        
+        if contracts == 0:
+            return Decimal("0")
+        
+        # Determine payout based on outcome and side
+        if position["side"] == "yes":
+            payout_per_contract = 1.0 if outcome == "yes" else 0.0
+        else:  # side == "no"
+            payout_per_contract = 1.0 if outcome == "no" else 0.0
+        
+        total_payout = payout_per_contract * contracts
+        cost_basis = (avg_entry_price_cents * contracts) / 100.0
+        fees = fees_cents / 100.0
+        
+        settlement_pnl = total_payout - cost_basis - fees
+        return Decimal(str(settlement_pnl))
+    
+    def on_market_price_update(self, market_ticker: str, last_price_cents: int) -> None:
+        """Handle market price update for unrealized PnL recompute.
+        
+        Args:
+            market_ticker: Market ticker
+            last_price_cents: Last price in cents
+        """
+        # Check if any open positions for this market
+        updated = False
+        for instrument_key, position in list(self._open_positions.items()):
+            if position["market_ticker"] == market_ticker:
+                # Mark position to market with new price
+                # Placeholder: would update position's mark-to-market value
+                updated = True
+        
+        if updated:
+            self._session_unrealized_pnl = self._recompute_unrealized_pnl()
+            self._persist_session_metadata(self._get_current_session_date())
+            logger.debug(
+                "Market price update: %s price=%dc unrealized_pnl=%s",
+                market_ticker, last_price_cents, self._session_unrealized_pnl
+            )
+    
+    def rebuild_session_pnl_from_fills(self) -> None:
+        """Rebuild session PnL from historical fills after restart.
+        
+        This is called on system startup to reconcile session state with fill history.
+        """
+        if self._last_session_start_date is None:
+            logger.debug("No prior session date, skipping rebuild")
+            return
+        
+        # Load fills since last session start
+        from datetime import datetime, timezone, timedelta
+        session_start_dt = datetime.fromisoformat(f"{self._last_session_start_date}T00:00:00+00:00")
+        
+        fills = self.get_fills(since=session_start_dt)
+        fills_sorted = sorted(fills, key=lambda f: f.created_time)
+        
+        logger.info(
+            "Rebuilding session PnL from %d fills since %s",
+            len(fills_sorted), self._last_session_start_date
+        )
+        
+        # Reset session state (but keep cumulative_realized_pnl)
+        self._session_realized_pnl = Decimal("0")
+        self._session_unrealized_pnl = Decimal("0")
+        self._open_positions = {}
+        self._processed_fill_ids = set()
+        
+        # Replay fills in chronological order
+        for fill in fills_sorted:
+            if fill.fill_id not in self._processed_fill_ids:
+                self.on_fill(fill)
+        
+        logger.info(
+            "Session PnL rebuilt: session_realized=%s session_unrealized=%s cumulative_realized=%s",
+            self._session_realized_pnl, self._session_unrealized_pnl, self._cumulative_realized_pnl
+        )
     
     async def health_check(self) -> Dict[str, Any]:
         """Health check for the fills ledger - consumed by health endpoints.
@@ -1241,6 +2752,234 @@ class KalshiFillsLedger:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
     
+    # ═══════════════════════════════════════════════════════════════════════════
+    # OPERATOR MANUAL INTERVENTION — Position Management
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    async def mark_position_closed(
+        self, 
+        ticker: str, 
+        reason: str = "manual_operator_close",
+        closed_at: Optional[datetime] = None
+    ) -> Dict[str, Any]:
+        """Mark a position as manually closed by operator.
+        
+        This is for when positions are closed outside the system (e.g., via Kalshi website)
+        and need to be manually reconciled. Adds a synthetic "close" fill to zero out
+        the computed position.
+        
+        Args:
+            ticker: Market ticker to close (e.g., "KXFED-27APR-T3.25")
+            reason: Why the position is being marked closed
+            closed_at: When the close occurred (default: now)
+            
+        Returns:
+            Result dict with status and position before/after
+        """
+        async with self._mutex:
+            ticker = ticker.upper()
+            closed_at = closed_at or datetime.now(timezone.utc)
+            
+            # Compute current position from fills
+            current_pos = self.compute_position_from_fills(ticker)
+            if not current_pos or current_pos.get("contracts", 0) == 0:
+                return {
+                    "status": "no_position",
+                    "ticker": ticker,
+                    "message": f"No open position found for {ticker}",
+                }
+            
+            contracts = current_pos.get("contracts", 0)
+            # PRODUCTION-FIX: Try to get avg_price_cents from market state for manual close
+            avg_price_cents = current_pos.get("avg_price_cents")
+            if avg_price_cents is None:
+                try:
+                    from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                    state = get_kalshi_market_state_store().get_state(ticker)
+                    if state and state.mid_cents > 0:
+                        avg_price_cents = state.mid_cents
+                except Exception as _exc:
+                    logger.debug("[FILLS_LEDGER] failed to fetch market state for %s, using 50c fallback: %s", ticker, _exc)
+            avg_price_cents = avg_price_cents or 50
+            
+            # Create synthetic "close" fill to zero out the position
+            # This is the OPPOSITE action of the position (if long, create sell)
+            close_action = "sell" if contracts > 0 else "buy"
+            close_count = abs(contracts)
+            
+            synthetic_fill = KalshiFill(
+                fill_id=f"manual_close_{ticker}_{int(closed_at.timestamp())}",
+                market_ticker=ticker,
+                side=current_pos.get("side", "yes"),
+                action=close_action,
+                count_fp=close_count,
+                yes_price_dollars=Decimal(str(avg_price_cents / 100)) if current_pos.get("side") == "yes" else None,
+                no_price_dollars=Decimal(str(avg_price_cents / 100)) if current_pos.get("side") == "no" else None,
+                fee_cost=Decimal("0"),  # No fee for manual reconciliation
+                created_time=closed_at,
+                ingestion_source="manual_operator_close",
+                derived_id=True,  # Mark as synthetic
+                is_live=False,  # Not a real trade
+            )
+            
+            # Add the synthetic fill
+            self._fills[synthetic_fill.fill_id] = synthetic_fill
+            self._index_fill(synthetic_fill)
+            
+            logger.warning(
+                f"MANUAL_POSITION_CLOSE: {ticker} closed via operator. "
+                f"Contracts: {contracts} -> 0. Reason: {reason}. "
+                f"Synthetic fill ID: {synthetic_fill.fill_id}"
+            )
+            
+            # Persist the change
+            await self._persist()
+            
+            return {
+                "status": "closed",
+                "ticker": ticker,
+                "previous_contracts": contracts,
+                "previous_side": current_pos.get("side"),
+                "reason": reason,
+                "synthetic_fill_id": synthetic_fill.fill_id,
+                "closed_at": closed_at.isoformat(),
+            }
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # REST vs WS RECONCILIATION — "No Surprises" Integration
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    async def reconcile_ws_vs_rest(
+        self,
+        rest_fills: List[Dict[str, Any]],
+        since: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """Reconcile WebSocket fills against REST API fills.
+        
+        This is the 5-minute periodic reconciliation check that ensures
+        no fills are lost between WS (real-time) and REST (authoritative).
+        
+        Args:
+            rest_fills: List of fills from REST /portfolio/fills endpoint
+            since: Optional time window for reconciliation
+            
+        Returns:
+            Reconciliation report with mismatches and actions taken
+            
+        Log Line (on mismatch):
+            [RECON_MISMATCH] ws_fills=47 rest_fills=52 missing=5 tickers=KXBTC...,KXETH...
+        """
+        if since is None:
+            since = datetime.now(timezone.utc) - timedelta(minutes=30)
+        
+        # Get WS fills from our ledger within the window
+        ws_fill_ids = set()
+        ws_fills_by_ticker: Dict[str, List[str]] = {}
+        
+        for fill_id, fill in self._fills.items():
+            if fill.created_time >= since:
+                ws_fill_ids.add(fill_id)
+                ticker = fill.market_ticker or "unknown"
+                if ticker not in ws_fills_by_ticker:
+                    ws_fills_by_ticker[ticker] = []
+                ws_fills_by_ticker[ticker].append(fill_id)
+        
+        # Get REST fill IDs
+        rest_fill_ids = set()
+        rest_only_fills: List[Dict[str, Any]] = []
+        
+        for raw in rest_fills:
+            fill_id = raw.get("fill_id") or raw.get("trade_id") or raw.get("id")
+            if fill_id:
+                rest_fill_ids.add(fill_id)
+                if fill_id not in ws_fill_ids:
+                    rest_only_fills.append(raw)
+        
+        # Calculate mismatches
+        ws_only = ws_fill_ids - rest_fill_ids  # In WS but not REST (should be empty)
+        rest_only = rest_fill_ids - ws_fill_ids  # In REST but not WS (need backfill)
+        
+        result = {
+            "ws_count": len(ws_fill_ids),
+            "rest_count": len(rest_fill_ids),
+            "ws_only_count": len(ws_only),
+            "rest_only_count": len(rest_only),
+            "rest_only_fills": rest_only_fills,  # For backfill
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        
+        # Alert on significant mismatches
+        if len(rest_only) > 3 or len(ws_only) > 3:
+            affected_tickers = set()
+            for fill_id in rest_only:
+                # Find ticker for missing fill
+                for raw in rest_fills:
+                    fid = raw.get("fill_id") or raw.get("trade_id") or raw.get("id")
+                    if fid == fill_id:
+                        ticker = raw.get("market_ticker") or raw.get("ticker") or "unknown"
+                        affected_tickers.add(ticker)
+                        break
+            
+            logger.error(
+                "[RECON_MISMATCH] ws_fills=%d rest_fills=%d ws_only=%d rest_only=%d tickers=%s",
+                len(ws_fill_ids),
+                len(rest_fill_ids),
+                len(ws_only),
+                len(rest_only),
+                ",".join(sorted(affected_tickers)) if affected_tickers else "none"
+            )
+        
+        return result
+    
+    async def reconcile_pnl_vs_portfolio(
+        self,
+        kalshi_portfolio_pnl: float,
+        tolerance_usd: float = 1.0,
+    ) -> Dict[str, Any]:
+        """Reconcile our computed PnL against Kalshi's portfolio endpoint.
+        
+        This is the daily/periodic PnL invariant check that ensures our
+        fills-based PnL calculation matches Kalshi's authoritative PnL.
+        
+        Args:
+            kalshi_portfolio_pnl: PnL from Kalshi /portfolio endpoint (USD)
+            tolerance_usd: Max allowed difference (default $1.00 for rounding)
+            
+        Returns:
+            Reconciliation result with matched/mismatched status
+            
+        Log Line (on mismatch):
+            [PNL_RECON_ERROR] ledger_pnl=1234.56 kalshi_pnl=1230.00 diff=4.56 tolerance=1.00
+        """
+        # Get our computed PnL
+        pnl_summary = self.get_pnl_summary()
+        ledger_pnl = float(pnl_summary.get("total_realized_pnl_usd", 0))
+        
+        diff = abs(ledger_pnl - kalshi_portfolio_pnl)
+        matched = diff <= tolerance_usd
+        
+        result = {
+            "ledger_pnl": ledger_pnl,
+            "kalshi_pnl": kalshi_portfolio_pnl,
+            "diff": diff,
+            "tolerance": tolerance_usd,
+            "matched": matched,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        
+        if not matched:
+            logger.error(
+                "[PNL_RECON_ERROR] ledger_pnl=%.2f kalshi_pnl=%.2f diff=%.2f tolerance=%.2f",
+                ledger_pnl, kalshi_portfolio_pnl, diff, tolerance_usd
+            )
+        else:
+            logger.debug(
+                "[PNL_RECON_OK] ledger_pnl=%.2f kalshi_pnl=%.2f diff=%.2f (within tolerance)",
+                ledger_pnl, kalshi_portfolio_pnl, diff
+            )
+        
+        return result
+    
     # ── Private methods ─────────────────────────────────────────────────────
     
     def _parse_fill(self, raw: Dict[str, Any], source: str) -> KalshiFill:
@@ -1252,7 +2991,7 @@ class KalshiFillsLedger:
             # Generate deterministic ID from content for safety
             fill_id = f"derived_{int(hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()[:8], 16)}"
             derived_id_flag = True
-            import os
+            # BUG-FIX: Removed nested 'import os' - os is already imported at module level
             strict_mode = os.environ.get("MERID_STRICT_FILL_ID", "").strip() == "1"
             
             # Log at DEBUG for non-strict, WARNING for strict - and throttle to every 100th
@@ -1280,8 +3019,9 @@ class KalshiFillsLedger:
                 logger.debug(f"Timestamp parse failed: {e}")
         
         # Parse price - handle both cents and dollars
-        yes_price = raw.get("yes_price")
-        no_price = raw.get("no_price")
+        # NEW API FORMAT: yes_price_dollars, no_price_dollars (strings) - these are in dollars already
+        yes_price = raw.get("yes_price_dollars") or raw.get("yes_price")
+        no_price = raw.get("no_price_dollars") or raw.get("no_price")
         price = raw.get("price")
         
         def normalize_price(p) -> Optional[Decimal]:
@@ -1289,8 +3029,18 @@ class KalshiFillsLedger:
                 return None
             try:
                 p = float(p)
-                # If > 1, assume cents; else dollars
-                return Decimal(str(p / 100.0 if p >= 1.0 else p))
+                # NEW API FORMAT: yes_price_dollars and no_price_dollars are already in dollars (0.0-1.0)
+                # OLD API FORMAT: yes_price and no_price are in cents (0-99)
+                # Check if the value looks like dollars (< 1.0) or cents (> 1.0)
+                if p < 1.0:
+                    # Already in dollars (new API format)
+                    return Decimal(str(p))
+                elif p >= 1.0 and p <= 100:
+                    # In cents (old API format) - convert to dollars
+                    return Decimal(str(p / 100.0))
+                else:
+                    # > 100, assume cents and convert
+                    return Decimal(str(p / 100.0))
             except Exception:
                 return None
         
@@ -1319,13 +3069,58 @@ class KalshiFillsLedger:
         # HTTP fills with no action but positive count default to "buy".
         _raw_act = raw.get("action") or raw.get("taker_action") or ""
         _action = _raw_act if _raw_act in ("buy", "sell") else ""
-        _count_fp = int(raw.get("count") or raw.get("contracts") or raw.get("size", 0))
+        
+        # FIX: Parse count with explicit None check (not 'or' which treats 0 as falsy)
+        # Kalshi API uses various field names across endpoints
+        # NEW API FORMAT: count_fp (string), yes_price_dollars (string), no_price_dollars (string)
+        _count_raw = raw.get("count_fp")  # Check new format first
+        if _count_raw is None:
+            _count_raw = raw.get("count")
+        if _count_raw is None:
+            _count_raw = raw.get("contracts")
+        if _count_raw is None:
+            _count_raw = raw.get("size")
+        if _count_raw is None:
+            _count_raw = raw.get("filled_count")
+        if _count_raw is None:
+            _count_raw = raw.get("quantity")
+        if _count_raw is None:
+            _count_raw = raw.get("amount")
+        _count_fp = int(float(_count_raw)) if _count_raw is not None else 0
+        
         if not _action:
             from merid.event_venues.kalshi.kalshi_ledger_metrics import inc_fills_missing_action as _inct
             _inct()
             # HTTP source with positive count: default to "buy" rather than storing invalid.
             if source != "websocket" and _count_fp > 0:
                 _action = "buy"
+            elif source == "websocket" and _count_fp > 0:
+                # BUG-FIX: WebSocket fills often arrive without action field.
+                # Infer action from current position: if we have a position, this is likely a sell (close).
+                # If no position, this is likely a buy (open). This is critical for proper PnL tracking.
+                ticker = (raw.get("market_ticker") or raw.get("ticker") or "").upper()
+                if ticker:
+                    current_pos = self.compute_position_from_fills(ticker)
+                    current_contracts = current_pos.get("contracts", 0) if current_pos else 0
+                    if current_contracts > 0:
+                        # We have a long position, this WS fill is likely a sell (closing)
+                        _action = "sell"
+                        logger.debug(f"WS fill {fill_id} for {ticker}: inferred action='sell' (closing position of {current_contracts})")
+                    else:
+                        # No position or short, this is likely a buy (opening)
+                        _action = "buy"
+                        logger.debug(f"WS fill {fill_id} for {ticker}: inferred action='buy' (opening position)")
+                else:
+                    # No ticker available, default to buy (safer for accounting)
+                    _action = "buy"
+            else:
+                # P2 Task 10: Zero-count fills (settlements, cancels, info events)
+                # MUST still get a non-empty action so downstream PnL aggregation
+                # (compute_position_from_fills, _compute_yes_no_contracts) does not
+                # silently misclassify them. Use "settle" as a sentinel — these
+                # fills are not buys or sells; they should be skipped by accounting
+                # paths that filter on action in ("buy", "sell").
+                _action = "settle"
 
         # Calculate proceeds_dollars (net cash flow after fees)
         # Buy: negative (money out), Sell: positive (money in)
@@ -1341,6 +3136,26 @@ class KalshiFillsLedger:
             else:  # sell
                 proceeds = (no_price_dollars * _count_fp) - fee_decimal
 
+        # Determine if this is a LIVE trade (real money)
+        # This is critical for bankroll reconciliation
+        try:
+            from trading.trade_mode import get_trade_mode, TradeMode
+            current_mode = get_trade_mode()
+            is_live_trade = (current_mode == TradeMode.LIVE)
+        except Exception:
+            # Fallback: check env var directly
+            is_live_trade = os.getenv("MERID_PM_TRADING_MODE", "").lower() == "live" and \
+                           os.getenv("MERID_ALLOW_LIVE_TRADES", "").lower() in ("1", "true")
+        
+        # LIVE SAFETY: In strict mode, live trades MUST have real Kalshi fill IDs
+        strict_mode = os.environ.get("MERID_STRICT_FILL_ID", "").strip() == "1"
+        if is_live_trade and derived_id_flag and strict_mode:
+            # This should never happen in production - log CRITICAL
+            logger.critical(
+                f"LIVE TRADE WITH DERIVED ID DETECTED: fill_id={fill_id} ticker={raw.get('market_ticker')} "
+                f"source={source} - This indicates a serious data integrity issue!"
+            )
+        
         return KalshiFill(
             fill_id=str(fill_id),
             trade_id=raw.get("trade_id"),
@@ -1365,6 +3180,7 @@ class KalshiFillsLedger:
             derived_id=derived_id_flag,  # Track if ID was synthesized
             confirmed_by_rest=(source == "http_poller"),  # HTTP fills are canonical
             decision_trace_id=raw.get("decision_trace_id"),
+            is_live=is_live_trade,  # CRITICAL: Track if this was a real money trade
         )
     
     def _index_fill(self, fill: KalshiFill) -> None:
@@ -1396,7 +3212,7 @@ class KalshiFillsLedger:
             # WAL mode for better concurrency
             await db.execute("PRAGMA journal_mode=WAL;")
             await db.execute("PRAGMA synchronous=NORMAL;")
-            await db.execute("PRAGMA busy_timeout=30000;")  # 30 second timeout for startup contention
+            await db.execute(f"PRAGMA busy_timeout={_FILLS_DB_BUSY_TIMEOUT_MS};")  # From environment
             await db.execute("PRAGMA temp_store=MEMORY;")
             await db.execute("PRAGMA mmap_size=268435456;")  # 256MB mmap
             
@@ -1426,7 +3242,12 @@ class KalshiFillsLedger:
                     agent_id TEXT,
                     intent_id TEXT,
                     reconciled INTEGER DEFAULT 0,
-                    raw_payload TEXT
+                    raw_payload TEXT,
+                    decision_trace_id TEXT,
+                    fill_source TEXT,
+                    hedge_reason TEXT,
+                    hedge_pnl_cents INTEGER DEFAULT 0,
+                    related_alpha_fill_id TEXT
                 )
             """)
             await db.execute("""
@@ -1438,6 +3259,12 @@ class KalshiFillsLedger:
             await db.execute("""
                 CREATE INDEX IF NOT EXISTS idx_fills_time ON kalshi_fills(created_time)
             """)
+            
+            # NOTE: Indexes referencing fill_source, hedge_reason, related_alpha_fill_id
+            # are created AFTER the migrations below to ensure those columns exist on
+            # legacy databases. Creating them here would fail with "no such column" on
+            # pre-existing tables and abort the entire schema init before migrations run.
+            
             # NOTE: idx_fills_proceeds is created AFTER the proceeds_dollars migration below
             
             # CRITICAL: ALWAYS run migrations, regardless of _db_initialized
@@ -1474,18 +3301,72 @@ class KalshiFillsLedger:
             except Exception as idx_exc:
                 logger.warning(f"Could not create idx_fills_proceeds (column may not exist): {idx_exc}")
             
+            # SCHEMA-FIX-002: Migrate fill_source column (fixes production incident)
+            if "fill_source" not in _cols:
+                try:
+                    logger.info("Migrating kalshi_fills: adding fill_source column")
+                    await db.execute("ALTER TABLE kalshi_fills ADD COLUMN fill_source TEXT")
+                    await db.commit()
+                    logger.info("Migration complete: fill_source column added")
+                except Exception as migrate_exc:
+                    logger.error(f"Failed to add fill_source column: {migrate_exc}")
+            
+            # SCHEMA-FIX-003: Migrate hedge_reason column
+            if "hedge_reason" not in _cols:
+                try:
+                    logger.info("Migrating kalshi_fills: adding hedge_reason column")
+                    await db.execute("ALTER TABLE kalshi_fills ADD COLUMN hedge_reason TEXT")
+                    await db.commit()
+                    logger.info("Migration complete: hedge_reason column added")
+                except Exception as migrate_exc:
+                    logger.error(f"Failed to add hedge_reason column: {migrate_exc}")
+            
+            # SCHEMA-FIX-004: Migrate hedge_pnl_cents column
+            if "hedge_pnl_cents" not in _cols:
+                try:
+                    logger.info("Migrating kalshi_fills: adding hedge_pnl_cents column")
+                    await db.execute("ALTER TABLE kalshi_fills ADD COLUMN hedge_pnl_cents INTEGER DEFAULT 0")
+                    await db.commit()
+                    logger.info("Migration complete: hedge_pnl_cents column added")
+                except Exception as migrate_exc:
+                    logger.error(f"Failed to add hedge_pnl_cents column: {migrate_exc}")
+            
+            # SCHEMA-FIX-005: Migrate related_alpha_fill_id column
+            if "related_alpha_fill_id" not in _cols:
+                try:
+                    logger.info("Migrating kalshi_fills: adding related_alpha_fill_id column")
+                    await db.execute("ALTER TABLE kalshi_fills ADD COLUMN related_alpha_fill_id TEXT")
+                    await db.commit()
+                    logger.info("Migration complete: related_alpha_fill_id column added")
+                except Exception as migrate_exc:
+                    logger.error(f"Failed to add related_alpha_fill_id column: {migrate_exc}")
+            
+            # Now that all columns exist, create indexes that reference them.
+            # Each is wrapped individually so a failure on one does not block others.
+            for _idx_sql in (
+                "CREATE INDEX IF NOT EXISTS idx_fills_source ON kalshi_fills(fill_source) WHERE fill_source IS NOT NULL",
+                "CREATE INDEX IF NOT EXISTS idx_fills_hedge_reason ON kalshi_fills(hedge_reason, fill_source) WHERE fill_source = 'hedge'",
+                "CREATE INDEX IF NOT EXISTS idx_fills_related_alpha ON kalshi_fills(related_alpha_fill_id) WHERE related_alpha_fill_id IS NOT NULL",
+            ):
+                try:
+                    await db.execute(_idx_sql)
+                except Exception as idx_exc:
+                    logger.warning(f"Could not create index (post-migration): {idx_exc} | sql={_idx_sql}")
+            
             await db.commit()
         
         self._db_initialized = True
         logger.info("SQLite DB initialized with WAL mode and schema migrations complete")
     
-    async def _execute_with_retry(self, db, sql: str, params: tuple = (), retries: int = 3) -> None:
+    async def _execute_with_retry(self, db, sql: str, params: tuple = (), retries: int = None) -> None:
         """Execute SQL with retry on database locked errors.
         
         DEFENSIVE-FIX-004: Reduced retries from 8 to 3, added error classification.
         Permanent errors (schema mismatch) are never retried.
         """
-        delay = 0.05  # Start with shorter delay
+        if retries is None:
+            retries = _FILLS_DB_RETRY_ATTEMPTS
+        delay = _FILLS_DB_RETRY_DELAY_INITIAL  # Start with configured delay
         last_error = None
         
         for i in range(retries):
@@ -1511,7 +3392,7 @@ class KalshiFillsLedger:
                     # Use shorter backoff to reduce event-loop blocking
                     logger.debug(f"DB locked, retrying in {delay}s (attempt {i+1}/{retries})")
                     await asyncio.sleep(delay)
-                    delay = min(delay * 2, 0.5)  # Exponential backoff, cap at 500ms
+                    delay = min(delay * 2, _FILLS_DB_RETRY_DELAY_MAX)  # Exponential backoff
             except Exception:
                 raise
         
@@ -1563,7 +3444,7 @@ class KalshiFillsLedger:
         try:
             _writer_db = await aiosqlite.connect(self._db_path)
             await _writer_db.execute("PRAGMA journal_mode=WAL;")
-            await _writer_db.execute("PRAGMA busy_timeout=30000;")  # 30s busy wait for startup contention
+            await _writer_db.execute(f"PRAGMA busy_timeout={_FILLS_DB_BUSY_TIMEOUT_MS};")  # From environment
             await _writer_db.execute("PRAGMA synchronous=NORMAL;")
             logger.info("Fills writer: persistent DB connection established")
         except ImportError:
@@ -1582,7 +3463,7 @@ class KalshiFillsLedger:
                 try:
                     await asyncio.wait_for(
                         self._persist_queue.get(),
-                        timeout=0.5  # Reduced from 1.0 to 0.5 for more responsive shutdown
+                        timeout=_FILLS_WRITER_QUEUE_TIMEOUT
                     )
                 except asyncio.TimeoutError:
                     # Periodic flush even if no signals - but don't block event loop
@@ -1614,8 +3495,7 @@ class KalshiFillsLedger:
                 break
             except Exception as e:
                 logger.error(f"Writer loop error: {e}")
-                # Reduced sleep to prevent event loop blocking
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(_FILLS_WRITER_ERROR_SLEEP)
         
         # Final flush on shutdown
         try:
@@ -1661,6 +3541,12 @@ class KalshiFillsLedger:
                 
                 for fill in fills_snapshot:
                     try:
+                        # PRODUCTION FIX (2026-05-18): Skip test fixture fills at write path
+                        # This prevents test data from contaminating the database
+                        if _is_test_fixture_fill(fill.fill_id):
+                            logger.debug(f"Skipping test fixture fill at write path: {fill.fill_id}")
+                            continue
+                        
                         # Check circuit breaker before attempting write
                         if self._circuit_open:
                             self._fills_dropped_count += 1
@@ -1673,8 +3559,9 @@ class KalshiFillsLedger:
                                 count_fp, yes_price_dollars, no_price_dollars, fee_cost,
                                 proceeds_dollars, client_order_id, subaccount_number, created_time,
                                 ingestion_source, ingested_at, agent_id, intent_id,
-                                reconciled, raw_payload, decision_trace_id
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                reconciled, raw_payload, decision_trace_id, fill_source,
+                                hedge_reason, hedge_pnl_cents, related_alpha_fill_id
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
                             fill.fill_id, fill.trade_id, fill.order_id, fill.market_ticker,
                             fill.side, fill.action, fill.count_fp,
@@ -1690,6 +3577,10 @@ class KalshiFillsLedger:
                             1 if fill.reconciled else 0,
                             json.dumps(fill.raw_payload) if fill.raw_payload else None,
                             fill.decision_trace_id,
+                            fill.fill_source,
+                            fill.hedge_reason,
+                            fill.hedge_pnl_cents,
+                            fill.related_alpha_fill_id,
                         ))
                     except Exception as e:
                         # Classify error
@@ -1733,7 +3624,7 @@ class KalshiFillsLedger:
                 # Fallback: open a one-shot connection
                 async with aiosqlite.connect(self._db_path) as fallback_db:
                     await fallback_db.execute("PRAGMA journal_mode=WAL;")
-                    await fallback_db.execute("PRAGMA busy_timeout=30000;")  # 30s for startup contention
+                    await fallback_db.execute(f"PRAGMA busy_timeout={_FILLS_DB_BUSY_TIMEOUT_MS};")  # From environment
                     await _do_flush(fallback_db)
                 
         except ImportError:
@@ -1762,7 +3653,7 @@ class KalshiFillsLedger:
         # Wait for writer task to complete
         if self._writer_task and not self._writer_task.done():
             try:
-                await asyncio.wait_for(self._writer_task, timeout=5.0)
+                await asyncio.wait_for(self._writer_task, timeout=_FILLS_SHUTDOWN_TIMEOUT)
             except asyncio.TimeoutError:
                 logger.warning("Writer task did not complete in time, cancelling")
                 self._writer_task.cancel()
@@ -1791,7 +3682,7 @@ class KalshiFillsLedger:
                 await self._init_db()
             
             async with aiosqlite.connect(self._db_path) as db:
-                await db.execute("PRAGMA busy_timeout=30000;")  # 30s for startup contention
+                await db.execute(f"PRAGMA busy_timeout={_FILLS_DB_BUSY_TIMEOUT_MS};")  # From environment
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
                     "SELECT * FROM kalshi_fills ORDER BY created_time DESC LIMIT 10000"
@@ -1851,6 +3742,10 @@ class KalshiFillsLedger:
                         skipped_test, ", ".join(_TEST_FILL_PREFIXES[:3]) + "..."
                     )
                 logger.info(f"Loaded {loaded} fills from database")
+                
+                # Session-based PnL tracking: rebuild session PnL from loaded fills
+                self.rebuild_session_pnl_from_fills()
+                
                 return loaded
         except Exception as e:
             logger.debug(f"No existing fills DB or load error: {e}")
@@ -1869,6 +3764,10 @@ def get_fills_ledger() -> KalshiFillsLedger:
         with _ledger_lock:
             if _ledger is None:
                 _ledger = KalshiFillsLedger()
+                # Session-based PnL tracking: load session metadata on first access
+                _ledger._load_session_metadata()
+                # Check if we need to start a new session
+                _ledger.start_new_session()
     return _ledger
 
 

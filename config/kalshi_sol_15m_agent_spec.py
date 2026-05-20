@@ -28,13 +28,11 @@ class Sol15mAgentSpec:
     daily_dd_limit_pct: float = -0.02
 
     # Entry filters
-    min_edge_threshold: float = 0.05
+    min_edge_threshold: float = 0.012  # 1.2¢ for aggressive micro-scalping (just above 2¢ fee, rely on volume)
     max_vol_ratio: float = 2.0
-    min_time_to_expiry: int = 300
-    max_time_to_expiry: int = 600
-
-    # Regime confidence thresholds
-    min_regime_confidence: float = 0.7
+    min_time_to_expiry: int = 120  # Don't enter last 2 minutes (aggressive)
+    max_time_to_expiry: int = 900  # Trade first 15 minutes (wider window)
+    min_regime_confidence: float = 0.5
     regime_window_minutes: int = 15
 
 

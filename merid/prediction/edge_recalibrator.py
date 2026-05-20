@@ -30,7 +30,7 @@ from utils.logger import get_logger
 logger = get_logger("merid.prediction.edge_recalibrator")
 
 # Safety floors — thresholds never drop below these
-MIN_EDGE_FLOOR = Decimal("0.015")   # 1.5% absolute minimum edge
+MIN_EDGE_FLOOR = Decimal("0.050")   # 5.0% absolute minimum edge (conservative "sure bet" mode)
 MAX_EDGE_CEILING = Decimal("0.15")  # 15% — don't require absurd edges
 
 # How aggressively to adjust (0 = no change, 1 = full correction)
@@ -96,6 +96,8 @@ class EdgeRecalibrator:
                 await self._task
             except asyncio.CancelledError:
                 pass
+            finally:
+                self._task = None
         logger.info("Edge recalibrator stopped")
 
     async def _run_loop(self) -> None:
@@ -255,14 +257,21 @@ class EdgeRecalibrator:
 # ── Singleton ────────────────────────────────────────────────────────────
 
 _recalibrator: Optional[EdgeRecalibrator] = None
-_recalibrator_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _recalibrator_lock = threading.Lock()
+_recalibrator_lock = None  # Disabled to prevent startup hang
 
 
 def get_edge_recalibrator() -> EdgeRecalibrator:
     """Get or create the singleton EdgeRecalibrator."""
     global _recalibrator
     if _recalibrator is None:
-        with _recalibrator_lock:
-            if _recalibrator is None:
-                _recalibrator = EdgeRecalibrator()
+        if _recalibrator_lock is not None:
+            with _recalibrator_lock:
+                if _recalibrator is None:
+                    _recalibrator = EdgeRecalibrator()
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _recalibrator = EdgeRecalibrator()
     return _recalibrator

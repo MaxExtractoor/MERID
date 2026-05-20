@@ -18,7 +18,10 @@ from config.kalshi_btc_15m_agent_spec import (
 )
 from merid.data.rti_stream import RTIStream
 from merid.risk.crypto_rti_monitor import CryptoRTIMonitor
-from merid.agents.base import AgentOpinion
+from merid.agents.base import BaseKalshiAgent, AgentOpinion
+from merid.agents.loop_tracing import trace_agent_step
+from merid.kalshi.market_registry import KalshiMarketRegistry
+from merid.portfolio.risk import PortfolioRiskAgent
 from utils.logger import get_logger
 
 logger = get_logger("merid.agents.btc_15m")
@@ -38,42 +41,48 @@ class Btc15mAgentState:
             self.active_positions = []
 
 
-class Btc15mAgent:
+class Btc15mAgent(BaseKalshiAgent):
     """BTC 15m Kalshi trading agent implementing KalshiGrid interface."""
 
-    def __init__(self, spec: Btc15mAgentSpec = BTC_15M_AGENT_SPEC):
-        self.spec = spec
-        self.state = Btc15mAgentState(agent_id=spec.agent_id)
-        self.signal_generator = Btc15mSignalGenerator(spec)
-        self.risk_rules = Btc15mRiskRules(spec)
+    agent_id = "btc_15m_regime"
+    product = "btc_15m"
 
-        # Dependencies (injected by grid)
-        self.rti_stream: Optional[RTIStream] = None
-        self.crypto_rti_monitor: Optional[CryptoRTIMonitor] = None
-        self.portfolio_risk_agent = None  # For exposure/PnL queries
-        self.kalshi_market_registry = None  # For current market data
-        self.btc_lane = None  # For regime signals
-        self.signal_fusion_agent = None  # For microstructure signals
-
-    def configure_dependencies(
+    def __init__(
         self,
-        rti_stream: RTIStream,
-        crypto_rti_monitor: CryptoRTIMonitor,
-        portfolio_risk_agent,
-        kalshi_market_registry,
-        btc_lane,
-        signal_fusion_agent=None
-    ):
-        """Inject dependencies from KalshiGrid.
-
-        LEAN 15m KALSHI STACK (2026-05-13): Added signal_fusion_agent for microstructure signals.
-        """
-        self.rti_stream = rti_stream
+        market_registry: KalshiMarketRegistry | None = None,
+        crypto_rti_monitor: CryptoRTIMonitor | None = None,
+        portfolio_risk_agent: PortfolioRiskAgent | None = None,
+        params: Any = None,
+    ) -> None:
+        super().__init__(agent_id=self.agent_id)
+        self.market_registry = market_registry
         self.crypto_rti_monitor = crypto_rti_monitor
         self.portfolio_risk_agent = portfolio_risk_agent
-        self.kalshi_market_registry = kalshi_market_registry
-        self.btc_lane = btc_lane
-        self.signal_fusion_agent = signal_fusion_agent
+        
+        # Initialize spec-based components for backward compatibility
+        from config.kalshi_btc_15m_agent_spec import BTC_15M_AGENT_SPEC
+        self.spec = BTC_15M_AGENT_SPEC
+        self.state = Btc15mAgentState(agent_id=self.spec.agent_id)
+        self.signal_generator = Btc15mSignalGenerator(self.spec)
+        self.risk_rules = Btc15mRiskRules(self.spec)
+        
+        # Log risk limits at startup for audit trail (same as Eth15mAgent)
+        try:
+            from config.kalshi_15m_crypto_config import log_risk_limits_for_agent
+            from merid.prediction.venue_gate import get_venue_gate
+            mode = get_venue_gate().mode.value.upper()
+            log_risk_limits_for_agent("BTC", mode)
+        except Exception as exc:
+            logger.warning(f"Failed to log risk limits for BTC: {exc}")
+
+    async def configure_dependencies(self, container: Any) -> None:
+        """DI hook used by KalshiGrid bootstrap."""
+        if self.market_registry is None:
+            self.market_registry = container.resolve(KalshiMarketRegistry)
+        if self.crypto_rti_monitor is None:
+            self.crypto_rti_monitor = container.resolve(CryptoRTIMonitor)
+        if self.portfolio_risk_agent is None:
+            self.portfolio_risk_agent = container.resolve(PortfolioRiskAgent)
 
     def get_status(self) -> Dict[str, Any]:
         """Get agent status for grid summary."""
@@ -90,6 +99,7 @@ class Btc15mAgent:
             }
         }
 
+    @trace_agent_step()
     async def run_cycle(self) -> Optional[AgentOpinion]:
         """Run one agent cycle and return opinion if signal generated.
 
@@ -124,13 +134,24 @@ class Btc15mAgent:
 
     async def _build_inputs(self) -> Optional[Btc15mInputs]:
         """Build Btc15mInputs from current state."""
-        if not all([self.rti_stream, self.crypto_rti_monitor, self.portfolio_risk_agent,
-                    self.kalshi_market_registry, self.btc_lane]):
-            logger.warning("BTC 15m agent missing dependencies")
+        assert self.market_registry is not None
+        assert self.crypto_rti_monitor is not None
+        assert self.portfolio_risk_agent is not None
+
+        market = self.market_registry.get_active_btc_15m()
+        if not market:
+            self.logger.debug("BTC 15m: no active market, skipping.")
             return None
 
-        # RTI metrics
-        rti_metrics = self.rti_stream.get_current_metrics("BTC")
+        rti = self.crypto_rti_monitor.get_current_metrics(symbol="BTC")
+        if rti is None:
+            self.logger.debug("BTC 15m: no RTI metrics, skipping.")
+            return None
+
+        vol_metrics = self.crypto_rti_monitor.get_vol_metrics(symbol="BTC")
+        if vol_metrics is None:
+            self.logger.debug("BTC 15m: no vol metrics, skipping.")
+            return None
 
         # Risk state
         current_position_size = self.portfolio_risk_agent.get_exposure_pct(
@@ -141,35 +162,30 @@ class Btc15mAgent:
         crypto_vol_alert_active = self.portfolio_risk_agent.is_crypto_vol_elevated("BTC")
 
         # Market data
-        market = self.kalshi_market_registry.get_active_btc_15m()
         market_id = market.ticker
-        strike_price = market.strike  # or settlement reference
+        strike_price = market.strike
         time_to_expiry = market.seconds_to_expiry
         orderbook_bid = market.best_bid
         orderbook_ask = market.best_ask
 
-        # Regime signal
-        btc_15m_regime_signal = self.btc_lane.get_regime_signal("BTC_15M_KALSHI")
+        # Regime signal - not available in lean 15m mode, use None
+        btc_15m_regime_signal = None
 
-        # LEAN 15m KALSHI STACK (2026-05-13): Fetch SignalFusion microstructure signals
+        # PROFILE-GUARD: Skip SignalFusion microstructure signals for kalshi_crypto_15m_v2 (experimental, not needed for lean 15m)
+        import os as _os
+        _profile = _os.getenv("MERID_PROFILE", "full").lower().strip()
+        _is_15m_crypto = _profile == "kalshi_crypto_15m_v2"
+        
+        # LEAN 15m KALSHI STACK (2026-05-13): SignalFusion microstructure signals disabled for 15m
         orderflow_bias = 0.0
         onchain_velocity = 0.0
-        if self.signal_fusion_agent:
-            try:
-                history = self.signal_fusion_agent.get_history(limit=1)
-                if history:
-                    latest = history[-1]
-                    orderflow_bias = float(latest.get("orderflow_bias", 0.0))
-                    onchain_velocity = float(latest.get("onchain_velocity", 0.0))
-            except Exception as exc:
-                logger.debug("SignalFusion fetch failed: %s", exc)
 
         return Btc15mInputs(
-            rti_current=rti_metrics["rti_current"],
-            rti_60s_sma=rti_metrics["rti_60s_sma"],
-            vol_1m_realized=rti_metrics["rti_60s_vol"],   # temporary approximation
-            vol_5m_realized=rti_metrics["rti_60s_vol"],   # same
-            vol_15m_realized=rti_metrics["rti_sma_trend"],
+            rti_current=rti.get("rti_current"),
+            rti_60s_sma=rti.get("rti_60s_sma"),
+            vol_1m_realized=vol_metrics.get("vol_1m", 0.0),
+            vol_5m_realized=vol_metrics.get("vol_5m", 0.0),
+            vol_15m_realized=vol_metrics.get("vol_15m", 0.0),
             vol_baseline_median=self.crypto_rti_monitor.get_vol_baseline("BTC"),
             market_id=market_id,
             strike_price=strike_price,
@@ -180,7 +196,6 @@ class Btc15mAgent:
             crypto_vol_alert_active=crypto_vol_alert_active,
             current_position_size=current_position_size,
             daily_pnl=self.state.daily_pnl,
-            # LEAN 15m KALSHI STACK (2026-05-13): SignalFusion microstructure signals
             orderflow_bias=orderflow_bias,
             onchain_velocity=onchain_velocity,
         )

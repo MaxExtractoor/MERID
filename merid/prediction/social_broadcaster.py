@@ -421,14 +421,21 @@ class KalshiSocialBroadcaster:
 # ── Singleton ──────────────────────────────────────────────────────
 
 _broadcaster: Optional[KalshiSocialBroadcaster] = None
-_broadcaster_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _broadcaster_lock = threading.Lock()
+_broadcaster_lock = None  # Disabled to prevent startup hang
 
 
 def get_social_broadcaster() -> KalshiSocialBroadcaster:
     """Get or create the singleton KalshiSocialBroadcaster."""
     global _broadcaster
     if _broadcaster is None:
-        with _broadcaster_lock:
-            if _broadcaster is None:
-                _broadcaster = KalshiSocialBroadcaster()
+        if _broadcaster_lock is not None:
+            with _broadcaster_lock:
+                if _broadcaster is None:
+                    _broadcaster = KalshiSocialBroadcaster()
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _broadcaster = KalshiSocialBroadcaster()
     return _broadcaster

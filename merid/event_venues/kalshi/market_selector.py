@@ -20,6 +20,7 @@ Usage::
 
 from __future__ import annotations
 
+import os
 from typing import Any, Callable, Dict, List, Optional
 
 from config.kalshi_universe import KALSHI_CRYPTO_PRODUCTS as _KCP
@@ -28,50 +29,88 @@ from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.market_selector")
 
+# P0 FIX: Import scope filter functions from correct module (config.trading_scope)
+# trading_scope.py has convenience functions, not standalone is_allowed_asset/is_15m_series_ticker
+try:
+    from config.trading_scope import (
+        validate_asset_for_trading,
+        validate_series_ticker_for_trading,
+    )
+    TRADING_SCOPE_AVAILABLE = True
+    logger.info("[SCOPE-FILTER] trading_scope import successful, scope filtering enabled")
+except ImportError as e:
+    TRADING_SCOPE_AVAILABLE = False
+    # Fail-closed in production: functions always return False to reject everything
+    def validate_asset_for_trading(asset: str) -> bool:
+        return False
+    
+    def validate_series_ticker_for_trading(ticker: str) -> bool:
+        return False
+    
+    logger.error(f"[SCOPE-FILTER] trading_scope import failed ({e}), scope filtering DISABLED - rejecting all tickers")
+
+# Keep constants from market_constraints for backward compatibility
+from merid.event_venues.kalshi.market_constraints import (
+    ALLOWED_TIMEFRAMES,
+    ALLOWED_UNDERLYINGS,
+    SERIES_PREFIX as CRYPTO_SERIES_BASE,
+    TIMEFRAME_SUFFIX as TIMEFRAME_SERIES_SUFFIX,
+)
+
 # ── Canonical Kalshi series prefixes per coin ─────────────────────────────
 # Source: collector.py + Kalshi docs
 # https://kalshi.com/category/crypto/frequency/fifteen_min
-
-CRYPTO_SERIES_BASE: Dict[str, str] = {
-    "BTC": "KXBTC",
-    "ETH": "KXETH",
-    "SOL": "KXSOL",
-    "XRP": "KXXRP",
-    "DOGE": "KXDOGE",
-}
+# Import from centralized config module (imported above as CRYPTO_SERIES_BASE)
 
 # ── Timeframe → series suffix ─────────────────────────────────────────────
 # Real Kalshi format: no dashes. 15m = "15M", hourly = "" (no suffix),
 # daily = "D1", weekly = "W1", monthly = "M1".
-
-TIMEFRAME_SERIES_SUFFIX: Dict[str, str] = {
-    "15m": "15M",
-    "1h": "",          # hourly = base series, no suffix
-    "hourly": "",
-    "daily": "D1",
-    "weekly": "W1",
-    "monthly": "M1",
-}
+# Import from centralized config module (imported above as TIMEFRAME_SERIES_SUFFIX)
 
 ALL_COINS = list(ALL_CRYPTO_ASSETS)
-ALL_TIMEFRAMES = ["15m", "1h", "daily", "weekly", "monthly"]
+# PRODUCTION AUDIT (Step 3): Only 15m timeframe allowed for trading
+ALL_TIMEFRAMES = ["15m"]
 
 
 def resolve_series_ticker(coin: str, timeframe: str) -> str:
     """Build the Kalshi series ticker for a coin + timeframe.
 
+    PRODUCTION AUDIT (Step 3): Only 15m timeframe and allowed assets (BTC/ETH/SOL/XRP/DOGE).
+
     Examples:
         resolve_series_ticker("BTC", "15m")     → "KXBTC15M"
-        resolve_series_ticker("ETH", "1h")      → "KXETH"
-        resolve_series_ticker("SOL", "daily")   → "KXSOLD1"
-        resolve_series_ticker("DOGE", "weekly") → "KXDOGEW1"
-        resolve_series_ticker("BTC", "monthly") → "KXBTCM1"
+        resolve_series_ticker("ETH", "15m")     → "KXETH15M"
+        resolve_series_ticker("SOL", "15m")     → "KXSOL15M"
+        resolve_series_ticker("XRP", "15m")     → "KXXRP15M"
+        resolve_series_ticker("DOGE", "15m")    → "KXDOGE15M"
     """
+    # PRODUCTION AUDIT: Enforce 15m timeframe only
+    if timeframe.lower() != "15m":
+        raise ValueError(
+            f"Timeframe '{timeframe}' not allowed in production. Only '15m' is permitted."
+        )
+    
+    # PRODUCTION AUDIT: Enforce allowed assets only
+    allowed_assets = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
+    if coin.upper() not in allowed_assets:
+        raise ValueError(
+            f"Asset '{coin}' not allowed in production. Allowed: {sorted(allowed_assets)}"
+        )
+    
     base = CRYPTO_SERIES_BASE.get(coin.upper())
     if not base:
         raise ValueError(f"Unknown coin: {coin}. Known: {sorted(CRYPTO_SERIES_BASE)}")
     suffix = TIMEFRAME_SERIES_SUFFIX.get(timeframe.lower(), "")
-    return f"{base}{suffix}"
+    ticker = f"{base}{suffix}"
+    
+    # PRODUCTION AUDIT: Verify resulting ticker is in whitelist
+    allowed_series = {"KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M"}
+    if ticker not in allowed_series:
+        raise ValueError(
+            f"Series ticker '{ticker}' not in production whitelist. Allowed: {sorted(allowed_series)}"
+        )
+    
+    return ticker
 
 
 def resolve_series_tickers_multi(
@@ -94,6 +133,9 @@ def resolve_series_tickers_multi(
 # The catalog uses these to discover live market IDs.
 
 AGENT_SERIES_MAP: Dict[str, List[str]] = {
+    # PRODUCTION RESTRICTION: Only 5 15m crypto agents for BTC/ETH/SOL/XRP/DOGE 15m trading
+    # All other agents have empty series lists (disabled for 15m crypto-only deployment)
+    
     # Per-coin 15m markets — from KALSHI_CRYPTO_PRODUCTS (canonical)
     "BTC_15M":    _KCP.get("BTC_15M",   ["KXBTC15M"]),
     "ETH_15M":    _KCP.get("ETH_15M",   ["KXETH15M"]),
@@ -101,65 +143,41 @@ AGENT_SERIES_MAP: Dict[str, List[str]] = {
     "XRP_15M":    _KCP.get("XRP_15M",   ["KXXRP15M"]),
     "DOGE_15M":   _KCP.get("DOGE_15M",  ["KXDOGE15M"]),
 
-    # Per-coin hourly markets — from KALSHI_CRYPTO_PRODUCTS (canonical)
-    "BTC_HOURLY":  _KCP.get("BTC_1H",   ["KXBTC"]),
-    "ETH_HOURLY":  _KCP.get("ETH_1H",   ["KXETH"]),
-    "SOL_HOURLY":  _KCP.get("SOL_1H",   ["KXSOL"]),
-    "XRP_HOURLY":  _KCP.get("XRP_1H",   ["KXXRP"]),
-    "DOGE_HOURLY": _KCP.get("DOGE_1H",  ["KXDOGE"]),
+    # DISABLED: Non-15m agents removed for 15m crypto-only deployment
+    "BTC_DAILY":  [],
+    "BTC_HOURLY":  [],
+    "BTC_WEEKLY": [],
+    "ETH_DAILY":  [],
+    "ETH_HOURLY":  [],
+    "ETH_WEEKLY": [],
+    "SOL_DAILY":  [],
+    "SOL_HOURLY":  [],
+    "SOL_WEEKLY": [],
+    "XRP_DAILY":  [],
+    "XRP_HOURLY":  [],
+    "XRP_WEEKLY": [],
+    "DOGE_DAILY":  [],
+    "DOGE_HOURLY":  [],
+    "DOGE_WEEKLY": [],
 
-    # Daily and weekly series — price-level markets, canonical format TBD, unchanged
-    "BTC_DAILY":  [resolve_series_ticker("BTC", "daily")],
-    "BTC_WEEKLY": [resolve_series_ticker("BTC", "weekly")],
-
-    "ETH_DAILY":  [resolve_series_ticker("ETH", "daily")],
-    "ETH_WEEKLY": [resolve_series_ticker("ETH", "weekly")],
-
-    "SOL_DAILY":  [resolve_series_ticker("SOL", "daily")],
-    "SOL_WEEKLY": [resolve_series_ticker("SOL", "weekly")],
-
-    "XRP_DAILY":  [resolve_series_ticker("XRP", "daily")],
-    "XRP_WEEKLY": [resolve_series_ticker("XRP", "weekly")],
-
-    "DOGE_DAILY":  [resolve_series_ticker("DOGE", "daily")],
-    "DOGE_WEEKLY": [resolve_series_ticker("DOGE", "weekly")],
-
-    # Market-making across all 15m crypto
-    "CRYPTO_15M_MM": resolve_series_tickers_multi(ALL_COINS, ["15m"]),
-
-    # Arbitrage scanner: all crypto markets, all frequencies
-    "KALSHI_ARB_SCANNER": resolve_series_tickers_multi(ALL_COINS, ALL_TIMEFRAMES),
-
-    # Directional macro — crypto daily only for now
-    "MACRO_DIRECTIONAL": resolve_series_tickers_multi(ALL_COINS, ["daily"]),
-
-    # Non-crypto directional agents — empty until those markets are wired
+    # DISABLED: Non-crypto agents removed for 15m crypto-only deployment
+    "CRYPTO_15M_MM": [],
+    "KALSHI_ARB_SCANNER": [],
+    "MACRO_DIRECTIONAL": [],
     "FINANCIALS_DIRECTIONAL": [],
     "POLITICS_DIRECTIONAL": [],
     "CLIMATE_DIRECTIONAL": [],
     "SPORTS_DIRECTIONAL": [],
     "TECH_DIRECTIONAL": [],
 
-    # Sentiment agents: contrarian uses short timeframes
-    "SENTIMENT_CONTRARIAN_CRYPTO": resolve_series_tickers_multi(
-        ALL_COINS, ["15m", "1h"],
-    ),
-    "SENTIMENT_CONTRARIAN_MACRO": [],  # fill when non-crypto markets added
-
-    # Regime switch uses longer timeframes
-    "SENTIMENT_REGIME_SWITCH_CRYPTO": resolve_series_tickers_multi(
-        ALL_COINS, ["daily", "weekly"],
-    ),
+    # DISABLED: Sentiment agents removed for 15m crypto-only deployment (sentiment stack deprecated)
+    "SENTIMENT_CONTRARIAN_CRYPTO": [],
+    "SENTIMENT_CONTRARIAN_MACRO": [],
+    "SENTIMENT_REGIME_SWITCH_CRYPTO": [],
     "SENTIMENT_REGIME_SWITCH_FINANCIALS": [],
-
-    # Vol breakout: short timeframes
-    "SENTIMENT_VOL_BREAKOUT_CRYPTO": resolve_series_tickers_multi(
-        ALL_COINS, ["15m", "1h"],
-    ),
+    "SENTIMENT_VOL_BREAKOUT_CRYPTO": [],
     "SENTIMENT_VOL_BREAKOUT_GLOBAL": [],
-
-    # Catch-all: every crypto series
-    "KALSHI_CATCH_ALL": resolve_series_tickers_multi(ALL_COINS, ALL_TIMEFRAMES),
+    "KALSHI_CATCH_ALL": [],
 }
 
 
@@ -199,9 +217,20 @@ async def get_agent_market_tickers(
     from merid.event_venues.kalshi.market_catalog import get_market_catalog
     catalog = get_market_catalog()
 
+    # P1 FIX: Add timeout around catalog.refresh() to prevent indefinite blocking
     # Ensure catalog is populated
     if not catalog.get_all_markets():
-        await catalog.refresh()
+        try:
+            logger.info("[TICKER-RESOLUTION] Catalog empty, refreshing with 30s timeout")
+            import asyncio
+            await asyncio.wait_for(catalog.refresh(), timeout=30.0)
+            logger.info("[TICKER-RESOLUTION] Catalog refresh completed")
+        except asyncio.TimeoutError:
+            logger.error("[TICKER-RESOLUTION] Catalog refresh timed out after 30s")
+            return []  # Fail closed - no tickers
+        except Exception as e:
+            logger.error(f"[TICKER-RESOLUTION] Catalog refresh failed: {e}")
+            return []
 
     seen: set = set()
     results: list = []
@@ -211,10 +240,24 @@ async def get_agent_market_tickers(
         # Search catalog for markets matching this series
         per_count = 0
         for cm in catalog.get_all_markets():
-            raw = cm.market.raw_data or {}
+            # CRITICAL FIX: CatalogMarket wraps EventMarket, so raw_data is on nested market.market
+            if hasattr(cm, "market") and hasattr(cm.market, "raw_data"):
+                raw = cm.market.raw_data or {}
+            elif hasattr(cm, "raw_data"):
+                raw = cm.raw_data or {}
+            else:
+                raw = {}
+            
             mkt_series = raw.get("series_ticker", "") or ""
             mkt_event = raw.get("event_ticker", "") or ""
-            mkt_id = cm.market.market_id or ""
+            
+            # CRITICAL FIX: market_id is on nested EventMarket
+            if hasattr(cm, "market") and hasattr(cm.market, "market_id"):
+                mkt_id = cm.market.market_id or ""
+            elif hasattr(cm, "market_id"):
+                mkt_id = cm.market_id or ""
+            else:
+                mkt_id = ""
 
             # Match by series_ticker, event_ticker prefix, or market_id prefix
             matches = (
@@ -228,7 +271,13 @@ async def get_agent_market_tickers(
 
             # Only include markets that pass the volume filter and are unseen
             if matches and mkt_id not in seen:
-                vol = float(cm.market.volume) if cm.market.volume else 0
+                # CRITICAL FIX: volume is on nested EventMarket
+                if hasattr(cm, "market") and hasattr(cm.market, "volume"):
+                    vol = float(cm.market.volume) if cm.market.volume else 0
+                elif hasattr(cm, "volume"):
+                    vol = float(cm.volume) if cm.volume else 0
+                else:
+                    vol = 0
                 if vol >= min_volume:
                     seen.add(mkt_id)
                     results.append((vol, mkt_id))
@@ -237,13 +286,24 @@ async def get_agent_market_tickers(
 
     # Sort by volume descending
     results.sort(key=lambda x: x[0], reverse=True)
+
+    # WS-CAP-FIX: Limit markets per agent to prevent overwhelming the WS bridge (max 150 total)
+    # Each agent should get at most 20 markets to allow 7-8 agents to run concurrently
+    _MAX_MARKETS_PER_AGENT = int(os.getenv("MERID_MAX_MARKETS_PER_AGENT", "20"))
+    if len(results) > _MAX_MARKETS_PER_AGENT:
+        logger.warning(
+            "Agent %s: resolved %d markets, limiting to top %d by volume to preserve WS quota",
+            agent_name, len(results), _MAX_MARKETS_PER_AGENT,
+        )
+        results = results[:_MAX_MARKETS_PER_AGENT]
+
     tickers = [t for _, t in results]
 
     # Human-friendly summary log (keeps previous info but adds a clear
     # 'Series resolution' line to make debugging easier in logs).
     logger.info(
-        "Agent %s: resolved %d series → %d live markets",
-        agent_name, len(series_list), len(tickers),
+        "Agent %s: resolved %d series → %d live markets (cap=%d)",
+        agent_name, len(series_list), len(tickers), _MAX_MARKETS_PER_AGENT,
     )
 
     # Fallback: if the in-memory catalog search yields nothing for the
@@ -254,18 +314,57 @@ async def get_agent_market_tickers(
     # not present in the cached listing.
     if not tickers and series_list:
         try:
-            # Use the catalog's complementary discovery path
-            _cms = await catalog.discover_crypto_via_series(min_volume=min_volume)
-            if _cms:
-                # deduplicate and preserve volume-sorted order from discovery
-                _seen = set(tickers)
-                for cm in _cms:
-                    if cm.market.market_id not in _seen:
-                        tickers.append(cm.market.market_id)
-                        _seen.add(cm.market.market_id)
+            # PRODUCTION FIX (2026-05-01): Query specific series tickers via Kalshi REST API
+            # The previous fallback did broad discovery without filtering by series.
+            # Now we query each specific series ticker and extract its markets.
+            _discovered_count = 0
+            for series_ticker in series_list:
+                try:
+                    # Query Kalshi for this specific series
+                    _series_markets = await catalog.get_markets_for_series(series_ticker)
+                    if _series_markets:
+                        for cm in _series_markets:
+                            # CRITICAL FIX: market_id is on nested EventMarket
+                            if hasattr(cm, "market") and hasattr(cm.market, "market_id"):
+                                mkt_id = cm.market.market_id
+                            elif hasattr(cm, "market_id"):
+                                mkt_id = cm.market_id
+                            else:
+                                continue
+                            
+                            if mkt_id not in seen:
+                                # CRITICAL FIX: volume is on nested EventMarket
+                                if hasattr(cm, "market") and hasattr(cm.market, "volume"):
+                                    vol = float(cm.market.volume) if cm.market.volume else 0
+                                elif hasattr(cm, "volume"):
+                                    vol = float(cm.volume) if cm.volume else 0
+                                else:
+                                    vol = 0
+                                
+                                if vol >= min_volume:
+                                    seen.add(mkt_id)
+                                    results.append((vol, mkt_id))
+                                    _discovered_count += 1
+                except Exception as _series_exc:
+                    logger.debug(
+                        "Series discovery failed for %s: %s", series_ticker, _series_exc
+                    )
+            
+            # Re-sort by volume after adding discovered markets
+            if _discovered_count > 0:
+                results.sort(key=lambda x: x[0], reverse=True)
+                # WS-CAP-FIX: Also apply cap to fallback discovery
+                _MAX_MARKETS_PER_AGENT = int(os.getenv("MERID_MAX_MARKETS_PER_AGENT", "20"))
+                if len(results) > _MAX_MARKETS_PER_AGENT:
+                    logger.warning(
+                        "Agent %s: REST API discovered %d markets, limiting to top %d by volume",
+                        agent_name, len(results), _MAX_MARKETS_PER_AGENT,
+                    )
+                    results = results[:_MAX_MARKETS_PER_AGENT]
+                tickers = [t for _, t in results]
                 logger.info(
-                    "Series resolution: %s → %d markets from %d series",
-                    agent_name, len(tickers), len(series_list),
+                    "Series resolution: %s → %d markets from %d series (via REST API, cap=%d)",
+                    agent_name, len(tickers), len(series_list), _MAX_MARKETS_PER_AGENT,
                 )
         except Exception as _exc:
             logger.debug("Series-discovery fallback failed for %s: %s", agent_name, _exc)
@@ -284,12 +383,101 @@ async def get_agent_market_tickers(
     return tickers
 
 
+# Track ticker subscriptions with refcounts to handle shared markets between agents
+# Format: ticker -> set(agent_names)
+# This ensures we only unsubscribe when the last agent drops a ticker
+_TICKER_REFCOUNT: Dict[str, set] = {}
+# Track each agent's current tickers for diff calculation
+_AGENT_TICKER_TRACKING: Dict[str, set] = {}
+# Lock for thread-safe access to tracking structures
+import threading
+_TRACKING_LOCK = threading.Lock()
+
+def cleanup_agent_tickers(agent_name: str) -> List[str]:
+    """Remove an agent from all ticker refcounts (call on agent restart/reload).
+    
+    Prevents stale agent IDs from leaking and blocking proper unsubscription.
+    Returns list of tickers that were fully dropped (refcount reached 0).
+    """
+    with _TRACKING_LOCK:
+        to_remove = []
+        old_tickers = _AGENT_TICKER_TRACKING.get(agent_name, set()).copy()
+        
+        for ticker in old_tickers:
+            if ticker in _TICKER_REFCOUNT:
+                _TICKER_REFCOUNT[ticker].discard(agent_name)
+                if not _TICKER_REFCOUNT[ticker]:
+                    del _TICKER_REFCOUNT[ticker]
+                    to_remove.append(ticker)
+        
+        # Remove agent from tracking
+        if agent_name in _AGENT_TICKER_TRACKING:
+            del _AGENT_TICKER_TRACKING[agent_name]
+        
+        if to_remove:
+            logger.info(
+                "[market-selector] Cleanup for agent %s: removed %d tickers (refcount reached 0)",
+                agent_name, len(to_remove)
+            )
+        
+        return to_remove
+
+def _update_ticker_refcounts(agent_name: str, old_tickers: set, new_tickers: set) -> tuple:
+    """Update refcounts and return (to_remove, to_add) ticker lists.
+    
+    Thread-safe refcount management:
+    - Decrement refcount for tickers agent is dropping
+    - Increment refcount for tickers agent is adding
+    - Only unsubscribe when refcount reaches 0
+    """
+    with _TRACKING_LOCK:
+        to_remove = []
+        to_add = []
+        
+        # Process tickers agent is dropping
+        for ticker in old_tickers - new_tickers:
+            if ticker in _TICKER_REFCOUNT:
+                _TICKER_REFCOUNT[ticker].discard(agent_name)
+                if not _TICKER_REFCOUNT[ticker]:
+                    # No agents want this ticker anymore
+                    del _TICKER_REFCOUNT[ticker]
+                    to_remove.append(ticker)
+                    logger.debug(
+                        "[market-selector] Ticker %s refcount reached 0 (dropped by agent %s)",
+                        ticker, agent_name
+                    )
+                else:
+                    # Other agents still want this ticker
+                    logger.debug(
+                        "[market-selector] Ticker %s still has %d agents: %s (dropped by %s)",
+                        ticker, len(_TICKER_REFCOUNT[ticker]), _TICKER_REFCOUNT[ticker], agent_name
+                    )
+        
+        # Process tickers agent is adding
+        for ticker in new_tickers - old_tickers:
+            if ticker not in _TICKER_REFCOUNT:
+                _TICKER_REFCOUNT[ticker] = set()
+            _TICKER_REFCOUNT[ticker].add(agent_name)
+            to_add.append(ticker)
+            logger.debug(
+                "[market-selector] Ticker %s refcount now %d (added by agent %s): %s",
+                ticker, len(_TICKER_REFCOUNT[ticker]), agent_name, _TICKER_REFCOUNT[ticker]
+            )
+        
+        # Update agent's ticker tracking
+        _AGENT_TICKER_TRACKING[agent_name] = new_tickers
+        
+        return to_remove, to_add
+
 async def enable_kalshi_agent(agent_name: str, series_tickers: Optional[List[str]] = None) -> Dict[str, Any]:
     """Subscribe an agent to its Kalshi prediction markets.
 
     1. Resolve market IDs via get_agent_market_tickers
-    2. Subscribe via WS bridge for live orderbook/trade data
-    3. Return summary of what was subscribed
+    2. Remove agent's old tickers from WS bridge (if no other agents want them)
+    3. Subscribe via WS bridge for live orderbook/trade data
+    4. Return summary of what was subscribed
+
+    Uses refcount-based ticker tracking to safely handle shared markets between agents.
 
     Args:
         agent_name: Agent name (e.g., "BTC_15M").
@@ -313,20 +501,36 @@ async def enable_kalshi_agent(agent_name: str, series_tickers: Optional[List[str
             "subscribed": 0,
         }
 
-    # Subscribe via WS bridge for live data
+    # Calculate old vs new tickers using refcount tracking
+    with _TRACKING_LOCK:
+        old_tickers = _AGENT_TICKER_TRACKING.get(agent_name, set()).copy()
+    new_tickers = set(market_ids)
+    to_remove, to_add = _update_ticker_refcounts(agent_name, old_tickers, new_tickers)
+    
     ws_subscribed = 0
     try:
         from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
         bridge = get_ws_bridge()
-        if bridge.is_running():
-            await bridge.subscribe(market_ids)
-            ws_subscribed = len(market_ids)
-        else:
+        
+        # Unsubscribe from tickers no longer wanted by any agent
+        if to_remove and bridge.is_running():
+            await bridge.unsubscribe(to_remove)
+            logger.debug(
+                "enable_kalshi_agent(%s): unsubscribed from %d tickers (refcount reached 0)",
+                agent_name, len(to_remove)
+            )
+        
+        # Subscribe to new tickers
+        if to_add and bridge.is_running():
+            await bridge.subscribe(to_add)
+            ws_subscribed = len(to_add)
+        elif not bridge.is_running():
             await bridge.start(tickers=market_ids)
             ws_subscribed = len(market_ids)
+        
         logger.info(
-            "enable_kalshi_agent(%s): WS subscribed to %d markets",
-            agent_name, ws_subscribed,
+            "enable_kalshi_agent(%s): WS subscribed to %d new markets (unsubscribed %d, total agent markets=%d)",
+            agent_name, ws_subscribed, len(to_remove), len(new_tickers),
         )
     except Exception as exc:
         logger.warning(

@@ -1,31 +1,35 @@
-import React, { useState, useRef, useCallback } from "react";
+import React, { useState, useRef, useCallback, lazy, Suspense } from "react";
 import { useFillToast } from "./hooks/useFillToast";
 import Sidebar from "./components/Sidebar";
 import TopBar from "./components/TopBar";
-import Overview from "./views/Overview";
-import Logs from "./views/Logs";
-import Settings from "./views/Settings";
+
+// Lazy-loaded views for code splitting (Tier 1 optimization)
+const Overview = lazy(() => import("./views/Overview"));
+const Logs = lazy(() => import("./views/Logs"));
+const Settings = lazy(() => import("./views/Settings"));
 
 // Consolidated Unified Views (Stages 1, 4, 5, 6, 7, 8)
-import DiscoverView from "./views/DiscoverView";
-import SizeView from "./views/SizeView";
-import ExecuteView from "./views/ExecuteView";
-import MonitorView from "./views/MonitorView";
-import PromoteView from "./views/PromoteView";
-import ProtectView from "./views/ProtectView";
+const DiscoverView = lazy(() => import("./views/DiscoverView"));
+const SizeView = lazy(() => import("./views/SizeView"));
+const ExecuteView = lazy(() => import("./views/ExecuteView"));
+const MonitorView = lazy(() => import("./views/MonitorView"));
+const PromoteView = lazy(() => import("./views/PromoteView"));
+const ProtectView = lazy(() => import("./views/ProtectView"));
 
 // Individual Stage Views (Stages 2, 3)
-import KalshiAgentPerformanceView from "./views/KalshiAgentPerformanceView";
-import KalshiSentimentView from "./views/KalshiSentimentView";
-import KalshiVolDashboardView from "./views/KalshiVolDashboardView";
-import SwarmConsensusMatrix from "./views/SwarmConsensusMatrix";
-import CalibrationDashboardView from "./views/CalibrationDashboardView";
-import OperatorDashboard from "./views/OperatorDashboard";
+const KalshiAgentPerformanceView = lazy(() => import("./views/KalshiAgentPerformanceView"));
+const KalshiSentimentView = lazy(() => import("./views/KalshiSentimentView"));
+const KalshiVolDashboardView = lazy(() => import("./views/KalshiVolDashboardView"));
+const SwarmConsensusMatrix = lazy(() => import("./views/SwarmConsensusMatrix"));
+const CalibrationDashboardView = lazy(() => import("./views/CalibrationDashboardView"));
+const OperatorDashboard = lazy(() => import("./views/OperatorDashboard"));
 
 // Optimized UI Components
 import ErrorBoundary from "./components/ErrorBoundary";
+import KalshiErrorBoundary from "./components/KalshiErrorBoundary";
 import CommandPalette from "./components/CommandPalette";
 import { OfflineIndicator } from "./components/OfflineIndicator";
+import KalshiLoadingSkeleton from "./components/KalshiLoadingSkeleton";
 import { KalshiModeProvider } from "./context/KalshiModeContext";
 import { NetworkProvider } from "./hooks/useNetworkStatusProvider";
 import { RealtimeDisconnectedBanner } from "./components/RealtimeDisconnectedBanner";
@@ -39,7 +43,8 @@ import { LEGACY_VIEW_MAP } from "./types/views";
 
 // Zero-lag view loader with preloading
 // Consolidated architecture: Stages 1, 5, 8 use unified views
-const VIEW_COMPONENTS: Record<string, React.LazyExoticComponent<React.ComponentType<any>> | React.ComponentType<any>> = {
+// All views are now lazy-loaded for code splitting (Tier 1 optimization)
+const VIEW_COMPONENTS: Record<string, React.LazyExoticComponent<React.ComponentType<any>>> = {
   // System Views
   overview: Overview,
   operator: OperatorDashboard,
@@ -50,13 +55,11 @@ const VIEW_COMPONENTS: Record<string, React.LazyExoticComponent<React.ComponentT
   discover: DiscoverView,
   
   // Stage 2: Analyze (Individual Views)
-  "analyze-edge": KalshiVolDashboardView,  // Edge signals use vol dashboard
   "analyze-sentiment": KalshiSentimentView,
-  "analyze-vol": KalshiVolDashboardView,
+  "analyze-vol": KalshiVolDashboardView,  // Also used for edge signals
   
   // Stage 3: Consensus (Individual Views)
-  "consensus-swarm": SwarmConsensusMatrix,
-  "consensus-debates": SwarmConsensusMatrix,
+  "consensus-swarm": SwarmConsensusMatrix,  // Also shows debates
   "consensus-performance": KalshiAgentPerformanceView,
   "consensus-calibration": CalibrationDashboardView,
   
@@ -151,30 +154,32 @@ export default function App() {
         <div className="fixed inset-0 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 pointer-events-none" />
         
         {/* Sidebar - hidden on mobile, shown on desktop */}
-        <Sidebar 
-          current={view} 
-          onChange={handleNavigate}
-          collapsed={sidebarCollapsed}
-          onToggleCollapse={toggleSidebarCollapse}
-          className="hidden md:flex relative z-10"
-        />
+        <ErrorBoundary viewName="Sidebar" enhanced={false}>
+          <Sidebar 
+            current={view} 
+            onChange={handleNavigate}
+            collapsed={sidebarCollapsed}
+            onToggleCollapse={toggleSidebarCollapse}
+            className="hidden md:flex relative z-10"
+          />
 
-        {/* Mobile sidebar drawer */}
-        {sidebarOpen && (
-          <>
-            <button
-              type="button"
-              className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40 md:hidden"
-              onClick={() => setSidebarOpen(false)}
-              aria-label="Close sidebar"
-            />
-            <Sidebar
-              current={view}
-              onChange={handleNavigate}
-              className="fixed inset-y-0 left-0 z-50 w-64 md:hidden shadow-2xl"
-            />
-          </>
-        )}
+          {/* Mobile sidebar drawer */}
+          {sidebarOpen && (
+            <>
+              <button
+                type="button"
+                className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40 md:hidden"
+                onClick={() => setSidebarOpen(false)}
+                aria-label="Close sidebar"
+              />
+              <Sidebar
+                current={view}
+                onChange={handleNavigate}
+                className="fixed inset-y-0 left-0 z-50 w-64 md:hidden shadow-2xl"
+              />
+            </>
+          )}
+        </ErrorBoundary>
 
         {/* Command Palette (Ctrl+K) */}
         <CommandPalette
@@ -184,20 +189,30 @@ export default function App() {
 
         {/* Main content area */}
         <div className="flex flex-1 flex-col overflow-hidden relative z-10">
-          <TopBar
-            onMenuClick={() => setSidebarOpen(true)}
-            onNavigate={handleNavigate}
-            onOpenSearch={() => openPaletteRef.current?.()}
-          />
-          <RealtimeDisconnectedBanner />
-          <ExecutionBlockedBanner />
-          <OfflineIndicator />
+          <ErrorBoundary viewName="TopBar" enhanced={false}>
+            <TopBar
+              onMenuClick={() => setSidebarOpen(true)}
+              onNavigate={handleNavigate}
+              onOpenSearch={() => openPaletteRef.current?.()}
+            />
+          </ErrorBoundary>
+          
+          <ErrorBoundary viewName="StatusBanners" enhanced={false}>
+            <RealtimeDisconnectedBanner />
+            <ExecutionBlockedBanner />
+            <OfflineIndicator />
+          </ErrorBoundary>
           
           {/* Per-view error boundaries — one crash doesn't take down the whole dashboard */}
           <main className="flex-1 overflow-auto p-4 lg:p-6">
-            <ErrorBoundary viewName={view}>
-              <ViewRenderer view={view} onNavigate={handleNavigate} />
-            </ErrorBoundary>
+            <KalshiErrorBoundary 
+              viewName={view}
+              onGoHome={() => setView('overview')}
+            >
+              <Suspense fallback={<KalshiLoadingSkeleton />}>
+                <ViewRenderer view={view} onNavigate={handleNavigate} />
+              </Suspense>
+            </KalshiErrorBoundary>
           </main>
         </div>
       </div>

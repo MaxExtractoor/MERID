@@ -15,8 +15,8 @@ import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   Search, TrendingUp, Clock, Droplets,
   ChevronLeft, ChevronRight, Star, Target,
-  Activity, Filter, ArrowRight, Info,
-  Zap, BarChart3, Percent
+  Activity, Filter,
+  Zap
 } from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
@@ -82,11 +82,6 @@ const PAGE_SIZE = 20;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Convert cents to probability percentage */
-function toProbability(cents: number): string {
-  return `${cents}%`;
-}
-
 /** Format large numbers compactly */
 function formatCompact(num: number): string {
   if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1)}M`;
@@ -96,7 +91,9 @@ function formatCompact(num: number): string {
 
 /** Time remaining with color coding */
 function TimeToExpiry({ expiresAt }: { expiresAt: string }) {
-  const ms = new Date(expiresAt).getTime() - Date.now();
+  const expiryTs = new Date(expiresAt).getTime();
+  if (!isFinite(expiryTs)) return <span className="text-slate-500">—</span>;
+  const ms = expiryTs - Date.now();
   if (ms <= 0) return <span className="text-slate-500">Expired</span>;
   
   const mins = Math.floor(ms / 60000);
@@ -166,29 +163,6 @@ function CategoryBadge({ category }: { category: string }) {
 
 // ── Sub-Components ───────────────────────────────────────────────────────────
 
-/** Market stat card for selected market */
-function MarketStat({ label, value, subtext, accent = 'slate' }: { 
-  label: string; 
-  value: string; 
-  subtext?: string;
-  accent?: 'green' | 'red' | 'yellow' | 'slate';
-}) {
-  const accentClasses = {
-    green: 'text-green-400',
-    red: 'text-red-400',
-    yellow: 'text-yellow-400',
-    slate: 'text-slate-300',
-  };
-  
-  return (
-    <div className="bg-slate-800/50 rounded-lg p-3">
-      <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">{label}</div>
-      <div className={`text-lg font-semibold ${accentClasses[accent]}`}>{value}</div>
-      {subtext && <div className="text-xs text-slate-500 mt-0.5">{subtext}</div>}
-    </div>
-  );
-}
-
 /** Probability display with visual bar */
 function ProbabilityBar({ yesPrice, noPrice }: { yesPrice: number; noPrice: number }) {
   const yesPct = yesPrice;
@@ -222,7 +196,6 @@ interface DiscoverViewProps {
 }
 
 const DiscoverView: React.FC<DiscoverViewProps> = ({ 
-  onNavigate,
   initialMode = 'trending' 
 }) => {
   // Mode & filter state

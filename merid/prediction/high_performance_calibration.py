@@ -175,7 +175,7 @@ _HP_EDGE_CONFIGS: Dict[Tuple[str, str], HPEdgeConfig] = {
     # BTC - Most liquid, can use tighter edges
     ("BTC", "15m"): HPEdgeConfig(
         asset="BTC", timeframe="15m",
-        min_edge_entry=Decimal("0.025"),      # 2.5% minimum edge (was 1.1%)
+        min_edge_entry=Decimal("0.05"),       # CONSERVATIVE: 5% minimum edge (was 2.5%)
         strong_edge_threshold=Decimal("0.050"),  # 5% for strong conviction
         expiry_hour_24=Decimal("0.030"),
         expiry_hour_4=Decimal("0.035"),
@@ -185,7 +185,7 @@ _HP_EDGE_CONFIGS: Dict[Tuple[str, str], HPEdgeConfig] = {
     ),
     ("BTC", "1h"): HPEdgeConfig(
         asset="BTC", timeframe="1h",
-        min_edge_entry=Decimal("0.030"),      # 3% for hourly
+        min_edge_entry=Decimal("0.05"),       # CONSERVATIVE: 5% for hourly
         strong_edge_threshold=Decimal("0.060"),
         expiry_hour_24=Decimal("0.035"),
         expiry_hour_4=Decimal("0.040"),
@@ -195,7 +195,7 @@ _HP_EDGE_CONFIGS: Dict[Tuple[str, str], HPEdgeConfig] = {
     ),
     ("BTC", "daily"): HPEdgeConfig(
         asset="BTC", timeframe="daily",
-        min_edge_entry=Decimal("0.040"),       # 4% for daily (longer hold, need more edge)
+        min_edge_entry=Decimal("0.05"),       # CONSERVATIVE: 5% for daily
         strong_edge_threshold=Decimal("0.080"),
         expiry_hour_24=Decimal("0.045"),
         expiry_hour_4=Decimal("0.050"),
@@ -207,7 +207,7 @@ _HP_EDGE_CONFIGS: Dict[Tuple[str, str], HPEdgeConfig] = {
     # ETH - Slightly wider edges than BTC
     ("ETH", "15m"): HPEdgeConfig(
         asset="ETH", timeframe="15m",
-        min_edge_entry=Decimal("0.030"),      # 3% for ETH 15m
+        min_edge_entry=Decimal("0.05"),       # CONSERVATIVE: 5% for ETH 15m
         strong_edge_threshold=Decimal("0.055"),
         expiry_hour_24=Decimal("0.035"),
         expiry_hour_4=Decimal("0.040"),
@@ -217,7 +217,7 @@ _HP_EDGE_CONFIGS: Dict[Tuple[str, str], HPEdgeConfig] = {
     ),
     ("ETH", "1h"): HPEdgeConfig(
         asset="ETH", timeframe="1h",
-        min_edge_entry=Decimal("0.035"),
+        min_edge_entry=Decimal("0.05"),       # CONSERVATIVE
         strong_edge_threshold=Decimal("0.065"),
         expiry_hour_24=Decimal("0.040"),
         expiry_hour_4=Decimal("0.045"),
@@ -229,7 +229,7 @@ _HP_EDGE_CONFIGS: Dict[Tuple[str, str], HPEdgeConfig] = {
     # SOL - Higher volatility, need more edge
     ("SOL", "15m"): HPEdgeConfig(
         asset="SOL", timeframe="15m",
-        min_edge_entry=Decimal("0.040"),      # 4% for SOL (higher vol)
+        min_edge_entry=Decimal("0.05"),       # CONSERVATIVE: 5% for SOL
         strong_edge_threshold=Decimal("0.075"),
         expiry_hour_24=Decimal("0.045"),
         expiry_hour_4=Decimal("0.055"),
@@ -239,7 +239,7 @@ _HP_EDGE_CONFIGS: Dict[Tuple[str, str], HPEdgeConfig] = {
     ),
     ("SOL", "1h"): HPEdgeConfig(
         asset="SOL", timeframe="1h",
-        min_edge_entry=Decimal("0.045"),
+        min_edge_entry=Decimal("0.05"),       # CONSERVATIVE
         strong_edge_threshold=Decimal("0.080"),
         expiry_hour_24=Decimal("0.050"),
         expiry_hour_4=Decimal("0.060"),
@@ -251,7 +251,7 @@ _HP_EDGE_CONFIGS: Dict[Tuple[str, str], HPEdgeConfig] = {
     # XRP - Similar to SOL
     ("XRP", "15m"): HPEdgeConfig(
         asset="XRP", timeframe="15m",
-        min_edge_entry=Decimal("0.038"),
+        min_edge_entry=Decimal("0.05"),       # CONSERVATIVE
         strong_edge_threshold=Decimal("0.070"),
         expiry_hour_24=Decimal("0.043"),
         expiry_hour_4=Decimal("0.053"),
@@ -296,7 +296,7 @@ _HP_TP_CONFIGS: Dict[Tuple[str, str], HPTakeProfitConfig] = {
         hard_tp_pct=150.0,            # Hard exit at 150% profit
         partial_tp_pct=75.0,          # Partial at 75%
         min_price_move_reentry=8,     # 8c move before re-entry
-        max_round_trips=1,            # Max 1 round trip (was 2)
+        max_round_trips=3,            # 15m scalper: 3 round trips (was 1) - more re-entry opportunities
     ),
     ("BTC", "1h"): HPTakeProfitConfig(
         r_multiple_primary=0.80,
@@ -454,13 +454,21 @@ class HighPerformanceCalibration:
     def __init__(self, win_rate_target: WinRateTarget = WinRateTarget.AGGRESSIVE):
         self.win_rate_target = win_rate_target
         self._cache: Dict[Tuple[str, str], HighPerformanceConfig] = {}
-        self._lock = threading.Lock()
+        # TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+        # TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+        # self._lock = threading.Lock()
+        self._lock = None  # Disabled to prevent startup hang
         
     def get_config(self, asset: str, timeframe: str) -> HighPerformanceConfig:
         """Get optimized configuration for an asset/timeframe pair."""
         key = (asset.upper(), timeframe.lower())
         
-        with self._lock:
+        if self._lock is not None:
+            with self._lock:
+                if key in self._cache:
+                    return self._cache[key]
+        else:
+            # Lock disabled - direct access (startup workaround)
             if key in self._cache:
                 return self._cache[key]
         
@@ -501,7 +509,11 @@ class HighPerformanceCalibration:
             expected_sharpe=sharpe,
         )
         
-        with self._lock:
+        if self._lock is not None:
+            with self._lock:
+                self._cache[key] = config
+        else:
+            # Lock disabled - direct access (startup workaround)
             self._cache[key] = config
         
         return config
@@ -606,29 +618,33 @@ class HighPerformanceCalibration:
 
 # Singleton instance
 _hp_instance: Optional[HighPerformanceCalibration] = None
-_hp_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _hp_lock = threading.Lock()
+_hp_lock = None  # Disabled to prevent startup hang
 
 
 def get_hp_config(asset: str, timeframe: str) -> HighPerformanceConfig:
     """Get high-performance configuration for an asset/timeframe."""
     global _hp_instance
     if _hp_instance is None:
-        with _hp_lock:
-            if _hp_instance is None:
-                target = os.getenv("MERID_HP_WIN_RATE_TARGET", "85")
-                try:
-                    win_rate = float(target) / 100.0
-                    if win_rate >= 0.90:
-                        target_enum = WinRateTarget.MAXIMUM
-                    elif win_rate >= 0.85:
-                        target_enum = WinRateTarget.AGGRESSIVE
-                    elif win_rate >= 0.80:
-                        target_enum = WinRateTarget.MODERATE
-                    else:
-                        target_enum = WinRateTarget.CONSERVATIVE
-                except ValueError:
-                    target_enum = WinRateTarget.AGGRESSIVE
-                _hp_instance = HighPerformanceCalibration(target_enum)
+        if _hp_lock is not None:
+            with _hp_lock:
+                if _hp_instance is None:
+                    target = os.getenv("MERID_HP_WIN_RATE_TARGET", "85")
+                    try:
+                        win_rate_target = WinRateTarget(target.upper())
+                    except ValueError:
+                        win_rate_target = WinRateTarget.AGGRESSIVE
+                    _hp_instance = HighPerformanceCalibration(win_rate_target)
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            target = os.getenv("MERID_HP_WIN_RATE_TARGET", "85")
+            try:
+                win_rate_target = WinRateTarget(target.upper())
+            except ValueError:
+                win_rate_target = WinRateTarget.AGGRESSIVE
+            _hp_instance = HighPerformanceCalibration(win_rate_target)
     return _hp_instance.get_config(asset, timeframe)
 
 

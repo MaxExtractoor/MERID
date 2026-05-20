@@ -18,6 +18,7 @@ services:
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - ENVIRONMENT=${ENVIRONMENT:-development}
+      - MERID_PROFILE=kalshi_crypto_15m_v2
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data

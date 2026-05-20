@@ -5,29 +5,33 @@ Core agents for consensus, analysis, risk management, and execution.
 
 Layer 1-3 of Master Build Directive - AGENT INFRASTRUCTURE
 
+LEAN 15m KALSHI STACK (2026-05-13): Pruned for BTC/ETH/SOL/XRP/DOGE 15-minute trading.
+Removed news, sentiment, meta, and synthesis agents - edge comes from microstructure.
+
 Components:
-- Core Agents: Analysts, Skeptic, Risk, Synthesizer
-- Meta Agents: Archivist, Strategy, Meta-Audit
+- Core Agents: MarketAnalyst, Skeptic, Risk, Strategy
+- Meta Agents: Strategy (trading)
 - Optimization: Caching, Profiling, Resource Allocation
-- Social Agents: Twitter, Telegram, News Monitor
 """
+
+import os
 
 from agents.interface import AgentInterface, AgentState, VoteDecision
 from agents.base_agent import BaseAgent
-from agents.analyst_gemma import AnalystGemma
-from agents.analyst_llama import AnalystLlama
 from agents.skeptic import Skeptic
 from agents.risk import RiskAgent
-from agents.synthesizer import Synthesizer
-from agents.archivist import Archivist
 from agents.strategy_agent import StrategyAgent
-from agents.meta_agent import MetaAuditAgent
-from agents.reflection_layer import ReflectionLayer, Reflection
+
+# PROFILE-GUARD: Skip reflection layer for kalshi_crypto_15m_v2 (sealed 15m stack doesn't need LLM reflection)
+_is_15m_crypto = os.getenv("MERID_PROFILE", "") == "kalshi_crypto_15m_v2"
+if not _is_15m_crypto:
+    from agents.reflection_layer import ReflectionLayer, Reflection
+else:
+    # Create stub classes for kalshi_crypto_15m_v2 to prevent import errors
+    ReflectionLayer = None
+    Reflection = None
+
 from agents.registry import load_agents
-from agents.twitter_agent import TwitterAgent
-from agents.telegram_agent import TelegramAgent
-from agents.news_monitor_agent import NewsMonitorAgent
-from agents.fast_prediction_arbitrage_analyst import register_fast_agent
 from agents.optimization import (
     AgentOptimizer,
     get_agent_optimizer,
@@ -49,16 +53,11 @@ def get_all_agents():
 
 
 def get_core_agents():
-    """Get core consensus agents."""
+    """Get core consensus agents for lean 15m Kalshi stack."""
     return [
-        AnalystGemma(agent_id="analyst-gemma-01"),
-        AnalystLlama(agent_id="analyst-llama-01"),
         Skeptic(agent_id="skeptic-01"),
         RiskAgent(agent_id="risk-01"),
-        Synthesizer(agent_id="synthesizer-01"),
-        Archivist(agent_id="archivist-01"),
         StrategyAgent(agent_id="strategy-agent-01"),
-        MetaAuditAgent(agent_id="meta-audit-01"),
     ]
 
 
@@ -68,23 +67,13 @@ __all__ = [
     "AgentState",
     "VoteDecision",
     "BaseAgent",
-    # Analyst Agents
-    "AnalystGemma",
-    "AnalystLlama",
     # Governance Agents
     "Skeptic",
     "RiskAgent",
-    "Synthesizer",
-    # Meta Agents
-    "Archivist",
     "StrategyAgent",
-    "MetaAuditAgent",
+    # Meta Agents
     "ReflectionLayer",
     "Reflection",
-    # Social Agents
-    "TwitterAgent",
-    "TelegramAgent",
-    "NewsMonitorAgent",
     # Registry
     "load_agents",
     "get_all_agents",
@@ -102,9 +91,3 @@ __all__ = [
     "profiled",
     "budget_limited",
 ]
-
-# Register the fast agent for experiments
-try:
-    register_fast_agent()
-except Exception as e:
-    print(f"Warning: Could not register fast agent: {e}")

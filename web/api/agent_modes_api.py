@@ -92,6 +92,14 @@ async def set_agent_mode_endpoint(agent_id: str, request: AgentModeRequest):
 @router.get("/routing-status")
 async def get_routing_status():
     """Get routing status for all agents."""
+    # PROFILE-GUARD: Disable for kalshi_crypto_15m_v2 (agent mode routing not needed for sealed 15m profile)
+    profile = os.getenv("MERID_PROFILE", "").lower()
+    if profile == "kalshi_crypto_15m_v2":
+        raise HTTPException(
+            403,
+            "Agent mode routing is disabled for kalshi_crypto_15m_v2 profile (sealed 15m profile uses direct agent grid)"
+        )
+    
     try:
         from merid.kalshi.agent_mode_router import get_agent_mode_router
         router = get_agent_mode_router()

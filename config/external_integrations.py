@@ -43,11 +43,11 @@ class ExternalIntegrations:
         """Load external API configurations"""
         return {
             # Price Feed APIs
-            "coingecko": ExternalAPIConfig(
-                name="CoinGecko",
-                base_url="https://api.coingecko.com/api/v3",
-                api_key=os.getenv("COINGECKO_API_KEY"),
-                status=IntegrationStatus.MOCK if os.getenv("COINGECKO_API_KEY") else IntegrationStatus.DISABLED,
+            "binanceus": ExternalAPIConfig(
+                name="BinanceUS",
+                base_url="https://api.binance.us",
+                api_key=os.getenv("BINANCEUS_API_KEY"),
+                status=IntegrationStatus.ACTIVE,  # Public API works without auth
                 timeout_seconds=30,
                 rate_limit_per_minute=30
             ),

@@ -22,10 +22,11 @@ import {
   AlertTriangle, CheckCircle, XCircle, RefreshCw,
   ArrowDownRight, Gauge
 } from '../ui/icons';
-import { DRAWDOWN_TIER_CONFIG, getDrawdownTierConfig } from '../shared/config/riskConfig';
+import { DRAWDOWN_TIER_CONFIG } from '../shared/config/riskConfig';
 import { useApiData } from '../hooks/useApiData';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
-import { authHeaders } from '../api/auth';
+import { getAuthHeaders } from '../services/auth';
+import { fmtTimestamp } from '../utils/formatters';
 
 // Sub-components
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
@@ -188,7 +189,6 @@ const ProtectView: React.FC = () => {
   const alerts = alertsRes.data?.alerts || [];
 
   const isKillActive = ks?.active || ks?.global_kill || risk?.kill_switch_active;
-  const canTrade = ks?.can_trade ?? !isKillActive;
 
   // Kill switch handlers
   const executeKillSwitch = useCallback(async (activate: boolean) => {
@@ -202,7 +202,7 @@ const ProtectView: React.FC = () => {
       
       const res = await fetch(`${API_BASE_URL}${endpoint}`, {
         method: 'POST',
-        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
         body,
       });
       
@@ -254,7 +254,7 @@ const ProtectView: React.FC = () => {
         try {
           const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.KALSHI_RISK_DOWNSIZE}`, {
             method: 'POST',
-            headers: authHeaders(),
+            headers: getAuthHeaders(),
           });
           const json = await res.json().catch(() => ({}));
           setDownsizeResult(json.message || 'Downsize triggered successfully');
@@ -543,7 +543,7 @@ const ProtectView: React.FC = () => {
                       <div className="flex-1">
                         <div className="text-sm text-white">{alert.message}</div>
                         <div className="text-xs text-slate-500 mt-1">
-                          {alert.category} · {new Date(alert.timestamp).toLocaleTimeString()}
+                          {alert.category} · {fmtTimestamp(alert.timestamp, { timeOnly: true })}
                         </div>
                       </div>
                     </div>
@@ -578,7 +578,7 @@ const ProtectView: React.FC = () => {
                       </div>
                       {ks?.triggered_at && (
                         <div className="text-sm text-slate-400">
-                          Triggered: {new Date(ks.triggered_at).toLocaleString()}
+                          Triggered: {fmtTimestamp(ks.triggered_at)}
                         </div>
                       )}
                     </div>
@@ -624,14 +624,14 @@ const ProtectView: React.FC = () => {
                 </CardHeader>
                 <CardContent>
                   <div className="space-y-2">
-                    {risk?.recent_breaches?.map((breach, i) => (
-                      <div key={i} className="flex items-start gap-3 text-sm">
+                    {risk?.recent_breaches?.map((breach) => (
+                      <div key={`${breach.check}:${breach.ts}`} className="flex items-start gap-3 text-sm">
                         <AlertTriangle className="w-4 h-4 text-yellow-400 mt-0.5" />
                         <div>
                           <div className="text-white">{breach.check}</div>
                           <div className="text-xs text-slate-400">{breach.reason}</div>
                           <div className="text-xs text-slate-500">
-                            {new Date(breach.ts).toLocaleTimeString()}
+                            {fmtTimestamp(breach.ts, { timeOnly: true })}
                           </div>
                         </div>
                       </div>

@@ -357,48 +357,97 @@ class KalshiSignalGenerator:
         return signals
     
     async def _generate_edge_signals(self, now: float) -> List[MarketEdgeSignal]:
-        """Generate edge signals from Kalshi edge endpoint.
-        
-        Returns empty list if edge data is unavailable.
-        Synthetic/tradeable edge values are NEVER emitted.
+        """Generate edge signals from Kalshi market data and agent snapshots.
+
+        Pulls edge data from:
+        1. MarketMoodBus for sentiment-driven edges
+        2. Active MarketSnapshot edges from prediction model
+
+        Returns actionable MarketEdgeSignal objects for the SignalStore.
         """
         signals = []
-        
+
         try:
             # Import here to avoid circular dependencies
             from merid.event_venues.kalshi.venue_adapter import get_kalshi_venue_adapter
-            
+            from merid.prediction.model import get_active_snapshots
+            from merid.sentiment.market_mood_bus import get_market_mood_bus
+
             adapter = get_kalshi_venue_adapter()
-            
+            mood_bus = get_market_mood_bus()
+
             # Get instruments (markets) for crypto category
             instruments = await adapter.list_instruments(category="crypto", active_only=True)
-            
-            # Attempt to fetch real edge data from edge endpoint
-            # If unavailable, return empty list - NEVER use synthetic values
-            for inst in instruments[:10]:  # Limit to 10 for performance
-                # Extract asset and timeframe from ticker
-                asset = self._extract_asset(inst.id)
-                timeframe = self._extract_timeframe(inst.id)
-                
-                # TODO: Implement real edge calculation via edge endpoint
-                # For now, return empty list to prevent synthetic signals
-                logger.debug(
-                    f"Edge data unavailable for {inst.id}: "
-                    "Real edge endpoint not yet implemented. Returning no signals."
+
+            # Get active snapshots from prediction model
+            active_snapshots = get_active_snapshots()
+            snapshot_map = {s.market_id: s for s in active_snapshots}
+
+            for inst in instruments[:20]:  # Limit to 20 for performance
+                ticker = inst.id
+                asset = self._extract_asset(ticker)
+                timeframe = self._extract_timeframe(ticker)
+
+                # Try to get snapshot edges first
+                snapshot = snapshot_map.get(ticker)
+                if snapshot and snapshot.edges:
+                    # Find best speculative edge
+                    spec_edges = [e for e in snapshot.edges if e.edge_type == "speculative"]
+                    if spec_edges:
+                        best = max(spec_edges, key=lambda e: e.net_edge)
+                        if best.net_edge > 0:  # Only emit positive edges
+                            signals.append(MarketEdgeSignal(
+                                ticker=ticker,
+                                asset=asset,
+                                timeframe=timeframe,
+                                question=inst.question or "",
+                                implied_prob=float(best.market_prob),
+                                model_prob=float(best.model_prob),
+                                ev_cents=float(best.net_edge) * 100,  # Convert to cents
+                                edge_pct=float(best.net_edge) * 100,  # As percentage
+                                confidence=float(best.confidence),
+                                confidence_bucket="high" if best.confidence > 0.7 else "medium" if best.confidence > 0.4 else "low",
+                                sizing_tier="normal" if best.net_edge > 0.05 else "reduced",
+                                source="kalshi_edge",
+                            ))
+                            continue
+
+                # Fallback: Try MarketMoodBus sentiment context
+                for tf in ["15m", "1h", "daily"]:
+                    context = mood_bus.get_context(asset, tf)
+                    if context and context.swarm_consensus_prob is not None:
+                        # Use swarm consensus as model probability
+                        implied_prob = context.kalshi_price
+                        model_prob = context.swarm_consensus_prob
+                        edge = model_prob - implied_prob
+
+                        if abs(edge) > 0.05:  # CONSERVATIVE: 5% minimum edge
+                            signals.append(MarketEdgeSignal(
+                                ticker=ticker,
+                                asset=asset,
+                                timeframe=timeframe,
+                                question=inst.question or "",
+                                implied_prob=implied_prob,
+                                model_prob=model_prob,
+                                ev_cents=edge * 100,
+                                edge_pct=edge * 100,
+                                confidence=context.swarm_confidence or 0.5,
+                                confidence_bucket="high" if (context.swarm_confidence or 0) > 0.7 else "medium",
+                                sizing_tier="normal" if abs(edge) > 0.05 else "reduced",
+                                source="swarm_consensus",
+                            ))
+                        break
+
+            if signals:
+                logger.info(
+                    f"Generated {len(signals)} edge signals from {len(instruments)} instruments"
                 )
-                
-            # No signals emitted until real edge endpoint is wired
-            logger.warning(
-                "Edge signal generation returning empty list: "
-                "Real edge endpoint not implemented. No synthetic signals emitted."
-            )
-            
+            else:
+                logger.debug("No actionable edge signals generated")
+
         except Exception as exc:
-            logger.error(
-                f"Edge signal generation failed: {exc}. "
-                "No signals emitted to prevent synthetic data."
-            )
-        
+            logger.error(f"Edge signal generation failed: {exc}")
+
         return signals
     
     async def _generate_liquidity_signals(self, now: float) -> List[LiquiditySignal]:
@@ -625,34 +674,48 @@ class ConsensusGatedSignalGenerator:
 # ── Singleton ─────────────────────────────────────────────────────────────
 
 _generator: Optional[KalshiSignalGenerator] = None
-_generator_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _generator_lock = threading.Lock()
+_generator_lock = None  # Disabled to prevent startup hang
 
 # NEW: Consensus-gated singleton
 _gated_generator: Optional[ConsensusGatedSignalGenerator] = None
-_gated_generator_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _gated_generator_lock = threading.Lock()
+_gated_generator_lock = None  # Disabled to prevent startup hang
 
 
 def get_kalshi_signal_generator() -> KalshiSignalGenerator:
     """Get or create the singleton KalshiSignalGenerator."""
     global _generator
     if _generator is None:
-        with _generator_lock:
-            if _generator is None:
-                _generator = KalshiSignalGenerator()
+        if _generator_lock is not None:
+            with _generator_lock:
+                if _generator is None:
+                    _generator = KalshiSignalGenerator()
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _generator = KalshiSignalGenerator()
     return _generator
 
 
 def get_consensus_gated_generator() -> ConsensusGatedSignalGenerator:
     """Get or create the singleton ConsensusGatedSignalGenerator.
-    
+
     This is the PRIMARY interface for market-driven signal generation.
     All signals are checked against swarm consensus before being emitted.
     """
     global _gated_generator
     if _gated_generator is None:
-        with _gated_generator_lock:
-            if _gated_generator is None:
-                _gated_generator = ConsensusGatedSignalGenerator()
+        if _gated_generator_lock is not None:
+            with _gated_generator_lock:
+                if _gated_generator is None:
+                    _gated_generator = ConsensusGatedSignalGenerator()
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _gated_generator = ConsensusGatedSignalGenerator()
     return _gated_generator
 
 

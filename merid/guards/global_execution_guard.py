@@ -33,6 +33,8 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timezone
 
 from utils.logger import get_logger
+from utils.logging_helpers import log_guardrail_check, log_risk_check, log_trading_operation
+from utils.alerting import send_alert_sync, AlertSeverity, AlertContext
 
 logger = get_logger("merid.guards.global_execution_guard")
 
@@ -101,6 +103,7 @@ class GlobalExecutionGuard:
         price_cents: int,
         source: str,
         asset: Optional[str] = None,
+        action: Optional[str] = None,
     ) -> Tuple[bool, str]:
         """Check if order is allowed — THE UNIFIED GATE.
         
@@ -112,6 +115,7 @@ class GlobalExecutionGuard:
             price_cents: Price per contract in cents
             source: Which execution path (trading_agent, pipeline_adapter, kalshi_client, etc.)
             asset: Optional asset code (BTC, ETH, etc.)
+            action: Order action - "buy" (entry) or "sell" (exit/close)
             
         Returns:
             (allowed: bool, reason: str)
@@ -121,6 +125,29 @@ class GlobalExecutionGuard:
         with self._lock:
             # 0. Emergency halt check
             if self._emergency_halt:
+                log_guardrail_check(
+                    "emergency_halt",
+                    logger,
+                    value=1.0,
+                    threshold=0.0,
+                    passed=False,
+                    halt_reason=self._halt_reason,
+                    ticker=ticker,
+                    source=source,
+                )
+                send_alert_sync(
+                    condition="emergency_halt",
+                    severity=AlertSeverity.CRITICAL,
+                    message=f"Emergency halt active: {self._halt_reason}",
+                    context=AlertContext(
+                        source="merid.guards.global_execution_guard",
+                        additional_fields={
+                            "halt_reason": self._halt_reason,
+                            "ticker": ticker,
+                            "source": source,
+                        },
+                    ),
+                )
                 logger.error(
                     "[GLOBAL_GUARD_BLOCKED] Emergency halt active: %s | ticker=%s source=%s",
                     self._halt_reason, ticker, source
@@ -136,22 +163,82 @@ class GlobalExecutionGuard:
             
             # 2. Calculate notional
             proposed_notional_usd = (contracts * price_cents) / 100.0
+            _is_sell = action and action.lower() == "sell"
             
-            # 3. Get bankroll and compute 2% cap
+            # 3. Get bankroll and compute cycle risk cap from bankroll_service_v2 (single source of truth)
             try:
-                from merid.settings import settings
-                bankroll_cents = getattr(settings, 'KALSHI_PORTFOLIO_BANKROLL_CENTS', 50_000_00)
-                bankroll_usd = bankroll_cents / 100.0
-                bankroll_cap_usd = bankroll_usd * 0.02  # 2% of bankroll
+                from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+                from core.settings import MAX_CYCLE_RISK_PCT
+                bankroll_usd = get_equity_for_risk_calc_sync()
+                if bankroll_usd is None or bankroll_usd <= 0:
+                    logger.error("[GLOBAL_GUARD_ERROR] Bankroll unavailable from bankroll_service_v2")
+                    return False, "BANKROLL_UNAVAILABLE: bankroll_service_v2 returned None or 0"
+                bankroll_cap_usd = bankroll_usd * MAX_CYCLE_RISK_PCT  # Unified with core.settings
             except Exception as e:
                 logger.error("[GLOBAL_GUARD_ERROR] Failed to get bankroll: %s", e)
                 # Fail-closed: block order if we can't determine bankroll
                 return False, f"BANKROLL_UNAVAILABLE: {e}"
             
-            # 4. Check global notional cap
+            # 4. Handle sell orders (exits) - they REDUCE exposure, so approve and subtract
+            if _is_sell:
+                # Sell orders close positions - always allow and reduce tracked notional
+                new_total = max(0.0, self._total_notional_usd - proposed_notional_usd)
+                self._total_notional_usd = new_total
+                log_trading_operation(
+                    "sell_order_approved",
+                    logger,
+                    market_id=ticker,
+                    side="SELL",
+                    contracts=contracts,
+                    price_cents=price_cents,
+                    notional_usd=proposed_notional_usd,
+                    total_notional_usd=new_total,
+                    source=source,
+                )
+                logger.info(
+                    "[GLOBAL_GUARD_APPROVED] SELL order reducing exposure | "
+                    "ticker=%s contracts=%d price_cents=%d "
+                    "notional=$%.2f total_now=$%.2f source=%s",
+                    ticker, contracts, price_cents,
+                    proposed_notional_usd, new_total, source
+                )
+                return True, "OK"
+            
+            # 5. Check global notional cap for BUY orders (entries)
             new_total = self._total_notional_usd + proposed_notional_usd
             
             if new_total > bankroll_cap_usd:
+                log_risk_check(
+                    "global_bankroll_cap",
+                    logger,
+                    current_value=new_total,
+                    limit_value=bankroll_cap_usd,
+                    action="reject",
+                    ticker=ticker,
+                    contracts=contracts,
+                    price_cents=price_cents,
+                    current_total_notional=self._total_notional_usd,
+                    proposed_notional=proposed_notional_usd,
+                    bankroll=bankroll_usd,
+                    source=source,
+                )
+                send_alert_sync(
+                    condition="global_bankroll_cap",
+                    severity=AlertSeverity.CRITICAL,
+                    message=f"Bankroll cap exceeded: ${new_total:.2f} > ${bankroll_cap_usd:.2f}",
+                    context=AlertContext(
+                        source="merid.guards.global_execution_guard",
+                        current_value=new_total,
+                        threshold_value=bankroll_cap_usd,
+                        additional_fields={
+                            "ticker": ticker,
+                            "contracts": contracts,
+                            "price_cents": price_cents,
+                            "bankroll_usd": bankroll_usd,
+                            "source": source,
+                        },
+                    ),
+                )
                 logger.error(
                     "[GLOBAL_GUARD_BLOCKED] 2%% BANKROLL CAP EXCEEDED | "
                     "ticker=%s contracts=%d price_cents=%d "
@@ -185,6 +272,15 @@ class GlobalExecutionGuard:
                 max_per_hour = 300
             
             if self._orders_this_minute >= max_per_minute:
+                log_risk_check(
+                    "rate_limit_minute",
+                    logger,
+                    current_value=self._orders_this_minute,
+                    limit_value=max_per_minute,
+                    action="reject",
+                    ticker=ticker,
+                    source=source,
+                )
                 logger.warning(
                     "[GLOBAL_GUARD_BLOCKED] Rate limit: %d orders/minute | ticker=%s source=%s",
                     max_per_minute, ticker, source
@@ -192,6 +288,15 @@ class GlobalExecutionGuard:
                 return False, f"RATE_LIMIT_MINUTE: {max_per_minute} orders/minute exceeded"
             
             if self._orders_this_hour >= max_per_hour:
+                log_risk_check(
+                    "rate_limit_hour",
+                    logger,
+                    current_value=self._orders_this_hour,
+                    limit_value=max_per_hour,
+                    action="reject",
+                    ticker=ticker,
+                    source=source,
+                )
                 logger.warning(
                     "[GLOBAL_GUARD_BLOCKED] Rate limit: %d orders/hour | ticker=%s source=%s",
                     max_per_hour, ticker, source
@@ -217,6 +322,19 @@ class GlobalExecutionGuard:
             if len(self._order_history) > self._max_history:
                 self._order_history.pop(0)
             
+            log_trading_operation(
+                "buy_order_approved",
+                logger,
+                market_id=ticker,
+                side="BUY",
+                contracts=contracts,
+                price_cents=price_cents,
+                notional_usd=proposed_notional_usd,
+                total_notional_usd=new_total,
+                bankroll_cap_usd=bankroll_cap_usd,
+                source=source,
+                asset=asset,
+            )
             logger.info(
                 "[GLOBAL_GUARD_APPROVED] ticker=%s contracts=%d price_cents=%d "
                 "notional=$%.2f total_now=$%.2f cap=$%.2f source=%s",
@@ -235,6 +353,15 @@ class GlobalExecutionGuard:
             notional_usd = (contracts * price_cents) / 100.0
             # For now, we track submitted notional as a conservative estimate
             # In production, you'd track actual filled notional separately
+            log_trading_operation(
+                "order_fill_recorded",
+                logger,
+                market_id=ticker,
+                contracts=contracts,
+                price_cents=price_cents,
+                notional_usd=notional_usd,
+                source=source,
+            )
             logger.debug(
                 "[GLOBAL_GUARD_FILL] ticker=%s contracts=%d price_cents=%d "
                 "notional=$%.2f source=%s",
@@ -245,18 +372,23 @@ class GlobalExecutionGuard:
         """Get current guard status for monitoring."""
         with self._lock:
             try:
-                from merid.settings import settings
-                bankroll_cents = getattr(settings, 'KALSHI_PORTFOLIO_BANKROLL_CENTS', 50_000_00)
-                bankroll_usd = bankroll_cents / 100.0
-                bankroll_cap_usd = bankroll_usd * 0.02
+                from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+                from core.settings import MAX_CYCLE_RISK_PCT
+                bankroll_usd = get_equity_for_risk_calc_sync()
+                if bankroll_usd is None or bankroll_usd <= 0:
+                    bankroll_usd = 0.0
+                    bankroll_cap_usd = 0.0
+                else:
+                    bankroll_cap_usd = bankroll_usd * MAX_CYCLE_RISK_PCT
             except Exception:
-                bankroll_usd = 50000.0
-                bankroll_cap_usd = 1000.0
+                bankroll_usd = 0.0
+                bankroll_cap_usd = 0.0
             
             return {
                 "total_notional_usd": round(self._total_notional_usd, 2),
                 "bankroll_usd": round(bankroll_usd, 2),
-                "bankroll_cap_2pct_usd": round(bankroll_cap_usd, 2),
+                "bankroll_cap_usd": round(bankroll_cap_usd, 2),
+                "cap_percentage": round(MAX_CYCLE_RISK_PCT * 100, 1),
                 "pct_of_cap_used": round((self._total_notional_usd / bankroll_cap_usd) * 100, 1) if bankroll_cap_usd > 0 else 0,
                 "orders_this_minute": self._orders_this_minute,
                 "orders_this_hour": self._orders_this_hour,
@@ -270,6 +402,14 @@ class GlobalExecutionGuard:
         with self._lock:
             self._emergency_halt = True
             self._halt_reason = reason
+            log_guardrail_check(
+                "emergency_halt_triggered",
+                logger,
+                value=1.0,
+                threshold=0.0,
+                passed=False,
+                halt_reason=reason,
+            )
             logger.critical(
                 "[GLOBAL_GUARD_EMERGENCY_HALT] All order execution HALTED: %s",
                 reason
@@ -282,6 +422,13 @@ class GlobalExecutionGuard:
             self._emergency_halt = False
             self._halt_reason = ""
             if was_halted:
+                log_guardrail_check(
+                    "emergency_halt_resumed",
+                    logger,
+                    value=0.0,
+                    threshold=0.0,
+                    passed=True,
+                )
                 logger.critical("[GLOBAL_GUARD_EMERGENCY_RESUME] Order execution RESUMED")
     
     def reset_total_notional(self, new_value: float = 0.0) -> None:
@@ -289,9 +436,41 @@ class GlobalExecutionGuard:
         with self._lock:
             old_value = self._total_notional_usd
             self._total_notional_usd = new_value
+            log_risk_check(
+                "total_notional_reset",
+                logger,
+                current_value=old_value,
+                limit_value=new_value,
+                action="reset",
+            )
             logger.warning(
                 "[GLOBAL_GUARD_RESET] Total notional reset: $%.2f -> $%.2f",
                 old_value, new_value
+            )
+    
+    def reset_cycle(self) -> None:
+        """Reset cycle-level state (total notional accumulator).
+        
+        This should be called at the start of each trading cycle to prevent
+        the notional accumulator from growing indefinitely across cycles.
+        
+        The guard tracks total notional exposure across all orders in a cycle.
+        Without a reset, the accumulator would grow forever and block all orders
+        after the first few cycles.
+        """
+        with self._lock:
+            old_value = self._total_notional_usd
+            self._total_notional_usd = 0.0
+            log_risk_check(
+                "cycle_notional_reset",
+                logger,
+                current_value=old_value,
+                limit_value=0.0,
+                action="reset",
+            )
+            logger.debug(
+                "[GLOBAL_GUARD_CYCLE_RESET] Total notional reset for new cycle: $%.2f -> $0.00",
+                old_value
             )
 
 

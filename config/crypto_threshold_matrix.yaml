@@ -4,13 +4,25 @@
 #
 # Row match: (asset, timeframe, archetype) with "*" = wildcard. Higher-specificity rows win.
 # Optional fields (null): fall back to merid.settings / Strategy defaults.
+#
+# CONSERVATIVE "SURE BET" MODE (2026-05-10): Edges raised to 5-10%+ to ensure
+# profitable trading after fees, slippage, and model uncertainty on Kalshi.
+# Previous 2.5-3.5% edges were too aggressive for prediction market liquidity.
+#
+# DEPRECATION NOTICE (2026-05-17):
+# For kalshi_crypto_15m_v2 profile (MERID_PROFILE=kalshi_crypto_15m_v2), edge thresholds
+# come from config/profiles/kalshi_crypto_15m.yaml. This matrix is NOT used for 15m crypto.
+# The 15m edge_grid entries below (BTC 15m: 0.020, ETH 15m: 0.02, etc.) are superseded
+# by profile YAML values. This matrix remains active for other profiles (baseline, production)
+# and other timeframes (1h, daily, weekly, etc.).
 
 schema_version: 2  # Bumped for confidence bands integration
 
 profiles:
   # ═══════════════════════════════════════════════════════════════════════════════
   # PROFILE: modern_tradeable_kalshi_v1 (PRODUCTION DEFAULT)
-  # Tradeable but fee-aware. BTC 15m min_edge=1.1%, DOGE annual=3.4%.
+  # Conservative "sure bet" mode. BTC 15m min_edge=5.0%, DOGE annual=10.5%.
+  # DEPRECATED for 15m crypto when MERID_PROFILE=kalshi_crypto_15m_v2
   # ═══════════════════════════════════════════════════════════════════════════════
   modern_tradeable_kalshi_v1:
     confidence_bands:
@@ -30,6 +42,14 @@ profiles:
         edge_cents_bump: 0.5     # +0.5¢ net EV after fees
         kelly_multiplier: 0.5    # half-Kelly
 
+      - name: "quick_win"
+        min_conf: 0.80        # 80%+ model probability bucket
+        max_conf: 0.92        # keep really extreme 92-100% separate for future ultra_confident tier
+        allow_trades: true
+        edge_prob_bump: 0.010 # +1.0ppt extra edge requirement
+        edge_cents_bump: 1.0  # +1¢ extra net EV after fees
+        kelly_multiplier: 0.6 # 0.6 × base_fraction = 0.12 Kelly effective
+
       - name: "confident"
         min_conf: 0.75
         max_conf: 1.00
@@ -39,59 +59,70 @@ profiles:
         kelly_multiplier: 1.0    # full allowed Kelly (capped by base_fraction)
 
     edge_grid:
+      # NOTE: 15m timeframe entries are retained for MERID_CRYPTO_EDGE_PRODUCTION_PROFILE=modern_tradeable_kalshi_v1
+      # When MERID_PROFILE=kalshi_crypto_15m_v2, edge thresholds come from config/profiles/kalshi_crypto_15m.yaml instead
+      # This matrix remains active for other profiles (baseline, production, crypto_low_edge_dev)
       BTC:
-        15m: 0.011
-        1h: 0.0125
-        daily: 0.016
-        weekly: 0.022
-        monthly: 0.025
-        annual: 0.025
+        15m: 0.050    # 5.0% - conservative "sure bet" for 15m
+        1h: 0.025     # 2.5% - reduced from 4.0%
+        daily: 0.030  # 3.0% - reduced from 6.0%
+        weekly: 0.035 # 3.5% - reduced from 7.0%
+        monthly: 0.040 # 4.0% - reduced from 7.5%
+        annual: 0.045  # 4.5% - reduced from 8.0%
       ETH:
-        15m: 0.012
-        1h: 0.014
-        daily: 0.018
-        weekly: 0.024
-        monthly: 0.027
-        annual: 0.027
+        15m: 0.050    # 5.0% - conservative "sure bet" for 15m
+        1h: 0.03
+        4h: 0.04
+        daily: 0.05
       SOL:
-        15m: 0.014
-        1h: 0.016
-        daily: 0.020
-        weekly: 0.027
-        monthly: 0.030
-        annual: 0.030
+        15m: 0.050    # 5.0% - conservative "sure bet" for 15m
+        1h: 0.04
+        4h: 0.05
+        daily: 0.06
       XRP:
-        15m: 0.015
-        1h: 0.017
-        daily: 0.022
-        weekly: 0.029
-        monthly: 0.032
-        annual: 0.032
+        15m: 0.050    # 5.0% - conservative "sure bet" for 15m
+        1h: 0.04
+        4h: 0.05
+        daily: 0.06
       DOGE:
-        15m: 0.016
-        1h: 0.018
-        daily: 0.024
-        weekly: 0.031
-        monthly: 0.034
-        annual: 0.034
+        15m: 0.050    # 5.0% - conservative "sure bet" for 15m
+        1h: 0.05
+        4h: 0.06
+        daily: 0.07
+        weekly: 0.08
+        monthly: 0.09
+        annual: 0.10
 
     fee_aware_settings:
-      min_edge_cents: 0.35
+      # Calibration mode: 4¢ floor accounts for fees (~2¢) + slippage + spread
+      min_edge_cents: 4.0  # 4.0¢ min net edge after all costs
       avoid_mid_fee_band: true
-      mid_fee_band_multiplier: 1.75  # tightened from 1.5 to match code-level calibration
+      mid_fee_band_multiplier: 1.8  # Tighter for conservative mode
       max_price_cents_grid:
-        BTC:  {15m: 45, 1h: 55, daily: 65, weekly: 70, monthly: 75, annual: 85}
-        ETH:  {15m: 42, 1h: 52, daily: 62, weekly: 68, monthly: 73, annual: 83}
-        SOL:  {15m: 40, 1h: 50, daily: 60, weekly: 66, monthly: 72, annual: 78}
-        XRP:  {15m: 38, 1h: 48, daily: 58, weekly: 64, monthly: 70, annual: 76}
-        DOGE: {15m: 35, 1h: 45, daily: 55, weekly: 60, monthly: 66, annual: 72}
+        # NOTE: 15m entries retained for MERID_CRYPTO_EDGE_PRODUCTION_PROFILE=modern_tradeable_kalshi_v1
+        # When MERID_PROFILE=kalshi_crypto_15m_v2, price caps come from config/profiles/kalshi_crypto_15m.yaml
+        BTC:  {15m: 60, 1h: 65, daily: 70, weekly: 75, monthly: 80, annual: 85}
+        ETH:  {15m: 57, 1h: 62, daily: 67, weekly: 73, monthly: 78, annual: 83}
+        SOL:  {15m: 55, 1h: 60, daily: 65, weekly: 71, monthly: 77, annual: 83}
+        XRP:  {15m: 53, 1h: 58, daily: 63, weekly: 69, monthly: 75, annual: 81}
+        DOGE: {15m: 50, 1h: 55, daily: 60, weekly: 65, monthly: 71, annual: 77}
+
+      # Quick-win mode: stricter price caps for 80%+ probability trades
+      # NOTE: 15m entries retained for MERID_CRYPTO_EDGE_PRODUCTION_PROFILE=modern_tradeable_kalshi_v1
+      quick_win_max_price_cents_grid:
+        BTC:  {15m: 52, 1h: 58, daily: 63, weekly: 68, monthly: 73, annual: 78}
+        ETH:  {15m: 50, 1h: 55, daily: 60, weekly: 66, monthly: 71, annual: 76}
+        SOL:  {15m: 48, 1h: 53, daily: 58, weekly: 64, monthly: 70, annual: 76}
+        XRP:  {15m: 46, 1h: 51, daily: 56, weekly: 62, monthly: 68, annual: 74}
+        DOGE: {15m: 43, 1h: 48, daily: 53, weekly: 58, monthly: 64, annual: 70}
 
     kelly_settings:
       base_fraction: 0.20  # tightened from 0.25 (fifth-Kelly for capital preservation)
       confidence_tier_multiplier:
         no_trade: 0.0
-        cautious: 0.5
-        confident: 1.0
+        cautious: 0.5       # 0.10 Kelly effective
+        quick_win: 0.6      # 0.12 Kelly effective
+        confident: 1.0      # 0.20 Kelly effective
 
     min_notional:
       contracts: 1
@@ -101,56 +132,58 @@ profiles:
   # PROFILE: modern (DEPRECATED — use modern_tradeable_kalshi_v1)
   # Kept for backward compatibility; will be removed in future release.
   # ═══════════════════════════════════════════════════════════════════════════════
+  # DEPRECATED: Use modern_tradeable_kalshi_v1 instead
+  # Updated to conservative "sure bet" thresholds (2026-05-10)
   modern:
     rows:
       - asset: "*"
         timeframe: "*"
         archetype: "*"
-        directional_min_edge: "0.011"
-        sentiment_vol_regime_min_edge: "0.011"
-        contrarian_sentiment_min: 58
+        directional_min_edge: "0.050"  # 5.0% min (conservative)
+        sentiment_vol_regime_min_edge: "0.050"
+        contrarian_sentiment_min: 35
         contrarian_model_gap_min: 0.10
         mm_max_spread_cents: "40"
         pm_risk_max_spread_cents: "40"
-        tier_min_edge_floor: "0.005"
-        kelly_fraction: "0.25"
+        tier_min_edge_floor: "0.05"  # Hard floor at 5%
+        kelly_fraction: "0.20"
         min_order_notional_usd: 0.35
         spot_strike_veto_flag: false
 
       - asset: "*"
         timeframe: "1h"
         archetype: "*"
-        directional_min_edge: "0.0125"
-        sentiment_vol_regime_min_edge: "0.0125"
+        directional_min_edge: "0.060"  # 6.0%
+        sentiment_vol_regime_min_edge: "0.060"
 
       - asset: "*"
         timeframe: "daily"
         archetype: "*"
-        directional_min_edge: "0.016"
-        sentiment_vol_regime_min_edge: "0.016"
+        directional_min_edge: "0.070"  # 7.0%
+        sentiment_vol_regime_min_edge: "0.070"
 
       - asset: "*"
         timeframe: "weekly"
         archetype: "*"
-        directional_min_edge: "0.022"
-        sentiment_vol_regime_min_edge: "0.022"
+        directional_min_edge: "0.080"  # 8.0%
+        sentiment_vol_regime_min_edge: "0.080"
 
       - asset: "*"
         timeframe: "monthly"
         archetype: "*"
-        directional_min_edge: "0.025"
-        sentiment_vol_regime_min_edge: "0.025"
+        directional_min_edge: "0.085"  # 8.5%
+        sentiment_vol_regime_min_edge: "0.085"
 
       - asset: "*"
         timeframe: "annual"
         archetype: "*"
-        directional_min_edge: "0.025"
-        sentiment_vol_regime_min_edge: "0.025"
+        directional_min_edge: "0.090"  # 9.0%
+        sentiment_vol_regime_min_edge: "0.090"
 
       - asset: "*"
         timeframe: "*"
         archetype: "contrarian"
-        contrarian_sentiment_min: 59
+        contrarian_sentiment_min: 35
 
   # ═══════════════════════════════════════════════════════════════════════════════
   # PROFILE: legacy (fallback for emergency use only)
@@ -162,7 +195,7 @@ profiles:
         archetype: "*"
         directional_min_edge: "0.04"
         sentiment_vol_regime_min_edge: "0.04"
-        contrarian_sentiment_min: 75
+        contrarian_sentiment_min: 35
         contrarian_model_gap_min: 0.10
         mm_max_spread_cents: "10"
         pm_risk_max_spread_cents: "10"

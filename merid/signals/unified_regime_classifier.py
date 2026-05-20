@@ -172,7 +172,10 @@ class UnifiedRegimeClassifier:
         # Callbacks for regime changes
         self._callbacks: List[Callable[[UnifiedRegimeState, UnifiedRegimeState], None]] = []
         
-        self._lock = threading.Lock()
+        # TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+        # TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+        # self._lock = threading.Lock()
+        self._lock = None  # Disabled to prevent startup hang
         
         logger.info(
             "UnifiedRegimeClassifier initialized (cooldown=%.1fs, history=%d)",
@@ -187,9 +190,14 @@ class UnifiedRegimeClassifier:
         
         Callback receives (old_state, new_state) when regime changes.
         """
-        with self._lock:
+        if self._lock is not None:
+            with self._lock:
+                self._callbacks.append(callback)
+                logger.debug("Regime transition callback registered")
+        else:
+            # Lock disabled - direct update (startup workaround)
             self._callbacks.append(callback)
-            logger.debug("Regime transition callback registered")
+            logger.debug("Regime transition callback registered (lock disabled)")
     
     def update(self) -> UnifiedRegimeState:
         """Compute unified regime from all signal sources.
@@ -197,7 +205,32 @@ class UnifiedRegimeClassifier:
         Returns:
             Updated UnifiedRegimeState
         """
-        with self._lock:
+        if self._lock is not None:
+            with self._lock:
+                now = time.time()
+                
+                # Gather inputs from all signal layers
+                macro_state = self._macro_overlay.get_macro_state()
+                momentum_rankings = self._momentum_ranker.get_current_rankings()
+                btc_regime = self._btc_gate.get_current_regime()
+                
+                # Build new state
+                new_state = self._compute_state(macro_state, momentum_rankings, btc_regime)
+                new_state.timestamp = now
+                
+                # Check for regime transition
+                old_state = self._current_state
+                if old_state is not None:
+                    self._handle_transition(old_state, new_state)
+                
+                # Update history
+                self._regime_history.append(new_state)
+                self._current_state = new_state
+                self._last_update = now
+                
+                return new_state
+        else:
+            # Lock disabled - direct update (startup workaround)
             now = time.time()
             
             # Gather inputs from all signal layers
@@ -462,7 +495,10 @@ class UnifiedRegimeClassifier:
 # ═══════════════════════════════════════════════════════════════════════════
 
 _classifier_instance: Optional[UnifiedRegimeClassifier] = None
-_classifier_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _classifier_lock = threading.Lock()
+_classifier_lock = None  # Disabled to prevent startup hang
 
 
 def get_unified_regime_classifier(
@@ -472,19 +508,31 @@ def get_unified_regime_classifier(
     """Get or create the singleton UnifiedRegimeClassifier."""
     global _classifier_instance
     if _classifier_instance is None:
-        with _classifier_lock:
-            if _classifier_instance is None:
-                _classifier_instance = UnifiedRegimeClassifier(
-                    history_window=history_window,
-                    transition_cooldown_seconds=transition_cooldown_seconds,
-                )
-                logger.info("UnifiedRegimeClassifier singleton initialized")
+        if _classifier_lock is not None:
+            with _classifier_lock:
+                if _classifier_instance is None:
+                    _classifier_instance = UnifiedRegimeClassifier(
+                        history_window=history_window,
+                        transition_cooldown_seconds=transition_cooldown_seconds,
+                    )
+                    logger.info("UnifiedRegimeClassifier singleton initialized")
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _classifier_instance = UnifiedRegimeClassifier(
+                history_window=history_window,
+                transition_cooldown_seconds=transition_cooldown_seconds,
+            )
+            logger.info("UnifiedRegimeClassifier singleton initialized (lock disabled)")
     return _classifier_instance
 
 
 def reset_unified_regime_classifier() -> None:
     """Reset the singleton (for testing)."""
     global _classifier_instance
-    with _classifier_lock:
+    if _classifier_lock is not None:
+        with _classifier_lock:
+            _classifier_instance = None
+            logger.info("UnifiedRegimeClassifier singleton reset")
+    else:
         _classifier_instance = None
-        logger.info("UnifiedRegimeClassifier singleton reset")
+        logger.info("UnifiedRegimeClassifier singleton reset (lock disabled)")

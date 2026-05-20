@@ -352,7 +352,13 @@ class OutcomeResolver:
                 return None
 
             market_data = result.data
-            raw = market_data.raw_data or {}
+            # CRITICAL FIX: Handle CatalogMarket wrapping EventMarket
+            if hasattr(market_data, "market") and hasattr(market_data.market, "raw_data"):
+                raw = market_data.market.raw_data or {}
+            elif hasattr(market_data, "raw_data"):
+                raw = market_data.raw_data or {}
+            else:
+                raw = {}
 
             # Kalshi markets have a 'result' field when settled.
             # Normalize to lowercase to handle API casing variations
@@ -390,7 +396,13 @@ class OutcomeResolver:
             if cm is None:
                 return None
 
-            raw = cm.market.raw_data or {}
+            # CRITICAL FIX: Handle CatalogMarket wrapping EventMarket
+            if hasattr(cm, "market") and hasattr(cm.market, "raw_data"):
+                raw = cm.market.raw_data or {}
+            elif hasattr(cm, "raw_data"):
+                raw = cm.raw_data or {}
+            else:
+                raw = {}
             settlement = raw.get("result")
             if settlement is not None:
                 settlement = str(settlement).strip().lower()

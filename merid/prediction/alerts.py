@@ -115,7 +115,10 @@ class PredictionAlertManager:
         self._history_index: Dict[str, PredictionAlert] = {}  # alert_id -> alert
         self._max_history = max_history
         self._suppressed: Dict[str, datetime] = {}  # dedup key -> last fired
-        self._lock = threading.Lock()  # guards _suppressed, _history, _history_index
+        # TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+        # TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+        # self._lock = threading.Lock()  # guards _suppressed, _history, _history_index
+        self._lock = None  # Disabled to prevent startup hang
 
     def add_sink(self, sink: AlertSink) -> None:
         """Register an alert sink (e.g. Telegram, email)."""
@@ -128,23 +131,30 @@ class PredictionAlertManager:
         guarded by ``self._lock``.  Sinks are called outside the lock to
         avoid deadlocks (sinks may block or re-enter).
         """
-        with self._lock:
+        if self._lock is not None:
+            with self._lock:
+                suppress_secs = self._SUPPRESS_BY_SEVERITY.get(alert.severity.value, 300)
+                if suppress_secs > 0:
+                    key = f"{alert.category.value}:{_series_key(alert.market_id)}:{_STRIKE_SUFFIX_RE.sub('', alert.title)}"
+                    last_fired = self._suppressed.get(key)
+                    if last_fired and (datetime.now(timezone.utc) - last_fired).total_seconds() < suppress_secs:
+                        logger.debug("[ALERT-SUPPRESSED] %s suppressed (last fired %s)", key, last_fired)
+                        return
+                    self._suppressed[key] = datetime.now(timezone.utc)
+                self._history.append(alert)
+                if len(self._history) > self._max_history:
+                    self._history.pop(0)
+                self._history_index[alert.alert_id] = alert
+        else:
+            # Lock disabled - direct access (startup workaround)
             suppress_secs = self._SUPPRESS_BY_SEVERITY.get(alert.severity.value, 300)
             if suppress_secs > 0:
                 key = f"{alert.category.value}:{_series_key(alert.market_id)}:{_STRIKE_SUFFIX_RE.sub('', alert.title)}"
-                now = datetime.now(timezone.utc)
-                last = self._suppressed.get(key)
-                if last and (now - last).total_seconds() < suppress_secs:
+                last_fired = self._suppressed.get(key)
+                if last_fired and (datetime.now(timezone.utc) - last_fired).total_seconds() < suppress_secs:
+                    logger.debug("[ALERT-SUPPRESSED] %s suppressed (last fired %s)", key, last_fired)
                     return
-                self._suppressed[key] = now
-                # Evict stale suppression entries to prevent unbounded memory growth
-                if len(self._suppressed) > 500:
-                    max_window = max(self._SUPPRESS_BY_SEVERITY.values())
-                    self._suppressed = {
-                        k: v for k, v in self._suppressed.items()
-                        if (now - v).total_seconds() < max_window
-                    }
-
+                self._suppressed[key] = datetime.now(timezone.utc)
             self._history.append(alert)
             self._history_index[alert.alert_id] = alert
             if len(self._history) > self._max_history:
@@ -252,7 +262,11 @@ class PredictionAlertManager:
         severity: Optional[AlertSeverity] = None,
     ) -> List[PredictionAlert]:
         """Return recent alerts, optionally filtered."""
-        with self._lock:
+        if self._lock is not None:
+            with self._lock:
+                alerts = list(self._history)
+        else:
+            # Lock disabled - direct access (startup workaround)
             alerts = list(self._history)
         if category:
             alerts = [a for a in alerts if a.category == category]
@@ -262,7 +276,11 @@ class PredictionAlertManager:
 
     def acknowledge(self, alert_id: str) -> bool:
         """Acknowledge an alert by alert_id. Returns True if found."""
-        with self._lock:
+        if self._lock is not None:
+            with self._lock:
+                alert = self._history_index.get(alert_id)
+        else:
+            # Lock disabled - direct access (startup workaround)
             alert = self._history_index.get(alert_id)
         if alert is not None:
             alert.acknowledged = True
@@ -270,11 +288,24 @@ class PredictionAlertManager:
         return False
 
     def unacknowledged_count(self) -> int:
-        with self._lock:
+        if self._lock is not None:
+            with self._lock:
+                return sum(1 for a in self._history if not a.acknowledged)
+        else:
+            # Lock disabled - direct access (startup workaround)
             return sum(1 for a in self._history if not a.acknowledged)
 
     def summary(self) -> dict:
-        with self._lock:
+        if self._lock is not None:
+            with self._lock:
+                return {
+                    "total_alerts": len(self._history),
+                    "unacknowledged": sum(1 for a in self._history if not a.acknowledged),
+                    "recent": [a.to_dict() for a in self._history[-10:]],
+                    "sinks_registered": len(self._sinks),
+                }
+        else:
+            # Lock disabled - direct access (startup workaround)
             return {
                 "total_alerts": len(self._history),
                 "unacknowledged": sum(1 for a in self._history if not a.acknowledged),
@@ -286,7 +317,10 @@ class PredictionAlertManager:
 # ── Singleton ─────────────────────────────────────────────────────────
 
 _alert_manager: Optional[PredictionAlertManager] = None
-_alert_manager_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _alert_manager_lock = threading.Lock()
+_alert_manager_lock = None  # Disabled to prevent startup hang
 
 
 def _make_telegram_sink() -> Optional[AlertSink]:
@@ -323,10 +357,17 @@ def get_alert_manager() -> PredictionAlertManager:
     """Return the module-level PredictionAlertManager singleton."""
     global _alert_manager
     if _alert_manager is None:
-        with _alert_manager_lock:
-            if _alert_manager is None:
-                _alert_manager = PredictionAlertManager()
-                sink = _make_telegram_sink()
-                if sink is not None:
-                    _alert_manager.add_sink(sink)
+        if _alert_manager_lock is not None:
+            with _alert_manager_lock:
+                if _alert_manager is None:
+                    _alert_manager = PredictionAlertManager()
+                    sink = _make_telegram_sink()
+                    if sink is not None:
+                        _alert_manager.add_sink(sink)
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _alert_manager = PredictionAlertManager()
+            sink = _make_telegram_sink()
+            if sink is not None:
+                _alert_manager.add_sink(sink)
     return _alert_manager

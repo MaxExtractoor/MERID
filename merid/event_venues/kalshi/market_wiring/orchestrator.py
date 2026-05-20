@@ -8,6 +8,7 @@ full coverage, explicit mapping, and strong safety constraints.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from typing import Dict, List, Optional, Any
 
@@ -348,14 +349,25 @@ class KalshiWiringOrchestrator:
 
 # Singleton instance
 _wiring_orchestrator: Optional[KalshiWiringOrchestrator] = None
-_wiring_orchestrator_lock = asyncio.Lock()
+_wiring_orchestrator_lock: Optional[asyncio.Lock] = None
+_wiring_orchestrator_lock_init = threading.Lock()
+
+
+def _ensure_wiring_orchestrator_lock() -> asyncio.Lock:
+    """Lazy-initialize the wiring orchestrator lock in the current event loop."""
+    global _wiring_orchestrator_lock
+    if _wiring_orchestrator_lock is None:
+        with _wiring_orchestrator_lock_init:
+            if _wiring_orchestrator_lock is None:
+                _wiring_orchestrator_lock = asyncio.Lock()
+    return _wiring_orchestrator_lock
 
 
 async def get_kalshi_wiring_orchestrator() -> KalshiWiringOrchestrator:
     """Get singleton wiring orchestrator instance"""
     global _wiring_orchestrator
     if _wiring_orchestrator is None:
-        async with _wiring_orchestrator_lock:
+        async with _ensure_wiring_orchestrator_lock():
             if _wiring_orchestrator is None:
                 _wiring_orchestrator = KalshiWiringOrchestrator()
                 await _wiring_orchestrator.initialize()

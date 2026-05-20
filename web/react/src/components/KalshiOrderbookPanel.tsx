@@ -90,43 +90,7 @@ function ConnectionStatusIndicator({ status, reconnectAttempts, onRetry, isRetry
   );
 }
 
-function FallbackOrderbook({ ticker, cachedData }: { ticker: string; cachedData: OrderbookData | null }) {
-  const hasCachedLevels = cachedData && (cachedData.yes_bids?.length + cachedData.yes_asks?.length) > 0;
-  const maxYesBidQty = Math.max(...(cachedData?.yes_bids ?? []).map(l => l.quantity), 1);
-  const maxYesAskQty = Math.max(...(cachedData?.yes_asks ?? []).map(l => l.quantity), 1);
-
-  return (
-    <div className="bg-slate-800 rounded-xl">
-      <div className="p-2 border-b border-slate-700">
-        <div className="flex items-center gap-2">
-          <AlertTriangle className="w-4 h-4 text-amber-400" />
-          <span className="text-xs text-amber-400">{hasCachedLevels ? 'Using cached data (stale)' : 'Orderbook unavailable'}</span>
-        </div>
-      </div>
-      {hasCachedLevels ? (
-        <div className="p-3">
-          <div className="space-y-1">
-            <div className="text-[10px] text-gray-500">Bids</div>
-            {cachedData?.yes_bids?.slice(0, 5).map((level, i) => (
-              <LevelRow key={`bid-${i}`} level={level} side="bid" maxQty={maxYesBidQty} isStale />
-            ))}
-          </div>
-          <div className="space-y-1 mt-3">
-            <div className="text-[10px] text-gray-500">Asks</div>
-            {cachedData?.yes_asks?.slice(0, 5).map((level, i) => (
-              <LevelRow key={`ask-${i}`} level={level} side="ask" maxQty={maxYesAskQty} isStale />
-            ))}
-          </div>
-        </div>
-      ) : (
-        <div className="p-6 text-center">
-          <WifiOff className="w-6 h-6 text-gray-500 mx-auto mb-2" />
-          <p className="text-xs text-gray-500">No orderbook data available</p>
-        </div>
-      )}
-    </div>
-  );
-}
+// FallbackOrderbook component removed - unused
 
 function KalshiOrderbookPanel({ ticker, depth = 5, enhanced = false }: KalshiOrderbookPanelProps) {
   const [cachedData, setCachedData] = useState<OrderbookData | null>(null);

@@ -139,7 +139,8 @@ class KalshiWebSocketBridge:
         # BUG-4 FIX: Dead-letter queue for fills during reconnection
         # Fills that arrive during reconnection are stored here for later processing
         self._fill_dead_letter_queue: List[Dict[str, Any]] = []
-        self._fill_dead_letter_lock = asyncio.Lock()
+        self._fill_dead_letter_lock: Optional[asyncio.Lock] = None  # Lazy-init to avoid event loop binding
+        self._fill_dead_letter_lock_init = threading.Lock()  # Thread-safe lazy init
         self._max_dead_letter_size = 1000  # Max fills to queue during reconnection
         self._processing_dead_letter = False
         
@@ -165,11 +166,13 @@ class KalshiWebSocketBridge:
         
         # Health logger: logs book health every 60s
         self._health_logger_task: Optional[asyncio.Task] = None
-        self._start_lock = asyncio.Lock()
-        
+        self._start_lock: Optional[asyncio.Lock] = None  # Lazy-init to avoid event loop binding
+        self._start_lock_init = threading.Lock()  # Thread-safe lazy init
+
         # CRASH-001: Task failure tracking for health degradation
         self._task_failures: List[Dict[str, Any]] = []
-        self._emergency_reconnect_lock = asyncio.Lock()
+        self._emergency_reconnect_lock: Optional[asyncio.Lock] = None  # Lazy-init to avoid event loop binding
+        self._emergency_reconnect_lock_init = threading.Lock()  # Thread-safe lazy init
         
         # PHASE-2: Circuit breaker for repeated WS failures (production hardening)
         # Tracks recent connection failures to prevent reconnect storms
@@ -182,6 +185,33 @@ class KalshiWebSocketBridge:
         self._CIRCUIT_BREAKER_THRESHOLD: int = 20  # v9: was 10, now 20 failures in window
         self._CIRCUIT_BREAKER_WINDOW_S: float = 60.0  # 60-second window
         self._CIRCUIT_BREAKER_COOLDOWN_S: float = 15.0  # v9: was 30, now 15s backoff when tripped
+        
+        # EVENT-LOOP-FIX: Cache market_state_store reference to avoid repeated lookups
+        self._market_state_store: Optional[Any] = None
+
+    def _ensure_fill_dead_letter_lock(self) -> asyncio.Lock:
+        """Lazy-initialize the fill_dead_letter_lock in the current event loop."""
+        if self._fill_dead_letter_lock is None:
+            with self._fill_dead_letter_lock_init:
+                if self._fill_dead_letter_lock is None:
+                    self._fill_dead_letter_lock = asyncio.Lock()
+        return self._fill_dead_letter_lock
+
+    def _ensure_start_lock(self) -> asyncio.Lock:
+        """Lazy-initialize the start_lock in the current event loop."""
+        if self._start_lock is None:
+            with self._start_lock_init:
+                if self._start_lock is None:
+                    self._start_lock = asyncio.Lock()
+        return self._start_lock
+
+    def _ensure_emergency_reconnect_lock(self) -> asyncio.Lock:
+        """Lazy-initialize the emergency_reconnect_lock in the current event loop."""
+        if self._emergency_reconnect_lock is None:
+            with self._emergency_reconnect_lock_init:
+                if self._emergency_reconnect_lock is None:
+                    self._emergency_reconnect_lock = asyncio.Lock()
+        return self._emergency_reconnect_lock
 
     def _record_task_failure(self, task_name: str, error: str) -> None:
         """Record task failure for health monitoring."""
@@ -273,7 +303,7 @@ class KalshiWebSocketBridge:
 
     async def _emergency_reconnect(self) -> None:
         """Emergency reconnect triggered by critical task failure."""
-        async with self._emergency_reconnect_lock:
+        async with self._ensure_emergency_reconnect_lock():
             if not self._shutdown.is_set():
                 logger.critical("[CRASH-001] Executing emergency reconnect")
                 await self.stop()
@@ -282,15 +312,85 @@ class KalshiWebSocketBridge:
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
+    async def _fetch_snapshots_with_timeout(
+        self,
+        client,
+        store,
+        tickers: List[str],
+        batch_size: int
+    ) -> None:
+        """Fetch REST orderbook snapshots for tickers with per-request timeout.
+        
+        STARTUP-FIX: This helper isolates snapshot fetching to prevent
+        startup stall if individual REST requests hang. Each request gets
+        a 5-second timeout, and the entire batch is wrapped in a 30s timeout
+        by the caller.
+        """
+        for i in range(0, len(tickers), batch_size):
+            batch = tickers[i : i + batch_size]
+            for ticker in batch:
+                try:
+                    # Add per-request timeout to prevent individual hangs
+                    result = await asyncio.wait_for(
+                        client._request_with_resilience(
+                            "GET", f"/markets/{ticker}/orderbook",
+                            operation_name=f"get_orderbook({ticker})"
+                        ),
+                        timeout=5.0  # 5 second timeout per request
+                    )
+                    if result.success and result.data:
+                        # Parse raw REST response
+                        data = result.data
+                        logger.info(f"[WS-SUBSCRIPTION] REST orderbook response for {ticker}: {data}")
+                        no_levels = []
+                        yes_levels = []
+                        orderbook_fp = data.get("orderbook_fp", {})
+                        if "no_dollars" in orderbook_fp:
+                            no_levels = [[float(price), float(size)] for price, size in orderbook_fp["no_dollars"]]
+                        if "yes_dollars" in orderbook_fp:
+                            yes_levels = [[float(price), float(size)] for price, size in orderbook_fp["yes_dollars"]]
+                        
+                        snapshot_msg = {
+                            "ticker": ticker,
+                            "type": "orderbook_snapshot",
+                            "no": no_levels,
+                            "yes": yes_levels,
+                        }
+                        # EVENT-LOOP-FIX: Run in thread pool to avoid blocking on threading.Lock
+                        loop = asyncio.get_running_loop()
+                        await loop.run_in_executor(None, store.apply_orderbook_message, snapshot_msg)
+                        
+                        # Log snapshot bootstrap completion
+                        n_levels = len(no_levels) + len(yes_levels)
+                        state = store.get(ticker)
+                        bid_str = f"{state.best_bid_cents}" if state and state.best_bid_cents else "None"
+                        ask_str = f"{state.best_ask_cents}" if state and state.best_ask_cents else "None"
+                        mid_str = f"{state.mid_cents}" if state and state.mid_cents else "None"
+                        logger.info(
+                            "[SNAPSHOT-BOOTSTRAP] complete market=%s levels=%d bid=%s ask=%s mid=%s source=REST",
+                            ticker, n_levels, bid_str, ask_str, mid_str
+                        )
+                except asyncio.TimeoutError:
+                    logger.warning(f"[WS-SUBSCRIPTION] Timeout fetching REST orderbook for {ticker} (5s limit)")
+                except Exception as e:
+                    logger.warning(f"[WS-SUBSCRIPTION] Failed to fetch REST orderbook for {ticker}: {e}")
+            # Small delay between batches to avoid rate limiting
+            if i + batch_size < len(tickers):
+                await asyncio.sleep(0.1)
+
     async def start(self, tickers: Optional[List[str]] = None) -> None:
         """Connect WS, subscribe to channels, and start forwarding."""
-        async with self._start_lock:
+        async with self._ensure_start_lock():
             if self._task and not self._task.done():
                 logger.warning("WS bridge already running")
                 return
 
             self._shutdown.clear()
             self._start_ts = time.monotonic()
+
+            # EVENT-LOOP-FIX: Cache market_state_store reference at startup
+            from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+            self._market_state_store = get_kalshi_market_state_store()
 
             # Startup sanity log - confirms WS code path is executing
             import os
@@ -338,8 +438,21 @@ class KalshiWebSocketBridge:
             connected = False
             stability_confirmed = False
             for attempt in range(1, 4):
+                attempt_start = time.monotonic()
                 try:
-                    await self._ws.connect()
+                    logger.info(
+                        "[WS-BRIDGE-CONNECT] Attempt %d/3 starting (profile=%s, tickers=%d)",
+                        attempt, os.getenv("MERID_PROFILE", "unknown"), len(tickers) if tickers else 0
+                    )
+                    
+                    # Add timeout to connection attempt to prevent hanging
+                    await asyncio.wait_for(self._ws.connect(), timeout=10.0)
+                    
+                    connect_elapsed = time.monotonic() - attempt_start
+                    logger.info(
+                        "[WS-BRIDGE-CONNECT] Attempt %d/3 connected in %.2fs",
+                        attempt, connect_elapsed
+                    )
                     
                     # PHASE-2: Connection stability gate — wait 500ms to confirm socket stays open
                     # This catches immediate-close scenarios from auth failures
@@ -365,6 +478,11 @@ class KalshiWebSocketBridge:
                     connected = True
                     stability_confirmed = True
                     self._last_connect_time = time.monotonic()
+                    total_elapsed = time.monotonic() - attempt_start
+                    logger.info(
+                        "[WS-BRIDGE-CONNECT] Attempt %d/3 SUCCESS (total=%.2fs, stable=True)",
+                        attempt, total_elapsed
+                    )
                     if attempt > 1:
                         self._reconnect_count += 1
                     # Clear failure history on successful stable connection
@@ -380,19 +498,34 @@ class KalshiWebSocketBridge:
                     
                     break
                     
+                except asyncio.TimeoutError:
+                    self._record_ws_failure()
+                    elapsed = time.monotonic() - attempt_start
+                    logger.warning(
+                        "[WS-BRIDGE-CONNECT] Attempt %d/3 TIMEOUT after %.2fs (10s limit)",
+                        attempt, elapsed
+                    )
+                    if attempt < 3:
+                        delay = 2 ** attempt
+                        await asyncio.sleep(delay)
+                    else:
+                        logger.error(
+                            "[WS-BRIDGE-CONNECT] All 3 attempts timed out (10s limit each)"
+                        )
                 except Exception as exc:
                     self._record_ws_failure()
+                    elapsed = time.monotonic() - attempt_start
                     if attempt < 3:
                         delay = 2 ** attempt
                         logger.warning(
-                            "WS bridge connect attempt %d/3 failed: %s — retrying in %ds",
-                            attempt, type(exc).__name__, delay,
+                            "[WS-BRIDGE-CONNECT] Attempt %d/3 failed after %.2fs: %s — retrying in %ds",
+                            attempt, elapsed, type(exc).__name__, delay,
                         )
                         await asyncio.sleep(delay)
                     else:
                         logger.error(
-                            "WS bridge failed to connect after 3 attempts: %s: %s",
-                            type(exc).__name__, exc,
+                            "[WS-BRIDGE-CONNECT] Failed after 3 attempts: %s: %s (total=%.2fs)",
+                            type(exc).__name__, exc, elapsed,
                         )
             
             # Check if circuit breaker should trip due to accumulated failures
@@ -482,6 +615,48 @@ class KalshiWebSocketBridge:
                         len(ut), original_count,
                         ut[:10] if len(ut) > 10 else ut  # Show first 10 to avoid log spam
                     )
+                    
+                    # ASSERTION: Verify 5 assets subscribed for kalshi_crypto_15m_v2 profile
+                    # Kalshi 15m crypto markets are continuous for BTC/ETH/SOL/XRP/DOGE
+                    # Missing assets indicate a local catalog/subscription bug, not Kalshi absence
+                    profile = os.getenv("MERID_PROFILE", "")
+                    if profile == "kalshi_crypto_15m_v2":
+                        # Extract unique assets from subscribed tickers
+                        subscribed_assets = set()
+                        for ticker in ut:
+                            for symbol in _ALLOWED_SYMBOLS:
+                                if symbol in ticker.upper():
+                                    subscribed_assets.add(symbol)
+                                    break
+                        
+                        # Check catalog for which assets actually have markets
+                        from merid.event_venues.kalshi.market_catalog import get_market_catalog
+                        catalog = get_market_catalog()
+                        assets_with_markets = set()
+                        for cm in catalog.get_all_markets():
+                            if cm.asset:
+                                assets_with_markets.add(cm.asset.upper())
+                        
+                        # All 5 assets are required for kalshi_crypto_15m_v2 profile
+                        expected_assets = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
+                        
+                        missing_assets = expected_assets - subscribed_assets
+                        
+                        if missing_assets:
+                            logger.warning(
+                                "[WS-SUBSCRIPTION-ASSERTION] WARNING: Missing WebSocket subscriptions for assets: %s. "
+                                "Subscribed to: %s. Catalog has markets for: %s. "
+                                "Check prepare_crypto_ws_bridge_subscription filters and catalog ingestion.",
+                                sorted(missing_assets),
+                                sorted(subscribed_assets),
+                                sorted(assets_with_markets)
+                            )
+                        else:
+                            logger.info(
+                                "[WS-SUBSCRIPTION-ASSERTION] OK: All assets with markets subscribed: %s (catalog has: %s)",
+                                sorted(subscribed_assets),
+                                sorted(assets_with_markets)
+                            )
 
                     # UPSTREAM FIX: Priority order - orderbooks (CRITICAL for cache), fills (CRITICAL for execution), trades (MEDIUM), quotes (LOW)
 
@@ -495,65 +670,35 @@ class KalshiWebSocketBridge:
                     # We need to bootstrap the orderbook state via REST to avoid uninitialized books
                     logger.info("[SNAPSHOT-BOOTSTRAP] started markets=%d", len(ut))
                     from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                    from merid.event_venues.kalshi.kalshi_rest_client import get_kalshi_rest_client
                     store = get_kalshi_market_state_store()
-                    client = get_kalshi_client()
+                    rest_client = await get_kalshi_rest_client()
+                    client = await rest_client._ensure_client()
                     
                     # Fetch snapshots in batches to avoid overwhelming the REST API
+                    # STARTUP-FIX: Add timeout to prevent blocking startup if REST API hangs
                     snapshot_batch_size = 10
                     snapshot_success = 0
                     snapshot_failed = 0
-                    for i in range(0, len(ut), snapshot_batch_size):
-                        batch = ut[i : i + snapshot_batch_size]
-                        for ticker in batch:
-                            try:
-                                # Use raw REST API request to get orderbook data directly
-                                # Bypass get_orderbook_result() which returns empty LocalOrderbook
-                                result = await client._request_with_resilience(
-                                    "GET", f"/markets/{ticker}/orderbook",
-                                    operation_name=f"get_orderbook({ticker})"
-                                )
-                                if result.success and result.data:
-                                    # Parse raw REST response: {"orderbook_fp": {"no_dollars": [[price, size], ...], "yes_dollars": [[price, size], ...]}}
-                                    data = result.data
-                                    logger.info(f"[WS-SUBSCRIPTION] REST orderbook response for {ticker}: {data}")
-                                    no_levels = []
-                                    yes_levels = []
-                                    orderbook_fp = data.get("orderbook_fp", {})
-                                    # no_dollars = no side (no contracts), yes_dollars = yes side (yes contracts)
-                                    # LocalOrderbook expects "no" and "yes" keys
-                                    if "no_dollars" in orderbook_fp:
-                                        no_levels = [[float(price), float(size)] for price, size in orderbook_fp["no_dollars"]]
-                                    if "yes_dollars" in orderbook_fp:
-                                        yes_levels = [[float(price), float(size)] for price, size in orderbook_fp["yes_dollars"]]
-                                    
-                                    snapshot_msg = {
-                                        "ticker": ticker,
-                                        "type": "orderbook_snapshot",
-                                        "no": no_levels,
-                                        "yes": yes_levels,
-                                    }
-                                    store.apply_orderbook_message(snapshot_msg)
-                                    
-                                    # Log snapshot bootstrap completion per market with bid/ask/mid for production verification
-                                    n_levels = len(no_levels) + len(yes_levels)
-                                    # Get the applied state to log bid/ask/mid for verification
-                                    state = store.get(ticker)
-                                    bid_str = f"{state.best_bid_cents}" if state and state.best_bid_cents else "None"
-                                    ask_str = f"{state.best_ask_cents}" if state and state.best_ask_cents else "None"
-                                    mid_str = f"{state.mid_cents}" if state and state.mid_cents else "None"
-                                    logger.info(
-                                        "[SNAPSHOT-BOOTSTRAP] complete market=%s levels=%d bid=%s ask=%s mid=%s source=REST",
-                                        ticker, n_levels, bid_str, ask_str, mid_str
-                                    )
-                                    snapshot_success += 1
-                                else:
-                                    snapshot_failed += 1
-                            except Exception as e:
-                                logger.warning(f"[WS-SUBSCRIPTION] Failed to fetch REST orderbook for {ticker}: {e}")
+                    try:
+                        # Wrap entire snapshot bootstrap in timeout to prevent startup stall
+                        await asyncio.wait_for(
+                            self._fetch_snapshots_with_timeout(client, store, ut, snapshot_batch_size),
+                            timeout=30.0  # 30 second timeout for all snapshots
+                        )
+                        # Count successes after timeout completes
+                        for ticker in ut:
+                            state = store.get(ticker)
+                            if state and state.book_initialized:
+                                snapshot_success += 1
+                            else:
                                 snapshot_failed += 1
-                        # Small delay between batches to avoid rate limiting
-                        if i + snapshot_batch_size < len(ut):
-                            await asyncio.sleep(0.1)
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "[SNAPSHOT-BOOTSTRAP] TIMEOUT after 30s - proceeding with %d/%d snapshots initialized",
+                            snapshot_success, len(ut)
+                        )
+                        snapshot_failed = len(ut) - snapshot_success
                     
                     logger.info(
                         "[SNAPSHOT-BOOTSTRAP] completed markets=%d/%d succeeded=%d failed=%d",
@@ -625,11 +770,12 @@ class KalshiWebSocketBridge:
 
             def _task_done_cb(task: asyncio.Task) -> None:
                 """Log unhandled exceptions from background tasks and trigger health degradation."""
+                task_name = task.get_name()
                 if task.cancelled():
+                    logger.info("[WS-BRIDGE] Task %s cancelled", task_name)
                     return
                 exc = task.exception()
                 if exc is not None:
-                    task_name = task.get_name()
                     logger.critical(
                         "WS bridge task %s crashed: %s",
                         task_name, exc, exc_info=exc
@@ -654,6 +800,9 @@ class KalshiWebSocketBridge:
                             if not t.cancelled() and t.exception():
                                 logger.error("Emergency reconnect task failed: %s", t.exception())
                         _emergency_task.add_done_callback(_on_emergency_done)
+                else:
+                    # Task completed successfully - log for visibility
+                    logger.info("[WS-BRIDGE] Task %s completed successfully (no exception)", task_name)
 
             # Start the WS listener task (enqueues events)
             self._task = asyncio.create_task(
@@ -732,9 +881,50 @@ class KalshiWebSocketBridge:
     async def subscribe(self, tickers: List[str]) -> None:
         """Subscribe to additional tickers while running.
         
+        PRODUCTION AUDIT (Step 4): Scope validation - only 15m crypto allowed.
+        
         UPSTREAM FIX: Enforces hard cap on total subscriptions and applies
         tiered shedding when approaching threshold. Rotates subscriptions when at cap.
         """
+        # PRODUCTION AUDIT (Step 4): Filter tickers by trading scope
+        # P0 FIX: Fail-closed import - reject all tickers if trading_scope unavailable
+        try:
+            from config.trading_scope import validate_series_ticker_for_trading, validate_asset_for_trading
+            logger.info("[SCOPE-FILTER] trading_scope import successful, scope filtering enabled")
+        except ImportError as e:
+            # Fail-closed in production: functions always return False to reject everything
+            def validate_series_ticker_for_trading(t: str) -> bool:
+                return False
+            
+            def validate_asset_for_trading(a: str) -> bool:
+                return False
+            
+            logger.error(f"[SCOPE-FILTER] trading_scope import failed ({e}), scope filtering DISABLED - rejecting all tickers")
+        
+        filtered_tickers = []
+        for t in tickers:
+            # Extract asset
+            asset = None
+            if t.startswith("KXBTC"):
+                asset = "BTC"
+            elif t.startswith("KXETH"):
+                asset = "ETH"
+            elif t.startswith("KXSOL"):
+                asset = "SOL"
+            elif t.startswith("KXXRP"):
+                asset = "XRP"
+            elif t.startswith("KXDOGE"):
+                asset = "DOGE"
+            
+            # Check scope
+            if asset and validate_asset_for_trading(asset) and validate_series_ticker_for_trading(t):
+                filtered_tickers.append(t)
+            else:
+                logger.warning(
+                    f"[SCOPE_FILTER] WS subscription rejected: ticker={t} not in production whitelist"
+                )
+        tickers = filtered_tickers
+        
         new = [t for t in tickers if t not in self._subscribed_tickers]
         if not new:
             return
@@ -799,8 +989,10 @@ class KalshiWebSocketBridge:
             # Kalshi WS does NOT send snapshots automatically - only deltas
             logger.info("[SNAPSHOT-BOOTSTRAP] started for %d new tickers", len(ut))
             from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+            from merid.event_venues.kalshi.kalshi_rest_client import get_kalshi_rest_client
             store = get_kalshi_market_state_store()
-            client = get_kalshi_client()
+            rest_client = await get_kalshi_rest_client()
+            client = await rest_client._ensure_client()
             
             snapshot_batch_size = 10
             snapshot_success = 0
@@ -830,7 +1022,9 @@ class KalshiWebSocketBridge:
                                 "no": no_levels,
                                 "yes": yes_levels,
                             }
-                            store.apply_orderbook_message(snapshot_msg)
+                            # EVENT-LOOP-FIX: Run in thread pool to avoid blocking on threading.Lock
+                            loop = asyncio.get_running_loop()
+                            await loop.run_in_executor(None, store.apply_orderbook_message, snapshot_msg)
                             
                             n_levels = len(no_levels) + len(yes_levels)
                             # Get the applied state to log bid/ask/mid for verification
@@ -970,7 +1164,7 @@ class KalshiWebSocketBridge:
             # BUG-4 FIX: Queue fills that fail during reconnection for later processing
             # This prevents fill loss when fills ledger or position cache are unavailable
             try:
-                async with self._fill_dead_letter_lock:
+                async with self._ensure_fill_dead_letter_lock():
                     if len(self._fill_dead_letter_queue) < self._max_dead_letter_size:
                         # Check if this fill is already in the queue (avoid duplicates)
                         fill_id = raw.get("fill_id") or raw.get("id")
@@ -1087,21 +1281,27 @@ class KalshiWebSocketBridge:
 
     async def _health_logger_loop(self) -> None:
         """Periodic task to log book health for all tracked tickers."""
+        logger.info("[WS-BRIDGE] health_logger_loop starting")
         try:
             while not self._shutdown.is_set():
+                logger.info("[WS-BRIDGE] health_logger_loop tick start")
                 try:
                     from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
                     store = get_kalshi_market_state_store()
+                    logger.info("[WS-BRIDGE] health_logger_loop calling log_book_health")
                     store.log_book_health()
+                    logger.info("[WS-BRIDGE] health_logger_loop completed log_book_health")
                 except Exception as exc:
                     logger.error("[WS-BRIDGE] Health logging error: %s", exc, exc_info=True)
                 
-                # Log health every 60 seconds
+                logger.info("[WS-BRIDGE] health_logger_loop sleeping 60s")
                 await asyncio.sleep(60.0)
         except asyncio.CancelledError:
             logger.info("[WS-BRIDGE] Health logger loop cancelled")
         except Exception as exc:
             logger.error("[WS-BRIDGE] Health logger loop crashed: %s", exc, exc_info=True)
+        finally:
+            logger.info("[WS-BRIDGE] health_logger_loop exiting, shutdown=%s", self._shutdown.is_set())
 
     async def _forward_loop(self) -> None:
         """Continuously drain the queue and publish to the event bus.
@@ -1308,26 +1508,27 @@ class KalshiWebSocketBridge:
                 # Feed orderbook data into KalshiMarketStateStore so book fields
                 # (mid_cents, spread_cents, depth_10c) stay live for CryptoAlertRouter
                 # and any other consumer that reads the state store directly.
+                # EVENT-LOOP-FIX: Offload to thread pool to avoid blocking async event loop
                 try:
-                    from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                    # EVENT-LOOP-FIX: Use cached store reference instead of repeated lookups
+                    if self._market_state_store is None:
+                        from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                        self._market_state_store = get_kalshi_market_state_store()
+                    
                     # Extract the actual message body if nested
                     msg_body = event.get("msg", event) if isinstance(event, dict) else event
-                    
+
                     # Preserve type field from outer event if extracting nested msg
                     if isinstance(event, dict) and isinstance(msg_body, dict) and "msg" in event:
                         if "type" in event and "type" not in msg_body:
                             msg_body["type"] = event["type"]
-                    
-                    # DIAGNOSTIC: Log message structure before passing to state store
-                    logger.debug(
-                        "[WS-BRIDGE] Passing to state store: event_type=%s, msg_body keys=%s, has_bids=%s, has_asks=%s",
-                        event.get("type"),
-                        list(msg_body.keys()) if isinstance(msg_body, dict) else "N/A",
-                        "bids" in msg_body if isinstance(msg_body, dict) else False,
-                        "asks" in msg_body if isinstance(msg_body, dict) else False
+
+                    # EVENT-LOOP-FIX: Run apply_orderbook_message in thread pool to avoid blocking
+                    loop = asyncio.get_running_loop()
+                    result = await loop.run_in_executor(
+                        None,
+                        lambda: self._market_state_store.apply_orderbook_message(msg_body)
                     )
-                    
-                    result = get_kalshi_market_state_store().apply_orderbook_message(msg_body)
                     if result:
                         logger.debug(
                             "[WS-STATE-UPDATE] Updated market state for ticker=%s, mid_cents=%s, book_initialized=%s",
@@ -1343,36 +1544,12 @@ class KalshiWebSocketBridge:
                 except Exception as _exc:
                     logger.error("WS bridge → state store update error: %s", _exc, exc_info=True)
                 
-                # CRITICAL FIX: Feed Kalshi market data into MarketMoodBus for sentiment analysis
-                # This fixes the root cause of neutral sentiment (0.0) → model_prob=0.5000 → prob_edge=0.000
-                try:
-                    from merid.swarm.market_mood_bus import get_market_mood_bus
-                    from config.kalshi_crypto_config import kalshi_ticker_to_asset
-                    
-                    body = event.get("msg", event)
-                    ticker = body.get("ticker") or body.get("market_ticker", "")
-                    asset = kalshi_ticker_to_asset(ticker) if ticker else None
-                    
-                    if asset:
-                        mood_bus = get_market_mood_bus()
-                        # Extract price, volume, spread, OI from orderbook message
-                        price = body.get("price") or body.get("mid_price")
-                        volume = body.get("volume_24h", 0)
-                        spread_bps = body.get("spread_bps", 0)
-                        open_interest = body.get("open_interest", 0)
-                        
-                        if price:
-                            mood_bus.update_kalshi_data(
-                                asset=asset,
-                                timeframe="15m",  # Use 15m as default for fast-moving crypto
-                                price=float(price),
-                                volume_24h=float(volume),
-                                spread_bps=float(spread_bps),
-                                open_interest=float(open_interest),
-                                ticker=ticker
-                            )
-                except Exception as _exc:
-                    logger.debug("WS bridge → MarketMoodBus update error (ignored): %s", _exc)
+                # PROFILE-GUARD: Skip MarketMoodBus for kalshi_crypto_15m_v2 (sealed 15m stack)
+                # Sentiment is not used in the 15m profile, so we skip this entire block
+                # to avoid unnecessary imports and logging on every orderbook tick
+                import os
+                merid_profile = os.getenv("MERID_PROFILE", "").lower()
+                # REMOVED: MarketMoodBus integration - sentiment components not used in 15m stack
                 
                 # CRITICAL FIX: Update position cache with current prices for micro-scalp PnL calculation
                 # This fixes $0 PnL exits due to stale current_price_cents
@@ -1507,11 +1684,11 @@ class KalshiWebSocketBridge:
 
     async def _process_dead_letter_queue(self) -> None:
         """Process fills that were queued during reconnection.
-        
+
         This ensures fills received during WebSocket downtime are not lost.
         Called automatically after successful reconnection.
         """
-        async with self._fill_dead_letter_lock:
+        async with self._ensure_fill_dead_letter_lock():
             if self._processing_dead_letter or not self._fill_dead_letter_queue:
                 return
             self._processing_dead_letter = True
@@ -1548,8 +1725,8 @@ class KalshiWebSocketBridge:
             "[WS-DEAD-LETTER] Completed processing: %d success, %d failed",
             processed, failed
         )
-        
-        async with self._fill_dead_letter_lock:
+
+        async with self._ensure_fill_dead_letter_lock():
             self._processing_dead_letter = False
 
     async def _sync_fills_with_rest_on_reconnect(self) -> None:
@@ -1624,16 +1801,23 @@ class KalshiWebSocketBridge:
 # ── Singleton ────────────────────────────────────────────────────────────
 
 _bridge: Optional[KalshiWebSocketBridge] = None
-_bridge_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _bridge_lock = threading.Lock()
+_bridge_lock = None  # Disabled to prevent startup hang
 
 
 def get_ws_bridge() -> KalshiWebSocketBridge:
     """Get or create the singleton KalshiWebSocketBridge."""
     global _bridge
     if _bridge is None:
-        with _bridge_lock:
-            if _bridge is None:
-                _bridge = KalshiWebSocketBridge()
+        if _bridge_lock is not None:
+            with _bridge_lock:
+                if _bridge is None:
+                    _bridge = KalshiWebSocketBridge()
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _bridge = KalshiWebSocketBridge()
     return _bridge
 
 

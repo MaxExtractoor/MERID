@@ -20,7 +20,6 @@ class CoinbaseSpotAdapter(TradingVenueAdapterBase):
     def __init__(self, *, exchange_id: str | None = None) -> None:
         super().__init__(api_key=coinbase_api_key(), api_secret=coinbase_api_secret())
         self.exchange_id = exchange_id or os.getenv("MERID_COINBASE_EXCHANGE_ID", "coinbasepro")
-        self.passphrase = os.getenv("MERID_COINBASE_API_PASSPHRASE")
         self._exchange = None
         if not self.use_mock:
             self._exchange = self._build_exchange()
@@ -35,8 +34,6 @@ class CoinbaseSpotAdapter(TradingVenueAdapterBase):
                 "secret": self.api_secret,
                 "enableRateLimit": True,
             }
-            if self.passphrase:
-                config["password"] = self.passphrase
             return exchange_cls(config)
         except Exception as exc:  # pragma: no cover - relies on ccxt availability
             logger.error("Failed to initialize Coinbase exchange: %s", exc)

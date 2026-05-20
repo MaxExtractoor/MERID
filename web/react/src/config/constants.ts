@@ -21,7 +21,8 @@ if (!API_BASE_URL && typeof window !== 'undefined') {
     }
   } catch { /* non-Vite environment */ }
 }
-export const WS_URL = getEnv('VITE_WS_URL', 'ws://localhost:8011/ws/trades');
+
+export const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8011/ws/trades';
 export const WS_PORTFOLIO_URL = getEnv('VITE_WS_PORTFOLIO_URL', 'ws://localhost:8011/ws/risk');
 
 // API Endpoints
@@ -40,6 +41,12 @@ export const API_ENDPOINTS = {
   SYSTEM_SESSION_LOG: "/api/v1/system/session-log",
   SYSTEM_SYMBOL_STATUS: "/api/v1/system/symbol-status",
   SYSTEM_FRESH_START: "/api/v1/system/fresh-start",
+  SYSTEM_CONTRACT_HEALTH: "/api/v1/system/contract-health",
+  SYSTEM_FEATURE_FLAGS: "/api/v1/system/feature-flags",
+
+  // ── Assistant (Sprint 19) ───────────────────────────────────────────────
+  ASSISTANT_QUERY: "/api/v1/assistant/query",
+  ASSISTANT_CONTEXTS: "/api/v1/assistant/contexts",
   SYSTEM_STOP: "/api/v1/monitoring/system/stop",
   SYSTEM_DECISIONS: "/api/v1/operator/decisions/recent",
   TELEMETRY: "/api/v1/telemetry",
@@ -164,6 +171,10 @@ export const API_ENDPOINTS = {
   KALSHI_BALANCE: "/api/v1/kalshi/balance",
   KALSHI_PNL: "/api/v1/kalshi/pnl",
   KALSHI_RISK: "/api/v1/kalshi/risk",
+  
+  // ── Portfolio Service (Event-Driven) ───────────────────────────────
+  PORTFOLIO_SNAPSHOT: (accountId: string = "default") => `/api/v1/portfolio/snapshot/${accountId}`,
+  PORTFOLIO_WEBSOCKET: (accountId: string = "default") => `/api/v1/portfolio/ws/${accountId}`,
   KALSHI_HEALTH: "/api/v1/kalshi/health",
   KALSHI_DISCOVER_HEALTH: "/api/v1/kalshi/discover-health",
   KALSHI_SWARM_GRID: "/api/v1/kalshi/swarm/grid",
@@ -192,16 +203,24 @@ export const API_ENDPOINTS = {
   KALSHI_EDGE: "/api/v1/kalshi/edge",
   KALSHI_RISK_EVENTS: "/api/v1/kalshi/risk/events",
   KALSHI_RISK_DOWNSIZE: "/api/v1/kalshi/risk/downsize",
+  KALSHI_RISK_ENVELOPE: "/api/v1/kalshi/risk/envelope",
   KALSHI_CONSENSUS_SIGNALS: "/api/v1/kalshi/consensus-signals",
-  KALSHI_NEWS_SIGNALS: "/api/v1/kalshi/news-signals",
-  KALSHI_PUBLISH_PIPELINE: "/api/v1/kalshi/publish-pipeline",
-  KALSHI_PUBLISH_PIPELINE_TRIGGER: "/api/v1/kalshi/publish-pipeline/trigger",
-  KALSHI_FAVORITES: "/api/v1/kalshi/favorites",
-  KALSHI_FAVORITES_TOGGLE: "/api/v1/kalshi/favorites/toggle",
-  KALSHI_CATEGORIES: "/api/v1/kalshi/categories",
+  // NOTE: Removed unused constants with no backend implementation:
+  // - KALSHI_NEWS_SIGNALS (unused)
+  // - KALSHI_PUBLISH_PIPELINE (no backend)
+  // - KALSHI_PUBLISH_PIPELINE_TRIGGER (no backend)
+  // - KALSHI_FAVORITES (no backend)
+  // - KALSHI_FAVORITES_TOGGLE (no backend)
+  // - KALSHI_CATEGORIES (no backend)
   KALSHI_ORDER_CANCEL: (orderId: string) => `/api/v1/kalshi/orders/${orderId}`,
   KALSHI_ORDER_AMEND: (orderId: string) => `/api/v1/kalshi/orders/${orderId}`,
   KALSHI_ORDERS_BATCH_CANCEL: "/api/v1/kalshi/orders",
+
+  // ── FVG (Fair Value Gap) Analysis ────────────────────────────────
+  FVG_SIGNALS: (ticker: string) => `/api/v1/fvg/signals/${ticker}`,
+  FVG_STATS: "/api/v1/fvg/stats",
+  FVG_CONFIG: "/api/v1/fvg/config",
+  FVG_ACTIVE_GAPS: (asset: string, timeframe: string) => `/api/v1/fvg/fvgs/${asset}/${timeframe}`,
 
   // ── Order Groups ────────────────────────────────────────────────
   KALSHI_ORDER_GROUPS: "/api/v1/kalshi/order-groups",
@@ -248,6 +267,9 @@ export const API_ENDPOINTS = {
   KALSHI_INSIGHTS: "/api/v1/kalshi/insights",
   KALSHI_RISK_INSIGHTS: "/api/v1/kalshi/risk/insights",
 
+  // ── Market States (Market Consensus Integration) ─────────────────────
+  KALSHI_MARKET_STATES: "/api/v1/kalshi/market-states",
+
   // ── SentimentBundle ──────────────────────────────────────────────────
   KALSHI_SENTIMENT_BUNDLE: (asset: string) => `/api/v1/kalshi/sentiment/bundle/${asset}`,
 
@@ -263,6 +285,10 @@ export const API_ENDPOINTS = {
   // ── Auto Promoter ─────────────────────────────────────────────────────
   AUTO_PROMOTER_STATUS: "/api/v1/kalshi/deployment/auto-promoter/status",
   AUTO_PROMOTER_PROMOTIONS: "/api/v1/kalshi/deployment/auto-promoter/promotions",
+
+  // ── Operator Auto Promoter ─────────────────────────────────────────────
+  OPERATOR_AUTO_PROMOTER_START: "/api/v1/operator/auto-promoter/start",
+  OPERATOR_AUTO_PROMOTER_STOP: "/api/v1/operator/auto-promoter/stop",
 
   // ── System Config ─────────────────────────────────────────────────────
   CONFIG_RELOAD: "/api/v1/system/config-reload",
@@ -368,6 +394,13 @@ export const API_ENDPOINTS = {
   CALIBRATION_UNRESOLVED: "/api/v1/kalshi/calibration/unresolved",
   CALIBRATION_RESOLVE: "/api/v1/kalshi/calibration/resolve",
   CALIBRATION_CELL_METRICS: "/api/v1/kalshi/calibration/cell-metrics",
+
+  // ── Canonical UI State (Phase 1) ─────────────────────────────────────────────
+  KALSHI_UI_STATE: "/api/v1/kalshi/ui-state",
+  KALSHI_UI_STATE_WS: "/api/v1/kalshi/ui-state/ws",
+  KALSHI_UI_STATE_AGENT_DETAIL: (agentId: string) => `/api/v1/kalshi/ui-state/agent/${agentId}`,
+  KALSHI_UI_STATE_SENTIMENT_DETAIL: (asset: string) => `/api/v1/kalshi/ui-state/sentiment/${asset}`,
+  KALSHI_UI_STATE_MARKET_DETAIL: (ticker: string) => `/api/v1/kalshi/ui-state/market/${ticker}`,
 
 } as const;
 

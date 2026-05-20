@@ -111,6 +111,23 @@ class KalshiMetricsCollector:
             "Current drawdown percentage"
         )
         
+        # Risk envelope metrics
+        self.envelope_band = Gauge(
+            "kalshi_risk_envelope_band",
+            "Current risk envelope band (1.0, 0.75, 0.5, 0.25, 0.0)",
+            ["profile"]
+        )
+        self.envelope_distance_to_halt_pct = Gauge(
+            "kalshi_risk_envelope_distance_to_halt_pct",
+            "Remaining headroom before halt as percentage",
+            ["profile"]
+        )
+        self.envelope_per_trade_multiplier = Gauge(
+            "kalshi_risk_envelope_per_trade_multiplier",
+            "Current per-trade risk multiplier applied to base risk",
+            ["profile"]
+        )
+        
         # Regime metrics
         self.regime_active = Gauge(
             "kalshi_regime",

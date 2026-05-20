@@ -406,12 +406,35 @@ _default_monitor_lock = threading.Lock()
 
 
 def get_whale_monitor(config: Optional[WhaleMonitorConfig] = None) -> WhaleMonitor:
-    """Get or create the default WhaleMonitor instance."""
+    """Get or create the default WhaleMonitor instance.
+
+    Thread-safe singleton with double-checked locking pattern.
+    Warns if config mismatch detected (config changes are ignored after init).
+    """
     global _default_monitor
+    # Double-checked locking pattern for thread safety
     if _default_monitor is None:
         with _default_monitor_lock:
+            # Second check inside lock to prevent race condition
             if _default_monitor is None:
-                _default_monitor = WhaleMonitor(config)
+                try:
+                    _default_monitor = WhaleMonitor(config)
+                except Exception as e:
+                    logger.error("[WHALE] Failed to create WhaleMonitor: %s", e)
+                    raise
+
+    # Warn if caller requested different config than existing singleton
+    if config is not None and _default_monitor is not None:
+        existing_cfg = _default_monitor.config
+        if (config.mint_address != existing_cfg.mint_address or
+            config.whale_threshold != existing_cfg.whale_threshold):
+            logger.warning(
+                "[WHALE] Config mismatch: requested mint=%s/threshold=%s but "
+                "singleton has mint=%s/threshold=%s. Returning existing singleton.",
+                config.mint_address, config.whale_threshold,
+                existing_cfg.mint_address, existing_cfg.whale_threshold
+            )
+
     return _default_monitor
 
 

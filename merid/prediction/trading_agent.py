@@ -5750,63 +5750,7 @@ class KalshiTradingAgent:
         snapshot.phantom_pricing = _is_phantom_pricing
         snapshot.pricing_source = _pricing_source
 
-        # Inject fear/greed sentiment scores
-        # H2: gate on context age — stale sentiment must not bias the snapshot.
-        # H9: set sentiment_adjusted=True so forecasters skip their own nudge.
-        _MAX_SENTIMENT_AGE_S = 900.0  # 15 minutes
-        try:
-            from merid.event_venues.kalshi.sentiment import get_sentiment_service
-            svc = get_sentiment_service()
-            # Feed latest data point so the service stays current
-            svc.update_market(
-                market.market_id,
-                prob=float(implied.yes_prob),
-                volume=float(market.volume or 0),
-                category=(market.category or "unknown").lower(),
-            )
-            local_s = svc.market_score(market.market_id)
-            cat_s   = svc.category_score((market.category or "unknown").lower())
-            glob_s  = svc.global_score()
-
-            # H2: determine age of the context; skip injection if stale
-            _ctx_ts = None
-            try:
-                from merid.sentiment.sentiment_bus_v2 import get_sentiment_bus_v2
-                _bus_v2 = get_sentiment_bus_v2()
-                asset = self.config.assets[0] if self.config.assets else None
-                if asset:
-                    _asset_ctx = _bus_v2.get_asset_context(asset)
-                    if _asset_ctx and hasattr(_asset_ctx, "timestamp"):
-                        _ctx_ts = _asset_ctx.timestamp
-            except Exception as e:
-                self.logger.debug(f"Silent error suppressed: {e}")
-
-            _age_s: Optional[float] = None
-            if _ctx_ts is not None:
-                try:
-                    from datetime import timezone as _tz
-                    _ctx_aware = _ctx_ts if _ctx_ts.tzinfo else _ctx_ts.replace(tzinfo=_tz.utc)
-                    _now_aware = now if now.tzinfo else now.replace(tzinfo=_tz.utc)
-                    _age_s = (_now_aware - _ctx_aware).total_seconds()
-                except Exception as e:
-                    self.logger.debug(f"Silent error suppressed: {e}")
-
-            if _age_s is not None and _age_s > _MAX_SENTIMENT_AGE_S:
-                self.logger.warning(
-                    "Sentiment context age %.0fs exceeds limit %.0fs for %s — "
-                    "skipping sentiment injection (H2)",
-                    _age_s, _MAX_SENTIMENT_AGE_S, market.market_id,
-                )
-            else:
-                snapshot.sentiment_local    = local_s.score if local_s else None
-                snapshot.sentiment_category = cat_s.score
-                snapshot.sentiment_global   = glob_s.score
-                snapshot.sentiment_regime   = local_s.regime if local_s else glob_s.regime
-                snapshot.sentiment_age_seconds = _age_s
-                # H9: mark as adjusted so forecasters do not re-apply the nudge
-                snapshot.sentiment_adjusted = True
-        except Exception as _se:
-            self.logger.debug("sentiment enrichment skipped: %s", _se)
+        # REMOVED: Fear/greed sentiment injection - not used in 15m stack
 
         # Compute edges for both sides using the model (single spot fetch per snapshot)
         from merid.prediction.spot_strike_context import (
@@ -8361,21 +8305,7 @@ class KalshiTradingAgent:
         except Exception as exc:
             self.logger.debug(f"Explainability blocked order record skipped: {exc}")
 
-    # ── Market Mood Bus Integration ────────────────────────────────────────
-
-    def _get_mood_context(
-        self,
-        asset: str,
-        timeframe: str,
-    ) -> Optional[Any]:
-        """Get unified market context from the Market Mood Bus."""
-        try:
-            from merid.swarm.market_mood_bus import get_market_mood_bus
-            bus = get_market_mood_bus()
-            return bus.get_context(asset, timeframe)
-        except Exception as exc:
-            self.logger.debug(f"MarketMoodBus fetch error: {exc}")
-            return None
+    # REMOVED: Market Mood Bus Integration - not used in 15m stack
 
     def _build_kalshi_market_context(self, ticker: str, snapshot: MarketSnapshot) -> dict:
         """Build a market-data context dict from live KalshiMarketState + snapshot.
@@ -8508,6 +8438,8 @@ class KalshiTradingAgent:
             )
         except Exception as exc:
             self.logger.warning("consensus_proposal_failed (non-fatal): %s", exc)
+
+    # REMOVED: _submit_to_consensus - not used in 15m stack
 
     def _submit_to_consensus(
         self,

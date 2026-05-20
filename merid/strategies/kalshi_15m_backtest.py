@@ -102,11 +102,8 @@ class BacktestSummary:
 # Fee helpers
 # ═══════════════════════════════════════════════════════════════════════════
 
-
-def kalshi_fee_cents(price_cents: float, contracts: int = 1) -> float:
-    """Kalshi taker fee: ceil(0.07 * contracts * P * (1-P))."""
-    p = price_cents / 100.0
-    return math.ceil(0.07 * contracts * p * (1.0 - p))
+# Use canonical fee calculation from unified fees module
+from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents as kalshi_fee_cents
 
 
 def trade_pnl_cents(

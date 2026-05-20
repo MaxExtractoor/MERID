@@ -20,7 +20,9 @@ import {
   ChevronRight, Zap, Activity, TrendingUp
 } from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
-import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY } from '../config/constants';
+import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { getAuthHeaders } from '../services/auth';
+import { fmtTimestamp } from '../utils/formatters';
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/Card';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
@@ -106,37 +108,20 @@ interface DeploymentTransition {
   reason: string;
 }
 
-const authHeaders = (): HeadersInit => {
-  const token = localStorage.getItem(AUTH_TOKEN_KEY);
-  return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}`, 'X-Session-ID': token } : {}) };
-};
-
-const MODE_COLORS: Record<string, { bg: string; text: string; border: string; label: string }> = {
-  PAPER: { bg: 'bg-blue-500/20', text: 'text-blue-400', border: 'border-blue-500/30', label: 'Paper' },
-  SHADOW: { bg: 'bg-purple-500/20', text: 'text-purple-400', border: 'border-purple-500/30', label: 'Shadow' },
-  LIVE: { bg: 'bg-green-500/20', text: 'text-green-400', border: 'border-green-500/30', label: 'Live' },
-  HALTED: { bg: 'bg-red-500/20', text: 'text-red-400', border: 'border-red-500/30', label: 'Halted' },
-};
-
 // ── Sub-Components ─────────────────────────────────────────────────────────
 
 interface AgentCardProps {
   agent: AgentSummary;
-  onClick?: () => void;
 }
 
-const AgentCard: React.FC<AgentCardProps> = ({ agent, onClick }) => {
+const AgentCard: React.FC<AgentCardProps> = ({ agent }) => {
   const isHealthy = agent.running && !agent.last_error;
-  const lastCycle = agent.last_cycle_at 
-    ? new Date(agent.last_cycle_at).toLocaleTimeString() 
-    : 'Never';
   
   return (
     <div 
-      onClick={onClick}
-      className={`p-3 rounded-lg border cursor-pointer transition-colors ${
+      className={`p-3 rounded-lg border transition-colors ${
         isHealthy 
-          ? 'bg-slate-800 border-slate-700 hover:border-slate-600' 
+          ? 'bg-slate-800 border-slate-700' 
           : 'bg-red-500/10 border-red-500/30'
       }`}
     >
@@ -145,8 +130,8 @@ const AgentCard: React.FC<AgentCardProps> = ({ agent, onClick }) => {
         <div className={`w-2 h-2 rounded-full ${isHealthy ? 'bg-green-400' : 'bg-red-400'}`} />
       </div>
       
-      <div className="text-xs text-slate-500 mb-2">
-        {agent.config.assets?.join(', ')} · {agent.config.timeframes?.join(', ')}
+      <div className="text-xs text-slate-500">
+        {agent.series_tickers?.join(', ') || 'No tickers'}
       </div>
       
       <div className="grid grid-cols-2 gap-2 text-xs">
@@ -181,7 +166,6 @@ const AgentCard: React.FC<AgentCardProps> = ({ agent, onClick }) => {
 const PromoteView: React.FC = () => {
   const [activeTab, setActiveTab] = useState<PromoteTab>('pipeline');
   const [gridLoading, setGridLoading] = useState(false);
-  const [selectedAgent, setSelectedAgent] = useState<AgentSummary | null>(null);
   
   // Data fetching
   const gridRes = useApiData<GridStatus>(
@@ -209,7 +193,7 @@ const PromoteView: React.FC = () => {
           : API_ENDPOINTS.KALSHI_GRID_PAUSE;
       const res = await fetch(`${API_BASE_URL}${endpoint}`, {
         method: 'POST',
-        headers: authHeaders(),
+        headers: getAuthHeaders(),
       });
       if (!res.ok) throw new Error(`Failed to ${action} grid`);
       gridRes.refetch();
@@ -226,9 +210,10 @@ const PromoteView: React.FC = () => {
   ];
 
   // Group agents by asset/timeframe for matrix view
+  // 15m stack focus: only 15m timeframe (1h, daily, weekly removed as legacy)
   const agentMatrix = React.useMemo(() => {
     const assets = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
-    const timeframes = ['15m', '1h', 'daily', 'weekly'];
+    const timeframes = ['15m'];
     
     return assets.map(asset => ({
       asset,
@@ -403,10 +388,10 @@ const PromoteView: React.FC = () => {
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {transitions.slice(0, 10).map((t, i) => (
-                      <div key={i} className="flex items-center gap-4 p-3 bg-slate-800 rounded-lg">
+                    {transitions.slice(0, 10).map((t) => (
+                      <div key={`${t.agent}:${t.ts}`} className="flex items-center gap-4 p-3 bg-slate-800 rounded-lg">
                         <div className="text-xs text-slate-500 w-24">
-                          {new Date(t.ts).toLocaleTimeString()}
+                          {fmtTimestamp(t.ts, { timeOnly: true })}
                         </div>
                         <div className="font-medium text-white w-32">{t.agent}</div>
                         <div className="flex items-center gap-2">
@@ -439,9 +424,6 @@ const PromoteView: React.FC = () => {
                       <tr className="border-b border-slate-800">
                         <th className="text-left p-3 text-slate-500 text-sm">Asset</th>
                         <th className="text-center p-3 text-slate-500 text-sm">15m</th>
-                        <th className="text-center p-3 text-slate-500 text-sm">1h</th>
-                        <th className="text-center p-3 text-slate-500 text-sm">Daily</th>
-                        <th className="text-center p-3 text-slate-500 text-sm">Weekly</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -452,7 +434,6 @@ const PromoteView: React.FC = () => {
                             <td key={timeframe} className="p-2">
                               {agent ? (
                                 <button
-                                  onClick={() => setSelectedAgent(agent)}
                                   className={`w-full p-2 rounded text-xs text-left transition-colors ${
                                     agent.running 
                                       ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30' 
@@ -488,7 +469,6 @@ const PromoteView: React.FC = () => {
                     <AgentCard 
                       key={agent.name} 
                       agent={agent} 
-                      onClick={() => setSelectedAgent(agent)}
                     />
                   ))}
                 </div>

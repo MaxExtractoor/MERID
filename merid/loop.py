@@ -52,13 +52,11 @@ _loop_executor: Optional[ThreadPoolExecutor] = None
 _arb_executor: Optional[ThreadPoolExecutor] = None
 
 def _get_loop_executor() -> ThreadPoolExecutor:
-    """Get or create the dedicated loop executor with 48 workers."""
-    global _loop_executor
-    if _loop_executor is None or _loop_executor._shutdown:
-        # 48 workers allows 43 agents + loop operations to run concurrently without queue buildup
-        # BUG-EL24 FIX: Increased from 32 to 48 to prevent thread pool saturation
-        _loop_executor = ThreadPoolExecutor(max_workers=48, thread_name_prefix="merid_loop")
-    return _loop_executor
+    """Get or create the dedicated loop executor with 48 workers.
+    
+    DISABLED - use default executor (None) to avoid Windows event loop issues.
+    """
+    return None
 
 
 def _get_arb_executor() -> ThreadPoolExecutor:
@@ -144,7 +142,7 @@ class LoopConfig:
 
     # Domains to run
     active_domains: List[str] = field(default_factory=lambda: ["crypto", "prediction"])
-    active_symbols: List[str] = field(default_factory=lambda: ["BTC", "ETH", "SOL"])
+    active_symbols: List[str] = field(default_factory=lambda: ["BTC", "ETH", "SOL", "XRP", "DOGE"])
 
     # Per-domain mode map (populated by from_paper_config)
     domain_modes: Dict[str, str] = field(default_factory=dict)
@@ -170,6 +168,19 @@ class LoopConfig:
                     # "BTC/USD" -> "BTC", "AAPL" -> "AAPL"
                     short = s.split("/")[0] if "/" in s else s
                     price_symbols.append(short)
+        
+        # CRITICAL FIX: Derive crypto assets from catalog for prediction domain
+        # paper_config has symbols=[] for prediction (dynamic), so get assets from catalog
+        if any(d.name == "prediction" and d.enabled for d in pc.active_domains()):
+            try:
+                from merid.event_venues.kalshi.market_catalog import get_market_catalog
+                catalog = get_market_catalog()
+                catalog_assets = list(catalog.asset_index.keys())
+                # Add catalog crypto assets to price_symbols
+                price_symbols.extend([a for a in catalog_assets if a not in price_symbols])
+            except Exception as _e:
+                # Fallback to hardcoded list if catalog unavailable
+                price_symbols.extend(["BTC", "ETH", "SOL", "XRP", "DOGE"])
 
         domain_modes = {d.name: d.mode.value for d in pc.active_domains()}
         # paper_config keeps prediction=PAPER for legacy MeridLoop/matching semantics;
@@ -348,6 +359,26 @@ class MeridLoop:
         # before run() is called (e.g. in tests or if tick() is called standalone).
         self._ws_bridge = None
 
+        # Log lane and agent registration for debugging
+        self._lanes: Dict[str, Any] = {}
+        self._agents: List[Any] = []
+        logger.info("[MERID-LOOP-INIT] lanes=%s agents=%s", sorted(self._lanes.keys()), len(self._agents))
+
+        # WATCHDOG: Error budget and stall detection
+        self._tick_errors: List[float] = []  # timestamps of recent tick errors
+        self._last_tick_time: Optional[float] = None  # timestamp of last successful tick
+        self._WATCHDOG_ERROR_BUDGET = 5  # max errors allowed in window
+        self._WATCHDOG_ERROR_WINDOW_S = 300.0  # 5-minute window for error budget
+        self._WATCHDOG_STALL_THRESHOLD_S = 60.0  # 60 seconds without successful tick = stall
+
+        # MONITORING: Aggregate stats tracking
+        self._tick_trades_count = 0  # trades in current tick
+        self._aggregate_trades_since_start = 0  # total trades since start
+        self._last_aggregate_log_tick = 0  # tick index of last aggregate log
+
+        # P1-4: Log structured startup snapshot for kalshi_crypto_15m_v2 profile
+        self._log_kalshi_startup_snapshot()
+
         # Initialize matching engines for domains that have them configured
         try:
             from merid.matching_engine import init_matching_engines
@@ -358,6 +389,311 @@ class MeridLoop:
                 )
         except Exception as e:
             logger.warning(f"Matching engine init skipped: {e}")
+
+    def _check_watchdog(self, now: float) -> None:
+        """Check error budget and stall detection.
+        
+        Enforces:
+        - Error budget: if > N errors in last M minutes, halt
+        - Stall detection: if no successful tick in threshold, log stall
+        
+        Args:
+            now: Current timestamp
+        """
+        import time
+        
+        # Clean old errors outside the window
+        window_start = now - self._WATCHDOG_ERROR_WINDOW_S
+        self._tick_errors = [ts for ts in self._tick_errors if ts > window_start]
+        
+        # Check error budget
+        error_count = len(self._tick_errors)
+        if error_count >= self._WATCHDOG_ERROR_BUDGET:
+            logger.critical(
+                "[WATCHDOG] Error budget exceeded: %d errors in last %.1fs (budget=%d)",
+                error_count, self._WATCHDOG_ERROR_WINDOW_S, self._WATCHDOG_ERROR_BUDGET
+            )
+            logger.critical("[WATCHDOG] Halting MeridLoop - too many tick errors")
+            self._running = False
+            return
+        
+        # Check stall detection
+        if self._last_tick_time is not None:
+            time_since_last_tick = now - self._last_tick_time
+            if time_since_last_tick > self._WATCHDOG_STALL_THRESHOLD_S:
+                logger.warning(
+                    "[WATCHDOG] Stall detected: %.1fs since last successful tick (threshold=%.1fs)",
+                    time_since_last_tick, self._WATCHDOG_STALL_THRESHOLD_S
+                )
+            elif error_count > 0:
+                logger.info(
+                    "[WATCHDOG] Health check: %d errors in window, %.1fs since last tick",
+                    error_count, time_since_last_tick
+                )
+
+    def _compute_profile_signature(self) -> dict:
+        """Compute a signature dict of critical profile parameters.
+        
+        This captures the key risk/edge/distance parameters that should not change
+        unexpectedly. Used to detect configuration drift between runs.
+        """
+        signature = {}
+        
+        try:
+            from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+            envelope = get_kalshi_crypto_15m_risk_envelope()
+            
+            # Venue caps
+            signature['max_single_order_notional_usd'] = round(envelope.max_single_order_notional_usd, 2)
+            signature['max_total_notional_usd'] = round(envelope.max_total_notional_usd, 2)
+            signature['max_concurrent_trades'] = envelope.max_concurrent_trades
+            signature['max_daily_loss_usd'] = round(envelope.max_daily_loss_usd, 2)
+            signature['drawdown_halt_pct'] = round(envelope.drawdown_halt_pct, 4)
+            signature['drawdown_unwind_pct'] = round(envelope.drawdown_unwind_pct, 4)
+            
+            # Per-asset caps
+            signature['asset_caps'] = {
+                asset: round(cap, 2) 
+                for asset, cap in envelope.asset_max_notional_usd.items()
+            }
+        except Exception as e:
+            logger.warning("[PROFILE-SIGNATURE] Failed to include envelope params: %s", e)
+        
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+            adapter = get_active_profile()
+            if adapter:
+                p = adapter.profile
+                
+                # Edge thresholds per asset
+                signature['edge_thresholds'] = {}
+                for asset in ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE']:
+                    if asset in p.asset_configs:
+                        ac = p.asset_configs[asset]
+                        signature['edge_thresholds'][asset] = {
+                            'early': round(ac.min_edge_early, 4),
+                            'mid': round(ac.min_edge_mid, 4),
+                            'late': round(ac.min_edge_late, 4),
+                            'terminal': round(ac.min_edge_terminal, 4),
+                        }
+                
+                # Kelly parameters
+                signature['kelly'] = {
+                    'hard_cap': round(p.kelly_hard_cap, 4),
+                    'min_edge': round(p.kelly_min_edge_pct, 4),
+                    'max_edge': round(p.kelly_max_edge_pct, 4),
+                }
+        except Exception as e:
+            logger.warning("[PROFILE-SIGNATURE] Failed to include edge thresholds: %s", e)
+        
+        return signature
+    
+    def _log_profile_diff(self, current: dict, previous: dict) -> None:
+        """Log differences between current and previous profile signatures.
+        
+        Args:
+            current: Current profile signature dict
+            previous: Previous profile signature dict (may be None)
+        """
+        if previous is None:
+            logger.info("[PROFILE-DIFF] No previous snapshot found - creating baseline")
+            return
+        
+        logger.info("=" * 80)
+        logger.info("[PROFILE-DIFF] Configuration Change Detection")
+        logger.info("=" * 80)
+        
+        changes = []
+        
+        # Compare top-level keys
+        for key in set(current.keys()) | set(previous.keys()):
+            if key not in previous:
+                changes.append(f"  + {key}: {current[key]} (new)")
+            elif key not in current:
+                changes.append(f"  - {key}: {previous[key]} (removed)")
+            elif current[key] != previous[key]:
+                changes.append(f"  ~ {key}: {previous[key]} → {current[key]}")
+        
+        # Compare nested dicts
+        for key in ['asset_caps', 'edge_thresholds', 'kelly']:
+            if key in current or key in previous:
+                curr_nested = current.get(key, {})
+                prev_nested = previous.get(key, {})
+                
+                if curr_nested != prev_nested:
+                    changes.append(f"  ~ {key}: {prev_nested} → {curr_nested}")
+        
+        if changes:
+            logger.warning("[PROFILE-DIFF] %d parameter changes detected:", len(changes))
+            for change in changes:
+                logger.warning(change)
+            logger.warning("[PROFILE-DIFF] Review these changes to ensure they are intentional")
+        else:
+            logger.info("[PROFILE-DIFF] No parameter changes detected")
+        
+        logger.info("=" * 80)
+    
+    def _save_profile_snapshot(self, signature: dict) -> None:
+        """Save current profile signature to disk for next-run comparison.
+        
+        Args:
+            signature: Current profile signature dict
+        """
+        try:
+            from pathlib import Path
+            import json
+            from datetime import datetime
+            
+            snapshot_dir = Path("data/profile_snapshots")
+            snapshot_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Save with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            snapshot_file = snapshot_dir / f"kalshi_crypto_15m_{timestamp}.json"
+            
+            with open(snapshot_file, 'w') as f:
+                json.dump({
+                    'timestamp': timestamp,
+                    'signature': signature
+                }, f, indent=2)
+            
+            # Update "last.json" symlink/copy
+            last_file = snapshot_dir / "last.json"
+            with open(last_file, 'w') as f:
+                json.dump({
+                    'timestamp': timestamp,
+                    'signature': signature
+                }, f, indent=2)
+            
+            logger.info("[PROFILE-SNAPSHOT] Saved to %s", snapshot_file)
+        except Exception as e:
+            logger.warning("[PROFILE-SNAPSHOT] Failed to save snapshot: %s", e)
+
+    def _log_kalshi_startup_snapshot(self) -> None:
+        """Log structured startup snapshot for kalshi_crypto_15m_v2 profile.
+        
+        P1-4: This provides a single unified log showing the complete configuration
+        flow from profile → envelope → capabilities → agents for observability.
+        """
+        import os
+        profile = os.getenv("MERID_PROFILE", "").lower()
+        
+        # Only log for kalshi_crypto_15m_v2 profile
+        if profile != "kalshi_crypto_15m_v2":
+            return
+        
+        logger.info("=" * 80)
+        logger.info("[STARTUP-SNAPSHOT] Kalshi 15m Crypto Profile Configuration")
+        logger.info("=" * 80)
+        
+        # Log profile configuration
+        logger.info("[PROFILE] MERID_PROFILE=%s", profile)
+        logger.info("[PROFILE] MERID_PM_PROFILE=%s", os.getenv("MERID_PM_PROFILE", "baseline"))
+        logger.info("[PROFILE] KALSHI_ENV=%s", os.getenv("KALSHI_ENV", "production"))
+        
+        # Profile diff detection
+        try:
+            from pathlib import Path
+            import json
+            
+            # Compute current signature
+            current_signature = self._compute_profile_signature()
+            
+            # Load previous signature
+            previous_signature = None
+            last_file = Path("data/profile_snapshots/last.json")
+            if last_file.exists():
+                with open(last_file) as f:
+                    data = json.load(f)
+                    previous_signature = data.get('signature')
+            
+            # Log diff
+            self._log_profile_diff(current_signature, previous_signature)
+            
+            # Save current signature
+            self._save_profile_snapshot(current_signature)
+        except Exception as e:
+            logger.warning("[PROFILE-DIFF] Failed to compute/log profile diff: %s", e)
+        
+        # Log risk envelope
+        try:
+            from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+            envelope = get_kalshi_crypto_15m_risk_envelope()
+            logger.info("[ENVELOPE] profile_capital_usd=$%.2f", envelope.profile_capital_usd)
+            logger.info("[ENVELOPE] live_bankroll_usd=$%.2f", envelope.live_bankroll_usd)
+            logger.info("[ENVELOPE] max_single_order_notional_usd=$%.2f", envelope.max_single_order_notional_usd)
+            logger.info("[ENVELOPE] max_total_notional_usd=$%.2f", envelope.max_total_notional_usd)
+            logger.info("[ENVELOPE] max_concurrent_trades=%d", envelope.max_concurrent_trades)
+            logger.info("[ENVELOPE] agent_max_notional_usd=$%.2f", envelope.agent_max_notional_usd)
+            logger.info("[ENVELOPE] max_daily_loss_usd=$%.2f", envelope.max_daily_loss_usd)
+            logger.info("[ENVELOPE] drawdown_halt_pct=%.2f%%", envelope.drawdown_halt_pct * 100)
+            logger.info("[ENVELOPE] drawdown_unwind_pct=%.2f%%", envelope.drawdown_unwind_pct * 100)
+            
+            # Log per-asset caps
+            logger.info("[ENVELOPE] Per-asset caps:")
+            for asset, cap in envelope.asset_max_notional_usd.items():
+                logger.info("[ENVELOPE-ASSET] %s: max_notional=$%.2f (%.1f%% of envelope capital)", 
+                           asset, cap, (cap / envelope.profile_capital_usd * 100))
+        except Exception as e:
+            logger.warning("[STARTUP-SNAPSHOT] Failed to load risk envelope: %s", e)
+        
+        # Log capability maps
+        try:
+            from merid.guardrails.capabilities import get_capability_store
+            cap_store = get_capability_store()
+            stats = cap_store.get_stats()
+            logger.info("[CAPABILITIES] total_agents=%d", stats.get("total_agents", 0))
+            logger.info("[CAPABILITIES] by_max_scope=%s", stats.get("by_max_scope", {}))
+            
+            # Log each Kalshi PM agent capability
+            kalshi_agents = [aid for aid in cap_store.list_agents() if "kalshi" in aid.lower() and "15m" in aid.lower()]
+            for agent_id in kalshi_agents:
+                cap_map = cap_store.get(agent_id)
+                if cap_map:
+                    logger.info(
+                        "[CAPABILITY] agent=%s max_scope=%s max_notional=$%.2f tools=%d",
+                        cap_map.agent_id,
+                        cap_map.max_scope,
+                        cap_map.max_notional_usd,
+                        len(cap_map.allowed_tools)
+                    )
+        except Exception as e:
+            logger.warning("[STARTUP-SNAPSHOT] Failed to load capability maps: %s", e)
+        
+        # Log paper session state
+        try:
+            from merid.prediction.paper_session import get_paper_session
+            ps = get_paper_session()
+            if ps:
+                logger.info("[PAPER-SESSION] session_id=%s", ps._session_id)
+                logger.info("[PAPER-SESSION] intervals=%d", len(ps._intervals))
+                logger.info("[PAPER-SESSION] live_promoted=%d", len(ps._live_promoted))
+        except Exception as e:
+            logger.debug("[STARTUP-SNAPSHOT] Paper session not available: %s", e)
+        
+        # Log edge thresholds from profile YAML
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+            adapter = get_active_profile()
+            if adapter:
+                p = adapter.profile
+                logger.info("[THRESHOLDS] Per-asset edge thresholds from profile YAML:")
+                for asset in ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE']:
+                    if asset in p.asset_configs:
+                        ac = p.asset_configs[asset]
+                        logger.info(
+                            "[THRESHOLD] %s: min_edge_early=%.2f%%, min_edge_mid=%.2f%%, min_edge_late=%.2f%%, min_edge_terminal=%.2f%%",
+                            asset, ac.min_edge_early * 100, ac.min_edge_mid * 100, ac.min_edge_late * 100, ac.min_edge_terminal * 100
+                        )
+                logger.info("[THRESHOLDS] Kelly: hard_cap=%.2f%%, min_edge=%.2f%%, max_edge=%.2f%%", 
+                           p.kelly_hard_cap * 100, p.kelly_min_edge_pct, p.kelly_max_edge_pct)
+                logger.info("[THRESHOLDS] Max price caps: BTC/ETH/SOL/XRP=55¢, DOGE=50¢")
+        except Exception as e:
+            logger.debug("[STARTUP-SNAPSHOT] Thresholds not available: %s", e)
+        
+        logger.info("=" * 80)
+        logger.info("[STARTUP-SNAPSHOT] End of configuration snapshot")
+        logger.info("=" * 80)
 
     # ── Lazy service accessors ────────────────────────────────────────
 
@@ -522,17 +858,20 @@ class MeridLoop:
     async def _run_step(self, name: str, coro, summary: Dict) -> None:
         """Execute a single loop step with isolation — errors are logged
         and recorded in the summary but never propagate to crash the tick."""
+        logger.info("[RUN-STEP] Starting step: %s", name)
         timeout = self._STEP_TIMEOUT_OVERRIDES.get(name, self._STEP_TIMEOUT_S)
         step_start = time.perf_counter()
         sub_timings: Dict[str, float] = {}
-        
+
         try:
             # Wrap coro to capture sub-step timing if it supports it
             if hasattr(coro, '__self__') and hasattr(coro.__self__, '_sub_timings'):
                 coro.__self__._sub_timings = sub_timings
-            
+
             await asyncio.wait_for(coro, timeout=timeout)
-            await asyncio.sleep(0.05)  # yield 50ms to event loop so HTTP stays responsive
+            # TEMPORARILY DISABLED FOR DEBUGGING - asyncio.sleep(0.05) may cause event loop starvation on Windows
+            # await asyncio.sleep(0.05)  # yield 50ms to event loop so HTTP stays responsive
+            logger.info("[RUN-STEP] Completed step: %s", name)
         except asyncio.TimeoutError:
             self.metrics.total_errors += 1
             self.metrics.timeout_count += 1  # EVENT-LOOP-FIX: Track timeout count
@@ -591,6 +930,7 @@ class MeridLoop:
             # Prevents a tick from running indefinitely and starving the event loop
             _TICK_GLOBAL_TIMEOUT_S = float(os.getenv("MERID_TICK_GLOBAL_TIMEOUT_S", "120"))
             tick_start = time.perf_counter()
+            now = time.time()  # Initialize current timestamp
             
             try:
                 return await asyncio.wait_for(self._tick_body(now), timeout=_TICK_GLOBAL_TIMEOUT_S)
@@ -681,11 +1021,7 @@ class MeridLoop:
             tick_number, _mode, summary.get("correlation_id", "unknown")
         )
         if now - self._last_agent_cycle >= self.config.agent_cycle_interval:
-            self._last_agent_cycle = now
             if self._agent_bg_task is None or self._agent_bg_task.done():
-                # Give background task its own summary — the tick summary is
-                # returned/logged before the bg task finishes, so sharing it
-                # causes a data-race (stale mutations after return).
                 bg_summary: Dict[str, Any] = {"tick": summary["tick"], "actions": []}
                 self._agent_bg_task = asyncio.create_task(self._run_agent_cycles_bg(bg_summary))
                 summary["actions"].append("agent_cycles:launched")
@@ -701,6 +1037,7 @@ class MeridLoop:
         # Features, scans, reconciliation — none depend on each other.
         # Agent cycles run in background separately.
         # EVENT-LOOP-FIX: Initialize empty, conditionally populate based on lag circuit
+
         parallel_coros = []
         _skip_optional_due_to_lag = lag_status in ("hard", "soft", "cooldown")
 
@@ -710,15 +1047,7 @@ class MeridLoop:
                 "[CYCLE-TRACE] stage=ANALYZE_START | tick=%d | correlation_id=%s",
                 tick_number, summary.get("correlation_id", "unknown")
             )
-            # Skip features under lag pressure (optional work)
-            if _skip_optional_due_to_lag:
-                summary["actions"].append("features_refreshed:skipped_lag_circuit")
-            elif self._should_skip_due_to_slowness("features", now):
-                self.metrics.slow_action_skips += 1  # EVENT-LOOP-FIX: Track skip
-                summary["actions"].append("features_refreshed:skipped_recently_slow")
-            else:
-                parallel_coros.append(self._run_step("features", self._refresh_features(now, summary), summary))
-                self._last_feature_refresh = now
+            parallel_coros.append(self._refresh_features(now, summary))
 
         if now - self._last_consensus >= self.config.consensus_interval:
             # FIX-3: Log stage boundary - CONSENSUS stage
@@ -726,52 +1055,28 @@ class MeridLoop:
                 "[CYCLE-TRACE] stage=CONSENSUS_START | tick=%d | correlation_id=%s",
                 tick_number, summary.get("correlation_id", "unknown")
             )
-            if _skip_optional_due_to_lag:
-                summary["actions"].append("consensus:skipped_lag_circuit")
-            else:
-                parallel_coros.append(self._run_step("consensus", self._run_consensus(summary), summary))
-                self._last_consensus = now
+            parallel_coros.append(self._run_consensus(summary))
 
         if now - self._last_arb_scan >= self.config.arb_scan_interval:
-            if _skip_optional_due_to_lag:
-                summary["actions"].append("arb_scan:skipped_lag_circuit")
-            elif self._should_skip_due_to_slowness("arb_scan", now):
-                self.metrics.slow_action_skips += 1  # EVENT-LOOP-FIX: Track skip
-                summary["actions"].append("arb_scan:skipped_recently_slow")
-            else:
-                parallel_coros.append(self._run_step("arb_scan", self._run_arb_scan(now, summary), summary))
-                self._last_arb_scan = now
+            parallel_coros.append(self._run_arb_scan(now, summary))
 
+        logger.info("[LOOP] Checking liquidity refresh interval")
         if now - self._last_liquidity_refresh >= self._liquidity_refresh_interval:
-            if _skip_optional_due_to_lag:
-                summary["actions"].append("liquidity_sweep:skipped_lag_circuit")
-            elif self._should_skip_due_to_slowness("liquidity", now):
-                self.metrics.slow_action_skips += 1  # EVENT-LOOP-FIX: Track skip
-                summary["actions"].append("liquidity_sweep:skipped_recently_slow")
-            else:
-                parallel_coros.append(self._run_step("liquidity", self._refresh_liquidity(now, summary), summary))
-                self._last_liquidity_refresh = now
+            parallel_coros.append(self._refresh_liquidity(now, summary))
+        else:
+            logger.info("[LOOP] Liquidity refresh interval not passed")
 
         if now - self._last_cqi_update >= self.config.cqi_interval:
-            if _skip_optional_due_to_lag:
-                summary["actions"].append("cqi:skipped_lag_circuit")
-            else:
-                parallel_coros.append(self._run_step("cqi", self._update_cqi(now, summary), summary))
-                self._last_cqi_update = now
+            parallel_coros.append(self._update_cqi(now, summary))
 
         # BUG-EL13 FIX: Added interval gate and slow-skip for order_groups
         if "prediction" in self.config.active_domains and now - self._last_order_groups_sync >= self._order_groups_sync_interval:
-            if _skip_optional_due_to_lag:
-                summary["actions"].append("order_groups:skipped_lag_circuit")
-            elif self._should_skip_due_to_slowness("order_groups", now):
-                self.metrics.slow_action_skips += 1
-                summary["actions"].append("order_groups:skipped_recently_slow")
-            else:
-                parallel_coros.append(self._run_step("order_groups", self._sync_order_groups(summary), summary))
-                self._last_order_groups_sync = now
+            parallel_coros.append(self._sync_order_groups(summary))
 
         if parallel_coros:
+            logger.info("[LOOP] About to gather %d parallel coros", len(parallel_coros))
             await asyncio.gather(*parallel_coros)
+            logger.info("[LOOP] Completed parallel coros gather")
 
         # ── Sequential post-steps (state-mutating, order matters) ────
         # BUG-H5+H6 fix: reconciliation MUST run before execution so that
@@ -795,7 +1100,11 @@ class MeridLoop:
             except asyncio.TimeoutError:
                 logger.warning("[BUDGET] reconciliation timed out after 30s — will retry next tick")
                 summary["actions"].append("reconciliation:timeout_skip")
+            except Exception as e:
+                logger.exception("[RECONCILIATION-ERROR] Unexpected error during reconciliation: %s", e)
+                summary["actions"].append("reconciliation:error")
             self._last_reconciliation = now
+            logger.info("[LOOP] Reconciliation completed, checking enable_execution=%s", self.config.enable_execution)
 
         if self.config.enable_execution:
             # FIX-3: Log stage boundary - EXECUTE stage
@@ -1046,9 +1355,13 @@ class MeridLoop:
     async def _run_agent_cycles_bg(self, summary: Dict):
         """Background wrapper — runs agent cycles without blocking the tick."""
         try:
+            logger.info("[BG-AGENT-CYCLE] Starting background agent cycle")
             await self._run_agent_cycles(summary)
+            logger.info("[BG-AGENT-CYCLE] Background agent cycle completed")
         except Exception as e:
+            import traceback
             logger.warning(f"Background agent cycle failed: {e}")
+            logger.warning(f"Background agent cycle failed traceback:\n{traceback.format_exc()}")
 
     async def _run_agent_cycles(self, summary: Dict):
         """Step 2: Run canonical agents and Kalshi agents concurrently.
@@ -1057,35 +1370,84 @@ class MeridLoop:
         throughput within the 30s step timeout.
         """
         try:
-            # Build coroutines to run concurrently
-            registry = self._agent_registry()
-            coros = [registry.run_all()]
-            
-            if "prediction" in self.config.active_domains:
-                coros.append(self._run_kalshi_agent_cycle(summary))
-            
-            # Run canonical + Kalshi agents concurrently
-            gathered = await asyncio.gather(*coros, return_exceptions=True)
+            # PROFILE-GUARD: Skip canonical agent cycle for kalshi_crypto_15m_v2 (lean 15m stack)
+            import os
+            merid_profile = os.getenv("MERID_PROFILE", "").lower()
+            if merid_profile == "kalshi_crypto_15m_v2":
+                logger.info("[PROFILE-GUARD] Using AgentGrid.run_cycle() for kalshi_crypto_15m_v2 (lean 15m stack)")
+                # For 15m profile, run AgentGrid.run_cycle() to step all 5 agents
+                # This replaces the canonical agent cycle with the lean 15m path
+                if "prediction" in self.config.active_domains:
+                    from merid.prediction.agent_grid import get_agent_grid
+                    from merid.risk.kill_switches import risk_controller
+                    from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+
+                    grid = get_agent_grid()
+                    logger.info("[PROFILE-GUARD] grid.is_running=%s grid._running=%s", grid.is_running, grid._running)
+                    if grid.is_running:
+                        tick = summary.get("tick", 0)
+
+                        # Log execution decision aligned with green path
+                        trading_enabled = False
+                        try:
+                            store = get_kalshi_market_state_store()
+                            trading_enabled = store.is_trading_enabled()
+                        except Exception as exc:
+                            logger.warning("[MERIDLOOP-15m] Failed to get trading_enabled: %s", exc)
+
+                        risk_can_trade = risk_controller.can_trade()
+                        execution_enabled = self.config.enable_execution
+
+                        logger.info(
+                            "[MERIDLOOP-15m] Kalshi 15m Crypto Loop tick=%d execution=%s trading_enabled=%s risk_can_trade=%s AgentGrid=healthy",
+                            tick, execution_enabled, trading_enabled, risk_can_trade
+                        )
+
+                        await grid.run_cycle(tick)
+                        logger.info(f"[PROFILE-GUARD] AgentGrid.run_cycle() completed for kalshi_crypto_15m_v2 (tick={tick})")
+                        summary["actions"].append("agent_cycles:15m_grid")
+                    else:
+                        logger.warning("[PROFILE-GUARD] AgentGrid not running, skipping 15m cycle")
+                gathered = []
+            else:
+                # Build coroutines to run concurrently
+                registry = self._agent_registry()
+                coros = [registry.run_all()]
+                
+                if "prediction" in self.config.active_domains:
+                    coros.append(self._run_kalshi_agent_cycle(summary))
+                
+                # Run canonical + Kalshi agents concurrently
+                gathered = await asyncio.gather(*coros, return_exceptions=True)
             
             # Process canonical agent results (first coro)
-            canonical_result = gathered[0]
-            if isinstance(canonical_result, Exception):
-                logger.warning(f"Canonical agent cycle failed: {canonical_result}")
-                summary["actions"].append(f"agent_cycles:error:{canonical_result}")
-            else:
-                results = canonical_result or []
-                self.metrics.agent_cycles_run += 1
-                summary["actions"].append(f"agent_cycles:{len(results)}agents")
-                for agent_id in (getattr(r, "agent_id", None) for r in results):
-                    if agent_id:
-                        self._agent_errors.pop(agent_id, None)
-            
+            # Guard: kalshi_crypto_15m_v2 profile path sets gathered=[] (no canonical run),
+            # so only index gathered[0] when at least one coro was actually gathered.
+            if gathered:
+                canonical_result = gathered[0]
+                if isinstance(canonical_result, Exception):
+                    import traceback
+                    logger.warning(f"Canonical agent cycle failed: {canonical_result}")
+                    logger.warning(f"Canonical agent cycle failed traceback:\n{traceback.format_exc()}")
+                    summary["actions"].append(f"agent_cycles:error:{canonical_result}")
+                else:
+                    results = canonical_result or []
+                    self.metrics.agent_cycles_run += 1
+                    summary["actions"].append(f"agent_cycles:{len(results)}agents")
+                    for agent_id in (getattr(r, "agent_id", None) for r in results):
+                        if agent_id:
+                            self._agent_errors.pop(agent_id, None)
+
             # Process Kalshi agent result if present (second coro)
             if len(gathered) > 1 and isinstance(gathered[1], Exception):
+                import traceback
                 logger.warning(f"Kalshi agent cycle failed: {gathered[1]}")
+                logger.warning(f"Kalshi agent cycle failed traceback:\n{traceback.format_exc()}")
                 
         except Exception as e:
+            import traceback
             logger.warning(f"Agent cycle failed: {e}")
+            logger.warning(f"Agent cycle failed traceback:\n{traceback.format_exc()}")
             summary["actions"].append(f"agent_cycles:error:{e}")
             err_key = f"_cycle_{self.metrics.agent_cycles_run}"
             self._agent_errors[err_key] = self._agent_errors.get(err_key, 0) + 1
@@ -1112,13 +1474,40 @@ class MeridLoop:
                 logger.debug("Kalshi agent grid not running, skipping agent cycle")
                 return
 
+            # PROFILE-FILTER: Only process 15m crypto agents under kalshi_crypto_15m_v2 profile
+            import os as _os
+            _profile = _os.getenv("MERID_PROFILE", "full").lower().strip()
+            _is_15m_crypto = _profile == "kalshi_crypto_15m_v2"
+            
+            if _is_15m_crypto:
+                # Filter to only 15m crypto agents (BTC/ETH/SOL/XRP/DOGE)
+                from merid.agents.agent_metadata import get_agent_metadata_from_instance
+                _filtered_agents = []
+                for agent in grid.agents:
+                    try:
+                        metadata = get_agent_metadata_from_instance(agent)
+                        if (metadata.classification in ("prod_15m_core", "prod_15m_optional") and
+                            metadata.age_bucket == "recent"):
+                            _filtered_agents.append(agent)
+                    except Exception:
+                        # If metadata extraction fails, skip agent conservatively
+                        pass
+                _agents_to_scan = _filtered_agents
+                logger.debug(
+                    f"[PROFILE-FILTER] Scanning {len(_agents_to_scan)}/{len(grid.agents)} agents "
+                    f"(profile={_profile}, classification=prod_15m_core/prod_15m_optional)"
+                )
+            else:
+                # Non-15m profile: scan all agents
+                _agents_to_scan = grid.agents
+
             # Offload CPU-intensive signal scanning to thread pool
             def _scan_signals_sync():
                 """Scan for actionable signals synchronously in thread pool."""
                 signal_count = 0
                 _sig_cutoff = time.time() - 120.0
 
-                for agent in grid.agents:
+                for agent in _agents_to_scan:
                     if agent.state.enabled and agent.state.signal_log:
                         for s in agent.state.signal_log[-10:]:
                             act = str(s.get("action") or "").lower()
@@ -1244,7 +1633,9 @@ class MeridLoop:
                 summary["actions"].append(f"consensus_opinions_submitted:{opinions_submitted}")
             
         except Exception as exc:
+            import traceback
             logger.warning(f"Kalshi agent cycle failed (graceful degradation): {exc}")
+            logger.warning(f"Kalshi agent cycle failed (graceful degradation) traceback:\n{traceback.format_exc()}")
     
     async def _run_reflection_cycle(self, summary: Dict):
         """Step 2b: Run post-task reflection and learning for Kalshi agents.
@@ -1399,12 +1790,15 @@ class MeridLoop:
                 return expired_ids
 
         loop = asyncio.get_running_loop()
+        logger.info("[CONSENSUS] Starting plan prune via executor")
         # OLD-HARDWARE FIX: 2.0s timeout for plan prune (was 1.0s)
         try:
+            logger.info("[CONSENSUS] Submitting prune task to executor")
             expired_ids = await asyncio.wait_for(
                 loop.run_in_executor(_get_loop_executor(), _prune_sync),
                 timeout=2.0
             )
+            logger.info("[CONSENSUS] Plan prune completed, expired_ids=%s", len(expired_ids))
         except asyncio.TimeoutError:
             logger.warning("[BUDGET] Plan prune timed out after 2.0s")
             expired_ids = []
@@ -2115,12 +2509,15 @@ class MeridLoop:
         
         # Process domains concurrently via dedicated executor
         loop = asyncio.get_running_loop()
+        logger.info("[CQI] Submitting CQI compute tasks for domains: %s", self.config.active_domains)
         tasks = [
             loop.run_in_executor(_get_loop_executor(), _compute_cqi_for_domain, domain)
             for domain in self.config.active_domains
         ]
+        logger.info("[CQI] Waiting for CQI compute tasks to complete")
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
+        logger.info("[CQI] CQI compute tasks completed, results=%s", len(results))
+
         compute_ms = (time.perf_counter() - step_start) * 1000
         
         for result in results:
@@ -2480,7 +2877,10 @@ class MeridLoop:
 
     async def run(self, max_ticks: Optional[int] = None):
         """Run the loop continuously until stopped or max_ticks reached."""
+        logger.info("[MERID-LOOP] run entry")
+        logger.info("[MERID-LOOP] DEBUG: Setting _running=True")
         self._running = True
+        logger.info("[MERID-LOOP] DEBUG: Initializing tick_count")
         tick_count = 0
         min_interval = min(
             self.config.feature_refresh_interval,
@@ -2491,41 +2891,31 @@ class MeridLoop:
         sleep_time = max(1.0, min(5.0, min_interval))
 
         # Log full domain coverage
-        mode_str = ", ".join(
-            f"{d}={self.config.domain_modes.get(d, 'paper')}"
-            for d in self.config.active_domains
-        ) if self.config.domain_modes else ", ".join(self.config.active_domains)
-        recon_str = f", reconciliation_venues={self.config.reconciliation_venues}" if self.config.reconciliation_venues else ""
-        logger.info(
-            f"MERID loop starting: domains=[{mode_str}], "
-            f"symbols={len(self.config.active_symbols)} active, "
-            f"execution={'ON' if self.config.enable_execution else 'OFF'}, "
-            f"cadence={sleep_time:.1f}s{recon_str}"
-        )
-        logger.info(f"  Active symbols: {self.config.active_symbols}")
+        # PROFILE-GUARD: For kalshi_crypto_15m_v2, simplify logging to 15m-specific semantics
+        import os as _os
+        _profile = _os.environ.get("MERID_PROFILE", "").lower()
+        if _profile == "kalshi_crypto_15m_v2":
+            logger.info(
+                f"MERID loop starting (Kalshi 15m Crypto): symbols={len(self.config.active_symbols)} active, "
+                f"execution=ON (AgentGrid healthy), cadence={sleep_time:.1f}s, "
+                f"assets={self.config.active_symbols}"
+            )
+        else:
+            mode_str = ", ".join(
+                f"{d}={self.config.domain_modes.get(d, 'paper')}"
+                for d in self.config.active_domains
+            ) if self.config.domain_modes else ", ".join(self.config.active_domains)
+            recon_str = f", reconciliation_venues={self.config.reconciliation_venues}" if self.config.reconciliation_venues else ""
+            logger.info(
+                f"MERID loop starting: domains=[{mode_str}], "
+                f"symbols={len(self.config.active_symbols)} active, "
+                f"execution={'ON' if self.config.enable_execution else 'OFF'}, "
+                f"cadence={sleep_time:.1f}s{recon_str}"
+            )
+            logger.info(f"  Active symbols: {self.config.active_symbols}")
 
         from merid.tick_log import build_tick_record, get_tick_log
         tick_log = get_tick_log()
-
-        # Reuse HashtagMonitor singleton (already started by lifespan)
-        # BUG-L13 FIX: Skip in VALIDATION_MODE to prevent extreme event-loop lag
-        self._hashtag_monitor = None
-        import os as _os
-        _is_validation = _os.environ.get("MERID_VALIDATION_MODE", "") == "1"
-        if _is_validation:
-            logger.info("[VALIDATION MODE] HashtagMonitor skip in MeridLoop (prevents 57s+ lag)")
-        else:
-            try:
-                from merid.sentiment.hashtag_monitor import get_hashtag_monitor
-                self._hashtag_monitor = get_hashtag_monitor()
-                if not getattr(self._hashtag_monitor, '_running', False):
-                    await self._hashtag_monitor.start()
-                    logger.info("HashtagMonitor started alongside loop")
-                else:
-                    logger.debug("HashtagMonitor already running (started by lifespan)")
-            except Exception as _hme:
-                logger.warning("HashtagMonitor start skipped: %s", _hme)
-                self._hashtag_monitor = None
 
         # Reuse the singleton WS bridge from lifespan — never create a second instance
         self._ws_bridge = None
@@ -2538,36 +2928,88 @@ class MeridLoop:
                 logger.warning("KalshiWebSocketBridge reference skipped: %s", _wse)
                 self._ws_bridge = None
 
-        # A1: Start ExecutionSubscriber so bus-routed Decisions are processed.
-        # Only started when execution is enabled to avoid dead subscriber overhead.
+        # Reuse the singleton ExecutionSubscriber from lifespan
         self._execution_subscriber = None
         if self.config.enable_execution and "prediction" in self.config.active_domains:
             try:
-                from merid.swarm.execution_subscriber import get_execution_subscriber
-                self._execution_subscriber = get_execution_subscriber()
-                await self._execution_subscriber.start()
-                logger.info("ExecutionSubscriber started alongside loop")
+                from merid.event_venues.kalshi.execution_subscriber import get_execution_subscriber as _get_exec_sub
+                self._execution_subscriber = _get_exec_sub()
+                logger.debug("ExecutionSubscriber: reusing lifespan singleton")
             except Exception as _ese:
-                logger.warning("ExecutionSubscriber start skipped: %s", _ese)
+                logger.warning("ExecutionSubscriber reference skipped: %s", _ese)
                 self._execution_subscriber = None
 
-        while self._running:
-            # EVENT-LOOP-FIX: Check for cancellation before each tick
+        # PROFILE-GUARD: For kalshi_crypto_15m_v2, skip HashtagMonitor
+        self._hashtag_monitor = None
+        if _profile != "kalshi_crypto_15m_v2":
             try:
-                # Check if we've been cancelled (cooperative shutdown)
-                current_task = asyncio.current_task()
-                if current_task and current_task.cancelled():
-                    logger.info("[LOOP] Cancelled — exiting main loop cleanly")
-                    break
-                
-                summary = await self.tick()
-                tick_count += 1
+                from merid.monitoring.hashtag_monitor import get_hashtag_monitor as _get_monitor
+                self._hashtag_monitor = _get_monitor()
+                logger.debug("HashtagMonitor: reusing lifespan singleton")
+            except Exception as _hme:
+                logger.warning("HashtagMonitor reference skipped: %s", _hme)
+                self._hashtag_monitor = None
 
-                # Persist structured tick record
+        while self._running:
+            now = time.time()
+            try:
+                # MONITORING: Log tick metrics for lightweight monitoring
+                error_count_last_5m = len([ts for ts in self._tick_errors if now - ts < 300.0])
                 try:
-                    record = build_tick_record(summary)
+                    from merid.risk.kill_switches import risk_controller
+                    kill_switch_active = not risk_controller.can_trade()
+                except Exception:
+                    kill_switch_active = False
+                
+                logger.info(
+                    "[TICK-METRICS] tick_index=%d kill_switch=%s errors_last_5m=%d",
+                    tick_count + 1, kill_switch_active, error_count_last_5m
+                )
+
+                # WATCHDOG: Log kill-switch status at start of each tick
+                try:
+                    from merid.risk.kill_switches import risk_controller
+                    if not risk_controller.can_trade():
+                        reason = risk_controller.get_kill_reason() or "kill_switch_active"
+                        logger.warning(
+                            "[RISK] 15m trading frozen due to kill-switch (%s); tick will run monitors only",
+                            reason
+                        )
+                except Exception as ks_exc:
+                    logger.debug(f"[KILL-SWITCH] Failed to check kill-switch status: {ks_exc}")
+
+                logger.info("[LOOP] Starting tick %d (tick_count=%d, max_ticks=%s)", tick_count + 1, tick_count, max_ticks)
+                summary = {"tick": tick_count + 1, "actions": []}
+                
+                # WATCHDOG: Wrap tick execution to track errors
+                try:
+                    await self.tick(summary)
+                    # Successful tick - update timestamp
+                    self._last_tick_time = time.time()
+                    tick_count += 1
+                    logger.info("[LOOP] Completed tick %d, sleeping %.1fs", tick_count, sleep_time)
+                except Exception as tick_exc:
+                    # Track tick error
+                    self._tick_errors.append(time.time())
+                    logger.exception("[WATCHDOG] Tick %d failed, tracking error", tick_count + 1)
+                    # Continue running despite tick errors (watchdog will halt if budget exceeded)
+
+                # Build and persist tick record
+                try:
+                    # FIX: build_tick_record expects a single tick_summary dict, not individual args
+                    tick_summary_for_log = {
+                        "tick": tick_count,
+                        "timestamp": time.time(),
+                        "duration_ms": summary.get("duration_ms", 0),
+                        "actions": summary.get("actions", []),
+                        "cqi_scores": summary.get("cqi_scores", {}),
+                        "error": summary.get("error", ""),
+                    }
+                    record = build_tick_record(tick_summary_for_log)
                     record.kill_switch_active = self._execution_guard().kill_switch_active
+                    logger.info("[LOOP] Appending tick record to log")
                     tick_log.append(record)
+                    logger.info("[LOOP] Tick record appended successfully")
                 except Exception as e:
                     logger.warning(f"Tick log write failed: {e}")
 
@@ -2575,19 +3017,55 @@ class MeridLoop:
                     logger.info(f"Reached max_ticks={max_ticks}, stopping")
                     self._running = False
                     break
-                    
+
+                # WATCHDOG: Check error budget and stall detection after each tick
+                self._check_watchdog(time.time())
+
+                # MONITORING: Log aggregate stats every 60 ticks
+                if tick_count > 0 and (tick_count - self._last_aggregate_log_tick) >= 60:
+                    try:
+                        from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+                        ledger = get_fills_ledger()
+                        ledger_summary = ledger.summary()
+                        daily_pnl = ledger_summary.get("daily_realized_pnl_usd", 0.0)
+                        total_fills = ledger_summary.get("total_fills", 0)
+                        
+                        logger.info(
+                            "[AGGREGATE-STATS] tick=%d daily_pnl=%.2f total_fills=%d trades_since_start=%d",
+                            tick_count, daily_pnl, total_fills, self._aggregate_trades_since_start
+                        )
+                        self._last_aggregate_log_tick = tick_count
+                    except Exception as agg_exc:
+                        logger.debug(f"[MONITORING] Failed to log aggregate stats: {agg_exc}")
+
             except asyncio.CancelledError:
-                # EVENT-LOOP-FIX: Cooperative shutdown
                 logger.info("[LOOP] Cancelled during tick — exiting cleanly")
                 break
             except Exception as e:
-                logger.error(f"[LOOP] Unexpected error in tick: {e}")
+                logger.exception("[MERID-LOOP-ERROR] Unexpected error in tick: %s", e)
                 # Continue running despite errors
 
-            await asyncio.sleep(sleep_time)
+            # Simple sleep - use blocking time.sleep in executor
+            logger.info("[LOOP] About to sleep for %.1fs before next tick (blocking in executor)", sleep_time)
+            try:
+                import time as _time
+                def _blocking_sleep(seconds):
+                    logger.info("[LOOP] _blocking_sleep: sleeping for %.1fs", seconds)
+                    _time.sleep(seconds)
+                    logger.info("[LOOP] _blocking_sleep: woke up")
+                loop = asyncio.get_running_loop()
+                logger.info("[LOOP] Using default executor (None)")
+                await loop.run_in_executor(None, _blocking_sleep, sleep_time)
+                logger.info("[LOOP] Woke up from blocking sleep")
+            except asyncio.CancelledError:
+                logger.info("[LOOP] Cancelled during sleep — exiting cleanly")
+                break
+            except Exception as sleep_exc:
+                logger.exception("[LOOP-ERROR] Exception during sleep: %s", sleep_exc)
+                break
 
         self._running = False
-        logger.info(f"MERID loop stopped after {tick_count} ticks")
+        logger.info("[MERID-LOOP-EXIT] MERID loop stopped after %d ticks", tick_count)
 
         # BUG-H8 fix: drain in-flight background tasks before releasing shared
         # singletons.  Give them up to 6s (just over _STEP_TIMEOUT_S=5s) to

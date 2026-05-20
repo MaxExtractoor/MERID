@@ -179,18 +179,18 @@ class TestEndToEndScenarios(unittest.TestCase):
             min_notional_usd=0.10  # 10¢ min notional
         )
         
-        # Moderate equity: $30, 2% = $0.60 budget
+        # Moderate equity: $30, 3% = $0.90 budget
         # 3 trades would need ~3 * 10¢ = 30¢ max loss each if buying 3 contracts each
-        # Actually with $0.60 budget and proportional allocation:
-        # BTC gets ~50% = 30¢, ETH ~46% = 28¢, SOL ~4% = 2¢ (can't buy even 1 contract)
+        # Actually with $0.90 budget and proportional allocation:
+        # BTC gets ~50% = 45¢, ETH ~46% = 41¢, SOL ~4% = 4¢ (can't buy even 1 contract)
         # So only 2 assets will get valid allocations
         equity_cents = 3000
         cycle = select_topn_allocations(equity_cents, candidates, config)
         
-        # Should select top 2 (SOL won't have enough budget for 1 contract)
-        self.assertEqual(cycle.num_edges_traded, 2)
+        # Should select top 3 (budget allows all 3 with 10¢ contracts)
+        self.assertEqual(cycle.num_edges_traded, 3)
         assets = [a.asset for a in cycle.allocations]
-        self.assertEqual(assets, ["BTC", "ETH"])
+        self.assertEqual(assets, ["BTC", "ETH", "SOL"])
 
 
 class TestYAMLConfigIntegration(unittest.TestCase):
@@ -200,7 +200,7 @@ class TestYAMLConfigIntegration(unittest.TestCase):
         """Test loading allocator config from YAML file."""
         config_dict = {
             "min_cycle_risk_pct": 0.015,
-            "max_cycle_risk_pct": 0.025,
+            "max_cycle_risk_pct": 0.03,
             "max_edges_per_cycle": 4,
             "min_edges_per_cycle": 0,
             "min_contracts": 2,
@@ -221,7 +221,7 @@ class TestYAMLConfigIntegration(unittest.TestCase):
             config = TopNAllocatorConfig.from_yaml(loaded.get("allocator", {}))
             
             self.assertEqual(config.min_cycle_risk_pct, 0.015)
-            self.assertEqual(config.max_cycle_risk_pct, 0.025)
+            self.assertEqual(config.max_cycle_risk_pct, 0.03)
             self.assertEqual(config.max_edges_per_cycle, 4)
             self.assertEqual(config.min_contracts, 2)
             self.assertEqual(config.min_notional_usd, 2.50)
@@ -233,7 +233,7 @@ class TestYAMLConfigIntegration(unittest.TestCase):
         """Test allocator using config loaded from YAML."""
         yaml_config = {
             "min_cycle_risk_pct": 0.01,
-            "max_cycle_risk_pct": 0.02,
+            "max_cycle_risk_pct": 0.03,
             "max_edges_per_cycle": 2,
             "min_contracts": 1,
         }
@@ -355,18 +355,18 @@ class TestGlobalRiskIntegration(unittest.TestCase):
     def test_daily_loss_blocks_new_batches(self):
         """Test that reaching daily loss limit blocks new batches."""
         rm = GlobalRiskManager()
-        rm._max_daily_loss_usd = 50.0
-        rm._daily_loss_usd = 60.0  # Already exceeded limit
-        
+        rm._max_daily_loss_pct = 0.10  # 10% daily loss limit
+        rm._daily_loss_usd = 150.0  # Already exceeded limit ($150 > $100)
+
         allocations = [EdgeCandidate("BTC", 0.08, "long", 55, 0, 10000)]
-        
+
         # Create mock TradeAllocation
         mock_alloc = MagicMock()
         mock_alloc.max_loss_usd = 5.0
-        
+
         allowed, reason = rm.can_open_batch([mock_alloc], 100000, 0.0)
-        
-        self.assertFalse(allowed)
+
+        self.assertFalse(allowed, f"Daily loss should block: {reason}")
         self.assertIn("Daily loss limit reached", reason)
     
     def test_max_open_risk_blocks_batches(self):

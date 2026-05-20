@@ -1,0 +1,2245 @@
+{
+  "scan_timestamp": "2026-05-12T20:35:38.949476",
+  "repo_root": ".",
+  "total_agents": 99,
+  "agents": [
+    {
+      "name": "CryptoPredictionAgent",
+      "type": "agent_interface",
+      "module": "agents.crypto_prediction_agent",
+      "file_path": "agents\\crypto_prediction_agent.py",
+      "description": "Concrete agent for cryptocurrency market analysis and prediction.",
+      "category": "",
+      "markets": [
+        "crypto"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "AgentInterface",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "FastPredictionArbitrageAnalystAgent",
+      "type": "llm_base",
+      "module": "agents.fast_prediction_arbitrage_analyst",
+      "file_path": "agents\\fast_prediction_arbitrage_analyst.py",
+      "description": "Lightweight version optimized for fast experiments.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "BaseAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "MetaAuditAgent",
+      "type": "llm_base",
+      "module": "agents.meta_agent",
+      "file_path": "agents\\meta_agent.py",
+      "description": "",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "BaseAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "PredictionArbitrageAnalystAgent",
+      "type": "llm_base",
+      "module": "agents.prediction_arbitrage_analyst",
+      "file_path": "agents\\prediction_arbitrage_analyst.py",
+      "description": "Agent that analyzes prediction market arbitrage opportunities and provides structured recommendations.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "BaseAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "RiskAgent",
+      "type": "llm_base",
+      "module": "agents.risk",
+      "file_path": "agents\\risk.py",
+      "description": "Core risk management agent for MERID.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "startup_agents.py"
+      ],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "BaseAgent",
+      "role": "risk",
+      "feature_namespace": ""
+    },
+    {
+      "name": "RiskAgent",
+      "type": "llm_base",
+      "module": "agents.risk_agent",
+      "file_path": "agents\\risk_agent.py",
+      "description": "",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "startup_agents.py"
+      ],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "BaseAgent",
+      "role": "risk",
+      "feature_namespace": ""
+    },
+    {
+      "name": "StrategyAgent",
+      "type": "llm_base",
+      "module": "agents.strategy_agent",
+      "file_path": "agents\\strategy_agent.py",
+      "description": "",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "BaseAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "ArchivistAgent",
+      "type": "agent_interface",
+      "module": "agents.core.archivist_agent",
+      "file_path": "agents\\core\\archivist_agent.py",
+      "description": "Archivist Agent - Memory and historical analysis.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "AgentInterface",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "MarketAnalystAgent",
+      "type": "agent_interface",
+      "module": "agents.core.market_analyst",
+      "file_path": "agents\\core\\market_analyst.py",
+      "description": "Market Analyst Agent - Specializes in price pattern detection.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "AgentInterface",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "MetaAuditAgent",
+      "type": "agent_interface",
+      "module": "agents.core.meta_audit_agent",
+      "file_path": "agents\\core\\meta_audit_agent.py",
+      "description": "Meta Audit Agent - System health and governance auditor.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "AgentInterface",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "NewsAnalystAgent",
+      "type": "agent_interface",
+      "module": "agents.core.news_analyst",
+      "file_path": "agents\\core\\news_analyst.py",
+      "description": "News Analyst Agent - Specializes in sentiment analysis.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "AgentInterface",
+      "role": "feature",
+      "feature_namespace": "sentiment"
+    },
+    {
+      "name": "RiskAgent",
+      "type": "agent_interface",
+      "module": "agents.core.risk_agent",
+      "file_path": "agents\\core\\risk_agent.py",
+      "description": "Risk Agent - Specializes in risk assessment and management.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "startup_agents.py"
+      ],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "AgentInterface",
+      "role": "risk",
+      "feature_namespace": ""
+    },
+    {
+      "name": "SkepticAgent",
+      "type": "agent_interface",
+      "module": "agents.core.skeptic_agent",
+      "file_path": "agents\\core\\skeptic_agent.py",
+      "description": "Skeptic Agent - Adversarial challenger and devil's advocate.",
+      "category": "",
+      "markets": [],
+      "timeframes": [
+        "1h"
+      ],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "AgentInterface",
+      "role": "feature",
+      "feature_namespace": "regime"
+    },
+    {
+      "name": "StrategyAgent",
+      "type": "agent_interface",
+      "module": "agents.core.strategy_agent",
+      "file_path": "agents\\core\\strategy_agent.py",
+      "description": "Strategy Agent - Formulates trade strategies.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "AgentInterface",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "SynthesizerAgent",
+      "type": "agent_interface",
+      "module": "agents.core.synthesizer_agent",
+      "file_path": "agents\\core\\synthesizer_agent.py",
+      "description": "Synthesizer Agent - Integrates signals from all agents.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "AgentInterface",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "PolymarketAgent",
+      "type": "llm_base",
+      "module": "agents.polymarket.polymarket_agent",
+      "file_path": "agents\\polymarket\\polymarket_agent.py",
+      "description": "Production Polymarket arbitrage scanner.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "BaseAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "BaseKalshiAgent",
+      "type": "canonical",
+      "module": "merid.agents.base",
+      "file_path": "merid\\agents\\base.py",
+      "description": "Abstract base for Kalshi-specific regime agents.",
+      "category": "",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "wiring.py"
+      ],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "CanonicalAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "Btc1hAgent",
+      "type": "base_kalshi",
+      "module": "merid.agents.btc_1h_agent",
+      "file_path": "merid\\agents\\btc_1h_agent.py",
+      "description": "BTC 1h Kalshi agent mirroring BTC 15m structure with hourly horizons.",
+      "category": "",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "15m",
+        "1h",
+        "1h",
+        "1h"
+      ],
+      "assets": [
+        "BTC"
+      ],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "BaseKalshiAgent",
+      "role": "feature",
+      "feature_namespace": "regime"
+    },
+    {
+      "name": "ConsensusCoordinatorAgent",
+      "type": "canonical",
+      "module": "merid.agents.coordination",
+      "file_path": "merid\\agents\\coordination.py",
+      "description": "Manages voting/aggregation among domain agents.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "CanonicalAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "ExplainabilityAgent",
+      "type": "canonical",
+      "module": "merid.agents.coordination",
+      "file_path": "merid\\agents\\coordination.py",
+      "description": "Turns internal state and logs into human-readable rationale.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "CanonicalAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "DebateCoordinatorAgent",
+      "type": "canonical",
+      "module": "merid.agents.coordination",
+      "file_path": "merid\\agents\\coordination.py",
+      "description": "Orchestrates structured multi-agent debates on prediction instruments.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "CanonicalAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "GovernanceAgent",
+      "type": "canonical",
+      "module": "merid.agents.coordination",
+      "file_path": "merid\\agents\\coordination.py",
+      "description": "Enforces non-negotiable constraints (compliance, forbidden venues, ethical rules).",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "CanonicalAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "Doge15mAgent",
+      "type": "base_kalshi",
+      "module": "merid.agents.doge_15m_agent",
+      "file_path": "merid\\agents\\doge_15m_agent.py",
+      "description": "DOGE 15m Kalshi agent mirroring XRP/BTC 15m structure.",
+      "category": "",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "15m"
+      ],
+      "assets": [
+        "DOGE"
+      ],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "BaseKalshiAgent",
+      "role": "feature",
+      "feature_namespace": "microstructure"
+    },
+    {
+      "name": "Eth15mAgent",
+      "type": "base_kalshi",
+      "module": "merid.agents.eth_15m_agent",
+      "file_path": "merid\\agents\\eth_15m_agent.py",
+      "description": "ETH 15m Kalshi agent mirroring BTC 15m structure.",
+      "category": "",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "15m"
+      ],
+      "assets": [
+        "ETH"
+      ],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "BaseKalshiAgent",
+      "role": "feature",
+      "feature_namespace": "microstructure"
+    },
+    {
+      "name": "HybridCanonicalAgent",
+      "type": "canonical",
+      "module": "merid.agents.hybrid",
+      "file_path": "merid\\agents\\hybrid.py",
+      "description": "CanonicalAgent with optional LLM enhancement.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "CanonicalAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "OpsRunbookAgent",
+      "type": "canonical",
+      "module": "merid.agents.ops",
+      "file_path": "merid\\agents\\ops.py",
+      "description": "Maps incidents and alerts to runbooks and concrete actions.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "CanonicalAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "BacktestAgent",
+      "type": "canonical",
+      "module": "merid.agents.ops",
+      "file_path": "merid\\agents\\ops.py",
+      "description": "Continually evaluates strategy performance.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "CanonicalAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "TwitterPublisherAgent",
+      "type": "canonical",
+      "module": "merid.agents.publisher_agent",
+      "file_path": "merid\\agents\\publisher_agent.py",
+      "description": "Agent that acts as a publisher to Twitter/X for the system's actions.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "CanonicalAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "MarketResearchAgent",
+      "type": "canonical",
+      "module": "merid.agents.research",
+      "file_path": "merid\\agents\\research.py",
+      "description": "Ingests news, macro data, on-chain intel, and produces theses.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "wiring.py"
+      ],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "CanonicalAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "CryptoSignalsAgent",
+      "type": "canonical",
+      "module": "merid.agents.research",
+      "file_path": "merid\\agents\\research.py",
+      "description": "Detects spreads, basis, funding, and structural signals across CEXs.",
+      "category": "",
+      "markets": [
+        "crypto"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "wiring.py"
+      ],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "CanonicalAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "RiskManagerAgent",
+      "type": "canonical",
+      "module": "merid.agents.risk_agents",
+      "file_path": "merid\\agents\\risk_agents.py",
+      "description": "Enforces hard risk constraints across all domains.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "CanonicalAgent",
+      "role": "risk",
+      "feature_namespace": ""
+    },
+    {
+      "name": "CapitalAllocatorAgent",
+      "type": "canonical",
+      "module": "merid.agents.risk_agents",
+      "file_path": "merid\\agents\\risk_agents.py",
+      "description": "Allocates capital between strategies, venues, and domains.",
+      "category": "",
+      "markets": [
+        "crypto"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "CanonicalAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "AnomalyDetectorAgent",
+      "type": "canonical",
+      "module": "merid.agents.risk_agents",
+      "file_path": "merid\\agents\\risk_agents.py",
+      "description": "Watches for bad data and weird price behavior.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "CanonicalAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "SentimentVotingAgent",
+      "type": "canonical",
+      "module": "merid.agents.sentiment_agent",
+      "file_path": "merid\\agents\\sentiment_agent.py",
+      "description": "Subscribes to SentimentBus and votes on TradeProposals based on social/news sentiment.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "CanonicalAgent",
+      "role": "feature",
+      "feature_namespace": "sentiment"
+    },
+    {
+      "name": "TwitterIngestionAgent",
+      "type": "canonical",
+      "module": "merid.agents.social_ingestion",
+      "file_path": "merid\\agents\\social_ingestion.py",
+      "description": "Runs the HashtagAgent to scrape X/Twitter for crypto sentiment.",
+      "category": "",
+      "markets": [
+        "crypto"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "CanonicalAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "RedditIngestionAgent",
+      "type": "canonical",
+      "module": "merid.agents.social_ingestion",
+      "file_path": "merid\\agents\\social_ingestion.py",
+      "description": "Runs Reddit sentiment scraping.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "CanonicalAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "Sol15mAgent",
+      "type": "base_kalshi",
+      "module": "merid.agents.sol_15m_agent",
+      "file_path": "merid\\agents\\sol_15m_agent.py",
+      "description": "SOL 15m Kalshi agent mirroring BTC 15m structure.",
+      "category": "",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "15m"
+      ],
+      "assets": [
+        "SOL"
+      ],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "BaseKalshiAgent",
+      "role": "feature",
+      "feature_namespace": "microstructure"
+    },
+    {
+      "name": "OddsAwareSportsAgent",
+      "type": "canonical",
+      "module": "merid.agents.sports_odds",
+      "file_path": "merid\\agents\\sports_odds.py",
+      "description": "Agent that ingests live sports odds and produces consensus opinions.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "CanonicalAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "StrategyDesignerAgent",
+      "type": "canonical",
+      "module": "merid.agents.strategy",
+      "file_path": "merid\\agents\\strategy.py",
+      "description": "Translates research theses into explicit strategy configs.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "CanonicalAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "ArbitrageAgent",
+      "type": "canonical",
+      "module": "merid.agents.strategy",
+      "file_path": "merid\\agents\\strategy.py",
+      "description": "Scans for executable arb across all supported markets.",
+      "category": "",
+      "markets": [
+        "kalshi",
+        "crypto"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "CanonicalAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "ExecutionOptimizerAgent",
+      "type": "canonical",
+      "module": "merid.agents.strategy",
+      "file_path": "merid\\agents\\strategy.py",
+      "description": "Chooses order types, slicing, and routing for each proposal.",
+      "category": "",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "CanonicalAgent",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "Xrp15mAgent",
+      "type": "base_kalshi",
+      "module": "merid.agents.xrp_15m_agent",
+      "file_path": "merid\\agents\\xrp_15m_agent.py",
+      "description": "XRP 15m Kalshi agent mirroring BTC 15m structure.",
+      "category": "",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "15m"
+      ],
+      "assets": [
+        "XRP"
+      ],
+      "enabled": true,
+      "status": "experimental",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "BaseKalshiAgent",
+      "role": "feature",
+      "feature_namespace": "microstructure"
+    },
+    {
+      "name": "MarketResearchAgent",
+      "type": "config",
+      "module": "agents.research.MarketResearchAgent",
+      "file_path": "config\\agent_manifest.yml",
+      "description": "Multi-API market research \u00e2\u20ac\u201d thesis generation from news, sentiment, and fundamentals",
+      "category": "research",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "",
+      "role": "research",
+      "feature_namespace": ""
+    },
+    {
+      "name": "PredictionMarketAgentV2",
+      "type": "config",
+      "module": "agents.research.PredictionMarketAgentV2",
+      "file_path": "config\\agent_manifest.yml",
+      "description": "Kalshi prediction market scanner \u00e2\u20ac\u201d event discovery and probability estimation",
+      "category": "research",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "",
+      "role": "research",
+      "feature_namespace": ""
+    },
+    {
+      "name": "CryptoSignalsAgent",
+      "type": "config",
+      "module": "agents.research.CryptoSignalsAgent",
+      "file_path": "config\\agent_manifest.yml",
+      "description": "CEX spread, funding rate, and basis analysis",
+      "category": "research",
+      "markets": [
+        "binance",
+        "coinbase"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "",
+      "role": "research",
+      "feature_namespace": ""
+    },
+    {
+      "name": "StrategyDesignerAgent",
+      "type": "config",
+      "module": "agents.strategy.StrategyDesignerAgent",
+      "file_path": "config\\agent_manifest.yml",
+      "description": "Converts research theses into executable strategy definitions",
+      "category": "strategy",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "",
+      "role": "research",
+      "feature_namespace": ""
+    },
+    {
+      "name": "ArbitrageAgent",
+      "type": "config",
+      "module": "agents.strategy.ArbitrageAgent",
+      "file_path": "config\\agent_manifest.yml",
+      "description": "Cross-exchange arbitrage opportunity detection and trade proposal generation",
+      "category": "strategy",
+      "markets": [
+        "binance",
+        "coinbase"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "",
+      "role": "research",
+      "feature_namespace": ""
+    },
+    {
+      "name": "ExecutionOptimizerAgent",
+      "type": "config",
+      "module": "agents.strategy.ExecutionOptimizerAgent",
+      "file_path": "config\\agent_manifest.yml",
+      "description": "Venue-specific execution optimization \u00e2\u20ac\u201d tick sizes, fees, rate limits for 7 venues",
+      "category": "strategy",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "",
+      "role": "research",
+      "feature_namespace": ""
+    },
+    {
+      "name": "RiskManagerAgent",
+      "type": "config",
+      "module": "agents.risk_agents.RiskManagerAgent",
+      "file_path": "config\\agent_manifest.yml",
+      "description": "Wraps GlobalRiskManager \u00e2\u20ac\u201d 7-point risk check, veto power on proposals",
+      "category": "risk",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "",
+      "role": "risk",
+      "feature_namespace": ""
+    },
+    {
+      "name": "CapitalAllocatorAgent",
+      "type": "config",
+      "module": "agents.risk_agents.CapitalAllocatorAgent",
+      "file_path": "config\\agent_manifest.yml",
+      "description": "Portfolio-level capital allocation and rebalance detection",
+      "category": "risk",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "",
+      "role": "risk",
+      "feature_namespace": ""
+    },
+    {
+      "name": "AnomalyDetectorAgent",
+      "type": "config",
+      "module": "agents.risk_agents.AnomalyDetectorAgent",
+      "file_path": "config\\agent_manifest.yml",
+      "description": "Detects stale data, price spikes, and spread anomalies",
+      "category": "risk",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "",
+      "role": "risk",
+      "feature_namespace": ""
+    },
+    {
+      "name": "ConsensusCoordinatorAgent",
+      "type": "config",
+      "module": "agents.coordination.ConsensusCoordinatorAgent",
+      "file_path": "config\\agent_manifest.yml",
+      "description": "Weighted voting with 2/3 quorum, risk agent veto, skeptic re-round",
+      "category": "coordination",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "",
+      "role": "research",
+      "feature_namespace": ""
+    },
+    {
+      "name": "ExplainabilityAgent",
+      "type": "config",
+      "module": "agents.coordination.ExplainabilityAgent",
+      "file_path": "config\\agent_manifest.yml",
+      "description": "What/why/why-now explanations for every decision",
+      "category": "coordination",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "",
+      "role": "research",
+      "feature_namespace": ""
+    },
+    {
+      "name": "GovernanceAgent",
+      "type": "config",
+      "module": "agents.coordination.GovernanceAgent",
+      "file_path": "config\\agent_manifest.yml",
+      "description": "US compliance enforcement \u00e2\u20ac\u201d forbidden venues, leverage limits",
+      "category": "coordination",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "",
+      "role": "research",
+      "feature_namespace": ""
+    },
+    {
+      "name": "OpsRunbookAgent",
+      "type": "config",
+      "module": "agents.ops.OpsRunbookAgent",
+      "file_path": "config\\agent_manifest.yml",
+      "description": "Alert \u00e2\u2020\u2019 runbook action mapping for 6 runbook types",
+      "category": "ops",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "",
+      "role": "research",
+      "feature_namespace": ""
+    },
+    {
+      "name": "BacktestAgent",
+      "type": "config",
+      "module": "agents.ops.BacktestAgent",
+      "file_path": "config\\agent_manifest.yml",
+      "description": "Strategy backtesting with promote/demote decisions",
+      "category": "ops",
+      "markets": [],
+      "timeframes": [],
+      "assets": [],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [],
+      "series_tickers": [],
+      "archetype": "",
+      "base_class": "",
+      "role": "research",
+      "feature_namespace": ""
+    },
+    {
+      "name": "BTC_15M",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.btc_15m",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi BTC_15M agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "15m"
+      ],
+      "assets": [
+        "BTC"
+      ],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [
+        "KXBTC"
+      ],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "execution",
+      "feature_namespace": ""
+    },
+    {
+      "name": "BTC_HOURLY",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.btc_hourly",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi BTC_HOURLY agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": false,
+      "status": "dormant",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "BTC_DAILY",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.btc_daily",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi BTC_DAILY agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "daily"
+      ],
+      "assets": [
+        "BTC"
+      ],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "regime"
+    },
+    {
+      "name": "BTC_WEEKLY",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.btc_weekly",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi BTC_WEEKLY agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": false,
+      "status": "dormant",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "ETH_15M",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.eth_15m",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi ETH_15M agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "15m"
+      ],
+      "assets": [
+        "ETH"
+      ],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [
+        "KXETH"
+      ],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "execution",
+      "feature_namespace": ""
+    },
+    {
+      "name": "ETH_HOURLY",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.eth_hourly",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi ETH_HOURLY agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": false,
+      "status": "dormant",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "ETH_DAILY",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.eth_daily",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi ETH_DAILY agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": false,
+      "status": "dormant",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "ETH_WEEKLY",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.eth_weekly",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi ETH_WEEKLY agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "weekly"
+      ],
+      "assets": [
+        "ETH"
+      ],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "SOL_15M",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.sol_15m",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi SOL_15M agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "15m"
+      ],
+      "assets": [
+        "SOL"
+      ],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [
+        "KXSOL"
+      ],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "execution",
+      "feature_namespace": ""
+    },
+    {
+      "name": "SOL_HOURLY",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.sol_hourly",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi SOL_HOURLY agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": false,
+      "status": "dormant",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "SOL_DAILY",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.sol_daily",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi SOL_DAILY agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "daily"
+      ],
+      "assets": [
+        "SOL"
+      ],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "regime"
+    },
+    {
+      "name": "SOL_WEEKLY",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.sol_weekly",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi SOL_WEEKLY agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "weekly"
+      ],
+      "assets": [
+        "SOL"
+      ],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "XRP_15M",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.xrp_15m",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi XRP_15M agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "15m"
+      ],
+      "assets": [
+        "XRP"
+      ],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [
+        "KXXRP"
+      ],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "execution",
+      "feature_namespace": ""
+    },
+    {
+      "name": "XRP_HOURLY",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.xrp_hourly",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi XRP_HOURLY agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": false,
+      "status": "dormant",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "XRP_DAILY",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.xrp_daily",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi XRP_DAILY agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "daily"
+      ],
+      "assets": [
+        "XRP"
+      ],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "regime"
+    },
+    {
+      "name": "XRP_WEEKLY",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.xrp_weekly",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi XRP_WEEKLY agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "weekly"
+      ],
+      "assets": [
+        "XRP"
+      ],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "BTC_MONTHLY",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.btc_monthly",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi BTC_MONTHLY agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": false,
+      "status": "dormant",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "BTC_ANNUAL",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.btc_annual",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi BTC_ANNUAL agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "annual"
+      ],
+      "assets": [
+        "BTC"
+      ],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "ETH_MONTHLY",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.eth_monthly",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi ETH_MONTHLY agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": false,
+      "status": "dormant",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "ETH_ANNUAL",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.eth_annual",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi ETH_ANNUAL agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "annual"
+      ],
+      "assets": [
+        "ETH"
+      ],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "SOL_MONTHLY",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.sol_monthly",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi SOL_MONTHLY agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": false,
+      "status": "dormant",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "SOL_ANNUAL",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.sol_annual",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi SOL_ANNUAL agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "annual"
+      ],
+      "assets": [
+        "SOL"
+      ],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "XRP_MONTHLY",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.xrp_monthly",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi XRP_MONTHLY agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "monthly"
+      ],
+      "assets": [
+        "XRP"
+      ],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "XRP_ANNUAL",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.xrp_annual",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi XRP_ANNUAL agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": false,
+      "status": "dormant",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "DOGE_MONTHLY",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.doge_monthly",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi DOGE_MONTHLY agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "monthly"
+      ],
+      "assets": [
+        "DOGE"
+      ],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "DOGE_ANNUAL",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.doge_annual",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi DOGE_ANNUAL agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "annual"
+      ],
+      "assets": [
+        "DOGE"
+      ],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "DOGE_15M",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.doge_15m",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi DOGE_15M agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "15m"
+      ],
+      "assets": [
+        "DOGE"
+      ],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [
+        "KXDOGE"
+      ],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "execution",
+      "feature_namespace": ""
+    },
+    {
+      "name": "DOGE_HOURLY",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.doge_hourly",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi DOGE_HOURLY agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": false,
+      "status": "dormant",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "DOGE_DAILY",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.doge_daily",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi DOGE_DAILY agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "daily"
+      ],
+      "assets": [
+        "DOGE"
+      ],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "regime"
+    },
+    {
+      "name": "DOGE_WEEKLY",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.doge_weekly",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi DOGE_WEEKLY agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "weekly"
+      ],
+      "assets": [
+        "DOGE"
+      ],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "MACRO_DIRECTIONAL",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.macro_directional",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi MACRO_DIRECTIONAL agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": false,
+      "status": "dormant",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "macro"
+    },
+    {
+      "name": "FINANCIALS_DIRECTIONAL",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.financials_directional",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi FINANCIALS_DIRECTIONAL agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": false,
+      "status": "dormant",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "POLITICS_DIRECTIONAL",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.politics_directional",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi POLITICS_DIRECTIONAL agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [
+        "ELECTION"
+      ],
+      "enabled": false,
+      "status": "dormant",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "CLIMATE_DIRECTIONAL",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.climate_directional",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi CLIMATE_DIRECTIONAL agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [
+        "WEATHER",
+        "CLIMATE"
+      ],
+      "enabled": false,
+      "status": "dormant",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "SPORTS_DIRECTIONAL",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.sports_directional",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi SPORTS_DIRECTIONAL agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "daily"
+      ],
+      "assets": [
+        "BTC",
+        "ETH"
+      ],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "regime"
+    },
+    {
+      "name": "TECH_DIRECTIONAL",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.tech_directional",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi TECH_DIRECTIONAL agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": false,
+      "status": "dormant",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    },
+    {
+      "name": "SENTIMENT_CONTRARIAN_CRYPTO",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.sentiment_contrarian_crypto",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi SENTIMENT_CONTRARIAN_CRYPTO agent (contrarian)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [
+        "BTC",
+        "ETH",
+        "SOL",
+        "XRP",
+        "DOGE"
+      ],
+      "enabled": false,
+      "status": "dormant",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "contrarian",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "sentiment"
+    },
+    {
+      "name": "SENTIMENT_CONTRARIAN_MACRO",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.sentiment_contrarian_macro",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi SENTIMENT_CONTRARIAN_MACRO agent (contrarian)",
+      "category": "economics",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": false,
+      "status": "dormant",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "contrarian",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "sentiment"
+    },
+    {
+      "name": "SENTIMENT_REGIME_SWITCH_CRYPTO",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.sentiment_regime_switch_crypto",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi SENTIMENT_REGIME_SWITCH_CRYPTO agent (regime_switch)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [
+        "BTC",
+        "ETH",
+        "SOL",
+        "XRP",
+        "DOGE"
+      ],
+      "enabled": false,
+      "status": "dormant",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "regime_switch",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "sentiment"
+    },
+    {
+      "name": "SENTIMENT_REGIME_SWITCH_FINANCIALS",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.sentiment_regime_switch_financials",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi SENTIMENT_REGIME_SWITCH_FINANCIALS agent (regime_switch)",
+      "category": "financials",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": false,
+      "status": "dormant",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "regime_switch",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "sentiment"
+    },
+    {
+      "name": "SENTIMENT_VOL_BREAKOUT_CRYPTO",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.sentiment_vol_breakout_crypto",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi SENTIMENT_VOL_BREAKOUT_CRYPTO agent (vol_breakout)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [
+        "1h",
+        "15m"
+      ],
+      "assets": [
+        "BTC",
+        "ETH",
+        "SOL",
+        "XRP",
+        "DOGE"
+      ],
+      "enabled": true,
+      "status": "active",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "vol_breakout",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "sentiment"
+    },
+    {
+      "name": "SENTIMENT_VOL_BREAKOUT_GLOBAL",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.sentiment_vol_breakout_global",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi SENTIMENT_VOL_BREAKOUT_GLOBAL agent (vol_breakout)",
+      "category": "all",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": false,
+      "status": "dormant",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "vol_breakout",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "sentiment"
+    },
+    {
+      "name": "KALSHI_CATCH_ALL",
+      "type": "kalshi_grid",
+      "module": "config.kalshi_agent_grid.kalshi_catch_all",
+      "file_path": "config\\kalshi_agent_grid.yaml",
+      "description": "Kalshi KALSHI_CATCH_ALL agent (directional)",
+      "category": "crypto",
+      "markets": [
+        "kalshi"
+      ],
+      "timeframes": [],
+      "assets": [],
+      "enabled": false,
+      "status": "dormant",
+      "wired_where": [
+        "kalshi_agent_grid"
+      ],
+      "series_tickers": [],
+      "archetype": "directional",
+      "base_class": "",
+      "role": "feature",
+      "feature_namespace": "general"
+    }
+  ]
+}

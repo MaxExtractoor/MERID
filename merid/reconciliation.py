@@ -356,7 +356,13 @@ def _fetch_kalshi_settlement(market_id: str) -> Optional[bool]:
             if resolution in ("no", "false", "0"):
                 return False
             # Kalshi sometimes returns the winning outcome_id — check raw_data
-            raw = market.raw_data or {}
+            # CRITICAL FIX: Handle CatalogMarket wrapping EventMarket
+            if hasattr(market, "market") and hasattr(market.market, "raw_data"):
+                raw = market.market.raw_data or {}
+            elif hasattr(market, "raw_data"):
+                raw = market.raw_data or {}
+            else:
+                raw = {}
             result_str = str(raw.get("result", "")).lower()
             if result_str in ("yes", "true", "1"):
                 return True

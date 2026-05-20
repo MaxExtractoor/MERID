@@ -51,11 +51,11 @@ class TestResolveTraderMinEdge(unittest.TestCase):
 
         with patch.dict(
             os.environ,
-            {"KALSHI_CT_PROFILE": "diagnostic", "KALSHI_TRADER_MIN_EDGE": ""},
+            {"KALSHI_CT_PROFILE": "diagnostic", "KALSHI_TRADER_MIN_EDGE": "", "KALSHI_CT_DIAGNOSTIC_MIN_EDGE": "0.02"},
             clear=False,
         ):
             me = kct._resolve_trader_min_edge(smoke_test=False)
-        self.assertEqual(str(me), "0.008")
+        self.assertEqual(str(me), "0.02")  # diagnostic profile now uses 0.02 (was 0.008)
 
     def test_diagnostic_overridden_by_env(self):
         from merid.trading import kalshi_continuous_trader as kct
@@ -117,17 +117,17 @@ class TestPerAssetConfig(unittest.TestCase):
     def test_default_asset_exposure_pcts(self):
         from merid.trading.kalshi_continuous_trader import TraderConfig
         cfg = TraderConfig()
-        self.assertEqual(cfg.asset_max_exposure_pct["BTC"], 0.30)
-        self.assertEqual(cfg.asset_max_exposure_pct["ETH"], 0.30)
-        self.assertEqual(cfg.asset_max_exposure_pct["SOL"], 0.30)
-        self.assertEqual(cfg.asset_max_exposure_pct["XRP"], 0.30)
-        self.assertEqual(cfg.asset_max_exposure_pct["DOGE"], 0.30)
-        self.assertEqual(cfg.asset_exposure_default_pct, 0.10)
+        self.assertEqual(cfg.asset_max_exposure_pct["BTC"], 0.03)  # 3% unified cycle risk (was 0.30 - legacy)
+        self.assertEqual(cfg.asset_max_exposure_pct["ETH"], 0.03)  # 3% unified cycle risk (was 0.30 - legacy)
+        self.assertEqual(cfg.asset_max_exposure_pct["SOL"], 0.03)  # 3% unified cycle risk (was 0.20 - legacy)
+        self.assertEqual(cfg.asset_max_exposure_pct["XRP"], 0.03)  # 3% unified cycle risk (was 0.20 - legacy)
+        self.assertEqual(cfg.asset_max_exposure_pct["DOGE"], 0.03)  # 3% unified cycle risk (was 0.20 - legacy)
+        self.assertEqual(cfg.asset_exposure_default_pct, 0.10)  # Default is 0.10, from_env overrides to 0.03
 
     def test_default_series_multipliers(self):
         from merid.trading.kalshi_continuous_trader import TraderConfig
         cfg = TraderConfig()
-        self.assertEqual(cfg.series_exposure_multiplier["15m"],   0.40)
+        self.assertEqual(cfg.series_exposure_multiplier["15m"], 0.80)  # Increased to 0.80 for 15m scalper (was 0.40)
         self.assertEqual(cfg.series_exposure_multiplier["1h"],    0.70)
         self.assertEqual(cfg.series_exposure_multiplier["daily"], 1.00)
 
@@ -476,7 +476,7 @@ class TestCalibratedExposureValues(unittest.TestCase):
         cfg = TraderConfig()
         bal = 1211
         raw_eth_1h = int(bal * cfg.asset_max_exposure_pct["ETH"] * cfg.series_exposure_multiplier["1h"])
-        self.assertEqual(raw_eth_1h, 254)   # 1211 * 0.30 * 0.70 = 254
+        self.assertEqual(raw_eth_1h, 25)   # 1211 * 0.03 * 0.70 = 25 (was 254 with legacy 0.30)
         self.assertEqual(int(bal * cfg.global_max_exposure_pct), 605)  # 1211 * 0.50
 
     def test_show_caps_for_100_dollars(self):

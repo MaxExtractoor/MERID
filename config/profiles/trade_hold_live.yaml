@@ -22,12 +22,12 @@ entry_window:
   expiry_caution_zone_seconds: 180
 
 strategy:
-  min_edge_early: 0.10       # 10% — tighter than default 8%
-  min_edge_mid: 0.09
-  min_edge_late: 0.08
-  min_edge_terminal: 0.07
+  min_edge_early: 0.05       # 5% — aligned with live trading config
+  min_edge_mid: 0.04
+  min_edge_late: 0.04
+  min_edge_terminal: 0.05
   min_arb_edge: 0.01         # 1% for arb (vs 0.5% default)
-  min_confidence: 0.65       # Higher confidence floor
+  min_confidence: 0.45       # Aligned with live trading config
   min_volume: 0
   min_open_interest: 0
   snapshot_stale_seconds: 90  # Shorter staleness window

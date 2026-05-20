@@ -76,7 +76,8 @@ class AgentDeployment:
 class DeploymentConfig:
     """Configuration for deployment controller."""
     # Readiness gates
-    require_readiness_check: bool = True
+    # DISABLED FOR LIVE TRADING (2026-05-14): Set to False to allow direct promotion without paper trading requirements
+    require_readiness_check: bool = False
     min_paper_trades: int = 200
     min_profit_factor: float = 1.4
     min_expectancy_cents: float = 5.0
@@ -93,13 +94,16 @@ class DeploymentConfig:
     auto_rollback_on_consecutive_losses: int = 10
 
     # Max simultaneous live agents
-    max_live_agents: int = 3
+    # INCREASED FOR LIVE TRADING (2026-05-14): Set to 10 to allow all 5 crypto agents (BTC/ETH/SOL/XRP/DOGE) to run live simultaneously
+    max_live_agents: int = 10
 
     # Operator acknowledgement required after restart before re-promoting to LIVE
-    require_operator_ack_after_restart: bool = True
+    # DISABLED FOR LIVE TRADING (2026-05-14): Set to False to allow automatic re-promotion after restart
+    require_operator_ack_after_restart: bool = False
 
     # Require backtest validate_before_lift() before SHADOW → LIVE (fail-closed in prod)
-    require_backtest_lift_gate: bool = True
+    # DISABLED FOR LIVE TRADING (2026-05-14): Set to False to allow direct PAPER → LIVE promotion
+    require_backtest_lift_gate: bool = False
 
 
 DEFAULT_DEPLOYMENT_CONFIG = DeploymentConfig()

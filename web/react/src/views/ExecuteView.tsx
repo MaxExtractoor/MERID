@@ -15,12 +15,13 @@
  *   - Batch order operations
  */
 
-import React, { useState, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Terminal, ClipboardList, TrendingUp,
   X, RefreshCw, AlertTriangle
 } from '../ui/icons';
 import { useApiData } from '../hooks/useApiData';
+import { subscribeToPortfolio, PortfolioSnapshot, PositionSnapshot } from '../lib/portfolioClient';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { authHeaders } from '../api/auth';
 
@@ -48,20 +49,6 @@ interface Order {
   placed_at: string;
   agent_name?: string;
   client_tag?: string;
-}
-
-interface Position {
-  id: string;
-  ticker: string;
-  side: 'yes' | 'no';
-  contracts: number;
-  avg_price_cents: number;
-  current_price_cents: number;
-  unrealized_pnl_cents: number;
-  realized_pnl_cents: number;
-  opened_at: string;
-  market_question?: string;
-  initiated_by?: string;
 }
 
 interface Market {
@@ -122,14 +109,21 @@ const ExecuteView: React.FC<ExecuteViewProps> = ({
   const [orderFilter, setOrderFilter] = useState<'all' | 'resting' | 'filled'>('all');
   const [cancellingOrders, setCancellingOrders] = useState<Set<string>>(new Set());
   
+  // Portfolio state from event-driven service
+  const [portfolio, setPortfolio] = useState<PortfolioSnapshot | null>(null);
+  
+  // Subscribe to portfolio updates on mount
+  useEffect(() => {
+    const unsubscribe = subscribeToPortfolio((update) => {
+      setPortfolio(update as PortfolioSnapshot);
+    });
+    
+    return unsubscribe;
+  }, []);
+  
   // Data fetching
   const ordersRes = useApiData<{ orders: Order[] }>(
     API_ENDPOINTS.KALSHI_ORDERS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
-  );
-  
-  const positionsRes = useApiData<{ positions: Position[] }>(
-    API_ENDPOINTS.KALSHI_POSITIONS,
     { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );
   
@@ -140,7 +134,27 @@ const ExecuteView: React.FC<ExecuteViewProps> = ({
 
   // Derived data
   const orders = ordersRes.data?.orders || [];
-  const positions = positionsRes.data?.positions || [];
+  
+  // Map portfolio positions to local Position interface
+  const positions = useMemo(() => {
+    if (!portfolio?.positions || !Array.isArray(portfolio.positions)) return [];
+    return portfolio.positions
+      .filter((p: PositionSnapshot) => p && typeof p === 'object' && Math.abs(p.quantity || 0) > 0)
+      .map((p: PositionSnapshot) => ({
+        id: p.instrument_id || '',
+        ticker: p.ticker || 'unknown',
+        side: (p.side || 'unknown') as 'yes' | 'no',
+        contracts: Math.abs(p.quantity || 0),
+        avg_price_cents: p.avg_entry_price_cents || 0,
+        current_price_cents: p.mark_price_cents || 0,
+        unrealized_pnl_cents: p.unrealized_pnl_cents || 0,
+        realized_pnl_cents: 0, // Will be computed from portfolio when available
+        opened_at: p.last_updated,
+        market_question: '', // Will be populated from portfolio when available
+        initiated_by: '', // Will be populated from portfolio when available
+      }));
+  }, [portfolio?.positions]);
+  
   const markets = marketsRes.data?.markets || [];
   
   const selectedMarket = useMemo(() => 
@@ -154,11 +168,11 @@ const ExecuteView: React.FC<ExecuteViewProps> = ({
   }, [orders, orderFilter]);
   
   const totalExposure = useMemo(() => {
-    return positions.reduce((acc, p) => acc + Math.abs(p.contracts), 0);
+    return positions.reduce((acc: number, p: any) => acc + Math.abs(p.contracts), 0);
   }, [positions]);
   
   const totalUnrealizedPnl = useMemo(() => {
-    return positions.reduce((acc, p) => acc + p.unrealized_pnl_cents, 0);
+    return positions.reduce((acc: number, p: any) => acc + p.unrealized_pnl_cents, 0);
   }, [positions]);
 
   // Cancel order handler
@@ -454,7 +468,6 @@ const ExecuteView: React.FC<ExecuteViewProps> = ({
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => positionsRes.refetch()}
                   icon={<RefreshCw className="w-4 h-4" />}
                 >
                   Refresh
@@ -483,7 +496,7 @@ const ExecuteView: React.FC<ExecuteViewProps> = ({
                 <div className="bg-slate-800 rounded-lg p-4">
                   <div className="text-xs text-slate-500 mb-1">Realized PnL (Today)</div>
                   <div className="text-2xl font-bold text-white">
-                    {formatUsd(positions.reduce((acc, p) => acc + p.realized_pnl_cents, 0))}
+                    {formatUsd(positions.reduce((acc: number, p: any) => acc + p.realized_pnl_cents, 0))}
                   </div>
                 </div>
               </div>
@@ -510,7 +523,7 @@ const ExecuteView: React.FC<ExecuteViewProps> = ({
                         </td>
                       </tr>
                     ) : (
-                      positions.map(pos => (
+                      positions.map((pos: any) => (
                         <tr 
                           key={pos.id} 
                           className="border-b border-slate-800/50 hover:bg-slate-800/30 cursor-pointer"

@@ -1,4 +1,19 @@
-"""Shared dataclasses and abstractions for perpetual venue adapters."""
+"""
+PerpVenueAdapterBase — Base class for perpetual market adapters.
+
+Provides common functionality for all perpetual market adapters including
+market data fetching, funding rate tracking, and whale signal detection.
+"""
+
+# LEGACY EXECUTION GUARD: This module contains legacy execution logic
+# To enable, set MERID_ALLOW_LEGACY_EXECUTION=true (non-prod environments only)
+# Production deployments must never set this env var
+import os
+if os.getenv("MERID_ALLOW_LEGACY_EXECUTION", "false").lower() != "true":
+    raise RuntimeError(
+        "Legacy execution module cannot be imported in production. "
+        "Set MERID_ALLOW_LEGACY_EXECUTION=true only in non-prod environments."
+    )
 
 from __future__ import annotations
 

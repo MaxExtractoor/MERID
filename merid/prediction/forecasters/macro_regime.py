@@ -108,10 +108,13 @@ class MacroRegimeForecaster(Forecaster):
             self._last_vol_regime = "normal"
 
         # ── 4. Sentiment Composite ──────────────────────────────────
-        sentiment = kwargs.get("sentiment_score", 0.0)
-        components["sentiment"] = sentiment
-        if abs(sentiment) > 0.1:
-            adjustments.append(sentiment * 0.3)
+        # PRODUCTION FIX (2026-05-10): Removed fake 0.0 fallback for sentiment
+        # Require real sentiment data - if not available, skip sentiment adjustment
+        sentiment = kwargs.get("sentiment_score")
+        if sentiment is not None:
+            components["sentiment"] = sentiment
+            if abs(sentiment) > 0.1:
+                adjustments.append(sentiment * 0.3)
 
         # ── Combine ─────────────────────────────────────────────────
         total_adjustment = sum(adjustments)
@@ -151,7 +154,7 @@ class MacroRegimeForecaster(Forecaster):
         if fg_value is None:
             # Try to fetch from the sentiment system
             try:
-                from merid.swarm.market_mood_bus import get_market_mood_bus
+                from merid.sentiment.market_mood_bus import get_market_mood_bus
                 bus = get_market_mood_bus()
                 context = bus.get_context(asset.upper(), "daily")
                 if context and hasattr(context, "fg_index"):
@@ -184,7 +187,7 @@ class MacroRegimeForecaster(Forecaster):
 
         if xtf_agreement is None:
             try:
-                from merid.swarm.market_mood_bus import get_market_mood_bus
+                from merid.sentiment.market_mood_bus import get_market_mood_bus
                 bus = get_market_mood_bus()
                 context = bus.get_context(asset.upper(), "daily")
                 if context:
@@ -220,7 +223,7 @@ class MacroRegimeForecaster(Forecaster):
 
         if vol is None:
             try:
-                from merid.swarm.market_mood_bus import get_market_mood_bus, VolatilityRegime
+                from merid.sentiment.market_mood_bus import get_market_mood_bus, VolatilityRegime
                 bus = get_market_mood_bus()
                 context = bus.get_context(asset.upper(), "daily")
                 if context and hasattr(context, "volatility_regime"):

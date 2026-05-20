@@ -55,6 +55,14 @@ async def get_paper_agent_performance(agent_id: str):
 @router.get("/paper-vs-shadow")
 async def get_paper_vs_shadow_comparison():
     """Compare paper vs shadow performance across crypto agents."""
+    # PROFILE-GUARD: Disable for kalshi_crypto_15m_v2 (paper vs shadow comparison not needed for sealed 15m profile)
+    profile = os.getenv("MERID_PROFILE", "").lower()
+    if profile == "kalshi_crypto_15m_v2":
+        raise HTTPException(
+            403,
+            "Paper vs shadow comparison is disabled for kalshi_crypto_15m_v2 profile (sealed 15m profile uses direct trading only)"
+        )
+    
     try:
         # Get paper portfolio data
         portfolio = get_kalshi_paper_portfolio()

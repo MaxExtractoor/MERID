@@ -126,14 +126,6 @@ class TestRegimeAgentInstantiation:
         assert agent.agent_id == "sol_15m"
         assert agent.category.value == "strategy"
 
-    def test_btc_1h_agent_instantiation_no_side_effects(self):
-        """Btc1hAgent should instantiate without touching Redis or Kalshi."""
-        from merid.agents.btc_1h_agent import Btc1hAgent
-        
-        agent = Btc1hAgent()
-        assert agent.agent_id == "btc_1h"
-        assert agent.category.value == "strategy"
-
     def test_xrp_15m_agent_instantiation_no_side_effects(self):
         """Xrp15mAgent should instantiate without touching Redis or Kalshi."""
         from merid.agents.xrp_15m_agent import Xrp15mAgent
@@ -324,14 +316,13 @@ class TestRegimeGridSmokeTest:
         """All regime agents should be able to generate opinions."""
         from merid.agents.eth_15m_agent import Eth15mAgent
         from merid.agents.sol_15m_agent import Sol15mAgent
-        from merid.agents.btc_1h_agent import Btc1hAgent
+        # Btc1hAgent archived 2026-01-15 - focus on 15m timeframe only
         from merid.agents.xrp_15m_agent import Xrp15mAgent
         from merid.agents.doge_15m_agent import Doge15mAgent
         
         agents = [
             Eth15mAgent(),
             Sol15mAgent(),
-            Btc1hAgent(),
             Xrp15mAgent(),
             Doge15mAgent(),
         ]
@@ -353,14 +344,13 @@ class TestRegimeGridSmokeTest:
         """Each regime agent should have a unique agent_id."""
         from merid.agents.eth_15m_agent import Eth15mAgent
         from merid.agents.sol_15m_agent import Sol15mAgent
-        from merid.agents.btc_1h_agent import Btc1hAgent
+        # Btc1hAgent archived 2026-01-15 - focus on 15m timeframe only
         from merid.agents.xrp_15m_agent import Xrp15mAgent
         from merid.agents.doge_15m_agent import Doge15mAgent
         
         agents = [
             Eth15mAgent(),
             Sol15mAgent(),
-            Btc1hAgent(),
             Xrp15mAgent(),
             Doge15mAgent(),
         ]

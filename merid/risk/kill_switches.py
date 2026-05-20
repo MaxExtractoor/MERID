@@ -68,6 +68,66 @@ def _get_kill_switch_path() -> Path:
 logger = get_logger("merid.risk.kill_switches")
 
 
+def get_profile_daily_loss_limit() -> tuple[Optional[float], bool]:
+    """Get daily loss limit and enabled flag from active profile for kalshi_crypto_15m_v2.
+    
+    Returns:
+        Tuple of (daily_loss_limit_usd, daily_loss_enabled)
+        Returns (None, False) if not a profile with dynamic limits
+    """
+    import os
+    profile = os.getenv("MERID_PROFILE", "").lower()
+    if profile != "kalshi_crypto_15m_v2":
+        return None, False
+    
+    try:
+        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+        envelope = get_kalshi_crypto_15m_risk_envelope()
+        return envelope.max_daily_loss_usd, envelope.daily_loss_enabled
+    except Exception as e:
+        logger.warning(f"[PROFILE-LIMIT] Failed to load profile daily loss limit: {e}")
+        return None, False
+
+
+def get_profile_drawdown_state() -> tuple[Optional[float], Optional[float], bool]:
+    """Get drawdown state from active profile for kalshi_crypto_15m_v2.
+    
+    Returns:
+        Tuple of (current_drawdown_pct, drawdown_halt_pct, is_halted)
+        Returns (None, None, False) if not a profile with drawdown tracking or envelope disabled
+    """
+    import os
+    profile = os.getenv("MERID_PROFILE", "").lower()
+    if profile != "kalshi_crypto_15m_v2":
+        return None, None, False
+    
+    # Check if envelope is enabled via feature flag
+    try:
+        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import is_risk_envelope_enabled
+        if not is_risk_envelope_enabled():
+            logger.warning(
+                "[PROFILE-DRAWDOWN] Risk envelope disabled via MERID_RISK_ENVELOPE_ENABLED flag. "
+                "Using legacy behavior for profile %s", profile
+            )
+            return None, None, False
+    except ImportError:
+        logger.warning("[PROFILE-DRAWDOWN] Failed to import envelope feature flag check")
+        return None, None, False
+    
+    try:
+        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import (
+            get_kalshi_crypto_15m_risk_envelope,
+            safe_update_envelope_equity
+        )
+        envelope = get_kalshi_crypto_15m_risk_envelope()
+        # Update envelope with current equity
+        safe_update_envelope_equity(envelope)
+        return envelope.current_drawdown_pct, envelope.drawdown_halt_pct, envelope.is_halted
+    except Exception as e:
+        logger.warning(f"[PROFILE-DRAWDOWN] Failed to load profile drawdown state: {e}")
+        return None, None, False
+
+
 class KillSwitchState(str, Enum):
     """Kill switch states."""
     ACTIVE = "active"        # Trading allowed
@@ -109,33 +169,40 @@ class RiskController:
     - Distributed agent propagation (P0 fix)
     """
     
-    daily_loss_limit: float = 500.0
-    max_position_value: float = 10000.0
+    # ALIGNED: Daily loss now percentage-based like rest of system (15% of equity)
+    # Was: daily_loss_limit = 500.0 (legacy hardcoded value)
+    daily_loss_limit: float = 0.0  # 0 means "derive from settings/equity"
+    daily_loss_enabled: bool = False  # Default disabled, profile controls this
     error_threshold: int = 500  # FIXED: Was 50, now 500 - only truly catastrophic errors should halt trading
+    max_position_value: float = 10000.0  # CRITICAL FIX: Add missing field for operator API
 
     def __post_init__(self):
         # R-1, R-5: Override with env vars if set AND value still equals default.
         # This allows explicit constructor arguments to win over env vars.
         env_daily_loss = os.getenv("MERID_MAX_DAILY_LOSS_USD")
-        if env_daily_loss and self.daily_loss_limit == 500.0:
+        if env_daily_loss and self.daily_loss_limit == 0.0:
             try:
                 self.daily_loss_limit = float(env_daily_loss)
             except (ValueError, TypeError):
                 pass
 
-        env_max_pos = os.getenv("MERID_MAX_POSITION_VALUE_USD")
-        if env_max_pos and self.max_position_value == 10000.0:
-            try:
-                self.max_position_value = float(env_max_pos)
-            except (ValueError, TypeError):
-                pass
-
         env_error_thresh = os.getenv("MERID_ERROR_THRESHOLD")
-        if env_error_thresh and self.error_threshold == 50:
+        if env_error_thresh and self.error_threshold == 500:
             try:
                 self.error_threshold = int(env_error_thresh)
             except (ValueError, TypeError):
                 pass
+
+        # PROFILE-KILL-SWITCH: Use profile daily loss limit and enabled flag for kalshi_crypto_15m_v2
+        if self.daily_loss_limit == 0.0:
+            profile_limit, profile_enabled = get_profile_daily_loss_limit()
+            if profile_limit is not None:
+                self.daily_loss_limit = profile_limit
+                self.daily_loss_enabled = profile_enabled
+                if profile_enabled:
+                    logger.info(f"[PROFILE-KILL-SWITCH] Using profile daily loss limit: ${profile_limit:.2f}")
+                else:
+                    logger.info(f"[PROFILE-KILL-SWITCH] Daily loss DISABLED (drawdown is primary guardrail)")
 
         # Also try to read from settings if available (takes precedence after env vars)
         try:
@@ -143,8 +210,15 @@ class RiskController:
             # Only override if still at default (not explicitly set via env/constructor)
             if self.error_threshold == 50:
                 self.error_threshold = settings.MERID_ERROR_THRESHOLD
+            # ALIGNED: If daily_loss_limit is 0, derive from percentage-based settings
+            if self.daily_loss_limit == 0.0:
+                self.daily_loss_limit = settings.effective_pm_max_daily_loss
         except Exception:
             pass  # Settings not available, use env/constructor/default
+            
+        # Fallback: if still 0, use legacy default for safety
+        if self.daily_loss_limit == 0.0:
+            self.daily_loss_limit = 500.0
         
         self._global_kill: bool = False
         self._kill_reason: Optional[KillSwitchReason] = None
@@ -200,10 +274,14 @@ class RiskController:
             if _usd_limit > 0:
                 self.daily_loss_limit = _usd_limit
             else:
-                # Compute from percentage - 15% default for top-3 edge strategy
-                _bankroll = getattr(settings, 'KALSHI_PORTFOLIO_BANKROLL_CENTS', 0) / 100.0
-                if _bankroll <= 0:
-                    _bankroll = getattr(settings, 'MERID_TOTAL_CAPITAL_USD', 100.0)
+                # Compute from percentage - use live bankroll from bankroll_service_v2
+                try:
+                    from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+                    _bankroll = get_equity_for_risk_calc_sync()
+                    if _bankroll is None or _bankroll <= 0:
+                        _bankroll = getattr(settings, 'MERID_TOTAL_CAPITAL_USD', 0.0)
+                except Exception:
+                    _bankroll = getattr(settings, 'MERID_TOTAL_CAPITAL_USD', 0.0)
                 _pct = getattr(settings, 'MERID_MAX_DAILY_LOSS_PCT', 0.15)
                 self.daily_loss_limit = _bankroll * _pct
             self.max_position_value = settings.MERID_MAX_POSITION_SIZE_USD
@@ -348,14 +426,24 @@ class RiskController:
 
             # Inline daily-loss check: fire kill if limit already breached
             # Uses fills_ledger-synced _daily_pnl for accurate real trading P&L
+            # Skip check if daily loss is disabled (drawdown is primary guardrail)
             if (
-                not self._global_kill
+                self.daily_loss_enabled
+                and not self._global_kill
                 and self._daily_pnl < 0
                 and abs(self._daily_pnl) >= self.daily_loss_limit
             ):
                 self._trigger_kill_locked(
                     KillSwitchReason.DAILY_LOSS,
                     f"Daily loss ${abs(self._daily_pnl):.2f} exceeds limit ${self.daily_loss_limit:.2f} (detected in can_trade)",
+                )
+            
+            # PROFILE-DRAWDOWN: Check drawdown halt for kalshi_crypto_15m_v2
+            current_drawdown, drawdown_halt, is_halted = get_profile_drawdown_state()
+            if is_halted:
+                self._trigger_kill_locked(
+                    KillSwitchReason.DAILY_LOSS,  # Reuse or add new KillSwitchReason.DRAWDOWN_HALT
+                    f"Drawdown halt: {current_drawdown:.2%} >= {drawdown_halt:.2%} (detected in can_trade)",
                 )
 
             return not self._global_kill
@@ -474,7 +562,8 @@ class RiskController:
             "kill_timestamp": _kill_ts,
             "daily_pnl": _daily_pnl,
             "daily_loss_limit": self.daily_loss_limit,
-            "daily_pnl_pct": (abs(_daily_pnl) / self.daily_loss_limit * 100) if self.daily_loss_limit > 0 else 0,
+            "daily_loss_enabled": self.daily_loss_enabled,
+            "daily_pnl_pct": (abs(_daily_pnl) / self.daily_loss_limit * 100) if self.daily_loss_limit > 0 and self.daily_loss_enabled else 0,
             "position_value": _position_value,
             "max_position_value": self.max_position_value,
             "error_count": _error_count,

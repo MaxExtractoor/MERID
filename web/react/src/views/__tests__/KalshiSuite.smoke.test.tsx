@@ -10,6 +10,25 @@
 import React from 'react';
 import { render, screen } from '@testing-library/react';
 
+// Mock portfolioClient to avoid WebSocket connection errors
+jest.mock('../../lib/portfolioClient', () => ({
+  PortfolioClient: jest.fn().mockImplementation(() => ({
+    connect: jest.fn(),
+    subscribe: jest.fn(),
+    disconnect: jest.fn(),
+  })),
+  subscribeToPortfolio: jest.fn(),
+}));
+
+// Mock API_ENDPOINTS to include PORTFOLIO_WEBSOCKET function
+jest.mock('../../config/constants', () => ({
+  ...jest.requireActual('../../config/constants'),
+  API_ENDPOINTS: {
+    ...jest.requireActual('../../config/constants').API_ENDPOINTS,
+    PORTFOLIO_WEBSOCKET: jest.fn((accountId: string = "default") => `/api/v1/portfolio/ws/${accountId}`),
+  },
+}));
+
 // Mock useApiData to return stub data for all endpoints
 jest.mock('../../hooks/useApiData', () => ({
   useApiData: () => ({

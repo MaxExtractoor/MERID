@@ -8,9 +8,8 @@ This module provides:
 """
 
 from __future__ import annotations
-
+import os as _os  # Alias to prevent scope shadowing
 import asyncio
-import os
 import threading
 import time
 from datetime import datetime, timezone, timedelta
@@ -19,6 +18,46 @@ from typing import Any, Dict, List, Optional
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.fills_poller")
+
+
+def _is_test_ticker(ticker: str) -> bool:
+    """Check if a ticker is a test market ticker.
+    
+    Test tickers are identified by patterns like:
+    - Contains "TEST" or "KXTEST"
+    - Short codes like "KX-SK", "KX-DUP", "KX-TK"
+    - Timeframe-based test tickers like "KXBTC-15M", "KXETH-15M" (if they are test-related)
+    
+    Args:
+        ticker: The market ticker to check
+        
+    Returns:
+        True if the ticker is a test market, False otherwise
+    """
+    if not ticker:
+        return False
+    
+    ticker_upper = ticker.upper()
+    
+    # Explicit test markers
+    if "TEST" in ticker_upper or "KXTEST" in ticker_upper:
+        return True
+    
+    # Short codes (test development tickers)
+    if ticker_upper.startswith("KX-") and len(ticker_upper) <= 6:
+        return True
+    
+    # Timeframe-based tickers for crypto (may be test-related)
+    # These patterns are used for test markets in development
+    if ticker_upper.startswith(("KXBTC-", "KXETH-", "KXSOL-", "KXXRP-", "KXDOGE-")):
+        parts = ticker_upper.split("-")
+        if len(parts) >= 2:
+            last_part = parts[-1]
+            # Check for timeframe suffixes that indicate test markets
+            if last_part in ("15M", "1H", "H", "D", "W", "M", "A"):
+                return True
+    
+    return False
 
 
 class FillsPoller:
@@ -42,9 +81,9 @@ class FillsPoller:
     
     # Default intervals (seconds) — configurable via env vars:
     # MERID_FILLS_POLL_INTERVAL_SEC, MERID_FILLS_RECONCILE_INTERVAL_SEC, MERID_FILLS_BACKFILL_INTERVAL_SEC
-    DEFAULT_POLL_INTERVAL: float = float(os.getenv("MERID_FILLS_POLL_INTERVAL_SEC", "20.0"))
-    DEFAULT_RECONCILE_INTERVAL: float = float(os.getenv("MERID_FILLS_RECONCILE_INTERVAL_SEC", "60.0"))
-    DEFAULT_BACKFILL_INTERVAL: float = float(os.getenv("MERID_FILLS_BACKFILL_INTERVAL_SEC", "300.0"))
+    DEFAULT_POLL_INTERVAL: float = float(_os.getenv("MERID_FILLS_POLL_INTERVAL_SEC", "20.0"))
+    DEFAULT_RECONCILE_INTERVAL: float = float(_os.getenv("MERID_FILLS_RECONCILE_INTERVAL_SEC", "60.0"))
+    DEFAULT_BACKFILL_INTERVAL: float = float(_os.getenv("MERID_FILLS_BACKFILL_INTERVAL_SEC", "300.0"))
     
     def __new__(cls):
         if cls._instance is None:
@@ -83,6 +122,12 @@ class FillsPoller:
         self._last_poll_time: Optional[datetime] = None
         self._last_reconcile_time: Optional[datetime] = None
         self._last_error: Optional[str] = None
+
+        # Circuit breaker for backfill (BUG-38: prevents hammering API when failing)
+        self._backfill_failures_1h: int = 0
+        self._backfill_last_failure_time: Optional[datetime] = None
+        self._backfill_circuit_open: bool = False
+        self._backfill_circuit_opened_at: Optional[datetime] = None
 
         # Settlement tracking — markets we've already fired record_outcome() for
         # Prevents double-firing when the same market persists in fills_without_positions
@@ -176,7 +221,7 @@ class FillsPoller:
             except Exception as e:
                 self._polls_failed += 1
                 self._last_error = str(e)
-                logger.warning(f"Fills poll failed: {e}")
+                logger.warning(f"Fills poll failed: {e}", exc_info=True)
             
             try:
                 await asyncio.wait_for(
@@ -215,7 +260,12 @@ class FillsPoller:
         # Fetch fills
         try:
             await client.connect()
-            result = await client.get_fills(limit=200, since_ts=since_ts)
+            # BUG-FIX (2026-05-12): Add timeout to get_fills call to prevent indefinite blocking
+            # Wrap in asyncio.wait_for to prevent 30s timeout from blocking the event loop
+            result = await asyncio.wait_for(
+                client.get_fills(limit=200, since_ts=since_ts),
+                timeout=10.0  # 10 second timeout for Kalshi API call
+            )
             
             if not result.success:
                 self._fills_ingestion_errors += 1
@@ -248,6 +298,10 @@ class FillsPoller:
             
             return new_count
             
+        except asyncio.TimeoutError:
+            self._fills_ingestion_errors += 1
+            logger.warning("Fills poll timed out after 10s - Kalshi API slow to respond")
+            return 0
         except Exception as e:
             self._fills_ingestion_errors += 1
             logger.warning(f"Fills poll error: {e}")
@@ -264,7 +318,7 @@ class FillsPoller:
                 self._last_reconcile_time = datetime.now(timezone.utc)
             except Exception as e:
                 self._reconcile_errors += 1
-                logger.warning(f"Reconciliation failed: {e}")
+                logger.warning(f"Reconciliation failed: {e}", exc_info=True)
             
             try:
                 await asyncio.wait_for(
@@ -285,7 +339,10 @@ class FillsPoller:
             
             # Get positions from Kalshi
             from merid.resilience import OperationResult
-            pos_result = await client.get_positions_with_filters({"nonzero": "position"})
+            # CRITICAL FIX: Remove "nonzero" filter to get ALL positions including zero-quantity ones
+            # The "nonzero": "position" filter was causing REST to return empty positions
+            # when positions were closed/settled but still in the system.
+            pos_result = await client.get_positions_with_filters({})
             
             if not pos_result.success:
                 return {"status": "error", "message": str(pos_result.error)}
@@ -317,32 +374,28 @@ class FillsPoller:
             
             self._last_reconcile_report = report
             
-            # Sync position cache with ground truth from Kalshi
-            # This prevents ghost positions when WS fill events were dropped
+            # Sync position cache with ground truth from Kalshi REST API
+            # SINGLE SOURCE OF TRUTH: Use ONLY Kalshi REST API positions, never computed from fills
+            # Orders do NOT count as positions - only actual open positions from REST API
             if report.get("status") in ("ok", "degraded", "broken"):
                 try:
                     from merid.event_venues.kalshi.position_cache import get_position_cache
-                    from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
                     cache = get_position_cache()
-                    ledger = get_fills_ledger()
                     
-                    # If REST returned empty but fills ledger has computed positions,
-                    # use the computed positions instead (fills are ground truth)
-                    computed_positions = await ledger.compute_net_positions_async()
-                    if not positions and computed_positions:
-                        # Convert computed positions to the format expected by sync_from_rest
-                        positions = []
-                        for ticker, pos in computed_positions.items():
-                            positions.append({
-                                "market_ticker": ticker,
-                                "contracts": pos.get("contracts", 0),
-                                "side": pos.get("side", "yes"),
-                                "avg_price_cents": pos.get("avg_price_cents", 50),
-                            })
-                        logger.info(f"Using {len(positions)} computed positions from fills (REST returned empty)")
-                    
-                    cache.sync_from_rest(positions)
-                    logger.info(f"Position cache synced from reconciliation: {len(positions)} positions")
+                    # BUG-FIX: await added - sync_from_rest is now async with mutex protection
+                    await cache.sync_from_rest(positions)
+                    logger.info(f"Position cache synced from REST API (single source of truth): {len(positions)} positions")
+
+                    # CRITICAL FIX: Resync category_contracts counter with actual positions
+                    # This fixes the desync where category_contracts accumulates incorrectly
+                    # when record_close() is not called for settled/closed positions.
+                    # Call after sync completes to ensure cache has the latest positions
+                    try:
+                        from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+                        risk_mgr = get_kalshi_risk()
+                        risk_mgr.resync_category_contracts_from_positions()
+                    except Exception as _resync_exc:
+                        logger.warning(f"Failed to resync category_contracts after position sync: {_resync_exc}")
 
                     # HIGH-1 FIX: Detect cache vs ledger position divergence.
                     # Cache is WS-event-driven; ledger is the source of truth.
@@ -400,6 +453,14 @@ class FillsPoller:
             ]
             if settled:
                 await self._fire_settlement_outcomes(client, settled)
+            
+            # Record EOD snapshot if day has changed (for accurate daily PnL calculation)
+            try:
+                from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+                ledger = get_fills_ledger()
+                ledger.maybe_record_eod_snapshot()
+            except Exception as e:
+                logger.debug("Failed to record EOD snapshot: %s", e)
 
             return report
             
@@ -409,16 +470,35 @@ class FillsPoller:
             return {"status": "error", "message": str(e)}
     
     async def _backfill_loop(self) -> None:
-        """Periodic full backfill for completeness."""
+        """Periodic full backfill for completeness with circuit breaker protection."""
         # Wait for startup
         await asyncio.sleep(30)
-        
+
         while not self._shutdown.is_set():
+            # BUG-38: Check circuit breaker before attempting backfill
+            if self._backfill_circuit_open:
+                if self._should_close_backfill_circuit():
+                    self._backfill_circuit_open = False
+                    logger.info("Backfill circuit breaker closed - resuming backfill")
+                else:
+                    logger.debug("Backfill circuit breaker open - skipping cycle")
+                    try:
+                        await asyncio.wait_for(
+                            self._shutdown.wait(),
+                            timeout=self._backfill_interval
+                        )
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
+
             try:
                 await self._do_backfill()
+                # Reset failure counter on success
+                self._backfill_failures_1h = 0
             except Exception as e:
-                logger.warning(f"Backfill failed: {e}")
-            
+                logger.warning(f"Backfill failed: {e}", exc_info=True)
+                self._record_backfill_failure()
+
             try:
                 await asyncio.wait_for(
                     self._shutdown.wait(),
@@ -426,39 +506,86 @@ class FillsPoller:
                 )
             except asyncio.TimeoutError:
                 pass
+
+    def _record_backfill_failure(self) -> None:
+        """Record a backfill failure and open circuit if threshold exceeded (BUG-38)."""
+        now = datetime.now(timezone.utc)
+        self._backfill_last_failure_time = now
+        self._backfill_failures_1h += 1
+
+        # Open circuit after 5 failures
+        if self._backfill_failures_1h >= 5:
+            self._backfill_circuit_open = True
+            self._backfill_circuit_opened_at = now
+            logger.error(
+                f"Backfill circuit breaker OPENED after {self._backfill_failures_1h} failures. "
+                f"Pausing backfill for 5 minutes."
+            )
+
+    def _should_close_backfill_circuit(self) -> bool:
+        """Check if circuit should be closed (5-minute timeout) (BUG-38)."""
+        if not self._backfill_circuit_opened_at:
+            return True
+        now = datetime.now(timezone.utc)
+        # Circuit stays open for 5 minutes
+        return (now - self._backfill_circuit_opened_at).total_seconds() >= 300
+
+    def get_backfill_circuit_status(self) -> Dict[str, Any]:
+        """Get circuit breaker status for monitoring (BUG-36 metrics)."""
+        return {
+            "circuit_open": self._backfill_circuit_open,
+            "failures_1h": self._backfill_failures_1h,
+            "last_failure": self._backfill_last_failure_time.isoformat() if self._backfill_last_failure_time else None,
+            "opened_at": self._backfill_circuit_opened_at.isoformat() if self._backfill_circuit_opened_at else None,
+        }
     
     async def _do_backfill(self) -> int:
-        """Execute full backfill of recent fills (last 24h)."""
+        """Execute full backfill of recent fills (last 24h) with retry logic."""
+        max_retries = 3
+        base_delay = 2.0  # seconds
+
+        for attempt in range(max_retries):
+            try:
+                return await self._execute_backfill()
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)  # Exponential backoff: 2s, 4s, 8s
+                    logger.warning(f"Backfill attempt {attempt + 1} failed: {e}. Retrying in {delay}s...")
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(f"Backfill failed after {max_retries} attempts: {e}", exc_info=True)
+                    return 0
+        return 0
+
+    async def _execute_backfill(self) -> int:
+        """Execute the actual backfill logic (extracted for retry wrapping)."""
         client = self._get_client()
         if not client:
             return 0
-        
-        try:
-            await client.connect()
-            
-            # Get last 24h of fills
-            since_ts = int((datetime.now(timezone.utc) - timedelta(hours=24)).timestamp())
-            result = await client.get_fills(limit=500, since_ts=since_ts)
-            
-            if not result.success:
-                return 0
-            
-            fills = result.data or []
-            
-            from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
-            ledger = get_fills_ledger()
-            
-            # No agent map for backfill — just ensure completeness (no fill_bus: avoid toast spam)
-            new_count, _ = await ledger.ingest_http_fills(fills, agent_map=None)
-            
-            if new_count > 0:
-                logger.info(f"Backfill added {new_count} fills (from {len(fills)} fetched)")
-            
-            return new_count
-            
-        except Exception as e:
-            logger.warning(f"Backfill error: {e}")
+
+        await client.connect()
+
+        # Get last 24h of fills
+        since_ts = int((datetime.now(timezone.utc) - timedelta(hours=24)).timestamp())
+        result = await client.get_fills(limit=500, since_ts=since_ts)
+
+        if not result.success:
+            raise Exception(f"Kalshi API error: {result.error}")
+
+        fills = result.data or []
+        if not fills:
             return 0
+
+        from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+        ledger = get_fills_ledger()
+
+        # No agent map for backfill — just ensure completeness (no fill_bus: avoid toast spam)
+        new_count, _ = await ledger.ingest_http_fills(fills, agent_map=None)
+
+        if new_count > 0:
+            logger.info(f"Backfill added {new_count} fills (from {len(fills)} fetched)")
+
+        return new_count
     
     # ── Helpers ───────────────────────────────────────────────────────────────
     
@@ -477,8 +604,10 @@ class FillsPoller:
             if not settings.KALSHI_API_KEY_ID or (not key_path and not settings.KALSHI_PRIVATE_KEY_PEM):
                 return None
             
-            # Use singleton pattern
+            # FIX: Use singleton client to prevent garbage collection warning
+            # The singleton is properly managed by close_kalshi_client() during shutdown
             if not hasattr(self, '_client'):
+                from merid.event_venues.kalshi.client import get_kalshi_client
                 config = KalshiConfig(
                     api_key=settings.KALSHI_API_KEY_ID,
                     private_key_path=key_path,
@@ -487,8 +616,8 @@ class FillsPoller:
                     password=settings.KALSHI_PASSWORD,
                     use_demo=settings.KALSHI_USE_DEMO,
                 )
-                self._client = KalshiVenueClient(config)
-            
+                self._client = get_kalshi_client(config)
+
             return self._client
             
         except Exception as e:
@@ -554,34 +683,62 @@ class FillsPoller:
                     _side_hint = tracker._open_trades[matching_keys[0]].side
 
                 if settled_yes is None:
-                    # CRIT-5 FIX: Inference from side is risky — if side was misrecorded,
-                    # the wrong settlement outcome propagates to APT and PnL.
-                    # MERID_SETTLEMENT_REQUIRE_API_RESULT=true hard-fails here instead of inferring.
-                    _require_api = os.getenv(
+                    # AUDIT-4 FIX: Two-step outcome inference with Outcome enum
+                    # Step 1: Try official Kalshi outcomes (already attempted above)
+                    # Step 2: Only infer if API unavailable AND market is clearly expired with no open position
+                    
+                    _require_api = _os.getenv(
                         "MERID_SETTLEMENT_REQUIRE_API_RESULT", ""
                     ).strip().lower() in ("1", "true", "yes", "on")
                     if _require_api:
                         logger.error(
-                            "settlement: MERID_SETTLEMENT_REQUIRE_API_RESULT=true but Kalshi API "
+                            "[SETTLEMENT-AUDIT] MERID_SETTLEMENT_REQUIRE_API_RESULT=true but Kalshi API "
                             "returned no outcome for %s — skipping record_outcome. "
                             "Will retry on next reconcile cycle.",
                             ticker,
                         )
                         continue
-                    # Fallback: infer from side (conservative — assume held to settlement).
-                    # Log at WARNING so this is always visible in production logs.
-                    settled_yes = _side_hint == "yes"
-                    logger.warning(
-                        "settlement: INFERRED outcome for %s (Kalshi API unavailable): "
-                        "settled_yes=%s inferred from side=%s. "
-                        "Verify manually or set MERID_SETTLEMENT_REQUIRE_API_RESULT=true "
-                        "to hard-fail on missing API outcome.",
-                        ticker,
-                        settled_yes,
-                        _side_hint,
-                    )
+                    
+                    # Import Outcome enum for structured inference
+                    try:
+                        from merid.event_venues.kalshi.side_semantics import Outcome
+                        
+                        # Record position side at close separately from inferred outcome
+                        position_side_at_close = _side_hint
+                        
+                        # Infer outcome using conservative fallback (WARNING: not authoritative)
+                        inferred_outcome = Outcome.from_side_hint(_side_hint)
+                        settled_yes = inferred_outcome.to_settled_yes()
+                        
+                        logger.warning(
+                            "[SETTLEMENT-AUDIT] INFERRED outcome for %s (Kalshi API unavailable): "
+                            "inferred_outcome=%s position_side_at_close=%s settled_yes=%s. "
+                            "This is a FALLBACK - verify manually or set MERID_SETTLEMENT_REQUIRE_API_RESULT=true "
+                            "to hard-fail on missing API outcome.",
+                            ticker,
+                            inferred_outcome.value,
+                            position_side_at_close,
+                            settled_yes,
+                        )
+                        
+                        # Record both inferred outcome and position side for later reconciliation
+                        # Reconciliation of inferred vs actual outcomes is handled by portfolio_reconciliation.py
+                        # which compares internal state against Kalshi API settlements endpoint.
+                        
+                    except ImportError:
+                        # Fallback to old logic if enum unavailable
+                        settled_yes = _side_hint == "yes"
+                        logger.warning(
+                            "[SETTLEMENT-AUDIT] INFERRED outcome for %s (Kalshi API unavailable, enum fallback): "
+                            "settled_yes=%s inferred from side=%s. "
+                            "Verify manually or set MERID_SETTLEMENT_REQUIRE_API_RESULT=true "
+                            "to hard-fail on missing API outcome.",
+                            ticker,
+                            settled_yes,
+                            _side_hint,
+                        )
                 else:
-                    logger.info("settlement: %s settled_yes=%s (from Kalshi API)", ticker, settled_yes)
+                    logger.info("[SETTLEMENT-AUDIT] %s settled_yes=%s (from Kalshi API)", ticker, settled_yes)
 
                 settlement_cents = 100 if settled_yes else 0
                 tracker.record_outcome(
@@ -610,19 +767,28 @@ class FillsPoller:
             "last_reconcile_time": self._last_reconcile_time.isoformat() if self._last_reconcile_time else None,
             "last_error": self._last_error,
             "reconciliation": self._last_reconcile_report,
+            "backfill_circuit": self.get_backfill_circuit_status(),  # BUG-36: metrics
         }
     
     async def reconcile_now(self) -> Dict[str, Any]:
-        """Immediate poll + reconcile (for API / manual repair)."""
-        poll_new = 0
+        """Immediate poll + reconcile (for API / manual repair).
+        
+        Returns:
+            Dict with keys:
+            - poll_new_fills: int count of new fills from poll
+            - reconcile: dict with reconciliation report or error info
+        """
+        poll_new: int = 0
         try:
             poll_new = await self._do_poll()
         except Exception as e:
-            logger.warning("reconcile_now poll failed: %s", e)
+            logger.warning("reconcile_now poll failed: %s", e, exc_info=True)
+        
+        rep: Dict[str, Any]
         try:
             rep = await self._do_reconcile()
         except Exception as e:
-            logger.warning("reconcile_now reconcile failed: %s", e)
+            logger.warning("reconcile_now reconcile failed: %s", e, exc_info=True)
             rep = {"status": "error", "message": str(e)}
         return {"poll_new_fills": poll_new, "reconcile": rep}
 
@@ -645,10 +811,11 @@ _poller_lock = threading.Lock()
 
 
 def get_fills_poller() -> FillsPoller:
-    """Get the singleton FillsPoller instance."""
+    """Get the singleton FillsPoller instance (double-checked locking pattern)."""
     global _poller
     if _poller is None:
         with _poller_lock:
+            # Double-checked: verify _poller is still None inside lock
             if _poller is None:
                 _poller = FillsPoller()
     return _poller

@@ -14,6 +14,13 @@ import time
 import requests
 import os
 
+# PROFILE-GUARD: Skip for kalshi_crypto_15m_v2 (dashboard not needed for sealed 15m profile)
+_profile = os.getenv("MERID_PROFILE", "").lower()
+if _profile == "kalshi_crypto_15m_v2":
+    st.error("Strategy Dashboard is disabled for kalshi_crypto_15m_v2 profile.")
+    st.info("The 15m profile uses a sealed product surface with minimal telemetry only.")
+    st.stop()
+
 # Import strategy components
 try:
     from merid.strategies.strategy_integration import strategy_manager

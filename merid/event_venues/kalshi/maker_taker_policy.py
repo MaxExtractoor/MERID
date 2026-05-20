@@ -132,7 +132,7 @@ class MakerTakerPolicyEngine:
     """
 
     # Default thresholds
-    AGGRESSIVE_THRESHOLD_PCT = 2.0  # 2% edge required to take
+    AGGRESSIVE_THRESHOLD_PCT = 5.0  # CONSERVATIVE: 5% edge required to take
     ARB_MIN_EDGE_PCT = 0.5  # 0.5% minimum for arb legs
 
     def __init__(

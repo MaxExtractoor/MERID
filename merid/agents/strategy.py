@@ -33,7 +33,9 @@ class StrategyDefinition:
     exit_rules: List[str] = field(default_factory=list)
     position_sizing: str = "quarter_kelly"
     max_positions: int = 5
-    max_notional_usd: float = 5000.0
+    # CRITICAL: max_notional_usd should be derived from live bankroll, not hardcoded
+    # Default 0 means "derive from live bankroll" for trading strategies
+    max_notional_usd: float = 0.0  # 0 = derive from live bankroll (was 5000.0 hardcoded)
     backtest_requested: bool = False
     status: str = "draft"  # draft, backtested, live, retired
 

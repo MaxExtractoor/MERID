@@ -40,6 +40,39 @@ def _check_operator_token_once():
         )
 
 
+def _check_kalshi_15m_profile_guard(operation: str) -> None:
+    """Guard to prevent operator actions that touch legacy systems in kalshi_crypto_15m_v2 profile.
+    
+    In kalshi_crypto_15m_v2 mode, certain operator actions that would start/stop legacy systems
+    (swarm, sentiment, governance, non-Kalshi venues) are blocked to maintain isolation.
+    
+    Args:
+        operation: Description of the operation being attempted
+    
+    Raises:
+        HTTPException: If operation touches legacy systems in kalshi_crypto_15m_v2 mode
+    """
+    profile = os.getenv("MERID_PROFILE", "").lower()
+    if profile != "kalshi_crypto_15m_v2":
+        return  # Guard only applies to kalshi_crypto_15m_v2 profile
+    
+    # Check if operation touches legacy systems
+    legacy_keywords = ["swarm", "sentiment", "governance", "debate", "augur", "polymarket", "defi", "sports", "macro"]
+    operation_lower = operation.lower()
+    
+    for keyword in legacy_keywords:
+        if keyword in operation_lower:
+            logger.warning(
+                f"[OPERATOR-GUARD] Blocked operation '{operation}' in kalshi_crypto_15m_v2 profile: "
+                f"touches legacy system '{keyword}'"
+            )
+            raise HTTPException(
+                status_code=403,
+                detail=f"Operation '{operation}' is not available in kalshi_crypto_15m_v2 profile: "
+                       f"touches legacy system '{keyword}'. The sealed 15m stack does not include {keyword} infrastructure."
+            )
+
+
 def _get_last_cqi() -> Dict[str, float]:
     """Return per-agent cycle count as a proxy CQI until confidence tracking is added."""
     try:
@@ -802,6 +835,7 @@ async def get_recent_decisions(limit: int = 10) -> Dict[str, Any]:
 
     # 3) Debate outcomes as decisions
     if len(decisions) < limit:
+        _check_kalshi_15m_profile_guard("debate outcomes")
         try:
             from merid.prediction.debate import get_debate_store
             store = get_debate_store()
@@ -846,6 +880,7 @@ async def get_recent_decisions(limit: int = 10) -> Dict[str, Any]:
 @legacy_router.get("/governance-status")
 async def get_governance_status_legacy() -> Dict[str, Any]:
     """Governance status stub — not implemented in Kalshi-only mode."""
+    _check_kalshi_15m_profile_guard("governance status")
     return {
         "channels": [],
         "total_dispatches": 0,

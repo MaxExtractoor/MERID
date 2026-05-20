@@ -17,6 +17,7 @@ Usage::
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
@@ -116,13 +117,24 @@ class KalshiVenueAdapter:
             markets = self._catalog.get_all_markets()
             instruments = []
             for cm in markets:
-                if active_only and not cm.market.active:
-                    continue
+                # CRITICAL FIX: active is on nested EventMarket
+                if active_only:
+                    if hasattr(cm, "market") and hasattr(cm.market, "active"):
+                        if not cm.market.active:
+                            continue
+                    elif hasattr(cm, "active"):
+                        if not cm.active:
+                            continue
+                
                 if category and cm.category != category:
                     continue
 
                 # Convert to InstrumentConfig
-                inst = self._market_to_instrument(cm.market)
+                # CRITICAL FIX: Pass nested EventMarket to _market_to_instrument
+                if hasattr(cm, "market"):
+                    inst = self._market_to_instrument(cm.market)
+                else:
+                    continue
                 instruments.append(inst)
 
             self._instruments_cache = instruments
@@ -242,7 +254,7 @@ class KalshiVenueAdapter:
         
         # Fallback: REST API
         try:
-            await self.client.connect()
+            await asyncio.wait_for(self.client.connect(), timeout=10.0)
             positions = await self.client.get_positions()
             # NOTE: Do NOT close client here - singleton adapter keeps connection alive
             # Closing causes race conditions when multiple concurrent calls happen
@@ -252,18 +264,50 @@ class KalshiVenueAdapter:
                 try:
                     from merid.event_venues.kalshi.position_cache import get_position_cache
                     cache = get_position_cache()
+                    # Get existing cached positions to preserve TP targets during reconciliation
+                    existing_cached = cache.get_all_positions()
                     # Convert VenuePosition list to format expected by sync_from_rest
+                    # PRODUCTION FIX: Preserve TP targets from existing cache during reconciliation
                     rest_pos_list = []
                     for p in positions:
+                        market_id = p.market_id
+                        # Look up existing cached position to preserve TP targets
+                        existing_pos = existing_cached.get(market_id)
+                        
+                        # CRITICAL FIX (2026-05-08): Use market-driven price instead of hardcoded 50 cent fallback
+                        # Fetch from KalshiMarketStateStore if average_entry_price is missing
+                        avg_price_cents = None
+                        if p.average_entry_price:
+                            avg_price_cents = int(float(p.average_entry_price) * 100)
+                        else:
+                            # Try to get from market state store as fallback
+                            try:
+                                from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                                mss = get_kalshi_market_state_store()
+                                state = mss.get(market_id)
+                                if state and state.mid_cents > 0:
+                                    avg_price_cents = state.mid_cents
+                            except Exception:
+                                pass
+                            # Only use default price as last resort if market state also unavailable
+                            from merid.event_venues.kalshi.risk_parameters import DEFAULT_KALSHI_PRICE_CENTS
+                            if avg_price_cents is None:
+                                avg_price_cents = DEFAULT_KALSHI_PRICE_CENTS
+                        
                         rest_pos_list.append({
-                            "market_id": p.market_id,
+                            "market_id": market_id,
                             "contracts": float(p.size),
                             "side": p.outcome_id,
-                            "avg_price_cents": int(float(p.average_entry_price) * 100) if p.average_entry_price else 50,
+                            "avg_price_cents": avg_price_cents,
                             "realized_pnl": float(p.realized_pnl) if p.realized_pnl else 0.0,
                             "unrealized_pnl": float(p.unrealized_pnl) if p.unrealized_pnl else 0.0,
+                            # Preserve TP targets from existing cache
+                            "take_profit_price_cents": getattr(existing_pos, 'take_profit_price_cents', None),
+                            "take_profit_r_multiple": getattr(existing_pos, 'take_profit_r_multiple', None),
+                            "stop_loss_price_cents": getattr(existing_pos, 'stop_loss_price_cents', None),
                         })
-                    cache.sync_from_rest(rest_pos_list)
+                    # BUG-FIX: await added - sync_from_rest is now async with mutex protection
+                    await cache.sync_from_rest(rest_pos_list)
                 except Exception as sync_exc:
                     logger.debug(f"Failed to sync REST positions to cache: {sync_exc}")
             
@@ -299,13 +343,16 @@ class KalshiVenueAdapter:
             if status and order.status.value != status:
                 continue
 
+            # PRODUCTION-FIX: Preserve price even if <= 0 (mock engine may have edge cases)
+            # Setting price to None can cause downstream 50c fallback issues
+            price_val = Decimal(str(order.price)) if order.price is not None else None
             orders.append(
                 PlacedOrder(
                     order_id=order.order_id,
                     market_id=order.instrument_id,
                     side=order.side.value,
                     size=Decimal(str(order.quantity)),
-                    price=Decimal(str(order.price)) if order.price > 0 else None,
+                    price=price_val,
                     filled_size=Decimal(str(order.filled_quantity)),
                     remaining_size=Decimal(str(order.quantity - order.filled_quantity)),
                     status=order.status.value,
@@ -318,7 +365,7 @@ class KalshiVenueAdapter:
     async def _get_live_orders(self, status: Optional[str] = None) -> List[PlacedOrder]:
         """Fetch orders from Kalshi REST API."""
         try:
-            await self.client.connect()
+            await asyncio.wait_for(self.client.connect(), timeout=10.0)
             orders = await self.client.get_open_orders()
             # NOTE: Do NOT close client here - singleton adapter keeps connection alive
             if status:
@@ -429,8 +476,39 @@ class KalshiVenueAdapter:
                 f"VenueGate initialization failed - blocking order for safety: {exc}"
             ) from exc
 
+        # ── Dry-run mode check (Extra 1) ───────────────────────────────────────
+        # Check if dry-run mode is enabled for kalshi_crypto_15m_v2 profile
         try:
-            await self.client.connect()
+            from merid.config.dry_run import is_dry_run_enabled, log_dry_run_order
+            if is_dry_run_enabled():
+                # Log order instead of submitting
+                log_dry_run_order({
+                    "ticker": order.market_id,
+                    "side": order.side,
+                    "size": str(order.size),
+                    "price": str(order.price),
+                    "order_type": order.order_type,
+                    "outcome_id": order.outcome_id,
+                })
+                # Return a mock PlacedOrder to indicate success without actual submission
+                from merid.event_venues.kalshi.client import PlacedOrder
+                return PlacedOrder(
+                    order_id="dry-run-mock-order-id",
+                    status="accepted",  # Mock success status
+                    created_at=datetime.utcnow().isoformat(),
+                    cost=0.0,
+                    total_fees=0.0,
+                    side=order.side,
+                    count=int(order.size),
+                    price=float(order.price) if order.price else 0.0,
+                    market_id=order.market_id,
+                )
+        except ImportError:
+            # dry_run module not available, proceed with normal order submission
+            pass
+
+        try:
+            await asyncio.wait_for(self.client.connect(), timeout=10.0)
             placed = await self.client.place_order(order)
             # NOTE: Do NOT close client here - singleton adapter keeps connection alive
             return placed

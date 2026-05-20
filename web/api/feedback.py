@@ -373,23 +373,23 @@ async def get_calibration_stability(model_id: str, days: int = Query(default=30,
         stability_analysis = {
             "brier_score": {
                 "values": brier_values,
-                "mean": np.mean(brier_values),
-                "std": np.std(brier_values),
-                "coefficient_of_variation": np.std(brier_values) / np.mean(brier_values) if np.mean(brier_values) > 0 else 0,
-                "trend": "improving" if brier_values[-1] < brier_values[0] else "degrading"
+                "mean": np.mean(brier_values) if brier_values.size > 0 else 0,
+                "std": np.std(brier_values) if brier_values.size > 0 else 0,
+                "coefficient_of_variation": np.std(brier_values) / np.mean(brier_values) if brier_values.size > 0 and np.mean(brier_values) > 0 else 0,
+                "trend": "improving" if brier_values.size > 1 and brier_values[-1] < brier_values[0] else "stable"
             },
             "brier_skill_score": {
                 "values": bss_values,
-                "mean": np.mean(bss_values),
-                "std": np.std(bss_values),
-                "coefficient_of_variation": np.std(bss_values) / np.mean(bss_values) if np.mean(bss_values) > 0 else 0,
-                "trend": "improving" if bss_values[-1] > bss_values[0] else "degrading"
+                "mean": np.mean(bss_values) if bss_values.size > 0 else 0,
+                "std": np.std(bss_values) if bss_values.size > 0 else 0,
+                "coefficient_of_variation": np.std(bss_values) / np.mean(bss_values) if bss_values.size > 0 and np.mean(bss_values) > 0 else 0,
+                "trend": "improving" if bss_values.size > 1 and bss_values[-1] > bss_values[0] else "stable"
             },
             "reliability": {
                 "values": reliability_values,
-                "mean": np.mean(reliability_values),
-                "std": np.std(reliability_values),
-                "trend": "improving" if reliability_values[-1] < reliability_values[0] else "degrading"
+                "mean": np.mean(reliability_values) if reliability_values.size > 0 else 0,
+                "std": np.std(reliability_values) if reliability_values.size > 0 else 0,
+                "trend": "improving" if reliability_values.size > 1 and reliability_values[-1] < reliability_values[0] else "stable"
             }
         }
         

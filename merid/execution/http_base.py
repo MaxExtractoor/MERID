@@ -151,6 +151,7 @@ class HTTPExecutor(TradeExecutor):
     def _get_auth_headers(self) -> Dict[str, str]:
         """Authentication headers. Must be implemented by subclass."""
         raise NotImplementedError
+        raise NotImplementedError
     
     def _generate_idempotency_key(self) -> str:
         """Generate unique idempotency key for request."""
@@ -343,7 +344,8 @@ class HTTPExecutor(TradeExecutor):
     # TradeExecutor interface - subclasses must implement
     @abstractmethod
     async def get_quote(self, symbol: str, side: TradeSideLiteral, amount: float) -> Quote:
-        """Get quote for symbol. Must be implemented by subclass."""
+        """Get quote for symbol. 
+    Must be implemented by subclass."""
         raise NotImplementedError
     
     @abstractmethod
@@ -358,9 +360,7 @@ class HTTPExecutor(TradeExecutor):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> TradeResult:
         """Execute trade. Must be implemented by subclass."""
-        raise NotImplementedError
     
     @abstractmethod
     async def get_positions(self) -> List:
         """Get positions. Must be implemented by subclass."""
-        raise NotImplementedError

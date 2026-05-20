@@ -19,7 +19,6 @@ from merid.event_venues.kalshi.market_selector import ALL_TIMEFRAMES, resolve_se
 from merid.trading.crypto_spot_service import (
     ASSET_TO_COINBASE_PRODUCT,
     ASSET_TO_BINANCEUS_SYMBOL,
-    ASSET_TO_COINGECKO_ID,
 )
 from merid.trading.kalshi_continuous_trader import TraderConfig
 
@@ -37,7 +36,6 @@ def test_all_crypto_assets_matches_kalshi_universe_and_spot_maps() -> None:
     assert set(KALSHI_CRYPTO_ASSETS) == set(ALL_CRYPTO_ASSETS)
     assert set(ASSET_TO_COINBASE_PRODUCT.keys()) == ALL_CRYPTO_ASSETS
     assert set(ASSET_TO_BINANCEUS_SYMBOL.keys()) == ALL_CRYPTO_ASSETS
-    assert set(ASSET_TO_COINGECKO_ID.keys()) == ALL_CRYPTO_ASSETS
 
 
 def test_kalshi_cryptotimeframes_matches_ct_selector_tenors() -> None:

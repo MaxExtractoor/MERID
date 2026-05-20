@@ -160,62 +160,8 @@ class TestFinnhubNews(unittest.TestCase):
         self.assertEqual(mgr._stats["news_fetched"], 0)
 
 
-class TestCoinGecko(unittest.TestCase):
-    """Test CoinGecko on-chain data fetching."""
-
-    def test_coingecko_ingests_market_data(self):
-        fs = FeatureService()
-        mgr = LiveFeedManager(fs)
-        now = time.time()
-
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.json.return_value = [
-            {
-                "id": "bitcoin",
-                "current_price": 98500,
-                "market_cap": 1900000000000,
-                "total_volume": 35000000000,
-                "price_change_percentage_1h_in_currency": 0.5,
-                "price_change_percentage_24h": 2.1,
-                "price_change_percentage_7d_in_currency": -1.3,
-                "circulating_supply": 19500000,
-                "ath_change_percentage": -2.5,
-            },
-        ]
-
-        with patch.object(mgr._client, "get", new_callable=AsyncMock, return_value=mock_response):
-            run_async(mgr._fetch_coingecko(["BTC"], now))
-
-        self.assertEqual(mgr._stats["onchain_fetched"], 1)
-        btc_onchain = fs.onchain.get_onchain_features("ethereum", "BTC", now=now)
-        self.assertEqual(btc_onchain.source, "live")
-        self.assertIn("price_usd", btc_onchain.features)
-
-    def test_coingecko_skips_unknown_symbols(self):
-        fs = FeatureService()
-        mgr = LiveFeedManager(fs)
-
-        # AAPL is not a crypto coin — should be skipped
-        with patch.object(mgr._client, "get", new_callable=AsyncMock) as mock_get:
-            run_async(mgr._fetch_coingecko(["AAPL"], time.time()))
-            mock_get.assert_not_called()
-
-    def test_coingecko_handles_error(self):
-        fs = FeatureService()
-        mgr = LiveFeedManager(fs)
-
-        mock_response = MagicMock()
-        mock_response.status_code = 429
-        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
-            "Rate limited", request=MagicMock(), response=mock_response
-        )
-
-        with patch.object(mgr._client, "get", new_callable=AsyncMock, return_value=mock_response):
-            run_async(mgr._fetch_coingecko(["BTC"], time.time()))
-
-        self.assertEqual(mgr._stats["errors"], 1)
-
+# REMOVED: TestCoinGecko class - CoinGecko replaced with BinanceUS for price feed
+# BinanceUS tests should be added in data/test_live_price_feed.py
 
 class TestFredMacro(unittest.TestCase):
     """Test FRED macro data fetching."""

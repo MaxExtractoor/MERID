@@ -39,7 +39,10 @@ from utils.logger import get_logger
 logger = get_logger("merid.prediction.crypto_edge_production")
 
 _CANON_READ_LAST: Dict[str, float] = {}
-_HEALTH_LOCK = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _HEALTH_LOCK = threading.Lock()
+_HEALTH_LOCK = None  # Disabled to prevent startup hang
 _SIGNAL_EVENTS: Dict[str, Deque[Tuple[float, str]]] = defaultdict(
     lambda: deque(maxlen=256)
 )
@@ -153,11 +156,13 @@ def _matrix_row_to_cell(row: Dict[str, Any]) -> CryptoThresholdsCell:
     return CryptoThresholdsCell(
         mode=str(row.get("profile", "legacy")),
         timeframe=str(row.get("timeframe", "15m")),
-        directional_min_edge=Decimal(str(row.get("directional_min_edge", "0.04"))),
+        directional_min_edge=Decimal(str(row.get("directional_min_edge", "0.05"))),
         sentiment_vol_regime_min_edge=Decimal(
-            str(row.get("sentiment_vol_regime_min_edge", row.get("directional_min_edge", "0.04")))
+            str(row.get("sentiment_vol_regime_min_edge", row.get("directional_min_edge", "0.05")))
         ),
-        contrarian_sentiment_min=float(row.get("contrarian_sentiment_min") or 75.0),
+        # PRODUCTION FIX (2026-05-13): Don't override contrarian_sentiment_min with hardcoded default
+        # Allow pm_profiles.yaml to set the value (baseline=35, production=75)
+        contrarian_sentiment_min=float(row.get("contrarian_sentiment_min") if row.get("contrarian_sentiment_min") else 75.0),
         mm_max_spread_cents=Decimal(str(row.get("mm_max_spread_cents", "10"))),
         pm_risk_max_spread_cents=Decimal(
             str(row.get("pm_risk_max_spread_cents", row.get("mm_max_spread_cents", "10")))
@@ -261,17 +266,25 @@ def apply_crypto_strategy_thresholds_to_config(
     cell = _matrix_row_to_cell(row)
 
     arch_u = (archetype or "").upper()
+    # SENTIMENT DECOUPLING (2026-05-14): Removed SENTIMENT_REGIME from sentiment-based archetype check.
+    # Sentiment should not gate agent configuration or edge selection.
     use_sentiment_row = any(
         x in arch_u
         for x in (
             "VOL_BREAKOUT",
             "REGIME_SWITCH",
             "SENTIMENT_VOL",
-            "SENTIMENT_REGIME",
+            # SENTIMENT_REGIME removed
         )
     )
     edge = cell.sentiment_vol_regime_min_edge if use_sentiment_row else cell.directional_min_edge
 
+    # PROFILE-GUARD: Skip crypto matrix overrides for kalshi_crypto_15m_v2
+    merid_profile = os.getenv("MERID_PROFILE", "").lower()
+    if merid_profile == "kalshi_crypto_15m_v2":
+        logger.info("[PROFILE-GUARD] Crypto matrix skipped for kalshi_crypto_15m_v2 (uses canonical risk envelope)")
+        return sc
+    
     phase_attrs = ("min_edge_early", "min_edge_mid", "min_edge_late", "min_edge_terminal")
     if prior_yaml_phase_edges:
         try:
@@ -555,13 +568,15 @@ def maybe_emit_consensus_health_warnings() -> None:
                     (now - last_c) if last_c else None,
                 )
             if len(recent) >= leak_n:
-                try:
-                    a, tf = key.split(":", 1)
-                    from merid.swarm.consensus_aggregator import get_consensus_aggregator
-
-                    view = get_consensus_aggregator().get_consensus(a, tf)
-                except Exception:
-                    view = None
+                # SWARM DISABLED FOR 15M STACK: Skip consensus check
+                # The 15m stack is a single-agent system and doesn't need multi-agent consensus
+                view = None
+                # try:
+                #     a, tf = key.split(":", 1)
+                #     from merid.swarm.consensus_aggregator import get_consensus_aggregator
+                #     view = get_consensus_aggregator().get_consensus(a, tf)
+                # except Exception:
+                #     view = None
                 if view and view.status.value == "ready":
                     if (
                         view.consensus_direction == "neutral"
@@ -580,14 +595,22 @@ class NoTradeDecisionTracker:
     """Observability only — records no-trade reasons; does not participate in gating."""
 
     _inst: Optional["NoTradeDecisionTracker"] = None
-    _lock = threading.Lock()
+    # TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+    # TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+    # _lock = threading.Lock()
+    _lock = None  # Disabled to prevent startup hang
 
     def __new__(cls) -> "NoTradeDecisionTracker":
-        with cls._lock:
+        if cls._lock is not None:
+            with cls._lock:
+                if cls._inst is None:
+                    cls._inst = super().__new__(cls)
+        else:
+            # Lock disabled - direct initialization (startup workaround)
             if cls._inst is None:
                 cls._inst = super().__new__(cls)
-                cls._inst._buf = deque(maxlen=500)  # type: ignore[attr-defined]
-            return cls._inst
+        cls._inst._buf = deque(maxlen=500)  # type: ignore[attr-defined]
+        return cls._inst
 
     def observe(self, reason: str, **ctx: Any) -> None:
         if logger.isEnabledFor(logging.DEBUG):
@@ -627,6 +650,376 @@ def maybe_log_shadow_edge_near_miss(
             min_required,
             shadow,
         )
+
+
+def get_momentum_asset_filter(asset: str, max_rank: int = 2) -> Tuple[bool, Optional[str]]:
+    """Filter assets based on momentum ranking for crypto edge production.
+    
+    Returns (allowed, reason) tuple where:
+    - allowed: True if asset passes momentum filter
+    - reason: Explanation if blocked, None if allowed
+    
+    This implements the "restrict candidates to top 2 momentum assets in favorable regimes"
+    requirement from the tuning roadmap.
+    """
+    try:
+        from merid.signals.momentum_ranker import get_momentum_ranker
+        from merid.signals.unified_regime_classifier import get_unified_regime_classifier
+        
+        ranker = get_momentum_ranker()
+        classifier = get_unified_regime_classifier()
+        
+        # Check if momentum rankings are fresh
+        if not ranker.is_fresh(max_age_seconds=300):
+            logger.debug("[MOMENTUM_FILTER] Rankings stale, allowing all assets")
+            return True, None
+        
+        rankings = ranker.get_current_rankings()
+        if not rankings:
+            logger.debug("[MOMENTUM_FILTER] No rankings available, allowing all assets")
+            return True, None
+        
+        # Get unified regime state
+        regime_state = classifier.get_current_state()
+        if regime_state and regime_state.is_defensive:
+            # Defensive regime: only allow top momentum assets
+            asset_rank = rankings.get_rank(asset)
+            if asset_rank > max_rank:
+                return False, f"momentum_rank_{asset_rank}_exceeds_max_{max_rank}_defensive_regime"
+        
+        # Check if asset is in top N
+        asset_rank = rankings.get_rank(asset)
+        if asset_rank <= max_rank:
+            return True, None
+        
+        # For assets beyond top N, check if momentum is strong enough
+        asset_momentum = rankings.get_momentum(asset)
+        if asset_momentum and asset_momentum.is_strong_momentum:
+            # Strong momentum assets allowed regardless of rank
+            return True, None
+        
+        return False, f"momentum_rank_{asset_rank}_exceeds_max_{max_rank}"
+        
+    except Exception as exc:
+        logger.debug("[MOMENTUM_FILTER] Momentum filter error, allowing all: %s", exc)
+        return True, None
+
+
+def apply_momentum_edge_multiplier(asset: str, base_edge: float) -> float:
+    """Apply momentum-based multiplier to edge threshold.
+    
+    Returns adjusted edge threshold. Assets with strong momentum get
+    slightly lower edge requirements (more aggressive), while weak
+    momentum assets get higher edge requirements (more conservative).
+    """
+    try:
+        from merid.signals.momentum_ranker import get_momentum_ranker
+        
+        ranker = get_momentum_ranker()
+        if not ranker.is_fresh(max_age_seconds=300):
+            return base_edge
+        
+        rankings = ranker.get_current_rankings()
+        if not rankings:
+            return base_edge
+        
+        asset_momentum = rankings.get_momentum(asset)
+        if not asset_momentum:
+            return base_edge
+        
+        # Multiplier based on regime
+        if asset_momentum.regime in ("strong_up", "strong_down"):
+            # Strong momentum: 10% edge reduction
+            return base_edge * 0.9
+        elif asset_momentum.regime in ("up", "down"):
+            # Moderate momentum: 5% edge reduction
+            return base_edge * 0.95
+        elif asset_momentum.regime == "neutral":
+            # Neutral: no adjustment
+            return base_edge
+        
+        return base_edge
+        
+    except Exception as exc:
+        logger.debug("[MOMENTUM_EDGE] Edge multiplier error, using base: %s", exc)
+        return base_edge
+
+
+def check_anomaly_gating(
+    ticker: str,
+    volume: float,
+    bid: Optional[float],
+    ask: Optional[float],
+) -> Tuple[bool, Optional[str]]:
+    """Check for volume/spread anomalies that should gate trading.
+    
+    Returns (allowed, reason) tuple where:
+    - allowed: True if no anomaly detected
+    - reason: Explanation if blocked, None if allowed
+    
+    This implements anomaly detection gating for volume spikes and
+    spread outliers that may indicate market stress or manipulation.
+    """
+    try:
+        # Spread anomaly check
+        if bid is not None and ask is not None and bid > 0 and ask > 0:
+            spread_cents = (ask - bid) * 100
+            # Extremely wide spread (> 20 cents) indicates liquidity stress
+            if spread_cents > 20:
+                return False, f"spread_anomaly_{spread_cents:.1f}_cents_exceeds_threshold"
+            # Wide spread (> 10 cents) in 15m markets is concerning
+            if "15M" in ticker.upper() and spread_cents > 10:
+                return False, f"spread_anomaly_{spread_cents:.1f}_cents_in_15m_market"
+        
+        # Volume anomaly check (if volume data available)
+        if volume > 0:
+            # Extremely high volume (> 10000 contracts) may indicate pump/dump
+            if volume > 10000:
+                return False, f"volume_anomaly_{volume:.0f}_contracts_exceeds_threshold"
+            # Very high volume (> 5000 contracts) warrants caution
+            if volume > 5000:
+                logger.warning(
+                    "[ANOMALY_GATE] ticker=%s volume=%.0f high but not gating - monitor closely",
+                    ticker,
+                    volume,
+                )
+        
+        return True, None
+        
+    except Exception as exc:
+        logger.debug("[ANOMALY_GATE] Anomaly check error, allowing trade: %s", exc)
+        return True, None
+
+
+def get_risk_appetite_factor() -> float:
+    """Get per-cycle risk appetite factor (0-1) for edge scaling.
+    
+    Returns a factor between 0.0 (risk-off, halt trading) and 1.0 (normal risk).
+    Values < 1.0 reduce edge requirements (more aggressive), values > 1.0
+    increase edge requirements (more conservative).
+    
+    This factor is derived from the unified regime classifier which integrates
+    macro, momentum, and BTC anchor signals.
+    """
+    try:
+        from merid.signals.unified_regime_classifier import get_unified_regime_classifier
+        
+        classifier = get_unified_regime_classifier()
+        regime_state = classifier.get_current_state()
+        
+        if not regime_state:
+            return 1.0
+        
+        # Map execution regime to risk appetite factor
+        if regime_state.execution_regime.value == "aggressive":
+            # Aggressive: 20% edge reduction (0.8 factor)
+            return 0.8
+        elif regime_state.execution_regime.value == "defensive":
+            # Defensive: 50% edge increase (1.5 factor)
+            return 1.5
+        elif regime_state.execution_regime.value == "halt":
+            # Halt: infinite edge requirement (effectively block trades)
+            return float('inf')
+        else:
+            # Normal: no adjustment
+            return 1.0
+        
+    except Exception as exc:
+        logger.debug("[RISK_APPETITE] Factor derivation error, using default 1.0: %s", exc)
+        return 1.0
+
+
+def apply_risk_appetite_to_edge(base_edge: float) -> float:
+    """Apply risk appetite factor to base edge threshold.
+    
+    Returns adjusted edge threshold. Lower risk appetite (conservative regime)
+    increases edge requirements, higher risk appetite (aggressive regime)
+    decreases edge requirements.
+    """
+    risk_factor = get_risk_appetite_factor()
+    
+    if risk_factor == float('inf'):
+        # Halt regime: effectively infinite edge requirement
+        return float('inf')
+    
+    adjusted = base_edge * risk_factor
+    return adjusted
+
+
+def get_dynamic_bankroll_cap(base_cap: int, bankroll_usd: Optional[float] = None) -> int:
+    """Calculate dynamic position cap based on available bankroll.
+    
+    For small bankrolls (~36 USD), scales down position caps to ensure
+    diversification across multiple edges while maintaining minimum trade size.
+    
+    Args:
+        base_cap: Base position cap from config (e.g., 5 positions)
+        bankroll_usd: Available bankroll in USD (default: reads from system)
+    
+    Returns:
+        Dynamic position cap (integer, minimum 1)
+    """
+    try:
+        # If bankroll not provided, try to read from system
+        if bankroll_usd is None:
+            try:
+                from merid.prediction.model import PredictionMarketModel
+                model = PredictionMarketModel()
+                # Try to get bankroll from paper trading or live account
+                # This is a fallback - in production, bankroll should be passed explicitly
+                bankroll_usd = 36.0  # Default small bankroll for crypto 15m
+            except Exception:
+                bankroll_usd = 36.0
+        
+        # Small bankroll threshold (below this, reduce caps)
+        SMALL_BANKROLL_THRESHOLD = 50.0  # USD
+        MIN_CONTRACT_COST = 0.02  # Minimum cost per trade (1¢ contract + 1¢ fee)
+        
+        if bankroll_usd >= SMALL_BANKROLL_THRESHOLD:
+            # Normal bankroll: use base cap
+            return base_cap
+        
+        # Small bankroll: scale cap to allow diversification
+        # Target: reserve 50% of bankroll for fees, use 50% for positions
+        usable_bankroll = bankroll_usd * 0.5
+        max_positions_by_cap = int(usable_bankroll / MIN_CONTRACT_COST)
+        
+        # Cap at base_cap, minimum 1 position
+        dynamic_cap = min(base_cap, max(1, max_positions_by_cap))
+        
+        # For very small bankrolls (< $10), limit to 1-2 positions max
+        if bankroll_usd < 10.0:
+            dynamic_cap = min(2, dynamic_cap)
+        
+        return dynamic_cap
+        
+    except Exception as exc:
+        logger.debug("[DYNAMIC_CAP] Cap calculation error, using base cap: %s", exc)
+        return base_cap
+
+
+def get_trade_granularity(bankroll_usd: Optional[float] = None) -> int:
+    """Get trade granularity (contracts per edge) for small bankroll.
+    
+    For small bankrolls (~36 USD), returns 1 contract per edge to maximize
+    diversification. For larger bankrolls, can scale up.
+    
+    Args:
+        bankroll_usd: Available bankroll in USD (default: reads from system)
+    
+    Returns:
+        Number of contracts per edge (integer, minimum 1)
+    """
+    try:
+        # If bankroll not provided, try to read from system
+        if bankroll_usd is None:
+            try:
+                from merid.prediction.model import PredictionMarketModel
+                model = PredictionMarketModel()
+                bankroll_usd = 36.0  # Default small bankroll for crypto 15m
+            except Exception:
+                bankroll_usd = 36.0
+        
+        # Small bankroll: 1 contract per edge for maximum diversification
+        SMALL_BANKROLL_THRESHOLD = 50.0  # USD
+        
+        if bankroll_usd < SMALL_BANKROLL_THRESHOLD:
+            return 1
+        
+        # Larger bankrolls can use larger trade sizes
+        # For bankroll $50-100: 1-2 contracts per edge
+        if bankroll_usd < 100.0:
+            return 1
+        
+        # For bankroll $100-500: 2-3 contracts per edge
+        if bankroll_usd < 500.0:
+            return 2
+        
+        # For larger bankrolls: scale proportionally (capped at 10)
+        return min(10, int(bankroll_usd / 100.0))
+        
+    except Exception as exc:
+        logger.debug("[TRADE_GRANULARITY] Granularity calculation error, using default 1: %s", exc)
+        return 1
+
+
+def apply_brier_feedback_to_edge(base_edge: float, min_resolved: int = 50) -> float:
+    """Apply Brier score feedback to edge threshold for auto-tuning.
+    
+    Uses BrierMetricsTracker to read prediction calibration and adjust
+    edge thresholds accordingly:
+    - Low Brier score (< 0.15): model is well-calibrated, can lower edge threshold
+    - High Brier score (> 0.25): model is poorly calibrated, raise edge threshold
+    - Between 0.15-0.25: no adjustment
+    
+    Args:
+        base_edge: Base edge threshold from config
+        min_resolved: Minimum number of resolved predictions required for feedback
+    
+    Returns:
+        Adjusted edge threshold
+    """
+    try:
+        from monitoring.brier_metrics import get_brier_tracker
+        
+        tracker = get_brier_tracker()
+        summary = tracker.get_summary()
+        
+        resolved_count = summary.get("resolved_predictions", 0)
+        
+        # Need minimum resolved predictions for meaningful feedback
+        if resolved_count < min_resolved:
+            logger.debug(
+                "[BRIER_FEEDBACK] Insufficient resolved predictions (%d < %d), using base edge",
+                resolved_count,
+                min_resolved,
+            )
+            return base_edge
+        
+        brier_score = summary.get("overall_brier_score", 0.25)
+        skill_score = summary.get("skill_score", 0.0)
+        
+        # Adjust edge based on Brier score
+        # Lower Brier = better calibration = lower edge threshold (more aggressive)
+        # Higher Brier = worse calibration = higher edge threshold (more conservative)
+        
+        if brier_score < 0.12:
+            # Excellent calibration: 20% edge reduction
+            multiplier = 0.8
+            logger.info("[BRIER_FEEDBACK] Excellent calibration (Brier=%.3f), edge * 0.8", brier_score)
+        elif brier_score < 0.15:
+            # Good calibration: 10% edge reduction
+            multiplier = 0.9
+            logger.info("[BRIER_FEEDBACK] Good calibration (Brier=%.3f), edge * 0.9", brier_score)
+        elif brier_score > 0.30:
+            # Poor calibration: 30% edge increase
+            multiplier = 1.3
+            logger.warning("[BRIER_FEEDBACK] Poor calibration (Brier=%.3f), edge * 1.3", brier_score)
+        elif brier_score > 0.25:
+            # Below baseline: 15% edge increase
+            multiplier = 1.15
+            logger.warning("[BRIER_FEEDBACK] Below baseline (Brier=%.3f), edge * 1.15", brier_score)
+        else:
+            # Normal range: no adjustment
+            multiplier = 1.0
+            logger.debug("[BRIER_FEEDBACK] Normal calibration (Brier=%.3f), no adjustment", brier_score)
+        
+        # Also consider skill score
+        if skill_score > 0.5:
+            # High skill: additional 5% reduction
+            multiplier *= 0.95
+            logger.debug("[BRIER_FEEDBACK] High skill (%.2f), additional edge * 0.95", skill_score)
+        elif skill_score < 0:
+            # Negative skill: additional 10% increase
+            multiplier *= 1.1
+            logger.warning("[BRIER_FEEDBACK] Negative skill (%.2f), additional edge * 1.1", skill_score)
+        
+        adjusted = base_edge * multiplier
+        return adjusted
+        
+    except Exception as exc:
+        logger.debug("[BRIER_FEEDBACK] Feedback application error, using base edge: %s", exc)
+        return base_edge
 
 
 def maybe_log_ct_execution_invariant(

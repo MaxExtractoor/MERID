@@ -421,6 +421,34 @@ def _reset_trade_mode_between_tests():
     _reset_for_tests()
 
 
+# ---------------------------------------------------------------------------
+# GlobalRiskGuard isolation fixtures (Production Audit 2026-04-15)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _reset_global_risk_guard_between_tests():
+    """Reset GlobalRiskGuard singleton before and after every test.
+    
+    PRODUCTION AUDIT: This fixture ensures test isolation for the GlobalRiskGuard
+    singleton, preventing state leakage between tests. The guard enforces
+    fail-closed bankroll behavior and cycle/total risk caps.
+    
+    Reference: PRODUCTION_AUDIT_SUMMARY_2026-04-15.md
+    """
+    try:
+        from merid.guards.global_risk_guard import reset_global_risk_guard_for_tests
+        reset_global_risk_guard_for_tests()
+    except ImportError:
+        # Module not available, skip reset
+        pass
+    yield
+    try:
+        from merid.guards.global_risk_guard import reset_global_risk_guard_for_tests
+        reset_global_risk_guard_for_tests()
+    except ImportError:
+        pass
+
+
 @pytest.fixture
 def fresh_paper_session(tmp_path):
     """Create a fresh paper trading session for testing.
@@ -542,3 +570,5 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "trading_hours: Trading hours guard tests")
     config.addinivalue_line("markers", "promotion: AutoPromoter and promotion tests")
     config.addinivalue_line("markers", "kill_switch: Kill switch and safety tests")
+    config.addinivalue_line("markers", "production_audit: Production audit regression tests (scope, bankroll, WS format)")
+    config.addinivalue_line("markers", "integration: Integration-style vertical slice tests")

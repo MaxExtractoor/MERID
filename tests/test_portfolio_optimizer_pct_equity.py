@@ -161,22 +161,22 @@ class TestMomentumScalpingEnforcement:
             "_validated": True,
         }
         optimizer = PortfolioOptimizer(config)
-        assert optimizer.enforce_momentum_scalping is True
+        assert optimizer.enforce_mean_reversion is True
     
     def test_momentum_only_can_be_disabled(self):
         """Momentum scalping can be disabled via config."""
         config = {
             "_validated": True,
-            "enforce_momentum_scalping_only": False,
+            "enforce_mean_reversion_only": False,
         }
         optimizer = PortfolioOptimizer(config)
-        assert optimizer.enforce_momentum_scalping is False
+        assert optimizer.enforce_mean_reversion is False
     
     def test_strategy_allowed_with_momentum_tag(self):
         """Strategies with momentum tag are allowed."""
         config = {
             "_validated": True,
-            "enforce_momentum_scalping_only": True,
+            "enforce_mean_reversion_only": True,
         }
         optimizer = PortfolioOptimizer(config)
         
@@ -187,7 +187,7 @@ class TestMomentumScalpingEnforcement:
         """Strategies without allowed tags are blocked."""
         config = {
             "_validated": True,
-            "enforce_momentum_scalping_only": True,
+            "enforce_mean_reversion_only": True,
         }
         optimizer = PortfolioOptimizer(config)
         
@@ -198,7 +198,7 @@ class TestMomentumScalpingEnforcement:
         """Strategies matching blocked patterns are rejected."""
         config = {
             "_validated": True,
-            "enforce_momentum_scalping_only": True,
+            "enforce_mean_reversion_only": True,
             "blocked_strategy_patterns": [".*hold.*expiry.*"],
         }
         optimizer = PortfolioOptimizer(config)
@@ -210,7 +210,7 @@ class TestMomentumScalpingEnforcement:
         """All strategies allowed when enforcement is disabled."""
         config = {
             "_validated": True,
-            "enforce_momentum_scalping_only": False,
+            "enforce_mean_reversion_only": False,
         }
         optimizer = PortfolioOptimizer(config)
         
@@ -318,7 +318,7 @@ class TestConfigSerialization:
         """get_config includes momentum enforcement settings."""
         config = {
             "_validated": True,
-            "enforce_momentum_scalping_only": True,
+            "enforce_mean_reversion_only": True,
             "momentum_scalp_config": {
                 "max_hold_minutes": 30,
                 "profit_target_pct": 0.10,
@@ -327,8 +327,8 @@ class TestConfigSerialization:
         optimizer = PortfolioOptimizer(config)
         
         cfg = optimizer.get_config()
-        assert "enforce_momentum_scalping_only" in cfg
-        assert cfg["enforce_momentum_scalping_only"] is True
+        assert "enforce_mean_reversion_only" in cfg
+        assert cfg["enforce_mean_reversion_only"] is True
         assert "momentum_scalp_config" in cfg
         assert "allowed_strategy_tags" in cfg
         assert "blocked_strategy_patterns" in cfg

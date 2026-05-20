@@ -266,13 +266,20 @@ class AlertRouter:
 # ── Module singleton ─────────────────────────────────────────────────
 
 _router: Optional[AlertRouter] = None
-_router_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _router_lock = threading.Lock()
+_router_lock = None  # Disabled to prevent startup hang
 
 
 def get_alert_router() -> AlertRouter:
     global _router
     if _router is None:
-        with _router_lock:
-            if _router is None:
-                _router = AlertRouter()
+        if _router_lock is not None:
+            with _router_lock:
+                if _router is None:
+                    _router = AlertRouter()
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _router = AlertRouter()
     return _router

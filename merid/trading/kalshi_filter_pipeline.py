@@ -6,7 +6,6 @@ embedded inside the continuous trader cycle so it can be reused by both:
   - KalshiContinuousTrader (continuous crypto runner)
   - KalshiTradingAgent (agent-grid market resolution)
 
-NOW RETURNS: rich MarketCandidate from market_filter.py (unified type)
 """
 
 from __future__ import annotations
@@ -107,6 +106,18 @@ class FilterPipeline:
         self.config = config
         self._spot_prices: Dict[str, Decimal] = {}
 
+    def update_spot_prices(self, spots: Dict[str, float]):
+        """Update spot prices from external source (DEPRECATED - now uses UnifiedSpotService).
+        
+        This method is kept for backward compatibility but no longer used.
+        Spot prices are now fetched directly from UnifiedSpotService.get_spot_price().
+        
+        Args:
+            spots: Dict mapping asset -> spot price (unused)
+        """
+        _fp_logger.debug("[FILTER-PIPELINE] update_spot_prices called (deprecated, using UnifiedSpotService)")
+        # No-op - spot prices now fetched from UnifiedSpotService directly
+
     def set_spot_prices(self, spots: Dict[str, float]) -> None:
         """Set spot prices from canonical source (e.g., _get_all_spots).
         
@@ -116,7 +127,28 @@ class FilterPipeline:
             self._spot_prices[asset.upper()] = Decimal(str(spot))
 
     def get_spot_price(self, asset: str) -> Optional[Decimal]:
-        return self._spot_prices.get(asset.upper())
+        """Get spot price from unified spot service.
+        
+        Args:
+            asset: Asset symbol (BTC, ETH, SOL, XRP, DOGE)
+            
+        Returns:
+            Decimal spot price or None if unavailable
+        """
+        try:
+            from data.unified_spot_service import get_unified_spot_service
+            
+            unified = get_unified_spot_service()
+            spot = unified.get(asset)
+            
+            if spot is None:
+                return None
+            
+            return Decimal(str(spot.price))
+            
+        except Exception as e:
+            _fp_logger.warning(f"Error fetching spot for {asset}: {e}")
+            return None
 
     @staticmethod
     def _parse_strike(ticker: str) -> Optional[Decimal]:
@@ -125,7 +157,8 @@ class FilterPipeline:
             return None
         try:
             return Decimal(m.group(1))
-        except Exception:
+        except (ValueError, TypeError, ArithmeticError, IndexError) as e:
+            logger.debug("[KALSHI-FILTER] Failed to parse strike from ticker '%s': %s", ticker, e)
             return None
 
     @staticmethod
@@ -203,7 +236,7 @@ class FilterPipeline:
             dt = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
             now = datetime.now(timezone.utc)
             return max(0.0, (dt - now).total_seconds())
-        except Exception:
+        except (ValueError, TypeError, AttributeError, OSError):
             return None
 
     @staticmethod
@@ -218,7 +251,7 @@ class FilterPipeline:
         try:
             vol = int(m.get("volume") or 0)
             oi = int(m.get("open_interest") or 0)
-        except Exception:
+        except (ValueError, TypeError):
             vol = 0
             oi = 0
         if vol < liq.min_volume or oi < liq.min_open_interest:
@@ -231,7 +264,7 @@ class FilterPipeline:
                 try:
                     if int(ask) - int(bid) > int(liq.max_spread_cents):
                         return False
-                except Exception:
+                except (ValueError, TypeError):
                     return False
         return True
 
@@ -254,7 +287,7 @@ class FilterPipeline:
                 if tid and is_rti_settled_kalshi_crypto_ticker(tid):
                     if secs < float(exp.min_seconds_to_expiry_rti_crypto):
                         return False
-            except Exception:
+            except (ValueError, TypeError, AttributeError, ImportError):
                 pass
         return True
 
@@ -293,7 +326,7 @@ class FilterPipeline:
                     if should_quarantine_rti_markets() and is_cfb_anchored_market(m):
                         st.rti_quarantined += 1
                         continue
-                except Exception:
+                except (ImportError, AttributeError, TypeError):
                     pass
 
                 if not self._passes_liquidity(m):
@@ -349,7 +382,7 @@ class FilterPipeline:
                             lp = float(last_price_raw)
                             # > 1.0 → catalog cents format; <= 1.0 → fractional WS format
                             mid = int(lp * 100) if 0 < lp <= 1.0 else int(lp) if lp > 1.0 else 0
-                except Exception:
+                except (ValueError, TypeError, KeyError):
                     vol, oi, best_bid, best_ask, mid = 0, 0, 0, 0, 0
 
                 asset_candidates.append(
@@ -420,12 +453,12 @@ class FilterPipeline:
                     # Try ISO format first
                     dt = datetime.fromisoformat(c.close_time.replace('Z', '+00:00'))
                     expiry_ts = dt.timestamp()
-                except Exception:
+                except (ValueError, TypeError):
                     try:
                         # Try common Kalshi formats
                         dt = datetime.strptime(c.close_time, "%Y-%m-%dT%H:%M:%S.%fZ")
                         expiry_ts = dt.timestamp()
-                    except Exception:
+                    except (ValueError, TypeError):
                         pass
             
             # Generate canonical group_id for risk aggregation using canonical helper

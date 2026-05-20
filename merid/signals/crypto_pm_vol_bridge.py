@@ -20,7 +20,10 @@ from utils.logger import get_logger
 
 logger = get_logger("merid.signals.crypto_pm_vol_bridge")
 
-_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _lock = threading.Lock()
+_lock = None  # Disabled to prevent startup hang
 _STACKS: Dict[str, Any] = {}
 _LAST_MINUTE_BUCKET: Dict[str, int] = {}
 _LAST_CTX: Dict[str, Dict[str, Any]] = {}
@@ -156,7 +159,36 @@ def feed_spot_and_get_context(
     except Exception as exc:
         logger.debug("crypto_pm_vol_bridge matrix row skipped: %s", exc)
 
-    with _lock:
+    if _lock is not None:
+        with _lock:
+            if not math.isfinite(price) or price <= 0:
+                return _LAST_CTX.get(a)
+
+            if _LAST_MINUTE_BUCKET.get(a) != bucket:
+                try:
+                    stack = _get_stack(a)
+                    stack.update(float(price))
+                    _LAST_MINUTE_BUCKET[a] = bucket
+                    snap = stack.snapshot()
+                    rv = float(snap.realized_vol_annualized)
+                    cfg_lo = float(stack.cfg.vol_low_threshold)
+                    cfg_hi = float(stack.cfg.vol_high_threshold)
+                    eff_lo = matrix_vol_lo if matrix_vol_lo is not None else cfg_lo
+                    eff_hi = matrix_vol_hi if matrix_vol_hi is not None else cfg_hi
+                    band, gate_ok = _classify_vol_band(rv, eff_lo, eff_hi)
+                    _LAST_CTX[a] = {
+                        "vol_band": band,
+                        "vol_size_mult": _size_mult_for_band(band, matrix_mults),
+                        "realized_vol_annualized": rv,
+                        "bars_available": int(snap.bars_available),
+                        "vol_gate_ok": gate_ok,
+                    }
+                except Exception as exc:
+                    logger.debug("crypto_pm_vol_bridge update failed %s: %s", a, exc)
+            _maybe_log_all_unlocked(t)
+            return _LAST_CTX.get(a)
+    else:
+        # Lock disabled - direct update (startup workaround)
         if not math.isfinite(price) or price <= 0:
             return _LAST_CTX.get(a)
 
@@ -201,5 +233,9 @@ def _maybe_log_all_unlocked(now: float) -> None:
 
 def get_cached_pm_vol_context() -> Dict[str, Dict[str, Any]]:
     """Return last computed context per asset (copy for operators/tests)."""
-    with _lock:
+    if _lock is not None:
+        with _lock:
+            return {k: dict(v) for k, v in _LAST_CTX.items()}
+    else:
+        # Lock disabled - direct access (startup workaround)
         return {k: dict(v) for k, v in _LAST_CTX.items()}

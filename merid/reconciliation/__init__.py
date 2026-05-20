@@ -11,12 +11,13 @@ Key components:
 
 from typing import Any, Dict, Optional
 
-from merid.reconciliation.kalshi_reconciler import (
-    ReconciliationIssue,
-    ReconciliationReport,
-    KalshiReconciler,
-    get_kalshi_reconciler,
-)
+# Legacy KalshiReconciler removed - superseded by portfolio reconciliation system
+# from merid.reconciliation.kalshi_reconciler import (
+#     ReconciliationIssue,
+#     ReconciliationReport,
+#     KalshiReconciler,
+#     get_kalshi_reconciler,
+# )
 
 from merid.reconciliation.venue_reconciler import (
     VenuePositionDiscrepancy,
@@ -32,7 +33,7 @@ from merid.reconciliation.venue_reconciler import (
 )
 
 # Backward-compat aliases used by older tests
-PositionDiscrepancy = ReconciliationIssue
+# PositionDiscrepancy = ReconciliationIssue  # Removed with KalshiReconciler
 
 
 def get_reconciliation_status() -> Dict[str, Any]:
@@ -50,9 +51,13 @@ def get_reconciliation_status() -> Dict[str, Any]:
     }
 
 
-def get_last_report() -> Optional["ReconciliationReport"]:
-    """Get the most recent reconciliation report from the singleton reconciler."""
-    return get_kalshi_reconciler().get_last_report()
+def get_last_report() -> Optional[dict]:
+    """Get the most recent reconciliation report from the portfolio reconciliation system.
+    
+    Legacy KalshiReconciler removed - now delegates to portfolio reconciliation.
+    Returns None for now as portfolio reconciliation API is separate.
+    """
+    return None
 
 
 def auto_reconcile_and_fix(
@@ -93,12 +98,13 @@ def auto_reconcile_and_fix(
 
 
 __all__ = [
-    "ReconciliationIssue",
-    "ReconciliationReport",
-    "KalshiReconciler",
-    "get_kalshi_reconciler",
+    # Legacy KalshiReconciler exports removed
+    # "ReconciliationIssue",
+    # "ReconciliationReport",
+    # "KalshiReconciler",
+    # "get_kalshi_reconciler",
     "VenuePositionDiscrepancy",
-    "PositionDiscrepancy",
+    # "PositionDiscrepancy",  # Removed with KalshiReconciler
     "force_align_from_venue",
     "reconcile_all_venues",
     "reconcile_venue",

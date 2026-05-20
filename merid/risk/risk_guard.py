@@ -560,7 +560,10 @@ class RiskGuard:
             from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
             _ledger = get_fills_ledger()
             _summary = _ledger.summary()
-            self.portfolio.daily_pnl_usd = float(_summary.get("daily_realized_pnl_usd", 0.0))
+            # Include both realized and unrealized PnL for daily PnL to show mark-to-market performance
+            daily_realized = float(_summary.get("daily_realized_pnl_usd", 0.0))
+            total_unrealized = float(_summary.get("total_unrealized_pnl_usd", 0.0))
+            self.portfolio.daily_pnl_usd = daily_realized + total_unrealized
         except Exception:
             pass
 

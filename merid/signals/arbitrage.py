@@ -11,6 +11,7 @@ when the opportunity decays.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 import uuid
@@ -28,6 +29,11 @@ from merid.signals.decay import (
 from utils.logger import get_logger
 
 logger = get_logger("merid.signals.arbitrage")
+
+
+# CRYPTO-15M-ARB: Primary crypto assets for 15m timeframe arbitrage
+# These are the 5 assets we trade on Kalshi 15m markets
+CRYPTO_15M_ASSETS = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
 
 
 # ── Enums ─────────────────────────────────────────────────────────────
@@ -257,31 +263,65 @@ class DislocationScanner:
             self.ingest_price(p)
 
     def scan(self, now: Optional[float] = None) -> List[DislocationSignal]:
-        """Scan all symbols for cross-venue dislocations."""
+        """Scan for cross-venue dislocations with crypto 15m focus.
+
+        CRYPTO-15M-ARB: Only scan BTC, ETH, SOL, XRP, DOGE for 15m timeframe
+        arbitrage opportunities. Skip other symbols to reduce CPU load.
+
+        NOTE: This method is SYNCHRONOUS and intended to run in a thread pool.
+        It uses time.sleep(0) for yielding control, NOT asyncio.sleep().
+        """
         now = now or time.time()
         new_signals = []
-        
-        # BUG-EL20 fix: Limit symbols scanned to prevent 2s+ blocking
-        MAX_SYMBOLS_SCAN = 3
+
+        # CRYPTO-15M-ARB: Strict filtering - only scan our 5 crypto assets
+        # This prevents CPU waste on irrelevant markets
+        allowed_symbols = set(CRYPTO_15M_ASSETS)
+
+        # BUG-EL20/23 fix: Aggressive limits to prevent event-loop lag
+        MAX_SYMBOLS_SCAN = 5  # One per crypto asset
+        MAX_PAIRS_PER_SYMBOL = 3  # Limit pairwise checks
         symbols_scanned = 0
 
         for symbol, venues in self._prices.items():
+            # CRYPTO-15M-ARB: Skip non-crypto symbols entirely
+            base_symbol = symbol.replace("/USD", "").replace("-USD", "").upper()
+            if base_symbol not in allowed_symbols:
+                continue
+
             if symbols_scanned >= MAX_SYMBOLS_SCAN:
                 break
             if len(venues) < 2:
                 continue
             symbols_scanned += 1
-            venue_list = list(venues.values())
-            # Find all pairwise dislocations
-            for i in range(len(venue_list)):
-                for j in range(i + 1, len(venue_list)):
-                    signal = self._check_pair(venue_list[i], venue_list[j], now)
-                    if signal:
-                        new_signals.append(signal)
-                        self._signals.append(signal)
 
-        # Expire old signals
-        self._expire_signals(now)
+            venue_list = list(venues.values())
+            # Find pairwise dislocations with strict limit
+            pair_count = 0
+            for i in range(len(venue_list)):
+                if pair_count >= MAX_PAIRS_PER_SYMBOL:
+                    break
+                for j in range(i + 1, len(venue_list)):
+                    if pair_count >= MAX_PAIRS_PER_SYMBOL:
+                        break
+                    signal = self._check_pair(venue_list[i], venue_list[j], now)
+                    pair_count += 1
+                    if signal:
+                        # CRYPTO-15M-ARB: Only keep high-quality signals
+                        if signal.net_edge_bps > 20:  # Min 20bps net edge
+                            new_signals.append(signal)
+                            self._signals.append(signal)
+
+            # THREAD-POOL FIX: Use time.sleep(0) to yield GIL in thread pool context
+            # Do NOT use asyncio.sleep() here - this runs in a thread pool, not the event loop
+            time.sleep(0)
+
+        # Expire old signals (chunked with yields)
+        self._expire_signals_sync(now)
+        
+        if new_signals:
+            logger.info("[CRYPTO-15M-ARB] scan found %d high-quality signals (scanned %d symbols)",
+                       len(new_signals), symbols_scanned)
         return new_signals
 
     def _check_pair(self, a: VenuePrice, b: VenuePrice, now: float) -> Optional[DislocationSignal]:
@@ -370,20 +410,69 @@ class DislocationScanner:
     _MAX_SIGNALS = 500
     _MAX_PLANS = 200
 
-    def _expire_signals(self, now: float):
-        for sig in self._signals:
+    def _expire_signals_sync(self, now: float):
+        """Expire old signals with chunked processing - SYNCHRONOUS version for thread pools.
+
+        BUG-EL22 FIX: Process in chunks with GIL yields to prevent blocking.
+        Uses time.sleep(0) instead of asyncio.sleep(0) for thread pool compatibility.
+        """
+        # Phase 1: Mark expired (chunked)
+        for i, sig in enumerate(self._signals):
+            if i % 100 == 0:
+                time.sleep(0)  # Yield GIL in thread pool context
             if sig.status == DislocationStatus.ACTIVE.value and sig.is_expired(now):
                 sig.status = DislocationStatus.EXPIRED.value
-        # Prune: drop expired signals older than 10 min to bound list size
+
+        # Phase 2: Prune expired signals older than 10 min (chunked)
         cutoff = now - 600
-        self._signals = [
-            s for s in self._signals
-            if s.status == DislocationStatus.ACTIVE.value or s.detected_at > cutoff
-        ][-self._MAX_SIGNALS:]
-        self._plans = [
-            p for p in self._plans
-            if p.status in ("proposed", "approved") or (now - p.created_at) < 600
-        ][-self._MAX_PLANS:]
+        pruned_signals = []
+        for i, s in enumerate(self._signals):
+            if i % 100 == 0:
+                time.sleep(0)  # Yield GIL
+            if s.status == DislocationStatus.ACTIVE.value or s.detected_at > cutoff:
+                pruned_signals.append(s)
+        self._signals = pruned_signals[-self._MAX_SIGNALS:]
+
+        # Phase 3: Prune plans (chunked)
+        pruned_plans = []
+        for i, p in enumerate(self._plans):
+            if i % 100 == 0:
+                time.sleep(0)  # Yield GIL
+            if p.status in ("proposed", "approved") or (now - p.created_at) < 600:
+                pruned_plans.append(p)
+        self._plans = pruned_plans[-self._MAX_PLANS:]
+
+    async def _expire_signals(self, now: float):
+        """Expire old signals with chunked processing - ASYNC version for event loop.
+
+        BUG-EL22 FIX: Process in chunks with asyncio yield points to prevent
+        event-loop lag when _signals/_plans lists are large.
+        """
+        # Phase 1: Mark expired (chunked)
+        for i, sig in enumerate(self._signals):
+            if i % 100 == 0:
+                await asyncio.sleep(0)  # Yield to event loop every 100 items
+            if sig.status == DislocationStatus.ACTIVE.value and sig.is_expired(now):
+                sig.status = DislocationStatus.EXPIRED.value
+
+        # Phase 2: Prune expired signals older than 10 min (chunked)
+        cutoff = now - 600
+        pruned_signals = []
+        for i, s in enumerate(self._signals):
+            if i % 100 == 0:
+                await asyncio.sleep(0)  # Yield to event loop
+            if s.status == DislocationStatus.ACTIVE.value or s.detected_at > cutoff:
+                pruned_signals.append(s)
+        self._signals = pruned_signals[-self._MAX_SIGNALS:]
+
+        # Phase 3: Prune plans (chunked)
+        pruned_plans = []
+        for i, p in enumerate(self._plans):
+            if i % 100 == 0:
+                await asyncio.sleep(0)  # Yield to event loop
+            if p.status in ("proposed", "approved") or (now - p.created_at) < 600:
+                pruned_plans.append(p)
+        self._plans = pruned_plans[-self._MAX_PLANS:]
 
     def build_arb_plan(self, signal: DislocationSignal, size_usd: float = 1000.0) -> Optional[ArbPlan]:
         """Build an ArbPlan from a DislocationSignal."""
@@ -461,21 +550,32 @@ class DislocationScanner:
         }
 
     def synthetic_scan(self, now: Optional[float] = None) -> List[DislocationSignal]:
-        """Generate synthetic dislocation signals for development."""
+        """Generate synthetic dislocation signals for development.
+
+        PRODUCTION NOTE: This is disabled by default. Set MERID_ENABLE_SYNTHETIC_ARB=1
+        to enable for testing only. Never use in live trading.
+
+        NOTE: This method is SYNCHRONOUS. scan() is called synchronously.
+        """
+        import os
+        if os.getenv("MERID_ENABLE_SYNTHETIC_ARB", "0") != "1":
+            logger.debug("synthetic_scan skipped - set MERID_ENABLE_SYNTHETIC_ARB=1 to enable")
+            return []
+
         import random
         now = now or time.time()
         rng = random.Random(int(now / 60))
 
-        # BUG-EL21 fix: Limit symbols in synthetic scan to reduce CPU load
-        symbols = ["BTC", "ETH", "SOL"]
         venues_map = {
-            "BTC": [("binance", 43250), ("coinbase", 43280)],
-            "ETH": [("binance", 2650), ("coinbase", 2655)],
-            "SOL": [("binance", 105.5), ("coinbase", 105.8)],
+            "BTC": [("binance", 78000), ("coinbase", 78050)],
+            "ETH": [("binance", 2350), ("coinbase", 2352)],
+            "SOL": [("binance", 86.5), ("coinbase", 86.6)],
+            "XRP": [("binance", 1.43), ("coinbase", 1.435)],
+            "DOGE": [("binance", 0.099), ("coinbase", 0.0991)],
         }
 
         signals = []
-        for sym in symbols:
+        for sym in CRYPTO_15M_ASSETS:
             venues = venues_map.get(sym, [])
             for venue, base in venues:
                 spread_pct = rng.uniform(0.01, 0.1)
@@ -490,6 +590,7 @@ class DislocationScanner:
                     fees_bps=rng.uniform(5, 30),
                 ))
 
+        # scan() is now synchronous - call directly without await
         signals = self.scan(now)
         return signals
 
@@ -497,13 +598,20 @@ class DislocationScanner:
 # ── Singleton ─────────────────────────────────────────────────────────
 
 _scanner: Optional[DislocationScanner] = None
-_scanner_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _scanner_lock = threading.Lock()
+_scanner_lock = None  # Disabled to prevent startup hang
 
 
 def get_dislocation_scanner() -> DislocationScanner:
     global _scanner
     if _scanner is None:
-        with _scanner_lock:
-            if _scanner is None:
-                _scanner = DislocationScanner()
+        if _scanner_lock is not None:
+            with _scanner_lock:
+                if _scanner is None:
+                    _scanner = DislocationScanner()
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _scanner = DislocationScanner()
     return _scanner

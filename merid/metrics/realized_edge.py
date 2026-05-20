@@ -166,6 +166,7 @@ class RealizedEdgeStore:
                     bucket         TEXT NOT NULL,
                     market_id      TEXT NOT NULL,
                     side           TEXT NOT NULL,
+                    action         TEXT NOT NULL,
                     price_cents    INTEGER NOT NULL,
                     p_model        REAL NOT NULL,
                     p_implied      REAL NOT NULL,
@@ -208,6 +209,7 @@ class RealizedEdgeStore:
         bucket: str,
         market_id: str,
         side: str,
+        action: str,
         price_cents: int,
         p_model: float,
         p_implied: float,
@@ -223,6 +225,7 @@ class RealizedEdgeStore:
             bucket: Category bucket (crypto, macro, etc.).
             market_id: Kalshi market ticker.
             side: "yes" or "no".
+            action: "buy" or "sell".
             price_cents: Price paid per contract (0-99).
             p_model: Model's YES probability.
             p_implied: Implied YES probability from price.
@@ -244,11 +247,11 @@ class RealizedEdgeStore:
             # increment below only fires when a genuinely new row was inserted.
             cursor = self._conn.execute(
                 """INSERT OR IGNORE INTO trade_edges
-                   (trade_id, forecaster_id, bucket, market_id, side,
+                   (trade_id, forecaster_id, bucket, market_id, side, action,
                     price_cents, p_model, p_implied, est_edge, contracts,
                     fee_cents, timestamp)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (trade_id, forecaster_id, bucket, market_id, side.lower(),
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (trade_id, forecaster_id, bucket, market_id, side.lower(), action.lower(),
                  price_cents, p_model, p_implied, est_edge, contracts,
                  fee_cents, ts),
             )
@@ -303,25 +306,44 @@ class RealizedEdgeStore:
             return False
 
         side = row["side"]
+        action = row["action"]
         price = row["price_cents"]
         contracts = row["contracts"]
         fee = row["fee_cents"]
 
         # Compute realized PnL in cents
-        if side == "yes":
-            if outcome == 1:
-                # YES buyer wins: payout = (100 - price) * contracts - fees
-                pnl = (100 - price) * contracts - fee
-            else:
-                # YES buyer loses: lose stake
-                pnl = -price * contracts
-        else:  # side == "no"
-            if outcome == 0:
-                # NO buyer wins: payout = (100 - (100-price)) * contracts - fees = price * contracts - fees
-                pnl = price * contracts - fee
-            else:
-                # NO buyer loses
-                pnl = -(100 - price) * contracts
+        # For BUY trades: pay price upfront, receive payout at settlement
+        # For SELL trades: receive price upfront, pay payout at settlement
+        if action == "buy":
+            if side == "yes":
+                if outcome == 1:
+                    # YES buyer wins: payout = (100 - price) * contracts - fees
+                    pnl = (100 - price) * contracts - fee
+                else:
+                    # YES buyer loses: lose stake
+                    pnl = -price * contracts
+            else:  # side == "no"
+                if outcome == 0:
+                    # NO buyer wins: payout = price * contracts - fees
+                    pnl = price * contracts - fee
+                else:
+                    # NO buyer loses: lose stake
+                    pnl = -(100 - price) * contracts
+        else:  # action == "sell"
+            if side == "yes":
+                if outcome == 1:
+                    # YES seller loses: received price, must pay 100
+                    pnl = price * contracts - (100 * contracts) - fee
+                else:
+                    # YES seller wins: received price, pay 0
+                    pnl = price * contracts - fee
+            else:  # side == "no"
+                if outcome == 0:
+                    # NO seller loses: received price, must pay 0
+                    pnl = price * contracts - fee
+                else:
+                    # NO seller wins: received price, pay 100
+                    pnl = price * contracts - (100 * contracts) - fee
 
         # Realized edge as fraction of stake
         stake = price * contracts if side == "yes" else (100 - price) * contracts

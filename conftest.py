@@ -5,6 +5,16 @@ from pathlib import Path
 import pytest
 
 
+def pytest_configure(config):
+    """Register custom pytest markers."""
+    config.addinivalue_line(
+        "markers", "kalshi_crypto_15m_v2: Tests for the kalshi_crypto_15m_v2 profile (BTC/ETH/SOL/XRP/DOGE 15m sentiment-free trading)"
+    )
+    config.addinivalue_line(
+        "markers", "sentiment_research: Research-only sentiment tests excluded from live 15m Kalshi runs"
+    )
+
+
 def pytest_sessionstart(session):
     try:
         mp.set_start_method("spawn", force=True)

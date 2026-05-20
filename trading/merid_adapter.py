@@ -27,7 +27,7 @@ class MeridExecutionAdapter:
     Provides the same interface as external broker adapters but uses local execution.
     """
     
-    def __init__(self, execution_service_url: str = "http://127.0.0.1:8012"):
+    def __init__(self, execution_service_url: str = "http://127.0.0.1:8011"):
         self.execution_service_url = execution_service_url
         self._router: Optional[ExecutionRouter] = None
         self.account_id = "merid_sim_account"
@@ -223,7 +223,7 @@ class MeridPaperTradingEngine:
     This replaces the external paper trading broker with our own infrastructure.
     """
     
-    def __init__(self, execution_service_url: str = "http://127.0.0.1:8012"):
+    def __init__(self, execution_service_url: str = "http://127.0.0.1:8011"):
         self.adapter = MeridExecutionAdapter(execution_service_url)
         self._running = False
         
@@ -317,7 +317,7 @@ def get_paper_engine() -> MeridPaperTradingEngine:
 
 
 # Integration function for MERID's existing paper trading system
-async def initialize_self_hosted_paper_trading(execution_service_url: str = "http://127.0.0.1:8012") -> MeridPaperTradingEngine:
+async def initialize_self_hosted_paper_trading(execution_service_url: str = "http://127.0.0.1:8011") -> MeridPaperTradingEngine:
     """
     Initialize self-hosted paper trading for MERID.
     
@@ -332,7 +332,7 @@ async def initialize_self_hosted_paper_trading(execution_service_url: str = "htt
 
 
 # Utility function to check if execution service is available
-async def is_execution_service_available(url: str = "http://127.0.0.1:8012") -> bool:
+async def is_execution_service_available(url: str = "http://127.0.0.1:8011") -> bool:
     """Check if the execution service is available."""
     try:
         async with aiohttp.ClientSession() as session:

@@ -43,6 +43,8 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from utils.logger import get_logger
 
+from merid.event_venues.kalshi.risk_parameters import DEFAULT_KALSHI_PRICE_CENTS
+
 logger = get_logger("merid.event_venues.kalshi.sentiment")
 
 
@@ -391,7 +393,11 @@ class KalshiSentimentService:
                 resp = await client.get(EXTERNAL_FG_URL)
                 resp.raise_for_status()
                 data = resp.json()
-            entry = data.get("data", [{}])[0]
+            entry = data.get("data", [])
+            if entry:
+                entry = entry[0]
+            else:
+                entry = {}
             self._ext_score  = float(entry.get("value", 50))
             self._ext_regime = entry.get("value_classification", "").lower().replace(" ", "_")
             self._ext_fetched_at = now
@@ -452,7 +458,7 @@ class KalshiSentimentService:
                 ticker   = m.ticker if hasattr(m, "ticker") else getattr(m, "market_id", None)
                 if not ticker:
                     continue
-                prob     = float(getattr(m, "yes_price", 50)) / 100.0
+                prob     = float(getattr(m, "yes_price", DEFAULT_KALSHI_PRICE_CENTS)) / 100.0
                 volume   = float(getattr(m, "volume", 0) or 0)
                 oi       = float(getattr(m, "open_interest", 0) or 0)
                 category = (getattr(m, "category", None) or "unknown").lower()
@@ -490,8 +496,19 @@ _service: Optional[KalshiSentimentService] = None
 _service_lock = threading.Lock()
 
 
-def get_sentiment_service() -> KalshiSentimentService:
-    """Return the module-level KalshiSentimentService singleton."""
+def get_sentiment_service() -> Optional[KalshiSentimentService]:
+    """Return the module-level KalshiSentimentService singleton.
+    
+    For kalshi_crypto_15m_v2 profile, returns None to prevent sentiment loading.
+    """
+    import os
+    
+    # Profile gating: Skip sentiment service for 15m crypto profile
+    profile = os.getenv("MERID_PROFILE", "").lower()
+    if profile == "kalshi_crypto_15m_v2":
+        logger.info("[PROFILE-GUARD] KalshiSentimentService skipped for kalshi_crypto_15m_v2 (sentiment disabled)")
+        return None
+    
     global _service
     if _service is None:
         with _service_lock:

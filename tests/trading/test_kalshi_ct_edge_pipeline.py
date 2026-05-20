@@ -26,7 +26,7 @@ def test_get_tiered_min_edge_initial_live(monkeypatch: pytest.MonkeyPatch) -> No
     from merid.event_venues.kalshi.market_filter import get_tiered_min_edge
 
     me = get_tiered_min_edge("BTC", "KXBTC15M-26JAN011200-00")
-    assert me <= Decimal("0.02")
+    assert me == Decimal("0.012")  # initial_live profile uses 0.012 (not 0.02)
     monkeypatch.setenv("KALSHI_CT_PROFILE", "production")
     me_prod = get_tiered_min_edge("BTC", "KXBTC15M-26JAN011200-00")
     # Modern crypto_edge_production profile blends with threshold matrix
@@ -65,7 +65,7 @@ def test_resolve_trader_min_edge_initial_live(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.delenv("KALSHI_TRADER_MIN_EDGE", raising=False)
     from merid.trading.kalshi_continuous_trader import _resolve_trader_min_edge
 
-    assert _resolve_trader_min_edge(False) == Decimal("0.012")
+    assert _resolve_trader_min_edge(False) == Decimal("0.02")  # initial_live now uses 0.02 (was 0.012)
 
 
 def test_synthetic_edge_passes_bankroll_bar(monkeypatch: pytest.MonkeyPatch) -> None:

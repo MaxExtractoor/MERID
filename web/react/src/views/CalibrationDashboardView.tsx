@@ -1,14 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY } from '../config/constants';
+import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { CorrelationRiskPanel } from '../components/CorrelationRiskPanel';
-
-const authHeaders = (): HeadersInit => {
-  const token = localStorage.getItem(AUTH_TOKEN_KEY);
-  return {
-    'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}`, 'X-Session-ID': token } : {}),
-  };
-};
+import { getAuthHeaders } from '../services/auth';
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -43,7 +36,7 @@ const CalibrationDashboardView: React.FC = () => {
 
   const fetchData = useCallback(async () => {
     try {
-      const opts = { headers: authHeaders() };
+      const opts = { headers: getAuthHeaders() };
       const [fRes, rRes, rcRes, crRes, exRes] = await Promise.all([
         fetch(`${API_BASE_URL}${API_ENDPOINTS.METRICS_FORECASTERS}`, opts),
         fetch(`${API_BASE_URL}${API_ENDPOINTS.METRICS_RESOLVER}`, opts),
@@ -91,7 +84,7 @@ const CalibrationDashboardView: React.FC = () => {
       setResolveAllStatus('resolving...');
       const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.KALSHI_METRICS_RESOLVE_ALL}`, {
         method: 'POST',
-        headers: authHeaders(),
+        headers: getAuthHeaders(),
       });
       if (res.ok) {
         const json = await res.json();

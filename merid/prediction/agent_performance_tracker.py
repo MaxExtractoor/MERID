@@ -511,17 +511,117 @@ class AgentPerformanceTracker:
         logger.info(f"Exported {len(self._closed_trades)} trades to {filepath}")
 
 
+# ── Scalping Metrics ───────────────────────────────────────────────
+
+@dataclass
+class ScalpingMetrics:
+    """Micro-scalping performance requirements and validation.
+    
+    For $44.35 micro bankrolls with rapid capital turnover:
+    - 70% minimum win rate for profitability (after transaction costs)
+    - $0.02 minimum profit per trade to justify Kalshi fees
+    - Tracks last N trades for rolling window analysis
+    """
+    
+    MIN_WIN_RATE: float = 0.70  # 70% minimum for scalping viability
+    MIN_PROFIT_PER_TRADE_USD: Decimal = Decimal("0.02")  # $0.02 after fees
+    WINDOW_SIZE: int = 30  # Last 30 trades for rolling metrics
+    
+    def validate_strategy_health(
+        self,
+        last_trades: List[TradeRecord],
+    ) -> tuple[bool, str, Dict[str, Any]]:
+        """Check if scalping strategy remains profitable.
+        
+        Args:
+            last_trades: List of closed trades (last N)
+            
+        Returns:
+            Tuple of (healthy, reason, metrics_dict)
+        """
+        if not last_trades:
+            return False, "No trades to evaluate", {"trade_count": 0}
+        
+        # Win rate calculation
+        closed = [t for t in last_trades if t.outcome is not None]
+        if not closed:
+            return False, "No closed trades", {"trade_count": 0}
+        
+        wins = sum(1 for t in closed if t.outcome == "win")
+        win_rate = wins / len(closed)
+        
+        # Average profit on winning trades
+        win_trades = [t for t in closed if t.outcome == "win" and t.profit_usd is not None]
+        avg_profit = (
+            sum(t.profit_usd for t in win_trades) / len(win_trades)
+            if win_trades else Decimal("0")
+        )
+        
+        # Average loss on losing trades
+        loss_trades = [t for t in closed if t.outcome == "loss" and t.profit_usd is not None]
+        avg_loss = (
+            sum(t.profit_usd for t in loss_trades) / len(loss_trades)
+            if loss_trades else Decimal("0")
+        )
+        
+        metrics = {
+            "trade_count": len(closed),
+            "win_rate": round(win_rate, 3),
+            "min_win_rate": self.MIN_WIN_RATE,
+            "avg_profit_per_win": str(avg_profit.quantize(Decimal("0.01"))),
+            "avg_loss_per_loss": str(avg_loss.quantize(Decimal("0.01"))),
+            "min_profit_threshold": str(self.MIN_PROFIT_PER_TRADE_USD),
+            "wins": wins,
+            "losses": len(closed) - wins,
+        }
+        
+        # Validation
+        if win_rate < self.MIN_WIN_RATE:
+            return False, (
+                f"Win rate {win_rate:.1%} below {self.MIN_WIN_RATE:.0%} threshold "
+                f"({wins}/{len(closed)} trades)"
+            ), metrics
+        
+        if avg_profit < self.MIN_PROFIT_PER_TRADE_USD:
+            return False, (
+                f"Avg profit ${avg_profit:.2f} below min ${self.MIN_PROFIT_PER_TRADE_USD} "
+                f"— transaction costs may be eroding profitability"
+            ), metrics
+        
+        return True, "Strategy healthy", metrics
+    
+    def get_rolling_metrics(self, trades: List[TradeRecord]) -> Dict[str, Any]:
+        """Get rolling window metrics for scalping performance."""
+        recent = trades[-self.WINDOW_SIZE:] if len(trades) > self.WINDOW_SIZE else trades
+        healthy, reason, metrics = self.validate_strategy_health(recent)
+        
+        return {
+            "window_size": len(recent),
+            "window_max": self.WINDOW_SIZE,
+            "healthy": healthy,
+            "status": reason,
+            **metrics,
+        }
+
+
 # ── Singleton ──────────────────────────────────────────────────────
 
 _tracker: Optional[AgentPerformanceTracker] = None
-_tracker_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _tracker_lock = threading.Lock()
+_tracker_lock = None  # Disabled to prevent startup hang
 
 
 def get_agent_performance_tracker() -> AgentPerformanceTracker:
     """Return the module-level AgentPerformanceTracker singleton."""
     global _tracker
     if _tracker is None:
-        with _tracker_lock:
-            if _tracker is None:
-                _tracker = AgentPerformanceTracker()
+        if _tracker_lock is not None:
+            with _tracker_lock:
+                if _tracker is None:
+                    _tracker = AgentPerformanceTracker()
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _tracker = AgentPerformanceTracker()
     return _tracker

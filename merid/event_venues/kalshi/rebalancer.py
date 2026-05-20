@@ -8,6 +8,8 @@ from __future__ import annotations
 import threading
 import asyncio
 from dataclasses import dataclass, field
+
+from merid.event_venues.kalshi.risk_parameters import DEFAULT_KALSHI_PRICE_CENTS
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set
 
@@ -152,8 +154,16 @@ class PortfolioRebalancer:
                     side = "yes" if current_exposure > 0 else "no"
                     delta = abs(delta)
 
-                # Convert exposure delta to contracts (simplified - assumes ~50c avg)
-                avg_price_cents = 50
+                # Convert exposure delta to contracts using market price from KalshiMarketStateStore
+                # PRODUCTION-FIX: Use actual market price instead of hardcoded default fallback
+                avg_price_cents = DEFAULT_KALSHI_PRICE_CENTS  # Fallback if market state unavailable
+                try:
+                    from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                    state = get_kalshi_market_state_store().get_state(ticker)
+                    if state and state.mid_cents > 0:
+                        avg_price_cents = state.mid_cents
+                except Exception as _exc:
+                    logger.debug("Rebalancer: failed to fetch market state for %s, using 50c fallback: %s", ticker, _exc)
                 contracts_delta = int(delta * 100 / avg_price_cents)
 
                 if contracts_delta >= self._min_order_size:
@@ -248,7 +258,7 @@ class PortfolioRebalancer:
                 "action": action.action,
                 "count": action.delta,
                 "type": "limit",
-                "yes_price": 50,  # Mid-market for rebalancing
+                "yes_price": DEFAULT_KALSHI_PRICE_CENTS,  # Mid-market for rebalancing
             }
 
             try:

@@ -48,20 +48,32 @@ class NATSEventBus:
     
     def __init__(self, url: str = "nats://localhost:4222"):
         if not NATS_AVAILABLE:
-            raise ImportError("nats-py not installed: pip install nats-py")
+            raise ImportError(
+                "CRITICAL: nats-py not installed. NATS is required for order execution. "
+                "Install with: pip install nats-py"
+            )
         
         self.url = url
         self.nc: Optional[NATSClient] = None
         self.subscriptions: Dict[str, object] = {}  # topic -> Subscription object
         
     async def connect(self) -> None:
-        """Connect to NATS server"""
+        """Connect to NATS server
+        
+        CRITICAL: This must succeed for order execution to work.
+        If connection fails, trading will be halted.
+        """
         if self.nc and self.nc.is_connected:
             logger.warning("Already connected to NATS")
             return
         
-        self.nc = await nats.connect(self.url)
-        logger.info(f"Connected to NATS at {self.url}")
+        try:
+            self.nc = await nats.connect(self.url)
+            logger.info(f"Connected to NATS at {self.url}")
+        except Exception as e:
+            logger.error(f"CRITICAL: Failed to connect to NATS at {self.url}: {e}")
+            logger.error("Order execution will be unavailable without NATS")
+            raise
     
     async def disconnect(self) -> None:
         """Disconnect from NATS server"""
@@ -73,12 +85,17 @@ class NATSEventBus:
         """
         Publish event to topic
         
+        CRITICAL: This is used for order routing. Failures will prevent orders from executing.
+        
         Args:
             topic: Event topic (e.g., "kalshi.orderbook")
             data: Event payload (must be JSON-serializable)
         """
         if not self.nc or not self.nc.is_connected:
-            raise RuntimeError("Not connected to NATS")
+            raise RuntimeError(
+                "CRITICAL: Not connected to NATS. Order execution is unavailable. "
+                "Check NATS server status and restart if needed."
+            )
         
         import time as _time
         envelope = EventEnvelope(
@@ -104,6 +121,9 @@ class NATSEventBus:
         """
         Subscribe to topic
         
+        CRITICAL: This is used for receiving order execution confirmations.
+        Failures will prevent order status updates.
+        
         Args:
             topic: Topic pattern (supports wildcards: * and >)
             handler: Async callback function
@@ -112,7 +132,10 @@ class NATSEventBus:
             Subscription ID
         """
         if not self.nc or not self.nc.is_connected:
-            raise RuntimeError("Not connected to NATS")
+            raise RuntimeError(
+                "CRITICAL: Not connected to NATS. Order execution is unavailable. "
+                "Check NATS server status and restart if needed."
+            )
         
         async def message_handler(msg):
             try:

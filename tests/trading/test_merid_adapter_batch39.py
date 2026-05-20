@@ -17,17 +17,17 @@ class TestMeridExecutionAdapter:
 
     @pytest.fixture
     def adapter(self):
-        return MeridExecutionAdapter(execution_service_url="http://localhost:8012")
+        return MeridExecutionAdapter(execution_service_url="http://localhost:8011")
 
     def test_initialization(self, adapter):
-        assert adapter.execution_service_url == "http://localhost:8012"
+        assert adapter.execution_service_url == "http://localhost:8011"
         assert adapter.account_id == "merid_sim_account"
         assert adapter.session is None
         assert adapter._connected is False
 
     def test_initialization_default_url(self):
         adapter = MeridExecutionAdapter()
-        assert adapter.execution_service_url == "http://127.0.0.1:8012"
+        assert adapter.execution_service_url == "http://127.0.0.1:8011"
 
     @pytest.mark.asyncio
     async def test_disconnect(self, adapter):
@@ -92,7 +92,7 @@ class TestMeridPaperTradingEngine:
     @pytest.fixture
     def engine(self):
         with patch('trading.merid_adapter.MeridExecutionAdapter'):
-            return MeridPaperTradingEngine(execution_service_url="http://localhost:8012")
+            return MeridPaperTradingEngine(execution_service_url="http://localhost:8011")
 
     def test_initialization(self, engine):
         assert engine._running is False
@@ -193,7 +193,7 @@ class TestUtilityFunctions:
             mock_session.get = AsyncMock(side_effect=aiohttp.ClientError("Connection refused"))
             mock_session_class.return_value = mock_session
             
-            result = await is_execution_service_available("http://localhost:8012")
+            result = await is_execution_service_available("http://localhost:8011")
             assert result is False
 
     @pytest.mark.asyncio
@@ -202,7 +202,7 @@ class TestUtilityFunctions:
         mock_engine.start = AsyncMock()
         
         with patch('trading.merid_adapter.MeridPaperTradingEngine', return_value=mock_engine):
-            result = await initialize_self_hosted_paper_trading("http://localhost:8012")
+            result = await initialize_self_hosted_paper_trading("http://localhost:8011")
             assert result is mock_engine
             mock_engine.start.assert_called_once()
 

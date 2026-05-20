@@ -127,14 +127,22 @@ class KalshiBalance:
 
 @dataclass
 class KalshiConfig:
-    """Configuration for Kalshi client."""
+    """Configuration for Kalshi client.
     
-    # API endpoints — live production matches Kalshi quick-start (authenticated REST + WS).
-    # Demo: demo-api.kalshi.co; live: api.elections.kalshi.com (see Kalshi API docs).
-    rest_api_url: str = "https://api.elections.kalshi.com/trade-api/v2"
-    ws_api_url: str = "wss://api.elections.kalshi.com/trade-api/ws/v2"
-    demo_rest_api_url: str = "https://demo-api.kalshi.co/trade-api/v2"
-    demo_ws_api_url: str = "wss://demo-api.kalshi.co/trade-api/ws/v2"
+    NOTE: URL defaults are overridden at runtime by get_kalshi_base_url() from invariants.py.
+    These dataclass defaults are only used as fallbacks if invariants import fails.
+    For production, set KALSHI_ENV=live/demo or KALSHI_API_BASE_URL explicitly.
+    """
+    
+    # API endpoints — defaults overridden by invariants.get_kalshi_base_url()
+    # Kalshi's recommended URLs: external-api.kalshi.com (live), external-api.demo.kalshi.co (demo)
+    rest_api_url: str = "https://external-api.kalshi.com/trade-api/v2"
+    ws_api_url: str = "wss://external-api.kalshi.com/trade-api/ws/v2"
+    demo_rest_api_url: str = "https://external-api.demo.kalshi.co/trade-api/v2"
+    demo_ws_api_url: str = "wss://external-api.demo.kalshi.co/trade-api/ws/v2"
+    
+    # Public market-data endpoint (unified, recommended host for discovery)
+    public_rest_api_url: str = "https://external-api.kalshi.com/trade-api/v2"
     
     # Authentication
     email: Optional[str] = None
@@ -150,6 +158,24 @@ class KalshiConfig:
     
     def __post_init__(self):
         import os
+        # ── URL Resolution: Use invariants module as single source of truth ─────
+        # Respect KALSHI_API_BASE_URL from invariants.py instead of hard-coded defaults
+        try:
+            from merid.event_venues.kalshi.invariants import get_kalshi_base_url, get_kalshi_ws_url
+            _base_url = get_kalshi_base_url()
+            _ws_url = get_kalshi_ws_url()
+            # Override hard-coded defaults with invariants-based URLs
+            self.rest_api_url = _base_url
+            self.ws_api_url = _ws_url
+            # Demo URLs remain as-is (invariants returns live URL by default)
+            # Demo mode selection happens via use_demo flag below
+        except Exception as _url_exc:
+            logger.warning(
+                "KalshiConfig: failed to get base URL from invariants, using hard-coded defaults. Error: %s",
+                _url_exc
+            )
+        # ── End URL Resolution ───────────────────────────────────────────────
+
         # Prefer merid.settings over raw env vars for consistency
         try:
             from merid.settings import settings as _s
@@ -180,6 +206,16 @@ class KalshiConfig:
         # ── A7: KALSHI_ENV-aware key selection ─────────────────────────────
         # Explicit per-environment key pairs take precedence over legacy vars.
         _kalshi_env = os.getenv("KALSHI_ENV", "").lower()  # "demo" or "live"
+        
+        # Deprecation warning: if KALSHI_ENV is unset but KALSHI_USE_DEMO is set, warn user
+        if not _kalshi_env and _use_demo:
+            logger.warning(
+                "KALSHI_ENV_DEPRECATED_BOOL_USED: KALSHI_ENV is unset but KALSHI_USE_DEMO=%s. "
+                "Set KALSHI_ENV=demo explicitly instead. Treating as KALSHI_ENV=demo.",
+                _use_demo
+            )
+            _kalshi_env = "demo" if _use_demo else "live"
+        
         if _kalshi_env == "live":
             _env_key = os.getenv("KALSHI_LIVE_API_KEY_ID")
             _env_path = os.getenv("KALSHI_LIVE_PRIVATE_KEY_PATH")
@@ -223,12 +259,25 @@ class KalshiConfig:
         # must not be silently overwritten by a missing env var.
         if not self.use_demo:
             self.use_demo = _use_demo
-        # Override the active URL if KALSHI_API_HOST is set explicitly
+        # Override the active URL if KALSHI_API_HOST is set explicitly (legacy, deprecated)
         if _api_host:
+            logger.warning(
+                "KalshiConfig: KALSHI_API_HOST is deprecated. Use KALSHI_API_BASE_URL instead. "
+                "KALSHI_API_HOST=%s will override invariants-based URL.", _api_host
+            )
             if self.use_demo:
                 self.demo_rest_api_url = _api_host
             else:
                 self.rest_api_url = _api_host
+
+        # MODE CONSISTENCY CHECK: Ensure use_demo matches TradeMode
+        # This must happen after environment/host/key selection
+        try:
+            from merid.mode_resolver import ModeResolver
+            ModeResolver.assert_mode_consistency()
+        except Exception as mode_exc:
+            logger.error("KalshiConfig mode consistency check failed: %s", mode_exc)
+            raise
     
     @property
     def base_url(self) -> str:
@@ -239,6 +288,56 @@ class KalshiConfig:
     def ws_url(self) -> str:
         """Get WebSocket URL based on environment."""
         return self.demo_ws_api_url if self.use_demo else self.ws_api_url
+    
+    def log_startup_sanity(self):
+        """Log startup sanity check for Kalshi configuration.
+        
+        This should be called during system startup to verify:
+        - Correct API base URL (demo vs live)
+        - Environment setting
+        - Auth configuration status
+        """
+        env = "demo" if self.use_demo else "live"
+        base_url = self.base_url
+        ws_url = self.ws_url
+        
+        # Check auth configuration
+        has_api_key = bool(self.api_key and self.api_key != "change_me")
+        has_key_path = bool(self.private_key_path and self.private_key_path != "change_me")
+        has_key_pem = bool(self.private_key_pem and self.private_key_pem != "change_me")
+        has_auth = has_api_key and (has_key_path or has_key_pem)
+        
+        # Redact API key for logging
+        redacted_key = f"{self.api_key[:4]}...{self.api_key[-4:]}" if self.api_key and len(self.api_key) > 8 else "NOT_SET"
+        
+        logger.info("=" * 80)
+        logger.info("KALSHI CLIENT STARTUP SANITY CHECK")
+        logger.info("=" * 80)
+        logger.info(f"Environment: {env}")
+        logger.info(f"REST API URL: {base_url}")
+        logger.info(f"WebSocket URL: {ws_url}")
+        logger.info(f"API Key: {redacted_key} (configured: {has_api_key})")
+        logger.info(f"Private Key Path: {self.private_key_path} (configured: {has_key_path})")
+        logger.info(f"Private Key PEM: {'SET' if has_key_pem else 'NOT_SET'} (configured: {has_key_pem})")
+        logger.info(f"Auth Configured: {has_auth}")
+        
+        if not has_auth:
+            logger.warning(
+                "KALSHI AUTH NOT CONFIGURED - Order placement will fail. "
+                "Set KALSHI_API_KEY_ID and either KALSHI_PRIVATE_KEY_PATH or KALSHI_PRIVATE_KEY_PEM"
+            )
+        
+        if self.use_demo and "demo-api.kalshi.co" not in base_url:
+            logger.warning(
+                f"use_demo=True but base URL does not contain 'demo-api.kalshi.co': {base_url}"
+            )
+        
+        if not self.use_demo and "api.elections.kalshi.com" not in base_url:
+            logger.warning(
+                f"use_demo=False but base URL does not contain 'api.elections.kalshi.com': {base_url}"
+            )
+        
+        logger.info("=" * 80)
 
 
 @dataclass
@@ -286,6 +385,9 @@ class KalshiMarketState:
     # Timestamps (monotonic)
     last_book_update_ts: float = 0.0
     last_rest_update_ts: float = 0.0
+    
+    # Market status for health check (open/closed/paused/unknown)
+    status: str = "open"
 
     # ── Derived helpers for UI ─────────────────────────────────────────
 

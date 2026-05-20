@@ -242,8 +242,22 @@ class VolumeMonitor:
         new_deltas: Dict[str, Dict[str, Any]] = {}
 
         for cm in catalog.get_all_markets():
-            ticker = cm.market.market_id
-            vol = float(cm.market.volume) if cm.market.volume else 0.0
+            # CRITICAL FIX: CatalogMarket wraps EventMarket, so market_id is on nested market.market
+            if hasattr(cm, "market") and hasattr(cm.market, "market_id"):
+                ticker = cm.market.market_id
+            elif hasattr(cm, "market_id"):
+                ticker = cm.market_id
+            else:
+                continue
+            
+            # CRITICAL FIX: volume is on nested EventMarket
+            if hasattr(cm, "market") and hasattr(cm.market, "volume"):
+                vol = float(cm.market.volume) if cm.market.volume else 0.0
+            elif hasattr(cm, "volume"):
+                vol = float(cm.volume) if cm.volume else 0.0
+            else:
+                vol = 0.0
+            
             prev = self._last_volumes.get(ticker, vol)
             delta = vol - prev
 
@@ -253,9 +267,17 @@ class VolumeMonitor:
             self._history[ticker].append(VolumeSnapshot(ts=now_iso, volume=vol, delta=delta))
 
             if delta != 0:
+                # CRITICAL FIX: question is on nested EventMarket
+                if hasattr(cm, "market") and hasattr(cm.market, "question"):
+                    question = cm.market.question
+                elif hasattr(cm, "question"):
+                    question = cm.question
+                else:
+                    question = ""
+                
                 new_deltas[ticker] = {
                     "ticker": ticker,
-                    "question": cm.market.question,
+                    "question": question,
                     "category": cm.category or "",
                     "asset": cm.asset or "",
                     "previous_volume": prev,

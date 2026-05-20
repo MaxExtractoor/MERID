@@ -23,6 +23,49 @@ _DEFAULT_CONFIG_PATH = os.path.join(
 )
 
 
+def _validate_profile_usage(raw_config: Dict[str, Any], config_path: str) -> None:
+    """Validate profile usage for 15m crypto agents.
+    
+    Checks if the kalshi_crypto_15m profile should be active when 15m crypto agents
+    are present in the agent grid. Logs warnings if profile is not active but
+    should be.
+    
+    Args:
+        raw_config: Parsed YAML config dictionary
+        config_path: Path to config file (for logging)
+    """
+    try:
+        from merid.risk.profiles.crypto_15m_profile import is_profile_active
+    except ImportError:
+        # Profile module not available, skip validation
+        return
+    
+    # Check if 15m crypto agents are present
+    raw_agents = raw_config.get("agents", [])
+    crypto_15m_agents = []
+    for agent in raw_agents:
+        name = agent.get("name", "").upper()
+        assets = agent.get("assets", [])
+        timeframes = agent.get("timeframes", [])
+        
+        # Check if this is a 15m crypto agent
+        if ("BTC" in name or "ETH" in name or "SOL" in name or "XRP" in name or "DOGE" in name):
+            if "15M" in name or "15m" in name or ("15m" in timeframes):
+                crypto_15m_agents.append(name)
+    
+    if not crypto_15m_agents:
+        return
+    
+    # Check if profile is active
+    if is_profile_active():
+        logger.info(
+            f"[PROFILE-VALIDATION] Profile kalshi_crypto_15m_v2 is active. "
+            f"15m crypto agents will use profile-based risk limits: {crypto_15m_agents}"
+        )
+    # Removed warning - bankroll-derived risk limits are acceptable for live trading
+
+
+
 # ── Typed config models ────────────────────────────────────────────────
 
 @dataclass
@@ -34,6 +77,8 @@ class VenueConfig:
     """
     name: str = "kalshi"
     use_demo: bool = False
+    # DEPRECATED for kalshi_crypto_15m_v2 profile: Use config/profiles/kalshi_crypto_15m.yaml instead
+    # This setting is still used by other profiles (sports, paper, generic prediction)
     max_notional_per_expiry_usd: Decimal = Decimal("0")  # 0 = derive from bankroll (was $5000)
     max_open_markets_per_asset: int = 20
 
@@ -67,18 +112,37 @@ class MarketFilterConfig:
 
 
 @dataclass
+class PriceBand:
+    """Price band for price-aware contract limits."""
+    price_range_min: int  # Minimum price in cents
+    price_range_max: int  # Maximum price in cents
+    max_contracts: int   # Maximum contracts allowed in this price band
+
+
+@dataclass
 class AgentRiskLimits:
-    """Per-agent risk limits."""
+    """Per-agent risk limits.
+    
+    NOTE: Price-aware sizing via price_bands replaces blunt max_yes_position/max_no_position.
+    When price_bands is non-empty, max_yes_position and max_no_position are ignored.
+    
+    DEPRECATED for kalshi_crypto_15m_v2 profile: Use config/profiles/kalshi_crypto_15m.yaml instead
+    These settings are still used by other profiles (sports, paper, generic prediction)
+    """
     max_yes_position: int = 0  # 0 = derive from bankroll % (was 500)
     max_no_position: int = 0   # 0 = derive from bankroll % (was 500)
     max_orders_per_window: int = 0  # 0 = auto-compute from bankroll
     max_notional_usd: Decimal = Decimal("0")  # 0 = derive from bankroll (was $500)
-    max_contracts_per_order: int = 50
+    # CRITICAL FIX: 0 = derive from bankroll (was 50 - dangerous for micro bankrolls)
+    max_contracts_per_order: int = 0  # 0 = derive: min(25, 1% of bankroll / price)
+    # Price-aware sizing: replace blunt caps with graduated limits by contract price
+    price_bands: List[PriceBand] = field(default_factory=list)
 
     def get_effective_max_orders(self, bankroll_cents: int, top_n_edges: int = 3) -> int:
         """Compute dynamic max_orders based on bankroll and available edges.
 
         Formula: min(floor(bankroll_usd / 100), 3, top_n_edges_count)
+        REVERTED (2026-05-08): default top_n_edges=3 (was 1) to restore profitable trades.
 
         This ensures:
         - Small bankroll ($14) → 1 order (top edge only)
@@ -99,12 +163,79 @@ class AgentRiskLimits:
 
         return effective
 
+    def get_max_contracts_for_price(self, price_cents: int) -> int:
+        """Get maximum contracts allowed for a given contract price using price bands.
+
+        Args:
+            price_cents: Contract price in cents
+
+        Returns:
+            Maximum contracts allowed, or 0 if no price bands configured (use legacy max_yes_position)
+        """
+        if not self.price_bands:
+            # No price bands configured, use legacy blunt caps
+            return max(self.max_yes_position, self.max_no_position)
+
+        # Find matching price band
+        for band in self.price_bands:
+            if band.price_range_min <= price_cents <= band.price_range_max:
+                return band.max_contracts
+
+        # No matching band found, use conservative default of 1
+        logger.warning(
+            f"No price band found for price {price_cents}¢, using conservative default of 1 contract"
+        )
+        return 1
+
 
 @dataclass
 class EntryWindowConfig:
-    """When the agent is allowed to enter relative to contract expiry."""
-    minutes_before_expiry: int = 10
-    cutoff_minutes_before_expiry: int = 2
+    """When the agent is allowed to enter relative to contract expiry.
+
+    LEGACY DEFAULTS - For non-crypto, non-15m agents only.
+
+    For Kalshi 15m crypto agents (BTC_15M, ETH_15M, SOL_15M, XRP_15M, DOGE_15M):
+      - Entry window values: Use config/profiles/kalshi_crypto_15m.yaml (SINGLE SOURCE OF TRUTH)
+      - Profile values are applied via profile overrides in agent_grid_config.py
+      - These hardcoded defaults are NOT used by 15m crypto agents
+
+    PRODUCTION FIX v8 (2026-04-30): Increased defaults from 10/2 to 60/5 minutes.
+    Previous narrow window (10/2) caused ENTRY-WINDOW-SUSPECT warnings for macro/tech agents.
+    60/5 provides reasonable entry windows for all timeframes from 15m to daily.
+
+    AUDIT-12 FIX (2026-05-11): Tightened 15m entry window via env var support.
+    Use MERID_PM_ENTRY_WINDOW_15M_MINUTES and MERID_PM_ENTRY_WINDOW_15M_CUTOFF
+    to configure tighter windows for choppy crypto 15m markets.
+    """
+    minutes_before_expiry: int = 60  # Was 10 - too narrow for macro/tech agents
+    cutoff_minutes_before_expiry: int = 5  # Was 2 - too tight for higher timeframe agents
+    
+    @classmethod
+    def for_timeframe(cls, timeframe: str) -> "EntryWindowConfig":
+        """Get entry window config with timeframe-specific overrides from env vars.
+        
+        Args:
+            timeframe: Timeframe (e.g., "15m", "1h", "daily")
+            
+        Returns:
+            EntryWindowConfig with timeframe-specific overrides applied
+        """
+        import os
+        
+        # Default config
+        config = cls()
+        
+        # Apply timeframe-specific overrides from env vars
+        if timeframe == "15m":
+            # AUDIT-12: Tighter window for 15m crypto markets (choppy, fast-moving)
+            minutes = os.getenv("MERID_PM_ENTRY_WINDOW_15M_MINUTES")
+            cutoff = os.getenv("MERID_PM_ENTRY_WINDOW_15M_CUTOFF")
+            if minutes:
+                config.minutes_before_expiry = int(minutes)
+            if cutoff:
+                config.cutoff_minutes_before_expiry = int(cutoff)
+        
+        return config
 
 
 @dataclass
@@ -138,6 +269,9 @@ class AgentConfig:
     # When True, skip swarm consensus direction / solo timer (strategy + risk still apply).
     # Also see env ``MERID_PM_BYPASS_SWARM_CONSENSUS_AGENTS=name1,name2``.
     bypass_swarm_consensus: bool = False
+    # When True, agent is signal-only (provides context/consensus but never executes trades).
+    # Used by SPORTS_DIRECTIONAL and other context agents.
+    signalonly: bool = False
     # Take-profit configuration — None means use the preset from get_tp_config_for_agent().
     # Populated from YAML ``take_profit:`` block if present.
     take_profit: Optional[Any] = None  # TakeProfitConfig (typed in take_profit.py)
@@ -169,21 +303,38 @@ class PortfolioRiskConfig:
     rebalance_check_interval_seconds: int = 0  # 0 = derive from settings
 
     def __post_init__(self):
-        """Derive any zero values from settings (bankroll-driven limits)."""
+        """Derive any zero values from core.settings (SINGLE SOURCE OF TRUTH - bankroll-driven limits)."""
+        from core.settings import (
+            MAX_TOTAL_RISK_PCT, 
+            DAILY_LOSS_CAP_PCT, 
+            MAX_CYCLE_RISK_PCT
+        )
         from merid.settings import settings
         
-        bankroll_cents = settings.KALSHI_PORTFOLIO_BANKROLL_CENTS
+        # Use live bankroll from bankroll_service_v2 (single source of truth)
+        try:
+            from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+            bankroll_usd = get_equity_for_risk_calc_sync()
+            if bankroll_usd is None or bankroll_usd <= 0:
+                # Fail closed - no bankroll available
+                bankroll_cents = 0
+            else:
+                bankroll_cents = int(bankroll_usd * 100)
+        except Exception:
+            # Fail closed on error
+            bankroll_cents = 0
         
+        # Use unified core.settings values instead of deprecated merid.settings
         if self.max_total_notional_usd == 0:
-            self.max_total_notional_usd = Decimal(settings.kalshi_portfolio_max_notional_cents) / 100
+            self.max_total_notional_usd = Decimal(bankroll_cents * MAX_TOTAL_RISK_PCT) / 100
         if self.max_daily_loss_usd == 0:
-            self.max_daily_loss_usd = Decimal(settings.kalshi_portfolio_max_daily_loss_cents) / 100
+            self.max_daily_loss_usd = Decimal(bankroll_cents * DAILY_LOSS_CAP_PCT) / 100
         if self.max_notional_per_asset_usd == 0:
-            self.max_notional_per_asset_usd = Decimal(settings.kalshi_portfolio_max_per_asset_cents) / 100
+            self.max_notional_per_asset_usd = Decimal(bankroll_cents * MAX_CYCLE_RISK_PCT) / 100
         if self.max_margin_utilization_pct == 0:
-            self.max_margin_utilization_pct = Decimal(str(settings.KALSHI_PORTFOLIO_MAX_MARGIN_UTIL_PCT * 100))
+            self.max_margin_utilization_pct = Decimal("75")  # 75% default
         if self.rebalance_check_interval_seconds == 0:
-            self.rebalance_check_interval_seconds = settings.KALSHI_PORTFOLIO_CHECK_INTERVAL_S
+            self.rebalance_check_interval_seconds = 30  # 30s default
 
 
 @dataclass
@@ -241,16 +392,30 @@ def _parse_market_filter(raw: Dict[str, Any]) -> MarketFilterConfig:
 
 
 def _parse_risk_limits(raw: Dict[str, Any]) -> AgentRiskLimits:
+    # Parse price_bands if present
+    price_bands_raw = raw.get("price_bands", [])
+    price_bands = []
+    for band_raw in price_bands_raw:
+        price_range = band_raw.get("price_range", [0, 99])
+        if isinstance(price_range, list) and len(price_range) == 2:
+            price_bands.append(PriceBand(
+                price_range_min=int(price_range[0]),
+                price_range_max=int(price_range[1]),
+                max_contracts=int(band_raw.get("max_contracts", 1))
+            ))
+    
     return AgentRiskLimits(
         max_yes_position=raw.get("max_yes_position", 0),  # 0 = derive from bankroll
         max_no_position=raw.get("max_no_position", 0),   # 0 = derive from bankroll
         max_orders_per_window=raw.get("max_orders_per_window", 0),  # 0 = auto-compute
         max_notional_usd=Decimal(str(raw.get("max_notional_usd", 0))),  # 0 = derive from bankroll
         max_contracts_per_order=raw.get("max_contracts_per_order", 50),
+        price_bands=price_bands,
     )
 
 
-_MIN_CUTOFF_MINUTES = 2  # Hard floor: never enter inside 2 min of expiry
+# 15m scalper: configurable cutoff (OPTIMIZED 2026-05-10: was 2 min, now 3 min)
+_MIN_CUTOFF_MINUTES = int(os.getenv("SCALPER15M_MIN_CUTOFF_MINUTES", "3"))  # 3 min default for 15m
 
 
 def _parse_strategy_overrides(block: Any) -> Dict[str, Any]:
@@ -289,8 +454,11 @@ def _parse_entry_window(raw: Dict[str, Any]) -> EntryWindowConfig:
             cutoff, _MIN_CUTOFF_MINUTES, _MIN_CUTOFF_MINUTES,
         )
         cutoff = _MIN_CUTOFF_MINUTES
+    # 15m scalper: longer entry window (30 min vs 10 min)
+    is_scalper = os.getenv("STRATEGY_MODE", "").upper() == "MOMENTUM_SCALPER"
+    default_minutes = 30 if is_scalper else 10
     return EntryWindowConfig(
-        minutes_before_expiry=raw.get("minutes_before_expiry", 10),
+        minutes_before_expiry=raw.get("minutes_before_expiry", default_minutes),
         cutoff_minutes_before_expiry=cutoff,
     )
 
@@ -333,12 +501,16 @@ def _parse_agent(raw: Dict[str, Any]) -> AgentConfig:
     name = raw["name"]
     # Resolve series_tickers: YAML explicit -> AGENT_SERIES_MAP lookup -> empty list
     series_tickers: List[str] = raw.get("series_tickers", [])
+    logger.debug("[PARSE-AGENT] %s: YAML series_tickers=%s", name, series_tickers)
     if not series_tickers:
         try:
             from merid.event_venues.kalshi.market_selector import AGENT_SERIES_MAP
             series_tickers = AGENT_SERIES_MAP.get(name, [])
-        except Exception:
+            logger.debug("[PARSE-AGENT] %s: AGENT_SERIES_MAP series_tickers=%s", name, series_tickers)
+        except Exception as exc:
+            logger.warning("[PARSE-AGENT] %s: AGENT_SERIES_MAP lookup failed: %s", name, exc)
             series_tickers = []
+    logger.info("[PARSE-AGENT] %s: final series_tickers=%s", name, series_tickers)
     agent = AgentConfig(
         name=name,
         category=raw.get("category", "crypto"),
@@ -356,6 +528,7 @@ def _parse_agent(raw: Dict[str, Any]) -> AgentConfig:
         filter_max_candidates_global=raw.get("filter_max_candidates_global", 20),
         strategy_overrides=_parse_strategy_overrides(raw.get("strategy")),
         bypass_swarm_consensus=bool(raw.get("bypass_swarm_consensus", False)),
+        signalonly=bool(raw.get("signalonly", False)),
         take_profit=_parse_take_profit(raw.get("take_profit"), name),
         strike_selection=_parse_strike_selection(raw.get("strike_selection")),
         series_tickers=series_tickers,
@@ -368,6 +541,52 @@ def _parse_agent(raw: Dict[str, Any]) -> AgentConfig:
             "All orders must flow through main execution gate.",
             name
         )
+
+    # PROFILE OVERRIDE: Apply kalshi_crypto_15m_v2 profile overrides to risk_limits and entry_window
+    # This ensures max_yes_position, max_no_position, entry_window, and other params from profile are applied
+    # instead of the default 0 values or hardcoded defaults from agent_grid_config.py
+    try:
+        from merid.risk.profiles.crypto_15m_profile import is_profile_active, get_active_profile
+        import os
+        profile_name = os.environ.get('MERID_PROFILE', '')
+        logger.info("[PROFILE_OVERRIDE_DEBUG] Agent %s: MERID_PROFILE=%s, is_profile_active=%s", name, profile_name, is_profile_active())
+        if is_profile_active():
+            profile_adapter = get_active_profile()
+            if profile_adapter:
+                overrides = profile_adapter.to_agent_overrides(name)
+                logger.info("[PROFILE_OVERRIDE_DEBUG] Agent %s: Profile overrides=%s", name, overrides)
+                # Apply risk limit overrides if they are non-zero
+                if overrides.get('max_yes_position', 0) > 0:
+                    agent.risk_limits.max_yes_position = overrides['max_yes_position']
+                if overrides.get('max_no_position', 0) > 0:
+                    agent.risk_limits.max_no_position = overrides['max_no_position']
+                if overrides.get('max_notional_usd', 0) > 0:
+                    agent.risk_limits.max_notional_usd = Decimal(str(overrides['max_notional_usd']))
+                if overrides.get('max_orders_per_window', 0) > 0:
+                    agent.risk_limits.max_orders_per_window = overrides['max_orders_per_window']
+                # Apply entry_window overrides from profile (replaces hardcoded defaults)
+                if overrides.get('minutes_before_expiry', 0) > 0:
+                    agent.entry_window.minutes_before_expiry = overrides['minutes_before_expiry']
+                if overrides.get('cutoff_minutes_before_expiry', 0) > 0:
+                    agent.entry_window.cutoff_minutes_before_expiry = overrides['cutoff_minutes_before_expiry']
+                logger.info(
+                    "[PROFILE_OVERRIDE] Applied profile overrides to agent %s: "
+                    "max_yes_position=%d, max_no_position=%d, max_notional_usd=%s, max_orders_per_window=%d, "
+                    "minutes_before_expiry=%d, cutoff_minutes_before_expiry=%d",
+                    name,
+                    agent.risk_limits.max_yes_position,
+                    agent.risk_limits.max_no_position,
+                    agent.risk_limits.max_notional_usd,
+                    agent.risk_limits.max_orders_per_window,
+                    agent.entry_window.minutes_before_expiry,
+                    agent.entry_window.cutoff_minutes_before_expiry
+                )
+            else:
+                logger.warning("[PROFILE_OVERRIDE] Profile adapter is None for agent %s", name)
+        else:
+            logger.info("[PROFILE_OVERRIDE] Profile not active for agent %s", name)
+    except Exception as profile_exc:
+        logger.error("Failed to apply profile overrides for agent %s: %s", name, profile_exc, exc_info=True)
 
     return agent
 
@@ -469,6 +688,9 @@ def _preflight_grid_check(agents: List[AgentConfig]) -> None:
 
     # Orphan detection
     for a in agents:
+        # Skip asset/timeframe warnings for signal-only agents (context-only providers)
+        if a.signalonly:
+            continue
         if a.enabled and not a.assets:
             logger.warning("[GRID-PREFLIGHT] Agent %s is enabled but has no assets", a.name)
         if a.enabled and not a.timeframes:
@@ -540,6 +762,9 @@ def load_agent_grid_config(path: Optional[str] = None) -> AgentGridConfig:
         logger.warning(f"Empty config at {config_path}, using defaults")
         return _default_agent_grid_config()
 
+    # Profile validation for 15m crypto agents
+    _validate_profile_usage(raw, config_path)
+
     # Venue
     v = raw.get("venue", {})
     venue = VenueConfig(
@@ -559,6 +784,7 @@ def load_agent_grid_config(path: Optional[str] = None) -> AgentGridConfig:
 
     # Agents — validate raw YAML before parsing
     raw_agents = raw.get("agents", [])
+    logger.info("[GRID-LOAD] Found %d raw agents in YAML", len(raw_agents))
     validation_errors = _validate_agent_configs(raw_agents)
     if validation_errors:
         for err in validation_errors:
@@ -569,7 +795,9 @@ def load_agent_grid_config(path: Optional[str] = None) -> AgentGridConfig:
         )
         return _default_agent_grid_config()
 
+    logger.info("[GRID-LOAD] Parsing %d agents from YAML", len(raw_agents))
     agents = [_parse_agent(a) for a in raw_agents]
+    logger.info("[GRID-LOAD] Parsed %d agents successfully", len(agents))
 
     # Pre-flight sanity checks (logs warnings, does not abort)
     _preflight_grid_check(agents)
@@ -604,7 +832,10 @@ def load_agent_grid_config(path: Optional[str] = None) -> AgentGridConfig:
 # ── Singleton ──────────────────────────────────────────────────────────
 
 _grid_config: Optional[AgentGridConfig] = None
-_grid_config_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _grid_config_lock = threading.Lock()
+_grid_config_lock = None  # Disabled to prevent startup hang
 
 
 def get_agent_grid_config() -> AgentGridConfig:
@@ -614,7 +845,12 @@ def get_agent_grid_config() -> AgentGridConfig:
     during concurrent agent startup.
     """
     global _grid_config
-    with _grid_config_lock:
-        if _grid_config is None:
+    if _grid_config is None:
+        if _grid_config_lock is not None:
+            with _grid_config_lock:
+                if _grid_config is None:
+                    _grid_config = load_agent_grid_config()
+        else:
+            # Lock disabled - direct initialization (startup workaround)
             _grid_config = load_agent_grid_config()
     return _grid_config

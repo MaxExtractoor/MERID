@@ -286,27 +286,17 @@ class DataContractRegistry:
 
 
 def build_default_contracts() -> DataContractRegistry:
-    """Build a registry with default contracts for known feeds."""
+    """Build a registry with default contracts for known feeds.
+    
+    KALSHI-ONLY: Only registers Kalshi and Coinbase (for spot prices via CCXT fallback).
+    Legacy venues (binance, alpaca, polygon) removed for Kalshi-only 15m stack.
+    """
     registry = DataContractRegistry()
-
-    registry.register(DataContract(
-        feed_id="binance",
-        schema={"price": float, "volume": float, "timestamp": float, "symbol": str},
-        max_age_seconds=30.0,
-        fallback_strategy=FallbackStrategy.USE_CACHED,
-        required_fields={"price", "symbol"},
-        field_specs=[
-            FieldSpec("price", float, min_value=0.0),
-            FieldSpec("volume", float, required=False, min_value=0.0),
-        ],
-        description="Binance spot market data",
-        owner="data-team",
-    ))
 
     registry.register(DataContract(
         feed_id="coinbase",
         schema={"price": float, "volume": float, "timestamp": float, "symbol": str},
-        max_age_seconds=30.0,
+        max_age_seconds=120.0,  # Increased from 30s to 120s to reduce false stale alerts (CCXT fallback polling interval)
         fallback_strategy=FallbackStrategy.USE_CACHED,
         required_fields={"price", "symbol"},
         field_specs=[
@@ -335,29 +325,6 @@ def build_default_contracts() -> DataContractRegistry:
         ],
         description="Kalshi prediction market orderbook",
         owner="prediction-team",
-    ))
-
-    registry.register(DataContract(
-        feed_id="alpaca",
-        schema={"price": float, "volume": float, "timestamp": float, "symbol": str},
-        max_age_seconds=15.0,
-        fallback_strategy=FallbackStrategy.PAUSE_INSTRUMENT,
-        required_fields={"price", "symbol"},
-        field_specs=[
-            FieldSpec("price", float, min_value=0.0),
-        ],
-        description="Alpaca equity market data",
-        owner="equity-team",
-    ))
-
-    registry.register(DataContract(
-        feed_id="polygon",
-        schema={"price": float, "volume": float, "timestamp": float, "symbol": str},
-        max_age_seconds=60.0,
-        fallback_strategy=FallbackStrategy.USE_CACHED,
-        required_fields={"price", "symbol"},
-        description="Polygon.io market data (delayed)",
-        owner="data-team",
     ))
 
     return registry

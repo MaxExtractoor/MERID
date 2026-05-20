@@ -1,6 +1,7 @@
 # web/api/kalshi_crypto_signals_api.py
-from typing import Dict
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Dict, List, Optional
+from datetime import datetime, timedelta
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from web.api.auth import get_current_session
 from utils.logger import get_logger
@@ -145,3 +146,140 @@ async def get_crypto_consensus_signals() -> KalshiConsensusSignalsResponse:
             consensus_rate=0.0,
             engine_running=False,
             error=str(exc))
+
+
+@router.get("/burnin-stats")
+async def get_burnin_stats(
+    hours: int = Query(24, description="Hours of data to include (default 24h)"),
+    min_trades: int = Query(30, description="Minimum trades per asset to include (default 30)")
+) -> Dict:
+    """Get burn-in statistics for crypto 15m trading (trade count, win-rate, avg R, z-score).
+    
+    This endpoint aggregates per-asset trading statistics needed for tuning:
+    - Trade count per asset
+    - Win-rate in different range regimes
+    - Average R per trade
+    - Average z-score at entry
+    
+    Used to capture 30-50 trades per asset sample during 24-48h burn-in period.
+    """
+    try:
+        from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+        
+        ledger = get_fills_ledger()
+        since = datetime.now(timezone.utc) - timedelta(hours=hours)
+        fills = ledger.get_fills(since=since, limit=10000)
+        
+        # Aggregate by asset
+        asset_stats: Dict[str, Dict] = {}
+        
+        for fill in fills:
+            # Extract asset from market_id (e.g., "KXBTC-15M-..." -> "BTC")
+            market_id = getattr(fill, "market_id", "")
+            asset = None
+            if "KXBTC" in market_id:
+                asset = "BTC"
+            elif "KXETH" in market_id:
+                asset = "ETH"
+            elif "KXSOL" in market_id:
+                asset = "SOL"
+            elif "KXXRP" in market_id:
+                asset = "XRP"
+            elif "KXDOGE" in market_id:
+                asset = "DOGE"
+            
+            if not asset:
+                continue
+            
+            if asset not in asset_stats:
+                asset_stats[asset] = {
+                    "trade_count": 0,
+                    "win_count": 0,
+                    "total_r": 0.0,
+                    "total_z_score": 0.0,
+                    "entry_prices": [],
+                    "regime_wins": {"tight": 0, "medium": 0, "wide": 0},
+                    "regime_trades": {"tight": 0, "medium": 0, "wide": 0}
+                }
+            
+            stats = asset_stats[asset]
+            stats["trade_count"] += 1
+            
+            # Calculate R (risk/reward)
+            pnl = float(getattr(fill, "realized_pnl_usd", 0.0))
+            cost = float(getattr(fill, "cost_basis_usd", 1.0))
+            r = pnl / cost if cost > 0 else 0.0
+            stats["total_r"] += r
+            
+            if pnl > 0:
+                stats["win_count"] += 1
+            
+            # Z-score at entry (if available)
+            z_score = float(getattr(fill, "z_score_at_entry", 0.0))
+            stats["total_z_score"] += z_score
+            
+            # Entry price for regime classification
+            entry_price = float(getattr(fill, "avg_price_cents", 0.0))
+            stats["entry_prices"].append(entry_price)
+        
+        # Calculate derived stats and filter by min_trades
+        result: Dict[str, Dict] = {}
+        for asset, stats in asset_stats.items():
+            if stats["trade_count"] < min_trades:
+                continue
+            
+            win_rate = stats["win_count"] / stats["trade_count"] if stats["trade_count"] > 0 else 0.0
+            avg_r = stats["total_r"] / stats["trade_count"] if stats["trade_count"] > 0 else 0.0
+            avg_z_score = stats["total_z_score"] / stats["trade_count"] if stats["trade_count"] > 0 else 0.0
+            
+            # Classify regime based on entry price spread
+            if stats["entry_prices"]:
+                price_std = (sum((x - sum(stats["entry_prices"]) / len(stats["entry_prices"])) ** 2 for x in stats["entry_prices"]) / len(stats["entry_prices"])) ** 0.5
+                price_mean = sum(stats["entry_prices"]) / len(stats["entry_prices"])
+                
+                for price in stats["entry_prices"]:
+                    deviation = abs(price - price_mean)
+                    if deviation < price_std * 0.5:
+                        stats["regime_trades"]["tight"] += 1
+                        if price > 0:  # Simplified win tracking
+                            stats["regime_wins"]["tight"] += 1
+                    elif deviation < price_std:
+                        stats["regime_trades"]["medium"] += 1
+                        if price > 0:
+                            stats["regime_wins"]["medium"] += 1
+                    else:
+                        stats["regime_trades"]["wide"] += 1
+                        if price > 0:
+                            stats["regime_wins"]["wide"] += 1
+            
+            # Calculate regime win-rates
+            regime_win_rates = {}
+            for regime in ["tight", "medium", "wide"]:
+                regime_win_rates[regime] = (
+                    stats["regime_wins"][regime] / stats["regime_trades"][regime]
+                    if stats["regime_trades"][regime] > 0 else 0.0
+                )
+            
+            result[asset] = {
+                "trade_count": stats["trade_count"],
+                "win_rate": win_rate,
+                "avg_r_per_trade": avg_r,
+                "avg_z_score_at_entry": avg_z_score,
+                "regime_win_rates": regime_win_rates,
+                "sample_hours": hours,
+                "meets_burnin_threshold": stats["trade_count"] >= 30
+            }
+        
+        return {
+            "assets": result,
+            "summary": {
+                "total_assets": len(result),
+                "assets_meeting_threshold": sum(1 for a in result.values() if a["meets_burnin_threshold"]),
+                "min_trades_threshold": min_trades,
+                "sample_period_hours": hours
+            }
+        }
+    except Exception as exc:
+        logger.error(f"Failed to get burn-in stats: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+

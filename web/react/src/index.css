@@ -60,6 +60,7 @@
     );
     background-size: 400% 400%;
     animation: gradient 15s ease infinite;
+    will-change: background-position;
   }
 
   @keyframes gradient {
@@ -87,6 +88,7 @@
   /* Pulse animation for live indicators */
   .pulse-dot {
     @apply relative;
+    will-change: transform, opacity;
   }
 
   .pulse-dot::before {
@@ -94,6 +96,7 @@
     @apply absolute inset-0 rounded-full;
     @apply bg-current;
     animation: pulse-ring 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    will-change: transform, opacity;
   }
 
   @keyframes pulse-ring {
@@ -117,6 +120,7 @@
     );
     background-size: 200% 100%;
     animation: shimmer 2s infinite;
+    will-change: background-position;
   }
 
   @keyframes shimmer {

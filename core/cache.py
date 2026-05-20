@@ -38,7 +38,7 @@ class CacheAdapter:
                 _safe_url = f"redis://***@{_safe_url}"
             self.logger.info("Connected to Redis cache at %s", _safe_url)
             return client
-        except (ConnectionError, TimeoutError, ValueError, redis.RedisError) as exc:  # pragma: no cover - depends on environment
+        except Exception as exc:  # pragma: no cover - depends on environment
             self.logger.warning("Redis unavailable (%s). Using in-memory cache.", exc)
             return None
 
@@ -62,7 +62,7 @@ class CacheAdapter:
         if self._client:
             try:
                 return self._client.get(key)
-            except (ConnectionError, TimeoutError, redis.RedisError) as exc:
+            except Exception as exc:
                 self.logger.warning("Redis get failed (%s). Falling back to memory.", exc)
         with self._lock:
             expires = self._local_expiry.get(key)
@@ -77,7 +77,7 @@ class CacheAdapter:
             try:
                 self._client.set(key, value, ex=ttl)
                 return
-            except (ConnectionError, TimeoutError, redis.RedisError) as exc:
+            except Exception as exc:
                 self.logger.warning("Redis set failed (%s). Falling back to memory.", exc)
         with self._lock:
             self._local_store[key] = value
@@ -87,7 +87,7 @@ class CacheAdapter:
         if self._client:
             try:
                 self._client.delete(key)
-            except (ConnectionError, TimeoutError, redis.RedisError):
+            except Exception:
                 pass
         with self._lock:
             self._local_store.pop(key, None)

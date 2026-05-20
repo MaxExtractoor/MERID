@@ -155,7 +155,8 @@ class TestAgentDomainSplit(unittest.TestCase):
 
     def test_crypto_package_exports_agents(self):
         source = (MERID_ROOT / "merid" / "agents" / "kalshi_crypto" / "__init__.py").read_text()
-        for agent in ["Btc15mAgent", "Btc1hAgent", "Eth15mAgent", "Sol15mAgent", "Xrp15mAgent"]:
+        # Btc1hAgent archived 2026-01-15 - focus on 15m timeframe only
+        for agent in ["Btc15mAgent", "Eth15mAgent", "Sol15mAgent", "Xrp15mAgent"]:
             self.assertIn(agent, source, f"kalshi_crypto package missing {agent}")
 
     def test_event_package_exports_agents(self):

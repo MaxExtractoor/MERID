@@ -84,9 +84,13 @@ def build_agent_grid_bankroll_overlay(
     _risk_st = None
     try:
         # PM CYCLE WIRING: Use unified v2 bankroll service as primary source
-        from merid.event_venues.kalshi import get_equity_for_risk_calc_sync, get_summary_sync
-        _effective_usd = get_equity_for_risk_calc_sync()
-        _summary = get_summary_sync()
+        from merid.event_venues.kalshi.bankroll_service_v2 import (
+            get_equity_for_risk_calc_sync, 
+            get_summary_sync,
+            get_bankroll_service,
+        )
+        _effective_usd = get_equity_for_risk_calc_sync() 
+        _summary = get_summary_sync(caller_module="pm_bankroll_snapshot")
         _eq_usd = float(_effective_usd) if _effective_usd else 0.0
         _live_usd = float(_summary.equity_usd) if _summary and _summary.equity_usd else 0.0
 
@@ -101,7 +105,16 @@ def build_agent_grid_bankroll_overlay(
         if _eq_usd > 0:
             _bal_cents = int(_eq_usd * 100)
             out["balance_cents"] = _bal_cents
-            out["total_value_cents"] = _bal_cents + int(out.get("portfolio_cents") or 0)
+            # Use centralized portfolio value calculation from v2 service (single source of truth)
+            _portfolio_cents = 0
+            try:
+                service = asyncio.run(get_bankroll_service())
+                _portfolio_cents = service.get_portfolio_value_cents_sync()
+            except Exception as exc:
+                logger.debug("[pm_bankroll_overlay] Failed to fetch portfolio value from v2 service: %s", exc)
+            
+            out["portfolio_cents"] = _portfolio_cents
+            out["total_value_cents"] = _bal_cents + _portfolio_cents
             # Use live balance for peak/drawdown calculation if peak not tracked separately
             if _peak_usd > 0 and _eq_usd <= _peak_usd:
                 out["peak_balance_cents"] = int(_peak_usd * 100)

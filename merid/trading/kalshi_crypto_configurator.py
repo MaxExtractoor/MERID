@@ -7,6 +7,7 @@ the prompt constant and parse JSON, or call :func:`build_kalshi_crypto_scan_conf
 
 from __future__ import annotations
 
+import os
 import json
 import math
 from typing import Dict, List, Mapping, Sequence
@@ -14,8 +15,8 @@ from typing import Dict, List, Mapping, Sequence
 # All keys required in output JSON
 CRYPTO_ASSETS: tuple[str, ...] = ("BTC", "ETH", "SOL", "XRP", "DOGE")
 
-WIDTH_MIN = 0.10
-WIDTH_MAX = 0.35
+WIDTH_MIN = float(os.getenv("KALSHI_STRIKE_WIDTH_MIN", "0.10"))
+WIDTH_MAX = float(os.getenv("KALSHI_STRIKE_WIDTH_MAX", "0.35"))
 LOOKBACK_MIN = 60
 LOOKBACK_MAX = 3600
 

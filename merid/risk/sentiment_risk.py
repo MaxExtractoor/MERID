@@ -64,21 +64,5 @@ def _asset_from_intent(intent) -> Optional[str]:
         return None
 
 
-def sentiment_order_rejection_reason(intent) -> Optional[str]:
-    """Return rejection reason if sentiment cap would be exceeded, else None."""
-    if not getattr(intent, "sentiment_driven", False):
-        return None
-    asset = _asset_from_intent(intent)
-    if not asset:
-        return None
-    cap = _sentiment_cap_usd_for_asset(asset)
-    new_n = intent.count * intent.price_cents / 100.0
-    current = sentiment_tagged_notional_usd(asset)
-    if current + new_n > cap + 1e-6:
-        msg = (
-            f"sentiment_notional_cap: {asset} would be ${current + new_n:.2f} "
-            f"vs cap ${cap:.2f} (tagged ${current:.2f} + order ${new_n:.2f})"
-        )
-        logger.warning(msg)
-        return msg
-    return None
+# SENTIMENT DECOUPLING (2026-05-14): Removed sentiment_order_rejection_reason function.
+# Sentiment should not gate trading via notional caps.

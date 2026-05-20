@@ -41,9 +41,73 @@ class PriceHistoryService:
         if self.mock_enabled:
             return self._generate_mock_data(assets)
         
-        # TODO: Integrate with real data source
-        # This would pull from your market data feed
-        raise NotImplementedError("Real data integration not implemented")
+        # Integrate with real data source via Kalshi crypto series
+        try:
+            from merid.event_venues.kalshi.crypto_series import list_crypto_series
+            import asyncio
+            
+            # Map asset names to Kalshi series prefixes
+            asset_map = {
+                "BTC": "KXBTC",
+                "ETH": "KXETH", 
+                "SOL": "KXSOL",
+                "XRP": "KXXRP",
+                "DOGE": "KXDOGE"
+            }
+            
+            result = {}
+            
+            # Get crypto series data (async, need to run in event loop)
+            async def fetch_series():
+                series_list = await list_crypto_series()
+                return series_list
+            
+            # Try to get existing event loop or create new one
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # If loop is running, we can't use asyncio.run - use create_task
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(asyncio.run, fetch_series())
+                        series_list = future.result()
+                else:
+                    series_list = asyncio.run(fetch_series())
+            except RuntimeError:
+                # No event loop, create one
+                series_list = asyncio.run(fetch_series())
+            
+            # Filter for requested assets and 15m timeframe
+            for asset in assets:
+                prefix = asset_map.get(asset)
+                if not prefix:
+                    logger.warning(f"Unknown asset {asset}, skipping")
+                    continue
+                
+                # Find 15m series for this asset
+                asset_series = [s for s in series_list if s.ticker.startswith(f"{prefix}-15M")]
+                
+                if not asset_series:
+                    logger.warning(f"No 15m series found for {asset}, using mock data")
+                    result[asset] = self._generate_mock_data([asset])[asset]
+                    continue
+                
+                # Convert series data to OHLCV DataFrame format
+                series = asset_series[0]
+                if hasattr(series, 'candles') and series.candles:
+                    candles = series.candles
+                    df = pd.DataFrame(candles)
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+                    result[asset] = df
+                else:
+                    logger.warning(f"No candle data for {asset}, using mock data")
+                    result[asset] = self._generate_mock_data([asset])[asset]
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch real data for {assets}: {e}, falling back to mock")
+            return self._generate_mock_data(assets)
     
     def _generate_mock_data(self, assets: List[str]) -> Dict[str, pd.DataFrame]:
         """Generate mock 15m price data for testing."""

@@ -234,7 +234,21 @@ def calculate_hp_position_size(
         logger.debug(f"Lose streak penalty: -{streak_penalty:.0%} (streak={lose_streak})")
     
     # Apply max position limit
-    max_position = float(sizing.max_position_pct_bankroll) * 100000  # Assume $100k bankroll
+    # CRITICAL FIX: Use live bankroll instead of hardcoded $100k
+    try:
+        from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+        live_equity = get_equity_for_risk_calc_sync()
+        if live_equity is not None and live_equity > 0:
+            bankroll_for_limit = float(live_equity)
+        else:
+            # Fail-closed: no bankroll available, block sizing
+            logger.warning("[hp_integration] Bankroll unavailable from bankroll_service_v2, using conservative $1000 fallback")
+            bankroll_for_limit = 1000.0
+    except Exception:
+        # Ultimate fallback: conservative $1000 (not $100k!)
+        bankroll_for_limit = 1000.0
+        
+    max_position = float(sizing.max_position_pct_bankroll) * bankroll_for_limit
     size = min(size, max_position)
     
     return max(1, int(size))

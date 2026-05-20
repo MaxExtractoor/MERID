@@ -67,9 +67,12 @@ class ProbAccuracyTracker:
         self._init_db()
 
     def _conn(self) -> sqlite3.Connection:
+        import time as _time
+        print(f"[IO-DEBUG] prob_accuracy_tracker: Connecting to SQLite DB at {_time.time()}")
         conn = sqlite3.connect(str(self._db_path), timeout=10)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=5000")
+        print(f"[IO-DEBUG] prob_accuracy_tracker: Connected to SQLite DB at {_time.time()}")
         return conn
 
     def _init_db(self) -> None:
@@ -88,7 +91,7 @@ class ProbAccuracyTracker:
 
         ``market_family`` defaults to the first segment of *ticker* (e.g. ``KXBTC``).
         """
-        family = market_family or ticker.split("-")[0]
+        family = market_family or (ticker.split("-")[0] if "-" in ticker else ticker)
         now = time.time()
         try:
             with self._lock, self._conn() as conn:
@@ -106,7 +109,7 @@ class ProbAccuracyTracker:
         market_family: Optional[str] = None,
     ) -> None:
         """Record the binary resolution of a market."""
-        family = market_family or ticker.split("-")[0]
+        family = market_family or (ticker.split("-")[0] if "-" in ticker else ticker)
         now = time.time()
         try:
             with self._lock, self._conn() as conn:

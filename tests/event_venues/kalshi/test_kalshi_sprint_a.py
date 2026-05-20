@@ -332,6 +332,21 @@ class TestMarketConditionRevalidation(unittest.TestCase):
 
 class TestSanityCheckGate(unittest.TestCase):
 
+    def setUp(self):
+        """Set trade mode to MOCK for these tests."""
+        from trading.trade_mode import set_trade_mode, TradeMode
+        self.previous_mode = set_trade_mode(TradeMode.MOCK, reason="test setup")
+
+    def tearDown(self):
+        """Restore previous trade mode."""
+        from trading.trade_mode import set_trade_mode, TradeMode
+        if hasattr(self, 'previous_mode'):
+            # If previous was LIVE, set to PAPER to avoid MOCK→LIVE transition error
+            if self.previous_mode == TradeMode.LIVE:
+                set_trade_mode(TradeMode.PAPER, reason="test teardown")
+            else:
+                set_trade_mode(self.previous_mode, reason="test teardown")
+
     def _intent(self, count=5, price_cents=50, **kw):
         from merid.event_venues.kalshi.order_router import OrderIntent
         from merid.prediction.venue_gate import TradingMode
@@ -342,11 +357,18 @@ class TestSanityCheckGate(unittest.TestCase):
             price_cents=price_cents,
             count=count,
             mode=TradingMode.MOCK,
+            agent_id="BTC_15M",
+            edge_pct=5.0,
+            confidence=0.8,
+            model_prob=0.6,
+            group_id="test-group-123",
             **kw,
         )
 
+    @patch("merid.event_venues.kalshi.order_router._validate_position_lifecycle", return_value=None)
+    @patch("merid.event_venues.kalshi.order_router._check_bankroll_risk_cap", return_value=None)
     @patch("merid.event_venues.kalshi.order_router._is_authorized_caller", return_value=True)
-    def test_valid_order_passes_sanity_check(self, mock_auth):
+    def test_valid_order_passes_sanity_check(self, mock_auth, mock_bankroll, mock_lifecycle):
         from merid.event_venues.kalshi.order_router import route_order
         result = route_order(self._intent())
         self.assertNotEqual(result.status, "rejected")
@@ -400,6 +422,21 @@ class TestSanityCheckGate(unittest.TestCase):
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestKalshiConfigEnvEnforcement(unittest.TestCase):
+
+    def setUp(self):
+        """Set trade mode to MOCK for these tests."""
+        from trading.trade_mode import set_trade_mode, TradeMode
+        self.previous_mode = set_trade_mode(TradeMode.MOCK, reason="test setup")
+
+    def tearDown(self):
+        """Restore previous trade mode."""
+        from trading.trade_mode import set_trade_mode, TradeMode
+        if hasattr(self, 'previous_mode'):
+            # If previous was LIVE, set to PAPER to avoid MOCK→LIVE transition error
+            if self.previous_mode == TradeMode.LIVE:
+                set_trade_mode(TradeMode.PAPER, reason="test teardown")
+            else:
+                set_trade_mode(self.previous_mode, reason="test teardown")
 
     def _make_settings_mock(self, env: dict):
         """Build a mock merid.settings module whose settings object returns env values."""

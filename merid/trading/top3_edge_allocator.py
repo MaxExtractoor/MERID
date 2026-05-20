@@ -255,11 +255,11 @@ class Top3SelectionSpec:
     
     # Configuration - ENV-DRIVEN (no hardcoded defaults)
     # These read from environment at runtime, defaulting only if env not set
-    DEFAULT_CYCLE_RISK_CAP_PCT_MIN: float = field(default_factory=lambda: float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MIN", "0.01")))
-    DEFAULT_CYCLE_RISK_CAP_PCT_MAX: float = field(default_factory=lambda: float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MAX", "0.02")))
-    DEFAULT_EPS: float = field(default_factory=lambda: float(os.getenv("MERID_TOP3_EDGE_EPS", "1e-6")))
-    MAX_ASSETS: int = field(default_factory=lambda: int(os.getenv("MERID_TOP3_MAX_ASSETS", "3")))
-    MIN_ALLOCATION_CENTS: int = field(default_factory=lambda: int(os.getenv("MERID_TOP3_MIN_ALLOCATION_CENTS", "50")))  # $0.50 minimum
+    DEFAULT_CYCLE_RISK_CAP_PCT_MIN: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MIN", "0.01"))
+    DEFAULT_CYCLE_RISK_CAP_PCT_MAX: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MAX", "0.02"))
+    DEFAULT_EPS: float = float(os.getenv("MERID_TOP3_EDGE_EPS", "1e-6"))
+    MAX_ASSETS: int = int(os.getenv("MERID_TOP3_MAX_ASSETS", "3"))
+    MIN_ALLOCATION_CENTS: int = int(os.getenv("MERID_TOP3_MIN_ALLOCATION_CENTS", "50"))  # $0.50 minimum
     
     VALID_ASSETS: Tuple[str, ...] = ("BTC", "ETH", "SOL", "XRP", "DOGE")
 
@@ -461,7 +461,11 @@ class Top3EdgeAllocator:
                     min(pct, self.spec.DEFAULT_CYCLE_RISK_CAP_PCT_MAX)
                 )
             except ValueError:
-                pass
+                logger.warning(
+                    "[TOP3-ALLOCATOR] Invalid MERID_CYCLE_RISK_CAP_PCT env value '%s', using default %s",
+                    env_val,
+                    self.spec.DEFAULT_CYCLE_RISK_CAP_PCT_MAX,
+                )
         
         # Default to 2%
         return self.spec.DEFAULT_CYCLE_RISK_CAP_PCT_MAX
@@ -506,70 +510,44 @@ class Top3EdgeAllocator:
             return []
         
         # ═════════════════════════════════════════════════════════════════
-        # SENTIMENT-BASED RISK ADJUSTMENT
+        # SENTIMENT_ISOLATION_AUDIT: Removed sentiment-based risk adjustment
         # ═════════════════════════════════════════════════════════════════
-        # Check market sentiment and reduce sizing in extreme regimes
-        _sentiment_adjusted_cap_pct = self._cycle_risk_cap_pct
-        try:
-            from merid.sentiment.sentiment_bus import get_sentiment_bus
-            from merid.sentiment.crypto_risk_dial import get_crypto_risk_dial
-            
-            # Get aggregate market sentiment (use BTC as proxy for crypto basket)
-            _sentiment_bus = get_sentiment_bus()
-            _btc_sentiment = _sentiment_bus.get_sentiment("BTC")
-            
-            if _btc_sentiment:
-                # Check for extreme sentiment regimes
-                if _btc_sentiment.trend_regime in ["extreme_fear", "extreme_greed"]:
-                    # Reduce cycle cap by 35% in extreme regimes
-                    _sentiment_adjusted_cap_pct = self._cycle_risk_cap_pct * 0.65
-                    logger.info(
-                        "[TOP3-SENTIMENT] Extreme regime detected: %s | "
-                        "cycle_cap adjusted: %.2f%% → %.2f%%",
-                        _btc_sentiment.trend_regime,
-                        self._cycle_risk_cap_pct * 100,
-                        _sentiment_adjusted_cap_pct * 100
-                    )
-                elif _btc_sentiment.should_reduce_size():
-                    # Reduce by 20% in regular fear/greed regimes
-                    _sentiment_adjusted_cap_pct = self._cycle_risk_cap_pct * 0.80
-                    logger.info(
-                        "[TOP3-SENTIMENT] Elevated sentiment: %s | "
-                        "cycle_cap adjusted: %.2f%% → %.2f%%",
-                        _btc_sentiment.trend_regime,
-                        self._cycle_risk_cap_pct * 100,
-                        _sentiment_adjusted_cap_pct * 100
-                    )
-                else:
-                    logger.debug(
-                        "[TOP3-SENTIMENT] Normal regime: %s | cap unchanged",
-                        _btc_sentiment.trend_regime
-                    )
-            
-            # Asset-specific risk dial adjustments
-            for candidate in candidates:
-                if candidate.asset in ("ETH", "SOL", "XRP", "DOGE"):
-                    try:
-                        _risk_dial = get_crypto_risk_dial(candidate.asset)
-                        _can_trade, _reason = _risk_dial.can_trade()
-                        if not _can_trade:
-                            # Zero out this candidate's allocation
-                            logger.warning(
-                                "[TOP3-RISK-DIAL] HALT for %s | reason=%s | excluding from allocation",
-                                candidate.asset, _reason
-                            )
-                            # Modify the candidate in place via metadata
-                            candidate.metadata["risk_dial_halt"] = True
-                            candidate.edge = 0.0  # Zero edge excludes from selection
-                    except Exception as _rd_exc:
-                        logger.debug("[TOP3-RISK-DIAL] Check skipped for %s: %s", candidate.asset, _rd_exc)
-        except Exception as _sent_exc:
-            # Sentiment failure is non-fatal, log and continue with original cap
-            logger.debug("[TOP3-SENTIMENT] Adjustment skipped: %s", _sent_exc)
+        # Per the Sentiment Isolation Audit specification, execution must depend
+        # only on: Kalshi market state, orderbook/candle pipeline, and 15m
+        # mean-reversion edge logic. Sentiment is descriptive context only and
+        # must not influence execution decisions (side, size, entry).
+        #
+        # Previous implementation adjusted cycle_risk_cap_pct based on BTC
+        # fear/greed regime. This has been removed to prevent sentiment leakage
+        # into position sizing logic.
+        #
+        # Risk adjustment now depends only on:
+        # - System-level risk settings (self._cycle_risk_cap_pct)
+        # - Asset-specific risk dial (crypto_risk_dial) for halt conditions
+        # ═════════════════════════════════════════════════════════════════
+        
+        # Asset-specific risk dial adjustments (sentiment-free)
+        for candidate in candidates:
+            if candidate.asset in ("ETH", "SOL", "XRP", "DOGE"):
+                try:
+                    from merid.sentiment.crypto_risk_dial import get_crypto_risk_dial
+                    _risk_dial = get_crypto_risk_dial(candidate.asset)
+                    _can_trade, _reason = _risk_dial.can_trade()
+                    if not _can_trade:
+                        # Zero out this candidate's allocation
+                        logger.warning(
+                            "[TOP3-RISK-DIAL] HALT for %s | reason=%s | excluding from allocation",
+                            candidate.asset, _reason
+                        )
+                        # Modify the candidate in place via metadata
+                        candidate.metadata["risk_dial_halt"] = True
+                        candidate.edge = 0.0  # Zero edge excludes from selection
+                except Exception as _rd_exc:
+                    logger.debug("[TOP3-RISK-DIAL] Check skipped for %s: %s", candidate.asset, _rd_exc)
         
         allocations = select_top3_allocations(
             bankroll_notional=bankroll_notional,
-            cycle_risk_cap_pct=_sentiment_adjusted_cap_pct,
+            cycle_risk_cap_pct=self._cycle_risk_cap_pct,
             candidates=candidates,
             eps=self.spec.DEFAULT_EPS,
         )
@@ -580,7 +558,7 @@ class Top3EdgeAllocator:
             pct_of_bankroll = (total / bankroll_notional) * 100
             logger.info(
                 "[TOP3-ALLOCATOR] Selected %d assets, total=%d¢ (%.2f%% of bankroll, cap=%.2f%%)",
-                len(allocations), total, pct_of_bankroll, _sentiment_adjusted_cap_pct * 100
+                len(allocations), total, pct_of_bankroll, self._cycle_risk_cap_pct * 100
             )
         else:
             logger.info("[TOP3-ALLOCATOR] No allocations selected")

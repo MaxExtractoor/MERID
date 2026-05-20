@@ -159,7 +159,9 @@ class DomainConfig:
     venues: List[str] = field(default_factory=list)
 
     # Risk limits
-    max_notional_usd: float = 10_000.0
+    # CRITICAL: max_notional_usd should be derived from live bankroll, not hardcoded
+    # Default 0 means "derive from live bankroll" for paper trading
+    max_notional_usd: float = 0.0  # 0 = derive from live bankroll (was 10_000.0 hardcoded)
     max_daily_loss_usd: float = 500.0
     max_positions: int = 20
     max_single_order_usd: float = 1_000.0
@@ -217,7 +219,7 @@ DOMAIN_CONFIGS: Dict[str, DomainConfig] = {
         enabled=True,
         symbols=[],                    # Dynamic — populated from Kalshi market fetch
         venues=["kalshi"],
-        max_notional_usd=5_000.0,
+        max_notional_usd=0.0,  # 0 = derive from live bankroll (was 5_000.0 hardcoded)
         max_daily_loss_usd=250.0,
         max_positions=20,
         max_single_order_usd=500.0,

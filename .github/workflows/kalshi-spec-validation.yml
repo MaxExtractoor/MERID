@@ -1,0 +1,93 @@
+name: Kalshi Spec Validation
+
+on:
+  schedule:
+    # Run daily at 3 AM UTC
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'config/kalshi_expected_spec.yaml'
+      - 'merid/tools/kalshi_spec_snapshot.py'
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'config/kalshi_expected_spec.yaml'
+      - 'merid/tools/kalshi_spec_snapshot.py'
+
+jobs:
+  kalshi-spec-validation:
+    name: Validate Kalshi Spec
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install -e .
+          pip install pyyaml
+      
+      - name: Validate Kalshi spec
+        env:
+          MERID_KALSHI_API_KEY: ${{ secrets.MERID_KALSHI_API_KEY }}
+        run: |
+          python -m merid.tools.kalshi_spec_snapshot \
+            --mode validate \
+            --fail-on-mismatch
+      
+      - name: Upload validation results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: kalshi-spec-validation-results
+          path: kalshi_spec_validation_results.json
+          retention-days: 30
+
+  kalshi-spec-snapshot:
+    name: Snapshot Kalshi Spec
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'workflow_dispatch'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install -e .
+          pip install pyyaml
+      
+      - name: Snapshot Kalshi spec
+        env:
+          MERID_KALSHI_API_KEY: ${{ secrets.MERID_KALSHI_API_KEY }}
+        run: |
+          python -m merid.tools.kalshi_spec_snapshot \
+            --mode snapshot \
+            --output config/kalshi_expected_spec.yaml
+      
+      - name: Create PR for spec update
+        uses: peter-evans/create-pull-request@v5
+        with:
+          title: "Update Kalshi expected spec"
+          body: "Automated update of Kalshi expected specification from live API."
+          branch: update-kalshi-spec
+          commit-message: "Update Kalshi expected spec from live API"

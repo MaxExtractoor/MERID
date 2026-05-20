@@ -4,8 +4,13 @@ Cache Manager for MERID Production Scalability
 Provides Redis-based caching system for high-performance data access
 with US-compliant configuration and intelligent cache management.
 
+ADVISORY STATUS: Redis is an ADVISORY component, not critical for execution.
+- If Redis is unavailable, the system falls back to in-memory cache (MockRedis)
+- Trading and execution continue without Redis
+- Redis provides performance benefits but is not required for system operation
+
 Features:
-- Redis integration for distributed caching
+- Redis integration for distributed caching (advisory - fallback available)
 - Intelligent cache invalidation
 - Performance monitoring and metrics
 - US-compliant data handling
@@ -35,7 +40,10 @@ from utils.logger import get_logger
 
 logger = get_logger("scaling.cache_manager")
 if not REDIS_AVAILABLE:
-    logger.warning("Redis not available, using mock cache")  # ZT12-01
+    logger.info(
+        "Redis not available (advisory component). "
+        "System will use in-memory cache fallback. Trading will continue normally."
+    )
 
 @dataclass
 class CacheConfig:
@@ -89,6 +97,10 @@ class CacheStats:
     total_response_time: float = 0.0
     memory_usage: int = 0
     redis_memory_usage: int = 0
+    
+    ADVISORY: This fallback allows system to operate without Redis.
+    Trading and execution continue normally with in-memory caching.
+    
 
 class MockRedis:
     """Mock Redis implementation for testing/fallback."""

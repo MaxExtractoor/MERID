@@ -570,7 +570,7 @@ class EdgeModel:
         asset: Optional[str],
         ticker: str,
     ) -> tuple:
-        """Compute a context-adjusted probability nudge from macro + perp features.
+        """Compute a context-adjusted probability nudge from macro + perp + regime features.
 
         Rules (all additive nudges, capped at ±0.08 total):
           - High VIX (>25)        → pull toward 0.5 (more uncertainty)
@@ -578,6 +578,7 @@ class EdgeModel:
           - High CPI momentum     → hawkish environment → slight crypto bearish
           - Strong positive fund  → crowded longs → slight mean-reversion
           - High IV               → widen uncertainty → pull toward 0.5
+          - Regime-aware          → adjust edge threshold based on execution regime
 
         Returns (adjusted_prob, confidence).  confidence = 0 if no features loaded.
         """
@@ -594,7 +595,16 @@ class EdgeModel:
         coingecko = getattr(self, "_coingecko_features", None) or {}
         cmc       = getattr(self, "_cmc_features",        None) or {}
 
-        if not any([macro, perp, fh, poly, news, trend, hurr, av, fg, messari, coingecko, cmc]):
+        # ── Unified Regime Integration (regime/anomaly/momentum stacks) ───────
+        unified_regime = None
+        try:
+            from merid.signals.unified_regime_classifier import get_unified_regime_classifier
+            classifier = get_unified_regime_classifier()
+            unified_regime = classifier.get_current_state()
+        except Exception as _regime_exc:
+            logger.debug("edge_model: unified regime classifier unavailable: %s", _regime_exc)
+
+        if not any([macro, perp, fh, poly, news, trend, hurr, av, fg, messari, coingecko, cmc, unified_regime]):
             return None, 0.0
 
         nudge = 0.0
@@ -808,6 +818,41 @@ class EdgeModel:
                 nudge += 0.005
                 signals_fired += 1
 
+        # ── Signal 11: Unified Regime (regime/anomaly/momentum stacks) ───────────
+        if unified_regime and is_crypto:
+            # Execution regime adjustments
+            if unified_regime.is_defensive:
+                # Defensive regime: pull toward 0.5 (more uncertainty)
+                nudge += 0.015 * (0.5 - implied_prob)
+                signals_fired += 1
+            elif unified_regime.is_aggressive:
+                # Aggressive regime: slight boost to directional conviction
+                if implied_prob > 0.6:
+                    nudge += 0.005
+                elif implied_prob < 0.4:
+                    nudge -= 0.005
+                signals_fired += 1
+
+            # Momentum leader adjustment
+            if unified_regime.momentum_leader and asset:
+                # Favor momentum leader, penalize laggards
+                if au == unified_regime.momentum_leader:
+                    nudge += 0.008
+                elif unified_regime.momentum_avg_score > 0.05:
+                    # Positive momentum environment, slight boost to all
+                    nudge += 0.003
+                signals_fired += 1
+
+            # BTC anchor regime
+            if unified_regime.btc_trending and asset and au != "BTC":
+                # BTC trending: slight adjustment to alts based on BTC direction
+                btc_regime = unified_regime.btc_regime
+                if "bull" in btc_regime.lower():
+                    nudge += 0.003  # risk-on lift for alts
+                elif "bear" in btc_regime.lower():
+                    nudge -= 0.003  # risk-off drag on alts
+                signals_fired += 1
+
         if signals_fired == 0:
             return None, 0.0
 
@@ -826,14 +871,21 @@ class EdgeModel:
 # ── Singleton ────────────────────────────────────────────────────────────
 
 _instance: Optional[EdgeModel] = None
-_instance_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _instance_lock = threading.Lock()
+_instance_lock = None  # Disabled to prevent startup hang
 
 
 def get_edge_model() -> EdgeModel:
     """Get or create the singleton EdgeModel instance."""
     global _instance
     if _instance is None:
-        with _instance_lock:
-            if _instance is None:
-                _instance = EdgeModel()
+        if _instance_lock is not None:
+            with _instance_lock:
+                if _instance is None:
+                    _instance = EdgeModel()
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _instance = EdgeModel()
     return _instance

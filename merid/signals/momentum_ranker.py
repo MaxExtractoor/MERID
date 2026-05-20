@@ -160,7 +160,10 @@ class CrossSectionalMomentumRanker:
         self._current_rankings: Optional[MomentumRankings] = None
         self._last_update: float = 0.0
         
-        self._lock = threading.Lock()
+        # TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+        # TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+        # self._lock = threading.Lock()
+        self._lock = None  # Disabled to prevent startup hang
         
         logger.info(
             "CrossSectionalMomentumRanker initialized for %s (lookbacks: 15m=%d, 1h=%d, 4h=%d)",
@@ -182,10 +185,15 @@ class CrossSectionalMomentumRanker:
         key = (asset, timeframe)
         ts = timestamp or time.time()
         
-        with self._lock:
+        if self._lock is not None:
+            with self._lock:
+                if key not in self._prices:
+                    self._prices[key] = deque(maxlen=self._get_maxlen(timeframe))
+                self._prices[key].append((ts, price))
+        else:
+            # Lock disabled - direct update (startup workaround)
             if key not in self._prices:
                 self._prices[key] = deque(maxlen=self._get_maxlen(timeframe))
-            
             self._prices[key].append((ts, price))
     
     def _get_maxlen(self, timeframe: str) -> int:
@@ -366,7 +374,10 @@ class CrossSectionalMomentumRanker:
 # ═══════════════════════════════════════════════════════════════════════════
 
 _ranker_instance: Optional[CrossSectionalMomentumRanker] = None
-_ranker_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _ranker_lock = threading.Lock()
+_ranker_lock = None  # Disabled to prevent startup hang
 
 
 def get_momentum_ranker(
@@ -378,21 +389,35 @@ def get_momentum_ranker(
     """Get or create the singleton CrossSectionalMomentumRanker."""
     global _ranker_instance
     if _ranker_instance is None:
-        with _ranker_lock:
-            if _ranker_instance is None:
-                _ranker_instance = CrossSectionalMomentumRanker(
-                    assets=assets,
-                    lookback_15m=lookback_15m,
-                    lookback_1h=lookback_1h,
-                    lookback_4h=lookback_4h,
-                )
-                logger.info("CrossSectionalMomentumRanker singleton initialized")
+        if _ranker_lock is not None:
+            with _ranker_lock:
+                if _ranker_instance is None:
+                    _ranker_instance = CrossSectionalMomentumRanker(
+                        assets=assets,
+                        lookback_15m=lookback_15m,
+                        lookback_1h=lookback_1h,
+                        lookback_4h=lookback_4h,
+                    )
+                    logger.info("CrossSectionalMomentumRanker singleton initialized")
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _ranker_instance = CrossSectionalMomentumRanker(
+                assets=assets,
+                lookback_15m=lookback_15m,
+                lookback_1h=lookback_1h,
+                lookback_4h=lookback_4h,
+            )
+            logger.info("CrossSectionalMomentumRanker singleton initialized (lock disabled)")
     return _ranker_instance
 
 
 def reset_momentum_ranker() -> None:
     """Reset the singleton (for testing)."""
     global _ranker_instance
-    with _ranker_lock:
+    if _ranker_lock is not None:
+        with _ranker_lock:
+            _ranker_instance = None
+            logger.info("CrossSectionalMomentumRanker singleton reset")
+    else:
         _ranker_instance = None
-        logger.info("CrossSectionalMomentumRanker singleton reset")
+        logger.info("CrossSectionalMomentumRanker singleton reset (lock disabled)")

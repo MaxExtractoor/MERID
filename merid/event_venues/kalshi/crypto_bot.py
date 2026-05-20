@@ -23,8 +23,14 @@ class KalshiCryptoBot:
         
         for market in all_markets:
             if market.category == "crypto" and market.asset == "BTC":
-                # Determine market type
-                question = market.market.question.lower()
+                # CRITICAL FIX: question is on nested EventMarket
+                if hasattr(market, "market") and hasattr(market.market, "question"):
+                    question = market.market.question.lower()
+                elif hasattr(market, "question"):
+                    question = market.question.lower()
+                else:
+                    question = ""
+                
                 market_type = "unknown"
                 
                 if "high" in question:
@@ -34,13 +40,35 @@ class KalshiCryptoBot:
                 elif "close" in question:
                     market_type = "close"
                 
+                # CRITICAL FIX: market_id, question, active are on nested EventMarket
+                if hasattr(market, "market") and hasattr(market.market, "market_id"):
+                    ticker = market.market.market_id
+                elif hasattr(market, "market_id"):
+                    ticker = market.market_id
+                else:
+                    ticker = ""
+                
+                if hasattr(market, "market") and hasattr(market.market, "question"):
+                    nested_question = market.market.question
+                elif hasattr(market, "question"):
+                    nested_question = market.question
+                else:
+                    nested_question = ""
+                
+                if hasattr(market, "market") and hasattr(market.market, "active"):
+                    active = market.market.active
+                elif hasattr(market, "active"):
+                    active = market.active
+                else:
+                    active = False
+                
                 btc_markets.append({
                     "market": market,
                     "market_type": market_type,
-                    "ticker": market.market.market_id,
-                    "question": market.market.question,
+                    "ticker": ticker,
+                    "question": nested_question,
                     "expiry": market.expires_at,
-                    "active": market.market.active
+                    "active": active
                 })
         
         return sorted(btc_markets, key=lambda x: x["expiry"] or "")

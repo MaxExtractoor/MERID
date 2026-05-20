@@ -26,10 +26,8 @@ _BLOCKED_VENUES = frozenset({
 _ALLOWED_VENUES = frozenset({"kalshi"})
 
 
-# DEPRECATED: local TradingMode removed in Season 5 mode-unification.
-# Use the canonical ``trading.trade_mode.TradeMode`` (MOCK/PAPER/LIVE).
-# SIM is now MOCK.  Alias kept for backward compatibility within this file.
-TradingMode = TradeMode
+# Use canonical TradingMode from merid.prediction.trading_mode
+from merid.prediction.trading_mode import TradingMode
 
 
 class VenueGate:
@@ -89,7 +87,12 @@ class VenueGate:
         # SAFETY: MERID_ALLOW_LIVE_TRADES must be set for LIVE (shared with
         # trading.trade_mode.get_trade_mode initial resolution and set_trade_mode).
         if self._mode == TradingMode.LIVE:
-            allow_live = os.getenv("MERID_ALLOW_LIVE_TRADES", "false").lower()
+            # Check settings first, then env var
+            try:
+                from merid.settings import settings
+                allow_live = str(settings.MERID_ALLOW_LIVE_TRADES).lower()
+            except Exception:
+                allow_live = os.getenv("MERID_ALLOW_LIVE_TRADES", "false").lower()
             if allow_live not in ("1", "true", "yes", "on"):
                 logger.warning(
                     "VenueGate: mode resolved to LIVE but MERID_ALLOW_LIVE_TRADES is not set — "
@@ -115,7 +118,12 @@ class VenueGate:
         # BUG-S fix: apply the same MERID_ALLOW_LIVE_TRADES guard that the
         # constructor enforces — direct setter calls previously bypassed it.
         if value == TradingMode.LIVE:
-            allow_live = os.getenv("MERID_ALLOW_LIVE_TRADES", "false").lower()
+            # Check settings first, then env var
+            try:
+                from merid.settings import settings
+                allow_live = str(settings.MERID_ALLOW_LIVE_TRADES).lower()
+            except Exception:
+                allow_live = os.getenv("MERID_ALLOW_LIVE_TRADES", "false").lower()
             if allow_live not in ("1", "true", "yes", "on"):
                 logger.warning(
                     "VenueGate.mode setter: refusing LIVE — MERID_ALLOW_LIVE_TRADES not set, "
@@ -245,14 +253,21 @@ class VenueGate:
 
 # Module-level singleton (lazy)
 _gate: Optional[VenueGate] = None
-_gate_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _gate_lock = threading.Lock()
+_gate_lock = None  # Disabled to prevent startup hang
 
 
 def get_venue_gate() -> VenueGate:
     """Return the module-level VenueGate singleton."""
     global _gate
     if _gate is None:
-        with _gate_lock:
-            if _gate is None:
-                _gate = VenueGate()
+        if _gate_lock is not None:
+            with _gate_lock:
+                if _gate is None:
+                    _gate = VenueGate()
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _gate = VenueGate()
     return _gate

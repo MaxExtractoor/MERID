@@ -81,21 +81,14 @@ def _probe_neo4j() -> DependencyStatus:
 
 
 def _probe_twitter() -> DependencyStatus:
-    """Check Twitter/X agent health."""
+    """Check Twitter/X agent health.
+    
+    SOCIAL-TRUTH (2026-05-13): Twitter agent disabled for lean 15m Kalshi trading.
+    Returns DOWN status to indicate disabled.
+    """
     dep = DependencyStatus(name="twitter", critical=False)
-    try:
-        from agents.twitter_agent import get_twitter_agent
-        agent = get_twitter_agent()
-        health = agent.get_health()
-        dep.status = DepStatus(health["status"])
-        dep.message = health.get("disabled_reason") or "OK"
-        dep.details = health
-    except ImportError:
-        dep.status = DepStatus.DOWN
-        dep.message = "Twitter agent module not available"
-    except Exception as exc:
-        dep.status = DepStatus.DOWN
-        dep.message = str(exc)[:200]
+    dep.status = DepStatus.DOWN
+    dep.message = "Twitter agent disabled for lean 15m Kalshi stack"
     dep.last_check = time.time()
     return dep
 

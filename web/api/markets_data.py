@@ -102,10 +102,19 @@ async def get_stocks(
                 "pe_ratio": price_data.pe_ratio
             })
         
+        # Get timestamp safely - avoid crash if no prices available
+        timestamp = 0
+        if stocks_data:
+            latest_prices = stocks_feed.get_latest_prices()
+            if latest_prices:
+                keys = list(latest_prices.keys())
+                if keys:
+                    timestamp = int(latest_prices[keys[0]].timestamp.timestamp() * 1000)
+        
         return {
             "stocks": stocks_data,
             "count": len(stocks_data),
-            "timestamp": int(stocks_feed.get_latest_prices()[list(stocks_feed.get_latest_prices().keys())[0]].timestamp.timestamp() * 1000) if stocks_data else 0
+            "timestamp": timestamp
         }
         
     except Exception as e:
@@ -154,10 +163,19 @@ async def get_forex(
                 "source": rate_data.source
             })
         
+        # Get timestamp safely - avoid crash if no rates available
+        timestamp = 0
+        if forex_data:
+            latest_rates = forex_feed.get_latest_rates()
+            if latest_rates:
+                keys = list(latest_rates.keys())
+                if keys:
+                    timestamp = int(latest_rates[keys[0]].timestamp.timestamp() * 1000)
+        
         return {
             "forex": forex_data,
             "count": len(forex_data),
-            "timestamp": int(forex_feed.get_latest_rates()[list(forex_feed.get_latest_rates().keys())[0]].timestamp.timestamp() * 1000) if forex_data else 0
+            "timestamp": timestamp
         }
         
     except Exception as e:
@@ -207,10 +225,19 @@ async def get_commodities(
                 "source": price_data.source
             })
         
+        # Get timestamp safely - avoid crash if no prices available
+        timestamp = 0
+        if commodities_data:
+            latest_prices = commodities_feed.get_latest_prices()
+            if latest_prices:
+                keys = list(latest_prices.keys())
+                if keys:
+                    timestamp = int(latest_prices[keys[0]].timestamp.timestamp() * 1000)
+        
         return {
             "commodities": commodities_data,
             "count": len(commodities_data),
-            "timestamp": int(commodities_feed.get_latest_prices()[list(commodities_feed.get_latest_prices().keys())[0]].timestamp.timestamp() * 1000) if commodities_data else 0
+            "timestamp": timestamp
         }
         
     except Exception as e:

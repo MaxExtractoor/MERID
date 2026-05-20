@@ -5,6 +5,12 @@ Subscribes to MARKET_DATA and AGENT_OUTPUT channels.
 Monitors exposure, liquidation risk, and can VETO decisions.
 """
 
+# DEPRECATION NOTICE:
+# This module is part of the legacy LLM/mesh risk system.
+# It is NOT used in the kalshi_crypto_15m_v2 profile and MUST NOT
+# be wired into any production trading or execution path.
+LEGACY_EXPERIMENTAL_ONLY = True
+
 from __future__ import annotations
 
 from typing import Dict, Any, Optional

@@ -16,11 +16,11 @@ class TestMeridExecutionAdapter:
     @pytest.fixture
     def adapter(self):
         """Create adapter."""
-        return MeridExecutionAdapter(execution_service_url="http://localhost:8012")
+        return MeridExecutionAdapter(execution_service_url="http://localhost:8011")
 
     def test_initialization(self, adapter):
         """Test adapter initialization."""
-        assert adapter.execution_service_url == "http://localhost:8012"
+        assert adapter.execution_service_url == "http://localhost:8011"
         assert adapter.account_id == "merid_sim_account"
         assert adapter._connected is False
 

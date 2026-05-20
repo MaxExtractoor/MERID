@@ -513,8 +513,8 @@ class AssetManager:
                     "avg_return_1m": np.mean(returns_1m),
                     "avg_volatility": np.mean(volatilities),
                     "avg_sharpe_ratio": np.mean(sharpe_ratios),
-                    "best_performer": max(class_metrics, key=lambda m: m.return_1m).symbol,
-                    "worst_performer": min(class_metrics, key=lambda m: m.return_1m).symbol
+                    "best_performer": max(class_metrics, key=lambda m: m.return_1m).symbol if class_metrics else None,
+                    "worst_performer": min(class_metrics, key=lambda m: m.return_1m).symbol if class_metrics else None
                 },
                 "risk_metrics": {
                     "avg_risk_score": np.mean([m.risk_score for m in class_metrics]),

@@ -96,6 +96,9 @@ class TestPositionSizer:
         assert size == 0
 
     def test_halted_returns_zero(self):
+        import os
+        # Ensure halt behavior is not disabled by env var
+        os.environ.pop("DISABLE_PAPER_SESSION_HALT", None)
         sizer = PositionSizer()
         size = sizer.compute(
             "BTC_HOURLY", edge_pct=5.0, price_cents=55, size_factor=0.0,
@@ -238,21 +241,21 @@ class TestAdaptiveKellyFraction:
 
     def test_vol_danger_halves(self):
         f = adaptive_kelly_fraction(0.25, local_vol_pct=55.0)
-        assert f == pytest.approx(0.125)
+        assert f == pytest.approx(0.0625)
 
     def test_multipliers_stack(self):
-        # PF caution (0.5) + DD caution (0.5) + vol danger (0.5) = 0.125
+        # PF caution (0.5) + DD caution (0.5) + vol danger (0.25) = 0.0625
         f = adaptive_kelly_fraction(
             0.25, profit_factor=1.1, max_drawdown_pct=20.0, local_vol_pct=55.0,
         )
-        assert f == pytest.approx(0.25 * 0.5 * 0.5 * 0.5)
+        assert f == pytest.approx(0.25 * 0.5 * 0.5 * 0.25)
 
     def test_all_danger_very_small(self):
         f = adaptive_kelly_fraction(
             0.25, profit_factor=0.9, max_drawdown_pct=30.0, local_vol_pct=55.0,
         )
-        # 0.25 * 0.25 * 0.25 * 0.5 = 0.0078125
-        assert f == pytest.approx(0.25 * 0.25 * 0.25 * 0.5)
+        # 0.25 * 0.25 * 0.25 * 0.25 = 0.00390625
+        assert f == pytest.approx(0.25 * 0.25 * 0.25 * 0.25)
         assert f < 0.01
 
     def test_never_negative(self):

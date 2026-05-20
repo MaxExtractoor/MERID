@@ -60,20 +60,20 @@ def test_kalshi_market_info_roundtrip_from_catalog_market() -> None:
 
 def test_kalshi_crypto_catalog_query_methods() -> None:
     rows = [
-        _cm("KXBTC-26MAR2914-T80000", asset="BTC", timeframe="1h", series_ticker="KXBTC"),
-        _cm("KXETH-26MAR2914-T3000", asset="ETH", timeframe="1h", series_ticker="KXETH"),
+        _cm("KXBTC15M-26MAR291315-15", asset="BTC", timeframe="15m", series_ticker="KXBTC15M"),
+        _cm("KXETH15M-26MAR291315-15", asset="ETH", timeframe="15m", series_ticker="KXETH15M"),
         _cm("KXSOL15M-26MAR291315-15", asset="SOL", timeframe="15m", series_ticker="KXSOL15M"),
     ]
     cat = build_kalshi_crypto_catalog_from_catalog_markets(rows)
-    assert cat.tickers_for_asset_freq("BTC", "1H") == ["KXBTC-26MAR2914-T80000"]
-    assert set(cat.all_active_crypto_tickers(KALSHI_CRYPTO_ASSETS, ["15M", "1H"])) == {
-        "KXBTC-26MAR2914-T80000",
-        "KXETH-26MAR2914-T3000",
+    assert cat.tickers_for_asset_freq("BTC", "15M") == ["KXBTC15M-26MAR291315-15"]
+    assert set(cat.all_active_crypto_tickers(KALSHI_CRYPTO_ASSETS, ["15M"])) == {
+        "KXBTC15M-26MAR291315-15",
+        "KXETH15M-26MAR291315-15",
         "KXSOL15M-26MAR291315-15",
     }
     assert set(cat.all_active_tickers()) == {
-        "KXBTC-26MAR2914-T80000",
-        "KXETH-26MAR2914-T3000",
+        "KXBTC15M-26MAR291315-15",
+        "KXETH15M-26MAR291315-15",
         "KXSOL15M-26MAR291315-15",
     }
 
@@ -211,21 +211,21 @@ def test_market_state_store_separate_books_per_ticker() -> None:
     store.apply_orderbook_message(
         {
             "type": "orderbook_snapshot",
-            "ticker": "KXBTC-TEST",
+            "ticker": "KXBTC15M-TEST",
             "msg": {"yes": [[50, 10]], "no": [[48, 10]]},
         }
     )
     store.apply_orderbook_message(
         {
             "type": "orderbook_snapshot",
-            "ticker": "KXETH-TEST",
+            "ticker": "KXETH15M-TEST",
             "msg": {"yes": [[51, 5]], "no": [[47, 5]]},
         }
     )
     store.apply_orderbook_message(
         {
             "type": "orderbook_delta",
-            "ticker": "KXBTC-TEST",
+            "ticker": "KXBTC15M-TEST",
             "side": "yes",
             "price": 49,
             "size_delta": 2,
@@ -234,16 +234,16 @@ def test_market_state_store_separate_books_per_ticker() -> None:
     store.apply_orderbook_message(
         {
             "type": "orderbook_delta",
-            "ticker": "KXETH-TEST",
+            "ticker": "KXETH15M-TEST",
             "side": "yes",
             "price": 52,
             "size_delta": 1,
         }
     )
-    sb = store.get("KXBTC-TEST")
-    se = store.get("KXETH-TEST")
+    sb = store.get("KXBTC15M-TEST")
+    se = store.get("KXETH15M-TEST")
     assert sb is not None and se is not None
-    assert sb.ticker == "KXBTC-TEST"
-    assert se.ticker == "KXETH-TEST"
+    assert sb.ticker == "KXBTC15M-TEST"
+    assert se.ticker == "KXETH15M-TEST"
     assert sb.best_bid_cents is not None
     assert se.best_bid_cents is not None

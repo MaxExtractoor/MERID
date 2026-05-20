@@ -178,20 +178,23 @@ class TakeProfitConfig:
     tp_enabled: bool = True
 
     # Primary TP target — R-multiple (0 = disable this mode)
-    tp_r_multiple_primary: float = 0.5
+    # OPTIMIZED (2026-05-10): 15m uses 0.4 with time-based dynamic adjustment
+    tp_r_multiple_primary: float = 0.4
 
     # Primary TP target — fraction of max possible gain (0.0 = disable this mode)
     tp_pct_of_max_gain_primary: float = 0.0
 
     # Minimum absolute profit cents to allow TP to fire
-    tp_min_cents: int = 5
+    # OPTIMIZED (2026-05-10): 15m reduced from 5 to 3 cents
+    tp_min_cents: int = 3
 
     # Fraction of position sold at primary TP
     tp_scale_out_fraction: float = 0.5
 
     # Trailing stop on the remainder
     tp_trailing_enabled: bool = True
-    tp_trailing_activation_r_multiple: float = 0.5  # same as primary by default
+    # OPTIMIZED (2026-05-10): 15m reduced from 0.5 to 0.3
+    tp_trailing_activation_r_multiple: float = 0.3
     tp_trailing_giveback_cents: int = 5
 
     # Fee floor
@@ -245,46 +248,75 @@ DEFAULT_TP_CONFIG = TakeProfitConfig()
 
 # Per-asset/timeframe presets — factory functions consumed by get_tp_config_for_agent()
 def _btc_15m_config() -> TakeProfitConfig:
+    """15m scalper config — aligned with 5% conservative edge threshold (2026-05-10).
+
+    With 5% min entry edge, 0.40R gives ~2% profit target instead of 1.25%.
+    Reduced scale-out and widened giveback to let more profit run.
+    """
     return TakeProfitConfig(
         tp_enabled=True,
-        tp_r_multiple_primary=0.5,       # close half at +50% of risk
-        tp_pct_of_max_gain_primary=0.0,  # disabled — use R-multiple only
-        tp_min_cents=5,
-        tp_scale_out_fraction=0.5,
+        tp_r_multiple_primary=0.40,       # RAISED from 0.25 → 0.40 (2% TP on 5% edge entries)
+        tp_pct_of_max_gain_primary=0.0,   # disabled — use R-multiple only
+        tp_min_cents=4,                    # need 4¢ minimum profit
+        tp_scale_out_fraction=0.70,       # LOOSENED from 0.80 → 0.70 (let 30% trail for bigger wins)
         tp_trailing_enabled=True,
-        tp_trailing_activation_r_multiple=0.5,
-        tp_trailing_giveback_cents=5,
-        tp_max_round_trips_per_contract=2,
-        tp_min_price_move_for_reentry=5,
-        tp_min_edge_after_fees_cents=2.0,
+        tp_trailing_activation_r_multiple=0.40,  # trail activates at same R as primary
+        tp_trailing_giveback_cents=4,     # WIDENED from 3 → 4 (allow more room for moves)
+        tp_max_round_trips_per_contract=3,  # 3 round-trips max per contract
+        tp_min_price_move_for_reentry=4,  # 4¢ min move before re-entry
+        tp_min_edge_after_fees_cents=1.5,  # must net 1.5¢ after fees
     )
 
 def _eth_15m_config() -> TakeProfitConfig:
     c = _btc_15m_config()
-    c.tp_r_multiple_primary = 0.5
-    c.tp_trailing_giveback_cents = 6   # slightly wider: ETH more volatile
+    c.tp_r_multiple_primary = 0.45      # ETH slightly wider than BTC (higher vol)
+    c.tp_trailing_giveback_cents = 5    # wider giveback for ETH volatility
     return c
 
 def _sol_15m_config() -> TakeProfitConfig:
+    """15m scalper config for SOL — aligned with 5.5% edge threshold (2026-05-10).
+
+    SOL higher volatility → slightly wider TP and giveback than BTC/ETH.
+    """
     return TakeProfitConfig(
         tp_enabled=True,
-        tp_r_multiple_primary=0.6,       # require a bit more before partial exit
-        tp_min_cents=6,
-        tp_scale_out_fraction=0.6,       # exit 60% at primary
+        tp_r_multiple_primary=0.48,       # RAISED from 0.30 → 0.48 (2.6% TP on 5.5% edge)
+        tp_min_cents=5,                    # 5¢ minimum (higher vol → wider floor)
+        tp_scale_out_fraction=0.70,       # LOOSENED from 0.75 → 0.70 (let more trail)
         tp_trailing_enabled=True,
-        tp_trailing_activation_r_multiple=0.6,
-        tp_trailing_giveback_cents=7,
-        tp_max_round_trips_per_contract=2,
-        tp_min_price_move_for_reentry=6,
-        tp_min_edge_after_fees_cents=2.5,
+        tp_trailing_activation_r_multiple=0.48,  # trail at same R as primary
+        tp_trailing_giveback_cents=5,     # 5¢ giveback (SOL vol needs room)
+        tp_max_round_trips_per_contract=2,  # TIGHTENED from 3 → 2 (fewer re-entries)
+        tp_min_price_move_for_reentry=5,   # 5¢ min move before re-entry
+        tp_min_edge_after_fees_cents=2.0,  # must net 2¢ after fees
     )
 
 def _xrp_15m_config() -> TakeProfitConfig:
+    """15m scalper config for XRP — aligned with 5.7% edge threshold (2026-05-10)."""
     c = _sol_15m_config()
-    c.tp_r_multiple_primary = 0.65
-    c.tp_min_cents = 6
-    c.tp_trailing_giveback_cents = 8
+    c.tp_r_multiple_primary = 0.50       # RAISED from 0.35 → 0.50 (2.9% TP on 5.7% edge)
+    c.tp_trailing_activation_r_multiple = 0.50
+    c.tp_trailing_giveback_cents = 5    # same as SOL
     return c
+
+def _doge_15m_config() -> TakeProfitConfig:
+    """15m scalper config for DOGE — aligned with 6.0% edge threshold (2026-05-10).
+
+    Meme-coin volatility → widest bands, but R-multiple raised to match entry edge.
+    Take 65% at tier 1 (take more profit earlier on riskiest asset).
+    """
+    return TakeProfitConfig(
+        tp_enabled=True,
+        tp_r_multiple_primary=0.52,                # RAISED from 0.50 → 0.52 (3.1% TP on 6% edge)
+        tp_min_cents=5,                            # 5¢ minimum profit to trigger
+        tp_scale_out_fraction=0.65,                # take 65% at tier 1 (riskiest asset)
+        tp_trailing_enabled=True,
+        tp_trailing_activation_r_multiple=0.52,    # trail at same R as primary
+        tp_trailing_giveback_cents=6,              # widest giveback — highest vol asset
+        tp_max_round_trips_per_contract=2,         # TIGHTENED from 4 → 2 (meme-coin chop is expensive)
+        tp_min_price_move_for_reentry=8,           # widest re-entry hysteresis
+        tp_min_edge_after_fees_cents=2.0,          # higher fee floor due to vol
+    )
 
 def _hourly_config(asset: str) -> TakeProfitConfig:
     """Hourly contracts: wider giveback, slightly higher R-multiple."""
@@ -359,6 +391,16 @@ _AGENT_TP_PRESETS: Dict[str, TakeProfitConfig] = {
     "XRP_HOURLY": _hourly_config("XRP"),
     "XRP_DAILY":  _daily_config("XRP"),
     "XRP_WEEKLY": _weekly_config("XRP"),
+    "XRP_MONTHLY": _monthly_annual_config("XRP"),
+    "XRP_ANNUAL": _monthly_annual_config("XRP"),
+    "SOL_MONTHLY": _monthly_annual_config("SOL"),
+    "SOL_ANNUAL": _monthly_annual_config("SOL"),
+    "DOGE_15M":    _doge_15m_config(),
+    "DOGE_HOURLY": _hourly_config("DOGE"),
+    "DOGE_DAILY":  _daily_config("DOGE"),
+    "DOGE_WEEKLY": _weekly_config("DOGE"),
+    "DOGE_MONTHLY": _monthly_annual_config("DOGE"),
+    "DOGE_ANNUAL": _monthly_annual_config("DOGE"),
 }
 
 
@@ -705,6 +747,28 @@ class TakeProfitManager:
                 ps.ticker, unrealized_pct, cfg.tp_min_unrealized_pct_partial
             )
             return self._check_primary(ps, mid_cents, bid_cents, ask_cents, cfg, force_trigger=True)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # FVG Exit Timing: Check for opposing FVG approaching (resistance/support)
+        # ═══════════════════════════════════════════════════════════════════
+        try:
+            from merid.prediction.fvg_integration import get_fvg_entry_exit_timing, is_fvg_enabled
+            if is_fvg_enabled():
+                fvg_timing = get_fvg_entry_exit_timing(
+                    ticker=ps.ticker,
+                    bid=bid_cents / 100.0,
+                    ask=ask_cents / 100.0,
+                )
+                if fvg_timing and fvg_timing.should_exit and fvg_timing.exit_urgency >= 0.8:
+                    # FVG signals high urgency exit - treat as partial TP trigger
+                    logger.info(
+                        "[TP-FVG-EXIT] %s: FVG exit trigger — exit_urgency=%.2f target=%.1fc reason=%s",
+                        ps.ticker, fvg_timing.exit_urgency, 
+                        fvg_timing.target_price_cents or 0, fvg_timing.reason
+                    )
+                    return self._check_primary(ps, mid_cents, bid_cents, ask_cents, cfg, force_trigger=True)
+        except Exception as e:
+            logger.debug("FVG exit timing check skipped for %s: %s", ps.ticker, e)
 
         # Always update trailing peak before any debounce gate so the high-water
         # mark is correct even when no action fires this cycle.

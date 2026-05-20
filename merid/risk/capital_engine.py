@@ -624,14 +624,29 @@ class CapitalEngine:
 
     def check_drawdown_recovery(self, asset: str) -> bool:
         """Force check drawdown recovery regardless of recent trade activity.
-        
+
         P2-5 FIX: This allows drawdown recovery to fire after kill switch reset,
         even if the kill switch was triggered by manual or daily-loss reasons
         rather than drawdown.
-        
+
+        PROFILE GUARD: For kalshi_crypto_15m_v2 profile, this method is no-op
+        to ensure the risk envelope remains the single source of truth for drawdown.
+
         Returns:
             True if sizing multiplier was restored to 1.0
         """
+        import os
+        profile = os.getenv("MERID_PROFILE", "").lower()
+
+        # Profile guard: envelope is single source of truth for kalshi_crypto_15m_v2
+        if profile == "kalshi_crypto_15m_v2":
+            logger.info(
+                "[CAPITAL-ENGINE] check_drawdown_recovery() no-op for profile %s. "
+                "Risk envelope is single source of truth for drawdown.",
+                profile
+            )
+            return False
+
         if asset not in self._asset_configs:
             return False
         cfg = self._asset_configs[asset]
@@ -639,7 +654,7 @@ class CapitalEngine:
         if recovery_frac >= cfg.drawdown_recovery_threshold and self._sizing_multiplier < 1.0:
             self._sizing_multiplier = 1.0
             logger.info(
-                "CapitalEngine [%s]: forced recovery check ΓÇö risk capital at %.1f%% of peak, "
+                "CapitalEngine [%s]: forced recovery check — risk capital at %.1f%% of peak, "
                 "restoring full sizing",
                 asset, recovery_frac * 100,
             )

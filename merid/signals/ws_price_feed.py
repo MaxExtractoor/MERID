@@ -104,7 +104,11 @@ class CoinbasePriceFeed:
     WS_URL = "wss://ws-feed.exchange.coinbase.com"
 
     def __init__(self, product_ids: Optional[List[str]] = None):
-        self._product_ids = product_ids or ["BTC-USD", "ETH-USD", "SOL-USD"]
+        from merid.constants import CRYPTO_15M_ASSETS
+        if product_ids is None:
+            self._product_ids = [f"{asset}-USD" for asset in CRYPTO_15M_ASSETS]
+        else:
+            self._product_ids = product_ids
         self._ws = None
         self._running = False
         self._subscribers: Set[Callable] = set()
@@ -346,13 +350,20 @@ class WSFeedManager:
 # ── Singleton ─────────────────────────────────────────────────────────
 
 _ws_mgr: Optional[WSFeedManager] = None
-_ws_mgr_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _ws_mgr_lock = threading.Lock()
+_ws_mgr_lock = None  # Disabled to prevent startup hang
 
 
 def get_ws_feed_manager() -> WSFeedManager:
     global _ws_mgr
     if _ws_mgr is None:
-        with _ws_mgr_lock:
-            if _ws_mgr is None:
-                _ws_mgr = WSFeedManager()
+        if _ws_mgr_lock is not None:
+            with _ws_mgr_lock:
+                if _ws_mgr is None:
+                    _ws_mgr = WSFeedManager()
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _ws_mgr = WSFeedManager()
     return _ws_mgr

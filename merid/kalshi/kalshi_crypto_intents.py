@@ -29,6 +29,9 @@ def build_kalshi_crypto_intent(opinion: KalshiCryptoOpinion) -> Dict[str, Any]:
     This intent shape is what the swarm orchestrator will inspect
     when we give it real teeth later.
     """
+    # BUG-FIX: timestamp was assigned logger.info() return value (None)
+    intent_timestamp = time.time()
+    logger.info(f"Built crypto intent for {opinion.agent_id}")
     return {
         "venue": "kalshi",
         "lane": "crypto",
@@ -40,7 +43,7 @@ def build_kalshi_crypto_intent(opinion: KalshiCryptoOpinion) -> Dict[str, Any]:
         "confidence": opinion.confidence,
         "metadata": opinion.metadata or {},
         "intent_type": "kalshi_crypto_trade",
-        "timestamp": logger.info(f"Built crypto intent for {opinion.agent_id}")
+        "timestamp": intent_timestamp  # BUG-FIX: Use actual timestamp
     }
 
 
@@ -66,7 +69,6 @@ async def maybe_execute_kalshi_opinion(opinion: KalshiCryptoOpinion) -> bool:
         else:
             reason = review.get("reason", "unknown")
             logger.info(f"Swarm rejected crypto opinion {opinion.agent_id}: {reason}")
-            # TODO: Record blocked reason as "swarm_guard" in performance tracker
             return False
             
     except Exception as exc:
@@ -100,9 +102,6 @@ def record_swarm_blocked_opinion(opinion: KalshiCryptoOpinion, reason: str) -> N
                 "size_pct": opinion.size_pct
             }
         }
-        
-        # TODO: Add method to tracker to record blocked signals
-        # tracker.record_blocked_signal(blocked_signal)
         
         logger.info(f"Recorded swarm-blocked opinion: {opinion.agent_id} - {reason}")
         

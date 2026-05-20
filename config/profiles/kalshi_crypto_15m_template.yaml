@@ -1,0 +1,143 @@
+# ============================================================================
+# Kalshi Crypto 15m Profile Template
+# ============================================================================
+#
+# This is a minimal template for creating new 15m-crypto profiles.
+# Copy this file to create a new profile (e.g., kalshi_crypto_15m_aggressive.yaml).
+#
+# REQUIRED FIELDS:
+# - guardrails: drawdown_halt_pct, drawdown_unwind_pct, max_daily_loss_usd
+# - agent_defaults: max_notional_usd, max_orders_per_window, max_yes_position, max_no_position
+# - venue_max_single_order_pct: Maximum single order as % of bankroll
+# - capital_usd: Trading capital (0 = derive from live bankroll)
+#
+# VALIDATION:
+# - Profile will be validated at startup via startup_validations.py
+# - Missing required fields will prevent profile activation
+# - Values must be in sane ranges (e.g., drawdown_halt_pct < drawdown_unwind_pct)
+#
+# ============================================================================
+
+# Profile metadata
+profile_name: "kalshi_crypto_15m_template"
+profile_version: "1.0.0"
+description: "Template for new 15m-crypto profiles"
+
+# Trading capital (0 = derive from live bankroll API)
+capital_usd: 0.0
+
+# Maximum single order as percentage of bankroll
+venue_max_single_order_pct: 0.01  # 1% of bankroll
+
+# ============================================================================
+# REQUIRED: Risk Guardrails
+# ============================================================================
+guardrails:
+  # Drawdown halt: Stop trading when drawdown reaches this threshold
+  drawdown_halt_pct: 0.10  # 10% - MUST be < drawdown_unwind_pct
+  
+  # Drawdown unwind: Reduce position size when drawdown reaches this threshold
+  drawdown_unwind_pct: 0.15  # 15% - MUST be > drawdown_halt_pct
+  
+  # Maximum daily loss in USD
+  max_daily_loss_usd: 200.0  # $200 daily loss cap
+  
+  # Maximum spread (as percentage of price)
+  max_spread_pct: 0.05  # 5% max spread
+  
+  # Maximum slippage (as percentage of price)
+  max_slippage_pct: 0.02  # 2% max slippage
+  
+  # Minimum order book depth
+  min_depth_contracts: 10  # Minimum 10 contracts depth
+  
+  # Minimum post-fee edge (as percentage)
+  min_post_fee_edge: 0.01  # 1% minimum edge after fees
+
+# ============================================================================
+# REQUIRED: Agent Defaults
+# ============================================================================
+agent_defaults:
+  # Maximum notional exposure per agent
+  max_notional_usd: 1000.0  # $1000 max notional per agent
+  
+  # Maximum orders per time window
+  max_orders_per_window: 10  # Max 10 orders per window
+  
+  # Maximum yes position (per side cap)
+  max_yes_position: 3  # Max 3 yes contracts per market
+  
+  # Maximum no position (per side cap)
+  max_no_position: 3  # Max 3 no contracts per market
+  
+  # Minutes before expiry to stop trading
+  minutes_before_expiry: 5  # Stop 5 minutes before expiry
+  
+  # Cutoff minutes before expiry (hard stop)
+  cutoff_minutes_before_expiry: 2  # Hard stop 2 minutes before expiry
+
+# ============================================================================
+# REQUIRED: Per-Asset Configuration
+# ============================================================================
+# Each 15m crypto asset must be configured with:
+# - max_notional_usd: Asset-specific notional cap
+# - min_edge_early: Minimum edge early in expiry
+# - min_edge_mid: Minimum edge mid-expiry
+# - min_edge_late: Minimum edge late in expiry
+# - min_edge_terminal: Minimum edge near expiry
+
+asset_configs:
+  BTC:
+    max_notional_usd: 1000.0
+    min_edge_early: 0.05  # 5% edge early
+    min_edge_mid: 0.04    # 4% edge mid
+    min_edge_late: 0.03   # 3% edge late
+    min_edge_terminal: 0.02  # 2% edge terminal
+  
+  ETH:
+    max_notional_usd: 1000.0
+    min_edge_early: 0.05
+    min_edge_mid: 0.04
+    min_edge_late: 0.03
+    min_edge_terminal: 0.02
+  
+  SOL:
+    max_notional_usd: 500.0
+    min_edge_early: 0.05
+    min_edge_mid: 0.04
+    min_edge_late: 0.03
+    min_edge_terminal: 0.02
+  
+  XRP:
+    max_notional_usd: 500.0
+    min_edge_early: 0.05
+    min_edge_mid: 0.04
+    min_edge_late: 0.03
+    min_edge_terminal: 0.02
+  
+  DOGE:
+    max_notional_usd: 500.0
+    min_edge_early: 0.05
+    min_edge_mid: 0.04
+    min_edge_late: 0.03
+    min_edge_terminal: 0.02
+
+# ============================================================================
+# OPTIONAL: Legacy Flags
+# ============================================================================
+# These flags control whether to use legacy bankroll-derived calculations
+# For new profiles, set all to true to use config-only behavior
+
+legacy_disable_balance_calibration: true
+legacy_disable_dynamic_contract_caps: true
+legacy_disable_bankroll_category_limits: true
+legacy_disable_bankroll_prediction_risk: true
+legacy_disable_bankroll_guardrails: true
+
+# ============================================================================
+# OPTIONAL: Kelly Sizing Parameters
+# ============================================================================
+# Kelly fraction parameters for position sizing
+kelly_base_risk_frac: 0.01  # 1% base Kelly fraction
+kelly_max_risk_frac: 0.05    # 5% maximum Kelly fraction
+kelly_fractional_kelly: 0.5  # 50% of full Kelly

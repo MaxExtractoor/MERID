@@ -7,6 +7,8 @@ Most values now derive from merid.settings for bankroll-driven configuration.
 
 from __future__ import annotations
 
+from typing import Tuple
+
 from merid.settings import settings
 
 # =============================================================================
@@ -36,6 +38,14 @@ KALSHI_MAX_POSITION_SIZE = getattr(settings, 'MERID_MAX_POSITION_SIZE_USD', 1000
 # =============================================================================
 HEALTH_CHECK_INTERVAL = getattr(settings, 'KALSHI_HEALTH_CHECK_INTERVAL', 60.0)  # seconds
 METRICS_COLLECTION_INTERVAL = getattr(settings, 'KALSHI_METRICS_INTERVAL', 30.0)  # seconds
+
+# =============================================================================
+# KALSHI 15M CRYPTO ASSET SET (canonical 5-asset invariant)
+# =============================================================================
+# The ONLY valid asset set for kalshi_crypto_15m_v2 profile.
+# Any code, config, or log referencing a subset (e.g., BTC/ETH/SOL only)
+# in the 15m profile must be treated as a bug.
+CRYPTO_15M_ASSETS: Tuple[str, ...] = ("BTC", "ETH", "SOL", "XRP", "DOGE")
 
 # =============================================================================
 # LEGACY SCRIPT CONSTANTS (for backward compatibility)
@@ -70,6 +80,9 @@ __all__ = [
     # Monitoring
     "HEALTH_CHECK_INTERVAL",
     "METRICS_COLLECTION_INTERVAL",
+    
+    # 15m Crypto Asset Set (canonical invariant)
+    "CRYPTO_15M_ASSETS",
     
     # Legacy (to be deprecated)
     "VOLUME_TARGET",

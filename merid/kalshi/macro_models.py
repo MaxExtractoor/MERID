@@ -78,7 +78,14 @@ class MacroMarketState:
     @property
     def is_liquid(self) -> bool:
         """Market has adequate liquidity."""
-        return self.volume_24h > 100 and self.spread_cents <= 5
+        # BUG-FIX: Made configurable via env vars instead of hardcoded
+        # Import here to avoid circular dependency
+        try:
+            from merid.kalshi.macro_overlay import MIN_VOLUME_24H, MAX_SPREAD_CENTS
+            return self.volume_24h > MIN_VOLUME_24H and self.spread_cents <= MAX_SPREAD_CENTS
+        except ImportError:
+            # Fallback to defaults if import fails
+            return self.volume_24h > 100 and self.spread_cents <= 5
 
 
 @dataclass

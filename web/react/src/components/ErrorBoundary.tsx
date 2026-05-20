@@ -38,7 +38,7 @@ const getErrorSeverity = (error: Error): ErrorSeverity => {
   return 'low';
 };
 
-const getUserFriendlyMessage = (error: Error, category: ErrorCategory): string => {
+const getUserFriendlyMessage = (_error: Error, category: ErrorCategory): string => {
   switch (category) {
     case 'network': return 'A network connection issue occurred. Please check your connection and try again.';
     case 'render': return 'A display issue occurred. The component has been reset.';

@@ -49,7 +49,60 @@ from config.kalshi_crypto_series_meta import SERIES_META_BY_TICKER, infer_asset_
 from monitoring.metrics import get_metrics_registry
 from utils.logger import get_logger
 
+# BTC-Anchored Model for dynamic strike distance (Task 4: wire to NearSpotSelector)
+try:
+    from merid.signals.btc_anchored_move import get_btc_anchored_model
+    _BTC_ANCHORED_AVAILABLE = True
+except ImportError:
+    _BTC_ANCHORED_AVAILABLE = False
+
 logger = get_logger("merid.prediction.kalshi_strike_selector")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# "No Surprises" Integration: Centralized Config for 15m Execution Guards
+# ═══════════════════════════════════════════════════════════════════════════
+# For 15m markets, use the canonical distance config from kalshi_distance.yaml.
+# Non-15m markets (signal-only) continue to use the wider legacy defaults.
+
+_15m_cfg: Optional[Any] = None
+
+def _get_15m_distance_config() -> Optional[Any]:
+    """Get centralized distance config for 15m markets."""
+    global _15m_cfg
+    if _15m_cfg is None:
+        try:
+            from merid.prediction.kalshi_distance_config import get_distance_config
+            _15m_cfg = get_distance_config()
+        except Exception as e:
+            logger.debug("Could not load centralized distance config: %s", e)
+            _15m_cfg = None
+    return _15m_cfg
+
+
+def get_max_distance_for_15m(asset: str) -> float:
+    """Get max distance for 15m markets (tight execution guard values).
+    
+    Uses centralized config if available, otherwise falls back to inline defaults
+    matching the execution guards in trading_agent.py.
+    
+    Args:
+        asset: Asset symbol (BTC, ETH, SOL, XRP, DOGE)
+        
+    Returns:
+        Max distance as fraction (e.g., 0.04 for 4.0%)
+    """
+    cfg = _get_15m_distance_config()
+    if cfg is not None:
+        return cfg.max_delta_pct.get(asset, 0.065)  # Default 6.5% if unknown
+    
+    # Fallback to inline defaults (OPTIMIZED 2026-05-10: aligned with kalshi_distance.yaml)
+    return {
+        "BTC": 0.04,     # 4.0% - aligned with strike selector
+        "ETH": 0.05,     # 5.0% - aligned with strike selector
+        "SOL": 0.06,     # 6.0% - aligned with strike selector
+        "XRP": 0.065,    # 6.5% - aligned with strike selector
+        "DOGE": 0.065,   # 6.5% - aligned with strike selector
+    }.get(asset, 0.065)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Crypto-only guard
@@ -233,47 +286,50 @@ def asset_in_ticker(ticker: str, expected_asset: str) -> bool:
 # will override these once MIN_OBS observations accumulate per (asset, timeframe).
 
 DEFAULT_MAX_DISTANCE: Dict[Tuple[str, str], float] = {
-    # PRODUCTION FIX v5 (2026-04-26): EXTREME widening based on live log analysis
-    # Observed rejections: BTC annual 74.5%, ETH hourly 28%, XRP hourly 49%, DOGE hourly 176%
-    # Previous bands were 0.12-0.35 - far too narrow for actual Kalshi market structure.
-    # New bands allow actual market strikes while maintaining practical limits:
-    # - 15m: 8-10% (tight for precision)
-    # - Hourly: 35-50% (was 12-14% - logs showed 28-49% rejections)
-    # - Daily: 50-60% (was 15-18%)
-    # - Weekly: 60-75% (was 18-25%)
-    # - Monthly/Annual: 75-100% (was 25-40% - logs showed 74.5% rejection)
+    # PRODUCTION FIX (2026-05-01): Sweet spot calibration for profitable trading
+    # Previous extreme widening (35-50% for hourly) allowed strikes too far from the money,
+    # causing poor risk/reward and edge decay before position could profit.
+    # 
+    # New bands calibrated for optimal edge capture:
+    # - 15m: 5-8% (tight precision for quick scalps)
+    # - Hourly: 15-20% (sweet spot for directional edge - close enough for quick moves)
+    # - Daily: 25-30% (allows overnight moves but still actionable)
+    # - Weekly+: 35-50% (longer holds need more room, but capped for risk management)
+    # - Monthly/Annual: 50-75% (extreme moves only, primarily for hedging)
     #
-    # Intraday - 15m stays relatively tight for precision
-    ("BTC", "15m"): 0.08,    # Was 0.06
-    ("ETH", "15m"): 0.08,    # Was 0.06
-    ("SOL", "15m"): 0.10,    # Was 0.07
-    ("XRP", "15m"): 0.10,    # Was 0.07
-    ("DOGE", "15m"): 0.12,   # Was 0.065
-    # Hourly - EXTREME widening: logs showed 28-49% distance rejections at 12-14% bands
-    ("BTC", "1h"): 0.35,     # Was 0.12 - logs showed 28% rejections
-    ("ETH", "1h"): 0.40,     # Was 0.12 - logs showed 29% rejections
-    ("SOL", "1h"): 0.45,     # Was 0.14
-    ("XRP", "1h"): 0.55,     # Was 0.14 - logs showed 49% rejections
-    ("DOGE", "1h"): 2.00,    # Was 0.12 - logs showed 176% rejections
-    # Daily - widened significantly
-    ("BTC", "daily"): 0.50,   # Was 0.15
-    ("ETH", "daily"): 0.55,   # Was 0.15
-    ("SOL", "daily"): 0.60,   # Was 0.18
-    ("XRP", "daily"): 0.70,   # Was 0.18
-    ("DOGE", "daily"): 2.50,  # Was 0.15
-    # Weekly - widened significantly
-    ("BTC", "weekly"): 0.60,   # Was 0.18
-    ("ETH", "weekly"): 0.65,   # Was 0.18
-    ("SOL", "weekly"): 0.75,   # Was 0.25
-    ("XRP", "weekly"): 0.80,   # Was 0.25
-    ("DOGE", "weekly"): 3.00,  # Was 0.18
-    # Monthly/Annual - EXTREME widening for long-tenor markets
-    # Logs: BTC annual rejected at 74.5% vs 35% max
-    ("BTC", "monthly"): 0.75, ("BTC", "annual"): 0.80,   # Was 0.25/0.35
-    ("ETH", "monthly"): 0.80, ("ETH", "annual"): 0.90,   # Was 0.25/0.35
-    ("SOL", "monthly"): 0.90, ("SOL", "annual"): 1.00,    # Was 0.30/0.40
-    ("XRP", "monthly"): 0.90, ("XRP", "annual"): 1.00,    # Was 0.30/0.40
-    ("DOGE", "monthly"): 3.50, ("DOGE", "annual"): 4.00,  # Was 0.25/0.35
+    # These values ensure contracts are close enough to spot for effective theta capture
+    # while still allowing practical market selection from available Kalshi strikes.
+    #
+    # Intraday - 15m: tight bands for micro-scalping precision
+    ("BTC", "15m"): 0.05,     # 5% - tight for BTC stability
+    ("ETH", "15m"): 0.06,     # 6% - slightly wider for ETH volatility
+    ("SOL", "15m"): 0.07,     # 7% - SOL volatility
+    ("XRP", "15m"): 0.08,     # 8% - XRP higher volatility
+    ("DOGE", "15m"): 0.08,    # 8% - DOGE meme volatility
+    # Hourly - SWEET SPOT: 15-20% max for effective directional trading
+    ("BTC", "1h"): 0.15,      # 15% - optimal for hourly BTC momentum
+    ("ETH", "1h"): 0.18,      # 18% - ETH hourly needs slightly more room
+    ("SOL", "1h"): 0.20,      # 20% - SOL volatility requires wider band
+    ("XRP", "1h"): 0.20,      # 20% - XRP hourly volatility
+    ("DOGE", "1h"): 0.25,     # 25% - DOGE extreme volatility, but capped
+    # Daily - 25-30% for overnight directional holds
+    ("BTC", "daily"): 0.25,   # 25% - daily BTC moves
+    ("ETH", "daily"): 0.28,   # 28% - daily ETH volatility
+    ("SOL", "daily"): 0.30,    # 30% - SOL daily moves
+    ("XRP", "daily"): 0.30,    # 30% - XRP daily
+    ("DOGE", "daily"): 0.35,   # 35% - DOGE daily (capped for risk)
+    # Weekly - 35-45% for multi-day holds
+    ("BTC", "weekly"): 0.35,   # 35% - weekly BTC
+    ("ETH", "weekly"): 0.40,   # 40% - weekly ETH
+    ("SOL", "weekly"): 0.45,   # 45% - weekly SOL volatility
+    ("XRP", "weekly"): 0.45,   # 45% - weekly XRP
+    ("DOGE", "weekly"): 0.50,   # 50% - weekly DOGE (extreme moves only)
+    # Monthly/Annual - 50-75% for long-tenor, primarily hedging
+    ("BTC", "monthly"): 0.50, ("BTC", "annual"): 0.60,
+    ("ETH", "monthly"): 0.55, ("ETH", "annual"): 0.70,
+    ("SOL", "monthly"): 0.60, ("SOL", "annual"): 0.75,
+    ("XRP", "monthly"): 0.60, ("XRP", "annual"): 0.75,
+    ("DOGE", "monthly"): 0.65, ("DOGE", "annual"): 0.75,  # Capped for risk management
 }
 
 # Default preferred ATM band (fraction of spot).
@@ -526,14 +582,19 @@ class KalshiStrikeSelector:
             return self._reject(ticker, asset_upper, tf_lower, spot, strike,
                                 RejectionReason.MISSING_STRIKE)
 
-        # Gate: zero strike
-        if strike <= 0:
+        # Gate: zero strike or None
+        if strike is None or strike <= 0:
             return self._reject(ticker, asset_upper, tf_lower, spot, strike,
                                 RejectionReason.ZERO_STRIKE)
 
+        # Gate: None spot before division
+        if spot is None or spot <= 0:
+            return self._reject(ticker, asset_upper, tf_lower, spot, strike,
+                                RejectionReason.MISSING_SPOT)
+
         # Compute distance: percentage relative to SPOT (not strike)
         # This ensures consistent distance measurement regardless of strike level
-        distance_pct = abs(spot - strike) / spot if spot > 0 else float('inf')
+        distance_pct = abs(spot - strike) / spot
 
         # SAFETY CLAMP: Reject pathological tickers where strike is extremely far.
         # For assets with deep_otm_allowed (e.g., DOGE), use a higher threshold (3x/300%)
@@ -786,8 +847,30 @@ class KalshiStrikeSelector:
                 is_directional=True,
             )
 
+        # Gate: None spot or strike before division
+        if spot is None or spot <= 0:
+            return StrikeSelectionResult(
+                ticker=ticker,
+                asset=asset.upper(),
+                timeframe=timeframe.lower(),
+                accepted=False,
+                spot=spot,
+                strike=strike,
+                rejection_reason="MISSING_SPOT_FOR_DISTANCE",
+            )
+        if strike is None:
+            return StrikeSelectionResult(
+                ticker=ticker,
+                asset=asset.upper(),
+                timeframe=timeframe.lower(),
+                accepted=False,
+                spot=spot,
+                strike=None,
+                rejection_reason="MISSING_STRIKE_FOR_DISTANCE",
+            )
+
         # Distance calculation: percentage relative to SPOT (not strike)
-        distance_pct = abs(spot - strike) / spot if spot > 0 else float('inf')
+        distance_pct = abs(spot - strike) / spot
 
         # SAFETY CLAMP: Hard reject if strike is extremely far (>50% from spot)
         if strike < spot * 0.5 or strike > spot * 1.5:
@@ -892,19 +975,30 @@ class KalshiStrikeSelector:
         """Resolve max distance for an asset/timeframe combo.
 
         Priority:
-        1. Config override (per_asset_tf_max_distance)
-        2. Config override (max_spot_to_strike_pct)
-        3. Calibrated threshold (if data available, see kalshi_strike_calibrator.py)
-        4. Bootstrap defaults (DEFAULT_MAX_DISTANCE)
-        5. FALLBACK_MAX_DISTANCE_PCT
+        1. 15m canonical config (tight execution guard values from kalshi_distance.yaml)
+        2. Config override (per_asset_tf_max_distance)
+        3. Config override (max_spot_to_strike_pct)
+        4. Calibrated threshold (if data available, see kalshi_strike_calibrator.py)
+        5. Bootstrap defaults (DEFAULT_MAX_DISTANCE - wide for non-15m signal-only)
+        6. FALLBACK_MAX_DISTANCE_PCT
         """
+        # 1. 15m canonical config: tight execution guard values
+        # This ensures strike selector and execution guards are aligned for 15m markets
+        if timeframe == "15m":
+            canonical_distance = get_max_distance_for_15m(asset)
+            logger.debug(
+                "[STRIKE_SELECTOR_15M] %s/%s using canonical max_distance=%.4f (%.2f%%)",
+                asset, timeframe, canonical_distance, canonical_distance * 100
+            )
+            return canonical_distance
+        
         key = (asset, timeframe)
         if key in self._config.per_asset_tf_max_distance:
             return self._config.per_asset_tf_max_distance[key]
         if self._config.max_spot_to_strike_pct is not None:
             return self._config.max_spot_to_strike_pct
 
-        # 3. Data-driven calibration (if available)
+        # 4. Data-driven calibration (if available)
         calibrator = _get_calibrator()
         if calibrator is not None:
             calibrated = calibrator.get_max_distance(asset, timeframe)
@@ -920,8 +1014,80 @@ class KalshiStrikeSelector:
                     asset, timeframe, count,
                 )
 
-        # 4. Bootstrap defaults
-        return DEFAULT_MAX_DISTANCE.get(key, FALLBACK_MAX_DISTANCE_PCT)
+        # 5. Bootstrap defaults (wide bands for non-15m signal-only markets)
+        base_distance = DEFAULT_MAX_DISTANCE.get(key, FALLBACK_MAX_DISTANCE_PCT)
+
+        # 6. BTC-Anchored adjustment for alt-coins (Task 4 wiring)
+        # When BTC ATR is elevated, high-beta alts need wider strike bands
+        if asset != "BTC" and _BTC_ANCHORED_AVAILABLE:
+            btc_adjusted = self._get_btc_anchored_distance(asset, timeframe, base_distance)
+            if btc_adjusted != base_distance:
+                logger.debug(
+                    "[STRIKE_SELECTOR_BTC_ANCHORED] %s/%s: base=%.2f%% adjusted=%.2f%%",
+                    asset, timeframe, base_distance * 100, btc_adjusted * 100,
+                )
+                return btc_adjusted
+
+        return base_distance
+
+    def _get_btc_anchored_distance(self, asset: str, timeframe: str, base_distance: float) -> float:
+        """Get BTC-anchored strike distance suggestion for alt-coins.
+
+        When BTC volatility is elevated, alts with high beta to BTC should have
+        wider strike distance bands to account for expected co-movement.
+
+        Args:
+            asset: Alt asset symbol (ETH, SOL, XRP, DOGE)
+            timeframe: Market timeframe
+            base_distance: Base max distance from config
+
+        Returns:
+            Suggested distance (may be same as base if no adjustment needed)
+        """
+        if not _BTC_ANCHORED_AVAILABLE or asset == "BTC":
+            return base_distance
+
+        try:
+            model = get_btc_anchored_model()
+
+            # Get BTC's current ATR from indicator stack (if available)
+            btc_atr_pct = self._get_btc_atr_pct(timeframe)
+            if btc_atr_pct is None:
+                return base_distance
+
+            # Get suggested distance from model
+            suggested = model.suggested_strike_distance_pct(
+                asset=asset,
+                timeframe=timeframe,
+                btc_atr_pct=btc_atr_pct,
+                base_distance_pct=base_distance,
+            )
+
+            # Cap at 3x base to avoid runaway widening
+            return min(suggested, base_distance * 3.0)
+
+        except Exception as exc:
+            logger.debug("[BTC_ANCHORED_DISTANCE] %s/%s: error getting suggestion: %s", asset, timeframe, exc)
+            return base_distance
+
+    def _get_btc_atr_pct(self, timeframe: str) -> Optional[float]:
+        """Get BTC ATR as percentage of price from indicator stack.
+
+        Returns None if indicator stack unavailable.
+        """
+        try:
+            from merid.signals.crypto_15m_indicators import get_indicator_stack
+            stack = get_indicator_stack()
+            if stack is None:
+                return None
+
+            snap = stack.snapshot("BTC", timeframe)
+            if snap is None or snap.atr is None or snap.price is None or snap.price <= 0:
+                return None
+
+            return snap.atr / snap.price
+        except Exception:
+            return None
 
     def _resolve_target_band(self, asset: str, timeframe: str) -> float:
         """Resolve target ATM band for an asset/timeframe combo.

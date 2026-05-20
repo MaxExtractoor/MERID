@@ -296,6 +296,51 @@ class IdempotentOrderStore:
                     return True
             return False
 
+    # ── Duplicate Race Detection ─────────────────────────────────────────
+
+    def check_duplicate_race(
+        self,
+        contract_id: str,
+        side: str,
+        strategy_group: str,
+        race_window_seconds: float = 2.0,
+    ) -> tuple[bool, str]:
+        """Prevent same-asset duplicate orders within time window.
+        
+        MICRO-SCALPING FIX: Allow multiple orders IF they're on different sides
+        (YES vs NO) or different assets. Block only true duplicates within
+        the race window.
+        
+        Args:
+            contract_id: Market ticker
+            side: "yes" or "no"
+            strategy_group: Logical strategy group
+            race_window_seconds: Time window for duplicate detection (default 2s)
+            
+        Returns:
+            Tuple of (allowed, reason). allowed=True if no duplicate race detected.
+        """
+        with self._lock:
+            now = time.time()
+            
+            for rec in self._orders.values():
+                # Check for pending/submitted orders on same contract+side+strategy
+                if (
+                    rec.contract_id == contract_id
+                    and rec.side == side
+                    and rec.strategy_group == strategy_group
+                    and rec.status in (OrderStatus.PENDING, OrderStatus.SUBMITTED, OrderStatus.LIVE)
+                ):
+                    time_since = now - rec.created_at
+                    if time_since < race_window_seconds:
+                        return False, (
+                            f"duplicate_race:rejected — {contract_id}:{side} "
+                            f"already has {rec.status.value} order within {time_since:.1f}s "
+                            f"(window: {race_window_seconds}s)"
+                        )
+            
+            return True, "approved"
+
     # ── Maintenance ──────────────────────────────────────────────────────
 
     def prune_old(self, ttl_s: Optional[float] = None) -> int:
@@ -582,8 +627,9 @@ class PreTradeGate:
                                 phase, coid, contract_id, agent_id
                             )
         except Exception as exc:
-            # Fail-open: log but don't block if check fails
-            logger.debug("[GATE] CRYPTO15M check failed (fail-open): %s", exc)
+            # Fail-closed: block trade if CRYPTO15M check fails
+            logger.warning("[GATE] CRYPTO15M check failed (fail-closed): %s - blocking trade", exc)
+            return False, f"crypto15m_check_failed:{type(exc).__name__}"
 
         # 5. Insert new record (PENDING)
         record = OrderRecord(

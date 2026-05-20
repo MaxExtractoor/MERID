@@ -5,15 +5,18 @@ asyncio starvation caused by blocking operations.
 
 Thresholds (milliseconds, overridable via env):
 
-- ``KALSHI_LOOP_LAG_HEALTHY_MS`` (default 50): below = healthy.
-- ``KALSHI_LOOP_LAG_DEGRADE_MS`` (default 500): at/above = LIMITED-style
+- ``KALSHI_LOOP_LAG_HEALTHY_MS`` (default 3000): below = healthy.
+- ``KALSHI_LOOP_LAG_DEGRADE_MS`` (default 8000): at/above = LIMITED-style
   degradation (warnings; CT blocks new entries when gate is LIMITED).
-- ``KALSHI_LOOP_LAG_HALT_MS`` (default 2000): at/above = halt-eligible band;
-  ``core.execution_gate`` only trips kill / full block after **consecutive**
-  samples in this band (see ``KALSHI_LOOP_LAG_HALT_CONSECUTIVE`` there).
-- ``KALSHI_LOOP_LAG_P95_MIN_SAMPLES`` (default 10, read in ``execution_gate``):
-  once lag stats report at least this many samples, LIMITED/degrade uses
-  rolling ``p95_ms`` instead of a single ``current_ms`` tick.
+- ``KALSHI_LOOP_LAG_HALT_MS`` (default 15000): at/above = halt-eligible band.
+
+OLD-HARDWARE FIX (2026-04-29): ULTRA-relaxed thresholds for very old hardware:
+- Warning: 3000ms (was 100ms) - very high tolerance for slow hardware
+- Degrade: 8000ms (was 2500ms) - requires 15 consecutive breaches
+- Halt: 15000ms (was 5000ms) - requires 20 consecutive breaches, never auto-shutdown
+
+Recovery: Breach counters reset after 45s of sustained lag < warning threshold.
+Shutdown: NEVER automatic - only manual kill-switch or fatal structural errors.
 """
 
 from __future__ import annotations
@@ -33,11 +36,17 @@ logger = get_logger("merid.diagnostics.loop_lag")
 
 
 def get_loop_lag_thresholds_ms() -> Dict[str, float]:
-    """Read lag bands from environment (shared with execution_gate)."""
+    """Read lag bands from environment (shared with execution_gate).
+    
+    OLD-HARDWARE FIX (2026-04-29): ULTRA-relaxed for very old hardware + spotty internet.
+    - Warning: 3000ms (was 100ms) - extreme tolerance for slow hardware
+    - Degrade: 8000ms (was 2500ms) - requires 15 consecutive breaches
+    - Halt: 15000ms (was 5000ms) - never triggers automatic shutdown
+    """
     return {
-        "healthy_ms": float(os.getenv("KALSHI_LOOP_LAG_HEALTHY_MS", "50")),
-        "degrade_ms": float(os.getenv("KALSHI_LOOP_LAG_DEGRADE_MS", "500")),
-        "halt_ms": float(os.getenv("KALSHI_LOOP_LAG_HALT_MS", "2000")),
+        "healthy_ms": float(os.getenv("KALSHI_LOOP_LAG_HEALTHY_MS", "3000")),  # OLD-HW: 3000ms tolerance
+        "degrade_ms": float(os.getenv("KALSHI_LOOP_LAG_DEGRADE_MS", "8000")),  # OLD-HW: 8000ms tolerance
+        "halt_ms": float(os.getenv("KALSHI_LOOP_LAG_HALT_MS", "15000")),  # OLD-HW: 15000ms tolerance
     }
 
 
@@ -152,15 +161,23 @@ class LoopLagMonitor:
         self._on_degraded_callbacks: List[Callable[[float], None]] = []
         self._on_halt_callbacks: List[Callable[[float, int], Optional[bool]]] = []
 
-        # Consecutive halt-band tracking for shutdown decision
+        # Consecutive breach tracking for degraded/halt mode decisions
+        # OLD-HARDWARE FIX (2026-04-29): ULTRA-relaxed for very old hardware
+        self._degraded_consecutive_count: int = 0
+        self._degraded_max_consecutive: int = int(os.getenv("KALSHI_LOOP_LAG_DEGRADED_CONSECUTIVE", "15"))  # 15 breaches (was 5)
         self._halt_consecutive_count: int = 0
-        self._halt_max_consecutive: int = int(os.getenv("KALSHI_LOOP_LAG_HALT_CONSECUTIVE", "3"))
+        self._halt_max_consecutive: int = int(os.getenv("KALSHI_LOOP_LAG_HALT_CONSECUTIVE", "20"))  # 20 breaches (was 10)
         self._last_action_ts: float = 0.0
         self._action_cooldown_s: float = 5.0  # Min time between actions
+
+        # Recovery tracking
+        self._recovery_window_s: float = float(os.getenv("KALSHI_LOOP_LAG_RECOVERY_WINDOW_S", "45.0"))  # Reset counters after 45s healthy
+        self._last_healthy_ts: Optional[float] = None
 
         # Load shedding state
         self._scope_reduced: bool = False
         self._scope_reduced_at: Optional[float] = None
+        self._degraded_mode_active: bool = False  # OLD-HW: Track degraded mode separately
         
     def _capture_task_snapshot(self) -> List[Dict[str, Any]]:
         """Capture snapshot of currently running asyncio tasks."""
@@ -265,14 +282,34 @@ class LoopLagMonitor:
                 logger.debug(f"Elevated callback error: {e}")
 
     def _trigger_degraded(self, lag_ms: float) -> None:
-        """Trigger degraded lag callbacks (scope reduction)."""
-        if not self._scope_reduced and self._check_rate_limit():
-            self._scope_reduced = True
-            self._scope_reduced_at = time.time()
-            logger.warning(
-                "[LOOP-LAG] ENTERING DEGRADED MODE — lag %.1fms, reducing scope",
-                lag_ms
-            )
+        """Trigger degraded lag callbacks (scope reduction).
+        
+        OLD-HARDWARE FIX: Require consecutive breaches before entering degraded mode.
+        Single spikes are logged as warnings but don't change operating mode.
+        """
+        self._degraded_consecutive_count += 1
+        
+        # Only enter degraded mode after consecutive breaches
+        if self._degraded_consecutive_count >= self._degraded_max_consecutive:
+            if not self._degraded_mode_active:
+                self._degraded_mode_active = True
+                logger.warning(
+                    "[LOOP-LAG] ENTERING DEGRADED MODE — lag %.1fms after %d consecutive breaches, reducing scope",
+                    lag_ms, self._degraded_consecutive_count
+                )
+            
+            if not self._scope_reduced and self._check_rate_limit():
+                self._scope_reduced = True
+                self._scope_reduced_at = time.time()
+        else:
+            # STARTUP-FIX: Classify isolated spikes as INFO, not WARNING
+            # Degraded mode requires 5 consecutive breaches - single spikes are expected
+            # DISABLED: User requested removal of LOOP-LAG logging
+            # logger.info(
+            #     "[LOOP-LAG] Elevated lag %.1fms (breach %d/%d for degraded mode)",
+            #     lag_ms, self._degraded_consecutive_count, self._degraded_max_consecutive
+            # )
+            pass  # No action for isolated spikes
 
         for cb in self._on_degraded_callbacks:
             try:
@@ -281,65 +318,88 @@ class LoopLagMonitor:
                 logger.debug(f"Degraded callback error: {e}")
 
     def _trigger_halt(self, lag_ms: float) -> None:
-        """Trigger halt-band callbacks (consider shutdown).
+        """Trigger halt-band callbacks.
 
-        Returns True if shutdown should proceed, False otherwise.
+        OLD-HARDWARE POLICY: Never shutdown automatically due to loop lag.
+        Only manual kill-switch or fatal structural errors trigger shutdown.
         """
         self._halt_consecutive_count += 1
 
-        # Always call callbacks to allow custom handling
-        should_shutdown: Optional[bool] = None
+        # Always call callbacks to allow custom handling (e.g., metrics, alerts)
         for cb in self._on_halt_callbacks:
             try:
-                result = cb(lag_ms, self._halt_consecutive_count)
-                if result is not None:
-                    should_shutdown = result
+                # Callbacks can return False to suppress default logging
+                cb(lag_ms, self._halt_consecutive_count)
             except Exception as e:
                 logger.debug(f"Halt callback error: {e}")
 
-        # If callbacks explicitly said don't shutdown, respect that
-        if should_shutdown is False:
-            logger.warning(
-                "[LOOP-LAG] HALT BAND (%.1fms, count=%d) — callbacks suppressed shutdown",
-                lag_ms, self._halt_consecutive_count
-            )
-            return
-
-        # INFINITE ERROR BUDGET: Shutdown disabled for 24/7 operation
-        # System will log warnings but never shutdown due to event-loop lag
+        # OLD-HARDWARE: Log only - never trigger automatic shutdown
         if self._halt_consecutive_count >= self._halt_max_consecutive:
             logger.critical(
-                "[LOOP-LAG] HALT BAND CRITICAL — lag %.1fms for %d consecutive samples "
-                "(max=%d). CONTINUING OPERATION (infinite error budget - no shutdown).",
-                lag_ms, self._halt_consecutive_count, self._halt_max_consecutive
-            )
-            # Reset counter to prevent log spam, but keep running
-            self._halt_consecutive_count = 0
-        else:
-            logger.warning(
-                "[LOOP-LAG] HALT BAND (%.1fms, count=%d/%d) — continuing operation",
-                lag_ms, self._halt_consecutive_count, self._halt_max_consecutive
-            )
-
-    def _reset_state_on_recovery(self, lag_ms: float) -> None:
-        """Reset state when lag recovers to healthy levels."""
-        if self._halt_consecutive_count > 0:
-            logger.info(
-                "[LOOP-LAG] Lag recovered to %.1fms, resetting halt counter (was %d)",
+                "[LOOP-LAG] HALT BAND SUSTAINED — lag %.1fms for %d consecutive samples. "
+                "CONTINUING OPERATION (no auto-shutdown policy). Consider manual review.",
                 lag_ms, self._halt_consecutive_count
             )
-            self._halt_consecutive_count = 0
+            # Reset counter to prevent log spam, but stay in halt band
+            self._halt_consecutive_count = self._halt_max_consecutive // 2
+        else:
+            # STARTUP-FIX: Classify isolated halt-band spikes as INFO
+            # Sustained halt requires 10 consecutive breaches
+            # DISABLED: User requested removal of LOOP-LAG logging
+            # logger.info(
+            #     "[LOOP-LAG] HALT BAND (%.1fms, count=%d/%d) — continuing operation",
+            #     lag_ms, self._halt_consecutive_count, self._halt_max_consecutive
+            # )
+            pass  # Continue operation despite lag
 
-        if self._scope_reduced and self._scope_reduced_at:
-            # Only restore after sustained recovery
-            recovery_duration = time.time() - self._scope_reduced_at
-            if recovery_duration > 30.0:  # 30s of recovery before restoring scope
-                logger.info(
-                    "[LOOP-LAG] Scope restoration after %.1fs recovery",
-                    recovery_duration
-                )
+    def _reset_state_on_recovery(self, lag_ms: float, healthy_threshold: float) -> None:
+        """Reset state when lag recovers to healthy levels.
+        
+        OLD-HARDWARE FIX: Recovery requires sustained healthy period (45s default).
+        This prevents oscillation between degraded and normal modes.
+        """
+        now = time.time()
+        
+        # Track when we first dropped below warning threshold
+        if self._last_healthy_ts is None:
+            self._last_healthy_ts = now
+        
+        # Check if we've been healthy long enough to reset
+        healthy_duration = now - self._last_healthy_ts
+        
+        if healthy_duration >= self._recovery_window_s:
+            # Reset all breach counters after sustained recovery
+            if self._halt_consecutive_count > 0 or self._degraded_consecutive_count > 0:
+                # DISABLED: User requested removal of LOOP-LAG logging
+                # logger.info(
+                #     "[LOOP-LAG] Lag recovered to %.1fms after %.0fs sustained healthy period. "
+                #     "Resetting breach counters (halt was %d, degraded was %d)",
+                #     lag_ms, healthy_duration, self._halt_consecutive_count, self._degraded_consecutive_count
+                # )
+                self._halt_consecutive_count = 0
+                self._degraded_consecutive_count = 0
+                self._degraded_mode_active = False
+            
+            # Restore scope after recovery
+            if self._scope_reduced and self._scope_reduced_at:
+                recovery_duration = now - self._scope_reduced_at
+                # DISABLED: User requested removal of LOOP-LAG logging
+                # logger.info(
+                #     "[LOOP-LAG] Scope restoration after %.1fs recovery (%.0fs healthy)",
+                #     recovery_duration, healthy_duration
+                # )
                 self._scope_reduced = False
                 self._scope_reduced_at = None
+        else:
+            # Still in recovery window - don't reset yet
+            if self._degraded_mode_active or self._halt_consecutive_count > 0:
+                # DISABLED: User requested removal of LOOP-LAG logging
+                # logger.debug(
+                #     "[LOOP-LAG] Recovery in progress: %.0f/%.0fs healthy, lag=%.1fms",
+                #     healthy_duration, self._recovery_window_s, lag_ms
+                # )
+                # No action needed - just checking state
+                pass
 
     async def _monitor_loop(self) -> None:
         """Main monitoring loop with progressive load shedding.
@@ -379,23 +439,32 @@ class LoopLagMonitor:
                 tasks = self._capture_task_snapshot()
                 self._record_high_lag_profile(lag_ms, tasks)
 
-            # EVENT-LOOP-FIX: Progressive action based on lag band
+            # OLD-HARDWARE-FIX: Progressive action based on lag band with recovery tracking
             if lag_ms >= halt_ms:
                 self._trigger_halt(lag_ms)
+                self._last_healthy_ts = None  # Reset recovery timer
             elif lag_ms >= d_ms:
                 self._trigger_degraded(lag_ms)
-                self._reset_state_on_recovery(lag_ms)
+                self._last_healthy_ts = None  # Reset recovery timer
             elif lag_ms >= h_ok:
                 self._trigger_elevated(lag_ms)
-                self._reset_state_on_recovery(lag_ms)
+                self._last_healthy_ts = None  # Reset recovery timer
             else:
-                # Healthy - reset any elevated state
-                self._reset_state_on_recovery(lag_ms)
+                # Healthy - track recovery and reset elevated state after sustained period
+                self._reset_state_on_recovery(lag_ms, h_ok)
     
     def get_stats(self) -> LoopLagStats:
         """Get current lag statistics."""
         return self._stats
     
+    @property
+    def is_degraded(self) -> bool:
+        """Return True if monitor is in degraded mode (sustained high lag).
+
+        Used by SessionGuard to block new order placement during loop lag.
+        """
+        return self._degraded_mode_active
+
     def get_health(self) -> Dict[str, Any]:
         """Get health status for monitoring endpoints.
 
@@ -422,11 +491,15 @@ class LoopLagMonitor:
             "degraded": degraded,
             "critical": critical,
             "high_lag_profiles": len(self._high_lag_profiles),
-            # EVENT-LOOP-FIX: Load shedding state
+            # OLD-HARDWARE-FIX: Extended load shedding state
             "scope_reduced": self._scope_reduced,
             "scope_reduced_at": self._scope_reduced_at,
+            "degraded_mode_active": self._degraded_mode_active,
+            "degraded_consecutive_count": self._degraded_consecutive_count,
+            "degraded_max_consecutive": self._degraded_max_consecutive,
             "halt_consecutive_count": self._halt_consecutive_count,
             "halt_max_consecutive": self._halt_max_consecutive,
+            "recovery_window_s": self._recovery_window_s,
         }
         return health
 

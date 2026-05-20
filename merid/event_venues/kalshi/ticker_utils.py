@@ -5,7 +5,7 @@ to ensure they match Kalshi's canonical format and prevent 404 errors from inval
 """
 
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List, Set, Tuple
 from dataclasses import dataclass
 import logging
@@ -76,7 +76,7 @@ class KalshiTickerCache:
                     self._cache[asset] = {}
                 self._cache[asset][ticker] = market_id
         
-        self._last_update = datetime.utcnow()
+        self._last_update = datetime.now(timezone.utc)
         logger.info(f"[KALSHI_TICKER_CACHE] Updated with {len(markets)} markets, "
                    f"{sum(len(t) for t in self._cache.values())} valid tickers")
     
@@ -84,7 +84,7 @@ class KalshiTickerCache:
         """Check if cache needs refresh based on TTL."""
         if not self._last_update:
             return True
-        age = datetime.utcnow() - self._last_update
+        age = datetime.now(timezone.utc) - self._last_update
         return age > timedelta(minutes=self._cache_ttl_minutes)
     
     def get_cached_tickers(self, asset: Optional[str] = None) -> Set[str]:
@@ -298,7 +298,7 @@ def floor_time_to_15m(dt: datetime) -> datetime:
 
 def get_current_15m_window() -> datetime:
     """Get the current 15-minute window start time (floored)."""
-    return floor_time_to_15m(datetime.utcnow())
+    return floor_time_to_15m(datetime.now(timezone.utc))
 
 
 def format_ticker_for_15m_window(asset: str, window_time: datetime) -> str:
@@ -327,3 +327,61 @@ def format_ticker_for_15m_window(asset: str, window_time: datetime) -> str:
     minute = floored.minute
     
     return f"KX{asset.upper()}15M-{day:02d}{month}{year_short}{hour:02d}{minute:02d}"
+
+
+def normalize_ticker_for_order(ticker: str) -> str:
+    """Normalize a ticker for order submission by stripping strike suffix.
+    
+    CRITICAL FIX (2026-05-01): Kalshi market tickers can include strike price
+    suffixes like -30, -T80199.99, or -B80150. The order API expects the base
+    market ticker without these suffixes.
+    
+    Examples:
+        "KXETH15M-26MAY011530-30" -> "KXETH15M-26MAY011530"
+        "KXBTC-26MAR2501-T80199.99" -> "KXBTC-26MAR2501"
+        "KXBTC15M-26MAR251500" -> "KXBTC15M-26MAR251500" (no change)
+    
+    Args:
+        ticker: The raw ticker string from market discovery
+        
+    Returns:
+        Normalized ticker suitable for order submission
+    """
+    if not ticker:
+        return ticker
+    
+    # Pattern 1: Strip numeric-only suffix after time (e.g., -30, -45)
+    # Matches: KXETH15M-26MAY011530-30 -> KXETH15M-26MAY011530
+    #          KXETH15M-26MAY2025011530-30 -> KXETH15M-26MAY2025011530 (4-digit year)
+    # This is the most common case for 15m markets
+    # Handle both 2-digit year (0600 = 6 digits) and 4-digit year (20250600 = 8 digits)
+    numeric_suffix_pattern = r'^(KX[A-Z]+\d{2}[A-Z]{3}\d{6,8})-\d+$'
+    match = re.match(numeric_suffix_pattern, ticker.upper())
+    if match:
+        normalized = match.group(1)
+        if normalized != ticker:
+            logger.debug(f"[TICKER_NORMALIZE] Stripped numeric suffix: {ticker} -> {normalized}")
+        return normalized
+    
+    # Pattern 2: Strip threshold strike suffix (e.g., -T80199.99)
+    # Matches: KXBTC-26MAR2501-T80199.99 -> KXBTC-26MAR2501
+    threshold_pattern = r'^(KX[A-Z]+(?:\d{2}[A-Z]{3}\d{2,4})?)-T\d+(?:\.\d+)?$'
+    match = re.match(threshold_pattern, ticker.upper())
+    if match:
+        normalized = match.group(1)
+        if normalized != ticker:
+            logger.debug(f"[TICKER_NORMALIZE] Stripped threshold suffix: {ticker} -> {normalized}")
+        return normalized
+    
+    # Pattern 3: Strip bracket strike suffix (e.g., -B80150)
+    # Matches: KXBTC-26MAR2501-B80150 -> KXBTC-26MAR2501
+    bracket_pattern = r'^(KX[A-Z]+(?:\d{2}[A-Z]{3}\d{2,4})?)-B\d+(?:\.\d+)?$'
+    match = re.match(bracket_pattern, ticker.upper())
+    if match:
+        normalized = match.group(1)
+        if normalized != ticker:
+            logger.debug(f"[TICKER_NORMALIZE] Stripped bracket suffix: {ticker} -> {normalized}")
+        return normalized
+    
+    # No patterns matched - return original ticker
+    return ticker

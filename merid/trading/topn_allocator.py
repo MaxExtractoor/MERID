@@ -2,15 +2,15 @@
 Top-N Edge Allocator — Production Implementation with Fixed Fractional Risk
 
 Implements the cross-agent "Top-N Edge Selector & Allocator" that:
-1. Selects top N edges across 5 assets (BTC, ETH, SOL, XRP, DOGE) with N dynamically determined
-2. Allocates at most 1-2% of bankroll in TOTAL across all new positions per cycle (fixed fractional)
-3. Dynamically steps down N (3→2→1→0) based on affordability and risk constraints
-4. Sizes positions by max loss per trade, respecting stop distances
-5. Enforces min contracts and notional constraints
+1. Selects top 3 edges across 5 assets (BTC, ETH, SOL, XRP, DOGE) on 15m timeframe
+2. Allocates MAX_CYCLE_RISK_PCT (3% default) of bankroll in TOTAL across all new positions per cycle
+   - Unified risk for all modes from core.settings (SINGLE SOURCE OF TRUTH)
+3. Sizes positions by max loss per trade, respecting stop distances
+4. Enforces min contracts and notional constraints
 
 Key invariants:
-- len(selected_assets) ∈ {0, 1, 2, 3} determined by affordability
-- sum(max_loss_usd for selected) ≤ cycle_risk_usd (hard cap)
+- len(selected_assets) ∈ {0, 1, 2, 3} - top 3 edges maximum
+- sum(max_loss_usd for selected) ≤ cycle_risk_usd (hard cap = MAX_CYCLE_RISK_PCT of bankroll)
 - Each trade ≥ min_contracts and ≥ min_notional_usd
 - All trades route through this allocator (no bypasses)
 
@@ -44,8 +44,8 @@ class TopNAllocatorConfig:
     All percentage fields are in decimal form (e.g., 0.01 = 1%).
     """
     # Risk budget per cycle (fixed fractional)
-    min_cycle_risk_pct: float = 0.01  # 1% minimum
-    max_cycle_risk_pct: float = 0.02  # 2% maximum
+    min_cycle_risk_pct: float = 0.01  # 1.0% minimum cycle risk
+    max_cycle_risk_pct: float = 0.03  # 3% maximum (increased from 2%)
     
     # Dynamic N limits
     max_edges_per_cycle: int = 3
@@ -66,33 +66,57 @@ class TopNAllocatorConfig:
     
     @classmethod
     def from_env(cls) -> "TopNAllocatorConfig":
-        """Load configuration from environment variables."""
+        """Load configuration from environment variables and core.settings.
+        
+        UNIFIED RISK REGIME: Risk settings come from both .env and core.settings.
+        TOPN_MAX_EDGES from .env controls the top-N limit (default 3 for risk management).
+        MAX_CYCLE_RISK_PCT from core.settings controls the cycle risk budget.
+        TOPN_DEFAULT_STOP_DISTANCE_PCT from .env controls default stop distance.
+        """
+        try:
+            from core.settings import MAX_CYCLE_RISK_PCT
+            cycle_pct = float(MAX_CYCLE_RISK_PCT)
+            logger.info(
+                "[TOPN_ALLOCATOR] MAX_CYCLE_RISK_PCT loaded: %.4f (%.2f%%)",
+                cycle_pct,
+                cycle_pct * 100
+            )
+        except Exception:
+            cycle_pct = 0.03  # Fallback to 3%
+            logger.warning("[TOPN_ALLOCATOR] Failed to load MAX_CYCLE_RISK_PCT, using fallback: 3%")
+        
+        # Read TOPN_MAX_EDGES from environment (default 3 for risk management)
+        max_edges = int(os.getenv("TOPN_MAX_EDGES", "3"))
+        
+        # Read individual overrides if set
+        min_cycle_risk_pct = float(os.getenv("TOPN_MIN_CYCLE_RISK_PCT", str(cycle_pct * 0.5)))
+        min_contracts = int(os.getenv("TOPN_MIN_CONTRACTS", "1"))
+        default_stop_distance_pct = float(os.getenv("TOPN_DEFAULT_STOP_DISTANCE_PCT", "0.02"))
+        
         return cls(
-            min_cycle_risk_pct=float(os.getenv("TOPN_MIN_CYCLE_RISK_PCT", "0.01")),
-            max_cycle_risk_pct=float(os.getenv("TOPN_MAX_CYCLE_RISK_PCT", "0.02")),
-            max_edges_per_cycle=int(os.getenv("TOPN_MAX_EDGES", "3")),
-            min_edges_per_cycle=int(os.getenv("TOPN_MIN_EDGES", "0")),
-            min_contracts=int(os.getenv("TOPN_MIN_CONTRACTS", "1")),
-            min_notional_usd=float(os.getenv("TOPN_MIN_NOTIONAL_USD", "1.00")),
-            edge_epsilon=float(os.getenv("TOPN_EDGE_EPSILON", "1e-6")),
-            default_stop_distance_pct=float(os.getenv("TOPN_DEFAULT_STOP_PCT", "0.02")),
+            min_cycle_risk_pct=min_cycle_risk_pct,
+            max_cycle_risk_pct=cycle_pct,  # Use unified MAX_CYCLE_RISK_PCT
+            max_edges_per_cycle=max_edges,  # Read from TOPN_MAX_EDGES env var
+            min_edges_per_cycle=0,
+            min_contracts=min_contracts,
+            min_notional_usd=0.50,  # Reduced from $1.00 to $0.50 for small bankrolls
+            edge_epsilon=1e-6,
+            default_stop_distance_pct=default_stop_distance_pct,
         )
     
     @classmethod
-    def from_yaml(cls, config_dict: Dict[str, Any]) -> "TopNAllocatorConfig":
-        """Load configuration from YAML dict."""
+    def from_yaml(cls, config_dict: dict) -> "TopNAllocatorConfig":
+        """Load configuration from YAML dictionary."""
         return cls(
-            min_cycle_risk_pct=config_dict.get("min_cycle_risk_pct", 0.01),
-            max_cycle_risk_pct=config_dict.get("max_cycle_risk_pct", 0.02),
-            max_edges_per_cycle=config_dict.get("max_edges_per_cycle", 3),
-            min_edges_per_cycle=config_dict.get("min_edges_per_cycle", 0),
-            min_contracts=config_dict.get("min_contracts", 1),
-            min_notional_usd=config_dict.get("min_notional_usd", 1.00),
-            edge_epsilon=config_dict.get("edge_epsilon", 1e-6),
-            default_stop_distance_pct=config_dict.get("default_stop_distance_pct", 0.02),
+            min_cycle_risk_pct=config_dict.get("min_cycle_risk_pct", cls.min_cycle_risk_pct),
+            max_cycle_risk_pct=config_dict.get("max_cycle_risk_pct", cls.max_cycle_risk_pct),
+            max_edges_per_cycle=config_dict.get("max_edges_per_cycle", cls.max_edges_per_cycle),
+            min_edges_per_cycle=config_dict.get("min_edges_per_cycle", cls.min_edges_per_cycle),
+            min_contracts=config_dict.get("min_contracts", cls.min_contracts),
+            min_notional_usd=config_dict.get("min_notional_usd", cls.min_notional_usd),
+            edge_epsilon=config_dict.get("edge_epsilon", cls.edge_epsilon),
+            default_stop_distance_pct=config_dict.get("default_stop_distance_pct", cls.default_stop_distance_pct),
         )
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Data Models
 # ═══════════════════════════════════════════════════════════════════════════
@@ -252,10 +276,12 @@ class AllocationCycle:
             )
         
         # Invariant 2: sum_risk_usd <= cycle_risk_usd
-        if self.sum_risk_usd > self.cycle_risk_usd + 0.01:  # Small tolerance for float
+        # BUG-TNA8 FIX: Use percentage-based tolerance instead of absolute for small bankrolls
+        tolerance = max(0.01, self.cycle_risk_usd * 0.01)  # 1% of budget or $0.01 minimum
+        if self.sum_risk_usd > self.cycle_risk_usd + tolerance:
             violations.append(
                 f"INVARIANT_VIOLATION: sum_risk_usd ({self.sum_risk_usd:.2f}) > "
-                f"cycle_risk_usd ({self.cycle_risk_usd:.2f})"
+                f"cycle_risk_usd ({self.cycle_risk_usd:.2f}) + tolerance ({tolerance:.2f})"
             )
         
         # Invariant 3: Each allocation respects min_contracts
@@ -327,7 +353,8 @@ def select_topn_allocations(
                             min(cycle_risk_pct, config.max_cycle_risk_pct))
 
     # Edge #1 gets MINIMUM 1% risk budget (non-negotiable if valid)
-    edge1_min_risk_pct = config.min_cycle_risk_pct  # 1%
+    # BUG-TNA10 FIX: Ensure min_cycle_risk_pct is at least 0.01 (1%) to prevent zero budget
+    edge1_min_risk_pct = max(config.min_cycle_risk_pct, 0.01)  # Minimum 1%
     total_cycle_risk_cents = int(equity_cents * cycle_risk_pct)
     edge1_budget_cents = int(equity_cents * edge1_min_risk_pct)
 
@@ -486,6 +513,46 @@ def _allocate_single_candidate(
     # Calculate contracts that fit within risk budget
     target_contracts = budget_cents // max_loss_per_contract
 
+    # ═══════════════════════════════════════════════════════════════════
+    # BETA NORMALIZATION: Adjust position size based on asset volatility
+    # Uses DYNAMIC BETA from BTC-anchored model when available,
+    # falling back to static beta from config.
+    # ═══════════════════════════════════════════════════════════════════
+    try:
+        # Try dynamic beta first (real-time from price action)
+        from merid.signals.btc_anchored_move import get_dynamic_beta
+        _beta = get_dynamic_beta(
+            candidate.asset,
+            timeframe=candidate.metadata.get("timeframe", "15m"),
+            min_observations=20,
+            fallback_to_static=True,
+        )
+        _beta_source = "dynamic"
+
+        # Get volatility adjustment from static config
+        from merid.signals.asset_configs import get_asset_config
+        _asset_cfg = get_asset_config(candidate.asset)
+        _vol_adj = _asset_cfg.vol_size_adjustment
+
+        # Apply beta scaling: higher beta = fewer contracts
+        # Use inverse of beta, capped at 2x reduction for very high beta assets
+        _beta_scale = min(1.0, 1.0 / max(_beta, 0.5))  # Cap at 0.5x for beta >= 2.0
+        _target_before = target_contracts
+        target_contracts = max(1, int(target_contracts * _beta_scale * _vol_adj))
+
+        if _target_before != target_contracts:
+            logger.info(
+                "[BETA-NORM] %s: contracts %d -> %d (beta=%.2f %s, vol_adj=%.2f, scale=%.2f)",
+                candidate.asset, _target_before, target_contracts, _beta,
+                _beta_source, _vol_adj, _beta_scale
+            )
+    except Exception as _beta_exc:
+        # BUG-TNA4 FIX: Log at warning level instead of debug to catch silent failures
+        logger.warning(
+            "[BETA-NORM] %s: beta normalization failed (error=%s), using unadjusted contracts",
+            candidate.asset, _beta_exc
+        )
+
     # Check min contracts constraint
     if target_contracts < config.min_contracts:
         logger.debug(
@@ -545,13 +612,32 @@ def _filter_valid_candidates(
     candidates: List[EdgeCandidate],
     config: TopNAllocatorConfig,
 ) -> List[EdgeCandidate]:
-    """Filter out invalid candidates."""
+    """Filter out invalid candidates.
+    
+    BUG-TNA9: Zero/near-zero edges are handled here by checking edge > min_edge_threshold.
+    This ensures only edges with meaningful expected value proceed to ranking.
+    """
     valid = []
     
     for c in candidates:
-        # Check edge > 0
-        if c.edge <= 0:
-            logger.debug("[TOPN-FILTER] %s: edge=%.4f <= 0", c.asset, c.edge)
+        # ═══════════════════════════════════════════════════════════════════
+        # ASSET-SPECIFIC EDGE THRESHOLDS (Task 6)
+        # High-noise assets (DOGE, SOL) need higher edge bars than BTC
+        # ═══════════════════════════════════════════════════════════════════
+        try:
+            from merid.signals.asset_configs import get_asset_config
+            asset_cfg = get_asset_config(c.asset)
+            min_edge_threshold = asset_cfg.min_edge_threshold  # e.g., 0.060 for DOGE (conservative)
+        except Exception:
+            min_edge_threshold = 0.050  # CONSERVATIVE: 5.0% default fallback
+
+        # Check edge meets asset-specific threshold
+        # BUG-TNA9: This ensures zero/near-zero edges are filtered before ranking
+        if c.edge <= 0 or c.edge < min_edge_threshold:
+            logger.debug(
+                "[TOPN-FILTER] %s: edge=%.4f below threshold=%.4f",
+                c.asset, c.edge, min_edge_threshold
+            )
             continue
         
         # Check valid asset
@@ -578,156 +664,6 @@ def _filter_valid_candidates(
         valid.append(c)
     
     return valid
-
-
-def _allocate_to_candidates(
-    candidates: List[EdgeCandidate],
-    total_risk_cents: int,
-    config: TopNAllocatorConfig,
-) -> Optional[List[TradeAllocation]]:
-    """Allocate risk budget to candidates with proportional sizing.
-    
-    Args:
-        candidates: Top N candidates (already sorted)
-        total_risk_cents: Total risk budget in cents
-        config: Configuration
-        
-    Returns:
-        List of TradeAllocation if valid, None if constraints violated
-    """
-    n = len(candidates)
-    if n == 0:
-        return []
-    
-    # Compute edge weights (handle ties)
-    edges = [c.edge for c in candidates]
-    edge_sum = sum(edges)
-    
-    if edge_sum <= 0:
-        return None
-    
-    # Check for ties (edges within epsilon)
-    max_edge = max(edges)
-    min_edge = min(edges)
-    edges_equal = (max_edge - min_edge) < config.edge_epsilon
-    
-    # Compute risk budget per candidate
-    risk_budgets_cents: List[int] = []
-    
-    if edges_equal:
-        # Equal split among tied edges
-        base_budget = total_risk_cents // n
-        remainder = total_risk_cents - (base_budget * n)
-        
-        for i in range(n):
-            # Distribute remainder to first candidates
-            extra = 1 if i < remainder else 0
-            risk_budgets_cents.append(base_budget + extra)
-    else:
-        # Proportional by edge
-        remaining_budget = total_risk_cents
-        
-        for i, c in enumerate(candidates):
-            is_last = (i == n - 1)
-            
-            if is_last:
-                # Last gets remainder
-                budget_i = remaining_budget
-            else:
-                # Weighted allocation
-                weight = c.edge / edge_sum
-                budget_i = int(total_risk_cents * weight)
-            
-            risk_budgets_cents.append(budget_i)
-            remaining_budget -= budget_i
-    
-    # Build allocations
-    allocations: List[TradeAllocation] = []
-    
-    for i, c in enumerate(candidates):
-        risk_budget_cents = risk_budgets_cents[i]
-        
-        # Compute contracts based on max loss per contract
-        max_loss_per_contract = c.compute_max_loss_per_contract()
-        
-        if max_loss_per_contract <= 0:
-            logger.debug("[TOPN-ALLOC] %s: max_loss_per_contract <= 0", c.asset)
-            return None  # Constraint violated
-        
-        # Calculate contracts that fit within risk budget
-        target_contracts = risk_budget_cents // max_loss_per_contract
-        
-        # Check min contracts constraint
-        if target_contracts < config.min_contracts:
-            logger.debug(
-                "[TOPN-ALLOC] %s: target_contracts (%d) < min_contracts (%d)",
-                c.asset, target_contracts, config.min_contracts
-            )
-            return None  # Constraint violated
-        
-        # Check min notional constraint
-        notional_cents = target_contracts * c.entry_price_cents
-        min_notional_cents = int(config.min_notional_usd * 100)
-        if notional_cents < min_notional_cents and target_contracts > 0:
-            logger.debug(
-                "[TOPN-ALLOC] %s: notional ($%.2f) < min_notional ($%.2f)",
-                c.asset, notional_cents / 100, config.min_notional_usd
-            )
-            return None  # Constraint violated
-        
-        # Compute actual max loss with integer contracts
-        actual_max_loss_cents = target_contracts * max_loss_per_contract
-        
-        # Check per-asset notional cap
-        if notional_cents > c.max_notional_cap:
-            # Cap the contracts to respect max_notional_cap
-            max_contracts_by_cap = c.max_notional_cap // c.entry_price_cents
-            target_contracts = min(target_contracts, max_contracts_by_cap)
-            actual_max_loss_cents = target_contracts * max_loss_per_contract
-            logger.debug(
-                "[TOPN-ALLOC] %s: capped by max_notional | contracts: %d -> %d",
-                c.asset, target_contracts, max_contracts_by_cap
-            )
-            
-            # Re-check min contracts after capping
-            if target_contracts < config.min_contracts:
-                return None
-        
-        # Compute weight
-        weight = 1.0 / n if edges_equal else c.edge / edge_sum
-        
-        allocations.append(TradeAllocation(
-            asset=c.asset,
-            edge=c.edge,
-            direction=c.direction,
-            target_contracts=target_contracts,
-            entry_price_cents=c.entry_price_cents,
-            stop_price_cents=c.stop_price_cents,
-            max_loss_usd=actual_max_loss_cents / 100,
-            weight=weight,
-            risk_budget_usd=risk_budget_cents / 100,
-            metadata=c.metadata,
-        ))
-    
-    # Final validation: sum of risk must be within budget
-    sum_risk_cents = sum(int(a.max_loss_usd * 100) for a in allocations)
-    
-    if sum_risk_cents > total_risk_cents:
-        # Shrink largest allocations to fit budget
-        excess = sum_risk_cents - total_risk_cents
-        allocations = _shrink_allocations_to_fit(allocations, excess)
-        
-        # Re-check after shrinking
-        sum_risk_cents = sum(int(a.max_loss_usd * 100) for a in allocations)
-        if sum_risk_cents > total_risk_cents:
-            return None  # Still doesn't fit
-    
-    # Check all allocations have min contracts
-    for a in allocations:
-        if a.target_contracts < config.min_contracts:
-            return None
-    
-    return allocations
 
 
 def _shrink_allocations_to_fit(
@@ -773,6 +709,17 @@ def _shrink_allocations_to_fit(
         reduced_by = current_loss_cents - new_max_loss_cents
         remaining_excess -= reduced_by
         
+        # BUG-TNA7 FIX: Re-check min notional after shrinking
+        new_notional_cents = new_contracts * a.entry_price_cents
+        min_notional_cents = int(1.00 * 100)  # $1.00 min notional
+        if new_notional_cents < min_notional_cents and new_contracts > 0:
+            logger.debug(
+                "[SHRINK] %s: notional after shrink ($%.2f) < min_notional ($%.2f), keeping original",
+                a.asset, new_notional_cents / 100, 1.00
+            )
+            adjusted.append(a)  # Keep original allocation
+            continue
+        
         # Create adjusted allocation
         adjusted.append(TradeAllocation(
             asset=a.asset,
@@ -807,6 +754,7 @@ class GlobalRiskManager:
     def __init__(self):
         self._daily_loss_usd: float = 0.0
         self._max_daily_loss_usd: float = float(os.getenv("MAX_DAILY_LOSS_USD", "100.0"))
+        self._max_daily_loss_pct: float = float(os.getenv("MAX_DAILY_LOSS_PCT", "0.10"))  # 10%
         self._max_open_risk_pct: float = float(os.getenv("MAX_OPEN_RISK_PCT", "0.10"))  # 10%
     
     def can_open_batch(
@@ -825,11 +773,12 @@ class GlobalRiskManager:
         Returns:
             (allowed, reason) tuple
         """
-        # Check daily loss limit
-        if self._daily_loss_usd >= self._max_daily_loss_usd:
-            return False, f"Daily loss limit reached: ${self._daily_loss_usd:.2f}"
+        # Check daily loss limit (using percentage from core.settings)
+        max_daily_loss_usd = (current_equity_cents / 100) * self._max_daily_loss_pct
+        if self._daily_loss_usd >= max_daily_loss_usd:
+            return False, f"Daily loss limit reached: ${self._daily_loss_usd:.2f} (max=${max_daily_loss_usd:.2f})"
         
-        # Check max open risk
+        # Check max open risk (using percentage from core.settings)
         proposed_risk_usd = sum(a.max_loss_usd for a in proposed_allocations)
         total_open_risk_usd = current_open_risk_usd + proposed_risk_usd
         max_open_risk_usd = (current_equity_cents / 100) * self._max_open_risk_pct
@@ -840,14 +789,22 @@ class GlobalRiskManager:
                 f"current=${current_open_risk_usd:.2f} > max=${max_open_risk_usd:.2f}"
             )
         
-        return True, ""
+        return True, "Batch allowed"
     
     def record_loss(self, loss_usd: float) -> None:
-        """Record a loss for daily tracking."""
+        """Record a loss for daily tracking.
+        
+        BUG-TNA6: This duplicates daily loss tracking in other systems (fills_ledger, KalshiRiskManager).
+        Consider removing this and using the canonical source.
+        """
         self._daily_loss_usd += loss_usd
     
     def reset_daily_loss(self) -> None:
-        """Reset daily loss (call at start of trading day)."""
+        """Reset daily loss (call at start of trading day).
+        
+        BUG-TNA6: This duplicates daily loss tracking in other systems (fills_ledger, KalshiRiskManager).
+        Consider removing this and using the canonical source.
+        """
         self._daily_loss_usd = 0.0
 
 
@@ -923,80 +880,94 @@ class TopNEdgeAllocator:
         Returns:
             AllocationCycle with allocations and metadata
         """
+        # PERF-OPTIMIZATION: Minimize lock contention by doing expensive work outside lock
+        # Phase 1: Handle invalid equity (potentially slow bankroll derivation) - OUTSIDE LOCK
+        if equity_cents <= 0:
+            logger.warning("[TOPN] Invalid equity: %d cents, attempting live bankroll derivation", equity_cents)
+            # Try to derive live bankroll from Kalshi API
+            try:
+                from merid.event_venues.kalshi.order_router import _derive_live_bankroll_usd
+                _live = _derive_live_bankroll_usd()
+                if _live is not None and _live > 0:
+                    equity_cents = int(_live * 100)
+                    logger.info("[TOPN] Recovered with live bankroll: %d cents", equity_cents)
+                else:
+                    # FAIL CLOSED: Cannot get live bankroll
+                    logger.error("[TOPN] Cannot determine live Kalshi balance. Rejecting cycle.")
+                    # Quick update to rejected counter - minimal lock time
+                    with self._lock:
+                        self._rejected_cycles += 1
+                    return self._create_empty_cycle(0, candidates)
+            except Exception as _e:
+                # FAIL CLOSED: Cannot get live bankroll
+                # BUG-TNA5 FIX: Log specific exception type for better diagnostics
+                import traceback
+                logger.error(
+                    "[TOPN] Failed to get live bankroll: %s. Rejecting cycle. Traceback: %s",
+                    _e, traceback.format_exc()
+                )
+                # Quick update to rejected counter - minimal lock time
+                with self._lock:
+                    self._rejected_cycles += 1
+                return self._create_empty_cycle(0, candidates)
+
+        if not candidates:
+            logger.debug("[TOPN] No candidates provided")
+            return self._create_empty_cycle(equity_cents, candidates)
+
+        # Phase 2: Compute allocations - OUTSIDE LOCK (pure computation, no shared state)
+        cycle = select_topn_allocations(
+            equity_cents=equity_cents,
+            candidates=candidates,
+            config=self.config,
+            cycle_risk_pct=cycle_risk_pct,
+        )
+
+        # Phase 3: Global risk check - OUTSIDE LOCK (uses external risk manager)
+        if cycle.allocations:
+            allowed, reason = self._global_risk.can_open_batch(
+                cycle.allocations, equity_cents, current_open_risk_usd
+            )
+
+            if not allowed:
+                logger.warning("[TOPN] Global risk rejected batch: %s", reason)
+                # Quick update to rejected counter - minimal lock time
+                with self._lock:
+                    self._rejected_cycles += 1
+                # Return empty cycle with same metadata
+                return AllocationCycle(
+                    cycle_id=cycle.cycle_id,
+                    cycle_ts=cycle.cycle_ts,
+                    equity_cents=equity_cents,
+                    cycle_risk_pct=cycle.cycle_risk_pct,
+                    cycle_risk_usd=cycle.cycle_risk_usd,
+                    num_candidates=len(candidates),
+                    num_edges_traded=0,
+                    sum_risk_usd=0.0,
+                    allocations=[],
+                    config=self.config,
+                )
+
+        # Phase 4: Update shared state - INSIDE LOCK (minimal critical section)
         with self._lock:
             self._cycle_count += 1
-            
-            if equity_cents <= 0:
-                logger.warning("[TOPN] Invalid equity: %d cents, attempting live bankroll derivation", equity_cents)
-                # Try to derive live bankroll from Kalshi API
-                try:
-                    from merid.event_venues.kalshi.order_router import _derive_live_bankroll_usd
-                    _live = _derive_live_bankroll_usd()
-                    if _live is not None and _live > 0:
-                        equity_cents = int(_live * 100)
-                        logger.info("[TOPN] Recovered with live bankroll: %d cents", equity_cents)
-                    else:
-                        # FAIL CLOSED: Cannot get live bankroll
-                        logger.error("[TOPN] Cannot determine live Kalshi balance. Rejecting cycle.")
-                        self._rejected_cycles += 1
-                        return self._create_empty_cycle(0, candidates)
-                except Exception as _e:
-                    # FAIL CLOSED: Cannot get live bankroll
-                    logger.error("[TOPN] Failed to get live bankroll: %s. Rejecting cycle.", _e)
-                    self._rejected_cycles += 1
-                    return self._create_empty_cycle(0, candidates)
-            
-            if not candidates:
-                logger.debug("[TOPN] No candidates provided")
-                return self._create_empty_cycle(equity_cents, candidates)
-            
-            # Compute allocations with dynamic N stepping
-            cycle = select_topn_allocations(
-                equity_cents=equity_cents,
-                candidates=candidates,
-                config=self.config,
-                cycle_risk_pct=cycle_risk_pct,
-            )
-            
-            # Global risk check (if we have allocations)
             if cycle.allocations:
-                allowed, reason = self._global_risk.can_open_batch(
-                    cycle.allocations, equity_cents, current_open_risk_usd
-                )
-                
-                if not allowed:
-                    logger.warning("[TOPN] Global risk rejected batch: %s", reason)
-                    self._rejected_cycles += 1
-                    # Return empty cycle with same metadata
-                    return AllocationCycle(
-                        cycle_id=cycle.cycle_id,
-                        cycle_ts=cycle.cycle_ts,
-                        equity_cents=equity_cents,
-                        cycle_risk_pct=cycle.cycle_risk_pct,
-                        cycle_risk_usd=cycle.cycle_risk_usd,
-                        num_candidates=len(candidates),
-                        num_edges_traded=0,
-                        sum_risk_usd=0.0,
-                        allocations=[],
-                        config=self.config,
-                    )
-                
                 self._total_trades += len(cycle.allocations)
-            
-            # Validate invariants
-            is_valid, violations = cycle.validate_invariants()
-            if not is_valid:
-                for v in violations:
-                    logger.error("[TOPN] %s", v)
-                
-                # In debug/test, raise assertion
-                if os.getenv("TOPN_STRICT_INVARIANTS", "false").lower() == "true":
-                    raise AssertionError(f"Invariant violations: {violations}")
-            
-            # Log structured metrics
-            self._log_cycle_metrics(cycle)
-            
-            return cycle
+
+        # Phase 5: Validation and logging - OUTSIDE LOCK (no shared state needed)
+        is_valid, violations = cycle.validate_invariants()
+        if not is_valid:
+            for v in violations:
+                logger.error("[TOPN] %s", v)
+
+            # In debug/test, raise assertion
+            if os.getenv("TOPN_STRICT_INVARIANTS", "false").lower() == "true":
+                raise AssertionError(f"Invariant violations: {violations}")
+
+        # Log structured metrics (outside lock)
+        self._log_cycle_metrics(cycle)
+
+        return cycle
     
     def _create_empty_cycle(
         self,

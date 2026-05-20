@@ -423,13 +423,20 @@ class FeatureService:
 # ── Singleton ─────────────────────────────────────────────────────────
 
 _feature_service: Optional[FeatureService] = None
-_feature_service_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _feature_service_lock = threading.Lock()
+_feature_service_lock = None  # Disabled to prevent startup hang
 
 
 def get_feature_service() -> FeatureService:
     global _feature_service
     if _feature_service is None:
-        with _feature_service_lock:
-            if _feature_service is None:
-                _feature_service = FeatureService()
+        if _feature_service_lock is not None:
+            with _feature_service_lock:
+                if _feature_service is None:
+                    _feature_service = FeatureService()
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _feature_service = FeatureService()
     return _feature_service

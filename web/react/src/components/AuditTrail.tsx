@@ -34,7 +34,7 @@ interface AuditTrailProps {
   enhanced?: boolean;
 }
 
-const AuditTrail: React.FC<AuditTrailProps> = ({ enhanced = true }) => {
+const AuditTrail: React.FC<AuditTrailProps> = () => {
   const [selectedSource, setSelectedSource] = useState<string>('all');
   const [selectedSeverity, setSelectedSeverity] = useState<string>('all');
   const [selectedEventType, setSelectedEventType] = useState<string>('all');

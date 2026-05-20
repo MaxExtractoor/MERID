@@ -111,7 +111,7 @@ async def get_kalshi_ui_summary() -> Dict[str, Any]:
                 logger.debug("fills aggregation skipped: %s", _e)
                 summary["fills"] = []
 
-            # Get balance from Kalshi REST client
+            # Get balance from BankrollServiceV2 via unified API (single source of truth)
             try:
                 from web.api.kalshi_api import get_balance as _get_bal
                 import asyncio as _aio
@@ -120,10 +120,13 @@ async def get_kalshi_ui_summary() -> Dict[str, Any]:
                     "usd": float(_bal.get("usd", 0.0)),
                     "locked": float(_bal.get("locked", 0.0)),
                     "available": float(_bal.get("available", 0.0)),
+                    "portfolio_cents": _bal.get("portfolio_cents", 0),
+                    "total_value_cents": _bal.get("total_value_cents", 0),
+                    "state": _bal.get("state", "UNKNOWN"),
                 }
             except Exception as _e:
                 logger.debug("balance lookup skipped: %s", _e)
-                summary["balance"] = {"usd": 0.0, "locked": 0.0, "available": 0.0}
+                summary["balance"] = {"usd": 0.0, "locked": 0.0, "available": 0.0, "portfolio_cents": 0, "total_value_cents": 0, "state": "UNKNOWN"}
             
         except Exception as exc:
             logger.warning(f"Failed to fetch positions/orders/balance: {exc}")

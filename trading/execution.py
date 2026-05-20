@@ -191,13 +191,10 @@ class ExecutionConfig:
     api_passphrase: Optional[str] = None  # For exchanges that require it
     sandbox: bool = True  # Use sandbox/testnet by default
     
-    # Risk limits
+    # Risk limits (PRODUCTION CANONICAL VALUES - used by both LIVE and PAPER)
     max_position_size_usd: float = 10000.0
     max_total_exposure_usd: float = 50000.0
     max_leverage: float = 3.0
-    # Paper-mode risk limits (used for fallbacks/degraded execution)
-    paper_max_position_size_usd: float = 50000.0
-    paper_max_total_exposure_usd: float = 200000.0
     
     # Default stop/take profit
     default_stop_loss_pct: float = 0.05

@@ -8,14 +8,8 @@ from merid.swarm.consensus_aggregator import (
     get_consensus_aggregator,
     neutral_consensus_view,
 )
-from merid.swarm.market_mood_bus import (
-    InsightObject,
-    MarketMoodBus,
-    SentimentConfidence,
-    SentimentContext,
-    VolatilityRegime,
-    get_market_mood_bus,
-)
+
+# REMOVED: MarketMoodBus imports - sentiment components not used in 15m stack
 
 __all__ = [
     "AgentProposal",
@@ -24,10 +18,4 @@ __all__ = [
     "SwarmConsensusAggregator",
     "get_consensus_aggregator",
     "neutral_consensus_view",
-    "InsightObject",
-    "MarketMoodBus",
-    "SentimentConfidence",
-    "SentimentContext",
-    "VolatilityRegime",
-    "get_market_mood_bus",
 ]

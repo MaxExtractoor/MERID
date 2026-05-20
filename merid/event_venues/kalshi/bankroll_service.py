@@ -99,54 +99,36 @@ class KalshiBankrollService:
         self._fetch_count += 1
         
         try:
-            # Use provided client or get singleton
-            if client is None:
-                from merid.event_venues.kalshi import get_kalshi_client
-                client = get_kalshi_client()
+            # Use BankrollServiceV2 instead of direct client call - it's the source of truth
+            from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service
+            from merid.event_venues.kalshi.types import BalanceState
+            v2_service = await get_bankroll_service()
+            summary = await v2_service.get_summary()  # get_summary is async, returns BankrollSummary
             
-            # THE ONLY API CALL ALLOWED for bankroll
-            # Handle both sync and async clients
-            if asyncio.iscoroutinefunction(client.get_balance):
-                balance_data = await client.get_balance()
-            else:
-                balance_data = client.get_balance()
-            
-            # Parse response from Kalshi client
-            # Client returns: {"USD": Decimal(dollars), "locked": Decimal(dollars)}
-            if isinstance(balance_data, dict):
-                # Extract cash balance (USD = available cash)
-                balance_cents = self._extract_cents(balance_data, "USD")
-                # Extract locked balance (funds in orders)
-                locked_cents = self._extract_cents(balance_data, "locked") or 0
+            if summary.state == BalanceState.FRESH and summary.available_cash_usd is not None:
+                balance_cents = int(summary.available_cash_usd * 100)
+                # Calculate portfolio value from equity - available cash
+                portfolio_value_cents = int((summary.equity_usd - summary.available_cash_usd) * 100)
                 
-                # Validate we got real balance from API
-                if balance_cents is not None and balance_cents >= 0:
-                    # NOTE: Kalshi /portfolio/balance doesn't return portfolio_value directly.
-                    # Total equity = available cash + locked funds (both are "your money")
-                    # Positions value requires separate positions fetch.
-                    total_cents = balance_cents + locked_cents
-                    
-                    result = BankrollResult(
-                        success=True,
-                        balance_cents=balance_cents,
-                        portfolio_value_cents=locked_cents,  # Using locked as "at risk"
-                    )
-                    
-                    logger.info(
-                        "[LIVE_BANKROLL] Kalshi API: cash=$%d.%02d, locked=$%d.%02d, total=$%d.%02d",
-                        balance_cents // 100, balance_cents % 100,
-                        locked_cents // 100, locked_cents % 100,
-                        result.total_value_cents // 100, result.total_value_cents % 100
-                    )
-                    
-                    with self._lock:
-                        self._last_result = result
-                    
-                    return result
-                else:
-                    error = f"Missing or invalid balance. Got: {balance_data}"
+                result = BankrollResult(
+                    success=True,
+                    balance_cents=balance_cents,
+                    portfolio_value_cents=portfolio_value_cents,
+                )
+                
+                logger.info(
+                    "[LIVE_BANKROLL] Kalshi API (via BankrollServiceV2): cash=$%d.%02d, portfolio=$%d.%02d, total=$%d.%02d",
+                    balance_cents // 100, balance_cents % 100,
+                    portfolio_value_cents // 100, portfolio_value_cents % 100,
+                    result.total_value_cents // 100, result.total_value_cents % 100
+                )
+                
+                with self._lock:
+                    self._last_result = result
+                
+                return result
             else:
-                error = f"Invalid response type: {type(balance_data)}"
+                error = f"BankrollServiceV2 state={summary.state}, available_cash={summary.available_cash_usd}"
                 
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"

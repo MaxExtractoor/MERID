@@ -1,0 +1,123 @@
+name: Production Data Guards
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+
+jobs:
+  check-mock-imports:
+    runs-on: ubuntu-latest
+    name: Check for mock imports in production code
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Search for FakeKalshi imports
+        run: |
+          echo "Checking for FakeKalshiClient imports outside tests..."
+          if grep -r "FakeKalshiClient" --include="*.py" merid/ web/ 2>/dev/null; then
+            echo "❌ Found FakeKalshiClient imports in production code"
+            exit 1
+          fi
+          echo "✅ No FakeKalshiClient imports found"
+      
+      - name: Search for DummyCatalog imports
+        run: |
+          echo "Checking for DummyMarketCatalog imports outside tests..."
+          if grep -r "DummyMarketCatalog" --include="*.py" merid/ web/ 2>/dev/null; then
+            echo "❌ Found DummyMarketCatalog imports in production code"
+            exit 1
+          fi
+          echo "✅ No DummyMarketCatalog imports found"
+      
+      - name: Search for MockKalshi imports
+        run: |
+          echo "Checking for MockKalshiClient imports outside tests..."
+          if grep -r "MockKalshiClient" --include="*.py" merid/ web/ 2>/dev/null; then
+            echo "❌ Found MockKalshiClient imports in production code"
+            exit 1
+          fi
+          echo "✅ No MockKalshiClient imports found"
+      
+      - name: Check for test imports in production
+        run: |
+          echo "Checking for imports from tests/ or mocks/ directories..."
+          if grep -r "^from tests\." --include="*.py" merid/ web/ 2>/dev/null; then
+            echo "❌ Found imports from tests/ in production code"
+            exit 1
+          fi
+          if grep -r "^from mocks\." --include="*.py" merid/ web/ 2>/dev/null; then
+            echo "❌ Found imports from mocks/ in production code"
+            exit 1
+          fi
+          echo "✅ No test/mocks imports found in production code"
+      
+      - name: Check for hardcoded fake tickers
+        run: |
+          echo "Checking for hardcoded fake tickers..."
+          if grep -r "FAKE_BTC\|TEST_MARKET\|DUMMY_MARKET" --include="*.py" merid/ web/ 2>/dev/null; then
+            echo "❌ Found hardcoded fake tickers in production code"
+            exit 1
+          fi
+          echo "✅ No hardcoded fake tickers found"
+
+  check-production-wiring:
+    runs-on: ubuntu-latest
+    name: Validate production wiring
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Check for build_kalshi_catalog usage
+        run: |
+          echo "Checking that build_kalshi_catalog is used in startup_validations..."
+          if grep -q "build_kalshi_catalog" merid/startup_validations.py; then
+            echo "✅ build_kalshi_catalog used in startup_validations"
+          else
+            echo "❌ build_kalshi_catalog not found in startup_validations"
+            exit 1
+          fi
+      
+      - name: Check for validate_production_wiring
+        run: |
+          echo "Checking that validate_production_wiring exists..."
+          if grep -q "def validate_production_wiring" merid/startup_validations.py; then
+            echo "✅ validate_production_wiring function exists"
+          else
+            echo "❌ validate_production_wiring function not found"
+            exit 1
+          fi
+      
+      - name: Check for MERID_ALLOW_FAKE_DATA flag
+        run: |
+          echo "Checking that MERID_ALLOW_FAKE_DATA flag exists in settings..."
+          if grep -q "MERID_ALLOW_FAKE_DATA" merid/settings.py; then
+            echo "✅ MERID_ALLOW_FAKE_DATA flag exists"
+          else
+            echo "❌ MERID_ALLOW_FAKE_DATA flag not found"
+            exit 1
+          fi
+
+      - name: Check for legacy module imports in production
+        run: |
+          echo "Checking that IS_LEGACY_MODULE modules are not imported from production packages..."
+          if grep -r "from legacy" --include="*.py" merid/ web/ 2>/dev/null; then
+            echo "❌ Found imports from legacy/ in production code"
+            exit 1
+          fi
+          echo "✅ No legacy module imports found in production code"
+
+  summary:
+    runs-on: ubuntu-latest
+    name: Production Data Guards Summary
+    needs: [check-mock-imports, check-production-wiring]
+    if: always()
+    steps:
+      - name: Print summary
+        run: |
+          echo "## Production Data Guards Summary"
+          echo ""
+          echo "✅ Mock imports check: ${{ needs.check-mock-imports.result }}"
+          echo "✅ Production wiring check: ${{ needs.check-production-wiring.result }}"
+          echo ""
+          echo "All production data guards passed successfully!"

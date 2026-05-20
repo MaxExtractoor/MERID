@@ -361,6 +361,11 @@ async def run_and_validate(
     Returns {"report": BacktestReport, "validation": {"ok": bool, "reason": str}}.
     """
     from merid.risk.btc_promotion_config import validate_before_lift
+    from merid.startup_validations import validate_profile_backtest_eligibility
+    
+    # Validate profile backtest eligibility before running
+    validate_profile_backtest_eligibility()
+    
     report = await run_backtest_2y(ticker, strategy_fn, years=years)
     validation = validate_before_lift(report)
     return {"report": report, "validation": validation}

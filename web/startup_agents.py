@@ -16,21 +16,18 @@ from utils.logger import get_logger
 logger = get_logger("web.startup_agents")
 
 # Lazy imports — these modules may not exist in Kalshi-only deployments
-try:
-    from agents.news_monitor_agent import NewsMonitorAgent as _NewsMonitorAgent
-    _NEWS_MONITOR_AVAILABLE = True
-except ImportError:
-    _NewsMonitorAgent = None  # type: ignore[assignment,misc]
-    _NEWS_MONITOR_AVAILABLE = False
-    logger.debug("news_monitor_agent not available — skipping")
 
-try:
-    from agents.twitter_agent import get_twitter_agent as _get_twitter_agent
-    _TWITTER_AVAILABLE = True
-except ImportError:
-    _get_twitter_agent = None  # type: ignore[assignment]
-    _TWITTER_AVAILABLE = False
-    logger.debug("twitter_agent not available — skipping")
+# NEWS-TRUTH (2026-05-13): NewsMonitorAgent disabled for lean 15m Kalshi trading
+# For 15-minute binary markets, edge comes from microstructure, not news headlines
+_NewsMonitorAgent = None  # type: ignore
+_NEWS_MONITOR_AVAILABLE = False
+logger.debug("news_monitor_agent disabled for lean 15m Kalshi stack")
+
+# SOCIAL-TRUTH (2026-05-13): Twitter/Telegram agents disabled for lean 15m Kalshi trading
+# For 15-minute binary markets, social signals are redundant with microstructure
+_get_twitter_agent = None  # type: ignore[assignment]
+_TWITTER_AVAILABLE = False
+logger.debug("twitter_agent disabled for lean 15m Kalshi stack")
 
 try:
     from agents.telegram_agent import get_telegram_agent as _get_telegram_agent
@@ -64,7 +61,8 @@ class OrchestratorAgentManager:
             return
 
         self.running = True
-        logger.info("Starting orchestrator agents...")
+        _profile = __import__("os").environ.get("MERID_PROFILE", "").lower()
+        logger.info(f"[ORCHESTRATOR-STARTUP] Starting orchestrator agents (profile={_profile})")
 
         # News monitor (optional)
         if _NEWS_MONITOR_AVAILABLE and _NewsMonitorAgent is not None:
@@ -106,8 +104,16 @@ class OrchestratorAgentManager:
         # The grid internally manages its own PortfolioRiskAgent — no need to duplicate.
         try:
             from merid.prediction.agent_grid import get_agent_grid
+            logger.info("[GRID-STARTUP] Fetching agent grid...")
             self.kalshi_agent_grid = get_agent_grid()
+            
+            # Log grid composition for audit trail
+            if hasattr(self.kalshi_agent_grid, 'agents'):
+                agent_names = [a.name for a in self.kalshi_agent_grid.agents] if self.kalshi_agent_grid.agents else []
+                logger.info(f"[GRID-STARTUP] Agent grid loaded with {len(agent_names)} agents: {agent_names}")
+            
             if not self.kalshi_agent_grid._running:
+                logger.info("[GRID-STARTUP] Starting agent grid (fallback path)...")
                 await self.kalshi_agent_grid.start()
                 logger.info("✅ Kalshi agent grid started (fallback)")
             else:
@@ -124,9 +130,13 @@ class OrchestratorAgentManager:
         
         # Start Kalshi insight pipeline → news/X publishing
         # BUG-L13 FIX: Skip in VALIDATION_MODE to reduce startup lag
+        # PROFILE-GUARD: Skip for kalshi_crypto_15m_v2 (insight/news publishing not needed for 15m crypto)
         _is_validation = __import__("os").environ.get("MERID_VALIDATION_MODE", "") == "1"
+        _profile = __import__("os").environ.get("MERID_PROFILE", "").lower()
         if _is_validation:
             logger.info("[VALIDATION MODE] Kalshi insight pipeline skipped (11 category loops deferred)")
+        elif _profile == "kalshi_crypto_15m_v2":
+            logger.info("[PROFILE-GUARD] Kalshi insight pipeline skipped for kalshi_crypto_15m_v2 (insight/news publishing not needed)")
         else:
             try:
                 from merid.publishing.kalshi_insight_pipeline import get_insight_pipeline
@@ -143,9 +153,21 @@ class OrchestratorAgentManager:
         # synthesizer, strategy, archivist, meta-audit). Requires WSFeedManager to be running
         # first so streaming_bus.MARKET_DATA receives live price events.
         # BUG-L13 FIX: Skip in VALIDATION_MODE to reduce startup lag
+        # PROFILE-GUARD: Skip for kalshi_crypto_15m_v2 (LLM agents not needed for 15m crypto)
         _is_validation = __import__("os").environ.get("MERID_VALIDATION_MODE", "") == "1"
+        _profile = __import__("os").environ.get("MERID_PROFILE", "").lower()
         if _is_validation:
             logger.info("[VALIDATION MODE] AgentMesh skipped (8 streaming agents deferred)")
+        elif _profile == "kalshi_crypto_15m_v2":
+            logger.info("[PROFILE-INVARIANT] kalshi_crypto_15m_v2: AgentMesh and core.consensus_engine disabled by design")
+            logger.info("[PROFILE-INVARIANT] All production risk decisions handled by Crypto15MLane with deterministic RCK + Bayesian logic")
+            # Hard invariant: do not allow AgentMesh to start under kalshi_crypto_15m_v2
+            # This prevents accidental re-wiring of legacy LLM/mesh risk system into production 15m stack
+            raise RuntimeError(
+                "PROFILE INVARIANT VIOLATION: AgentMesh cannot be started under MERID_PROFILE=kalshi_crypto_15m_v2. "
+                "The 15m Kalshi profile uses Crypto15MLane with deterministic RCK + Bayesian logic (no LLM, no sentiment, no mesh). "
+                "See docs/RISK_AGENT_MESH_DEPRECATION.md for details."
+            )
         else:
             try:
                 from agents.agent_mesh import start_agent_mesh
@@ -155,34 +177,99 @@ class OrchestratorAgentManager:
                 logger.warning(f"AgentMesh not started (non-fatal): {exc}")
 
         # Start KalshiSocialBroadcaster — consumes kalshi:order_filled/placed/resolved events
-        try:
-            from merid.prediction.social_broadcaster import get_social_broadcaster
-            self.social_broadcaster = get_social_broadcaster()
-            await self.social_broadcaster.start()
-            logger.info("✅ KalshiSocialBroadcaster started (trade event → social log)")
-        except Exception as exc:
-            logger.warning(f"KalshiSocialBroadcaster not started (non-fatal): {exc}")
+        # PROFILE-GUARD: Skip for kalshi_crypto_15m_v2 (social broadcasting not needed for 15m crypto)
+        if _profile != "kalshi_crypto_15m_v2":
+            try:
+                from merid.prediction.social_broadcaster import get_social_broadcaster
+                self.social_broadcaster = get_social_broadcaster()
+                await self.social_broadcaster.start()
+                logger.info("✅ KalshiSocialBroadcaster started (trade event → social log)")
+            except Exception as exc:
+                logger.warning(f"KalshiSocialBroadcaster not started (non-fatal): {exc}")
+        else:
+            logger.info("[PROFILE-GUARD] KalshiSocialBroadcaster skipped for kalshi_crypto_15m_v2 (social broadcasting not needed)")
 
         # Start ReflectionSystem — loads persisted reflections, starts background flush
-        try:
-            from agents.reflection.integration import get_reflection_system
-            self.reflection_system = get_reflection_system()
-            logger.info("✅ ReflectionSystem started (persistence, learning, analytics active)")
-        except Exception as exc:
-            logger.warning(f"ReflectionSystem not started (non-fatal): {exc}")
+        # PROFILE-GUARD: Skip for kalshi_crypto_15m_v2 (reflection/learning not needed for 15m crypto)
+        if _profile != "kalshi_crypto_15m_v2":
+            try:
+                from agents.reflection.integration import get_reflection_system
+                self.reflection_system = get_reflection_system()
+                logger.info("✅ ReflectionSystem started (persistence, learning, analytics active)")
+            except Exception as exc:
+                logger.warning(f"ReflectionSystem not started (non-fatal): {exc}")
+        else:
+            logger.info("[PROFILE-GUARD] ReflectionSystem skipped for kalshi_crypto_15m_v2 (reflection/learning not needed)")
 
-        # Start LaneOrchestrator — BTC 15m primary lane + phase-gated additional lanes
+        # Start Crypto15MLane — BTC 15m primary lane via registry (MIGRATION 2026-05-15)
+        # This is the PRIMARY orchestrator component for kalshi_crypto_15m_v2
         try:
-            from merid.lanes.btc15m_lane import get_lane_orchestrator
+            from merid.lanes.registry import get_lane_registry, build_crypto_lanes
             from merid.risk.promotion_engine import get_promotion_engine
+            from merid.prediction.paper_session import get_paper_session
+            from merid.settings import settings as _settings
+            from merid.event_venues.kalshi.client import get_kalshi_client
+            from merid.event_venues.kalshi.types import BalanceSuccess
+            from core.price_feed import get_price_feed
+            from merid.event_venues.kalshi.risk_bus import get_risk_bus
+            from merid.portfolio.manager import get_portfolio_manager
+            
+            _profile = __import__("os").environ.get("MERID_PROFILE", "").lower()
+            logger.info(f"[ORCHESTRATOR-CANONICAL] Crypto15MLane startup for profile={_profile}")
+            
+            logger.info("[LANE-STARTUP] Initializing Crypto15MLane startup...")
             _promo = get_promotion_engine()
-            _lane_orch = get_lane_orchestrator(base_equity=10.52)
-            await _lane_orch.start()
-            self._lane_orchestrator = _lane_orch
-            logger.info(
-                "✅ LaneOrchestrator started (BTC 15m primary | phase=%s)",
-                _promo.current_phase.name,
-            )
+            
+            # Build crypto lanes if registry is empty (first-time setup)
+            registry = get_lane_registry()
+            existing_lanes = registry.list_lane_ids()
+            logger.info(f"[LANE-STARTUP] Lane registry has {len(existing_lanes)} existing lanes: {existing_lanes}")
+            
+            if not existing_lanes:
+                logger.info("[LANE-STARTUP] Registry empty - building crypto lanes for BTC/ETH/SOL/XRP/DOGE...")
+                try:
+                    _kalshi_client = get_kalshi_client()
+                    _price_feed = get_price_feed()
+                    _risk_bus = get_risk_bus()
+                    _portfolio = get_portfolio_manager()
+                    _lane_control = None  # Optional, can be None
+                    
+                    logger.info("[LANE-STARTUP] Calling build_crypto_lanes()...")
+                    build_crypto_lanes(
+                        kalshi_client=_kalshi_client,
+                        price_feed=_price_feed,
+                        risk_bus=_risk_bus,
+                        portfolio=_portfolio,
+                        lane_control=_lane_control,
+                    )
+                    logger.info("[LANE-STARTUP] ✅ Crypto lanes built successfully")
+                    
+                    # Verify lanes were registered
+                    new_lanes = registry.list_lane_ids()
+                    logger.info(f"[LANE-STARTUP] Registry now has {len(new_lanes)} lanes: {new_lanes}")
+                except Exception as build_exc:
+                    logger.warning("[LANE-STARTUP] Failed to build crypto lanes: %s", build_exc)
+
+            # Get BTC_15M lane from registry (canonical Crypto15MLane)
+            logger.info("[LANE-STARTUP] Fetching BTC_15M lane from registry...")
+            btc_lane = registry.get_lane("BTC_15M")
+
+            if btc_lane is not None:
+                # Start the Crypto15MLane directly
+                import asyncio
+                logger.info("[LANE-STARTUP] Starting Crypto15MLane (BTC_15M)...")
+                _start_task = asyncio.create_task(btc_lane.start(), name="crypto15m-btc-start")
+                _start_task.add_done_callback(
+                    lambda t: logger.error(
+                        "Crypto15MLane start task failed: %s", t.exception()
+                    ) if not t.cancelled() and t.exception() else None
+                )
+                logger.info(
+                    "✅ Crypto15MLane started (BTC_15M | phase=%s)",
+                    _promo.current_phase.name if _promo else "unknown",
+                )
+            else:
+                logger.warning("Crypto15MLane (BTC_15M) not found in registry")
         except Exception as exc:
             logger.warning(f"LaneOrchestrator not started (non-fatal): {exc}")
             self._lane_orchestrator = None
@@ -196,6 +283,16 @@ class OrchestratorAgentManager:
             
         logger.info("Stopping orchestrator agents...")
         self.running = False
+        
+        # Cancel all background tasks
+        for task in self.background_tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self.background_tasks.clear()
         
         # Stop news monitor
         if self.news_monitor:

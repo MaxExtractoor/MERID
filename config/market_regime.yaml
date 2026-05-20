@@ -23,20 +23,20 @@ market_regime_gate:
     bars: 16  # 4 hours of 15m bars
 
   flatness:
-    # ENV-DRIVEN: Flatness detection thresholds
-    max_abs_return_pct: ${MERID_FLAT_MAX_ABS_RETURN_PCT:-0.75}
-    min_atr_pct: ${MERID_FLAT_MIN_ATR_PCT:-0.35}
-    min_volume_ratio: ${MERID_FLAT_MIN_VOLUME_RATIO:-0.80}
+    # Flatness detection thresholds (override via config.py env fallbacks)
+    max_abs_return_pct: 0.75
+    min_atr_pct: 0.35
+    min_volume_ratio: 0.80
 
   basket_rules:
-    # ENV-DRIVEN: Basket blocking/reduction rules
-    block_if_flat_count_gte: ${MERID_BLOCK_IF_FLAT_COUNT:-4}
-    reduce_if_flat_count_gte: ${MERID_REDUCE_IF_FLAT_COUNT:-3}
+    # Basket blocking/reduction rules
+    block_if_flat_count_gte: 4
+    reduce_if_flat_count_gte: 3
 
   trend_confirmation:
-    # ENV-DRIVEN: Trend confirmation thresholds
-    adx_min: ${MERID_ADX_MIN:-18}
-    breakout_range_pct_min: ${MERID_BREAKOUT_RANGE_PCT_MIN:-1.2}
+    # Trend confirmation thresholds
+    adx_min: 18
+    breakout_range_pct_min: 1.2
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Phase Rollout Guide

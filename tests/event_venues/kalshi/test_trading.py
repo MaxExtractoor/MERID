@@ -104,7 +104,8 @@ class TestKalshiTraderBuyOperations:
         assert call_args.size == Decimal("10")
         assert call_args.outcome_id == "yes"
         assert call_args.order_type == "market"
-        assert call_args.price is None
+        # Market orders now include default price for validation (bug fix)
+        assert call_args.price == Decimal("0.5")
 
     @pytest.mark.asyncio
     async def test_buy_yes_limit_order(self, trader, mock_client):

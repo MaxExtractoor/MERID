@@ -126,6 +126,9 @@ async def _fetch_equity(ticker: str, days: int = 25) -> EquityMomentum:
         lows   = [float(b["l"]) for b in bars]
         ranges = [h - l for h, l in zip(highs, lows)]
 
+        if not closes:
+            return None
+        
         latest = closes[-1]
         close_5d_ago = closes[-6] if len(closes) >= 6 else closes[0]
         import math

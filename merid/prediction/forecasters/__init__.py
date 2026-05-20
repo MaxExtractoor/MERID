@@ -11,6 +11,7 @@ Kalshi market, using different methodologies:
 - OrderbookForecaster    — bid/ask imbalance, spread compression, depth-weighted FV
 - TimeSeriesForecaster   — AR(2) model, EWMA volatility, OU half-life, Hurst exponent
 - ExternalSentimentForecaster — news/X sentiment, fear/greed contrarian, divergence
+- FVGForecaster         — Fair Value Gap detection, price imbalance signals (SMC)
 
 All forecasters are managed by ForecasterRegistry which:
 1. Runs each on every market snapshot
@@ -28,6 +29,7 @@ from merid.prediction.forecasters.macro_regime import MacroRegimeForecaster
 from merid.prediction.forecasters.orderbook import OrderbookForecaster
 from merid.prediction.forecasters.time_series import TimeSeriesForecaster
 from merid.prediction.forecasters.sentiment import ExternalSentimentForecaster
+from merid.prediction.forecasters.fvg import FVGForecaster, get_fvg_forecaster, get_fvg_store
 from merid.prediction.forecasters.registry import (
     ForecasterRegistry,
     EnsembleForecast,
@@ -43,6 +45,9 @@ __all__ = [
     "OrderbookForecaster",
     "TimeSeriesForecaster",
     "ExternalSentimentForecaster",
+    "FVGForecaster",
+    "get_fvg_forecaster",
+    "get_fvg_store",
     "ForecasterRegistry",
     "EnsembleForecast",
     "get_forecaster_registry",

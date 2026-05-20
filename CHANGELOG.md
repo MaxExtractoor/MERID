@@ -99,6 +99,20 @@ Full debate-based consensus layer, agent incentive/reward system, comprehensive 
 - **Fake data scrub** — Removed all `random.*` fake data from production paths: `prediction_publisher.py`, `maker_bot_advanced.py`, `celery_tasks.py` (30% random failure injection), `antifragile_patterns.py`, `performance_optimizer.py`; 8 mock API files archived
 - **Frontend crashes** — `OnChainHealthPanel` `blockHeight.toLocaleString()` null crash, `DataTableEnhanced` shape mismatch, `SwarmPanel` metrics shape, `ApiDashboard` response shape
 
+#### Bankroll & Fills UI/UX Alignment
+- **Backend updates** — Centralized portfolio value calculation from position cache (cost basis + unrealized PnL) across `bankroll_service.py`, `bankroll_adapter.py`, `client.py`, `responsible_trading.py`, and `pm_bankroll_snapshot.py`
+- **Continuous trader wiring** — `kalshi_continuous_trader._get_balance()` now delegates to v1 bankroll service for unified bankroll representation
+- **Fills correctness** — `fills_ledger.py` fixes price normalization and makes HTTP source authoritative for price upgrades
+- **Balance endpoint** — `/balance` (in `kalshi_api.py`) now returns `balance_cents` (cash), `portfolio_cents` (positions), and `total_value_cents` (cash + portfolio) while maintaining legacy field compatibility
+- **Bankroll panel** — `KalshiBankrollPanel.tsx` updated to display three clearly labeled stats: Cash (balance_cents), Portfolio (portfolio_cents), and Total Value (total_value_cents)
+- **Top bar fixes** — `TopBar.tsx` updated to use `total_value_cents` for balance display (cash + portfolio) instead of just cash; `/pnl` endpoint now includes unrealized PnL in daily_pnl_usd to show mark-to-market performance
+- **UI view fixes** — `Overview.tsx` updated to show Total Value with Cash/Portfolio breakdown; `OperatorDashboard.tsx` updated to use total_value_cents
+- **Trade ticket fixes** — `KalshiTradeTicket.tsx` updated balance check to use total_value_cents
+- **Type updates** — `KalshiBalance` interface in `types/kalshi.ts` updated with new balance_cents, portfolio_cents, total_value_cents fields
+- **Backend PnL fixes** — `kalshi_risk.py`, `risk_guard.py`, `portfolio_risk_agent.py` all updated to include unrealized PnL in daily_pnl_usd calculations for mark-to-market performance
+- **Testing** — `test_bankroll_unification.py` (12 passed), `test_fills_ledger.py` (16 passed), `test_bankroll_reconciliation_fixes.py` (14 passed), `test_continuous_trader_wiring.py` (29 passed, 1 pre-existing failure)
+- **Key outcomes** — Clear cash vs portfolio separation, real-time PnL reflection, more reliable fills, end-to-end backend/UI alignment
+
 #### Logging & Import Cleanup (ZT8–ZT12)
 - **Analytics root logger mutation** — `cohort_analytics.py` was mutating ROOT logger at import time; replaced with named scoped logger
 - **22 files** had unused `import logging` removed (ml/, ai_signals/, multi_asset/, scaling/, deployment/, integration/, risk/, streams/)

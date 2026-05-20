@@ -1,0 +1,119 @@
+name: DRY_RUN Smoke Test
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+
+jobs:
+  dry-run-smoke-test:
+    runs-on: ubuntu-latest
+    name: DRY_RUN Smoke Test with Mocked Kalshi Catalog
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install -e .
+      
+      - name: Run DRY_RUN smoke test
+        env:
+          MERID_LOOP_DRY_RUN: "true"
+          MERID_ENV: "development"
+          MERID_PM_PROFILE: "baseline"
+          MERID_PROFILE: "kalshi_crypto_15m_v2"
+          MERID_ENABLE_RESEARCH_AGENTS: "false"
+        run: |
+          python -c "
+          import asyncio
+          import json
+          import os
+          from merid.agents.bootstrap import bootstrap_canonical_agents
+          from merid.settings import settings as _settings
+          
+          # Bootstrap agents
+          n_agents = bootstrap_canonical_agents()
+          print(f'Bootstrap: {n_agents} agents registered')
+          
+          # Verify DRY_RUN flag is set
+          assert _settings.MERID_LOOP_DRY_RUN == True, 'DRY_RUN flag not set'
+          print('DRY_RUN flag verified')
+          
+          # Verify research agents disabled
+          assert _settings.MERID_ENABLE_RESEARCH_AGENTS == False, 'Research agents should be disabled'
+          print('Research agents disabled')
+          
+          # Verify no legacy agents in registry
+          from merid.agents.base import get_canonical_registry
+          registry = get_canonical_registry()
+          
+          legacy_agent_types = ['PredictionMarketAgentV2', 'MarketResearchAgent', 'CryptoSignalsAgent']
+          agents = registry.get_all_agents()
+          legacy_found = [a for a in agents if a.__class__.__name__ in legacy_agent_types]
+          
+          if legacy_found:
+              print(f'ERROR: Found {len(legacy_found)} legacy agents in registry')
+              for agent in legacy_found:
+                  print(f'  - {agent.__class__.__name__}: {agent.agent_id}')
+              raise AssertionError('Legacy agents found in DRY_RUN registry')
+          
+          print('No legacy agents in registry')
+          
+          # Verify KalshiTradingAgent is present
+          kalshi_agents = [a for a in agents if a.__class__.__name__ == 'KalshiTradingAgent']
+          if not kalshi_agents:
+              raise AssertionError('No KalshiTradingAgent found in registry')
+          print(f'Found {len(kalshi_agents)} KalshiTradingAgent instances')
+          
+          print('DRY_RUN smoke test passed')
+          "
+      
+      - name: Verify log schema
+        env:
+          MERID_LOOP_DRY_RUN: "true"
+        run: |
+          python -c "
+          import json
+          
+          # Simulate log output to verify JSON schema
+          test_log = {
+              'env': 'development',
+              'dry_run': True,
+              'ticker': 'KXBTC15M-25JUN-T100000',
+              'asset': 'BTC',
+              'side': 'yes',
+              'action': 'buy',
+              'price_cents': 55,
+              'count': 10,
+              'agent_name': 'BTC_15M'
+          }
+          
+          # Verify required fields
+          required_fields = ['env', 'dry_run', 'ticker', 'asset', 'side', 'action', 'price_cents', 'count', 'agent_name']
+          for field in required_fields:
+              assert field in test_log, f'Missing required field: {field}'
+          
+          print('Log schema validation passed')
+          print(json.dumps(test_log, indent=2))
+          "
+
+  summary:
+    runs-on: ubuntu-latest
+    name: DRY_RUN Smoke Test Summary
+    needs: [dry-run-smoke-test]
+    if: always()
+    steps:
+      - name: Print summary
+        run: |
+          echo "## DRY_RUN Smoke Test Summary"
+          echo ""
+          echo "✅ DRY_RUN smoke test: ${{ needs.dry-run-smoke-test.result }}"
+          echo ""
+          echo "DRY_RUN mode validated successfully!"

@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional
 from merid.event_venues.kalshi.archiver import SnapshotArchiver
 from merid.event_venues.kalshi.backtest import MarketSnapshot
 from merid.event_venues.kalshi.historical_sim import HistoricalTrade
+from merid.event_venues.kalshi.risk_parameters import DEFAULT_KALSHI_PRICE_CENTS
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.collector")
@@ -308,7 +309,7 @@ class HistoricalCollector:
         for trade in raw_trades:
             try:
                 ts = self._parse_ts(trade)
-                price_cents = int(trade.get("price", trade.get("yes_price", 50)))
+                price_cents = int(trade.get("price", trade.get("yes_price", DEFAULT_KALSHI_PRICE_CENTS)))
                 size = int(trade.get("count", trade.get("size", 1)))
 
                 snap = MarketSnapshot(
@@ -339,7 +340,7 @@ class HistoricalCollector:
         for trade in raw_trades:
             try:
                 ts = self._parse_ts(trade)
-                price_cents = int(trade.get("price", trade.get("yes_price", 50)))
+                price_cents = int(trade.get("price", trade.get("yes_price", DEFAULT_KALSHI_PRICE_CENTS)))
                 size = int(trade.get("count", trade.get("size", 1)))
                 side = trade.get("taker_side", trade.get("side", "buy"))
 

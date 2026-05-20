@@ -128,7 +128,7 @@ class ExecutionIntelligence:
         # 2. Edge magnitude: big edge → cross to capture
         if abs(edge) >= _HIGH_EDGE:
             scores["edge"] = 0.9
-        elif abs(edge) >= 0.03:
+        elif abs(edge) >= 0.05:  # CONSERVATIVE: 5% edge threshold
             scores["edge"] = 0.5
         else:
             scores["edge"] = 0.2
@@ -258,14 +258,21 @@ class ExecutionIntelligence:
 # ── Singleton ────────────────────────────────────────────────────────────
 
 _intel: Optional[ExecutionIntelligence] = None
-_intel_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _intel_lock = threading.Lock()
+_intel_lock = None  # Disabled to prevent startup hang
 
 
 def get_execution_intel() -> ExecutionIntelligence:
     """Get or create the singleton ExecutionIntelligence."""
     global _intel
     if _intel is None:
-        with _intel_lock:
-            if _intel is None:
-                _intel = ExecutionIntelligence()
+        if _intel_lock is not None:
+            with _intel_lock:
+                if _intel is None:
+                    _intel = ExecutionIntelligence()
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _intel = ExecutionIntelligence()
     return _intel

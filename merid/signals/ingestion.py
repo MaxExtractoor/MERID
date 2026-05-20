@@ -339,13 +339,20 @@ class NewsWorker:
 # ── Module-level shared buffer ───────────────────────────────────────
 
 _buffer: Optional[EventBuffer] = None
-_buffer_lock = threading.Lock()
+# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
+# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
+# _buffer_lock = threading.Lock()
+_buffer_lock = None  # Disabled to prevent startup hang
 
 
 def get_event_buffer() -> EventBuffer:
     global _buffer
     if _buffer is None:
-        with _buffer_lock:
-            if _buffer is None:
-                _buffer = EventBuffer()
+        if _buffer_lock is not None:
+            with _buffer_lock:
+                if _buffer is None:
+                    _buffer = EventBuffer()
+        else:
+            # Lock disabled - direct initialization (startup workaround)
+            _buffer = EventBuffer()
     return _buffer

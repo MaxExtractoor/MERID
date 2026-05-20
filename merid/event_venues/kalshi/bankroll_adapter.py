@@ -14,8 +14,6 @@ The new v2 API:
 - service.get_current_bankroll() -> Optional[InternalBankroll]
 
 This adapter maps legacy calls to v2 internally.
-
-TODO: Once all agents are migrated, delete this adapter and use v2 directly.
 """
 
 from __future__ import annotations
@@ -83,26 +81,30 @@ class BankrollAdapter:
         
         Maps v2 summary to legacy result format.
         CRITICAL: success=True only if state == FRESH.
+        Uses centralized portfolio value calculation from v2 service.
         """
-        summary = await self._v2.get_summary()
+        summary = await self._v2.get_summary(caller_module="bankroll_adapter")
         
-        if summary.state == BalanceState.FRESH and summary.equity_usd is not None:
-            equity_cents = int(summary.equity_usd * 100)
+        # Use centralized portfolio value calculation from v2 service (single source of truth)
+        portfolio_value_cents = await self._v2.get_portfolio_value_cents()
+        
+        if summary.state == BalanceState.FRESH and summary.available_cash_usd is not None:
+            balance_cents = int(summary.available_cash_usd * 100)
             return LegacyBalanceResult(
                 success=True,
-                balance_cents=equity_cents,  # Treat all as available for now
-                portfolio_value_cents=0,  # v2 doesn't track separately
+                balance_cents=balance_cents,
+                portfolio_value_cents=portfolio_value_cents,
                 error=None,
                 http_status=200,
             )
-        elif summary.state == BalanceState.STALE and summary.equity_usd is not None:
+        elif summary.state == BalanceState.STALE and summary.available_cash_usd is not None:
             # Stale but we have data - mark success=True but warn
-            equity_cents = int(summary.equity_usd * 100)
-            logger.warning(f"[adapter] Returning STALE balance: ${summary.equity_usd}")
+            balance_cents = int(summary.available_cash_usd * 100)
+            logger.warning(f"[adapter] Returning STALE balance: ${summary.available_cash_usd}")
             return LegacyBalanceResult(
                 success=True,  # Legacy code expects success to trade
-                balance_cents=equity_cents,
-                portfolio_value_cents=0,
+                balance_cents=balance_cents,
+                portfolio_value_cents=portfolio_value_cents,
                 error=f"STALE: {summary.last_error_reason}",
                 http_status=200,
             )
@@ -110,7 +112,7 @@ class BankrollAdapter:
             # ERROR or UNKNOWN - no data available
             return LegacyBalanceResult(
                 success=False,
-                balance_cents=0,  # LEGACY: This is the lie we want to eliminate
+                balance_cents=0,
                 portfolio_value_cents=0,
                 error=summary.last_error_reason or "Bankroll unavailable",
                 http_status=503,

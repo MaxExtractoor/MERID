@@ -12,7 +12,12 @@ import sys
 
 
 def main() -> int:
-    os.environ.setdefault("KALSHI_TRADER_SMOKE_TEST", "true")
+    # Set paper mode to avoid ModeResolver blocking
+    os.environ["MERID_TRADE_MODE"] = "paper"
+    os.environ["MERID_PM_TRADING_MODE"] = "paper"
+    os.environ["KALSHI_ENV"] = "demo"
+    # Unset smoke test flag to prevent safety violations
+    os.environ.pop("KALSHI_TRADER_SMOKE_TEST", None)
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if root not in sys.path:
         sys.path.insert(0, root)

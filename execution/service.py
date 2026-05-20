@@ -276,7 +276,7 @@ class ExecutionService:
         except (ConnectionError, RuntimeError) as e:
             logger.error(f"Error stopping ExecutionService: {e}")
     
-    def run(self, host: str = "127.0.0.1", port: int = 8012) -> None:
+    def run(self, host: str = "127.0.0.1", port: int = 8011) -> None:
         """Run the execution service."""
         self.app.router.lifespan_context = self.lifespan
         
@@ -305,7 +305,7 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="MERID Execution Service")
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
-    parser.add_argument("--port", type=int, default=8012, help="Port to bind to")
+    parser.add_argument("--port", type=int, default=8011, help="Port to bind to")
     parser.add_argument("--mode", choices=["sim", "live"], default="sim", help="Trading mode")
     
     args = parser.parse_args()

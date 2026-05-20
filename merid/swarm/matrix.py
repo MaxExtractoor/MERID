@@ -129,14 +129,16 @@ class SwarmMatrixBuilder:
         matrix: Dict[str, SwarmCell] = {}
         try:
             gate_status = self.execution_gate_fn()
-        except Exception:
+        except Exception as exc:
+            logger.debug("swarm matrix: execution gate check failed: %s", exc)
             gate_status = None
 
         venue_cap = None
         if self.execution_guard is not None:
             try:
                 venue_cap = self.execution_guard.get_venue_cap("kalshi")
-            except Exception:
+            except Exception as exc:
+                logger.debug("swarm matrix: venue cap check failed: %s", exc)
                 venue_cap = None
 
         for cell in self.agent_grid.iter_cells():
@@ -181,7 +183,8 @@ class SwarmMatrixBuilder:
         view = None
         try:
             view = self.consensus_aggregator.get_consensus(cell.asset, cell.timeframe)
-        except Exception:
+        except Exception as exc:
+            logger.debug("swarm matrix: consensus fetch failed for %s/%s: %s", cell.asset, cell.timeframe, exc)
             view = None
 
         if view:

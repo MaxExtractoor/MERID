@@ -65,9 +65,8 @@ export function OrderGroupAnalytics({
   const innerWidth = chartWidth - padding.left - padding.right;
   const innerHeight = chartHeight - padding.top - padding.bottom;
 
-  // Get time range
-  const now = useMemo(() => new Date(), []);
-  const startTime = useMemo(() => new Date(now.getTime() - hours * 60 * 60 * 1000), [now, hours]);
+  // Get time range (use Date.now() for current time, not stale useMemo)
+  const startTime = useMemo(() => new Date(Date.now() - hours * 60 * 60 * 1000), [hours]);
 
   // Filter and normalize data
   const normalizedData = useMemo(() => {

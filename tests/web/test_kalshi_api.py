@@ -16,6 +16,8 @@ def test_kalshi_endpoints_require_auth(client, monkeypatch):
     """Test that Kalshi endpoints require authentication."""
     monkeypatch.setenv("MERID_ENV", "production")
     monkeypatch.delenv("MERID_SKIP_AUTH_FOR_TESTS", raising=False)
+    monkeypatch.delenv("MERID_SINGLE_USER_OPERATOR", raising=False)
+    monkeypatch.delenv("MERID_DEV_AUTH_BYPASS", raising=False)
     resp = client.get("/api/v1/kalshi/markets")
     assert resp.status_code == 401
 

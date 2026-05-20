@@ -36,6 +36,14 @@ _ALLOWED_CALLER_PREFIXES = (
     "merid.event_venues.kalshi.maker_taker_policy",
     "merid.event_venues.kalshi.take_profit",
     "merid.event_venues.kalshi.universe",
+    # Execution infrastructure
+    "merid.execution.execution_queue_handler",
+    "merid.execution.executors",
+    "merid.hedging.engine",
+    # Sentiment infrastructure
+    "merid.sentiment.live_correlation_bot",
+    # Scripts
+    "scripts.verify_live_trade",
     # Operator API endpoints (manual override only)
     "web.api.kalshi_api",
     "web.api.kalshi_grid_api",
@@ -323,12 +331,16 @@ class TestRouterRejectsUnauthorized:
         route_order (sync) should reject with 'unauthorized_caller'.
         """
         from merid.event_venues.kalshi.order_router import route_order
+        from merid.mode_resolver import ModeResolver
 
         # Mock the caller to be unauthorized
         monkeypatch.setattr(
             "merid.event_venues.kalshi.order_router._get_caller_module",
             lambda: "unauthorized.malicious.module",
         )
+
+        # Mock ModeResolver to not be in live mode (bypass assert_not_live check)
+        monkeypatch.setattr(ModeResolver, "is_live_trading", lambda: False)
 
         result = route_order(mock_intent)
 
@@ -478,6 +490,7 @@ class TestSingleExecutorPrinciple:
                 # Core router and client infrastructure
                 "merid.event_venues.kalshi.client",
                 "merid.event_venues.kalshi.order_router",
+                "merid.event_venues.kalshi.regime_detection",  # Regime detection infrastructure
                 "merid.trading.kalshi_continuous_trader",  # Known bypass (migration in progress)
                 "merid.trading.ct_execution_adapter",  # CT → router adapter (migration Phase 1)
                 "merid.trading.adapters",
@@ -487,6 +500,7 @@ class TestSingleExecutorPrinciple:
                 "merid_core.kalshi",
                 "merid.swarm",
                 "merid.strategies",
+                "merid.sentiment.market_mood_bus",  # Market mood infrastructure
                 # Test infrastructure
                 "tests.",
                 "test_",

@@ -15,15 +15,29 @@ Domain-specific features:
   - Political event polling integration
 """
 
-from merid.agents.sports_odds import (
-    OddsAwareSportsAgent,
-    SportsOddsStrategy,
-    get_sports_odds_agent,
-)
-from merid.agents.research import (
-    MarketResearchAgent,
-    PredictionMarketAgentV2 as PredictionMarketAgent,
-)
+# Sports odds module moved to legacy - import with graceful fallback
+try:
+    from merid.agents.sports_odds import (
+        OddsAwareSportsAgent,
+        SportsOddsStrategy,
+        get_sports_odds_agent,
+    )
+    _sports_odds_available = True
+except ImportError:
+    _sports_odds_available = False
+    OddsAwareSportsAgent = None
+    SportsOddsStrategy = None
+    get_sports_odds_agent = None
+
+try:
+    from legacy.merid.agents.research import (
+        MarketResearchAgent,
+        PredictionMarketAgentV2 as PredictionMarketAgent,
+    )
+except ImportError:
+    # Fallback if legacy module structure differs
+    MarketResearchAgent = None
+    PredictionMarketAgent = None
 from merid.agents.strategy import (
     StrategyDesignerAgent,
 )
@@ -42,16 +56,14 @@ def is_event_market(ticker: str) -> bool:
 
 
 EVENT_AGENTS = {
-    "sports_odds": OddsAwareSportsAgent,
     "market_research": MarketResearchAgent,
     "prediction_market": PredictionMarketAgent,
     "strategy_designer": StrategyDesignerAgent,
 }
+if _sports_odds_available:
+    EVENT_AGENTS["sports_odds"] = OddsAwareSportsAgent
 
 __all__ = [
-    "OddsAwareSportsAgent",
-    "SportsOddsStrategy",
-    "get_sports_odds_agent",
     "MarketResearchAgent",
     "PredictionMarketAgent",
     "StrategyDesignerAgent",
@@ -60,3 +72,9 @@ __all__ = [
     "KALSHI_EVENT_CATEGORIES",
     "market_domain",
 ]
+if _sports_odds_available:
+    __all__.extend([
+        "OddsAwareSportsAgent",
+        "SportsOddsStrategy",
+        "get_sports_odds_agent",
+    ])

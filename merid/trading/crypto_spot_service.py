@@ -1,20 +1,35 @@
 """Unified Crypto Spot Price Service for MERID.
 
-Provides multi-asset spot price fetching with the following priority:
-1. Coinbase Advanced (primary) - per-asset calls using existing adapter
-2. BinanceUS (fallback) - batch call for missing assets
-3. CoinGecko (final fallback) - batch call for remaining assets
+DEPRECATED: Use data.unified_spot_service.UnifiedSpotService instead.
+
+This module is kept for:
+1. Shadow mode comparison in UnifiedSpotService
+2. Legacy consumers (KalshiContinuousTrader, crypto_venue_bridge, risk_posture)
+3. Test compatibility
+
+Provides multi-asset spot price fetching with the following priority (aligned with Kalshi's CFB RTI):
+1. Coinbase (primary) - USD spot pairs: BTC-USD, ETH-USD, SOL-USD, XRP-USD, DOGE-USD
+2. Kraken (secondary) - USD spot pairs: XBT/USD, ETH/USD, SOL/USD, XRP/USD, DOGE/USD
+3. BinanceUS (tertiary) - USD pairs: BTC/USD, ETH/USD, SOL/USD, XRP/USD, DOGE/USD
+
+This aligns with Kalshi's methodology which aggregates exchange prices in USD every second
+and uses a 60-second average before expiration to settle markets.
 
 Features:
 - Rate limit aware with token bucket per source
 - TTL caching with stale-while-revalidate pattern
 - Source tracking for observability
 - Synchronous API (for use in CT run_in_executor contexts)
+- USD-only hard filter (rejects USDT, USDC, cross-crypto pairs)
+- Time-aligned composite price aggregation (median across available USD feeds)
+- 60-second averaging window to match Kalshi's CFB RTI
 
 Env vars:
     SPOT_SERVICE_CACHE_TTL_SECONDS: int (default: 10)
     SPOT_SERVICE_STALE_TTL_SECONDS: int (default: 30)
-    SPOT_SERVICE_COINGECKO_API_KEY: Optional[str]
+    MERID_SPOT_STALE_MS: float (default: 5000) - milliseconds before spot is stale
+    MERID_SPOT_MISSING_MS: float (default: 30000) - milliseconds before spot is missing
+    MERID_KALSHI_COMPOSITE_WINDOW_S: int (default: 5) - composite window for Kalshi 15m contracts
 """
 
 from typing import Dict, List, Optional, Tuple, Any
@@ -31,13 +46,21 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-# Asset to symbol mappings
+# Asset to symbol mappings (USD-only, aligned with Kalshi's CFB RTI methodology)
 ASSET_TO_COINBASE_PRODUCT = {
     "BTC": "BTC-USD",
     "ETH": "ETH-USD",
     "SOL": "SOL-USD",
     "XRP": "XRP-USD",
     "DOGE": "DOGE-USD",
+}
+
+ASSET_TO_KRAKEN_PAIR = {
+    "BTC": "XBTUSD",  # Kraken uses XBT for Bitcoin
+    "ETH": "ETHUSD",
+    "SOL": "SOLUSD",
+    "XRP": "XRPUSD",
+    "DOGE": "DOGEUSD",
 }
 
 ASSET_TO_BINANCEUS_SYMBOL = {
@@ -48,14 +71,6 @@ ASSET_TO_BINANCEUS_SYMBOL = {
     "DOGE": "DOGEUSD",
 }
 
-ASSET_TO_COINGECKO_ID = {
-    "BTC": "bitcoin",
-    "ETH": "ethereum",
-    "SOL": "solana",
-    "XRP": "ripple",
-    "DOGE": "dogecoin",
-}
-
 _SPOT_VENUE_ERROR_STREAK_MAX: int = int(os.getenv("SPOT_VENUE_ERROR_STREAK_MAX", "5"))
 
 
@@ -64,10 +79,11 @@ class SpotPrice:
     """Spot price result with metadata."""
     asset: str
     price: float
-    source: str  # 'coinbase', 'binanceus', 'coingecko', 'cache'
+    source: str  # 'coinbase', 'kraken', 'binanceus', 'cache', 'composite', 'single_venue:{source}'
     timestamp: float
     age_seconds: float = field(default=0.0)
     is_stale: bool = field(default=False)
+    is_composite: bool = field(default=False)  # True if price is a 60-second median composite
 
 
 @dataclass
@@ -147,23 +163,33 @@ class CryptoSpotService:
         self,
         cache_ttl_seconds: Optional[int] = None,
         stale_ttl_seconds: Optional[int] = None,
-        coingecko_api_key: Optional[str] = None,
     ):
         self.cache_ttl = cache_ttl_seconds or int(os.getenv("SPOT_SERVICE_CACHE_TTL_SECONDS", "10"))
-        self.stale_ttl = stale_ttl_seconds or int(os.getenv("SPOT_SERVICE_STALE_TTL_SECONDS", "30"))
-        self.coingecko_api_key = coingecko_api_key or os.getenv("SPOT_SERVICE_COINGECKO_API_KEY")
+        # FIX: Use unified staleness threshold from environment variable
+        # Matches spot_basis_config.py and live_price_feed.py for consistency
+        spot_missing_ms = float(os.getenv("MERID_SPOT_MISSING_MS", "30000"))
+        self.stale_ttl = stale_ttl_seconds or int(spot_missing_ms / 1000.0)  # Convert ms to seconds
         
         # Cache: asset -> _CacheEntry
         self._cache: Dict[str, _CacheEntry] = {}
         self._cache_lock = None  # Lazy init
         
-        # Rate limiters per source
+        # FIX: Kalshi-specific composite window for 15m contracts
+        # General: 60-second rolling window (matches Kalshi CFB RTI)
+        # Kalshi: 5-second rolling window for near-real-time 15m settlement
+        self._kalshi_window_seconds = float(os.getenv("MERID_KALSHI_COMPOSITE_WINDOW_S", "5"))
+        self._price_window: Dict[str, List[Tuple[float, float, str]]] = {}  # asset -> [(timestamp, price, source), ...]
+        self._window_lock = None  # Lazy init
+        self._window_seconds = 60.0  # Default for general trading
+        self._max_window_points = 600  # Hard cap to avoid unbounded growth at high tick rates
+        
+        # Rate limiters per source (aligned with Kalshi's CFB RTI methodology)
         # Coinbase: 10 requests per second (generous for 5 assets)
         self._coinbase_limiter = TokenBucket(rate_per_second=10.0, burst=5)
+        # Kraken: 15 requests per second
+        self._kraken_limiter = TokenBucket(rate_per_second=15.0, burst=10)
         # BinanceUS: 20 requests per second
         self._binanceus_limiter = TokenBucket(rate_per_second=20.0, burst=10)
-        # CoinGecko: 10-30 calls/minute for free tier, 1 call per 2 seconds
-        self._coingecko_limiter = TokenBucket(rate_per_second=0.5, burst=1)
         
         # HTTP clients (lazy init)
         self._http_client: Optional[httpx.Client] = None
@@ -171,13 +197,13 @@ class CryptoSpotService:
         # Upstream failure metrics for observability
         self._failure_metrics: Dict[str, Dict[str, int]] = {
             "coinbase": {"429": 0, "timeout": 0, "http_error": 0, "other": 0},
+            "kraken": {"429": 0, "timeout": 0, "http_error": 0, "other": 0},
             "binanceus": {"429": 0, "timeout": 0, "http_error": 0, "other": 0},
-            "coingecko": {"429": 0, "timeout": 0, "http_error": 0, "other": 0},
         }
         self._venue_error_streak: Dict[str, int] = {
             "coinbase": 0,
+            "kraken": 0,
             "binanceus": 0,
-            "coingecko": 0,
         }
 
         logger.info(
@@ -191,10 +217,129 @@ class CryptoSpotService:
             self._cache_lock = threading.Lock()
         return self._cache_lock
     
+    def _get_window_lock(self):
+        if self._window_lock is None:
+            import threading
+            self._window_lock = threading.Lock()
+        return self._window_lock
+    
+    def _add_to_price_window(
+        self,
+        asset: str,
+        price: float,
+        timestamp: float,
+        source: Optional[str] = None,
+    ) -> None:
+        """Add a price point to the 60-second rolling window for composite aggregation.
+
+        Args:
+            asset: Asset symbol
+            price: Price value
+            timestamp: Unix timestamp
+            source: Exchange source (coinbase, kraken, binanceus) for debugging
+        """
+        with self._get_window_lock():
+            if asset not in self._price_window:
+                self._price_window[asset] = []
+
+            # Add new price point with source
+            self._price_window[asset].append((timestamp, price, source))
+
+            # Prune old entries outside the 60-second window (time-based)
+            cutoff = timestamp - self._window_seconds
+            self._price_window[asset] = [
+                (ts, p, s) for ts, p, s in self._price_window[asset] if ts > cutoff
+            ]
+
+            # Hard cap to avoid pathological growth at high tick rates
+            if len(self._price_window[asset]) > self._max_window_points:
+                self._price_window[asset] = self._price_window[asset][-self._max_window_points:]
+    
+    def _get_composite_price(
+        self,
+        asset: str,
+        min_samples: int = 2,
+        max_staleness_seconds: float = 15.0,
+    ) -> Optional[Tuple[float, str]]:
+        """Calculate composite price from the 60-second rolling window.
+
+        Uses median of all prices in the window to align with Kalshi's CFB RTI methodology
+        which aggregates exchange prices in USD every second and uses a 60-second average
+        before expiration to settle markets.
+
+        Args:
+            asset: Asset symbol
+            min_samples: Minimum number of price points required to compute composite
+            max_staleness_seconds: Maximum age of latest point to consider composite valid
+
+        Returns:
+            Tuple of (median_price, source_tag) or None if insufficient data or too stale
+            source_tag indicates "composite", "single_venue:{source}", or "stale"
+        """
+        with self._get_window_lock():
+            if asset not in self._price_window or not self._price_window[asset]:
+                return None
+
+            if len(self._price_window[asset]) < min_samples:
+                return None
+
+            now = time.time()
+            latest_timestamp = self._price_window[asset][-1][0]
+            latest_age = now - latest_timestamp
+
+            # Age-aware guard: reject composite if latest point is too stale
+            if latest_age > max_staleness_seconds:
+                logger.debug(
+                    "[SPOT-COMPOSITE] Composite for %s rejected: latest point %.1fs old (max %.1fs)",
+                    asset, latest_age, max_staleness_seconds
+                )
+                return None
+
+            prices = [p for _, p, _ in self._price_window[asset]]
+            sources = [s for _, _, s in self._price_window[asset] if s]
+
+            if not prices:
+                return None
+
+            # Calculate median (time-aligned composite)
+            prices.sort()
+            n = len(prices)
+            if n % 2 == 0:
+                median = (prices[n // 2 - 1] + prices[n // 2]) / 2
+            else:
+                median = prices[n // 2]
+
+            # Detect single-venue composite for drift detection
+            unique_sources = set(s for s in sources if s)
+            if len(unique_sources) == 1:
+                source_tag = f"single_venue:{unique_sources.pop()}"
+                logger.debug(
+                    "[SPOT-COMPOSITE] Single-venue composite for %s: %s (considered degraded)",
+                    asset, source_tag
+                )
+            else:
+                source_tag = "composite"
+
+            return median, source_tag
+    
     def _get_http_client(self) -> httpx.Client:
         if self._http_client is None:
             self._http_client = httpx.Client(timeout=10.0, follow_redirects=True)
         return self._http_client
+    
+    def close(self) -> None:
+        """Close the HTTP client to free resources. Call on shutdown."""
+        if self._http_client is not None:
+            try:
+                self._http_client.close()
+                self._http_client = None
+                logger.info("CryptoSpotService: HTTP client closed")
+            except Exception as e:
+                logger.warning("CryptoSpotService: error closing HTTP client: %s", e)
+    
+    def __del__(self) -> None:
+        """Cleanup on garbage collection (fallback if close() not called)."""
+        self.close()
 
     def _bump_venue_error(self, venue: str) -> None:
         self._venue_error_streak[venue] = min(
@@ -316,6 +461,86 @@ class CryptoSpotService:
         self._bump_venue_error("coinbase")
         return None
 
+    def _try_kraken(self, asset: str) -> Optional[float]:
+        """Try to fetch spot price from Kraken.
+
+        Uses the public Ticker endpoint which requires no authentication:
+            GET https://api.kraken.com/0/public/Ticker?pair=XBTUSD
+
+        Kraken uses XBT for Bitcoin in API responses.
+        """
+        pair = ASSET_TO_KRAKEN_PAIR.get(asset.upper())
+        if not pair:
+            logger.warning("Kraken: no pair mapping for asset %s", asset)
+            return None
+
+        if not self._kraken_limiter.acquire(timeout=2.0):
+            logger.warning("Kraken rate limit exceeded for %s", asset)
+            return None
+
+        try:
+            url = "https://api.kraken.com/0/public/Ticker"
+            params = {"pair": pair}
+            logger.debug("Kraken request: GET %s with params %s", url, params)
+            resp = requests.get(url, params=params, timeout=8)
+            resp.raise_for_status()
+            data = resp.json()
+            
+            # Kraken returns data in a nested structure: {"result": {"XXBTZUSD": {"c": ["PRICE", ...]}}}
+            if data.get("error"):
+                logger.warning("Kraken API error for %s: %s", asset, data.get("error"))
+                self._bump_venue_error("kraken")
+                return None
+            
+            result = data.get("result", {})
+            if not result:
+                logger.warning("Kraken: no result data for %s", asset)
+                self._bump_venue_error("kraken")
+                return None
+            
+            # Get the first (and only) key in the result
+            if result and result.keys():
+                ticker_key = list(result.keys())[0]
+            else:
+                logger.warning("Kraken: empty result keys for %s", asset)
+                self._bump_venue_error("kraken")
+                return None
+            ticker_data = result[ticker_key]
+            
+            # 'c' is the last trade closed array: [price, volume]
+            c_array = ticker_data.get("c", [])
+            if c_array:
+                price_str = c_array[0]
+            else:
+                logger.warning("Kraken: no price array in response for %s", asset)
+                self._bump_venue_error("kraken")
+                return None
+            if price_str:
+                price = float(price_str)
+                logger.debug("Kraken success: %s = %.2f", asset, price)
+                self._clear_venue_error("kraken")
+                return price
+            else:
+                logger.warning("Kraken: no price field in response for %s", asset)
+                self._bump_venue_error("kraken")
+                return None
+                
+        except requests.exceptions.HTTPError as e:
+            status = getattr(resp, "status_code", "?")
+            logger.warning("Kraken HTTP error for %s: %s (status=%s)", asset, e, status)
+            self._failure_metrics["kraken"]["http_error"] += 1
+            self._bump_venue_error("kraken")
+        except requests.exceptions.Timeout:
+            logger.warning("Kraken timeout for %s", asset)
+            self._failure_metrics["kraken"]["timeout"] += 1
+            self._bump_venue_error("kraken")
+        except Exception as e:
+            logger.debug("Kraken fetch failed for %s: %s", asset, e)
+            self._failure_metrics["kraken"]["other"] += 1
+            self._bump_venue_error("kraken")
+        
+        return None
+
     def _try_binanceus_one_by_one(
         self, symbols: List[str], symbol_to_asset: Dict[str, str]
     ) -> Dict[str, float]:
@@ -418,102 +643,30 @@ class CryptoSpotService:
         
         return results
     
-    def _try_coingecko_batch(self, assets: List[str]) -> Dict[str, float]:
-        """Try to fetch spot prices from CoinGecko for multiple assets.
-        
-        Uses the /simple/price endpoint with multiple IDs in one call.
-        Respects CoinGecko's limit of 50 tokens per request.
-        """
-        if not assets:
-            return {}
-        
-        # CoinGecko limits to 50 tokens per request
-        if len(assets) > 50:
-            logger.warning("CoinGecko batch size %d exceeds 50-token limit, truncating", len(assets))
-            assets = assets[:50]
-        
-        if not self._coingecko_limiter.acquire(timeout=5.0):
-            logger.warning("CoinGecko rate limit exceeded")
-            return {}
-        
-        # Map assets to CoinGecko IDs
-        ids = []
-        id_to_asset = {}
-        for asset in assets:
-            cg_id = ASSET_TO_COINGECKO_ID.get(asset.upper())
-            if cg_id:
-                ids.append(cg_id)
-                id_to_asset[cg_id] = asset.upper()
-        
-        if not ids:
-            return {}
-        
-        results = {}
-        try:
-            url = "https://api.coingecko.com/api/v3/simple/price"
-            params = {
-                "ids": ",".join(ids),
-                "vs_currencies": "usd",
-            }
-            
-            # Add API key if available (for higher rate limits)
-            headers = {}
-            if self.coingecko_api_key:
-                headers["x-cg-pro-api-key"] = self.coingecko_api_key
-            
-            logger.debug("CoinGecko request: GET %s with ids=%s", url, params["ids"])
-            resp = requests.get(url, params=params, headers=headers, timeout=10)
-            
-            if resp.status_code == 429:
-                logger.warning("CoinGecko rate limited (429) - %d assets", len(ids))
-                self._failure_metrics["coingecko"]["429"] += 1
-                self._bump_venue_error("coingecko")
-                return {}
-            
-            resp.raise_for_status()
-            data = resp.json()
-            
-            for cg_id, values in data.items():
-                asset = id_to_asset.get(cg_id)
-                if asset and "usd" in values:
-                    results[asset] = float(values["usd"])
-                    logger.debug("CoinGecko success: %s = %.2f", asset, results[asset])
-            
-            # Log missing assets
-            missing_ids = set(ids) - set(data.keys())
-            if missing_ids:
-                logger.warning("CoinGecko: ids not returned: %s", missing_ids)
-            if results:
-                self._clear_venue_error("coingecko")
-                    
-        except requests.exceptions.HTTPError as e:
-            logger.warning("CoinGecko HTTP error: %s (status=%s)", e, resp.status_code)
-            self._failure_metrics["coingecko"]["http_error"] += 1
-            self._bump_venue_error("coingecko")
-        except requests.exceptions.Timeout:
-            logger.warning("CoinGecko timeout")
-            self._failure_metrics["coingecko"]["timeout"] += 1
-            self._bump_venue_error("coingecko")
-        except Exception as e:
-            logger.debug("CoinGecko batch fetch failed: %s", e)
-            self._failure_metrics["coingecko"]["other"] += 1
-            self._bump_venue_error("coingecko")
-        
-        return results
-    
     def get_spot(self, asset: str, use_cache: bool = True) -> Optional[SpotPrice]:
         """Get spot price for a single asset.
-        
+
+        Returned price is a 60-second median composite across available USD sources
+        when sufficient data is present (≥2 points in window); otherwise, the latest
+        primary source quote is used. This aligns with Kalshi's CFB RTI methodology
+        which aggregates exchange prices in USD every second and uses a 60-second
+        average before expiration to settle markets.
+
+        Priority order (aligned with Kalshi's CFB RTI):
+        1. Coinbase (primary) - USD spot
+        2. Kraken (secondary) - USD spot
+        3. BinanceUS (tertiary) - USD pairs
+
         Args:
             asset: Asset symbol (BTC, ETH, etc.)
             use_cache: Whether to check cache first
-            
+
         Returns:
             SpotPrice or None if all sources failed
         """
         asset = asset.upper()
         now = time.time()
-        
+
         # Check cache first
         if use_cache:
             cached = self._get_from_cache(asset)
@@ -527,41 +680,62 @@ class CryptoSpotService:
                     age_seconds=age,
                     is_stale=age > self.cache_ttl
                 )
-        
-        # Try sources in priority order
+
+        # Try sources in priority order (Coinbase > Kraken > BinanceUS)
         # 1. Coinbase
         price = self._try_coinbase(asset)
         if price is not None:
-            self._set_cache(asset, price, "coinbase")
+            self._add_to_price_window(asset, price, now, "coinbase")
+            composite = self._get_composite_price(asset, min_samples=2)
+            final_price = composite[0] if composite else price
+            source_tag = composite[1] if composite else "coinbase"
+            is_composite = composite is not None
+
+            self._set_cache(asset, final_price, source_tag)
             return SpotPrice(
                 asset=asset,
-                price=price,
-                source="coinbase",
-                timestamp=now
+                price=final_price,
+                source=source_tag,
+                timestamp=now,
+                is_composite=is_composite
             )
-        
-        # 2. BinanceUS (single asset as batch of 1)
+
+        # 2. Kraken
+        price = self._try_kraken(asset)
+        if price is not None:
+            self._add_to_price_window(asset, price, now, "kraken")
+            composite = self._get_composite_price(asset, min_samples=2)
+            final_price = composite[0] if composite else price
+            source_tag = composite[1] if composite else "kraken"
+            is_composite = composite is not None
+
+            self._set_cache(asset, final_price, source_tag)
+            return SpotPrice(
+                asset=asset,
+                price=final_price,
+                source=source_tag,
+                timestamp=now,
+                is_composite=is_composite
+            )
+
+        # 3. BinanceUS (single asset as batch of 1)
         results = self._try_binanceus_batch([asset])
         if asset in results:
-            self._set_cache(asset, results[asset], "binanceus")
+            self._add_to_price_window(asset, results[asset], now, "binanceus")
+            composite = self._get_composite_price(asset, min_samples=2)
+            final_price = composite[0] if composite else results[asset]
+            source_tag = composite[1] if composite else "binanceus"
+            is_composite = composite is not None
+
+            self._set_cache(asset, final_price, source_tag)
             return SpotPrice(
                 asset=asset,
-                price=results[asset],
-                source="binanceus",
-                timestamp=now
+                price=final_price,
+                source=source_tag,
+                timestamp=now,
+                is_composite=is_composite
             )
-        
-        # 3. CoinGecko (single asset as batch of 1)
-        results = self._try_coingecko_batch([asset])
-        if asset in results:
-            self._set_cache(asset, results[asset], "coingecko")
-            return SpotPrice(
-                asset=asset,
-                price=results[asset],
-                source="coingecko",
-                timestamp=now
-            )
-        
+
         return None
     
     def get_all_spots(
@@ -570,28 +744,34 @@ class CryptoSpotService:
         use_cache: bool = True
     ) -> SpotServiceResult:
         """Get spot prices for multiple assets with efficient batching.
-        
+
+        Returned prices are 60-second median composites across available USD sources
+        when sufficient data is present (≥2 points in window); otherwise, the latest
+        primary source quote is used. This aligns with Kalshi's CFB RTI methodology
+        which aggregates exchange prices in USD every second and uses a 60-second
+        average before expiration to settle markets.
+
         Returns partial results: assets with successful fetches are in `prices`,
         failed assets are in `failed`. Callers MUST check `asset not in result.failed`
         or use `.get()` before accessing prices. Missing key ⇒ price unavailable.
-        
-        Strategy:
+
+        Strategy (aligned with Kalshi's CFB RTI):
         1. Check cache for all assets
-        2. Try Coinbase for remaining (per-asset, parallel-friendly)
-        3. Batch failed assets through BinanceUS
-        4. Batch remaining through CoinGecko
+        2. Try Coinbase for remaining (primary - USD spot)
+        3. Try Kraken for remaining (secondary - USD spot)
+        4. Batch remaining through BinanceUS (tertiary - USD pairs)
         5. Return stale cache entries if live sources fail
-        
+
         Args:
             assets: List of asset symbols (e.g., ["BTC", "ETH"])
             use_cache: Whether to use cached prices
-            
+
         Returns:
             SpotServiceResult with:
             - prices: Dict[str, SpotPrice] - only successful fetches
             - failed: List[str] - assets that couldn't be fetched (any reason)
             - by_source: breakdown of which source served each asset
-            
+
         Example:
             result = service.get_all_spots(["BTC", "ETH"])
             for asset in ["BTC", "ETH"]:
@@ -616,7 +796,7 @@ class CryptoSpotService:
         
         results: Dict[str, SpotPrice] = {}
         failed: List[str] = []
-        by_source: Dict[str, List[str]] = {"coinbase": [], "binanceus": [], "coingecko": [], "cache": [], "stale_cache": []}
+        by_source: Dict[str, List[str]] = {"coinbase": [], "kraken": [], "binanceus": [], "composite": [], "cache": [], "stale_cache": []}
         cache_hits = 0
         live_fetches = 0
         
@@ -648,51 +828,71 @@ class CryptoSpotService:
                         needed.remove(asset)
                         cache_hits += 1
         
-        # Step 2: Try Coinbase for remaining assets
-        coinbase_success = []
+        # Step 2: Try Coinbase for remaining assets (primary)
         if needed:
             for asset in list(needed):
                 price = self._try_coinbase(asset)
                 if price is not None:
-                    self._set_cache(asset, price, "coinbase")
+                    self._add_to_price_window(asset, price, now, "coinbase")
+                    composite = self._get_composite_price(asset, min_samples=2)
+                    final_price = composite[0] if composite else price
+                    source_tag = composite[1] if composite else "coinbase"
+                    is_composite = composite is not None
+
+                    self._set_cache(asset, final_price, source_tag)
                     results[asset] = SpotPrice(
                         asset=asset,
-                        price=price,
-                        source="coinbase",
-                        timestamp=time.time()
+                        price=final_price,
+                        source=source_tag,
+                        timestamp=now,
+                        is_composite=is_composite
                     )
-                    by_source["coinbase"].append(asset)
+                    by_source["coinbase" if "composite" not in source_tag else "composite"].append(asset)
                     needed.remove(asset)
-                    coinbase_success.append(asset)
                     live_fetches += 1
-        
-        # Step 3: Batch remaining through BinanceUS
+
+        # Step 3: Try Kraken for remaining assets (secondary)
+        if needed:
+            for asset in list(needed):
+                price = self._try_kraken(asset)
+                if price is not None:
+                    self._add_to_price_window(asset, price, now, "kraken")
+                    composite = self._get_composite_price(asset, min_samples=2)
+                    final_price = composite[0] if composite else price
+                    source_tag = composite[1] if composite else "kraken"
+                    is_composite = composite is not None
+
+                    self._set_cache(asset, final_price, source_tag)
+                    results[asset] = SpotPrice(
+                        asset=asset,
+                        price=final_price,
+                        source=source_tag,
+                        timestamp=now,
+                        is_composite=is_composite
+                    )
+                    by_source["kraken" if "composite" not in source_tag else "composite"].append(asset)
+                    needed.remove(asset)
+                    live_fetches += 1
+
+        # Step 4: Batch remaining through BinanceUS (tertiary)
         if needed:
             binance_results = self._try_binanceus_batch(list(needed))
             for asset, price in binance_results.items():
-                self._set_cache(asset, price, "binanceus")
+                self._add_to_price_window(asset, price, now, "binanceus")
+                composite = self._get_composite_price(asset, min_samples=2)
+                final_price = composite[0] if composite else price
+                source_tag = composite[1] if composite else "binanceus"
+                is_composite = composite is not None
+
+                self._set_cache(asset, final_price, source_tag)
                 results[asset] = SpotPrice(
                     asset=asset,
-                    price=price,
-                    source="binanceus",
-                    timestamp=time.time()
+                    price=final_price,
+                    source=source_tag,
+                    timestamp=now,
+                    is_composite=is_composite
                 )
-                by_source["binanceus"].append(asset)
-                needed.discard(asset)
-                live_fetches += 1
-        
-        # Step 4: Batch remaining through CoinGecko
-        if needed:
-            coingecko_results = self._try_coingecko_batch(list(needed))
-            for asset, price in coingecko_results.items():
-                self._set_cache(asset, price, "coingecko")
-                results[asset] = SpotPrice(
-                    asset=asset,
-                    price=price,
-                    source="coingecko",
-                    timestamp=time.time()
-                )
-                by_source["coingecko"].append(asset)
+                by_source["binanceus" if "composite" not in source_tag else "composite"].append(asset)
                 needed.discard(asset)
                 live_fetches += 1
         
@@ -793,7 +993,18 @@ crypto_spot_service: Optional[CryptoSpotService] = None
 
 
 def get_crypto_spot_service() -> CryptoSpotService:
-    """Get or create the singleton spot service instance."""
+    """Get or create the singleton spot service instance.
+    
+    DEPRECATED: Use data.unified_spot_service.get_unified_spot_service() instead.
+    This function is kept for legacy compatibility and will be removed in a future version.
+    """
+    import warnings
+    warnings.warn(
+        "get_crypto_spot_service() is deprecated. Use data.unified_spot_service.get_unified_spot_service() instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    
     global crypto_spot_service
     if crypto_spot_service is None:
         crypto_spot_service = CryptoSpotService()

@@ -1,6 +1,13 @@
 """
 Costs Model - Slippage and Commissions for Realistic Backtesting
 
+BACKTEST/SIMULATION MODULE ONLY - Not used in live 15m crypto trading.
+
+For live Kalshi 15m crypto agents (BTC_15M, ETH_15M, SOL_15M, XRP_15M, DOGE_15M):
+  - Fee calculation: Use merid/event_venues/kalshi/fees.py (SINGLE SOURCE OF TRUTH)
+  - Slippage: Use profile config or environment variables
+  - This module's defaults are for generic backtesting only
+
 Simple model for slippage and commissions to make backtests more realistic.
 """
 

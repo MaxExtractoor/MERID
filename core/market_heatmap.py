@@ -35,7 +35,8 @@ def _build_sector_map() -> Dict[str, str]:
             result[key] = sector
         return result
     except Exception:
-        return {"BTC": "Crypto Major", "ETH": "Crypto Major", "SOL": "Crypto L1"}
+        from merid.constants import CRYPTO_15M_ASSETS
+        return {asset: "Crypto Major" for asset in CRYPTO_15M_ASSETS}
 
 
 def _build_category_symbols() -> Dict[str, List[str]]:
@@ -51,7 +52,8 @@ def _build_category_symbols() -> Dict[str, List[str]]:
             "meme": CATEGORIES.get("meme", []),
         }
     except Exception:
-        return {"core": ["BTC", "ETH", "SOL"]}
+        from merid.constants import CRYPTO_15M_ASSETS
+        return {"core": list(CRYPTO_15M_ASSETS)}
 
 
 SECTOR_MAP: Dict[str, str] = _build_sector_map()

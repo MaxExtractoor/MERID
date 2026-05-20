@@ -52,10 +52,54 @@ class AgentModeRouter:
             return success
         
         elif config.mode == "live":
-            # Live mode: route to real Kalshi venue
-            # TODO: Integrate with actual Kalshi order execution
-            logger.warning(f"Live mode not yet implemented for {agent_id} - opinion ignored")
-            return False
+            # Live mode: route to Kalshi order execution
+            try:
+                from merid.event_venues.kalshi.order_router import route_order_async, OrderIntent
+                import asyncio
+                
+                # Build order intent
+                intent = OrderIntent(
+                    ticker=market_id,
+                    side=side,
+                    action="buy" if side.lower() in ("yes", "buy", "long") else "sell",
+                    price_cents=0,  # Market order (price determined by venue)
+                    count=adjusted_contracts,
+                    order_type="market",
+                    time_in_force="ioc",
+                    source=f"agent_mode_router:{agent_id}",
+                    agent_id=agent_id,
+                )
+                
+                # Route order asynchronously
+                async def execute_live_order():
+                    result = await route_order_async(intent)
+                    return result
+                
+                # Run async order execution
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            future = executor.submit(asyncio.run, execute_live_order())
+                            result = future.result()
+                    else:
+                        result = asyncio.run(execute_live_order())
+                    
+                    if result and result.success:
+                        logger.info(f"Live mode: executed order from {agent_id} for {market_id}")
+                        return True
+                    else:
+                        logger.error(f"Live mode: order failed for {agent_id} on {market_id}: {result.error if result else 'unknown'}")
+                        return False
+                        
+                except Exception as e:
+                    logger.error(f"Live mode: order execution error for {agent_id}: {e}")
+                    return False
+                    
+            except ImportError as e:
+                logger.error(f"Live mode: order router not available for {agent_id}: {e}")
+                return False
         
         else:
             logger.error(f"Unknown mode '{config.mode}' for agent {agent_id}")

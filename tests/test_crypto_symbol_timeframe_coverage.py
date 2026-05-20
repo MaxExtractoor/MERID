@@ -204,7 +204,7 @@ class TestParameterizedAgentOpinionSmokeTest:
             ("SOL", "15m"): "merid.agents.sol_15m_agent",
             ("XRP", "15m"): "merid.agents.xrp_15m_agent",
             ("DOGE", "15m"): "merid.agents.doge_15m_agent",
-            ("BTC", "1h"): "merid.agents.btc_1h_agent",
+            # BTC 1h archived 2026-01-15 - focus on 15m timeframe only
         }
         
         module_path = agent_map[(symbol, timeframe)]
@@ -342,7 +342,7 @@ class TestAgentOpinionToKalshiMarketRouting:
         
         # Test for all crypto regime agents
         crypto_agents = [
-            "eth_15m", "sol_15m", "xrp_15m", "doge_15m", "btc_1h",
+            "eth_15m", "sol_15m", "xrp_15m", "doge_15m",
             "btc_15m", "eth_1h", "sol_1h", "xrp_1h", "doge_1h",
         ]
         

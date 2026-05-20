@@ -11,6 +11,16 @@ import random
 from typing import List, Optional
 from datetime import datetime, timedelta
 
+# LEGACY EXECUTION GUARD: This module contains legacy execution logic
+# To enable, set MERID_ALLOW_LEGACY_EXECUTION=true (non-prod environments only)
+# Production deployments must never set this env var
+import os
+if os.getenv("MERID_ALLOW_LEGACY_EXECUTION", "false").lower() != "true":
+    raise RuntimeError(
+        "Legacy execution module cannot be imported in production. "
+        "Set MERID_ALLOW_LEGACY_EXECUTION=true only in non-prod environments."
+    )
+
 from trading._legacy.perp.base import (
     PerpVenueAdapterBase, PerpMarketSnapshot, 
     FundingRateSnapshot, WhaleSignal

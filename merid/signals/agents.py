@@ -13,7 +13,12 @@ from typing import Any, Dict, List, Optional
 
 from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS
 from merid.agents.base import AgentCategory, AgentOutput, CanonicalAgent
-from merid.agents.research import ResearchThesis, ThesisDirection
+try:
+    from legacy.merid.agents.research import ResearchThesis, ThesisDirection
+except ImportError:
+    # Fallback if legacy module structure differs
+    ResearchThesis = None
+    ThesisDirection = None
 from merid.signals.events import (
     InfoEvent,
     InfoSource,

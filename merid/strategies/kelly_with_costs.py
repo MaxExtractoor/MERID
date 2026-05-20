@@ -1,7 +1,14 @@
 """
-Kelly Criterion with Transaction Costs
+Kelly sizing with transaction costs.
 
-Adjust PnL per trade before feeding into Kelly stats.
+BACKTEST/SIMULATION MODULE ONLY - Not used in live 15m crypto trading.
+
+For live Kalshi 15m crypto agents (BTC_15M, ETH_15M, SOL_15M, XRP_15M, DOGE_15M):
+  - Fee calculation: Use merid/event_venues/kalshi/fees.py (SINGLE SOURCE OF TRUTH)
+  - Slippage: Use profile config or environment variables
+  - This module's defaults are for generic backtesting only
+
+Applies slippage and commission to trade PnL before calculating Kelly fraction.
 """
 
 import numpy as np

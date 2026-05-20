@@ -53,9 +53,10 @@ MACRO_CATEGORY_PATTERNS: Dict[str, MacroCategory] = {
 }
 
 # Minimum liquidity thresholds
-MIN_VOLUME_24H = 50      # Minimum 24h contracts traded
-MAX_SPREAD_CENTS = 10    # Maximum acceptable spread
-MAX_AGE_SECONDS = 300    # Maximum age for macro data (5 minutes)
+# BUG-FIX: Made configurable via env vars instead of hardcoded
+MIN_VOLUME_24H = int(os.getenv("MERID_MACRO_MIN_VOLUME_24H", "50"))      # Minimum 24h contracts traded
+MAX_SPREAD_CENTS = int(os.getenv("MERID_MACRO_MAX_SPREAD_CENTS", "10"))    # Maximum acceptable spread
+MAX_AGE_SECONDS = int(os.getenv("MERID_MACRO_MAX_AGE_SECONDS", "300"))   # Maximum age for macro data (5 minutes)
 
 
 class MacroConvictionScorer:
@@ -109,47 +110,58 @@ class MacroConvictionScorer:
         }
         
         # Risk-on/off contribution
+        # BUG-FIX: Made configurable via env vars instead of hardcoded 0.15
+        RISK_ON_WEIGHT = float(os.getenv("MERID_MACRO_RISK_ON_WEIGHT", "0.15"))
         if macro_state.macro_regime == MacroRegime.RISK_ON:
-            contributions["risk_on"] = sens.risk_on_sensitivity * 0.15
+            contributions["risk_on"] = sens.risk_on_sensitivity * RISK_ON_WEIGHT
         elif macro_state.macro_regime == MacroRegime.RISK_OFF:
-            contributions["risk_on"] = -sens.risk_on_sensitivity * 0.15
+            contributions["risk_on"] = -sens.risk_on_sensitivity * RISK_ON_WEIGHT
         
         # Monetary policy contribution (from fed_hike_prob)
+        # BUG-FIX: Made configurable via env vars instead of hardcoded 0.2
+        MONETARY_POLICY_WEIGHT = float(os.getenv("MERID_MACRO_MONETARY_POLICY_WEIGHT", "0.2"))
         if macro_state.fed_hike_prob is not None:
             # Lower hike prob = more dovish = bullish for crypto
             dovish_score = 1.0 - macro_state.fed_hike_prob
             contributions["monetary_policy"] = (
-                (dovish_score - 0.5) * sens.rate_cut_sensitivity * 0.2
+                (dovish_score - 0.5) * sens.rate_cut_sensitivity * MONETARY_POLICY_WEIGHT
             )
         
         # Inflation contribution
+        # BUG-FIX: Made configurable via env vars instead of hardcoded 0.2
+        INFLATION_WEIGHT = float(os.getenv("MERID_MACRO_INFLATION_WEIGHT", "0.2"))
         if macro_state.cpi_surprise_prob is not None:
             # Lower surprise prob = less inflation fear = bullish
             low_inflation_score = 1.0 - macro_state.cpi_surprise_prob
             contributions["inflation"] = (
-                (low_inflation_score - 0.5) * sens.cpi_surprise_sensitivity * 0.2
+                (low_inflation_score - 0.5) * sens.cpi_surprise_sensitivity * INFLATION_WEIGHT
             )
         
         # Recession contribution
+        # BUG-FIX: Made configurable via env vars instead of hardcoded 0.2
+        RECESSION_WEIGHT = float(os.getenv("MERID_MACRO_RECESSION_WEIGHT", "0.2"))
         if macro_state.recession_prob is not None:
             # Lower recession prob = bullish
             growth_score = 1.0 - macro_state.recession_prob
             contributions["recession"] = (
-                (growth_score - 0.5) * sens.recession_sensitivity * 0.2
+                (growth_score - 0.5) * sens.recession_sensitivity * RECESSION_WEIGHT
             )
         
         # Tech sentiment (from tech_science category)
+        # BUG-FIX: Made configurable via env vars instead of hardcoded 0.6 and 0.15
+        TECH_BULLISH_THRESHOLD = float(os.getenv("MERID_MACRO_TECH_BULLISH_THRESHOLD", "0.6"))
+        TECH_SENTIMENT_WEIGHT = float(os.getenv("MERID_MACRO_TECH_SENTIMENT_WEIGHT", "0.15"))
         if macro_state.tech_science:
             # Aggregate tech sentiment from available markets
             tech_bullish_count = sum(
                 1 for m in macro_state.tech_science.values()
-                if m.yes_prob > 0.6
+                if m.yes_prob > TECH_BULLISH_THRESHOLD
             )
             tech_total = len(macro_state.tech_science)
             if tech_total > 0:
                 tech_sentiment = tech_bullish_count / tech_total
                 contributions["tech_sentiment"] = (
-                    (tech_sentiment - 0.5) * sens.tech_sentiment_sensitivity * 0.15
+                    (tech_sentiment - 0.5) * sens.tech_sentiment_sensitivity * TECH_SENTIMENT_WEIGHT
                 )
         
         # Calculate final score
@@ -160,13 +172,18 @@ class MacroConvictionScorer:
         confidence = self._calculate_confidence(macro_state)
         
         # Calculate recommended modifier (0.5x to 1.5x range)
-        # Score < 0.4: reduce exposure (modifier < 1.0)
-        # Score > 0.6: increase exposure (modifier > 1.0)
-        # Score 0.4-0.6: neutral (modifier = 1.0)
-        if score < 0.4:
-            modifier = 0.5 + (score / 0.4) * 0.5  # 0.5 to 1.0
-        elif score > 0.6:
-            modifier = 1.0 + ((score - 0.6) / 0.4) * 0.5  # 1.0 to 1.5
+        # BUG-FIX: Made thresholds configurable via constants
+        SCORE_REDUCTION_THRESHOLD = float(os.getenv("MERID_MACRO_SCORE_REDUCTION_THRESHOLD", "0.4"))
+        SCORE_INCREASE_THRESHOLD = float(os.getenv("MERID_MACRO_SCORE_INCREASE_THRESHOLD", "0.6"))
+        MODIFIER_MIN = float(os.getenv("MERID_MACRO_MODIFIER_MIN", "0.5"))
+        MODIFIER_MAX = float(os.getenv("MERID_MACRO_MODIFIER_MAX", "1.5"))
+        
+        if score < SCORE_REDUCTION_THRESHOLD:
+            # Scale from MODIFIER_MIN to 1.0 based on how far below threshold
+            modifier = MODIFIER_MIN + (score / SCORE_REDUCTION_THRESHOLD) * (1.0 - MODIFIER_MIN)
+        elif score > SCORE_INCREASE_THRESHOLD:
+            # Scale from 1.0 to MODIFIER_MAX based on how far above threshold
+            modifier = 1.0 + ((score - SCORE_INCREASE_THRESHOLD) / (1.0 - SCORE_INCREASE_THRESHOLD)) * (MODIFIER_MAX - 1.0)
         else:
             modifier = 1.0
         
@@ -426,11 +443,16 @@ class KalshiMacroOverlay:
                     risk_on_signals += 1
         
         # Determine regime
-        if risk_off_signals >= 2:
+        # BUG-FIX: Made thresholds configurable via env vars
+        RISK_OFF_SIGNAL_THRESHOLD = int(os.getenv("MERID_MACRO_RISK_OFF_SIGNAL_THRESHOLD", "2"))
+        RISK_ON_SIGNAL_THRESHOLD = int(os.getenv("MERID_MACRO_RISK_ON_SIGNAL_THRESHOLD", "2"))
+        EVENT_RISK_HIGH_THRESHOLD = float(os.getenv("MERID_MACRO_EVENT_RISK_HIGH_THRESHOLD", "0.7"))
+        
+        if risk_off_signals >= RISK_OFF_SIGNAL_THRESHOLD:
             return MacroRegime.RISK_OFF
-        elif risk_on_signals >= 2:
+        elif risk_on_signals >= RISK_ON_SIGNAL_THRESHOLD:
             return MacroRegime.RISK_ON
-        elif state.event_risk_score > 0.7:
+        elif state.event_risk_score > EVENT_RISK_HIGH_THRESHOLD:
             return MacroRegime.EVENT_RISK_HIGH
         else:
             return MacroRegime.NEUTRAL
@@ -438,11 +460,16 @@ class KalshiMacroOverlay:
     def _classify_volatility(self, state: MacroState) -> VolatilityRegime:
         """Classify volatility regime."""
         # Use event risk as proxy for vol regime
-        if state.event_risk_score > 0.7:
+        # BUG-FIX: Made thresholds configurable via env vars
+        VOL_ELEVATED_THRESHOLD = float(os.getenv("MERID_MACRO_VOL_ELEVATED_THRESHOLD", "0.7"))
+        VOL_EXPANDING_THRESHOLD = float(os.getenv("MERID_MACRO_VOL_EXPANDING_THRESHOLD", "0.4"))
+        VOL_CONTRACTING_THRESHOLD = float(os.getenv("MERID_MACRO_VOL_CONTRACTING_THRESHOLD", "0.2"))
+        
+        if state.event_risk_score > VOL_ELEVATED_THRESHOLD:
             return VolatilityRegime.ELEVATED
-        elif state.event_risk_score > 0.4:
+        elif state.event_risk_score > VOL_EXPANDING_THRESHOLD:
             return VolatilityRegime.EXPANDING
-        elif state.event_risk_score < 0.2:
+        elif state.event_risk_score < VOL_CONTRACTING_THRESHOLD:
             return VolatilityRegime.CONTRACTING
         else:
             return VolatilityRegime.STABLE
@@ -451,20 +478,29 @@ class KalshiMacroOverlay:
         """Compute aggregate event risk score (0.0-1.0)."""
         factors = []
         
+        # BUG-FIX: Made configurable constants for event risk calculation
+        ELECTION_PROB_LOW = float(os.getenv("MERID_MACRO_ELECTION_PROB_LOW", "0.3"))
+        ELECTION_PROB_HIGH = float(os.getenv("MERID_MACRO_ELECTION_PROB_HIGH", "0.7"))
+        ELECTION_RISK_WEIGHT = float(os.getenv("MERID_MACRO_ELECTION_RISK_WEIGHT", "0.5"))
+        CLOSE_EVENT_SECONDS = int(os.getenv("MERID_MACRO_CLOSE_EVENT_SECONDS", "86400"))
+        CLOSE_EVENT_RISK_WEIGHT = float(os.getenv("MERID_MACRO_CLOSE_EVENT_RISK_WEIGHT", "0.3"))
+        HIGH_SPREAD_THRESHOLD = int(os.getenv("MERID_MACRO_HIGH_SPREAD_THRESHOLD", "5"))
+        HIGH_SPREAD_RISK_WEIGHT = float(os.getenv("MERID_MACRO_HIGH_SPREAD_RISK_WEIGHT", "0.2"))
+        
         # Elections
         for market in state.elections.values():
-            if market.yes_prob > 0.3 and market.yes_prob < 0.7:
-                factors.append(0.5)  # Uncertain outcome
+            if market.yes_prob > ELECTION_PROB_LOW and market.yes_prob < ELECTION_PROB_HIGH:
+                factors.append(ELECTION_RISK_WEIGHT)  # Uncertain outcome
         
         # Close macro events (low seconds_to_expiry)
         for market in list(state.financials.values()) + list(state.economics.values()):
-            if market.seconds_to_expiry and market.seconds_to_expiry < 86400:
-                factors.append(0.3)
+            if market.seconds_to_expiry and market.seconds_to_expiry < CLOSE_EVENT_SECONDS:
+                factors.append(CLOSE_EVENT_RISK_WEIGHT)
         
         # Volatile macro markets (high spread = uncertainty)
         for market in self._market_cache.values():
-            if market.spread_cents > 5:
-                factors.append(0.2)
+            if market.spread_cents > HIGH_SPREAD_THRESHOLD:
+                factors.append(HIGH_SPREAD_RISK_WEIGHT)
         
         return min(1.0, sum(factors)) if factors else 0.0
     

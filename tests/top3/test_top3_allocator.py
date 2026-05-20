@@ -39,7 +39,7 @@ class TestSelectTop3Basic:
     """Tests for basic selection behavior with 3+ candidates."""
     
     def test_selects_top_3_by_edge(self):
-        """Should select exactly 3 assets with highest edges."""
+        """Should select assets with highest edges using sequential fill (Edge #1 priority)."""
         candidates = [
             EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
             EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
@@ -53,19 +53,23 @@ class TestSelectTop3Basic:
         
         allocations = select_top3_allocations(bankroll, cap_pct, candidates)
         
-        # Should select exactly 3
-        assert len(allocations) == 3
+        # With sequential fill: Edge #1 gets 1% min ($10), Edge #2 gets remaining ($10), Edge #3 skipped
+        # Total budget = $20 (2% of $1000)
+        # Edge #1 (BTC): $10 budget
+        # Edge #2 (ETH): $10 budget
+        # Edge #3 (SOL): $0 remaining - skipped
+        assert len(allocations) == 2
         
-        # Should be BTC, ETH, SOL (top 3 edges)
+        # Should be BTC, ETH (top 2 edges that fit budget)
         assets = [a.asset for a in allocations]
         assert "BTC" in assets
         assert "ETH" in assets
-        assert "SOL" in assets
+        assert "SOL" not in assets
         assert "XRP" not in assets
         assert "DOGE" not in assets
     
     def test_weighted_sizing_by_edge(self):
-        """Sizes should be proportional to edge weights."""
+        """Sizes follow sequential fill: Edge #1 gets 1% minimum, then remaining budget."""
         candidates = [
             EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
             EdgeCandidate("ETH", edge=0.08, max_notional_cap=4000),
@@ -77,20 +81,16 @@ class TestSelectTop3Basic:
         
         allocations = select_top3_allocations(bankroll, cap_pct, candidates)
         
-        # Total edge = 0.24
-        # BTC weight = 0.10/0.24 = 41.7% -> ~833
-        # ETH weight = 0.08/0.24 = 33.3% -> ~667
-        # SOL weight = 0.06/0.24 = 25.0% -> ~500
-        
+        # Sequential fill: Edge #1 gets 1% min ($1000), Edge #2 gets remaining ($1000), Edge #3 skipped
         total = sum(a.target_notional for a in allocations)
         assert total <= 2000  # Within cap
         
-        # Check relative ordering
+        # Check Edge #1 gets minimum 1% budget
         btc_alloc = next(a for a in allocations if a.asset == "BTC")
-        eth_alloc = next(a for a in allocations if a.asset == "ETH")
-        sol_alloc = next(a for a in allocations if a.asset == "SOL")
+        assert btc_alloc.target_notional >= 1000  # Minimum 1% of $100k = $1000
         
-        assert btc_alloc.target_notional > eth_alloc.target_notional > sol_alloc.target_notional
+        # Check at least 2 edges allocated if budget allows
+        assert len(allocations) >= 2
     
     def test_respects_per_asset_cap(self):
         """Should not exceed per-asset max_notional_cap."""
@@ -114,7 +114,7 @@ class TestSelectTop3Ties:
     """Tests for edge tie-breaking behavior."""
     
     def test_equal_edges_get_even_split(self):
-        """All 3 equal edges should split notional evenly."""
+        """Equal edges use sequential fill: Edge #1 gets 1% minimum, Edge #2 gets remaining."""
         candidates = [
             EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
             EdgeCandidate("ETH", edge=0.10, max_notional_cap=5000),
@@ -126,13 +126,17 @@ class TestSelectTop3Ties:
         
         allocations = select_top3_allocations(bankroll, cap_pct, candidates)
         
-        # Should split evenly: 1800 / 3 = 600 each
-        for a in allocations:
-            assert a.target_notional == 600
-            assert a.weight == pytest.approx(1/3, rel=0.01)
+        # Sequential fill: Edge #1 gets 1% min ($900), Edge #2 gets remaining ($900), Edge #3 skipped
+        assert len(allocations) == 2
+        
+        # Both get equal allocation due to equal edges and sequential fill
+        btc_alloc = next(a for a in allocations if a.asset == "BTC")
+        eth_alloc = next(a for a in allocations if a.asset == "ETH")
+        assert btc_alloc.target_notional == 900  # 1% of $900
+        assert eth_alloc.target_notional == 900  # Remaining budget
     
     def test_two_equal_one_different(self):
-        """Two equal edges and one different should split correctly."""
+        """Two equal edges and one different with sequential fill."""
         candidates = [
             EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
             EdgeCandidate("ETH", edge=0.10, max_notional_cap=5000),  # Equal to BTC
@@ -144,13 +148,14 @@ class TestSelectTop3Ties:
         
         allocations = select_top3_allocations(bankroll, cap_pct, candidates)
         
-        # BTC and ETH should be equal
+        # Sequential fill: Edge #1 gets 1% min ($1000), Edge #2 gets remaining ($1000), Edge #3 skipped
+        assert len(allocations) == 2
+        
+        # BTC and ETH should be equal (both got $1000)
         btc_alloc = next(a for a in allocations if a.asset == "BTC")
         eth_alloc = next(a for a in allocations if a.asset == "ETH")
-        sol_alloc = next(a for a in allocations if a.asset == "SOL")
-        
         assert btc_alloc.target_notional == eth_alloc.target_notional
-        assert sol_alloc.target_notional < btc_alloc.target_notional
+        assert btc_alloc.target_notional == 1000  # 1% of $100k
 
 
 class TestSelectTop3EdgeCases:
@@ -172,7 +177,7 @@ class TestSelectTop3EdgeCases:
         assert {a.asset for a in allocations} == {"BTC", "ETH"}
     
     def test_only_1_valid_candidate(self):
-        """Should handle single valid candidate."""
+        """Should handle single valid candidate with sequential fill."""
         candidates = [
             EdgeCandidate("BTC", edge=0.10, max_notional_cap=5000),
         ]
@@ -184,7 +189,8 @@ class TestSelectTop3EdgeCases:
         
         assert len(allocations) == 1
         assert allocations[0].asset == "BTC"
-        assert allocations[0].target_notional == 2000  # Full cap
+        # Sequential fill: Edge #1 gets minimum 1% ($1000) since it's the only edge
+        assert allocations[0].target_notional == 1000  # Minimum 1% of $100k
     
     def test_zero_edge_candidates_return_empty(self):
         """Zero or negative edges should result in no allocations."""

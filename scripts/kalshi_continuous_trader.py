@@ -314,7 +314,19 @@ class _LocalBankrollManager:
 
     def __init__(self, config: TraderConfig):
         self.config = config
-        self._peak_balance_cents = config.initial_bankroll_cents
+        # CRITICAL: Initialize peak from live bankroll if available, otherwise use static reference
+        # Static reference (initial_bankroll_cents) is for reporting only, not for risk calculations
+        try:
+            from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+            live_equity = get_equity_for_risk_calc_sync()
+            if live_equity is not None and live_equity > 0:
+                self._peak_balance_cents = int(live_equity * 100)
+            else:
+                # Fallback to static reference (may be 0 if not set)
+                self._peak_balance_cents = config.initial_bankroll_cents
+        except Exception:
+            # Fallback to static reference
+            self._peak_balance_cents = config.initial_bankroll_cents
         self._halted = False
         self._halt_reason = ""
         self._total_trades = 0

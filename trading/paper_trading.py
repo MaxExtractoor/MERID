@@ -614,12 +614,18 @@ class PaperTradingEngine:
                     current_price = market.yes_price if order.side == "yes" else market.no_price
                     logger.info(f"Using real prediction market price: {current_price} for {order.market_id}")
                 else:
-                    # Fallback to order price or 0.5
-                    current_price = order.price or 0.5
-                    logger.warning(f"Market {order.market_id} not found, using fallback price: {current_price}")
+                    # REMOVED: No fallback to 0.5 - require explicit price
+                    logger.error(
+                        f"Market {order.market_id} not found and no valid order price - cannot calculate PnL"
+                    )
+                    raise ValueError(f"Market {order.market_id} not found and no valid order price")
             except Exception as e:
                 logger.error(f"Failed to get prediction market price: {e}")
-                current_price = order.price or 0.5
+                # REMOVED: No fallback to 0.5 - require explicit price
+                if order.price is None or order.price <= 0 or order.price >= 1:
+                    logger.error(f"Invalid order price {order.price} - cannot calculate PnL")
+                    raise ValueError(f"Invalid order price {order.price} for PnL calculation")
+                current_price = order.price
         
         if current_price == 0.0:
             order.status = PaperOrderStatus.REJECTED

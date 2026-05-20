@@ -5,9 +5,12 @@ Each lane is a self-contained orchestration loop for a specific
 asset/timeframe/venue combination.
 
 Available lanes:
-- BTC15MLane: Kalshi BTC 15m directional trading
+- Crypto15MLane: Kalshi 15m crypto trading (BTC/ETH/SOL/XRP/DOGE)
+
+NOTE: BTC15MLane was moved to legacy/lanes/ on 2026-05-15.
+Use Crypto15MLane via registry.get_lane() for all 15m crypto assets.
 """
 
-from merid.lanes.btc15m_lane import BTC15MLane, BTC15MLaneConfig, run_btc15m_lane
+from merid.lanes.crypto15m_lane import Crypto15MLane, Crypto15MLaneConfig
 
-__all__ = ["BTC15MLane", "BTC15MLaneConfig", "run_btc15m_lane"]
+__all__ = ["Crypto15MLane", "Crypto15MLaneConfig"]

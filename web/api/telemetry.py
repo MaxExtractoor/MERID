@@ -195,7 +195,7 @@ async def prometheus_metrics() -> Response:
         - job_name: merid_ui
           metrics_path: /api/v1/telemetry/metrics
           static_configs:
-            - targets: ['localhost:8000']
+            - targets: ['localhost:8011']
     """
     snap = _sli.snapshot()
     lines: List[str] = []

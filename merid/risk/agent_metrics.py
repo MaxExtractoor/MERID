@@ -246,7 +246,11 @@ class AgentMetricsTracker:
         if agent.current_equity > agent.peak_equity:
             agent.peak_equity = agent.current_equity
         
-        agent.current_drawdown = (agent.peak_equity - agent.current_equity) / agent.peak_equity
+        # Avoid division by zero
+        if agent.peak_equity > 0:
+            agent.current_drawdown = (agent.peak_equity - agent.current_equity) / agent.peak_equity
+        else:
+            agent.current_drawdown = 0.0
         if agent.current_drawdown > agent.max_drawdown:
             agent.max_drawdown = agent.current_drawdown
         

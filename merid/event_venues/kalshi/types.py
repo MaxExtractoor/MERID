@@ -7,7 +7,7 @@ NO legacy "locked bankroll" concepts. NO assertions on external data.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum, auto
 from typing import Any, Dict, Optional, Union
@@ -25,12 +25,18 @@ class BalanceState(Enum):
 class RawVenueBalance:
     """Exactly what Kalshi returns - no interpretation.
     
-    Kalshi API returns balance in cents. We store as Decimal USD
+    Kalshi API returns balance and portfolio_value in cents. We store as Decimal USD
     for precision, but the mapping is 1:1 with raw fields.
+    
+    Bankroll split:
+    - cash_available: spendable cash balance for new trades
+    - portfolio_value: total value of open positions
+    - total_equity: cash_available + portfolio_value (total account value)
     """
     cash_available: Decimal   # balance / 100
     cash_locked: Decimal      # locked_balance / 100  
-    total_equity: Decimal     # balance / 100 (available + locked)
+    portfolio_value: Decimal  # portfolio_value / 100 (positions value)
+    total_equity: Decimal     # cash_available + portfolio_value
     raw_cents: Dict[str, int] # Original raw values for debugging
     as_of: datetime
     source: str = "kalshi"
@@ -39,20 +45,28 @@ class RawVenueBalance:
     def from_kalshi_response(cls, response: Dict[str, Any]) -> RawVenueBalance:
         """Parse Kalshi /portfolio/balance response.
         
+        Bankroll is split between portfolio value (positions) and cash USD on hand.
         No assertions - if fields missing, they'll be 0 and logged.
         """
         balance_cents = response.get("balance", 0) or 0
         locked_cents = response.get("locked_balance", 0) or 0
+        portfolio_value_cents = response.get("portfolio_value", 0) or 0
+        
+        cash_available_usd = Decimal(str(balance_cents)) / 100
+        portfolio_value_usd = Decimal(str(portfolio_value_cents)) / 100
+        total_equity_usd = cash_available_usd + portfolio_value_usd
         
         return cls(
-            cash_available=Decimal(str(balance_cents)) / 100,
+            cash_available=cash_available_usd,
             cash_locked=Decimal(str(locked_cents)) / 100,
-            total_equity=Decimal(str(balance_cents)) / 100,
+            portfolio_value=portfolio_value_usd,
+            total_equity=total_equity_usd,
             raw_cents={
                 "balance": balance_cents,
                 "locked_balance": locked_cents,
+                "portfolio_value": portfolio_value_cents,
             },
-            as_of=datetime.utcnow(),
+            as_of=datetime.now(timezone.utc),
             source="kalshi",
         )
 
@@ -63,8 +77,13 @@ class InternalBankroll:
     
     This is what the rest of the system uses. No "effective" nonsense.
     No "locked bankroll" legacy crap. Just clean equity and risk config.
+    
+    NOTE: available_cash_usd is spendable cash for new trades.
+          equity_usd is total portfolio value (cash + positions).
+          For conservative sizing, use available_cash_usd.
     """
-    equity_usd: Decimal           # Total equity for sizing
+    equity_usd: Decimal           # Total equity (cash + positions)
+    available_cash_usd: Decimal   # Spendable cash for new trades (conservative sizing)
     max_riskable_frac: Decimal    # Configurable (e.g., 0.02 for 2%)
     as_of: datetime
     source: str
@@ -72,13 +91,22 @@ class InternalBankroll:
     
     @property
     def max_position_usd(self) -> Decimal:
-        """Maximum single position size based on equity * risk fraction."""
-        return self.equity_usd * self.max_riskable_frac
+        """Maximum single position size based on available cash * risk fraction.
+        
+        Uses available_cash (not total equity) to avoid over-leveraging.
+        """
+        return self.available_cash_usd * self.max_riskable_frac
+    
+    @property
+    def locked_cash_usd(self) -> Decimal:
+        """Cash locked in positions (equity - available)."""
+        return self.equity_usd - self.available_cash_usd
     
     def with_state(self, state: BalanceState) -> InternalBankroll:
         """Return copy with different state (for stale/error transitions)."""
         return InternalBankroll(
             equity_usd=self.equity_usd,
+            available_cash_usd=self.available_cash_usd,
             max_riskable_frac=self.max_riskable_frac,
             as_of=self.as_of,
             source=self.source,

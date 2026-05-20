@@ -160,8 +160,12 @@ class ThreeAmSimulation:
                 instructions = await self.show_startup_instructions(services)
                 logger.info("\n" + instructions)
                 
-                # Add helpful error message to issues
-                self.issues.append(f"Services not running: {list(services.keys())[list(services.values()).index(False)]}")
+                # Add helpful error message to issues - find which service is down
+                down_services = [name for name, status in services.items() if not status]
+                if down_services:
+                    self.issues.append(f"Services not running: {', '.join(down_services)}")
+                else:
+                    self.issues.append("Services not running (unknown)")
                 self.issues.append("Start services with: docker-compose up -d")
                 self.issues.append("Wait 30 seconds, then re-run drill")
                 return False

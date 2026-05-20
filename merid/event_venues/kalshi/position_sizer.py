@@ -27,14 +27,48 @@ Usage::
 
 from __future__ import annotations
 
-import threading
 import math
+import threading
+import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
+
+from merid.event_venues.kalshi.fees import calculate_kalshi_fee_per_contract_cents
+from merid.event_venues.kalshi.risk_parameters import (
+    DEFAULT_KELLY_FRACTION,
+    SIZER_MIN_CONTRACTS,
+    SIZER_MAX_CONTRACTS,
+    SIZER_MAX_BANKROLL_PCT,
+    SIZER_MIN_BANKROLL_PCT,
+    SIZER_PF_MIN_FOR_SCALING,
+    SIZER_PF_FULL_KELLY_AT,
+    SIZER_EXPECTANCY_MIN_CENTS,
+    SIZER_MAX_CONTRACTS_PER_UNDERLYING_PER_HOUR,
+    SIZER_MIN_TRADES_FOR_SCALING,
+    SIZER_DOWNTOWN_CAUTION_THRESHOLD_PCT,
+    SIZER_DOWNTOWN_DANGER_THRESHOLD_PCT,
+    SIZER_VOL_CAUTION_THRESHOLD_PCT,
+    SIZER_VOL_DANGER_THRESHOLD_PCT,
+    SIZER_DOWNTOWN_DANGER_REDUCTION,
+    SIZER_DOWNTOWN_CAUTION_REDUCTION,
+    SIZER_VOL_DANGER_REDUCTION,
+    SIZER_VOL_CAUTION_REDUCTION,
+    SIZER_TIGHT_REDUCTION,
+    SIZER_VOL_HIGH_REDUCTION,
+    SIZER_TARGET_VOL,
+    SIZER_MIN_SCALE,
+    SIZER_MAX_RISK_PCT,
+    PROB_MIN_BOUND,
+    PROB_MAX_BOUND,
+)
+# REMOVED: get_merid_swarm_confidence_min - sentiment-driven sizing not used in 15m stack
+from merid.event_venues.kalshi.fees import (
+    calculate_kalshi_fee_cents,
+    calculate_kalshi_fee_per_contract_cents,
+)
 
 from utils.logger import get_logger
-
-from config.kalshi_crypto_config import get_merid_swarm_confidence_min
 
 logger = get_logger("merid.event_venues.kalshi.position_sizer")
 
@@ -43,27 +77,28 @@ logger = get_logger("merid.event_venues.kalshi.position_sizer")
 class SizerConfig:
     """Configuration for the position sizer."""
 
-    # Kelly fraction (0.0–1.0). 0.25 = quarter-Kelly (conservative default)
-    kelly_fraction: float = 0.25
+    # Kelly fraction (0.0–1.0). TIGHTENED from 0.25 to 0.15 for small bankroll
+    # More conservative sizing to protect capital while building back up
+    kelly_fraction: float = DEFAULT_KELLY_FRACTION
 
     # Minimum and maximum contracts per trade
-    min_contracts: int = 1
-    max_contracts: int = 50
+    min_contracts: int = SIZER_MIN_CONTRACTS
+    max_contracts: int = SIZER_MAX_CONTRACTS
 
-    # Bankroll fraction caps
-    max_bankroll_pct: float = 2.0     # Never risk more than 2% of bankroll per trade
-    min_bankroll_pct: float = 0.25    # Floor: at least 0.25% when sizing is active
+    # Bankroll fraction caps - TIGHTENED for small bankroll protection
+    max_bankroll_pct: float = SIZER_MAX_BANKROLL_PCT
+    min_bankroll_pct: float = SIZER_MIN_BANKROLL_PCT
 
     # PF/expectancy gates for size scaling
-    pf_min_for_scaling: float = 1.2   # Below this PF, use minimum size
-    pf_full_kelly_at: float = 1.8     # At this PF, use full kelly_fraction
-    expectancy_min_cents: float = 5.0 # Below this expectancy, use minimum size
+    pf_min_for_scaling: float = SIZER_PF_MIN_FOR_SCALING
+    pf_full_kelly_at: float = SIZER_PF_FULL_KELLY_AT
+    expectancy_min_cents: float = SIZER_EXPECTANCY_MIN_CENTS
 
     # Per-underlying hourly exposure cap (contracts)
-    max_contracts_per_underlying_per_hour: int = 100
+    max_contracts_per_underlying_per_hour: int = SIZER_MAX_CONTRACTS_PER_UNDERLYING_PER_HOUR
 
     # Minimum sample size before scaling up from minimum
-    min_trades_for_scaling: int = 50
+    min_trades_for_scaling: int = SIZER_MIN_TRADES_FOR_SCALING
 
 
 DEFAULT_SIZER_CONFIG = SizerConfig()
@@ -96,56 +131,40 @@ def kelly_fraction_for_binary(
     return f
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Fee calculations — delegated to unified fees module
+# ═══════════════════════════════════════════════════════════════════════════
+# These functions are now thin wrappers around the unified fees module
+# to maintain backward compatibility during migration.
+
 def _kalshi_fee_rate(contracts: int) -> float:
     """Return the tiered fee rate for a given contract count.
-
-    Kalshi fee schedule (as of 2025):
-      1-99 contracts:   7%
-      100-999:          5%
-      1000+:            3%
+    
+    DELEGATED: Uses unified fees module internally.
     """
-    if contracts < 100:
-        return 0.07
-    elif contracts < 1000:
-        return 0.05
+    from merid.event_venues.kalshi.fees import TIER_RATES, Decimal
+    for (low, high), rate in TIER_RATES.items():
+        if low <= contracts < high:
+            return float(rate)
     return 0.03
 
 
 def kalshi_fee_cents(price_cents: int, contracts: int) -> int:
     """Compute total Kalshi fee in cents for a trade.
-
-    Uses the official Kalshi parabolic formula:
-        fee = ceil(rate × C × P × (1 − P))
-    where P = price_cents / 100, with a minimum fee of 2¢.
-
-    Tiered rates: 7% (<100 contracts), 5% (100-999), 3% (1000+).
+    
+    DELEGATED to unified fees module: merid.event_venues.kalshi.fees
+    Note: Original signature is (price_cents, contracts), unified is (contracts, price_cents)
     """
-    if contracts <= 0 or price_cents <= 0 or price_cents >= 100:
-        return 0
-    rate = _kalshi_fee_rate(contracts)
-    p = price_cents / 100.0
-    raw = rate * contracts * p * (1.0 - p)
-    # Minimum fee: 2¢ total
-    return max(2, math.ceil(raw * 100))
+    return calculate_kalshi_fee_cents(contracts, price_cents)
 
 
 def kalshi_fee_per_contract_cents(price_cents: int, contracts: int = 1) -> int:
     """Compute per-contract Kalshi fee for a given trade size.
-
-    Returns total_fee / contracts (rounded up), correctly accounting for
-    tiered rates based on total contract count.
-
-    Args:
-        price_cents: Contract price in cents (1-99)
-        contracts: Total number of contracts in the trade (affects tier rate)
-
-    Returns:
-        Fee per contract in cents
+    
+    DELEGATED to unified fees module: merid.event_venues.kalshi.fees
+    Note: Original signature is (price_cents, contracts), unified is (contracts, price_cents)
     """
-    if contracts <= 0 or price_cents <= 0 or price_cents >= 100:
-        return 0
-    total = kalshi_fee_cents(price_cents, contracts)
-    return math.ceil(total / contracts)
+    return int(calculate_kalshi_fee_per_contract_cents(contracts, price_cents))
 
 
 def adaptive_kelly_fraction(
@@ -156,10 +175,10 @@ def adaptive_kelly_fraction(
     *,
     pf_caution_threshold: float = 1.2,
     pf_danger_threshold: float = 1.05,
-    dd_caution_threshold: float = 15.0,
-    dd_danger_threshold: float = 25.0,
-    vol_caution_threshold: float = 30.0,
-    vol_danger_threshold: float = 50.0,
+    dd_caution_threshold: float = SIZER_DOWNTOWN_CAUTION_THRESHOLD_PCT,
+    dd_danger_threshold: float = SIZER_DOWNTOWN_DANGER_THRESHOLD_PCT,
+    vol_caution_threshold: float = SIZER_VOL_CAUTION_THRESHOLD_PCT,
+    vol_danger_threshold: float = SIZER_VOL_DANGER_THRESHOLD_PCT,
 ) -> float:
     """Compute a vol-aware, drawdown-aware adaptive Kelly fraction.
 
@@ -195,21 +214,21 @@ def adaptive_kelly_fraction(
     # PF-based shrinkage (only when PF is known)
     if profit_factor > 0:
         if profit_factor < pf_danger_threshold:
-            frac *= 0.25
+            frac *= SIZER_DOWNTOWN_DANGER_REDUCTION
         elif profit_factor < pf_caution_threshold:
-            frac *= 0.5
+            frac *= SIZER_DOWNTOWN_CAUTION_REDUCTION
 
     # Drawdown-based shrinkage
     if max_drawdown_pct > dd_danger_threshold:
-        frac *= 0.25
+        frac *= SIZER_DOWNTOWN_DANGER_REDUCTION
     elif max_drawdown_pct > dd_caution_threshold:
-        frac *= 0.5
+        frac *= SIZER_DOWNTOWN_CAUTION_REDUCTION
 
     # Volatility-based shrinkage
     if local_vol_pct > vol_danger_threshold:
-        frac *= 0.5
+        frac *= SIZER_VOL_DANGER_REDUCTION
     elif local_vol_pct > vol_caution_threshold:
-        frac *= 0.7
+        frac *= SIZER_VOL_HIGH_REDUCTION
 
     return max(0.0, frac)
 
@@ -217,8 +236,8 @@ def adaptive_kelly_fraction(
 def vol_scaled_fraction(
     base_fraction: float,
     realized_vol: float,
-    target_vol: float = 0.02,
-    min_scale: float = 0.25,
+    target_vol: float = SIZER_TARGET_VOL,
+    min_scale: float = SIZER_MIN_SCALE,
     max_scale: float = 1.0,
 ) -> float:
     """Volatility-targeted Kelly fraction scaling.
@@ -254,7 +273,7 @@ def atr_risk_fraction(
     account_risk_pct: float,
     atr: float,
     atr_unit: float,
-    max_risk_pct: float = 0.02,
+    max_risk_pct: float = SIZER_MAX_RISK_PCT,
 ) -> float:
     """ATR-based position sizing for BTC hourly contracts.
 
@@ -297,11 +316,17 @@ class PositionSizer:
         self._config = config or DEFAULT_SIZER_CONFIG
         # Runtime state exposed to the API layer
         self._manual_override_factor: float = 1.0   # operator downsize factor (0-1)
-        self._realized_vol: float = 0.02             # rolling realized vol (fraction)
-        self._target_vol: float = 0.02               # vol target (fraction)
+        self._realized_vol: float = SIZER_TARGET_VOL             # rolling realized vol (fraction)
+        self._target_vol: float = SIZER_TARGET_VOL               # vol target (fraction)
         self._atr_value: float = 0.0                 # latest ATR reading
         self._atr_fraction: float = 0.0              # ATR-derived risk fraction
         self._kelly_util_pct: float = 0.0            # rolling avg Kelly utilization %
+
+        # Rate/activity tracking for observability
+        self._last_positive_edge_time: float = time.time()
+        self._trade_timestamps: deque = deque(maxlen=100)  # Track last 100 trade timestamps
+        self._total_sizing_calls: int = 0
+        self._positive_edge_count: int = 0
 
     # ── Runtime properties (read by sizing-metrics API) ──────────────────
 
@@ -320,7 +345,7 @@ class PositionSizer:
         """Current vol-targeting scale factor (target_vol / realized_vol)."""
         if self._realized_vol <= 0:
             return 1.0
-        return min(1.0, max(0.25, self._target_vol / self._realized_vol))
+        return min(1.0, max(SIZER_MIN_SCALE, self._target_vol / self._realized_vol))
 
     @property
     def target_vol(self) -> float:
@@ -420,21 +445,41 @@ class PositionSizer:
         """
         cfg = self._config
 
-        # Halted or zero factor → no trade
-        if size_factor <= 0:
+        # Rate/activity tracking: count sizing calls
+        self._total_sizing_calls += 1
+
+        # Log input parameters for debugging (WARNING level to ensure visibility)
+        logger.warning(
+            "[PositionSizer] compute called: agent=%s edge_pct=%.2f price_cents=%d bankroll_cents=%d "
+            "size_factor=%.2f profit_factor=%.2f swarm_confidence=%s",
+            agent_name, edge_pct, price_cents, bankroll_cents, size_factor, profit_factor,
+            f"{swarm_confidence:.3f}" if swarm_confidence is not None else "None"
+        )
+
+        # Halted or zero factor → no trade (unless override enabled)
+        import os
+        if os.getenv("DISABLE_PAPER_SESSION_HALT", "").lower() in ("1", "true", "yes"):
+            if size_factor <= 0:
+                logger.debug(
+                    "[PositionSizer] Paper session halt/downsize disabled via env var for %s - setting size_factor=1.0",
+                    agent_name
+                )
+                size_factor = 1.0
+        elif size_factor <= 0:
+            logger.warning(
+                "[PositionSizer] size_factor=0 for %s (halted/downsized) — returning 0 contracts",
+                agent_name
+            )
             return 0
 
-        # Swarm conviction floor (settings + env via get_merid_swarm_confidence_min)
-        swarm_min = get_merid_swarm_confidence_min()
-        if (
-            swarm_confidence is not None
-            and swarm_min > 0
-            and swarm_confidence < swarm_min
-        ):
-            return 0
+        # REMOVED: Swarm conviction floor check - sentiment-driven sizing not used in 15m stack
 
         # Validate price
         if price_cents <= 0 or price_cents >= 100:
+            logger.warning(
+                "[PositionSizer] invalid price_cents=%d for %s — returning 0 contracts",
+                price_cents, agent_name
+            )
             return 0
 
         # ── Kelly sizing ──────────────────────────────────────────
@@ -445,12 +490,39 @@ class PositionSizer:
         # edge_pct = (true_prob - implied_prob) * 100
         implied_prob = price_cents / 100.0
         est_win_prob = implied_prob + (edge_pct / 100.0)
-        est_win_prob = max(0.01, min(0.99, est_win_prob))
+        est_win_prob = max(PROB_MIN_BOUND, min(PROB_MAX_BOUND, est_win_prob))
 
         raw_kelly = kelly_fraction_for_binary(est_win_prob, win_payout, loss_amount)
 
+        # Edge sanity logging: log p_model, p_market, net_edge, Kelly fraction for auditability
+        logger.info(
+            "[EDGE_SANITY] agent=%s p_model=%.4f p_market=%.4f net_edge=%.4f raw_kelly=%.6f "
+            "kelly_fraction_config=%.3f edge_pct=%.2f price_cents=%d",
+            agent_name, est_win_prob, implied_prob, edge_pct / 100.0, raw_kelly,
+            cfg.kelly_fraction, edge_pct, price_cents
+        )
+
+        # Rate/activity tracking: update last positive edge time
+        self._last_positive_edge_time = time.time()
+        self._positive_edge_count += 1
+
         if raw_kelly <= 0:
             # Negative edge → don't trade
+            logger.warning(
+                "[PositionSizer] raw_kelly=%.4f <= 0 for %s (edge_pct=%.2f, price_cents=%d) — returning 0 contracts",
+                raw_kelly, agent_name, edge_pct, price_cents
+            )
+
+            # Rate/activity check: log if no positive edge for > 1 hour
+            time_since_last_positive = time.time() - self._last_positive_edge_time
+            if time_since_last_positive > 3600:  # 1 hour
+                logger.warning(
+                    "[ACTIVITY_CHECK] No positive edge opportunities for %.1f hours (last positive at %s). "
+                    "This may indicate modeling reality or market conditions, not a bug.",
+                    time_since_last_positive / 3600,
+                    time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self._last_positive_edge_time))
+                )
+
             return 0
 
         # Apply fractional Kelly with adaptive shrinkage
@@ -484,6 +556,10 @@ class PositionSizer:
         # ── PF/expectancy scaling gate ────────────────────────────
         scale = self._pf_scale(profit_factor, expectancy_cents, total_trades)
         if scale <= 0:
+            logger.warning(
+                "[PositionSizer] PF scale=%.4f <= 0 for %s (profit_factor=%.2f) — returning 0 contracts",
+                scale, agent_name, profit_factor
+            )
             return 0
         f *= scale
 
@@ -550,6 +626,28 @@ class PositionSizer:
         # If contracts >= 100, the per-contract fee drops from 7% to 5% tier
         actual_fee_per_contract = kalshi_fee_per_contract_cents(price_cents, contracts)
 
+        # Edge sanity logging: log final contract size for auditability
+        logger.info(
+            "[EDGE_SANITY_FINAL] agent=%s final_contracts=%d adapted_fraction=%.4f "
+            "sentiment_vol_multiplier=%.3f pf_scale=%.4f size_factor=%.2f",
+            agent_name, contracts, adapted_fraction, sentiment_vol_multiplier, scale, size_factor
+        )
+
+        # Rate/activity check: track trade timestamps and detect frequency spikes
+        if contracts > 0:
+            current_time = time.time()
+            self._trade_timestamps.append(current_time)
+
+            # Detect frequency spike: > 10 sizing computations in 5 minutes
+            recent_computations = [t for t in self._trade_timestamps if current_time - t < 300]  # 5 minutes
+            if len(recent_computations) > 10:
+                logger.warning(
+                    "[ACTIVITY_CHECK] Position sizing frequency spike detected: %d sizing computations in last 5 minutes. "
+                    "This may indicate unusual market conditions or model behavior. "
+                    "NOTE: These are sizing computations, NOT actual trades.",
+                    len(recent_computations)
+                )
+
         if sentiment_vol_asset and contracts > 0:
             risk_cents = contracts * (price_cents + actual_fee_per_contract)
             logger.info(
@@ -586,9 +684,11 @@ class PositionSizer:
         if expectancy_cents < 0 and total_trades >= cfg.min_trades_for_scaling:
             return 0.0
 
-        # Not enough data → use minimum scale
+        # Not enough data → use full scale (1.0) to allow trading
+        # BUG-FIX: Previously returned min/max ratio (0.125) which caused 0 contracts
+        # when combined with low bankroll. Now uses 1.0 to allow Kelly sizing to work.
         if total_trades < cfg.min_trades_for_scaling:
-            return cfg.min_bankroll_pct / cfg.max_bankroll_pct
+            return 1.0
 
         # Below expectancy floor → minimum scale
         if expectancy_cents < cfg.expectancy_min_cents:

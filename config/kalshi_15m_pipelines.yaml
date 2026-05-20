@@ -1,0 +1,258 @@
+# Kalshi 15m Pipeline Configuration
+#
+# Defines the feature graph for 15m crypto trading.
+# Only 15m execution agents (BTC_15M, ETH_15M, etc.) can place orders.
+# All other agents are feature producers.
+
+version: "1.0"
+description: "15m Kalshi crypto trading pipelines with feature graph architecture"
+
+pipelines:
+  # BTC 15m Pipeline
+  - pipeline_id: btc_15m_pipeline
+    asset: BTC
+    timeframe: 15m
+    enabled: true
+    description: "BTC 15m execution with multi-tf and macro features"
+    
+    feature_agents:
+      # Microstructure features (lower timeframe)
+      - name: BTC_MICROSTRUCTURE_1M
+        role: feature
+        feature_namespace: microstructure
+        enabled: false  # Disabled until implemented
+        assets: [BTC]
+      - name: CRYPTO_VOL_REGIME
+        role: feature
+        feature_namespace: volatility
+        enabled: true
+      
+      # Regime / Trend features (higher timeframe)
+      - name: BTC_HOURLY
+        role: feature
+        feature_namespace: regime
+        enabled: false  # Signal-only, not execution
+        assets: [BTC]
+      - name: BTC_DAILY
+        role: feature
+        feature_namespace: regime
+        enabled: true
+        assets: [BTC]
+      - name: BTC_WEEKLY
+        role: feature
+        feature_namespace: regime
+        enabled: false  # Disabled for now
+        assets: [BTC]
+      
+      # Macro / Cross-asset features
+      - name: CRYPTO_MACRO_CONTEXT
+        role: feature
+        feature_namespace: macro
+        enabled: false  # Disabled until implemented
+        assets: [CRYPTO]
+      
+      # Confidence / Ensemble features
+      - name: CRYPTO_ENSEMBLE_CONFIDENCE
+        role: feature
+        feature_namespace: confidence
+        enabled: false  # Disabled until implemented
+    
+    decision_agent:
+      name: BTC_15M
+      role: execution
+      asset: BTC
+      timeframe: 15m
+      allowed_assets: [BTC, ETH, SOL, XRP, DOGE]
+    
+    executor:
+      series_ticker: KXBTC
+      executor_type: kalshi_trading_agent
+    
+    risk_agents:
+      - PortfolioRiskAgent
+      - CryptoRTIMonitor
+    
+    max_feature_age_seconds: 60
+    require_all_features: false
+
+  # ETH 15m Pipeline
+  - pipeline_id: eth_15m_pipeline
+    asset: ETH
+    timeframe: 15m
+    enabled: true
+    description: "ETH 15m execution with multi-tf and macro features"
+    
+    feature_agents:
+      # Microstructure features
+      - name: CRYPTO_VOL_REGIME
+        role: feature
+        feature_namespace: volatility
+        enabled: true
+      
+      # Regime / Trend features
+      - name: ETH_DAILY
+        role: feature
+        feature_namespace: regime
+        enabled: true
+        assets: [ETH]
+      - name: ETH_WEEKLY
+        role: feature
+        feature_namespace: regime
+        enabled: false  # Disabled for now
+        assets: [ETH]
+      
+      # Confidence / Ensemble features
+      - name: CRYPTO_ENSEMBLE_CONFIDENCE
+        role: feature
+        feature_namespace: confidence
+        enabled: false  # Disabled until implemented
+    
+    decision_agent:
+      name: ETH_15M
+      role: execution
+      asset: ETH
+      timeframe: 15m
+      allowed_assets: [BTC, ETH, SOL, XRP, DOGE]
+    
+    executor:
+      series_ticker: KXETH
+      executor_type: kalshi_trading_agent
+    
+    risk_agents:
+      - PortfolioRiskAgent
+      - CryptoRTIMonitor
+    
+    max_feature_age_seconds: 60
+    require_all_features: false
+
+  # SOL 15m Pipeline
+  - pipeline_id: sol_15m_pipeline
+    asset: SOL
+    timeframe: 15m
+    enabled: true
+    description: "SOL 15m execution with multi-tf and macro features"
+    
+    feature_agents:
+      # Microstructure features
+      - name: CRYPTO_VOL_REGIME
+        role: feature
+        feature_namespace: volatility
+        enabled: true
+      
+      # Regime / Trend features
+      - name: SOL_DAILY
+        role: feature
+        feature_namespace: regime
+        enabled: true
+        assets: [SOL]
+      - name: SOL_WEEKLY
+        role: feature
+        feature_namespace: regime
+        enabled: false  # Disabled for now
+        assets: [SOL]
+    
+    decision_agent:
+      name: SOL_15M
+      role: execution
+      asset: SOL
+      timeframe: 15m
+      allowed_assets: [BTC, ETH, SOL, XRP, DOGE]
+    
+    executor:
+      series_ticker: KXSOL
+      executor_type: kalshi_trading_agent
+    
+    risk_agents:
+      - PortfolioRiskAgent
+      - CryptoRTIMonitor
+    
+    max_feature_age_seconds: 60
+    require_all_features: false
+
+  # XRP 15m Pipeline
+  - pipeline_id: xrp_15m_pipeline
+    asset: XRP
+    timeframe: 15m
+    enabled: true
+    description: "XRP 15m execution with multi-tf and macro features"
+    
+    feature_agents:
+      # Microstructure features
+      - name: CRYPTO_VOL_REGIME
+        role: feature
+        feature_namespace: volatility
+        enabled: true
+      
+      # Regime / Trend features
+      - name: XRP_DAILY
+        role: feature
+        feature_namespace: regime
+        enabled: true
+        assets: [XRP]
+      - name: XRP_WEEKLY
+        role: feature
+        feature_namespace: regime
+        enabled: false  # Disabled for now
+        assets: [XRP]
+    
+    decision_agent:
+      name: XRP_15M
+      role: execution
+      asset: XRP
+      timeframe: 15m
+      allowed_assets: [BTC, ETH, SOL, XRP, DOGE]
+    
+    executor:
+      series_ticker: KXXRP
+      executor_type: kalshi_trading_agent
+    
+    risk_agents:
+      - PortfolioRiskAgent
+      - CryptoRTIMonitor
+    
+    max_feature_age_seconds: 60
+    require_all_features: false
+
+  # DOGE 15m Pipeline
+  - pipeline_id: doge_15m_pipeline
+    asset: DOGE
+    timeframe: 15m
+    enabled: true
+    description: "DOGE 15m execution with multi-tf and macro features"
+    
+    feature_agents:
+      # Microstructure features
+      - name: CRYPTO_VOL_REGIME
+        role: feature
+        feature_namespace: volatility
+        enabled: true
+      
+      # Regime / Trend features
+      - name: DOGE_DAILY
+        role: feature
+        feature_namespace: regime
+        enabled: true
+        assets: [DOGE]
+      - name: DOGE_WEEKLY
+        role: feature
+        feature_namespace: regime
+        enabled: false  # Disabled for now
+        assets: [DOGE]
+    
+    decision_agent:
+      name: DOGE_15M
+      role: execution
+      asset: DOGE
+      timeframe: 15m
+      allowed_assets: [BTC, ETH, SOL, XRP, DOGE]
+    
+    executor:
+      series_ticker: KXDOGE
+      executor_type: kalshi_trading_agent
+    
+    risk_agents:
+      - PortfolioRiskAgent
+      - CryptoRTIMonitor
+    
+    max_feature_age_seconds: 60
+    require_all_features: false
