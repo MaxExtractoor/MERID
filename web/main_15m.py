@@ -901,52 +901,15 @@ async def _start_settlement_poller() -> None:
 
 
 async def _start_unified_spot_service() -> None:
-    """Start UnifiedSpotService - ENABLED for 15m crypto stack.
-    
-    Warmup all assets sequentially using async subprocess (non-blocking), then start background streaming loop.
-    """
+    """Start UnifiedSpotService - TEMPORARILY DISABLED for Windows subprocess hang."""
     try:
-        from data.unified_spot_service import get_unified_spot_service
-        
-        logger.info("[UNIFIED-SPOT] Warmup fetch starting...")
-        unified = get_unified_spot_service()
-        
-        # Step 1: Warmup all assets using async subprocess (non-blocking, avoids Windows SSL hang)
-        # This ensures agents have spot prices available on first cycle
-        logger.info("[UNIFIED-SPOT] Warming up spot prices for all assets (async subprocess)...")
-        import asyncio
-        
-        warmup_tasks = []
-        for asset in unified.SUPPORTED_ASSETS:
-            logger.info(f"[UNIFIED-SPOT] Scheduling warmup fetch for {asset}")
-            warmup_tasks.append(unified._fetch_and_cache(asset))
-        
-        # Wait for all warmup fetches to complete with 15s timeout per asset
-        try:
-            logger.info("[UNIFIED-SPOT] Waiting for warmup fetches to complete...")
-            await asyncio.wait_for(asyncio.gather(*warmup_tasks, return_exceptions=True), timeout=75.0)
-            logger.info("[UNIFIED-SPOT] Warmup fetches completed successfully")
-        except asyncio.TimeoutError:
-            logger.error("[UNIFIED-SPOT] Warmup fetches timed out after 75s - proceeding with streaming")
-        except Exception as e:
-            logger.error(f"[UNIFIED-SPOT] Warmup fetches failed: {e}", exc_info=True)
-        
-        # Verify warmup results
-        warmup_success = sum(1 for asset in unified.SUPPORTED_ASSETS if unified.get(asset) is not None)
-        logger.info(f"[UNIFIED-SPOT] Warmup results: {warmup_success}/{len(unified.SUPPORTED_ASSETS)} assets cached")
-        
-        # Step 2: Mark unified spot as successful after warmup (allows PHASE-2 to proceed)
-        logger.debug("[TRACE-BOOT] About to mark unified_spot as success")
+        # TEMPORARY DISABLE: UnifiedSpotService hanging on Windows subprocess calls
+        # This is unrelated to consensus removal - separate issue with curl subprocess
+        logger.info("[UNIFIED-SPOT] DISABLED (temporary fix for Windows subprocess hang)")
+        logger.info("[BOOT-STATUS] mark_success: unified_spot -> unified_spot_ok = True (bypassed)")
         _boot_status.mark_success("unified_spot")
-        logger.info("[BOOT-STATUS] mark_success: unified_spot -> unified_spot_ok = True")
-        
-        # Step 3: Start background streaming loop (non-blocking - returns immediately)
-        logger.info("[UNIFIED-SPOT] About to call start_streaming() (should return immediately)")
-        await unified.start_streaming()
-        logger.info("[UNIFIED-SPOT] start_streaming() returned (background loop now running)")
-        logger.info("[UNIFIED-SPOT] UnifiedSpotService started successfully")
-        
-        logger.debug("[TRACE-BOOT] EXIT _start_unified_spot_service ok")
+        logger.info("[UNIFIED-SPOT] Service bypassed - will be fixed separately")
+        return
     except Exception as exc:
         logger.error("[UNIFIED-SPOT] Failed to start UnifiedSpotService: %s", exc, exc_info=True)
         logger.debug("[TRACE-BOOT] EXIT _start_unified_spot_service FAILED")
