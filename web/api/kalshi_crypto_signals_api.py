@@ -6,7 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from web.api.auth import get_current_session
 from utils.logger import get_logger
 from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
-from consensus.consensus_coordinator import get_consensus_coordinator
+# LEGACY REMOVAL: consensus.consensus_coordinator import removed - consensus module deleted
+# from consensus.consensus_coordinator import get_consensus_coordinator
 from web.api.config.kalshi_signals import CRYPTO_AGENT_IDS
 
 from .models.signals import (
@@ -107,52 +108,18 @@ async def get_crypto_rti_signals() -> Dict:
 
 @router.get("/consensus", response_model=KalshiConsensusSignalsResponse)
 async def get_crypto_consensus_signals() -> KalshiConsensusSignalsResponse:
-    try:
-        coordinator = get_consensus_coordinator()
-        # however you already pull consensus rows
-        rows = coordinator.get_kalshi_crypto_consensus()  # adapt to your API
-
-        signals: list[KalshiConsensusSignal] = []
-        pending_votes = 0
-
-        for r in rows:
-            signals.append(
-                KalshiConsensusSignal(
-                    ticker=r.ticker,
-                    direction=r.direction,
-                    confidence=r.confidence,
-                    vote_count=r.vote_count,
-                    bull_weight=r.bull_weight,
-                    bear_weight=r.bear_weight,
-                    agents=r.agents,
-                    product=getattr(r, "product", None),
-                    agent_id=getattr(r, "agent_id", None))
-            )
-            pending_votes += getattr(r, "pending_votes", 0)
-
-        return KalshiConsensusSignalsResponse(
-            signals=signals,
-            count=len(signals),
-            pending_votes=pending_votes,
-            consensus_rate=coordinator.get_consensus_rate(domain="kalshi_crypto"),
-            engine_running=True,
-            error=None)
-    except Exception as exc:
-        logger.error(f"Failed to get crypto consensus signals: {exc}")
-        return KalshiConsensusSignalsResponse(
-            signals=[],
-            count=0,
-            pending_votes=0,
-            consensus_rate=0.0,
-            engine_running=False,
-            error=str(exc))
+    # LEGACY REMOVAL: Consensus module deleted - endpoint disabled
+    logger.debug("Crypto consensus signals disabled - consensus module deleted")
+    return KalshiConsensusSignalsResponse(
+        signals=[],
+        pending_votes=0,
+        timestamp=int(datetime.now().timestamp()),
+        source="disabled"
+    )
 
 
-@router.get("/burnin-stats")
-async def get_burnin_stats(
-    hours: int = Query(24, description="Hours of data to include (default 24h)"),
-    min_trades: int = Query(30, description="Minimum trades per asset to include (default 30)")
-) -> Dict:
+@router.get("/rti")
+async def get_crypto_rti_signals() -> Dict:
     """Get burn-in statistics for crypto 15m trading (trade count, win-rate, avg R, z-score).
     
     This endpoint aggregates per-asset trading statistics needed for tuning:
