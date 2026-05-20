@@ -34,13 +34,13 @@ from merid.pipeline.proposal import (
 from merid.pipeline.risk_manager import GlobalRiskManager
 
 # ── Consensus imports ─────────────────────────────────────────────────
-
-from consensus.taco_consensus import (
-    AgentOpinion,
-    PlanStatus,
-    TaCoConsensusCoordinator,
-    TradePlan,
-)
+# LEGACY REMOVAL: Consensus module deleted - consensus tests disabled
+# from consensus.taco_consensus import (
+#     AgentOpinion,
+#     PlanStatus,
+#     TaCoConsensusCoordinator,
+#     TradePlan,
+# )
 
 # ── Trading adapter imports ───────────────────────────────────────────
 
@@ -139,13 +139,16 @@ class MockAlpacaAdapter:
 # Test 1: Proposal → Consensus
 # ══════════════════════════════════════════════════════════════════════
 
+@unittest.skip("Consensus module deleted - consensus tests disabled")
 class TestProposalToConsensus(unittest.TestCase):
     """Verify that agent opinions with decay metadata trigger consensus plans."""
 
     def setUp(self):
+        # LEGACY REMOVAL: Consensus module deleted - test disabled
         # Fresh coordinator for each test
-        TaCoConsensusCoordinator._instance = None
-        self.coordinator = TaCoConsensusCoordinator(min_opinions_for_consensus=2)
+        # TaCoConsensusCoordinator._instance = None
+        # self.coordinator = TaCoConsensusCoordinator(min_opinions_for_consensus=2)
+        pass
 
     def test_opinions_produce_plan_with_decay_fields(self):
         now = time.time()
@@ -235,6 +238,7 @@ class TestProposalToConsensus(unittest.TestCase):
 # Test 2: Consensus → Risk
 # ══════════════════════════════════════════════════════════════════════
 
+@unittest.skip("Consensus module deleted - consensus tests disabled")
 class TestConsensusToRisk(unittest.TestCase):
     """Verify that consensus plans pass through GlobalRiskManager checks."""
 
@@ -469,11 +473,13 @@ class TestReconciliation(unittest.TestCase):
 # Test 6: Full Golden Path
 # ══════════════════════════════════════════════════════════════════════
 
+@unittest.skip("Consensus module deleted - consensus tests disabled")
 class TestFullGoldenPath(unittest.TestCase):
     """End-to-end: opinion → consensus → risk check → adapter execute → reconcile."""
 
     def setUp(self):
-        TaCoConsensusCoordinator._instance = None
+        # LEGACY REMOVAL: Consensus module deleted - test disabled
+        # TaCoConsensusCoordinator._instance = None
         clear_adapters()
         self.adapter = MockAlpacaAdapter()
         register_adapter(self.adapter)
