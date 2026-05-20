@@ -42,7 +42,7 @@ class EvidenceType(str, Enum):
     """Type of evidence supporting or contradicting a hypothesis."""
     SIGNAL = "signal"            # from signal layer metrics
     OPINION = "opinion"          # from prediction opinion
-    DEBATE_ARGUMENT = "debate_argument"  # from debate session
+    # LEGACY REMOVAL: DEBATE_ARGUMENT removed - debate module deleted
     MARKET_OUTCOME = "market_outcome"    # resolved market
     EXTERNAL_DATA = "external_data"      # article, memo, domain knowledge
     PRICE_ACTION = "price_action"        # observed price movement

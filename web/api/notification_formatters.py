@@ -1,21 +1,21 @@
 """
-Notification Formatters for Debate Alerts
+Notification Formatters for Alerts
 Converts AlertItem objects into platform-specific message formats.
 """
 
 from typing import Dict, Any
 from datetime import datetime
 
-# AlertItem structure from debate_data_api.py
+# AlertItem structure for notification alerts
 AlertItem = Dict[str, Any]
 
 def format_telegram_alert(alert: AlertItem) -> str:
     """
-    Format a debate alert for Telegram.
-    
+    Format an alert for Telegram.
+
     Args:
         alert: AlertItem with agent_id, tier, utilization_pct, metric_id, metric_label, severity, message, triggered_at
-        
+
     Returns:
         Formatted Telegram message with emoji and markdown
     """
