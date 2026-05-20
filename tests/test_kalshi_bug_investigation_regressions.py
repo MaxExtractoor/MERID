@@ -276,34 +276,38 @@ class TestM2_ActivePlansDeprecation(unittest.TestCase):
 
     def test_deprecation_warning_emitted(self):
         """Accessing _active_plans must trigger a DeprecationWarning."""
-        from consensus.consensus_coordinator import EnhancedConsensusCoordinator
-
-        coord = EnhancedConsensusCoordinator.__new__(EnhancedConsensusCoordinator)
-        coord._rounds = {}
-        coord._pending_opinions = {}
-        coord._lock = asyncio.Lock()
-
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            _ = coord._active_plans
-            self.assertEqual(len(w), 1)
-            self.assertTrue(issubclass(w[0].category, DeprecationWarning))
-            self.assertIn("ConsensusRound", str(w[0].message))
+        # LEGACY REMOVAL: Consensus module deleted - test disabled
+        # from consensus.consensus_coordinator import EnhancedConsensusCoordinator
+        #
+        # coord = EnhancedConsensusCoordinator.__new__(EnhancedConsensusCoordinator)
+        # coord._rounds = {}
+        # coord._pending_opinions = {}
+        # coord._lock = asyncio.Lock()
+        #
+        # with warnings.catch_warnings(record=True) as w:
+        #     warnings.simplefilter("always")
+        #     _ = coord._active_plans
+        #     self.assertEqual(len(w), 1)
+        #     self.assertTrue(issubclass(w[0].category, DeprecationWarning))
+        #     self.assertIn("ConsensusRound", str(w[0].message))
+        self.skipTest("Consensus module deleted")
 
     def test_active_plans_returns_rounds(self):
         """_active_plans must still return _rounds dict for backward compat."""
-        from consensus.consensus_coordinator import EnhancedConsensusCoordinator
-
-        coord = EnhancedConsensusCoordinator.__new__(EnhancedConsensusCoordinator)
-        test_rounds = {"round-1": {"symbol": "BTC", "status": "pending"}}
-        coord._rounds = test_rounds
-        coord._pending_opinions = {}
-        coord._lock = asyncio.Lock()
-
-        with warnings.catch_warnings(record=True):
-            warnings.simplefilter("always")
-            result = coord._active_plans
-            self.assertIs(result, test_rounds)
+        # LEGACY REMOVAL: Consensus module deleted - test disabled
+        # from consensus.consensus_coordinator import EnhancedConsensusCoordinator
+        #
+        # coord = EnhancedConsensusCoordinator.__new__(EnhancedConsensusCoordinator)
+        # test_rounds = {"round-1": {"symbol": "BTC", "status": "pending"}}
+        # coord._rounds = test_rounds
+        # coord._pending_opinions = {}
+        # coord._lock = asyncio.Lock()
+        #
+        # with warnings.catch_warnings(record=True):
+        #     warnings.simplefilter("always")
+        #     result = coord._active_plans
+        #     self.assertEqual(result, test_rounds)
+        self.skipTest("Consensus module deleted")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -469,94 +473,60 @@ class TestUIWiringAfterFixes(unittest.TestCase):
 # ConsensusRound TradePlan compatibility shim
 # ═══════════════════════════════════════════════════════════════════════════
 
+@unittest.skip("Consensus module deleted - consensus round compatibility tests disabled")
 class TestConsensusRoundCompat(unittest.TestCase):
     """ConsensusRound must expose TradePlan-compatible attributes for loop.py."""
 
     def _make_round(self, **kwargs):
-        from consensus.consensus_coordinator import ConsensusRound, ConsensusState
-        defaults = dict(
-            symbol="BTC",
-            venue="kalshi",
-            state=ConsensusState.DECIDED,
-            target_size_usd=500.0,
-            direction="long",
-        )
-        defaults.update(kwargs)
-        return ConsensusRound(**defaults)
+        pass
 
     def test_status_maps_decided_to_approved(self):
-        from consensus.consensus_coordinator import ConsensusState
-        r = self._make_round(state=ConsensusState.DECIDED)
-        self.assertEqual(r.status, "approved")
+        # LEGACY REMOVAL: Consensus module deleted - test disabled (class already skipped)
+        pass
 
     def test_status_maps_timeout_to_expired(self):
-        from consensus.consensus_coordinator import ConsensusState
-        r = self._make_round(state=ConsensusState.TIMEOUT)
-        self.assertEqual(r.status, "expired")
+        # LEGACY REMOVAL: Consensus module deleted - test disabled (class already skipped)
+        pass
 
     def test_status_setter_executed(self):
-        from consensus.consensus_coordinator import ConsensusState
-        r = self._make_round()
-        r.status = "executed"
-        self.assertEqual(r.state, ConsensusState.DECIDED)
+        # LEGACY REMOVAL: Consensus module deleted - test disabled (class already skipped)
+        pass
 
     def test_plan_id_aliases_round_id(self):
-        r = self._make_round()
-        self.assertEqual(r.plan_id, r.round_id)
+        # LEGACY REMOVAL: Consensus module deleted - test disabled (class already skipped)
+        pass
 
     def test_domain_inferred_from_kalshi_venue(self):
-        r = self._make_round(venue="kalshi")
-        self.assertEqual(r.domain, "prediction")
+        # LEGACY REMOVAL: Consensus module deleted - test disabled (class already skipped)
+        pass
 
     def test_domain_defaults_to_crypto(self):
-        r = self._make_round(venue="binance")
-        self.assertEqual(r.domain, "crypto")
+        # LEGACY REMOVAL: Consensus module deleted - test disabled (class already skipped)
+        pass
 
     def test_approved_size_usd_reads_target(self):
-        r = self._make_round(target_size_usd=750.0)
-        self.assertEqual(r.approved_size_usd, 750.0)
+        # LEGACY REMOVAL: Consensus module deleted - test disabled (class already skipped)
+        pass
 
     def test_approved_size_usd_writes_target(self):
-        r = self._make_round(target_size_usd=100.0)
-        r.approved_size_usd = 300.0
-        self.assertEqual(r.target_size_usd, 300.0)
+        # LEGACY REMOVAL: Consensus module deleted - test disabled (class already skipped)
+        pass
 
     def test_is_expired_false_for_recent(self):
-        r = self._make_round()
-        self.assertFalse(r.is_expired())
+        # LEGACY REMOVAL: Consensus module deleted - test disabled (class already skipped)
+        pass
 
     def test_is_expired_true_for_old(self):
-        r = self._make_round()
-        r.started_at = time.time() - 300  # 5 min ago, default timeout 120s
-        self.assertTrue(r.is_expired())
+        # LEGACY REMOVAL: Consensus module deleted - test disabled (class already skipped)
+        pass
 
     def test_is_expired_true_for_timeout_state(self):
-        from consensus.consensus_coordinator import ConsensusState
-        r = self._make_round(state=ConsensusState.TIMEOUT)
-        self.assertTrue(r.is_expired())
+        # LEGACY REMOVAL: Consensus module deleted - test disabled (class already skipped)
+        pass
 
     def test_loop_execute_plans_attribute_chain(self):
-        """Simulate the exact attribute access pattern from loop.py _execute_plans."""
-        from consensus.consensus_coordinator import ConsensusState
-        r = self._make_round(state=ConsensusState.DECIDED, direction="long", target_size_usd=100.0)
-        # line 984: p.status == "approved" and not p.is_expired()
-        self.assertEqual(r.status, "approved")
-        self.assertFalse(r.is_expired())
-        # line 987-993
-        domain = getattr(r, "domain", "crypto")
-        self.assertEqual(domain, "prediction")
-        size_usd = getattr(r, "approved_size_usd", None) or r.target_size_usd
-        self.assertEqual(size_usd, 100.0)
-        # line 1006
-        _ = r.plan_id
-        _ = r.symbol
-        _ = r.direction
-        # line 1019: plan.approved_size_usd = verdict.adjusted_size_usd
-        r.approved_size_usd = 75.0
-        self.assertEqual(r.target_size_usd, 75.0)
-        # line 1081: plan.status = "executed"
-        r.status = "executed"
-        self.assertEqual(r.state, ConsensusState.DECIDED)
+        # LEGACY REMOVAL: Consensus module deleted - test disabled (class already skipped)
+        pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════
