@@ -246,13 +246,9 @@ async def check_order_router_health() -> bool:
 
 async def check_consensus_health() -> bool:
     """Check if consensus coordinator is operational."""
-    try:
-        from consensus.consensus_coordinator import get_consensus_coordinator
-        coordinator = get_consensus_coordinator()
-        return coordinator is not None
-    except Exception as e:
-        logger.error(f"Consensus coordinator health check failed: {e}")
-        return False
+    # LEGACY REMOVAL: Consensus module deleted - health check disabled
+    logger.debug("Consensus health check disabled - consensus module deleted")
+    return False
 
 
 async def check_execution_health() -> bool:
