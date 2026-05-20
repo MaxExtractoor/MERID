@@ -1148,21 +1148,27 @@ async def _start_15m_loop() -> None:
         _startup_state["background_tasks"].append(loop._loop_task)
 
         logger.info("[15m-LOOP] Kalshi15mLoop started (cadence=5s)")
+        print("=== PRINT DEBUG: Before _startup_state assignment ===")
         _startup_state["services"]["loop"] = {
             "status": "running",
             "started_at": time.time(),
         }
+        print("=== PRINT DEBUG: After _startup_state assignment ===")
+        logger.info("[AUTO-START-LIVE] About to check auto-start condition (after loop start)")
 
         # Auto-start grid in live mode if configured
         # CRITICAL FIX: Automatically start grid live on startup if MERID_PM_LIVE_ENABLED=true
         # This eliminates the need for manual API call to start the grid after system startup
+        logger.info("[AUTO-START-LIVE] About to check auto-start condition")
         try:
             from trading.trade_mode import TradeMode, get_trade_mode
             from merid.prediction.venue_gate import get_venue_gate
             from merid.settings import settings
             
+            logger.info("[AUTO-START-LIVE] ENTER auto-start check")
             current_mode = get_trade_mode()
             is_live_enabled = settings.MERID_PM_LIVE_ENABLED if hasattr(settings, 'MERID_PM_LIVE_ENABLED') else False
+            logger.info(f"[AUTO-START-LIVE] Trade mode check: current_mode={current_mode.value}, is_live_enabled={is_live_enabled}")
             
             if current_mode == TradeMode.LIVE and is_live_enabled:
                 # Set VenueGate to live mode
@@ -1171,10 +1177,11 @@ async def _start_15m_loop() -> None:
                     gate.mode = TradeMode.LIVE
                     logger.info("[AUTO-START-LIVE] VenueGate set to LIVE mode on startup")
                 
-                # Start the grid in live mode
+                # Start the grid in live mode (background task to avoid blocking 15m loop)
                 if agent_grid:
-                    await agent_grid.start()
-                    logger.info("[AUTO-START-LIVE] AgentGrid started automatically in LIVE mode")
+                    grid_task = asyncio.create_task(agent_grid.start(), name="agent-grid-start")
+                    _startup_state["background_tasks"].append(grid_task)
+                    logger.info("[AUTO-START-LIVE] AgentGrid start task launched in background")
                 else:
                     logger.warning("[AUTO-START-LIVE] agent_grid is None, skipping start")
                 _startup_state["services"]["agent_grid"]["auto_started"] = True
