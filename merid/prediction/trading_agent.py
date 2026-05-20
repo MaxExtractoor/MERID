@@ -6962,38 +6962,38 @@ class KalshiTradingAgent:
             pass
 
             # === KalshiCore Agent Pipeline ===
-        # Fire all 8 LLM-based reasoning agents against this trade proposal in the
-        # background.  Results are recorded in Neo4j + the reflection system so agents
-        # learn over time.  Never blocks trade execution — always fail-open.
-        try:
-            from core.kalshi_orchestrator import get_kalshi_core
-            from core.energy import create_energy as _create_energy
-            _kc_edge = getattr(signal, "edge", None)
-            _kc_edge_bps = int(float(getattr(_kc_edge, "net_edge", 0)) * 10000) if _kc_edge else 0
-            _kc_p_true = float(getattr(_kc_edge, "model_prob", 0.5)) if _kc_edge else 0.5
-            _kc_p_implied = float(getattr(_kc_edge, "market_prob", 0.5)) if _kc_edge else 0.5
-            _kc_payload = (
-                f"Kalshi trade proposal | agent={self.agent_id} lane={self.config.name} "
-                f"market={market.market_id} direction={side} action={action} "
-                f"price={price_cents}c size={size} contracts "
-                f"edge={_kc_edge_bps}bps p_true={_kc_p_true:.3f} p_implied={_kc_p_implied:.3f} "
-                f"confidence={float(getattr(signal, 'confidence', 0)):.2f} "
-                f"reason: {getattr(signal, 'reason', 'N/A')}"
-            )
-            _kc_energy = _create_energy(
-                source=f"kalshi_lane:{self.config.name}",
-                payload=_kc_payload,
-            )
-            _kc_task = asyncio.create_task(
-                get_kalshi_core().run_cycle(_kc_energy),
-                name=f"kalshi_core:{market.market_id}",
-            )
-            # Drain the exception so Python doesn't log "task was destroyed pending"
-            _kc_task.add_done_callback(
-                lambda _t: _t.exception() if not _t.cancelled() else None
-            )
-        except Exception as _kc_exc:
-            self.logger.debug("kalshi_core_fire_and_forget: %s", _kc_exc)
+            # Fire all 8 LLM-based reasoning agents against this trade proposal in the
+            # background.  Results are recorded in Neo4j + the reflection system so agents
+            # learn over time.  Never blocks trade execution — always fail-open.
+            try:
+                from core.kalshi_orchestrator import get_kalshi_core
+                from core.energy import create_energy as _create_energy
+                _kc_edge = getattr(signal, "edge", None)
+                _kc_edge_bps = int(float(getattr(_kc_edge, "net_edge", 0)) * 10000) if _kc_edge else 0
+                _kc_p_true = float(getattr(_kc_edge, "model_prob", 0.5)) if _kc_edge else 0.5
+                _kc_p_implied = float(getattr(_kc_edge, "market_prob", 0.5)) if _kc_edge else 0.5
+                _kc_payload = (
+                    f"Kalshi trade proposal | agent={self.agent_id} lane={self.config.name} "
+                    f"market={market.market_id} direction={side} action={action} "
+                    f"price={price_cents}c size={size} contracts "
+                    f"edge={_kc_edge_bps}bps p_true={_kc_p_true:.3f} p_implied={_kc_p_implied:.3f} "
+                    f"confidence={float(getattr(signal, 'confidence', 0)):.2f} "
+                    f"reason: {getattr(signal, 'reason', 'N/A')}"
+                )
+                _kc_energy = _create_energy(
+                    source=f"kalshi_lane:{self.config.name}",
+                    payload=_kc_payload,
+                )
+                _kc_task = asyncio.create_task(
+                    get_kalshi_core().run_cycle(_kc_energy),
+                    name=f"kalshi_core:{market.market_id}",
+                )
+                # Drain the exception so Python doesn't log "task was destroyed pending"
+                _kc_task.add_done_callback(
+                    lambda _t: _t.exception() if not _t.cancelled() else None
+                )
+            except Exception as _kc_exc:
+                self.logger.debug("kalshi_core_fire_and_forget: %s", _kc_exc)
 
         if action == "quote":
             # For quotes, place a buy and sell limit order pair
