@@ -316,16 +316,7 @@ export const API_ENDPOINTS = {
   KALSHI_CYCLE_DRAWDOWN_RESET: "/api/v1/kalshi/metrics/cycle-drawdown/reset",
 
   // ── Prediction Consensus & Debate (Sprint 8) ────────────────────────
-  PREDICTION_CONSENSUS_SUMMARY: "/api/v1/prediction/consensus/summary",
-  PREDICTION_CONSENSUS_PLANS: "/api/v1/prediction/consensus/plans",
-  PREDICTION_CONSENSUS_OPINIONS: "/api/v1/prediction/consensus/opinions",
-  PREDICTION_DEBATES: "/api/v1/prediction/consensus/debates",
-  PREDICTION_DEBATE_DETAIL: (id: string) => `/api/v1/prediction/consensus/debates/${id}`,
-  PREDICTION_DEBATE_METRICS: "/api/v1/prediction/consensus/debate-metrics",
-  PREDICTION_TEAMS: "/api/v1/prediction/consensus/teams",
-  PREDICTION_LEADERBOARD: "/api/v1/prediction/consensus/leaderboard",
-  PREDICTION_REWARDS: (agentId: string) => `/api/v1/prediction/consensus/rewards/${agentId}`,
-  PREDICTION_BADGES: (agentId: string) => `/api/v1/prediction/consensus/badges/${agentId}`,
+  // LEGACY REMOVAL: Consensus and debate endpoints removed - consensus/debate modules deleted
   PREDICTION_METRICS: "/api/v1/prediction/metrics",
 
   // ── Trade Mode & Reconciliation ─────────────────────────────────────
