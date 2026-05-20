@@ -920,46 +920,47 @@ class TestBUGL4_DynamicConsensusQuorum:
 
     def test_effective_quorum_fallback_to_config(self):
         """With no registered agents, effective_quorum falls back to config minimum."""
-        from consensus.consensus_coordinator import EnhancedConsensusCoordinator, ConsensusConfig
-        # Use a fresh instance
-        cc = EnhancedConsensusCoordinator(ConsensusConfig(min_agents_for_quorum=3))
-        assert cc.effective_quorum == 3, (
-            f"BUG-L4: with no agents, effective_quorum should be 3 (config min), got {cc.effective_quorum}"
-        )
+        # LEGACY REMOVAL: Consensus module deleted - test disabled
+        # from consensus.consensus_coordinator import EnhancedConsensusCoordinator, ConsensusConfig
+        # # Use a fresh instance
+        # cc = EnhancedConsensusCoordinator(ConsensusConfig(min_agents_for_quorum=3))
+        # assert cc.effective_quorum == 3, (
+        #     f"BUG-L4: with no agents, effective_quorum should be 3 (config min), got {cc.effective_quorum}"
+        # )
+        self.skipTest("Consensus module deleted")
 
     def test_effective_quorum_scales_with_healthy_agents(self):
         """With 10 healthy agents and 60% quorum_pct, effective_quorum == max(3, ceil(6)) == 6."""
-        import math
-        from consensus.consensus_coordinator import EnhancedConsensusCoordinator, ConsensusConfig, AgentHeartbeat
-        cc = EnhancedConsensusCoordinator(ConsensusConfig(min_agents_for_quorum=3, quorum_percentage=0.6))
-        for i in range(10):
-            hb = AgentHeartbeat(agent_id=f"agent-{i}", agent_role="trader")
-            hb.is_healthy = True
-            cc._agent_heartbeats[f"agent-{i}"] = hb
-        expected = max(3, math.ceil(10 * 0.6))  # 6
-        assert cc.effective_quorum == expected, (
-            f"BUG-L4: with 10 healthy agents expected quorum={expected}, got {cc.effective_quorum}"
-        )
+        # LEGACY REMOVAL: Consensus module deleted - test disabled
+        # import math
+        # from consensus.consensus_coordinator import EnhancedConsensusCoordinator, ConsensusConfig, AgentHeartbeat
+        # cc = EnhancedConsensusCoordinator(ConsensusConfig(min_agents_for_quorum=3, quorum_percentage=0.6))
+        # for i in range(10):
+        #     hb = AgentHeartbeat(agent_id=f"agent-{i}", agent_role="trader")
+        #     hb.is_healthy = True
+        #     cc._agent_heartbeats[f"agent-{i}"] = hb
+        # expected = max(3, math.ceil(10 * 0.6))  # 6
+        # assert cc.effective_quorum == expected, (
+        #     f"BUG-L4: with 10 healthy agents expected quorum={expected}, got {cc.effective_quorum}"
+        # )
+        self.skipTest("Consensus module deleted")
 
     def test_clear_stale_opinions_purges_old(self):
         """clear_stale_opinions removes entries older than max_age_s."""
-        import time
-        from consensus.consensus_coordinator import EnhancedConsensusCoordinator, ConsensusConfig
-        from unittest.mock import MagicMock
-        cc = EnhancedConsensusCoordinator(ConsensusConfig())
-        old_op = MagicMock()
-        old_op.timestamp = time.time() - 120  # 2 min old
-        fresh_op = MagicMock()
-        fresh_op.timestamp = time.time() - 5   # 5 sec old
-        cc._pending_opinions["BTC"] = [old_op, fresh_op]
-        purged = cc.clear_stale_opinions(max_age_s=60.0)
-        assert purged == 1, f"BUG-L4: expected 1 purged, got {purged}"
-        assert len(cc._pending_opinions["BTC"]) == 1, "BUG-L4: fresh opinion must survive purge"
-
-
-# =============================================================================
-# BUG-L5 — Shutdown order: drain agents before stopping PortfolioRiskAgent
-# =============================================================================
+        # LEGACY REMOVAL: Consensus module deleted - test disabled
+        # import time
+        # from consensus.consensus_coordinator import EnhancedConsensusCoordinator, ConsensusConfig
+        # from unittest.mock import MagicMock
+        # cc = EnhancedConsensusCoordinator(ConsensusConfig())
+        # old_op = MagicMock()
+        # old_op.timestamp = time.time() - 120  # 2 min old
+        # fresh_op = MagicMock()
+        # fresh_op.timestamp = time.time() - 5   # 5 sec old
+        # cc._pending_opinions["BTC"] = [old_op, fresh_op]
+        # purged = cc.clear_stale_opinions(max_age_s=60.0)
+        # assert purged == 1, f"BUG-L4: expected 1 purged, got {purged}"
+        # assert len(cc._pending_opinions["BTC"]) == 1, "BUG-L4: fresh opinion must survive purge"
+        self.skipTest("Consensus module deleted")
 
 class TestBUGL5_ShutdownDrainOrder:
 
