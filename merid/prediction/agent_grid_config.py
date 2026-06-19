@@ -20,6 +20,7 @@ logger = get_logger("merid.prediction.agent_grid_config")
 _DEFAULT_CONFIG_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "config", "kalshi_agent_grid.yaml"
 )
+DEFAULT_KALSHI_BASE_URL = "https://trading-api.kalshi.com/trade-api/v2"
 
 
 # ── Typed config models ────────────────────────────────────────────────
@@ -28,7 +29,7 @@ _DEFAULT_CONFIG_PATH = os.path.join(
 class VenueConfig:
     """Top-level venue settings."""
     name: str = "kalshi"
-    base_url: str = "https://trading-api.kalshi.com/trade-api/v2"
+    base_url: str = DEFAULT_KALSHI_BASE_URL
     use_demo: bool = False
     agent_stagger_seconds: float = 0.5
 
@@ -317,7 +318,7 @@ def load_agent_grid_config(path: Optional[str] = None) -> AgentGridConfig:
     v = raw.get("venue", {})
     venue = VenueConfig(
         name=v.get("name", "kalshi"),
-        base_url=v.get("base_url", VenueConfig.base_url),
+        base_url=v.get("base_url", DEFAULT_KALSHI_BASE_URL),
         use_demo=v.get("use_demo", False),
         agent_stagger_seconds=float(v.get("agent_stagger_seconds", 0.5)),
     )
