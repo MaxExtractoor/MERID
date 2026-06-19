@@ -5,6 +5,7 @@ Reduces latency from 5-30s (REST polling) to <1s (WS event-driven).
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -81,70 +82,77 @@ class KalshiPositionCache:
 
         self._positions: Dict[str, CachedPosition] = {}
         self._last_sync: Optional[datetime] = None
+        self._lock = asyncio.Lock()
         self._initialized = True
         logger.info("KalshiPositionCache initialized")
 
-    def on_fill(self, market_id: str, contracts: int, price_cents: int, fee_cents: int, side: str) -> None:
+    async def on_fill(self, market_id: str, contracts: int, price_cents: int, fee_cents: int, side: str) -> None:
         """Handle a fill event from WebSocket."""
-        position = self._positions.get(market_id)
+        async with self._lock:
+            position = self._positions.get(market_id)
 
-        if position is None:
-            # New position
-            self._positions[market_id] = CachedPosition(
-                market_id=market_id,
-                contracts=contracts,
-                side=side,
-                avg_price_cents=price_cents,
-            )
-            logger.debug(f"Position cache: opened {side} position on {market_id}: {contracts} @ {price_cents}¢")
-        else:
-            # Update existing
-            position.apply_fill(contracts, price_cents, fee_cents, side)
-            logger.debug(f"Position cache: updated {market_id}: {position.contracts} contracts")
+            if position is None:
+                # New position
+                self._positions[market_id] = CachedPosition(
+                    market_id=market_id,
+                    contracts=contracts,
+                    side=side,
+                    avg_price_cents=price_cents,
+                )
+                logger.debug(f"Position cache: opened {side} position on {market_id}: {contracts} @ {price_cents}¢")
+            else:
+                # Update existing
+                position.apply_fill(contracts, price_cents, fee_cents, side)
+                logger.debug(f"Position cache: updated {market_id}: {position.contracts} contracts")
 
-            # Remove if fully closed
-            if position.contracts == 0:
-                del self._positions[market_id]
-                logger.debug(f"Position cache: closed position on {market_id}")
+                # Remove if fully closed
+                if position.contracts == 0:
+                    del self._positions[market_id]
+                    logger.debug(f"Position cache: closed position on {market_id}")
 
-    def on_price_update(self, market_id: str, price_cents: int) -> None:
+    async def on_price_update(self, market_id: str, price_cents: int) -> None:
         """Update unrealized PnL when market price changes."""
-        position = self._positions.get(market_id)
-        if position:
-            position.update_unrealized_pnl(price_cents)
+        async with self._lock:
+            position = self._positions.get(market_id)
+            if position:
+                position.update_unrealized_pnl(price_cents)
 
-    def get_position(self, market_id: str) -> Optional[CachedPosition]:
+    async def get_position(self, market_id: str) -> Optional[CachedPosition]:
         """Get cached position for a market."""
-        return self._positions.get(market_id)
+        async with self._lock:
+            return self._positions.get(market_id)
 
-    def get_all_positions(self) -> Dict[str, CachedPosition]:
+    async def get_all_positions(self) -> Dict[str, CachedPosition]:
         """Get all cached positions."""
-        return dict(self._positions)
+        async with self._lock:
+            return dict(self._positions)
 
-    def sync_from_rest(self, positions: list) -> None:
+    async def sync_from_rest(self, positions: list) -> None:
         """Sync cache with REST API positions (fallback/reconciliation)."""
-        self._positions.clear()
-        for pos in positions:
-            market_id = pos.get("market_id") or pos.get("ticker")
-            if not market_id:
-                continue
+        async with self._lock:
+            self._positions.clear()
+            for pos in positions:
+                market_id = pos.get("market_id") or pos.get("ticker")
+                if not market_id:
+                    continue
 
-            self._positions[market_id] = CachedPosition(
-                market_id=market_id,
-                contracts=int(pos.get("contracts", 0)),
-                side=pos.get("side", "yes"),
-                avg_price_cents=int(pos.get("avg_price_cents", 50)),
-                realized_pnl_usd=Decimal(str(pos.get("realized_pnl", 0))),
-                unrealized_pnl_usd=Decimal(str(pos.get("unrealized_pnl", 0))),
-            )
+                self._positions[market_id] = CachedPosition(
+                    market_id=market_id,
+                    contracts=int(pos.get("contracts", 0)),
+                    side=pos.get("side", "yes"),
+                    avg_price_cents=int(pos.get("avg_price_cents", 50)),
+                    realized_pnl_usd=Decimal(str(pos.get("realized_pnl", 0))),
+                    unrealized_pnl_usd=Decimal(str(pos.get("unrealized_pnl", 0))),
+                )
 
-        self._last_sync = datetime.now(timezone.utc)
-        logger.info(f"Position cache synced from REST: {len(self._positions)} positions")
+            self._last_sync = datetime.now(timezone.utc)
+            logger.info(f"Position cache synced from REST: {len(self._positions)} positions")
 
-    def clear(self) -> None:
+    async def clear(self) -> None:
         """Clear all cached positions."""
-        self._positions.clear()
-        logger.info("Position cache cleared")
+        async with self._lock:
+            self._positions.clear()
+            logger.info("Position cache cleared")
 
 
 # Singleton accessor
