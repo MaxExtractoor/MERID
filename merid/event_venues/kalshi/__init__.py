@@ -80,6 +80,12 @@ from merid.event_venues.kalshi.order_router import (
     KALSHI_CHANNEL_ORDER_FILL,
     KALSHI_CHANNEL_ORDER_REJECT,
 )
+from merid.event_venues.kalshi.crypto_series import (
+    list_crypto_series,
+    fetch_markets_batch,
+    group_frequencies_by_asset,
+    TARGET_ASSETS,
+)
 
 __all__ = [
     "KalshiVenueClient",
@@ -144,4 +150,8 @@ __all__ = [
     "KALSHI_CHANNEL_ORDERBOOK",
     "KALSHI_CHANNEL_ORDER_FILL",
     "KALSHI_CHANNEL_ORDER_REJECT",
+    "list_crypto_series",
+    "fetch_markets_batch",
+    "group_frequencies_by_asset",
+    "TARGET_ASSETS",
 ]
