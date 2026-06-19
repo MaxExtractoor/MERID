@@ -355,7 +355,7 @@ const KalshiVolDashboardView: React.FC = () => {
             <h3 className="text-sm font-medium text-gray-300">Vol Targeting</h3>
             {sizing && (
               <span className={`ml-auto px-2 py-0.5 rounded text-[10px] font-bold ${tierStyle.text} ${tierStyle.bg}`}>
-                {(sizing.drawdown_tier ?? 'normal').toUpperCase()}
+                {(sizing?.drawdown_tier ?? 'normal').toUpperCase()}
               </span>
             )}
           </div>
@@ -564,7 +564,7 @@ const KalshiVolDashboardView: React.FC = () => {
             <h3 className="text-sm font-medium text-gray-300">Equity & Vol</h3>
             {sizing && (
               <span className={`ml-auto px-2 py-0.5 rounded text-[10px] font-bold ${tierStyle.text} ${tierStyle.bg}`}>
-                {(sizing.drawdown_tier ?? 'normal').toUpperCase()}
+                {(sizing?.drawdown_tier ?? 'normal').toUpperCase()}
               </span>
             )}
           </div>
