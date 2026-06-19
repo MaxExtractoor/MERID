@@ -31,10 +31,16 @@ logger = get_logger("main")
 async def lifespan(app: FastAPI):
     """
     Application lifespan manager - CANONICAL STARTUP SEQUENCE.
-    
+
     Starts all production components on startup,
     stops them on shutdown.
     """
+    from core.task_supervision import get_task_manager
+    from core.runtime_state import set_runtime_mode, RuntimeMode, mark_startup_complete
+
+    task_mgr = get_task_manager()
+    set_runtime_mode(RuntimeMode.BOOTING)
+
     logger.info("=" * 60)
     logger.info("MERID PRODUCTION SYSTEM STARTING")
     logger.info("=" * 60)
@@ -58,16 +64,16 @@ async def lifespan(app: FastAPI):
         logger.info("Starting WebSocket price publisher...")
         from web.services.price_publisher import get_price_publisher
         price_publisher = get_price_publisher()
-        asyncio.create_task(price_publisher.start())
+        task_mgr.create_task(price_publisher.start(), name="price-publisher")
         logger.info("Price publisher task created")
     except Exception as e:
         logger.error(f"Failed to start price publisher: {e}", exc_info=True)
-    
+
     try:
         logger.info("Starting WebSocket portfolio publisher...")
         from web.services.portfolio_publisher import get_portfolio_publisher
         portfolio_publisher = get_portfolio_publisher()
-        asyncio.create_task(portfolio_publisher.start())
+        task_mgr.create_task(portfolio_publisher.start(), name="portfolio-publisher")
         logger.info("Portfolio publisher task created")
     except Exception as e:
         logger.error(f"Failed to start portfolio publisher: {e}", exc_info=True)
@@ -79,43 +85,51 @@ async def lifespan(app: FastAPI):
     try:
         logger.info("Starting agent orchestrator...")
         orchestrator = get_agent_orchestrator()
-        asyncio.create_task(orchestrator.start())
+        task_mgr.create_task(orchestrator.start(), name="agent-orchestrator")
     except Exception as e:
         logger.error(f"Failed to start orchestrator: {e}")
-    
+
     # Yield to event loop after each major component
     await asyncio.sleep(0)
-    
+
     # Start consensus engine
     try:
         logger.info("Starting consensus engine...")
         consensus = get_consensus_engine()
-        asyncio.create_task(consensus.start())
+        task_mgr.create_task(consensus.start(), name="consensus-engine")
     except Exception as e:
         logger.error(f"Failed to start consensus: {e}")
-    
+
     # Start simulation miner
     try:
         logger.info("Starting simulation miner...")
         miner = get_continuous_miner()
-        asyncio.create_task(miner.start())
+        task_mgr.create_task(miner.start(), name="simulation-miner")
     except Exception as e:
         logger.error(f"Failed to start miner: {e}")
-    
+
     # Start audit trail
     try:
         logger.info("Starting audit trail...")
         audit = get_audit_trail()
-        asyncio.create_task(audit.start())
+        task_mgr.create_task(audit.start(), name="audit-trail")
     except Exception as e:
         logger.error(f"Failed to start audit: {e}")
-    
+
     # Start execution engine
+    # TODO(BUG-10): Wire execution engine to readiness flags before allowing execution
+    # The execution engine should check:
+    # 1. Runtime state is LIVE_TRADING (not BOOTING or OBSERVE_ONLY)
+    # 2. Price feed is connected and streaming
+    # 3. Consensus engine is operational
+    # 4. Risk engine has completed initial checks
+    # Currently, the engine starts immediately which could lead to execution
+    # attempts before critical dependencies are ready.
     try:
         logger.info("Starting execution engine...")
         execution = get_optimal_executor()
-        asyncio.create_task(execution.start())
-        
+        task_mgr.create_task(execution.start(), name="execution-engine")
+
         # Wire execution engine to live price feed
         price_feed = get_live_price_feed()
         def on_execution_price_update(price_data):
@@ -124,76 +138,76 @@ async def lifespan(app: FastAPI):
         logger.info("Execution engine wired to live price feed")
     except Exception as e:
         logger.error(f"Failed to start execution: {e}")
-    
+
     # Start streaming agent mesh
     try:
         logger.info("Starting streaming agent mesh...")
-        asyncio.create_task(agent_mesh.initialize())
-        asyncio.create_task(agent_mesh.start())
+        task_mgr.create_task(agent_mesh.initialize(), name="agent-mesh-init")
+        task_mgr.create_task(agent_mesh.start(), name="agent-mesh")
     except Exception as e:
         logger.error(f"Failed to start agent mesh: {e}")
-    
+
     # Start prediction markets aggregator
     try:
         logger.info("Starting prediction markets aggregator...")
         prediction_agg = get_prediction_aggregator()
-        asyncio.create_task(prediction_agg.start())
+        task_mgr.create_task(prediction_agg.start(), name="prediction-aggregator")
         # Store in app state for API access
         app.state.prediction_aggregator = prediction_agg
         logger.info(f"Prediction aggregator stored in app.state (id={id(prediction_agg)})")
     except Exception as e:
         logger.error(f"Failed to start prediction markets: {e}")
-    
+
     await asyncio.sleep(0)  # Yield to event loop
-    
+
     # Start live price feed streaming
     try:
         logger.info("Starting live price feed...")
         price_feed = get_live_price_feed()
-        asyncio.create_task(price_feed.start_streaming())
+        task_mgr.create_task(price_feed.start_streaming(), name="live-price-feed")
     except Exception as e:
         logger.error(f"Failed to start price feed: {e}")
-    
+
     await asyncio.sleep(0)  # Yield to event loop
-    
+
     # Start intelligence news aggregation
     try:
         logger.info("Starting intelligence news aggregation...")
-        asyncio.create_task(aggregate_news())
+        task_mgr.create_task(aggregate_news(), name="intelligence-news")
     except Exception as e:
         logger.error(f"Failed to start intelligence: {e}")
-    
+
     await asyncio.sleep(0)  # Yield to event loop
-    
+
     # Start API live data fetching
     try:
         logger.info("Starting API live data feed...")
-        asyncio.create_task(fetch_api_prices())
+        task_mgr.create_task(fetch_api_prices(), name="api-live-data")
     except Exception as e:
         logger.error(f"Failed to start API live data: {e}")
-    
+
     await asyncio.sleep(0)  # Yield to event loop
-    
+
     # Start alert manager
     try:
         logger.info("Starting alert manager...")
         alert_mgr = get_alert_manager()
-        asyncio.create_task(alert_mgr.start())
-        
+        task_mgr.create_task(alert_mgr.start(), name="alert-manager")
+
         price_feed = get_live_price_feed()
         def on_price_update(price_data):
             alert_mgr.update_price(price_data.symbol, price_data.price)
         price_feed.subscribe(on_price_update)
     except Exception as e:
         logger.error(f"Failed to start alerts: {e}")
-    
+
     await asyncio.sleep(0)  # Yield to event loop
-    
+
     # Start health monitor
     try:
         logger.info("Starting health monitor...")
         health_mon = get_health_monitor()
-        asyncio.create_task(health_mon.start())
+        task_mgr.create_task(health_mon.start(), name="health-monitor")
     except Exception as e:
         logger.error(f"Failed to start health monitor: {e}")
 
@@ -205,7 +219,7 @@ async def lifespan(app: FastAPI):
         logger.info("Starting Kalshi WS bridge...")
         from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
         ws_bridge = get_ws_bridge()
-        asyncio.create_task(ws_bridge.start())
+        task_mgr.create_task(ws_bridge.start(), name="kalshi-ws-bridge")
         logger.info("✅ Kalshi WS bridge started")
     except Exception as e:
         logger.warning(f"Kalshi WS bridge not started (non-fatal): {e}")
@@ -240,6 +254,11 @@ async def lifespan(app: FastAPI):
 
     await asyncio.sleep(0)  # Final yield before completing startup
 
+    # Mark startup complete and transition to LIVE_TRADING
+    mark_startup_complete()
+    task_status = task_mgr.get_status()
+    logger.info(f"Task manager: {task_status['total']} tasks ({task_status['active']} active)")
+
     logger.info("=" * 60)
     logger.info("MERID SYSTEM LIVE - All components operational")
     logger.info("=" * 60)
@@ -250,37 +269,43 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 60)
     logger.info("MERID SYSTEM SHUTTING DOWN")
     logger.info("=" * 60)
-    
+
+    # Transition to SHUTTING_DOWN mode
+    set_runtime_mode(RuntimeMode.SHUTTING_DOWN)
+
+    # Import shutdown helper
+    from core.task_supervision import shutdown_with_timeout
+
     # Stop WebSocket publishers
     try:
         from web.services.price_publisher import get_price_publisher
         price_publisher = get_price_publisher()
-        await price_publisher.stop()
+        await shutdown_with_timeout(price_publisher.stop(), timeout=5.0, component_name="price_publisher")
     except Exception as e:
         logger.debug("shutdown: price_publisher stop error: %s", e)
 
     try:
         from web.services.portfolio_publisher import get_portfolio_publisher
         portfolio_publisher = get_portfolio_publisher()
-        await portfolio_publisher.stop()
+        await shutdown_with_timeout(portfolio_publisher.stop(), timeout=5.0, component_name="portfolio_publisher")
     except Exception as e:
         logger.debug("shutdown: portfolio_publisher stop error: %s", e)
 
     try:
         health_mon = get_health_monitor()
-        await health_mon.stop()
+        await shutdown_with_timeout(health_mon.stop(), timeout=5.0, component_name="health_monitor")
     except Exception as e:
         logger.debug("shutdown: health_monitor stop error: %s", e)
 
     try:
         alert_mgr = get_alert_manager()
-        await alert_mgr.stop()
+        await shutdown_with_timeout(alert_mgr.stop(), timeout=5.0, component_name="alert_manager")
     except Exception as e:
         logger.debug("shutdown: alert_manager stop error: %s", e)
 
     try:
         prediction_agg = get_prediction_aggregator()
-        await prediction_agg.stop()
+        await shutdown_with_timeout(prediction_agg.stop(), timeout=5.0, component_name="prediction_aggregator")
     except Exception as e:
         logger.debug("shutdown: prediction_aggregator stop error: %s", e)
 
@@ -291,31 +316,31 @@ async def lifespan(app: FastAPI):
         logger.debug("shutdown: price_feed stop error: %s", e)
 
     try:
-        await agent_mesh.stop()
+        await shutdown_with_timeout(agent_mesh.stop(), timeout=10.0, component_name="agent_mesh")
     except Exception as e:
         logger.debug("shutdown: agent_mesh stop error: %s", e)
 
     try:
         execution = get_optimal_executor()
-        await execution.stop()
+        await shutdown_with_timeout(execution.stop(), timeout=10.0, component_name="execution")
     except Exception as e:
         logger.debug("shutdown: execution stop error: %s", e)
 
     try:
         audit = get_audit_trail()
-        await audit.stop()
+        await shutdown_with_timeout(audit.stop(), timeout=5.0, component_name="audit_trail")
     except Exception as e:
         logger.debug("shutdown: audit_trail stop error: %s", e)
 
     try:
         miner = get_continuous_miner()
-        await miner.stop()
+        await shutdown_with_timeout(miner.stop(), timeout=5.0, component_name="miner")
     except Exception as e:
         logger.debug("shutdown: miner stop error: %s", e)
 
     try:
         consensus = get_consensus_engine()
-        await consensus.stop()
+        await shutdown_with_timeout(consensus.stop(), timeout=5.0, component_name="consensus")
     except Exception as e:
         logger.debug("shutdown: consensus stop error: %s", e)
 
@@ -328,21 +353,25 @@ async def lifespan(app: FastAPI):
     try:
         from web.startup_agents import get_orchestrator_manager
         orch_mgr = get_orchestrator_manager()
-        await orch_mgr.stop_all()
+        await shutdown_with_timeout(orch_mgr.stop_all(), timeout=10.0, component_name="orchestrator_manager")
     except Exception as e:
         logger.debug("shutdown: orchestrator_manager stop error: %s", e)
 
     try:
         from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
-        await get_ws_bridge().stop()
+        await shutdown_with_timeout(get_ws_bridge().stop(), timeout=5.0, component_name="ws_bridge")
     except Exception as e:
         logger.debug("shutdown: ws_bridge stop error: %s", e)
 
     try:
         if hasattr(app.state, "portfolio_risk_agent"):
-            await app.state.portfolio_risk_agent.stop()
+            await shutdown_with_timeout(app.state.portfolio_risk_agent.stop(), timeout=5.0, component_name="portfolio_risk_agent")
     except Exception as e:
         logger.debug("shutdown: portfolio_risk_agent stop error: %s", e)
+
+    # Cancel remaining background tasks with timeout
+    logger.info("Cancelling remaining background tasks...")
+    await task_mgr.shutdown(timeout=10.0)
 
     logger.info("All components stopped - shutdown complete")
 

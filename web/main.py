@@ -1848,13 +1848,10 @@ async def _app_lifespan(application: FastAPI):
         _startup_state["services"]["portfolio_rebalancer"] = {"status": "failed", "error": str(e)}
 
     # ── Phase 0.55: MeridLoop ───────────────────────────────────────────
-    try:
-        from merid.loop import get_merid_loop as _get_merid_loop
-        _merid_loop = _get_merid_loop()
-        asyncio.create_task(_merid_loop.run())
-        logger.info("✅ MeridLoop started")
-    except Exception as e:
-        logger.warning(f"MeridLoop start failed (non-fatal): {e}")
+    # REMOVED: Duplicate start - MeridLoop is started in Phase 3 (line 2270-2280)
+    # The singleton pattern prevents double-start, but we should avoid creating
+    # duplicate tasks. See docs/RUNTIME_HARDENING_BUGS.md BUG-04 for details.
+    logger.info("MeridLoop startup deferred to Phase 3")
 
     # ── Phase 0.6: Orchestrator Agents ─────────────────────────────────
     logger.info("=" * 80)
@@ -2387,7 +2384,7 @@ async def _app_lifespan(application: FastAPI):
     try:
         from core.agent_orchestrator import get_agent_orchestrator
         orchestrator = get_agent_orchestrator()
-        task = asyncio.create_task(orchestrator.start())
+        task = asyncio.create_task(orchestrator.start(), name="agent-orchestrator")
         _startup_state["background_tasks"].append(task)
         logger.info("✅ Agent orchestrator started")
         _startup_state["services"]["agent_orchestrator"] = {"status": "running", "started_at": time.time()}
@@ -2482,8 +2479,9 @@ async def _app_lifespan(application: FastAPI):
     # Agent mesh
     try:
         from agents.agent_mesh import agent_mesh
-        asyncio.create_task(agent_mesh.initialize())
-        task = asyncio.create_task(agent_mesh.start())
+        init_task = asyncio.create_task(agent_mesh.initialize(), name="agent-mesh-init")
+        _startup_state["background_tasks"].append(init_task)
+        task = asyncio.create_task(agent_mesh.start(), name="agent-mesh")
         _startup_state["background_tasks"].append(task)
         logger.info("✅ Agent mesh started")
         _startup_state["services"]["agent_mesh"] = {"status": "running", "started_at": time.time()}
@@ -2495,7 +2493,7 @@ async def _app_lifespan(application: FastAPI):
     try:
         from core.consensus_engine import get_consensus_engine
         consensus = get_consensus_engine()
-        task = asyncio.create_task(consensus.start())
+        task = asyncio.create_task(consensus.start(), name="consensus-engine-streaming")
         _startup_state["background_tasks"].append(task)
         logger.info("✅ Consensus engine streaming started")
     except Exception as e:
@@ -2508,7 +2506,7 @@ async def _app_lifespan(application: FastAPI):
     try:
         from core.audit_trail import get_audit_trail
         audit = get_audit_trail()
-        task = asyncio.create_task(audit.start())
+        task = asyncio.create_task(audit.start(), name="audit-trail")
         _startup_state["background_tasks"].append(task)
         logger.info("✅ Audit trail started")
         _startup_state["services"]["audit_trail"] = {"status": "running", "started_at": time.time()}
@@ -2519,7 +2517,7 @@ async def _app_lifespan(application: FastAPI):
     # Intelligence news aggregation
     try:
         from web.api.intelligence import aggregate_news
-        task = asyncio.create_task(aggregate_news())
+        task = asyncio.create_task(aggregate_news(), name="intelligence-news")
         _startup_state["background_tasks"].append(task)
         logger.info("✅ Intelligence news aggregation started")
     except Exception as e:
@@ -2528,7 +2526,7 @@ async def _app_lifespan(application: FastAPI):
     # API live data fetching
     try:
         from web.api.live_data import fetch_live_prices as fetch_api_prices
-        task = asyncio.create_task(fetch_api_prices())
+        task = asyncio.create_task(fetch_api_prices(), name="api-live-data")
         _startup_state["background_tasks"].append(task)
         logger.info("✅ API live data feed started")
     except Exception as e:
@@ -2538,7 +2536,7 @@ async def _app_lifespan(application: FastAPI):
     try:
         from core.alerts import get_alert_manager
         alert_mgr = get_alert_manager()
-        task = asyncio.create_task(alert_mgr.start())
+        task = asyncio.create_task(alert_mgr.start(), name="alert-manager")
         _startup_state["background_tasks"].append(task)
         try:
             from data.live_price_feed import get_live_price_feed
@@ -2558,7 +2556,7 @@ async def _app_lifespan(application: FastAPI):
     try:
         from core.health import get_health_monitor
         health_mon = get_health_monitor()
-        task = asyncio.create_task(health_mon.start())
+        task = asyncio.create_task(health_mon.start(), name="health-monitor")
         _startup_state["background_tasks"].append(task)
         logger.info("✅ Health monitor started")
         _startup_state["services"]["health_monitor"] = {"status": "running", "started_at": time.time()}
@@ -2586,9 +2584,19 @@ async def _app_lifespan(application: FastAPI):
     logger.info("🚀 MERID STARTUP COMPLETE - System Ready")
     logger.info("=" * 80)
 
+    # Mark startup as complete and transition to LIVE_TRADING if no critical failures
+    try:
+        from core.runtime_state import mark_startup_complete
+        mark_startup_complete()  # This also transitions to LIVE_TRADING if safe
+    except Exception as exc:
+        logger.warning("Failed to mark startup complete in RuntimeState: %s", exc)
+
     # ── Startup reconciliation — unblock execution gate immediately ─────
     try:
         from merid.reconciliation import reconcile_all_venues, has_critical_discrepancies
+        from core.runtime_state import set_runtime_mode, RuntimeMode
+        from merid.execution_guard import get_execution_guard
+
         logger.info("Running startup reconciliation to unblock execution gate...")
         discrepancies = await asyncio.get_running_loop().run_in_executor(
             None, lambda: reconcile_all_venues(["kalshi"])
@@ -2599,10 +2607,21 @@ async def _app_lifespan(application: FastAPI):
             "✅ Startup reconciliation: %d discrepancies (%d critical, %d warning)",
             len(discrepancies), n_crit, n_warn,
         )
+
+        # BUG-09 FIX: Wire reconciliation to RuntimeState
         if has_critical_discrepancies():
-            logger.warning("⚠️  Execution gate BLOCKED (critical reconciliation issues)")
+            logger.error("⚠️  CRITICAL RECONCILIATION ISSUES - downgrading to OBSERVE_ONLY")
+            set_runtime_mode(RuntimeMode.OBSERVE_ONLY, reason="critical_reconciliation_discrepancies")
+            # Optionally activate kill switch to hard-block execution
+            # get_execution_guard().set_kill_switch(
+            #     active=True,
+            #     reason="Reconciliation found critical discrepancies",
+            #     domain="all"
+            # )
         else:
             logger.info("✅ Execution gate CLEAR — trades can proceed")
+            # Don't transition to LIVE_TRADING yet - wait for mark_startup_complete()
+
     except Exception as exc:
         logger.warning("Startup reconciliation failed (gate may remain blocked): %s", exc)
 
@@ -2658,16 +2677,12 @@ async def _app_lifespan(application: FastAPI):
         logger.debug("Kalshi venue reconciliation loop not started: %s", exc)
 
     # ── Phase N: Kalshi Insight Pipeline + News Agent ──────────────────
-    try:
-        from merid.publishing.kalshi_insight_pipeline import get_insight_pipeline
-        from merid.publishing.kalshi_news_agent import get_kalshi_news_agent
-        _insight_pipeline = get_insight_pipeline()
-        _news_agent = get_kalshi_news_agent()
-        _insight_pipeline.add_consumer(_news_agent.handle_insight)
-        asyncio.create_task(_insight_pipeline.start())
-        logger.info("✅ KalshiInsightPipeline + KalshiNewsAgent started")
-    except Exception as exc:
-        logger.warning("KalshiInsightPipeline start failed (non-fatal): %s", exc)
+    # REMOVED: Duplicate start - KalshiInsightPipeline already started and
+    # wired to KalshiNewsAgent in Phase 3 (lines 2103-2138).
+    # The singleton pattern + idempotent start() prevents issues, but we
+    # should avoid duplicate configuration. See docs/RUNTIME_HARDENING_BUGS.md
+    # BUG-05 for details.
+    logger.info("KalshiInsightPipeline already started in Phase 3")
 
     # Terminal telemetry loop DISABLED — was printing synthetic crypto trades/portfolio
     # Kalshi agent grid has its own telemetry via the /api/v1/kalshi-grid/* endpoints.
@@ -2678,6 +2693,16 @@ async def _app_lifespan(application: FastAPI):
 
     # ── SHUTDOWN ───────────────────────────────────────────────────────
     logger.info("🛑 MERID shutdown initiated - cancelling background tasks...")
+
+    # Import shutdown helper
+    from core.task_supervision import shutdown_with_timeout
+
+    # Transition to SHUTTING_DOWN mode
+    try:
+        from core.runtime_state import set_runtime_mode, RuntimeMode
+        set_runtime_mode(RuntimeMode.SHUTTING_DOWN)
+    except Exception as exc:
+        logger.debug("RuntimeState shutdown transition failed: %s", exc)
 
     # Stop MeridLoop
     try:
@@ -2690,7 +2715,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop KalshiInsightPipeline
     try:
         from merid.publishing.kalshi_insight_pipeline import get_insight_pipeline as _get_pipeline
-        await _get_pipeline().stop()
+        await shutdown_with_timeout(_get_pipeline().stop(), timeout=5.0, component_name="KalshiInsightPipeline")
         logger.info("✅ KalshiInsightPipeline stopped")
     except Exception as exc:
         logger.warning("KalshiInsightPipeline stop failed: %s", exc)
@@ -2705,7 +2730,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop MarketMoodBus aggregation loop
     try:
         from merid.swarm.market_mood_bus import get_market_mood_bus as _get_mood_bus
-        await _get_mood_bus().stop()
+        await shutdown_with_timeout(_get_mood_bus().stop(), timeout=5.0, component_name="MarketMoodBus")
         logger.info("✅ MarketMoodBus stopped")
     except Exception as exc:
         logger.warning("MarketMoodBus stop failed: %s", exc)
@@ -2713,7 +2738,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop WSFeedManager (Coinbase WS price feed)
     try:
         from merid.signals.ws_price_feed import get_ws_feed_manager as _get_ws_mgr
-        await _get_ws_mgr().stop()
+        await shutdown_with_timeout(_get_ws_mgr().stop(), timeout=5.0, component_name="WSFeedManager")
         logger.info("✅ WSFeedManager stopped")
     except Exception as exc:
         logger.warning("WSFeedManager stop failed: %s", exc)
@@ -2729,7 +2754,7 @@ async def _app_lifespan(application: FastAPI):
     # Close LiveFeedManager httpx client
     try:
         from merid.signals.live_feeds import get_live_feed_manager as _get_live_feed_mgr
-        await _get_live_feed_mgr().close()
+        await shutdown_with_timeout(_get_live_feed_mgr().close(), timeout=5.0, component_name="LiveFeedManager")
         logger.info("✅ LiveFeedManager closed")
     except Exception as exc:
         logger.warning("LiveFeedManager close failed: %s", exc)
@@ -2737,7 +2762,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop SentimentBus (Twitter+Reddit background loops)
     try:
         from merid.sentiment.sentiment_bus import get_sentiment_bus as _get_sent_bus
-        await _get_sent_bus().stop()
+        await shutdown_with_timeout(_get_sent_bus().stop(), timeout=5.0, component_name="SentimentBus")
         logger.info("✅ SentimentBus stopped")
     except Exception as exc:
         logger.warning("SentimentBus stop failed: %s", exc)
@@ -2753,7 +2778,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop KalshiWebSocketBridge
     try:
         from merid.event_venues.kalshi.ws_bridge import get_ws_bridge as _get_ws_bridge
-        await _get_ws_bridge().stop()
+        await shutdown_with_timeout(_get_ws_bridge().stop(), timeout=5.0, component_name="KalshiWebSocketBridge")
         logger.info("✅ KalshiWebSocketBridge stopped")
     except Exception as exc:
         logger.warning("KalshiWebSocketBridge stop failed: %s", exc)
@@ -2761,15 +2786,15 @@ async def _app_lifespan(application: FastAPI):
     # Stop KalshiSentimentService
     try:
         from merid.event_venues.kalshi.sentiment import get_sentiment_service as _get_sentiment_svc
-        await _get_sentiment_svc().stop()
+        await shutdown_with_timeout(_get_sentiment_svc().stop(), timeout=5.0, component_name="KalshiSentimentService")
         logger.info("✅ KalshiSentimentService stopped")
     except Exception as exc:
         logger.warning("KalshiSentimentService stop failed: %s", exc)
 
-    # Stop KalshiInsightPipeline
+    # Stop KalshiInsightPipeline (duplicate stop call)
     try:
         from merid.publishing.kalshi_insight_pipeline import get_insight_pipeline as _get_insight_pl
-        await _get_insight_pl().stop()
+        await shutdown_with_timeout(_get_insight_pl().stop(), timeout=5.0, component_name="KalshiInsightPipeline")
         logger.info("✅ KalshiInsightPipeline stopped")
     except Exception as exc:
         logger.warning("KalshiInsightPipeline stop failed: %s", exc)
@@ -2777,7 +2802,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop KalshiMarketCatalog
     try:
         from merid.event_venues.kalshi.market_catalog import get_market_catalog as _get_catalog
-        await _get_catalog().stop()
+        await shutdown_with_timeout(_get_catalog().stop(), timeout=5.0, component_name="KalshiMarketCatalog")
         logger.info("✅ KalshiMarketCatalog stopped")
     except Exception as exc:
         logger.warning("KalshiMarketCatalog stop failed: %s", exc)
@@ -2785,7 +2810,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop TickerCollector
     try:
         from merid.event_venues.kalshi.ticker_collector import get_ticker_collector as _get_ticker_col
-        await _get_ticker_col().stop()
+        await shutdown_with_timeout(_get_ticker_col().stop(), timeout=5.0, component_name="TickerCollector")
         logger.info("✅ TickerCollector stopped")
     except Exception as exc:
         logger.warning("TickerCollector stop failed: %s", exc)
@@ -2793,7 +2818,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop KalshiMarketCache
     try:
         from merid.event_venues.kalshi.market_cache import get_market_cache as _get_mkt_cache
-        await _get_mkt_cache().stop()
+        await shutdown_with_timeout(_get_mkt_cache().stop(), timeout=5.0, component_name="KalshiMarketCache")
         logger.info("✅ KalshiMarketCache stopped")
     except Exception as exc:
         logger.warning("KalshiMarketCache stop failed: %s", exc)
@@ -2801,7 +2826,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop EnhancedConsensusCoordinator opinion subscriber
     try:
         from consensus.consensus_coordinator import EnhancedConsensusCoordinator as _ECC
-        await _ECC.get_instance().stop_opinion_subscriber()
+        await shutdown_with_timeout(_ECC.get_instance().stop_opinion_subscriber(), timeout=5.0, component_name="EnhancedConsensusCoordinator")
         logger.info("✅ EnhancedConsensusCoordinator opinion subscriber stopped")
     except Exception as exc:
         logger.warning("EnhancedConsensusCoordinator stop failed: %s", exc)
@@ -2809,7 +2834,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop OrchestratorAgentManager (AgentMesh, NewsMonitor, SocialBroadcaster, ReflectionSystem)
     try:
         from web.startup_agents import get_orchestrator_manager as _get_orch_mgr
-        await _get_orch_mgr().stop_all()
+        await shutdown_with_timeout(_get_orch_mgr().stop_all(), timeout=10.0, component_name="OrchestratorAgentManager")
         logger.info("✅ OrchestratorAgentManager stopped")
     except Exception as exc:
         logger.warning("OrchestratorAgentManager stop failed: %s", exc)
@@ -2817,7 +2842,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop WatchdogCoordinator
     try:
         from agents.watchdog_agents import get_watchdog_coordinator as _get_watchdog
-        await _get_watchdog().stop()
+        await shutdown_with_timeout(_get_watchdog().stop(), timeout=5.0, component_name="WatchdogCoordinator")
         logger.info("✅ WatchdogCoordinator stopped")
     except Exception as exc:
         logger.warning("WatchdogCoordinator stop failed: %s", exc)
@@ -2825,7 +2850,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop SystemOrchestrator (also stops ConsensusEngine)
     try:
         from core.system_orchestrator import stop_merid
-        await stop_merid()
+        await shutdown_with_timeout(stop_merid(), timeout=10.0, component_name="SystemOrchestrator")
         logger.info("✅ SystemOrchestrator stopped")
     except Exception as exc:
         logger.warning("SystemOrchestrator stop failed: %s", exc)
@@ -2833,7 +2858,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop AuditTrail
     try:
         from core.audit_trail import get_audit_trail as _get_audit
-        await _get_audit().stop()
+        await shutdown_with_timeout(_get_audit().stop(), timeout=5.0, component_name="AuditTrail")
         logger.info("✅ AuditTrail stopped")
     except Exception as exc:
         logger.warning("AuditTrail stop failed: %s", exc)
@@ -2841,7 +2866,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop AlertManager
     try:
         from core.alerts import get_alert_manager as _get_alert_mgr
-        await _get_alert_mgr().stop()
+        await shutdown_with_timeout(_get_alert_mgr().stop(), timeout=5.0, component_name="AlertManager")
         logger.info("✅ AlertManager stopped")
     except Exception as exc:
         logger.warning("AlertManager stop failed: %s", exc)
@@ -2849,7 +2874,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop HealthMonitor
     try:
         from core.health import get_health_monitor as _get_health_mon
-        await _get_health_mon().stop()
+        await shutdown_with_timeout(_get_health_mon().stop(), timeout=5.0, component_name="HealthMonitor")
         logger.info("✅ HealthMonitor stopped")
     except Exception as exc:
         logger.warning("HealthMonitor stop failed: %s", exc)
@@ -2858,7 +2883,7 @@ async def _app_lifespan(application: FastAPI):
     try:
         from merid.prediction.agent_grid import get_agent_grid
         grid = get_agent_grid()
-        await grid.stop()
+        await shutdown_with_timeout(grid.stop(), timeout=10.0, component_name="KalshiAgentGrid")
         logger.info("✅ Kalshi agent grid stopped")
     except Exception as exc:
         logger.warning("Kalshi agent grid stop failed: %s", exc)
@@ -2866,7 +2891,7 @@ async def _app_lifespan(application: FastAPI):
     # Stop orchestrator agents (news monitor, twitter, telegram)
     try:
         orchestrator_manager = get_orchestrator_manager()
-        await orchestrator_manager.stop_all()
+        await shutdown_with_timeout(orchestrator_manager.stop_all(), timeout=10.0, component_name="orchestrator_agents")
         logger.info("✅ Orchestrator agents stopped")
     except Exception as exc:
         logger.warning("Orchestrator agents stop failed: %s", exc)
@@ -2897,6 +2922,26 @@ async def _app_lifespan(application: FastAPI):
                 pass
     logger.info("✅ Shutdown complete")
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# APP INSTANCE CREATION
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# IMPORTANT: Two entry points exist for MERID:
+#
+# 1. main.py (Production): Calls create_app(lifespan=main.lifespan) with
+#    curated component set (14 core components). THIS app instance is used
+#    in production. The app instance created below is shadowed and NOT used.
+#
+# 2. web/main.py (Development/Standalone): Uses the app instance created below
+#    with _app_lifespan (40+ services) when run directly via __main__.
+#
+# The module-level app instance below is required for @app.get() decorators
+# used in this file. When main.py imports web.main, this instance is created
+# but never started (main.py creates its own instance which shadows this one).
+# FastAPI lifespans only execute when uvicorn.run() is called, so no
+# duplication occurs.
+# ═══════════════════════════════════════════════════════════════════════════
 
 # Create app instance after all routes are defined
 app = create_app(lifespan=_app_lifespan)
@@ -3033,10 +3078,21 @@ async def healthz():
 
 @app.get("/readyz")
 async def readyz():
-    """Readiness probe - data feed OK, risk engine responding, DB reachable"""
+    """
+    Readiness probe - system ready to accept traffic AND execute trades
+
+    Checks:
+    1. Startup completed
+    2. Runtime mode (must be LIVE_TRADING or DEGRADED, not BOOTING/OFFLINE)
+    3. Execution guard (kill switch not active)
+    4. Reconciliation status (no critical discrepancies)
+    5. Critical services running (execution, consensus, kalshi_market_catalog)
+
+    See docs/RUNTIME_HARDENING_BUGS.md BUG-08 for rationale.
+    """
     import time
     import os
-    
+
     # Check if startup has completed
     if _startup_state.get("started_at") is None:
         return {
@@ -3044,18 +3100,73 @@ async def readyz():
             "reason": "startup_not_complete",
             "timestamp": time.time()
         }
-    
-    # Check service states from startup tracking
+
+    # Check runtime mode
+    try:
+        from core.runtime_state import get_runtime_state, RuntimeMode
+        runtime_state = get_runtime_state()
+        if runtime_state.mode not in (RuntimeMode.LIVE_TRADING, RuntimeMode.DEGRADED):
+            return {
+                "status": "not_ready",
+                "reason": f"runtime_mode_{runtime_state.mode.value}",
+                "runtime_mode": runtime_state.mode.value,
+                "degradation_reason": runtime_state.degradation_reason,
+                "timestamp": time.time()
+            }
+    except Exception as e:
+        logger.debug(f"Runtime state check error: {e}")
+        # If runtime_state module not available, continue with legacy checks
+        runtime_state = None
+
+    # Check execution guard
+    try:
+        from merid.execution_guard import get_execution_guard
+        guard = get_execution_guard()
+        if guard.is_kill_switch_active():
+            return {
+                "status": "not_ready",
+                "reason": "execution_blocked_kill_switch",
+                "kill_switch_reason": guard._kill_switch_reason,
+                "timestamp": time.time()
+            }
+    except Exception as e:
+        logger.debug(f"Execution guard check error: {e}")
+
+    # Check reconciliation status
+    try:
+        from merid.reconciliation import has_critical_discrepancies
+        if has_critical_discrepancies():
+            return {
+                "status": "not_ready",
+                "reason": "critical_reconciliation_issues",
+                "timestamp": time.time()
+            }
+    except Exception as e:
+        logger.debug(f"Reconciliation check error: {e}")
+
+    # Check critical services
     services = _startup_state.get("services", {})
+    critical_services = ["execution", "consensus", "kalshi_market_catalog", "kalshi_ws_bridge"]
+    failed_services = [
+        svc for svc in critical_services
+        if services.get(svc, {}).get("status") in ("failed", "timeout")
+    ]
+
+    if failed_services:
+        return {
+            "status": "not_ready",
+            "reason": "critical_services_failed",
+            "failed_services": failed_services,
+            "timestamp": time.time()
+        }
+
+    # Check prediction markets / aggregator (legacy check)
     prediction_markets_ok = services.get("prediction_markets", {}).get("status") == "running"
-    
-    # Check if we're in synthetic mode
     synthetic_mode = os.getenv("SIMULATION_MODE", "").lower() == "synthetic_only"
-    
-    # Check aggregator status
+
     aggregator_available = False
     data_fresh = False
-    
+
     try:
         from monitoring.real_prediction_markets import get_real_prediction_aggregator
         aggregator = await get_real_prediction_aggregator()
@@ -3066,17 +3177,20 @@ async def readyz():
                 data_fresh = True
     except Exception as e:
         logger.debug(f"Ready check aggregator error: {e}")
-    
-    # Overall readiness - allow degraded mode if prediction markets started
-    ready = (aggregator_available or prediction_markets_ok) and (data_fresh or synthetic_mode)
-    
+
+    # Overall readiness
+    ready = (aggregator_available or prediction_markets_ok or synthetic_mode) and len(failed_services) == 0
+
     return {
         "status": "ready" if ready else "not_ready",
         "timestamp": time.time(),
+        "runtime_mode": runtime_state.mode.value if runtime_state else "unknown",
+        "execution_allowed": runtime_state.is_execution_allowed() if runtime_state else None,
         "services": {
             "prediction_markets": services.get("prediction_markets", {}).get("status", "unknown"),
             "aggregator_available": aggregator_available,
             "data_fresh": data_fresh,
+            "critical_services": {svc: services.get(svc, {}).get("status", "unknown") for svc in critical_services},
         },
         "synthetic_mode": synthetic_mode,
     }
