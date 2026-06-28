@@ -60,13 +60,14 @@ class KalshiFIXClient:
         self,
         sender_comp_id: str,
         target_comp_id: str = "KALSHI",
-        host: str = "127.0.0.1",
+        host: Optional[str] = None,
         port: int = 98228,  # stunnel local port
         heartbeat_interval: int = 30,
     ):
+        import os
         self.sender_comp_id = sender_comp_id
         self.target_comp_id = target_comp_id
-        self.host = host
+        self.host = host if host is not None else os.getenv("FIX_HOST", "127.0.0.1")
         self.port = port
         self.heartbeat_interval = heartbeat_interval
 

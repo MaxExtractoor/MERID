@@ -8,21 +8,24 @@ or during simulation to catch:
 3. **State leakage**: PnL/margin must be tracked in aggregate, not per-contract
 4. **Bar construction bias**: Timestamps must be right-aligned (bar close)
 5. **Fill-model optimism**: Detect unrealistic fill rates
+6. **Execution delay randomization**: Add realistic execution delays to simulate latency
 
 Usage::
 
     from merid.event_venues.kalshi.backtest_checks import (
         check_lookahead, check_fees_applied, check_state_leakage,
-        check_fill_rate, run_all_checks,
+        check_fill_rate, add_execution_delay, run_all_checks,
     )
 
     issues = run_all_checks(state, snapshots, trade_log)
+    delayed_trades = add_execution_delay(trade_log, delay_ms_range=(50, 500))
 """
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from utils.logger import get_logger
 
@@ -226,6 +229,160 @@ def check_bar_alignment(
     )
 
 
+# ── Edge/lag validation checks ─────────────────────────────────────────────
+
+def check_edge_lag_consistency(
+    trade_log: List[Dict[str, Any]],
+    max_lag_ms: float = 1000.0,
+) -> CheckResult:
+    """Verify edge/lag metrics are within acceptable bounds.
+    
+    Detects unrealistic lag values or missing lag data that could indicate
+    edge/lag computation issues in backtests.
+    
+    Args:
+        trade_log: List of trade dictionaries with 'lag_ms' and 'edge_lag_ratio' fields
+        max_lag_ms: Maximum acceptable lag in milliseconds
+        
+    Returns:
+        CheckResult indicating if edge/lag metrics are consistent
+    """
+    if not trade_log:
+        return CheckResult("edge_lag_consistency", True, "No trades to check")
+    
+    missing_lag = 0
+    excessive_lag = 0
+    invalid_ratio = 0
+    
+    for trade in trade_log:
+        lag_ms = trade.get("lag_ms")
+        edge_lag_ratio = trade.get("edge_lag_ratio")
+        
+        # Check for missing lag data
+        if lag_ms is None:
+            missing_lag += 1
+        
+        # Check for excessive lag
+        elif lag_ms > max_lag_ms:
+            excessive_lag += 1
+        
+        # Check for invalid ratio (should be in [0, 1] or None)
+        if edge_lag_ratio is not None and (edge_lag_ratio < 0 or edge_lag_ratio > 1):
+            invalid_ratio += 1
+    
+    issues = []
+    if missing_lag > 0:
+        issues.append(f"{missing_lag} trades missing lag_ms")
+    if excessive_lag > 0:
+        issues.append(f"{excessive_lag} trades with lag > {max_lag_ms}ms")
+    if invalid_ratio > 0:
+        issues.append(f"{invalid_ratio} trades with invalid edge_lag_ratio")
+    
+    if issues:
+        return CheckResult(
+            "edge_lag_consistency", False,
+            f"Edge/lag consistency issues: {', '.join(issues)}",
+            severity="warning",
+        )
+    
+    return CheckResult(
+        "edge_lag_consistency", True,
+        f"All {len(trade_log)} trades have valid edge/lag metrics"
+    )
+
+
+def check_volatility_regime_distribution(
+    trade_log: List[Dict[str, Any]],
+    min_regime_samples: int = 10,
+) -> CheckResult:
+    """Verify volatility regime distribution is reasonable.
+    
+    Detects if backtest is biased toward a single volatility regime,
+    which could indicate data quality issues or unrealistic market conditions.
+    
+    Args:
+        trade_log: List of trade dictionaries with 'vol_regime' field
+        min_regime_samples: Minimum samples expected per regime
+        
+    Returns:
+        CheckResult indicating if regime distribution is reasonable
+    """
+    if not trade_log:
+        return CheckResult("vol_regime_distribution", True, "No trades to check")
+    
+    regime_counts: Dict[str, int] = {}
+    for trade in trade_log:
+        regime = trade.get("vol_regime", "UNKNOWN")
+        regime_counts[regime] = regime_counts.get(regime, 0) + 1
+    
+    # Check if any regime has insufficient samples
+    underrepresented = [
+        f"{regime} ({count})"
+        for regime, count in regime_counts.items()
+        if count < min_regime_samples
+    ]
+    
+    if underrepresented:
+        return CheckResult(
+            "vol_regime_distribution", False,
+            f"Underrepresented regimes: {', '.join(underrepresented)}",
+            severity="warning",
+        )
+    
+    return CheckResult(
+        "vol_regime_distribution", True,
+        f"Regime distribution: {dict(regime_counts)}"
+    )
+
+
+# ── Execution delay randomization ───────────────────────────────────────────
+
+def add_execution_delay(
+    trade_log: List[Dict[str, Any]],
+    delay_ms_range: Tuple[int, int] = (50, 500),
+    seed: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Add realistic execution delays to trade log to simulate network/processing latency.
+
+    In real trading, there is always some delay between decision and execution.
+    This function adds random delays to trade timestamps to make backtests more realistic.
+
+    Args:
+        trade_log: List of trade dictionaries with 'ts' (fill timestamp) and 'decision_ts' fields
+        delay_ms_range: Tuple of (min_delay_ms, max_delay_ms) for random delay
+        seed: Optional random seed for reproducibility
+
+    Returns:
+        Modified trade log with updated timestamps reflecting execution delays
+    """
+    if seed is not None:
+        random.seed(seed)
+
+    delayed_log = []
+    for trade in trade_log:
+        trade_copy = trade.copy()
+        
+        # Generate random delay in milliseconds
+        delay_ms = random.randint(delay_ms_range[0], delay_ms_range[1])
+        delay_seconds = delay_ms / 1000.0
+        
+        # Apply delay to fill timestamp
+        original_ts = trade_copy.get("ts", 0)
+        trade_copy["ts"] = original_ts + delay_seconds
+        
+        # Track the applied delay for analysis
+        trade_copy["execution_delay_ms"] = delay_ms
+        
+        delayed_log.append(trade_copy)
+    
+    logger.info(
+        "[BACKTEST-DELAY] Added execution delays to %d trades (range: %d-%dms)",
+        len(trade_log), delay_ms_range[0], delay_ms_range[1]
+    )
+    
+    return delayed_log
+
+
 # ── Run all checks ──────────────────────────────────────────────────────
 
 def run_all_checks(
@@ -237,8 +394,20 @@ def run_all_checks(
     fills_executed: int = 0,
     snapshots: Optional[List[Dict[str, Any]]] = None,
     expected_interval_seconds: int = 3600,
+    include_edge_lag_checks: bool = True,
 ) -> Dict[str, Any]:
     """Run all backtest sanity checks and return a summary.
+
+    Args:
+        trade_log: List of trade dictionaries
+        pnl_history: PnL history for state leakage check
+        total_fees: Total fees paid
+        initial_cash: Initial cash amount
+        orders_attempted: Number of orders attempted
+        fills_executed: Number of fills executed
+        snapshots: Market snapshots for bar alignment check
+        expected_interval_seconds: Expected interval between snapshots
+        include_edge_lag_checks: Whether to include edge/lag validation checks
 
     Returns:
         Dict with "passed" (bool), "checks" (list of CheckResult dicts),
@@ -251,6 +420,11 @@ def run_all_checks(
     checks.append(check_state_leakage(pnl_history or [], total_fees, initial_cash))
     checks.append(check_fill_rate(orders_attempted, fills_executed))
     checks.append(check_bar_alignment(snapshots or [], expected_interval_seconds))
+    
+    # Add edge/lag validation checks if enabled
+    if include_edge_lag_checks:
+        checks.append(check_edge_lag_consistency(trade_log or []))
+        checks.append(check_volatility_regime_distribution(trade_log or []))
 
     errors = sum(1 for c in checks if not c.passed and c.severity == "error")
     warnings = sum(1 for c in checks if not c.passed and c.severity == "warning")

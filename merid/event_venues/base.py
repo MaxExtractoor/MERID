@@ -67,6 +67,11 @@ class VenueOrder:
     time_in_force: str = "GTC"  # GTC, IOC, FOK, GTT
     # Unix epoch seconds for good-till-time (Kalshi GTT); None for GTC/IOC/FOK
     expiration_ts: Optional[int] = None
+    # Post-only flag: if True, order should only add liquidity (maker-only)
+    # Maps to Kalshi's "resting order only" / FIX ExecInst=6
+    post_only: bool = False
+    # Source of the order: "agent_grid" for pipeline orders, None for manual/test orders
+    source: Optional[str] = None
 
 
 @dataclass

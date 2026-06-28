@@ -36,7 +36,7 @@ Usage::
 from __future__ import annotations
 
 import json
-import time
+import time as _time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import Enum
@@ -94,7 +94,7 @@ class TradeLifecycle:
     ticker: str
     side: str
     agent_id: str
-    created_at: float = field(default_factory=time.time)
+    created_at: float = field(default_factory=_time.time)
     events: List[LifecycleEvent] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
     
@@ -102,7 +102,7 @@ class TradeLifecycle:
         """Add a lifecycle event."""
         event = LifecycleEvent(
             stage=stage,
-            timestamp=time.time(),
+            timestamp=_time.time(),
             data=data,
         )
         self.events.append(event)

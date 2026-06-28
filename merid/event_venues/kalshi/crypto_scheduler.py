@@ -46,7 +46,7 @@ class CryptoBotScheduler:
     
     async def run_cycle(self):
         """Run one crypto bot cycle"""
-        cycle_start = datetime.now()
+        cycle_start = datetime.now(timezone.utc)
         
         try:
             logger.info("Starting crypto bot cycle")
@@ -56,7 +56,7 @@ class CryptoBotScheduler:
             self.last_run = {
                 "timestamp": cycle_start.isoformat(),
                 "result": result,
-                "duration_seconds": (datetime.now() - cycle_start).total_seconds()
+                "duration_seconds": (datetime.now(timezone.utc) - cycle_start).total_seconds()
             }
             
             logger.info(f"Crypto bot cycle completed: {result['status']}")
@@ -70,7 +70,7 @@ class CryptoBotScheduler:
             self.last_run = {
                 "timestamp": cycle_start.isoformat(),
                 "error": str(e),
-                "duration_seconds": (datetime.now() - cycle_start).total_seconds()
+                "duration_seconds": (datetime.now(timezone.utc) - cycle_start).total_seconds()
             }
     
     def get_status(self) -> Dict[str, Any]:

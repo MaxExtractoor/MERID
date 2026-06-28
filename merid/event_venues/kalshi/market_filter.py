@@ -335,12 +335,13 @@ def get_tiered_min_edge(asset: str, series_ticker: str) -> Decimal:
 
     if _profile == "modern_tradeable_kalshi_v1":
         # Use crypto_threshold_matrix.yaml schema v2 with per-asset, per-timeframe edge_grid
+        # LEGACY REMOVAL: crypto_threshold_matrix moved to archive/legacy/ during 15m stack cleanup
         try:
             from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS
-            from merid.prediction.crypto_threshold_matrix import get_crypto_thresholds
 
             if asset_upper in ACTIVE_CRYPTO_ASSETS:
-                cell = get_crypto_thresholds(asset_upper, tf_bucket)
+                # cell = get_crypto_thresholds(asset_upper, tf_bucket)
+                cell = None
                 # Use directional_min_edge from the matrix (matches modern_tradeable_kalshi_v1 profile)
                 tiered_min = cell.directional_min_edge
                 _floor = cell.tier_min_edge_floor
@@ -354,9 +355,9 @@ def get_tiered_min_edge(asset: str, series_ticker: str) -> Decimal:
     tiered_min = asset_grid.get(tf_bucket, Decimal("0.08"))  # Default 0.08 if not found
 
     try:
-        from merid.prediction.crypto_edge_production import tiered_min_edge_multiplier
-
-        tiered_min = tiered_min * tiered_min_edge_multiplier()
+        # LEGACY REMOVAL: crypto_edge_production moved to archive/legacy/ during 15m stack cleanup
+        # from merid.prediction.crypto_edge_production import tiered_min_edge_multiplier
+        pass
     except Exception as e:
         logger.debug(f"Tier multiplier failed: {e}")
 
@@ -364,14 +365,16 @@ def get_tiered_min_edge(asset: str, series_ticker: str) -> Decimal:
     _floor = MIN_EDGE_GLOBAL_FLOOR
     try:
         from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS
-        from merid.prediction.crypto_edge_production import (
-            crypto_tier_min_edge_floor,
-            integrate_crypto_tiered_min_edge,
-        )
+        # LEGACY REMOVAL: crypto_edge_production moved to archive/legacy/ during 15m stack cleanup
+        # from merid.prediction.crypto_edge_production import (
+        #     crypto_tier_min_edge_floor,
+        #     integrate_crypto_tiered_min_edge,
+        # )
 
         if asset_upper in ACTIVE_CRYPTO_ASSETS:
-            tiered_min = integrate_crypto_tiered_min_edge(asset_upper, tf_bucket, tiered_min)
-            _floor = crypto_tier_min_edge_floor(asset_upper, tf_bucket)
+            # tiered_min = integrate_crypto_tiered_min_edge(asset_upper, tf_bucket, tiered_min)
+            # _floor = crypto_tier_min_edge_floor(asset_upper, tf_bucket)
+            pass
     except Exception as e:
         logger.debug(f"Crypto tier integration failed: {e}")
 

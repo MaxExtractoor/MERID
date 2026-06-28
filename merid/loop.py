@@ -21,6 +21,18 @@ Usage:
     await loop.tick()
 """
 
+# PROFILE GUARD: This module is legacy and should not be used in kalshi_crypto_15m_v2
+# Use merid.loop_15m.Kalshi15mLoop instead for 15m crypto trading
+from merid.profile_resolver import is_kalshi_crypto_15m_v2
+
+if is_kalshi_crypto_15m_v2():
+    raise RuntimeError(
+        "LEGACY module imported in kalshi_crypto_15m_v2 profile. "
+        "This module is deprecated and should not be used in production. "
+        "Use merid.loop_15m.Kalshi15mLoop instead for 15m crypto trading. "
+        f"Module: {__name__}"
+    )
+
 from __future__ import annotations
 
 import asyncio
@@ -93,27 +105,16 @@ def _resolve_plan_adapter_venue(plan: Any, plan_domain: str) -> str:
                 return "kalshi"
         except Exception:
             pass
-    try:
-        from merid.paper_config import get_paper_config
-
-        dc = get_paper_config().domains.get(plan_domain)
-        if dc and dc.venues:
-            return dc.venues[0]
-    except Exception:
-        pass
-    pd = (plan_domain or "").lower()
-    if pd in ("prediction", "betting"):
-        return "kalshi"
-    if pd == "equity":
-        return "alpaca"
-    try:
-        from merid.settings import settings as _s
-
-        if getattr(_s, "KALSHI_ONLY", True):
-            return "kalshi"
-    except Exception:
-        pass
-    return "alpaca"
+    # Production stack: use kalshi as default venue instead of legacy paper_config
+    # try:
+    #     from merid.paper_config import get_paper_config
+    # 
+    #     dc = get_paper_config().domains.get(plan_domain)
+    #     if dc and dc.venues:
+    #         return dc.venues[0]
+    # except Exception:
+    #     pass
+    return "kalshi"
 
 
 # ── Configuration ─────────────────────────────────────────────────────
@@ -1374,7 +1375,7 @@ class MeridLoop:
                 # For 15m profile, run AgentGrid.run_cycle() to step all 5 agents
                 # This replaces the canonical agent cycle with the lean 15m path
                 if "prediction" in self.config.active_domains:
-                    from merid.prediction.agent_grid import get_agent_grid
+                    from merid.prediction.agent_grid_15m import get_agent_grid
                     from merid.risk.kill_switches import risk_controller
                     from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
 
@@ -1560,6 +1561,12 @@ class MeridLoop:
             return
             
         try:
+            # Skip reflection for kalshi_crypto_15m_v2 profile
+            import os
+            profile = os.environ.get("MERID_PROFILE", "")
+            if profile == "kalshi_crypto_15m_v2":
+                return  # Skip reflection for 15m profile
+                
             from agents.reflection.integration import get_reflection_system
             from merid.prediction.agent_grid import get_agent_grid
 
@@ -1865,8 +1872,8 @@ class MeridLoop:
                     mid_cents = int(round((bid + ask) / 2 * 100))
                     if mid_cents > 0:
                         try:
-                            from merid.prediction.agent_grid import get_agent_grid as _gg
-                            for _agent in _gg().agents:
+                            from merid.prediction.agent_grid_15m import get_agent_grid as _gg
+                            for _agent in _gg()._agents:
                                 for _pos in _agent._tracked_positions.values():
                                     if _pos.ticker == ticker:
                                         _pos.current_price_cents = mid_cents
@@ -2586,7 +2593,7 @@ class MeridLoop:
         self._ws_bridge = None
         if "prediction" in self.config.active_domains:
             try:
-                from merid.event_venues.kalshi.ws_bridge import get_ws_bridge as _get_bridge
+                from merid.event_venues.kalshi.ws_bridge import get_bridge as _get_bridge
                 self._ws_bridge = _get_bridge()
                 logger.debug("KalshiWebSocketBridge: reusing lifespan singleton (running=%s)", self._ws_bridge.is_running())
             except Exception as _wse:

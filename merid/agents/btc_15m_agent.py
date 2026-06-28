@@ -42,7 +42,12 @@ class Btc15mAgentState:
 
 
 class Btc15mAgent(BaseKalshiAgent):
-    """BTC 15m Kalshi trading agent implementing KalshiGrid interface."""
+    """BTC 15m Kalshi trading agent implementing KalshiGrid interface.
+    
+    DEPRECATED: This agent is NOT used in production 15m crypto trading.
+    Production uses LeanAgent15m from merid/prediction/agent_grid_15m.py.
+    This agent is kept for backward compatibility and testing only.
+    """
 
     agent_id = "btc_15m_regime"
     product = "btc_15m"
@@ -66,14 +71,9 @@ class Btc15mAgent(BaseKalshiAgent):
         self.signal_generator = Btc15mSignalGenerator(self.spec)
         self.risk_rules = Btc15mRiskRules(self.spec)
         
-        # Log risk limits at startup for audit trail (same as Eth15mAgent)
-        try:
-            from config.kalshi_15m_crypto_config import log_risk_limits_for_agent
-            from merid.prediction.venue_gate import get_venue_gate
-            mode = get_venue_gate().mode.value.upper()
-            log_risk_limits_for_agent("BTC", mode)
-        except Exception as exc:
-            logger.warning(f"Failed to log risk limits for BTC: {exc}")
+        # DEPRECATED: Legacy agent - not used in production 15m stack
+        # Production uses LeanAgent15m from merid/prediction/agent_grid_15m.py
+        # Risk limit logging removed to avoid deprecated config import
 
     async def configure_dependencies(self, container: Any) -> None:
         """DI hook used by KalshiGrid bootstrap."""
@@ -139,18 +139,13 @@ class Btc15mAgent(BaseKalshiAgent):
         assert self.portfolio_risk_agent is not None
 
         market = self.market_registry.get_active_btc_15m()
-        if not market:
+        if not market or not market.ticker:
             self.logger.debug("BTC 15m: no active market, skipping.")
             return None
 
-        rti = self.crypto_rti_monitor.get_current_metrics(symbol="BTC")
+        rti = self.crypto_rti_monitor.get_rti_metrics(asset="BTC")
         if rti is None:
             self.logger.debug("BTC 15m: no RTI metrics, skipping.")
-            return None
-
-        vol_metrics = self.crypto_rti_monitor.get_vol_metrics(symbol="BTC")
-        if vol_metrics is None:
-            self.logger.debug("BTC 15m: no vol metrics, skipping.")
             return None
 
         # Risk state
@@ -181,12 +176,12 @@ class Btc15mAgent(BaseKalshiAgent):
         onchain_velocity = 0.0
 
         return Btc15mInputs(
-            rti_current=rti.get("rti_current"),
-            rti_60s_sma=rti.get("rti_60s_sma"),
-            vol_1m_realized=vol_metrics.get("vol_1m", 0.0),
-            vol_5m_realized=vol_metrics.get("vol_5m", 0.0),
-            vol_15m_realized=vol_metrics.get("vol_15m", 0.0),
-            vol_baseline_median=self.crypto_rti_monitor.get_vol_baseline("BTC"),
+            rti_current=rti.get("rti_current", 0.0),
+            rti_60s_sma=rti.get("rti_60s_sma", 0.0),
+            vol_1m_realized=rti.get("rti_60s_vol", 0.0),
+            vol_5m_realized=rti.get("rti_60s_vol", 0.0),
+            vol_15m_realized=rti.get("rti_60s_vol", 0.0),
+            vol_baseline_median=0.0,
             market_id=market_id,
             strike_price=strike_price,
             time_to_expiry=time_to_expiry,

@@ -24,7 +24,7 @@ external retry logic in callers.
 from __future__ import annotations
 
 import asyncio
-import time
+import time as _time
 from dataclasses import dataclass
 from typing import Dict, Optional
 
@@ -48,8 +48,9 @@ class RateLimitBudget:
     max_ws_subscriptions_per_second: int = 5
 
     def __post_init__(self) -> None:
-        self._lock: asyncio.Lock = asyncio.Lock()
-        self._window_start: float = time.monotonic()
+        # EVENT-LOOP-FIX: Lazy-initialize to avoid binding to wrong event loop
+        self._lock: Optional[asyncio.Lock] = None
+        self._window_start: float = _time.monotonic()
         self._rest_count: int = 0
         self._ws_count: int = 0
         self._total_rest_acquires: int = 0
@@ -59,9 +60,15 @@ class RateLimitBudget:
         self._rest_denials: int = 0
         self._ws_denials: int = 0
 
+    def _ensure_lock(self) -> asyncio.Lock:
+        """Lazy-initialize the lock in the current event loop."""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
+
     def _maybe_reset_window(self) -> None:
         """Reset 1-second window if expired. Must be called inside lock."""
-        now = time.monotonic()
+        now = _time.monotonic()
         if now - self._window_start >= 1.0:
             self._window_start = now
             self._rest_count = 0
@@ -69,7 +76,7 @@ class RateLimitBudget:
 
     def _window_remaining(self) -> float:
         """Seconds until the current window expires. Call inside lock."""
-        elapsed = time.monotonic() - self._window_start
+        elapsed = _time.monotonic() - self._window_start
         return max(0.0, 1.0 - elapsed)
 
     # ── Public async permit methods ─────────────────────────────────────
@@ -82,7 +89,7 @@ class RateLimitBudget:
         more window resets.
         """
         while True:
-            async with self._lock:
+            async with self._ensure_lock():
                 self._maybe_reset_window()
                 if self._ws_count < self.max_ws_subscriptions_per_second:
                     self._ws_count += 1
@@ -106,7 +113,7 @@ class RateLimitBudget:
     async def acquire_rest_permit(self) -> None:
         """Wait until a REST permit is available, then consume it."""
         while True:
-            async with self._lock:
+            async with self._ensure_lock():
                 self._maybe_reset_window()
                 if self._rest_count < self.max_requests_per_second:
                     self._rest_count += 1

@@ -81,7 +81,8 @@ class FillsPoller:
     
     # Default intervals (seconds) — configurable via env vars:
     # MERID_FILLS_POLL_INTERVAL_SEC, MERID_FILLS_RECONCILE_INTERVAL_SEC, MERID_FILLS_BACKFILL_INTERVAL_SEC
-    DEFAULT_POLL_INTERVAL: float = float(_os.getenv("MERID_FILLS_POLL_INTERVAL_SEC", "20.0"))
+    # PRODUCTION AUDIT: Reduced from 20s to 10s to stay under 15s MD staleness threshold
+    DEFAULT_POLL_INTERVAL: float = float(_os.getenv("MERID_FILLS_POLL_INTERVAL_SEC", "10.0"))
     DEFAULT_RECONCILE_INTERVAL: float = float(_os.getenv("MERID_FILLS_RECONCILE_INTERVAL_SEC", "60.0"))
     DEFAULT_BACKFILL_INTERVAL: float = float(_os.getenv("MERID_FILLS_BACKFILL_INTERVAL_SEC", "300.0"))
     
@@ -152,14 +153,16 @@ class FillsPoller:
         self._shutdown = asyncio.Event()
         
         # Load any existing fills from DB
-        try:
-            from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
-            ledger = get_fills_ledger()
-            loaded = await ledger.load_from_db()
-            if loaded > 0:
-                logger.info(f"FillsPoller: Restored {loaded} fills from DB")
-        except Exception as e:
-            logger.warning(f"DB restore failed: {e}")
+        # TEMPORARILY DISABLED: DB load may be hanging - will debug separately
+        logger.info("FillsPoller: DB load skipped (debugging startup hang)")
+        # try:
+        #     from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+        #     ledger = get_fills_ledger()
+        #     loaded = await ledger.load_from_db()
+        #     if loaded > 0:
+        #         logger.info(f"FillsPoller: Restored {loaded} fills from DB")
+        # except Exception as e:
+        #     logger.warning(f"DB restore failed: {e}")
         
         def _task_done_cb(task: asyncio.Task) -> None:
             """Log unhandled exceptions from FillsPoller background tasks."""
@@ -255,7 +258,8 @@ class FillsPoller:
         
         # Calculate lookback window
         # Start from 2x poll interval ago to catch any missed fills
-        since_ts = int((datetime.now(timezone.utc) - timedelta(seconds=self._poll_interval * 2)).timestamp())
+        # Kalshi API expects milliseconds since epoch
+        since_ts = int((datetime.now(timezone.utc) - timedelta(seconds=self._poll_interval * 2)).timestamp() * 1000)
         
         # Fetch fills
         try:
@@ -566,7 +570,8 @@ class FillsPoller:
         await client.connect()
 
         # Get last 24h of fills
-        since_ts = int((datetime.now(timezone.utc) - timedelta(hours=24)).timestamp())
+        # Kalshi API expects milliseconds since epoch
+        since_ts = int((datetime.now(timezone.utc) - timedelta(hours=24)).timestamp() * 1000)
         result = await client.get_fills(limit=500, since_ts=since_ts)
 
         if not result.success:
@@ -594,7 +599,7 @@ class FillsPoller:
         try:
             from merid.event_venues.kalshi.client import KalshiVenueClient
             from merid.settings import settings
-            from merid.event_venues.kalshi.models import KalshiConfig
+            from merid.event_venues.kalshi.kalshi_config import get_kalshi_config
             
             # Check if credentials are configured
             key_path = settings.KALSHI_PRIVATE_KEY_PATH
@@ -608,14 +613,8 @@ class FillsPoller:
             # The singleton is properly managed by close_kalshi_client() during shutdown
             if not hasattr(self, '_client'):
                 from merid.event_venues.kalshi.client import get_kalshi_client
-                config = KalshiConfig(
-                    api_key=settings.KALSHI_API_KEY_ID,
-                    private_key_path=key_path,
-                    private_key_pem=settings.KALSHI_PRIVATE_KEY_PEM,
-                    email=settings.KALSHI_EMAIL,
-                    password=settings.KALSHI_PASSWORD,
-                    use_demo=settings.KALSHI_USE_DEMO,
-                )
+                # Use unified config
+                config = get_kalshi_config()
                 self._client = get_kalshi_client(config)
 
             return self._client
@@ -629,7 +628,7 @@ class FillsPoller:
         agent_map = {}
         
         try:
-            from merid.prediction.agent_grid import get_agent_grid
+            from merid.prediction.agent_grid_15m import get_agent_grid
             grid = get_agent_grid()
             
             for agent in grid.agents:

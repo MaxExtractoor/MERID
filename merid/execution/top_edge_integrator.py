@@ -62,16 +62,15 @@ class TopEdgeIntegrator:
             Tuple of (risk_ok, available_bankroll)
         """
         try:
-            from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service
+            from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
             
-            service = get_bankroll_service()
-            summary = service.get_summary_sync()  # Sync version for simplicity
+            equity_usd = get_equity_for_risk_calc_sync()
             
-            if not summary or not summary.equity_usd:
+            if not equity_usd:
                 logger.warning("[TOP_EDGE_INTEGRATOR] Bankroll unavailable")
                 return False, Decimal("0")
             
-            available = summary.equity_usd
+            available = Decimal(str(equity_usd))
             
             # Reserve a portion (e.g., don't use more than 50% for any single position)
             max_single_position = available * Decimal("0.5")

@@ -17,7 +17,7 @@ Design
   well inside Kalshi's rate limits.
 - Per-ticker failures (HTTP errors or malformed data) are counted in ``_errors``
   and logged at DEBUG; one bad ticker never stalls the whole loop.
-- The poller is started/stopped by the FastAPI lifespan in ``web/main.py``.
+- The poller is started/stopped by the application startup/shutdown lifecycle.
 """
 from __future__ import annotations
 

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import threading
 import asyncio
-import time
+import time as _time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional
@@ -157,7 +157,7 @@ class TickerCollector:
             spread = round(ask - bid, 4)
 
         record = TickRecord(
-            ts=time.time(),
+            ts=_time.time(),
             market_id=payload.get("market_id", ""),
             yes_bid=bid,
             yes_ask=ask,

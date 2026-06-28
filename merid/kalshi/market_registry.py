@@ -31,6 +31,7 @@ class KalshiMarketRegistry:
         self._eth_15m_ticker: Optional[str] = None
         self._sol_15m_ticker: Optional[str] = None
         self._xrp_15m_ticker: Optional[str] = None
+        self._doge_15m_ticker: Optional[str] = None
 
     def refresh_crypto_15m(self, universe: dict[str, list[str]]) -> None:
         """Refresh active crypto 15m/hourly tickers from universe subsets."""
@@ -39,14 +40,16 @@ class KalshiMarketRegistry:
         eth = universe.get("ETH_15M") or []
         sol = universe.get("SOL_15M") or []
         xrp = universe.get("XRP_15M") or []
+        doge = universe.get("DOGE_15M") or []
 
         self._btc_15m_ticker = btc_15m[0] if btc_15m else None
         self._btc_1h_ticker = btc_1h[0] if btc_1h else None
         self._eth_15m_ticker = eth[0] if eth else None
         self._sol_15m_ticker = sol[0] if sol else None
         self._xrp_15m_ticker = xrp[0] if xrp else None
+        self._doge_15m_ticker = doge[0] if doge else None
 
-        logger.debug(f"Refreshed crypto 15m/hourly tickers: BTC_15M={self._btc_15m_ticker}, BTC_1H={self._btc_1h_ticker}, ETH_15M={self._eth_15m_ticker}, SOL_15M={self._sol_15m_ticker}, XRP_15M={self._xrp_15m_ticker}")
+        logger.debug(f"Refreshed crypto 15m/hourly tickers: BTC_15M={self._btc_15m_ticker}, BTC_1H={self._btc_1h_ticker}, ETH_15M={self._eth_15m_ticker}, SOL_15M={self._sol_15m_ticker}, XRP_15M={self._xrp_15m_ticker}, DOGE_15M={self._doge_15m_ticker}")
 
     def _get_market_info(self, ticker: str) -> Optional[KalshiMarketInfo]:
         """Fetch market info from Kalshi API."""
@@ -106,6 +109,10 @@ class KalshiMarketRegistry:
     def get_active_xrp_15m(self) -> Optional[KalshiMarketInfo]:
         """Get current active XRP 15m market."""
         return self._get_market_info(self._xrp_15m_ticker)
+
+    def get_active_doge_15m(self) -> Optional[KalshiMarketInfo]:
+        """Get current active DOGE 15m market."""
+        return self._get_market_info(self._doge_15m_ticker)
 
     def refresh(self) -> None:
         """Refresh crypto 15m tickers from latest universe."""

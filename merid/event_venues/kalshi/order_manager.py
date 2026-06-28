@@ -582,7 +582,7 @@ class OrderManager:
                     price_est = 50  # Fallback if market state unavailable
                     try:
                         from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
-                        state = get_kalshi_market_state_store().get_state(tracked.ticker)
+                        state = get_kalshi_market_state_store().get_unified(tracked.ticker)
                         if state and state.mid_cents > 0:
                             price_est = state.mid_cents
                     except Exception as _exc:

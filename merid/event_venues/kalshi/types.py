@@ -16,7 +16,6 @@ from typing import Any, Dict, Optional, Union
 class BalanceState(Enum):
     """Bankroll freshness state - explicit, no lying with zeros."""
     FRESH = auto()      # Recently confirmed from Kalshi
-    STALE = auto()      # Using cached value due to temporary error
     ERROR = auto()      # Permanent error, trading blocked
     UNKNOWN = auto()    # Never successfully fetched
 

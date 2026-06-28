@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
-import time
+import time as _time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -61,7 +61,7 @@ def _get_market_price_fallback(ticker: str) -> int:
     """
     try:
         from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
-        state = get_kalshi_market_state_store().get_state(ticker)
+        state = get_kalshi_market_state_store().get_unified(ticker)
         if state and state.mid_cents > 0:
             return state.mid_cents
     except Exception as _exc:
@@ -72,9 +72,12 @@ def _get_market_price_fallback(ticker: str) -> int:
 @dataclass
 class CachedPosition:
     """Cached position state.
-    
+
     Task 1: Added fill_source and client_order_id to distinguish hedge vs alpha positions
     for accurate exposure calculation.
+    P1 FIX: Added scale_out_complete flag for partial profit taking tracking.
+    P1 FIX: Added entry_intent_id for RoundTripMonitor exit reason tracking.
+    FIX: Added notional_usd property for exposure calculation.
     """
     market_id: str
     contracts: int
@@ -87,12 +90,26 @@ class CachedPosition:
     take_profit_price_cents: Optional[int] = None  # TP price level in cents
     take_profit_r_multiple: Optional[float] = None  # R-multiple target (e.g., 1.5R, 2.0R)
     stop_loss_price_cents: Optional[int] = None  # Protective stop in cents
+    # P1 FIX: Scale-out tracking for partial profit taking
+    scale_out_complete: bool = False  # True if partial exit already executed
+    # P1 FIX: Entry intent ID for RoundTripMonitor exit reason tracking
+    entry_intent_id: Optional[str] = None  # Intent ID of the entry order
     # Task 1: Fill source tracking ("alpha" or "hedge")
     fill_source: str = "alpha"  # "alpha" = trading position, "hedge" = hedge position
     client_order_id: Optional[str] = None  # For hedge fill detection
     # Resting bracket order tracking (GTC limit at TP / SL price)
     tp_bracket_client_tag: Optional[str] = None  # client_tag of resting TP order
     sl_bracket_client_tag: Optional[str] = None  # client_tag of resting SL order
+
+    @property
+    def notional_usd(self) -> Decimal:
+        """Compute notional value in USD from contracts and average price."""
+        return Decimal(self.contracts * self.avg_price_cents) / Decimal("100")
+
+    @property
+    def notional_value(self) -> Decimal:
+        """Alias for notional_usd for compatibility with loop_15m.py."""
+        return self.notional_usd
 
     def apply_fill(
         self,
@@ -177,16 +194,39 @@ class KalshiPositionCache:
 
         self._positions: Dict[str, CachedPosition] = {}
         self._last_sync: Optional[datetime] = None
+
+        # Log bracket order mode on startup
+        brackets_enabled = os.getenv("MERID_RESTING_BRACKETS_ENABLED", "false").lower() in ("true", "1", "yes")
+        mode = "RESTING" if brackets_enabled else "MONITOR_ONLY"
+        logger.info("[BRACKET-STATE] mode=%s MERID_RESTING_BRACKETS_ENABLED=%s", mode, os.getenv("MERID_RESTING_BRACKETS_ENABLED", "false"))
         # BUG-FIX: Add mutex for thread safety during concurrent WebSocket fill events
-        self._mutex = asyncio.Lock()
+        # EVENT-LOOP-FIX: Lazy-initialize to avoid binding to wrong event loop
+        self._mutex: Optional[asyncio.Lock] = None
         # PRODUCTION FIX: Pending TP targets keyed by client_order_id for fill-time lookup
         self._pending_tp_targets: Dict[str, Dict[str, Any]] = {}
         # Task 2: Add fills_ledger reference for authoritative fill_source lookup
+        # DETOX FIX: Lazy load fills_ledger to prevent import-time initialization cascade
         # BUG-FIX: Actually initialize the ledger reference (was always None)
-        from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
-        self._fills_ledger = get_fills_ledger()
+        self._fills_ledger = None  # Lazy loaded via _get_fills_ledger()
+        # TUNED (2026-05-25): Trailing stop monitoring infrastructure
+        self._monitoring_enabled: bool = False
+        self._monitoring_task: Optional[asyncio.Task] = None
+        self._monitoring_interval_seconds: float = 5.0  # Check every 5 seconds
         self._initialized = True
         logger.info("KalshiPositionCache initialized")
+
+    def _ensure_mutex(self) -> asyncio.Lock:
+        """Lazy-initialize the mutex in the current event loop."""
+        if self._mutex is None:
+            self._mutex = asyncio.Lock()
+        return self._mutex
+
+    def _get_fills_ledger(self):
+        """Lazy load fills_ledger to prevent import-time initialization cascade."""
+        if self._fills_ledger is None:
+            from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+            self._fills_ledger = get_fills_ledger()
+        return self._fills_ledger
 
     def register_tp_targets(
         self,
@@ -207,7 +247,7 @@ class KalshiPositionCache:
             "tp_price": take_profit_price_cents,
             "tp_r": take_profit_r_multiple,
             "sl_price": stop_loss_price_cents,
-            "registered_at": time.time(),
+            "registered_at": _time.time(),
         }
         # Opportunistic GC every 100 registrations to keep the dict bounded.
         if len(self._pending_tp_targets) % 100 == 0:
@@ -219,7 +259,7 @@ class KalshiPositionCache:
         Returns the number of entries removed. Called opportunistically from
         register_tp_targets and on demand from operators / tests.
         """
-        cutoff = time.time() - max_age_seconds
+        cutoff = _time.time() - max_age_seconds
         stale_ids = [
             coid
             for coid, target in self._pending_tp_targets.items()
@@ -265,7 +305,7 @@ class KalshiPositionCache:
 
         Task 2: Integrates with fills_ledger for authoritative fill_source lookup.
         """
-        async with self._mutex:
+        async with self._ensure_mutex():
             # Task 2: Look up fill_source from fills_ledger if fill_id provided
             fill_source = await self._lookup_fill_source(fill_id, client_order_id)
 
@@ -278,6 +318,13 @@ class KalshiPositionCache:
                 tp_targets = self._pending_tp_targets.get(client_order_id, {}) or {}
 
             position = self._positions.get(market_id)
+
+            # Log fill with linkage to order submission and position
+            logger.info(
+                "[FILL] fill_id=%s client_order_id=%s market=%s side=%s size=%d price=%dc position_id=%s",
+                fill_id or "N/A", client_order_id or "N/A", market_id, side, contracts, price_cents,
+                position.market_id if position else "NEW"
+            )
 
             if position is None:
                 # New position - capture TP targets from the opening order
@@ -292,8 +339,54 @@ class KalshiPositionCache:
                     stop_loss_price_cents=tp_targets.get("sl_price"),
                     fill_source=fill_source,  # Task 1: Track fill source
                     client_order_id=client_order_id,  # Task 1: Store for hedge detection
+                    entry_intent_id=client_order_id or fill_id or "unknown",  # For RoundTripMonitor tracking
                 )
+                
+                # Phase 5.4: Record entry in RoundTripMonitor with calibration data
+                try:
+                    from merid.event_venues.kalshi.round_trip_monitor import get_round_trip_monitor, EntryRecord
+                    rt_monitor = get_round_trip_monitor()
+                    
+                    # Extract raw_logit and agent_id from fills_ledger if available
+                    raw_logit = None
+                    agent_id = None
+                    if fill_id and self._fills_ledger:
+                        try:
+                            fill_record = self._fills_ledger.get_fill(fill_id)
+                            if fill_record:
+                                raw_logit = getattr(fill_record, 'raw_logit', None)
+                                agent_id = getattr(fill_record, 'agent_id', None)
+                        except Exception as ledger_err:
+                            logger.debug("[POSITION-CACHE] Could not get fill record for calibration: %s", ledger_err)
+                    
+                    # Record entry for round-trip tracking
+                    entry_record = EntryRecord(
+                        intent_id=client_order_id or fill_id or "unknown",
+                        ticker=market_id,
+                        asset=market_id.split("-")[0].replace("KX", "") if "-" in market_id else "UNKNOWN",
+                        timestamp=datetime.utcnow(),
+                        price_cents=price_cents,
+                        count=contracts,
+                        action=action,
+                        risk_tier="A",  # Default risk tier
+                        window_resolution_id="default",
+                        exit_policy_id="default",
+                        raw_logit=raw_logit,  # Phase 5.4: Raw logit for calibration
+                        agent_id=agent_id,  # Phase 5.4: Agent ID for outcome recording
+                    )
+                    rt_monitor.record_entry(entry_record)
+                except Exception as rt_err:
+                    logger.warning("[POSITION-CACHE] Failed to record entry in RoundTripMonitor: %s", rt_err)
                 self._positions[market_id] = new_position
+
+                # Log entry timing for audit (correlate with [SCHEDULER-CHECK] for full timing metrics)
+                asset = market_id.split("-")[0].replace("KX", "") if "-" in market_id else "UNKNOWN"
+                logger.info(
+                    "[ENTRY-TIMING] position_id=%s asset=%s ticker=%s side=%s size=%d entry_price=%dc "
+                    "entry_timestamp=%s best_price_after=N/A early_cost_cents=N/A early_cost_r=N/A",
+                    market_id, asset, market_id, side, contracts, price_cents,
+                    datetime.utcnow().isoformat()
+                )
                 # Task 1: Different log message for hedge vs alpha
                 if fill_source == "hedge":
                     logger.info(
@@ -303,6 +396,13 @@ class KalshiPositionCache:
                         client_id=client_order_id
                     )
                 else:
+                    logger.info(
+                        "[TP-SL-ARMED] market=%s side=%s entry=%dc tp=%dc sl=%dc r_multiple=%.2f vol_regime=N/A confidence=N/A",
+                        market_id, side, price_cents,
+                        tp_targets.get('tp_price') or 0,
+                        tp_targets.get('sl_price') or 0,
+                        tp_targets.get('tp_r') or 0
+                    )
                     logger.debug(
                         f"Position cache: opened {side} position on {market_id}: {contracts} @ {price_cents}¢ "
                         f"TP={tp_targets.get('tp_price')}¢ ({tp_targets.get('tp_r')}R)"
@@ -351,6 +451,52 @@ class KalshiPositionCache:
                         self._pending_tp_targets.pop(client_order_id, None)
                     if position.client_order_id:
                         self._pending_tp_targets.pop(position.client_order_id, None)
+
+                    # SELL-SIDE FIX: Release contract lease when position is fully closed
+                    # This ensures the lease is freed for future orders and prevents
+                    # potential lease conflicts if the lease expires before renewal.
+                    # Note: Uses "default" strategy_group since CachedPosition doesn't track it.
+                    # The lease system allows same-owner renewal, so this is cleanup-only.
+                    try:
+                        from merid.event_venues.kalshi.contract_lease import (
+                            get_contract_lease_registry,
+                            LeaseKey,
+                        )
+                        registry = get_contract_lease_registry()
+                        lease_key = LeaseKey(
+                            venue="kalshi",
+                            contract_id=market_id,
+                            side=position.side,
+                            strategy_group="default",
+                        )
+                        released = registry.release(lease_key, owner_agent_id="position_cache")
+                        if released:
+                            logger.info(
+                                "[LEASE-RELEASE] Released lease for closed position: market=%s side=%s",
+                                market_id, position.side
+                            )
+                    except Exception as lease_exc:
+                        logger.debug(
+                            "[LEASE-RELEASE] Failed to release lease for %s (non-fatal): %s",
+                            market_id, lease_exc
+                        )
+
+                    # Calculate realized R before closing
+                    realized_r = 0.0
+                    if position.stop_loss_price_cents and position.stop_loss_price_cents > 0:
+                        risk_cents = abs(position.avg_price_cents - position.stop_loss_price_cents)
+                        if risk_cents > 0:
+                            if position.side == "yes":
+                                pnl_cents = price_cents - position.avg_price_cents
+                            else:
+                                pnl_cents = position.avg_price_cents - price_cents
+                            realized_r = pnl_cents / risk_cents
+
+                    logger.info(
+                        "[EXIT] market=%s side=%s reason=MANUAL realized_R=%.2f asset=N/A confidence=N/A time_in_trade=N/A",
+                        market_id, position.side, realized_r
+                    )
+
                     del self._positions[market_id]
                     logger.debug(f"Position cache: closed position on {market_id}")
                 # P0 Task 3: resize bracket when position grows.
@@ -392,7 +538,7 @@ class KalshiPositionCache:
         
         BUG-FIX: Now async with mutex protection for thread safety.
         """
-        async with self._mutex:
+        async with self._ensure_mutex():
             position = self._positions.get(market_id)
             if position:
                 position.current_price_cents = price_cents
@@ -431,16 +577,77 @@ class KalshiPositionCache:
             return [position]
         return []
 
-    async def sync_from_rest(self, positions: list) -> None:
+    def get_asset_exposure(self, asset: str) -> Dict[str, Any]:
+        """Get total exposure for an asset across all markets.
+
+        Args:
+            asset: Asset symbol (e.g., "BTC", "ETH")
+
+        Returns:
+            Dict with exposure metrics:
+            - total_contracts: Total contracts held
+            - total_notional_usd: Total notional value in USD
+            - unrealized_pnl_usd: Total unrealized PnL in USD
+            - position_count: Number of markets with positions
+        """
+        total_contracts = 0
+        total_notional_usd = Decimal("0")
+        total_unrealized_pnl = Decimal("0")
+        position_count = 0
+
+        for market_id, position in self._positions.items():
+            # Check if this position belongs to the requested asset
+            # Market IDs are like KXBTC15M-26MAY241245-45
+            if asset.upper() in market_id.upper():
+                if position.contracts > 0:
+                    total_contracts += position.contracts
+                    total_notional_usd += position.notional_usd
+                    total_unrealized_pnl += position.unrealized_pnl_usd
+                    position_count += 1
+
+        return {
+            "total_contracts": total_contracts,
+            "total_notional_usd": float(total_notional_usd),
+            "unrealized_pnl_usd": float(total_unrealized_pnl),
+            "position_count": position_count,
+        }
+
+    async def sync_from_rest(self, positions: list, rest_timestamp: Optional[float] = None) -> None:
         """Sync cache with REST API positions (fallback/reconciliation).
         
         BUG-FIX: Now async with mutex protection for thread safety.
         PRODUCTION FIX (2026-05-10): Filter out test positions to prevent bleeding into production.
         PRODUCTION FIX (2026-05-11): Filter out closed positions (contracts=0) to prevent phantom positions.
+        STALENESS GUARD (2026-05-22): Reject REST snapshots older than local cache to prevent stale overwrites.
+        
+        Args:
+            positions: List of position dicts from REST API
+            rest_timestamp: Unix timestamp when REST snapshot was fetched. If None, uses current time.
         """
-        async with self._mutex:
+        # Use current time if no timestamp provided
+        if rest_timestamp is None:
+            rest_timestamp = _time.time()
+        
+        # Staleness check: reject if REST snapshot is older than local cache
+        if self._last_sync:
+            local_sync_time = self._last_sync.timestamp()
+            age_seconds = rest_timestamp - local_sync_time
+            
+            # If REST snapshot is older than local cache by more than 30s, reject it
+            if age_seconds < -30.0:
+                logger.warning(
+                    "[POSITION-CACHE-STALE] Rejecting REST snapshot older than local cache: "
+                    f"REST timestamp={rest_timestamp:.0f}, local sync={local_sync_time:.0f}, "
+                    f"age={age_seconds:.1f}s (threshold=-30s). Preserving local state."
+                )
+                return
+        
+        async with self._ensure_mutex():
             try:
                 self._positions.clear()
+                positions_processed = 0
+                positions_filtered = 0
+                
                 for pos in positions:
                     market_id = pos.get("market_id") or pos.get("ticker")
                     if not market_id:
@@ -449,6 +656,7 @@ class KalshiPositionCache:
                     # PRODUCTION FIX (2026-05-10): Filter out test positions
                     if _is_test_ticker(market_id):
                         logger.debug(f"Skipping test ticker in position cache sync: {market_id}")
+                        positions_filtered += 1
                         continue
 
                     contracts = int(pos.get("contracts", 0))
@@ -457,6 +665,7 @@ class KalshiPositionCache:
                     # Closed positions (contracts=0) should not be in the cache
                     if contracts == 0:
                         logger.debug(f"Skipping closed position in position cache sync: {market_id} (contracts=0)")
+                        positions_filtered += 1
                         continue
 
                     self._positions[market_id] = CachedPosition(
@@ -472,20 +681,105 @@ class KalshiPositionCache:
                         take_profit_r_multiple=pos.get("take_profit_r_multiple"),
                         stop_loss_price_cents=pos.get("stop_loss_price_cents"),
                     )
+                    positions_processed += 1
 
+                # CRITICAL FIX: Always update _last_sync even when no positions pass filters
                 self._last_sync = datetime.now(timezone.utc)
-                logger.info(f"Position cache synced from REST: {len(self._positions)} positions (test & closed filtered)")
+                logger.info(f"Position cache synced from REST: {positions_processed} open positions, {positions_filtered} filtered (test & closed)")
+                # AUDIT #1: Log position cache health after successful sync
+                self.log_health()
             except Exception as e:
                 logger.error(f"Position cache sync from REST failed: {e}")
+
+    def log_health(self) -> None:
+        """Log position cache health metrics for AUDIT #1.
+        
+        Logs:
+        - Last successful sync time
+        - Number of open positions
+        - Per-asset net exposure
+        """
+        from datetime import datetime, timezone
+        
+        # Log last sync time
+        if self._last_sync:
+            staleness_seconds = (datetime.now(timezone.utc) - self._last_sync).total_seconds()
+            logger.info(
+                "[POSITION-CACHE-HEALTH] last_sync=%s staleness=%.1fs",
+                self._last_sync.isoformat(),
+                staleness_seconds
+            )
+        else:
+            logger.warning("[POSITION-CACHE-HEALTH] last_sync=NEVER (cache never synced)")
+        
+        # Log total open positions
+        open_positions = [p for p in self._positions.values() if p.contracts > 0]
+        logger.info(
+            "[POSITION-CACHE-HEALTH] total_positions=%d open_positions=%d",
+            len(self._positions),
+            len(open_positions)
+        )
+        
+        # Log per-asset exposure
+        assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+        for asset in assets:
+            exposure = self.get_asset_exposure(asset)
+            logger.info(
+                "[POSITION-CACHE-HEALTH] asset=%s contracts=%d notional=%.2f unrealized_pnl=%.2f position_count=%d",
+                asset,
+                exposure["total_contracts"],
+                exposure["total_notional_usd"],
+                exposure["unrealized_pnl_usd"],
+                exposure["position_count"]
+            )
+
+    def is_healthy(self, max_staleness_seconds: float = 60.0) -> bool:
+        """Check if position cache is healthy for trading operations.
+        
+        Health criteria:
+        - Cache has been synced at least once (last_sync is not None)
+        - Last sync is within max_staleness_seconds (default 60s)
+        
+        Args:
+            max_staleness_seconds: Maximum allowed staleness in seconds
+        
+        Returns:
+            True if cache is healthy, False otherwise
+        """
+        from datetime import datetime, timezone
+        
+        if self._last_sync is None:
+            logger.warning("[POSITION-CACHE-HEALTH-GUARD] Cache never synced - unhealthy")
+            return False
+        
+        staleness_seconds = (datetime.now(timezone.utc) - self._last_sync).total_seconds()
+        if staleness_seconds > max_staleness_seconds:
+            logger.warning(
+                "[POSITION-CACHE-HEALTH-GUARD] Cache too stale: %.1fs > %.1fs - unhealthy",
+                staleness_seconds,
+                max_staleness_seconds
+            )
+            return False
+        
+        return True
 
     async def clear(self) -> None:
         """Clear all cached positions.
         
         BUG-FIX: Now async with mutex protection for thread safety.
         """
-        async with self._mutex:
+        async with self._ensure_mutex():
             self._positions.clear()
             logger.info("Position cache cleared")
+    
+    def clear_sync(self) -> None:
+        """Synchronous version of clear() for use in non-async contexts.
+        
+        This bypasses the mutex for simplicity when called from __init__ or other
+        synchronous contexts where the event loop is not available.
+        """
+        self._positions.clear()
+        logger.info("Position cache cleared (sync)")
 
     async def _lookup_fill_source(
         self,
@@ -550,7 +844,7 @@ class KalshiPositionCache:
         hedge_fills_in_ledger = len(ledger_hedge_fills)
         
         # Check cache positions for hedge fill_source consistency
-        async with self._mutex:
+        async with self._ensure_mutex():
             for ticker, pos in self._positions.items():
                 if pos.fill_source == "hedge":
                     hedge_fills_in_cache += 1
@@ -646,7 +940,7 @@ class KalshiPositionCache:
         Same (market_id, kind, price) within a 60s window produces the same tag.
         Prefix with BRACKET_ for visibility in logs / DLQ.
         """
-        bucket = int(time.time() // 60)
+        bucket = int(_time.time() // 60)
         preimage = f"{market_id}|{kind}|{price_cents}|{bucket}".encode("utf-8")
         digest = hashlib.sha256(preimage).hexdigest()[:16]
         return f"BRACKET_{kind.upper()}_{digest}"
@@ -757,6 +1051,381 @@ class KalshiPositionCache:
                     "[BRACKET] SL submission failed market=%s tag=%s err=%s",
                     position.market_id, sl_tag, exc,
                 )
+
+    # ── Trailing Stop Monitoring (TUNED 2026-05-25) ─────────────────────────────
+
+    def start_monitoring(self) -> None:
+        """Start the trailing stop monitoring loop.
+
+        This should be called during application startup if trailing is enabled.
+        The loop runs every 5 seconds and checks positions for trailing activation.
+        """
+        logger.info("[TRAIL-MONITOR] start_monitoring called, enabled=%s, interval=%s", self._monitoring_enabled, self._monitoring_interval_seconds)
+        if self._monitoring_enabled:
+            logger.warning("[TRAIL-MONITOR] Already running, ignoring start request")
+            return
+
+        self._monitoring_enabled = True
+        self._monitoring_task = asyncio.create_task(self._monitor_positions_loop())
+        logger.info("[TRAIL-MONITOR] Started trailing stop monitoring loop (interval=%.1fs)", self._monitoring_interval_seconds)
+
+    def stop_monitoring(self) -> None:
+        """Stop the trailing stop monitoring loop.
+
+        This should be called during application shutdown.
+        """
+        if not self._monitoring_enabled:
+            return
+
+        self._monitoring_enabled = False
+        if self._monitoring_task:
+            self._monitoring_task.cancel()
+            self._monitoring_task = None
+        logger.info("[TRAIL-MONITOR] Stopped trailing stop monitoring loop")
+
+    async def _monitor_positions_loop(self) -> None:
+        """Background loop that monitors positions for trailing stop activation and time-based forced exit.
+
+        For each open position with TP/SL targets:
+        1. Fetch current market price from market state
+        2. Check time to expiry and force exit at cutoff (P0 FIX)
+        3. Compute current PnL in R-multiples
+        4. Check if trailing should activate (based on trailing_activation_r_multiple from config)
+        5. If activated, compute new trailing stop and submit order to update SL
+        """
+        from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+        from merid.prediction.dynamic_takeprofit import get_dtp_engine
+
+        dtp_engine = get_dtp_engine()
+        market_state_store = get_kalshi_market_state_store()
+
+        # P3-FIX9: Get cutoff from profile (default 2 minutes)
+        cutoff_minutes = 2  # Default fallback
+        try:
+            from pathlib import Path
+            import yaml
+            profile_yaml_path = Path(__file__).parent.parent.parent.parent / "config" / "profiles" / "kalshi_crypto_15m.yaml"
+            if profile_yaml_path.exists():
+                with open(profile_yaml_path, 'r', encoding='utf-8') as f:
+                    profile_config = yaml.safe_load(f)
+                cutoff_minutes = profile_config.get("exit_policy", {}).get("time_exit", {}).get("cutoff_minutes_before_expiry", 2)
+                logger.info("[TRAIL-CONFIG] Loaded cutoff_minutes=%d from profile", cutoff_minutes)
+        except Exception as exc:
+            logger.warning("[TRAIL-CONFIG] Failed to load cutoff from profile, using default 2: %s", exc)
+
+        logger.info("[TRAIL-MONITOR] Loop started, interval=%s, cutoff_minutes=%d", self._monitoring_interval_seconds, cutoff_minutes)
+
+        while self._monitoring_enabled:
+            try:
+                async with self._ensure_mutex():
+                    positions_snapshot = list(self._positions.values())
+
+                logger.info("[TRAIL-MONITOR] Loop tick, positions=%d", len(positions_snapshot))
+
+                for position in positions_snapshot:
+                    # Skip positions without TP/SL targets or zero contracts
+                    if position.contracts <= 0:
+                        continue
+                    if position.take_profit_price_cents is None or position.stop_loss_price_cents is None:
+                        logger.error(
+                            "[TRAIL-ERROR] market=%s side=%s has missing TP/SL metadata (tp=%s sl=%s) - position cannot be monitored for trailing",
+                            position.market_id, position.side, position.take_profit_price_cents, position.stop_loss_price_cents
+                        )
+                        continue
+
+                    # Get current market price
+                    state = market_state_store.get_unified(position.market_id)
+                    if not state or state.mid_cents <= 0:
+                        continue
+
+                    current_price_cents = state.mid_cents
+                    entry_price_cents = position.avg_price_cents
+                    sl_price_cents = position.stop_loss_price_cents
+
+                    # P0 FIX: Time-based forced exit at cutoff
+                    if state.seconds_to_expiry is not None:
+                        time_to_expiry_minutes = state.seconds_to_expiry / 60.0
+                        if time_to_expiry_minutes <= cutoff_minutes:
+                            logger.info(
+                                "[TIME-EXIT] market=%s side=%s time_to_expiry=%.1fmin <= cutoff=%dmin forcing exit",
+                                position.market_id, position.side, time_to_expiry_minutes, cutoff_minutes
+                            )
+                            # Submit market exit order via order router
+                            try:
+                                from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
+
+                                # Determine exit side: closing YES long = sell YES, closing NO long = buy YES
+                                # For YES positions: action="sell", side="yes"
+                                # For NO positions: action="buy", side="yes" (to close the NO)
+                                if position.side == "yes":
+                                    exit_action = "sell"
+                                    exit_side = "yes"
+                                else:  # "no"
+                                    exit_action = "buy"
+                                    exit_side = "yes"
+
+                                # Create exit intent
+                                exit_intent = OrderIntent(
+                                    ticker=position.market_id,
+                                    side=exit_side,
+                                    action=exit_action,
+                                    price_cents=current_price_cents,  # Market price
+                                    count=position.contracts,
+                                    order_type="market",  # Market order for quick exit
+                                    time_in_force="ioc",  # Immediate or cancel
+                                    source="time_exit_monitor",
+                                    agent_id="position_cache",
+                                    rationale=f"Time-based forced exit at {time_to_expiry_minutes:.1f}min to expiry",
+                                )
+
+                                # Submit order asynchronously
+                                result = await route_order_async(exit_intent)
+                                logger.info(
+                                    "[TIME-EXIT] market=%s submitted exit order: status=%s reason=%s",
+                                    position.market_id, result.status, result.reason
+                                )
+
+                                # Mark exit reason in RoundTripMonitor
+                                from merid.event_venues.kalshi.round_trip_monitor import get_round_trip_monitor
+                                rt_monitor = get_round_trip_monitor()
+                                if position.entry_intent_id:
+                                    rt_monitor.record_exit(
+                                        exit_intent_id=exit_intent.intent_id,
+                                        entry_intent_id=position.entry_intent_id,
+                                        exit_price_cents=current_price_cents,
+                                        exit_reason="time_exit",
+                                    )
+                                    logger.info(
+                                        "[TIME-EXIT] market=%s recorded exit in RoundTripMonitor with reason=time_exit",
+                                        position.market_id
+                                    )
+                                else:
+                                    logger.warning(
+                                        "[TIME-EXIT] market=%s exit submitted but RoundTripMonitor tracking incomplete (missing entry_intent_id)",
+                                        position.market_id
+                                    )
+
+                            except Exception as exc:
+                                logger.error(
+                                    "[TIME-EXIT] market=%s failed to submit exit order: %s",
+                                    position.market_id, exc, exc_info=True
+                                )
+                            continue
+
+                    # P1 FIX: Partial profit taking (scale-out) at trigger threshold
+                    # Load scale-out parameters from profile config
+                    try:
+                        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+                        risk_envelope = get_kalshi_crypto_15m_risk_envelope()
+                        scale_out_config = risk_envelope.profile.get('scale_out', {})
+                        scale_out_trigger_r = scale_out_config.get('scale_out_trigger_r', 0.7)
+                        scale_out_fraction = scale_out_config.get('scale_out_fraction', 0.5)
+                    except Exception as config_err:
+                        logger.warning("[SCALE-OUT] Failed to load scale-out config, using defaults: %s", config_err)
+                        scale_out_trigger_r = 0.7
+                        scale_out_fraction = 0.5
+                    if not position.scale_out_complete and current_r >= scale_out_trigger_r:
+                        size_to_sell = int(position.contracts * scale_out_fraction)
+                        if size_to_sell >= 1:
+                            logger.info(
+                                "[SCALE-OUT] market=%s side=%s fraction=%.2f size=%d at %.2fR",
+                                position.market_id, position.side, scale_out_fraction, size_to_sell, current_r
+                            )
+                            # Submit partial exit order via order router
+                            try:
+                                from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
+
+                                # Determine exit side
+                                if position.side == "yes":
+                                    exit_action = "sell"
+                                    exit_side = "yes"
+                                else:  # "no"
+                                    exit_action = "buy"
+                                    exit_side = "yes"
+
+                                # Create scale-out intent (limit order near current price)
+                                scale_out_intent = OrderIntent(
+                                    ticker=position.market_id,
+                                    side=exit_side,
+                                    action=exit_action,
+                                    price_cents=current_price_cents,  # Limit at current price
+                                    count=size_to_sell,
+                                    order_type="limit",
+                                    time_in_force="gtc",
+                                    source="scale_out_monitor",
+                                    agent_id="position_cache",
+                                    rationale=f"Scale-out at {current_r:.2f}R (sell {scale_out_fraction:.0%} of position)",
+                                )
+
+                                # Submit order asynchronously
+                                result = await route_order_async(scale_out_intent)
+                                logger.info(
+                                    "[SCALE-OUT] market=%s submitted scale-out order: status=%s reason=%s",
+                                    position.market_id, result.status, result.reason
+                                )
+
+                                # Move stop loss to breakeven for remaining position
+                                # Breakeven = entry price (no loss if stopped out)
+                                new_sl_cents = entry_price_cents
+                                logger.info(
+                                    "[SCALE-OUT] market=%s moving SL to breakeven: old_sl=%dc new_sl=%dc",
+                                    position.market_id, sl_price_cents, new_sl_cents
+                                )
+                                # Cancel existing SL bracket and submit new one at breakeven
+                                if position.sl_bracket_client_tag:
+                                    try:
+                                        # Cancel only the SL bracket (preserve TP bracket)
+                                        from merid.event_venues.kalshi.client_v2 import get_kalshi_client
+                                        client = get_kalshi_client()
+                                        sl_tag = position.sl_bracket_client_tag
+                                        
+                                        # Cancel the SL order
+                                        try:
+                                            await client.cancel_order_by_client_order_id(sl_tag)
+                                            logger.info(
+                                                "[SCALE-OUT] market=%s canceled old SL bracket: tag=%s",
+                                                position.market_id, sl_tag
+                                            )
+                                        except Exception as cancel_exc:
+                                            logger.warning(
+                                                "[SCALE-OUT] market=%s failed to cancel SL bracket (non-fatal): %s",
+                                                position.market_id, cancel_exc
+                                            )
+                                        
+                                        # Submit new SL bracket at breakeven
+                                        new_sl_tag = self._bracket_client_tag(position.market_id, "sl", new_sl_cents)
+                                        from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
+
+                                        # Remaining contracts after scale-out
+                                        # position.contracts already reflects the updated count after the partial fill
+                                        remaining_contracts = position.contracts
+                                        
+                                        sl_intent = OrderIntent(
+                                            ticker=position.market_id,
+                                            side=position.side,
+                                            action="sell",
+                                            price_cents=int(new_sl_cents),
+                                            count=int(remaining_contracts),
+                                            source="scale_out_breakeven_sl",
+                                            agent_id="position_cache_bracket",
+                                            client_tag=new_sl_tag,
+                                            group_id="bracket",
+                                            rationale=f"breakeven_sl_after_scaleout:{position.market_id}:{new_sl_cents}c",
+                                        )
+                                        
+                                        res = await route_order_async(sl_intent)
+                                        ok = bool(getattr(res, "success", False))
+                                        self._record_bracket_metric("sl", ok)
+                                        
+                                        # Update position with new SL tag and price
+                                        position.sl_bracket_client_tag = new_sl_tag
+                                        position.stop_loss_price_cents = new_sl_cents
+                                        
+                                        logger.info(
+                                            "[SCALE-OUT] market=%s submitted new SL at breakeven: price=%dc contracts=%d tag=%s ok=%s",
+                                            position.market_id, new_sl_cents, remaining_contracts, new_sl_tag, ok
+                                        )
+                                        
+                                    except Exception as sl_exc:
+                                        logger.error(
+                                            "[SCALE-OUT] market=%s failed to update SL to breakeven: %s",
+                                            position.market_id, sl_exc, exc_info=True
+                                        )
+
+                                # Mark scale-out as complete
+                                position.scale_out_complete = True
+                                logger.info(
+                                    "[SCALE-OUT] market=%s scale-out complete, remaining contracts=%d",
+                                    position.market_id, position.contracts - size_to_sell
+                                )
+
+                            except Exception as exc:
+                                logger.error(
+                                    "[SCALE-OUT] market=%s failed to submit scale-out order: %s",
+                                    position.market_id, exc, exc_info=True
+                                )
+
+                    # Compute risk per contract (R)
+                    risk_cents = abs(entry_price_cents - sl_price_cents)
+                    if risk_cents == 0:
+                        continue
+
+                    # Compute current PnL in R-multiples
+                    if position.side == "yes":
+                        pnl_cents = current_price_cents - entry_price_cents
+                    else:  # "no"
+                        pnl_cents = entry_price_cents - current_price_cents
+                    current_r = pnl_cents / risk_cents if risk_cents > 0 else 0.0
+
+                    # P3-FIX8: Get trailing activation threshold from profile (default 0.8R)
+                    try:
+                        from pathlib import Path
+                        import yaml
+                        profile_yaml_path = Path(__file__).parent.parent.parent.parent / "config" / "profiles" / "kalshi_crypto_15m.yaml"
+                        trailing_activation_r = 0.8  # Default fallback
+                        if profile_yaml_path.exists():
+                            with open(profile_yaml_path, 'r', encoding='utf-8') as f:
+                                profile_config = yaml.safe_load(f)
+                            trailing_config = profile_config.get("exit_policy", {}).get("trailing", {})
+                            if trailing_config.get("enabled", False):
+                                trailing_activation_r = trailing_config.get("activation_r_multiple", 0.8)
+                                logger.debug("[TRAIL-CONFIG] Loaded trailing_activation_r=%.2f from profile", trailing_activation_r)
+                    except Exception as exc:
+                        logger.warning(
+                            "[TRAIL-CONFIG] Failed to load trailing activation from profile, using default 0.8R: %s",
+                            exc
+                        )
+                        trailing_activation_r = 0.8  # Fallback
+
+                    # Check if trailing should activate
+                    if current_r >= trailing_activation_r:
+                        logger.info(
+                            "[TRAIL-ACTIVATION] market=%s threshold=%.2fR current=%.2fR",
+                            position.market_id, trailing_activation_r, current_r
+                        )
+                        # Compute new trailing stop using DynamicTakeProfitEngine
+                        confidence = 0.6  # Default confidence for trailing
+                        time_to_expiry_minutes = 10.0  # Default for 15m contracts
+
+                        # Compute new trailing stop price
+                        new_sl_cents = dtp_engine.compute_trailing_stop(
+                            entry_price_cents=entry_price_cents,
+                            current_price_cents=current_price_cents,
+                            side=position.side,
+                            confidence=confidence,
+                            time_to_expiry_minutes=time_to_expiry_minutes
+                        )
+
+                        # Only update if new SL is better (higher for longs, lower for shorts)
+                        should_update = False
+                        if position.side == "yes":
+                            should_update = new_sl_cents > sl_price_cents
+                        else:  # "no"
+                            should_update = new_sl_cents < sl_price_cents
+
+                        if should_update:
+                            logger.info(
+                                "[TRAIL-UPDATE] market=%s side=%s entry=%dc current=%dc old_sl=%dc new_sl=%dc R=%.2f confidence=%.2f",
+                                position.market_id, position.side, entry_price_cents,
+                                current_price_cents, sl_price_cents, new_sl_cents, current_r, confidence
+                            )
+                            # TODO: Submit order to update SL via order_router
+                            # This requires:
+                            # 1. Cancel existing SL bracket order (if resting brackets enabled)
+                            # 2. Submit new SL order at new_sl_cents
+                        else:
+                            logger.debug(
+                                "[TRAIL-CHECK] market=%s side=%s R=%.2f - no update needed (new_sl=%dc not better than old_sl=%dc)",
+                                position.market_id, position.side, current_r, new_sl_cents, sl_price_cents
+                            )
+
+            except Exception as exc:
+                logger.error("[TRAIL-MONITOR] Error in monitoring loop: %s", exc, exc_info=True)
+
+            # Wait for next check interval
+            await asyncio.sleep(self._monitoring_interval_seconds)
+
+        logger.info("[TRAIL-MONITOR] Monitoring loop exited")
 
 
 # Singleton accessor

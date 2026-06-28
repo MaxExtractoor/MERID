@@ -1,5 +1,14 @@
 """Unified Kalshi Bankroll Service — Single source of truth for live bankroll.
 
+DEPRECATION NOTICE:
+====================
+This module is deprecated. The canonical single source of truth for bankroll
+management is BankrollServiceV2:
+    from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service
+
+This module is kept for test compatibility only. Live trading code should use
+BankrollServiceV2 directly.
+
 CRITICAL INVARIANT: The ONLY source of "real money" is Kalshi's /portfolio/balance API.
 - GET /trade-api/v2/portfolio/balance returns: balance (cash), portfolio_value (positions)
 - Total equity = balance + portfolio_value
@@ -7,12 +16,23 @@ CRITICAL INVARIANT: The ONLY source of "real money" is Kalshi's /portfolio/balan
 ANY other value is FAKE and must not be used for risk/sizing.
 """
 
+# PROFILE GUARD: This module is deprecated and should not be used in kalshi_crypto_15m_v2
+from merid.profile_resolver import is_kalshi_crypto_15m_v2
+
+if is_kalshi_crypto_15m_v2():
+    raise RuntimeError(
+        "KalshiBankrollService is deprecated in kalshi_crypto_15m_v2 profile. "
+        "Use BankrollServiceV2 instead: "
+        "from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service_v2"
+    )
+
 from __future__ import annotations
 
 import asyncio
 import os
 import time
 import threading
+import warnings
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional, Tuple
@@ -20,6 +40,14 @@ from typing import Optional, Tuple
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.bankroll")
+
+# Issue deprecation warning on module import
+warnings.warn(
+    "bankroll_service is deprecated. Use BankrollServiceV2 instead: "
+    "from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Bankroll Result Types
@@ -76,11 +104,19 @@ class BankrollUnavailableError(Exception):
 class KalshiBankrollService:
     """Single source of truth for Kalshi bankroll.
     
+    DEPRECATED: Use BankrollServiceV2 instead.
+    
     This is the ONLY module allowed to call /portfolio/balance.
     All other components must use this service.
     """
     
     def __init__(self):
+        warnings.warn(
+            "KalshiBankrollService is deprecated. Use BankrollServiceV2 instead: "
+            "from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service",
+            DeprecationWarning,
+            stacklevel=2
+        )
         self._lock = threading.Lock()
         self._last_result: Optional[BankrollResult] = None
         self._fetch_count = 0

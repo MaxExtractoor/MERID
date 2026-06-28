@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 from utils.logger import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger("merid.event_venues.kalshi.signal_router")
 
 # ── Known enum values (used for validation) ──────────────────────────
 _VALID_ACTIONS = frozenset({"buy", "sell", "hold", "no_action"})
@@ -43,20 +43,25 @@ class AgentSignal:
     non-empty the signal MUST be dropped.
     """
 
-    # ── Core identification ───────────────────────────────────────────
+    # ── Core identification (required fields, no defaults) ──────────
     agent_id: str
     agent_type: str  # e.g., "btc15m_lane", "kalshi_tools", "ct", "universal_agent"
     market_id: str
     action: str  # e.g., "buy", "sell", "hold", "no_action"
+
+    # ── Execution parameters (required when executable=True) ─────────
     side: Optional[str] = None  # "yes", "no" for binary markets
     size: Optional[int] = None  # Recommended contract count
     price_cents: Optional[int] = None  # Limit price in cents
+
+    # ── Model confidence ─────────────────────────────────────────────
     confidence: float = 0.5
     edge: Optional[float] = None  # Edge estimate
     reasoning: str = ""
+
+    # ── Metadata (optional) ───────────────────────────────────────────
     metadata: Dict[str, Any] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    signal_id: str = field(default_factory=lambda: f"sig-{datetime.now(timezone.utc).timestamp():.6f}")
 
     # ── Enrichment fields (populated by originating agent) ────────────
     intent: str = "open"  # open | close | scale_in | scale_out | rebalance
@@ -64,6 +69,9 @@ class AgentSignal:
     origin_strategy: str = ""  # Strategy class name
     risk_bucket: str = ""  # Risk category (e.g., "crypto_directional")
     timeframe_label: str = ""  # e.g., "15m", "1h", "daily"
+
+    # ── Trade trace integration (P1: Feed lag calibration) ──────────
+    trace_id: Optional[str] = None  # TradeTrace ID for calibration
 
     # ── Validation / readiness ────────────────────────────────────────
     executable: bool = False  # True = all execution fields must be present
@@ -73,6 +81,9 @@ class AgentSignal:
     quality_score: float = 0.0  # 0-1 quality score
     is_duplicate: bool = False  # True if this is a duplicate signal
     consensus_count: int = 1  # How many agents agree with this signal
+
+    # ── Auto-generated ID (must be last, has default) ───────────────
+    signal_id: str = field(default_factory=lambda: f"sig-{datetime.now(timezone.utc).timestamp():.6f}")
 
     # ── Validation ────────────────────────────────────────────────────
 
@@ -434,7 +445,7 @@ def submit_signal(
         origin_strategy=origin_strategy,
         risk_bucket=risk_bucket,
         timeframe_label=timeframe_label,
-        executable=True,
+        trace_id=metadata.get('trace_id') if metadata else None,  # P1: Extract trace_id from metadata
     )
 
     # Validate before routing — drop invalid signals at origin

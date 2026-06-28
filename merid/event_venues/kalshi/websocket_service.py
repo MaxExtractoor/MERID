@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from merid.event_venues.kalshi.ws import KalshiWebSocket
-from merid.event_venues.kalshi.models import KalshiConfig
+from merid.event_venues.kalshi.kalshi_config import get_kalshi_config
 from merid.event_venues.kalshi.orderbook import LocalOrderbook
 from utils.logger import get_logger
 
@@ -40,8 +40,9 @@ class KalshiWebSocketService:
     - Event distribution to subscribers
     """
     
-    def __init__(self, config: Optional[KalshiConfig] = None):
-        self.config = config or KalshiConfig()
+    def __init__(self, config: Optional[Any] = None):
+        # Use unified config by default
+        self.config = config or get_kalshi_config()
         self._ws: Optional[KalshiWebSocket] = None
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -219,7 +220,9 @@ class KalshiWebSocketService:
             except Exception as _ete:
                 logger.warning(f"Essential tickers derivation failed: {_ete} — using emergency fallback")
                 # Emergency fallback: minimal BTC/ETH 15m set
-                emergency_tickers = ["KXBTC-15M", "KXETH-15M"]
+                # HARDENING-FIX: Import from canonical asset list instead of hardcoding
+                from merid.event_venues.kalshi.kalshi_crypto_15m_profile import get_all_active_tickers
+                emergency_tickers = get_all_active_tickers()[:2]  # Use first 2 tickers (BTC, ETH)
                 self._ws.set_essential_tickers(emergency_tickers)
                 logger.critical(f"Using emergency essential tickers: {emergency_tickers}")
 
@@ -249,7 +252,9 @@ class KalshiWebSocketService:
                     try:
                         await self._ws.derive_essential_tickers_from_positions()
                     except Exception as _ete:
-                        emergency_tickers = ["KXBTC-15M", "KXETH-15M"]
+                        # HARDENING-FIX: Import from canonical asset list instead of hardcoding
+                        from merid.event_venues.kalshi.kalshi_crypto_15m_profile import get_all_active_tickers
+                        emergency_tickers = get_all_active_tickers()[:2]  # Use first 2 tickers (BTC, ETH)
                         self._ws.set_essential_tickers(emergency_tickers)
                         logger.warning(f"Using emergency essential tickers after reconnect: {emergency_tickers}")
                     

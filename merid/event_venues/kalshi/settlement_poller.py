@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import threading
+import time as _time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Callable, Set
@@ -57,7 +58,7 @@ def _get_redis() -> Optional[Any]:
                         _redis_lib = _rl
                     # Prefer MERID_REDIS_URL (same as core.cache) so Cloud Redis works with one env var
                     redis_url = os.getenv("MERID_REDIS_URL") or os.getenv(
-                        "REDIS_URL", "redis://localhost:6379/0"
+                        "REDIS_URL", os.getenv("REDIS_URL", "redis://localhost:6379/0")
                     )
                     # TIMEOUT FIX: Add socket/connect timeouts to prevent startup hangs
                     # BUG-FIX (2026-05-10): Increased timeouts from 5s to 10s to reduce Redis timeout errors
@@ -79,8 +80,6 @@ def _get_redis() -> Optional[Any]:
                     _redis_client.ping()
                     logger.info("Redis cursor persistence connected")
                 except Exception as e:
-                    import time as _time
-
                     now = _time.monotonic()
                     err = str(e).lower()
                     is_missing = "no module" in err
@@ -441,7 +440,8 @@ class KalshiSettlementPoller:
         # State
         self._running = False
         self._task: Optional[asyncio.Task] = None
-        self._lock = asyncio.Lock()
+        # EVENT-LOOP-FIX: Lazy-initialize to avoid binding to wrong event loop
+        self._lock: Optional[asyncio.Lock] = None
         
         # Settlement DB storage for exactly-once grading
         self._settlement_cache: Dict[str, KalshiSettlement] = {}
@@ -474,6 +474,12 @@ class KalshiSettlementPoller:
         
         # Canary metrics for end-to-end validation
         self._settlements_fetched_count = 0  # Total fetched from Kalshi
+
+    def _ensure_lock(self) -> asyncio.Lock:
+        """Lazy-initialize the lock in the current event loop."""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
     
     # Canonical identity for settlement tracking (asset, timeframe, ticker, market_id)
     _VALID_ASSETS: Set[str] = frozenset(ACTIVE_CRYPTO_ASSETS)
@@ -597,7 +603,15 @@ class KalshiSettlementPoller:
             self._settlement_count += 1
             new_count += 1
             new_settlements.append(settlement)  # Collect for event bus
-            
+
+            # Log settlement with key information
+            outcome = "WIN" if settlement.settlement_price_cents == 100 else "LOSE" if settlement.settlement_price_cents == 0 else "UNKNOWN"
+            logger.info(
+                "[SETTLEMENT] contract=%s ticker=%s outcome=%s pnl_cents=%d bankroll_update=N/A",
+                settlement.market_id, settlement.ticker, outcome,
+                int(settlement.realized_pnl_cents) if settlement.realized_pnl_cents else 0
+            )
+
             # Check for settled-but-ungraded backlog
             self._update_ungraded_backlog(settlement)
             
@@ -966,39 +980,16 @@ class KalshiSettlementPoller:
         """
         Load cursor state from Redis for restart resilience.
         
-        Per Contract §4.1: Cursor-based pagination must resume on restart.
-        Without this, poller re-queries from lookback start on each restart.
-        
-        BUG-FIX (2026-05-12): Disabled Redis cursor persistence entirely to prevent
-        connection hangs. Redis operations are causing blocking I/O timeouts.
+        Redis cursor persistence disabled to prevent connection hangs.
         """
-        # DISABLED: Redis cursor persistence causing blocking I/O timeouts
-        # The Redis connection is hanging on _read_from_socket despite being in executor
-        # with keepalive enabled. This is a critical path issue preventing server startup.
-        # TODO: Investigate Redis connection pool or async Redis client (redis-py async)
-        logger.debug("Redis cursor state loading disabled due to blocking I/O issues")
         return
     
     async def _save_cursor_state(self) -> None:
         """
         Persist cursor state to Redis for crash recovery.
         
-        Includes retry/backoff for transient Redis timeouts.
-        
-        BUG-FIX (2026-05-10): Made async and replaced time.sleep with asyncio.sleep
-        to prevent event-loop lag. Previously used blocking time.sleep() which
-        caused 17-31s event-loop lag when Redis was slow.
-        
-        BUG-FIX (2026-05-12): Wrapped Redis calls in run_in_executor with 5s timeout
-        to prevent blocking I/O from causing 30s faulthandler timeouts.
-        
-        BUG-FIX (2026-05-12): Disabled Redis cursor persistence entirely to prevent
-        connection hangs. Redis operations are causing blocking I/O timeouts.
+        Redis cursor persistence disabled to prevent connection hangs.
         """
-        # DISABLED: Redis cursor persistence causing blocking I/O timeouts
-        # The Redis connection is hanging on _read_from_socket despite being in executor
-        # with keepalive enabled. This is a critical path issue preventing server startup.
-        # TODO: Investigate Redis connection pool or async Redis client (redis-py async)
         return
                 
     # ── Event Bus Publishing ─────────────────────────────────────────────────────
@@ -1063,7 +1054,7 @@ class KalshiSettlementPoller:
                 events.append(event)
             
             # Measure bus latency (just the publish calls)
-            bus_start_time = time.monotonic()
+            bus_start_time = _time.monotonic()
             
             # Publish batch (async fire-and-forget for throughput)
             # Event bus handles its own backpressure via max queue size
@@ -1074,7 +1065,7 @@ class KalshiSettlementPoller:
                 )
             
             # Calculate latency only for bus operations
-            latency_ms = (time.monotonic() - bus_start_time) * 1000
+            latency_ms = (_time.monotonic() - bus_start_time) * 1000
             
             logger.info(
                 f"Published {len(events)} settlements to event bus "
@@ -1138,6 +1129,21 @@ class SettlementToGradingBridge:
             f"Settlement received: {settlement.ticker} = {settlement.outcome_str} "
             f"({settlement.settlement_price_cents}c)"
         )
+        
+        # P1: Wire TradeTrace into settlement listener (finalize trace)
+        try:
+            from merid.prediction.trade_trace import find_trace_by_contract_id, update_trace, finalize_trace
+            trace = find_trace_by_contract_id(settlement.market_id)
+            if trace:
+                update_trace(
+                    trace.trace_id,
+                    settlement_time=_time.time(),
+                    settlement_price=settlement.settlement_price_cents / 100.0  # Convert cents to probability
+                )
+                finalize_trace(trace.trace_id)
+                logger.debug("[TRACE-SETTLEMENT] Finalized trace_id=%s for market_id=%s", trace.trace_id, settlement.market_id)
+        except Exception as exc:
+            logger.debug("[TRACE-SETTLEMENT] Failed to finalize trace for market_id=%s: %s", settlement.market_id, exc)
         
         # Session-based PnL tracking: notify fills_ledger of market settlement
         try:
@@ -1207,7 +1213,7 @@ def _make_kalshi_client_from_settings():
     try:
         from merid.event_venues.kalshi.client import KalshiVenueClient
         from merid.settings import settings
-        from merid.event_venues.kalshi.models import KalshiConfig
+        from merid.event_venues.kalshi.kalshi_config import get_kalshi_config
 
         key_path = settings.KALSHI_PRIVATE_KEY_PATH
         if key_path == "change_me":
@@ -1219,14 +1225,8 @@ def _make_kalshi_client_from_settings():
         # FIX: Use singleton client to prevent garbage collection warning
         # The singleton is properly managed by close_kalshi_client() during shutdown
         from merid.event_venues.kalshi.client import get_kalshi_client
-        config = KalshiConfig(
-            api_key=settings.KALSHI_API_KEY_ID,
-            private_key_path=key_path,
-            private_key_pem=settings.KALSHI_PRIVATE_KEY_PEM,
-            email=settings.KALSHI_EMAIL,
-            password=settings.KALSHI_PASSWORD,
-            use_demo=settings.KALSHI_USE_DEMO,
-        )
+        # Use unified config
+        config = get_kalshi_config()
         return get_kalshi_client(config)
     except Exception as exc:
         logger.warning("Settlement poller: failed to create Kalshi client: %s", exc)

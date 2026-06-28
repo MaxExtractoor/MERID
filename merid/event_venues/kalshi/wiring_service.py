@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import time
+import time as _time
 from typing import Dict, List, Optional, Any
 
 from merid.event_venues.kalshi.universe_sync import get_kalshi_universe_sync
@@ -137,7 +137,7 @@ class KalshiWiringService:
             "errors": [],
         }
         
-        start_time = time.time()
+        start_time = _time.time()
         
         try:
             # 1. Sync universe
@@ -166,7 +166,7 @@ class KalshiWiringService:
                 }
             
             results["success"] = len(results["errors"]) == 0
-            results["duration_seconds"] = time.time() - start_time
+            results["duration_seconds"] = _time.time() - start_time
             
             logger.info(
                 f"Full sync completed: "
@@ -178,7 +178,7 @@ class KalshiWiringService:
         except Exception as e:
             logger.error(f"Full sync failed: {e}")
             results["errors"].append(f"Sync exception: {e}")
-            results["duration_seconds"] = time.time() - start_time
+            results["duration_seconds"] = _time.time() - start_time
         
         return results
     
@@ -271,7 +271,7 @@ class KalshiWiringService:
             
             # Check sync status
             sync_timestamps = self._store.get_sync_timestamps()
-            current_time = time.time()
+            current_time = _time.time()
             
             # Check universe sync freshness
             universe_age = current_time - sync_timestamps.get("kalshi", 0)

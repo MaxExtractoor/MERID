@@ -48,17 +48,14 @@ def compute_pm_live_readiness() -> Dict[str, Any]:
         notes.append("env does not match prod+live PM checklist (see is_env_prod_live_pm fields in code)")
 
     grid_ok = False
-    startup: Dict[str, Any] = {}
     try:
-        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_grid_15m import get_agent_grid
 
-        startup = get_agent_grid().startup_health()
-        grid_ok = bool(startup.get("started")) and startup.get("last_error") is None
-        if startup.get("deferred_start_skipped_reason"):
-            notes.append(f"grid deferred skip: {startup['deferred_start_skipped_reason']}")
+        grid = get_agent_grid()
+        # LeanAgentGrid15m doesn't have startup_health() - check if running
+        grid_ok = bool(grid and grid._running)
     except Exception as exc:
-        startup = {"error": str(exc)}
-        notes.append(f"agent grid startup_health failed: {exc}")
+        notes.append(f"agent grid check failed: {exc}")
 
     kill_ok = False
     kill_switch: Dict[str, Any] = {}

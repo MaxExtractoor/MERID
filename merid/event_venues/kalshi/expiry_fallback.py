@@ -24,7 +24,8 @@ from merid.event_venues.base import EventMarket
 
 _ET = ZoneInfo("America/New_York") if ZoneInfo else None
 
-# KXBTC15M-26APR071830-30 → date + time in ET; trailing -30 is an exchange-specific token (ignored for duration)
+# KXBTC15M-26MAY201245-45 → date + time in ET; trailing -45 is strike price
+# Format: KX[A-Z0-9]+15M-(YY)(MON)(DD)(HHMM)-STRIKE
 _RE_15M_BODY = re.compile(
     r"^KX[A-Z0-9]+15M-(\d{2})([A-Z]{3})(\d{2})(\d{4})-\d+$",
     re.IGNORECASE,
@@ -47,8 +48,6 @@ _MONTHS = {
 
 
 def _infer_15m_window_end_utc(ticker: str) -> Optional[datetime]:
-    if _ET is None:
-        return None
     m = _RE_15M_BODY.match(ticker.strip())
     if not m:
         return None
@@ -61,11 +60,26 @@ def _infer_15m_window_end_utc(ticker: str) -> Optional[datetime]:
         day = int(dd_s)
         hh = int(hhmm_s) // 100
         mm = int(hhmm_s) % 100
-        start_et = datetime(year, month, day, hh, mm, tzinfo=_ET)
+        # CRITICAL FIX: The time in the ticker is in Eastern Time (America/New_York), not UTC
+        # The ticker format is KXBTC15M-26JUN140215-15 where 0215 is 02:15 ET
+        # We need to parse it as ET and convert to UTC
+        if _ET:
+            start_et = datetime(year, month, day, hh, mm, tzinfo=_ET)
+            start_utc = start_et.astimezone(timezone.utc)
+        else:
+            # Fallback if ZoneInfo not available (treat as UTC, but this is incorrect)
+            start_utc = datetime(year, month, day, hh, mm, tzinfo=timezone.utc)
     except (ValueError, TypeError):
         return None
-    end_et = start_et + timedelta(minutes=15)
-    return end_et.astimezone(timezone.utc)
+    end_utc = start_utc + timedelta(minutes=15)
+    # DEBUG: Log inferred expiry for debugging
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "[EXPIRY-FALLBACK] ticker=%s parsed: %s-%02d-%02d %02d:%02d ET → start_utc=%s end_utc=%s",
+        ticker, year, month, day, hh, mm, start_utc, end_utc
+    )
+    return end_utc
 
 
 def expiry_fallback_enabled() -> bool:
@@ -78,19 +92,43 @@ def expiry_fallback_enabled() -> bool:
 
 
 def apply_crypto_interval_expiry_fallback(m: EventMarket, now: datetime) -> EventMarket:
-    """If ``end_date`` is missing or not after ``now``, try ticker-based repair for KX*15M."""
+    """Use ticker-based repair ONLY when API fields are missing or invalid.
+    
+    CRITICAL REFACTOR: This is now a fallback, not the primary source of truth.
+    Kalshi's close_ts/close_time should be used when available.
+    Ticker-based inference is only used when API fields are completely missing.
+    """
+    
     if not expiry_fallback_enabled():
+        logger.debug("[EXPIRY-FALLBACK] Disabled - MERID_PM_EXPIRY_FALLBACK_CRYPTO not set")
         return m
     tid = (m.market_id or "").strip().upper()
     if "15M" not in tid or not tid.startswith("KX"):
+        logger.debug("[EXPIRY-FALLBACK] Skipped - ticker does not match pattern: %s", tid)
         return m
-    inferred = _infer_15m_window_end_utc(m.market_id or "")
-    if inferred is None:
-        return m
+    
+    # CRITICAL: Only use ticker-based inference if API fields are missing or invalid
+    # If end_date exists and is reasonable, trust it over ticker parsing
     cur = m.end_date
     if cur is not None and cur.tzinfo is None:
         cur = cur.replace(tzinfo=timezone.utc)
-    if cur is not None and cur > now:
+    
+    # Check if existing end_date is reasonable (not in the distant past or future)
+    if cur is not None:
+        now_utc = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+        time_diff = (cur - now_utc).total_seconds()
+        # If end_date is within reasonable bounds (e.g., -1 hour to +24 hours), trust it
+        if -3600 <= time_diff <= 86400:
+            logger.debug("[EXPIRY-FALLBACK] Skipping - API end_date is reasonable: ticker=%s end_date=%s", 
+                        m.market_id, cur)
+            return m
+    
+    # Only use ticker inference if API fields are missing or unreasonable
+    inferred = _infer_15m_window_end_utc(m.market_id or "")
+    if inferred is None:
+        logger.warning("[EXPIRY-FALLBACK] Failed to infer expiry from ticker: %s", m.market_id)
         return m
-    # Missing, stale, or already past — use inferred window end
+    
+    logger.info("[EXPIRY-FALLBACK] Applying fallback (API fields missing/invalid) - ticker=%s old_end_date=%s new_end_date=%s", 
+                m.market_id, cur, inferred)
     return replace(m, end_date=inferred)

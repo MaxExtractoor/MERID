@@ -21,7 +21,12 @@ from config.doge_15m_agent_spec import (
 
 
 class Doge15mAgent(BaseKalshiAgent):
-    """DOGE 15m Kalshi agent mirroring XRP/BTC 15m structure."""
+    """DOGE 15m Kalshi agent mirroring XRP/BTC 15m structure.
+    
+    DEPRECATED: This agent is NOT used in production 15m crypto trading.
+    Production uses LeanAgent15m from merid/prediction/agent_grid_15m.py.
+    This agent is kept for backward compatibility and testing only.
+    """
 
     agent_id = "doge_15m_regime"
     product = "doge_15m"
@@ -39,11 +44,9 @@ class Doge15mAgent(BaseKalshiAgent):
         self.portfolio_risk_agent = portfolio_risk_agent
         self.params = params or Doge15mParams()
         
-        # Log risk limits at startup for audit trail
-        from config.kalshi_15m_crypto_config import log_risk_limits_for_agent
-        from merid.prediction.venue_gate import get_venue_gate
-        mode = get_venue_gate().mode.value.upper()
-        log_risk_limits_for_agent("DOGE", mode)
+        # DEPRECATED: Legacy agent - not used in production 15m stack
+        # Production uses LeanAgent15m from merid/prediction/agent_grid_15m.py
+        # Risk limit logging removed to avoid deprecated config import
 
     async def configure_dependencies(self, container: Any) -> None:
         """DI hook used by KalshiGrid bootstrap."""
@@ -59,18 +62,13 @@ class Doge15mAgent(BaseKalshiAgent):
             return None
 
         market = self.market_registry.get_active_doge_15m()
-        if not market:
+        if not market or not market.ticker:
             self.logger.debug("DOGE 15m: no active market, skipping.")
             return None
 
-        rti = self.crypto_rti_monitor.get_current_metrics(symbol="DOGE")
+        rti = self.crypto_rti_monitor.get_rti_metrics(asset="DOGE")
         if rti is None:
             self.logger.debug("DOGE 15m: no RTI metrics, skipping.")
-            return None
-
-        vol_metrics = self.crypto_rti_monitor.get_vol_metrics(symbol="DOGE")
-        if vol_metrics is None:
-            self.logger.debug("DOGE 15m: no vol metrics, skipping.")
             return None
 
         is_vol_elevated = self.portfolio_risk_agent.is_crypto_vol_elevated("DOGE")
@@ -81,12 +79,12 @@ class Doge15mAgent(BaseKalshiAgent):
         )
 
         return Doge15mInputs(
-            rti_current=rti.rti_current,
-            rti_60s_sma=rti.rti_60s_sma,
-            vol_1m_realized=vol_metrics.vol_1m_realized,
-            vol_5m_realized=vol_metrics.vol_5m_realized,
-            vol_15m_realized=vol_metrics.vol_15m_realized,
-            vol_baseline_median=vol_metrics.vol_baseline_median,
+            rti_current=rti["rti_current"],
+            rti_60s_sma=rti["rti_60s_sma"],
+            vol_1m_realized=rti.get("rti_60s_vol", 0.0),
+            vol_5m_realized=rti.get("rti_60s_vol", 0.0),
+            vol_15m_realized=rti.get("rti_60s_vol", 0.0),
+            vol_baseline_median=0.0,
             seconds_to_expiry=market.seconds_to_expiry,
             best_bid=market.best_bid,
             best_ask=market.best_ask,
@@ -122,7 +120,7 @@ class Doge15mAgent(BaseKalshiAgent):
             
             # Get the current market ticker
             market = self.market_registry.get_active_doge_15m()
-            if market:
+            if market and market.ticker:
                 is_winner = grid_ctx.is_winner(market.ticker)
                 
                 if not is_winner:

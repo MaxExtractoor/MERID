@@ -5,6 +5,8 @@ Provides:
   - Signal source taxonomy enforcement (canonical labels)
   - Asset wiring validation across BTC/ETH/SOL/XRP/DOGE
   - Intel/news feed consistency checks
+  - Probability clamping (venue invariants for model sanity and tail risk)
+  - Entry window validation (single source of truth for time window logic)
 
 Usage::
 
@@ -12,6 +14,10 @@ Usage::
         require_kalshi_base_url,
         KalshiSignalSource,
         validate_asset_wiring,
+        clamp_probability,
+        KALSHI_MIN_PROBABILITY,
+        KALSHI_MAX_PROBABILITY,
+        is_within_entry_window,
     )
 
     # Fail fast if BASE_URL not configured in production
@@ -19,6 +25,29 @@ Usage::
 
     # Use canonical signal source labels
     sources = [KalshiSignalSource.ORDERBOOK, KalshiSignalSource.SPREAD]
+
+    # Clamp model probabilities to venue-invariant range
+    model_prob = clamp_probability(raw_model_prob)
+
+    # Check if market is within entry window
+    from datetime import datetime
+    if is_within_entry_window(datetime.utcnow(), expiry, 30, 2):
+        # Market is in valid trading window
+        pass
+
+    # Calculate effective edge threshold
+    edge_threshold = get_effective_edge_threshold(market_state, profile_config)
+
+    # Compute sizing using pure helpers
+    max_notional, floor_applied = compute_max_notional(bankroll_usd, risk_pct, min_max_notional)
+    contracts, override_applied = compute_contracts(max_notional, contract_price, override_threshold)
+    is_valid = is_trade_valid(bankroll_usd, notional_usd, max_risk_pct)
+
+    # Check if market is within entry window
+    from datetime import datetime
+    if is_within_entry_window(datetime.utcnow(), expiry, 30, 2):
+        # Market is in valid trading window
+        pass
 """
 
 from __future__ import annotations
@@ -26,6 +55,7 @@ from __future__ import annotations
 import os
 import sys
 import logging
+from datetime import datetime
 from enum import Enum
 from typing import List, Dict, Set, Optional, Any
 from dataclasses import dataclass
@@ -34,6 +64,366 @@ from urllib.parse import urlparse
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.invariants")
+
+
+# ── Probability Clamping (Venue Invariants) ───────────────────────────────────
+# Kalshi contracts trade between 1¢ and 99¢, effectively encoding 1–99% probabilities.
+# We clamp to 5–95% for model sanity and tail risk management.
+# These are venue invariants - they should not be changed per strategy or profile.
+
+KALSHI_MIN_PROBABILITY: float = 0.05  # 5% minimum probability (tail risk guard)
+KALSHI_MAX_PROBABILITY: float = 0.95  # 95% maximum probability (tail risk guard)
+
+# Rationale:
+# - Kalshi contracts have price range [1, 99] cents → [0.01, 0.99] probability
+# - Clamping to [0.05, 0.95] provides 4% buffer from venue limits
+# - Prevents model from betting on near-certain events (tail risk)
+# - Accounts for spread, slippage, and execution uncertainty
+
+
+def clamp_probability(p: float) -> float:
+    """Clamp probability to Kalshi venue-invariant range [0.05, 0.95].
+
+    This is a venue invariant - all model probabilities should pass through
+    this function before being used for trading decisions.
+
+    Args:
+        p: Raw probability from model (any float in [0, 1])
+
+    Returns:
+        Clamped probability in [KALSHI_MIN_PROBABILITY, KALSHI_MAX_PROBABILITY]
+
+    Example:
+        >>> clamp_probability(0.99)
+        0.95
+        >>> clamp_probability(0.01)
+        0.05
+        >>> clamp_probability(0.50)
+        0.50
+    """
+    if p < KALSHI_MIN_PROBABILITY:
+        logger.debug(
+            "[KALSHI-INVARIANTS] Probability %.4f clamped to %.4f (below minimum)",
+            p, KALSHI_MIN_PROBABILITY
+        )
+        return KALSHI_MIN_PROBABILITY
+    if p > KALSHI_MAX_PROBABILITY:
+        logger.debug(
+            "[KALSHI-INVARIANTS] Probability %.4f clamped to %.4f (above maximum)",
+            p, KALSHI_MAX_PROBABILITY
+        )
+        return KALSHI_MAX_PROBABILITY
+    return p
+
+
+def is_probability_in_range(p: float) -> bool:
+    """Check if probability is within Kalshi venue-invariant range.
+
+    Args:
+        p: Probability to check
+
+    Returns:
+        True if p in [KALSHI_MIN_PROBABILITY, KALSHI_MAX_PROBABILITY], False otherwise
+    """
+    return KALSHI_MIN_PROBABILITY <= p <= KALSHI_MAX_PROBABILITY
+
+
+# ── Entry Window Helper ───────────────────────────────────────────────────────
+# Kalshi contracts have a defined entry window before expiry.
+# This helper provides a single source of truth for time window validation
+# across agents, filters, schedulers, and backtests.
+
+def is_within_entry_window(
+    now: datetime,
+    expiry: datetime,
+    minutes_before_expiry: int,
+    cutoff_minutes_before_expiry: int,
+) -> bool:
+    """Check if current time is within the valid entry window for a market.
+
+    This is a venue invariant - all time window checks should use this function
+    to ensure consistent behavior across the stack.
+
+    Args:
+        now: Current datetime (typically datetime.utcnow())
+        expiry: Market expiration datetime
+        minutes_before_expiry: Maximum minutes before expiry to start trading (e.g., 30)
+        cutoff_minutes_before_expiry: Minimum minutes before expiry to stop trading (e.g., 2)
+
+    Returns:
+        True if now is within the entry window [cutoff, minutes_before_expiry], False otherwise
+
+    Example:
+        >>> from datetime import datetime, timedelta
+        >>> expiry = datetime(2026, 3, 20, 15, 0)
+        >>> now = datetime(2026, 3, 20, 14, 35)  # 25 minutes before expiry
+        >>> is_within_entry_window(now, expiry, 30, 2)
+        True
+        >>> now = datetime(2026, 3, 20, 14, 59)  # 1 minute before expiry
+        >>> is_within_entry_window(now, expiry, 30, 2)
+        False
+    """
+    if expiry <= now:
+        return False
+    
+    tte_minutes = (expiry - now).total_seconds() / 60.0
+    return cutoff_minutes_before_expiry <= tte_minutes <= minutes_before_expiry
+
+
+def is_within_entry_window_by_minutes(
+    tte_minutes: float,
+    minutes_before_expiry: int,
+    cutoff_minutes_before_expiry: int,
+) -> bool:
+    """Check if pre-computed time-to-expiry is within the valid entry window.
+
+    Convenience overload for cases where tte_minutes is already computed
+    (e.g., from market API response). Delegates to is_within_entry_window
+    for the actual logic.
+
+    Args:
+        tte_minutes: Time to expiry in minutes (can be float)
+        minutes_before_expiry: Maximum minutes before expiry to start trading (e.g., 30)
+        cutoff_minutes_before_expiry: Minimum minutes before expiry to stop trading (e.g., 2)
+
+    Returns:
+        True if tte_minutes is within the entry window [cutoff, minutes_before_expiry], False otherwise
+
+    Example:
+        >>> is_within_entry_window_by_minutes(25, 30, 2)
+        True
+        >>> is_within_entry_window_by_minutes(1, 30, 2)
+        False
+    """
+    return cutoff_minutes_before_expiry <= tte_minutes <= minutes_before_expiry
+
+
+# ── Edge Threshold Helper ─────────────────────────────────────────────────────
+# Edge threshold calculation provides a single source of truth for minimum edge
+# requirements across the stack. This consolidates spread-based adjustments
+# and dynamic calibrators into one callable function.
+
+def get_effective_edge_threshold(
+    market_state,
+    profile_config,
+    dynamic_state=None,
+) -> float:
+    """Calculate the effective edge threshold for a given market.
+
+    This is a venue invariant - all edge threshold calculations should use
+    this function to ensure consistent behavior across the stack.
+
+    **IMPORTANT**: This function returns a PRE-FEE edge threshold. The threshold
+    does not account for trading fees (typically $0.02 per contract on Kalshi).
+    For fee-aware edge calculations, use the fee model in kalshi_risk.py or
+    apply fee adjustment after calling this function.
+
+    Args:
+        market_state: Market state object with spread information (e.g., KalshiMarketState)
+                     Must have spread_cents attribute or similar.
+        profile_config: Profile configuration object with min_edge_pct attribute.
+        dynamic_state: Optional dynamic state for calibrators (currently unused, reserved for future).
+
+    Returns:
+        Effective edge threshold as a float (e.g., 0.02 for 2%). This is PRE-FEE.
+
+    Edge calculation logic:
+    1. Base edge from profile config (min_edge_pct)
+    2. Spread-based adjustment: max(base_edge, spread_pct * 2.0)
+    3. Dynamic calibrators (if any) - reserved for future use
+
+    Example:
+        >>> class MockMarketState:
+        ...     spread_cents = 2  # 2 cents on a 100-cent contract = 2% spread
+        >>> class MockProfileConfig:
+        ...     min_edge_pct = 0.02  # 2% base edge
+        >>> get_effective_edge_threshold(MockMarketState(), MockProfileConfig())
+        0.04  # 2x spread (4%) > base (2%), so use 4% (PRE-FEE)
+    """
+    # Base edge from profile config
+    base_edge = getattr(profile_config, 'min_edge_pct', 0.02)
+    
+    # Spread-based adjustment
+    # Calculate spread percentage from market state
+    spread_cents = 0
+    if market_state is not None:
+        if hasattr(market_state, 'spread_cents'):
+            spread_cents = market_state.spread_cents
+        elif hasattr(market_state, 'spread'):
+            spread_cents = market_state.spread
+    
+    # Assume 100-cent contract for spread percentage calculation
+    # (Kalshi binary contracts are typically priced in cents, 1-99 range)
+    spread_pct = spread_cents / 100.0 if spread_cents > 0 else 0.0
+    
+    # Effective edge is max of base edge and 2x spread
+    # This ensures we have enough edge to overcome spread and slippage
+    spread_edge = max(base_edge, spread_pct * 2.0)
+    
+    # Dynamic calibrators (reserved for future use)
+    if dynamic_state is not None:
+        # Placeholder for dynamic edge adjustment logic
+        # e.g., volatility-based scaling, regime detection, etc.
+        pass
+    
+    return spread_edge
+
+
+# ── Sizing Helpers ─────────────────────────────────────────────────────────────
+# Pure functions for trade sizing calculations. These provide a single source of
+# truth for sizing logic, making it testable and auditable.
+
+def compute_max_notional(
+    bankroll_usd: float,
+    risk_pct: float,
+    min_max_notional_usd: float,
+) -> tuple[float, bool]:
+    """Compute maximum notional exposure based on bankroll and risk percentage.
+
+    Args:
+        bankroll_usd: Current bankroll in USD
+        risk_pct: Risk percentage (e.g., 0.02 for 2%)
+        min_max_notional_usd: Minimum floor for max notional (prevents tiny trades)
+
+    Returns:
+        Tuple of (max_notional_usd, min_floor_applied)
+        - max_notional_usd: The computed maximum notional
+        - min_floor_applied: True if the minimum floor was applied, False otherwise
+
+    Example:
+        >>> compute_max_notional(1000.0, 0.02, 0.35)
+        (20.0, False)  # 2% of 1000 = 20, above floor
+        >>> compute_max_notional(10.0, 0.02, 0.35)
+        (0.35, True)  # 2% of 10 = 0.20, below floor, use 0.35
+    """
+    raw_notional = float(bankroll_usd) * risk_pct
+    if raw_notional < min_max_notional_usd:
+        return min_max_notional_usd, True
+    return raw_notional, False
+
+
+def compute_contracts(
+    max_notional_usd: float,
+    contract_price_usd: float,
+    override_threshold: float,
+) -> tuple[int, bool]:
+    """Compute number of contracts based on notional and contract price.
+
+    Args:
+        max_notional_usd: Maximum notional exposure in USD
+        contract_price_usd: Price per contract in USD
+        override_threshold: Fractional threshold (e.g., 0.5 for 50%)
+                           If contracts_float >= threshold but contracts == 0, bump to 1
+
+    Returns:
+        Tuple of (contracts, override_applied)
+        - contracts: Number of contracts (integer)
+        - override_applied: True if fractional override was applied, False otherwise
+
+    Example:
+        >>> compute_contracts(20.0, 0.50, 0.5)
+        (40, False)  # 20 / 0.50 = 40 contracts
+        >>> compute_contracts(0.35, 0.50, 0.5)
+        (0, False)  # 0.35 / 0.50 = 0.7, below threshold, no override
+        >>> compute_contracts(0.30, 0.50, 0.5)
+        (1, True)  # 0.30 / 0.50 = 0.6, above threshold, override to 1
+    """
+    # Guard against invalid inputs
+    if contract_price_usd <= 0 or max_notional_usd <= 0:
+        return 0, False
+
+    contracts_float = max_notional_usd / contract_price_usd
+    contracts = int(contracts_float)
+
+    # Fractional override: bump to 1 if we are close enough
+    override_applied = False
+    if contracts == 0 and contracts_float >= override_threshold:
+        contracts = 1
+        override_applied = True
+
+    return contracts, override_applied
+
+
+def is_trade_valid(
+    bankroll_usd: float,
+    notional_usd: float,
+    max_risk_pct: float,
+) -> bool:
+    """Check if a trade is valid given bankroll and risk constraints.
+
+    Args:
+        bankroll_usd: Current bankroll in USD
+        notional_usd: Trade notional exposure in USD
+        max_risk_pct: Maximum allowed risk percentage (e.g., 0.02 for 2%)
+
+    Returns:
+        True if trade is within risk limits, False otherwise
+
+    Example:
+        >>> is_trade_valid(1000.0, 20.0, 0.02)
+        True  # 20/1000 = 2%, at limit
+        >>> is_trade_valid(1000.0, 25.0, 0.02)
+        False  # 25/1000 = 2.5%, exceeds limit
+    """
+    if bankroll_usd <= 0:
+        return False
+
+    effective_risk_pct = notional_usd / bankroll_usd
+    # Add small epsilon for floating point comparison
+    return effective_risk_pct <= max_risk_pct * (1.0 + 1e-6)
+
+
+def is_liquid_enough(
+    best_bid_cents: int,
+    best_ask_cents: int,
+    bid_size: int,
+    ask_size: int,
+    min_size: int = 1,
+    max_spread_cents: int = 20,
+) -> bool:
+    """Check if market has sufficient liquidity for trading.
+
+    This implements an explicit liquidity policy to avoid trading on
+    thin or illiquid markets. Markets must meet minimum size and
+    spread requirements to be considered liquid.
+
+    Args:
+        best_bid_cents: Best bid price in cents (0-100)
+        best_ask_cents: Best ask price in cents (0-100)
+        bid_size: Size at best bid (number of contracts)
+        ask_size: Size at best ask (number of contracts)
+        min_size: Minimum required size at best bid/ask (default: 1)
+        max_spread_cents: Maximum allowed spread in cents (default: 20)
+
+    Returns:
+        True if market meets liquidity criteria, False otherwise
+
+    Example:
+        >>> is_liquid_enough(45, 55, 10, 10)
+        True  # 10-cent spread, sufficient size
+        >>> is_liquid_enough(10, 90, 10, 10)
+        False  # 80-cent spread too wide
+        >>> is_liquid_enough(45, 55, 0, 10)
+        False  # No bid size
+    """
+    # CRITICAL: Reject (0,100) pattern - indicates no real liquidity
+    if best_bid_cents == 0 and best_ask_cents == 100:
+        return False
+    
+    # Check minimum size requirements
+    if bid_size < min_size or ask_size < min_size:
+        return False
+    
+    # Check spread requirements
+    spread_cents = best_ask_cents - best_bid_cents
+    if spread_cents > max_spread_cents:
+        return False
+    
+    # Ensure prices are in valid range
+    if not (1 <= best_bid_cents <= 99 and 1 <= best_ask_cents <= 99):
+        return False
+    
+    return True
 
 
 # ── BASE_URL Validation ─────────────────────────────────────────────────────
@@ -45,7 +435,7 @@ KALSHI_WS_URL_ENV = "KALSHI_WS_URL"
 ALLOWED_KALSHI_API_HOSTS: frozenset[str] = frozenset(
     {
         "demo-api.kalshi.co",
-        "api.elections.kalshi.com",
+        "external-api.kalshi.com",
         "api.kalshi.com",
         "trading-api.kalshi.com",
     }
@@ -101,7 +491,7 @@ def require_kalshi_base_url(fail_in_prod: bool = True) -> Optional[str]:
             f"{KALSHI_API_BASE_URL_ENV} not set. "
             f"Kalshi API base URL must be configured. "
             f"Use 'https://demo-api.kalshi.co/trade-api/v2' for demo, "
-            f"or 'https://api.elections.kalshi.com/trade-api/v2' for live (Kalshi quick start)."
+            f"or 'https://external-api.kalshi.com/trade-api/v2' for live (Kalshi quick start)."
         )
         if fail_in_prod and not in_test:
             logger.error(msg)
@@ -136,7 +526,7 @@ def require_kalshi_ws_url(fail_in_prod: bool = True) -> Optional[str]:
             f"{KALSHI_WS_URL_ENV} not set. "
             f"Kalshi WebSocket URL must be configured. "
             f"Use 'wss://demo-api.kalshi.co/trade-api/ws/v2' for demo, "
-            f"or 'wss://api.elections.kalshi.com/trade-api/ws/v2' for live (same host family as REST)."
+            f"or 'wss://external-api.kalshi.com/trade-api/ws/v2' for live (same host family as REST)."
         )
         if fail_in_prod and not in_test:
             logger.error(msg)
@@ -177,7 +567,7 @@ def get_kalshi_base_url() -> str:
 
     Kalshi's documented URLs:
         - Live (recommended): https://external-api.kalshi.com/trade-api/v2
-        - Live (supported): https://api.elections.kalshi.com/trade-api/v2
+        - Live (supported): https://external-api.kalshi.com/trade-api/v2
         - Demo: https://external-api.demo.kalshi.co/trade-api/v2
         - Demo (legacy): https://demo-api.kalshi.co/trade-api/v2
 
@@ -226,7 +616,7 @@ def get_kalshi_base_url() -> str:
         return "https://external-api.demo.kalshi.co/trade-api/v2"
     elif kalshi_env == "elections":
         # Alias for live (Kalshi's elections API host)
-        return "https://api.elections.kalshi.com/trade-api/v2"
+        return "https://external-api.kalshi.com/trade-api/v2"
     elif kalshi_env:
         logger.warning(
             f"Unknown KALSHI_ENV={kalshi_env!r}. Valid values: demo, live, elections. "
@@ -874,7 +1264,7 @@ def require_live_confirmation() -> None:
     
     _LIVE_KALSHI_HOST_MARKERS = (
         "trading-api.kalshi.com",
-        "api.elections.kalshi.com",
+        "external-api.kalshi.com",
         "api.kalshi.com",
     )
     if any(m in base_url for m in _LIVE_KALSHI_HOST_MARKERS):

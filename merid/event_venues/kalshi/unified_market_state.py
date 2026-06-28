@@ -21,7 +21,7 @@ Pipeline alignment
 """
 from __future__ import annotations
 
-import time
+import time as _time
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -260,15 +260,15 @@ class UnifiedMarketState:
 
     @property
     def book_age_s(self) -> float:
-        return time.time() - self.book_updated_ts
+        return _time.time() - self.book_updated_ts
 
     @property
     def candle_age_s(self) -> float:
-        return time.time() - self.candle_updated_ts
+        return _time.time() - self.candle_updated_ts
 
     @property
     def index_age_s(self) -> float:
-        return time.time() - self.index_updated_ts
+        return _time.time() - self.index_updated_ts
 
     def is_tradeable(
         self,

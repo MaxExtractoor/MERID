@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import time
+import time as _time
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 
@@ -20,7 +20,11 @@ from merid.event_venues.kalshi.market_wiring.models import (
     MarketStatus,
 )
 from merid.event_venues.kalshi.market_wiring.store import get_kalshi_market_store
-from merid.event_venues.kalshi.market_wiring.classifier import MarketClassifier
+try:
+    from merid.event_venues.kalshi.market_wiring.classifier import MarketClassifier
+except ImportError:
+    # Legacy wiring – classifier module removed or relocated.
+    MarketClassifier = None
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.universe_sync")
@@ -70,7 +74,11 @@ class KalshiUniverseSync:
         self._config = config or SyncConfig()
         self._store = get_kalshi_market_store()
         self._client: Optional[KalshiVenueClient] = None
-        self._classifier = MarketClassifier()
+        if MarketClassifier is None:
+            logger.warning("MarketClassifier not available – universe_sync is operating in no-op mode")
+            self._classifier = None
+        else:
+            self._classifier = MarketClassifier()
         self._running = False
         self._last_sync_time = 0.0
         
@@ -88,7 +96,7 @@ class KalshiUniverseSync:
     
     async def _fetch_series_list(self) -> Dict[str, Dict[str, Any]]:
         """Fetch and cache series list for classification"""
-        current_time = time.time()
+        current_time = _time.time()
         
         # Check cache first
         if (current_time - self._series_cache_updated < self._series_cache_ttl 
@@ -229,7 +237,7 @@ class KalshiUniverseSync:
     
     async def sync_markets_async(self) -> int:
         """Fetch Kalshi markets, upsert KalshiMarketRecord rows, return count updated"""
-        start_time = time.time()
+        start_time = _time.time()
         
         try:
             # Update series cache
@@ -277,7 +285,7 @@ class KalshiUniverseSync:
             logger.info(
                 f"Kalshi universe sync completed: "
                 f"total={len(all_markets)}, new={new_count}, updated={updated_count}, "
-                f"errors={error_count}, duration={time.time() - start_time:.2f}s"
+                f"errors={error_count}, duration={_time.time() - start_time:.2f}s"
             )
             
             return len(all_markets)
@@ -294,7 +302,7 @@ class KalshiUniverseSync:
         while self._running:
             try:
                 # Check if it's time to sync
-                current_time = time.time()
+                current_time = _time.time()
                 time_since_sync = current_time - self._last_sync_time
                 
                 if time_since_sync >= self._config.sync_interval_seconds:

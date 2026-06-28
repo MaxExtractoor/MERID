@@ -337,12 +337,21 @@ class CryptoHedgeEngine:
         """
         if market_catalog is not None:
             try:
-                markets = market_catalog.get_markets_by_asset(asset, timeframe=tf)
-                if markets:
-                    best = markets[0]
-                    mid = getattr(best, "mid_price_cents", 0) or 0
-                    if 1 <= mid <= 99:
-                        return int(mid)
+                # CRITICAL: For 15m timeframe, use canonical get_current_15m_market to enforce single-market invariant
+                if tf == "15m":
+                    current_market = market_catalog.get_current_15m_market(asset)
+                    if current_market:
+                        mid = getattr(current_market, "mid_price_cents", 0) or 0
+                        if 1 <= mid <= 99:
+                            return int(mid)
+                else:
+                    # For other timeframes, use get_markets_by_asset (legacy behavior)
+                    markets = market_catalog.get_markets_by_asset(asset, timeframe=tf)
+                    if markets:
+                        best = markets[0]
+                        mid = getattr(best, "mid_price_cents", 0) or 0
+                        if 1 <= mid <= 99:
+                            return int(mid)
             except Exception as e:
                 logger.debug(f"Market catalog price lookup failed: {e}")
         return 50
@@ -354,9 +363,16 @@ class CryptoHedgeEngine:
         """Resolve a concrete Kalshi ticker for the hedge."""
         if market_catalog is not None:
             try:
-                markets = market_catalog.get_markets_by_asset(asset, timeframe=tf)
-                if markets:
-                    return markets[0].ticker
+                # CRITICAL: For 15m timeframe, use canonical get_current_15m_market to enforce single-market invariant
+                if tf == "15m":
+                    current_market = market_catalog.get_current_15m_market(asset)
+                    if current_market:
+                        return current_market.ticker if hasattr(current_market, 'ticker') else None
+                else:
+                    # For other timeframes, use get_markets_by_asset (legacy behavior)
+                    markets = market_catalog.get_markets_by_asset(asset, timeframe=tf)
+                    if markets:
+                        return markets[0].ticker
             except Exception as e:
                 logger.debug(f"Market catalog ticker lookup failed: {e}")
         # Fallback: construct a synthetic series ticker for paper/mock

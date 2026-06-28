@@ -91,6 +91,8 @@ def calculate_kalshi_fee_cents(
     Returns:
         Fee in cents (>= 2 for valid trades, 0 for invalid/edge cases)
         
+    CRITICAL FIX: Added input validation for production safety
+        
     Examples:
         >>> calculate_kalshi_fee_cents(10, 55)
         18  # 18 cents fee for 10 contracts at 55 cents
@@ -101,9 +103,23 @@ def calculate_kalshi_fee_cents(
     Reference:
         https://kalshi.com/docs/kalshi-fee-schedule.pdf
     """
-    # Edge cases: invalid or boundary prices
-    if contracts <= 0 or price_cents <= 0 or price_cents >= 100:
+    # CRITICAL FIX: Comprehensive input validation for production safety
+    # Validate contracts
+    if contracts <= 0:
         return 0
+    if contracts > 100000:  # Sanity check for extreme values
+        raise ValueError(f"contracts={contracts} exceeds maximum allowed (100000)")
+    
+    # Validate price_cents
+    if price_cents <= 0 or price_cents >= 100:
+        return 0
+    if not isinstance(price_cents, (int, float, Decimal)):
+        raise TypeError(f"price_cents must be int, float, or Decimal, got {type(price_cents)}")
+    
+    # Additional validation for extreme prices
+    if price_cents < 1 or price_cents > 99:
+        # Log warning but still calculate (could be valid edge case)
+        logger.warning(f"fees.py: Extreme price_cents={price_cents} - verifying calculation accuracy")
     
     if use_decimal:
         # High precision calculation with Decimal

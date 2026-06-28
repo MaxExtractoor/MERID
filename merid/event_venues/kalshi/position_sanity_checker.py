@@ -13,7 +13,7 @@ This module provides defense-in-depth after orders are acknowledged:
 from __future__ import annotations
 
 import threading
-import time
+import time as _time
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Dict, List, Optional, Set
@@ -45,7 +45,7 @@ class OrderIntentTracking:
     intended_count: int
     actual_filled: int = 0
     fill_records: List[FillRecord] = field(default_factory=list)
-    created_at: float = field(default_factory=time.time)
+    created_at: float = field(default_factory=_time.time)
 
 
 @dataclass
@@ -157,7 +157,7 @@ class PositionSanityChecker:
                 side=side,
                 filled_count=filled_count,
                 price_cents=price_cents,
-                timestamp=time.time(),
+                timestamp=_time.time(),
                 applied=True,
             )
             
@@ -186,7 +186,7 @@ class PositionSanityChecker:
             self._positions[pos_key] = {
                 "contracts": new_contracts,
                 "notional": current_pos["notional"] + notional,
-                "last_update": time.time(),
+                "last_update": _time.time(),
             }
             
             return True, None
@@ -256,7 +256,7 @@ class PositionSanityChecker:
     def prune_old_records(self, max_age_seconds: float = 86400.0) -> int:
         """Remove old records to prevent unbounded growth."""
         with self._lock:
-            now = time.time()
+            now = _time.time()
             to_remove = [
                 coid for coid, order in self._orders.items()
                 if now - order.created_at > max_age_seconds

@@ -15,7 +15,12 @@ from typing import Optional, Dict, Any
 
 from utils.logger import get_logger
 from merid.event_venues.kalshi.types import BalanceState, InternalBankroll
-from merid.event_venues.kalshi.bankroll_service_v2 import BankrollSummary
+# CRITICAL FIX: Make BankrollSummary import lazy to prevent import-time bankroll service initialization
+# BankrollSummary import was triggering bankroll service initialization during import
+def _get_BankrollSummary():
+    """Lazy import wrapper for BankrollSummary to prevent import-time bankroll initialization."""
+    from merid.event_venues.kalshi.bankroll_service_v2 import BankrollSummary
+    return BankrollSummary
 
 logger = get_logger("merid.event_venues.kalshi.risk_policy")
 
@@ -66,7 +71,7 @@ class KalshiRiskPolicy:
         
         self._consecutive_stale_periods = 0
     
-    def evaluate(self, summary: BankrollSummary) -> RiskAllowance:
+    def evaluate(self, summary) -> RiskAllowance:
         """Evaluate risk policy for current bankroll state.
         
         This is the SINGLE entry point for all risk decisions.
@@ -179,7 +184,7 @@ def get_default_policy() -> KalshiRiskPolicy:
 
 
 async def check_trade_allowed(
-    summary: BankrollSummary,
+    summary,
     proposed_notional: Decimal,
     policy: Optional[KalshiRiskPolicy] = None,
 ) -> tuple[bool, str]:

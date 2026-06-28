@@ -155,7 +155,15 @@ class BankrollUnavailable(Exception):
 
 # Global adapter singleton
 _ADAPTER: Optional[BankrollAdapter] = None
-_ADAPTER_LOCK = asyncio.Lock()
+_ADAPTER_LOCK: Optional[asyncio.Lock] = None
+
+
+def _ensure_adapter_lock() -> asyncio.Lock:
+    """Lazy-initialize the asyncio.Lock in the current event loop."""
+    global _ADAPTER_LOCK
+    if _ADAPTER_LOCK is None:
+        _ADAPTER_LOCK = asyncio.Lock()
+    return _ADAPTER_LOCK
 
 
 async def get_bankroll_adapter() -> BankrollAdapter:
@@ -163,7 +171,8 @@ async def get_bankroll_adapter() -> BankrollAdapter:
     global _ADAPTER
     
     if _ADAPTER is None:
-        async with _ADAPTER_LOCK:
+        lock = _ensure_adapter_lock()
+        async with lock:
             if _ADAPTER is None:
                 v2 = await get_bankroll_service()
                 _ADAPTER = BankrollAdapter(v2)

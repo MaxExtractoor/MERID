@@ -380,15 +380,25 @@ class CoverageChecker:
 # Singleton instance
 _coverage_checker: Optional[CoverageChecker] = None
 _coverage_checker_lock: Optional[asyncio.Lock] = None
+_coverage_checker_lock_init = threading.Lock()
+
+
+def _ensure_coverage_checker_lock() -> asyncio.Lock:
+    """Lazy-initialize the coverage checker lock in the current event loop."""
+    global _coverage_checker_lock
+    if _coverage_checker_lock is None:
+        with _coverage_checker_lock_init:
+            if _coverage_checker_lock is None:
+                _coverage_checker_lock = asyncio.Lock()
+    return _coverage_checker_lock
 
 
 async def get_coverage_checker() -> CoverageChecker:
     """Get singleton coverage checker instance"""
-    global _coverage_checker, _coverage_checker_lock
-    if _coverage_checker_lock is None:
-        _coverage_checker_lock = asyncio.Lock()
+    global _coverage_checker
     if _coverage_checker is None:
-        async with _coverage_checker_lock:
+        lock = _ensure_coverage_checker_lock()
+        async with lock:
             if _coverage_checker is None:
                 _coverage_checker = CoverageChecker()
     return _coverage_checker

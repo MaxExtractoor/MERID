@@ -390,7 +390,7 @@ class AutoPromoter:
         """BUG-2 fix: verify a current passing gauntlet verdict exists for this agent."""
         try:
             from merid.agent_gauntlet import has_valid_gauntlet_pass, _compute_agent_config_hash
-            from merid.prediction.agent_grid import get_agent_grid
+            from merid.prediction.agent_grid_15m import get_agent_grid
             grid = get_agent_grid()
             agent = grid.get_agent(agent_name)
             if agent is None:
@@ -433,7 +433,7 @@ class AutoPromoter:
     def _collect_agent_metrics(self) -> Dict[str, Dict[str, Any]]:
         """Pull current performance metrics from the KalshiAgentGrid."""
         try:
-            from merid.prediction.agent_grid import get_agent_grid
+            from merid.prediction.agent_grid_15m import get_agent_grid
             grid = get_agent_grid()
             raw = grid.get_performance_summary() if hasattr(grid, "get_performance_summary") else {}
             if not raw:

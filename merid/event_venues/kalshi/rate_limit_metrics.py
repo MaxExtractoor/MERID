@@ -4,7 +4,7 @@ Emits metrics for rate limit utilization and backoff events (429 errors, retry d
 Integrates with rate_limit_coordinator and api_metrics for comprehensive monitoring.
 """
 
-import time
+import time as _time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -38,7 +38,7 @@ class RateLimitMetrics:
         self._max_history = max_history
         self._backoff_history: deque = deque(maxlen=max_history)
         self._backoff_counts: Dict[int, int] = defaultdict(int)  # status_code -> count
-        self._start_time = time.monotonic()
+        self._start_time = _time.monotonic()
 
     def record_backoff(
         self,
@@ -56,7 +56,7 @@ class RateLimitMetrics:
             reason: Reason for backoff (rate_limit, server_error, etc.)
         """
         event = BackoffEvent(
-            timestamp=time.monotonic(),
+            timestamp=_time.monotonic(),
             endpoint=endpoint,
             status_code=status_code,
             retry_delay_seconds=retry_delay_seconds,
@@ -91,7 +91,7 @@ class RateLimitMetrics:
             utilization = {}
 
         # Get backoff stats from window
-        now = time.monotonic()
+        now = _time.monotonic()
         window_start = now - self._window_seconds
         recent_backoffs = [
             b for b in self._backoff_history if b.timestamp >= window_start
@@ -123,7 +123,7 @@ class RateLimitMetrics:
 
         Alert threshold: >10 backoffs per minute
         """
-        now = time.monotonic()
+        now = _time.monotonic()
         window_start = now - 60.0  # 1 minute window
         recent_backoffs = [
             b for b in self._backoff_history if b.timestamp >= window_start

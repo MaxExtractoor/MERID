@@ -12,7 +12,7 @@ from merid.event_venues.base import (
     VenueOrder,
 )
 from merid.event_venues.kalshi.client import KalshiVenueClient
-from merid.event_venues.kalshi.models import KalshiConfig
+from merid.event_venues.kalshi.kalshi_config import get_kalshi_config
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.trading")
@@ -26,7 +26,9 @@ class KalshiTrader:
     like buying/selling yes/no contracts, position management, etc.
     """
     
-    def __init__(self, client: Optional[KalshiVenueClient] = None, config: Optional[KalshiConfig] = None):
+    def __init__(self, client: Optional[KalshiVenueClient] = None, config: Optional[Any] = None):
+        # Use unified config by default
+        config = config or get_kalshi_config()
         self.client = client or KalshiVenueClient(config)
 
     # G8: Central gate — checked before every order method
@@ -299,7 +301,7 @@ class KalshiTrader:
             price_est = 50  # Fallback if market state unavailable
             try:
                 from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
-                state = get_kalshi_market_state_store().get_state(ticker)
+                state = get_kalshi_market_state_store().get_unified(ticker)
                 if state and state.mid_cents > 0:
                     price_est = state.mid_cents
             except Exception as _exc:

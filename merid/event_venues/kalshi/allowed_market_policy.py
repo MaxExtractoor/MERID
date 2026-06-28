@@ -194,8 +194,7 @@ def filter_allowed_markets(markets: list) -> list:
     Returns:
         List of allowed markets in their original format.
     """
-    print(f"[CRITICAL-FILTER-PRINT] filter_allowed_markets called with {len(markets)} markets")
-    logger.warning("[CRITICAL-FILTER] filter_allowed_markets called with %d markets", len(markets))
+    logger.info("[CRITICAL-FILTER] filter_allowed_markets called with %d markets", len(markets))
     if not markets:
         logger.error("[CRITICAL-FILTER] markets list is EMPTY!")
         return []

@@ -182,11 +182,16 @@ def collect_crypto_ws_subscription_tickers(
     Filters to category *crypto*, canonical five assets, and configured timeframes,
     then builds a :class:`KalshiCryptoCatalog` so the result matches
     :meth:`KalshiCryptoCatalog.all_active_tickers` / ``kalshi_ticker_to_asset`` mapping.
+    
+    CRITICAL REFACTOR: Now filters by close_ts to ensure only currently active markets
+    are subscribed. This prevents subscribing to expired markets.
     """
 
     asset_set = {a.upper() for a in (assets or KALSHI_CRYPTO_ASSETS)}
     tf_set = set(timeframes or ACTIVE_CRYPTO_WS_TIMEFRAMES)
     rows: List[CatalogMarket] = []
+    now_utc = datetime.now(timezone.utc)
+    
     for cm in catalog.get_all_markets():
         if not cm.asset or cm.asset not in asset_set:
             continue
@@ -198,6 +203,15 @@ def collect_crypto_ws_subscription_tickers(
             elif hasattr(cm, "active"):
                 if not cm.active:
                     continue
+        # CRITICAL FIX: Remove overly strict 0-15 minute expiry filter
+        # The catalog should return all active markets, not just those in the current window
+        # Market selection and entry window logic should be handled downstream by the agent grid
+        # This filter was causing 0 active tickers to be returned when markets were outside the 15min window
+        # if hasattr(cm, "expires_at") and cm.expires_at:
+        #     # Check if market is within tradeable window (0-15 minutes to expiry)
+        #     time_to_expiry = (cm.expires_at - now_utc).total_seconds()
+        #     if time_to_expiry < 0 or time_to_expiry > 900:  # Not in 0-15 minute window
+        #         continue
         # CRITICAL FIX: Don't filter by category since Kalshi API returns category=None for crypto markets
         # Instead, rely on asset detection from ticker patterns (KXBTC, KXETH, KXSOL, etc.)
         # if cm.category != "crypto":
