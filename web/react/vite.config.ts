@@ -1,42 +1,37 @@
-import { defineConfig, loadEnv } from 'vite'
+import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import path from 'path'
 
-export default defineConfig(({ mode }) => {
-  const rootDir = path.resolve(__dirname, '../..')
-  const env = loadEnv(mode, rootDir, '')
-  const backendHost = env.MERID_BACKEND_HOST || '127.0.0.1'
-  const backendPort = env.MERID_BACKEND_PORT || '8011'
-  const backendHttp = `http://${backendHost}:${backendPort}`
-  const backendWs = `ws://${backendHost}:${backendPort}`
-
-  return {
-    plugins: [react()],
-    build: {
-      target: 'esnext',
+export default defineConfig({
+  plugins: [react()],
+  build: {
+    target: 'esnext',
+  },
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, './src'),
     },
-    resolve: {
-      alias: {
-        '@': path.resolve(__dirname, './src'),
+  },
+  server: {
+    port: 5173,
+    strictPort: true,
+    host: true,
+    open: false,
+    fs: {
+      strict: false,
+    },
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:8011',
+        changeOrigin: true,
+        secure: false,
+        ws: true,
+      },
+      '/ws': {
+        target: 'ws://127.0.0.1:8011',
+        ws: true,
+        changeOrigin: true,
       },
     },
-    server: {
-      port: 5173,
-      strictPort: true,  // Fail if port is already in use instead of incrementing
-      host: true,
-      proxy: {
-        '/api': {
-          target: backendHttp,
-          changeOrigin: true,
-          secure: false,
-          ws: true,
-        },
-        '/ws': {
-          target: backendWs,
-          ws: true,
-          changeOrigin: true,
-        },
-      },
-    },
-  }
+  },
 })

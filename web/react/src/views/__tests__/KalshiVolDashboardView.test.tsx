@@ -24,10 +24,7 @@ jest.mock('../../components/ExecutionGateStrip', () => ({
   default: () => <div data-testid="execution-gate-strip" />,
 }));
 
-jest.mock('../../components/PublishPipelinePanel', () => ({
-  __esModule: true,
-  default: () => <div data-testid="publish-pipeline" />,
-}));
+// LEGACY REMOVAL: PublishPipelinePanel removed - not used in 15m stack
 
 // Proxy mock for lucide-react icons
 jest.mock('lucide-react', () => {
@@ -114,9 +111,8 @@ const MOCK_RISK = {
 };
 
 const MOCK_GRID = {
-  agent_count: 3,
+  agent_count: 2,
   agents: [
-    { name: 'btc-1h', asset: 'BTC', timeframe: '1h', status: 'running', cycles: 120, pf: 1.85, sharpe: 2.10, sortino: 2.80, calmar: 3.50, size_factor: 0.25 },
     { name: 'eth-15m', asset: 'ETH', timeframe: '15m', status: 'running', cycles: 80, pf: 1.42, sharpe: 1.60, sortino: 2.00, calmar: 2.20, size_factor: 0.15 },
     { name: 'btc-15m', asset: 'BTC', timeframe: '15m', status: 'paused', cycles: 50, pf: 0.95, sharpe: 0.80, sortino: 0.90, calmar: 1.10, size_factor: 0.05 },
   ],
@@ -126,8 +122,8 @@ const MOCK_ALERTS_EMPTY = { alerts: [] };
 
 const MOCK_ALERTS_WITH_DATA = {
   alerts: [
-    { market_id: 'KXBTC-1H', kind: 'wide_spread', severity: 'warning', msg: 'Spread 0.12 > 0.08', ts: 1708000000 },
     { market_id: 'KXETH-15M', kind: 'thin_book', severity: 'critical', msg: 'Depth 20 < 50', ts: 1708000010 },
+    { market_id: 'KXBTC-15M', kind: 'wide_spread', severity: 'warning', msg: 'Spread 0.12 > 0.08', ts: 1708000020 },
   ],
 };
 
@@ -229,7 +225,7 @@ describe('KalshiVolDashboardView', () => {
     it('shows agent count', () => {
       setupMocks();
       render(<KalshiVolDashboardView />);
-      expect(screen.getByText(/3 active/)).toBeInTheDocument();
+      expect(screen.getByText(/2 active/)).toBeInTheDocument();
     });
 
     it('shows rate limit info', () => {
@@ -361,15 +357,14 @@ describe('KalshiVolDashboardView', () => {
     it('renders each agent row', () => {
       setupMocks();
       render(<KalshiVolDashboardView />);
-      expect(screen.getByText('BTC/1h')).toBeInTheDocument();
       expect(screen.getByText('ETH/15m')).toBeInTheDocument();
       expect(screen.getByText('BTC/15m')).toBeInTheDocument();
     });
 
+    // LEGACY REMOVAL: PF values test removed - sizing metrics display changed in 15m alignment
     it('renders agent PF values', () => {
       setupMocks();
       render(<KalshiVolDashboardView />);
-      expect(screen.getByText('1.85')).toBeInTheDocument();
       expect(screen.getByText('1.42')).toBeInTheDocument();
       expect(screen.getByText('0.95')).toBeInTheDocument();
     });
@@ -383,7 +378,7 @@ describe('KalshiVolDashboardView', () => {
     it('shows agent count in header', () => {
       setupMocks();
       render(<KalshiVolDashboardView />);
-      expect(screen.getByText('3 agents')).toBeInTheDocument();
+      expect(screen.getByText('2 agents')).toBeInTheDocument();
     });
   });
 
@@ -446,7 +441,6 @@ describe('KalshiVolDashboardView', () => {
     it('renders market IDs', () => {
       setupMocks({ alerts: MOCK_ALERTS_WITH_DATA });
       render(<KalshiVolDashboardView />);
-      expect(screen.getByText('KXBTC-1H')).toBeInTheDocument();
       expect(screen.getByText('KXETH-15M')).toBeInTheDocument();
     });
   });
