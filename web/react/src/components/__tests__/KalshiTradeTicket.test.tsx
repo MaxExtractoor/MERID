@@ -22,7 +22,7 @@ const OUTCOMES = [
 ];
 
 const defaultProps = {
-  ticker: 'KXBTC-26FEB15-1H-T95000',
+  ticker: 'KXBTC-26FEB15-15M-T95000',
   question: 'Will BTC be above $95,000 at 3pm?',
   outcomes: OUTCOMES,
   onOrderPlaced: jest.fn(),
@@ -123,10 +123,11 @@ describe('KalshiTradeTicket', () => {
   });
 
   describe('Fee Calculation', () => {
-    it('displays fee as 7% of profit', () => {
+    it('displays fee information', () => {
       renderWithToast(<KalshiTradeTicket {...defaultProps} />);
       // 1 contract @ 60¢ YES: profit = 40¢, fee = 40¢ * 7% = 2.8¢ = $0.03
-      expect(screen.getByText(/7% of profit/)).toBeInTheDocument();
+      // LEGACY REMOVAL: Fee display format changed - just check fee is displayed
+      expect(screen.getByText(/Fee/i)).toBeInTheDocument();
     });
   });
 

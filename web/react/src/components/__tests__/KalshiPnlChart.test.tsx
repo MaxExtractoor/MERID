@@ -81,7 +81,7 @@ describe('KalshiPnlChart', () => {
     render(<KalshiPnlChart />);
     expect(screen.getByText('All')).toBeInTheDocument();
     expect(screen.getByText('Crypto')).toBeInTheDocument();
-    expect(screen.getByText('Politics')).toBeInTheDocument();
+    // LEGACY REMOVAL: Politics category removed - 15m stack is crypto-only
   });
 
   it('clicking category filter changes active state', () => {

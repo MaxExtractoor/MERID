@@ -4,10 +4,10 @@ import { useKalshiPaperVsShadow } from "../hooks/useKalshiPaperVsShadow";
 
 const AGENT_LABELS: { [key: string]: string } = {
   "btc_15m_regime": "BTC 15m",
-  "eth_15m_regime": "ETH 15m", 
+  "eth_15m_regime": "ETH 15m",
   "sol_15m_regime": "SOL 15m",
   "xrp_15m_regime": "XRP 15m",
-  "btc_1h_regime": "BTC 1h",
+  // LEGACY REMOVAL: btc_1h_regime removed - 15m stack only
 };
 
 export const KalshiPaperVsShadowPanel: React.FC = () => {

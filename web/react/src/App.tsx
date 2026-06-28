@@ -3,26 +3,15 @@ import { useFillToast } from "./hooks/useFillToast";
 import Sidebar from "./components/Sidebar";
 import TopBar from "./components/TopBar";
 
-// Lazy-loaded views for code splitting (Tier 1 optimization)
-const Overview = lazy(() => import("./views/Overview"));
+// 8-View Architecture - Only these views are functional
+const Dashboard = lazy(() => import("./views/Dashboard"));
+const Trade = lazy(() => import("./views/Trade"));
+const Monitor = lazy(() => import("./views/Monitor"));
+const Grid = lazy(() => import("./views/Grid"));
+const Risk = lazy(() => import("./views/Risk"));
+const Calibration = lazy(() => import("./views/Calibration"));
 const Logs = lazy(() => import("./views/Logs"));
 const Settings = lazy(() => import("./views/Settings"));
-
-// Consolidated Unified Views (Stages 1, 4, 5, 6, 7, 8)
-const DiscoverView = lazy(() => import("./views/DiscoverView"));
-const SizeView = lazy(() => import("./views/SizeView"));
-const ExecuteView = lazy(() => import("./views/ExecuteView"));
-const MonitorView = lazy(() => import("./views/MonitorView"));
-const PromoteView = lazy(() => import("./views/PromoteView"));
-const ProtectView = lazy(() => import("./views/ProtectView"));
-
-// Individual Stage Views (Stages 2, 3)
-const KalshiAgentPerformanceView = lazy(() => import("./views/KalshiAgentPerformanceView"));
-const KalshiSentimentView = lazy(() => import("./views/KalshiSentimentView"));
-const KalshiVolDashboardView = lazy(() => import("./views/KalshiVolDashboardView"));
-// LEGACY REMOVAL: SwarmConsensusMatrix removed - consensus module deleted
-const CalibrationDashboardView = lazy(() => import("./views/CalibrationDashboardView"));
-const OperatorDashboard = lazy(() => import("./views/OperatorDashboard"));
 
 // Optimized UI Components
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -39,54 +28,18 @@ import { ThemeProvider } from "./theme";
 import ToastProvider from "./components/ToastProvider";
 
 import type { View } from "./types/views";
-import { LEGACY_VIEW_MAP } from "./types/views";
 
-// Zero-lag view loader with preloading
-// Consolidated architecture: Stages 1, 5, 8 use unified views
-// All views are now lazy-loaded for code splitting (Tier 1 optimization)
+// 8-View Architecture - Clean mapping
 const VIEW_COMPONENTS: Record<string, React.LazyExoticComponent<React.ComponentType<any>>> = {
-  // System Views
-  overview: Overview,
-  operator: OperatorDashboard,
+  dashboard: Dashboard,
+  trade: Trade,
+  monitor: Monitor,
+  grid: Grid,
+  risk: Risk,
+  calibration: Calibration,
   logs: Logs,
   settings: Settings,
-  
-  // Stage 1: Discover (Unified Consolidated View)
-  discover: DiscoverView,
-  
-  // Stage 2: Analyze (Individual Views)
-  "analyze-sentiment": KalshiSentimentView,
-  "analyze-vol": KalshiVolDashboardView,  // Also used for edge signals
-  
-  // Stage 3: Consensus (Individual Views)
-  // LEGACY REMOVAL: consensus-swarm (SwarmConsensusMatrix) removed - consensus module deleted
-  "consensus-performance": KalshiAgentPerformanceView,
-  "consensus-calibration": CalibrationDashboardView,
-  
-  // Stage 4: Size (Unified Consolidated View)
-  size: SizeView,
-  
-  // Stage 5: Execute (Unified Consolidated View)
-  execute: ExecuteView,
-  
-  // Stage 6: Monitor (Unified Consolidated View)
-  monitor: MonitorView,
-  
-  // Stage 7: Promote (Unified Consolidated View)
-  promote: PromoteView,
-  
-  // Stage 8: Protect (Unified Consolidated View)
-  protect: ProtectView,
 };
-
-// Legacy view compatibility layer for transition period
-function resolveView(view: View): View {
-  // Check if it's a legacy view that needs mapping
-  if (view in LEGACY_VIEW_MAP) {
-    return LEGACY_VIEW_MAP[view];
-  }
-  return view;
-}
 
 function FillToastWatcher() {
   useFillToast();
@@ -95,36 +48,31 @@ function FillToastWatcher() {
 
 // Zero-lag view renderer with memoization
 const ViewRenderer = React.memo(({ view, onNavigate }: { view: View; onNavigate: (v: View) => void }) => {
-  const resolvedView = resolveView(view);
-  const Component = VIEW_COMPONENTS[resolvedView];
+  const Component = VIEW_COMPONENTS[view];
   
   if (!Component) {
     return (
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
           <h2 className="text-xl font-semibold text-slate-300 mb-2">View Not Found</h2>
-          <p className="text-slate-500">The view &quot;{view}&quot; is not yet implemented in the 8-stage workflow.</p>
+          <p className="text-slate-500">The view &quot;{view}&quot; is not yet implemented.</p>
           <button
-            onClick={() => onNavigate('overview')}
+            onClick={() => onNavigate('dashboard')}
             className="mt-4 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
           >
-            Return to Overview
+            Return to Dashboard
           </button>
         </div>
       </div>
     );
   }
   
-  const viewProps = ['execute-positions', 'positions'].includes(resolvedView) ? { onNavigate } : 
-                   ['kalshi-risk-context', 'protect-alerts'].includes(resolvedView) ? { onNavigate: (v: string) => onNavigate(v as View) } : 
-                   {};
-  
-  return <Component {...viewProps} />;
+  return <Component />;
 });
 ViewRenderer.displayName = 'ViewRenderer';
 
 export default function App() {
-  const [view, setView] = useState<View>("overview");
+  const [view, setView] = useState<View>("dashboard");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try { return localStorage.getItem('merid-sidebar-collapsed') === 'true'; } catch { return false; }
