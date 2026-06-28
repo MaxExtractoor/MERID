@@ -1,9 +1,9 @@
 # 15-Minute Kalshi Trading Stack Audit Report
 
 **Audit Scope:** BTC, ETH, SOL, XRP, DOGE 15-minute crypto prediction markets on Kalshi  
-**Audit Date:** 2026-01-15  
+**Audit Date:** 2026-01-15 (Original) / 2026-06-05 (Update)  
 **Auditor:** MERID Audit System  
-**Version:** 1.0
+**Version:** 2.0
 
 ---
 
@@ -1095,6 +1095,396 @@ The 15-minute Kalshi trading stack for BTC, ETH, SOL, XRP, and DOGE is **product
 5. Plan refactoring of large modules for maintainability
 
 **Audit Coverage:** **COMPLETE** - All requested components audited including trading infrastructure, execution layer, risk management, data pipeline, code usage, expected behavior, configuration, and logging/monitoring.
+
+---
+
+## 13. Production Stack Architecture Audit (Update 2026-06-05)
+
+### 13.1 Production vs Legacy Stack Clarification
+
+**Critical Finding:** The audit identified two distinct code paths:
+
+**Production Stack (15m Live Trading):**
+- `merid/loop_15m.py` - Lean event loop for 15m crypto trading
+- `merid/prediction/agent_grid_15m.py` - LeanAgentGrid15m with velocity-based signals
+- `merid/agents/btc_15m_agent.py` (and ETH/SOL/XRP/DOGE equivalents) - Per-asset agents
+- `merid/prediction/unified_edge.py` - Unified edge computation
+- `merid/risk/profiles/kalshi_crypto_15m_risk_envelope.py` - Risk envelope
+- `merid/prediction/candidate_optimizer.py` - Market selection and ranking
+- `merid/event_venues/kalshi/order_router.py` - Order routing with security checks
+- `config/profiles/kalshi_crypto_15m_v2.yaml` - Single source of truth for risk config
+
+**Legacy Stack (Deprecated for 15m):**
+- `merid/trading/kalshi_continuous_trader.py` - Continuous trader (not used in 15m loop)
+- `merid/lanes/crypto15m_lane.py` - Legacy lane orchestration
+- `merid/agents/btc_1h_agent.py` - Hourly agents (signal-only)
+- Legacy agent grid configurations
+
+**Import Policy (15m_live mode):**
+The production 15m stack explicitly forbids:
+- PM runtime controllers
+- Paper trading engine
+- Reflection/learning systems
+- Social broadcasters
+- Cross-venue logic
+- Deprecated config modules (kalshi_15m_crypto_config.py)
+
+### 13.2 Signal Generation Audit (Upstream)
+
+**Velocity-Based Signal Strategy:**
+
+**File:** `merid/prediction/agent_grid_15m.py`
+
+**Core Logic:**
+```python
+# VELOCITY-BASED SIGNAL DECISION (2026 #1 winner)
+# Positive velocity (> threshold) -> buy YES
+# Negative velocity (< -threshold) -> buy NO
+# Small velocity (between -threshold and threshold) -> no trade
+velocity_threshold = self.config.velocity_threshold
+
+if velocity > velocity_threshold:
+    signal_side = "yes"
+    signal_action = "buy"
+elif velocity < -velocity_threshold:
+    signal_side = "no"
+    signal_action = "buy"
+else:
+    return None  # Insufficient momentum
+```
+
+**Strategy Invariants:**
+1. Velocity-based signals: Use Coinbase 1-minute velocity for trade direction
+2. Simplified gates: Only liquidity, spread, staleness (no complex indicator gates)
+3. Market state validation: Use KalshiMarketStateStore for live orderbook data
+4. Risk envelope: Apply profile-driven risk limits and position sizing
+5. Full asset coverage: All 5 crypto assets (BTC, ETH, SOL, XRP, DOGE) must be included
+
+**Signal Mode Configuration:**
+- `config/profiles/kalshi_crypto_15m_v2.yaml` defines `signal_mode: hybrid`
+- Supports: mean_reversion, momentum_fvg, hybrid
+- Hybrid mode allows both mean reversion and momentum trading
+
+**Momentum/FVG Parameters:**
+- Per-asset OBI (Order Book Imbalance) thresholds tuned for Kalshi microstructure
+- Per-asset EWMA alpha for smoothing (BTC/ETH: 0.15, SOL/XRP/DOGE: 0.20)
+- Fair Value Gap (FVG) detection with 4-bar max age
+- EMA stack alignment requirements
+
+### 13.3 Agent Decision Logic Audit (Midstream)
+
+**AgentOpinion Structure:**
+
+**File:** `merid/agents/base.py`
+
+```python
+@dataclass
+class AgentOpinion:
+    """Typed opinion output from a Kalshi regime agent."""
+    agent_id: str
+    market_id: str
+    side: str  # "yes" or "no", or "buy_yes"/"buy_no"
+    confidence: float  # 0.0 to 1.0
+    edge_estimate: float  # Expected edge in cents
+    horizon: str  # e.g., "15m", "1h"
+    symbol: Optional[str] = None  # e.g., "BTC", "ETH"
+    timeframe: Optional[str] = None  # e.g., "15m", "1h", "daily"
+    size_pct: Optional[float] = None  # Position size percentage
+    trace_id: Optional[str] = None  # Tracing identifier
+    correlation_id: Optional[str] = None  # Business correlation ID
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+```
+
+**Per-Asset Agent Implementation:**
+
+All 5 assets have identical structure:
+- `merid/agents/btc_15m_agent.py` - Btc15mAgent
+- `merid/agents/eth_15m_agent.py` - Eth15mAgent
+- `merid/agents/sol_15m_agent.py` - Sol15mAgent
+- `merid/agents/xrp_15m_agent.py` - Xrp15mAgent
+- `merid/agents/doge_15m_agent.py` - Doge15mAgent
+
+**Opinion Formation Flow:**
+1. Build inputs from market registry, RTI monitor, portfolio risk agent
+2. Check arbiter winner status (WINNER ALIGNMENT FIX 2026-05-10)
+3. Generate signal via asset-specific `should_trade_*_15m()` function
+4. Calculate Kelly size via `portfolio_risk_agent.get_kelly_size_pct()`
+5. Create AgentOpinion with confidence, edge_estimate, size_pct
+
+**Arbiter Winner Check:**
+All agents include a winner check before opinion generation:
+```python
+from merid.prediction.grid_context import get_grid_context
+grid_ctx = get_grid_context()
+is_winner = grid_ctx.is_winner(market.ticker)
+if not is_winner:
+    return None  # Skip if not in winner set
+```
+
+**Confidence Scoring:**
+- Confidence derived from `signal.regime_confidence`
+- Edge estimate from `signal.edge_estimate`
+- Size percentage from Kelly criterion calculation
+
+### 13.4 Risk Management Audit (Midstream)
+
+**Risk Envelope Configuration:**
+
+**File:** `merid/risk/profiles/kalshi_crypto_15m_risk_envelope.py`
+
+**Single Source of Truth:**
+- `KalshiCrypto15mRiskEnvelope` dataclass
+- `compute_kalshi_crypto_15m_risk_envelope()` function
+- Profile: `kalshi_crypto_15m_v2`
+
+**Risk Parameters:**
+- Venue-level caps (percentage-based, not hardcoded USD)
+- Per-asset caps for BTC, ETH, SOL, XRP, DOGE
+- Depth thresholds (contracts at best price)
+- Agent defaults (max contracts, max notional)
+- Cycle risk caps
+- Guardrails (daily loss, drawdown thresholds)
+- Adaptive risk scaling based on drawdown bands
+
+**Per-Asset Configuration (from kalshi_crypto_15m_v2.yaml):**
+
+| Asset | Max Notional % | Max Contracts | Distance Cap % | Asset Tier |
+|-------|---------------|---------------|---------------|------------|
+| BTC   | 2%            | 5             | 1.5%          | Tier 1     |
+| ETH   | 2%            | 5             | 2.0%          | Tier 1     |
+| SOL   | 2%            | 3             | 2.5%          | Tier 2     |
+| XRP   | 2%            | 3             | 3.0%          | Tier 2     |
+| DOGE  | 2%            | 3             | 4.0%          | Tier 2     |
+
+**Position Sizing:**
+
+**File:** `merid/risk/position_sizing.py`
+
+**Available Methods:**
+- Volatility-based sizing
+- Kelly criterion sizing
+- Fixed fractional sizing
+- Risk parity sizing
+
+**Note:** This module appears to be a general-purpose position sizing library and may not be actively used by the 15m production stack, which uses profile-driven sizing via the risk envelope.
+
+**Edge Computation:**
+
+**File:** `merid/prediction/unified_edge.py`
+
+**Key Features:**
+- Cross-asset edge normalization
+- Contract-vs-spot relationship modeling
+- Per-asset calibration (BTC, ETH, SOL, XRP, DOGE)
+- Volatility estimates per asset
+- Slippage models per asset
+- Edge check breakdowns (spread, depth, TTE, OTM distance)
+
+**Supported Assets:**
+```python
+SUPPORTED_15M_CRYPTO_ASSETS = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
+```
+
+### 13.5 Execution Pipeline Audit (Downstream)
+
+**Order Router Security:**
+
+**File:** `merid/event_venues/kalshi/order_router.py`
+
+**Authorized Agents:**
+```python
+_KALSHI_15M_CRYPTO_AGENTS: set = {
+    "BTC_15M",
+    "ETH_15M",
+    "SOL_15M",
+    "XRP_15M",
+    "DOGE_15M",
+}
+```
+
+**Security Checks:**
+- Caller authorization (only whitelisted agents can route orders)
+- Asset authorization (only 5 crypto assets allowed for 15m trading)
+- Mode validation (mock/paper/live)
+- 13+ pre-trade validation functions
+
+**Executor:**
+
+**File:** `merid/execution/executors/kalshi.py`
+
+**Features:**
+- Wraps order_router for API endpoint use
+- Dynamic TP/SL computation for 15m crypto entry orders
+- Position queries, fill history, balance checks
+- Authentication checks
+
+**Market State Store:**
+
+**File:** `merid/event_venues/kalshi/market_state.py`
+
+**KalshiMarketStateStore:**
+- Thread-safe registry of per-market live state
+- Two write paths: WebSocket (orderbook_delta/snapshot) and REST (market data)
+- Per-ticker locks to reduce contention
+- Single source of truth for bid/ask/mid prices
+
+**Market Registry:**
+
+**File:** `merid/kalshi/market_registry.py`
+
+**KalshiMarketRegistry:**
+- Tracks active markets for all 5 assets
+- Methods: `get_active_btc_15m()`, `get_active_eth_15m()`, etc.
+- Refreshes from universe every cycle
+
+**Fills Poller:**
+
+**File:** `merid/event_venues/kalshi/fills_poller.py`
+
+**Features:**
+- Background polling for fills (10s interval)
+- Ingestion into KalshiFillsLedger
+- Reconciliation every 60s
+- Test ticker detection and filtering
+
+**Bankroll Service:**
+
+**File:** `merid/event_venues/kalshi/bankroll_service_v2.py`
+
+**Features:**
+- Single source of truth for Kalshi bankroll
+- Periodic refresh from Kalshi client (10s interval)
+- FRESH/ERROR state transitions
+- No fake/fallback values allowed in live profiles
+
+### 13.6 Cross-Component Consistency Check
+
+**Asset Coverage Verification:**
+
+**Confirmed in all components:**
+1. **Market Registry:** All 5 assets tracked with `get_active_*_15m()` methods
+2. **Order Router:** All 5 assets in `_KALSHI_15M_CRYPTO_AGENTS` whitelist
+3. **Unified Edge:** All 5 assets in `SUPPORTED_15M_CRYPTO_ASSETS`
+4. **Risk Envelope:** All 5 assets with per-asset caps in kalshi_crypto_15m_v2.yaml
+5. **Agent Grid:** All 5 assets have dedicated agent files
+6. **Configuration:** All 5 assets in kalshi_crypto_config.py ACTIVE_CRYPTO_ASSETS
+
+**Configuration Consistency:**
+
+**Single Source of Truth Enforcement:**
+- `kalshi_crypto_15m_v2.yaml` declared as single source of truth for 15m crypto
+- Profile-guards disable legacy config sources (crypto_threshold_matrix.yaml)
+- Edge bands defined in profile (watch: 1-2%, small: 2-4%, standard: ≥4%)
+- Per-asset OBI thresholds defined in profile
+- Adaptive risk scaling defined in profile
+
+**Potential Inconsistencies:**
+1. **Position Sizing:** `merid/risk/position_sizing.py` exists but may not be used by 15m stack
+2. **Formulas:** `merid/formulas.py` has deprecated `fee_aware_edge()` for Kalshi 15m
+3. **Legacy Config:** Some legacy config files still present but profile-gated
+
+### 13.7 All 5 Crypto Assets Integration Verification
+
+**BTC Integration:**
+- ✓ Agent: `merid/agents/btc_15m_agent.py`
+- ✓ Market Registry: `get_active_btc_15m()`
+- ✓ Order Router: "BTC_15M" in whitelist
+- ✓ Unified Edge: BTC calibration present
+- ✓ Risk Envelope: BTC per-asset caps defined
+- ✓ Configuration: BTC in ACTIVE_CRYPTO_ASSETS
+
+**ETH Integration:**
+- ✓ Agent: `merid/agents/eth_15m_agent.py`
+- ✓ Market Registry: `get_active_eth_15m()`
+- ✓ Order Router: "ETH_15M" in whitelist
+- ✓ Unified Edge: ETH calibration present
+- ✓ Risk Envelope: ETH per-asset caps defined
+- ✓ Configuration: ETH in ACTIVE_CRYPTO_ASSETS
+
+**SOL Integration:**
+- ✓ Agent: `merid/agents/sol_15m_agent.py`
+- ✓ Market Registry: `get_active_sol_15m()`
+- ✓ Order Router: "SOL_15M" in whitelist
+- ✓ Unified Edge: SOL calibration present
+- ✓ Risk Envelope: SOL per-asset caps defined
+- ✓ Configuration: SOL in ACTIVE_CRYPTO_ASSETS
+
+**XRP Integration:**
+- ✓ Agent: `merid/agents/xrp_15m_agent.py`
+- ✓ Market Registry: `get_active_xrp_15m()`
+- ✓ Order Router: "XRP_15M" in whitelist
+- ✓ Unified Edge: XRP calibration present
+- ✓ Risk Envelope: XRP per-asset caps defined
+- ✓ Configuration: XRP in ACTIVE_CRYPTO_ASSETS
+
+**DOGE Integration:**
+- ✓ Agent: `merid/agents/doge_15m_agent.py`
+- ✓ Market Registry: `get_active_doge_15m()`
+- ✓ Order Router: "DOGE_15M" in whitelist
+- ✓ Unified Edge: DOGE calibration present
+- ✓ Risk Envelope: DOGE per-asset caps defined
+- ✓ Configuration: DOGE in ACTIVE_CRYPTO_ASSETS
+
+**Verification Result:** **PASS** - All 5 crypto assets are fully integrated across all components.
+
+### 13.8 Updated Recommendations
+
+**High Priority:**
+
+1. **Clarify Production vs Legacy Stack**
+   - Document clear separation between production 15m stack and legacy components
+   - Add warnings in legacy files about deprecation status
+   - Consider moving legacy components to archive directory
+
+2. **Position Sizing Module Clarification**
+   - Determine if `merid/risk/position_sizing.py` is used by 15m stack
+   - If not used, archive to reduce confusion
+   - If used, document integration points
+
+3. **Formulas Deprecation Cleanup**
+   - Remove deprecated `fee_aware_edge()` from `merid/formulas.py`
+   - Update all references to use `unified_edge.py` instead
+   - Add migration guide if needed
+
+**Medium Priority:**
+
+4. **Configuration Consolidation**
+   - Ensure kalshi_crypto_15m_v2.yaml is truly single source of truth
+   - Remove or document all legacy config files
+   - Add validation to prevent config drift
+
+5. **Arbiter Winner Check Documentation**
+   - Document the arbiter winner logic and its purpose
+   - Explain why assets not in winner set are blocked
+   - Document winner selection algorithm
+
+**Low Priority:**
+
+6. **Unified Logging Schema**
+   - Implement unified logging schema for 15m stack
+   - Add correlation ID propagation
+   - Standardize error codes
+
+### 13.9 Conclusion
+
+The 15-minute Kalshi production trading stack is **well-architected** with clear separation between production and legacy components. All 5 crypto assets (BTC, ETH, SOL, XRP, DOGE) are fully integrated across all components. The system uses velocity-based signals, simplified gates, and profile-driven risk management.
+
+**Overall Assessment:** **HEALTHY** - Production stack is production-ready with comprehensive risk controls and proper asset integration.
+
+**Key Strengths:**
+- Clear production vs legacy stack separation
+- All 5 assets fully integrated
+- Velocity-based signal strategy (2026 #1 winner)
+- Profile-driven single source of truth for risk
+- Comprehensive security checks in order router
+- Arbiter winner check for cross-asset coordination
+
+**Areas for Improvement:**
+- Clarify position sizing module usage
+- Clean up deprecated formulas
+- Consolidate configuration sources
+- Document arbiter winner logic
 
 ---
 

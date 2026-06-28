@@ -592,5 +592,82 @@
     "report_timestamp": 1779219574.2583659,
     "runbook_version": "1.0",
     "source": "automation"
+  },
+  {
+    "timestamp": 1779975016.2038949,
+    "entity_type": "domain",
+    "entity_id": "prediction",
+    "previous_status": "unknown",
+    "new_status": "eligible",
+    "reason": "all rings passing, domain meets requirements",
+    "report_timestamp": 1779975016.2032695,
+    "runbook_version": "1.0",
+    "source": "automation"
+  },
+  {
+    "timestamp": 1780777032.052889,
+    "entity_type": "domain",
+    "entity_id": "prediction",
+    "previous_status": "unknown",
+    "new_status": "eligible",
+    "reason": "all rings passing, domain meets requirements",
+    "report_timestamp": 1780777031.6937997,
+    "runbook_version": "1.0",
+    "source": "automation"
+  },
+  {
+    "timestamp": 1780777142.7530103,
+    "entity_type": "domain",
+    "entity_id": "prediction",
+    "previous_status": "unknown",
+    "new_status": "eligible",
+    "reason": "all rings passing, domain meets requirements",
+    "report_timestamp": 1780777142.637805,
+    "runbook_version": "1.0",
+    "source": "automation"
+  },
+  {
+    "timestamp": 1781121670.8021135,
+    "entity_type": "domain",
+    "entity_id": "prediction",
+    "previous_status": "unknown",
+    "new_status": "eligible",
+    "reason": "all rings passing, domain meets requirements",
+    "report_timestamp": 1781121670.8021135,
+    "runbook_version": "1.0",
+    "source": "automation"
+  },
+  {
+    "timestamp": 1781121824.7514837,
+    "entity_type": "domain",
+    "entity_id": "prediction",
+    "previous_status": "unknown",
+    "new_status": "eligible",
+    "reason": "all rings passing, domain meets requirements",
+    "report_timestamp": 1781121824.7509608,
+    "runbook_version": "1.0",
+    "source": "automation"
+  },
+  {
+    "timestamp": 1781121948.142339,
+    "entity_type": "domain",
+    "entity_id": "prediction",
+    "previous_status": "unknown",
+    "new_status": "eligible",
+    "reason": "all rings passing, domain meets requirements",
+    "report_timestamp": 1781121948.142339,
+    "runbook_version": "1.0",
+    "source": "automation"
+  },
+  {
+    "timestamp": 1781122610.6167912,
+    "entity_type": "domain",
+    "entity_id": "prediction",
+    "previous_status": "unknown",
+    "new_status": "eligible",
+    "reason": "all rings passing, domain meets requirements",
+    "report_timestamp": 1781122610.6167912,
+    "runbook_version": "1.0",
+    "source": "automation"
   }
 ]
