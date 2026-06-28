@@ -34,7 +34,7 @@ FRONTEND_DEV_PORT: int = int(os.getenv("MERID_FRONTEND_PORT", "5173"))
 KALSHI_API_BASE_URL: str = os.getenv(
     "KALSHI_API_BASE_URL",
     os.getenv("KALSHI_ENV", "demo").lower() == "live" 
-    and "https://api.elections.kalshi.com/trade-api/v2"
+    and "https://external-api.kalshi.com/trade-api/v2"
     or "https://demo-api.kalshi.co/trade-api/v2",
 )
 

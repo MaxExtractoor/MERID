@@ -67,6 +67,18 @@ PROFILES: Dict[str, ProfileConfig] = {
         allow_live_trading=True,
     ),
     
+    "kalshi_crypto_15m_v2": ProfileConfig(
+        name="kalshi_crypto_15m_v2",
+        description="Production 15-minute Kalshi crypto trading stack (BTC/ETH/SOL/XRP/DOGE). Uses web.main_15m_lean entrypoint with Kalshi15mLoop.",
+        disabled_routers={
+            "prediction", "betting", "mining", "wallet", "treasury",
+            "rewards", "cognitive", "devswarm", "simulation", "neo4j",
+            "x_bot", "moat",
+        },
+        allowed_modes=["live"],  # Live trading only for production 15m stack
+        allow_live_trading=True,
+    ),
+    
     "kalshi_swarm": ProfileConfig(
         name="kalshi_swarm",
         description="Full Kalshi swarm with social advisory + incentives (Loop 5)",
