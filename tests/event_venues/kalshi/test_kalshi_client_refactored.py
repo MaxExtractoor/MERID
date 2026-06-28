@@ -24,9 +24,9 @@ def kalshi_config():
     c.timeout = 30.0
     c.ws_timeout = 60.0
     c.demo_rest_api_url = "https://demo-api.kalshi.co/trade-api/v2"
-    c.rest_api_url = "https://api.elections.kalshi.com/trade-api/v2"
+    c.rest_api_url = "https://external-api.kalshi.com/trade-api/v2"
     c.demo_ws_api_url = "wss://demo-api.kalshi.co/trade-api/ws/v2"
-    c.ws_api_url = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+    c.ws_api_url = "wss://external-api.kalshi.com/trade-api/ws/v2"
     return c
 
 

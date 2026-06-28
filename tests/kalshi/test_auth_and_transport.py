@@ -188,13 +188,13 @@ class TestKalshiEnvironmentRouting:
         assert "demo-api.kalshi.co" in config.demo_ws_api_url
         
     def test_live_url_selection(self):
-        """Live mode uses api.elections.kalshi.com URLs."""
+        """Live mode uses external-api.kalshi.com URLs."""
         from merid.event_venues.kalshi.models import KalshiConfig
         
         config = KalshiConfig(use_demo=False)
         
-        assert "api.elections.kalshi.com" in config.rest_api_url
-        assert "api.elections.kalshi.com" in config.ws_api_url
+        assert "external-api.kalshi.com" in config.rest_api_url
+        assert "external-api.kalshi.com" in config.ws_api_url
         
     def test_base_url_derived_from_use_demo(self):
         """Config base_url property reflects use_demo flag."""
@@ -205,7 +205,7 @@ class TestKalshiEnvironmentRouting:
         
         # The property should return the correct URL
         assert "demo-api.kalshi.co" in demo_config.base_url
-        assert "api.elections.kalshi.com" in live_config.base_url
+        assert "external-api.kalshi.com" in live_config.base_url
         
     def test_circuit_breaker_namespaced_by_env(self):
         """Circuit breaker name includes env (demo/live)."""

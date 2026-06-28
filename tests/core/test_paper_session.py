@@ -1,5 +1,11 @@
-"""Tests for core/paper_session.py."""
+"""Tests for core/paper_session.py.
+
+LEGACY: This module tests PaperSessionState, which is not used by kalshi_crypto_15m_v2 profile.
+The lean 15m stack uses live bankroll service (merid.event_venues.kalshi.bankroll_service_v2).
+"""
 import pytest
+
+pytestmark = pytest.mark.legacy
 from datetime import datetime, timezone
 from core.paper_session import (
     PaperSessionState, get_paper_session_state, update_paper_session_state,

@@ -284,8 +284,8 @@ class TestKalshiConfig:
         """Test KalshiConfig default values."""
         config = KalshiConfig()
         
-        assert config.rest_api_url == "https://api.elections.kalshi.com/trade-api/v2"
-        assert config.ws_api_url == "wss://api.elections.kalshi.com/trade-api/ws/v2"
+        assert config.rest_api_url == "https://external-api.kalshi.com/trade-api/v2"
+        assert config.ws_api_url == "wss://external-api.kalshi.com/trade-api/ws/v2"
         assert config.demo_rest_api_url == "https://demo-api.kalshi.co/trade-api/v2"
         assert config.demo_ws_api_url == "wss://demo-api.kalshi.co/trade-api/ws/v2"
         assert config.use_demo is False

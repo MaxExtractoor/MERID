@@ -253,6 +253,100 @@ def mock_httpx_client():
     return client
 
 
+# ---------------------------------------------------------------------------
+# TODO-15M-001: HTTP client abstraction for public API
+# ---------------------------------------------------------------------------
+
+class FakeHttpClient:
+    """Mock HTTP client for testing public API calls with pagination."""
+    
+    def __init__(self, pages=None):
+        self.pages = pages or []
+        self.calls = []
+        self._call_count = 0
+    
+    async def get(self, url, params=None, headers=None):
+        """Record call and return next page from pages list."""
+        self.calls.append((url, params, headers))
+        if self.pages:
+            page = self._call_count % len(self.pages)
+            self._call_count += 1
+            response = MagicMock()
+            response.status_code = 200
+            response.json = MagicMock(return_value=self.pages[page])
+            response.raise_for_status = MagicMock()
+            return response
+        # Default empty response
+        response = MagicMock()
+        response.status_code = 200
+        response.json = MagicMock(return_value={"markets": [], "cursor": None})
+        response.raise_for_status = MagicMock()
+        return response
+    
+    async def aclose(self):
+        """No-op close for async compatibility."""
+        pass
+
+
+@pytest.fixture
+def fake_public_client():
+    """Fixture providing a KalshiPublicDataClient with injected FakeHttpClient.
+    
+    Usage:
+        def test_pagination(fake_public_client):
+            client, fake_http = fake_public_client
+            # Configure fake_http.pages with paginated responses
+            # Call client.list_open_markets_for_series(...)
+            # Assert fake_http.calls contains expected requests
+    """
+    from merid.event_venues.kalshi.client_public import KalshiPublicDataClient
+    from merid.event_venues.kalshi.kalshi_config import KalshiConfig
+    
+    config = KalshiConfig(
+        env="demo",
+        rest_base_url="https://external-api.demo.kalshi.co/trade-api/v2",
+        ws_base_url="wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2",
+        api_key_id="test_key",
+        private_key_path="/path/to/key.pem",
+        private_key_pem="test_pem",
+        public_rest_api_url="https://api.kalshi.com/public-api/v2",
+    )
+    
+    fake_http = FakeHttpClient()
+    client = KalshiPublicDataClient(cfg=config, http_client=fake_http)
+    
+    return client, fake_http
+
+
+# ---------------------------------------------------------------------------
+# TODO-15M-002: Injectable execution guard for order tests
+# ---------------------------------------------------------------------------
+
+class NoopExecutionGuard:
+    """No-op execution guard that always allows orders for testing."""
+    
+    def allow_order(self, venue, payload):
+        """Always return True to allow orders."""
+        return True
+    
+    def check_execution_gate(self, *args, **kwargs):
+        """No-op check that always allows execution."""
+        result = MagicMock()
+        result.allowed = True
+        result.reason = "OK"
+        return result
+    
+    def check_order(self, ticker, contracts, price_cents, source, asset=None, action=None):
+        """No-op check that always allows orders - matches GlobalExecutionGuard signature."""
+        return True, "OK"
+
+
+@pytest.fixture
+def noop_execution_guard():
+    """Fixture providing a NoopExecutionGuard for order placement tests."""
+    return NoopExecutionGuard()
+
+
 @pytest.fixture
 def mock_websocket():
     """Fixture providing a mock WebSocket for tests."""

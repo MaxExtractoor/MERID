@@ -40,10 +40,10 @@ def _make_rsa_client():
     config.password = None
     config.timeout = 30.0
     config.ws_timeout = 60.0
-    config.rest_api_url = "https://api.elections.kalshi.com/trade-api/v2"
+    config.rest_api_url = "https://external-api.kalshi.com/trade-api/v2"
     config.demo_rest_api_url = "https://demo-api.kalshi.co/trade-api/v2"
     config.demo_ws_api_url = "wss://demo-api.kalshi.co/trade-api/ws/v2"
-    config.ws_api_url = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+    config.ws_api_url = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
 
     client = KalshiVenueClient(config)
     client._private_key = private_key
@@ -199,10 +199,10 @@ class TestKalshiRSACacheIsolation(unittest.TestCase):
         config.password = None
         config.timeout = 30.0
         config.ws_timeout = 60.0
-        config.rest_api_url = "https://api.elections.kalshi.com/trade-api/v2"
+        config.rest_api_url = "https://external-api.kalshi.com/trade-api/v2"
         config.demo_rest_api_url = "https://demo-api.kalshi.co/trade-api/v2"
         config.demo_ws_api_url = "wss://demo-api.kalshi.co/trade-api/ws/v2"
-        config.ws_api_url = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+        config.ws_api_url = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
 
         client = KalshiVenueClient(config)
         client._private_key = key1
@@ -245,9 +245,9 @@ def _make_demo_client_fixed_url():
     config.ws_timeout = 60.0
     # Fixed URLs — not loaded from env so respx can predict them
     config.demo_rest_api_url = "https://demo-api.kalshi.co/trade-api/v2"
-    config.rest_api_url = "https://api.elections.kalshi.com/trade-api/v2"
+    config.rest_api_url = "https://external-api.kalshi.com/trade-api/v2"
     config.demo_ws_api_url = "wss://demo-api.kalshi.co/trade-api/ws/v2"
-    config.ws_api_url = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+    config.ws_api_url = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
     return KalshiVenueClient(config)
 
 
@@ -339,7 +339,7 @@ class TestKalshiConfigUrlConsistency(unittest.TestCase):
         c.rest_api_url = live_url
         c.demo_rest_api_url = demo_url
         c.demo_ws_api_url = "wss://demo-api.kalshi.co/trade-api/ws/v2"
-        c.ws_api_url = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+        c.ws_api_url = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
         return c
 
     def test_base_url_uses_demo_url_when_use_demo_true(self):
@@ -347,7 +347,7 @@ class TestKalshiConfigUrlConsistency(unittest.TestCase):
         c = self._make_config(
             use_demo=True,
             demo_url="https://demo-api.kalshi.co/trade-api/v2",
-            live_url="https://api.elections.kalshi.com/trade-api/v2",
+            live_url="https://external-api.kalshi.com/trade-api/v2",
         )
         self.assertEqual(c.base_url, "https://demo-api.kalshi.co/trade-api/v2")
         self.assertEqual(c.base_url, c.demo_rest_api_url)
@@ -357,9 +357,9 @@ class TestKalshiConfigUrlConsistency(unittest.TestCase):
         c = self._make_config(
             use_demo=False,
             demo_url="https://demo-api.kalshi.co/trade-api/v2",
-            live_url="https://api.elections.kalshi.com/trade-api/v2",
+            live_url="https://external-api.kalshi.com/trade-api/v2",
         )
-        self.assertEqual(c.base_url, "https://api.elections.kalshi.com/trade-api/v2")
+        self.assertEqual(c.base_url, "https://external-api.kalshi.com/trade-api/v2")
         self.assertEqual(c.base_url, c.rest_api_url)
 
 

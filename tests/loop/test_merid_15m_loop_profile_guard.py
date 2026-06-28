@@ -38,6 +38,22 @@ class TestMeridLoopConfiguration:
         expected_profile = "kalshi_crypto_15m_v2"
         assert expected_profile == "kalshi_crypto_15m_v2"
 
+    def test_loop_timing_metrics_logged(self):
+        """Test that LOOP-TIMING metrics are logged in the 15m loop."""
+        from merid.loop_15m import Kalshi15mLoop
+        
+        # Verify Kalshi15mLoop class exists
+        assert Kalshi15mLoop is not None
+        
+        # Verify the loop has timing tracking capability
+        # The loop should track cycle duration and streak counter
+        # This is verified by checking the source code contains LOOP-TIMING log
+        import inspect
+        source = inspect.getsource(Kalshi15mLoop.run_forever)
+        
+        # Verify LOOP-TIMING log is present
+        assert "LOOP-TIMING" in source or "[LOOP-TIMING]" in source
+
 
 class TestMeridLoopProfileGuardBehavior:
     """Test Merid loop profile guard behavior for 15m."""

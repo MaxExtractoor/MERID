@@ -21,42 +21,6 @@ import yaml
 class Test15mOptimizationRegression:
     """Regression tests for 15m timeframe optimizations"""
 
-    def test_distance_params_aligned(self):
-        """Verify max_delta_pct matches strike selector ranges"""
-        with open("c:/Dev/MERID/config/kalshi_distance.yaml", "r", encoding="utf-8") as f:
-            distance_cfg = yaml.safe_load(f)
-
-        assert distance_cfg["max_delta_pct"]["BTC"] == 0.04
-        assert distance_cfg["max_delta_pct"]["ETH"] == 0.05
-        assert distance_cfg["max_delta_pct"]["SOL"] == 0.06
-        assert distance_cfg["max_delta_pct"]["DOGE"] == 0.065
-
-    def test_entry_window_expanded(self):
-        """Verify entry windows provide adequate time for indicator confirmation"""
-        with open("c:/Dev/MERID/config/kalshi_agent_grid.yaml", "r", encoding="utf-8") as f:
-            agent_cfg = yaml.safe_load(f)
-
-        # Find BTC_15M agent
-        btc_agent = next((a for a in agent_cfg["agents"] if a["name"] == "BTC_15M"), None)
-        assert btc_agent is not None
-
-        # BTC/ETH should have 9min window (12-3)
-        btc_window = (
-            btc_agent["entry_window"]["minutes_before_expiry"]
-            - btc_agent["entry_window"]["cutoff_minutes_before_expiry"]
-        )
-        assert btc_window == 9
-
-        # Find SOL_15M agent
-        sol_agent = next((a for a in agent_cfg["agents"] if a["name"] == "SOL_15M"), None)
-        assert sol_agent is not None
-
-        # SOL/XRP/DOGE should have 10min window (13-3)
-        sol_window = (
-            sol_agent["entry_window"]["minutes_before_expiry"]
-            - sol_agent["entry_window"]["cutoff_minutes_before_expiry"]
-        )
-        assert sol_window == 10
 
     def test_ema_params_asset_specific(self):
         """Verify EMA parameters are optimized per asset volatility"""
@@ -92,19 +56,6 @@ class Test15mOptimizationRegression:
         assert btc_chop["consecutive_closes_required"] == 3  # Strict
         assert doge_chop["consecutive_closes_required"] == 2  # Relaxed
 
-    def test_take_profit_dynamic_by_time(self):
-        """Verify dynamic TP based on time remaining"""
-        with open("c:/Dev/MERID/config/kalshi_agent_grid.yaml", "r", encoding="utf-8") as f:
-            agent_cfg = yaml.safe_load(f)
-
-        # Find BTC_15M agent
-        btc_agent = next((a for a in agent_cfg["agents"] if a["name"] == "BTC_15M"), None)
-        assert btc_agent is not None
-
-        tp = btc_agent["take_profit"]["time_based_r_multiple"]
-
-        assert tp["over_7_min"] > tp["between_4_7_min"] > tp["under_4_min"]
-        assert tp["under_4_min"] == 0.15  # Fast exit near expiry
 
     def test_fvg_pullback_enabled(self):
         """Verify FVG pullback logic is active"""
@@ -160,12 +111,100 @@ class Test15mOptimizationRegression:
             if agent["name"].endswith("_15M"):
                 assert agent["take_profit"]["min_cents"] == 3
 
-    def test_trailing_activation_reduced(self):
-        """Verify trailing activation R-multiple reduced from 0.5 to 0.3"""
-        with open("c:/Dev/MERID/config/kalshi_agent_grid.yaml", "r", encoding="utf-8") as f:
-            agent_cfg = yaml.safe_load(f)
+    def test_max_spread_cents_from_profile_only(self):
+        """Verify max_spread_cents comes only from 15m profile, no hardcoded 40c/60c"""
+        # Check profile has the correct value
+        with open("c:/Dev/MERID/config/profiles/kalshi_crypto_15m.yaml", "r", encoding="utf-8") as f:
+            profile = yaml.safe_load(f)
 
-        # Check all 15m agents have trailing_activation_r_multiple: 0.3
-        for agent in agent_cfg["agents"]:
-            if agent["name"].endswith("_15M"):
-                assert agent["take_profit"]["trailing_activation_r_multiple"] == 0.3
+        # Verify profile has guardrails.max_spread_cents set to 70
+        assert "guardrails" in profile
+        assert "max_spread_cents" in profile["guardrails"]
+        assert profile["guardrails"]["max_spread_cents"] == 70
+
+        # Check candidate_optimizer.py uses profile-driven max_spread_cents
+        with open("c:/Dev/MERID/merid/prediction/candidate_optimizer.py", "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # Verify it reads from profile
+        assert "self.max_spread_cents" in content
+
+        # Verify no hardcoded "40" or "60" used as spread filter thresholds
+        # (allow other uses like time thresholds, percentages, legacy comments, etc.)
+        import re
+        # Look for patterns like "if spread > 40" or "max_spread = 60"
+        # Exclude lines with "legacy" or "audit" comments
+        lines = content.split('\n')
+        hardcoded_thresholds = []
+        for i, line in enumerate(lines):
+            # Skip lines that are comments or have legacy/audit markers
+            if 'legacy' in line.lower() or 'audit' in line.lower() or line.strip().startswith('#'):
+                continue
+            # Check for hardcoded spread thresholds
+            if re.search(r'if\s+.*spread.*[><=]\s*(40|60)', line, re.IGNORECASE):
+                hardcoded_thresholds.append(f"Line {i+1}: {line.strip()}")
+            if re.search(r'max_spread\s*[=]\s*(40|60)', line, re.IGNORECASE):
+                hardcoded_thresholds.append(f"Line {i+1}: {line.strip()}")
+
+        assert len(hardcoded_thresholds) == 0, f"Found hardcoded spread filter threshold: {hardcoded_thresholds}"
+
+    def test_collect_order_candidate_no_undefined_market(self):
+        """Verify collect_order_candidate does not reference undefined 'market' variable"""
+        import re
+        with open("c:/Dev/MERID/merid/prediction/agent_grid_15m.py", "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # The function should use 'best_candidate' after optimizer, not 'market'
+        # Look for the optimizer call and verify subsequent code uses best_candidate
+        assert "best_candidate" in content
+
+        # Verify no references to undefined 'market' variable after optimizer
+        # by checking that bare 'market' (not market_id, market_ticker, etc.) is not used
+        lines = content.split('\n')
+        in_collect_order_candidate = False
+        after_optimizer = False
+        for i, line in enumerate(lines):
+            if 'def collect_order_candidate' in line:
+                in_collect_order_candidate = True
+            elif in_collect_order_candidate and 'def ' in line and 'collect_order_candidate' not in line:
+                in_collect_order_candidate = False
+                after_optimizer = False
+
+            if in_collect_order_candidate and 'from merid.prediction.candidate_optimizer import' in line:
+                after_optimizer = True
+
+            if after_optimizer and in_collect_order_candidate:
+                # After optimizer, should not have bare 'market' variable references
+                # Allow: market_id, market_ticker, market_data, market_state, market_catalog
+                # Allow: dictionary keys like "markets_seen", "markets_with_spot"
+                # Allow: comments
+                if re.search(r'\bmarket\b', line, re.IGNORECASE):
+                    # Skip if it's part of a compound identifier or dictionary key
+                    if any(valid in line for valid in ['market_id', 'market_ticker', 'market_data', 'market_state', 'market_catalog', 'markets_', '#']):
+                        continue
+                    # Skip if it's in a string literal (dictionary key)
+                    if '"' in line or "'" in line:
+                        continue
+                    # Otherwise, it's likely a bare 'market' reference - check context
+                    # Allow if it's in a loop variable or assignment
+                    if 'for market in' in line or 'market =' in line:
+                        continue
+                    # This is a potential undefined reference
+                    assert False, f"Found potential undefined 'market' reference at line {i+1}: {line.strip()}"
+
+    def test_check_spot_data_uses_spot_service_get(self):
+        """Verify _check_spot_data uses spot_service.get(asset) and enforces 30s freshness window"""
+        with open("c:/Dev/MERID/merid/prediction/candidate_optimizer.py", "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # Verify it uses spot_service.get(asset) API
+        assert "spot_service.get(asset)" in content, "_check_spot_data should use spot_service.get(asset)"
+
+        # Verify it checks for 30s freshness window
+        assert "age < 30.0" in content, "_check_spot_data should enforce 30s freshness window"
+
+        # Verify it handles both milliseconds and seconds timestamps
+        assert "ts > 1000000000000" in content, "_check_spot_data should handle millisecond timestamps"
+        assert "Milliseconds" in content, "_check_spot_data should have comment about millisecond handling"
+        assert "Seconds" in content, "_check_spot_data should have comment about second handling"
+

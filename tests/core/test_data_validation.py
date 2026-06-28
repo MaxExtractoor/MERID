@@ -2,7 +2,7 @@
 import pytest
 import pandas as pd
 from unittest.mock import Mock, patch
-from core.data_validation import SchemaValidator, DependencyContainer, container
+from merid.core.data_validation import SchemaValidator, DependencyContainer, container
 
 
 class TestSchemaValidator:
