@@ -254,7 +254,7 @@ import requests
 import streamlit as st
 import os
 
-API_BASE = os.getenv("KALSHI_API_BASE", "http://localhost:8011")
+API_BASE = os.getenv("KALSHI_API_BASE", os.getenv("MERID_API_BASE", "http://localhost:8011"))
 
 def display_vix_kelly_sizing():
     st.sidebar.subheader("VIX-Kelly Sizing")

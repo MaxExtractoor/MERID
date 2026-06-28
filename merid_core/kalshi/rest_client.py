@@ -118,7 +118,7 @@ class KalshiRestClient:
         if env == "demo":
             self.base_url = "https://demo-api.kalshi.co"
         elif env == "prod":
-            self.base_url = "https://api.elections.kalshi.com"
+            self.base_url = "https://external-api.kalshi.com"
         else:
             raise ValueError(f"Invalid env: {env}. Must be 'demo' or 'prod'")
         

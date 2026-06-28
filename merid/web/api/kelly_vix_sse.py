@@ -345,7 +345,7 @@ def display_kelly_vix_sse():
     placeholder = st.empty()
     
     # SSE client simulation
-    api_base = os.getenv("KALSHI_API_BASE", f"http://localhost:{os.getenv('MERID_PORT', '8011')}")
+    api_base = os.getenv("KALSHI_API_BASE", os.getenv("MERID_API_BASE", f"http://localhost:{os.getenv('MERID_PORT', '8011')}"))
     
     try:
         response = requests.get(f"{api_base}/sse/kelly-vix", stream=True, timeout=10)
