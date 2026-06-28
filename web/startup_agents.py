@@ -103,7 +103,7 @@ class OrchestratorAgentManager:
         # Grab reference to Kalshi agent grid (already started by _app_lifespan Phase 0.5).
         # The grid internally manages its own PortfolioRiskAgent — no need to duplicate.
         try:
-            from merid.prediction.agent_grid import get_agent_grid
+            from merid.prediction.agent_grid_15m import get_agent_grid
             logger.info("[GRID-STARTUP] Fetching agent grid...")
             self.kalshi_agent_grid = get_agent_grid()
             
@@ -113,9 +113,13 @@ class OrchestratorAgentManager:
                 logger.info(f"[GRID-STARTUP] Agent grid loaded with {len(agent_names)} agents: {agent_names}")
             
             if not self.kalshi_agent_grid._running:
-                logger.info("[GRID-STARTUP] Starting agent grid (fallback path)...")
-                await self.kalshi_agent_grid.start()
-                logger.info("✅ Kalshi agent grid started (fallback)")
+                # CRITICAL FIX: DISABLED legacy fallback path - production uses lifespan-based startup only
+                # The agent grid MUST be started by the FastAPI lifespan in main_15m_lean.py
+                # If the grid is not running here, it means the lifespan startup failed - do NOT start it manually
+                logger.error("[GRID-STARTUP] Agent grid not running - LIFESPAN STARTUP FAILED")
+                logger.error("[GRID-STARTUP] DO NOT start agent grid manually - this bypasses production startup")
+                logger.error("[GRID-STARTUP] Fix the lifespan startup in main_15m_lean.py instead")
+                raise RuntimeError("Agent grid not running - lifespan startup failed. Do not use legacy fallback path.")
             else:
                 logger.info("✅ Kalshi agent grid already running (started by lifespan)")
         except Exception as exc:
@@ -178,6 +182,7 @@ class OrchestratorAgentManager:
 
         # Start KalshiSocialBroadcaster — consumes kalshi:order_filled/placed/resolved events
         # PROFILE-GUARD: Skip for kalshi_crypto_15m_v2 (social broadcasting not needed for 15m crypto)
+        # LEGACY REMOVAL: social_broadcaster moved to archive/legacy/ during 15m stack cleanup
         if _profile != "kalshi_crypto_15m_v2":
             try:
                 from merid.prediction.social_broadcaster import get_social_broadcaster
@@ -193,16 +198,20 @@ class OrchestratorAgentManager:
         # PROFILE-GUARD: Skip for kalshi_crypto_15m_v2 (reflection/learning not needed for 15m crypto)
         if _profile != "kalshi_crypto_15m_v2":
             try:
-                from agents.reflection.integration import get_reflection_system
-                self.reflection_system = get_reflection_system()
+                # Import only when needed to avoid loading legacy modules
+                import agents.reflection.integration
+                self.reflection_system = agents.reflection.integration.get_reflection_system()
                 logger.info("✅ ReflectionSystem started (persistence, learning, analytics active)")
             except Exception as exc:
                 logger.warning(f"ReflectionSystem not started (non-fatal): {exc}")
         else:
             logger.info("[PROFILE-GUARD] ReflectionSystem skipped for kalshi_crypto_15m_v2 (reflection/learning not needed)")
 
-        # Start Crypto15MLane — BTC 15m primary lane via registry (MIGRATION 2026-05-15)
-        # This is the PRIMARY orchestrator component for kalshi_crypto_15m_v2
+        # Start Crypto15MLane — BTC 15m primary lane via registry
+        # NOTE: The 15m production trading stack uses loop_15m.py and agent_grid_15m.py (LeanAgent15m)
+        # Crypto15MLane is started here for API/UI compatibility (lane status endpoints, etc.)
+        # but is NOT used for production trading decisions
+        # The lane system provides backward compatibility for legacy API endpoints
         try:
             from merid.lanes.registry import get_lane_registry, build_crypto_lanes
             from merid.risk.promotion_engine import get_promotion_engine
@@ -270,6 +279,9 @@ class OrchestratorAgentManager:
                 )
             else:
                 logger.warning("Crypto15MLane (BTC_15M) not found in registry")
+        except ImportError as import_exc:
+            logger.warning(f"LaneOrchestrator not started (legacy lane system quarantined): {import_exc}")
+            self._lane_orchestrator = None
         except Exception as exc:
             logger.warning(f"LaneOrchestrator not started (non-fatal): {exc}")
             self._lane_orchestrator = None

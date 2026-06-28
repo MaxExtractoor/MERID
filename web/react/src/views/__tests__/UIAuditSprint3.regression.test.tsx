@@ -662,19 +662,7 @@ describe.skip('S4-01 — RiskAlertFeed dismiss button has type=button', () => {
   });
 });
 
-describe.skip('S4-02 — SwarmVerdictFeed uses stable composite key', () => {
-  it('does not use array index as React key', () => {
-    const src = read('components', 'SwarmVerdictFeed.tsx');
-    // Should not see key={idx} pattern
-    expect(src).not.toMatch(/key=\{idx\}/);
-  });
-
-  it('uses a composite key derived from verdict fields', () => {
-    const src = read('components', 'SwarmVerdictFeed.tsx');
-    // Should have a key built from ts + asset + timeframe
-    expect(src).toMatch(/stableKey|ts.*asset.*timeframe|asset.*timeframe.*ts/);
-  });
-});
+// SwarmVerdictFeed component removed - legacy swarm consensus not used in 15m stack
 
 describe.skip('S4-03 — useApiData query option is implemented', () => {
   it('queryRef is declared in useApiData', () => {
