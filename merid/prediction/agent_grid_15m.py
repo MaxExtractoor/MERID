@@ -1305,7 +1305,26 @@ class LeanAgent15m:
             if hasattr(market, 'close_time'):
                 close_time = market.close_time
                 now = time.time()
-                minutes_to_expiry = (close_time - now) / 60
+                
+                # Handle different close_time types (datetime, timestamp string, or float)
+                if isinstance(close_time, str):
+                    # Parse ISO string to timestamp
+                    try:
+                        from datetime import datetime
+                        if close_time.endswith('Z'):
+                            close_time = close_time.replace('Z', '+00:00')
+                        dt = datetime.fromisoformat(close_time)
+                        close_time_ts = dt.timestamp()
+                    except (ValueError, AttributeError):
+                        # Fallback to computed time
+                        close_time_ts = now + 900
+                elif isinstance(close_time, datetime):
+                    close_time_ts = close_time.timestamp()
+                else:
+                    # Assume it's already a timestamp (float/int)
+                    close_time_ts = float(close_time) if close_time else now + 900
+                
+                minutes_to_expiry = (close_time_ts - now) / 60
             
             # For 15-minute rolling markets, only reject if expired (<= 0)
             # Kalshi 15m markets roll every quarter-hour (11:00, 11:15, 11:30, 11:45)
