@@ -303,22 +303,58 @@ class TestPositionSizerSanity:
     def test_fee_aware_position_sizing(self):
         """Position sizer should account for fees in calculations."""
         from merid.event_venues.kalshi.position_sizer import PositionSizer
+        from merid.prediction.unified_edge import EdgeResult, SpotReference
+        from datetime import datetime, timezone
         
         sizer = PositionSizer()
         
+        # Create mock EdgeResult for low fee scenario
+        edge_result_low = EdgeResult(
+            edge=0.03,
+            edge_risk_adjusted=0.03,
+            edge_slippage_adjusted=0.03,
+            edge_fee_adjusted=0.03,
+            model_win_prob=0.53,
+            market_implied_prob=0.50,
+            spot_ref=SpotReference(asset="BTC", price_usd=50000.0, timestamp=datetime.now(timezone.utc), source="test"),
+            confidence=0.7,
+            metadata={},
+            raw_edge_cents=3.0,
+            spread_cost_cents=0.5,
+            fee_cost_cents=0.5,
+            net_edge_cents=2.0,
+            ev_per_contract_cents=2.0,
+        )
+        
+        # Create mock EdgeResult for high fee scenario
+        edge_result_high = EdgeResult(
+            edge=0.03,
+            edge_risk_adjusted=0.03,
+            edge_slippage_adjusted=0.03,
+            edge_fee_adjusted=0.03,
+            model_win_prob=0.53,
+            market_implied_prob=0.50,
+            spot_ref=SpotReference(asset="BTC", price_usd=50000.0, timestamp=datetime.now(timezone.utc), source="test"),
+            confidence=0.7,
+            metadata={},
+            raw_edge_cents=3.0,
+            spread_cost_cents=0.5,
+            fee_cost_cents=1.5,  # Higher fee
+            net_edge_cents=1.0,
+            ev_per_contract_cents=1.0,
+        )
+        
         # Higher fee should generally result in smaller position
         # (or at least not larger)
-        size_low_fee = sizer.compute(
+        size_low_fee = sizer.compute_from_edge_result(
             agent_name="TEST",
-            edge_pct=3.0,
-            price_cents=30,  # Lower price = lower fee drag
+            edge_result=edge_result_low,
             bankroll_cents=10000,
         )
         
-        size_high_fee = sizer.compute(
+        size_high_fee = sizer.compute_from_edge_result(
             agent_name="TEST",
-            edge_pct=3.0,
-            price_cents=55,  # Higher price = higher fee drag
+            edge_result=edge_result_high,
             bankroll_cents=10000,
         )
         
@@ -329,14 +365,32 @@ class TestPositionSizerSanity:
     def test_position_size_respects_bankroll(self):
         """Position size should never exceed reasonable fraction of bankroll."""
         from merid.event_venues.kalshi.position_sizer import PositionSizer
+        from merid.prediction.unified_edge import EdgeResult, SpotReference
+        from datetime import datetime, timezone
         
         sizer = PositionSizer()
         bankroll_cents = 10000
         
-        size = sizer.compute(
+        edge_result = EdgeResult(
+            edge=0.05,
+            edge_risk_adjusted=0.05,
+            edge_slippage_adjusted=0.05,
+            edge_fee_adjusted=0.05,
+            model_win_prob=0.55,
+            market_implied_prob=0.50,
+            spot_ref=SpotReference(asset="BTC", price_usd=50000.0, timestamp=datetime.now(timezone.utc), source="test"),
+            confidence=0.8,
+            metadata={},
+            raw_edge_cents=5.0,
+            spread_cost_cents=0.5,
+            fee_cost_cents=0.5,
+            net_edge_cents=4.0,
+            ev_per_contract_cents=4.0,
+        )
+        
+        size = sizer.compute_from_edge_result(
             agent_name="TEST",
-            edge_pct=5.0,
-            price_cents=50,
+            edge_result=edge_result,
             bankroll_cents=bankroll_cents,
         )
         
@@ -357,7 +411,13 @@ class TestBankrollResolverSanity:
     
     def test_fallback_policy_values(self):
         """Fallback policy should resolve to expected values."""
-        from merid.event_venues.kalshi.bankroll_resolver import FallbackPolicy
+        # Import from deprecated bankroll_resolver since this is testing legacy behavior
+        # The canonical BankrollServiceV2 does not use FallbackPolicy
+        # This test validates the enum values of the deprecated API
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            from merid.event_venues.kalshi.bankroll_resolver import FallbackPolicy
         
         assert FallbackPolicy.REJECT.value == "reject"
         assert FallbackPolicy.USE_LAST_KNOWN.value == "last"
@@ -366,7 +426,11 @@ class TestBankrollResolverSanity:
     
     def test_bankroll_resolution_dataclass(self):
         """BankrollResolution should store values correctly."""
-        from merid.event_venues.kalshi.bankroll_resolver import BankrollResolution
+        # Import from deprecated bankroll_resolver since this is testing legacy behavior
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            from merid.event_venues.kalshi.bankroll_resolver import BankrollResolution
         
         resolution = BankrollResolution(
             equity_usd=1000.0,

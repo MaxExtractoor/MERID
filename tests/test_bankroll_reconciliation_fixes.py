@@ -401,7 +401,7 @@ class TestBankrollCalibration:
 
     def test_kalshi_risk_config_defaults(self):
         """KalshiRiskConfig should have sensible defaults."""
-        from merid.prediction.risk.kalshi_risk_engine import KalshiRiskConfig
+        from merid.event_venues.kalshi.kalshi_risk import KalshiRiskConfig
 
         config = KalshiRiskConfig()
 

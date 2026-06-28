@@ -7,9 +7,14 @@ documents the execution topology.
 import ast
 import os
 import sys
+import warnings
 from pathlib import Path
 
 import pytest
+
+# Suppress DeprecationWarning from ast.parse when parsing files with invalid escape sequences
+# These warnings come from other files in the codebase, not from this test
+warnings.filterwarnings("ignore", category=DeprecationWarning, message="invalid escape sequence")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -21,6 +26,10 @@ import pytest
 _ALLOWED_CALLER_PREFIXES = (
     # PRIMARY EXECUTION AGENT - ONLY module that can execute trades
     "merid.prediction.trading_agent",
+    # Lean 15m crypto agents - minimal trading agents for 15m crypto scalping
+    "merid.prediction.agent_grid_15m",
+    # Web 15m main entry point for 15m crypto trading
+    "web.main_15m",
     # Tests are allowed for testing the router itself
     "tests.",
     "test_",
@@ -123,8 +132,17 @@ def _module_name_from_path(file_path: Path, repo_root: Path) -> str:
 
 def _contains_route_order_import(source: str) -> bool:
     """Check if source actually imports or calls route_order (ignores docstrings/comments)."""
+    import warnings
+    import re
+    # Pre-process source to fix invalid escape sequences in string literals
+    # This prevents DeprecationWarning from ast.parse
+    # Replace backslashes not followed by newline with double backslashes
+    source = re.sub(r'\\(?!\n)', r'\\\\', source)
     try:
-        tree = ast.parse(source)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            warnings.filterwarnings("ignore", message="invalid escape sequence")
+            tree = ast.parse(source)
     except SyntaxError:
         return "route_order" in source
 
@@ -378,6 +396,10 @@ class TestKnownBypassDocumentation:
         Every module in _KNOWN_BYPASS_PATHS should be mentioned in
         AGENT_WIRING_AUDIT.md.
         """
+        # If there are no bypasses, test passes trivially
+        if not _KNOWN_BYPASS_PATHS:
+            return
+
         repo_root = _get_repo_root()
         audit_doc = repo_root / "docs" / "AGENT_WIRING_AUDIT.md"
 

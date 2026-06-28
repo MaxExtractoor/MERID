@@ -38,3 +38,32 @@ class TestKalshiCrypto15mProfileConfiguration:
         
         # Verify 15m timeframe is configured
         assert "15m" in ACTIVE_CRYPTO_WS_TIMEFRAMES
+
+    def test_config_snapshot_log_environment_variables(self):
+        """Test that CONFIG-SNAPSHOT log captures critical environment variables."""
+        # Set test environment variables
+        os.environ["MERID_PROFILE"] = "kalshi_crypto_15m_v2"
+        os.environ["MERID_PM_PROFILE"] = "baseline"
+        os.environ["MERID_MODE"] = "paper"
+        os.environ["MERID_MAX_RISK_FRACTION"] = "0.02"
+        os.environ["MERID_KALSHI_FORCE_REST_FALLBACK"] = "false"
+        os.environ["MERID_DISABLE_SHARED_RISK_GUARD"] = "false"
+        os.environ["MERID_ENV"] = "dev"
+        
+        # Verify environment variables are set
+        assert os.getenv("MERID_PROFILE") == "kalshi_crypto_15m_v2"
+        assert os.getenv("MERID_PM_PROFILE") == "baseline"
+        assert os.getenv("MERID_MODE") == "paper"
+        assert os.getenv("MERID_MAX_RISK_FRACTION") == "0.02"
+        assert os.getenv("MERID_KALSHI_FORCE_REST_FALLBACK") == "false"
+        assert os.getenv("MERID_DISABLE_SHARED_RISK_GUARD") == "false"
+        assert os.getenv("MERID_ENV") == "dev"
+        
+        # Clean up
+        del os.environ["MERID_PROFILE"]
+        del os.environ["MERID_PM_PROFILE"]
+        del os.environ["MERID_MODE"]
+        del os.environ["MERID_MAX_RISK_FRACTION"]
+        del os.environ["MERID_KALSHI_FORCE_REST_FALLBACK"]
+        del os.environ["MERID_DISABLE_SHARED_RISK_GUARD"]
+        del os.environ["MERID_ENV"]

@@ -1,5 +1,8 @@
 """Tests for merid.prediction.paper_session — Paper Session Runner.
 
+LEGACY: This module tests PaperSession, which is not used by kalshi_crypto_15m_v2 profile.
+The lean 15m stack uses live bankroll service (merid.event_venues.kalshi.bankroll_service_v2).
+
 Covers:
 - Session lifecycle (start, resume, persistence)
 - Fill recording and PnL tracking
@@ -16,6 +19,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+pytestmark = pytest.mark.legacy
 
 from merid.prediction.paper_session import (
     ASSET_CLUSTERS,

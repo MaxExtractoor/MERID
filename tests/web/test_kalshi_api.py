@@ -3,12 +3,11 @@
 import pytest
 from starlette.testclient import TestClient
 
-from web.main import create_app
+from web.main_15m_lean import app
 
 
 @pytest.fixture
 def client():
-    app = create_app()
     return TestClient(app)
 
 

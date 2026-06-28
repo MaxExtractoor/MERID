@@ -192,8 +192,9 @@ class TestRiskEngineEdgeCalculation(unittest.TestCase):
 
     def test_min_edge_for_price_decimal_arithmetic(self):
         """Edge calculations should not cast Decimal to float."""
-        from merid.prediction.risk.kalshi_risk_engine import KalshiRiskEngine, KalshiRiskConfig
-        
+        # P2: Use venue config instead of deprecated PM config
+        from merid.event_venues.kalshi.kalshi_risk import KalshiRiskEngine, KalshiRiskConfig
+
         engine = KalshiRiskEngine(KalshiRiskConfig())
         
         # Should not raise TypeError or lose precision

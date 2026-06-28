@@ -16,6 +16,8 @@ import asyncio
 from decimal import Decimal
 from unittest.mock import MagicMock, AsyncMock, patch
 
+pytestmark = pytest.mark.kalshi_15m
+
 
 class TestP0PositionValueMultiplier:
     """P0-1: max_position_value should not have *10 multiplier."""
@@ -140,36 +142,50 @@ class TestP0PaginationBounds:
     @pytest.mark.asyncio
     async def test_pagination_respects_max_pages(self):
         """Verify pagination loops break after max_pages even with persistent cursor."""
-        from merid.event_venues.kalshi.client import KalshiVenueClient
-        from merid.event_venues.kalshi.models import KalshiConfig
-        
-        config = KalshiConfig(email="test@test.com", password="test", use_demo=True)
-        client = KalshiVenueClient(config)
-        
-        # Mock _request_with_resilience to always return a cursor (simulating API bug)
-        call_count = 0
-        async def mock_request(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            mock_result = MagicMock()
-            mock_result.success = True
-            mock_result.latency_ms = 10
-            mock_result.retries = 0
-            # Always return cursor to test max_pages limit
-            mock_result.data = {
-                "history": [],
-                "cursor": f"page_{call_count}"  # Never-ending cursor
-            }
-            return mock_result
-        
-        client._request_with_resilience = mock_request
-        
-        # This would hang forever with while True, but should complete with max_pages
-        result = await client.get_portfolio_history(limit=100)
-        
-        # Should have stopped at max_pages (50) not continued indefinitely
-        assert call_count <= 50, f"Pagination made {call_count} calls, expected <= 50"
-        assert result.success is True
+        # Mock all profile-related imports to prevent bankroll service timeout
+        with patch('merid.event_venues.kalshi.client._load_kalshi_settings', MagicMock()):
+            with patch('merid.event_venues.kalshi.client.get_circuit_breaker', MagicMock()):
+                with patch('merid.event_venues.kalshi.client_public.KalshiPublicDataClient', MagicMock()):
+                    with patch('merid.risk.profiles.crypto_15m_profile.Crypto15mProfileAdapter', MagicMock()):
+                        with patch('merid.event_venues.kalshi.bankroll_service_v2.get_bankroll_service', AsyncMock(return_value=MagicMock())):
+                            from merid.event_venues.kalshi.client import KalshiVenueClient
+                            from merid.event_venues.kalshi.kalshi_config import KalshiConfig
+                            
+                            # Use unified config format
+                            config = KalshiConfig(
+                                env="demo",
+                                rest_base_url="https://external-api.demo.kalshi.co/trade-api/v2",
+                                ws_base_url="wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2",
+                                api_key_id="test_key",
+                                private_key_path="/path/to/key.pem",
+                                private_key_pem="test_pem"
+                            )
+                            client = KalshiVenueClient(config)
+                            
+                            # Mock _request_with_resilience to always return a cursor (simulating API bug)
+                            call_count = 0
+                            async def mock_request(*args, **kwargs):
+                                nonlocal call_count
+                                call_count += 1
+                                mock_result = MagicMock()
+                                mock_result.success = True
+                                mock_result.latency_ms = 10
+                                mock_result.retries = 0
+                                # Always return cursor to test max_pages limit
+                                mock_result.data = {
+                                    "history": [],
+                                    "cursor": f"page_{call_count}"  # Never-ending cursor
+                                }
+                                return mock_result
+                            
+                            client._request_with_resilience = mock_request
+                            
+                            # This would hang forever with while True, but should complete with max_pages
+                            result = await client.get_portfolio_history(limit=100)
+                            
+                            # Should have stopped at max_pages (50) not continued indefinitely
+                            assert call_count <= 50, f"Pagination made {call_count} calls, expected <= 50"
+                            assert result.success is True
 
 
 class TestP0OrderGroupRollback:

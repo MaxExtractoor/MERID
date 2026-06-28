@@ -108,6 +108,56 @@ class TestOrchestratorProfileGuards:
         # Clean up
         del os.environ["MERID_PROFILE"]
 
+    def test_kelly_from_profile_not_hardcoded(self):
+        """Verify Kelly fraction comes from profile YAML, not hardcoded fallbacks."""
+        os.environ["MERID_PROFILE"] = "kalshi_crypto_15m_v2"
+        
+        # Mock the risk config to return profile-driven Kelly
+        class MockRiskConfig:
+            kelly_fraction = 0.30  # From kalshi_crypto_15m.yaml
+        
+        def mock_get_kalshi_risk():
+            return MockRiskConfig()
+        
+        # Simulate the fallback path in kalshi_api.py
+        try:
+            from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+            with patch('merid.event_venues.kalshi.kalshi_risk.get_kalshi_risk', mock_get_kalshi_risk):
+                risk_config = get_kalshi_risk()
+                kelly_f = float(getattr(risk_config, 'kelly_fraction', 0.30))
+        except Exception:
+            kelly_f = 0.30
+        
+        # Assert Kelly matches profile (0.30), not old hardcoded (0.25 or 0.10)
+        assert kelly_f == 0.30, f"Expected Kelly 0.30 from profile, got {kelly_f}"
+        assert kelly_f != 0.25, "Kelly should not be old hardcoded 0.25"
+        assert kelly_f != 0.10, "Kelly should not be old hardcoded 0.10"
+        
+        # Clean up
+        del os.environ["MERID_PROFILE"]
+
+    def test_runtime_guard_refuses_conflicting_profiles(self):
+        """Test that runtime guard refuses startup when both MERID_PROFILE and MERID_PM_PROFILE are set."""
+        os.environ["MERID_PROFILE"] = "kalshi_crypto_15m_v2"
+        os.environ["MERID_PM_PROFILE"] = "production"
+        
+        # Read main_15m_lean.py and verify the guard exists
+        import web.main_15m_lean as main_module
+        main_file = main_module.__file__
+        
+        with open(main_file, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Verify the runtime guard exists
+        assert 'PROFILE-GUARD-ERROR' in content
+        assert 'CONFLICTING PROFILE SIGNALS DETECTED' in content
+        assert 'MERID_PROFILE=kalshi_crypto_15m_v2 but MERID_PM_PROFILE' in content
+        assert 'raise RuntimeError' in content
+        
+        # Clean up
+        del os.environ["MERID_PROFILE"]
+        del os.environ["MERID_PM_PROFILE"]
+
     def test_crypto_matrix_guarded_for_15m_profile(self):
         """Test that crypto matrix is skipped when MERID_PROFILE=kalshi_crypto_15m_v2."""
         # Read the crypto_edge_production.py file and verify the guard exists

@@ -26,16 +26,16 @@ def reset_risk_singleton():
 def mock_kalshi_api():
     with respx.mock(assert_all_called=False) as mock:
         # Auth mock
-        mock.post("https://api.elections.kalshi.com/trade-api/v2/login").mock(
+        mock.post("https://external-api.kalshi.com/trade-api/v2/login").mock(
             return_value=Response(200, json={"token": "test_token", "member_id": "test_member"})
         )
         # Balance mock
-        mock.get("https://api.elections.kalshi.com/trade-api/v2/portfolio/balance").mock(
+        mock.get("https://external-api.kalshi.com/trade-api/v2/portfolio/balance").mock(
             return_value=Response(200, json={"balance": {"balance": 100000, "locked_balance": 0}})
         )
         # Markets mock - ensure URL matches KalshiConfig defaults
         # Use realistic Kalshi ticker format (KXBTC15M-...) for proper asset inference
-        mock.get("https://api.elections.kalshi.com/trade-api/v2/markets").mock(
+        mock.get("https://external-api.kalshi.com/trade-api/v2/markets").mock(
             return_value=Response(200, json={
                 "markets": [
                     {
@@ -57,7 +57,7 @@ def mock_kalshi_api():
             })
         )
         # Market detail mock
-        mock.get("https://api.elections.kalshi.com/trade-api/v2/markets/KXBTC15M-25DEC-T100000").mock(
+        mock.get("https://external-api.kalshi.com/trade-api/v2/markets/KXBTC15M-25DEC-T100000").mock(
             return_value=Response(200, json={
                 "market": {
                     "ticker": "KXBTC15M-25DEC-T100000",
@@ -142,7 +142,7 @@ async def test_agent_grid_archetypes_integration(mock_kalshi_api):
     
     # Update mock for this specific test
     # Use realistic Kalshi ticker format (KXBTC15M-...) so strike selector can infer asset
-    mock_kalshi_api.get("https://api.elections.kalshi.com/trade-api/v2/markets").mock(
+    mock_kalshi_api.get("https://external-api.kalshi.com/trade-api/v2/markets").mock(
         return_value=Response(200, json={
             "markets": [
                 {

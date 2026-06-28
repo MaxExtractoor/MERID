@@ -1,5 +1,8 @@
 """End-to-end coverage tests for Kalshi crypto integration.
 
+LEGACY: This module tests PaperSession, which is not used by kalshi_crypto_15m_v2 profile.
+The lean 15m stack uses live bankroll service (merid.event_venues.kalshi.bankroll_service_v2).
+
 Parametrized test suite covering all asset/timeframe combinations:
 - Assets: BTC, ETH, SOL, XRP, DOGE
 - Timeframes: 15m, hourly, daily, weekly, one-time
@@ -15,6 +18,8 @@ Verifies:
 """
 
 import pytest
+
+pytestmark = pytest.mark.legacy
 import asyncio
 from datetime import datetime, timezone
 from typing import Dict, Any, List

@@ -1,5 +1,8 @@
 """Regression tests for the 8 bugs identified in the prediction market risk audit.
 
+LEGACY: This module tests PaperSession, which is not used by kalshi_crypto_15m_v2 profile.
+The lean 15m stack uses live bankroll service (merid.event_venues.kalshi.bankroll_service_v2).
+
 BUG-01: winning_trades double-incremented in record_settlement
 BUG-02: get_portfolio_stats mixes realized+unrealized under total_pnl
 BUG-03: fees excluded from balance identity invariant
@@ -21,6 +24,8 @@ from typing import Any, Dict, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+pytestmark = pytest.mark.legacy
 
 PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if PROJECT_ROOT not in sys.path:

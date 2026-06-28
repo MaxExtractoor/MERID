@@ -100,7 +100,7 @@ class TestLivePmGate(unittest.TestCase):
         t = KalshiContinuousTrader.__new__(KalshiContinuousTrader)
         t.config = TraderConfig(dry_run=True)
         t._guardian = None  # not wired in __new__ bypass
-        t._base_url = "https://api.elections.kalshi.com/trade-api/v2"  # required by _live_api_orders_allowed
+        t._base_url = "https://external-api.kalshi.com/trade-api/v2"  # required by _live_api_orders_allowed
         with patch.dict(os.environ, {"KALSHI_ENV": "live"}, clear=False):
             ok, _ = t._live_api_orders_allowed()
         self.assertTrue(ok)

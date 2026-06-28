@@ -144,14 +144,12 @@ class TestKalshi15mEntrypoint:
         mock_agent_grid = MagicMock()
         mock_agent_grid._agents = []
         
-        mock_venue_adapter = MagicMock()
         mock_bankroll_service = MagicMock()
         mock_risk_config = MagicMock()
         
         # Create loop instance
         loop = Kalshi15mLoop(
             agent_grid=mock_agent_grid,
-            venue_adapter=mock_venue_adapter,
             bankroll_service=mock_bankroll_service,
             risk_config=mock_risk_config,
             cadence_seconds=5.0,
@@ -175,13 +173,11 @@ class TestKalshi15mEntrypoint:
         mock_agent_grid._agents = [mock_agent]
         mock_agent_grid.run_cycle = AsyncMock()
         
-        mock_venue_adapter = MagicMock()
         mock_bankroll_service = MagicMock()
         mock_risk_config = MagicMock()
         
         loop = Kalshi15mLoop(
             agent_grid=mock_agent_grid,
-            venue_adapter=mock_venue_adapter,
             bankroll_service=mock_bankroll_service,
             risk_config=mock_risk_config,
             cadence_seconds=5.0,
@@ -206,7 +202,6 @@ class TestKalshi15mEntrypoint:
         
         loop = Kalshi15mLoop(
             agent_grid=mock_agent_grid,
-            venue_adapter=MagicMock(),
             bankroll_service=MagicMock(),
             risk_config=MagicMock(),
             cadence_seconds=5.0,
@@ -292,7 +287,6 @@ class TestKalshi15mEntrypoint:
         
         loop = Kalshi15mLoop(
             agent_grid=mock_agent_grid,
-            venue_adapter=MagicMock(),
             bankroll_service=MagicMock(),
             risk_config=MagicMock(),
             cadence_seconds=0.1,  # Fast cadence for testing
@@ -321,7 +315,6 @@ class TestKalshi15mEntrypoint:
         
         loop = Kalshi15mLoop(
             agent_grid=mock_agent_grid,
-            venue_adapter=MagicMock(),
             bankroll_service=MagicMock(),
             risk_config=MagicMock(),
             cadence_seconds=0.1,

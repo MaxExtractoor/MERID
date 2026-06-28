@@ -39,6 +39,18 @@ class TestKalshiCrypto15mRiskEnvelope:
             agent_max_orders_per_window=10,
             agent_max_yes_position=3,
             agent_max_no_position=3,
+            max_cycle_risk_pct=0.025,
+            daily_loss_enabled=True,
+            peak_equity_usd=50.0,
+            current_equity_usd=50.0,
+            current_drawdown_pct=0.0,
+            kelly_fraction=0.05,
+            adaptive_risk_bands=[],
+            per_trade_risk_multiplier=1.0,
+            is_halted=False,
+            current_risk_band=None,
+            resume_if_drawdown_improves=False,
+            asset_depth_thresholds={"BTC": {"min_depth_yes": 5, "min_depth_no": 5}},
         )
         assert envelope.profile_capital_usd == 50.0
         assert envelope.live_bankroll_usd == 50.0
@@ -54,17 +66,119 @@ class TestKalshiCrypto15mRiskEnvelope:
         assert envelope.agent_max_yes_position == 3
         assert envelope.agent_max_no_position == 3
 
+    def test_bankroll_tiered_per_trade_risk_small_bankroll(self):
+        """Test that small bankroll (<$100) uses 4% per-trade risk."""
+        envelope = KalshiCrypto15mRiskEnvelope(
+            profile_capital_usd=50.0,
+            live_bankroll_usd=50.0,  # Small bankroll
+            max_single_order_notional_usd=2.5,
+            max_total_notional_usd=15.0,
+            max_concurrent_trades=3,
+            agent_max_notional_usd=1.5,
+            asset_max_notional_usd={"BTC": 4.0, "ETH": 3.0, "SOL": 2.5, "XRP": 2.5, "DOGE": 2.0},
+            max_daily_loss_usd=200.0,
+            drawdown_halt_pct=0.10,
+            drawdown_unwind_pct=0.15,
+            agent_max_orders_per_window=10,
+            agent_max_yes_position=3,
+            agent_max_no_position=3,
+            max_cycle_risk_pct=0.025,
+            daily_loss_enabled=True,
+            peak_equity_usd=50.0,
+            current_equity_usd=50.0,
+            current_drawdown_pct=0.0,
+            kelly_fraction=0.05,
+            adaptive_risk_bands=[],
+            per_trade_risk_multiplier=1.0,
+            is_halted=False,
+            current_risk_band=None,
+            resume_if_drawdown_improves=False,
+            asset_depth_thresholds={"BTC": {"min_depth_yes": 5, "min_depth_no": 5}},
+        )
+        # Small bankroll should use 4% per-trade risk
+        assert envelope.get_per_trade_risk_pct() == 0.04
+
+    def test_bankroll_tiered_per_trade_risk_medium_bankroll(self):
+        """Test that medium bankroll ($100-$1k) uses 1.5% per-trade risk."""
+        envelope = KalshiCrypto15mRiskEnvelope(
+            profile_capital_usd=500.0,
+            live_bankroll_usd=500.0,  # Medium bankroll
+            max_single_order_notional_usd=25.0,
+            max_total_notional_usd=150.0,
+            max_concurrent_trades=3,
+            agent_max_notional_usd=15.0,
+            asset_max_notional_usd={"BTC": 40.0, "ETH": 30.0, "SOL": 25.0, "XRP": 25.0, "DOGE": 20.0},
+            max_daily_loss_usd=2000.0,
+            drawdown_halt_pct=0.10,
+            drawdown_unwind_pct=0.15,
+            agent_max_orders_per_window=10,
+            agent_max_yes_position=3,
+            agent_max_no_position=3,
+            max_cycle_risk_pct=0.025,
+            daily_loss_enabled=True,
+            peak_equity_usd=500.0,
+            current_equity_usd=500.0,
+            current_drawdown_pct=0.0,
+            kelly_fraction=0.05,
+            adaptive_risk_bands=[],
+            per_trade_risk_multiplier=1.0,
+            is_halted=False,
+            current_risk_band=None,
+            resume_if_drawdown_improves=False,
+            asset_depth_thresholds={"BTC": {"min_depth_yes": 5, "min_depth_no": 5}},
+        )
+        # Medium bankroll should use 1.5% per-trade risk
+        assert envelope.get_per_trade_risk_pct() == 0.015
+
+    def test_bankroll_tiered_per_trade_risk_large_bankroll(self):
+        """Test that large bankroll (>$1k) uses 0.8% per-trade risk."""
+        envelope = KalshiCrypto15mRiskEnvelope(
+            profile_capital_usd=5000.0,
+            live_bankroll_usd=5000.0,  # Large bankroll
+            max_single_order_notional_usd=250.0,
+            max_total_notional_usd=1500.0,
+            max_concurrent_trades=3,
+            agent_max_notional_usd=150.0,
+            asset_max_notional_usd={"BTC": 400.0, "ETH": 300.0, "SOL": 250.0, "XRP": 250.0, "DOGE": 200.0},
+            max_daily_loss_usd=20000.0,
+            drawdown_halt_pct=0.10,
+            drawdown_unwind_pct=0.15,
+            agent_max_orders_per_window=10,
+            agent_max_yes_position=3,
+            agent_max_no_position=3,
+            max_cycle_risk_pct=0.025,
+            daily_loss_enabled=True,
+            peak_equity_usd=5000.0,
+            current_equity_usd=5000.0,
+            current_drawdown_pct=0.0,
+            kelly_fraction=0.05,
+            adaptive_risk_bands=[],
+            per_trade_risk_multiplier=1.0,
+            is_halted=False,
+            current_risk_band=None,
+            resume_if_drawdown_improves=False,
+            asset_depth_thresholds={"BTC": {"min_depth_yes": 5, "min_depth_no": 5}},
+        )
+        # Large bankroll should use 0.8% per-trade risk
+        assert envelope.get_per_trade_risk_pct() == 0.008
+
     @patch.dict("os.environ", {"MERID_PROFILE": "kalshi_crypto_15m_v2"})
-    def test_compute_envelope_uses_profile_capital_when_nonzero(self):
-        """Test that envelope uses profile capital when capital_usd > 0."""
-        # Compute envelope with profile capital_usd=50.0
+    @patch("merid.event_venues.kalshi.bankroll_service_v2.get_equity_for_risk_calc_sync")
+    def test_compute_envelope_uses_live_bankroll_when_profile_capital_zero(self, mock_bankroll):
+        """Test that envelope uses live bankroll when profile capital_usd is 0."""
+        # Mock bankroll service to return $50
+        mock_bankroll.return_value = 50.0
+        
+        # Compute envelope with profile capital_usd=0 (uses live bankroll)
         envelope = get_kalshi_crypto_15m_risk_envelope()
 
-        # Verify profile capital used (50.0 from kalshi_crypto_15m.yaml)
-        assert envelope.profile_capital_usd == 50.0
-        # Verify max_single_order derived from 5% of profile capital
+        # Verify profile capital is 0 (uses live bankroll instead)
+        assert envelope.profile_capital_usd == 0.0
+        # Verify live bankroll used ($50 from mock)
+        assert envelope.live_bankroll_usd == 50.0
+        # Verify max_single_order derived from 5% of live bankroll
         assert envelope.max_single_order_notional_usd == 2.5  # 5% of $50
-        # Verify max_total_notional derived from 30% of profile capital
+        # Verify max_total_notional derived from 30% of live bankroll
         assert envelope.max_total_notional_usd == 15.0  # 30% of $50
         # Verify max_concurrent_trades from profile
         assert envelope.max_concurrent_trades == 3
@@ -136,6 +250,72 @@ class TestNoLegacyRiskConfigImports:
         # PM config should not be imported
         if "merid.prediction.risk.kalshi_risk_engine" in sys.modules:
             pytest.skip("PM risk config already imported by other tests")
+
+
+class TestEdgeBandConfiguration:
+    """Test that edge band thresholds are lowered for small bankroll regime."""
+
+    def test_edge_bands_lowered_for_small_bankroll(self):
+        """Test that edge bands use lowered thresholds for increased throughput."""
+        import yaml
+        
+        # Load profile config (UTF-8 encoding for Unicode characters)
+        with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
+            profile_config = yaml.safe_load(f)
+        
+        edge_bands = profile_config.get('edge_bands', {})
+        
+        # Verify watch band: 1-2% (lowered from 2-4%)
+        assert edge_bands['watch_band']['min_edge_pct'] == 0.01, \
+            "Watch band min edge should be 1% (lowered from 2%)"
+        assert edge_bands['watch_band']['max_edge_pct'] == 0.02, \
+            "Watch band max edge should be 2% (lowered from 4%)"
+        assert edge_bands['watch_band']['action'] == "log_only"
+        assert edge_bands['watch_band']['kelly_multiplier'] == 0.0
+        
+        # Verify small band: 2-4% (lowered from 4-6%)
+        assert edge_bands['small_band']['min_edge_pct'] == 0.02, \
+            "Small band min edge should be 2% (lowered from 4%)"
+        assert edge_bands['small_band']['max_edge_pct'] == 0.04, \
+            "Small band max edge should be 4% (lowered from 6%)"
+        assert edge_bands['small_band']['action'] == "trade_small"
+        assert edge_bands['small_band']['kelly_multiplier'] == 0.25
+        
+        # Verify standard band: ≥4% (lowered from ≥6%)
+        assert edge_bands['standard_band']['min_edge_pct'] == 0.04, \
+            "Standard band min edge should be 4% (lowered from 6%)"
+        assert edge_bands['standard_band']['max_edge_pct'] == 1.0, \
+            "Standard band max edge should be unlimited (1.0)"
+        assert edge_bands['standard_band']['action'] == "trade_standard"
+        assert edge_bands['standard_band']['kelly_multiplier'] == 0.50
+
+    def test_min_post_fee_edge_lowered(self):
+        """Test that min_post_fee_edge is lowered to 2%."""
+        import yaml
+        
+        # Load profile config (UTF-8 encoding for Unicode characters)
+        with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
+            profile_config = yaml.safe_load(f)
+        
+        guardrails = profile_config.get('guardrails', {})
+        
+        # Verify min_post_fee_edge: 2% (lowered from 4%)
+        assert guardrails['min_post_fee_edge'] == 0.02, \
+            "Min post-fee edge should be 2% (lowered from 4%)"
+
+    def test_strategy_policy_min_edge_lowered(self):
+        """Test that strategy_policy min_edge is lowered to 2%."""
+        import yaml
+        
+        # Load profile config (UTF-8 encoding for Unicode characters)
+        with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
+            profile_config = yaml.safe_load(f)
+        
+        strategy_policy = profile_config.get('strategy_policy', {})
+        
+        # Verify min_edge: 2% (lowered from 4%)
+        assert strategy_policy['min_edge'] == 0.02, \
+            "Strategy policy min edge should be 2% (lowered from 4%)"
 
 
 class TestAgentSeriesTickerConsistency:

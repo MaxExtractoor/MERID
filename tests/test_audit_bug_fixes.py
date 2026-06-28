@@ -1,5 +1,8 @@
 """Regression tests for the 10 high-risk bugs found in the audit.
 
+LEGACY: This module tests PaperSession, which is not used by kalshi_crypto_15m_v2 profile.
+The lean 15m stack uses live bankroll service (merid.event_venues.kalshi.bankroll_service_v2).
+
 BUG-01  Stop-loss retains position when close-order fails
 BUG-02  Paper PnL deferred to settlement, not Bernoulli draw at fill
 BUG-03  record_order not called for paper fills (notional stays correct)
@@ -23,6 +26,8 @@ from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+pytestmark = pytest.mark.legacy
 
 
 # ---------------------------------------------------------------------------

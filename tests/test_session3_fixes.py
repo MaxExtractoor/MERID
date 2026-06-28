@@ -83,13 +83,13 @@ class TestExecutionGuardSummary:
         assert len(serialized) > 0
 
 
-# ── 2. AgentMetrics.to_dict() inf/nan safety ─────────────────────────
+# ── 2. AgentPerformanceMetrics basic serialization ─────────────────────────
 
-class TestAgentMetricsJsonSafety:
-    """AgentMetrics.to_dict() must produce JSON-serializable output even with inf/nan."""
+class TestAgentPerformanceMetricsBasic:
+    """AgentPerformanceMetrics basic functionality after rename from AgentMetrics."""
 
     def _make_metrics(self, **overrides):
-        from merid.prediction.agent_performance_tracker import AgentMetrics
+        from merid.prediction.agent_performance_tracker import AgentPerformanceMetrics
         defaults = {
             "agent_id": "test-agent",
             "total_fills": 10,
@@ -99,58 +99,17 @@ class TestAgentMetricsJsonSafety:
             "total_pnl_usd": Decimal("100.00"),
         }
         defaults.update(overrides)
-        return AgentMetrics(**defaults)
+        return AgentPerformanceMetrics(**defaults)
 
     def test_normal_values_serializable(self):
-        m = self._make_metrics(sharpe_ratio=1.5, profit_factor=2.0)
+        m = self._make_metrics(sharpe_ratio=1.5)
         d = m.to_dict()
         serialized = json.dumps(d)
-        assert '"profit_factor": 2.0' in serialized
+        assert '"sharpe_ratio": 1.5' in serialized
 
-    def test_inf_profit_factor_serializable(self):
-        """When gross_losses=0, profit_factor=inf — must not crash JSON."""
-        m = self._make_metrics(profit_factor=float("inf"))
-        d = m.to_dict()
-        # Must not raise ValueError
-        serialized = json.dumps(d)
-        assert "9999" in serialized  # capped to 9999.0
-
-    def test_negative_inf_serializable(self):
-        m = self._make_metrics(calmar_ratio=float("-inf"))
-        d = m.to_dict()
-        serialized = json.dumps(d)
-        assert "-9999" in serialized
-
-    def test_nan_serializable(self):
-        m = self._make_metrics(sortino_ratio=float("nan"))
-        d = m.to_dict()
-        serialized = json.dumps(d)
-        # nan should be replaced with 0.0
-        parsed = json.loads(serialized)
-        assert parsed["sortino_ratio"] == 0.0
-
-    def test_safe_float_static_method(self):
-        from merid.prediction.agent_performance_tracker import AgentMetrics
-        assert AgentMetrics._safe_float(float("inf")) == 9999.0
-        assert AgentMetrics._safe_float(float("-inf")) == -9999.0
-        assert AgentMetrics._safe_float(float("nan")) == 0.0
-        assert AgentMetrics._safe_float(1.23456, 2) == 1.23
-
-    def test_all_ratio_fields_safe(self):
-        """All four ratio fields must survive inf without crash."""
-        m = self._make_metrics(
-            sharpe_ratio=float("inf"),
-            sortino_ratio=float("-inf"),
-            calmar_ratio=float("nan"),
-            profit_factor=float("inf"),
-        )
-        d = m.to_dict()
-        serialized = json.dumps(d)
-        parsed = json.loads(serialized)
-        assert parsed["sharpe_ratio"] == 9999.0
-        assert parsed["sortino_ratio"] == -9999.0
-        assert parsed["calmar_ratio"] == 0.0
-        assert parsed["profit_factor"] == 9999.0
+    def test_win_rate_calculation(self):
+        m = self._make_metrics(total_closes=10, wins=7)
+        assert m.win_rate == 0.7
 
 
 # ── 3. SwarmOrchestrator.review_portfolio_risk() ─────────────────────

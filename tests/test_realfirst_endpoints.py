@@ -1,6 +1,9 @@
 """
 Integration tests for "real-first, stub-fallback" endpoints.
 
+LEGACY: This module tests AgentRegistry, which is not used by kalshi_crypto_15m_v2 profile.
+The lean 15m stack uses agent_grid_15m for agent management.
+
 Each test seeds the underlying engine/cache with a tiny fixture, hits the
 endpoint via the shared ``missing_endpoints_client`` fixture, and asserts:
   1. ``_stub`` is absent (real data path taken)
@@ -18,6 +21,8 @@ from datetime import datetime
 from unittest.mock import patch, MagicMock
 
 import pytest
+
+pytestmark = pytest.mark.legacy
 
 
 @pytest.fixture(autouse=True)
