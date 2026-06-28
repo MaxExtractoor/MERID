@@ -1232,9 +1232,9 @@ class LeanAgent15m:
                         
                         if market_state:
                             # Create MinimalMarket wrapper for compatibility
-                            # Use close_time from market state if available, otherwise compute from ticker
-                            close_time_ts = getattr(market_state, 'close_time', 0)
-                            if close_time_ts == 0:
+                            # Use expiration_time from market state if available, otherwise compute from ticker
+                            close_time_ts = getattr(market_state, 'expected_expiration_time', None)
+                            if close_time_ts is None:
                                 # Fallback: compute close_time from current time + 15 minutes
                                 close_time_ts = time.time() + 900
                             
