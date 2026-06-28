@@ -5,7 +5,6 @@ import { DataAgeBadge } from '../components/DataAgeBadge';
 import DataFreshnessPanel from '../components/DataFreshnessPanel';
 import ExplainabilityTimeline from '../components/ExplainabilityTimeline';
 import TickTimeline from '../components/TickTimeline';
-import TelegramLogViewer from '../components/TelegramLogViewer';
 import AlertHistoryPanel from '../components/AlertHistoryPanel';
 import TradingHaltBanner from '../components/TradingHaltBanner';
 import ModeSafetyPanel from '../components/ModeSafetyPanel';
@@ -13,6 +12,7 @@ import SessionLogPanel from '../components/SessionLogPanel';
 import CryptoAlertStatusPanel from '../components/CryptoAlertStatusPanel';
 import SpotBasisPanel from '../components/SpotBasisPanel';
 import ContractHealthPanel from '../components/ContractHealthPanel';
+import { Kalshi15mAlignmentPanel, Kalshi15mHealthPanel, Kalshi15mShadowModePanel, Kalshi15mPreflightCheck } from '../components';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import type { OperatorRiskState } from '../types/risk';
@@ -394,6 +394,18 @@ export default function OperatorDashboard() {
       {/* Crypto Alert Router */}
       <CryptoAlertStatusPanel />
 
+      {/* 15m Kalshi Alignment & Health */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <Kalshi15mAlignmentPanel />
+        <Kalshi15mHealthPanel />
+      </div>
+
+      {/* 15m Shadow Mode */}
+      <Kalshi15mShadowModePanel />
+
+      {/* 15m Pre-Flight Check */}
+      <Kalshi15mPreflightCheck />
+
       {/* Spot / Kalshi Basis Monitor */}
       <SpotBasisPanel />
 
@@ -412,8 +424,56 @@ export default function OperatorDashboard() {
       {/* Session Log */}
       <SessionLogPanel />
 
-      {/* Telegram Log */}
-      <TelegramLogViewer />
+      {/* Operator Runbooks */}
+      <div className="bg-slate-900 rounded-xl border border-slate-800 p-6">
+        <h3 className="text-lg font-semibold text-white mb-4">Operator Runbooks</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          <a
+            href="https://docs.kalshi.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="p-3 bg-slate-800/50 rounded-lg border border-slate-700 hover:border-slate-600 transition-colors"
+          >
+            <div className="text-sm font-medium text-white">Kalshi API Documentation</div>
+            <div className="text-xs text-slate-500 mt-1">Official Kalshi API reference</div>
+          </a>
+          <a
+            href="/docs/15m-stack-overview"
+            className="p-3 bg-slate-800/50 rounded-lg border border-slate-700 hover:border-slate-600 transition-colors"
+          >
+            <div className="text-sm font-medium text-white">15m Stack Overview</div>
+            <div className="text-xs text-slate-500 mt-1">Architecture and invariants</div>
+          </a>
+          <a
+            href="/docs/troubleshooting"
+            className="p-3 bg-slate-800/50 rounded-lg border border-slate-700 hover:border-slate-600 transition-colors"
+          >
+            <div className="text-sm font-medium text-white">Troubleshooting Guide</div>
+            <div className="text-xs text-slate-500 mt-1">Common issues and solutions</div>
+          </a>
+          <a
+            href="/docs/risk-management"
+            className="p-3 bg-slate-800/50 rounded-lg border border-slate-700 hover:border-slate-600 transition-colors"
+          >
+            <div className="text-sm font-medium text-white">Risk Management</div>
+            <div className="text-xs text-slate-500 mt-1">Kill switches and limits</div>
+          </a>
+          <a
+            href="/docs/deployment"
+            className="p-3 bg-slate-800/50 rounded-lg border border-slate-700 hover:border-slate-600 transition-colors"
+          >
+            <div className="text-sm font-medium text-white">Deployment Procedures</div>
+            <div className="text-xs text-slate-500 mt-1">Live/shadow promotions</div>
+          </a>
+          <a
+            href="/docs/monitoring"
+            className="p-3 bg-slate-800/50 rounded-lg border border-slate-700 hover:border-slate-600 transition-colors"
+          >
+            <div className="text-sm font-medium text-white">Monitoring & Alerts</div>
+            <div className="text-xs text-slate-500 mt-1">Metrics and dashboards</div>
+          </a>
+        </div>
+      </div>
 
     </div>
   );

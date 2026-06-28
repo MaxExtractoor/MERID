@@ -23,7 +23,8 @@ export type DiscoverTab = "focus" | "universe" | "trending";
 export type AnalyzeView = "analyze-sentiment" | "analyze-vol";
 
 // Stage 3: CONSENSUS - Swarm Intelligence
-export type ConsensusView = "consensus-swarm" | "consensus-performance" | "consensus-calibration";
+// LEGACY REMOVAL: consensus-swarm removed - swarm consensus not used in 15m stack
+export type ConsensusView = "consensus-performance" | "consensus-calibration";
 
 // Stage 4: SIZE - Position Sizing (consolidated into unified SizeView)
 export type SizeView = "size";
@@ -62,7 +63,6 @@ export type LegacyView =
   | "positions"
   | "orders"
   | "kalshi-grid"
-  | "swarm-consensus"
   | "kalshi-performance"
   | "calibration-dashboard"
   | "lane-control"
@@ -82,7 +82,8 @@ export type View =
   | PromoteView
   | ProtectView
   | SystemView
-  | LegacyView;
+  | LegacyView
+  | NewView;
 
 // View Stage Mapping for Navigation
 export const VIEW_STAGES: Record<string, { label: string; color: string; icon: string }> = {
@@ -94,7 +95,6 @@ export const VIEW_STAGES: Record<string, { label: string; color: string; icon: s
   "analyze-vol": { label: "Vol & ATR", color: "text-purple-400", icon: "gauge" },
   
   // Stage 3: Consensus (Cyan)
-  "consensus-swarm": { label: "Swarm Matrix", color: "text-cyan-400", icon: "grid" },
   "consensus-performance": { label: "Performance", color: "text-cyan-400", icon: "award" },
   "consensus-calibration": { label: "Calibration", color: "text-cyan-400", icon: "crosshair" },
   
@@ -139,11 +139,11 @@ export const STAGE_GROUPS = [
     color: "purple", 
     views: ["analyze-sentiment", "analyze-vol"] as View[] 
   },
-  { 
-    id: "consensus", 
-    label: "3. Consensus", 
-    color: "cyan", 
-    views: ["consensus-swarm", "consensus-performance", "consensus-calibration"] as View[] 
+  {
+    id: "consensus",
+    label: "3. Consensus",
+    color: "cyan",
+    views: ["consensus-performance", "consensus-calibration"] as View[]
   },
   { 
     id: "size", 
@@ -228,6 +228,7 @@ export const STAGE_GROUPS = [
 //
 // NOTE: kalshi-dashboard and kalshi-terminal removed (stub views deleted)
 // LEGACY REMOVAL: SwarmConsensusMatrix removed - consensus module deleted
+// LEGACY REMOVAL: consensus-swarm removed from navigation (Phase 1 cleanup)
 export const LEGACY_VIEW_MAP: Record<string, View> = {
   // Stage 1: Discover - all map to unified discover view
   "kalshi-all-markets": "discover",
@@ -239,7 +240,6 @@ export const LEGACY_VIEW_MAP: Record<string, View> = {
   "kalshi-vol-dashboard": "analyze-vol",
   
   // Stage 3: Consensus - individual views preserved
-  "swarm-consensus": "consensus-swarm",
   "kalshi-performance": "consensus-performance",
   "calibration-dashboard": "consensus-calibration",
   

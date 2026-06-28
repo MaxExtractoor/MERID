@@ -1,15 +1,17 @@
 /**
- * Sidebar Navigation Manifest — the frontend single source of truth.
- *
- * This file mirrors the canonical `web/api/sidebar_config.py` on the backend.
- * Used by: Sidebar.tsx (rendering), smoke tests (validation), CommandPalette.
- *
- * When adding a new view:
- *   1. Add it here
- *   2. Add it to sidebar_config.py
- *   3. Add it to views.ts
- *   4. Add the route in App.tsx
- *   5. Run `py -m pytest tests/test_sidebar_wiring.py` to verify
+ * Sidebar Navigation Manifest — NEW 8-View Architecture
+ * 
+ * Consolidated from 20+ views to 8 core views aligned with 15m stack
+ * 
+ * Views:
+ *   - Dashboard: Single pane of glass (system health, kill switch, key metrics)
+ *   - Trade: Order entry and position management
+ *   - Monitor: Portfolio monitoring and PnL tracking
+ *   - Grid: Agent management and deployment
+ *   - Risk: Risk analytics and sizing
+ *   - Calibration: Agent calibration and consensus
+ *   - Logs: System logs and audit trail
+ *   - Settings: Configuration and profile management
  */
 
 import type { View } from '../types/views';
@@ -29,51 +31,34 @@ export interface SidebarSection {
 
 export const SIDEBAR_MANIFEST: SidebarSection[] = [
   {
-    label: 'Live Trading',
-    key: 'live-trading',
+    label: 'Dashboard',
+    key: 'dashboard',
     items: [
-      { name: 'Overview',     href: 'overview',            icon: 'LayoutDashboard', color: 'text-blue-400' },
-      { name: 'Terminal',     href: 'execute',             icon: 'Monitor',         color: 'text-orange-400' },
-      { name: 'Markets',      href: 'discover',            icon: 'Search',          color: 'text-orange-300' },
-      { name: 'All Markets',  href: 'kalshi-all-markets',  icon: 'Globe',           color: 'text-sky-400' },
-      { name: 'Portfolio',    href: 'kalshi-portfolio',    icon: 'Briefcase',       color: 'text-orange-300' },
-      { name: 'Positions',    href: 'positions',           icon: 'TrendingUp',      color: 'text-cyan-400' },
-      { name: 'Orders',       href: 'orders',              icon: 'ClipboardList',   color: 'text-teal-300' },
+      { name: 'Dashboard', href: 'dashboard', icon: 'LayoutDashboard', color: 'text-blue-400' },
     ],
   },
   {
-    label: 'Swarm Intelligence',
-    key: 'swarm-intelligence',
+    label: 'Operations',
+    key: 'operations',
     items: [
-      { name: 'Agent Grid',   href: 'kalshi-grid',         icon: 'LayoutGrid',      color: 'text-orange-500' },
-      { name: 'Swarm Matrix', href: 'swarm-consensus',     icon: 'Grid',            color: 'text-cyan-500' },
-      { name: 'Performance',  href: 'kalshi-performance',  icon: 'Award',           color: 'text-emerald-400' },
-      { name: 'Calibration',  href: 'calibration-dashboard', icon: 'Target',        color: 'text-rose-400' },
-      { name: 'Lane Control', href: 'lane-control',        icon: 'GitBranch',       color: 'text-violet-400' },
+      { name: 'Trade', href: 'trade', icon: 'Monitor', color: 'text-orange-400' },
+      { name: 'Monitor', href: 'monitor', icon: 'Briefcase', color: 'text-cyan-400' },
+      { name: 'Grid', href: 'grid', icon: 'LayoutGrid', color: 'text-orange-500' },
     ],
   },
   {
     label: 'Analytics',
     key: 'analytics',
     items: [
-      { name: 'Risk Context', href: 'kalshi-risk-context',  icon: 'Gauge',          color: 'text-purple-400' },
-      { name: 'Fear/Greed',   href: 'kalshi-sentiment',     icon: 'Activity',       color: 'text-rose-400' },
-      { name: 'Vol & Sizing',  href: 'kalshi-vol-dashboard', icon: 'BarChart3',      color: 'text-indigo-400' },
-    ],
-  },
-  {
-    label: 'Command Center',
-    key: 'command-center',
-    items: [
-      { name: 'Operator',    href: 'operator',    icon: 'Sliders',    color: 'text-indigo-400' },
-      { name: 'Kill Switch', href: 'kill-switch', icon: 'ShieldAlert', color: 'text-red-400' },
+      { name: 'Risk', href: 'risk', icon: 'Gauge', color: 'text-purple-400' },
+      { name: 'Calibration', href: 'calibration', icon: 'Target', color: 'text-rose-400' },
     ],
   },
   {
     label: 'System',
     key: 'system',
     items: [
-      { name: 'Logs',     href: 'logs',     icon: 'Terminal',  color: 'text-gray-400' },
+      { name: 'Logs', href: 'logs', icon: 'Terminal', color: 'text-gray-400' },
       { name: 'Settings', href: 'settings', icon: 'Settings2', color: 'text-gray-400' },
     ],
   },

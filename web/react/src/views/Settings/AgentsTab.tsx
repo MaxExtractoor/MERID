@@ -102,18 +102,9 @@ export function AgentsTab() {
       <div className="space-y-4">
         <h3 className="text-md font-medium text-white">Agent Features</h3>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* LEGACY REMOVAL: Swarm coordination removed - swarm consensus not used in 15m stack */}
           <label className="flex items-center gap-3">
-            <input aria-label="Agent Features"
-              id="swarm-coordination"
-              name="swarmCoordination"
-              type="checkbox"
-              defaultChecked
-              className="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500"
-            />
-            <span className="text-white">Enable swarm coordination</span>
-          </label>
-          <label className="flex items-center gap-3">
-            <input aria-label="Enable swarm coordination"
+            <input aria-label="Enable decision explainability"
               id="decision-explainability"
               name="decisionExplainability"
               type="checkbox"
@@ -123,7 +114,7 @@ export function AgentsTab() {
             <span className="text-white">Enable decision explainability</span>
           </label>
           <label className="flex items-center gap-3">
-            <input aria-label="Enable decision explainability"
+            <input aria-label="Auto-restart failed agents"
               id="auto-restart-agents"
               name="autoRestartAgents"
               type="checkbox"
@@ -132,7 +123,7 @@ export function AgentsTab() {
             <span className="text-white">Auto-restart failed agents</span>
           </label>
           <label className="flex items-center gap-3">
-            <input aria-label="Auto-restart failed agents"
+            <input aria-label="Log all agent decisions"
               id="log-agent-decisions"
               name="logAgentDecisions"
               type="checkbox"

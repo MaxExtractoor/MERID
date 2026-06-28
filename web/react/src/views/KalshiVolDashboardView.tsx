@@ -17,7 +17,6 @@ import { useApiData } from '../hooks/useApiData';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY } from '../config/constants';
 import KalshiModeBadge from '../components/KalshiModeBadge';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
-import PublishPipelinePanel from '../components/PublishPipelinePanel';
 import type { SizingMetrics, KalshiRiskSummary } from '../types/kalshi';
 import { ConfirmModal } from '../components/ConfirmModal';
 import KalshiBankrollPanel from '../components/KalshiBankrollPanel';
@@ -362,9 +361,6 @@ const KalshiVolDashboardView: React.FC = () => {
       />
 
       {/* ═══ PIPELINE ROW ═══ */}
-      <PublishPipelinePanel />
-
-      {/* Confirm Modal */}
       <ConfirmModal
         isOpen={confirmModal.isOpen}
         title={confirmModal.title}
