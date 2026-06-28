@@ -138,7 +138,7 @@ _kalshi_env = os.environ.get("KALSHI_ENV", "demo").lower()
 if _kalshi_env == "live":
     BASE_URL = os.environ.get(
         "KALSHI_API_BASE_URL",
-        "https://api.elections.kalshi.com/trade-api/v2",
+        "https://external-api.kalshi.com/trade-api/v2",
     )
 else:
     BASE_URL = os.environ.get(
@@ -290,7 +290,7 @@ def is_directional_market(ticker: str) -> bool:
 # ═══════════════════════════════════════════════════════════════════════════
 
 try:
-    from merid.prediction.risk.kalshi_risk_engine import KalshiRiskEngine as BankrollManager  # noqa: F811
+    from merid.event_venues.kalshi.kalshi_risk import KalshiRiskEngine as BankrollManager  # noqa: F811
     _USING_CANONICAL_BANKROLL = True
 except ImportError:
     _USING_CANONICAL_BANKROLL = False

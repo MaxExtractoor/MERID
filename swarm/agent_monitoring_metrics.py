@@ -27,8 +27,8 @@ class MetricCategory(Enum):
 
 
 @dataclass
-class AgentMetrics:
-    """Agent-level metrics."""
+class SwarmAgentMetrics:
+    """Agent-level metrics for swarm monitoring (renamed from AgentMetrics to avoid conflict with risk.agent_metrics)."""
     agent_id: str
     timestamp: datetime
     
@@ -205,11 +205,11 @@ class AgentMonitoringMetrics:
         decision_entropy: float,
         kl_divergence: float,
         drift_detected: bool,
-    ) -> AgentMetrics:
+    ) -> SwarmAgentMetrics:
         """Record agent-level metrics."""
         latency_array = np.array(latency_samples) if latency_samples else np.array([0])
         
-        metrics = AgentMetrics(
+        metrics = SwarmAgentMetrics(
             agent_id=agent_id,
             timestamp=datetime.utcnow(),
             success_rate=success_rate,
@@ -385,7 +385,7 @@ class AgentMonitoringMetrics:
         ts.values.append(value)
         ts.timestamps.append(datetime.utcnow())
     
-    def _check_agent_alerts(self, metrics: AgentMetrics) -> None:
+    def _check_agent_alerts(self, metrics: SwarmAgentMetrics) -> None:
         """Check agent metrics for alerts."""
         if metrics.failure_rate > self._alert_thresholds["agent_failure_rate"]:
             self._create_alert(

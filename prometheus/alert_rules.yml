@@ -127,6 +127,17 @@ groups:
           summary: "Safety job not running on schedule"
           description: "Safety job {{ $labels.job_name }} has not run in over 1 hour. Risk monitoring may be degraded."
           runbook_url: "https://docs.merid.dev/runbooks/safety-job-schedule"
+      
+      # 15m loop cycle duration p95 exceeding threshold
+      - alert: Loop15mCycleDurationHigh
+        expr: quantile_over_time(0.95, merid_15m_cycle_duration_seconds[15m]) > 1.0
+        for: 15m
+        labels:
+          severity: high
+          channel: slack
+        annotations:
+          summary: "15m loop cycle duration p95 exceeding 1s"
+          description: "95th percentile cycle duration is {{ $value }}s over the last 15 minutes. Expected < 1s. May indicate performance regression."
 
   - name: merid_medium_alerts
     interval: 1m
@@ -174,3 +185,87 @@ groups:
         annotations:
           summary: "Terminal phase guard blocking rate elevated"
           description: "Terminal phase guard is blocking {{ $value }} trades per second. Review if edge thresholds are appropriate."
+
+  - name: merid_market_data_alerts
+    interval: 30s
+    rules:
+      # P2 Task 7: Market data staleness critical
+      - alert: MarketDataStaleCritical
+        expr: merid_market_data_staleness_seconds > 90
+        for: 1m
+        labels:
+          severity: critical
+          channel: pagerduty
+        annotations:
+          summary: "Market data stale (>90s)"
+          description: "Market data for {{ $labels.asset }} - {{ $labels.ticker }} is {{ $value }}s old. Trading may be blocked."
+          runbook_url: "https://docs.merid.dev/runbooks/market-data-stale"
+
+      # P2 Task 7: Market data staleness warning
+      - alert: MarketDataStaleWarning
+        expr: merid_market_data_staleness_seconds > 30
+        for: 5m
+        labels:
+          severity: high
+          channel: slack
+        annotations:
+          summary: "Market data stale (>30s)"
+          description: "Market data for {{ $labels.asset }} - {{ $labels.ticker }} is {{ $value }}s old. Monitor for degradation."
+
+      # P2 Task 7: Market health degraded
+      - alert: MarketHealthDegraded
+        expr: merid_market_health_status < 3
+        for: 2m
+        labels:
+          severity: high
+          channel: slack
+        annotations:
+          summary: "Market health degraded"
+          description: "Market {{ $labels.asset }} - {{ $labels.ticker }} health status is {{ $value }} (0=unhealthy, 1=degraded, 2=stale, 3=suspended, 4=healthy)."
+
+      # P2 Task 7: WS bridge backpressure critical (fills dropped)
+      - alert: WSBridgeFillsDropped
+        expr: rate(merid_ws_fills_dropped_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          channel: pagerduty
+        annotations:
+          summary: "WS bridge dropping fills (CRITICAL)"
+          description: "WS bridge is dropping {{ $value }} fills/sec due to backpressure. Manual reconciliation may be required."
+          runbook_url: "https://docs.merid.dev/runbooks/ws-bridge-backpressure"
+
+      # P2 Task 7: WS bridge backpressure warning (events dropped)
+      - alert: WSBridgeEventsDropped
+        expr: rate(merid_ws_events_dropped_total[5m]) > 1
+        for: 5m
+        labels:
+          severity: high
+          channel: slack
+        annotations:
+          summary: "WS bridge dropping events due to backpressure"
+          description: "WS bridge is dropping {{ $value }} events/sec of type {{ $labels.event_type }} due to queue overflow."
+
+      # 15m Stack Determinism: Runtime invariant broken
+      - alert: RuntimeInvariantBroken
+        expr: rate(merid_runtime_invariant_broken_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          channel: pagerduty
+        annotations:
+          summary: "Runtime invariant broken (15m stack)"
+          description: "RUNTIME-INVARIANT BROKEN detected in 15m stack. Catalog open markets missing state or WS subscriptions. Trading may be blocked."
+          runbook_url: "https://docs.merid.dev/runbooks/runtime-invariant-broken"
+
+      # 15m Stack Determinism: MD freshness stale
+      - alert: MDFreshnessStale
+        expr: rate(merid_md_freshness_stale_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: high
+          channel: slack
+        annotations:
+          summary: "Market data freshness stale (15m stack)"
+          description: "MD-FRESHNESS status=STALE detected for {{ $labels.ticker }}. Market data exceeds staleness threshold."
+          runbook_url: "https://docs.merid.dev/runbooks/md-freshness-stale"

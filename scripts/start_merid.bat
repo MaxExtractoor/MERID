@@ -124,7 +124,10 @@ REM Write PID file
 echo %~n0 > "%PID_FILE%"
 
 REM Start the server with logging
-python -m web.main 2>&1 | tee logs\server_%date:~-4,4%%date:~-10,2%%date:~-7,2%.log
+REM Use uvicorn directly to ensure FastAPI lifespan handlers are invoked
+REM Production 15m entrypoint
+echo Using production 15m entrypoint (web.main_15m_lean)
+uvicorn web.main_15m_lean:app --host 0.0.0.0 --port 8011
 
 REM Cleanup
 del "%PID_FILE%" 2>nul

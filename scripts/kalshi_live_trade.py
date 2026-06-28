@@ -65,7 +65,7 @@ def _load_env():
 
 _load_env()
 
-BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
+BASE_URL = "https://external-api.kalshi.com/trade-api/v2"
 API_KEY_ID = os.environ.get("KALSHI_API_KEY_ID", "")
 PRIVATE_KEY_PATH = os.environ.get("KALSHI_PRIVATE_KEY_PATH", "kalshi_private_key.pem")
 

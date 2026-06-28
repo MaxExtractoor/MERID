@@ -496,6 +496,20 @@ def _initialize_default_metrics(registry: MetricsRegistry) -> None:
         ["price_cents"],
     )
 
+    # Catalog enrichment metrics
+    registry.counter(
+        "catalog_enrich_skipped_markets",
+        "Total markets skipped during catalog enrichment due to invalid data",
+        ["reason", "asset"],
+    )
+
+    # Entry window metrics
+    registry.counter(
+        "entry_window_rejections",
+        "Total markets rejected due to entry window filter",
+        ["agent_id", "reason"],
+    )
+
 
 def record_agent_observation(agent_id: str) -> None:
     """Record an agent observation."""
@@ -503,6 +517,14 @@ def record_agent_observation(agent_id: str) -> None:
     counter = registry._metrics.get("merid_agent_observations_total")
     if counter:
         counter.inc(labels={"agent_id": agent_id})
+
+
+def record_entry_window_rejection(agent_id: str, reason: str) -> None:
+    """Record an entry window rejection."""
+    registry = get_metrics_registry()
+    counter = registry._metrics.get("entry_window_rejections")
+    if counter:
+        counter.inc(labels={"agent_id": agent_id, "reason": reason})
 
 
 def record_agent_vote(agent_id: str, decision: str) -> None:

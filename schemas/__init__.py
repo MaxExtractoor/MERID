@@ -8,7 +8,7 @@ Version: 1.0.0
 """
 
 from schemas.intent import IntentEnvelope, IntentType, IntentStatus
-from schemas.consensus import ConsensusBlock, ConsensusVote, ConsensusOutcome
+# from schemas.consensus import ConsensusBlock, ConsensusVote, ConsensusOutcome  # File doesn't exist - removed
 from schemas.arbitrage import ArbitrageOpportunity, ArbitrageType, ArbitrageLeg
 from schemas.execution import ExecutionResult, ExecutionStatus, OrderFill
 from schemas.simulation import SimulationReport, SimulationScenario
@@ -19,10 +19,10 @@ __all__ = [
     "IntentEnvelope",
     "IntentType",
     "IntentStatus",
-    # Consensus
-    "ConsensusBlock",
-    "ConsensusVote",
-    "ConsensusOutcome",
+    # Consensus - REMOVED: file doesn't exist
+    # "ConsensusBlock",
+    # "ConsensusVote",
+    # "ConsensusOutcome",
     # Arbitrage
     "ArbitrageOpportunity",
     "ArbitrageType",

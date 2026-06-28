@@ -89,6 +89,3 @@ def publish_event(event_type: str, payload: Optional[Dict[str, Any]] = None) -> 
         asyncio.run(stream.publish(event_type, payload))
         return
     loop.create_task(stream.publish(event_type, payload))
-
-
-event_stream = get_event_stream()

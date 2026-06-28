@@ -1,3 +1,7 @@
+# LEGACY: not used by kalshi_crypto_15m_v2 profile
+# This module implements decentralized agent registry with DID-based identities
+# The lean 15m stack uses agent_grid_15m for agent management
+
 """
 Decentralized agent registry with DID-based identities for MERID.
 

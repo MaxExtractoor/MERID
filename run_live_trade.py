@@ -183,7 +183,7 @@ async def place_live_order():
     api_key = os.environ['KALSHI_API_KEY_ID']
     pem = Path('kalshi_private_key.pem').read_bytes()
     private_key = serialization.load_pem_private_key(pem, password=None)
-    base_url = "https://api.elections.kalshi.com/trade-api/v2"
+    base_url = "https://external-api.kalshi.com/trade-api/v2"
 
     def sign(method, path):
         ts_ms = str(int(time.time() * 1000))
