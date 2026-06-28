@@ -34,21 +34,12 @@ interface PnlChartProps {
   riskAlerts?: Array<{ ts: string; title: string; severity: string }>;
 }
 
-type CategoryFilter = '' | 'crypto' | 'politics' | 'sports' | 'culture' | 'climate' | 'economics' | 'mentions' | 'companies' | 'financials' | 'tech' | 'science';
+type CategoryFilter = '' | 'crypto';
 type ChartMode = 'equity' | 'daily';
 
 const CATEGORY_TABS: { id: CategoryFilter; label: string }[] = [
-  { id: '',           label: 'All' },
-  { id: 'crypto',     label: 'Crypto' },
-  { id: 'politics',   label: 'Politics' },
-  { id: 'sports',     label: 'Sports' },
-  { id: 'culture',    label: 'Culture' },
-  { id: 'climate',    label: 'Climate' },
-  { id: 'economics',  label: 'Economics' },
-  { id: 'mentions',   label: 'Mentions' },
-  { id: 'companies',  label: 'Companies' },
-  { id: 'financials', label: 'Financials' },
-  { id: 'tech',       label: 'Tech & Science' },
+  { id: '',       label: 'All' },
+  { id: 'crypto', label: 'Crypto' },
 ];
 
 const KalshiPnlChart: React.FC<PnlChartProps> = ({ riskAlerts }) => {

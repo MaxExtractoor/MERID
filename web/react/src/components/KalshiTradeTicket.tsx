@@ -20,7 +20,7 @@ import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY } from '../config
 
 import { useApiData } from '../hooks/useApiData';
 import { logUxEvent } from '../utils/uxTelemetry';
-import { SentimentBundleCard } from './SentimentBundleCard';
+// LEGACY REMOVAL: SentimentBundleCard removed - social sentiment not used in 15m stack
 import { useFillToast } from '../hooks/useFillToast';
 
 // AbortSignal.timeout polyfill for Safari <16.5, Firefox <127
@@ -340,12 +340,7 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
         {enhanced && <NetworkStatusIndicator />}
       </div>
 
-      {/* Sentiment Indicator */}
-      {['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'].some(a => ticker?.toUpperCase?.().includes(a)) && (
-        <div className="mb-4">
-          <SentimentBundleCard asset={['BTC','ETH','SOL','XRP','DOGE'].find(a => ticker?.toUpperCase?.().includes(a)) ?? 'BTC'} compact />
-        </div>
-      )}
+      {/* LEGACY REMOVAL: SentimentBundleCard removed - social sentiment not used in 15m stack */}
 
       {/* YES/NO Toggle */}
       <div className="flex rounded-lg overflow-hidden border border-slate-700">

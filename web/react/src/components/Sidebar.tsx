@@ -1,19 +1,13 @@
 import React from 'react';
 import { 
   LayoutDashboard, 
-  ShieldAlert,
   Terminal,
-  Search,
-  Activity,
+  Monitor,
   Gauge,
   Grid,
-  Award,
   Crosshair,
-  Sliders,
   Briefcase,
-  Rocket,
   Settings as SettingsIcon,
-  FileText,
 } from '../ui/icons';
 import type { View } from '../types/views';
 import { useKalshiMode } from '../context/KalshiModeContext';
@@ -27,92 +21,50 @@ interface SidebarProps {
   onToggleCollapse?: () => void;
 }
 
-/* ── 8-Stage Workflow Navigation ───────────────────────────────────── */
+/* ── 8-View Architecture Navigation ───────────────────────────────────── */
 
-// 8-Stage Workflow Navigation (Consolidated Architecture)
-// Stages 1, 5, 8 use unified views with internal tabs
-const STAGE_NAV = [
+// New 8-View Architecture Navigation (Consolidated from 20+ views)
+const DASHBOARD_NAV = [
   {
-    stage: '1',
-    label: 'Discover',
+    stage: 'DASH',
+    label: 'Dashboard',
     color: 'blue',
     accent: 'from-blue-500 to-blue-600',
     items: [
-      { name: 'Markets', href: 'discover', icon: Search },
+      { name: 'Dashboard', href: 'dashboard', icon: LayoutDashboard },
     ],
   },
+] as const;
+
+const OPERATIONS_NAV = [
   {
-    stage: '2',
-    label: 'Analyze',
-    color: 'purple',
-    accent: 'from-purple-500 to-purple-600',
-    items: [
-      { name: 'Sentiment', href: 'analyze-sentiment', icon: Activity },
-      { name: 'Volatility', href: 'analyze-vol', icon: Gauge },
-    ],
-  },
-  {
-    stage: '3',
-    label: 'Consensus',
-    color: 'cyan',
-    accent: 'from-cyan-500 to-cyan-600',
-    items: [
-      { name: 'Swarm', href: 'consensus-swarm', icon: Grid },
-      { name: 'Agents', href: 'consensus-performance', icon: Award },
-      { name: 'Calibration', href: 'consensus-calibration', icon: Crosshair },
-    ],
-  },
-  {
-    stage: '4',
-    label: 'Size',
-    color: 'amber',
-    accent: 'from-amber-500 to-amber-600',
-    items: [
-      { name: 'Size', href: 'size', icon: Sliders },
-    ],
-  },
-  {
-    stage: '5',
-    label: 'Execute',
-    color: 'emerald',
-    accent: 'from-emerald-500 to-emerald-600',
-    items: [
-      { name: 'Execute', href: 'execute', icon: Terminal },
-    ],
-  },
-  {
-    stage: '6',
-    label: 'Monitor',
+    stage: 'OPS',
+    label: 'Operations',
     color: 'orange',
     accent: 'from-orange-500 to-orange-600',
     items: [
+      { name: 'Trade', href: 'trade', icon: Monitor },
       { name: 'Monitor', href: 'monitor', icon: Briefcase },
+      { name: 'Grid', href: 'grid', icon: Grid },
     ],
   },
+] as const;
+
+const ANALYTICS_NAV = [
   {
-    stage: '7',
-    label: 'Promote',
-    color: 'violet',
-    accent: 'from-violet-500 to-violet-600',
+    stage: 'ANALYTICS',
+    label: 'Analytics',
+    color: 'purple',
+    accent: 'from-purple-500 to-purple-600',
     items: [
-      { name: 'Promote', href: 'promote', icon: Rocket },
-    ],
-  },
-  {
-    stage: '8',
-    label: 'Protect',
-    color: 'red',
-    accent: 'from-red-500 to-red-600',
-    items: [
-      { name: 'Risk', href: 'protect', icon: ShieldAlert },
+      { name: 'Risk', href: 'risk', icon: Gauge },
+      { name: 'Calibration', href: 'calibration', icon: Crosshair },
     ],
   },
 ] as const;
 
 const SYSTEM_NAV = [
-  { name: 'Overview', href: 'overview', icon: LayoutDashboard },
-  { name: 'Operator', href: 'operator', icon: Sliders },
-  { name: 'Logs', href: 'logs', icon: FileText },
+  { name: 'Logs', href: 'logs', icon: Terminal },
   { name: 'Settings', href: 'settings', icon: SettingsIcon },
 ] as const;
 
@@ -261,16 +213,16 @@ function Sidebar({ current, onChange, className, collapsed = false, onToggleColl
         {!collapsed && (
           <div className="flex flex-col">
             <span className="text-xl font-bold text-white">MERID</span>
-            <span className="text-[10px] text-slate-500 font-medium">8-Stage Workflow</span>
+            <span className="text-[10px] text-slate-500 font-medium">8-View Architecture</span>
           </div>
         )}
       </div>
 
       {/* Navigation */}
       <nav className="flex-1 p-3 space-y-4 overflow-y-auto">
-        {/* Workflow Stages */}
+        {/* Dashboard */}
         <div className="space-y-3">
-          {STAGE_NAV.map((stage) => (
+          {DASHBOARD_NAV.map((stage) => (
             <StageSection
               key={stage.stage}
               stage={stage as StageSectionProps['stage']}
@@ -281,7 +233,35 @@ function Sidebar({ current, onChange, className, collapsed = false, onToggleColl
             />
           ))}
         </div>
-        
+
+        {/* Operations */}
+        <div className="space-y-3">
+          {OPERATIONS_NAV.map((stage) => (
+            <StageSection
+              key={stage.stage}
+              stage={stage as StageSectionProps['stage']}
+              current={current}
+              onChange={onChange}
+              collapsed={collapsed}
+              isLive={modeData ? isLive : undefined}
+            />
+          ))}
+        </div>
+
+        {/* Analytics */}
+        <div className="space-y-3">
+          {ANALYTICS_NAV.map((stage) => (
+            <StageSection
+              key={stage.stage}
+              stage={stage as StageSectionProps['stage']}
+              current={current}
+              onChange={onChange}
+              collapsed={collapsed}
+              isLive={modeData ? isLive : undefined}
+            />
+          ))}
+        </div>
+
         {/* Divider */}
         <div className="border-t border-slate-800 pt-3">
           {!collapsed && (

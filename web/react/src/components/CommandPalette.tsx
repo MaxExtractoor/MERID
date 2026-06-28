@@ -22,7 +22,6 @@ const COMMANDS: CommandItem[] = [
   { id: 'analyze-vol', label: 'Vol & ATR', section: 'Analyze', icon: Gauge, keywords: ['volatility', 'atr', 'sizing', 'kelly', 'sharpe'] },
   
   // Stage 3: Consensus
-  { id: 'consensus-swarm', label: 'Swarm Matrix', section: 'Consensus', icon: Grid, keywords: ['swarm', 'consensus', 'matrix', 'agents', 'voting', 'direction'] },
   { id: 'consensus-performance', label: 'Performance', section: 'Consensus', icon: Award, keywords: ['performance', 'agent', 'win', 'sharpe', 'calibration', 'pnl'] },
   { id: 'consensus-calibration', label: 'Calibration', section: 'Consensus', icon: Crosshair, keywords: ['calibration', 'brier', 'forecaster', 'weight', 'accuracy'] },
   

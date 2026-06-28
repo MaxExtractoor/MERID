@@ -9,7 +9,7 @@ import React from 'react';
 import { useApiData } from '../hooks/useApiData';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 
-type TradingMode = 'LIVE' | 'PAPER' | 'SIM' | 'SHADOW' | 'HALTED' | 'MIXED';
+type TradingMode = 'LIVE' | 'PAPER' | 'SHADOW' | 'HALTED' | 'MIXED';
 
 interface ModeState {
   mode: TradingMode;
@@ -71,8 +71,6 @@ export function GlobalModeBanner() {
       mode = 'LIVE';
     } else if (modeStr.includes('shadow')) {
       mode = 'SHADOW';
-    } else if (modeStr.includes('sim')) {
-      mode = 'SIM';
     } else if (hasSyntheticData || hasExternalData) {
       mode = 'MIXED';
     }
@@ -98,7 +96,6 @@ export function GlobalModeBanner() {
   const config: Record<TradingMode, { color: string; icon: string; desc: string }> = {
     LIVE: { color: 'green', icon: '●', desc: 'Real orders, real capital' },
     PAPER: { color: 'blue', icon: '◎', desc: 'Simulated orders, no real capital' },
-    SIM: { color: 'purple', icon: '○', desc: 'Full simulation mode' },
     SHADOW: { color: 'cyan', icon: '◐', desc: 'Shadow trading (parallel paper)' },
     HALTED: { color: 'red', icon: '◼', desc: 'Trading halted by kill switch' },
     MIXED: { color: 'orange', icon: '◑', desc: 'Mixed data sources detected' },
@@ -110,7 +107,6 @@ export function GlobalModeBanner() {
     <div className={`relative ${
       modeState.mode === 'HALTED' ? 'bg-red-950/90 border-b-2 border-red-500' :
       modeState.mode === 'MIXED' ? 'bg-orange-950/90 border-b-2 border-orange-500' :
-      modeState.mode === 'SIM' ? 'bg-purple-950/90 border-b-2 border-purple-500' :
       'bg-blue-950/90 border-b-2 border-blue-500'
     }`}>
       <div className="flex items-center justify-between px-4 py-2">
@@ -119,7 +115,6 @@ export function GlobalModeBanner() {
           <span className={`w-3 h-3 rounded-full animate-pulse ${
             modeState.mode === 'HALTED' ? 'bg-red-500' :
             modeState.mode === 'MIXED' ? 'bg-orange-500' :
-            modeState.mode === 'SIM' ? 'bg-purple-500' :
             'bg-blue-500'
           }`} />
           
@@ -128,7 +123,6 @@ export function GlobalModeBanner() {
             <span className={`text-sm font-bold uppercase tracking-wider ${
               modeState.mode === 'HALTED' ? 'text-red-400' :
               modeState.mode === 'MIXED' ? 'text-orange-400' :
-              modeState.mode === 'SIM' ? 'text-purple-400' :
               'text-blue-400'
             }`}>
               {modeState.mode} MODE
@@ -173,7 +167,6 @@ export function GlobalModeBanner() {
       <div className={`h-0.5 ${
         modeState.mode === 'HALTED' ? 'bg-red-500' :
         modeState.mode === 'MIXED' ? 'bg-orange-500' :
-        modeState.mode === 'SIM' ? 'bg-purple-500' :
         'bg-blue-500'
       } animate-pulse`} />
     </div>

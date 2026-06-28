@@ -63,7 +63,7 @@ export function DataSourceBadge({
  * DataSourceBanner — Full-width banner for when synthetic data is displayed
  */
 interface DataSourceBannerProps {
-  /** Profile mode: prod, paper, sim, backtest */
+  /** Profile mode: prod, paper */
   profile?: string;
   /** Whether any synthetic data is currently displayed */
   showingSynthetic?: boolean;
@@ -81,15 +81,12 @@ export function DataSourceBanner({
     return null;
   }
 
-  const isSim = profile === 'sim' || profile === 'backtest';
   const isPaper = profile === 'paper';
 
   return (
     <div
       className={`flex items-center justify-between px-3 py-2 text-xs border-b ${
-        isSim
-          ? 'bg-purple-950/30 border-purple-500/30 text-purple-400'
-          : isPaper
+        isPaper
           ? 'bg-blue-950/30 border-blue-500/30 text-blue-400'
           : showingSynthetic
           ? 'bg-orange-950/30 border-orange-500/30 text-orange-400'
@@ -99,12 +96,10 @@ export function DataSourceBanner({
       <div className="flex items-center gap-2">
         <span className="w-2 h-2 rounded-full animate-pulse bg-current" />
         <span className="font-semibold uppercase tracking-wider">
-          {isSim ? 'Simulation Mode' : isPaper ? 'Paper Trading' : 'Mixed Data Sources'}
+          {isPaper ? 'Paper Trading' : 'Mixed Data Sources'}
         </span>
         <span className="opacity-75">
-          {isSim
-            ? '— All data is simulated, not actual venue data'
-            : isPaper
+          {isPaper
             ? '— Orders are simulated, no real capital at risk'
             : '— Some data shown is synthetic or manual'}
         </span>
