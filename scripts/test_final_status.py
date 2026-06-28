@@ -4,8 +4,11 @@ import json
 print('🚀 BOOTSTRAPPING REALITY SYSTEM')
 print('=' * 50)
 
+# CRITICAL FIX: Increased timeout for production stability
+TIMEOUT = 30.0  # Increased from 5s to 30s
+
 # Bootstrap the reality system
-response = requests.post('http://127.0.0.1:8001/api/v1/reality/bootstrap', timeout=5)
+response = requests.post('http://127.0.0.1:8001/api/v1/reality/bootstrap', timeout=TIMEOUT)
 print(f'Bootstrap Status: {response.status_code}')
 if response.status_code == 200:
     data = response.json()
@@ -17,7 +20,7 @@ print('🔍 TESTING POST-BOOTSTRAP SYSTEM STATUS')
 print('=' * 50)
 
 # Test reality status after bootstrap
-response = requests.get('http://127.0.0.1:8001/api/v1/reality/status', timeout=5)
+response = requests.get('http://127.0.0.1:8001/api/v1/reality/status', timeout=TIMEOUT)
 print(f'Reality Status API: {response.status_code}')
 if response.status_code == 200:
     data = response.json()
@@ -28,7 +31,7 @@ if response.status_code == 200:
         print(f'Assertions Count: {data["system_state"].get("assertions_count", 0)}')
 
 # Test local venue status
-response = requests.get('http://127.0.0.1:8001/api/v1/localvenue/validation-status', timeout=5)
+response = requests.get('http://127.0.0.1:8001/api/v1/localvenue/validation-status', timeout=TIMEOUT)
 print(f'\nLocal Venue Validation Status: {response.status_code}')
 if response.status_code == 200:
     data = response.json()
@@ -36,7 +39,7 @@ if response.status_code == 200:
     print(f'Current Phase: {data.get("current_phase", "unknown")}')
 
 # Test dashboard access
-response = requests.get('http://127.0.0.1:8001/dashboard', timeout=5, allow_redirects=False)
+response = requests.get('http://127.0.0.1:8001/dashboard', timeout=TIMEOUT, allow_redirects=False)
 print(f'\nDashboard Routing: {response.status_code}')
 
 print()

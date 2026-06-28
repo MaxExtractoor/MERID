@@ -43,7 +43,7 @@ def check_auth(env: str = "demo") -> bool:
     if env == "live":
         key_id = os.environ.get("KALSHI_LIVE_API_KEY_ID") or os.environ.get("KALSHI_API_KEY_ID")
         key_path = os.environ.get("KALSHI_LIVE_PRIVATE_KEY_PATH") or os.environ.get("KALSHI_PRIVATE_KEY_PATH")
-        base_url = os.environ.get("KALSHI_API_HOST", "https://api.elections.kalshi.com/trade-api/v2")
+        base_url = os.environ.get("KALSHI_API_HOST", "https://external-api.kalshi.com/trade-api/v2")
         if base_url.endswith("/"):
             base_url = base_url.rstrip("/")
     else:

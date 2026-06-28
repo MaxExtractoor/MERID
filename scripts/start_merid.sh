@@ -164,8 +164,8 @@ echo $$ > "$PID_FILE"
 while true; do
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting server..."
     
-    # Run the server
-    if python -m web.main 2>&1 | tee -a "logs/server_$(date +%Y%m%d).log"; then
+    # Run the server - use production 15m entrypoint
+    if uvicorn web.main_15m_lean:app --host 0.0.0.0 --port 8011 2>&1 | tee -a "logs/server_$(date +%Y%m%d).log"; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Server exited cleanly"
         break
     else

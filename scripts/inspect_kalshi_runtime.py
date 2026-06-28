@@ -17,7 +17,7 @@ import sys
 async def main() -> int:
     try:
         from merid.event_venues.kalshi.market_catalog import get_market_catalog
-        from merid.event_venues.kalshi.ws_bridge import get_ws_bridge, get_live_prices
+        from merid.event_venues.kalshi.ws_bridge import get_bridge, get_live_prices
         from merid.event_venues.kalshi.market_selector import AGENT_SERIES_MAP, get_agent_market_tickers
     except Exception as exc:
         print("Import error:", exc)
@@ -49,7 +49,7 @@ async def main() -> int:
     # WS bridge summary
     print("\nWS BRIDGE SUMMARY:")
     try:
-        bridge = get_ws_bridge()
+        bridge = get_bridge()
         print(json.dumps(bridge.summary(), indent=2))
     except Exception as exc:
         print("WS bridge summary failed:", exc)

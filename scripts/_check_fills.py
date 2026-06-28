@@ -8,7 +8,7 @@ load_dotenv()
 
 key = serialization.load_pem_private_key(Path("kalshi_private_key.pem").read_bytes(), None)
 kid = os.environ["KALSHI_API_KEY_ID"]
-base = "https://api.elections.kalshi.com/trade-api/v2"
+base = "https://external-api.kalshi.com/trade-api/v2"
 
 def sign(method, path):
     ts = str(int(time.time() * 1000))

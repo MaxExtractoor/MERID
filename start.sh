@@ -101,8 +101,8 @@ start_server() {
     
     # Determine entrypoint based on MERID_PROFILE
     if [ "${MERID_PROFILE:-}" = "kalshi_crypto_15m_v2" ]; then
-        ENTRYPOINT="web.main_15m:app"
-        log_info "Using 15m entrypoint (web.main_15m:app) for kalshi_crypto_15m_v2 profile"
+        ENTRYPOINT="web.main_15m_lean:app"
+        log_info "Using 15m lean entrypoint (web.main_15m_lean:app) for kalshi_crypto_15m_v2 profile"
     else
         ENTRYPOINT="web.main:app"
         log_info "Using legacy entrypoint (web.main:app)"
@@ -110,7 +110,10 @@ start_server() {
     
     if [ "$ENVIRONMENT" = "production" ]; then
         # Production: Use gunicorn with uvicorn workers
-        export MERID_PROFILE="${MERID_PROFILE:-kalshi-only}"
+        # CRITICAL: Do NOT override MERID_PROFILE if already set (e.g., kalshi_crypto_15m_v2)
+        if [ -z "${MERID_PROFILE:-}" ]; then
+            export MERID_PROFILE="kalshi-only"
+        fi
         export MERID_LOG_LEVEL="INFO"
         export RELOAD="false"
         
@@ -128,7 +131,10 @@ start_server() {
             --enable-stdio-inheritance
     else
         # Development: Use uvicorn directly with auto-reload
-        export MERID_PROFILE="${MERID_PROFILE:-full}"
+        # CRITICAL: Do NOT override MERID_PROFILE if already set (e.g., kalshi_crypto_15m_v2)
+        if [ -z "${MERID_PROFILE:-}" ]; then
+            export MERID_PROFILE="full"
+        fi
         export MERID_LOG_LEVEL="DEBUG"
         export RELOAD="true"
         

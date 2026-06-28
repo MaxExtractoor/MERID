@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import requests
 
 from merid_core.event_bus.nats_adapter import NATSEventBus, EventEnvelope
-from merid_core.kalshi.ws_bridge import KalshiWebSocketBridge
+from merid.event_venues.kalshi.ws_bridge import KalshiWebSocketBridge
 from merid_core.kalshi.execution_pipeline import ExecutionPipeline
 
 # ── Logging ──────────────────────────────────────────────────────────────────

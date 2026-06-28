@@ -9,8 +9,8 @@ py -m pip install -r requirements.txt --quiet
 
 REM Determine entrypoint based on profile
 if "%MERID_PROFILE%"=="kalshi_crypto_15m_v2" (
-    echo [MERID] Using 15m entrypoint (web.main_15m:app) for kalshi_crypto_15m_v2 profile
-    set ENTRYPOINT=web.main_15m:app
+    echo [MERID] Using 15m lean entrypoint (web.main_15m_lean:app) for kalshi_crypto_15m_v2 profile
+    set ENTRYPOINT=web.main_15m_lean:app
 ) else (
     echo [MERID] Using legacy entrypoint (web.main:app)
     set ENTRYPOINT=web.main:app

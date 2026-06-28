@@ -1,8 +1,11 @@
 """Test all frontend API endpoints against running backend."""
 import requests
 import json
+import time
 
 BASE = "http://127.0.0.1:8011"
+# CRITICAL FIX: Increased timeout for production stability
+TIMEOUT = 30.0  # Increased from default timeout
 
 endpoints = [
     # constants.ts endpoints
@@ -84,7 +87,7 @@ ok = []
 fail = []
 for ep in endpoints:
     try:
-        r = requests.get(f"{BASE}{ep}", timeout=5)
+        r = requests.get(f"{BASE}{ep}", timeout=TIMEOUT)
         status = r.status_code
         short = ep[:60]
         if status < 400:

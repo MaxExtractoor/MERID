@@ -440,7 +440,7 @@ class KalshiAuditClient:
         self.base_url = (
             "https://demo-api.kalshi.co/trade-api/v2"
             if env == "demo" else
-            "https://api.elections.kalshi.com/trade-api/v2"
+            "https://external-api.kalshi.com/trade-api/v2"
         )
         self._token: Optional[str] = None
     
