@@ -1,5 +1,8 @@
 """Regression tests for Agent Grid + Activity audit fixes.
 
+LEGACY: This module tests PaperSession, which is not used by kalshi_crypto_15m_v2 profile.
+The lean 15m stack uses live bankroll service (merid.event_venues.kalshi.bankroll_service_v2).
+
 Covers:
   1. KalshiTradingAgent.summary() includes config and performance data
   2. AgentPerformanceTracker._open_trades composite key (agent_id:market_id)
@@ -14,6 +17,8 @@ from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+pytestmark = pytest.mark.legacy
 
 
 # ── 1. KalshiTradingAgent.summary() includes config + performance ──────

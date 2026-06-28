@@ -13,7 +13,8 @@ import pytest
 def test_price_band_rejects_50c_without_edge():
     """Price band validation rejects 50¢ orders without exceptional edge.
     
-    Thresholds (edge > 10%, confidence > 80%) are policy knobs, not hard constants.
+    Thresholds (edge > 2%, confidence > 60%) are policy knobs, not hard constants.
+    Lowered from 10% to 2% for 15m crypto compatibility.
     """
     from merid.event_venues.kalshi.order_router import OrderIntent, _validate_price_band
     
@@ -23,7 +24,7 @@ def test_price_band_rejects_50c_without_edge():
         action="buy",
         price_cents=50,
         count=10,
-        edge_pct=0.05,  # Only 5% edge, not >10%
+        edge_pct=0.01,  # Only 1% edge, not >2%
         confidence=0.70
     )
     
@@ -34,17 +35,9 @@ def test_price_band_rejects_50c_without_edge():
 def test_price_band_rejects_50c_without_confidence():
     """Price band validation rejects 50¢ orders without exceptional confidence.
     
-    DELETED: This test is unrelated to the production audit changes (BTC/ETH/SOL/XRP/DOGE 15m only).
-    Price band validation logic is a separate concern from trading scope enforcement.
-    
-    If price band validation needs testing, it should be in a dedicated test file
-    with proper documentation of the business logic being tested.
+    BUG #38 FIX: This test now uses a non-15m source to ensure price band validation
+    still applies to non-velocity-based orders.
     """
-    pytest.skip("Price band validation is unrelated to production audit scope changes - needs dedicated test file")
-
-
-def test_price_band_allows_50c_with_exceptional_metrics():
-    """Price band validation allows 50¢ orders with edge>10% and confidence>80%."""
     from merid.event_venues.kalshi.order_router import OrderIntent, _validate_price_band
     
     intent = OrderIntent(
@@ -53,8 +46,27 @@ def test_price_band_allows_50c_with_exceptional_metrics():
         action="buy",
         price_cents=50,
         count=10,
-        edge_pct=0.12,  # Edge >10%
-        confidence=0.85  # Confidence >80%
+        edge_pct=0.05,  # Edge >2%
+        confidence=0.50,  # Confidence <60% (should be rejected)
+        source="other_strategy"  # Non-15m source to ensure price band validation applies
+    )
+    
+    error = _validate_price_band(intent)
+    assert error == "price_50_low_confidence"
+
+
+def test_price_band_allows_50c_with_exceptional_metrics():
+    """Price band validation allows 50¢ orders with edge>2% and confidence>60%."""
+    from merid.event_venues.kalshi.order_router import OrderIntent, _validate_price_band
+    
+    intent = OrderIntent(
+        ticker="KXBTC-TEST",
+        side="yes",
+        action="buy",
+        price_cents=50,
+        count=10,
+        edge_pct=0.05,  # Edge >2%
+        confidence=0.70  # Confidence >60%
     )
     
     error = _validate_price_band(intent)
@@ -83,6 +95,65 @@ def test_price_band_allows_non_50c_prices():
     intent.price_cents = 60
     error = _validate_price_band(intent)
     assert error is None
+
+
+def test_price_band_allows_15m_velocity_orders_at_50c():
+    """BUG #38 FIX: 15m velocity-based orders skip price band validation even at 50c."""
+    from merid.event_venues.kalshi.order_router import OrderIntent, _validate_price_band
+    
+    intent = OrderIntent(
+        ticker="KXBTC15M-TEST",
+        side="yes",
+        action="buy",
+        price_cents=50,  # At 50c band
+        count=10,
+        edge_pct=0.01,  # Low edge (would normally be rejected)
+        confidence=0.50,  # Low confidence (would normally be rejected)
+        source="merid.prediction.agent_grid_15m"  # BUG #38 FIX: 15m velocity source
+    )
+    
+    error = _validate_price_band(intent)
+    assert error is None, "15m velocity orders should skip price band validation"
+
+
+def test_signal_validation_allows_15m_velocity_orders_with_low_edge():
+    """SAFETY FIX: 15m velocity-based orders have relaxed but still enforced edge/confidence thresholds."""
+    from merid.event_venues.kalshi.order_router import OrderIntent, _validate_signal_metadata
+    
+    intent = OrderIntent(
+        ticker="KXBTC15M-TEST",
+        side="yes",
+        action="buy",
+        price_cents=50,
+        count=10,
+        edge_pct=0.03,  # 3% edge (above 2% minimum for velocity orders)
+        confidence=0.65,  # 65% confidence (above 60% minimum for velocity orders)
+        model_prob=0.50,  # Valid model_prob (required)
+        source="merid.prediction.agent_grid_15m"  # 15m velocity source
+    )
+    
+    error = _validate_signal_metadata(intent)
+    assert error is None, "15m velocity orders with sufficient edge/confidence should be accepted"
+
+
+def test_signal_validation_requires_model_prob_for_15m_orders():
+    """BUG #37 FIX: 15m velocity-based orders still require valid model_prob (venue invariant)."""
+    from merid.event_venues.kalshi.order_router import OrderIntent, _validate_signal_metadata
+    
+    intent = OrderIntent(
+        ticker="KXBTC15M-TEST",
+        side="yes",
+        action="buy",
+        price_cents=50,
+        count=10,
+        edge_pct=0.01,
+        confidence=0.50,
+        model_prob=0.01,  # Below KALSHI_MIN_PROBABILITY (0.05)
+        source="merid.prediction.agent_grid_15m"
+    )
+    
+    error = _validate_signal_metadata(intent)
+    assert error == "invalid_model_prob:0.01", "15m velocity orders should still require valid model_prob"
 
 
 def test_signal_validation_rejects_missing_edge():
@@ -190,3 +261,744 @@ def test_signal_validation_allows_valid_opening_orders():
     
     error = _validate_signal_metadata(intent)
     assert error is None
+
+
+class TestOrderIntentSizingContext:
+    """Test OrderIntent sizing context fields for TRADE-TRACE."""
+
+    def test_order_intent_sizing_context_fields(self):
+        """Test OrderIntent includes sizing context fields."""
+        from merid.event_venues.kalshi.order_router import OrderIntent
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=10,
+            # Sizing context fields
+            edgepct=0.05,
+            netedgecents=2.5,
+            band="STANDARD",
+            regime="NORMAL",
+            size_contracts=10,
+            notional_usd=5.0,
+        )
+        
+        assert intent.edgepct == 0.05
+        assert intent.netedgecents == 2.5
+        assert intent.band == "STANDARD"
+        assert intent.regime == "NORMAL"
+        assert intent.size_contracts == 10
+        assert intent.notional_usd == 5.0
+
+    def test_order_intent_default_sizing_context(self):
+        """Test OrderIntent sizing context defaults to zero/empty."""
+        from merid.event_venues.kalshi.order_router import OrderIntent
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=10,
+        )
+        
+        assert intent.edgepct == 0.0
+        assert intent.netedgecents == 0.0
+        assert intent.band == ""
+        assert intent.regime == ""
+        assert intent.size_contracts == 0
+        assert intent.notional_usd == 0.0
+
+    def test_order_intent_conversion_to_fills_ledger(self):
+        """Test OrderIntent can be converted to fills_ledger.OrderIntent with sizing context."""
+        from merid.event_venues.kalshi.order_router import OrderIntent as RouterOrderIntent
+        from merid.event_venues.kalshi.fills_ledger import OrderIntent as FillsLedgerOrderIntent
+        
+        router_intent = RouterOrderIntent(
+            intent_id="test-001",
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=10,
+            agent_id="agent-1",
+            edgepct=0.05,
+            netedgecents=2.5,
+            band="STANDARD",
+            regime="NORMAL",
+            size_contracts=10,
+            notional_usd=5.0,
+        )
+        
+        # Convert to fills_ledger.OrderIntent
+        fills_intent = FillsLedgerOrderIntent(
+            intent_id=router_intent.intent_id,
+            ticker=router_intent.ticker,
+            side=router_intent.side,
+            action=router_intent.action,
+            count=router_intent.count,
+            price_cents=router_intent.price_cents,
+            agent_id=router_intent.agent_id,
+            edgepct=router_intent.edgepct,
+            netedgecents=router_intent.netedgecents,
+            band=router_intent.band,
+            regime=router_intent.regime,
+            size_contracts=router_intent.size_contracts,
+            notional_usd=router_intent.notional_usd,
+        )
+
+
+class TestDynamicOrderTypeSelection:
+    """Test dynamic order type selection based on market conditions."""
+
+    def test_market_order_when_depth_below_threshold(self):
+        """Test that market orders are used when book depth < $500."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _determine_dynamic_order_type
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=10,
+            order_type="limit",
+        )
+        
+        # Create state with thin liquidity ($400 depth)
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            depth_10c=40000,  # $400 in cents
+            seconds_to_expiry=600,  # 10 minutes
+        )
+        
+        order_type, tif = _determine_dynamic_order_type(intent, state)
+        assert order_type == "market"
+        assert tif == "gtc"
+
+    def test_market_order_when_near_expiry(self):
+        """Test that market orders are used when within 5 minutes of expiry."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _determine_dynamic_order_type
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=10,
+            order_type="limit",
+        )
+        
+        # Create state with sufficient depth but near expiry
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            depth_10c=100000,  # $1000 depth
+            seconds_to_expiry=240,  # 4 minutes (< 5 min threshold)
+        )
+        
+        order_type, tif = _determine_dynamic_order_type(intent, state)
+        assert order_type == "market"
+        assert tif == "gtc"
+
+    def test_ioc_when_wide_spread(self):
+        """Test that IOC time-in-force is used when spread is wide (fast-moving market)."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _determine_dynamic_order_type
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=10,
+            order_type="limit",
+        )
+        
+        # Create state with wide spread indicating volatility
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            depth_10c=100000,  # $1000 depth
+            seconds_to_expiry=600,  # 10 minutes
+            spread_cents=10,  # Wide spread (> 5 cents)
+        )
+        
+        order_type, tif = _determine_dynamic_order_type(intent, state)
+        assert order_type == "limit"
+        assert tif == "ioc"
+
+    def test_80_15_5_split_limit_order(self):
+        """Test that 80% of orders are limit orders under normal conditions."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _determine_dynamic_order_type
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        import random
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=10,
+            order_type="limit",
+        )
+        
+        # Create state with normal conditions
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            depth_10c=100000,  # $1000 depth
+            seconds_to_expiry=600,  # 10 minutes
+            spread_cents=2,  # Normal spread
+        )
+        
+        # Test multiple times to verify distribution
+        limit_count = 0
+        market_count = 0
+        fok_count = 0
+        
+        # Use different timestamps to get different random values
+        for i in range(100):
+            # Mock time to vary the seed
+            import time as _time
+            original_time = _time.time
+            _time.time = lambda: 1000 + i * 60  # Vary by minute
+            
+            try:
+                order_type, tif = _determine_dynamic_order_type(intent, state)
+                if order_type == "limit" and tif == "gtc":
+                    limit_count += 1
+                elif order_type == "market":
+                    market_count += 1
+                elif tif == "fok":
+                    fok_count += 1
+            finally:
+                _time.time = original_time
+        
+        # Verify roughly 90/5/5 distribution (allowing for variance)
+        assert limit_count >= 80  # At least 80% limit
+        assert market_count >= 2   # At least 2% market
+        assert fok_count >= 1      # At least 1% FOK
+
+    def test_limit_order_when_conditions_good(self):
+        """Test that limit orders are used when depth is sufficient and not near expiry."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _determine_dynamic_order_type
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=10,
+            order_type="limit",
+        )
+        
+        # Create state with good conditions
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            depth_10c=100000,  # $1000 depth (> $500 threshold)
+            seconds_to_expiry=600,  # 10 minutes (> 5 min threshold)
+            spread_cents=2,  # Normal spread
+        )
+        
+        order_type, tif = _determine_dynamic_order_type(intent, state)
+        assert order_type == "limit"
+        assert tif == "gtc"
+
+    def test_preserves_market_order_when_already_set(self):
+        """Test that market orders are preserved when already set."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _determine_dynamic_order_type
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=10,
+            order_type="market",
+        )
+        
+        # Create state with good conditions (would normally use limit)
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            depth_10c=100000,
+            seconds_to_expiry=600,
+        )
+        
+        order_type, tif = _determine_dynamic_order_type(intent, state)
+        assert order_type == "market"
+        assert tif == "gtc"
+
+    def test_limit_order_when_no_state(self):
+        """Test that limit orders are used when no state is available."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _determine_dynamic_order_type
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=10,
+            order_type="limit",
+        )
+        
+        order_type, tif = _determine_dynamic_order_type(intent, None)
+        assert order_type == "limit"
+        assert tif == "gtc"
+
+
+class TestDepthBasedOrderSizing:
+    """Test depth-based order sizing to cap orders at available liquidity."""
+
+    def test_caps_order_size_when_exceeds_liquidity(self):
+        """Test that order size is capped when it exceeds available liquidity."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _apply_depth_based_order_sizing
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=100,  # Request 100 contracts
+        )
+        
+        # Create state with limited liquidity (50 contracts at best price)
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            top_of_book_size=50,
+        )
+        
+        adjusted_count = _apply_depth_based_order_sizing(intent, state)
+        # Should be capped at 80% of 50 = 40 contracts
+        assert adjusted_count == 40
+
+    def test_preserves_order_size_when_within_liquidity(self):
+        """Test that order size is preserved when within available liquidity."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _apply_depth_based_order_sizing
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=30,  # Request 30 contracts
+        )
+        
+        # Create state with sufficient liquidity (100 contracts at best price)
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            top_of_book_size=100,
+        )
+        
+        adjusted_count = _apply_depth_based_order_sizing(intent, state)
+        # Should remain at 30 (within 80% of 100 = 80)
+        assert adjusted_count == 30
+
+    def test_preserves_order_size_when_no_state(self):
+        """Test that order size is preserved when no state is available."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _apply_depth_based_order_sizing
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=50,
+        )
+        
+        adjusted_count = _apply_depth_based_order_sizing(intent, None)
+        assert adjusted_count == 50
+
+    def test_preserves_order_size_when_no_liquidity_data(self):
+        """Test that order size is preserved when liquidity data is unavailable."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _apply_depth_based_order_sizing
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=50,
+        )
+        
+        # Create state with no liquidity data
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            top_of_book_size=0,
+        )
+        
+        adjusted_count = _apply_depth_based_order_sizing(intent, state)
+        assert adjusted_count == 50
+
+
+class TestPriceValidationAgainstOrderbook:
+    """Test price validation against current order book."""
+
+    def test_rejects_price_too_far_from_mid(self):
+        """Test that limit orders with price too far from mid are rejected."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _validate_price_against_orderbook
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=70,  # 20 cents above mid
+            count=10,
+            order_type="limit",
+        )
+        
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            mid_cents=50,  # Mid is 50 cents
+            best_bid_cents=48,
+            best_ask_cents=52,
+        )
+        
+        error = _validate_price_against_orderbook(intent, state)
+        assert error is not None
+        assert "price_too_far_from_mid" in error
+
+    def test_rejects_buy_order_above_ask(self):
+        """Test that buy orders above ask are rejected."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _validate_price_against_orderbook
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=55,  # Above ask
+            count=10,
+            order_type="limit",
+        )
+        
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            mid_cents=50,
+            best_bid_cents=48,
+            best_ask_cents=52,  # Ask is 52 cents
+        )
+        
+        error = _validate_price_against_orderbook(intent, state)
+        assert error is not None
+        assert "buy_above_ask" in error
+
+    def test_rejects_sell_order_below_bid(self):
+        """Test that sell orders below bid are rejected."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _validate_price_against_orderbook
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="sell",
+            price_cents=45,  # Below bid
+            count=10,
+            order_type="limit",
+        )
+        
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            mid_cents=50,
+            best_bid_cents=48,  # Bid is 48 cents
+            best_ask_cents=52,
+        )
+        
+        error = _validate_price_against_orderbook(intent, state)
+        assert error is not None
+        assert "sell_below_bid" in error
+
+    def test_accepts_valid_limit_order_price(self):
+        """Test that valid limit order prices are accepted."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _validate_price_against_orderbook
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=50,  # At mid
+            count=10,
+            order_type="limit",
+        )
+        
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            mid_cents=50,
+            best_bid_cents=48,
+            best_ask_cents=52,
+        )
+        
+        error = _validate_price_against_orderbook(intent, state)
+        assert error is None
+
+    def test_skips_validation_for_market_orders(self):
+        """Test that market orders skip price validation."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _validate_price_against_orderbook
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=100,  # Far from mid
+            count=10,
+            order_type="market",
+        )
+        
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            mid_cents=50,
+        )
+        
+        error = _validate_price_against_orderbook(intent, state)
+        assert error is None
+
+    def test_skips_validation_when_no_state(self):
+        """Test that validation is skipped when no state is available."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _validate_price_against_orderbook
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=100,
+            count=10,
+            order_type="limit",
+        )
+        
+        error = _validate_price_against_orderbook(intent, None)
+        assert error is None
+
+
+class TestMarketLiquidityCheck:
+    """Test market liquidity check to reject orders with insufficient depth."""
+
+    def test_rejects_insufficient_liquidity(self):
+        """Test that orders are rejected when book depth is below threshold."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _check_market_liquidity
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=10,
+        )
+        
+        # Create state with insufficient liquidity ($200 depth, below $500 threshold)
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            depth_10c=20000,  # $200 in cents
+        )
+        
+        error = _check_market_liquidity(intent, state)
+        assert error is not None
+        assert "insufficient_depth" in error
+
+    def test_accepts_sufficient_liquidity(self):
+        """Test that orders are accepted when book depth is above threshold."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _check_market_liquidity
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=10,
+        )
+        
+        # Create state with sufficient liquidity ($600 depth, above $500 threshold)
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            depth_10c=60000,  # $600 in cents
+        )
+        
+        error = _check_market_liquidity(intent, state)
+        assert error is None
+
+    def test_skips_check_when_no_state(self):
+        """Test that liquidity check is skipped when no state is available."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _check_market_liquidity
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=10,
+        )
+        
+        error = _check_market_liquidity(intent, None)
+        assert error is None
+
+    def test_accepts_at_threshold_boundary(self):
+        """Test that orders are accepted at the threshold boundary ($500)."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _check_market_liquidity
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=10,
+        )
+        
+        # Create state at threshold ($500 depth)
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            depth_10c=50000,  # $500 in cents
+        )
+        
+        error = _check_market_liquidity(intent, state)
+        assert error is None
+
+
+class TestOrderPriceAdjustment:
+    """Test order price adjustment to improve fill rates."""
+
+    def test_adjusts_buy_order_price_towards_mid(self):
+        """Test that buy order prices are adjusted up towards mid."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _adjust_order_price_for_fill_rate
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=40,  # Below mid
+            count=10,
+            order_type="limit",
+        )
+        
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            mid_cents=50,
+            best_bid_cents=48,
+            best_ask_cents=52,
+        )
+        
+        adjusted_price = _adjust_order_price_for_fill_rate(intent, state)
+        # Should be adjusted to 25% of the distance to mid: 40 + (50-40)*0.25 = 42.5 -> 42
+        assert adjusted_price == 42
+
+    def test_adjusts_sell_order_price_towards_mid(self):
+        """Test that sell order prices are adjusted down towards mid."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _adjust_order_price_for_fill_rate
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="sell",
+            price_cents=60,  # Above mid
+            count=10,
+            order_type="limit",
+        )
+        
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            mid_cents=50,
+            best_bid_cents=48,
+            best_ask_cents=52,
+        )
+        
+        adjusted_price = _adjust_order_price_for_fill_rate(intent, state)
+        # Should be adjusted to 25% of the distance to mid: 60 - (60-50)*0.25 = 57.5 -> 57
+        assert adjusted_price == 57
+
+    def test_skips_adjustment_for_market_orders(self):
+        """Test that market orders skip price adjustment."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _adjust_order_price_for_fill_rate
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=40,
+            count=10,
+            order_type="market",
+        )
+        
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            mid_cents=50,
+        )
+        
+        adjusted_price = _adjust_order_price_for_fill_rate(intent, state)
+        # Should remain unchanged
+        assert adjusted_price == 40
+
+    def test_skips_adjustment_when_no_state(self):
+        """Test that price adjustment is skipped when no state is available."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _adjust_order_price_for_fill_rate
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=40,
+            count=10,
+            order_type="limit",
+        )
+        
+        adjusted_price = _adjust_order_price_for_fill_rate(intent, None)
+        assert adjusted_price == 40
+
+    def test_does_not_cross_mid_for_buy_orders(self):
+        """Test that buy orders are not adjusted above mid."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _adjust_order_price_for_fill_rate
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="buy",
+            price_cents=48,  # Close to mid
+            count=10,
+            order_type="limit",
+        )
+        
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            mid_cents=50,
+        )
+        
+        adjusted_price = _adjust_order_price_for_fill_rate(intent, state)
+        # Should be adjusted but not above mid (max 49)
+        assert adjusted_price <= 49
+        assert adjusted_price >= 48
+
+    def test_does_not_cross_mid_for_sell_orders(self):
+        """Test that sell orders are not adjusted below mid."""
+        from merid.event_venues.kalshi.order_router import OrderIntent, _adjust_order_price_for_fill_rate
+        from merid.event_venues.kalshi.models import KalshiMarketState
+        
+        intent = OrderIntent(
+            ticker="KXBTC-TEST",
+            side="yes",
+            action="sell",
+            price_cents=52,  # Close to mid
+            count=10,
+            order_type="limit",
+        )
+        
+        state = KalshiMarketState(
+            ticker="KXBTC-TEST",
+            mid_cents=50,
+        )
+        
+        adjusted_price = _adjust_order_price_for_fill_rate(intent, state)
+        # Should be adjusted but not below mid (min 51)
+        assert adjusted_price >= 51
+        assert adjusted_price <= 52

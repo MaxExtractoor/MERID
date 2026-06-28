@@ -32,7 +32,7 @@ class TestKalshiExecutorQuotes:
     async def test_get_quote_success(self, executor):
         """Test get_quote success."""
         route = respx.get(
-            "https://api.elections.kalshi.com/trade/v1/price",
+            "https://external-api.kalshi.com/trade/v1/price",
             params={"ticker": "PRES-2024-DEM", "side": "buy", "count": "100"}
         ).mock(
             return_value=Response(200, json={"price": "65.5"})
@@ -51,7 +51,7 @@ class TestKalshiExecutorQuotes:
     async def test_get_quote_converts_symbol(self, executor):
         """Test get_quote converts symbol to ticker."""
         respx.get(
-            "https://api.elections.kalshi.com/trade/v1/price",
+            "https://external-api.kalshi.com/trade/v1/price",
             params={"ticker": "PRES-2024-REP", "side": "sell", "count": "50"}
         ).mock(
             return_value=Response(200, json={"price": "35.0"})
@@ -69,7 +69,7 @@ class TestKalshiExecutorTrading:
     
     async def test_execute_trade_market(self, executor):
         """Test execute_trade with market order."""
-        route = respx.post("https://api.elections.kalshi.com/trade/v1/order").mock(
+        route = respx.post("https://external-api.kalshi.com/trade/v1/order").mock(
             return_value=Response(200, json={
                 "order_id": "order_123",
                 "executed_price": "65.5"
@@ -90,7 +90,7 @@ class TestKalshiExecutorTrading:
     
     async def test_execute_trade_limit(self, executor):
         """Test execute_trade with limit order."""
-        respx.post("https://api.elections.kalshi.com/trade/v1/order").mock(
+        respx.post("https://external-api.kalshi.com/trade/v1/order").mock(
             return_value=Response(200, json={
                 "order_id": "order_456",
                 "executed_price": "60.0"
@@ -108,7 +108,7 @@ class TestKalshiExecutorTrading:
     
     async def test_execute_trade_error(self, executor):
         """Test execute_trade with API error."""
-        respx.post("https://api.elections.kalshi.com/trade/v1/order").mock(
+        respx.post("https://external-api.kalshi.com/trade/v1/order").mock(
             return_value=Response(400, text="Insufficient funds")
         )
         
@@ -125,7 +125,7 @@ class TestKalshiExecutorPositions:
     
     async def test_get_positions(self, executor):
         """Test get_positions."""
-        route = respx.get("https://api.elections.kalshi.com/portfolio/v1/positions").mock(
+        route = respx.get("https://external-api.kalshi.com/portfolio/v1/positions").mock(
             return_value=Response(200, json={
                 "positions": [
                     {
@@ -158,7 +158,7 @@ class TestKalshiExecutorPositions:
     
     async def test_get_positions_empty(self, executor):
         """Test get_positions with empty response."""
-        respx.get("https://api.elections.kalshi.com/portfolio/v1/positions").mock(
+        respx.get("https://external-api.kalshi.com/portfolio/v1/positions").mock(
             return_value=Response(200, json={"positions": []})
         )
         

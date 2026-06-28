@@ -27,13 +27,13 @@ class TestKalshiExecutor:
         """Test successful trade execution."""
         # v2 balance endpoint — runs before every order submission
         mock_kalshi_api.get(
-            "https://api.elections.kalshi.com/trade-api/v2/portfolio/balance"
+            "https://external-api.kalshi.com/trade-api/v2/portfolio/balance"
         ).mock(
             return_value=Response(200, json={"balance": 100000, "payout": 0})
         )
         # v2 order endpoint
         mock_kalshi_api.post(
-            "https://api.elections.kalshi.com/trade-api/v2/portfolio/orders"
+            "https://external-api.kalshi.com/trade-api/v2/portfolio/orders"
         ).mock(
             return_value=Response(
                 200,
@@ -69,12 +69,12 @@ class TestKalshiExecutor:
         from merid.execution.http_base import ExecutionError
         # v2 balance endpoint — runs before every order submission
         mock_kalshi_api.get(
-            "https://api.elections.kalshi.com/trade-api/v2/portfolio/balance"
+            "https://external-api.kalshi.com/trade-api/v2/portfolio/balance"
         ).mock(
             return_value=Response(200, json={"balance": 100000, "payout": 0})
         )
         mock_kalshi_api.post(
-            "https://api.elections.kalshi.com/trade-api/v2/portfolio/orders"
+            "https://external-api.kalshi.com/trade-api/v2/portfolio/orders"
         ).mock(
             side_effect=ExecutionError("Network unreachable", "kalshi")
         )
@@ -95,12 +95,12 @@ class TestKalshiExecutor:
         import asyncio
         # v2 balance endpoint — runs before every order submission
         mock_kalshi_api.get(
-            "https://api.elections.kalshi.com/trade-api/v2/portfolio/balance"
+            "https://external-api.kalshi.com/trade-api/v2/portfolio/balance"
         ).mock(
             return_value=Response(200, json={"balance": 100000, "payout": 0})
         )
         mock_kalshi_api.post(
-            "https://api.elections.kalshi.com/trade-api/v2/portfolio/orders"
+            "https://external-api.kalshi.com/trade-api/v2/portfolio/orders"
         ).mock(
             side_effect=asyncio.TimeoutError("Request timed out")
         )
@@ -119,7 +119,7 @@ class TestKalshiExecutor:
         """Test getting a quote."""
         # v2 orderbook endpoint — executor hits /markets/{symbol}/orderbook
         mock_kalshi_api.get(
-            "https://api.elections.kalshi.com/trade-api/v2/markets/PRES-2024-DEM/orderbook"
+            "https://external-api.kalshi.com/trade-api/v2/markets/PRES-2024-DEM/orderbook"
         ).mock(
             return_value=Response(
                 200,
@@ -143,7 +143,7 @@ class TestKalshiExecutor:
         """Test fetching positions."""
         # v2 positions endpoint — executor hits /portfolio/positions
         mock_kalshi_api.get(
-            "https://api.elections.kalshi.com/trade-api/v2/portfolio/positions"
+            "https://external-api.kalshi.com/trade-api/v2/portfolio/positions"
         ).mock(
             return_value=Response(
                 200,
@@ -180,7 +180,7 @@ class TestKalshiExecutor:
     async def test_get_positions_empty(self, executor, mock_kalshi_api):
         """Test fetching positions with no open positions."""
         mock_kalshi_api.get(
-            "https://api.elections.kalshi.com/trade-api/v2/portfolio/positions"
+            "https://external-api.kalshi.com/trade-api/v2/portfolio/positions"
         ).mock(
             return_value=Response(200, json={"market_positions": []})
         )

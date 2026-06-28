@@ -137,8 +137,8 @@ def test_kalshi_enabled_ws_stale_denies():
                     return_value={
                         "connected": True,
                         "subscribed_tickers": 3,
-                        "expected_ws_url": "wss://api.elections.kalshi.com/trade-api/ws/v2",
-                        "ws_client": {"last_msg_ago_s": 99, "uptime_s": 100, "ws_url": "wss://api.elections.kalshi.com/trade-api/ws/v2"},
+                        "expected_ws_url": "wss://external-api-ws.kalshi.com/trade-api/ws/v2",
+                        "ws_client": {"last_msg_ago_s": 99, "uptime_s": 100, "ws_url": "wss://external-api-ws.kalshi.com/trade-api/ws/v2"},
                     },
                 ):
                     res = check_execution_gate()

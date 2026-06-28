@@ -14,7 +14,10 @@ from merid.event_venues.kalshi.ws import KalshiWebSocket, _AUTH_ERROR_CODES, _WA
 @pytest.fixture
 def ws():
     """Fresh KalshiWebSocket instance (not connected)."""
-    return KalshiWebSocket()
+    ws = KalshiWebSocket()
+    # Initialize msg queue to avoid None errors in backpressure tests
+    ws._ensure_msg_queue()
+    return ws
 
 
 # ── Error message handling ───────────────────────────────────────────────────
@@ -87,7 +90,14 @@ class TestSequenceTracking:
     def test_gap_detected_but_accepted(self, ws):
         ws._last_seq["KXBTC"] = 5
         data = {"type": "ticker", "ticker": "KXBTC", "seq": 10}
-        assert ws._check_sequence(data) is True
+        # Mock the sync method with regular MagicMock to avoid coroutine creation warning
+        with patch.object(ws, '_sync_sequence_gap_with_rest', new_callable=MagicMock):
+            # Patch asyncio.get_running_loop and create_task to avoid event loop requirement in sync test
+            mock_loop = MagicMock()
+            mock_loop.is_closing.return_value = False
+            with patch('asyncio.get_running_loop', return_value=mock_loop):
+                with patch('asyncio.create_task'):
+                    assert ws._check_sequence(data) is True
         assert ws._seq_gaps == 4  # 6,7,8,9 missing
         assert ws._last_seq["KXBTC"] == 10
 
@@ -96,7 +106,14 @@ class TestSequenceTracking:
         ws._ob_snapshots["KXBTC"] = {"type": "orderbook_snapshot", "ticker": "KXBTC"}
         ws._last_seq["KXBTC"] = 5
         data = {"type": "ticker", "ticker": "KXBTC", "seq": 10}
-        ws._check_sequence(data)
+        # Mock the sync method with regular MagicMock to avoid coroutine creation warning
+        with patch.object(ws, '_sync_sequence_gap_with_rest', new_callable=MagicMock):
+            # Patch asyncio.get_running_loop and create_task to avoid event loop requirement in sync test
+            mock_loop = MagicMock()
+            mock_loop.is_closing.return_value = False
+            with patch('asyncio.get_running_loop', return_value=mock_loop):
+                with patch('asyncio.create_task'):
+                    ws._check_sequence(data)
         assert "KXBTC" not in ws._ob_initialised
         assert "KXBTC" not in ws._ob_snapshots
 
@@ -113,8 +130,15 @@ class TestSequenceTracking:
 
     def test_cumulative_gap_count(self, ws):
         ws._last_seq["X"] = 1
-        ws._check_sequence({"ticker": "X", "seq": 5})  # gap=3
-        ws._check_sequence({"ticker": "X", "seq": 10})  # gap=4
+        # Mock the sync method with regular MagicMock to avoid coroutine creation warning
+        with patch.object(ws, '_sync_sequence_gap_with_rest', new_callable=MagicMock):
+            # Patch asyncio.get_running_loop and create_task to avoid event loop requirement in sync test
+            mock_loop = MagicMock()
+            mock_loop.is_closing.return_value = False
+            with patch('asyncio.get_running_loop', return_value=mock_loop):
+                with patch('asyncio.create_task'):
+                    ws._check_sequence({"ticker": "X", "seq": 5})  # gap=3
+                    ws._check_sequence({"ticker": "X", "seq": 10})  # gap=4
         assert ws._seq_gaps == 7
 
 

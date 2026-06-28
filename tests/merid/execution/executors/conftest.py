@@ -36,7 +36,7 @@ def mock_kalshi_balance():
     """
     with respx.mock:
         # Mock the balance endpoint used by KalshiExecutor
-        respx.get("https://api.elections.kalshi.com/trade-api/v2/portfolio/balance").mock(
+        respx.get("https://external-api.kalshi.com/trade-api/v2/portfolio/balance").mock(
             return_value=Response(200, json={
                 "balance": 1000000,  # $10,000 in cents
                 "available_balance": 1000000,

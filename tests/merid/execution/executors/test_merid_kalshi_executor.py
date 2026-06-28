@@ -74,7 +74,7 @@ class TestKalshiExecutorGetQuote:
         executor = KalshiExecutor()
 
         # Mock the orderbook endpoint used by get_quote
-        route = respx.get("https://api.elections.kalshi.com/trade-api/v2/markets/PRES-2024-DEM/orderbook").mock(
+        route = respx.get("https://external-api.kalshi.com/trade-api/v2/markets/PRES-2024-DEM/orderbook").mock(
             return_value=Response(200, json={
                 "orderbook": {
                     "yes": [["65", "100"]],  # price in cents, volume
@@ -100,7 +100,7 @@ class TestKalshiExecutorGetQuote:
         """Test getting quote for sell side."""
         executor = KalshiExecutor()
 
-        route = respx.get("https://api.elections.kalshi.com/trade-api/v2/markets/PRES-2024-REP/orderbook").mock(
+        route = respx.get("https://external-api.kalshi.com/trade-api/v2/markets/PRES-2024-REP/orderbook").mock(
             return_value=Response(200, json={
                 "orderbook": {
                     "yes": [["60", "100"]],
@@ -125,7 +125,7 @@ class TestKalshiExecutorExecuteTrade:
         monkeypatch.setenv("KALSHI_API_KEY_ID", "test_key")
         executor = KalshiExecutor()
         
-        route = respx.post("https://api.elections.kalshi.com/trade-api/v2/portfolio/orders").mock(
+        route = respx.post("https://external-api.kalshi.com/trade-api/v2/portfolio/orders").mock(
             return_value=Response(200, json={
                 "order_id": "order_123",
                 "status": "executed",
@@ -167,7 +167,7 @@ class TestKalshiExecutorExecuteTrade:
         monkeypatch.setenv("KALSHI_API_KEY_ID", "test_key")
         executor = KalshiExecutor()
         
-        route = respx.post("https://api.elections.kalshi.com/trade-api/v2/portfolio/orders").mock(
+        route = respx.post("https://external-api.kalshi.com/trade-api/v2/portfolio/orders").mock(
             return_value=Response(200, json={
                 "order_id": "order_456",
                 "status": "executed",
@@ -202,7 +202,7 @@ class TestKalshiExecutorExecuteTrade:
         monkeypatch.setenv("KALSHI_API_KEY_ID", "test_key")
         executor = KalshiExecutor()
         
-        route = respx.post("https://api.elections.kalshi.com/trade-api/v2/portfolio/orders").mock(
+        route = respx.post("https://external-api.kalshi.com/trade-api/v2/portfolio/orders").mock(
             return_value=Response(400, json={"message": "Invalid order"})
         )
         
@@ -222,7 +222,7 @@ class TestKalshiExecutorExecuteTrade:
         monkeypatch.setenv("KALSHI_API_KEY_ID", "test_key")
         executor = KalshiExecutor()
         
-        route = respx.post("https://api.elections.kalshi.com/trade-api/v2/portfolio/orders").mock(
+        route = respx.post("https://external-api.kalshi.com/trade-api/v2/portfolio/orders").mock(
             side_effect=ConnectionError("Network unreachable")
         )
         
@@ -243,7 +243,7 @@ class TestKalshiExecutorExecuteTrade:
         monkeypatch.setenv("KALSHI_API_KEY_ID", "test_key")
         executor = KalshiExecutor()
         
-        route = respx.post("https://api.elections.kalshi.com/trade-api/v2/portfolio/orders").mock(
+        route = respx.post("https://external-api.kalshi.com/trade-api/v2/portfolio/orders").mock(
             side_effect=asyncio.TimeoutError("Request timeout")
         )
         
@@ -267,7 +267,7 @@ class TestKalshiExecutorGetPositions:
         monkeypatch.setenv("KALSHI_API_KEY_ID", "test_key")
         executor = KalshiExecutor()
         
-        route = respx.get("https://api.elections.kalshi.com/trade-api/v2/portfolio/positions").mock(
+        route = respx.get("https://external-api.kalshi.com/trade-api/v2/portfolio/positions").mock(
             return_value=Response(200, json={
                 "market_positions": [
                     {
@@ -312,7 +312,7 @@ class TestKalshiExecutorGetPositions:
         monkeypatch.setenv("KALSHI_API_KEY_ID", "test_key")
         executor = KalshiExecutor()
         
-        route = respx.get("https://api.elections.kalshi.com/trade-api/v2/portfolio/positions").mock(
+        route = respx.get("https://external-api.kalshi.com/trade-api/v2/portfolio/positions").mock(
             return_value=Response(200, json={"market_positions": []})
         )
 
@@ -327,7 +327,7 @@ class TestKalshiExecutorGetPositions:
         monkeypatch.setenv("KALSHI_API_KEY_ID", "test_key")
         executor = KalshiExecutor()
         
-        route = respx.get("https://api.elections.kalshi.com/trade-api/v2/portfolio/positions").mock(
+        route = respx.get("https://external-api.kalshi.com/trade-api/v2/portfolio/positions").mock(
             return_value=Response(200, json={
                 "market_positions": [
                     {
@@ -355,7 +355,7 @@ class TestKalshiExecutorGetPositions:
         monkeypatch.setenv("KALSHI_API_KEY_ID", "test_key")
         executor = KalshiExecutor()
         
-        route = respx.get("https://api.elections.kalshi.com/trade-api/v2/portfolio/positions").mock(
+        route = respx.get("https://external-api.kalshi.com/trade-api/v2/portfolio/positions").mock(
             return_value=Response(401, json={"error": "Unauthorized"})
         )
         

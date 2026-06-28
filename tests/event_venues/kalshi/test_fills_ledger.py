@@ -18,6 +18,7 @@ import pytest
 
 from merid.event_venues.kalshi.fills_ledger import (
     KalshiFillsLedger,
+    OrderIntent,
 )
 
 
@@ -388,3 +389,233 @@ class TestFillsLedgerSummary:
         assert summary["fills_total"] == 0
         assert summary["total_realized_pnl_usd"] == 0.0
         assert summary["total_fees_usd"] == 0.0
+
+
+class TestOrderIntentSizingContext:
+    """Test OrderIntent sizing context fields for TRADE-TRACE."""
+
+    def test_order_intent_sizing_context_fields(self, ledger: KalshiFillsLedger) -> None:
+        """Test OrderIntent includes sizing context fields."""
+        intent = OrderIntent(
+            intent_id="intent-001",
+            ticker="KXBTC-15M",
+            side="yes",
+            action="buy",
+            count=100,
+            price_cents=50,
+            agent_id="agent-1",
+            # Sizing context fields
+            edgepct=0.05,
+            netedgecents=2.5,
+            band="STANDARD",
+            regime="NORMAL",
+            size_contracts=100,
+            notional_usd=50.0,
+        )
+        
+        ledger.record_intent(intent)
+        
+        # Verify intent was stored
+        retrieved = ledger._intents.get("intent-001")
+        assert retrieved is not None
+        assert retrieved.ticker == "KXBTC-15M"  # Field is now 'ticker', not 'market_ticker'
+        assert retrieved.edgepct == 0.05
+        assert retrieved.netedgecents == 2.5
+        assert retrieved.band == "STANDARD"
+        assert retrieved.regime == "NORMAL"
+        assert retrieved.size_contracts == 100
+        assert retrieved.notional_usd == 50.0
+
+    def test_order_intent_default_sizing_context(self, ledger: KalshiFillsLedger) -> None:
+        """Test OrderIntent sizing context defaults to zero/empty."""
+        intent = OrderIntent(
+            intent_id="intent-002",
+            ticker="KXBTC-15M",
+            side="yes",
+            action="buy",
+            count=100,
+            price_cents=50,
+            agent_id="agent-1",
+        )
+        
+        ledger.record_intent(intent)
+        
+        # Verify defaults
+        retrieved = ledger._intents.get("intent-002")
+        assert retrieved is not None
+        assert retrieved.ticker == "KXBTC-15M"  # Field is now 'ticker', not 'market_ticker'
+        assert retrieved.edgepct == 0.0
+        assert retrieved.netedgecents == 0.0
+        assert retrieved.band == ""
+        assert retrieved.regime == ""
+        assert retrieved.size_contracts == 0
+        assert retrieved.notional_usd == 0.0
+
+
+class TestFillIngestWithTradeTrace:
+    """Test FILL-INGEST log with TRADE-TRACE context."""
+
+    @pytest.mark.asyncio
+    async def test_fill_ingest_with_linked_intent(self, ledger: KalshiFillsLedger, caplog) -> None:
+        """Test FILL-INGEST log includes sizing context from linked intent."""
+        # Record intent with sizing context
+        intent = OrderIntent(
+            intent_id="intent-003",
+            ticker="KXBTC-15M",
+            side="yes",
+            action="buy",
+            count=100,
+            price_cents=50,
+            agent_id="agent-1",
+            edgepct=0.05,
+            netedgecents=2.5,
+            band="STANDARD",
+            regime="NORMAL",
+            size_contracts=100,
+            notional_usd=50.0,
+        )
+        ledger.record_intent(intent)
+        
+        # Ingest fill with client_order_id linking to intent
+        fill = {
+            "fill_id": "fill-003",
+            "market_ticker": "KXBTC-15M",
+            "side": "yes",
+            "action": "buy",
+            "count": 100,
+            "price": 50,
+            "client_order_id": "intent-003",
+        }
+        
+        with caplog.at_level("INFO"):
+            await ledger.ingest_ws_fill(fill)
+        
+        # Verify FILL-INGEST log was emitted with sizing context
+        ingest_logs = [log for log in caplog.records if "FILL-INGEST" in log.message]
+        assert len(ingest_logs) == 1
+        log_message = ingest_logs[0].message
+        assert "edgepct=0.0500" in log_message
+        assert "netedgecents=2.50" in log_message
+        assert "band=STANDARD" in log_message
+        assert "regime=NORMAL" in log_message
+
+    @pytest.mark.asyncio
+    async def test_fill_ingest_without_linked_intent(self, ledger: KalshiFillsLedger, caplog) -> None:
+        """Test FILL-INGEST log uses defaults when no linked intent."""
+        # Ingest fill without client_order_id (orphan)
+        fill = {
+            "fill_id": "fill-004",
+            "market_ticker": "KXBTC-15M",
+            "side": "yes",
+            "action": "buy",
+            "count": 100,
+            "price": 50,
+        }
+        
+        with caplog.at_level("INFO"):
+            await ledger.ingest_ws_fill(fill)
+        
+        # Verify FILL-INGEST log was emitted with defaults
+        ingest_logs = [log for log in caplog.records if "FILL-INGEST" in log.message]
+        assert len(ingest_logs) == 1
+        log_message = ingest_logs[0].message
+        assert "edgepct=0.0000" in log_message
+        assert "netedgecents=0.00" in log_message
+        assert "band=" in log_message  # Empty band
+        assert "regime=" in log_message  # Empty regime
+
+
+class TestFillsLedgerMutexInitialization:
+    """Test mutex initialization fix for event loop safety."""
+
+    @pytest.mark.asyncio
+    async def test_mutex_initialization_on_first_access(self, ledger: KalshiFillsLedger) -> None:
+        """Test that mutex is initialized on first access via _ensure_mutex()."""
+        # Initially mutex should be None
+        assert ledger._mutex is None
+        
+        # Access via _ensure_mutex should initialize it
+        mutex = ledger._ensure_mutex()
+        assert mutex is not None
+        assert isinstance(mutex, asyncio.Lock)
+        
+        # Subsequent calls should return the same mutex
+        mutex2 = ledger._ensure_mutex()
+        assert mutex is mutex2
+
+    @pytest.mark.asyncio
+    async def test_mutex_initialized_before_ingest_ws_fill(self, ledger: KalshiFillsLedger) -> None:
+        """Test that ingest_ws_fill properly initializes mutex via _ensure_mutex."""
+        fill = {
+            "fill_id": "fill-mutex-test-001",
+            "market_ticker": "KXBTC-15M",
+            "side": "yes",
+            "action": "buy",
+            "count": 100,
+            "price": 50,
+        }
+        
+        # Before ingest, mutex should be None
+        assert ledger._mutex is None
+        
+        # Ingest should work without error (mutex initialized internally)
+        result = await ledger.ingest_ws_fill(fill)
+        assert result is True
+        
+        # After ingest, mutex should be initialized
+        assert ledger._mutex is not None
+
+    @pytest.mark.asyncio
+    async def test_mutex_initialized_before_ingest_http_fills(self, ledger: KalshiFillsLedger) -> None:
+        """Test that ingest_http_fills properly initializes mutex via _ensure_mutex."""
+        fills = [
+            {
+                "fill_id": "KX-FILL-ABC123-XYZ789",  # Use realistic Kalshi fill ID format
+                "market_ticker": "KXBTC-15M",
+                "side": "yes",
+                "action": "buy",
+                "count": 100,
+                "yes_price": 0.50,
+                "created_time": datetime.now(timezone.utc).isoformat(),
+            }
+        ]
+        
+        # Before ingest, mutex should be None
+        assert ledger._mutex is None
+        
+        # Ingest should work without error (mutex initialized internally)
+        new_count, new_ids = await ledger.ingest_http_fills(fills, agent_map={})
+        assert new_count == 1
+        
+        # After ingest, mutex should be initialized
+        assert ledger._mutex is not None
+
+    @pytest.mark.asyncio
+    async def test_mutex_thread_safety_concurrent_access(self, ledger: KalshiFillsLedger) -> None:
+        """Test that mutex handles concurrent access safely."""
+        fill1 = {
+            "fill_id": "fill-concurrent-001",
+            "market_ticker": "KXBTC-15M",
+            "side": "yes",
+            "action": "buy",
+            "count": 100,
+            "price": 50,
+        }
+        fill2 = {
+            "fill_id": "fill-concurrent-002",
+            "market_ticker": "KXBTC-15M",
+            "side": "yes",
+            "action": "buy",
+            "count": 50,
+            "price": 51,
+        }
+        
+        # Ingest fills concurrently
+        results = await asyncio.gather(
+            ledger.ingest_ws_fill(fill1),
+            ledger.ingest_ws_fill(fill2),
+        )
+        
+        # Both should succeed
+        assert all(results)
+        assert ledger.summary()["fills_total"] == 2

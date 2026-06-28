@@ -194,7 +194,8 @@ class TestGauntletRunner:
         assert verdict.promoted is True
         assert verdict.successful_cycles == 5
         assert verdict.error_cycles == 0
-        assert len(verdict.checks) == 8
+        # Updated: 10 SLO dimensions (8 original + oversized_orders + kill_switch_triggers)
+        assert len(verdict.checks) == 10
 
     def test_erroring_agent_fails_if_over_threshold(self):
         # Errors on cycles 1, 2, 3 out of 5 = 60% error rate
@@ -250,11 +251,13 @@ class TestGauntletRunner:
         runner = GauntletRunner(cycles=5)
         verdict = asyncio.run(runner.run_agent(agent))
 
+        # Updated: 10 SLO dimensions (8 original + oversized_orders + kill_switch_triggers)
         check_names = {c.name for c in verdict.checks}
         expected = {
             "liveness", "error_rate", "latency_p95",
             "confidence_avg", "confidence_variance",
             "fill_rejection_rate", "max_drawdown", "sharpe_ratio",
+            "oversized_orders", "kill_switch_triggers",
         }
         assert check_names == expected
 

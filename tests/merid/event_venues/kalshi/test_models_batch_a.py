@@ -159,7 +159,7 @@ class TestKalshiConfig:
 
     def test_kalshi_config_defaults(self):
         config = KalshiConfig()
-        assert config.rest_api_url == "https://api.elections.kalshi.com/trade-api/v2"
+        assert config.rest_api_url == "https://external-api.kalshi.com/trade-api/v2"
         assert config.use_demo is False
         assert config.timeout == 30.0
 

@@ -2,7 +2,7 @@
 import pytest
 import time
 from unittest.mock import Mock, patch
-from core.drift_monitor import (
+from merid.core.drift_monitor import (
     DriftSeverity, DriftSignal, DriftEvent, DriftMonitor, get_drift_monitor
 )
 
