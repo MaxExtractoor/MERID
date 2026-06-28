@@ -20,6 +20,18 @@ schema_version: 2  # Bumped for confidence bands integration
 
 profiles:
   # ═══════════════════════════════════════════════════════════════════════════════
+  # PROFILE: kalshi_crypto_15m_v2 (15m Crypto Trading)
+  # Agent-specific min_order_notional for 15m crypto agents
+  # ═══════════════════════════════════════════════════════════════════════════════
+  kalshi_crypto_15m_v2:
+    agent_specific_min_notional:
+      BTC_15M: 0.05
+      ETH_15M: 0.05
+      SOL_15M: 0.05
+      XRP_15M: 0.05
+      DOGE_15M: 0.05
+
+  # ═══════════════════════════════════════════════════════════════════════════════
   # PROFILE: modern_tradeable_kalshi_v1 (PRODUCTION DEFAULT)
   # Conservative "sure bet" mode. BTC 15m min_edge=5.0%, DOGE annual=10.5%.
   # DEPRECATED for 15m crypto when MERID_PROFILE=kalshi_crypto_15m_v2
@@ -127,6 +139,14 @@ profiles:
     min_notional:
       contracts: 1
       usd: 0.35
+
+    # 15m crypto agent-specific min_order_notional (for kalshi_crypto_15m_v2 profile)
+    agent_specific_min_notional:
+      BTC_15M: 0.35
+      ETH_15M: 0.35
+      SOL_15M: 0.35
+      XRP_15M: 0.35
+      DOGE_15M: 0.35
 
   # ═══════════════════════════════════════════════════════════════════════════════
   # PROFILE: modern (DEPRECATED — use modern_tradeable_kalshi_v1)

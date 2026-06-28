@@ -10,7 +10,7 @@ DO NOT DUPLICATE these values elsewhere - import from this module.
 DEPRECATION NOTICE:
 ====================
 The ASSET_RISK_LIMITS and GLOBAL_RISK_LIMITS in this file are superseded by
-config/profiles/kalshi_crypto_15m.yaml, which is the single source of truth
+config/profiles/kalshi_crypto_15m_v2.yaml, which is the single source of truth
 for 15m crypto risk configuration when MERID_PROFILE=kalshi_crypto_15m_v2.
 The legacy dictionaries below are kept only for backward compatibility and
 should not be used in new code.
@@ -18,6 +18,7 @@ should not be used in new code.
 
 from __future__ import annotations
 import os
+import warnings
 
 from dataclasses import dataclass
 from typing import Dict, List, Literal, Optional, Tuple
@@ -403,7 +404,7 @@ GLOBAL_RISK_LIMITS = {
 def get_asset_risk_limits(asset: str) -> dict:
     """Get risk limits for a specific asset.
 
-    DEPRECATED: Use profile-based configuration from kalshi_crypto_15m.yaml instead.
+    DEPRECATED: Use profile-based configuration from kalshi_crypto_15m_v2.yaml instead.
     This function is kept for backward compatibility.
 
     Args:
@@ -414,7 +415,7 @@ def get_asset_risk_limits(asset: str) -> dict:
     """
     warnings.warn(
         "get_asset_risk_limits() is deprecated. Use profile-based configuration from "
-        "kalshi_crypto_15m.yaml instead. Profile-based config is the single source of truth.",
+        "kalshi_crypto_15m_v2.yaml instead. Profile-based config is the single source of truth.",
         DeprecationWarning,
         stacklevel=2
     )
@@ -423,7 +424,7 @@ def get_asset_risk_limits(asset: str) -> dict:
 def get_global_risk_limits() -> dict:
     """Get global risk limits for 15m crypto.
 
-    DEPRECATED: Use profile-based configuration from kalshi_crypto_15m.yaml instead.
+    DEPRECATED: Use profile-based configuration from kalshi_crypto_15m_v2.yaml instead.
     This function is kept for backward compatibility.
 
     Returns:
@@ -431,7 +432,7 @@ def get_global_risk_limits() -> dict:
     """
     warnings.warn(
         "get_global_risk_limits() is deprecated. Use profile-based configuration from "
-        "kalshi_crypto_15m.yaml instead. Profile-based config is the single source of truth.",
+        "kalshi_crypto_15m_v2.yaml instead. Profile-based config is the single source of truth.",
         DeprecationWarning,
         stacklevel=2
     )
@@ -488,6 +489,7 @@ def log_risk_limits_for_agent(asset: str, mode: str = "LIVE") -> None:
     """Log risk limits for a specific agent at startup.
     
     This provides an audit trail of which limits each agent is using.
+    Uses profile-based configuration from kalshi_crypto_15m_v2.yaml.
     
     Args:
         asset: Asset symbol (e.g., "BTC")
@@ -496,11 +498,39 @@ def log_risk_limits_for_agent(asset: str, mode: str = "LIVE") -> None:
     from utils.logger import get_logger
     logger = get_logger("config.kalshi_15m_crypto_config")
     
+    # Use profile-based configuration instead of deprecated functions
+    try:
+        from merid.risk.profiles.crypto_15m_profile import get_active_profile
+        profile_adapter = get_active_profile()
+        if profile_adapter is not None:
+            profile = profile_adapter.profile
+            
+            # Get per-asset limits from profile
+            asset_key = asset.lower()
+            per_asset = profile.per_asset.get(asset_key, {})
+            
+            logger.info("=" * 80)
+            logger.info(f"AGENT RISK LIMITS: {asset} ({mode})")
+            logger.info("=" * 80)
+            logger.info(f"max_contracts_per_order: {per_asset.get('max_contracts_per_order', 'N/A')}")
+            logger.info(f"max_open_contracts: {per_asset.get('max_open_contracts', 'N/A')}")
+            logger.info(f"max_concurrent_resting_orders: {per_asset.get('max_concurrent_resting_orders', 'N/A')}")
+            logger.info(f"max_daily_loss_usd: ${per_asset.get('max_daily_loss_usd', 'N/A')}")
+            logger.info(f"max_total_open_notional_usd: ${profile.global_capital.get('max_total_open_notional_usd', 'N/A')}")
+            logger.info(f"max_daily_loss_usd (global): ${profile.global_capital.get('max_daily_loss_usd', 'N/A')}")
+            logger.info(f"max_total_contracts_per_order: {profile.global_capital.get('max_total_contracts_per_order', 'N/A')}")
+            logger.info("=" * 80)
+            return
+    except Exception:
+        # Fallback to deprecated functions if profile unavailable
+        pass
+    
+    # Fallback to deprecated functions (will trigger deprecation warning)
     asset_limits = get_asset_risk_limits(asset)
     global_limits = get_global_risk_limits()
     
     logger.info("=" * 80)
-    logger.info(f"AGENT RISK LIMITS: {asset} ({mode})")
+    logger.info(f"AGENT RISK LIMITS: {asset} ({mode}) [FALLBACK - DEPRECATED]")
     logger.info("=" * 80)
     logger.info(f"max_contracts_per_order: {asset_limits['max_contracts_per_order']}")
     logger.info(f"max_open_contracts: {asset_limits['max_open_contracts']}")
