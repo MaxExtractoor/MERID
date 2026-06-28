@@ -69,8 +69,9 @@ def log_config_compliance_check():
     is_scalper = os.getenv("STRATEGY_MODE", "").upper() == "MOMENTUM_SCALPER"
     
     try:
-        from merid.prediction.kalshi_distance_config import get_distance_config
-        cfg = get_distance_config()
+        # LEGACY REMOVAL: kalshi_distance_config moved to archive/legacy/ during 15m stack cleanup
+        # cfg = get_distance_config()
+        cfg = None
         
         logger.info(
             "[CONFIG_CHECK] STRATEGY_MODE=%s, max_15m_positions=%d, max_exposure=%.1f%%",

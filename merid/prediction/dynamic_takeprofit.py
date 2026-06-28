@@ -5,6 +5,15 @@ This module implements the production scalping take-profit regime:
 - Stretch TP: 2.0-3.0R for high confidence signals
 - Confidence/Kelly fraction modulates between base and stretch
 
+TP STRATEGY PRECEDENCE:
+For 15m Kalshi crypto agents, the take-profit strategy is determined by:
+1. Agent config take_profit.enabled (kalshi_agent_grid.yaml) - master switch
+2. Time-based R-multiple (agent config take_profit.time_based_r_multiple) - overrides based on time to expiry
+3. DynamicTakeProfitEngine.compute_tp() - computes TP price based on confidence/Kelly
+4. Trailing stop (agent config take_profit.trailing_enabled) - activates after TP trigger
+
+Precedence order: Time-based R-multiple > DynamicTakeProfitEngine > Static TP from config
+
 Usage::
     from merid.prediction.dynamic_takeprofit import DynamicTakeProfitEngine, TakeProfitLevel
     
@@ -124,7 +133,12 @@ class DynamicTakeProfitEngine:
         r_multiple, tp_level, trail_trigger, trail_distance = self._map_confidence_to_r(
             effective_confidence
         )
-        
+
+        logger.info(
+            "[CONF-TP-SL] confidence=%.2f r_multiple=%.2f tp_level=%s trail_trigger=%.2f trail_distance=%.2f",
+            effective_confidence, r_multiple, tp_level.value, trail_trigger or 0, trail_distance or 0
+        )
+
         # Calculate TP offset from entry
         tp_offset = r_multiple * risk_per_contract
         

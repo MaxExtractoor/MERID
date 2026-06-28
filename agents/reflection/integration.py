@@ -1,3 +1,7 @@
+# LEGACY: not used by kalshi_crypto_15m_v2 profile
+# This module provides reflection system integration for learning and persistence
+# The lean 15m stack does not use reflection systems
+
 """
 ReflectionSystem Integration - Unified Interface
 

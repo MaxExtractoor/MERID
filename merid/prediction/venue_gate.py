@@ -59,6 +59,14 @@ class VenueGate:
             except Exception as _se:
                 logger.debug("VenueGate: settings unavailable for mode, using env: %s", _se)
                 raw_mode_str = os.getenv("MERID_PM_TRADING_MODE", "mock")
+            # CRITICAL FIX: Validate trading mode is valid
+            valid_modes = ["mock", "paper", "live", "sim"]
+            if raw_mode_str.lower() not in valid_modes:
+                logger.warning(
+                    "VenueGate: Invalid MERID_PM_TRADING_MODE=%s - using default 'mock'",
+                    raw_mode_str
+                )
+                raw_mode_str = "mock"
             val = raw_mode_str.lower()
             if val == "sim":
                 val = "mock"  # legacy alias
@@ -253,21 +261,13 @@ class VenueGate:
 
 # Module-level singleton (lazy)
 _gate: Optional[VenueGate] = None
-# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-# _gate_lock = threading.Lock()
-_gate_lock = None  # Disabled to prevent startup hang
+# LEGACY REMOVAL: Threading lock removed - causing deadlock during startup
+# Single-threaded FastAPI startup doesn't need lock protection
 
 
 def get_venue_gate() -> VenueGate:
-    """Return the module-level VenueGate singleton."""
+    """Get or create the VenueGate singleton."""
     global _gate
     if _gate is None:
-        if _gate_lock is not None:
-            with _gate_lock:
-                if _gate is None:
-                    _gate = VenueGate()
-        else:
-            # Lock disabled - direct initialization (startup workaround)
-            _gate = VenueGate()
+        _gate = VenueGate()
     return _gate

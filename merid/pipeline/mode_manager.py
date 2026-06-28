@@ -110,7 +110,7 @@ _DEFAULT_CONFIGS: List[VenueConfig] = [
     VenueConfig(
         venue="ibkr", domain="equity", mode=TradingMode.PAPER,
         api_key_env="IBKR_PAPER_TRADING_USERNAME",
-        api_url="127.0.0.1:7497",
+        api_url=os.getenv("IB_API_HOST", "127.0.0.1:7497"),
         notes="Paper account via TWS/Gateway.",
     ),
 ]

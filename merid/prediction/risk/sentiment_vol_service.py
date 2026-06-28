@@ -908,10 +908,7 @@ class SentimentVolService:
 # ═══════════════════════════════════════════════════════════════════════════
 
 _service_instance: Optional[SentimentVolService] = None
-# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-# _service_lock = threading.Lock()
-_service_lock = None  # Disabled to prevent startup hang
+_service_lock = None
 
 
 def get_sentiment_vol_service(

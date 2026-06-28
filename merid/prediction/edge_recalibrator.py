@@ -221,10 +221,10 @@ class EdgeRecalibrator:
         """
         configs = []
         try:
-            from merid.prediction.agent_grid import get_agent_grid
+            from merid.prediction.agent_grid_15m import get_agent_grid
             grid = get_agent_grid()
-            if grid and grid.agents:
-                for agent in grid.agents:
+            if grid and grid._agents:
+                for agent in grid._agents:
                     try:
                         cfg = agent._strategy._config
                         if cfg not in configs:
@@ -257,21 +257,13 @@ class EdgeRecalibrator:
 # ── Singleton ────────────────────────────────────────────────────────────
 
 _recalibrator: Optional[EdgeRecalibrator] = None
-# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-# _recalibrator_lock = threading.Lock()
-_recalibrator_lock = None  # Disabled to prevent startup hang
+# LEGACY REMOVAL: Threading lock removed - causing deadlock during startup
+# Single-threaded FastAPI startup doesn't need lock protection
 
 
 def get_edge_recalibrator() -> EdgeRecalibrator:
     """Get or create the singleton EdgeRecalibrator."""
     global _recalibrator
     if _recalibrator is None:
-        if _recalibrator_lock is not None:
-            with _recalibrator_lock:
-                if _recalibrator is None:
-                    _recalibrator = EdgeRecalibrator()
-        else:
-            # Lock disabled - direct initialization (startup workaround)
-            _recalibrator = EdgeRecalibrator()
+        _recalibrator = EdgeRecalibrator()
     return _recalibrator

@@ -614,13 +614,15 @@ def _run_agent_gauntlet(cycles: int = 10) -> tuple:
 
 def _assess_domains(rings_pass: bool) -> List[DomainEligibility]:
     """Assess per-domain live eligibility."""
-    try:
-        from merid.paper_config import DOMAIN_CONFIGS
-    except ImportError:
-        return []
+    # Production stack: return empty list instead of using legacy paper_config
+    # try:
+    #     from merid.paper_config import DOMAIN_CONFIGS
+    # except ImportError:
+    #     return []
+    return []
 
-    domains = []
-    for name, dc in DOMAIN_CONFIGS.items():
+    # domains = []
+    # for name, dc in DOMAIN_CONFIGS.items():
         blockers = []
 
         if not dc.enabled:

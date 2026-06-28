@@ -80,6 +80,18 @@ class CryptoRTIMonitor:
         """Process ETH RTI tick."""
         await self.on_rti_tick("ETH", price, ts)
 
+    async def on_sol_rti_tick(self, price: float, ts: float | None = None):
+        """Process SOL RTI tick."""
+        await self.on_rti_tick("SOL", price, ts)
+
+    async def on_xrp_rti_tick(self, price: float, ts: float | None = None):
+        """Process XRP RTI tick."""
+        await self.on_rti_tick("XRP", price, ts)
+
+    async def on_doge_rti_tick(self, price: float, ts: float | None = None):
+        """Process DOGE RTI tick."""
+        await self.on_rti_tick("DOGE", price, ts)
+
     def get_rti_metrics(self, asset: str) -> dict[str, float]:
         """Get current RTI metrics for asset."""
         return self.rti_stream.get_current_metrics(asset)

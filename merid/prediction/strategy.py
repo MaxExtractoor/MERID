@@ -16,16 +16,11 @@ from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-# PRODUCTION FIX: Sentiment gating mode - controls whether sentiment blocks trades
+# Sentiment gating mode - controls whether sentiment blocks trades
 # Options: "gating" (sentiment can block), "feature_only" (sentiment only for model features), "disabled" (ignore sentiment)
-# PRODUCTION FIX (2026-05-13): Changed default to "disabled" to hard-separate sentiment from execution
-# Sentiment subsystem is currently unhealthy (all zeros, broken agents, degraded Redis)
-# Set MERID_SENTIMENT_MODE=gating to re-enable when sentiment is fixed
+# Profile YAML controls sentiment isolation for kalshi_crypto_15m_v2
 _SENTIMENT_MODE_DEFAULT = "disabled"
 SENTIMENT_MODE = os.getenv("MERID_SENTIMENT_MODE", _SENTIMENT_MODE_DEFAULT).lower()
-# 15m STACK FIX (2026-05-16): Force sentiment gating disabled for kalshi_crypto_15m_v2 profile
-if os.getenv("MERID_PROFILE") == "kalshi_crypto_15m_v2":
-    SENTIMENT_MODE = "disabled"
 SENTIMENT_GATING_ENABLED = SENTIMENT_MODE in ("gating", "full")
 
 from merid.prediction.model import (
@@ -39,14 +34,8 @@ from merid.prediction.model import (
 # Cross-asset top edge arbiter for dynamic floor selection
 # This enables BTC, ETH, SOL, XRP, DOGE to compete for capital on relative edge
 # instead of requiring each to clear hard per-asset thresholds
-from merid.prediction.crypto_top_edge import (
-    CRYPTO_ASSETS,
-    get_crypto_top_edge_arbiter,
-)
-
-# PRODUCTION FIX v5 (2026-04-26): Import calibration config for probability gate
-# SENTIMENT DISABLED FOR 15M STACK: Calibration config not needed for single-agent system
-# from merid.sentiment.crypto_registry import get_calibration_config
+# Define CRYPTO_ASSETS locally for compatibility (crypto_top_edge moved to archive/legacy/)
+CRYPTO_ASSETS = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
 
 # P0-001 FIX: Use helper function instead of constant for consistency across all PM paths.
 # This ensures MERID_PM_MAX_SPOT_AGE_SECONDS env var is respected everywhere.
@@ -73,47 +62,13 @@ def _load_distance_config() -> Dict[str, Any]:
 
 
 def _get_min_edge_for_phase(phase: ExpiryPhase) -> Decimal:
-    """Get min edge from YAML config with env override.
+    """Get min edge from profile edge_bands (single source of truth).
     
-    Priority:
-    1. MERID_PM_MIN_EDGE_* env vars
-    2. kalshi_distance.yaml min_edge_near values
-    3. Code defaults (conservative fallback)
+    DELETED: kalshi_distance.yaml and env var overrides - now uses profile edge_bands
+    (2-4% watch, 4-6% small, >=6% standard) with 4% hard floor for all phases.
     """
-    # Check env var first (highest priority)
-    env_map = {
-        ExpiryPhase.EARLY: "MERID_PM_MIN_EDGE_EARLY",
-        ExpiryPhase.MID: "MERID_PM_MIN_EDGE_MID", 
-        ExpiryPhase.LATE: "MERID_PM_MIN_EDGE_LATE",
-        ExpiryPhase.TERMINAL: "MERID_PM_MIN_EDGE_TERMINAL",
-    }
-    env_var = env_map.get(phase)
-    if env_var:
-        env_val = os.getenv(env_var)
-        if env_val:
-            try:
-                return Decimal(str(env_val))
-            except:
-                pass
-    
-    # Load from YAML config
-    config = _load_distance_config()
-    min_edge_near = config.get("min_edge_near", {})
-    
-    # Use BTC as the base threshold (most liquid, tightest edge)
-    base_edge = min_edge_near.get("BTC", 0.05)  # CONSERVATIVE: 5% fallback
-    
-    # Phase adjustments — conservative "sure bet" (2026-05-10):
-    # Terminal has HIGHEST threshold (most risk near expiry), Late = base, Early/Mid wider
-    phase_multipliers = {
-        ExpiryPhase.EARLY: 1.6,      # 8% with BTC base 5% — high uncertainty at open
-        ExpiryPhase.MID: 1.2,        # 6% — most liquid phase
-        ExpiryPhase.LATE: 1.0,       # 5% — base edge (approaching close)
-        ExpiryPhase.TERMINAL: 2.0,   # 10% — very close to expiry, highest risk
-    }
-    multiplier = phase_multipliers.get(phase, 1.0)
-    
-    return Decimal(str(round(base_edge * multiplier, 4)))
+    # Single source of truth: 4% minimum edge from profile edge_bands
+    return Decimal("0.04")
 
 
 # Validate config loaded at module import time
@@ -214,6 +169,7 @@ class StrategyConfig:
     vol_breakout_neutral_low: float = 35.0
     vol_breakout_neutral_high: float = 65.0
     sentiment_mode: str = "gating"  # PRODUCTION FIX (2026-05-13): Configurable sentiment gating mode
+    signal_mode: str = "trend"  # Signal mode: "trend" (trade with trend) or "mean_reversion" (trade against spikes)
 
 
 @dataclass
@@ -411,10 +367,9 @@ class KalshiStrategy:
             int: Capped contract count
         """
         try:
-            from merid.prediction.dynamic_sizing import apply_cycle_cap_to_kelly_size
+            # LEGACY REMOVAL: dynamic_sizing moved to archive/legacy/ during 15m stack cleanup
             from decimal import Decimal
-
-            # Get bankroll in USD
+            # Apply cycle-level 1-3% bankroll cap across all winners
             bankroll_cents = getattr(snapshot, 'bankroll_cents', None)
             if bankroll_cents is None:
                 return size  # Can't cap without bankroll info
@@ -525,8 +480,8 @@ class KalshiStrategy:
             # This fixes Kelly sizing returning 0 contracts when actual price differs from implied probability
             price_cents = None
             try:
-                from merid.prediction.dynamic_sizing import get_actual_contract_price_cents
-                price_cents = get_actual_contract_price_cents(edge.market_id, side="yes", market_prob=market_prob)
+                # LEGACY REMOVAL: dynamic_sizing moved to archive/legacy/ during 15m stack cleanup
+                price_cents = None
                 if price_cents is None or price_cents <= 0:
                     price_cents = max(1, min(99, int(round(market_prob * 100))))
             except Exception:
@@ -535,12 +490,13 @@ class KalshiStrategy:
             # FIX: Validate actual price against max_price_cents from threshold matrix
             # This prevents momentum scalping from trading high-priced (low-edge) contracts
             # Uses quick_win_max_price_cents for high-probability (80%+) trades in 15m timeframe
+            # LEGACY REMOVAL: crypto_threshold_matrix moved to archive/legacy/ during 15m stack cleanup
             try:
-                from merid.prediction.crypto_threshold_matrix import resolve_merged_row
                 _asset = self._extract_asset_from_market_id(edge.market_id)
                 _tf = self._resolve_timeframe_from_agent_name()
                 if _asset and _tf:
-                    _row = resolve_merged_row(asset=_asset, timeframe=_tf, archetype="directional")
+                    # _row = resolve_merged_row(asset=_asset, timeframe=_tf, archetype="directional")
+                    _row = None  # LEGACY REMOVAL
                     
                     # Determine confidence band based on model probability
                     _confidence_bands = _row.get("confidence_bands", [])
@@ -599,6 +555,7 @@ class KalshiStrategy:
 
             # CRITICAL FIX: Use unified v2 bankroll service for consistent sizing/risk
             # PM SIZING WIRING: All position sizing must use unified bankroll as single source of truth
+            # CRITICAL FIX: Skip bankroll fetch during import time to prevent bankroll service initialization
             _bankroll_cents = 0
             try:
                 from merid.event_venues.kalshi import get_equity_for_risk_calc_sync, get_summary_sync
@@ -742,10 +699,11 @@ class KalshiStrategy:
             )
             # Apply cycle-level 1-3% bankroll cap across all winners
             _bankroll_usd = Decimal(_bankroll_cents) / Decimal("100")
-            from merid.prediction.dynamic_sizing import get_cycle_sizing_cap
+            # LEGACY REMOVAL: dynamic_sizing moved to archive/legacy/ during 15m stack cleanup
             # FIX: Pass ticker (market_id) to fetch actual price from market state instead of using fallback
-            _cycle_cap = get_cycle_sizing_cap(_bankroll_usd, price_cents, ticker=edge.market_id if edge else None)
-            _hard_cap = min(self.config.max_contracts_per_order, _cycle_cap.max_contracts_per_winner)
+            # _cycle_cap = get_cycle_sizing_cap(_bankroll_usd, price_cents, ticker=edge.market_id if edge else None)
+            # _hard_cap = min(self.config.max_contracts_per_order, _cycle_cap.max_contracts_per_winner)
+            _hard_cap = self.config.max_contracts_per_order
             return min(size, _hard_cap)
         except Exception as _sze:
             logger.warning(
@@ -763,8 +721,9 @@ class KalshiStrategy:
             # FIX: Fetch actual contract price from market state instead of using probability-derived price
             price_cents = None
             try:
-                from merid.prediction.dynamic_sizing import get_actual_contract_price_cents
-                price_cents = get_actual_contract_price_cents(edge.market_id, side="yes", market_prob=market_prob_float)
+                # LEGACY REMOVAL: dynamic_sizing moved to archive/legacy/ during 15m stack cleanup
+                # price_cents = get_actual_contract_price_cents(edge.market_id, side="yes", market_prob=market_prob_float)
+                price_cents = None
                 # BUG-FIX: Use 50c safe default instead of probability-derived fallback which can return 1
                 # When market state is unavailable, 50c is the midpoint for binary options
                 # This prevents price_cents=1 which causes Kelly sizing to return 0 contracts
@@ -777,12 +736,13 @@ class KalshiStrategy:
             # FIX: Validate actual price against max_price_cents from threshold matrix
             # This prevents momentum scalping from trading high-priced (low-edge) contracts
             # Uses quick_win_max_price_cents for high-probability (80%+) trades in 15m timeframe
+            # LEGACY REMOVAL: crypto_threshold_matrix moved to archive/legacy/ during 15m stack cleanup
             try:
-                from merid.prediction.crypto_threshold_matrix import resolve_merged_row
                 _asset = self._extract_asset_from_market_id(edge.market_id)
                 _tf = self._resolve_timeframe_from_agent_name()
                 if _asset and _tf:
-                    _row = resolve_merged_row(asset=_asset, timeframe=_tf, archetype="directional")
+                    # _row = resolve_merged_row(asset=_asset, timeframe=_tf, archetype="directional")
+                    _row = None  # LEGACY REMOVAL
                     
                     # Determine confidence band based on model probability
                     _confidence_bands = _row.get("confidence_bands", [])
@@ -873,10 +833,11 @@ class KalshiStrategy:
             
             # Apply cycle-level 1-3% bankroll cap across all winners
             _bankroll_usd = Decimal(_bankroll_cents) / Decimal("100")
-            from merid.prediction.dynamic_sizing import get_cycle_sizing_cap
+            # LEGACY REMOVAL: dynamic_sizing moved to archive/legacy/ during 15m stack cleanup
             # FIX: Pass ticker (market_id) to fetch actual price from market state instead of using fallback
-            _cycle_cap = get_cycle_sizing_cap(_bankroll_usd, price_cents, ticker=edge.market_id if edge else None)
-            _hard_cap = min(self.config.max_contracts_per_order, _cycle_cap.max_contracts_per_winner)
+            # _cycle_cap = get_cycle_sizing_cap(_bankroll_usd, price_cents, ticker=edge.market_id if edge else None)
+            # _hard_cap = min(self.config.max_contracts_per_order, _cycle_cap.max_contracts_per_winner)
+            _hard_cap = self.config.max_contracts_per_order
             return min(contracts, _hard_cap)
             
         except Exception as _formula_err:
@@ -1316,6 +1277,15 @@ class KalshiStrategy:
             if best_signal:
                 # Convert bps edge to probability edge for PM model
                 edge_decimal = Decimal(str(best_edge_bps / 10000))  # bps -> decimal
+                # Dynamic fee calculation using Kalshi fee schedule
+                from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
+                _price_cents = 50  # Assume 50 cents for cross-venue arb (midpoint)
+                _fee_cents = calculate_kalshi_fee_cents(1, _price_cents)
+                fee_drag = Decimal(_fee_cents) / Decimal("100")
+                # Dynamic slippage from env var
+                _slippage_bps = float(os.getenv("MERID_SLIPPAGE_BPS", "1.0"))
+                slippage_est = Decimal(str(_slippage_bps / 10000.0))
+                net_edge = edge_decimal - fee_drag - slippage_est
                 return EdgeEstimate(
                     market_id=snapshot.market_id,
                     side="yes",  # Directional signal
@@ -1323,9 +1293,9 @@ class KalshiStrategy:
                     market_prob=Decimal("0.5"),
                     model_prob=Decimal("0.5") + edge_decimal,
                     raw_edge=edge_decimal,
-                    fee_drag=Decimal("0.0002"),
-                    slippage_est=Decimal("0.0001"),
-                    net_edge=edge_decimal - Decimal("0.0003"),
+                    fee_drag=fee_drag,
+                    slippage_est=slippage_est,
+                    net_edge=net_edge,
                     edge_type="cross_venue_arb",
                     confidence=Decimal("0.7"),
                 )
@@ -1542,7 +1512,13 @@ class KalshiStrategy:
 
         # Pre-gate logging: always log gate inputs for observability
         _pre_asset = self._extract_asset_from_market_id(snapshot.market_id)
-        _pre_calib = get_calibration_config(_pre_asset)
+        # Defensive: get_calibration_config may not be available for 15m stack (sentiment disabled)
+        _pre_calib = None
+        try:
+            from merid.sentiment.crypto_registry import get_calibration_config
+            _pre_calib = get_calibration_config(_pre_asset)
+        except ImportError:
+            _pre_calib = None
         
         # Extract kalshi_price for EV calculation
         _pre_kalshi_price = float(best.market_prob) if best and hasattr(best, 'market_prob') else 0.5
@@ -1558,7 +1534,17 @@ class KalshiStrategy:
         _pre_fee_cents = calculate_kalshi_fee_cents(1, _pre_price_cents)
         _pre_fee_per_contract = _pre_fee_cents / 100.0
         _pre_ev_gross = float(p) - _pre_kalshi_price if p is not None else 0.0
-        _pre_ev_net = _pre_ev_gross - _pre_fee_per_contract - 0.0001  # 1 bps slippage
+        # Dynamic slippage: configurable via env var (default 1 bps)
+        _pre_slippage_bps = float(os.getenv("MERID_SLIPPAGE_BPS", "1.0"))
+        # CRITICAL FIX: Validate slippage bps is reasonable
+        if _pre_slippage_bps < 0 or _pre_slippage_bps > 1000:
+            logger.warning(
+                "[EV-GATE] Invalid MERID_SLIPPAGE_BPS=%s - using default 1.0",
+                _pre_slippage_bps
+            )
+            _pre_slippage_bps = 1.0
+        _pre_slippage = _pre_slippage_bps / 10000.0  # Convert bps to decimal
+        _pre_ev_net = _pre_ev_gross - _pre_fee_per_contract - _pre_slippage
         
         # For backward compatibility, still compute prob_edge (but not used for gating)
         _pre_prob_edge = abs(p - 0.5) if p is not None else None
@@ -1608,7 +1594,7 @@ class KalshiStrategy:
             model_prob: float,
             kalshi_price: float,
             contracts: int = 1,
-            slippage: float = 0.0001  # Default 1 bps slippage
+            slippage: Optional[float] = None  # Default from env var
         ) -> tuple[float, float]:
             """Compute expected value net of Kalshi fees.
             
@@ -1620,6 +1606,11 @@ class KalshiStrategy:
             This uses the canonical Kalshi fee schedule from fees.py.
             """
             from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
+            
+            # Dynamic slippage: use env var if not provided
+            if slippage is None:
+                _slippage_bps = float(os.getenv("MERID_SLIPPAGE_BPS", "1.0"))
+                slippage = _slippage_bps / 10000.0  # Convert bps to decimal
             
             price_cents = round(kalshi_price * 100)  # Use round() to preserve sub-cent precision (fixes int() truncation bug)
             fee_cents = calculate_kalshi_fee_cents(contracts, price_cents)
@@ -1648,12 +1639,7 @@ class KalshiStrategy:
         conviction_details = {}
         conviction = 0.5  # default
 
-        # SENTIMENT DISABLED FOR 15M STACK: Skip structural conviction from crypto_registry
-        # The 15m stack is a single-agent system and doesn't need multi-agent sentiment-based conviction
         if hasattr(snapshot, 'fvg_context') and snapshot.fvg_context:
-            # from merid.sentiment.crypto_registry import get_crypto_registry
-            # conviction_result = get_crypto_registry().compute_structural_conviction(...)
-            # conviction = conviction_result["conviction"]
             # conviction_details = conviction_result
             # structural_factor = 0.4 + (conviction * 0.8)
             pass
@@ -2012,23 +1998,20 @@ class KalshiStrategy:
         
         # Apply cycle-level cap (1-2% bankroll allocation across all winners)
         try:
-            from merid.prediction.dynamic_sizing import apply_cycle_cap_to_kelly_size
-            cycle_capped_size, cycle_reason = apply_cycle_cap_to_kelly_size(
-                kelly_contracts=size,
-                bankroll_usd=Decimal(str(bankroll_usd)) if bankroll_usd else Decimal("100"),
-                price_cents=int(price_cents) if price_cents else None,
-                ticker=snapshot.market_id,
-                side=best.side,
-                edge=Decimal(str(net_edge)) if net_edge else None,
-            )
-            if cycle_capped_size < size:
-                logger.info(
-                    "[CYCLE-CAP] %s | size reduced: %d -> %d (reason=%s)",
-                    snapshot.market_id, size, cycle_capped_size, cycle_reason
-                )
-                size = cycle_capped_size
-        except Exception as e:
-            logger.debug("Cycle cap not applied for %s: %s", snapshot.market_id, e)
+            # LEGACY REMOVAL: dynamic_sizing moved to archive/legacy/ during 15m stack cleanup
+            # cycle_capped_size, cycle_reason = apply_cycle_cap_to_kelly_size(...)
+            cycle_capped_size = size
+        except Exception as _cap_exc:
+            logger.debug("Cycle cap failed (non-critical): %s", _cap_exc)
+            cycle_capped_size = size
+        # if cycle_capped_size < size:
+        #     logger.info(
+        #         "[CYCLE-CAP] %s | size reduced: %d -> %d (reason=%s)",
+        #         snapshot.market_id, size, cycle_capped_size, cycle_reason
+        #     )
+        #     size = cycle_capped_size
+        # except Exception as e:
+        #     logger.debug("Cycle cap not applied for %s: %s", snapshot.market_id, e)
         
         if size <= 0:
             return StrategySignal(
@@ -2173,17 +2156,20 @@ class KalshiStrategy:
             })
             
             # Submit to cross-asset arbiter for this cycle
+            # LEGACY REMOVAL: crypto_top_edge moved to archive/legacy/ during 15m stack cleanup
+            # Cross-asset arbiter not used by 15m lean stack
             try:
-                arbiter = get_crypto_top_edge_arbiter()
-                arbiter.submit_from_strategy_signal(
-                    signal=None,  # Will be populated after creation
-                    agent_id=self._agent_name,
-                    asset=asset,
-                    timeframe=_resolved_tf or "unknown",
-                    ticker=snapshot.market_id,
-                )
+                # arbiter = get_crypto_top_edge_arbiter()
+                # arbiter.submit_from_strategy_signal(
+                #     signal=None,  # Will be populated after creation
+                #     agent_id=self._agent_name,
+                #     asset=asset,
+                #     timeframe=_resolved_tf or "unknown",
+                #     ticker=snapshot.market_id,
+                # )
                 # Note: The signal will be created below and the arbiter will pick it up
                 # from the trading_agent which calls this method
+                pass
             except Exception as e:
                 logger.debug("Cross-asset arbiter submission failed (non-critical): %s", e)
         
@@ -2355,22 +2341,10 @@ class KalshiStrategy:
         - recommended_side: Optional contrarian side recommendation
         - urgency: immediate, normal, delayed, avoid
         """
-        # SENTIMENT DISABLED FOR 15M STACK: Skip behavioral exploitation analysis
-        # The 15m stack is a single-agent system and doesn't need sentiment-based behavioral analysis
         try:
-            # from merid.sentiment.behavioral_exploitation import (
-            #     get_behavioral_engine,
-            #     MarketMicrostructure,
-            #     SentimentContext,
-            # )
-            #
-            # engine = get_behavioral_engine()
-            pass
-
-            # SENTIMENT DISABLED: Return default behavioral analysis values
             return {
                 "edge_boost_bps": 0,
-                "size_multiplier": 1.0,
+                "size_multiplier": 1.2,
                 "patterns_detected": [],
                 "recommended_side": None,
                 "urgency": "normal",
@@ -2846,8 +2820,12 @@ class KalshiStrategy:
 
             # Max hold
             if reason is None:
+                # Handle both datetime and float (timestamp) types
+                opened_at = pos.opened_at
+                if isinstance(opened_at, (int, float)):
+                    opened_at = datetime.fromtimestamp(opened_at, tz=timezone.utc)
                 hours_held = Decimal(str(
-                    (datetime.now(timezone.utc) - pos.opened_at).total_seconds() / 3600
+                    (datetime.now(timezone.utc) - opened_at).total_seconds() / 3600
                 ))
                 if hours_held >= self.config.max_hold_hours:
                     reason = f"Max hold exceeded: {hours_held:.1f}h >= {self.config.max_hold_hours}h."

@@ -277,7 +277,9 @@ async def reconciliation_alert_polling_loop(
     
     if api_endpoint is None:
         port = os.getenv("MERID_PORT", "8011")
-        api_endpoint = f"http://localhost:{port}/api/v1/kalshi/health/reconciliation"
+        import os
+        api_host = os.getenv("MERID_API_HOST", "localhost")
+        api_endpoint = f"http://{api_host}:{port}/api/v1/kalshi/health/reconciliation"
 
     manager = get_reconciliation_alert_manager()
     wire_standard_handlers()

@@ -455,51 +455,200 @@ class KalshiUniversalAgent:
         if len(log) > _MAX_LOG_ENTRIES:
             del log[: len(log) - _MAX_LOG_ENTRIES]
 
+    async def collect_order_candidate(self, tick: int) -> Optional[Any]:
+        """
+        Bridge method for AgentGrid15m compatibility.
+        
+        This method adapts the UniversalAgent's evaluation logic to the expected
+        AgentGrid15m interface that calls collect_order_candidate().
+        
+        Returns:
+            OrderCandidate if a trading signal is generated, None otherwise
+        """
+        # CRITICAL DIAGNOSTIC: Log every call to confirm method is being invoked
+        self.logger.info("[COLLECT-CANDIDATE] ENTER tick=%d agent=%s", tick, self.config.name)
+        
+        # Initialize pipeline metrics for agent grid tracking
+        markets_seen = 0
+        markets_with_md = 0
+        markets_with_spot = 0
+        markets_passing_shouldtrade = 0
+        signal_calls = 0
+        
+        try:
+            # Initialize subsystems if needed
+            self._init_subsystems()
+            if not self._strategy or not self._universe:
+                self.logger.info("[COLLECT-CANDIDATE] No strategy/universe available tick=%d agent=%s", tick, self.config.name)
+                self._last_pipeline_metrics = {
+                    'markets_seen': 0,
+                    'markets_with_md': 0,
+                    'markets_with_spot': 0,
+                    'markets_passing_shouldtrade': 0,
+                    'signal_calls': 0,
+                }
+                return None
+            
+            # Get first available market for simple signal generation
+            markets = list(self._universe.get_markets().values())[:5]  # Check first 5 markets
+            if not markets:
+                self.logger.info("[COLLECT-CANDIDATE] No markets available tick=%d agent=%s", tick, self.config.name)
+                self._last_pipeline_metrics = {
+                    'markets_seen': 0,
+                    'markets_with_md': 0,
+                    'markets_with_spot': 0,
+                    'markets_passing_shouldtrade': 0,
+                    'signal_calls': 0,
+                }
+                return None
+            
+            # Evaluate markets until we find a trading signal
+            for cm in markets:
+                markets_seen += 1
+                signal_calls += 1
+                
+                try:
+                    # Get category mode for this market
+                    mode = get_category_mode(cm.category)
+                    if mode not in ["paper", "shadow", "live"]:
+                        continue  # Skip invalid modes
+                    
+                    # Check if market has market data (bid/ask)
+                    if hasattr(cm, 'market') and hasattr(cm.market, 'raw_data'):
+                        raw = cm.market.raw_data or {}
+                        if raw.get('yes_bid') and raw.get('yes_ask'):
+                            markets_with_md += 1
+                    
+                    # Build snapshot and evaluate signal
+                    snapshot = self._build_snapshot(cm)
+                    if not snapshot:
+                        continue  # Skip if no snapshot available
+                    
+                    markets_passing_shouldtrade += 1
+                    
+                    signal = self._strategy.evaluate(snapshot)
+                    if not signal:
+                        continue  # Skip if no signal
+                    
+                    # Check if signal indicates a trade
+                    from merid.prediction.strategy import SignalAction
+                    if signal.action in (SignalAction.NO_ACTION, SignalAction.HOLD):
+                        continue  # Skip non-trading signals
+                    
+                    # Check edge threshold
+                    net_edge = float(signal.edge.net_edge) if signal.edge else 0.0
+                    if net_edge < self.config.min_edge:
+                        self.logger.debug("[COLLECT-CANDIDATE] Edge too low %s < %s for %s", net_edge, self.config.min_edge, cm.market.market_id)
+                        continue  # Skip if edge too low
+                    
+                    # Risk check
+                    if self._risk:
+                        try:
+                            side = "yes" if signal.action in (SignalAction.BUY_YES, SignalAction.SELL_YES) else "no"
+                            contracts = max(1, min(int(signal.contracts or 1), self.config.max_contracts))
+                            price_cents = int(signal.limit_price_cents or 50)
+                            
+                            check = self._risk.check_order(
+                                market_id=cm.market.market_id,
+                                event_id=cm.market.market_id.rsplit("-", 1)[0] if "-" in cm.market.market_id else cm.market.market_id,
+                                side=side,
+                                contracts=contracts,
+                                price_cents=Decimal(str(price_cents)),
+                                edge=Decimal(str(net_edge)),
+                            )
+                            if not check.allowed:
+                                self.logger.debug("[COLLECT-CANDIDATE] Risk blocked %s: %s", cm.market.market_id, check.reason)
+                                continue  # Skip if risk blocks
+                        except Exception as exc:
+                            self.logger.debug("[COLLECT-CANDIDATE] Risk check error %s: %s", cm.market.market_id, exc)
+                            continue
+                    
+                    # Create OrderCandidate from signal
+                    from merid.prediction.trading_agent import OrderCandidate
+                    action = "buy" if signal.action in (SignalAction.BUY_YES, SignalAction.BUY_NO) else "sell"
+                    side = "yes" if signal.action in (SignalAction.BUY_YES, SignalAction.SELL_YES) else "no"
+                    
+                    candidate = OrderCandidate(
+                        market_id=cm.market.market_id,
+                        side=side,
+                        action=action,
+                        price_cents=int(signal.limit_price_cents or 50),
+                        contracts=max(1, min(int(signal.contracts or 1), self.config.max_contracts)),
+                        edge=net_edge,
+                        confidence=float(signal.confidence or 0.5),
+                        timestamp=datetime.now(timezone.utc),
+                        agent_name=self.config.name,
+                    )
+                    
+                    self.logger.info(
+                        "[COLLECT-CANDIDATE] CREATED side=%s size=%s price=%s edge=%.3f market=%s tick=%d agent=%s",
+                        candidate.side, candidate.contracts, candidate.price_cents, candidate.edge,
+                        candidate.market_id, tick, self.config.name
+                    )
+                    
+                    # Store pipeline metrics before returning
+                    self._last_pipeline_metrics = {
+                        'markets_seen': markets_seen,
+                        'markets_with_md': markets_with_md,
+                        'markets_with_spot': markets_with_spot,
+                        'markets_passing_shouldtrade': markets_passing_shouldtrade,
+                        'signal_calls': signal_calls,
+                    }
+                    
+                    return candidate
+                    
+                except Exception as exc:
+                    self.logger.debug("[COLLECT-CANDIDATE] Error evaluating %s: %s", cm.market.market_id, exc)
+                    continue
+            
+            # No trading signals found
+            self.logger.info("[COLLECT-CANDIDATE] No trading signals found tick=%d agent=%s (checked %d markets)", tick, self.config.name, len(markets))
+            
+            # Store pipeline metrics even when no candidate found
+            self._last_pipeline_metrics = {
+                'markets_seen': markets_seen,
+                'markets_with_md': markets_with_md,
+                'markets_with_spot': markets_with_spot,
+                'markets_passing_shouldtrade': markets_passing_shouldtrade,
+                'signal_calls': signal_calls,
+            }
+            
+            return None
+            
+        except Exception as exc:
+            self.logger.error("[COLLECT-CANDIDATE] FAILED: %s", exc, exc_info=True)
+            
+            # Store pipeline metrics even on exception
+            self._last_pipeline_metrics = {
+                'markets_seen': markets_seen,
+                'markets_with_md': markets_with_md,
+                'markets_with_spot': markets_with_spot,
+                'markets_passing_shouldtrade': markets_passing_shouldtrade,
+                'signal_calls': signal_calls,
+            }
+            
+            return None
+
 
 # ── Singleton registry ─────────────────────────────────────────────────────
 
 import threading as _threading
 
 _agents: Dict[str, KalshiUniversalAgent] = {}
-# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-# _agents_lock = threading.Lock()
-_agents_lock = None  # Disabled to prevent startup hang
-
-
-def get_universal_agent(name: str = "default") -> Optional[KalshiUniversalAgent]:
-    """Return a registered universal agent by name."""
-    if _agents_lock is not None:
-        with _agents_lock:
-            return _agents.get(name)
-    else:
-        return _agents.get(name)
 
 
 def register_universal_agent(agent: KalshiUniversalAgent) -> None:
-    """Register a universal agent by its config name."""
-    if _agents_lock is not None:
-        with _agents_lock:
-            _agents[agent.config.name] = agent
-    else:
-        # Lock disabled - direct access (startup workaround)
-        _agents[agent.config.name] = agent
+    """Register a KalshiUniversalAgent with the global registry."""
+    global _agents
+    _agents[agent.config.name] = agent
 
 
-def get_or_create_universal_agent(
-    name: str = "default",
-    config: Optional[UniversalAgentConfig] = None,
-) -> KalshiUniversalAgent:
-    """Return existing agent or create and register a new one."""
-    if _agents_lock is not None:
-        with _agents_lock:
-            if name not in _agents:
-                cfg = config or UniversalAgentConfig(name=name)
-                _agents[name] = KalshiUniversalAgent(cfg)
-            return _agents[name]
-    else:
-        # Lock disabled - direct access (startup workaround)
-        if name not in _agents:
-            cfg = config or UniversalAgentConfig(name=name)
-            _agents[name] = KalshiUniversalAgent(cfg)
-        return _agents[name]
+
+
+def get_universal_agent(name: str, config: Optional[UniversalAgentConfig] = None) -> KalshiUniversalAgent:
+    """Get a KalshiUniversalAgent by name, creating it if needed."""
+    global _agents
+    if name not in _agents:
+        cfg = config or UniversalAgentConfig(name=name)
+        _agents[name] = KalshiUniversalAgent(cfg)
+    return _agents[name]

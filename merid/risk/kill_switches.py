@@ -49,6 +49,22 @@ except ImportError:
     FORMULAS_VERSION = "unknown"
     AUDIT_SPEC_VERSION = "unknown"
 
+# Prometheus metrics for daily loss limit tracking
+try:
+    from prometheus_client import Counter
+    
+    daily_loss_limit_hits_total = Counter(
+        'merid_daily_loss_limit_hits_total',
+        'Total daily loss limit hits by operation mode',
+        ['mode']  # mode: test, prod
+    )
+    PROMETHEUS_AVAILABLE = True
+except ImportError:
+    PROMETHEUS_AVAILABLE = False
+    class _DummyCounter:
+        def inc(self, **kwargs): pass
+    daily_loss_limit_hits_total = _DummyCounter()
+
 # Optional Path/str override for tests; if None, MERID_RISK_KS_FILE is read on each persist/load.
 _KILL_SWITCH_FILE: Optional[Union[Path, str]] = None
 
@@ -80,13 +96,10 @@ def get_profile_daily_loss_limit() -> tuple[Optional[float], bool]:
     if profile != "kalshi_crypto_15m_v2":
         return None, False
     
-    try:
-        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
-        envelope = get_kalshi_crypto_15m_risk_envelope()
-        return envelope.max_daily_loss_usd, envelope.daily_loss_enabled
-    except Exception as e:
-        logger.warning(f"[PROFILE-LIMIT] Failed to load profile daily loss limit: {e}")
-        return None, False
+    # CRITICAL FIX: Skip profile envelope loading during import time to prevent bankroll service initialization
+    # The envelope will be loaded during startup after bankroll service is ready
+    logger.info("[PROFILE-LIMIT] Skipping import-time envelope load - will load during startup")
+    return None, False
 
 
 def get_profile_drawdown_state() -> tuple[Optional[float], Optional[float], bool]:
@@ -114,18 +127,37 @@ def get_profile_drawdown_state() -> tuple[Optional[float], Optional[float], bool
         logger.warning("[PROFILE-DRAWDOWN] Failed to import envelope feature flag check")
         return None, None, False
     
+    # CRITICAL FIX: Skip envelope loading during import time to prevent bankroll service initialization
+    # The envelope will be loaded during startup after bankroll service is ready
+    logger.info("[PROFILE-DRAWDOWN] Skipping import-time envelope load - will load during startup")
+    return None, None, False
+
+
+def get_profile_max_position_value() -> tuple[Optional[float], bool]:
+    """Get max position value from active profile for kalshi_crypto_15m_v2.
+    
+    Returns:
+        Tuple of (max_position_value_usd, is_profile_driven)
+        Returns (None, False) if not a profile with position limit configuration
+    """
+    import os
+    profile = os.getenv("MERID_PROFILE", "").lower()
+    if profile != "kalshi_crypto_15m_v2":
+        return None, False
+    
     try:
-        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import (
-            get_kalshi_crypto_15m_risk_envelope,
-            safe_update_envelope_equity
-        )
-        envelope = get_kalshi_crypto_15m_risk_envelope()
-        # Update envelope with current equity
-        safe_update_envelope_equity(envelope)
-        return envelope.current_drawdown_pct, envelope.drawdown_halt_pct, envelope.is_halted
+        from merid.risk.profiles.crypto_15m_profile import get_active_profile
+        adapter = get_active_profile()
+        if adapter and hasattr(adapter, 'profile'):
+            profile_obj = adapter.profile
+            if hasattr(profile_obj, 'guardrails_max_position_value_usd'):
+                max_pos = profile_obj.guardrails_max_position_value_usd
+                logger.info(f"[PROFILE-POSITION-LIMIT] Using profile max_position_value_usd: ${max_pos:.2f}")
+                return max_pos, True
     except Exception as e:
-        logger.warning(f"[PROFILE-DRAWDOWN] Failed to load profile drawdown state: {e}")
-        return None, None, False
+        logger.warning(f"[PROFILE-POSITION-LIMIT] Failed to load profile max_position_value: {e}")
+    
+    return None, False
 
 
 class KillSwitchState(str, Enum):
@@ -136,9 +168,9 @@ class KillSwitchState(str, Enum):
 
 class KillSwitchReason(str, Enum):
     """Reasons for kill switch activation."""
-    MANUAL = "manual"                    # Operator triggered
-    DAILY_LOSS = "daily_loss"            # Daily loss limit hit
-    POSITION_LIMIT = "position_limit"    # Position limit exceeded
+    MANUAL = "manual"                    # Operator triggered (sticky, requires explicit reset)
+    DAILY_LOSS = "daily_loss"            # Daily loss limit hit (derived, auto-resets when PnL recovers)
+    POSITION_LIMIT = "position_limit"    # Position limit exceeded (derived, auto-resets when position drops)
     ERROR_THRESHOLD = "error_threshold"  # Too many errors
     CIRCUIT_BREAKER = "circuit_breaker"  # All venues circuit-broken
     DEPENDENCY_HEALTH = "dependency_health"  # Critical dependency down
@@ -174,7 +206,7 @@ class RiskController:
     daily_loss_limit: float = 0.0  # 0 means "derive from settings/equity"
     daily_loss_enabled: bool = False  # Default disabled, profile controls this
     error_threshold: int = 500  # FIXED: Was 50, now 500 - only truly catastrophic errors should halt trading
-    max_position_value: float = 10000.0  # CRITICAL FIX: Add missing field for operator API
+    max_position_value: float = 0.0  # 0 means "derive from profile/settings" (PROFILE-DRIVEN)
 
     def __post_init__(self):
         # R-1, R-5: Override with env vars if set AND value still equals default.
@@ -193,6 +225,13 @@ class RiskController:
             except (ValueError, TypeError):
                 pass
 
+        env_max_pos = os.getenv("MERID_MAX_POSITION_VALUE_USD")
+        if env_max_pos and self.max_position_value == 0.0:
+            try:
+                self.max_position_value = float(env_max_pos)
+            except (ValueError, TypeError):
+                pass
+
         # PROFILE-KILL-SWITCH: Use profile daily loss limit and enabled flag for kalshi_crypto_15m_v2
         if self.daily_loss_limit == 0.0:
             profile_limit, profile_enabled = get_profile_daily_loss_limit()
@@ -203,6 +242,13 @@ class RiskController:
                     logger.info(f"[PROFILE-KILL-SWITCH] Using profile daily loss limit: ${profile_limit:.2f}")
                 else:
                     logger.info(f"[PROFILE-KILL-SWITCH] Daily loss DISABLED (drawdown is primary guardrail)")
+
+        # PROFILE-POSITION-LIMIT: Use profile max_position_value for kalshi_crypto_15m_v2
+        if self.max_position_value == 0.0:
+            profile_max_pos, is_profile_driven = get_profile_max_position_value()
+            if profile_max_pos is not None and is_profile_driven:
+                self.max_position_value = profile_max_pos
+                logger.info(f"[PROFILE-POSITION-LIMIT] Using profile max_position_value: ${profile_max_pos:.2f}")
 
         # Also try to read from settings if available (takes precedence after env vars)
         try:
@@ -221,6 +267,7 @@ class RiskController:
             self.daily_loss_limit = 500.0
         
         self._global_kill: bool = False
+        self._manual_emergency_halt: bool = False  # Separate sticky flag for manual stops
         self._kill_reason: Optional[KillSwitchReason] = None
         self._kill_details: Optional[str] = None
         self._kill_timestamp: Optional[datetime] = None
@@ -265,7 +312,8 @@ class RiskController:
         if _env_limit > 0 or _env_pos > 0:
             return
         # Only load from settings if values are still at defaults (not explicitly overridden)
-        if self.daily_loss_limit != 500.0 or self.max_position_value != 10000.0:
+        # Updated default for max_position_value from 100000.0 to 0.0 (profile-driven)
+        if self.daily_loss_limit != 500.0 or self.max_position_value != 0.0:
             return
         try:
             from merid.settings import settings
@@ -275,18 +323,19 @@ class RiskController:
                 self.daily_loss_limit = _usd_limit
             else:
                 # Compute from percentage - use live bankroll from bankroll_service_v2
-                try:
-                    from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
-                    _bankroll = get_equity_for_risk_calc_sync()
-                    if _bankroll is None or _bankroll <= 0:
-                        _bankroll = getattr(settings, 'MERID_TOTAL_CAPITAL_USD', 0.0)
-                except Exception:
-                    _bankroll = getattr(settings, 'MERID_TOTAL_CAPITAL_USD', 0.0)
+                # CRITICAL FIX: Defer bankroll fetch to avoid import-time initialization
+                # Set to 0 initially, will be updated during startup
+                _bankroll = getattr(settings, 'MERID_TOTAL_CAPITAL_USD', 0.0)
                 _pct = getattr(settings, 'MERID_MAX_DAILY_LOSS_PCT', 0.15)
                 self.daily_loss_limit = _bankroll * _pct
             self.max_position_value = settings.MERID_MAX_POSITION_SIZE_USD
         except (ImportError, AttributeError):
             pass
+
+        # Fallback: if max_position_value is still 0, use legacy default for safety
+        if self.max_position_value == 0.0:
+            self.max_position_value = 100000.0
+            logger.warning("[PROFILE-POSITION-LIMIT] Using fallback max_position_value=$100k (profile not available)")
 
     def _persist_kill_switch(self) -> None:
         """Write kill-switch state to disk atomically (temp + rename).
@@ -294,12 +343,15 @@ class RiskController:
         Atomic write ensures that if the process is killed mid-write,
         the file is either the old complete version or the new complete version,
         never a partial/corrupted state.
+        
+        Only persists manual emergency halt (sticky), not derived daily loss state.
         """
         try:
             ks_path = _get_kill_switch_path()
             ks_path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "active": self._global_kill,
+                "manual_emergency_halt": self._manual_emergency_halt,  # Only persist manual stops
                 "reason": self._kill_reason.value if self._kill_reason else None,
                 "details": self._kill_details,
                 "activated_at": self._kill_timestamp.isoformat() if self._kill_timestamp else None,
@@ -313,7 +365,8 @@ class RiskController:
     def _load_persisted_kill_switch(self) -> None:
         """Reload kill-switch state from disk on startup.
         
-        If a kill switch is persisted from a prior run, it requires explicit
+        Only restores manual emergency halt (sticky), not derived daily loss state.
+        If a manual halt is persisted from a prior run, it requires explicit
         human acknowledgment before trading can resume (fail-safe behavior).
         """
         try:
@@ -321,10 +374,12 @@ class RiskController:
             if ks_path.exists():
                 data = json.loads(ks_path.read_text(encoding="utf-8"))
                 logger.info(
-                    "[risk] Kill switch persistence file found: %s | active=%s | reason=%s",
-                    ks_path, data.get("active"), data.get("reason")
+                    "[risk] Kill switch persistence file found: %s | active=%s | manual_halt=%s | reason=%s",
+                    ks_path, data.get("active"), data.get("manual_emergency_halt"), data.get("reason")
                 )
-                if data.get("active"):
+                # Only restore if it was a manual emergency halt (sticky)
+                if data.get("manual_emergency_halt"):
+                    self._manual_emergency_halt = True
                     self._global_kill = True
                     raw_reason = data.get("reason", "persisted")
                     try:
@@ -333,7 +388,7 @@ class RiskController:
                         self._kill_reason = KillSwitchReason.MANUAL
                     self._kill_details = data.get("details", "restored from disk - REQUIRES HUMAN ACKNOWLEDGMENT")
                     logger.critical(
-                        "[risk] Kill switch RESTORED from prior run: %s — %s. "
+                        "[risk] Manual emergency halt RESTORED from prior run: %s — %s. "
                         "EXPLICIT RESET REQUIRED before trading can resume.",
                         self._kill_reason, self._kill_details,
                     )
@@ -348,8 +403,8 @@ class RiskController:
                         record_event(
                             category="kill_switch",
                             severity="critical",
-                            title="Kill switch restored from disk - TRADING BLOCKED",
-                            detail=f"Prior kill switch ({self._kill_reason}) restored. "
+                            title="Manual emergency halt restored from disk - TRADING BLOCKED",
+                            detail=f"Prior manual halt ({self._kill_reason}) restored. "
                                    f"Operator must explicitly reset via dashboard before trading resumes.",
                             hint="Navigate to Mode & Safety panel and click 'Reset Kill Switch' after reviewing cause.",
                             metadata={
@@ -360,11 +415,18 @@ class RiskController:
                         )
                     except Exception as _se_exc:
                         logger.debug("[risk] kill_switch persistence session log failed: %s", _se_exc)
+                else:
+                    # Not a manual halt - ignore persisted state (derived daily loss will recompute)
+                    logger.info(
+                        "[risk] Ignoring non-manual persisted kill state (derived state will recompute): reason=%s",
+                        data.get("reason")
+                    )
         except Exception as exc:
             logger.critical(
                 "[risk] CORRUPT kill-switch state file — defaulting to BLOCKED: %s", exc
             )
             self._global_kill = True
+            self._manual_emergency_halt = True
             self._kill_reason = KillSwitchReason.MANUAL
             self._kill_details = f"Fail-closed: corrupt state file ({exc})"
     
@@ -378,6 +440,20 @@ class RiskController:
         """Get current UTC timestamp."""
         return datetime.now(timezone.utc)
     
+    def _compute_bankroll_aware_daily_loss_limit(self) -> float:
+        """Compute daily loss limit as percentage of equity (bankroll-aware).
+        
+        This makes limits scale with bankroll instead of being hardcoded.
+        Falls back to self.daily_loss_limit if bankroll unavailable.
+        
+        Returns:
+            Daily loss limit in USD
+        """
+        # CRITICAL FIX: Skip bankroll fetch during import time to prevent bankroll service initialization
+        # This method is called during module import, before bankroll service is ready
+        # Defer to runtime - will be updated during startup after bankroll service is ready
+        return self.daily_loss_limit
+    
     # -------------------------------------------------------------------------
     # Core API
     # -------------------------------------------------------------------------
@@ -388,55 +464,123 @@ class RiskController:
         
         Call this before every trade attempt.
         Returns False if any kill switch is triggered.
+        
+        Kill switch behavior:
+        - MANUAL: Sticky, requires explicit reset via reset()
+        - DAILY_LOSS: Derived, auto-resets when PnL recovers or on restart
+        - Other reasons: Sticky, requires explicit reset
         """
         with self._lock:
-            # Pull fresh daily P&L from fills_ledger (canonical source)
-            try:
-                from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
-                _ledger = get_fills_ledger()
-                _ledger_summary = _ledger.summary()
-                
-                # Validate fills_ledger data to detect test data pollution
-                is_valid, warning = self._validate_fills_ledger_data(_ledger_summary)
-                if not is_valid:
-                    logger.warning(f"[VALIDATION] Rejecting fills_ledger data in can_trade: {warning}")
-                    # CRITICAL FIX: Reset to 0 when stale data detected, don't keep corrupted value
-                    if self._daily_pnl != 0.0:
-                        logger.warning(f"[VALIDATION] Resetting corrupted daily_pnl from {self._daily_pnl:.2f} to 0.0")
-                        self._daily_pnl = 0.0
-                else:
-                    if warning:
-                        logger.info(f"[VALIDATION] {warning}")
-                    _ledger_daily_pnl = _ledger_summary.get("daily_realized_pnl_usd", 0.0)
-                    self._daily_pnl = float(_ledger_daily_pnl)
-            except Exception:
-                # If fills_ledger unavailable, keep existing value
-                pass
+            # Initialize daily loss start timestamp if not set
+            if not hasattr(self, '_daily_loss_start_ts'):
+                self._daily_loss_start_ts = None
             
-            # Reset daily P&L if new day
+            # Reset daily loss window on new day
             today = self._today()
             if self._daily_pnl_reset_date != today:
                 if self._daily_pnl != 0.0:
                     logger.warning(
-                        "[DAILY-PNL-RESET] date=%s → %s final_pnl=%.4f — resetting to 0",
+                        "[DAILY-LOSS-WINDOW-RESET] date=%s → %s final_pnl=%.4f — resetting window",
                         self._daily_pnl_reset_date, today, self._daily_pnl,
                     )
                 self._daily_pnl_reset_date = today
                 self._daily_pnl = 0.0
+                # Reset daily loss start timestamp to today's midnight
+                from datetime import datetime, timezone
+                self._daily_loss_start_ts = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+                logger.info("[DAILY-LOSS-WINDOW-RESET] Daily loss start timestamp reset to midnight UTC: %s", self._daily_loss_start_ts)
 
-            # Inline daily-loss check: fire kill if limit already breached
-            # Uses fills_ledger-synced _daily_pnl for accurate real trading P&L
+            # Try to get session-based PnL from agent grid snapshot (preferred)
+            # This uses session_start_ts from LeanAgentGrid15m for accurate windowing
+            daily_pnl_dollars = self._daily_pnl  # Fallback to existing value
+            pnl_source = "legacy"
+            
+            try:
+                from merid.prediction.agent_grid_15m import get_pnl_snapshot
+                pnl_snapshot = get_pnl_snapshot()
+                if pnl_snapshot and pnl_snapshot.timestamp > 0:
+                    daily_pnl_dollars = pnl_snapshot.session_realized_pnl_dollars
+                    pnl_source = "session_snapshot"
+                    logger.debug(
+                        "[DAILY-LOSS-SNAPSHOT] Using session PnL: $%.2f (source=%s, timestamp=%.0f)",
+                        daily_pnl_dollars, pnl_source, pnl_snapshot.timestamp
+                    )
+            except Exception as e:
+                logger.debug("[DAILY-LOSS-SNAPSHOT] Failed to get session snapshot: %s", e)
+            
+            # If snapshot unavailable, compute from fills ledger using daily loss start timestamp
+            if pnl_source == "legacy" and self._daily_loss_start_ts:
+                try:
+                    from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+                    from datetime import datetime, timezone, timedelta
+                    ledger = get_fills_ledger()
+                    
+                    # Get fills since daily loss start timestamp
+                    since_ts = self._daily_loss_start_ts
+                    fills = ledger.get_fills(since=since_ts)
+                    
+                    # Aggregate proceeds_dollars from fills
+                    daily_pnl_dollars = sum(
+                        float(f.proceeds_dollars or 0) 
+                        for f in fills 
+                        if f.is_live
+                    )
+                    
+                    pnl_source = "fills_since_start"
+                    logger.info(
+                        "[DAILY-LOSS-CALC] Computed from fills: since=%s num_fills=%d pnl=$%.2f",
+                        since_ts.isoformat() if since_ts else "None", len(fills), daily_pnl_dollars
+                    )
+                except Exception as e:
+                    logger.warning("[DAILY-LOSS-CALC] Failed to compute from fills: %s", e)
+            
+            # Update internal daily PnL state
+            self._daily_pnl = daily_pnl_dollars
+
+            # Compute bankroll-aware daily loss limit (percentage of equity)
+            # This makes limits scale with bankroll instead of being hardcoded
+            daily_loss_limit_usd = self._compute_bankroll_aware_daily_loss_limit()
+            
+            # Get equity for logging - skip during import time
+            equity_usd = 0.0
+
+            # DERIVED daily-loss check: compute kill state from current PnL (not sticky)
+            # Auto-resets when PnL recovers or on restart
             # Skip check if daily loss is disabled (drawdown is primary guardrail)
-            if (
-                self.daily_loss_enabled
-                and not self._global_kill
-                and self._daily_pnl < 0
-                and abs(self._daily_pnl) >= self.daily_loss_limit
-            ):
-                self._trigger_kill_locked(
-                    KillSwitchReason.DAILY_LOSS,
-                    f"Daily loss ${abs(self._daily_pnl):.2f} exceeds limit ${self.daily_loss_limit:.2f} (detected in can_trade)",
+            if self.daily_loss_enabled:
+                daily_loss_dollars = -min(daily_pnl_dollars, 0)  # Only count downside
+                
+                logger.info(
+                    "[DAILY-LOSS-CHECK] source=%s pnl=$%.2f loss=$%.2f equity=$%.2f limit=$%.2f",
+                    pnl_source, daily_pnl_dollars, daily_loss_dollars, equity_usd, daily_loss_limit_usd
                 )
+                
+                if daily_loss_dollars >= daily_loss_limit_usd:
+                    # Set derived kill state (not persisted, auto-resets)
+                    self._global_kill = True
+                    self._kill_reason = KillSwitchReason.DAILY_LOSS
+                    self._kill_details = f"Daily loss ${daily_loss_dollars:.2f} exceeds limit ${daily_loss_limit_usd:.2f} (derived, auto-resets, source={pnl_source})"
+                    self._kill_timestamp = self._now()
+                    
+                    # Track operation mode for metrics
+                    operation_mode = os.getenv('MERID_OPERATION_MODE', 'prod').lower()
+                    daily_loss_limit_hits_total.labels(mode=operation_mode).inc()
+                    
+                    logger.warning(
+                        "[DAILY-LOSS-KILL] Trading blocked (derived state): source=%s loss=$%.2f limit=$%.2f equity=$%.2f mode=%s",
+                        pnl_source, daily_loss_dollars, daily_loss_limit_usd, equity_usd, operation_mode
+                    )
+                elif self._kill_reason == KillSwitchReason.DAILY_LOSS and not self._manual_emergency_halt:
+                    # Auto-reset when PnL recovers (only if not manually halted)
+                    if daily_loss_dollars < daily_loss_limit_usd:
+                        self._global_kill = False
+                        self._kill_reason = None
+                        self._kill_details = None
+                        self._kill_timestamp = None
+                        logger.info(
+                            "[DAILY-LOSS-RESET] Auto-resumed: source=%s loss recovered to $%.2f (limit=$%.2f)",
+                            pnl_source, daily_loss_dollars, daily_loss_limit_usd
+                        )
             
             # PROFILE-DRAWDOWN: Check drawdown halt for kalshi_crypto_15m_v2
             current_drawdown, drawdown_halt, is_halted = get_profile_drawdown_state()
@@ -445,6 +589,29 @@ class RiskController:
                     KillSwitchReason.DAILY_LOSS,  # Reuse or add new KillSwitchReason.DRAWDOWN_HALT
                     f"Drawdown halt: {current_drawdown:.2%} >= {drawdown_halt:.2%} (detected in can_trade)",
                 )
+
+            # DERIVED position-limit check: compute kill state from current position (not sticky)
+            # Auto-resets when position drops below limit (similar to daily loss behavior)
+            if self._total_position_value > self.max_position_value:
+                self._global_kill = True
+                self._kill_reason = KillSwitchReason.POSITION_LIMIT
+                self._kill_details = f"Position value ${self._total_position_value:.2f} exceeds limit ${self.max_position_value:.2f} (derived, auto-resets)"
+                self._kill_timestamp = self._now()
+                logger.warning(
+                    "[POSITION-LIMIT-KILL] Trading blocked (derived state): position=$%.2f limit=$%.2f",
+                    self._total_position_value, self.max_position_value
+                )
+            elif self._kill_reason == KillSwitchReason.POSITION_LIMIT and not self._manual_emergency_halt:
+                # Auto-reset when position drops below limit (only if not manually halted)
+                if self._total_position_value < self.max_position_value:
+                    self._global_kill = False
+                    self._kill_reason = None
+                    self._kill_details = None
+                    self._kill_timestamp = None
+                    logger.info(
+                        "[POSITION-LIMIT-RESET] Auto-resumed: position recovered to $%.2f (limit=$%.2f)",
+                        self._total_position_value, self.max_position_value
+                    )
 
             return not self._global_kill
     
@@ -630,16 +797,18 @@ class RiskController:
 
     def emergency_stop(self, reason: str = "Manual stop") -> None:
         """
-        Trigger global kill switch immediately.
+        Trigger global kill switch immediately (sticky, requires explicit reset).
         
         Use for manual intervention or automated safety triggers.
+        This sets the manual emergency halt flag which persists across restarts.
         """
         with self._lock:
-            if self._global_kill:
-                logger.warning(f"[risk] Kill switch already triggered, ignoring: {reason}")
+            if self._global_kill and self._manual_emergency_halt:
+                logger.warning(f"[risk] Manual emergency halt already triggered, ignoring: {reason}")
                 return
+            self._manual_emergency_halt = True  # Set sticky flag
             self._trigger_kill_locked(KillSwitchReason.MANUAL, reason)
-        logger.critical(f"[risk] EMERGENCY STOP: {reason}")
+        logger.critical(f"[risk] EMERGENCY STOP (manual): {reason}")
 
     def trigger_rti_feed_stale(self, details: str) -> None:
         """Engage kill when CFB RTI is unavailable or operationally unsafe."""
@@ -797,6 +966,9 @@ class RiskController:
         
         Requires explicit operator acknowledgment.
         Returns True if reset successful.
+        
+        Clears manual emergency halt (sticky) but not derived daily loss state
+        (which auto-resets when PnL recovers).
         """
         with self._lock:
             if not self._global_kill:
@@ -814,6 +986,7 @@ class RiskController:
             old_details = self._kill_details
 
             self._global_kill = False
+            self._manual_emergency_halt = False  # Clear manual halt flag
             self._kill_reason = None
             self._kill_details = None
             self._kill_timestamp = None

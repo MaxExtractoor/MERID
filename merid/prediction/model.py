@@ -37,13 +37,21 @@ MAX_PRICE_AGE_SECONDS: int = 120
 def max_spot_age_seconds() -> int:
     """Upper bound on spot quote age for ``get_spot_price`` (shared by all PM paths).
 
-    Override with ``MERID_PM_MAX_SPOT_AGE_SECONDS`` so AgentGrid and helpers stay aligned
-    without duplicating literals.
+    P0 FIX: Now reads from centralized spot_sla_config to ensure consistency across stack.
+    Uses single MAX_SPOT_AGE_HARD threshold (60s) for all assets.
+    Override with ``MERID_PM_MAX_SPOT_AGE_SECONDS`` for backward compatibility, but
+    the canonical source is data.spot_sla_config.
     """
+    # Try centralized SLA config first
     try:
-        return int(os.getenv("MERID_PM_MAX_SPOT_AGE_SECONDS", str(MAX_PRICE_AGE_SECONDS)))
-    except ValueError:
-        return MAX_PRICE_AGE_SECONDS
+        from data.spot_sla_config import get_spot_max_age
+        return int(get_spot_max_age())
+    except ImportError:
+        # Fallback to env var for backward compatibility
+        try:
+            return int(os.getenv("MERID_PM_MAX_SPOT_AGE_SECONDS", str(MAX_PRICE_AGE_SECONDS)))
+        except ValueError:
+            return MAX_PRICE_AGE_SECONDS
 
 
 def pm_spot_feed_symbol_candidates(asset: str) -> tuple[str, ...]:
@@ -235,9 +243,14 @@ class PredictionMarketModel:
         price_feed=None,
     ):
         self._fee = fee_per_contract
-        # 15m scalper: higher default slippage (2c vs 1c) for volatile microstructure
-        _is_scalper = os.getenv("STRATEGY_MODE", "").upper() == "MOMENTUM_SCALPER"
-        _default_slip = Decimal("2") if _is_scalper else Decimal("1")
+        # Dynamic slippage: configurable via env var (default 1 cent)
+        # 15m scalper can use higher slippage (2 cents) via env var
+        _env_slippage_cents = os.getenv("MERID_SLIPPAGE_CENTS", "")
+        if _env_slippage_cents:
+            _default_slip = Decimal(_env_slippage_cents)
+        else:
+            _is_scalper = os.getenv("STRATEGY_MODE", "").upper() == "MOMENTUM_SCALPER"
+            _default_slip = Decimal("2") if _is_scalper else Decimal("1")
         self._default_slippage = default_slippage_cents if default_slippage_cents is not None else _default_slip
         self._model_probs: Dict[str, Decimal] = {}
 
@@ -405,6 +418,13 @@ class PredictionMarketModel:
             from data.unified_spot_service import get_unified_spot_service
 
             unified = get_unified_spot_service()
+            
+            # INFO: Log asset being requested and cache keys
+            logger.info(
+                "[SPOT-CACHE-DEBUG] model.get_spot_price called: asset=%s market_id=%s cache_keys=%s",
+                asset, market_id, list(unified._cache.keys()) if hasattr(unified, '_cache') else "N/A"
+            )
+            
             spot = unified.get(asset)
 
             if spot is None:
@@ -415,9 +435,9 @@ class PredictionMarketModel:
                 return None
 
             # Validate staleness
-            # FIX: unified_spot_service stores timestamp in milliseconds, convert to seconds
+            # FIX: unified_spot_service stores timestamp in seconds (time.time()), not milliseconds
             _max_age = max_spot_age_seconds()
-            age = (time.time() - spot.timestamp) / 1000.0  # Convert ms to seconds
+            age = time.time() - spot.timestamp  # Both are in seconds since epoch
 
             if age > _max_age:
                 logger.debug(
@@ -435,7 +455,7 @@ class PredictionMarketModel:
                 "[model] get_spot_price: %s price=%.2f source=%s confidence=%.2f",
                 asset,
                 spot.price,
-                spot.source.value,
+                spot.source,
                 spot.confidence,
             )
 
@@ -492,15 +512,23 @@ class PredictionMarketModel:
                 # calibrated per horizon.  For short tenors (15m) even a small
                 # spot/strike gap is highly predictive; for monthly/annual a
                 # 10% gap is modest and should not push probability to the clamp.
-                # Fallback: global MERID_PM_SPOT_DIST_PROB_SCALE (default 10).
+                # Dynamic scale: configurable via env vars per timeframe
                 _tf_scale_map = {
-                    "15m": Decimal("10"),
-                    "1h": Decimal("6"),
-                    "daily": Decimal("3"),
-                    "weekly": Decimal("1.5"),
-                    "monthly": Decimal("1.0"),
-                    "annual": Decimal("0.5"),
+                    "15m": Decimal(os.getenv("MERID_SPOT_SCALE_15M", "10")),
+                    "1h": Decimal(os.getenv("MERID_SPOT_SCALE_1H", "6")),
+                    "daily": Decimal(os.getenv("MERID_SPOT_SCALE_DAILY", "3")),
+                    "weekly": Decimal(os.getenv("MERID_SPOT_SCALE_WEEKLY", "1.5")),
+                    "monthly": Decimal(os.getenv("MERID_SPOT_SCALE_MONTHLY", "1.0")),
+                    "annual": Decimal(os.getenv("MERID_SPOT_SCALE_ANNUAL", "0.5")),
                 }
+                # CRITICAL FIX: Validate spot scale values are reasonable positive values
+                for tf, scale in _tf_scale_map.items():
+                    if scale <= 0 or scale > 100:
+                        logger.warning(
+                            "[MODEL] Invalid MERID_SPOT_SCALE_%s=%s - using default 10",
+                            tf.upper(), scale
+                        )
+                        _tf_scale_map[tf] = Decimal("10")
                 scale = spot_dist_prob_scale()  # env override always wins
                 _env_default = Decimal("10")
                 if scale == _env_default:
@@ -513,7 +541,9 @@ class PredictionMarketModel:
                     except Exception:
                         pass
                 yes_prob = Decimal("0.5") + (dist_pct * scale)
-                yes_prob = min(max(yes_prob, Decimal("0.05")), Decimal("0.95"))
+                # Clamp to venue-invariant range using centralized function
+                from merid.event_venues.kalshi.invariants import clamp_probability
+                yes_prob = Decimal(str(clamp_probability(float(yes_prob))))
                 derived_prob = yes_prob if side == "yes" else Decimal("1.0") - yes_prob
                 mp = derived_prob
                 logger.debug(
@@ -804,17 +834,14 @@ class PredictionMarketModel:
         Returns:
             Decimal: Model probability based on sentiment, or None if sentiment unavailable
         """
-        # KALSHI-ONLY: Sentiment disabled for kalshi_crypto_15m_v2 profile
-        # Sentiment features removed from trading stack for lean 15m operation
         if not asset:
             return None
 
-        # Return neutral sentiment (0.0) for all assets - sentiment disabled
         logger.debug(
-            "[model_sentiment] asset=%s side=%s sentiment=0.0000 (sentiment disabled for kalshi_crypto_15m_v2)",
+            "[model_sentiment] asset=%s side=%s sentiment=None (using spread-based fallback)",
             asset, side
         )
-        return 0.0
+        return None
 
     def build_snapshot(
         self,

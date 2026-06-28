@@ -336,7 +336,7 @@ class AgentRiskQuotaManager:
             logger.info("Debate store integration removed - using alternative performance data sources")
             
             # Update agent profiles with placeholder data
-            # TODO: Integrate with new performance data source
+            # NOTE: New performance data source integration pending - using empty dict for now
             agent_performance = {}
             team_performance = {}
             

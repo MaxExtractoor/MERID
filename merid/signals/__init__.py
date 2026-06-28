@@ -1,68 +1,75 @@
-"""MERID Signals — Unified ingestion, processing, and feature extraction.
+"""
+MERID Signals Module
+====================
 
-§1 Domain objects: InfoEvent, SentimentFeature, SentimentSpike
-§2 Ingestion: XWorker, TelegramWorker, NewsWorker
-§3 Processing: SentimentProcessor, spike detection
-§4 Agents: SentimentAgent, NewsThesisAgent, TelegramOpsAgent
-§5 Operator I/O: AlertRouter for Telegram + X outbound
+Technical analysis indicators and signal generation for trading strategies.
 
-Signal Layer (decay-aware opportunity discovery):
-§D1 Decay: DecayConfig, decay_weight(), DecayEnvelope, SignalSnapshot
-§D2 Features: NewsFeatures, MacroFeatures, OnChainFeatures, SocialFeatures
-§D3 Arbitrage: DislocationScanner, DislocationSignal, ArbPlan with TTL
-§D4 Store: SignalStore (SQLite persistence)
-§D5 Drift: DriftDetector, DomainDriftMetric, ConsensusQualityIndex
+This module provides:
+- Crypto15mIndicatorStack: Comprehensive indicator stack for 15-minute Kalshi crypto binaries
+- TAEngine: Core engine for computing RSI, MACD, EMAs, ATR, and divergence detection
+- TA Models: Data models for OHLCV snapshots, indicator bundles, and market structure
 
-TA Decision Stack (canonical technical analysis):
-§T1 Models: OHLCVSnapshot, IndicatorBundle, MarketStructure, SignalScore
-§T2 Engine: TAEngine with RSI/MACD divergence detection
-§T3 Fusion: TimeframeFusionEngine for multi-TF signal clustering
-§T4 Regime: RegimeEngine for dynamic threshold adjustment
-§T5 Logging: DecisionLogger for structured audit trail
+Usage:
+    from merid.signals.crypto_15m_indicators import Crypto15mIndicatorStack, IndicatorConfig
+    
+    # Initialize with asset-specific config
+    stack = Crypto15mIndicatorStack(config=IndicatorConfig(asset="BTC"))
+    
+    # Feed 1-minute close prices
+    stack.update(price=87450.0)
+    
+    # Get indicator snapshot
+    snap = stack.snapshot()
+    if snap.trade_allowed:
+        # Use indicators for edge computation
+        pass
 """
 
-# TA Stack exports
-from .ta_models import (
+from merid.signals.crypto_15m_indicators import (
+    Crypto15mIndicatorStack,
+    IndicatorConfig,
+    IndicatorSnapshot,
+    FVGZone,
+    FVGContext,
+    DEFAULT_15M_CONFIG,
+)
+
+from merid.signals.ta_engine import (
+    TAEngine,
+    IndicatorConfig as TAIndicatorConfig,
+)
+
+from merid.signals.ta_models import (
     OHLCVSnapshot,
+    PricePivot,
+    Divergence,
+    FibPivots,
     IndicatorBundle,
     MarketStructure,
     SignalScore,
     FusedClusterSignal,
-    Divergence,
-    FibPivots,
     GlobalRegime,
 )
 
-from .ta_engine import TAEngine, IndicatorConfig
-
-from .timeframe_fusion import TimeframeFusionEngine, FusionConfig
-
-from .regime_engine import RegimeEngine, RegimeConfig, get_regime_engine
-
-from .decision_logger import DecisionLogger, TradeDecisionLog, get_decision_logger
-
 __all__ = [
-    # Models
+    # Crypto 15m indicators
+    "Crypto15mIndicatorStack",
+    "IndicatorConfig",
+    "IndicatorSnapshot",
+    "FVGZone",
+    "FVGContext",
+    "DEFAULT_15M_CONFIG",
+    # TA Engine
+    "TAEngine",
+    "TAIndicatorConfig",
+    # TA Models
     "OHLCVSnapshot",
+    "PricePivot",
+    "Divergence",
+    "FibPivots",
     "IndicatorBundle",
     "MarketStructure",
     "SignalScore",
     "FusedClusterSignal",
-    "Divergence",
-    "FibPivots",
     "GlobalRegime",
-    # Engine
-    "TAEngine",
-    "IndicatorConfig",
-    # Fusion
-    "TimeframeFusionEngine",
-    "FusionConfig",
-    # Regime
-    "RegimeEngine",
-    "RegimeConfig",
-    "get_regime_engine",
-    # Logging
-    "DecisionLogger",
-    "TradeDecisionLog",
-    "get_decision_logger",
 ]

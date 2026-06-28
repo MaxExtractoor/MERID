@@ -32,20 +32,25 @@ from merid.guardrails.tools import (
     ToolValidity,
     get_tool_registry,
 )
-from merid.prediction.session_guard import get_session_guard
+# LEGACY REMOVAL: session_guard moved to archive/legacy/ during 15m stack cleanup
 from merid.prediction.venue_gate import get_venue_gate
 from utils.logger import get_logger
 
 logger = get_logger("merid.prediction.kalshi_tools")
 
+# Trade trace integration for calibration
+try:
+    from merid.prediction.trade_trace import update_trace
+    _TRACE_AVAILABLE = True
+except ImportError:
+    _TRACE_AVAILABLE = False
+    logger.debug("[TRACE-INTEGRATION] Trade trace module not available, skipping trace updates")
+
 # ── Lazy client accessor ───────────────────────────────────────────────
 
 _client = None
 _trader = None
-# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-# _trader_lock = threading.Lock()  # FPA-02: protect singleton init
-_trader_lock = None  # Disabled to prevent startup hang
+_trader_lock = None
 
 
 def _get_client():
@@ -82,13 +87,14 @@ async def _kalshi_list_markets(
     t0 = time.time()
 
     # Session guard
-    guard = get_session_guard()
-    if not guard.is_trading_allowed():
-        return ToolResult.fail(
-            ToolErrorCode.VENUE_DOWN,
-            guard.block_reason() or "Kalshi maintenance",
-            tool_name="kalshi_list_markets",
-        )
+    # LEGACY REMOVAL: session_guard moved to archive/legacy/ during 15m stack cleanup
+    # guard = get_session_guard()
+    # if not guard.is_trading_allowed():
+    #     return ToolResult.fail(
+    #         ToolErrorCode.VENUE_DOWN,
+    #         guard.block_reason() or "Kalshi maintenance",
+    #         tool_name="kalshi_list_markets",
+    #     )
 
     try:
         from merid.event_venues.kalshi.market_catalog import get_market_catalog
@@ -482,13 +488,14 @@ async def _kalshi_place_order(
             pass  # execution gate module not available — fall through
 
     # Session guard
-    session = get_session_guard()
-    if not session.is_trading_allowed():
-        return ToolResult.fail(
-            ToolErrorCode.VENUE_DOWN,
-            session.block_reason() or "Kalshi maintenance",
-            tool_name="kalshi_place_order",
-        )
+    # LEGACY REMOVAL: session_guard moved to archive/legacy/ during 15m stack cleanup
+    # session = get_session_guard()
+    # if not session.is_trading_allowed():
+    #     return ToolResult.fail(
+    #         ToolErrorCode.VENUE_DOWN,
+    #         session.block_reason() or "Kalshi maintenance",
+    #         tool_name="kalshi_place_order",
+    #     )
 
     # Simulate only when VenueGate says so. DeploymentController PAPER must not
     # override a LIVE VenueGate — otherwise every AgentGrid agent (registered PAPER
@@ -634,6 +641,12 @@ async def _kalshi_place_order(
                 "[kalshi_tools] Signal submitted to trading_agent: %s | %s %s on %s count=%d price=%d¢",
                 signal.signal_id, action, side, ticker, count, _pc
             )
+            
+            # P1: Wire TradeTrace into order submission (update order_submit_time)
+            # Check if signal has trace_id from agent_grid_15m.py (now in AgentSignal.trace_id)
+            if _TRACE_AVAILABLE and hasattr(signal, 'trace_id') and signal.trace_id:
+                update_trace(signal.trace_id, order_submit_time=time.time())
+                logger.debug("[TRACE-UPDATE] Updated trace_id=%s with order_submit_time", signal.trace_id)
 
             payload = {
                 "order_id": signal.signal_id,

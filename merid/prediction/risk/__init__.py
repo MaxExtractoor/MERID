@@ -22,11 +22,9 @@ from merid.prediction.risk._prediction_risk import (  # noqa: F401
     get_prediction_risk,
 )
 
-# ── Shared Kalshi risk engine (new) ───────────────────────────────────
-from merid.prediction.risk.kalshi_risk_engine import (  # noqa: F401
-    KalshiRiskConfig,
-    KalshiRiskEngine,
-)
+# ── Shared Kalshi risk engine (deprecated - moved to archive/legacy/) ──
+# KalshiRiskConfig and KalshiRiskEngine moved to archive/legacy/ during 15m stack cleanup
+# Use merid.event_venues.kalshi.kalshi_risk for venue-level risk configuration
 
 # ── Fear/Greed, Volatility & Sizing — Canonical Types ─────────────────
 from merid.prediction.risk.sentiment_vol_types import (  # noqa: F401

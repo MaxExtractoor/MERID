@@ -22,12 +22,6 @@ from merid.risk.agent_metrics import (
     PerformanceSnapshot,
     get_agent_metrics_tracker,
 )
-from merid.risk.capital_engine import (
-    AssetCapitalConfig,
-    CapitalEngine,
-    CapitalSnapshot,
-    RiskBudget,
-)
 from merid.risk.kill_switches import (
     KillSwitchEvent,
     KillSwitchReason,
@@ -68,11 +62,11 @@ __all__ = [
     "emergency_stop",
     "get_risk_status",
     "risk_controller",
-    # Capital engine
-    "AssetCapitalConfig",
-    "CapitalEngine",
-    "CapitalSnapshot",
-    "RiskBudget",
+    # LEGACY REMOVAL: capital_engine moved to archive/legacy/ during 15m stack cleanup
+    # "AssetCapitalConfig",
+    # "CapitalEngine",
+    # "CapitalSnapshot",
+    # "RiskBudget",
     # Agent metrics
     "AgentMetrics",
     "AgentMetricsTracker",

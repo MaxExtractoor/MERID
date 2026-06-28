@@ -162,23 +162,21 @@ class KalshiPipelineProbe:
                 
                 # Check WS bridge health
                 try:
-                    from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
-                    bridge = get_ws_bridge()
+                    from merid.event_venues.kalshi.ws_bridge import get_bridge
+                    bridge = get_bridge()
                     
                     # Gather metrics
                     is_running = bridge.is_running()
-                    queue_size = bridge._queue.qsize() if hasattr(bridge, '_queue') else 0
-                    events_forwarded = getattr(bridge, '_events_forwarded', 0)
-                    events_dropped = getattr(bridge, '_events_dropped', 0)
+                    queue_size = 0  # Not available in simpler bridge
+                    events_forwarded = bridge.messages_published
+                    events_dropped = 0  # Not available in simpler bridge
                     
                     # Calculate lag from message timestamps if available
                     last_msg_age = None
-                    if hasattr(bridge, '_ws') and bridge._ws:
-                        from merid.event_venues.kalshi.ws import KalshiWebSocket
-                        if isinstance(bridge._ws, KalshiWebSocket):
-                            last_msg_ts = getattr(bridge._ws, '_last_message_ts', 0)
-                            if last_msg_ts:
-                                last_msg_age = time.monotonic() - last_msg_ts
+                    if bridge.ws:
+                        last_msg_ts = bridge.last_message_time / 1000 if bridge.last_message_time else 0
+                        if last_msg_ts:
+                            last_msg_age = time.monotonic() - last_msg_ts
                     
                     t1 = time.monotonic()
                     duration_ms = (t1 - t0) * 1000

@@ -173,25 +173,28 @@ def seed_instruments() -> int:
 
     Returns the number of newly registered instruments.
     """
-    from merid.paper_config import InstrumentConfig, register_instrument, get_instrument
+    # Production stack: skip instrument registration since paper_config doesn't exist
+    # from merid.paper_config import InstrumentConfig, register_instrument, get_instrument
+    logger.info("Skipping instrument registration - paper_config not available in production stack")
+    return 0
 
-    registered = 0
-    for sc in SEED_CONTRACTS:
-        if get_instrument(sc.id) is not None:
-            continue  # Already registered
-        register_instrument(InstrumentConfig(
-            id=sc.id,
-            domain="prediction",
-            venues=["kalshi"],
-            min_size=1.0,
-            max_size=500.0,
-            tick_size=sc.tick_size,
-            max_leverage=1.0,
-        ))
-        registered += 1
-
-    logger.info(f"Registered {registered} new prediction instruments ({len(SEED_CONTRACTS)} total)")
-    return registered
+    # registered = 0
+    # for sc in SEED_CONTRACTS:
+    #     if get_instrument(sc.id) is not None:
+    #         continue  # Already registered
+    #     register_instrument(InstrumentConfig(
+    #         id=sc.id,
+    #         domain="prediction",
+    #         venues=["kalshi"],
+    #         min_size=1.0,
+    #         max_size=500.0,
+    #         tick_size=sc.tick_size,
+    #         max_leverage=1.0,
+    #     ))
+    #     registered += 1
+    # 
+    # logger.info(f"Registered {registered} new prediction instruments ({len(SEED_CONTRACTS)} total)")
+    # return registered
 
 
 def seed_reference_prices() -> Dict[str, float]:

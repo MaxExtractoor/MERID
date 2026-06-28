@@ -347,8 +347,9 @@ class AIGuardrails:
         # PRODUCTION FIX (2026-05-01): Derive from min_order_notional in crypto threshold matrix
         # Never use hardcoded fallbacks - always source from system configuration
         try:
-            from merid.prediction.crypto_threshold_matrix import get_global_min_order_notional_usd
-            min_notional = get_global_min_order_notional_usd()
+            # LEGACY REMOVAL: crypto_threshold_matrix moved to archive/legacy/ during 15m stack cleanup
+            # min_notional = get_global_min_order_notional_usd()
+            min_notional = None
             if min_notional > 0:
                 # Use 10x minimum order size as max per market cap
                 return min_notional * 10.0
@@ -358,14 +359,20 @@ class AIGuardrails:
         # PRODUCTION FIX (2026-05-01): Final fallback - derive from crypto_threshold_matrix fallback rows
         # Never use hardcoded 0.35 - always source from the same place that defines min_order_notional
         try:
-            from merid.prediction.crypto_threshold_matrix import _fallback_rows
-            _fallback = _fallback_rows()
+            # LEGACY REMOVAL: crypto_threshold_matrix moved to archive/legacy/ during 15m stack cleanup
+            # from merid.prediction.crypto_threshold_matrix import _fallback_rows
+            # _fallback = _fallback_rows()
+            _fallback = None
             if _fallback:
                 _min_from_fallback = min(r.get("min_order_notional_usd", 0.35) for r in _fallback)
                 if _min_from_fallback > 0:
                     return _min_from_fallback * 10.0
-        except Exception:
-            pass
+        except Exception as e:
+            # CRITICAL FIX: Log error before falling through
+            logger.warning(
+                "[AI-GUARDRAILS] Failed to derive max per market from fallback rows: %s",
+                e
+            )
         # Absolute minimum - should never reach here if crypto_threshold_matrix is importable
         return 3.5  # Derived from 0.35 * 10, but 0.35 comes from _fallback_rows
 
@@ -694,10 +701,7 @@ class AIGuardrails:
 # ── Singleton ────────────────────────────────────────────────────────────────
 
 _guardrails: Optional[AIGuardrails] = None
-# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-# _guardrails_lock = threading.Lock()
-_guardrails_lock = None  # Disabled to prevent startup hang
+_guardrails_lock = None
 
 
 def get_ai_guardrails() -> AIGuardrails:

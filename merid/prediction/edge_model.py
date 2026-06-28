@@ -31,6 +31,7 @@ from typing import Any, Dict, Optional
 from utils.logger import get_logger
 
 from merid.event_venues.kalshi.constants import ALL_CRYPTO_ASSETS
+from merid.event_venues.kalshi.invariants import clamp_probability
 from merid.prediction.model import pm_spot_feed_symbol_candidates
 
 logger = get_logger("merid.prediction.edge_model")
@@ -227,8 +228,8 @@ class EdgeModel:
             # No signals — return None (caller will use heuristic)
             return None
 
-        # Clamp
-        fair_prob = max(0.02, min(0.98, fair_prob))
+        # Clamp using centralized invariant (single source of truth for probability bounds)
+        fair_prob = clamp_probability(fair_prob)
 
         # Ensemble confidence
         confidence = min(1.0, max(0.0,
@@ -415,7 +416,7 @@ class EdgeModel:
         uncertainty = min(0.15, hours * 0.01)  # caps at 15% pull
 
         adjusted = implied_prob + uncertainty * (0.5 - implied_prob)
-        return max(0.02, min(0.98, adjusted))
+        return clamp_probability(adjusted)
 
     # ── D5: Cross-venue context helpers ──────────────────────────────────────
 
@@ -858,7 +859,7 @@ class EdgeModel:
 
         # Cap total nudge at ±0.08 to prevent context from overriding market price
         nudge = max(-0.08, min(0.08, nudge))
-        adjusted = max(0.02, min(0.98, implied_prob + nudge))
+        adjusted = clamp_probability(implied_prob + nudge)
         confidence = min(0.4, 0.05 * signals_fired)   # max 0.4 so it never dominates
         return adjusted, confidence
 
@@ -869,12 +870,9 @@ class EdgeModel:
 
 
 # ── Singleton ────────────────────────────────────────────────────────────
-
+# Singleton instance
 _instance: Optional[EdgeModel] = None
-# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-# _instance_lock = threading.Lock()
-_instance_lock = None  # Disabled to prevent startup hang
+_instance_lock = None
 
 
 def get_edge_model() -> EdgeModel:
@@ -886,6 +884,5 @@ def get_edge_model() -> EdgeModel:
                 if _instance is None:
                     _instance = EdgeModel()
         else:
-            # Lock disabled - direct initialization (startup workaround)
             _instance = EdgeModel()
     return _instance

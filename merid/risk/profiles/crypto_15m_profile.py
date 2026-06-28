@@ -19,6 +19,36 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
+def is_live_profile(profile_name: str) -> bool:
+    """Determine if profile is a live trading profile.
+    
+    Live profiles:
+    - Must be kalshi_crypto_15m_v2
+    - Must use prod environment (not demo)
+    - Must not allow fake bankroll
+    
+    Returns:
+        True if profile is live trading profile
+    """
+    from merid.settings import settings
+    from merid.event_venues.kalshi.kalshi_config import get_kalshi_env
+    
+    # Check profile name
+    if profile_name != "kalshi_crypto_15m_v2":
+        return False
+    
+    # Check environment
+    env = get_kalshi_env()
+    if env != "prod":
+        return False
+    
+    # Check fake bankroll flag
+    if settings.MERID_ALLOW_FAKE_BANKROLL_FOR_TEST:
+        return False
+    
+    return True
+
+
 @dataclass
 class Crypto15mProfile:
     """Parsed kalshi_crypto_15m profile from YAML."""
@@ -30,6 +60,58 @@ class Crypto15mProfile:
     
     # Global capital and cycle risk
     capital_usd: float
+    min_notional_usd: float  # Minimum notional per trade (floor)
+    min_contracts: int  # Minimum contracts per trade (venue invariant)
+    fractional_contract_override_threshold: float  # Allow 1 contract if max_notional >= X% of contract cost
+    
+    # Fallback pricing configuration
+    allow_fallback_trades: bool  # Whether to allow trades with fallback pricing
+    max_fallback_notional_usd: float  # Max notional for fallback trades
+    max_fallback_cycles: int  # Max consecutive cycles with fallback before halting
+    
+    # Catalog staleness enforcement
+    catalog_staleness_enforced: bool  # Whether catalog staleness can halt trading
+    
+    # Signal mode configuration
+    signal_mode: str  # Signal generation mode: mean_reversion, momentum_fvg, hybrid
+    
+    # Momentum/FVG mode parameters - Kalshi-specific
+    momentum_fvg_rsi_long_min: float  # Bullish momentum: RSI > threshold
+    momentum_fvg_rsi_short_max: float  # Bearish momentum: RSI < threshold
+    momentum_fvg_min_macd_hist_long: float  # For longs: MACD histogram >= threshold
+    momentum_fvg_min_macd_hist_short: float  # For shorts: MACD histogram <= threshold
+    momentum_fvg_obi_min: float  # Minimum absolute OBI value
+    momentum_fvg_obi_persistence_min: float  # Minimum OBI persistence fraction
+    momentum_fvg_obi_persistence_window_sec: float  # Time window for persistence check (seconds)
+    momentum_fvg_obi_ewma_alpha: float  # EWMA smoothing factor
+    momentum_fvg_obi_strong_btc: float  # BTC strong OBI threshold
+    momentum_fvg_obi_strong_eth: float  # ETH strong OBI threshold
+    momentum_fvg_obi_strong_sol: float  # SOL strong OBI threshold
+    momentum_fvg_obi_strong_xrp: float  # XRP strong OBI threshold
+    momentum_fvg_obi_strong_doge: float  # DOGE strong OBI threshold
+    momentum_fvg_obi_ewma_alpha_btc: float  # BTC EWMA alpha
+    momentum_fvg_obi_ewma_alpha_eth: float  # ETH EWMA alpha
+    momentum_fvg_obi_ewma_alpha_sol: float  # SOL EWMA alpha
+    momentum_fvg_obi_ewma_alpha_xrp: float  # XRP EWMA alpha
+    momentum_fvg_obi_ewma_alpha_doge: float  # DOGE EWMA alpha
+    momentum_fvg_fvg_max_age_bars: int  # Maximum FVG age in bars
+    momentum_fvg_fvg_min_size_ticks: int  # Minimum FVG size in ticks
+    momentum_fvg_fvg_min_time_to_expiry_min: float  # Minimum time to expiry for FVG entries
+    momentum_fvg_require_ema_stack: bool  # Require EMA stack alignment
+    momentum_fvg_require_price_vs_ema50: bool  # Require price vs EMA50
+    momentum_fvg_liquidity_high_threshold: int  # High liquidity threshold
+    momentum_fvg_liquidity_high_size_factor: float  # High liquidity size factor
+    momentum_fvg_liquidity_medium_threshold: int  # Medium liquidity threshold
+    momentum_fvg_liquidity_medium_size_factor: float  # Medium liquidity size factor
+    momentum_fvg_liquidity_low_threshold: int  # Low liquidity threshold
+    momentum_fvg_liquidity_low_size_factor: float  # Low liquidity size factor
+    momentum_fvg_liquidity_ultra_low_threshold: int  # Ultra-low liquidity threshold
+    momentum_fvg_liquidity_ultra_low_size_factor: float  # Ultra-low liquidity size factor
+    momentum_fvg_liquidity_min_threshold: int  # Minimum liquidity threshold
+    momentum_fvg_liquidity_min_size_factor: float  # Minimum liquidity size factor
+    momentum_fvg_spread_gate_cents: int  # Spread gate threshold
+    momentum_fvg_spread_gate_obi_persistence_boost: float  # Boosted persistence for wide spreads
+    
     max_cycle_risk_pct: float
     max_cycle_risk_usd: float
     
@@ -37,6 +119,7 @@ class Crypto15mProfile:
     venue_max_single_order_pct: float
     venue_max_total_notional_pct: float
     venue_max_category_notional_pct: float
+    venue_bankroll_cap_pct: float  # Bankroll cap percentage (overrides MERID_BANKROLL_CAP_PCT env)
     venue_max_orders_per_minute: int
     venue_max_orders_per_hour: int
     
@@ -62,9 +145,33 @@ class Crypto15mProfile:
     guardrails_max_slippage_cents: int
     guardrails_min_depth_contracts: int
     guardrails_min_post_fee_edge: float
+    guardrails_min_time_to_expiry_min: int  # Minimum time to expiry for entry in minutes
     guardrails_drawdown_halt_pct: float
     guardrails_drawdown_unwind_pct: float
     guardrails_max_daily_loss_usd: float
+    guardrails_max_position_value_usd: float  # Maximum total position value in USD (position limit kill switch)
+    # OTM filtering for 15-minute crypto
+    guardrails_max_dist_pct_trade: float  # Maximum spot-strike distance percentage for trading
+    guardrails_min_contract_price_cents: float  # Minimum contract price floor (prevents deep OTM longshots)
+    guardrails_max_same_side_per_strip: int  # Maximum same-direction positions per strip across all assets
+    # Time trap prevention (entry window narrowing)
+    guardrails_max_entry_mins: float  # Maximum time to expiry for entry (e.g., 12min)
+    guardrails_min_entry_mins: float  # Minimum time to expiry for entry (e.g., 2min)
+    # Microstructure trap prevention
+    guardrails_depth_size_multiplier: float  # Depth must be >= multiplier * order_size
+    # Regime/drawdown trap prevention
+    guardrails_regime_cooldown_enabled: bool  # Enable regime-based cooldown
+    guardrails_regime_cooldown_min_trades: int  # Minimum trades before regime check
+    guardrails_regime_cooldown_min_winrate: float  # Minimum winrate threshold
+    guardrails_regime_cooldown_max_loss_pct: float  # Maximum loss percentage threshold
+    
+    # Experimental slice configuration (targeted hypothesis testing)
+    guardrails_experimental_price_band_enabled: bool  # Enable experimental price band guard
+    guardrails_experimental_min_price_cents: int  # Minimum price for experimental slice
+    guardrails_experimental_max_price_cents: int  # Maximum price for experimental slice
+    guardrails_experimental_tte_band_enabled: bool  # Enable experimental TTE band guard
+    guardrails_experimental_min_tte_min: float  # Minimum TTE for experimental slice
+    guardrails_experimental_max_tte_min: float  # Maximum TTE for experimental slice
     
     # Kelly sizing
     kelly_hard_cap: float
@@ -74,6 +181,44 @@ class Crypto15mProfile:
     kelly_max_win_prob: float
     kelly_global_notional_cap_pct: float
     
+    # Contract caps (hard limits, not bankroll-scaled)
+    contract_caps_max_contracts_total: int
+    contract_caps_max_contracts_per_asset: int
+    contract_caps_max_contracts_per_cluster: int
+    contract_caps_max_single_order_contracts: int
+    
+    # Risk policy
+    risk_policy_group_notional_cap_usd: float
+    risk_policy_max_fee_to_notional_pct: float
+    
+    # Strategy policy
+    strategy_policy_min_edge: float
+    
+    # Universe liquidity filters (coarse prefilter)
+    universe_min_volume: int
+    universe_min_open_interest: int
+    universe_max_spread_cents: int
+    strategy_policy_min_confidence: float
+    strategy_policy_max_md_staleness_sec: float
+    
+    # Throttling (order rate limits)
+    throttling_global_orders_window_sec: float
+    throttling_global_orders_limit: int
+    throttling_per_asset_cooldown_sec: float
+    throttling_per_strip_order_limit: int
+    throttling_per_strip_notional_usd: float
+    
+    # Failsafe configuration (emergency brake)
+    failsafe_max_contracts_per_order: int
+    
+    # Venue invariants (Kalshi venue-level constants)
+    venue_invariants_valid_price_cents_min: int
+    venue_invariants_valid_price_cents_max: int
+    venue_invariants_deep_otm_threshold_cents: int  # Task 30: Deep OTM threshold from profile
+    venue_invariants_deep_itm_threshold_cents: int  # Task 30: Deep ITM threshold from profile
+    venue_invariants_ioc_auto_below_seconds: int  # Task 31: IOC auto-below threshold from profile
+    venue_invariants_max_book_staleness_ms: int  # Maximum orderbook staleness in milliseconds (PRODUCTION INVARIANT)
+    
     # Legacy path control
     legacy_disable_balance_calibration: bool
     legacy_disable_dynamic_contract_caps: bool
@@ -81,16 +226,61 @@ class Crypto15mProfile:
     legacy_disable_bankroll_prediction_risk: bool
     legacy_disable_bankroll_guardrails: bool
     
-    # Computed venue caps (USD, derived from capital)
+    # Edge/lag filter configuration (with defaults)
+    edge_lag_filter_min_edge_lag_ratio: Dict[str, float] = field(default_factory=dict)
+    edge_lag_filter_enabled: Dict[str, int] = field(default_factory=dict)
+    edge_lag_filter_cold_start_min_samples: int = 100
+    
+    # Computed venue caps (USD, derived from capital) - with defaults
     venue_max_single_order_usd: float = 0.0
     venue_max_total_notional_usd: float = 0.0
     venue_max_category_notional_usd: float = 0.0
     
-    # Computed agent defaults (USD, derived from capital)
+    # Computed agent defaults (USD, derived from capital) - with defaults
     agent_max_notional_usd: float = 0.0
     
-    # Per-asset caps (BTC/ETH/SOL/XRP/DOGE)
+    # Per-asset caps (BTC/ETH/SOL/XRP/DOGE) - with floor applied - with defaults
+    asset_max_notional_usd: Dict[str, float] = field(default_factory=dict)
+    
+    # Per-asset caps (BTC/ETH/SOL/XRP/DOGE) - with defaults
     asset_configs: Dict[str, "AssetConfig"] = field(default_factory=dict)
+    
+    # Microstructure trap prevention (with default)
+    guardrails_max_spread_for_edge: Dict[str, int] = field(default_factory=dict)  # edge_pct -> max_spread_cents
+    
+    # Velocity model coefficients (Phase 1: Logistic mapping from velocity to probability)
+    velocity_model_alpha_0_btc: float = 0.0
+    velocity_model_alpha_1_btc: float = 1000.0
+    velocity_model_alpha_0_eth: float = 0.0
+    velocity_model_alpha_1_eth: float = 1000.0
+    velocity_model_alpha_0_sol: float = 0.0
+    velocity_model_alpha_1_sol: float = 800.0
+    velocity_model_alpha_0_xrp: float = 0.0
+    velocity_model_alpha_1_xrp: float = 800.0
+    velocity_model_alpha_0_doge: float = 0.0
+    velocity_model_alpha_1_doge: float = 600.0
+
+    # Phase 4.1: Multi-window velocity weights for momentum signal fusion
+    momentum_weights_windows: list = field(default_factory=lambda: [10, 30, 60])  # Velocity windows in seconds
+    momentum_weights_values: list = field(default_factory=lambda: [0.2, 0.3, 0.5])  # Weights for each window
+
+    # Phase 4.4: Logit fusion weights for combining multiple signal sources
+    logit_fusion_velocity_weight: float = 0.7  # Weight for velocity signal
+    logit_fusion_mean_reversion_weight: float = 0.3  # Weight for mean reversion signal
+
+    # Phase 4.5: Near expiry guard for logit fusion
+    near_expiry_guard_sec: int = 300  # Skip logit fusion if time to expiry < 5 minutes
+
+    # Phase 5.2: Calibration configuration for probability calibration
+    calibration_enabled: bool = False  # Enable/disable probability calibration
+    calibration_auto_fit: bool = True  # Automatically fit calibration when sufficient data
+    calibration_min_samples: int = 100  # Minimum samples required to fit calibration
+    calibration_max_samples: int = 1000  # Maximum samples to keep for calibration
+    calibration_regularization: float = 0.0001  # L2 regularization parameter
+    calibration_fit_interval_hours: int = 24  # Re-fit calibration every N hours
+
+    # Phase 2: Strategy definitions for multi-strategy support
+    strategies: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -126,18 +316,101 @@ class Crypto15mProfileAdapter:
             profile_path: Path to kalshi_crypto_15m.yaml. If None, uses default.
         """
         if profile_path is None:
-            # Path from merid/risk/profiles/crypto_15m_profile.py to config/profiles/kalshi_crypto_15m.yaml
-            profile_path = Path(__file__).parent.parent.parent.parent / "config" / "profiles" / "kalshi_crypto_15m.yaml"
+            # Path from merid/risk/profiles/crypto_15m_profile.py to config/profiles/
+            # Use kalshi_crypto_15m_v2.yaml for MERID_PROFILE=kalshi_crypto_15m_v2
+            import os
+            profile_name = os.getenv("MERID_PROFILE", "kalshi_crypto_15m_v2")
+            profile_filename = f"{profile_name}.yaml"
+            profile_path = Path(__file__).parent.parent.parent.parent / "config" / "profiles" / profile_filename
         
         self.profile_path = profile_path
         self._profile: Optional[Crypto15mProfile] = None
         self._load_profile()
+
+    @property
+    def profile_version(self) -> str:
+        """Return the profile version from the loaded profile."""
+        if self._profile is None:
+            return "unknown"
+        return getattr(self._profile, 'profile_version', 'unknown')
     
+    def _validate_profile_schema(self, raw: Dict[str, Any]) -> None:
+        """Validate profile YAML schema and fail-fast on missing required fields.
+
+        This is a regression guard for Task 29 (profile YAML schema validation).
+        Ensures that critical fields are present in the profile YAML to prevent
+        silent fallback to default values.
+
+        Args:
+            raw: Raw profile YAML dictionary
+
+        Raises:
+            ValueError: If required fields are missing
+        """
+        required_sections = [
+            'profile_name',
+            'profile_version',
+            'description',
+            'capital_usd',
+            'min_notional_usd',
+            'min_contracts',
+            'max_cycle_risk_pct',
+            'venue',
+            'assets',
+            'agent_defaults',
+            'kelly',
+            'guardrails',
+            'contract_caps',
+            'risk_policy',
+            'strategy_policy',
+            'velocity_model',  # Phase 1: Required for logistic mapping
+        ]
+
+        for field in required_sections:
+            if field not in raw:
+                raise ValueError(
+                    f"Profile YAML validation failed: missing required field '{field}' in {self.profile_path}. "
+                    f"This field is required for profile loading. Check kalshi_crypto_15m.yaml."
+                )
+
+        # Validate Kelly section has required fields
+        kelly = raw.get('kelly', {})
+        required_kelly_fields = ['kelly_hard_cap', 'kelly_min_edge_pct', 'kelly_max_edge_pct']
+        for field in required_kelly_fields:
+            if field not in kelly:
+                raise ValueError(
+                    f"Profile YAML validation failed: missing required field 'kelly.{field}' in {self.profile_path}. "
+                    f"This field is required for Kelly sizing configuration."
+                )
+
+        # Validate guardrails section has required fields
+        guardrails = raw.get('guardrails', {})
+        required_guardrails_fields = ['drawdown_halt_pct', 'drawdown_unwind_pct']
+        for field in required_guardrails_fields:
+            if field not in guardrails:
+                raise ValueError(
+                    f"Profile YAML validation failed: missing required field 'guardrails.{field}' in {self.profile_path}. "
+                    f"This field is required for drawdown configuration."
+                )
+
+        logger.info("[PROFILE-SCHEMA-VALIDATION] Profile YAML schema validation passed")
+
     def _load_profile(self) -> None:
         """Load and parse the profile YAML."""
         try:
+            # CRITICAL FIX: Validate profile path exists before loading
+            if not self.profile_path.exists():
+                raise FileNotFoundError(f"Profile file not found: {self.profile_path}")
+            
             with open(self.profile_path, 'r', encoding='utf-8') as f:
                 raw = yaml.safe_load(f)
+                
+            # CRITICAL FIX: Validate YAML loaded successfully
+            if raw is None:
+                raise ValueError(f"Profile file is empty or invalid YAML: {self.profile_path}")
+            
+            # Validate profile YAML schema (Task 29: Fail-fast on missing fields)
+            self._validate_profile_schema(raw)
             
             # Parse venue caps
             venue = raw.get('venue', {})
@@ -146,14 +419,26 @@ class Crypto15mProfileAdapter:
             asset_configs = {}
             assets_raw = raw.get('assets', {})
             for asset_name, asset_data in assets_raw.items():
+                # Handle nested dict format for max_notional_pct
+                max_notional_pct = self._normalize_percentage_value(asset_data.get('max_notional_pct', 0.0))
+                
+                # Handle nested dict format for max_contracts
+                max_contracts = self._normalize_contracts_value(asset_data.get('max_contracts', 0))
+                
                 asset_configs[asset_name] = AssetConfig(
                     asset=asset_name,
-                    max_notional_pct=asset_data.get('max_notional_pct', 0.0),
-                    max_contracts=asset_data.get('max_contracts', 0),
-                    min_edge_early=asset_data.get('min_edge_early', 0.0),
-                    min_edge_mid=asset_data.get('min_edge_mid', 0.0),
-                    min_edge_late=asset_data.get('min_edge_late', 0.0),
-                    min_edge_terminal=asset_data.get('min_edge_terminal', 0.0),
+                    max_notional_pct=max_notional_pct,
+                    max_contracts=max_contracts,
+                    # REMOVED: Per-asset min_edge fields - now using profile edge_bands section
+                    # Edge thresholds come from kalshi_crypto_15m_v2.yaml edge_bands section:
+                    # - watch_band: 2-4% (log only)
+                    # - small_band: 4-6% (trade small)
+                    # - standard_band: >6% (trade standard)
+                    # - kelly_min_edge_pct: 4% (hard floor)
+                    min_edge_early=0.0,  # Not used - edge_bands instead
+                    min_edge_mid=0.0,    # Not used - edge_bands instead
+                    min_edge_late=0.0,   # Not used - edge_bands instead
+                    min_edge_terminal=0.0,  # Not used - edge_bands instead
                 )
             
             # Parse agent defaults
@@ -162,43 +447,40 @@ class Crypto15mProfileAdapter:
             # Parse capital_usd - derive from live bankroll if set to 0
             capital_usd = raw.get('capital_usd', 10000.0)
             if capital_usd == 0.0:
-                # Derive from live Kalshi bankroll API
-                try:
-                    from merid.event_venues.kalshi.kalshi_risk import get_live_bankroll
-                    live_bankroll = get_live_bankroll()
-                    if live_bankroll > 0:
-                        capital_usd = live_bankroll
-                        logger.info(
-                            "[PROFILE_WIRING] Derived capital_usd=%.2f from live Kalshi bankroll API",
-                            capital_usd
-                        )
-                    else:
-                        # Fallback to default if bankroll unavailable
-                        capital_usd = 10000.0
-                        logger.warning(
-                            "[PROFILE_WIRING] Live bankroll unavailable, using fallback capital_usd=%.2f",
-                            capital_usd
-                        )
-                except Exception as bankroll_exc:
-                    # Fallback to default on any error
-                    capital_usd = 10000.0
-                    logger.warning(
-                        "[PROFILE_WIRING] Failed to fetch live bankroll: %s. Using fallback capital_usd=%.2f",
-                        bankroll_exc,
-                        capital_usd
-                    )
+                # Derive from BankrollServiceV2 (single source of truth)
+                # NOTE: This is deferred - we set capital_usd=0 here and let the bankroll service
+                # provide the actual value via equity_provider during startup
+                logger.info("[PROFILE_WIRING] capital_usd=0 configured - will derive from BankrollServiceV2 during startup")
+                capital_usd = 0.0
             
             # Compute USD values from percentages
+            # Handle nested dict format: {value: 0.05, dynamic: bankroll, description: "..."}
             venue_max_single_order_pct = venue.get('max_single_order_pct', 0.05)
+            if isinstance(venue_max_single_order_pct, dict):
+                venue_max_single_order_pct = venue_max_single_order_pct.get('value', 0.05)
+            
             venue_max_total_notional_pct = venue.get('max_total_notional_pct', 0.15)
+            if isinstance(venue_max_total_notional_pct, dict):
+                venue_max_total_notional_pct = venue_max_total_notional_pct.get('value', 0.15)
+            
             venue_max_category_notional_pct = venue.get('max_category_notional_pct', 0.10)
+            if isinstance(venue_max_category_notional_pct, dict):
+                venue_max_category_notional_pct = venue_max_category_notional_pct.get('value', 0.10)
+            
+            venue_bankroll_cap_pct = venue.get('bankroll_cap_pct', 0.02)  # Default 2% if not specified
+            if isinstance(venue_bankroll_cap_pct, dict):
+                venue_bankroll_cap_pct = venue_bankroll_cap_pct.get('value', 0.02)
+            
             agent_max_notional_pct = agent_defaults.get('max_notional_pct', 0.03)
+            if isinstance(agent_max_notional_pct, dict):
+                agent_max_notional_pct = agent_max_notional_pct.get('value', 0.03)
             
             # Compute USD values from capital
-            venue_max_single_order_usd = capital_usd * venue_max_single_order_pct
-            venue_max_total_notional_usd = capital_usd * venue_max_total_notional_pct
-            venue_max_category_notional_usd = capital_usd * venue_max_category_notional_pct
-            agent_max_notional_usd = capital_usd * agent_max_notional_pct
+            # Ensure all computed values are floats to prevent type errors
+            venue_max_single_order_usd = float(capital_usd) * float(venue_max_single_order_pct)
+            venue_max_total_notional_usd = float(capital_usd) * float(venue_max_total_notional_pct)
+            venue_max_category_notional_usd = float(capital_usd) * float(venue_max_category_notional_pct)
+            agent_max_notional_usd = float(capital_usd) * float(agent_max_notional_pct)
             
             # PERCENTAGE CONSISTENCY ASSERTIONS: Prevent invalid config at load time
             # These ensure the profile is internally consistent before runtime
@@ -226,14 +508,47 @@ class Crypto15mProfileAdapter:
             # Parse confidence
             confidence = raw.get('confidence', {})
             
-            # Parse guardrails
+            # Parse guardrails (handle nested dict format)
             guardrails = raw.get('guardrails', {})
+            
+            # Extract drawdown thresholds from nested dict format
+            guardrails_drawdown_halt_pct = self._normalize_percentage_value(guardrails.get('drawdown_halt_pct', 0.10))
+            guardrails_drawdown_unwind_pct = self._normalize_percentage_value(guardrails.get('drawdown_unwind_pct', 0.15))
+            guardrails_per_trade_risk_pct = self._normalize_percentage_value(guardrails.get('per_trade_risk_pct', 0.008))
             
             # Parse Kelly
             kelly = raw.get('kelly', {})
             
+            # Parse contract caps
+            contract_caps = raw.get('contract_caps', {})
+            
+            # Parse risk policy
+            risk_policy = raw.get('risk_policy', {})
+            
+            # Parse strategy policy
+            strategy_policy = raw.get('strategy_policy', {})
+            
+            # Parse throttling (order rate limits)
+            throttling = raw.get('throttling', {})
+            
+            # Parse universe liquidity filters
+            universe = raw.get('universe', {})
+            
+            # Parse failsafe configuration
+            failsafe = raw.get('failsafe', {})
+            
             # Parse legacy flags
             legacy = raw.get('legacy', {})
+            
+            # Parse velocity model coefficients (Phase 1: Logistic mapping)
+            velocity_model = raw.get('velocity_model', {})
+            
+            # Parse strategies configuration (Phase 2: Multi-strategy support)
+            strategies = raw.get('strategies', {})
+            
+            # Parse momentum_fvg config before constructing profile
+            momentum_fvg_config = raw.get('momentum_fvg', {})
+            liquidity_tiers = momentum_fvg_config.get('liquidity_tiers', {})
             
             self._profile = Crypto15mProfile(
                 # Metadata
@@ -243,13 +558,70 @@ class Crypto15mProfileAdapter:
                 
                 # Global capital and cycle risk
                 capital_usd=capital_usd,
-                max_cycle_risk_pct=raw.get('max_cycle_risk_pct', 0.02),
+                min_notional_usd=raw.get('min_notional_usd', 0.35),  # Default $0.35
+                min_contracts=raw.get('min_contracts', 1),  # Default 1 contract
+                fractional_contract_override_threshold=raw.get('fractional_contract_override_threshold', 0.5),  # Default 50%
+                
+                # Fallback pricing configuration
+                allow_fallback_trades=raw.get('allow_fallback_trades', False),  # Default: disabled in prod
+                max_fallback_notional_usd=raw.get('max_fallback_notional_usd', 0.35),  # Default: min_notional
+                max_fallback_cycles=raw.get('max_fallback_cycles', 3),  # Default: 3 cycles before halt
+                
+                # Catalog staleness enforcement
+                catalog_staleness_enforced=raw.get('catalog_staleness_enforced', True),  # Default: enabled
+                
+                # Signal mode configuration
+                signal_mode=raw.get('signal_mode', 'hybrid'),  # Default: hybrid for maximum opportunity capture
+                
+                # Momentum/FVG mode parameters
+                momentum_fvg_rsi_long_min=momentum_fvg_config.get('momentum_rsi_long_min', 55.0),
+                momentum_fvg_rsi_short_max=momentum_fvg_config.get('momentum_rsi_short_max', 45.0),
+                momentum_fvg_min_macd_hist_long=momentum_fvg_config.get('momentum_min_macd_hist_long', 0.0),
+                momentum_fvg_min_macd_hist_short=momentum_fvg_config.get('momentum_min_macd_hist_short', 0.0),
+                momentum_fvg_obi_min=momentum_fvg_config.get('obi_min', 0.25),
+                momentum_fvg_obi_persistence_min=momentum_fvg_config.get('obi_persistence_min', 0.6),
+                momentum_fvg_obi_persistence_window_sec=momentum_fvg_config.get('obi_persistence_window_sec', 10.0),
+                momentum_fvg_obi_ewma_alpha=momentum_fvg_config.get('obi_ewma_alpha', 0.15),
+                momentum_fvg_obi_strong_btc=momentum_fvg_config.get('obi_strong_btc', 0.55),
+                momentum_fvg_obi_strong_eth=momentum_fvg_config.get('obi_strong_eth', 0.55),
+                momentum_fvg_obi_strong_sol=momentum_fvg_config.get('obi_strong_sol', 0.45),
+                momentum_fvg_obi_strong_xrp=momentum_fvg_config.get('obi_strong_xrp', 0.45),
+                momentum_fvg_obi_strong_doge=momentum_fvg_config.get('obi_strong_doge', 0.45),
+                momentum_fvg_obi_ewma_alpha_btc=momentum_fvg_config.get('obi_ewma_alpha_btc', 0.15),
+                momentum_fvg_obi_ewma_alpha_eth=momentum_fvg_config.get('obi_ewma_alpha_eth', 0.15),
+                momentum_fvg_obi_ewma_alpha_sol=momentum_fvg_config.get('obi_ewma_alpha_sol', 0.20),
+                momentum_fvg_obi_ewma_alpha_xrp=momentum_fvg_config.get('obi_ewma_alpha_xrp', 0.20),
+                momentum_fvg_obi_ewma_alpha_doge=momentum_fvg_config.get('obi_ewma_alpha_doge', 0.20),
+                momentum_fvg_fvg_max_age_bars=momentum_fvg_config.get('fvg_max_age_bars', 4),
+                momentum_fvg_fvg_min_size_ticks=momentum_fvg_config.get('fvg_min_size_ticks', 3),
+                momentum_fvg_fvg_min_time_to_expiry_min=momentum_fvg_config.get('fvg_min_time_to_expiry_min', 30.0),
+                momentum_fvg_require_ema_stack=momentum_fvg_config.get('require_ema_stack', True),
+                momentum_fvg_require_price_vs_ema50=momentum_fvg_config.get('require_price_vs_ema50', True),
+                
+                # Liquidity tiers
+                momentum_fvg_liquidity_high_threshold=liquidity_tiers.get('high_threshold', 200),
+                momentum_fvg_liquidity_high_size_factor=liquidity_tiers.get('high_size_factor', 1.0),
+                momentum_fvg_liquidity_medium_threshold=liquidity_tiers.get('medium_threshold', 80),
+                momentum_fvg_liquidity_medium_size_factor=liquidity_tiers.get('medium_size_factor', 0.75),
+                momentum_fvg_liquidity_low_threshold=liquidity_tiers.get('low_threshold', 40),
+                momentum_fvg_liquidity_low_size_factor=liquidity_tiers.get('low_size_factor', 0.5),
+                momentum_fvg_liquidity_ultra_low_threshold=liquidity_tiers.get('ultra_low_threshold', 25),
+                momentum_fvg_liquidity_ultra_low_size_factor=liquidity_tiers.get('ultra_low_size_factor', 0.25),
+                momentum_fvg_liquidity_min_threshold=liquidity_tiers.get('min_threshold', 25),
+                momentum_fvg_liquidity_min_size_factor=liquidity_tiers.get('min_size_factor', 0.0),
+                
+                # Spread gate interaction
+                momentum_fvg_spread_gate_cents=momentum_fvg_config.get('spread_gate_cents', 40),
+                momentum_fvg_spread_gate_obi_persistence_boost=momentum_fvg_config.get('spread_gate_obi_persistence_boost', 0.75),
+                
+                max_cycle_risk_pct=self._normalize_percentage_value(raw.get('max_cycle_risk_pct', 0.02)),
                 max_cycle_risk_usd=raw.get('max_cycle_risk_usd', 0.0),
                 
-                # Venue-level caps (percentage-based)
-                venue_max_single_order_pct=venue.get('max_single_order_pct', 0.05),
-                venue_max_total_notional_pct=venue.get('max_total_notional_pct', 0.15),
-                venue_max_category_notional_pct=venue.get('max_category_notional_pct', 0.10),
+                # Venue-level caps (percentage-based, normalize dict format)
+                venue_max_single_order_pct=self._normalize_percentage_value(venue.get('max_single_order_pct', 0.05)),
+                venue_max_total_notional_pct=self._normalize_percentage_value(venue.get('max_total_notional_pct', 0.05)),  # P2-FIX6: tightened from 0.15 to 0.05
+                venue_max_category_notional_pct=self._normalize_percentage_value(venue.get('max_category_notional_pct', 0.05)),  # P2-FIX6: tightened from 0.10 to 0.05
+                venue_bankroll_cap_pct=self._normalize_percentage_value(venue.get('bankroll_cap_pct', 0.02)),  # Default 2% if not specified
                 venue_max_orders_per_minute=venue.get('max_orders_per_minute', 30),
                 venue_max_orders_per_hour=venue.get('max_orders_per_hour', 300),
                 
@@ -261,8 +633,8 @@ class Crypto15mProfileAdapter:
                 # Per-asset caps
                 asset_configs=asset_configs,
                 
-                # Per-agent defaults (percentage-based)
-                agent_max_notional_pct=agent_defaults.get('max_notional_pct', 0.03),
+                # Per-agent defaults (percentage-based, normalize dict format)
+                agent_max_notional_pct=self._normalize_percentage_value(agent_defaults.get('max_notional_pct', 0.03)),
                 agent_max_orders_per_window=agent_defaults.get('max_orders_per_window', 3),
                 agent_max_yes_position=agent_defaults.get('max_yes_position', 3),
                 agent_max_no_position=agent_defaults.get('max_no_position', 3),
@@ -281,22 +653,92 @@ class Crypto15mProfileAdapter:
                 confidence_kelly_multiplier_quick_win=confidence.get('kelly_multiplier_quick_win', 0.6),
                 confidence_kelly_multiplier_confident=confidence.get('kelly_multiplier_confident', 1.0),
                 
-                # Guardrails
+                # Guardrails (normalize dict format for percentage fields)
                 guardrails_max_spread_cents=guardrails.get('max_spread_cents', 10),
                 guardrails_max_slippage_cents=guardrails.get('max_slippage_cents', 3),
                 guardrails_min_depth_contracts=guardrails.get('min_depth_contracts', 5),
-                guardrails_min_post_fee_edge=guardrails.get('min_post_fee_edge', 0.01),
-                guardrails_drawdown_halt_pct=guardrails.get('drawdown_halt_pct', 0.10),
-                guardrails_drawdown_unwind_pct=guardrails.get('drawdown_unwind_pct', 0.15),
+                guardrails_min_post_fee_edge=self._normalize_percentage_value(guardrails.get('min_post_fee_edge', 0.01)),
+                guardrails_min_time_to_expiry_min=guardrails.get('min_time_to_expiry_min', 3),  # Default 3 minutes
+                guardrails_drawdown_halt_pct=guardrails_drawdown_halt_pct,
+                guardrails_drawdown_unwind_pct=guardrails_drawdown_unwind_pct,
                 guardrails_max_daily_loss_usd=guardrails.get('max_daily_loss_usd', 200.0),
+                guardrails_max_position_value_usd=guardrails.get('max_position_value_usd', 100000.0),  # Default $100k
+                # OTM filtering for 15-minute crypto
+                guardrails_max_dist_pct_trade=guardrails.get('max_dist_pct_trade', 2.0),  # Default 2%
+                guardrails_min_contract_price_cents=guardrails.get('min_contract_price_cents', 20),  # Default 20 cents
+                guardrails_max_same_side_per_strip=guardrails.get('max_same_side_per_strip', 2),  # Default 2 per strip
+                # Time trap prevention (entry window narrowing)
+                guardrails_max_entry_mins=guardrails.get('max_entry_mins', 12.0),  # Default 12 minutes
+                guardrails_min_entry_mins=guardrails.get('min_entry_mins', 2.0),  # Default 2 minutes
+                # Microstructure trap prevention
+                guardrails_depth_size_multiplier=guardrails.get('depth_size_multiplier', 3.0),  # Default 3x
+                # Regime/drawdown trap prevention
+                guardrails_regime_cooldown_enabled=guardrails.get('regime_cooldown_enabled', False),  # Default disabled
+                guardrails_regime_cooldown_min_trades=guardrails.get('regime_cooldown_min_trades', 20),  # Default 20 trades
+                guardrails_regime_cooldown_min_winrate=guardrails.get('regime_cooldown_min_winrate', 0.4),  # Default 40%
+                guardrails_regime_cooldown_max_loss_pct=guardrails.get('regime_cooldown_max_loss_pct', 0.1),  # Default 10%
+                # Experimental slice configuration
+                guardrails_experimental_price_band_enabled=guardrails.get('experimental_price_band_enabled', False),  # Default disabled
+                guardrails_experimental_min_price_cents=guardrails.get('experimental_min_price_cents', 45),  # Default 45c
+                guardrails_experimental_max_price_cents=guardrails.get('experimental_max_price_cents', 60),  # Default 60c
+                guardrails_experimental_tte_band_enabled=guardrails.get('experimental_tte_band_enabled', False),  # Default disabled
+                guardrails_experimental_min_tte_min=guardrails.get('experimental_min_tte_min', 4.0),  # Default 4min
+                guardrails_experimental_max_tte_min=guardrails.get('experimental_max_tte_min', 7.0),  # Default 7min
                 
-                # Kelly sizing
-                kelly_hard_cap=kelly.get('kelly_hard_cap', 0.30),
-                kelly_min_edge_pct=kelly.get('kelly_min_edge_pct', 1.0),
-                kelly_max_edge_pct=kelly.get('kelly_max_edge_pct', 25.0),
+                # Kelly sizing (normalize dict format for percentage fields)
+                # P1-FIX1: fallback default reduced from 0.30 to 0.05
+                kelly_hard_cap=self._normalize_percentage_value(kelly.get('kelly_hard_cap', 0.05)),
+                kelly_min_edge_pct=self._normalize_percentage_value(kelly.get('kelly_min_edge_pct', 1.0)),
+                kelly_max_edge_pct=self._normalize_percentage_value(kelly.get('kelly_max_edge_pct', 25.0)),
                 kelly_min_win_prob=kelly.get('kelly_min_win_prob', 0.01),
                 kelly_max_win_prob=kelly.get('kelly_max_win_prob', 0.99),
-                kelly_global_notional_cap_pct=kelly.get('kelly_global_notional_cap_pct', 2.0),
+                kelly_global_notional_cap_pct=self._normalize_percentage_value(kelly.get('kelly_global_notional_cap_pct', 0.05)),  # P2-FIX6: tightened from 2.0 to 0.05 (was 200%, now 5%)
+                
+                # Contract caps
+                contract_caps_max_contracts_total=contract_caps.get('max_contracts_total', 5000),
+                contract_caps_max_contracts_per_asset=contract_caps.get('max_contracts_per_asset', 1750),
+                contract_caps_max_contracts_per_cluster=contract_caps.get('max_contracts_per_cluster', 750),
+                # Handle nested dict format for max_single_order_contracts
+                contract_caps_max_single_order_contracts=self._normalize_contracts_value(
+                    contract_caps.get('max_single_order_contracts', 10)
+                ),
+                
+                # Risk policy (normalize dict format for percentage fields)
+                risk_policy_group_notional_cap_usd=risk_policy.get('group_notional_cap_usd', 2000.0),
+                risk_policy_max_fee_to_notional_pct=self._normalize_percentage_value(risk_policy.get('max_fee_to_notional_pct', 15.0)),
+                
+                # Strategy policy (normalize dict format for percentage fields)
+                strategy_policy_min_edge=self._normalize_percentage_value(strategy_policy.get('min_edge', 0.05)),
+                strategy_policy_min_confidence=strategy_policy.get('min_confidence', 0.60),
+                strategy_policy_max_md_staleness_sec=float(strategy_policy.get('max_md_staleness_sec', 120.0)),
+                
+                # Throttling (order rate limits)
+                throttling_global_orders_window_sec=float(throttling.get('global_orders_window_sec', 60.0)),
+                throttling_global_orders_limit=int(throttling.get('global_orders_limit', 20)),
+                throttling_per_asset_cooldown_sec=float(throttling.get('per_asset_cooldown_sec', 10.0)),
+                throttling_per_strip_order_limit=int(throttling.get('per_strip_order_limit', 1)),
+                throttling_per_strip_notional_usd=float(throttling.get('per_strip_notional_usd', 0.0)),
+                
+                # Universe liquidity filters (coarse prefilter)
+                universe_min_volume=int(universe.get('min_volume', 5)),
+                universe_min_open_interest=int(universe.get('min_open_interest', 1)),
+                universe_max_spread_cents=int(universe.get('max_spread_cents', 30)),
+                
+                # Failsafe configuration (emergency brake)
+                failsafe_max_contracts_per_order=int(failsafe.get('max_contracts_per_order', 1)),
+                
+                # Edge/lag filter configuration
+                edge_lag_filter_min_edge_lag_ratio=raw.get('edge_lag_filter', {}).get('min_edge_lag_ratio', {}),
+                edge_lag_filter_enabled=raw.get('edge_lag_filter', {}).get('edge_lag_filter_enabled', {}),
+                edge_lag_filter_cold_start_min_samples=raw.get('edge_lag_filter', {}).get('cold_start_min_samples', 100),
+                
+                # Venue invariants (normalize dict format)
+                venue_invariants_valid_price_cents_min=self._normalize_contracts_value(raw.get('venue_invariants', {}).get('valid_price_cents_min', 1)),
+                venue_invariants_valid_price_cents_max=self._normalize_contracts_value(raw.get('venue_invariants', {}).get('valid_price_cents_max', 99)),
+                venue_invariants_deep_otm_threshold_cents=self._normalize_contracts_value(raw.get('venue_invariants', {}).get('deep_otm_threshold_cents', 5)),
+                venue_invariants_deep_itm_threshold_cents=self._normalize_contracts_value(raw.get('venue_invariants', {}).get('deep_itm_threshold_cents', 95)),
+                venue_invariants_ioc_auto_below_seconds=self._normalize_contracts_value(raw.get('venue_invariants', {}).get('ioc_auto_below_seconds', 120)),
+                venue_invariants_max_book_staleness_ms=self._normalize_contracts_value(raw.get('venue_invariants', {}).get('max_book_staleness_ms', 30000)),
                 
                 # Legacy path control
                 legacy_disable_balance_calibration=legacy.get('disable_balance_calibration', True),
@@ -304,6 +746,35 @@ class Crypto15mProfileAdapter:
                 legacy_disable_bankroll_category_limits=legacy.get('disable_bankroll_category_limits', True),
                 legacy_disable_bankroll_prediction_risk=legacy.get('disable_bankroll_prediction_risk', True),
                 legacy_disable_bankroll_guardrails=legacy.get('disable_bankroll_guardrails', True),
+                
+                # Velocity model coefficients (Phase 1: Logistic mapping)
+                velocity_model_alpha_0_btc=velocity_model.get('BTC', {}).get('alpha_0', 0.0),
+                velocity_model_alpha_1_btc=velocity_model.get('BTC', {}).get('alpha_1', 1000.0),
+                velocity_model_alpha_0_eth=velocity_model.get('ETH', {}).get('alpha_0', 0.0),
+                velocity_model_alpha_1_eth=velocity_model.get('ETH', {}).get('alpha_1', 1000.0),
+                velocity_model_alpha_0_sol=velocity_model.get('SOL', {}).get('alpha_0', 0.0),
+                velocity_model_alpha_1_sol=velocity_model.get('SOL', {}).get('alpha_1', 800.0),
+                velocity_model_alpha_0_xrp=velocity_model.get('XRP', {}).get('alpha_0', 0.0),
+                velocity_model_alpha_1_xrp=velocity_model.get('XRP', {}).get('alpha_1', 800.0),
+                velocity_model_alpha_0_doge=velocity_model.get('DOGE', {}).get('alpha_0', 0.0),
+                velocity_model_alpha_1_doge=velocity_model.get('DOGE', {}).get('alpha_1', 600.0),
+                # Phase 4.1: Multi-window velocity weights
+                momentum_weights_windows=raw.get('momentum_weights', {}).get('windows', [10, 30, 60]),
+                momentum_weights_values=raw.get('momentum_weights', {}).get('weights', [0.2, 0.3, 0.5]),
+                # Phase 4.4: Logit fusion weights
+                logit_fusion_velocity_weight=raw.get('logit_fusion_weights', {}).get('velocity_logit', 0.7),
+                logit_fusion_mean_reversion_weight=raw.get('logit_fusion_weights', {}).get('mean_reversion_logit', 0.3),
+                # Phase 4.5: Near expiry guard
+                near_expiry_guard_sec=raw.get('near_expiry_guard_sec', 300),
+                # Phase 5.2: Calibration configuration
+                calibration_enabled=raw.get('calibration_config', {}).get('enabled', False),
+                calibration_auto_fit=raw.get('calibration_config', {}).get('auto_fit', True),
+                calibration_min_samples=raw.get('calibration_config', {}).get('min_samples_for_fit', 100),
+                calibration_max_samples=raw.get('calibration_config', {}).get('max_samples', 1000),
+                calibration_regularization=raw.get('calibration_config', {}).get('regularization', 0.0001),
+                calibration_fit_interval_hours=raw.get('calibration_config', {}).get('fit_interval_hours', 24),
+                # Phase 2: Strategy definitions
+                strategies=strategies,
             )
             
             logger.info(f"[Crypto15mProfileAdapter] Loaded profile {self._profile.profile_name} v{self._profile.profile_version}")
@@ -333,18 +804,22 @@ class Crypto15mProfileAdapter:
         
         # For kalshi_crypto_15m_v2, use envelope values for drawdown/daily loss
         # The envelope is the single source of truth
+        envelope = None
         try:
-            from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
-            envelope = get_kalshi_crypto_15m_risk_envelope()
-            drawdown_halt_pct = envelope.drawdown_halt_pct
-            drawdown_unwind_pct = envelope.drawdown_unwind_pct
-            max_daily_loss_usd = envelope.max_daily_loss_usd
-            kelly_fraction = envelope.kelly_fraction
-            # Use envelope's computed values for risk parameters (derived from live bankroll)
-            max_single_order_notional_usd = envelope.max_single_order_notional_usd
-            max_total_notional_usd = envelope.max_total_notional_usd
+            from merid.risk.profiles.risk_envelope_service import get_risk_envelope_service
+            service = get_risk_envelope_service()
+            config = service.get_config()
+            envelope = config  # Store for later use
+            
+            # For backward compatibility, map RiskEnvelopeConfig to envelope-like fields
+            drawdown_halt_pct = config.drawdown_halt_pct if hasattr(config, 'drawdown_halt_pct') else p.guardrails_drawdown_halt_pct
+            drawdown_unwind_pct = config.drawdown_unwind_pct if hasattr(config, 'drawdown_unwind_pct') else p.guardrails_drawdown_unwind_pct
+            max_daily_loss_usd = config.max_daily_loss_usd if hasattr(config, 'max_daily_loss_usd') else float('inf')
+            kelly_fraction = config.kelly_fraction if hasattr(config, 'kelly_fraction') else 0.05  # P1-FIX1: 0.30 -> 0.05
+            max_single_order_notional_usd = config.max_single_order_notional_usd
+            max_total_notional_usd = config.max_total_notional_usd
         except Exception as e:
-            logger.warning(f"[PROFILE-ADAPTER] Failed to load envelope, using profile defaults: {e}")
+            logger.warning(f"[PROFILE-ADAPTER] Failed to load envelope via RiskEnvelopeService, using profile defaults: {e}")
             drawdown_halt_pct = p.guardrails_drawdown_halt_pct
             drawdown_unwind_pct = p.guardrails_drawdown_unwind_pct
             max_daily_loss_usd = p.guardrails_max_daily_loss_usd
@@ -353,11 +828,27 @@ class Crypto15mProfileAdapter:
             max_single_order_notional_usd = p.venue_max_single_order_usd
             max_total_notional_usd = p.venue_max_total_notional_usd
         
+        # Extract per-asset max_contracts and max_notional from envelope
+        per_asset_max_contracts = {}
+        asset_max_notional_usd = {}
+        for asset_name, asset_config in p.asset_configs.items():
+            # Normalize max_contracts to handle dict format
+            per_asset_max_contracts[asset_name] = self._normalize_contracts_value(asset_config.max_contracts)
+            # Get max_notional from envelope (with floor applied)
+            if envelope and hasattr(envelope, 'asset_max_notional_usd'):
+                asset_max_notional_usd[asset_name] = envelope.asset_max_notional_usd.get(asset_name)
+        
+        # Also store on profile object for direct access by agents
+        p.asset_max_notional_usd = asset_max_notional_usd
+        
         return {
-            'max_single_order_notional_usd': max_single_order_notional_usd,
-            'max_total_notional_usd': max_total_notional_usd,
-            'max_daily_loss_usd': max_daily_loss_usd,
-            'max_single_order_contracts': 10,  # From KALSHI_MAX_ORDER_CONTRACTS env var
+            'min_notional_usd': p.min_notional_usd,  # Minimum notional per trade (from profile)
+            'asset_max_notional_usd': asset_max_notional_usd,  # Per-asset max_notional with floor (from envelope)
+            'min_contracts': p.min_contracts,  # Minimum contracts per trade (from profile)
+            'max_single_order_notional_usd': float(max_single_order_notional_usd),  # Ensure float type
+            'max_total_notional_usd': float(max_total_notional_usd),  # Ensure float type
+            'max_daily_loss_usd': float(max_daily_loss_usd),  # Ensure float type
+            'max_single_order_contracts': int(p.contract_caps_max_single_order_contracts),  # From profile (ensure int type)
             'max_position_per_contract': 500,
             'kelly_hard_cap': kelly_fraction,
             'kelly_max_edge_pct': p.kelly_max_edge_pct,
@@ -365,21 +856,23 @@ class Crypto15mProfileAdapter:
             'kelly_min_win_prob': p.kelly_min_win_prob,
             'kelly_max_win_prob': p.kelly_max_win_prob,
             'kelly_global_notional_cap_pct': p.kelly_global_notional_cap_pct,
-            'max_fee_to_notional_pct': 15.0,
-            'valid_price_cents_min': 1,
-            'valid_price_cents_max': 99,
-            'max_contracts_total': 5000,  # Fixed from profile, not dynamic
-            'max_contracts_per_asset': 1750,  # Fixed from profile, not dynamic
-            'max_contracts_per_cluster': 750,  # Fixed from profile, not dynamic
-            'group_notional_cap_usd': 2000.0,  # Fixed from profile, not dynamic (per asset/timeframe/overlap-window)
+            'max_fee_to_notional_pct': p.risk_policy_max_fee_to_notional_pct,  # From profile
+            'min_edge': p.strategy_policy_min_edge,  # From profile strategy policy
+            'bankroll_cap_pct': p.venue_bankroll_cap_pct,  # From profile venue (overrides MERID_BANKROLL_CAP_PCT env)
+            'valid_price_cents_min': p.venue_invariants_valid_price_cents_min,  # From profile venue invariants
+            'valid_price_cents_max': p.venue_invariants_valid_price_cents_max,  # From profile venue invariants
+            'max_contracts_total': int(p.contract_caps_max_contracts_total),  # From profile (ensure int type)
+            'max_contracts_per_asset': int(p.contract_caps_max_contracts_per_asset),  # From profile (ensure int type)
+            'max_contracts_per_cluster': int(p.contract_caps_max_contracts_per_cluster),  # From profile (ensure int type)
+            'group_notional_cap_usd': float(p.risk_policy_group_notional_cap_usd),  # Ensure float type
             'group_limits_enabled': True,  # Enable group-level aggregation and caps
             'drawdown_halt_pct': drawdown_halt_pct,
             'drawdown_unwind_pct': drawdown_unwind_pct,
-            'min_edge': 0.05,  # Conservative 5% minimum edge
             'min_post_fee_edge': p.guardrails_min_post_fee_edge,
             'default_notional_to_equity_multiplier': 2.0,
             'max_orders_per_minute': p.venue_max_orders_per_minute,
             'max_orders_per_hour': p.venue_max_orders_per_hour,
+            'per_asset_max_contracts': per_asset_max_contracts,  # Per-asset max contracts from profile
             'category_limits': {
                 'crypto': {
                     'category': 'crypto',
@@ -391,6 +884,46 @@ class Crypto15mProfileAdapter:
             },
         }
     
+    def _normalize_contracts_value(self, value: Any) -> int:
+        """
+        Normalize contracts value to int, handling nested dict formats.
+        
+        Args:
+            value: Either an int or a dict with 'value' or 'max_contracts' key.
+            
+        Returns:
+            Integer contracts value.
+        """
+        if isinstance(value, int):
+            return value
+        if isinstance(value, dict):
+            # Accept typical shapes: {"max_contracts": 500} or {"value": 500}
+            if "max_contracts" in value:
+                return int(value["max_contracts"])
+            elif "value" in value:
+                return int(value["value"])
+        # Default fallback
+        return int(value) if value is not None else 0
+    
+    def _normalize_percentage_value(self, value: Any) -> float:
+        """
+        Normalize percentage value to float, handling nested dict formats.
+        
+        Args:
+            value: Either a float/int or a dict with 'value' key.
+            
+        Returns:
+            Float percentage value.
+        """
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, dict):
+            # Accept typical shape: {"value": 0.05}
+            if "value" in value:
+                return float(value["value"])
+        # Default fallback
+        return float(value) if value is not None else 0.0
+    
     def to_category_limits(self) -> Dict[str, Any]:
         """
         Map profile to CategoryLimit for crypto category.
@@ -400,11 +933,14 @@ class Crypto15mProfileAdapter:
         """
         p = self._profile
         
+        # Ensure max_contracts is an int (defensive)
+        max_contracts = self._normalize_contracts_value(500)
+        
         return {
             'crypto': {
                 'category': 'crypto',
                 'max_notional_usd': p.venue_max_category_notional_usd,
-                'max_contracts': 500,
+                'max_contracts': max_contracts,
                 'max_pct_of_portfolio': 0.20,
                 'enabled': True,
             }
@@ -463,23 +999,68 @@ class Crypto15mProfileAdapter:
         
         asset_config = p.asset_configs.get(asset) if asset else None
         
+        # CRITICAL FIX: Compute max_notional_usd dynamically from live bankroll
+        # If capital_usd is 0 (derive from bankroll), fetch live bankroll and compute USD value
+        max_notional_usd = p.agent_max_notional_usd
+        if p.capital_usd == 0.0:
+            try:
+                from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+                live_bankroll_usd = get_equity_for_risk_calc_sync()
+                if live_bankroll_usd and live_bankroll_usd > 0:
+                    # Compute from live bankroll using agent_max_notional_pct
+                    computed_notional = live_bankroll_usd * p.agent_max_notional_pct
+                    # Apply minimum floor from profile
+                    max_notional_usd = max(computed_notional, p.min_notional_usd)
+                    logger.info(
+                        "[PROFILE-ADAPTER] Computed max_notional_usd for %s from live bankroll: $%.2f (bankroll: $%.2f, pct: %.2f%%)",
+                        agent_name, max_notional_usd, live_bankroll_usd, p.agent_max_notional_pct * 100
+                    )
+                else:
+                    # Fallback to minimum floor if bankroll unavailable
+                    max_notional_usd = p.min_notional_usd
+                    logger.warning(
+                        "[PROFILE-ADAPTER] Live bankroll unavailable for %s, using min_notional_usd: $%.2f",
+                        agent_name, max_notional_usd
+                    )
+            except Exception as e:
+                logger.error("[PROFILE-ADAPTER] Failed to compute max_notional_usd from live bankroll for %s: %s", agent_name, e)
+                max_notional_usd = p.min_notional_usd
+        
         overrides = {
-            'max_notional_usd': p.agent_max_notional_usd,
+            'max_notional_usd': max_notional_usd,
             'max_orders_per_window': p.agent_max_orders_per_window,
             'max_yes_position': p.agent_max_yes_position,
             'max_no_position': p.agent_max_no_position,
             'minutes_before_expiry': p.agent_minutes_before_expiry,
             'cutoff_minutes_before_expiry': p.agent_cutoff_minutes_before_expiry,
+            'signal_mode': p.signal_mode,
         }
         
         # Override with asset-specific config if available
         if asset_config:
+            # For asset-specific, also compute dynamically if capital_usd is 0
+            asset_max_notional_usd = asset_config.max_notional_usd
+            if p.capital_usd == 0.0:
+                try:
+                    from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+                    live_bankroll_usd = get_equity_for_risk_calc_sync()
+                    if live_bankroll_usd and live_bankroll_usd > 0:
+                        # Compute from live bankroll using asset-specific max_notional_pct
+                        computed_asset_notional = live_bankroll_usd * asset_config.max_notional_pct
+                        # Apply minimum floor from profile
+                        asset_max_notional_usd = max(computed_asset_notional, p.min_notional_usd)
+                except Exception as e:
+                    logger.error("[PROFILE-ADAPTER] Failed to compute asset max_notional_usd from live bankroll for %s: %s", agent_name, e)
+                    asset_max_notional_usd = p.min_notional_usd
+            
             overrides.update({
-                'max_notional_usd': min(p.agent_max_notional_usd, asset_config.max_notional_usd),
-                'min_edge_early': asset_config.min_edge_early,
-                'min_edge_mid': asset_config.min_edge_mid,
-                'min_edge_late': asset_config.min_edge_late,
-                'min_edge_terminal': asset_config.min_edge_terminal,
+                'max_notional_usd': min(max_notional_usd, asset_max_notional_usd),
+                # REMOVED: Per-asset min_edge fields - now using profile edge_bands section
+                # Edge thresholds come from kalshi_crypto_15m_v2.yaml edge_bands section:
+                # - watch_band: 2-4% (log only)
+                # - small_band: 4-6% (trade small)
+                # - standard_band: >6% (trade standard)
+                # - kelly_min_edge_pct: 4% (hard floor)
             })
         
         return overrides
@@ -525,6 +1106,7 @@ def get_active_profile() -> Optional[Crypto15mProfileAdapter]:
     if profile_name == 'kalshi_crypto_15m_v2':
         if _active_adapter is None:
             _active_adapter = Crypto15mProfileAdapter()
+            logger.info("[PROFILE-ACTIVE] profile=%s config_source=kalshi_crypto_15m.yaml", profile_name)
         return _active_adapter
     
     return None
@@ -533,7 +1115,20 @@ def get_active_profile() -> Optional[Crypto15mProfileAdapter]:
 def is_profile_active() -> bool:
     """Check if the kalshi_crypto_15m profile is active."""
     import os
-    return os.environ.get('MERID_PROFILE', '') == 'kalshi_crypto_15m_v2'
+    profile_name = os.environ.get('MERID_PROFILE', '').strip()
+    
+    # CRITICAL FIX: Add validation for empty/invalid profile names
+    if not profile_name:
+        return False
+    
+    # CRITICAL FIX: Case-sensitive validation with logging
+    is_active = profile_name == 'kalshi_crypto_15m_v2'
+    if is_active:
+        logger.info("[PROFILE-ACTIVE] kalshi_crypto_15m_v2 profile is active")
+    elif profile_name.startswith('kalshi_crypto'):
+        logger.warning("[PROFILE-ACTIVE] Similar profile detected: %s (not kalshi_crypto_15m_v2)", profile_name)
+    
+    return is_active
 
 
 def runtime_profile_self_check() -> bool:

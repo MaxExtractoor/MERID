@@ -11,14 +11,6 @@ Key components:
 
 from typing import Any, Dict, Optional
 
-# Legacy KalshiReconciler removed - superseded by portfolio reconciliation system
-# from merid.reconciliation.kalshi_reconciler import (
-#     ReconciliationIssue,
-#     ReconciliationReport,
-#     KalshiReconciler,
-#     get_kalshi_reconciler,
-# )
-
 from merid.reconciliation.venue_reconciler import (
     VenuePositionDiscrepancy,
     force_align_from_venue,

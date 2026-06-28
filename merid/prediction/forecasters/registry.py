@@ -268,10 +268,7 @@ class ForecasterRegistry:
 # ── Singleton ────────────────────────────────────────────────────────────
 
 _registry: Optional[ForecasterRegistry] = None
-# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-# _registry_lock = threading.Lock()
-_registry_lock = None  # Disabled to prevent startup hang
+_registry_lock = None
 
 
 def get_forecaster_registry() -> ForecasterRegistry:

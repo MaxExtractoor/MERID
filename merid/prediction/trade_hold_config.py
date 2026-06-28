@@ -48,7 +48,7 @@ class WarmupConfig:
 
 @dataclass
 class EntryWindowConfig:
-    expiry_proximity_guard_seconds: float = 90.0
+    expiry_proximity_guard_seconds: float = 60.0  # Reduced from 90s to 60s to allow more trading time
     expiry_caution_zone_seconds: float = 120.0
 
 
@@ -214,38 +214,21 @@ def _build_config() -> TradeHoldConfig:
     return cfg
 
 
-# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-# _lock = threading.Lock()
-_lock = None  # Disabled to prevent startup hang
+# LEGACY REMOVAL: Threading lock removed - causing deadlock during startup
+# Single-threaded FastAPI startup doesn't need lock protection
 _singleton: Optional[TradeHoldConfig] = None
 
 
 def get_trade_hold_config() -> TradeHoldConfig:
-    """Return the global TradeHoldConfig singleton (thread-safe, lazy)."""
+    """Get the TradeHoldConfig singleton."""
     global _singleton
-    if _singleton is not None:
-        return _singleton
-    if _lock is not None:
-        with _lock:
-            if _singleton is not None:
-                return _singleton
-            _singleton = _build_config()
-            return _singleton
-    else:
-        # Lock disabled - direct initialization (startup workaround)
+    if _singleton is None:
         _singleton = _build_config()
-        return _singleton
+    return _singleton
 
 
 def reload_trade_hold_config() -> TradeHoldConfig:
-    """Force-reload (for tests or hot-reload)."""
+    """Force a reload of the TradeHoldConfig from the config file."""
     global _singleton
-    if _lock is not None:
-        with _lock:
-            _singleton = _build_config()
-            return _singleton
-    else:
-        # Lock disabled - direct access (startup workaround)
-        _singleton = _build_config()
-        return _singleton
+    _singleton = _build_config()
+    return _singleton

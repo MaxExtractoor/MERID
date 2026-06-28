@@ -98,6 +98,31 @@ class Capabilities:
     def telegram_bot_service_token(self) -> str | None:
         return self._get("TELEGRAM_BOT_SERVICE_TOKEN")
 
+    # CRITICAL FIX: Add missing core trading environment variables
+    @property
+    def merid_profile(self) -> str | None:
+        return self._get("MERID_PROFILE")
+    
+    @property
+    def merid_pm_profile(self) -> str | None:
+        return self._get("MERID_PM_PROFILE")
+    
+    @property
+    def merid_trade_mode(self) -> str | None:
+        return self._get("MERID_TRADE_MODE")
+    
+    @property
+    def merid_pm_trading_mode(self) -> str | None:
+        return self._get("MERID_PM_TRADING_MODE")
+    
+    @property
+    def merid_allow_live_trades(self) -> str | None:
+        return self._get("MERID_ALLOW_LIVE_TRADES")
+    
+    @property
+    def merid_pm_live_enabled(self) -> str | None:
+        return self._get("MERID_PM_LIVE_ENABLED")
+
     @property
     def merid_api_base_url(self) -> str:
         return self._get("MERID_API_BASE_URL", "http://localhost:8000/api/v1")

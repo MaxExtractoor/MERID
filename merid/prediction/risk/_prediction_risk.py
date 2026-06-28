@@ -5,12 +5,14 @@ Provides prediction-market-scoped risk controls:
 - Portfolio-wide daily loss limit for prediction markets.
 - Pre-trade sanity checks (max order size, slippage guard, depth check).
 - Kill switch: halt new orders and optionally unwind on drawdown.
+- Circuit breaker for consecutive risk check failures.
 """
 
 from __future__ import annotations
 
 import threading
 import math
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -234,6 +236,13 @@ class PredictionMarketRisk:
         # self._rate_lock = threading.Lock()  # guards check-and-increment atomicity
         self._rate_lock = None  # Disabled to prevent startup hang
 
+        # Circuit breaker for risk check failures
+        self._consecutive_failures = 0
+        self._circuit_breaker_threshold = 10  # Consecutive failures before halting
+        self._circuit_breaker_open = False
+        self._circuit_breaker_reset_time = 0.0
+        self._circuit_breaker_cooldown = 30.0  # Seconds before attempting recovery
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -401,22 +410,72 @@ class PredictionMarketRisk:
         """Run all pre-trade checks for a proposed order.
 
         Checks (in order):
-        1. Kill switch halted?
-        2. Max order size.
-        3. Per-market exposure limit.
-        4. Per-side position limit (BUG-009: YES/NO specific limits).
-        5. Per-event exposure limit.
-        6. Portfolio-wide notional limit.
-        7. Daily loss limit.
-        8. Max open markets.
-        9. Category exposure.
-        10. Rate limit.
-        11. Post-fee edge minimum.
-        12. Tick size.
-        13. Spread check.
-        14. Slippage guard.
-        15. Depth check.
+        1. Circuit breaker check (degradation path)
+        2. Kill switch halted?
+        3. Max order size.
+        4. Per-market exposure limit.
+        5. Per-side position limit (BUG-009: YES/NO specific limits).
+        6. Per-event exposure limit.
+        7. Portfolio-wide notional limit.
+        8. Daily loss limit.
+        9. Max open markets.
+        10. Category exposure.
+        11. Rate limit.
+        12. Post-fee edge minimum.
+        13. Tick size.
+        14. Spread check.
+        15. Slippage guard.
+        16. Depth check.
         """
+        # BYPASS: Circuit breaker for kalshi_crypto_15m_v2 - use risk envelope drawdown only
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+            profile_adapter = get_active_profile()
+            if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_regime_cooldown_enabled'):
+                if not profile_adapter.profile.guardrails_regime_cooldown_enabled:
+                    logger.debug("[RISK-CIRCUIT-BREAKER] Disabled for kalshi_crypto_15m_v2 - using risk envelope drawdown only")
+                else:
+                    # Only check circuit breaker if enabled
+                    if self._circuit_breaker_open:
+                        now = time.monotonic()
+                        if now < self._circuit_breaker_reset_time:
+                            remaining = self._circuit_breaker_reset_time - now
+                            logger.warning(
+                                "[RISK-CIRCUIT-BREAKER] Circuit breaker open - rejecting order (cooldown: %.1fs remaining)",
+                                remaining
+                            )
+                            return PreTradeCheck(
+                                action=RiskAction.REJECT,
+                                reason="risk_circuit_breaker_open",
+                                details=f"Risk engine circuit breaker open - retry after {remaining:.1f}s"
+                            )
+                        else:
+                            # Reset circuit breaker after cooldown
+                            logger.info("[RISK-CIRCUIT-BREAKER] Circuit breaker reset - attempting recovery")
+                            self._circuit_breaker_open = False
+                            self._consecutive_failures = 0
+        except Exception as e:
+            logger.debug("[RISK-CIRCUIT-BREAKER] Failed to check profile for bypass: %s", e)
+            # Fallback to original behavior if profile check fails
+            if self._circuit_breaker_open:
+                now = time.monotonic()
+                if now < self._circuit_breaker_reset_time:
+                    remaining = self._circuit_breaker_reset_time - now
+                    logger.warning(
+                        "[RISK-CIRCUIT-BREAKER] Circuit breaker open - rejecting order (cooldown: %.1fs remaining)",
+                        remaining
+                    )
+                    return PreTradeCheck(
+                        action=RiskAction.REJECT,
+                        reason="risk_circuit_breaker_open",
+                        details=f"Risk engine circuit breaker open - retry after {remaining:.1f}s"
+                    )
+                else:
+                    # Reset circuit breaker after cooldown
+                    logger.info("[RISK-CIRCUIT-BREAKER] Circuit breaker reset - attempting recovery")
+                    self._circuit_breaker_open = False
+                    self._consecutive_failures = 0
+
         # CRITICAL: Type safety enforcement - convert any float inputs to Decimal
         # to prevent TypeError: unsupported operand type(s) for float and Decimal
         try:
@@ -843,18 +902,12 @@ class PredictionMarketRisk:
                 market_id=market_id,
             )
 
-        # 12. Spread check — crypto KX* uses shared matrix (legacy 10¢ vs modern 40¢)
+        # 12. Spread check — crypto KX* uses profile config for max spread
+        # LEGACY REMOVAL: crypto_edge_production moved to archive/legacy/ during 15m stack cleanup
+        # Profile config (kalshi_crypto_15m.yaml) sets max_spread_cents = 10 for all crypto
         if best_bid_cents is not None and best_ask_cents is not None:
             spread = best_ask_cents - best_bid_cents
             max_spread = self.config.max_spread_cents
-            try:
-                from merid.prediction.crypto_edge_production import effective_crypto_pm_max_spread_cents
-
-                _ov = effective_crypto_pm_max_spread_cents(market_id)
-                if _ov is not None:
-                    max_spread = _ov
-            except Exception:
-                pass
             if spread > max_spread:
                 return PreTradeCheck(
                     allowed=False,
@@ -1263,10 +1316,7 @@ class CycleCapTracker:
 # ── Singleton ────────────────────────────────────────────────────────────
 
 _risk: Optional[PredictionMarketRisk] = None
-# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-# _risk_lock = threading.Lock()
-_risk_lock = None  # Disabled to prevent startup hang
+_risk_lock = None
 
 
 def get_prediction_risk(config: Optional[PredictionRiskConfig] = None) -> PredictionMarketRisk:

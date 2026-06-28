@@ -543,11 +543,13 @@ def reconcile_all_venues(venues: Optional[List[str]] = None) -> List[PositionDis
     """Reconcile across all configured venues (driven by paper_config matrix)."""
     global _last_discrepancies, _reconciliation_has_run, _last_reconciliation_ts
     if venues is None:
-        try:
-            from merid.paper_config import get_paper_config
-            venues = get_paper_config().reconciliation_venues()
-        except ImportError:
-            venues = ["kalshi"]
+        # Production stack: use kalshi as the only venue instead of legacy paper_config
+        venues = ["kalshi"]
+        # try:
+        #     from merid.paper_config import get_paper_config
+        #     venues = get_paper_config().reconciliation_venues()
+        # except ImportError:
+        #     venues = ["kalshi"]
         if not venues:
             venues = ["kalshi"]
     all_discrepancies: List[PositionDiscrepancy] = []
