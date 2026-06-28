@@ -70,9 +70,6 @@ export const API_ENDPOINTS = {
   // ── Pipeline ─────────────────────────────────────────────────
   PIPELINE_PNL: (venue: string) => `/api/v1/pipeline/venues/${venue}/pnl`,
 
-  // ── Paper Trading ─────────────────────────────────────────────
-  PAPER_TRADING_PORTFOLIO: (portfolioId: string) => `/api/v1/paper-trading/${portfolioId}`,
-
   // ── Notifications ─────────────────────────────────────────────
   NOTIFICATIONS: "/api/v1/notifications",
   NOTIFICATIONS_READ_ALL: "/api/v1/notifications/read-all",
@@ -106,10 +103,6 @@ export const API_ENDPOINTS = {
   TRADING_MODE_SET: "/api/v1/operator/trading-mode",
   GUARD_KILL: "/api/v1/operator/guard/kill",
   GUARD_UNKILL: "/api/v1/operator/guard/unkill",
-  DEV_SWARM_PAUSE: "/api/dev-swarm/pause",
-  DEV_SWARM_RESUME: "/api/dev-swarm/resume",
-  DEV_SWARM_SHUTDOWN: "/api/dev-swarm/shutdown",
-  PRIME_STATUS: "/api/v1/swarm/prime-screen/state",
   DATA_FRESHNESS: "/api/v1/data/freshness",
   SIGNALS_ALERTS_HISTORY: "/api/v1/signals/alerts/history",
   PM_ALERTS: "/api/v1/prediction-markets/alerts",
@@ -177,10 +170,6 @@ export const API_ENDPOINTS = {
   PORTFOLIO_WEBSOCKET: (accountId: string = "default") => `/api/v1/portfolio/ws/${accountId}`,
   KALSHI_HEALTH: "/api/v1/kalshi/health",
   KALSHI_DISCOVER_HEALTH: "/api/v1/kalshi/discover-health",
-  KALSHI_SWARM_GRID: "/api/v1/kalshi/swarm/grid",
-  KALSHI_SWARM_HEALTH: "/api/v1/kalshi/swarm/health",
-  KALSHI_SENTIMENT_PNL_ATTRIBUTION: "/api/v1/kalshi/sentiment/pnl-attribution",
-  KALSHI_SENTIMENT_PNL: "/api/v1/kalshi/sentiment/pnl",
   KALSHI_KILL_SWITCH: "/api/v1/kalshi/kill-switch",
   KALSHI_CIRCUIT_BREAKER: "/api/v1/resilience/breakers",
   KALSHI_LATENCY: "/api/metrics/latency",
@@ -298,11 +287,6 @@ export const API_ENDPOINTS = {
   CORRELATION_FACTOR: "/api/v1/kalshi/correlation/factor",
   CORRELATION_CLUSTERS: "/api/v1/kalshi/correlation/clusters",
 
-  // ── Swarm Bus (Sprint M) ─────────────────────────────────────────────
-  SWARM_CRITIC_HISTORY: "/api/v1/kalshi/swarm/critic/history",
-  SWARM_RECALIBRATION: "/api/v1/kalshi/swarm/recalibration",
-  SWARM_EXECUTION_STATS: "/api/v1/kalshi/swarm/execution/stats",
-
   // ── Forecaster Metrics (Sprint A) ────────────────────────────────────
   METRICS_FORECASTERS: "/api/v1/kalshi/metrics/forecasters",
   METRICS_FORECASTER: (id: string) => `/api/v1/kalshi/metrics/forecaster/${id}`,
@@ -366,9 +350,6 @@ export const API_ENDPOINTS = {
   // ── Risk Alert Acknowledge ────────────────────────────────────────
   RISK_ALERT_ACKNOWLEDGE: (alertId: string) => `/api/v1/risk/alerts/${alertId}/acknowledge`,
   RISK_ALERTS_ACKNOWLEDGE_ALL: "/api/v1/risk/alerts/acknowledge-all",
-
-  // ── Swarm Verdicts ────────────────────────────────────────────────
-  SWARM_VERDICTS: "/api/v1/kalshi/swarm/verdicts",
 
   // ── Crypto Alert Router ───────────────────────────────────────────
   CRYPTO_ALERTS_STATUS: "/api/v1/alerts/crypto/status",

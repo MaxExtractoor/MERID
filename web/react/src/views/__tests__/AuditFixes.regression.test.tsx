@@ -457,7 +457,7 @@ describe('Cross-cutting — modified TypeScript/TSX files are non-empty and well
     ['views/Overview.tsx',             'views',      'Overview.tsx'          ],
     ['components/TradingHaltBanner',   'components', 'TradingHaltBanner.tsx' ],
     // KillSwitchView, KalshiRiskScreen, KalshiGridView deleted - removed from list
-    ['views/SwarmConsensusMatrix.tsx', 'views',      'SwarmConsensusMatrix.tsx'],
+    // LEGACY REMOVAL: SwarmConsensusMatrix removed - swarm consensus not used in 15m stack
     ['components/TopBar.tsx',          'components', 'TopBar.tsx'            ],
   ];
 

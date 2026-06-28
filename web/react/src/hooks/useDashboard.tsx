@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components */
 import { useState, useEffect } from 'react';
-import { Activity, AlertCircle, CheckCircle, TrendingUp, Server, Cpu } from '../ui/icons';
+import { Activity, AlertCircle, CheckCircle, TrendingUp, Cpu } from '../ui/icons';
 import { api } from '../services/api';
 import type { SystemHealth } from '../services/api';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
@@ -78,12 +78,7 @@ interface TradingSummary {
   utilization_pct: number;
 }
 
-interface PrimeStatus {
-  mode: string;
-  market_data_connected: boolean;
-  // LEGACY REMOVAL: narrative_available and last_narrative_timestamp removed - narrative module deleted
-  data_feeds: Record<string, { connected: boolean; latency_ms: number }>;
-}
+// LEGACY REMOVAL: PrimeStatus interface removed - not used in 15m stack
 
 export function useSystemHealth() {
   const [health, setHealth] = useState<SystemHealth | null>(null);
@@ -210,13 +205,7 @@ export function useKalshiHealth() {
   return { health: data, loading, error };
 }
 
-export function usePrimeStatus() {
-  const { data, loading, error } = useApiData<PrimeStatus>(
-    API_ENDPOINTS.PRIME_STATUS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
-  );
-  return { prime: data, loading, error };
-}
+// LEGACY REMOVAL: usePrimeStatus removed - PRIME_STATUS endpoint not used in 15m stack
 
 // System Health Card Component
 export function SystemHealthCard() {
@@ -390,51 +379,7 @@ export function TradingOperationsCard() {
   );
 }
 
-// Prime Status Card
-export function PrimeStatusCard() {
-  const { prime, loading } = usePrimeStatus();
-
-  if (loading) {
-    return (
-      <div className="bg-slate-900/70 rounded-xl p-4 border border-slate-800 animate-pulse">
-        <div className="h-4 bg-slate-700 rounded mb-2"></div>
-        <div className="h-8 bg-slate-700 rounded"></div>
-      </div>
-    );
-  }
-
-  const mode = prime?.mode || 'paper';
-  const isLive = mode === 'live';
-
-  return (
-    <div className={`bg-slate-900/70 rounded-xl p-4 border ${isLive ? 'border-rose-500/30' : 'border-slate-800'}`}>
-      <div className="flex items-center gap-2 mb-3">
-        <Server className={`w-5 h-5 ${isLive ? 'text-rose-400' : 'text-blue-400'}`} />
-        <h3 className="text-sm font-medium text-slate-400">Prime Screen</h3>
-        {isLive && <span className="text-xs px-2 py-0.5 bg-rose-500/20 text-rose-400 rounded">LIVE</span>}
-      </div>
-      
-      <div className="flex items-center gap-2 mb-3">
-        <div className={`w-3 h-3 rounded-full ${prime?.market_data_connected ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`}></div>
-        <span className="text-sm">{prime?.market_data_connected ? 'Data Connected' : 'Disconnected'}</span>
-      </div>
-      
-      {prime?.data_feeds && (
-        <div className="grid grid-cols-3 gap-2 text-xs">
-          {Object.entries(prime.data_feeds).map(([name, feed]) => (
-            <div key={name} className="flex items-center gap-1">
-              <div className={`w-1.5 h-1.5 rounded-full ${feed.connected ? 'bg-emerald-400' : 'bg-rose-400'}`}></div>
-              <span className="text-slate-500 capitalize">{name}</span>
-              {feed.connected && <span className="text-slate-600">{feed.latency_ms}ms</span>}
-            </div>
-          ))}
-        </div>
-      )}
-      
-      {/* LEGACY REMOVAL: Narrative display removed - narrative module deleted */}
-    </div>
-  );
-}
+// LEGACY REMOVAL: PrimeStatusCard removed - Prime status not used in 15m stack
 
 // Kalshi Health Card
 export function KalshiHealthCard() {

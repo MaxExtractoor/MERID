@@ -21,7 +21,7 @@ import ExecutionGateStrip from '../components/ExecutionGateStrip';
 import { GaugeWidget } from './Sentiment/SentimentGauge';
 import { CategoryCard, ComponentBar } from './Sentiment/SentimentCards';
 import { LaneSentimentStrip } from './Sentiment/LaneSentimentStrip';
-import { SwarmSentimentPanel } from './Sentiment/SwarmSentimentPanel';
+// LEGACY REMOVAL: SwarmSentimentPanel removed - swarm consensus not used in 15m stack
 import { regimeCfg } from './Sentiment/types';
 import type { SentimentData, SizingEffectCardData } from './Sentiment/types';
 
@@ -251,8 +251,7 @@ export default function KalshiSentimentView() {
       {/* ── Sizing Effect Card ──────────────────────────────── */}
       <SizingEffectCard />
 
-      {/* ── Swarm Sentiment Intelligence ───────────────────── */}
-      <SwarmSentimentPanel />
+      {/* LEGACY REMOVAL: SwarmSentimentPanel removed - swarm consensus not used in 15m stack */}
 
       {/* ── Category Cards ────────────────────────────────── */}
       {categories.length > 0 && (

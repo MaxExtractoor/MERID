@@ -56,7 +56,7 @@ export const TIER_COLORS = {
   B: '#f59e0b',           // amber-500
   C: '#ef4444',           // red-500
   D: '#6b7280',           // gray-500
-  // PaperLadderCard specific structure
+  // Ladder tier colors
   0: { bg: 'bg-slate-800/60', border: 'border-slate-600/40', text: 'text-slate-300' },
   1: { bg: 'bg-green-900/30', border: 'border-green-600/40', text: 'text-green-400' },
   2: { bg: 'bg-blue-900/30', border: 'border-blue-600/40', text: 'text-blue-400' },
