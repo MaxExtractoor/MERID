@@ -48,7 +48,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH=/home/merid/.local/bin:$PATH \
     PYTHONPATH=/app \
     MERID_ENV=production \
-    MERID_PROFILE=kalshi-only \
+    MERID_PROFILE=kalshi_crypto_15m_v2 \
     HOST=0.0.0.0 \
     PORT=8011
 
@@ -62,5 +62,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 # Expose port
 EXPOSE 8011
 
-# Start command
-CMD ["python", "-m", "web.main"]
+# Start command - use production 15m entrypoint
+CMD ["uvicorn", "web.main_15m_lean:app", "--host", "0.0.0.0", "--port", "8011"]

@@ -113,6 +113,29 @@ npm install
 npm run dev                 # http://localhost:5173
 ```
 
+### 15m Lean Stack (Production Entrypoint)
+
+For Kalshi 15m crypto trading, use the lean stack:
+
+```bash
+# Set profile in .env
+MERID_PROFILE=kalshi_crypto_15m_v2
+MERID_TRADING_MODE=demo
+TRADING_ENABLED=false
+
+# Start lean stack
+python -m web.main_15m_lean    # http://127.0.0.1:8000
+```
+
+The lean stack (`web/main_15m_lean.py`) is the production entrypoint for the `kalshi_crypto_15m_v2` profile. It provides:
+- Minimal dependencies (no PM runtime, paper trading engine, reflection system)
+- 5 crypto 15m agents (BTC, ETH, SOL, XRP, DOGE)
+- Live bankroll service with `is_demo`/`is_live` mode flags
+- Runtime invariants checking via `/api/v1/self-check`
+- Normalized observability endpoints with schema versions
+
+See `merid/kalshi_15m_runtime_check.py` for production invariants.
+
 ### Environment
 
 MERID runs in paper mode with zero configuration. For Kalshi API access:
