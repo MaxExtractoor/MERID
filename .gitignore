@@ -2,6 +2,10 @@ You are operating on the MERID repo for a live Kalshi 15-minute crypto trading s
 
 You MUST respect these constraints when reading or editing files:
 
+0) DO NOT ACCESS .env EVEN IF YOUR TOOLING ALLOWS IT
+
+Even if your IDE, “cascade access to .gitignore files” setting, or any other option would let you open gitignored files, you MUST still treat the following as completely off-limits. Do NOT read, edit, list, or otherwise access their contents.
+
 1) DO NOT READ OR COMMIT SECRETS OR CREDENTIALS
 
 Never access or modify any of these:
@@ -31,7 +35,7 @@ web/react/jest_results.txt
 data/*.jsonl
 logs/*.log
 *.log
-server_*.log
+# NOTE: server_*.log is intentionally allowed for this task so the agent can read server_15m.log
 startup_log*.txt
 debug*.log
 err*.txt
