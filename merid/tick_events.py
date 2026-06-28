@@ -39,6 +39,7 @@ logger = get_logger("merid.tick_events")
 TICK_STARTED = "tick_started"
 DATA_SNAPSHOT_TAKEN = "data_snapshot_taken"
 AGENT_CYCLE_COMPLETED = "agent_cycle_completed"
+STRATEGY_DECISION = "strategy_decision"
 RISK_CHECKED = "risk_checked"
 ORDER_SUBMITTED = "order_submitted"
 ORDER_REJECTED = "order_rejected"
@@ -208,6 +209,14 @@ class TickContext:
             signals_evaluated=signals_evaluated,
             signals_actionable=signals_actionable,
             signals_consensus_blocked=signals_consensus_blocked,
+        )
+
+    def emit_strategy_decision(self, asset: str, decision_data: Dict[str, Any]) -> TickEvent:
+        """Emit strategy decision truth table as a structured event."""
+        return self._base_event(
+            STRATEGY_DECISION,
+            asset=asset,
+            decision_data=decision_data,
         )
 
     def emit_risk_check(self, market_id: str, allowed: bool, reason: str = "") -> TickEvent:

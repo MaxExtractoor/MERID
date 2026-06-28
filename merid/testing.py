@@ -235,9 +235,9 @@ def run_paper_scenario(
     """
     global _last_metrics
 
-    from trading.paper_trading import PaperTradingEngine
+    from merid.trading.paper_trading import PaperTradingEngine
     from merid.reconciliation import reconcile_all_venues
-    from trading.trade_mode import TradeMode, set_trade_mode, get_trade_mode
+    from merid.trading.trade_mode import TradeMode, set_trade_mode, get_trade_mode
 
     # Ensure we're in MOCK mode (no external calls)
     old_mode = get_trade_mode()

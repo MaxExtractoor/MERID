@@ -387,9 +387,9 @@ class ExecutionSubscriber:
             )
             raise RuntimeError(f"ExecutionGuard check failed: {_ege}") from _ege
 
-        # Try to route through AgentGrid — match on the agent that owns this market_id
+        # Try to route through LeanAgentGrid15m — match on the agent that owns this market_id
         try:
-            from merid.prediction.agent_grid import get_agent_grid
+            from merid.prediction.agent_grid_15m import get_agent_grid
             grid = get_agent_grid()
             if grid and grid.is_running:
                 from merid.prediction.kalshi_tools import _kalshi_place_order

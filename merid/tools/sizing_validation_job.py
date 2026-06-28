@@ -161,15 +161,14 @@ class SizingValidator:
             Recomputed sizing decision
         """
         logger.debug(f"Recomputing decision {decision.decision_id}")
-        
-        # TODO: Implement actual recomputation logic
-        # This would:
-        # 1. Load the sizing logic at the appropriate version
-        # 2. Feed the base inputs (bankroll, Kelly fraction, etc.)
-        # 3. Apply the same constraints
-        # 4. Return the recomputed decision
-        
-        # For now, return the original decision as a mock
+
+        # NOTE: Recomputation logic not yet implemented
+        # This would require:
+        # 1. Loading the sizing logic at the appropriate version
+        # 2. Feeding the base inputs (bankroll, Kelly fraction, etc.)
+        # 3. Applying the same constraints
+        # 4. Returning the recomputed decision
+        # For now, return the original decision as a placeholder
         return decision
     
     def validate_decision(

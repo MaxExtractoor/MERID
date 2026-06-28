@@ -39,12 +39,13 @@ from decimal import Decimal
 import json
 import time
 import os
-import logging
 
 import httpx
 import requests
 
-logger = logging.getLogger(__name__)
+from utils.logger import get_logger
+
+logger = get_logger("merid.trading.crypto_spot_service")
 
 # Asset to symbol mappings (USD-only, aligned with Kalshi's CFB RTI methodology)
 ASSET_TO_COINBASE_PRODUCT = {
@@ -196,7 +197,7 @@ class CryptoSpotService:
         
         # Upstream failure metrics for observability
         self._failure_metrics: Dict[str, Dict[str, int]] = {
-            "coinbase": {"429": 0, "timeout": 0, "http_error": 0, "other": 0},
+            "coinbase": {"429": 0, "timeout": 0, "http_error": 0, "other": 0, "stale": 0},
             "kraken": {"429": 0, "timeout": 0, "http_error": 0, "other": 0},
             "binanceus": {"429": 0, "timeout": 0, "http_error": 0, "other": 0},
         }
@@ -426,7 +427,31 @@ class CryptoSpotService:
             amount = data.get("data", {}).get("amount")
             if amount:
                 price = float(amount)
-                logger.debug("Coinbase v2 success: %s = %.2f", asset, price)
+                # Extract timestamp from API response for staleness validation
+                # Coinbase v2 returns timestamp in "data.base" or "data.timestamp" fields
+                api_timestamp = data.get("data", {}).get("timestamp")
+                if api_timestamp:
+                    try:
+                        # Coinbase v2 timestamp is in ISO 8601 format
+                        from datetime import datetime
+                        ts = datetime.fromisoformat(api_timestamp.replace('Z', '+00:00'))
+                        api_ts = ts.timestamp()
+                        age_seconds = time.time() - api_ts
+                        if age_seconds > 30.0:
+                            logger.warning(
+                                "Coinbase v2 stale price for %s: %.2f (age=%.1fs > 30s threshold)",
+                                asset, price, age_seconds
+                            )
+                            self._failure_metrics["coinbase"]["stale"] += 1
+                            # Reject stale data
+                            return None
+                        logger.debug("Coinbase v2 success: %s = %.2f (age=%.1fs)", asset, price, age_seconds)
+                    except (ValueError, TypeError) as e:
+                        logger.debug("Coinbase v2 timestamp parse failed for %s: %s", asset, e)
+                        # If timestamp parsing fails, accept price but log warning
+                        logger.debug("Coinbase v2 success: %s = %.2f (timestamp unavailable)", asset, price)
+                else:
+                    logger.debug("Coinbase v2 success: %s = %.2f (no timestamp in response)", asset, price)
                 self._clear_venue_error("coinbase")
                 return price
             else:
@@ -452,7 +477,29 @@ class CryptoSpotService:
             price_str = data.get("price")
             if price_str:
                 price = float(price_str)
-                logger.debug("Coinbase Exchange success: %s = %.2f", asset, price)
+                # Extract timestamp from API response for staleness validation
+                # Coinbase Exchange returns timestamp in "time" field (Unix ms)
+                api_time = data.get("time")
+                if api_time:
+                    try:
+                        # Coinbase Exchange timestamp is in milliseconds
+                        api_ts = float(api_time) / 1000.0
+                        age_seconds = time.time() - api_ts
+                        if age_seconds > 30.0:
+                            logger.warning(
+                                "Coinbase Exchange stale price for %s: %.2f (age=%.1fs > 30s threshold)",
+                                asset, price, age_seconds
+                            )
+                            self._failure_metrics["coinbase"]["stale"] += 1
+                            # Reject stale data
+                            return None
+                        logger.debug("Coinbase Exchange success: %s = %.2f (age=%.1fs)", asset, price, age_seconds)
+                    except (ValueError, TypeError) as e:
+                        logger.debug("Coinbase Exchange timestamp parse failed for %s: %s", asset, e)
+                        # If timestamp parsing fails, accept price but log warning
+                        logger.debug("Coinbase Exchange success: %s = %.2f (timestamp unavailable)", asset, price)
+                else:
+                    logger.debug("Coinbase Exchange success: %s = %.2f (no timestamp in response)", asset, price)
                 self._clear_venue_error("coinbase")
                 return price
         except Exception as e:
