@@ -201,6 +201,88 @@
           "x": 0,
           "y": 20
         }
+      },
+      {
+        "id": 10,
+        "title": "PnL by Asset (P2 Task 8)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "merid_pnl_by_asset",
+            "legendFormat": "{{asset}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "currencyUSD",
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "red",
+                  "value": -100
+                }
+              ]
+            }
+          }
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 28
+        }
+      },
+      {
+        "id": 11,
+        "title": "Win Rate by Asset (P2 Task 8)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "merid_cycles_profitable_total / (merid_cycles_profitable_total + merid_cycles_unprofitable_total + 0.001) * 100",
+            "legendFormat": "{{asset}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "min": 0,
+            "max": 100
+          }
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 28
+        }
+      },
+      {
+        "id": 12,
+        "title": "Cycle Count by Asset (P2 Task 8)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "merid_cycles_profitable_total",
+            "legendFormat": "{{asset}} - Profitable"
+          },
+          {
+            "expr": "merid_cycles_unprofitable_total",
+            "legendFormat": "{{asset}} - Unprofitable"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 36
+        }
       }
     ]
   }

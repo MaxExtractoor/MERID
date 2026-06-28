@@ -299,6 +299,71 @@
         }
       },
       {
+        "id": 16,
+        "title": "Per-Asset Signal Funnel (Pre-EV vs Post-EV)",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 36},
+        "targets": [
+          {
+            "expr": "sum by (asset) (rate(merid_15m_signals_total{phase=\"pre_ev\"}[5m]))",
+            "legendFormat": "{{asset}} Pre-EV",
+            "refId": "A"
+          },
+          {
+            "expr": "sum by (asset) (rate(merid_15m_signals_total{phase=\"post_ev\"}[5m]))",
+            "legendFormat": "{{asset}} Post-EV",
+            "refId": "B"
+          }
+        ],
+        "yaxes": [
+          {"format": "ops", "label": "Signals per second"},
+          {"format": "short"}
+        ],
+        "options": {
+          "displayMode": "lines"
+        }
+      },
+      {
+        "id": 17,
+        "title": "Per-Asset Orders Submitted",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 36},
+        "targets": [
+          {
+            "expr": "sum by (asset) (rate(merid_15m_orders_total[5m]))",
+            "legendFormat": "{{asset}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "ops", "label": "Orders per second"},
+          {"format": "short"}
+        ],
+        "options": {
+          "displayMode": "lines"
+        }
+      },
+      {
+        "id": 18,
+        "title": "Per-Asset Guard Denials",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 44},
+        "targets": [
+          {
+            "expr": "sum by (asset, reason) (rate(merid_15m_guard_denials_total[5m]))",
+            "legendFormat": "{{asset}} {{reason}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "ops", "label": "Denials per second"},
+          {"format": "short"}
+        ],
+        "options": {
+          "displayMode": "stacked"
+        }
+      },
+      {
         "id": 11,
         "title": "Reconciliation Run Rate",
         "type": "graph",

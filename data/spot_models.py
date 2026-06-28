@@ -1,10 +1,21 @@
-"""Pydantic models for multi-exchange spot price subsystem.
+"""
+LEGACY - DO NOT USE IN PRODUCTION 15m STACK
+
+Pydantic models for multi-exchange spot price subsystem.
+
+This module is NOT used by the Kalshi 15m crypto trading stack.
+The 15m stack uses UnifiedSpotService (data/unified_spot_service.py) as the
+single canonical spot provider via the parity helper system.
 
 Provides structured models for:
 - ExchangeTick: Normalized tick from a single exchange
 - CompositeSpot: Aggregated spot price across exchanges (VWAP/median)
 - CfbRtiObservation: CF Benchmarks Real-Time Index observation
 - SpotAlignment: Alignment snapshot between MERID_SPOT and CF Benchmarks RTI
+
+Production 15m stack path:
+- data/unified_spot_service.py (UnifiedSpotService with parity helpers)
+- merid/core/spot_parity_helpers.py (symmetric fetch across Coinbase/Kraken/BinanceUS)
 """
 from __future__ import annotations
 

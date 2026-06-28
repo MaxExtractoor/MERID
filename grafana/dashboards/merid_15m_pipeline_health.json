@@ -96,9 +96,78 @@
       },
       {
         "id": 6,
+        "title": "Order Fill Rate (5m)",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
+        "targets": [
+          {
+            "expr": "rate(merid_orders_filled_total[5m]) / (rate(merid_orders_submitted_total[5m]) + 0.001) * 100",
+            "legendFormat": "{{asset}} - {{price_band}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "percent", "label": "Fill Rate %"},
+          {"format": "short"}
+        ],
+        "description": "Order fill rate by asset and price band (48-52c = near_money)"
+      },
+      {
+        "id": 7,
+        "title": "Average Time on Book (5m)",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20},
+        "targets": [
+          {
+            "expr": "rate(merid_order_time_on_book_seconds_sum[5m]) / rate(merid_order_time_on_book_seconds_count[5m])",
+            "legendFormat": "{{asset}} - {{price_band}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "s", "label": "Seconds on Book"},
+          {"format": "short"}
+        ],
+        "description": "Average time orders spend on the book before fill/cancel/expire"
+      },
+      {
+        "id": 8,
+        "title": "Order Volume by State (5m)",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 28},
+        "targets": [
+          {
+            "expr": "rate(merid_orders_submitted_total[5m])",
+            "legendFormat": "Submitted - {{asset}}",
+            "refId": "A"
+          },
+          {
+            "expr": "rate(merid_orders_filled_total[5m])",
+            "legendFormat": "Filled - {{asset}}",
+            "refId": "B"
+          },
+          {
+            "expr": "rate(merid_orders_cancelled_total[5m])",
+            "legendFormat": "Cancelled - {{asset}}",
+            "refId": "C"
+          },
+          {
+            "expr": "rate(merid_orders_expired_total[5m])",
+            "legendFormat": "Expired - {{asset}}",
+            "refId": "D"
+          }
+        ],
+        "yaxes": [
+          {"format": "ops", "label": "Orders/sec"},
+          {"format": "short"}
+        ],
+        "description": "Order volume by terminal state"
+      },
+      {
+        "id": 9,
         "title": "Feature Namespace Sparsity",
         "type": "heatmap",
-        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 20},
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 36},
         "targets": [
           {
             "expr": "merid_feature_namespace_sparsity",
@@ -288,6 +357,91 @@
             ]
           }
         }
+      },
+      {
+        "id": 15,
+        "title": "Market Data Staleness (P2 Task 7)",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 74},
+        "targets": [
+          {
+            "expr": "merid_market_data_staleness_seconds",
+            "legendFormat": "{{asset}} - {{ticker}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "s", "label": "Staleness (seconds)"},
+          {"format": "short"}
+        ],
+        "description": "Seconds since last market data update per ticker. Alert if >90s."
+      },
+      {
+        "id": 16,
+        "title": "Market Health Status (P2 Task 7)",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 74},
+        "targets": [
+          {
+            "expr": "merid_market_health_status",
+            "legendFormat": "{{asset}} - {{ticker}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "short", "label": "Health (0=unhealthy, 4=healthy)"},
+          {"format": "short"}
+        ],
+        "description": "Health status: 0=unhealthy, 1=degraded, 2=stale, 3=suspended, 4=healthy"
+      },
+      {
+        "id": 17,
+        "title": "WS Events Dropped by Type (P2 Task 7)",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 82},
+        "targets": [
+          {
+            "expr": "rate(merid_ws_events_dropped_total[5m])",
+            "legendFormat": "{{event_type}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {"format": "ops", "label": "Drops/sec"},
+          {"format": "short"}
+        ],
+        "description": "WS bridge backpressure: events dropped per type due to queue overflow"
+      },
+      {
+        "id": 18,
+        "title": "WS Fills Dropped (P2 Task 7)",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 12, "x": 12, "y": 82},
+        "targets": [
+          {
+            "expr": "rate(merid_ws_fills_dropped_total[5m])",
+            "legendFormat": "Fills Dropped/sec",
+            "refId": "A"
+          },
+          {
+            "expr": "increase(merid_ws_fills_dropped_total[5m])",
+            "legendFormat": "Total Fills Dropped (5m)",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 0.1},
+                {"color": "red", "value": 1}
+              ]
+            }
+          }
+        },
+        "description": "Critical: fills dropped due to WS bridge backpressure"
       }
     ]
   }

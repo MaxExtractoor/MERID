@@ -1,4 +1,11 @@
-"""Composite spot price calculation from multi-exchange data.
+"""
+LEGACY - DO NOT USE IN PRODUCTION 15m STACK
+
+Composite spot price calculation from multi-exchange data.
+
+This module is NOT used by the Kalshi 15m crypto trading stack.
+The 15m stack uses UnifiedSpotService (data/unified_spot_service.py) as the
+single canonical spot provider via the parity helper system.
 
 Aggregates normalized per-exchange tick data and computes:
 - Volume-weighted mid price (VWAP) over a short window (preferred when volume available)
@@ -11,6 +18,10 @@ Emits canonical "MERID_SPOT" price per asset with metadata:
 - Health/quality flags (healthy, degraded, insufficient_data)
 
 Integrates with existing LivePriceFeed to avoid duplication.
+
+Production 15m stack path:
+- data/unified_spot_service.py (UnifiedSpotService with parity helpers)
+- merid/core/spot_parity_helpers.py (symmetric fetch across Coinbase/Kraken/BinanceUS)
 """
 from __future__ import annotations
 
