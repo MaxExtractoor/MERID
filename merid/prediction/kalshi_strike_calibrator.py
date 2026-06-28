@@ -50,6 +50,29 @@ CALIBRATION_LOOKBACK_DAYS: int = int(os.getenv("MERID_STRIKE_CALIBRATION_DAYS", 
 # Margin applied to d90 (e.g., 0.1 = 10% buffer)
 DISTANCE_MARGIN: float = float(os.getenv("MERID_STRIKE_DISTANCE_MARGIN", "0.1"))
 
+# CRITICAL FIX: Validate strike calibrator parameters are reasonable
+if MIN_OBSERVATIONS < 1 or MIN_OBSERVATIONS > 100000:
+    logger.warning(
+        "[STRIKE-CALIB] Invalid MERID_STRIKE_MIN_OBS=%s - using default 500",
+        MIN_OBSERVATIONS
+    )
+    global MIN_OBSERVATIONS
+    MIN_OBSERVATIONS = 500
+if CALIBRATION_LOOKBACK_DAYS < 1 or CALIBRATION_LOOKBACK_DAYS > 365:
+    logger.warning(
+        "[STRIKE-CALIB] Invalid MERID_STRIKE_CALIBRATION_DAYS=%s - using default 30",
+        CALIBRATION_LOOKBACK_DAYS
+    )
+    global CALIBRATION_LOOKBACK_DAYS
+    CALIBRATION_LOOKBACK_DAYS = 30
+if DISTANCE_MARGIN < 0 or DISTANCE_MARGIN > 2.0:
+    logger.warning(
+        "[STRIKE-CALIB] Invalid MERID_STRIKE_DISTANCE_MARGIN=%s - using default 0.1",
+        DISTANCE_MARGIN
+    )
+    global DISTANCE_MARGIN
+    DISTANCE_MARGIN = 0.1
+
 # Calibration data persistence path
 CALIBRATION_DATA_PATH: Path = Path(
     os.getenv("MERID_STRIKE_CALIBRATION_PATH", "data/kalshi_strike_calibration.json")

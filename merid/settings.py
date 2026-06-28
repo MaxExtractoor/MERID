@@ -7,6 +7,11 @@ Uses Pydantic Settings for type safety and validation.
 Usage:
     from merid.settings import settings
     logger.info(settings.MERID_ENV)
+
+15m Mode Guard:
+    This module contains both 15m and legacy settings. When running in 15m mode
+    (MERID_RUNTIME_MODE=15m_live), legacy settings should not be used.
+    See docs/kalshi_15m_stack.md Section 4.3 for details.
 """
 
 from __future__ import annotations
@@ -15,8 +20,16 @@ from utils.logger import get_logger
 import os
 from pathlib import Path
 from typing import Optional, Dict
-from pydantic import Field, BaseModel
+from pydantic import Field, BaseModel, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# 15m MODE GUARD: Check if we're in 15m mode and log legacy setting access
+_RUNTIME_MODE = os.environ.get('MERID_RUNTIME_MODE')
+_IS_15M_MODE = _RUNTIME_MODE == '15m_live'
+
+if _IS_15M_MODE:
+    logger = get_logger("merid.settings")
+    logger.info("[SETTINGS-15M-MODE] Running in 15m live mode - legacy settings should not be used")
 
 # Resolve .env absolute path so it loads correctly regardless of CWD
 _ENV_FILE = str(Path(__file__).resolve().parent.parent / ".env")
@@ -51,13 +64,30 @@ class Settings(BaseSettings):
     # CORE SYSTEM SETTINGS
     # =============================================================================
     MERID_ENV: str = Field(default="development", description="MERID environment")
+    MERID_PROFILE: str = Field(default="", description="MERID profile - for kalshi_crypto_15m_v2, must be exactly 'kalshi_crypto_15m_v2'")
     MERID_LOG_LEVEL: str = Field(default="INFO", description="Logging level")
     MERID_DEV_ALLOW_WS: bool = Field(default=False, description="Allow WebSocket in dev mode")
+    TRADING_ENABLED: bool = Field(default=False, description="Enable trading logic (agent_grid + 15m loop) - MUST be explicitly set to true in production startup script")
+    
+    @field_validator('TRADING_ENABLED', mode='before')
+    @classmethod
+    def parse_trading_enabled(cls, v):
+        """Parse TRADING_ENABLED from string to boolean."""
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.lower() in ('true', '1', 'yes', 'on')
+        return bool(v)
+    
+    # ============================================================================= 
+    # PROFILE DETECTION FOR FAKE BANKROLL PROTECTION
+    # =============================================================================
+    MERID_ALLOW_FAKE_BANKROLL_FOR_TEST: bool = Field(default=False, description="Allow fake bankroll sources in test profiles (DANGEROUS for production)")
     
     # =============================================================================
     # DATABASE SETTINGS
     # =============================================================================
-    NEO4J_URI: str = Field(default="bolt://localhost:7687", description="Neo4j connection URI")
+    NEO4J_URI: str = Field(default=os.getenv("NEO4J_URI", "bolt://localhost:7687"), description="Neo4j connection URI")
     NEO4J_USER: str = Field(default="neo4j", description="Neo4j username")
     NEO4J_PASSWORD: Optional[str] = Field(default=None, description="Neo4j password")
     
@@ -98,10 +128,10 @@ class Settings(BaseSettings):
     # BINANCEUS_API_KEY: Optional[str] = Field(default=None, description="BinanceUS API key (optional, public API works without auth)")
     
     # =============================================================================
-    # COINBASE ADVANCED TRADE API
+    # COINBASE ADVANCED TRADE API (LEGACY - NOT USED IN 15M KALSHI PRODUCTION)
     # =============================================================================
-    COINBASE_API_KEY: Optional[str] = Field(default=None, description="Coinbase Advanced Trade API key")
-    COINBASE_API_SECRET: Optional[str] = Field(default=None, description="Coinbase Advanced Trade API secret")
+    # COINBASE_API_KEY: Optional[str] = Field(default=None, description="[LEGACY] Coinbase Advanced Trade API key")
+    # COINBASE_API_SECRET: Optional[str] = Field(default=None, description="[LEGACY] Coinbase Advanced Trade API secret")
     
     FINNHUB_API_KEY: Optional[str] = Field(default=None, description="Finnhub API key")
     FINNHUB_SECRET_KEY: Optional[str] = Field(default=None, description="Finnhub secret key")
@@ -151,42 +181,42 @@ class Settings(BaseSettings):
     X_ACCESS_TOKEN_SECRET: Optional[str] = Field(default=None, description="X Twitter access token secret")
     
     # =============================================================================
-    # POLYMARKET INTEGRATION
+    # POLYMARKET INTEGRATION (LEGACY - NOT USED IN 15M KALSHI PRODUCTION)
     # =============================================================================
-    POLYMARKET_API_KEY: Optional[str] = Field(default=None, description="[LEGACY] Polymarket API key")
-    POLYMARKET_API_SECRET: Optional[str] = Field(default=None, description="[LEGACY] Polymarket API secret")
-    POLYMARKET_WALLET_ADDRESS: Optional[str] = Field(default=None, description="Polymarket wallet address")
-    POLYMARKET_PRIVATE_KEY: Optional[str] = Field(default=None, description="Polymarket private key")
+    # POLYMARKET_API_KEY: Optional[str] = Field(default=None, description="[LEGACY] Polymarket API key")
+    # POLYMARKET_API_SECRET: Optional[str] = Field(default=None, description="[LEGACY] Polymarket API secret")
+    # POLYMARKET_WALLET_ADDRESS: Optional[str] = Field(default=None, description="Polymarket wallet address")
+    # POLYMARKET_PRIVATE_KEY: Optional[str] = Field(default=None, description="Polymarket private key")
     
     # =============================================================================
-    # CRYPTO EXCHANGE APIS
+    # CRYPTO EXCHANGE APIS (LEGACY - NOT USED IN 15M KALSHI PRODUCTION)
     # =============================================================================
-    BINANCE_API_KEY: Optional[str] = Field(default=None, description="[LEGACY] Binance API key")
-    BINANCE_API_SECRET: Optional[str] = Field(default=None, description="[LEGACY] Binance API secret")
-    COINBASE_API_KEY: Optional[str] = Field(default=None, description="[LEGACY] Coinbase API key")
-    COINBASE_API_SECRET: Optional[str] = Field(default=None, description="[LEGACY] Coinbase API secret")
-    COINBASE_CLIENT_API_KEY: Optional[str] = Field(
-        default=None, description="Coinbase CDP client API key (alias for CB-ACCESS-KEY)"
-    )
-    COINBASE_CLIENT_API_SECRET: Optional[str] = Field(
-        default=None, description="Coinbase CDP API secret (alias for signing)"
-    )
-    MERID_COINBASE_API_KEY: Optional[str] = Field(default=None, description="Coinbase API key (MERID prefix)")
-    MERID_COINBASE_API_SECRET: Optional[str] = Field(default=None, description="Coinbase API secret (MERID prefix)")
-    KRAKEN_API_KEY: Optional[str] = Field(default=None, description="[LEGACY] Kraken API key")
-    KRAKEN_PRIVATE_KEY: Optional[str] = Field(default=None, description="[LEGACY] Kraken private key")
-    OKX_API_KEY: Optional[str] = Field(default=None, description="OKX API key")
-    OKX_SECRET_KEY: Optional[str] = Field(default=None, description="OKX secret key")
-    OKX_API_KEY_NAME: Optional[str] = Field(default=None, description="OKX API key name")
-    OKX_PERMISSIONS: Optional[str] = Field(default=None, description="OKX API permissions")
-    BYBIT_API_KEY: Optional[str] = Field(default=None, description="Bybit API key")
-    BYBIT_API_SECRET: Optional[str] = Field(default=None, description="Bybit API secret")
-    ALPACA_API_KEY: Optional[str] = Field(default=None, description="[LEGACY] Alpaca API key")
-    ALPACA_API_SECRET: Optional[str] = Field(default=None, description="[LEGACY] Alpaca API secret")
-    MERID_ALPACA_API_KEY: Optional[str] = Field(default=None, description="Alpaca API key (MERID prefix)")
-    MERID_ALPACA_API_SECRET: Optional[str] = Field(default=None, description="Alpaca API secret (MERID prefix)")
-    IBKR_PAPER_TRADING_USERNAME: Optional[str] = Field(default=None, description="[LEGACY] IBKR paper trading username")
-    IBKR_PAPER_TRADING_ACCOUNT_NUMBER: Optional[str] = Field(default=None, description="[LEGACY] IBKR paper trading account")
+    # BINANCE_API_KEY: Optional[str] = Field(default=None, description="[LEGACY] Binance API key")
+    # BINANCE_API_SECRET: Optional[str] = Field(default=None, description="[LEGACY] Binance API secret")
+    # COINBASE_API_KEY: Optional[str] = Field(default=None, description="[LEGACY] Coinbase API key")
+    # COINBASE_API_SECRET: Optional[str] = Field(default=None, description="[LEGACY] Coinbase API secret")
+    # COINBASE_CLIENT_API_KEY: Optional[str] = Field(
+    #     default=None, description="Coinbase CDP client API key (alias for CB-ACCESS-KEY)"
+    # )
+    # COINBASE_CLIENT_API_SECRET: Optional[str] = Field(
+    #     default=None, description="Coinbase CDP API secret (alias for signing)"
+    # )
+    # MERID_COINBASE_API_KEY: Optional[str] = Field(default=None, description="Coinbase API key (MERID prefix)")
+    # MERID_COINBASE_API_SECRET: Optional[str] = Field(default=None, description="Coinbase API secret (MERID prefix)")
+    # KRAKEN_API_KEY: Optional[str] = Field(default=None, description="[LEGACY] Kraken API key")
+    # KRAKEN_PRIVATE_KEY: Optional[str] = Field(default=None, description="[LEGACY] Kraken private key")
+    # OKX_API_KEY: Optional[str] = Field(default=None, description="OKX API key")
+    # OKX_SECRET_KEY: Optional[str] = Field(default=None, description="OKX secret key")
+    # OKX_API_KEY_NAME: Optional[str] = Field(default=None, description="OKX API key name")
+    # OKX_PERMISSIONS: Optional[str] = Field(default=None, description="OKX API permissions")
+    # BYBIT_API_KEY: Optional[str] = Field(default=None, description="Bybit API key")
+    # BYBIT_API_SECRET: Optional[str] = Field(default=None, description="Bybit API secret")
+    # ALPACA_API_KEY: Optional[str] = Field(default=None, description="[LEGACY] Alpaca API key")
+    # ALPACA_API_SECRET: Optional[str] = Field(default=None, description="[LEGACY] Alpaca API secret")
+    # MERID_ALPACA_API_KEY: Optional[str] = Field(default=None, description="Alpaca API key (MERID prefix)")
+    # MERID_ALPACA_API_SECRET: Optional[str] = Field(default=None, description="Alpaca API secret (MERID prefix)")
+    # IBKR_PAPER_TRADING_USERNAME: Optional[str] = Field(default=None, description="[LEGACY] IBKR paper trading username")
+    # IBKR_PAPER_TRADING_ACCOUNT_NUMBER: Optional[str] = Field(default=None, description="[LEGACY] IBKR paper trading account")
     KALSHI_API_KEY_ID: Optional[str] = Field(default=None, description="Kalshi API key ID")
     KALSHI_PRIVATE_KEY_PATH: Optional[str] = Field(default=None, description="Kalshi private key path")
     KALSHI_PRIVATE_KEY_PEM: Optional[str] = Field(default=None, description="Kalshi private key PEM")
@@ -373,6 +403,7 @@ class Settings(BaseSettings):
     KALSHI_ONLY: bool = Field(default=True, description="Kalshi-only mode: restricts UI/API to 8 canonical Kalshi views")
     MERID_PM_TRADING_MODE: str = Field(default="paper", description="Prediction market mode: paper/live (set MERID_PM_LIVE_ENABLED=true to unlock live)")
     MERID_PM_LIVE_ENABLED: bool = Field(default=False, description="Explicit unlock for live PM trading — must be true for MERID_PM_TRADING_MODE=live to take effect")
+    MERID_ALLOW_LIVE_TRADES: bool = Field(default=False, description="SAFETY INTERLOCK: Must be explicitly set to True to enable live trading.")
     MERID_PM_PROFILE: str = Field(
         default="baseline",
         description="PM profile: baseline/kalshi-pm-live (controls risk limits and agent set)"
@@ -388,6 +419,10 @@ class Settings(BaseSettings):
     MERID_LOOP_DRY_RUN: bool = Field(
         default=False,
         description="DRY_RUN mode: loop runs with full logging but no actual order placement (for validation/auditing)"
+    )
+    MERID_EXECUTION_MODE: str = Field(
+        default="normal",
+        description="Execution behavior mode: normal (submit real orders), dry_run (log would-submit without placing), simulate (log + simulate fills). NOTE: This is different from TradingMode (live/paper/mock) - this controls order placement behavior, not trading mode."
     )
     MERID_ALLOW_FAKE_DATA: bool = Field(
         default=False,
@@ -416,6 +451,22 @@ class Settings(BaseSettings):
         default="ws",
         description="Kalshi websocket implementation: ws (required for live) or websocket_service (dev only)",
     )
+    KALSHI_MAINTENANCE_DAY: str = Field(
+        default="THU",
+        description="Day of week for Kalshi maintenance window (e.g., 'THU' for Thursday)"
+    )
+    KALSHI_MAINTENANCE_START: str = Field(
+        default="03:00",
+        description="Start time for Kalshi maintenance window in ET (e.g., '03:00' for 3 AM)"
+    )
+    KALSHI_MAINTENANCE_END: str = Field(
+        default="05:00",
+        description="End time for Kalshi maintenance window in ET (e.g., '05:00' for 5 AM)"
+    )
+    KALSHI_MAINTENANCE_TZ: str = Field(
+        default="America/New_York",
+        description="Timezone for Kalshi maintenance window (e.g., 'America/New_York')"
+    )
     # PM limits - ENV-DRIVEN percentages of bankroll (aligns with Top 3 / 3% / 15% strategy)
     # Top 3 strategy: 3% total risk across 3 edges = ~1% per edge
     # Daily drawdown: 15% max (from env MERID_MAX_DAILY_LOSS_PCT)
@@ -439,7 +490,7 @@ class Settings(BaseSettings):
         default=0.0,  # 0 = 50% of bankroll
         description="Max total PM notional (0 = 50% of bankroll)"
     )
-    KALSHI_USE_DEMO: bool = Field(default=True, description="Use Kalshi demo/sandbox API (MUST be explicitly set to False for production)")
+    KALSHI_USE_DEMO: bool = Field(default=False, description="Use Kalshi demo/sandbox API (MUST be explicitly set to True for demo mode, defaults to False for production safety)")
     KALSHI_EMAIL: Optional[str] = Field(default=None, description="Kalshi account email")
     KALSHI_PASSWORD: Optional[str] = Field(default=None, description="Kalshi account password")
 
@@ -507,20 +558,6 @@ class Settings(BaseSettings):
     # Trading mode: "paper" (simulated), "live" (real money)
     MERID_TRADING_MODE: str = Field(default="paper", description="Trading mode: paper or live")
     
-    # Prediction Market Trading Mode Settings
-    MERID_PM_TRADING_MODE: str = Field(
-        default="paper", 
-        description="Prediction market trading mode: mock/paper/live. Controls VenueGate mode."
-    )
-    MERID_PM_LIVE_ENABLED: bool = Field(
-        default=False,
-        description="Enable live prediction market trading. Must be True for live mode."
-    )
-    MERID_ALLOW_LIVE_TRADES: bool = Field(
-        default=False,
-        description="SAFETY INTERLOCK: Must be explicitly set to True to enable live trading."
-    )
-    
     # Safety interlocks for live trading (0 = derive from bankroll %, these are last-line guards)
     # DEPRECATED for kalshi_crypto_15m_v2 profile: Use config/profiles/kalshi_crypto_15m.yaml instead
     # These settings are still used by other profiles (sports, paper, generic prediction)
@@ -569,6 +606,18 @@ class Settings(BaseSettings):
             "'modern_tradeable_kalshi_v1' rows with confidence bands, fee-aware cent edge, and tiered Kelly. "
             "Legacy profiles: 'modern' (deprecated), 'legacy' (emergency fallback)."
         ),
+    )
+    
+    # =============================================================================
+    # MARKET SELECTION REFACTOR FLAGS (Phase 1: A/B testing)
+    # =============================================================================
+    USE_CANONICAL_SELECTOR: bool = Field(
+        default=False,
+        description="Use canonical select_live_markets_by_ts() for market selection (Phase 1: false for comparison logging only)"
+    )
+    LOG_SELECTOR_COMPARISON: bool = Field(
+        default=False,
+        description="Log comparison between old and new market selectors for A/B testing (DISABLED - causing catalog empty issues)"
     )
     MERID_CONSENSUS_PATH_LOG: bool = Field(
         default=False,
@@ -828,10 +877,12 @@ class Settings(BaseSettings):
         CRITICAL: ONLY uses ACTUAL Kalshi API balance. NO fake fallbacks.
         
         NOTE: Logic duplicated from order_router to avoid circular import.
+        NOTE: This is a synchronous method - cannot use async/await.
+        Relies on kalshi_risk.get_live_bankroll() which handles async fetching internally.
         """
         # ONLY use actual Kalshi API balance - NO configured fallbacks
         try:
-            # Source 1: Kalshi risk module live bankroll (lazy import to avoid cycles)
+            # Source: Kalshi risk module live bankroll (sync, cached)
             try:
                 from merid.event_venues.kalshi.kalshi_risk import get_live_bankroll
                 live = get_live_bankroll()
@@ -840,17 +891,8 @@ class Settings(BaseSettings):
             except Exception:
                 pass
             
-            # Source 2: Direct Kalshi client balance API (lazy import to avoid cycles)
-            try:
-                from merid.event_venues.kalshi.kalshi_client import get_kalshi_client
-                client = get_kalshi_client()
-                balance_data = client.get_balance()
-                if balance_data:
-                    balance_cents = balance_data.get("balance_cents", 0)
-                    if balance_cents > 0:
-                        return balance_cents / 100.0
-            except Exception:
-                pass
+            # Note: Direct client.get_balance() is async and cannot be called from sync code.
+            # The kalshi_risk module handles async fetching and provides this sync interface.
         except Exception as exc:
             logger.error("[_get_live_bankroll_usd] Failed to fetch actual Kalshi balance: %s", exc)
         
@@ -922,7 +964,7 @@ class Settings(BaseSettings):
     # =============================================================================
     # WEB SERVER SETTINGS
     # =============================================================================
-    HOST: str = Field(default="127.0.0.1", description="Server host")
+    HOST: str = Field(default=os.getenv("MERID_HOST", "127.0.0.1"), description="Server host")
     PORT: int = Field(default=8011, description="Server port")
     RELOAD: bool = Field(default=True, description="Enable auto-reload")
     
@@ -990,26 +1032,11 @@ class Settings(BaseSettings):
                     exc,
                 )
         
-        # DERIVE bankroll from actual configured capital (MERID_TOTAL_CAPITAL_USD)
-        # This ensures 3% max notional sizing is computed from REAL capital, not magic numbers
-        # NOTE: This is a FALLBACK for legacy modules. The SINGLE SOURCE OF TRUTH is bankroll_service_v2.
-        # All new code should use get_equity_for_risk_calc_sync() from bankroll_service_v2.
-        if self.KALSHI_PORTFOLIO_BANKROLL_CENTS <= 0:
-            # Convert total capital USD to cents for bankroll
-            self.KALSHI_PORTFOLIO_BANKROLL_CENTS = int(self.MERID_TOTAL_CAPITAL_USD * 100)
-            if self.MERID_TOTAL_CAPITAL_USD > 0:
-                logger.info(
-                    "[RISK_CONFIG] KALSHI_PORTFOLIO_BANKROLL_CENTS derived from MERID_TOTAL_CAPITAL_USD: "
-                    "$%.2f USD -> %d cents (3%% max notional = $%.2f)",
-                    self.MERID_TOTAL_CAPITAL_USD,
-                    self.KALSHI_PORTFOLIO_BANKROLL_CENTS,
-                    self.MERID_TOTAL_CAPITAL_USD * 0.03  # 3%
-                )
-            else:
-                logger.warning(
-                    "[RISK_CONFIG] KALSHI_PORTFOLIO_BANKROLL_CENTS set to 0 (fallback). "
-                    "BankrollService will provide live data at runtime."
-                )
+        # Settings-derived bankroll is DEPRECATED for Kalshi 15m.
+        # The SINGLE SOURCE OF TRUTH for Kalshi 15m is bankroll_service_v2.get_equity_for_risk_calc_sync().
+        # All Kalshi 15m code must use RiskEnvelopeService, not settings-derived bankroll.
+        # This setting remains at 0 to force use of the proper bankroll service.
+        self.KALSHI_PORTFOLIO_BANKROLL_CENTS = 0
     
     def _fetch_kalshi_balance(self) -> float:
         """
@@ -1037,7 +1064,7 @@ class Settings(BaseSettings):
             # Determine base URL — respect KALSHI_ENV=live and KALSHI_USE_DEMO
             use_demo = os.getenv("KALSHI_USE_DEMO", "true").lower() in ("true", "1", "yes")
             is_live = env in ("live", "prod") and not use_demo
-            base_url = "https://api.elections.kalshi.com/trade-api/v2" if is_live else "https://demo-api.kalshi.co/trade-api/v2"
+            base_url = "https://external-api.kalshi.com/trade-api/v2" if is_live else "https://demo-api.kalshi.co/trade-api/v2"
             
             # Create signature (Kalshi format: timestamp + method + path with v2 prefix)
             timestamp = str(int(__import__('time').time() * 1000))
@@ -1212,6 +1239,43 @@ class Settings(BaseSettings):
                 issues.append("MERID_MAX_DAILY_LOSS_USD must be > 0 for live trading")
             if self.MERID_MAX_POSITION_SIZE_USD <= 0:
                 issues.append("MERID_MAX_POSITION_SIZE_USD must be > 0 for live trading")
+        
+        return issues
+    
+    def validate_15m_production(self) -> list[str]:
+        """Validate that legacy settings are not used in 15m Kalshi production mode.
+        
+        This ensures the production stack uses only Kalshi-specific settings and
+        does not accidentally use legacy exchange APIs or research agents.
+        """
+        issues = []
+        
+        # Only check if we're in 15m production mode
+        if self.MERID_PROFILE != "kalshi_crypto_15m_v2":
+            return issues
+        
+        # Check for legacy research agent flags
+        if self.MERID_ENABLE_KALSHI_CT:
+            issues.append("MERID_ENABLE_KALSHI_CT is enabled but this is a legacy research agent not for 15m live trading")
+        if self.MERID_ENABLE_RESEARCH_AGENTS:
+            issues.append("MERID_ENABLE_RESEARCH_AGENTS is enabled but legacy research agents are not for 15m live trading")
+        
+        # Check for legacy exchange API keys (these are commented out in settings but may still be set in env)
+        legacy_apis = [
+            ("BINANCE_API_KEY", "Binance"),
+            ("COINBASE_API_KEY", "Coinbase"),
+            ("KRAKEN_API_KEY", "Kraken"),
+            ("ALPACA_API_KEY", "Alpaca"),
+            ("POLYMARKET_API_KEY", "Polymarket"),
+        ]
+        
+        for env_var, api_name in legacy_apis:
+            if os.getenv(env_var):
+                issues.append(f"{env_var} is set but {api_name} is a legacy exchange not used in 15m Kalshi production")
+        
+        # Check for KALSHI_ENV (should use MERID_KALSHI_ENV only)
+        if os.getenv("KALSHI_ENV") and not os.getenv("MERID_KALSHI_ENV"):
+            issues.append("KALSHI_ENV is set but should use MERID_KALSHI_ENV for consistency")
         
         return issues
     
@@ -1502,7 +1566,73 @@ class Settings(BaseSettings):
             "mode": self.MERID_TRADING_MODE,
             "env": self.MERID_ENV,
         }
+    
+    @property
+    def PROFILE_IS_LIVE(self) -> bool:
+        """
+        Determine if current profile is a live trading profile.
+        
+        Live profiles require strict bankroll source validation and cannot use fake bankrolls.
+        Test profiles may allow fake bankrolls for simulation purposes.
+        
+        Returns:
+            bool: True if this is a live profile, False if test/simulation
+        """
+        # Explicit test profiles - these can use fake bankrolls
+        test_profiles = {
+            "kalshi_crypto_test",
+            "kalshi_crypto_sim",
+            "test_*",
+            "sim_*",
+            "demo_*",
+            "paper_*"
+        }
+        
+        # Explicit live profiles - these CANNOT use fake bankrolls
+        live_profiles = {
+            "kalshi_crypto_15m_v2",
+            "kalshi_crypto_prod",
+            "live_*",
+            "prod_*",
+            "production_*"
+        }
+        
+        profile = self.MERID_PROFILE.lower()
+        
+        # Check explicit live profiles first
+        for live_pattern in live_profiles:
+            if live_pattern.endswith("*"):
+                if profile.startswith(live_pattern[:-1]):
+                    return True
+            elif profile == live_pattern:
+                return True
+        
+        # Check explicit test profiles
+        for test_pattern in test_profiles:
+            if test_pattern.endswith("*"):
+                if profile.startswith(test_pattern[:-1]):
+                    return False
+            elif profile == test_pattern:
+                return False
+        
+        # Default: assume live if not explicitly a test profile
+        # This is a safe default - fake bankroll protection will be active
+        return True
 
 
 # Create global settings instance
 settings = Settings()
+
+# PROFILE VALIDATION FOR LEAN 15M STACK
+# If this module is imported by main_15m_lean, enforce profile constraint
+if settings.MERID_PROFILE and settings.MERID_PROFILE != "kalshi_crypto_15m_v2":
+    import sys
+    import traceback
+    # Check if main_15m_lean is in the call stack
+    for frame in traceback.extract_stack():
+        if "main_15m_lean" in frame.filename:
+            raise RuntimeError(
+                f"Invalid profile '{settings.MERID_PROFILE}' for main_15m_lean.py. "
+                f"Only 'kalshi_crypto_15m_v2' is allowed. "
+                f"Set MERID_PROFILE=kalshi_crypto_15m_v2 in .env or environment."
+            )

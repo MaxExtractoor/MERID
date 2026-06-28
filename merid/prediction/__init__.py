@@ -40,35 +40,15 @@ from merid.prediction.agent_grid_config import (
     AgentGridConfig,
     get_agent_grid_config,
 )
-from merid.prediction.session_guard import (
-    SessionGuard,
-    get_session_guard,
-)
-from merid.prediction.agent_grid import (
-    AgentGrid,
-    get_agent_grid,
-)
-from merid.prediction.trading_agent import KalshiTradingAgent
 from merid.prediction.portfolio_risk_agent import PortfolioRiskAgent
 from merid.prediction.kalshi_tools import register_kalshi_tools
-from merid.prediction.social_broadcaster import (
-    KalshiSocialBroadcaster,
-    get_social_broadcaster,
-)
-from merid.prediction.crypto_top_edge import (
-    CandidateSignal,
-    CrossAssetCycleResult,
-    CryptoTopEdgeArbiter,
-    CRYPTO_ASSETS,
-    MEAN_REVERSION_TIMEFRAMES,
-    get_crypto_top_edge_arbiter,
-    reset_crypto_top_edge_arbiter,
-    select_top_edges,
-)
+#     select_top_edges,
+# )
 
 __all__ = [
     # LEGACY REMOVAL: Debate module deleted - removed AgentTeam, DebateArgument, DebateBacktester, DebateSession, DebateStore, RewardEntry, RewardParameterSweep, get_debate_store
     # LEGACY REMOVAL: Consensus module deleted - removed PredictionConsensusStore, PredictionInstrument, PredictionOpinion, PredictionPlan, get_prediction_consensus_store
+    # LEGACY REMOVAL: session_guard, agent_grid, trading_agent, social_broadcaster, crypto_top_edge moved to archive/legacy/
     "ContractState",
     "KalshiStrategy",
     "MarketSnapshot",
@@ -76,40 +56,29 @@ __all__ = [
     "PredictionMarketRisk",
     "PredictionRiskConfig",
     "PreTradeCheck",
-    "ResolvedMarket",
     "StrategyConfig",
     "StrategySignal",
     "TradingMode",
     "VenueGate",
-    "AgentGrid",
+    # "AgentGrid",  # moved to archive/legacy/
     "AgentGridConfig",
-    "KalshiTradingAgent",
-    "SessionGuard",
-    "get_agent_grid",
+    # "KalshiTradingAgent",  # moved to archive/legacy/
+    # "SessionGuard",  # moved to archive/legacy/
+    # "get_agent_grid",  # moved to archive/legacy/
     "get_agent_grid_config",
-    "get_session_guard",
+    # "get_session_guard",  # moved to archive/legacy/
     "register_kalshi_tools",
-    "KalshiSocialBroadcaster",
-    "get_social_broadcaster",
+    "PortfolioRiskAgent",
+    # "KalshiSocialBroadcaster",  # moved to archive/legacy/
+    # "get_social_broadcaster",  # moved to archive/legacy/
     # Cross-asset top edge arbiter
-    "CandidateSignal",
-    "CrossAssetCycleResult",
-    "CryptoTopEdgeArbiter",
-    "CRYPTO_ASSETS",
-    "MEAN_REVERSION_TIMEFRAMES",
-    "get_crypto_top_edge_arbiter",
-    "reset_crypto_top_edge_arbiter",
-    "select_top_edges",
-    # "No Surprises" execution guards
-    "check_execution_guards",
-    "check_signal_staleness",
-    "check_spot_reference_integrity",
-    "run_all_upstream_guards",
-    "run_all_upstream_guards_with_ticker",
-    "extract_asset_from_ticker",
-    "extract_timeframe_from_ticker",
-    "ExecutionGuardResult",
-    "DataIntegrityResult",
-    "Health15MSnapshot",
-    "compute_health_15m_snapshot",
+    # "CandidateSignal",  # moved to archive/legacy/
+    # "CrossAssetCycleResult",  # moved to archive/legacy/
+    # "CryptoTopEdgeArbiter",  # moved to archive/legacy/
+    # "CRYPTO_ASSETS",  # moved to archive/legacy/
+    # "MEAN_REVERSION_TIMEFRAMES",  # moved to archive/legacy/
+    # "get_crypto_top_edge_arbiter",  # moved to archive/legacy/
+    # "reset_crypto_top_edge_arbiter",  # moved to archive/legacy/
+    # "select_top_edges",  # moved to archive/legacy/
+    # "No Surprises" execution guards - moved to archive/legacy/
 ]

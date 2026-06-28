@@ -569,10 +569,8 @@ class Crypto15MValidator:
 # =============================================================================
 
 _validator_instance: Optional[Crypto15MValidator] = None
-# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-# _validator_lock = threading.Lock()
-_validator_lock = None  # Disabled to prevent startup hang
+# LEGACY REMOVAL: Threading lock removed - causing deadlock during startup
+# Single-threaded FastAPI startup doesn't need lock protection
 
 
 def get_crypto15m_validator() -> Crypto15MValidator:
@@ -581,23 +579,11 @@ def get_crypto15m_validator() -> Crypto15MValidator:
     if _validator_instance is not None:
         return _validator_instance
     
-    if _validator_lock is not None:
-        with _validator_lock:
-            if _validator_instance is None:
-                _validator_instance = Crypto15MValidator()
-    else:
-        # Lock disabled - direct initialization (startup workaround)
-        _validator_instance = Crypto15MValidator()
-    
+    _validator_instance = Crypto15MValidator()
     return _validator_instance
 
 
 def reset_crypto15m_validator_for_testing() -> None:
     """Reset the global singleton (testing only)."""
     global _validator_instance
-    if _validator_lock is not None:
-        with _validator_lock:
-            _validator_instance = None
-    else:
-        # Lock disabled - direct reset (startup workaround)
-        _validator_instance = None
+    _validator_instance = None

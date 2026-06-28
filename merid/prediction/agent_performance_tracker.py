@@ -49,8 +49,8 @@ class TradeRecord:
 
 
 @dataclass
-class AgentMetrics:
-    """Performance metrics for a single agent."""
+class AgentPerformanceMetrics:
+    """Performance metrics for a single agent (renamed from AgentMetrics to avoid conflict with risk.agent_metrics)."""
     agent_id: str
     total_fills: int = 0
     total_closes: int = 0
@@ -117,7 +117,7 @@ class AgentPerformanceTracker:
         self._closed_trades: List[TradeRecord] = []
         
         # Metrics cache
-        self._agent_metrics: Dict[str, AgentMetrics] = defaultdict(lambda: AgentMetrics(agent_id=""))
+        self._agent_metrics: Dict[str, AgentPerformanceMetrics] = defaultdict(lambda: AgentPerformanceMetrics(agent_id=""))
         self._last_recalc = 0.0
         self._recalc_interval = 30.0  # Recalculate every 30 seconds
         
@@ -248,6 +248,12 @@ class AgentPerformanceTracker:
 
         # Feed outcome back into ReflectionSystem for learning
         try:
+            # Skip reflection for kalshi_crypto_15m_v2 profile
+            import os
+            profile = os.environ.get("MERID_PROFILE", "")
+            if profile == "kalshi_crypto_15m_v2":
+                return  # Skip reflection for 15m profile
+                
             from agents.reflection.integration import get_reflection_system
             from agents.reflection.core import DecisionOutcome
             reflection_sys = get_reflection_system()
@@ -342,11 +348,11 @@ class AgentPerformanceTracker:
 
     # ── Metrics Retrieval ──────────────────────────────────────────
 
-    def get_agent_metrics(self, agent_id: str) -> AgentMetrics:
+    def get_agent_metrics(self, agent_id: str) -> AgentPerformanceMetrics:
         """Get performance metrics for a specific agent."""
-        return self._agent_metrics.get(agent_id, AgentMetrics(agent_id=agent_id))
+        return self._agent_metrics.get(agent_id, AgentPerformanceMetrics(agent_id=agent_id))
 
-    def get_all_metrics(self) -> Dict[str, AgentMetrics]:
+    def get_all_metrics(self) -> Dict[str, AgentPerformanceMetrics]:
         """Get metrics for all agents."""
         return dict(self._agent_metrics)
 
@@ -378,6 +384,55 @@ class AgentPerformanceTracker:
             ) if all_metrics else 0.0,
             "open_trades": len(self._open_trades),
             "closed_trades": len(self._closed_trades),
+        }
+
+    def get_asset_performance(self, asset: str, min_trades: int = 20) -> Dict[str, Any]:
+        """Get recent performance metrics for a specific asset (BTC, ETH, SOL, XRP, DOGE).
+        
+        Aggregates performance across all agents trading this asset.
+        
+        Args:
+            asset: Asset code (e.g., "BTC", "ETH")
+            min_trades: Minimum number of trades required for meaningful stats
+            
+        Returns:
+            Dict with win_rate, total_trades, total_pnl_usd, avg_edge, and sufficient_data flag
+        """
+        # Filter closed trades by asset (extract from market_id)
+        asset_trades = []
+        for trade in self._closed_trades:
+            # Extract asset from market_id (e.g., KXBTC15M-... -> BTC)
+            if f"KX{asset}" in trade.market_id.upper():
+                asset_trades.append(trade)
+        
+        # Take the most recent min_trades if available
+        recent_trades = asset_trades[-min_trades:] if len(asset_trades) >= min_trades else asset_trades
+        
+        if not recent_trades:
+            return {
+                "asset": asset,
+                "total_trades": 0,
+                "win_rate": 0.0,
+                "total_pnl_usd": Decimal("0"),
+                "avg_predicted_edge": 0.0,
+                "avg_realized_edge": 0.0,
+                "sufficient_data": False,
+            }
+        
+        # Calculate metrics
+        wins = sum(1 for t in recent_trades if t.outcome == "win")
+        total_pnl = sum(t.profit_usd or Decimal("0") for t in recent_trades)
+        avg_pred_edge = sum(t.predicted_edge for t in recent_trades) / len(recent_trades)
+        avg_real_edge = sum(t.realized_edge or 0.0 for t in recent_trades) / len(recent_trades)
+        
+        return {
+            "asset": asset,
+            "total_trades": len(recent_trades),
+            "win_rate": wins / len(recent_trades) if recent_trades else 0.0,
+            "total_pnl_usd": total_pnl,
+            "avg_predicted_edge": avg_pred_edge,
+            "avg_realized_edge": avg_real_edge,
+            "sufficient_data": len(recent_trades) >= min_trades,
         }
 
     def get_top_agents(self, metric: str = "win_rate", limit: int = 10) -> List[Dict[str, Any]]:
@@ -607,10 +662,7 @@ class ScalpingMetrics:
 # ── Singleton ──────────────────────────────────────────────────────
 
 _tracker: Optional[AgentPerformanceTracker] = None
-# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-# _tracker_lock = threading.Lock()
-_tracker_lock = None  # Disabled to prevent startup hang
+_tracker_lock = None
 
 
 def get_agent_performance_tracker() -> AgentPerformanceTracker:

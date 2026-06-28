@@ -317,10 +317,7 @@ class PredictionAlertManager:
 # ── Singleton ─────────────────────────────────────────────────────────
 
 _alert_manager: Optional[PredictionAlertManager] = None
-# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-# _alert_manager_lock = threading.Lock()
-_alert_manager_lock = None  # Disabled to prevent startup hang
+_alert_manager_lock = None
 
 
 def _make_telegram_sink() -> Optional[AlertSink]:

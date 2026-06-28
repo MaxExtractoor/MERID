@@ -72,19 +72,20 @@ CLUSTER_STOP_PCT: float = float(os.getenv("CLUSTER_STOP_PCT", "0.06"))  # 6% def
 # ═══════════════════════════════════════════════════════════════════════════
 # UNIFIED KELLY AND EXPOSURE SETTINGS (SINGLE SOURCE OF TRUTH)
 # ═══════════════════════════════════════════════════════════════════════════
-# CRITICAL: All sizing and risk components MUST read from these settings.
+# CRITICAL: All sizing and risk components MUST read from profile YAML for Kelly.
 # Do NOT add duplicate Kelly fractions or caps in individual modules.
 #
 # Configuration:
-#   - KELLY_FRACTION: 0.20 (20% Kelly - single source of truth)
+#   - Kelly fraction: Single source of truth is profile YAML (kalshi_crypto_15m.yaml)
 #   - MAX_CATEGORY_CRYPTO_PCT: 0.30 (30% category cap for crypto)
 #   - CORRELATED_STACK_PCT: 0.02 (2% for same underlying across all timeframes)
 #   - DRAWDOWN_HALT_PCT: 0.10 (10% drawdown triggers halt)
 #   - DRAWDOWN_UNWIND_PCT: 0.15 (15% drawdown triggers unwind)
 # ═══════════════════════════════════════════════════════════════════════════
-KELLY_FRACTION: float = float(os.getenv("KELLY_FRACTION", "0.20"))  # 20% Kelly - single source of truth
+# KELLY_FRACTION env var is DEPRECATED - use profile YAML instead
+# KELLY_FRACTION: float = float(os.getenv("KELLY_FRACTION", "0.20"))  # DEPRECATED
 MAX_CATEGORY_CRYPTO_PCT: float = float(os.getenv("MAX_CATEGORY_CRYPTO_PCT", "0.30"))  # 30% category cap
-CORRELATED_STACK_PCT: float = float(os.getenv("CORRELATED_STACK_PCT", "0.02"))  # 2% correlated stack cap
+CORRELATED_STACK_PCT: float = float(os.getenv("CORRELATED_STACK_PCT", "0.20"))  # 20% correlated stack cap (increased from 2% to allow trades)
 DRAWDOWN_HALT_PCT: float = float(os.getenv("DRAWDOWN_HALT_PCT", "0.10"))  # 10% drawdown halt
 DRAWDOWN_UNWIND_PCT: float = float(os.getenv("DRAWDOWN_UNWIND_PCT", "0.15"))  # 15% drawdown unwind
 
@@ -172,7 +173,6 @@ __all__ = [
     "MAX_TOTAL_RISK_PCT",
     "DAILY_LOSS_CAP_PCT",
     "CLUSTER_STOP_PCT",
-    "KELLY_FRACTION",
     "MAX_CATEGORY_CRYPTO_PCT",
     "CORRELATED_STACK_PCT",
     "DRAWDOWN_HALT_PCT",

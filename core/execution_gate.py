@@ -443,8 +443,8 @@ def check_execution_gate() -> ExecutionGateStatus:
         diagnostics["event_loop_lag"] = {"error": str(e)}
 
     try:
-        from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
-        bridge = get_ws_bridge()
+        from merid.event_venues.kalshi.ws_bridge import get_bridge
+        bridge = get_bridge()
         if hasattr(bridge, 'get_queue_pressure'):
             pressure = bridge.get_queue_pressure()
             diagnostics["queue_pressure"] = {
@@ -463,43 +463,89 @@ def check_execution_gate() -> ExecutionGateStatus:
     # ── 6b. Kalshi WebSocket gate (opt-in via env var) ───────────────────
     # Only active when MERID_EXEC_GATE_REQUIRE_KALSHI_WS=1.  In live mode a
     # disconnected or stale WS means orderbook data is missing — BLOCKED.
+    # REST_FALLBACK mode: check state store freshness instead of WS status.
     # Fail-open: any import/runtime error is silently skipped.
     _require_kalshi_ws = os.environ.get("MERID_EXEC_GATE_REQUIRE_KALSHI_WS", "0").strip() == "1"
     if _require_kalshi_ws:
         try:
             from merid.event_venues.kalshi.ws_bridge import get_kalshi_ws_status
             _ws_status = get_kalshi_ws_status()
+            _mode = _ws_status.get("mode", "WS_PRIMARY")
             _ws_connected = bool(_ws_status.get("connected", False))
             _ws_tickers = int(_ws_status.get("subscribed_tickers", 0))
-            if not _ws_connected:
-                reasons.append(BlockReason(
-                    source="kalshi_ws",
-                    severity="critical",
-                    message="kalshi_ws:not_connected — Kalshi WebSocket bridge disconnected",
-                    details="WS bridge is not running or the underlying connection dropped",
-                    hint=REMEDIATION_HINTS["kalshi_ws"],
-                ))
-            elif _ws_tickers == 0:
-                reasons.append(BlockReason(
-                    source="kalshi_ws",
-                    severity="critical",
-                    message="kalshi_ws:no_subscriptions — Kalshi WebSocket has 0 market subscriptions",
-                    details="Bridge connected but no market tickers subscribed — orderbook is empty",
-                    hint=REMEDIATION_HINTS["kalshi_ws"],
-                ))
-            else:
-                # Staleness check: if ws_client.last_msg_ago_s > threshold → BLOCKED
-                _stale_threshold_s = float(os.environ.get("MERID_EXEC_GATE_KALSHI_WS_STALE_S", "60"))
-                _ws_client = _ws_status.get("ws_client", {})
-                _last_msg_ago = _ws_client.get("last_msg_ago_s") if _ws_client else None
-                if _last_msg_ago is not None and _last_msg_ago > _stale_threshold_s:
+            
+            if _mode == "REST_FALLBACK":
+                # In REST mode, check state store freshness instead of WS status
+                _rest_polling_active = bool(_ws_status.get("rest_polling_active", False))
+                if not _rest_polling_active:
                     reasons.append(BlockReason(
                         source="kalshi_ws",
                         severity="critical",
-                        message=f"kalshi_ws:stale — no Kalshi WS message for {_last_msg_ago:.0f}s (threshold {_stale_threshold_s:.0f}s)",
-                        details=f"Last message {_last_msg_ago:.1f}s ago; stale threshold is {_stale_threshold_s:.0f}s",
+                        message="kalshi_ws:rest_polling_inactive — REST polling not active in REST_FALLBACK mode",
+                        details="Bridge is in REST_FALLBACK mode but REST polling task is not running",
                         hint=REMEDIATION_HINTS["kalshi_ws"],
                     ))
+                else:
+                    # Check state store freshness for 5 crypto 15m tickers
+                    from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                    _store = get_kalshi_market_state_store()
+                    _max_rest_age_s = float(os.environ.get("MERID_KALSHI_MAX_REST_AGE_SECONDS", "10"))
+                    _now = time.monotonic()
+                    _crypto_15m_tickers = ["KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M"]
+                    _stale_tickers = []
+                    
+                    for _ticker in _crypto_15m_tickers:
+                        _state = _store.get(_ticker)
+                        if not _state:
+                            _stale_tickers.append((_ticker, "no_state"))
+                            continue
+                        _last_update = _state.last_book_update_ts or _state.last_rest_update_ts or 0
+                        if _last_update == 0:
+                            _stale_tickers.append((_ticker, "no_timestamp"))
+                            continue
+                        _age = _now - _last_update
+                        if _age > _max_rest_age_s:
+                            _stale_tickers.append((_ticker, f"age={_age:.1f}s"))
+                    
+                    if _stale_tickers:
+                        reasons.append(BlockReason(
+                            source="kalshi_ws",
+                            severity="critical",
+                            message=f"kalshi_ws:rest_stale — {len(_stale_tickers)} tickers stale in REST_FALLBACK mode",
+                            details=f"Stale tickers: {', '.join(f'{t} ({r})' for t, r in _stale_tickers)}; threshold={_max_rest_age_s}s",
+                            hint=REMEDIATION_HINTS["kalshi_ws"],
+                        ))
+            else:
+                # WS_PRIMARY mode: use original WS checks
+                if not _ws_connected:
+                    reasons.append(BlockReason(
+                        source="kalshi_ws",
+                        severity="critical",
+                        message="kalshi_ws:not_connected — Kalshi WebSocket bridge disconnected",
+                        details="WS bridge is not running or the underlying connection dropped",
+                        hint=REMEDIATION_HINTS["kalshi_ws"],
+                    ))
+                elif _ws_tickers == 0:
+                    reasons.append(BlockReason(
+                        source="kalshi_ws",
+                        severity="critical",
+                        message="kalshi_ws:no_subscriptions — Kalshi WebSocket has 0 market subscriptions",
+                        details="Bridge connected but no market tickers subscribed — orderbook is empty",
+                        hint=REMEDIATION_HINTS["kalshi_ws"],
+                    ))
+                else:
+                    # Staleness check: if ws_client.last_msg_ago_s > threshold → BLOCKED
+                    _stale_threshold_s = float(os.environ.get("MERID_EXEC_GATE_KALSHI_WS_STALE_S", "60"))
+                    _ws_client = _ws_status.get("ws_client", {})
+                    _last_msg_ago = _ws_client.get("last_msg_ago_s") if _ws_client else None
+                    if _last_msg_ago is not None and _last_msg_ago > _stale_threshold_s:
+                        reasons.append(BlockReason(
+                            source="kalshi_ws",
+                            severity="critical",
+                            message=f"kalshi_ws:stale — no Kalshi WS message for {_last_msg_ago:.0f}s (threshold {_stale_threshold_s:.0f}s)",
+                            details=f"Last message {_last_msg_ago:.1f}s ago; stale threshold is {_stale_threshold_s:.0f}s",
+                            hint=REMEDIATION_HINTS["kalshi_ws"],
+                        ))
         except Exception as _ws_exc:
             logger.debug("Kalshi WS gate check skipped: %s", _ws_exc)
 

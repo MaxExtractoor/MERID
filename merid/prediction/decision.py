@@ -52,6 +52,7 @@ class HoldReason(str, Enum):
 
     # ── Market resolution ─────────────────────────────────────────────
     NO_MARKETS = "no_markets"                    # No markets resolved for this agent
+    NO_VALID_CONTRACT = "no_valid_contract"      # No contracts passed filters (entry window, price band, deep OTM/ITM)
     OUTSIDE_ENTRY_WINDOW = "outside_entry_window"  # Market not in entry window
     EXPIRY_PROXIMITY = "expiry_proximity"        # Too close to expiry (≤90s guard)
 

@@ -1,5 +1,9 @@
 """Kalshi Agent Grid — YAML config loader and typed data models.
 
+DEPRECATED: This config loader is for legacy compatibility only.
+The production 15m Kalshi crypto system uses config/profiles/kalshi_crypto_15m_v2.yaml
+via the profile resolver (merid/profile_resolver.py).
+
 Loads config/kalshi_agent_grid.yaml and exposes strongly-typed dataclasses
 that the orchestrator, trading agents, and portfolio risk agent consume.
 """
@@ -8,9 +12,9 @@ from __future__ import annotations
 
 import threading
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import yaml
 
@@ -65,6 +69,75 @@ def _validate_profile_usage(raw_config: Dict[str, Any], config_path: str) -> Non
     # Removed warning - bankroll-derived risk limits are acceptable for live trading
 
 
+def apply_profile_to_agent(
+    base_config: AgentConfig,
+    profile: Any,
+    live_bankroll_usd: Optional[float],
+) -> AgentConfig:
+    """
+    Pure function to apply profile overrides to an agent configuration.
+    
+    This is the single source of truth for profile application, used by both
+    the base agent grid and the 15m agent grid to ensure consistency.
+    
+    Args:
+        base_config: Base agent configuration from YAML
+        profile: Trading profile object (e.g., Crypto15mProfile)
+        live_bankroll_usd: Current live bankroll in USD (None if not available)
+        
+    Returns:
+        AgentConfig with profile overrides applied
+    """
+    # 1. Determine capital source
+    effective_capital = live_bankroll_usd if live_bankroll_usd is not None else getattr(profile, 'capital_usd', 0)
+    
+    # 2. Handle zero capital case
+    if effective_capital is None or effective_capital <= 0:
+        # Use conservative default from profile or fallback
+        min_capital = getattr(profile, 'min_capital_usd', 1000.0)
+        effective_capital = min_capital
+        logger.warning(
+            "[PROFILE-ADAPTER] Zero or negative capital (%.2f), using min_capital=%.2f",
+            live_bankroll_usd or 0, min_capital
+        )
+    
+    # 3. Compute per-trade risk percent (unified across assets)
+    risk_pct = getattr(profile, 'per_trade_risk_pct', 0.02)  # Default 2%
+    
+    # 4. Compute max_notional
+    max_notional_usd = effective_capital * risk_pct
+    
+    # 5. Apply overrides to risk limits
+    updated_risk_limits = replace(
+        base_config.risk_limits,
+        max_notional_usd=Decimal(str(max_notional_usd))
+    )
+    
+    # 6. Apply signal_mode from profile if available
+    updated_strategy_overrides = base_config.strategy_overrides.copy()
+    if hasattr(profile, 'signal_mode'):
+        updated_strategy_overrides['signal_mode'] = profile.signal_mode
+        logger.info(
+            "[PROFILE-ADAPTER] Applied signal_mode=%s to agent %s from profile",
+            profile.signal_mode, base_config.name
+        )
+    
+    # 7. Return updated config
+    updated_config = replace(
+        base_config,
+        risk_limits=updated_risk_limits,
+        strategy_overrides=updated_strategy_overrides
+    )
+    
+    # 8. Log for debugging
+    logger.info(
+        "[PROFILE-ADAPTER] Applied profile to agent %s: bankroll=%.2f risk_pct=%.2f%% max_notional=%.2f signal_mode=%s",
+        base_config.name, effective_capital, risk_pct * 100, max_notional_usd,
+        updated_strategy_overrides.get('signal_mode', 'not_set')
+    )
+    
+    return updated_config
+
 
 # ── Typed config models ────────────────────────────────────────────────
 
@@ -101,6 +174,19 @@ class SessionConfig:
     maintenance_day: int = 3          # 0=Mon … 6=Sun → 3=Thu
     maintenance_start_et: str = "03:00"
     maintenance_end_et: str = "05:00"
+
+
+def get_session_config() -> SessionConfig:
+    """Get the SessionConfig from the loaded agent grid configuration.
+    
+    Returns:
+        SessionConfig with maintenance window settings
+        
+    Raises:
+        RuntimeError: If agent grid config is not loaded
+    """
+    config = get_agent_grid_config()
+    return config.session
 
 
 @dataclass
@@ -320,8 +406,12 @@ class PortfolioRiskConfig:
                 bankroll_cents = 0
             else:
                 bankroll_cents = int(bankroll_usd * 100)
-        except Exception:
-            # Fail closed on error
+        except Exception as e:
+            # CRITICAL FIX: Log error before failing closed
+            logger.error(
+                "[AGENT-GRID-CONFIG] Failed to load bankroll from bankroll_service_v2: %s - failing closed",
+                e
+            )
             bankroll_cents = 0
         
         # Use unified core.settings values instead of deprecated merid.settings
@@ -490,8 +580,9 @@ def _parse_strike_selection(raw: Optional[Dict[str, Any]]) -> Optional[Any]:
     if not raw:
         return None
     try:
-        from merid.prediction.kalshi_strike_selector import parse_strike_selection_config
-        return parse_strike_selection_config(raw)
+        # LEGACY REMOVAL: kalshi_strike_selector moved to archive/legacy/ during 15m stack cleanup
+        # return parse_strike_selection_config(raw)
+        return None
     except Exception as exc:
         logger.debug("_parse_strike_selection failed: %s", exc)
         return None
@@ -526,7 +617,7 @@ def _parse_agent(raw: Dict[str, Any]) -> AgentConfig:
         use_filter_pipeline=raw.get("use_filter_pipeline", False),
         filter_max_candidates_per_asset=raw.get("filter_max_candidates_per_asset", 10),
         filter_max_candidates_global=raw.get("filter_max_candidates_global", 20),
-        strategy_overrides=_parse_strategy_overrides(raw.get("strategy")),
+        strategy_overrides=_parse_strategy_overrides(raw.get("strategy_overrides")),
         bypass_swarm_consensus=bool(raw.get("bypass_swarm_consensus", False)),
         signalonly=bool(raw.get("signalonly", False)),
         take_profit=_parse_take_profit(raw.get("take_profit"), name),
@@ -542,51 +633,10 @@ def _parse_agent(raw: Dict[str, Any]) -> AgentConfig:
             name
         )
 
-    # PROFILE OVERRIDE: Apply kalshi_crypto_15m_v2 profile overrides to risk_limits and entry_window
-    # This ensures max_yes_position, max_no_position, entry_window, and other params from profile are applied
-    # instead of the default 0 values or hardcoded defaults from agent_grid_config.py
-    try:
-        from merid.risk.profiles.crypto_15m_profile import is_profile_active, get_active_profile
-        import os
-        profile_name = os.environ.get('MERID_PROFILE', '')
-        logger.info("[PROFILE_OVERRIDE_DEBUG] Agent %s: MERID_PROFILE=%s, is_profile_active=%s", name, profile_name, is_profile_active())
-        if is_profile_active():
-            profile_adapter = get_active_profile()
-            if profile_adapter:
-                overrides = profile_adapter.to_agent_overrides(name)
-                logger.info("[PROFILE_OVERRIDE_DEBUG] Agent %s: Profile overrides=%s", name, overrides)
-                # Apply risk limit overrides if they are non-zero
-                if overrides.get('max_yes_position', 0) > 0:
-                    agent.risk_limits.max_yes_position = overrides['max_yes_position']
-                if overrides.get('max_no_position', 0) > 0:
-                    agent.risk_limits.max_no_position = overrides['max_no_position']
-                if overrides.get('max_notional_usd', 0) > 0:
-                    agent.risk_limits.max_notional_usd = Decimal(str(overrides['max_notional_usd']))
-                if overrides.get('max_orders_per_window', 0) > 0:
-                    agent.risk_limits.max_orders_per_window = overrides['max_orders_per_window']
-                # Apply entry_window overrides from profile (replaces hardcoded defaults)
-                if overrides.get('minutes_before_expiry', 0) > 0:
-                    agent.entry_window.minutes_before_expiry = overrides['minutes_before_expiry']
-                if overrides.get('cutoff_minutes_before_expiry', 0) > 0:
-                    agent.entry_window.cutoff_minutes_before_expiry = overrides['cutoff_minutes_before_expiry']
-                logger.info(
-                    "[PROFILE_OVERRIDE] Applied profile overrides to agent %s: "
-                    "max_yes_position=%d, max_no_position=%d, max_notional_usd=%s, max_orders_per_window=%d, "
-                    "minutes_before_expiry=%d, cutoff_minutes_before_expiry=%d",
-                    name,
-                    agent.risk_limits.max_yes_position,
-                    agent.risk_limits.max_no_position,
-                    agent.risk_limits.max_notional_usd,
-                    agent.risk_limits.max_orders_per_window,
-                    agent.entry_window.minutes_before_expiry,
-                    agent.entry_window.cutoff_minutes_before_expiry
-                )
-            else:
-                logger.warning("[PROFILE_OVERRIDE] Profile adapter is None for agent %s", name)
-        else:
-            logger.info("[PROFILE_OVERRIDE] Profile not active for agent %s", name)
-    except Exception as profile_exc:
-        logger.error("Failed to apply profile overrides for agent %s: %s", name, profile_exc, exc_info=True)
+    # REMOVED: Legacy profile application code (lines 615-673)
+    # Profile application is now handled exclusively by the 15m agent grid using
+    # the apply_profile_to_agent() pure function in agent_grid_config.py
+    # This prevents double-application and cross-contamination between legacy and new codepaths
 
     return agent
 
@@ -782,6 +832,12 @@ def load_agent_grid_config(path: Optional[str] = None) -> AgentGridConfig:
         maintenance_end_et=s.get("maintenance_end_et", "05:00"),
     )
 
+    # Log effective maintenance window
+    logger.info(
+        "[MAINTENANCE] day=%d start_et=%s end_et=%s source=SessionConfig",
+        session.maintenance_day, session.maintenance_start_et, session.maintenance_end_et
+    )
+
     # Agents — validate raw YAML before parsing
     raw_agents = raw.get("agents", [])
     logger.info("[GRID-LOAD] Found %d raw agents in YAML", len(raw_agents))
@@ -832,10 +888,7 @@ def load_agent_grid_config(path: Optional[str] = None) -> AgentGridConfig:
 # ── Singleton ──────────────────────────────────────────────────────────
 
 _grid_config: Optional[AgentGridConfig] = None
-# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-# _grid_config_lock = threading.Lock()
-_grid_config_lock = None  # Disabled to prevent startup hang
+_grid_config_lock = None
 
 
 def get_agent_grid_config() -> AgentGridConfig:

@@ -151,8 +151,8 @@ def _probe_kalshi_ws() -> DependencyStatus:
     """Check Kalshi WebSocket bridge status."""
     dep = DependencyStatus(name="kalshi_websocket", critical=False)
     try:
-        from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
-        bridge = get_ws_bridge()
+        from merid.event_venues.kalshi.ws_bridge import get_bridge
+        bridge = get_bridge()
         if bridge is None:
             dep.status = DepStatus.DOWN
             dep.message = "WebSocket bridge not initialized"

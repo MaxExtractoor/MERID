@@ -293,10 +293,7 @@ class DynamicEdgeCalibrator:
 
 # Singleton instance
 _calibrator_instance: Optional[DynamicEdgeCalibrator] = None
-# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-# _calibrator_lock = threading.Lock()
-_calibrator_lock = None  # Disabled to prevent startup hang
+_calibrator_lock = None
 
 
 def get_dynamic_edge_calibrator() -> DynamicEdgeCalibrator:

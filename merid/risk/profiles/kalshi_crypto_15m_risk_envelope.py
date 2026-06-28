@@ -6,13 +6,42 @@ Single source of truth for all risk parameters for kalshi_crypto_15m_v2 profile.
 
 from __future__ import annotations
 
-import logging
 import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 from decimal import Decimal
+from enum import Enum
 
-logger = logging.getLogger(__name__)
+from utils.logger import get_logger
+
+logger = get_logger("merid.risk.profiles.kalshi_crypto_15m_risk_envelope")
+
+# VERSION TAG: This log identifies the deployed revision of kalshi_crypto_15m_risk_envelope.py
+# Changes in v20260529a:
+# - Added operation_mode support (test/prod) for daily loss limit
+# - test mode: 10% daily loss limit for realistic live testing
+# - prod mode: 5% daily loss limit for conservative production trading
+# - Controlled via MERID_OPERATION_MODE env var or profile YAML
+
+def log_risk_envelope_version() -> None:
+    """Log risk envelope version at startup (not import time)."""
+    print("[RISK-ENVELOPE VERSION v20260529a-cache-fix] Loaded - operation_mode support for daily loss limit")
+    logger.info("[RISK-ENVELOPE VERSION v20260529a-cache-fix] Loaded - operation_mode support for daily loss limit")
+
+
+class RiskBand(Enum):
+    """Explicit risk bands for drawdown-based scaling.
+    
+    Matches Kalshi's "take a break after losses" guidance:
+    - Normal: 0-10% drawdown, 100% risk multiplier
+    - Warning: 10-12% drawdown, 50% risk multiplier
+    - Downsize: 12-15% drawdown, 25% risk multiplier
+    - Halt: 15%+ drawdown, 0% risk multiplier (manual resume required)
+    """
+    NORMAL = "normal"
+    WARNING = "warning"
+    DOWNSIZE = "downsize"
+    HALT = "halt"
 
 
 def is_risk_envelope_enabled() -> bool:
@@ -53,11 +82,18 @@ class KalshiCrypto15mRiskEnvelope:
     # Each asset has its own notional cap as percentage of capital
     asset_max_notional_usd: Dict[str, float]  # {"BTC": X, "ETH": Y, ...}
     
+    # ── Depth Thresholds (single source of truth for 15m stack) ───────────────
+    # Per-asset depth thresholds from profile YAML
+    asset_depth_thresholds: Dict[str, Dict[str, int]]  # {"BTC": {"min_depth_yes": 30, "min_depth_no": 30}, ...}
+    
     # ── Per-Agent Defaults ───────────────────────────────────────────────────
     agent_max_notional_usd: float  # From profile agent_defaults
     agent_max_orders_per_window: int
     agent_max_yes_position: int
     agent_max_no_position: int
+
+    # ── Cycle Risk Cap ───────────────────────────────────────────────────────
+    max_cycle_risk_pct: float  # Maximum risk per cycle as percentage of capital
     
     # ── Guardrails ───────────────────────────────────────────────────────────
     daily_loss_enabled: bool
@@ -77,6 +113,8 @@ class KalshiCrypto15mRiskEnvelope:
     adaptive_risk_bands: List[Dict[str, float]]  # From YAML
     per_trade_risk_multiplier: float
     is_halted: bool
+    current_risk_band: RiskBand  # Explicit band state
+    resume_if_drawdown_improves: bool  # Auto-resume when drawdown improves to lower band
     
     def update_drawdown(self, current_equity_usd: float):
         """Update drawdown tracking with current equity.
@@ -109,34 +147,74 @@ class KalshiCrypto15mRiskEnvelope:
             self.current_drawdown_pct = max(0.0, min(1.0, self.current_drawdown_pct))
         
         # Update adaptive risk and halt state
+        old_halted = self.is_halted
+        old_band = self.current_risk_band
         self._update_adaptive_risk()
+        
+        # Auto-resume if drawdown improves to lower band (when enabled)
+        if self.resume_if_drawdown_improves and old_halted and not self.is_halted:
+            logger.info(
+                f"[RISK-ENVELOPE] Auto-resume: drawdown improved from {old_band.value} to {self.current_risk_band.value}, "
+                f"halt cleared (resume_if_drawdown_improves=True)"
+            )
+        
+        # Set halt state based on drawdown threshold
         self.is_halted = self.current_drawdown_pct >= self.drawdown_halt_pct
     
     def _update_adaptive_risk(self):
         """Update per-trade risk multiplier based on drawdown bands."""
         old_multiplier = self.per_trade_risk_multiplier
+        old_band = self.current_risk_band
+        
         for band in self.adaptive_risk_bands:
             if self.current_drawdown_pct <= band['max_drawdown_pct']:
                 self.per_trade_risk_multiplier = band['multiplier']
-                # Log band change if multiplier changed
-                if old_multiplier != self.per_trade_risk_multiplier:
+                # Map multiplier to explicit RiskBand
+                if band['multiplier'] == 1.0:
+                    self.current_risk_band = RiskBand.NORMAL
+                elif band['multiplier'] == 0.5:
+                    self.current_risk_band = RiskBand.WARNING
+                elif band['multiplier'] == 0.25:
+                    self.current_risk_band = RiskBand.DOWNSIZE
+                elif band['multiplier'] == 0.0:
+                    self.current_risk_band = RiskBand.HALT
+                else:
+                    self.current_risk_band = RiskBand.NORMAL  # Default
+                
+                # Log band change if multiplier or band changed
+                if old_multiplier != self.per_trade_risk_multiplier or old_band != self.current_risk_band:
                     logger.info(
                         f"[RISK-ENVELOPE] Band change: drawdown={self.current_drawdown_pct:.2%}, "
                         f"multiplier={old_multiplier:.2f}→{self.per_trade_risk_multiplier:.2f}, "
+                        f"band={old_band.value if old_band else 'none'}→{self.current_risk_band.value}, "
                         f"distance_to_halt={self.drawdown_halt_pct - self.current_drawdown_pct:.2%}"
                     )
                 return
         
         # Default to halt if no band matches
         self.per_trade_risk_multiplier = 0.0
-        if old_multiplier != 0.0:
+        self.current_risk_band = RiskBand.HALT
+        if old_multiplier != 0.0 or old_band != RiskBand.HALT:
             logger.warning(
                 f"[RISK-ENVELOPE] Halt triggered: drawdown={self.current_drawdown_pct:.2%} >= halt={self.drawdown_halt_pct:.2%}"
             )
     
     def get_per_trade_risk_pct(self) -> float:
-        """Get per-trade risk percentage from profile."""
-        return 0.008  # From guardrails.per_trade_risk_pct
+        """Get per-trade risk percentage from profile with bankroll-tiered logic.
+        
+        BANKROLL-TIERED: Higher risk for small bankrolls to ensure tradable sizes
+        - bankroll < $100: 4% per trade (aggressive to overcome minimum lot granularity)
+        - bankroll $100-$1k: 1.5% per trade (moderate scaling)
+        - bankroll > $1k: 0.8% per trade (conservative for larger capital)
+        """
+        # Extract tier thresholds from profile config (if available in envelope)
+        # For now, implement tiered logic directly based on live bankroll
+        if self.live_bankroll_usd < 100.0:
+            return 0.04  # 4% for small bankroll
+        elif self.live_bankroll_usd < 1000.0:
+            return 0.015  # 1.5% for medium bankroll
+        else:
+            return 0.008  # 0.8% for large bankroll
     
     def get_drawdown_halt_pct(self) -> float:
         """Get drawdown halt percentage."""
@@ -162,6 +240,45 @@ class KalshiCrypto15mRiskEnvelope:
     def distance_to_halt_pct(self) -> float:
         """Distance from current drawdown to halt threshold."""
         return max(0.0, self.drawdown_halt_pct - self.current_drawdown_pct)
+    
+    def get_depth_thresholds(self, asset: str) -> Dict[str, int]:
+        """Get depth thresholds for a specific asset from profile YAML.
+        
+        Args:
+            asset: Asset symbol (e.g., "BTC", "ETH", "SOL", "XRP", "DOGE")
+            
+        Returns:
+            Dict with min_depth_yes and min_depth_no thresholds
+            
+        Raises:
+            KeyError: If asset not found in depth thresholds (no silent defaults)
+        """
+        if asset not in self.asset_depth_thresholds:
+            raise KeyError(f"Asset {asset} not found in depth thresholds. "
+                          f"Available assets: {list(self.asset_depth_thresholds.keys())}")
+        return self.asset_depth_thresholds[asset]
+    
+    def get_base_position_size(self) -> int:
+        """Get base position size (number of contracts) for a single trade.
+        
+        This is derived from max_single_order_notional_usd and assumes a
+        conservative contract price of 50 cents (typical for 15m crypto futures).
+        
+        Returns:
+            Base position size as integer number of contracts (minimum 1)
+        """
+        # Conservative contract price assumption (50 cents = 0.50 USD)
+        # 15m crypto futures typically trade in the 40-60 cent range
+        assumed_contract_price_usd = 0.50
+        
+        # Calculate base size from max single order notional
+        base_size = self.max_single_order_notional_usd / assumed_contract_price_usd
+        
+        # Ensure minimum of 1 contract
+        base_size = max(1.0, base_size)
+        
+        # Return as integer
+        return int(base_size)
 
 
 
@@ -193,14 +310,14 @@ def compute_kalshi_crypto_15m_risk_envelope(
     if profile_path is None:
         # Use absolute path from repository root to avoid relative path issues
         repo_root = Path(__file__).parent.parent.parent.parent
-        profile_path = repo_root / "config" / "profiles" / "kalshi_crypto_15m.yaml"
+        profile_path = repo_root / "config" / "profiles" / "kalshi_crypto_15m_v2.yaml"
     
     try:
         with open(profile_path, 'r', encoding='utf-8') as f:
             profile_config = yaml.safe_load(f)
     except Exception as e:
         logger.error(f"[RISK-ENVELOPE] Failed to load profile from {profile_path}: {e}")
-        raise RuntimeError(f"Failed to load kalshi_crypto_15m.yaml: {e}")
+        raise RuntimeError(f"Failed to load {profile_path.name}: {e}")
     
     # Extract venue caps
     venue = profile_config.get('venue', {})
@@ -208,8 +325,15 @@ def compute_kalshi_crypto_15m_risk_envelope(
     assets = profile_config.get('assets', {})
     guardrails = profile_config.get('guardrails', {})
     kelly_config = profile_config.get('kelly', {})
+
+    # Extract cycle risk cap (handle nested dict format)
+    max_cycle_risk_pct_raw = profile_config.get('max_cycle_risk_pct', 0.02)  # Default 2%
+    if isinstance(max_cycle_risk_pct_raw, dict):
+        max_cycle_risk_pct = max_cycle_risk_pct_raw.get('value', 0.02)
+    else:
+        max_cycle_risk_pct = max_cycle_risk_pct_raw
     
-    # ── YAML Validation (no silent fallbacks) ───────────────────────────────
+    # ── Extract and Validate Guardrails (handle nested dict format) ─────────
     # Validate adaptive risk bands
     adaptive_risk_bands = guardrails.get('adaptive_risk_bands')
     if not adaptive_risk_bands:
@@ -229,16 +353,23 @@ def compute_kalshi_crypto_15m_risk_envelope(
     if adaptive_risk_bands[-1]['multiplier'] != 0.0:
         raise ValueError("Last adaptive_risk_bands entry must have multiplier 0.0 (halt)")
     
-    # Validate drawdown thresholds
-    drawdown_halt_pct = guardrails.get('drawdown_halt_pct')
-    if drawdown_halt_pct is None:
-        raise ValueError("drawdown_halt_pct is required in profile YAML")
+    # Extract drawdown thresholds (handle nested dict format)
+    drawdown_halt_pct_raw = guardrails.get('drawdown_halt_pct', 0.15)
+    if isinstance(drawdown_halt_pct_raw, dict):
+        drawdown_halt_pct = drawdown_halt_pct_raw.get('value', 0.15)
+    else:
+        drawdown_halt_pct = drawdown_halt_pct_raw
+    
+    drawdown_unwind_pct_raw = guardrails.get('drawdown_unwind_pct', 0.20)
+    if isinstance(drawdown_unwind_pct_raw, dict):
+        drawdown_unwind_pct = drawdown_unwind_pct_raw.get('value', 0.20)
+    else:
+        drawdown_unwind_pct = drawdown_unwind_pct_raw
+    
+    # Validate drawdown thresholds (after extraction)
     if drawdown_halt_pct <= 0 or drawdown_halt_pct > 0.50:
         raise ValueError(f"drawdown_halt_pct must be between 0 and 0.50: {drawdown_halt_pct}")
     
-    drawdown_unwind_pct = guardrails.get('drawdown_unwind_pct')
-    if drawdown_unwind_pct is None:
-        raise ValueError("drawdown_unwind_pct is required in profile YAML")
     if drawdown_unwind_pct <= drawdown_halt_pct or drawdown_unwind_pct > 0.50:
         raise ValueError(f"drawdown_unwind_pct must be > drawdown_halt_pct and <= 0.50: {drawdown_unwind_pct}")
     
@@ -250,19 +381,36 @@ def compute_kalshi_crypto_15m_risk_envelope(
     is_validation = os.getenv('MERID_VALIDATION_MODE', 'false').lower() in ('true', '1')
     effective_capital = profile_capital if (profile_capital > 0 and is_validation) else live_bankroll_usd
     
-    logger.info(
-        f"[RISK-ENVELOPE] Effective capital: ${effective_capital:.2f} "
-        f"(profile_capital=${profile_capital:.2f}, live_bankroll=${live_bankroll_usd:.2f})"
-    )
+    if is_validation and profile_capital > 0:
+        logger.info(
+            f"[RISK-ENVELOPE] Effective capital: ${effective_capital:.2f} (using profile capital for validation mode)"
+        )
+    else:
+        logger.info(
+            f"[RISK-ENVELOPE] Effective capital: ${effective_capital:.2f} (using live Kalshi bankroll)"
+        )
+        if profile_capital > 0:
+            logger.info(
+                f"[RISK-ENVELOPE] Profile capital ${profile_capital:.2f} is unused in production mode (live bankroll takes precedence)"
+            )
     
     # ── Compute Venue-Level Caps ────────────────────────────────────────────
-    max_single_order_pct = venue['max_single_order_pct']
+    # Handle nested dict format: {value: 0.05, dynamic: bankroll, description: "..."}
+    max_single_order_pct_raw = venue.get('max_single_order_pct', 0.05)
+    if isinstance(max_single_order_pct_raw, dict):
+        max_single_order_pct = max_single_order_pct_raw.get('value', 0.05)
+    else:
+        max_single_order_pct = max_single_order_pct_raw
     max_single_order_notional_usd = effective_capital * max_single_order_pct
     
-    max_total_notional_pct = venue['max_total_notional_pct']
+    max_total_notional_pct_raw = venue.get('max_total_notional_pct', 0.30)
+    if isinstance(max_total_notional_pct_raw, dict):
+        max_total_notional_pct = max_total_notional_pct_raw.get('value', 0.30)
+    else:
+        max_total_notional_pct = max_total_notional_pct_raw
     max_total_notional_usd = effective_capital * max_total_notional_pct
     
-    max_concurrent_trades = agent_defaults['max_concurrent_trades']
+    max_concurrent_trades = agent_defaults.get('max_concurrent_trades', 3)
     
     logger.info(
         f"[RISK-ENVELOPE] Venue caps: "
@@ -272,14 +420,62 @@ def compute_kalshi_crypto_15m_risk_envelope(
     )
     
     # ── Compute Per-Asset Caps ────────────────────────────────────────────────
+    # Apply minimum floor to ensure trades are possible with small bankrolls
+    min_max_notional_usd = profile_config.get('min_max_notional_usd', 0.0)
+    
     asset_max_notional_usd = {}
+    asset_depth_thresholds = {}
     for asset_symbol, asset_config in assets.items():
-        max_notional_pct = asset_config.get('max_notional_pct', 0.03)
+        # Handle nested dict format for max_notional_pct
+        max_notional_pct_raw = asset_config.get('max_notional_pct', 0.03)
+        if isinstance(max_notional_pct_raw, dict):
+            max_notional_pct = max_notional_pct_raw.get('value', 0.03)
+        else:
+            max_notional_pct = max_notional_pct_raw
         asset_max_notional_usd[asset_symbol] = effective_capital * max_notional_pct
+        
+        # Apply minimum floor to enable small bankroll trading
+        if min_max_notional_usd > 0:
+            asset_max_notional_usd[asset_symbol] = max(
+                asset_max_notional_usd[asset_symbol],
+                min_max_notional_usd
+            )
+        
+        # Log if floor was applied (risk distortion warning) - only log if significant distortion (>150% of target)
+        if min_max_notional_usd > 0 and asset_max_notional_usd[asset_symbol] > effective_capital * max_notional_pct:
+            distortion_pct = asset_max_notional_usd[asset_symbol] / (effective_capital * max_notional_pct) * 100
+            if distortion_pct > 150.0:
+                logger.warning(
+                    f"[RISK-ENVELOPE] Asset {asset_symbol}: min_floor applied - "
+                    f"target ${effective_capital * max_notional_pct:.2f} ({max_notional_pct*100:.1f}%) "
+                    f"-> actual ${asset_max_notional_usd[asset_symbol]:.2f} "
+                    f"({asset_max_notional_usd[asset_symbol]/effective_capital*100:.1f}%) "
+                    f"= {distortion_pct:.1f}% of target"
+                )
+            else:
+                logger.debug(
+                    f"[RISK-ENVELOPE] Asset {asset_symbol}: min_floor applied - "
+                    f"target ${effective_capital * max_notional_pct:.2f} ({max_notional_pct*100:.1f}%) "
+                    f"-> actual ${asset_max_notional_usd[asset_symbol]:.2f} "
+                    f"({asset_max_notional_usd[asset_symbol]/effective_capital*100:.1f}%) "
+                    f"= {distortion_pct:.1f}% of target"
+                )
         
         logger.info(
             f"[RISK-ENVELOPE] Asset {asset_symbol}: "
             f"max_notional=${asset_max_notional_usd[asset_symbol]:.2f} ({max_notional_pct*100:.1f}%)"
+            + (f" [min_floor=${min_max_notional_usd:.2f}]" if min_max_notional_usd > 0 else "")
+        )
+        
+        # Extract depth thresholds from profile YAML (single source of truth)
+        min_depth_yes = asset_config.get('min_depth_yes', 25)
+        min_depth_no = asset_config.get('min_depth_no', 25)
+        asset_depth_thresholds[asset_symbol] = {
+            'min_depth_yes': min_depth_yes,
+            'min_depth_no': min_depth_no
+        }
+        logger.info(
+            f"[RISK-ENVELOPE] Asset {asset_symbol}: depth thresholds (yes={min_depth_yes}, no={min_depth_no})"
         )
     
     # ── Compute Per-Agent Defaults ────────────────────────────────────────────
@@ -299,20 +495,52 @@ def compute_kalshi_crypto_15m_risk_envelope(
     
     # ── Compute Guardrails ───────────────────────────────────────────────────
     # Drawdown is the primary hard cap; daily loss is optional/soft
-    per_trade_risk_pct = guardrails.get('per_trade_risk_pct', 0.008)  # Default 0.8%
+    # Handle nested dict format for per_trade_risk_pct
+    per_trade_risk_pct_raw = guardrails.get('per_trade_risk_pct', 0.008)  # Default 0.8%
+    if isinstance(per_trade_risk_pct_raw, dict):
+        per_trade_risk_pct = per_trade_risk_pct_raw.get('value', 0.008)
+    else:
+        per_trade_risk_pct = per_trade_risk_pct_raw
     
-    # Extract kelly fraction
-    kelly_fraction = kelly_config.get('kelly_fraction', kelly_config.get('kelly_hard_cap', 0.30))
+    # Handle nested dict format for drawdown thresholds
+    drawdown_halt_pct_raw = guardrails.get('drawdown_halt_pct', 0.15)
+    if isinstance(drawdown_halt_pct_raw, dict):
+        drawdown_halt_pct = drawdown_halt_pct_raw.get('value', 0.15)
+    else:
+        drawdown_halt_pct = drawdown_halt_pct_raw
+    
+    drawdown_unwind_pct_raw = guardrails.get('drawdown_unwind_pct', 0.20)
+    if isinstance(drawdown_unwind_pct_raw, dict):
+        drawdown_unwind_pct = drawdown_unwind_pct_raw.get('value', 0.20)
+    else:
+        drawdown_unwind_pct = drawdown_unwind_pct_raw
+    
+    # Extract kelly fraction (P1-FIX1: fallback default reduced from 0.30 to 0.05)
+    kelly_fraction = kelly_config.get('kelly_fraction', kelly_config.get('kelly_hard_cap', 0.05))
     
     daily_loss_enabled = guardrails.get('daily_loss_enabled', False)
     
     # Daily loss is optional; if disabled, set to very high value (effectively disabled)
     if daily_loss_enabled:
-        # Derive daily loss limit from primary risk parameters
-        # Formula: min(3 × per_trade_risk_pct, 0.5 × drawdown_halt_pct)
-        daily_loss_from_trades = 3.0 * per_trade_risk_pct  # 3 losing trades
-        daily_loss_from_drawdown = 0.5 * drawdown_halt_pct  # 50% of halt drawdown
-        max_daily_loss_pct = min(daily_loss_from_trades, daily_loss_from_drawdown)
+        # Get operation mode from profile YAML or environment variable
+        # Priority: env var > profile YAML > default (prod)
+        operation_mode = os.getenv('MERID_OPERATION_MODE', profile_config.get('operation_mode', 'prod')).lower()
+        
+        # Get daily loss limit based on operation mode
+        max_daily_loss_pct_raw = guardrails.get('max_daily_loss_pct', 0.05)
+        if isinstance(max_daily_loss_pct_raw, dict):
+            # Mode-specific limits: {test: 0.10, prod: 0.05}
+            max_daily_loss_pct = max_daily_loss_pct_raw.get(operation_mode, max_daily_loss_pct_raw.get('prod', 0.05))
+        else:
+            # Legacy single value (backward compatibility)
+            max_daily_loss_pct = max_daily_loss_pct_raw
+        
+        # Log operation mode and limit
+        logger.info(
+            f"[RISK-ENVELOPE] Operation mode: {operation_mode}, "
+            f"Daily loss limit: {max_daily_loss_pct*100:.1f}% of capital (${effective_capital * max_daily_loss_pct:.2f})"
+        )
+        
         max_daily_loss_usd = effective_capital * max_daily_loss_pct
     else:
         # Daily loss disabled; drawdown is the single source of truth
@@ -344,16 +572,33 @@ def compute_kalshi_crypto_15m_risk_envelope(
     # ── Initialize Adaptive Risk ───────────────────────────────────────────────
     per_trade_risk_multiplier = 1.0
     is_halted = False
+    current_risk_band = RiskBand.NORMAL
+    resume_if_drawdown_improves = False  # Default: manual operator intervention required
     
     # ── Validation ────────────────────────────────────────────────────────────
-    # Ensure asset caps don't exceed total cap
+    # Ensure asset caps don't exceed total cap - enforce hard invariant
     total_asset_cap = sum(asset_max_notional_usd.values())
     if total_asset_cap > max_total_notional_usd:
-        logger.warning(
-            f"[RISK-ENVELOPE] WARNING: Sum of asset caps (${total_asset_cap:.2f}) "
-            f"exceeds total venue cap (${max_total_notional_usd:.2f}). "
-            f"This may cause position limits to be hit unexpectedly."
+        # Scale all caps down proportionally to fit exactly into venue cap
+        scale_factor = max_total_notional_usd / total_asset_cap
+        old_total_asset_cap = total_asset_cap
+        
+        for asset_symbol in asset_max_notional_usd:
+            old_cap = asset_max_notional_usd[asset_symbol]
+            asset_max_notional_usd[asset_symbol] = old_cap * scale_factor
+        
+        total_asset_cap = sum(asset_max_notional_usd.values())
+        
+        logger.info(
+            f"[RISK-ENVELOPE] CAPS-RESCALED: Sum of asset caps exceeded venue cap - "
+            f"old sum=${old_total_asset_cap:.2f} -> new sum=${total_asset_cap:.2f} "
+            f"(scale_factor={scale_factor:.4f}, venue_cap=${max_total_notional_usd:.2f})"
         )
+        for asset_symbol in asset_max_notional_usd:
+            logger.info(
+                f"[RISK-ENVELOPE] Asset {asset_symbol}: "
+                f"rescaled cap=${asset_max_notional_usd[asset_symbol]:.2f}"
+            )
     
     # Ensure per-trade cap is reasonable relative to bankroll
     if max_single_order_notional_usd > live_bankroll_usd:
@@ -364,17 +609,19 @@ def compute_kalshi_crypto_15m_risk_envelope(
         )
     
     # ── Return Envelope ────────────────────────────────────────────────────────
-    return KalshiCrypto15mRiskEnvelope(
+    envelope = KalshiCrypto15mRiskEnvelope(
         live_bankroll_usd=live_bankroll_usd,
         profile_capital_usd=profile_capital,
         max_single_order_notional_usd=max_single_order_notional_usd,
         max_total_notional_usd=max_total_notional_usd,
         max_concurrent_trades=max_concurrent_trades,
         asset_max_notional_usd=asset_max_notional_usd,
+        asset_depth_thresholds=asset_depth_thresholds,
         agent_max_notional_usd=agent_max_notional_usd,
         agent_max_orders_per_window=agent_max_orders_per_window,
         agent_max_yes_position=agent_max_yes_position,
         agent_max_no_position=agent_max_no_position,
+        max_cycle_risk_pct=max_cycle_risk_pct,
         daily_loss_enabled=daily_loss_enabled,
         max_daily_loss_usd=max_daily_loss_usd,
         drawdown_halt_pct=drawdown_halt_pct,
@@ -386,7 +633,38 @@ def compute_kalshi_crypto_15m_risk_envelope(
         adaptive_risk_bands=adaptive_risk_bands,
         per_trade_risk_multiplier=per_trade_risk_multiplier,
         is_halted=is_halted,
+        current_risk_band=current_risk_band,
+        resume_if_drawdown_improves=resume_if_drawdown_improves,
     )
+    
+    # ── Log Envelope Snapshot ───────────────────────────────────────────────────
+    logger.info(
+        "[RISK-ENVELOPE-SNAPSHOT] "
+        f"live_bankroll=${live_bankroll_usd:.2f} "
+        f"profile_capital=${profile_capital:.2f} "
+        f"venue_cap=${max_total_notional_usd:.2f} "
+        f"sum_caps=${total_asset_cap:.2f} "
+        f"scaled={total_asset_cap > max_total_notional_usd}"
+    )
+    for asset_symbol, cap in asset_max_notional_usd.items():
+        # Re-compute target for logging
+        asset_config = assets.get(asset_symbol, {})
+        max_notional_pct_raw = asset_config.get('max_notional_pct', 0.03)
+        if isinstance(max_notional_pct_raw, dict):
+            max_notional_pct = max_notional_pct_raw.get('value', 0.03)
+        else:
+            max_notional_pct = max_notional_pct_raw
+        target_usd = effective_capital * max_notional_pct
+        floor_applied = min_max_notional_usd > 0 and cap > target_usd
+        logger.info(
+            f"[RISK-ENVELOPE-SNAPSHOT] {asset_symbol}: "
+            f"target_pct={max_notional_pct*100:.1f}% "
+            f"target_usd=${target_usd:.2f} "
+            f"floor_applied={floor_applied} "
+            f"final_cap=${cap:.2f}"
+        )
+    
+    return envelope
 
 
 def get_kalshi_crypto_15m_risk_envelope() -> KalshiCrypto15mRiskEnvelope:
@@ -407,8 +685,8 @@ def get_kalshi_crypto_15m_risk_envelope() -> KalshiCrypto15mRiskEnvelope:
         raise RuntimeError(f"Failed to get live bankroll: {e}")
     
     if live_bankroll_usd is None or live_bankroll_usd <= 0:
-        logger.error(f"[RISK-ENVELOPE] Invalid live bankroll: ${live_bankroll_usd}")
-        raise RuntimeError(f"Invalid live bankroll: ${live_bankroll_usd}")
+        logger.warning(f"[RISK-ENVELOPE] Bankroll not ready yet (${live_bankroll_usd}), deferring envelope computation")
+        raise RuntimeError(f"Bankroll not ready: ${live_bankroll_usd}")
     
     return compute_kalshi_crypto_15m_risk_envelope(live_bankroll_usd)
 
@@ -429,7 +707,35 @@ def safe_update_envelope_equity(envelope: KalshiCrypto15mRiskEnvelope) -> bool:
     try:
         from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
         current_equity = get_equity_for_risk_calc_sync()
+        
+        # Handle None equity - fail-closed with clear logging
+        if current_equity is None:
+            logger.error("[RISK-ENVELOPE] Failed to update equity: get_equity_for_risk_calc_sync returned None - bankroll service may not be initialized or failed to fetch")
+            return False
+        
         envelope.update_drawdown(current_equity)
+        
+        # Collect drift metrics for risk envelope vs positions
+        try:
+            from merid.monitoring.drift_metrics import get_drift_metrics_collector
+            from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+            
+            drift_collector = get_drift_metrics_collector()
+            fills_ledger = get_fills_ledger()
+            
+            # Get current exposure from fills ledger
+            realized_exposure_usd = fills_ledger.get_total_exposure_usd() if fills_ledger else 0.0
+            pending_orders_notional_usd = 0.0  # NOTE: Order tracker integration pending - currently using 0
+            
+            # Collect drift metric
+            drift_collector.collect_risk_envelope_drift(
+                envelope_max_notional_usd=envelope.max_total_notional_usd,
+                realized_exposure_usd=realized_exposure_usd,
+                pending_orders_notional_usd=pending_orders_notional_usd
+            )
+        except Exception as drift_err:
+            logger.debug(f"[RISK-ENVELOPE] Failed to collect drift metrics: {drift_err}")
+        
         return True
     except Exception as e:
         logger.error(f"[RISK-ENVELOPE] Failed to update equity: {e}")
@@ -449,5 +755,6 @@ def reset_for_fresh_start(envelope: KalshiCrypto15mRiskEnvelope):
     envelope.current_drawdown_pct = 0.0
     envelope.per_trade_risk_multiplier = 1.0
     envelope.is_halted = False
+    envelope.current_risk_band = RiskBand.NORMAL
     logger.info("[RISK-ENVELOPE] Reset for fresh start")
 

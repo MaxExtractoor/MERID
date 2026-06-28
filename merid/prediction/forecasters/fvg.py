@@ -37,6 +37,32 @@ _FVG_MIN_GAP_CENTS = float(os.getenv("MERID_FVG_MIN_GAP_CENTS", "2.0"))  # Minim
 _FVG_FILL_THRESHOLD_CENTS = float(os.getenv("MERID_FVG_FILL_THRESHOLD", "5.0"))  # Within 5c = filling
 _FVG_ATR_PERIOD = int(os.getenv("MERID_FVG_ATR_PERIOD", "14"))
 
+# CRITICAL FIX: Validate FVG parameters are reasonable
+if _FVG_WINDOW_SIZE < 1 or _FVG_WINDOW_SIZE > 1000:
+    logger.warning(
+        "[FVG] Invalid MERID_FVG_WINDOW_SIZE=%s - using default 20",
+        _FVG_WINDOW_SIZE
+    )
+    _FVG_WINDOW_SIZE = 20
+if _FVG_MIN_GAP_CENTS < 0 or _FVG_MIN_GAP_CENTS > 100:
+    logger.warning(
+        "[FVG] Invalid MERID_FVG_MIN_GAP_CENTS=%s - using default 2.0",
+        _FVG_MIN_GAP_CENTS
+    )
+    _FVG_MIN_GAP_CENTS = 2.0
+if _FVG_FILL_THRESHOLD_CENTS < 0 or _FVG_FILL_THRESHOLD_CENTS > 100:
+    logger.warning(
+        "[FVG] Invalid MERID_FVG_FILL_THRESHOLD=%s - using default 5.0",
+        _FVG_FILL_THRESHOLD_CENTS
+    )
+    _FVG_FILL_THRESHOLD_CENTS = 5.0
+if _FVG_ATR_PERIOD < 1 or _FVG_ATR_PERIOD > 100:
+    logger.warning(
+        "[FVG] Invalid MERID_FVG_ATR_PERIOD=%s - using default 14",
+        _FVG_ATR_PERIOD
+    )
+    _FVG_ATR_PERIOD = 14
+
 
 @dataclass
 class FVG:

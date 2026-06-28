@@ -96,6 +96,27 @@ class SentimentVolConfig:
         default_factory=lambda: float(os.getenv("KALSHI_VOL_EXTREME_MIN", "1.20"))
     )
     
+    # Update __post_init__ to also validate volatility thresholds
+    def __post_init__(self):
+        # CRITICAL FIX: Validate sentiment thresholds are in valid range [0, 100]
+        for field_name in ["EXTREME_FEAR_MAX", "FEAR_MAX", "GREED_MIN", "EXTREME_GREED_MIN"]:
+            value = getattr(self, field_name)
+            if value < 0 or value > 100:
+                logger.warning(
+                    "[SENTIMENT-VOL] Invalid %s=%s - clamping to [0, 100]",
+                    field_name, value
+                )
+                setattr(self, field_name, max(0, min(100, value)))
+        # CRITICAL FIX: Validate volatility thresholds are reasonable positive values
+        for field_name in ["VOL_DEAD_MAX", "VOL_LOW_MAX", "VOL_TARGET", "VOL_HIGH_MIN", "VOL_EXTREME_MIN"]:
+            value = getattr(self, field_name)
+            if value < 0 or value > 5.0:
+                logger.warning(
+                    "[SENTIMENT-VOL] Invalid %s=%s - clamping to [0, 5.0]",
+                    field_name, value
+                )
+                setattr(self, field_name, max(0.0, min(5.0, value)))
+    
     # ── Uncertainty (Vol-of-Vol) Thresholds ─────────────────────────────────
     # When vol-of-vol is high, we penalize sizing further
     UNCERTAINTY_STABLE_MAX: float = field(
@@ -749,6 +770,17 @@ def create_volatility_scalar(
 ) -> VolatilityScalar:
     """Factory to create VolatilityScalar with auto-classified regime."""
     regime = compute_volatility_regime(value)
+    unc_regime = compute_uncertainty_regime(uncertainty)
+    return VolatilityScalar(
+        value=value,
+        regime=regime,
+        uncertainty=uncertainty,
+        uncertainty_regime=unc_regime,
+        source=source,
+        confidence=confidence,
+        lookback_hours=lookback_hours,
+        raw_data=raw_data,
+    )
     unc_regime = compute_uncertainty_regime(uncertainty)
     return VolatilityScalar(
         value=value,

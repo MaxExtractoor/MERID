@@ -11,13 +11,39 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from core.event_bus import event_stream
-from core.settings import MAX_TOOL_RESULTS, OLLAMA_BASE_URL, OLLAMA_GENERATE_ENDPOINT
-from core.time_authority import current_time
-from tools.web_search import web_search
+# Optional event bus for telemetry - not required for 15m Kalshi stack
+try:
+    from merid.core.event_bus import event_stream
+    _EVENT_BUS_AVAILABLE = True
+except ImportError:
+    # Event bus not available - agents will work without telemetry
+    event_stream = None
+    _EVENT_BUS_AVAILABLE = False
+
+# Optional settings module - not required for 15m Kalshi stack
+try:
+    from merid.core.settings import MAX_TOOL_RESULTS, OLLAMA_BASE_URL, OLLAMA_GENERATE_ENDPOINT
+    _SETTINGS_AVAILABLE = True
+except ImportError:
+    # Settings not available - use defaults
+    MAX_TOOL_RESULTS = 10
+    OLLAMA_BASE_URL = "http://localhost:11434"
+    OLLAMA_GENERATE_ENDPOINT = "/api/generate"
+    _SETTINGS_AVAILABLE = False
+
+# Optional time authority module - not required for 15m Kalshi stack
+try:
+    from merid.core.time_authority import current_time
+    _TIME_AUTHORITY_AVAILABLE = True
+except ImportError:
+    # Time authority not available - use time.time()
+    import time
+    current_time = time.time
+    _TIME_AUTHORITY_AVAILABLE = False
+from merid.tools.web_search import web_search
 from utils.logger import get_logger
-from agents.reflection.integration import get_reflection_system
-from agents.explainability import (
+from merid.agents.reflection.integration import get_reflection_system
+from merid.agents.explainability import (
     get_explainability_tracker, create_reasoning_builder, DecisionType
 )
 
@@ -105,10 +131,11 @@ class BaseAgent:
 
     async def process(self, energy: Dict[str, Any], phase: str = "reasoning") -> Dict[str, Any]:
         """Execute the agent reasoning pipeline for a single energy packet."""
-        await event_stream.publish(
-            "agent:start",
-            {"agent": self.agent_id, "energy_id": energy["energy_id"], "phase": phase},
-        )
+        if _EVENT_BUS_AVAILABLE and event_stream:
+            await event_stream.publish(
+                "agent:start",
+                {"agent": self.agent_id, "energy_id": energy["energy_id"], "phase": phase},
+            )
         self.logger.info("Processing energy %s", energy["energy_id"])
 
         research_findings = await self._gather_research(energy)
@@ -189,10 +216,11 @@ class BaseAgent:
             }
         )
 
-        await event_stream.publish(
-            "agent:result",
-            {"agent": self.agent_id, "energy_id": energy["energy_id"], "result": result},
-        )
+        if _EVENT_BUS_AVAILABLE and event_stream:
+            await event_stream.publish(
+                "agent:result",
+                {"agent": self.agent_id, "energy_id": energy["energy_id"], "result": result},
+            )
         return result
 
     async def _gather_research(self, energy: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -280,7 +308,7 @@ Instructions:
 
         try:
             async with _MODEL_SEMAPHORE:
-                async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=5.0)) as client:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=10.0)) as client:
                     response = await client.post(_OLLAMA_URL, json=payload)
                     response.raise_for_status()
                     data = response.json()

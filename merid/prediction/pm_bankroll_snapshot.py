@@ -30,11 +30,11 @@ def build_agent_grid_bankroll_overlay(
     agents: List[Any] = []
 
     try:
-        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_grid_15m import get_agent_grid
 
         grid = get_agent_grid()
-        grid_on = bool(grid.is_running)
-        agents = list(getattr(grid, "agents", []) or [])
+        grid_on = bool(grid._running if grid else False)
+        agents = list(getattr(grid, "_agents", []) or [])
     except Exception as exc:
         logger.debug("agent_grid overlay: grid unavailable (%s)", exc)
 

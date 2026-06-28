@@ -199,7 +199,11 @@ class GridContext:
             
             # Check cycle age
             max_age = max_age_seconds if max_age_seconds is not None else self._winner_max_age_seconds
-            age = (datetime.now(timezone.utc) - self._current_cycle.timestamp).total_seconds()
+            # Handle both datetime and float (timestamp) types
+            timestamp = self._current_cycle.timestamp
+            if isinstance(timestamp, (int, float)):
+                timestamp = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+            age = (datetime.now(timezone.utc) - timestamp).total_seconds()
             if age > max_age:
                 logger.debug(
                     "[GRID_CONTEXT] Cycle too old: age=%.0fs > max=%.0fs",
@@ -230,7 +234,11 @@ class GridContext:
             
             # Check cycle age
             max_age = max_age_seconds if max_age_seconds is not None else self._winner_max_age_seconds
-            age = (datetime.now(timezone.utc) - self._current_cycle.timestamp).total_seconds()
+            # Handle both datetime and float (timestamp) types
+            timestamp = self._current_cycle.timestamp
+            if isinstance(timestamp, (int, float)):
+                timestamp = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+            age = (datetime.now(timezone.utc) - timestamp).total_seconds()
             if age > max_age:
                 return False
             
@@ -282,7 +290,11 @@ class GridContext:
         with self._lock:
             if not self._current_cycle:
                 return -1.0
-            return (datetime.now(timezone.utc) - self._current_cycle.timestamp).total_seconds()
+            # Handle both datetime and float (timestamp) types
+            timestamp = self._current_cycle.timestamp
+            if isinstance(timestamp, (int, float)):
+                timestamp = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+            return (datetime.now(timezone.utc) - timestamp).total_seconds()
     
     def _extract_asset_from_ticker(self, ticker: str) -> Optional[str]:
         """Extract asset symbol from Kalshi ticker.
@@ -375,10 +387,7 @@ class GridContext:
 
 # Singleton instance
 _global_grid_context: Optional[GridContext] = None
-# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-# _global_lock = threading.Lock()
-_global_lock = None  # Disabled to prevent startup hang
+_global_lock = None
 
 
 def get_grid_context(

@@ -65,6 +65,13 @@ _HIGH_EDGE = 0.06        # 6% edge — worth crossing for
 _URGENT_MINUTES = 30.0   # < 30 min = urgent
 _DEEP_QUEUE = 200        # > 200 contracts at touch = long wait
 
+# Maker-first policy thresholds
+_T_URGENT = 60.0         # < 60 seconds = urgent (use taker)
+_LARGE_EDGE = 0.10       # > 10% edge = large (use taker)
+_TIGHT_SPREAD_TICKS = 1  # < 1 tick spread = tight (use taker)
+_WIDE_SPREAD_TICKS = 3   # > 3 ticks spread = wide (use maker)
+_LARGE_SIZE = 10         # > 10 contracts = large (consider split)
+
 
 class ExecutionIntelligence:
     """Decides between crossing the spread and joining the queue.
@@ -227,6 +234,79 @@ class ExecutionIntelligence:
 
         self._record(decision)
         return decision
+    
+    def choose_execution_mode(
+        self,
+        edge: float,
+        spread_ticks: float,
+        time_to_expiry: float,
+        size: int,
+        vol_regime: str = "NORMAL"
+    ) -> str:
+        """
+        Choose execution mode based on edge, spread, urgency, and size.
+        
+        Maker-first policy:
+        - Large edge, short time, or very tight spread → taker
+        - Moderate edge, wide spreads, and ample time → maker
+        - Large size relative to depth → split_maker_taker
+        
+        Args:
+            edge: Edge magnitude in probability space (0.0 to 1.0)
+            spread_ticks: Spread in ticks (cents for Kalshi $1 payoff)
+            time_to_expiry: Time to expiry in seconds
+            size: Order size in contracts
+            vol_regime: Volatility regime ("LOW", "NORMAL", "HIGH", "EXTREME")
+        
+        Returns:
+            Execution mode: "taker", "maker", or "split_maker_taker"
+        """
+        # Urgent conditions: use taker
+        if time_to_expiry < _T_URGENT:
+            logger.debug(
+                "[EXECUTION-MODE] Urgent: time_to_expiry=%.1fs < %.1fs → taker",
+                time_to_expiry, _T_URGENT
+            )
+            return "taker"
+        
+        # Large edge: use taker to capture before it disappears
+        if edge > _LARGE_EDGE:
+            logger.debug(
+                "[EXECUTION-MODE] Large edge: edge=%.3f > %.3f → taker",
+                edge, _LARGE_EDGE
+            )
+            return "taker"
+        
+        # Tight spread: cheap to cross, use taker
+        if spread_ticks < _TIGHT_SPREAD_TICKS:
+            logger.debug(
+                "[EXECUTION-MODE] Tight spread: spread=%.1f ticks < %.1f → taker",
+                spread_ticks, _TIGHT_SPREAD_TICKS
+            )
+            return "taker"
+        
+        # Wide spread: expensive to cross, use maker
+        if spread_ticks >= _WIDE_SPREAD_TICKS:
+            logger.debug(
+                "[EXECUTION-MODE] Wide spread: spread=%.1f ticks >= %.1f → maker",
+                spread_ticks, _WIDE_SPREAD_TICKS
+            )
+            return "maker"
+        
+        # Large size: consider split
+        if size >= _LARGE_SIZE:
+            logger.debug(
+                "[EXECUTION-MODE] Large size: size=%d >= %d → split_maker_taker",
+                size, _LARGE_SIZE
+            )
+            return "split_maker_taker"
+        
+        # Default: maker (passive execution preferred)
+        logger.debug(
+            "[EXECUTION-MODE] Default: edge=%.3f spread=%.1f ticks time=%.1fs size=%d → maker",
+            edge, spread_ticks, time_to_expiry, size
+        )
+        return "maker"
 
     def _format_reason(self, scores: Dict[str, float], strategy: str) -> str:
         top = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:2]
@@ -258,10 +338,7 @@ class ExecutionIntelligence:
 # ── Singleton ────────────────────────────────────────────────────────────
 
 _intel: Optional[ExecutionIntelligence] = None
-# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-# _intel_lock = threading.Lock()
-_intel_lock = None  # Disabled to prevent startup hang
+_intel_lock = None
 
 
 def get_execution_intel() -> ExecutionIntelligence:

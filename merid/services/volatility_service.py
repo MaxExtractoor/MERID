@@ -67,7 +67,14 @@ class VolatilityEstimate:
     
     def is_fresh(self, max_age_seconds: float = 60.0) -> bool:
         """Check if estimate is fresh enough to use."""
-        age = (datetime.now(timezone.utc) - self.timestamp).total_seconds()
+        # Handle both datetime and float (timestamp) types
+        timestamp = self.timestamp
+        if isinstance(timestamp, (int, float)):
+            timestamp = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        elif timestamp.tzinfo is None:
+            # Make timezone-naive datetime timezone-aware
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - timestamp).total_seconds()
         return age < max_age_seconds
     
     def is_high_vol(self, threshold: float = 0.50) -> bool:
@@ -345,27 +352,66 @@ class VolatilityService:
             return None
     
     def _asset_to_series_ticker(self, asset: str, timeframe: str) -> str:
-        """Convert asset/timeframe to series ticker."""
-        # Map to Kalshi series convention
+        """Convert asset/timeframe to series ticker.
+
+        Updated 2026-05-25: Use 15M series tickers (KXBTC15M, etc.) for 15m timeframe
+        to match agent grid and catalog discovery. Other timeframes use base tickers.
+        """
+        # Map assets to their series tickers per timeframe
         asset_map = {
-            "BTC": "KXBTC",
-            "ETH": "KXETH",
-            "SOL": "KXSOL",
-            "XRP": "KXXRP",
-            "DOGE": "KXDOGE",
+            "BTC": {
+                "15m": "KXBTC15M",
+                "1h": "KXBTC",
+                "hourly": "KXBTC",
+                "daily": "KXBTC-D",
+                "weekly": "KXBTC-W",
+            },
+            "ETH": {
+                "15m": "KXETH15M",
+                "1h": "KXETH",
+                "hourly": "KXETH",
+                "daily": "KXETH-D",
+                "weekly": "KXETH-W",
+            },
+            "SOL": {
+                "15m": "KXSOL15M",
+                "1h": "KXSOL",
+                "hourly": "KXSOL",
+                "daily": "KXSOL-D",
+                "weekly": "KXSOL-W",
+            },
+            "XRP": {
+                "15m": "KXXRP15M",
+                "1h": "KXXRP",
+                "hourly": "KXXRP",
+                "daily": "KXXRP-D",
+                "weekly": "KXXRP-W",
+            },
+            "DOGE": {
+                "15m": "KXDOGE15M",
+                "1h": "KXDOGE",
+                "hourly": "KXDOGE",
+                "daily": "KXDOGE-D",
+                "weekly": "KXDOGE-W",
+            },
         }
-        
+
+        asset_upper = asset.upper()
+        timeframe_lower = timeframe.lower()
+
+        if asset_upper in asset_map and timeframe_lower in asset_map[asset_upper]:
+            return asset_map[asset_upper][timeframe_lower]
+
+        # Fallback for unknown assets/timeframes
         suffix_map = {
-            "15m": "-15M",
+            "15m": "15M",
             "1h": "",
             "hourly": "",
             "daily": "-D",
             "weekly": "-W",
         }
-        
-        base = asset_map.get(asset.upper(), f"KX{asset.upper()}")
-        suffix = suffix_map.get(timeframe.lower(), "")
-        
+        base = f"KX{asset_upper}"
+        suffix = suffix_map.get(timeframe_lower, "")
         return f"{base}{suffix}"
     
     def _normalize_candles(self, data: Any) -> List[CandleData]:

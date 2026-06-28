@@ -17,10 +17,26 @@ def quarter_kelly_contracts(
     edge: float,
     price_cents: int,
     fractional_kelly: float = 0.25,
-    max_contracts: int = 50,  # Increased to 50 for 15m scalper mode (was 25)
-    min_contracts: int = 1,
+    max_contracts: int,  # REQUIRED: Must come from profile config (no default)
+    min_contracts: int,  # REQUIRED: Must come from profile config (no default)
 ) -> int:
-    """Map bankroll + edge to an integer contract count (``merid.formulas.quarter_kelly_size``)."""
+    """Map bankroll + edge to an integer contract count (``merid.formulas.quarter_kelly_size``).
+    
+    CRITICAL: max_contracts and min_contracts are REQUIRED parameters with no defaults.
+    These must be provided from the profile config (kalshi_crypto_15m.yaml) to ensure
+    single source of truth for risk constraints. Silent defaults have been removed
+    to prevent misconfiguration.
+    
+    Policy:
+    - edge <= 0: No trade (return 0) - negative or zero edge is not tradeable
+    - edge > 0: At least min_contracts if Kelly suggests trading, subject to max_contracts
+    - This is "minimum viable trade size" behavior, not pure Kelly sizing
+    - Caller must ensure min_contracts is consistent with min_notional_usd and risk envelopes
+    """
+    # POLICY: No trade when edge <= 0 (negative or zero edge is not tradeable)
+    if edge <= 0:
+        return 0
+    
     inp = PositionSizingInputs(
         bankroll_cents=bankroll_cents,
         edge=edge,
@@ -28,17 +44,23 @@ def quarter_kelly_contracts(
         fractional_kelly=fractional_kelly,
     )
     q, _, _warn = quarter_kelly_size(inp)
-    # 24/7-SCALPER-FIX: Ensure at least min_contracts when edge is positive
+    
+    # MINIMUM VIABLE TRADE: Ensure at least min_contracts when edge > 0
     # Prevents Kelly returning 0 for small bankrolls with positive edge
-    if edge > 0 and q < min_contracts:
-        return min_contracts
+    # This is intentional "always trade at least 1 contract when edge > 0" behavior
     if q < min_contracts:
-        return 0
-    return max(min_contracts, min(max_contracts, q))
+        return min_contracts
+    
+    # Clamp to [min_contracts, max_contracts] when Kelly suggests >= min_contracts
+    return min(max_contracts, q)
 
 
 def timeframe_exposure_multiplier(_timeframe: str) -> float:
-    """CT ``TraderConfig.series_exposure_multiplier`` — for AgentGrid sizing if needed."""
+    """CT ``TraderConfig.series_exposure_multiplier`` — for AgentGrid sizing if needed.
+    
+    NOTE: These multipliers are strategy policy parameters (hardcoded for now).
+    For profile-driven tuning, these could be moved to kalshi_crypto_15m.yaml in the future.
+    """
     _tf = (_timeframe or "").strip().lower()
     m: dict[str, float] = {
         "15m": 0.80,      # Increased from 0.40 for meaningful 15m scalping (Issue #3 fix)
@@ -54,7 +76,13 @@ def timeframe_exposure_multiplier(_timeframe: str) -> float:
 
 
 def clip_contracts_by_timeframe(contracts: int, timeframe: str) -> int:
-    """Scale integer contracts down for shorter timeframes (CT exposure curve)."""
+    """Scale integer contracts down for shorter timeframes (CT exposure curve).
+    
+    NOTE: For shorter timeframes (mult < 1.0), this ensures at least 1 contract
+    if the input is positive. This is consistent with "always trade at least 1 contract
+    when we decide to trade" behavior, but must be aligned with min_notional_usd
+    and risk envelopes.
+    """
     if contracts <= 0:
         return 0
     mult = timeframe_exposure_multiplier(timeframe)

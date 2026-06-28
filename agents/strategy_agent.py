@@ -4,16 +4,16 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from agents.base_agent import BaseAgent
-from memory.store import reality_memory
-from social.social_aware_quant import get_social_aware_quant_engine
+from merid.agents.base_agent import BaseAgent
+from merid.memory.store import reality_memory
+from merid.social.social_aware_quant import get_social_aware_quant_engine
 
 # CRITICAL FIX: Lazy import to break circular import chain
 # core.social_strategy_router -> governance.multi_agent_risk_controls -> 
 # core.strategy_versioning -> governance.meta_audit_runtime -> 
 # agents.reflection_layer -> agents.strategy_agent (circular!)
 def _get_evaluate_social_trade():
-    from core.social_strategy_router import evaluate_social_trade
+    from merid.core.social_strategy_router import evaluate_social_trade
     return evaluate_social_trade
 
 ROLE_PROMPT = """

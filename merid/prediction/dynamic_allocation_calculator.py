@@ -91,10 +91,8 @@ class DynamicAllocationCalculator:
         self._risk_metrics: Dict[str, AssetRiskMetrics] = {}
         self._last_recompute = 0.0
         self._cached_allocations: Dict[str, Decimal] = {}
-        # TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-        # TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-        # self._cache_lock = threading.Lock()
-        self._cache_lock = None  # Disabled to prevent startup hang
+        # LEGACY REMOVAL: Threading lock removed - causing deadlock during startup
+        # Single-threaded FastAPI startup doesn't need lock protection
         self._cache_ttl_seconds = 600  # 10 minute TTL
         
     def _fetch_risk_metrics(self, asset: str) -> AssetRiskMetrics:
@@ -388,23 +386,15 @@ class DynamicAllocationCalculator:
 
 # Singleton instance
 _calculator_instance: Optional[DynamicAllocationCalculator] = None
-# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-# _calculator_lock = threading.Lock()
-_calculator_lock = None  # Disabled to prevent startup hang
+# LEGACY REMOVAL: Threading lock removed - causing deadlock during startup
+# Single-threaded FastAPI startup doesn't need lock protection
 
 
 def get_dynamic_allocation_calculator() -> DynamicAllocationCalculator:
     """Get the singleton DynamicAllocationCalculator instance."""
     global _calculator_instance
     if _calculator_instance is None:
-        if _calculator_lock is not None:
-            with _calculator_lock:
-                if _calculator_instance is None:
-                    _calculator_instance = DynamicAllocationCalculator()
-        else:
-            # Lock disabled - direct initialization (startup workaround)
-            _calculator_instance = DynamicAllocationCalculator()
+        _calculator_instance = DynamicAllocationCalculator()
     return _calculator_instance
 
 

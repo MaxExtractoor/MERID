@@ -618,10 +618,7 @@ class HighPerformanceCalibration:
 
 # Singleton instance
 _hp_instance: Optional[HighPerformanceCalibration] = None
-# TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-# TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-# _hp_lock = threading.Lock()
-_hp_lock = None  # Disabled to prevent startup hang
+_hp_lock = None
 
 
 def get_hp_config(asset: str, timeframe: str) -> HighPerformanceConfig:

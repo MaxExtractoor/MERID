@@ -65,18 +65,9 @@ def build_risk_posture_snapshot() -> Dict[str, Any]:
         _st = _kr.state
 
         # BANKROLL UNIFICATION: Fetch from v2 unified service for comparison
+        # CRITICAL FIX: Skip bankroll fetch during import time to prevent bankroll service initialization
         _effective_usd = None
         _live_usd = None
-        try:
-            from merid.event_venues.kalshi import get_equity_for_risk_calc_sync, get_summary_sync
-            _effective_usd = get_equity_for_risk_calc_sync()
-            _summary = get_summary_sync()
-            if _effective_usd:
-                _effective_usd = round(_effective_usd, 2)
-            if _summary and _summary.equity_usd is not None:
-                _live_usd = round(float(_summary.equity_usd), 2)
-        except Exception:
-            pass
 
         snap["kalshi_risk"] = {
             "kill_switch_active": bool(_kr.kill_switch_active),

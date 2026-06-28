@@ -1,3 +1,7 @@
+# LEGACY: not used by kalshi_crypto_15m_v2 profile
+# This module is for paper trading sessions and is only used by legacy profiles
+# The lean 15m stack uses live bankroll service (merid.event_venues.kalshi.bankroll_service_v2)
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

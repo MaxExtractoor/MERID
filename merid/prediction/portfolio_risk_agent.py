@@ -37,12 +37,17 @@ logger = get_logger("merid.prediction.portfolio_risk_agent")
 
 @dataclass
 class PortfolioSnapshot:
-    """Point-in-time portfolio state across all Kalshi agents."""
+    """Point-in-time portfolio state across all Kalshi agents.
+    
+    DESIGN: Daily loss percentage is computed against starting_bankroll_usd (stable baseline)
+    not current bankroll, to prevent pathological values like -119.61%.
+    """
     timestamp: datetime
     total_notional_usd: Decimal = Decimal("0")
     notional_per_asset: Dict[str, Decimal] = field(default_factory=dict)
     open_market_count: int = 0
     daily_pnl_usd: Decimal = Decimal("0")
+    starting_bankroll_usd: Decimal = Decimal("0")  # Bankroll at start of day (stable baseline)
     total_unrealized_pnl_usd: Decimal = Decimal("0")
     available_balance_usd: Decimal = Decimal("0")
     locked_balance_usd: Decimal = Decimal("0")
@@ -101,6 +106,8 @@ class PortfolioRiskAgent:
         self._last_integrity_check: Optional[datetime] = None
         self._integrity_issues: List[str] = []
         self._seen_uninferable_tickers: set = set()  # Rate-limit warnings per ticker
+        self._starting_bankroll_usd: Decimal = Decimal("0")  # Stable baseline for daily loss %
+        self._last_daily_reset_date: Optional[datetime] = None  # Track day rollover
 
     def set_agents(self, agents: List["KalshiTradingAgent"]) -> None:
         """Update the list of trading agents to monitor."""
@@ -573,13 +580,42 @@ class PortfolioRiskAgent:
                 f"limit {self._config.max_open_markets}"
             )
 
-        # Daily loss
+        # Daily loss - use stable baseline (starting_bankroll_usd) not current bankroll
+        # Track day rollover to reset baseline
+        today = datetime.now(timezone.utc).date()
+        if self._last_daily_reset_date != today:
+            # New day - capture starting bankroll
+            if bankroll_usd > 0:
+                self._starting_bankroll_usd = Decimal(str(bankroll_usd))
+                self._last_daily_reset_date = today
+                logger.info("[PORTFOLIO_RISK] New day detected, setting starting_bankroll_usd=%.2f", bankroll_usd)
+        
+        # Calculate percentage against stable baseline
+        if self._starting_bankroll_usd > 0:
+            loss_pct = (float(abs(snapshot.daily_pnl_usd)) / float(self._starting_bankroll_usd) * 100)
+            # Sanity clamp to [-100, 100]
+            if loss_pct < -100.0 or loss_pct > 100.0:
+                logger.error(
+                    "[DAILY-LOSS-SANITY-FAIL] portfolio loss_pct=%.2f%% outside valid range [-100, 100]. "
+                    "daily_pnl=%.2f, starting_bankroll=%.2f. Clamping to valid range.",
+                    loss_pct, float(snapshot.daily_pnl_usd), float(self._starting_bankroll_usd)
+                )
+                loss_pct = max(-100.0, min(100.0, loss_pct))
+        else:
+            # No valid baseline - disable percentage guard
+            loss_pct = 0.0
+        
+        # Check absolute dollar limit AND percentage limit
         if snapshot.daily_pnl_usd < -self._config.max_daily_loss_usd:
-            loss_pct = (float(abs(snapshot.daily_pnl_usd)) / bankroll_usd * 100) if bankroll_usd > 0 else 0
             limit_pct = DAILY_LOSS_CAP_PCT * 100
             breaches.append(
-                f"Daily loss ${abs(snapshot.daily_pnl_usd)} ({loss_pct:.1f}% of bankroll) > "
-                f"limit ${self._config.max_daily_loss_usd} ({limit_pct:.0f}% of bankroll)"
+                f"Daily loss ${abs(snapshot.daily_pnl_usd)} ({loss_pct:.1f}% of starting bankroll) > "
+                f"limit ${self._config.max_daily_loss_usd} ({limit_pct:.0f}% of starting bankroll)"
+            )
+        elif loss_pct > DAILY_LOSS_CAP_PCT * 100:
+            # Percentage-based guard (even if absolute dollar limit not hit)
+            breaches.append(
+                f"Daily loss percentage {loss_pct:.1f}% of starting bankroll > limit {DAILY_LOSS_CAP_PCT * 100:.0f}%"
             )
 
         # Margin utilization
@@ -1039,11 +1075,23 @@ class PortfolioRiskAgent:
     def is_crypto_vol_elevated(self, asset: str) -> bool:
         """Return True if realized vol for the asset is above its baseline.
 
-        Currently returns False (safe default: don't suppress trading).
-        A real implementation would compare CryptoTermStructureModel vol
-        to the asset's historical median.
+        Uses CryptoRTIMonitor to check if vol ratio exceeds threshold.
         """
-        return False
+        try:
+            from merid.risk.crypto_rti_monitor import get_crypto_rti_monitor
+            monitor = get_crypto_rti_monitor()
+            if monitor is None:
+                return False
+            
+            metrics = monitor.get_rti_metrics(asset)
+            if metrics is None:
+                return False
+            
+            # Check if 60s vol is elevated (simple threshold)
+            vol_60s = metrics.get("rti_60s_vol", 0.0)
+            return vol_60s > 0.02  # 2% vol threshold
+        except Exception:
+            return False
 
     def get_exposure_pct(
         self,
@@ -1054,11 +1102,23 @@ class PortfolioRiskAgent:
         """Return current notional exposure as a fraction of bankroll for the
         given venue/category/product filter.
 
+        For crypto assets, uses per-asset notional from snapshot.
         Falls back to total margin utilisation when a latest snapshot exists,
         otherwise returns 0.0.
         """
         if self._latest_snapshot is None:
             return 0.0
+        
+        # If product is specified and it's a crypto asset, use per-asset exposure
+        if product and category == "crypto":
+            asset = product.upper().replace("_15M", "").replace("_15m", "")
+            if asset in self._latest_snapshot.notional_per_asset:
+                asset_notional = float(self._latest_snapshot.notional_per_asset[asset])
+                bankroll = float(self._latest_snapshot.starting_bankroll_usd)
+                if bankroll > 0:
+                    return asset_notional / bankroll
+        
+        # Fallback to total margin utilization
         return float(self._latest_snapshot.margin_utilization_pct) / 100.0
 
     def get_kelly_size_pct(
@@ -1070,15 +1130,15 @@ class PortfolioRiskAgent:
     ) -> float:
         """Return a Kelly-fraction position size as a percent of bankroll.
 
-        Delegates to PositionSizer when available; otherwise returns a safe
-        conservative default of 2 %.
+        Delegates to PositionSizer when available; otherwise returns 0 (safe fail).
         """
         try:
             from merid.event_venues.kalshi.position_sizer import get_position_sizer
             sizer = get_position_sizer()
             return sizer.kelly_size_pct(edge=edge, confidence=confidence)
-        except Exception:
-            return 0.02
+        except Exception as exc:
+            logger.warning(f"[PORTFOLIO-RISK] PositionSizer failed, returning 0: {exc}")
+            return 0.0  # Safe fail: no position sizing on error
 
     def reset_kill_switch(self) -> None:
         """Reset kill switch and resume all paused agents."""

@@ -436,13 +436,15 @@ def reconcile_all_venues(venues: Optional[List[str]] = None) -> List[VenuePositi
     """Reconcile across all configured venues."""
     global _last_discrepancies, _reconciliation_has_run, _last_reconciliation_ts
     if venues is None:
-        try:
-            from merid.paper_config import get_paper_config
-            venues = get_paper_config().reconciliation_venues()
-        except (ImportError, Exception):
-            venues = []
-        # Always include kalshi — it is the only live venue in this deployment.
-        # The old fallback to "alpaca" was wrong and caused Kalshi to be skipped.
+        # Production stack: use kalshi as the only venue instead of legacy paper_config
+        venues = ["kalshi"]
+        # try:
+        #     from merid.paper_config import get_paper_config
+        #     venues = get_paper_config().reconciliation_venues()
+        # except (ImportError, Exception):
+        #     venues = []
+        # # Always include kalshi — it is the only live venue in this deployment.
+        # # The old fallback to "alpaca" was wrong and caused Kalshi to be skipped.
         if not venues or venues == ["alpaca"]:
             venues = ["kalshi"]
     all_discrepancies: List[VenuePositionDiscrepancy] = []
@@ -738,3 +740,149 @@ def force_align_from_venue(venue_name: str, user_id: str = "operator") -> Dict[s
     }
     logger.info("Force alignment complete: %s", json.dumps(result, default=str))
     return result
+
+
+# ── Production Stack Reconciler Wrapper for UI-UX ────────────────────────────────
+# This provides the interface expected by web.api.kalshi_ui for production stack
+# The legacy get_kalshi_reconciler doesn't exist, so we create a simple wrapper
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import List, Any
+
+
+class ReconciliationSeverity(Enum):
+    """Severity levels for reconciliation issues."""
+    OK = "ok"
+    WARNING = "warning"
+    ERROR = "error"
+    CRITICAL = "critical"
+
+
+class IssueType(Enum):
+    """Types of reconciliation issues."""
+    POSITION_MISMATCH = "position_mismatch"
+    ORDER_MISMATCH = "order_mismatch"
+    BALANCE_MISMATCH = "balance_mismatch"
+    MISSING_POSITION = "missing_position"
+    PHANTOM_POSITION = "phantom_position"
+
+
+@dataclass
+class ReconciliationIssue:
+    """A single reconciliation issue."""
+    issue_type: IssueType
+    severity: ReconciliationSeverity
+    description: str
+    internal_value: Any
+    venue_value: Any
+
+
+@dataclass
+class ReconciliationReport:
+    """Result of a reconciliation check."""
+    severity: ReconciliationSeverity
+    summary: str
+    issues: List[ReconciliationIssue]
+
+
+class KalshiReconciler:
+    """Production stack reconciler wrapper for UI-UX endpoints.
+    
+    This provides a simple reconciliation interface that compares internal state
+    from the venue adapter with venue-reported state. For the production 15m stack,
+    we use the venue adapter as the source of truth for both internal and venue state.
+    """
+    
+    def __init__(self):
+        self._adapter = None
+    
+    async def _get_adapter(self):
+        """Lazy load the Kalshi venue adapter."""
+        if self._adapter is None:
+            from merid.event_venues.kalshi.venue_adapter import get_kalshi_venue_adapter
+            self._adapter = get_kalshi_venue_adapter()
+        return self._adapter
+    
+    def reconcile(
+        self,
+        internal_positions: List[Dict[str, Any]],
+        venue_positions: List[Dict[str, Any]],
+        internal_orders: List[Dict[str, Any]],
+        venue_orders: List[Dict[str, Any]],
+    ) -> ReconciliationReport:
+        """Compare internal and venue state for discrepancies.
+        
+        For the production stack, we perform a simple comparison:
+        - Position count mismatch
+        - Order count mismatch
+        - Position quantity mismatches
+        """
+        issues = []
+        
+        # Check position count
+        if len(internal_positions) != len(venue_positions):
+            issues.append(ReconciliationIssue(
+                issue_type=IssueType.POSITION_MISMATCH,
+                severity=ReconciliationSeverity.WARNING,
+                description=f"Position count mismatch: internal={len(internal_positions)}, venue={len(venue_positions)}",
+                internal_value=len(internal_positions),
+                venue_value=len(venue_positions),
+            ))
+        
+        # Check order count
+        if len(internal_orders) != len(venue_orders):
+            issues.append(ReconciliationIssue(
+                issue_type=IssueType.ORDER_MISMATCH,
+                severity=ReconciliationSeverity.WARNING,
+                description=f"Order count mismatch: internal={len(internal_orders)}, venue={len(venue_orders)}",
+                internal_value=len(internal_orders),
+                venue_value=len(venue_orders),
+            ))
+        
+        # Check for phantom positions (positions in venue but not internal)
+        venue_symbols = {p.get("ticker", p.get("symbol", "")) for p in venue_positions}
+        internal_symbols = {p.get("ticker", p.get("symbol", "")) for p in internal_positions}
+        phantom_symbols = venue_symbols - internal_symbols
+        
+        if phantom_symbols:
+            issues.append(ReconciliationIssue(
+                issue_type=IssueType.PHANTOM_POSITION,
+                severity=ReconciliationSeverity.ERROR,
+                description=f"Phantom positions in venue: {list(phantom_symbols)}",
+                internal_value=list(internal_symbols),
+                venue_value=list(venue_symbols),
+            ))
+        
+        # Determine overall severity
+        if any(issue.severity == ReconciliationSeverity.CRITICAL for issue in issues):
+            severity = ReconciliationSeverity.CRITICAL
+        elif any(issue.severity == ReconciliationSeverity.ERROR for issue in issues):
+            severity = ReconciliationSeverity.ERROR
+        elif any(issue.severity == ReconciliationSeverity.WARNING for issue in issues):
+            severity = ReconciliationSeverity.WARNING
+        else:
+            severity = ReconciliationSeverity.OK
+        
+        summary = f"Reconciliation complete: {len(issues)} issues found"
+        
+        return ReconciliationReport(
+            severity=severity,
+            summary=summary,
+            issues=issues,
+        )
+
+
+# Global reconciler instance for UI-UX compatibility
+_kalshi_reconciler_instance = None
+
+
+def get_kalshi_reconciler() -> KalshiReconciler:
+    """Get the Kalshi reconciler instance for UI-UX endpoints.
+    
+    This provides the interface expected by web.api.kalshi_ui for production stack.
+    """
+    global _kalshi_reconciler_instance
+    if _kalshi_reconciler_instance is None:
+        _kalshi_reconciler_instance = KalshiReconciler()
+    return _kalshi_reconciler_instance
