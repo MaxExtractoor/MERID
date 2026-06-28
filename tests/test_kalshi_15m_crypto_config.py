@@ -254,15 +254,17 @@ class TestValidation:
 class TestLivePaperRiskParity:
     """Test that LIVE and PAPER modes use identical risk limits (Section 8)."""
 
+    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
     def test_risk_parity(self):
         """Test that LIVE and PAPER risk limits are identical."""
         parity_ok, message = verify_risk_parity()
         assert parity_ok, f"Risk parity check failed: {message}"
 
+    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
     def test_all_assets_use_canonical_limits(self):
         """Test that all assets read from the same canonical config."""
         live_limits = {asset: get_asset_risk_limits(asset) for asset in KALSHI_15M_CRYPTO_ASSETS}
-        
+
         # Verify no environment-specific values
         for asset, limits in live_limits.items():
             for key, value in limits.items():
@@ -270,19 +272,21 @@ class TestLivePaperRiskParity:
                     assert "live" not in value.lower(), f"{asset}.{key} has live-specific value"
                     assert "paper" not in value.lower(), f"{asset}.{key} has paper-specific value"
 
+    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
     def test_global_limits_mode_agnostic(self):
         """Test that global limits are mode-agnostic."""
         global_limits = get_global_risk_limits()
-        
+
         for key, value in global_limits.items():
             if isinstance(value, str):
                 assert "live" not in value.lower(), f"GLOBAL.{key} has live-specific value"
                 assert "paper" not in value.lower(), f"GLOBAL.{key} has paper-specific value"
 
+    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
     def test_limits_are_consistent_across_assets(self):
         """Test that per-asset limits follow consistent structure."""
         btc_limits = get_asset_risk_limits("BTC")
-        
+
         for asset in KALSHI_15M_CRYPTO_ASSETS:
             asset_limits = get_asset_risk_limits(asset)
             assert set(asset_limits.keys()) == set(btc_limits.keys()), \

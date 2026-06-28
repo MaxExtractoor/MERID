@@ -263,7 +263,7 @@ class TestNoDirectKalshiAPICalls:
     
     def test_no_direct_kalshi_rest_urls(self):
         """No view should contain direct Kalshi API URLs."""
-        kalshi_domains = ["api.elections.kalshi.com", "demo-api.kalshi.co"]
+        kalshi_domains = ["external-api.kalshi.com", "external-api.demo.kalshi.co"]
         
         for view in VIEWS:
             if not view.kalshi_only:

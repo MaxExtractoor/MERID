@@ -49,6 +49,105 @@ class TestRestingOrderRecord:
         # Monitor should filter this out in register_order
 
 
+class Test15mMarketOrderExpiration:
+    """Test order expiration logic for 15m markets."""
+
+    def test_sets_max_hold_time_for_15m_markets(self):
+        """Test that 15m markets get 3-minute max hold time."""
+        from merid.event_venues.kalshi.resting_order_monitor import (
+            RestingOrderRecord,
+            RestingOrderMonitor,
+            MAX_HOLD_SECONDS_15M,
+        )
+        
+        monitor = RestingOrderMonitor()
+        
+        record = RestingOrderRecord(
+            kalshi_order_id="kalshi_order_123",
+            intent_id="intent_123",
+            ticker="KXBTC-15M-12345",  # 15m market ticker
+            side="yes",
+            action="buy",
+            original_size=10,
+            remaining_size=10,
+            price_cents=50,
+            asset="BTC",
+            window_resolution_id="wr_123",
+            exit_policy_id="ep_123",
+            risk_tier="A",
+            max_hold_seconds=900,  # Default value
+            time_in_force="gtc",
+        )
+        
+        monitor.register_order(record)
+        
+        # Should be overridden to 180s for 15m markets
+        assert record.max_hold_seconds == MAX_HOLD_SECONDS_15M
+        assert MAX_HOLD_SECONDS_15M == 180
+
+    def test_preserves_max_hold_time_for_non_15m_markets(self):
+        """Test that non-15m markets keep their original max hold time."""
+        from merid.event_venues.kalshi.resting_order_monitor import (
+            RestingOrderRecord,
+            RestingOrderMonitor,
+        )
+        
+        monitor = RestingOrderMonitor()
+        
+        record = RestingOrderRecord(
+            kalshi_order_id="kalshi_order_123",
+            intent_id="intent_123",
+            ticker="KXBTC-1H-12345",  # Non-15m market ticker
+            side="yes",
+            action="buy",
+            original_size=10,
+            remaining_size=10,
+            price_cents=50,
+            asset="BTC",
+            window_resolution_id="wr_123",
+            exit_policy_id="ep_123",
+            risk_tier="A",
+            max_hold_seconds=900,  # Custom value
+            time_in_force="gtc",
+        )
+        
+        monitor.register_order(record)
+        
+        # Should preserve original value for non-15m markets
+        assert record.max_hold_seconds == 900
+
+    def test_detects_15m_with_dash_pattern(self):
+        """Test that 15m detection works with -15M pattern."""
+        from merid.event_venues.kalshi.resting_order_monitor import (
+            RestingOrderRecord,
+            RestingOrderMonitor,
+            MAX_HOLD_SECONDS_15M,
+        )
+        
+        monitor = RestingOrderMonitor()
+        
+        record = RestingOrderRecord(
+            kalshi_order_id="kalshi_order_123",
+            intent_id="intent_123",
+            ticker="KXETH-15M-67890",  # -15M pattern
+            side="yes",
+            action="buy",
+            original_size=10,
+            remaining_size=10,
+            price_cents=50,
+            asset="ETH",
+            window_resolution_id="wr_123",
+            exit_policy_id="ep_123",
+            risk_tier="A",
+            max_hold_seconds=900,
+            time_in_force="gtc",
+        )
+        
+        monitor.register_order(record)
+        
+        assert record.max_hold_seconds == MAX_HOLD_SECONDS_15M
+
+
 class TestRecheckResult:
     """Tests for RecheckResult dataclass."""
     

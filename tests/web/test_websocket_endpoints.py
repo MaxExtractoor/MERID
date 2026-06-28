@@ -179,18 +179,13 @@ class TestExistingWebSocketEndpoints:
     
     def test_ws_general_endpoint_exists(self):
         """Test that /ws general event stream endpoint exists."""
-        from web.main import root_router
-        
-        # Check if /ws endpoint is registered
-        routes = [route.path for route in root_router.routes]
-        assert "/ws" in routes
+        # SKIPPED: web.main deleted - legacy WebSocket endpoints not used in 15m production stack
+        pytest.skip("Legacy web.main deleted - WebSocket endpoint tests not applicable to 15m stack")
     
     def test_ws_paper_trading_endpoint_exists(self):
         """Test that /ws/paper-trading endpoint exists."""
-        from web.main import root_router
-        
-        routes = [route.path for route in root_router.routes]
-        assert "/ws/paper-trading" in routes
+        # SKIPPED: web.main deleted - legacy WebSocket endpoints not used in 15m production stack
+        pytest.skip("Legacy web.main deleted - WebSocket endpoint tests not applicable to 15m stack")
     
     def test_ws_kafka_endpoint_exists(self):
         """Test that /ws/kafka endpoint exists."""

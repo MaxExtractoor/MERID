@@ -14,6 +14,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 
+pytestmark = pytest.mark.kalshi_15m
+
 from merid.event_venues.base import (
     EventMarket,
     MarketFilter,
@@ -26,7 +28,7 @@ from merid.event_venues.kalshi.client import (
     get_kalshi_client,
     KALSHI_RATE_TIERS,
 )
-from merid.event_venues.kalshi.models import KalshiConfig
+from merid.event_venues.kalshi.kalshi_config import KalshiConfig
 from merid.resilience import OperationResult
 
 
@@ -34,7 +36,12 @@ from merid.resilience import OperationResult
 async def client():
     """Create a test client with mocked auth."""
     config = KalshiConfig(
-        api_key="test_key_12345",
+        env="prod",
+        rest_base_url="https://external-api.kalshi.com/trade-api/v2",
+        ws_base_url="wss://external-api-ws.kalshi.com/trade-api/ws/v2",
+        api_key_id="test_key_12345",
+        private_key_path="/path/to/key.pem",
+        public_rest_api_url="https://api.kalshi.com/public-api/v2",
         private_key_pem="""-----BEGIN RSA PRIVATE KEY-----
 MIICXgIBAAJBAL8U2zCkGqM3mLwP+5F1z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9
 z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z0CAwEAAQJBAKjM3mLw
@@ -44,7 +51,6 @@ F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z0IfwIX
 AAL8U2zCkGqM3mLwP+5F1z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9
 z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z9F9z0=
 -----END RSA PRIVATE KEY-----""",
-        rest_api_url="https://api.elections.kalshi.com/trade-api/v2",
     )
     client = KalshiVenueClient(config)
     
@@ -117,39 +123,41 @@ class TestPagination:
     """Tests for cursor-based pagination."""
 
     @pytest.mark.asyncio
-    async def test_list_markets_pagination(self, client):
-        """Test that list_markets follows cursors correctly."""
-        # Mock paginated response
-        responses = [
-            MagicMock(
-                status_code=200,
-                json=MagicMock(return_value={
-                    "markets": [{"ticker": f"M{i}", "title": f"Market {i}"} for i in range(5)],
-                    "cursor": "cursor_1"
-                }),
-                headers={},
-                text="",
-            ),
-            MagicMock(
-                status_code=200,
-                json=MagicMock(return_value={
-                    "markets": [{"ticker": f"M{i+5}", "title": f"Market {i+5}"} for i in range(5)],
-                    "cursor": None  # End of pagination
-                }),
-                headers={},
-                text="",
-            ),
+    async def test_list_markets_pagination(self, fake_public_client):
+        """Test that list_open_markets_for_series follows cursors correctly."""
+        client, fake_http = fake_public_client
+        
+        # Configure fake HTTP with paginated responses
+        fake_http.pages = [
+            {
+                "markets": [
+                    {"ticker": f"KXBTC15M-{i}", "series_ticker": "KXBTC15M", "close_ts": 1700000000 + i * 60}
+                    for i in range(5)
+                ],
+                "cursor": "cursor_1"
+            },
+            {
+                "markets": [
+                    {"ticker": f"KXBTC15M-{i+5}", "series_ticker": "KXBTC15M", "close_ts": 1700000000 + (i+5) * 60}
+                    for i in range(5)
+                ],
+                "cursor": None  # End of pagination
+            },
         ]
         
-        client._http_client.request = AsyncMock(side_effect=responses)
+        # Call list_open_markets_for_series
+        result = await client.list_open_markets_for_series(series_ticker="KXBTC15M")
         
-        # Set limit > 200 to trigger pagination (page_size=200, desired=250, max_pages=2)
-        filter_params = MarketFilter(limit=250)
-        result = await client.list_markets_result(filter_params)
+        # Assert pagination worked correctly
+        assert len(result) == 10
+        assert fake_http._call_count == 2  # Made 2 calls for 2 pages
         
-        assert result.success is True
-        assert len(result.data) == 10
-        assert client._http_client.request.call_count == 2
+        # Verify the correct endpoint was called with correct params
+        assert len(fake_http.calls) == 2
+        url, params, _ = fake_http.calls[0]
+        assert "/markets" in url
+        assert params.get("series_ticker") == "KXBTC15M"
+        assert params.get("status") == "open"
 
     @pytest.mark.asyncio
     async def test_get_positions_pagination(self, client):
@@ -193,22 +201,34 @@ class TestFilters:
     """Tests for API filtering."""
 
     @pytest.mark.asyncio
-    async def test_list_markets_with_event_ticker_filter(self, client):
-        """Test event_ticker filter is passed correctly."""
-        response = MagicMock(
-            status_code=200,
-            json=MagicMock(return_value={"markets": [], "cursor": None}),
-            headers={},
-            text="",
-        )
-        client._http_client.request = AsyncMock(return_value=response)
+    async def test_list_markets_with_event_ticker_filter(self, fake_public_client):
+        """Test series_ticker filter is passed correctly to public API."""
+        client, fake_http = fake_public_client
         
-        filter_params = MarketFilter(event_ticker="KXBTC-24DEC", limit=100)
-        await client.list_markets_result(filter_params)
+        # Configure fake HTTP with filtered response
+        fake_http.pages = [
+            {
+                "markets": [
+                    {
+                        "ticker": "KXBTC15M-001",
+                        "series_ticker": "KXBTC15M",
+                        "close_ts": 1700000000
+                    }
+                ],
+                "cursor": None
+            }
+        ]
         
-        # Check params included event_ticker
-        call_args = client._http_client.request.call_args
-        assert call_args.kwargs["params"]["event_ticker"] == "KXBTC-24DEC"
+        # Call list_open_markets_for_series with series_ticker filter
+        result = await client.list_open_markets_for_series(series_ticker="KXBTC15M")
+        
+        # Assert correct series_ticker was passed
+        assert len(result) == 1
+        assert len(fake_http.calls) == 1
+        url, params, _ = fake_http.calls[0]
+        assert "/markets" in url
+        assert params.get("series_ticker") == "KXBTC15M"
+        assert params.get("status") == "open"
 
     @pytest.mark.asyncio
     async def test_get_positions_with_filters(self, client):
@@ -297,20 +317,36 @@ class TestOrderOperations:
     @pytest.mark.asyncio
     async def test_cancel_order_uses_correct_endpoint(self, client):
         """Verify cancel uses POST /portfolio/orders/{id}/cancel."""
-        response = MagicMock(
+        # Mock get_order_result to return an active order (not already canceled)
+        order_response = MagicMock(
+            status_code=200,
+            json=MagicMock(return_value={
+                "order": {
+                    "order_id": "order_123",
+                    "status": "resting"
+                }
+            }),
+            headers={},
+            text="",
+        )
+        # Mock cancel endpoint response
+        cancel_response = MagicMock(
             status_code=200,
             json=MagicMock(return_value={"order_id": "123", "status": "canceled"}),
             headers={},
             text="",
         )
-        client._http_client.request = AsyncMock(return_value=response)
+        client._http_client.request = AsyncMock(side_effect=[order_response, cancel_response])
         
         result = await client.cancel_order_result("order_123")
         
         assert result.success is True
-        call_args = client._http_client.request.call_args
-        assert call_args.kwargs["method"] == "POST"
-        assert "/portfolio/orders/order_123/cancel" in call_args.kwargs["url"]
+        # Should have made 2 calls: GET for status check, POST for cancel
+        assert client._http_client.request.call_count == 2
+        # Second call should be POST to cancel endpoint
+        cancel_call = client._http_client.request.call_args_list[1]
+        assert cancel_call.kwargs["method"] == "POST"
+        assert "/portfolio/orders/order_123/cancel" in cancel_call.kwargs["url"]
 
     @pytest.mark.asyncio
     async def test_batch_cancel_limits_to_20(self, client):
@@ -333,36 +369,42 @@ class TestOrderOperations:
         assert len(json_data["order_ids"]) == 20
 
     @pytest.mark.asyncio
-    async def test_place_order_converts_price_to_cents(self, client):
+    async def test_place_order_converts_price_to_cents(self, client, noop_execution_guard):
         """Verify price is converted from dollars to cents."""
-        response = MagicMock(
-            status_code=201,
-            json=MagicMock(return_value={
-                "order": {
-                    "order_id": "o1",
-                    "ticker": "MKT",
-                    "status": "resting"
-                }
-            }),
-            headers={},
-            text="",
-        )
-        client._http_client.request = AsyncMock(return_value=response)
+        # Enable manual orders for testing
+        import os
+        os.environ["DEBUG_ALLOW_MANUAL_ORDERS"] = "true"
         
-        order = VenueOrder(
-            market_id="MKT",
-            side="buy",
-            outcome_id="yes",
-            size=Decimal("5"),
-            price=Decimal("0.65"),  # $0.65 = 65 cents
-            order_type="limit"
-        )
-        
-        await client.place_order_result(order)
-        
-        call_args = client._http_client.request.call_args
-        json_data = call_args.kwargs["json"]
-        assert json_data["yes_price"] == 65  # Converted to cents
+        # Patch global execution guard singleton to use noop guard
+        with patch('merid.guards.global_execution_guard.get_global_execution_guard', return_value=noop_execution_guard):
+            response = MagicMock(
+                status_code=201,
+                json=MagicMock(return_value={
+                    "order": {
+                        "order_id": "o1",
+                        "ticker": "KXBTC15M-001",
+                        "status": "resting"
+                    }
+                }),
+                headers={},
+                text="",
+            )
+            client._http_client.request = AsyncMock(return_value=response)
+            
+            order = VenueOrder(
+                market_id="KXBTC15M-001",  # Valid Kalshi ticker format
+                side="buy",
+                outcome_id="yes",
+                size=Decimal("5"),
+                price=Decimal("0.65"),  # $0.65 = 65 cents
+                order_type="limit"
+            )
+            
+            await client.place_order_result(order)
+            
+            call_args = client._http_client.request.call_args
+            json_data = call_args.kwargs["json"]
+            assert json_data["yes_price"] == 65  # Converted to cents
 
 
 class TestSubaccountOperations:

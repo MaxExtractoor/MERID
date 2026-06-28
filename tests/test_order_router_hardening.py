@@ -1,5 +1,6 @@
 import pytest
 import asyncio
+import time
 from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async, OrderResult
 from merid.prediction.venue_gate import TradingMode
 
@@ -12,7 +13,14 @@ async def test_order_router_hardening():
         action="buy",
         price_cents=55,
         count=15000,  # Over the 10000 limit
-        mode=TradingMode.PAPER
+        mode=TradingMode.PAPER,
+        agent_id="BTC_15M",  # Use authorized agent from whitelist
+        edge_pct=0.05,  # Required for signal validation
+        confidence=0.70,  # Required for signal validation
+        model_prob=0.60,  # Required for signal validation
+        group_id="test_group",  # Required for position lifecycle exit plan check (uses group_id, not order_group_id)
+        snapshot_ts=time.time(),  # Required for staleness check
+        session_id="test_session"  # Required for position lifecycle exit plan check for non-15m markets
     )
     result = await route_order_async(intent)
     assert result.status == "rejected"

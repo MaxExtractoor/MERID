@@ -8,6 +8,7 @@ Tests that verify:
 """
 
 import os
+import logging
 import pytest
 
 from merid.mode_resolver import ModeResolver, KalshiEnvironment
@@ -319,7 +320,7 @@ class TestOrderRouterLiveModeRejection:
             ModeResolver.assert_not_live("simulate_paper_fill")
 
 
-class TestKalshiContinuousTraderProfileBlock:
+class TestKalshiContinuousTraderProfileCompatibility:
     """Test KalshiContinuousTrader profile compatibility."""
 
     def setup_method(self):
@@ -327,32 +328,42 @@ class TestKalshiContinuousTraderProfileBlock:
         from trading.trade_mode import _reset_for_tests
         _reset_for_tests()
 
-    def test_kalshi_continuous_trader_blocked_for_crypto_15m_profile(self, monkeypatch):
-        """Instantiating CT under kalshi_crypto_15m_v2 profile should raise RuntimeError."""
-        # Test the pattern directly - profile check is a hard assertion
-        # We simulate the pattern used in kalshi_continuous_trader.py
+    def test_kalshi_continuous_trader_warns_for_crypto_15m_profile(self, monkeypatch, caplog):
+        """Instantiating CT under kalshi_crypto_15m_v2 profile should issue deprecation warning."""
+        # Test the pattern directly - profile check now issues a warning instead of hard block
+        # We simulate the pattern used in kalshi_continuous_trader.py (archive/legacy/)
         
         def check_profile_compatibility(profile):
             """Simulates the profile check pattern from CT"""
             if profile == "kalshi_crypto_15m_v2":
-                raise RuntimeError(
-                    "CT-PROFILE-INCOMPATIBLE: KalshiContinuousTrader is incompatible with profile=kalshi_crypto_15m_v2"
+                import logging
+                logger = logging.getLogger("test")
+                logger.warning(
+                    "[CT-DEPRECATION] KalshiContinuousTrader is legacy/research-only for profile=%s. "
+                    "Use KalshiTradingAgent via AgentGrid for live trading.",
+                    profile
                 )
             return True
         
-        # Test with incompatible profile
-        with pytest.raises(RuntimeError, match="CT-PROFILE-INCOMPATIBLE"):
-            check_profile_compatibility("kalshi_crypto_15m_v2")
+        # Test with kalshi_crypto_15m_v2 profile - should warn but not raise
+        with caplog.at_level(logging.WARNING):
+            result = check_profile_compatibility("kalshi_crypto_15m_v2")
+            assert result is True  # Should still return True (not block)
+            assert any("CT-DEPRECATION" in record.message for record in caplog.records)
 
     def test_kalshi_continuous_trader_allowed_for_other_profiles(self, monkeypatch):
-        """Instantiating CT under other profiles should be allowed (if kill switch enabled)."""
-        # Test the pattern directly - other profiles should pass the check
+        """Instantiating CT under other profiles should be allowed without warning."""
+        # Test the pattern directly - other profiles should pass the check without warning
         
         def check_profile_compatibility(profile):
             """Simulates the profile check pattern from CT"""
             if profile == "kalshi_crypto_15m_v2":
-                raise RuntimeError(
-                    "CT-PROFILE-INCOMPATIBLE: KalshiContinuousTrader is incompatible with profile=kalshi_crypto_15m_v2"
+                import logging
+                logger = logging.getLogger("test")
+                logger.warning(
+                    "[CT-DEPRECATION] KalshiContinuousTrader is legacy/research-only for profile=%s. "
+                    "Use KalshiTradingAgent via AgentGrid for live trading.",
+                    profile
                 )
             return True
         

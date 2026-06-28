@@ -1,5 +1,8 @@
 """Comprehensive test suite for merid.agents — Canonical agent roster.
 
+LEGACY: This module tests CanonicalAgentRegistry, which is not used by kalshi_crypto_15m_v2 profile.
+The lean 15m stack uses agent_grid_15m for agent management.
+
 Covers all 5 categories:
 §1 Research: MarketResearchAgent, PredictionMarketAgentV2, CryptoSignalsAgent
 §2 Strategy: StrategyDesignerAgent, ArbitrageAgent, ExecutionOptimizerAgent
@@ -10,6 +13,8 @@ Covers all 5 categories:
 """
 
 import pytest
+
+pytestmark = pytest.mark.legacy
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from typing import Any, Dict

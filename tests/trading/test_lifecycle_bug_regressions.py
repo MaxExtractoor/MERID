@@ -1,6 +1,9 @@
 """
 Regression tests for the 10 trade-lifecycle bugs fixed in the audit sprint.
 
+LEGACY: This module tests PaperSession, which is not used by kalshi_crypto_15m_v2 profile.
+The lean 15m stack uses live bankroll service (merid.event_venues.kalshi.bankroll_service_v2).
+
 Each test class is named after the bug it covers and contains:
   - A docstring referencing the original bug description.
   - One or more test methods that would have FAILED before the fix and
@@ -19,6 +22,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+pytestmark = pytest.mark.legacy
 
 # ---------------------------------------------------------------------------
 # Ensure merid.settings is available without triggering live connections.

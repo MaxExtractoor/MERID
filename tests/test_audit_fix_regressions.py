@@ -1,5 +1,8 @@
 """Regression tests for the 10 audit fixes applied 2026-03-15.
 
+LEGACY: This module tests ReflectionSystem, which is not used by kalshi_crypto_15m_v2 profile.
+The lean 15m stack does not use reflection systems.
+
 Fix 1  — Missing threading import in agents/reflection/runtime.py
 Fix 2  — LearningEngine insights persisted to LongTermKnowledgeBase
 Fix 3  — Dual DB path risk: stores anchored to project root via __file__
@@ -23,6 +26,8 @@ from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+pytestmark = pytest.mark.legacy
 
 
 # ===========================================================================

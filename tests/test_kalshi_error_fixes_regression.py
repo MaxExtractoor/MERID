@@ -77,11 +77,11 @@ class TestBugA_ErrorThresholdFilter:
     """Verify all paper/live mismatch message variants are excluded from error threshold."""
 
     @pytest.mark.parametrize("reason", [
-        "Mode is paper but Kalshi client URL is live: https://api.elections.kalshi.com/trade-api/v2",
+        "Mode is paper but Kalshi client URL is live: https://external-api.kalshi.com/trade-api/v2",
         "CRITICAL: Paper/mock mode but client URL is LIVE. Refusing to create client.",
-        "paper/mock=True but using LIVE URL (https://api.elections.kalshi.com/trade-api/v2)",
+        "paper/mock=True but using LIVE URL (https://external-api.kalshi.com/trade-api/v2)",
         "Kalshi config mismatch: paper/mock=True but using LIVE URL",
-        "client url is live: https://api.elections.kalshi.com",
+        "client url is live: https://external-api.kalshi.com",
     ])
     def test_mismatch_variants_excluded(self, reason):
         from merid.prediction.order_error_threshold import should_count_toward_error_threshold

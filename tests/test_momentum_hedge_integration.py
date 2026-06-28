@@ -302,9 +302,10 @@ class TestKalshiRiskEngineAlignment(unittest.TestCase):
 
     def test_risk_config_uses_unified_defaults(self):
         """Verify KalshiRiskConfig defaults align with unified config."""
-        from merid.prediction.risk.kalshi_risk_engine import KalshiRiskConfig
+        # P2: Use venue config instead of deprecated PM config
+        from merid.event_venues.kalshi.kalshi_risk import KalshiRiskConfig
         from merid.risk.drawdown_config import get_drawdown_config
-        
+
         unified = get_drawdown_config()
         config = KalshiRiskConfig()
         

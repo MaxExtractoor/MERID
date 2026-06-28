@@ -68,15 +68,16 @@ class TestMicroScalpingEdgeThresholds:
     
     def test_fee_edge_multipliers_not_blocking_micro_scalping(self):
         """Fee edge multipliers should not block valid micro-scalping trades."""
-        from merid.prediction.risk.kalshi_risk_engine import KalshiRiskConfig
-        
+        # P2: Use venue config instead of deprecated PM config
+        from merid.event_venues.kalshi.kalshi_risk import KalshiRiskConfig
+
         config = KalshiRiskConfig()
-        
+
         # Multipliers should be reduced for micro-scalping
         # Mid-curve (40-60¢) actual is 1.5x
         assert config.fee_edge_multiplier_midcurve <= 1.5, \
             f"Mid-curve multiplier {config.fee_edge_multiplier_midcurve} too high for micro-scalping"
-        
+
         # Penny (≤5¢) actual is 2.0x
         assert config.fee_edge_multiplier_penny <= 2.0, \
             f"Penny multiplier {config.fee_edge_multiplier_penny} too high for micro-scalping"
@@ -87,10 +88,11 @@ class TestMicroScalpingPositionSizing:
 
     def test_position_sizing_with_44_bankroll(self):
         """Position sizing should produce at least 1 contract with $44 bankroll."""
-        from merid.prediction.risk.kalshi_risk_engine import KalshiRiskEngine
-        from merid.prediction.risk.kalshi_risk_engine import KalshiRiskConfig
+        # P2: Use venue config instead of deprecated PM config
+        from merid.event_venues.kalshi.kalshi_risk import KalshiRiskEngine
+        from merid.event_venues.kalshi.kalshi_risk import KalshiRiskConfig
         from decimal import Decimal
-        
+
         config = KalshiRiskConfig()
         engine = KalshiRiskEngine(config, name="test")
         
@@ -166,9 +168,10 @@ class TestMicroScalpingIntegration:
     def test_micro_scalping_economics_viable(self):
         """Complete micro-scalping economics should be viable with $44 bankroll."""
         from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents, calculate_net_edge_bps
-        from merid.prediction.risk.kalshi_risk_engine import KalshiRiskConfig
+        # P2: Use venue config instead of deprecated PM config
+        from merid.event_venues.kalshi.kalshi_risk import KalshiRiskConfig
         from decimal import Decimal
-        
+
         config = KalshiRiskConfig()
         
         # Scenario: 50¢ contract, 1 contract, 5% gross edge (500 bps)

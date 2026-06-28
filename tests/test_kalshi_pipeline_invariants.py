@@ -36,8 +36,8 @@ class TestKalshiBaseUrlInvariant:
         # The module should have imported BASE_URL from env
         assert hasattr(kalshi_market_data, "BASE_URL")
         # Should default to demo endpoint if env not set
-        assert "demo-api.kalshi.co" in kalshi_market_data.BASE_URL or \
-               "api.elections.kalshi.com" in kalshi_market_data.BASE_URL
+        assert "external-api.demo.kalshi.co" in kalshi_market_data.BASE_URL or \
+               "external-api.kalshi.com" in kalshi_market_data.BASE_URL
 
     def test_strategies_use_env_aware_base_url(self):
         """Verify strategy modules use env-aware BASE URLs."""
@@ -80,8 +80,8 @@ class TestKalshiBaseUrlInvariant:
 
         # Valid patterns should pass
         valid_urls = [
-            "https://demo-api.kalshi.co/trade-api/v2",
-            "https://api.elections.kalshi.com/trade-api/v2",
+            "https://external-api.demo.kalshi.co/trade-api/v2",
+            "https://external-api.kalshi.com/trade-api/v2",
             "https://trading-api.kalshi.com/trade-api/v2",
         ]
         for url in valid_urls:
@@ -96,36 +96,36 @@ class TestKalshiBaseUrlInvariant:
         # With no env set, should return demo default
         with patch.dict(os.environ, {}, clear=True):
             url = get_kalshi_base_url()
-            assert url == "https://demo-api.kalshi.co/trade-api/v2"
+            assert url == "https://external-api.demo.kalshi.co/trade-api/v2"
 
         # With demo env set, should return demo
-        with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://demo-api.kalshi.co/trade-api/v2"}):
+        with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://external-api.demo.kalshi.co/trade-api/v2"}):
             url = get_kalshi_base_url()
-            assert "demo-api.kalshi.co" in url
+            assert "external-api.demo.kalshi.co" in url
 
         # With live env set, should return live
-        with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://api.elections.kalshi.com/trade-api/v2"}):
+        with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://externel-axtealshi.com/trade-api/v2"}):
             url = get_kalshi_base_url()
-            assert "api.elections.kalshi.com" in url
+            assert "external-api.kalshi.com" in url
 
     def test_get_kalshi_ws_url_derives_from_base(self):
         """Verify get_kalshi_ws_url derives from BASE_URL when WS_URL not set."""
         from merid.event_venues.kalshi.invariants import get_kalshi_ws_url
 
         # Demo BASE should yield demo WS
-        with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://demo-api.kalshi.co/trade-api/v2"}, clear=True):
+        with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://external-api.demo.kalshi.co/trade-api/v2"}, clear=True):
             url = get_kalshi_ws_url()
-            assert "wss://demo-api.kalshi.co" in url
+            assert "wss://external-api-ws.demo.kalshi.co" in url
 
         # Live trading-api.kalshi.com should yield matching WS
         with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://trading-api.kalshi.com/trade-api/v2"}, clear=True):
             url = get_kalshi_ws_url()
             assert "wss://trading-api.kalshi.com" in url
 
-        # Legacy api.elections should yield elections WS
-        with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://api.elections.kalshi.com/trade-api/v2"}, clear=True):
+        # Legacy external-api should yield external-api WS
+        with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://external-api.kalshi.com/trade-api/v2"}, clear=True):
             url = get_kalshi_ws_url()
-            assert "wss://api.elections.kalshi.com" in url
+            assert "wss://external-api-ws.kalshi.com" in url
 
     def test_agent_grid_config_uses_env_aware_base(self):
         """Verify agent_grid_config.VenueConfig uses env-aware base_url from invariants."""
@@ -133,11 +133,11 @@ class TestKalshiBaseUrlInvariant:
         from merid.event_venues.kalshi.invariants import get_kalshi_base_url, get_kalshi_ws_url
 
         # Test with demo env
-        with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://demo-api.kalshi.co/trade-api/v2"}):
+        with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://external-api.demo.kalshi.co/trade-api/v2"}):
             config = VenueConfig()
             # base_url is now a property that calls get_kalshi_base_url()
             assert config.base_url == get_kalshi_base_url()
-            assert "demo-api.kalshi.co" in config.base_url
+            assert "external-api.demo.kalshi.co" in config.base_url
             # ws_url is also a property
             assert config.ws_url == get_kalshi_ws_url()
 
@@ -151,13 +151,13 @@ class TestKalshiBaseUrlInvariant:
         """Verify mode_manager kalshi config uses env-aware api_url via get_api_url()."""
         from merid.pipeline.mode_manager import get_mode_manager
 
-        with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://demo-api.kalshi.co/trade-api/v2"}):
+        with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://external-api.demo.kalshi.co/trade-api/v2"}):
             mm = get_mode_manager()
             kalshi_config = mm.get_config("kalshi")
             assert kalshi_config is not None
             # Use get_api_url() which dynamically resolves from invariants
             api_url = kalshi_config.get_api_url()
-            assert "demo-api.kalshi.co" in api_url
+            assert "external-api.demo.kalshi.co" in api_url
 
     def test_kalshi_insight_pipeline_uses_env_aware_urls(self):
         """Verify kalshi_insight_pipeline uses env-aware URLs."""
@@ -544,12 +544,12 @@ class TestHardcodedUrlScan:
 
     # URLs that should only appear in invariants.py
     PROHIBITED_URLS = [
-        "https://demo-api.kalshi.co",
+        "https://external-api.demo.kalshi.co",
         "https://trading-api.kalshi.com",
-        "https://api.elections.kalshi.com",
-        "wss://demo-api.kalshi.co",
+        "https://external-api.kalshi.com",
+        "wss://external-api.demo.kalshi.co",
         "wss://trading-api.kalshi.com",
-        "wss://api.elections.kalshi.com",
+        "wss://external-api.kalshi.com",
     ]
 
     # Files that are allowed to have these URLs (invariants + test fixtures)
@@ -624,9 +624,9 @@ class TestHardcodedUrlScan:
         from merid.event_venues.kalshi.invariants import log_kalshi_startup_info, classify_kalshi_environment
 
         # Test classification for each environment
-        assert classify_kalshi_environment("https://demo-api.kalshi.co/trade-api/v2") == "demo"
+        assert classify_kalshi_environment("https://external-api.demo.kalshi.co/trade-api/v2") == "demo"
         assert classify_kalshi_environment("https://trading-api.kalshi.com/trade-api/v2") == "live"
-        assert classify_kalshi_environment("https://api.elections.kalshi.com/trade-api/v2") == "elections"
+        assert classify_kalshi_environment("https://external-exakalshi.com/trade-api/v2") == "elections"
         assert classify_kalshi_environment("https://unknown.kalshi.com/trade-api/v2") == "unknown"
 
     def test_base_url_validation_raises_in_dev(self):
@@ -637,7 +637,7 @@ class TestHardcodedUrlScan:
         with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://invalid-host.com/api"}):
             # Should return demo default when URL doesn't match known patterns
             url = get_kalshi_base_url()
-            assert url == "https://demo-api.kalshi.co/trade-api/v2"
+            assert url == "https://external-api.demo.kalshi.co/trade-api/v2"
 
     def test_no_legacy_env_vars_detected(self):
         """Verify no legacy KALSHI_DEMO/KALSHI_ENV vars are set in test env."""
@@ -656,9 +656,9 @@ class TestIntegrationAllBaseUrls:
     """Integration test for all three base URL values."""
 
     BASE_URLS = [
-        ("demo", "https://demo-api.kalshi.co/trade-api/v2"),
+        ("demo", "https://external-api.demo.kalshi.co/trade-api/v2"),
         ("live", "https://trading-api.kalshi.com/trade-api/v2"),
-        ("elections", "https://api.elections.kalshi.com/trade-api/v2"),
+        ("elections", "https://external-exakalshi.com/trade-api/v2"),
     ]
 
     @pytest.mark.parametrize("env_name,base_url", BASE_URLS)
@@ -719,12 +719,12 @@ class TestProcessLifecycleAndSafety:
         from merid.event_venues.kalshi.invariants import KalshiEnvMonitor
 
         # Create monitor with initial env
-        with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://demo-api.kalshi.co/trade-api/v2"}):
+        with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://external-api.demo.kalshi.co/trade-api/v2"}):
             monitor = KalshiEnvMonitor()
             assert not monitor.has_flipped()
             
             initial = monitor.get_initial_urls()
-            assert "demo-api.kalshi.co" in initial["base_url"]
+            assert "external-api.demo.kalshi.co" in initial["base_url"]
             
             # Check should pass (no flip)
             assert not monitor.check()
@@ -739,12 +739,12 @@ class TestProcessLifecycleAndSafety:
         """Verify metrics labels include kalshi_env and kalshi_host."""
         from merid.event_venues.kalshi.invariants import get_kalshi_metrics_labels
 
-        with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://demo-api.kalshi.co/trade-api/v2"}):
+        with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://external-api.demo.kalshi.co/trade-api/v2"}):
             labels = get_kalshi_metrics_labels()
             assert "kalshi_env" in labels
             assert "kalshi_host" in labels
             assert labels["kalshi_env"] == "demo"
-            assert labels["kalshi_host"] == "demo-api.kalshi.co"
+            assert labels["kalshi_host"] == "external-api.demo.kalshi.co"
 
         with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://trading-api.kalshi.com/trade-api/v2"}):
             labels = get_kalshi_metrics_labels()
@@ -777,7 +777,7 @@ class TestProcessLifecycleAndSafety:
         """Verify demo environment does not require KALSHI_CONFIRM_LIVE."""
         from merid.event_venues.kalshi.invariants import require_live_confirmation
 
-        with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://demo-api.kalshi.co/trade-api/v2"}, clear=True):
+        with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://external-api.demo.kalshi.co/trade-api/v2"}, clear=True):
             # Should not raise for demo
             require_live_confirmation()  # No exception
 
@@ -785,7 +785,7 @@ class TestProcessLifecycleAndSafety:
         """Verify strict validation passes for valid configuration."""
         from merid.event_venues.kalshi.invariants import validate_kalshi_config_strict
 
-        with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://demo-api.kalshi.co/trade-api/v2"}, clear=True):
+        with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://external-api.demo.kalshi.co/trade-api/v2"}, clear=True):
             results = validate_kalshi_config_strict()
             assert "base_url" in results
             assert "ws_url" in results
@@ -803,7 +803,7 @@ class TestProcessLifecycleAndSafety:
         with patch.dict(os.environ, {"KALSHI_API_BASE_URL": "https://invalid-host.com/api"}, clear=True):
             results = validate_kalshi_config_strict()
             # Falls back to valid demo URL
-            assert results["base_url"] == "https://demo-api.kalshi.co/trade-api/v2"
+            assert results["base_url"] == "https://external-api.demo.kalshi.co/trade-api/v2"
 
     def test_strict_validation_fails_for_live_without_confirmation(self):
         """Verify strict validation hard-fails for live without confirmation."""
@@ -833,8 +833,8 @@ class TestProcessLifecycleAndSafety:
             ws = get_kalshi_ws_url()
             
             # Unknown hosts fall back to demo for safety
-            assert base == "https://demo-api.kalshi.co/trade-api/v2"
-            assert ws == "wss://demo-api.kalshi.co/trade-api/ws/v2"
+            assert base == "https://external-api.demo.kalshi.co/trade-api/v2"
+            assert ws == "wss://external-api.demo.kalshi.co/trade-api/ws/v2"
 
 
 if __name__ == "__main__":

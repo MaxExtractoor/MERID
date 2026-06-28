@@ -1,5 +1,8 @@
 """Comprehensive tests for agent wiring, hybrid bridge, orchestrator, and integration flow.
 
+LEGACY: This module tests CanonicalAgentRegistry, which is not used by kalshi_crypto_15m_v2 profile.
+The lean 15m stack uses agent_grid_15m for agent management.
+
 Covers:
 §1 Wiring: WiredPredictionMarketAgent, WiredCryptoSignalsAgent, WiredMarketResearchAgent
 §2 Hybrid: HybridBridge, LLMEnhancement, HybridCanonicalAgent
@@ -8,6 +11,8 @@ Covers:
 """
 
 import pytest
+
+pytestmark = pytest.mark.legacy
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List

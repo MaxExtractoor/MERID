@@ -1,5 +1,8 @@
 """test_prediction_audit_regressions.py
 
+LEGACY: This module tests PaperSession and PaperLadder, which are not used by kalshi_crypto_15m_v2 profile.
+The lean 15m stack uses live bankroll service (merid.event_venues.kalshi.bankroll_service_v2).
+
 Regression tests for all bugs fixed in the Prediction Module Audit.
 
 Bug IDs map to the audit report tickets:
@@ -23,6 +26,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+pytestmark = pytest.mark.legacy
 
 ROOT = Path(__file__).resolve().parent.parent
 

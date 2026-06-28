@@ -16,7 +16,8 @@ import merid.event_venues.kalshi.fills_ledger as _fills_ledger_mod
 from merid.event_venues.kalshi.fills_ledger import (
     KalshiFillsLedger, KalshiFill, OrderIntent, ReconciliationStatus, get_fills_ledger
 )
-from merid.prediction.risk.kalshi_risk_engine import KalshiRiskConfig
+# P2: Use venue config instead of deprecated PM config
+from merid.event_venues.kalshi.kalshi_risk import KalshiRiskConfig
 
 
 class TestLedgerRiskSeparationInvariant:
