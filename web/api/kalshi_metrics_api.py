@@ -432,3 +432,81 @@ async def get_regime_status() -> Dict[str, Any]:
     except Exception as exc:
         logger.warning("Regime metrics failed: %s", exc)
         raise HTTPException(status_code=503, detail=f"Regime metrics unavailable: {exc}")
+
+
+# ── GET /edge-rejections — NO_EDGE rejection statistics ─────────────────────
+
+@router.get("/edge-rejections")
+async def get_edge_rejection_stats() -> Dict[str, Any]:
+    """Get NO_EDGE rejection statistics for operational visibility."""
+    try:
+        from merid.prediction.edge_rejection_tracker import get_edge_rejection_tracker
+
+        tracker = get_edge_rejection_tracker()
+        summary = tracker.get_summary()
+        recent = tracker.get_recent_rejections(limit=10)
+        gap_distribution = tracker.get_edge_gap_distribution()
+
+        return {
+            "summary": summary,
+            "recent_rejections": recent,
+            "edge_gap_distribution": gap_distribution,
+        }
+    except Exception as exc:
+        logger.warning("Edge rejection stats failed: %s", exc)
+        raise HTTPException(status_code=503, detail=f"Edge rejection stats unavailable: {exc}")
+
+
+# ── POST /edge-rejections/reset — Reset edge rejection tracker ─────────────
+
+@router.post("/edge-rejections/reset")
+async def reset_edge_rejection_tracker() -> Dict[str, str]:
+    """Reset the edge rejection tracker (for testing or session reset)."""
+    try:
+        from merid.prediction.edge_rejection_tracker import get_edge_rejection_tracker
+
+        tracker = get_edge_rejection_tracker()
+        tracker.reset()
+
+        return {"status": "success", "message": "Edge rejection tracker reset"}
+    except Exception as exc:
+        logger.warning("Edge rejection tracker reset failed: %s", exc)
+        raise HTTPException(status_code=503, detail=f"Edge rejection tracker reset failed: {exc}")
+
+
+# ── GET /fill-rate — Order lifecycle and fill statistics ─────────────────────
+
+@router.get("/fill-rate")
+async def get_fill_rate_stats() -> Dict[str, Any]:
+    """Get order lifecycle and fill rate statistics for execution quality visibility."""
+    try:
+        from merid.ops.order_lifecycle_tracker import get_order_lifecycle_tracker
+
+        tracker = get_order_lifecycle_tracker()
+        stats = tracker.get_fill_statistics()
+        recent = tracker.get_recent_events(limit=20)
+
+        return {
+            "statistics": stats,
+            "recent_events": recent,
+        }
+    except Exception as exc:
+        logger.warning("Fill rate stats failed: %s", exc)
+        raise HTTPException(status_code=503, detail=f"Fill rate stats unavailable: {exc}")
+
+
+# ── POST /fill-rate/reset — Reset order lifecycle tracker ─────────────────
+
+@router.post("/fill-rate/reset")
+async def reset_order_lifecycle_tracker() -> Dict[str, str]:
+    """Reset the order lifecycle tracker (for testing or session reset)."""
+    try:
+        from merid.ops.order_lifecycle_tracker import get_order_lifecycle_tracker
+
+        tracker = get_order_lifecycle_tracker()
+        tracker.reset()
+
+        return {"status": "success", "message": "Order lifecycle tracker reset"}
+    except Exception as exc:
+        logger.warning("Order lifecycle tracker reset failed: %s", exc)
+        raise HTTPException(status_code=503, detail=f"Order lifecycle tracker reset failed: {exc}")

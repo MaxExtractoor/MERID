@@ -98,7 +98,7 @@ def _get_trader() -> Tuple[Optional[Any], Optional[str]]:
         if trader is None:
             # Check startup state for specific error
             try:
-                from web.main import _startup_state
+                from web.main_15m_lean import _startup_state
                 ct_state = _startup_state.get("services", {}).get("continuous_trader", {})
                 if ct_state.get("status") == "failed":
                     return None, f"Continuous trader failed: {ct_state.get('error', 'unknown error')}"

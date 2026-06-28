@@ -37,7 +37,11 @@ logger = get_logger("trading.execution")
 
 
 class ExecutionMode(Enum):
-    """Execution mode for the trading system."""
+    """Execution mode for the CEX trading layer (CCXT-based).
+    
+    NOTE: This is for the legacy CEX stack only. For Kalshi prediction markets,
+    use merid.prediction.trading_mode.TradingMode as the canonical enum.
+    """
     PAPER = "paper"
     LIVE = "live"
     DISABLED = "disabled"

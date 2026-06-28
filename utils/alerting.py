@@ -424,15 +424,26 @@ def send_alert_sync(
     """Synchronous wrapper for send_alert.
     
     Use this in non-async contexts. Runs the async function in a new event loop.
+    If already in an async context, try to use the running loop.
     """
     import asyncio
     
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(send_alert(condition, severity, message, context))
-        loop.close()
-        return result
+        try:
+            # Try to get running loop (if in async context)
+            loop = asyncio.get_running_loop()
+            # We're in an async context but called from sync code
+            # Use asyncio.create_task if we can, otherwise just log and return
+            logger.warning(f"send_alert_sync called from async context, alert may be delayed: {condition}")
+            # Can't await here, so just return False
+            return False
+        except RuntimeError:
+            # No running loop, create a new one
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(send_alert(condition, severity, message, context))
+            loop.close()
+            return result
     except Exception as e:
         logger.error(f"Error in send_alert_sync: {e}")
         return False

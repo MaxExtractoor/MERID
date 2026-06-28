@@ -43,7 +43,7 @@ async def get_crypto_market_status() -> Dict[str, Any]:
         return {
             "crypto_available": crypto_available,
             "status": status,
-            "kalshi_environment": "demo" if os.getenv("KALSHI_USE_DEMO", "false").lower() == "true" else "production",
+            "kalshi_environment": "demo" if os.getenv("KALSHI_USE_DEMO", "false").lower() == "true" else "production",  # TODO: migrate to kalshi_config.get_kalshi_env()
             "total_markets_seen": summary["total_markets"],
             "crypto_markets_seen": crypto_count,
             "last_checked_at": datetime.now().isoformat(),
@@ -57,7 +57,7 @@ async def get_crypto_market_status() -> Dict[str, Any]:
         return {
             "crypto_available": False,
             "status": "error",
-            "kalshi_environment": "demo" if os.getenv("KALSHI_USE_DEMO", "false").lower() == "true" else "production",
+            "kalshi_environment": "demo" if os.getenv("KALSHI_USE_DEMO", "false").lower() == "true" else "production",  # TODO: migrate to kalshi_config.get_kalshi_env()
             "total_markets_seen": 0,
             "crypto_markets_seen": 0,
             "last_checked_at": datetime.now().isoformat(),
@@ -115,13 +115,13 @@ async def test_kalshi_connectivity() -> Dict[str, Any]:
     
     results = {
         "primary_endpoint": {
-            "url": "https://api.kalshi.co",
+            "url": "https://external-api.kalshi.com/trade-api/v2",
             "status": "unknown",
             "error_type": None,
             "error_message": None
         },
         "fallback_endpoint": {
-            "url": "https://api.elections.kalshi.com", 
+            "url": "https://external-api.kalshi.com/trade-api/v2",
             "status": "unknown",
             "error_type": None,
             "error_message": None
@@ -131,7 +131,7 @@ async def test_kalshi_connectivity() -> Dict[str, Any]:
     # Test primary endpoint
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get("https://api.kalshi.co/trade-api/v2/markets?limit=10")
+            response = await client.get("https://external-api.kalshi.com/trade-api/v2/markets?limit=10")
             
             if response.status_code == 200:
                 results["primary_endpoint"]["status"] = "ok"
@@ -152,7 +152,7 @@ async def test_kalshi_connectivity() -> Dict[str, Any]:
     # Test fallback endpoint
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get("https://api.elections.kalshi.com/trade-api/v2/markets?limit=10")
+            response = await client.get("https://external-api.kalshi.com/trade-api/v2/markets?limit=10")
             
             if response.status_code == 200:
                 results["fallback_endpoint"]["status"] = "ok"

@@ -76,7 +76,7 @@ def _check_kalshi_15m_profile_guard(operation: str) -> None:
 def _get_last_cqi() -> Dict[str, float]:
     """Return per-agent cycle count as a proxy CQI until confidence tracking is added."""
     try:
-        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_grid_15m import get_agent_grid
         grid = get_agent_grid()
         return {
             a.config.name: float(getattr(a.state, "cycles_run", 0))
@@ -475,7 +475,7 @@ async def get_agent_activity() -> Dict[str, Any]:
 
         # Primary: Kalshi agent grid (live trading agents)
         try:
-            from merid.prediction.agent_grid import get_agent_grid
+            from merid.prediction.agent_grid_15m import get_agent_grid
             grid = get_agent_grid()
             summary = grid.summary()
             for a in summary.get("agents", []):
@@ -572,7 +572,7 @@ async def get_operator_summary() -> Dict[str, Any]:
         total_cycles = 0
         total_fills = 0
         try:
-            from merid.prediction.agent_grid import get_agent_grid
+            from merid.prediction.agent_grid_15m import get_agent_grid
             grid = get_agent_grid()
             grid_summary = grid.summary()
             total_agents = grid_summary.get("agent_count", grid_summary.get("total_agents", 0))
@@ -683,7 +683,7 @@ async def get_operator_audit_trail(limit: int = 20) -> Dict[str, Any]:
     # Fallback: pull recent order events from agent grid as activity
     if not entries:
         try:
-            from merid.prediction.agent_grid import get_agent_grid
+            from merid.prediction.agent_grid_15m import get_agent_grid
             grid = get_agent_grid()
             import datetime as _dt
             for agent in grid.agents:
@@ -801,7 +801,7 @@ async def get_recent_decisions(limit: int = 10) -> Dict[str, Any]:
 
     # 1) Agent grid signal log
     try:
-        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_grid_15m import get_agent_grid
         grid = get_agent_grid()
         for agent in grid.agents:
             for sig in agent.get_signals(limit):
@@ -853,7 +853,7 @@ async def get_recent_decisions(limit: int = 10) -> Dict[str, Any]:
     # 4) Agent cycle activity as decisions
     if len(decisions) < limit:
         try:
-            from merid.prediction.agent_grid import get_agent_grid
+            from merid.prediction.agent_grid_15m import get_agent_grid
             grid = get_agent_grid()
             import datetime as _dt
             _now = _dt.datetime.now(_dt.timezone.utc)

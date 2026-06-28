@@ -4,6 +4,7 @@ Config Validation API
 Provides endpoints for validating risk configuration before applying.
 """
 
+from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, validator, Field
 from typing import Optional, List, Dict, Any
@@ -198,6 +199,31 @@ async def get_current_config() -> Dict[str, Any]:
                 "message": f"Could not load current configuration: {e}",
                 "contact": "#platform-engineering"
             })
+        )
+
+
+@router.get("/profile_version")
+async def get_profile_version() -> Dict[str, Any]:
+    """
+    Get the active profile version and metadata.
+
+    Returns the profile name, version, and load timestamp for reproducibility.
+    """
+    try:
+        from merid.risk.profiles.crypto_15m_profile import get_active_profile
+
+        profile = get_active_profile()
+
+        return {
+            "profile_name": profile.profile_name,
+            "profile_version": profile.profile_version,
+            "description": profile.description,
+            "loaded_at": datetime.utcnow().isoformat(),
+        }
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Profile version unavailable: {exc}"
         )
 
 

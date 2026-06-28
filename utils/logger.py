@@ -187,6 +187,24 @@ _TEXT_DATEFMT = "%Y-%m-%d %H:%M:%S"
 
 _json_logging_enabled = os.getenv("MERID_JSON_LOGS", "1").lower() in ("1", "true", "yes")
 
+# ── Hot-path data-plane log throttling ────────────────────────────────
+# These loggers emit several INFO lines for EVERY WebSocket orderbook
+# message (~250 msg/s across the 5 crypto markets). Left at INFO they:
+#   * write thousands of lines/sec to logs/full.log (grows to multi-GB),
+#   * peg the CPU at ~100% and cause 400ms+ "Slow WS callback" stalls,
+#   * trigger bridge queue overflow ("dropped 2000 events") that starves
+#     the trading loop of fresh market data.
+# Throttle them to WARNING by default so real signals/orders remain
+# visible. Set MERID_VERBOSE_DATAPLANE=1 to restore full INFO firehose
+# for deep WS/market-state debugging.
+_VERBOSE_DATAPLANE = os.getenv("MERID_VERBOSE_DATAPLANE", "0").lower() in ("1", "true", "yes")
+_NOISY_DATAPLANE_LOGGERS = frozenset(
+    {
+        "merid.event_venues.kalshi.ws",
+        "merid.event_venues.kalshi.market_state",
+    }
+)
+
 
 def get_logger(name: str) -> logging.Logger:
     """Return a module-level logger that writes to logs/full.log with UTF-8 encoding.
@@ -199,7 +217,12 @@ def get_logger(name: str) -> logging.Logger:
         return _LOGGER_CACHE[name]
 
     logger = logging.getLogger(name)
-    logger.setLevel(logging.INFO)
+    # Throttle ultra-noisy WS/market-state data-plane loggers to WARNING to keep
+    # the event loop responsive and the trading loop fed (see note above).
+    if name in _NOISY_DATAPLANE_LOGGERS and not _VERBOSE_DATAPLANE:
+        logger.setLevel(logging.WARNING)
+    else:
+        logger.setLevel(logging.INFO)
     logger.propagate = False
 
     if not logger.handlers:

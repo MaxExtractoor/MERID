@@ -642,8 +642,8 @@ async def get_risk_summary() -> Dict[str, Any]:
             logger.debug(f"Silent error: {e}")
 
         try:
-            from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
-            bridge = get_ws_bridge()
+            from merid.event_venues.kalshi.ws_bridge import get_bridge
+            bridge = get_bridge()
             ws_connected = bridge.is_running()
             ws_status = "connected" if ws_connected else "disconnected"
             connectivity["ws_risk"] = _conn(ws_status)
@@ -1167,17 +1167,18 @@ async def get_risk_alerts_real() -> List[Dict[str, Any]]:
 
     # 3) Agent grid health alerts
     try:
-        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_grid_15m import get_agent_grid
         grid = get_agent_grid()
-        idle = [a.config.name for a in grid.agents if a.state.cycles_run == 0]
-        if idle:
-            idx += 1
-            alerts.append({"id": f"ra-{idx:03d}", "level": "low", "type": "Agent Health", "message": f"{len(idle)} agents idle (0 cycles): {', '.join(idle[:5])}", "timestamp": now_iso, "resolved": False})
-        total_orders = sum(a.state.orders_placed for a in grid.agents)
-        total_cycles = sum(a.state.cycles_run for a in grid.agents)
-        if total_orders == 0 and total_cycles > 50:
-            idx += 1
-            alerts.append({"id": f"ra-{idx:03d}", "level": "medium", "type": "Order Activity", "message": f"No orders across {len(grid.agents)} agents ({total_cycles} cycles completed)", "timestamp": now_iso, "resolved": False})
+        if grid:
+            # LeanAgentGrid15m uses _agents and doesn't have per-agent state tracking
+            idle = [a.config.name for a in grid._agents if not a.config.enabled]
+            if idle:
+                idx += 1
+                alerts.append({"id": f"ra-{idx:03d}", "level": "low", "type": "Agent Health", "message": f"{len(idle)} agents disabled: {', '.join(idle[:5])}", "timestamp": now_iso, "resolved": False})
+            # LeanAgentGrid15m doesn't track orders/cycles per agent
+            if len(grid._agents) > 0:
+                idx += 1
+                alerts.append({"id": f"ra-{idx:03d}", "level": "low", "type": "Agent Health", "message": f"{len(grid._agents)} agents active in LeanAgentGrid15m", "timestamp": now_iso, "resolved": False})
     except Exception as e:
         logger.debug(f"Silent error: {e}")
 

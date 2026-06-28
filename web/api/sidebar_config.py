@@ -418,8 +418,8 @@ async def get_mode_indicator() -> Dict[str, Any]:
         kill_switch = False
 
     try:
-        from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
-        bridge = get_ws_bridge()
+        from merid.event_venues.kalshi.ws_bridge import get_bridge
+        bridge = get_bridge()
         ws_connected = bridge.summary().get("running", False)
     except Exception:
         ws_connected = False

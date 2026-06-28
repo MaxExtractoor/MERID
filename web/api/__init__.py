@@ -9,11 +9,22 @@ Comprehensive API for system control, trading, monitoring, and data access.
 
 from web.api.system_control import router as system_router
 from web.api.trading import router as trading_router
-from web.api.reflection import router as reflection_router
 from web.api.streams import router as streams_router
 from web.api.live_stream import router as live_stream_router
 from web.api.paper_trading import router as paper_trading_router
 from web.api.data_endpoints import router as data_router
+
+# Make reflection router conditional to avoid loading legacy modules
+import os
+profile = os.environ.get("MERID_PROFILE", "")
+try:
+    if profile != "kalshi_crypto_15m_v2":
+        from web.api.reflection import router as reflection_router
+    else:
+        reflection_router = None
+except ImportError:
+    # Reflection router or its dependencies not available - skip it
+    reflection_router = None
 
 __all__ = [
     "system_router",

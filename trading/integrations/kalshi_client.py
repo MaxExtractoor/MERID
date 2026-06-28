@@ -34,7 +34,7 @@ def _load_private_key() -> Optional[str]:
 
 class Configuration:
     """Stub configuration class for backward compatibility."""
-    def __init__(self, host: str = "https://api.elections.kalshi.com/trade-api/v2"):
+    def __init__(self, host: str = "https://external-api.kalshi.com/trade-api/v2"):
         self.host = host
         self.api_key_id: Optional[str] = None
         self.private_key_pem: Optional[str] = None
@@ -58,7 +58,7 @@ def _build_client() -> KalshiClient:
             "Kalshi credentials missing: set KALSHI_API_KEY_ID and "
             "KALSHI_PRIVATE_KEY_PEM or KALSHI_PRIVATE_KEY_PATH"
         )
-    host = os.getenv("KALSHI_API_HOST", "https://api.elections.kalshi.com/trade-api/v2")
+    host = os.getenv("KALSHI_API_HOST", "https://external-api.kalshi.com/trade-api/v2")
     config = Configuration(host=host)
     config.api_key_id = api_key_id
     config.private_key_pem = private_key

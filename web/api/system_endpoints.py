@@ -11,7 +11,7 @@ import os
 
 logger = get_logger(__name__)
 
-router = APIRouter()
+router = APIRouter(prefix="/system", tags=["system"])
 
 # Track server start time for uptime calculation
 _server_start_time = time.time()
@@ -69,7 +69,7 @@ def _get_kalshi_risk():
 def _get_kalshi_grid():
     """Get AgentGrid for live trading summary."""
     try:
-        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_grid_15m import get_agent_grid
         return get_agent_grid()
     except ImportError:
         # Agent grid module not available
@@ -513,7 +513,7 @@ def _real_risk_exposure() -> Dict[str, Any]:
     }
 
 
-@router.get("/api/system/health")
+@router.get("/health")
 async def get_system_health() -> Dict[str, Any]:
     """Get system health status — real checks per subsystem."""
     import os
@@ -533,7 +533,7 @@ async def get_system_health() -> Dict[str, Any]:
             "merid.risk.kill_switches", fromlist=["risk_controller"]
         ).risk_controller.can_trade() is not None),
         "agent_grid": _svc(lambda: __import__(
-            "merid.prediction.agent_grid", fromlist=["get_agent_grid"]
+            "merid.prediction.agent_grid_15m", fromlist=["get_agent_grid"]
         ).get_agent_grid() is not None),
         "audit_trail": _svc(lambda: __import__(
             "core.audit_trail", fromlist=["get_audit_trail"]
@@ -589,16 +589,40 @@ async def get_risk_exposure() -> Dict[str, Any]:
     return {**exp, "timestamp": int(time.time() * 1000)}
 
 
-@router.get("/api/v1/system/health")
+@router.get("/health")
 async def get_system_health_v1() -> Dict[str, Any]:
-    """System health check — real status from grid and risk controller."""
+    """System health check — real status from 15m grid and critical components."""
     services: Dict[str, str] = {"api": "running"}
+    
+    # Check 15m agent grid (critical for trading readiness)
     try:
-        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_grid_15m import get_agent_grid
         grid = get_agent_grid()
-        services["prediction_markets"] = "running" if grid.is_running else "stopped"
+        if grid and hasattr(grid, 'is_running'):
+            services["agent_grid_15m"] = "running" if grid.is_running else "stopped"
+        elif grid:
+            services["agent_grid_15m"] = "initialized"
+        else:
+            services["agent_grid_15m"] = "missing"
     except Exception:
-        services["prediction_markets"] = "unavailable"
+        services["agent_grid_15m"] = "unavailable"
+    
+    # Check Kalshi 15m loop (critical for trading readiness)
+    try:
+        from merid.loop_15m import get_merid_loop_15m
+        loop = get_merid_loop_15m()
+        services["kalshi_loop_15m"] = "running" if loop and loop.is_running else "stopped"
+    except Exception:
+        services["kalshi_loop_15m"] = "unavailable"
+    
+    # Check Unified Spot Service (critical for price data)
+    try:
+        from data.unified_spot_service import get_unified_spot_service
+        spot = get_unified_spot_service()
+        services["spot_service"] = "running" if spot and spot.is_running else "stopped"
+    except Exception:
+        services["spot_service"] = "unavailable"
+    
     try:
         from merid.prediction.paper_session import get_paper_session
         sess = get_paper_session()
@@ -620,7 +644,13 @@ async def get_system_health_v1() -> Dict[str, Any]:
     except Exception as e:
         logger.debug(f"Silent error: {e}")
 
-    all_ok = all(v in ("running", "active", "idle", "healthy") for v in services.values())
+    # Critical components for Tier 1 readiness
+    critical_services = ["agent_grid_15m", "kalshi_loop_15m", "spot_service", "risk"]
+    critical_ok = all(services.get(svc) in ("running", "initialized", "active") for svc in critical_services)
+    
+    # Overall status for non-critical services
+    all_ok = all(v in ("running", "active", "idle", "healthy", "initialized") for v in services.values())
+    
     _ver = os.getenv("MERID_VERSION", "")
     if not _ver:
         try:
@@ -628,8 +658,10 @@ async def get_system_health_v1() -> Dict[str, Any]:
             _ver = _pkg_ver("merid")
         except Exception:
             _ver = "dev"
+    
     result = {
         "status": "healthy" if all_ok else "degraded",
+        "ready": critical_ok,
         "timestamp": time.time(),
         "version": _ver,
         "services": services,
@@ -641,10 +673,16 @@ async def get_system_health_v1() -> Dict[str, Any]:
             "degraded": dep_summary["degraded_count"],
             "down": dep_summary["down_count"],
         }
+    
+    # Return HTTP 503 if critical components are down (Tier 1 readiness failure)
+    if not critical_ok:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=503, detail=result)
+    
     return result
 
 
-@router.get("/api/v1/system/kalshi-crypto-runtime-config")
+@router.get("/kalshi-crypto-runtime-config")
 async def kalshi_crypto_runtime_config_v1() -> Dict[str, Any]:
     """Crypto CT / universe snapshot for runtime vs module-level invariant checks."""
     from merid.diagnostics.kalshi_runtime_config import build_kalshi_crypto_runtime_snapshot
@@ -652,7 +690,7 @@ async def kalshi_crypto_runtime_config_v1() -> Dict[str, Any]:
     return build_kalshi_crypto_runtime_snapshot()
 
 
-@router.get("/api/v1/system/risk-posture")
+@router.get("/risk-posture")
 async def risk_posture_v1() -> Dict[str, Any]:
     """Unified gates, spot venue health, risk manager, caps — operator-facing audit slice."""
     from merid.diagnostics.risk_posture import build_risk_posture_snapshot
@@ -660,7 +698,7 @@ async def risk_posture_v1() -> Dict[str, Any]:
     return build_risk_posture_snapshot()
 
 
-@router.get("/api/system/version")
+@router.get("/version")
 async def get_system_version() -> Dict[str, Any]:
     """System version and build info from env and package metadata."""
     import os
@@ -681,7 +719,7 @@ async def get_system_version() -> Dict[str, Any]:
     }
 
 
-@router.get("/api/system/components")
+@router.get("/components")
 async def get_system_components() -> Dict[str, Any]:
     """Real system component statuses — checks each subsystem."""
     def _check(name: str, fn) -> Dict[str, Any]:
@@ -697,7 +735,7 @@ async def get_system_components() -> Dict[str, Any]:
             "merid.risk.kill_switches", fromlist=["risk_controller"]
         ).risk_controller.can_trade() is not None),
         _check("Agent Manager", lambda: __import__(
-            "merid.prediction.agent_grid", fromlist=["get_agent_grid"]
+            "merid.prediction.agent_grid_15m", fromlist=["get_agent_grid"]
         ).get_agent_grid() is not None),
         _check("Paper Session", lambda: __import__(
             "merid.prediction.paper_session", fromlist=["get_paper_session"]
@@ -781,8 +819,28 @@ async def toggle_kill_switch(action: str) -> Dict[str, Any]:
 
 # ── Reconciliation & Audit Trail ──────────────────────────────────────
 
-@router.api_route("/api/v1/reconciliation/run", methods=["GET", "POST"])
-async def run_reconciliation_endpoint() -> Dict[str, Any]:
+@router.post("/api/v1/reconciliation/run", operation_id="run_reconciliation_post")
+async def run_reconciliation_endpoint_post() -> Dict[str, Any]:
+    """Run an on-demand venue reconciliation (Kalshi) and return the summary."""
+    try:
+        from merid.reconciliation import (
+            get_reconciliation_status,
+            reconcile_all_venues,
+        )
+
+        discrepancies = reconcile_all_venues(["kalshi"])
+        status = get_reconciliation_status()
+        return {
+            **status,
+            "discrepancies": [d.to_dict() for d in discrepancies],
+        }
+    except Exception as exc:
+        logger.debug("Reconciliation failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/api/v1/reconciliation/run", operation_id="run_reconciliation_get")
+async def run_reconciliation_endpoint_get() -> Dict[str, Any]:
     """Run an on-demand venue reconciliation (Kalshi) and return the summary."""
     try:
         from merid.reconciliation import (
@@ -981,7 +1039,7 @@ async def audit_trail_entries(
     _now = datetime.now(timezone.utc)
     fallback = []
     try:
-        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_grid_15m import get_agent_grid
         grid = get_agent_grid()
         for agent in grid.agents:
             if agent.state.cycles_run > 0:
@@ -1019,14 +1077,14 @@ async def get_trade_mode_endpoint() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@router.get("/api/v1/system/fresh-start")
+@router.get("/fresh-start")
 async def get_fresh_start_status() -> Dict[str, Any]:
     """Return whether this session was booted in fresh-start mode plus session context."""
     from core.fresh_start import is_fresh_start
     import time as _t
     result: Dict[str, Any] = {"fresh_start": is_fresh_start()}
     try:
-        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_grid_15m import get_agent_grid
         grid = get_agent_grid()
         total_cycles = sum(a.state.cycles_run for a in grid.agents)
         total_orders = sum(a.state.orders_placed for a in grid.agents)
@@ -1044,7 +1102,7 @@ async def get_fresh_start_status() -> Dict[str, Any]:
     return result
 
 
-@router.get("/api/v1/system/pnl-consistency")
+@router.get("/pnl-consistency")
 async def get_pnl_consistency() -> Dict[str, Any]:
     """Compare PnL from multiple sources and flag disagreements.
 
@@ -1120,7 +1178,7 @@ async def get_pnl_consistency() -> Dict[str, Any]:
     }
 
 
-@router.get("/api/v1/system/mode-safety")
+@router.get("/mode-safety")
 async def get_mode_safety() -> Dict[str, Any]:
     """Unified mode & safety status for the operator dashboard.
 
@@ -1230,7 +1288,7 @@ async def get_mode_safety() -> Dict[str, Any]:
     return result
 
 
-@router.get("/api/v1/system/execution-gate")
+@router.get("/execution-gate")
 async def get_execution_gate() -> Dict[str, Any]:
     """Unified execution gate status.
 
@@ -1241,7 +1299,7 @@ async def get_execution_gate() -> Dict[str, Any]:
     return check_execution_gate().to_dict()
 
 
-@router.get("/api/v1/system/price-feed-staleness")
+@router.get("/price-feed-staleness")
 async def get_price_feed_staleness() -> Dict[str, Any]:
     """Per-symbol price feed staleness with safe_to_trade flag."""
     from core.execution_gate import check_price_feed_staleness
@@ -1356,7 +1414,7 @@ async def get_safety_violations(
         }
 
 
-@router.get("/api/v1/system/session-log")
+@router.get("/session-log")
 async def get_session_log(
     limit: int = 50,
     category: str = None,
@@ -1372,7 +1430,7 @@ async def get_session_log(
     }
 
 
-@router.get("/api/v1/system/symbol-status")
+@router.get("/symbol-status")
 async def get_symbol_status_endpoint() -> Dict[str, Any]:
     """Per-symbol trading status matrix.
 
@@ -1425,8 +1483,9 @@ async def trigger_config_reload() -> Dict[str, Any]:
 
     # 4. MeridLoop config-reload step (fires _reload_config immediately)
     try:
-        from merid.loop import get_merid_loop
-        loop = get_merid_loop()
+        # LEGACY REMOVAL: Use 15m loop instead of legacy merid.loop
+        from merid.loop_15m import get_merid_loop_15m
+        loop = get_merid_loop_15m()
         import asyncio
         summary: Dict[str, Any] = {}
         await loop._reload_config(summary)
@@ -1758,8 +1817,8 @@ async def services_health() -> Dict[str, Any]:
     
     # Kalshi WebSocket bridge health
     try:
-        from merid.event_venues.kalshi.ws import get_ws_bridge
-        bridge = get_ws_bridge()
+        from merid.event_venues.kalshi.ws_bridge import get_bridge
+        bridge = get_bridge()
         health_results["services"]["kalshi_ws_bridge"] = {
             "status": "healthy" if bridge.is_connected else "disconnected",
             "connected": bridge.is_connected,
@@ -1771,7 +1830,7 @@ async def services_health() -> Dict[str, Any]:
     
     # Agent Grid health
     try:
-        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_grid_15m import get_agent_grid
         grid = get_agent_grid()
         grid_status = grid.get_grid_status() if hasattr(grid, 'get_grid_status') else {}
         health_results["services"]["agent_grid"] = {
@@ -1869,8 +1928,8 @@ async def kalshi_health() -> Dict[str, Any]:
     
     # WebSocket state
     try:
-        from merid.event_venues.kalshi.ws import get_ws_bridge
-        bridge = get_ws_bridge()
+        from merid.event_venues.kalshi.ws_bridge import get_bridge
+        bridge = get_bridge()
         result["components"]["websocket"] = {
             "connected": bridge.is_connected,
             "subscribed_channels": list(getattr(bridge, '_subscriptions', set())),
@@ -1908,7 +1967,7 @@ async def kalshi_health() -> Dict[str, Any]:
     return result
 
 
-@router.get("/api/v1/system/config-fingerprint")
+@router.get("/config-fingerprint")
 async def get_config_fingerprint_endpoint(
     subsystem: str = None
 ) -> Dict[str, Any]:
@@ -2019,7 +2078,7 @@ async def get_config_fingerprint_endpoint(
     return result
 
 
-@router.get("/api/v1/system/config-explain")
+@router.get("/config-explain")
 async def explain_config_endpoint(
     key: str
 ) -> Dict[str, Any]:

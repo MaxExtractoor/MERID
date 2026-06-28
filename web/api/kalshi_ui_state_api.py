@@ -225,10 +225,11 @@ async def _fetch_system_status() -> SystemStatus:
         from web.api.system_endpoints import router as system_router
         
         # Fetch mode from grid
+        # PRODUCTION STACK: Use agent_grid_15m instead of legacy agent_grid
         mode_data = None
         try:
             # Direct call to grid mode endpoint logic
-            from merid.prediction.agent_grid import get_agent_grid
+            from merid.prediction.agent_grid_15m import get_agent_grid
             grid = get_agent_grid()
             if grid:
                 mode_data = {
@@ -333,9 +334,9 @@ async def _fetch_capital_state() -> CapitalState:
     try:
         from merid.event_venues.kalshi import get_bankroll_service
         
-        bankroll_service = get_bankroll_service()
+        bankroll_service = await get_bankroll_service()
         if bankroll_service:
-            result = bankroll_service.get_balance()
+            result = await bankroll_service.get_balance()
             if isinstance(result, BalanceSuccess):
                 balance_cents = result.balance_cents
                 portfolio_cents = result.portfolio_cents
@@ -640,16 +641,17 @@ async def _fetch_risk_state() -> RiskState:
 async def _fetch_grid_state() -> GridState:
     """Aggregate grid state from grid status endpoint."""
     try:
-        from merid.prediction.agent_grid import get_agent_grid
-        
+        from merid.prediction.agent_grid_15m import get_agent_grid
+
         grid = get_agent_grid()
         if grid:
-            running = getattr(grid, "running", False)
-            agent_count = len(getattr(grid, "agents", []))
-            active_agent_count = len([a for a in getattr(grid, "agents", []) if getattr(a, "enabled", False)])
-            last_cycle_at = getattr(grid, "last_cycle_at", None)
-            cycles_run = getattr(grid, "cycles_run", 0)
-            
+            running = getattr(grid, "_running", False)
+            agent_count = len(getattr(grid, "_agents", []))
+            active_agent_count = len([a for a in getattr(grid, "_agents", []) if getattr(a.config, "enabled", False)])
+            # LeanAgentGrid15m doesn't track last_cycle_at or cycles_run
+            last_cycle_at = None
+            cycles_run = 0
+
             # Compute cycles per minute
             cycles_per_minute = None
             if last_cycle_at and cycles_run > 0:

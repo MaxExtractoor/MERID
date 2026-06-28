@@ -311,14 +311,15 @@ async def get_feed_staleness() -> Dict[str, Any]:
         logger.debug(f"Silent error: {e}")
 
     try:
-        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_grid_15m import get_agent_grid
         grid = get_agent_grid()
-        total_cycles = sum(a.state.cycles_run for a in grid.agents)
-        running = sum(1 for a in grid.agents if a.state.running)
-        feeds_info.append({"name": "agent_grid", "last_update": int(now * 1000), "stale": running == 0, "max_age_ms": 120000, "age_sec": 0, "detail": f"{running}/{len(grid.agents)} running, {total_cycles} total cycles"})
-        if running == 0:
-            stale_count += 1
-            paused["agent_grid"] = "no running agents"
+        if grid:
+            total_cycles = sum(1 for a in grid._agents)  # LeanAgentGrid15m uses _agents
+            running = len(grid._agents)  # LeanAgentGrid15m doesn't have per-agent running state
+            feeds_info.append({"name": "agent_grid", "last_update": int(now * 1000), "stale": running == 0, "max_age_ms": 120000, "age_sec": 0, "detail": f"{running}/{len(grid._agents)} agents, {total_cycles} total cycles"})
+            if running == 0:
+                stale_count += 1
+                paused["agent_grid"] = "no running agents"
     except Exception as e:
         logger.debug(f"Silent error: {e}")
 
@@ -346,25 +347,25 @@ async def get_risk_agents() -> Dict[str, Any]:
 
     # Fallback: derive from agent grid
     try:
-        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_grid_15m import get_agent_grid
         grid = get_agent_grid()
         agents_data: List[Dict[str, Any]] = []
-        for agent in grid.agents:
-            cfg = agent.config
-            st = agent.state
-            agents_data.append({
-                "agent_id": cfg.name,
-                "asset": cfg.assets[0] if cfg.assets else "",
-                "timeframe": cfg.timeframes[0] if cfg.timeframes else "",
-                "running": st.running,
-                "cycles": st.cycles_run,
-                "orders_placed": st.orders_placed,
-                "pnl": round(getattr(st, "total_pnl", 0.0), 2),
-                "drawdown_pct": round(getattr(st, "drawdown_pct", 0.0), 2),
-                "exposure_usd": round(getattr(st, "exposure_usd", 0.0), 2),
-                "win_rate": round(getattr(st, "win_rate", 0.0), 4),
-                "risk_score": "low" if st.orders_placed == 0 else ("medium" if getattr(st, "drawdown_pct", 0) < 5 else "high"),
-            })
+        if grid:
+            for agent in grid._agents:  # LeanAgentGrid15m uses _agents
+                cfg = agent.config
+                agents_data.append({
+                    "agent_id": cfg.name,
+                    "asset": cfg.series_tickers[0] if cfg.series_tickers else "",
+                    "timeframe": "15m",  # LeanAgent15m is always 15m
+                    "running": cfg.enabled,
+                    "cycles": 0,  # LeanAgent15m doesn't track cycles
+                    "orders_placed": 0,  # LeanAgent15m doesn't track orders
+                    "pnl": 0.0,
+                    "drawdown_pct": 0.0,
+                    "exposure_usd": 0.0,
+                    "win_rate": 0.0,
+                    "risk_score": "low",
+                })
         return {"agents": agents_data, "count": len(agents_data)}
     except Exception as e2:
         logger.warning(f"risk_agents fallback: {e2}")

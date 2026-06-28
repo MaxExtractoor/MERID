@@ -130,7 +130,7 @@ def _transform_metrics_for_ui(backend_metrics: Dict[str, Any], agents: List[Dict
 def _get_kalshi_agents_for_swarm() -> List[Dict[str, Any]]:
     """Return Kalshi trading agents in swarm-panel format."""
     try:
-        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_grid_15m import get_agent_grid
         grid = get_agent_grid()
         summary = grid.summary()
         agents = []

@@ -58,7 +58,7 @@ async def stop_system(
         
         # Also pause Kalshi agent grid
         try:
-            from merid.prediction.agent_grid import get_agent_grid
+            from merid.prediction.agent_grid_15m import get_agent_grid
             grid = get_agent_grid()
             for agent in grid.agents:
                 agent.pause()
