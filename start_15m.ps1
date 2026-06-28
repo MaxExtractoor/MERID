@@ -1,0 +1,116 @@
+# start_15m.ps1
+# PRODUCTION startup script for the MERID 15m lean trading server.
+#
+# This is the ONLY startup script for the production 15m Kalshi crypto trading system.
+# It sets environment variables and starts the FastAPI server.
+# Startup is handled exclusively by FastAPI lifespan events in main_15m_lean.py.
+#
+# Usage (from repo root):
+#   .\start_15m.ps1
+#
+# Optional overrides:
+#   .\start_15m.ps1 -Port 8011 -Profile kalshi_crypto_15m_v2
+
+param(
+    [int]$Port = 8011,
+    [string]$ServerHost = "0.0.0.0",
+    [string]$Profile = "kalshi_crypto_15m_v2"
+)
+
+$ErrorActionPreference = "Stop"
+
+# 0. Load .env file to get credentials
+$envFile = ".\.env"
+if (Test-Path $envFile) {
+    Write-Host "[start_15m] Loading environment variables from .env file" -ForegroundColor Cyan
+    Get-Content $envFile | ForEach-Object {
+        if ($_ -match '^([^#][^=]+)=(.*)$') {
+            $name = $matches[1].Trim()
+            $value = $matches[2].Trim()
+            # Skip empty values and comments
+            if ($name -and $value -and !$name.StartsWith('#')) {
+                Set-Item -Path "env:$name" -Value $value
+            }
+        }
+    }
+    Write-Host "[start_15m] .env file loaded successfully" -ForegroundColor Green
+} else {
+    Write-Host "[start_15m] WARNING: .env file not found at $envFile" -ForegroundColor Yellow
+}
+
+# 1. Risk profile (loop expects kalshi_crypto_15m_v2)
+$env:MERID_PROFILE = $Profile
+Write-Host "[start_15m] MERID_PROFILE=$($env:MERID_PROFILE)" -ForegroundColor Cyan
+
+# 2. Enable live trading -- ALL FOUR latches are required:
+#    TRADING_ENABLED=true (15m loop startup) AND
+#    MERID_PM_TRADING_MODE=live AND MERID_PM_LIVE_ENABLED=true AND MERID_ALLOW_LIVE_TRADES=true
+#    Missing any one force-demotes to PAPER (orders simulated, not sent).
+#    To run PAPER again, set MERID_PM_TRADING_MODE=paper (or unset live_enabled).
+$env:TRADING_ENABLED = "true"
+$env:MERID_PM_TRADING_MODE = "live"
+$env:MERID_PM_LIVE_ENABLED = "true"
+$env:MERID_ALLOW_LIVE_TRADES = "true"
+Write-Host "[start_15m] *** LIVE TRADING ENABLED - REAL ORDERS WILL BE SENT ***" -ForegroundColor Red
+Write-Host "[start_15m] TRADING_ENABLED=$($env:TRADING_ENABLED)" -ForegroundColor Cyan
+Write-Host "[start_15m] MERID_PM_TRADING_MODE=$($env:MERID_PM_TRADING_MODE)" -ForegroundColor Cyan
+Write-Host "[start_15m] MERID_PM_LIVE_ENABLED=$($env:MERID_PM_LIVE_ENABLED)" -ForegroundColor Cyan
+Write-Host "[start_15m] MERID_ALLOW_LIVE_TRADES=$($env:MERID_ALLOW_LIVE_TRADES)" -ForegroundColor Cyan
+
+# 3. Kalshi environment and endpoints (use api.elections.kalshi.com per .env configuration)
+# Consolidated to single environment variable: MERID_KALSHI_ENV
+$env:MERID_KALSHI_ENV = "prod"  # Unified environment variable (prod=demo, prod=live)
+$env:KALSHI_USE_DEMO = "false"  # Explicitly disable demo mode for production safety
+# CRITICAL FIX: Use api.elections.kalshi.com endpoints (elections API, not external-api)
+# The external-api endpoints do not support elections markets
+$env:MERID_KALSHI_HTTP_BASE = "https://api.elections.kalshi.com/trade-api/v2"
+$env:MERID_KALSHI_WS_BASE = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+
+# 3.1 Kalshi API credentials (required for live trading)
+# These should be set in your .env file or environment
+# Credentials are expected to be already set in environment variables
+if (-not $env:KALSHI_LIVE_API_KEY_ID) {
+    $env:KALSHI_LIVE_API_KEY_ID = $env:KALSHI_API_KEY_ID
+}
+if (-not $env:KALSHI_LIVE_PRIVATE_KEY_PATH) {
+    $env:KALSHI_LIVE_PRIVATE_KEY_PATH = $env:KALSHI_PRIVATE_KEY_PATH
+}
+
+Write-Host "[start_15m] MERID_KALSHI_ENV=$($env:MERID_KALSHI_ENV)" -ForegroundColor Cyan
+Write-Host "[start_15m] KALSHI_USE_DEMO=$($env:KALSHI_USE_DEMO)" -ForegroundColor Cyan
+Write-Host "[start_15m] MERID_KALSHI_HTTP_BASE=$($env:MERID_KALSHI_HTTP_BASE)" -ForegroundColor Cyan
+Write-Host "[start_15m] MERID_KALSHI_WS_BASE=$($env:MERID_KALSHI_WS_BASE)" -ForegroundColor Cyan
+if ($env:KALSHI_LIVE_API_KEY_ID) {
+    Write-Host "[start_15m] KALSHI_LIVE_API_KEY_ID=$($env:KALSHI_LIVE_API_KEY_ID.Substring(0, [Math]::Min(8, $env:KALSHI_LIVE_API_KEY_ID.Length)))****" -ForegroundColor Cyan
+} else {
+    Write-Host "[start_15m] KALSHI_LIVE_API_KEY_ID=NOT_SET" -ForegroundColor Yellow
+}
+Write-Host "[start_15m] KALSHI_LIVE_PRIVATE_KEY_PATH=$($env:KALSHI_LIVE_PRIVATE_KEY_PATH)" -ForegroundColor Cyan
+
+# 4. Enable 15M loop diagnostic logging for debugging
+$env:MERID_LOOP_DIAG_FILE = "1"
+Write-Host "[start_15m] MERID_LOOP_DIAG_FILE=$($env:MERID_LOOP_DIAG_FILE) - loop diagnostics enabled" -ForegroundColor Cyan
+
+# 5. Enable Phase 1 Profitability Enhancements
+$env:MERID_YES_NO_ARBITRAGE_ENABLED = "true"
+Write-Host "[start_15m] MERID_YES_NO_ARBITRAGE_ENABLED=$($env:MERID_YES_NO_ARBITRAGE_ENABLED) - YES/NO arbitrage enabled" -ForegroundColor Green
+
+# Market making and correlation tracking are controlled by profile config (kalshi_crypto_15m_v2.yaml)
+# These are already enabled in the profile config
+
+# CRITICAL FIX: Use WindowsSelectorEventLoopPolicy for WebSocket header support
+# Windows ProactorEventLoop doesn't support passing headers to create_connection()
+# which causes websockets.connect() to fail with "extra_headers not supported"
+$env:PYTHONUNBUFFERED = "1"
+Write-Host "[start_15m] Setting asyncio event loop policy to WindowsSelectorEventLoopPolicy for WebSocket header support" -ForegroundColor Cyan
+
+Write-Host "[start_15m] Launching server on http://${ServerHost}:${Port}" -ForegroundColor Cyan
+Write-Host "[start_15m] Startup is handled by FastAPI lifespan events - no health watcher needed" -ForegroundColor Green
+Write-Host "[start_15m] ---- server logs below ----" -ForegroundColor Yellow
+
+# Start the server - FastAPI lifespan will handle startup automatically
+# Use --log-level debug to see more output
+# Use --reload to automatically reload code changes during development
+$env:PYTHONUNBUFFERED = "1"
+$ErrorActionPreference = "Continue"
+& uvicorn web.main_15m_lean:app --host $ServerHost --port $Port --log-level debug
