@@ -11,7 +11,7 @@ import time
 
 from utils.logger import get_logger
 
-logger = get_logger("signals.health")
+logger = get_logger("kalshi.health")
 
 router = APIRouter(prefix="/api/health", tags=["health"])
 
@@ -106,6 +106,70 @@ async def execution_daemon_health():
             "status": "unhealthy",
             "timestamp": time.time(),
             "error": str(e)
+        }
+
+
+@router.get("/kalshi-config")
+async def kalshi_config_health():
+    """Health check for Kalshi API configuration"""
+    try:
+        from merid.event_venues.kalshi.kalshi_config import verify_kalshi_config
+        
+        is_valid, error_message, config = verify_kalshi_config()
+        
+        result = {
+            "status": "healthy" if is_valid else "unhealthy",
+            "timestamp": time.time(),
+            "is_valid": is_valid,
+            "error": error_message if error_message else None,
+        }
+        
+        if config:
+            result["config"] = {
+                "env": config.env,
+                "rest_base_url": config.rest_base_url,
+                "ws_base_url": config.ws_base_url,
+                "api_key_id": config.api_key_id[:4] + "****" + config.api_key_id[-4:] if len(config.api_key_id) > 8 else "****",
+                "private_key_path": config.private_key_path,
+                "has_private_key_pem": config.private_key_pem is not None,
+            }
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Kalshi config health check failed: {e}")
+        return {
+            "status": "unhealthy",
+            "timestamp": time.time(),
+            "error": str(e)
+        }
+
+
+@router.get("/kalshi-readiness")
+async def kalshi_readiness():
+    """Combined Kalshi readiness check - config, REST, WS, spot, MD
+    
+    Uses the shared health snapshot to ensure consistency between
+    health endpoint and 15m loop readiness checks.
+    """
+    try:
+        from merid.event_venues.kalshi.health_snapshot import get_kalshi_health_snapshot
+        import asyncio
+        
+        # Add timeout to prevent indefinite hangs (matches loop_15m.py timeout)
+        snapshot = await asyncio.wait_for(
+            asyncio.to_thread(get_kalshi_health_snapshot),
+            timeout=5.0  # 5 second timeout
+        )
+        return snapshot.to_dict()
+        
+    except Exception as e:
+        logger.error(f"Kalshi readiness check failed: {e}")
+        return {
+            "status": "unhealthy",
+            "timestamp": time.time(),
+            "error": str(e),
+            "reasons": [f"snapshot_build_failed: {e}"]
         }
 
 

@@ -114,8 +114,8 @@ async def get_halt_diagnosis() -> Dict[str, Any]:
     
     # 5. WebSocket health
     try:
-        from merid.event_venues.kalshi.ws import get_ws_bridge
-        ws = get_ws_bridge()
+        from merid.event_venues.kalshi.ws_bridge import get_bridge
+        ws = get_bridge()
         ws_status = ws.get_status() if hasattr(ws, "get_status") else {}
         diagnosis["ws_health"] = {
             "connected": ws_status.get("connected", False),

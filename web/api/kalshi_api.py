@@ -41,7 +41,7 @@ from merid.event_venues.kalshi import (
     BalanceSuccess,
     BalanceTemporaryError,
     BalancePermanentError,
-    BankrollSummary,
+    get_BankrollSummary,
 )
 
 logger = get_logger("web.api.kalshi_api")
@@ -228,8 +228,8 @@ def _get_order_router():
 
 def _get_bridge():
     try:
-        from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
-        return get_ws_bridge()
+        from merid.event_venues.kalshi.ws_bridge import get_bridge
+        return get_bridge()
     except (ImportError, ModuleNotFoundError):
         return None
 
@@ -498,7 +498,13 @@ async def list_markets(
 
     # Fallback: hit Kalshi public API directly
     import os, requests as req
-    base = os.getenv("KALSHI_API_BASE_URL", "https://api.elections.kalshi.com")
+    from merid.event_venues.kalshi.kalshi_config import get_kalshi_config
+    try:
+        config = get_kalshi_config()
+        base = config.public_rest_api_url or config.rest_base_url
+    except Exception:
+        # Fallback to official current endpoint if config fails
+        base = os.getenv("KALSHI_API_BASE_URL", "https://external-api.kalshi.com/trade-api/v2")
     try:
         params: Dict[str, Any] = {"limit": limit, "status": "open"}
         if search:
@@ -1582,7 +1588,7 @@ async def _ensure_fresh_positions(max_staleness_seconds: int = 60) -> Tuple[List
                         "realized_pnl": float(pos.realized_pnl) if pos.realized_pnl else 0.0,
                         "unrealized_pnl": float(pos.unrealized_pnl) if pos.unrealized_pnl else 0.0,
                     })
-                await cache.sync_from_rest(positions_list)
+                await cache.sync_from_rest(positions_list, rest_timestamp=time.time())
                 freshness_meta["triggered_sync"] = True
                 freshness_meta["staleness_seconds"] = 0  # Now fresh
             except Exception as sync_exc:
@@ -1605,7 +1611,7 @@ async def _ensure_fresh_positions(max_staleness_seconds: int = 60) -> Tuple[List
                     "realized_pnl": float(pos.realized_pnl) if pos.realized_pnl else 0.0,
                     "unrealized_pnl": float(pos.unrealized_pnl) if pos.unrealized_pnl else 0.0,
                 })
-            await cache.sync_from_rest(positions_list)
+            await cache.sync_from_rest(positions_list, rest_timestamp=time.time())
             freshness_meta["triggered_sync"] = True
             freshness_meta["staleness_seconds"] = 0
         except Exception as sync_exc:
@@ -1744,7 +1750,7 @@ async def get_positions(
     
     if include_synthetic:
         try:
-            from merid.prediction.agent_grid import get_agent_grid
+            from merid.prediction.agent_grid_15m import get_agent_grid
             grid = get_agent_grid()
             for agent in grid.agents:
                 for ticker in getattr(agent.state, "active_tickers", []):
@@ -1900,7 +1906,7 @@ async def get_orders(
     if include_scanning:
         import datetime as _dt
         try:
-            from merid.prediction.agent_grid import get_agent_grid
+            from merid.prediction.agent_grid_15m import get_agent_grid
             grid = get_agent_grid()
             _now = _dt.datetime.now(_dt.timezone.utc).isoformat()
             for agent in grid.agents:
@@ -2045,7 +2051,7 @@ async def get_order_lineage(order_id: str) -> Dict[str, Any]:
     
     # 2. Trace back to signal/agent
     try:
-        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_grid_15m import get_agent_grid
         grid = get_agent_grid()
         
         # Look for agent that created this order
@@ -4637,8 +4643,8 @@ async def green_path_diagnostic() -> Dict[str, Any]:
 
     # WS bridge state
     try:
-        from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
-        bridge = get_ws_bridge()
+        from merid.event_venues.kalshi.ws_bridge import get_bridge
+        bridge = get_bridge()
         result["ws_bridge_state"] = {
             "connected": bridge.is_running() if bridge else False,
             "shutdown_flag": bridge._shutdown.is_set() if bridge else None,
@@ -4653,7 +4659,7 @@ async def green_path_diagnostic() -> Dict[str, Any]:
 
     # Agent grid state
     try:
-        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_grid_15m import get_agent_grid
         grid = get_agent_grid()
         result["agent_grid_state"] = {
             "started": grid.is_running,
@@ -5021,11 +5027,16 @@ async def sizing_metrics_endpoint() -> Dict[str, Any]:
         kelly_util = sizer.kelly_utilization_pct
     except Exception as _e:
         logger.debug("position sizer metrics skipped, using live risk fallback: %s", _e)
-        # Fallback: derive from live risk state instead of paper hardcodes
+        # Fallback: derive from profile-driven risk config instead of hardcodes
+        try:
+            from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+            risk_config = get_kalshi_risk()
+            kelly_f = float(getattr(risk_config, 'kelly_fraction', 0.30))
+        except Exception:
+            kelly_f = 0.30  # Fallback to profile default if risk config unavailable
         live_equity = risk_summary.get("current_equity_usd", 0)
         live_notional = risk_summary.get("total_notional_usd", 0)
-        kelly_f = 0.25
-        effective = 0.25
+        effective = kelly_f
         vol_scale = 1.0
         target_vol = 0.02
         realized_vol = 0.02  # will be overwritten by PortfolioRiskAgent sync
@@ -5201,8 +5212,14 @@ async def edge_signals_endpoint(
         effective = sizer.effective_fraction
     except Exception as _e:
         logger.debug("position sizer kelly lookup skipped: %s", _e)
-        base_kelly = 0.10
-        effective = 0.01
+        # Fallback: derive from profile-driven risk config instead of hardcodes
+        try:
+            from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+            risk_config = get_kalshi_risk()
+            base_kelly = float(getattr(risk_config, 'kelly_fraction', 0.30))
+        except Exception:
+            base_kelly = 0.30  # Fallback to profile default if risk config unavailable
+        effective = base_kelly * 0.1  # Conservative effective fraction for sizing tier
 
     dd_pct = risk_summary.get("drawdown_pct", 0)
     dd_thresholds = {"warning": 5.0, "downsize": 10.0, "halt": 15.0}
@@ -5460,7 +5477,7 @@ async def risk_events_endpoint(
         })
         # Agent grid status event
         try:
-            from merid.prediction.agent_grid import get_agent_grid
+            from merid.prediction.agent_grid_15m import get_agent_grid
             _grid = get_agent_grid()
             _running = sum(1 for a in _grid.agents if a.state.running)
             _total_cycles = sum(a.state.cycles_run for a in _grid.agents)
@@ -5933,7 +5950,7 @@ async def get_swarm_insights(
     _now = _dt.datetime.now(_dt.timezone.utc)
     fallback_insights = []
     try:
-        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_grid_15m import get_agent_grid
         grid = get_agent_grid()
         for agent in grid.agents:
             if agent.state.cycles_run > 0:
@@ -6325,7 +6342,7 @@ async def get_favorites() -> Dict[str, Any]:
     return {"favorites": favs, "count": len(favs)}
 
 
-@router.post("/favorites/toggle")
+@router.post("/favorites/toggle", operation_id="toggle_favorite")
 async def toggle_favorite(ticker: str = Query(..., description="Market ticker to toggle")) -> Dict[str, Any]:
     """Add or remove a ticker from favorites/watchlist.
     
@@ -6457,6 +6474,62 @@ async def get_news_signals(limit: int = Query(20, ge=1, le=100)) -> Dict[str, An
     return {"signals": fallback_signals, "count": len(fallback_signals), "monitor_running": False}
 
 
+@router.get("/market-states")
+async def get_market_states(
+    tickers: Optional[str] = Query(None, description="Comma-separated list of tickers to filter")
+) -> Dict[str, Any]:
+    """Get current Kalshi market state data from the WebSocket bridge.
+    
+    Returns live order book data, spreads, depth, and other market state metrics
+    that are populated by the WebSocket bridge in real-time.
+    """
+    try:
+        from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+        store = get_kalshi_market_state_store()
+        
+        # Get all market states
+        all_states = store.get_all_states()
+        
+        # Filter by tickers if provided
+        if tickers:
+            ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+            filtered_states = {k: v for k, v in all_states.items() if k in ticker_list}
+        else:
+            filtered_states = all_states
+        
+        # Format response
+        states_dict = {}
+        for ticker, state in filtered_states.items():
+            states_dict[ticker] = {
+                "book_initialized": getattr(state, 'book_initialized', False),
+                "spread_cents": getattr(state, 'spread_cents', 0),
+                "mid_cents": getattr(state, 'mid_cents', 0),
+                "depth_10c": getattr(state, 'depth_10c', {}),
+                "top_of_book_size": getattr(state, 'top_of_book_size', {}),
+                "volume_24h": getattr(state, 'volume_24h', 0),
+                "open_interest": getattr(state, 'open_interest', 0),
+                "seconds_to_expiry": getattr(state, 'seconds_to_expiry', 0),
+                "expiration_time": getattr(state, 'expiration_time', None),
+                "last_updated": getattr(state, 'last_updated', None),
+                "source": "market_state_store"
+            }
+        
+        return {
+            "count": len(states_dict),
+            "states": states_dict,
+            "timestamp": store.get_last_update_timestamp() if hasattr(store, 'get_last_update_timestamp') else None
+        }
+        
+    except Exception as e:
+        logger.warning(f"Market states endpoint failed: {e}")
+        return {
+            "count": 0,
+            "states": {},
+            "error": str(e),
+            "timestamp": None
+        }
+
+
 @router.get("/consensus-signals")
 async def get_consensus_signals() -> Dict[str, Any]:
     """Get current Kalshi market consensus signals from the agent grid.
@@ -6572,20 +6645,6 @@ async def set_favorites(
     return {"favorites": clean, "count": len(clean)}
 
 
-@router.post("/favorites/toggle")
-async def toggle_favorite(
-    ticker: str = Query(..., description="Ticker to add/remove"),
-) -> Dict[str, Any]:
-    """Toggle a single ticker in the favorites list."""
-    favs = _load_favorites()
-    if ticker in favs:
-        favs.remove(ticker)
-        action = "removed"
-    else:
-        favs.append(ticker)
-        action = "added"
-    _save_favorites(favs)
-    return {"ticker": ticker, "action": action, "favorites": favs, "count": len(favs)}
 
 
 # ── FIX API ─────────────────────────────────────────────────────────────
@@ -8669,46 +8728,6 @@ async def get_p0_guardrails_status() -> Dict[str, Any]:
 # frontend developers and to provide a clear signal about implementation gaps.
 
 
-@router.get("/news-signals")
-async def get_news_signals() -> Dict[str, Any]:
-    """News signal feed — 501 Not Implemented.
-
-    Stub endpoint. Planned for future news-based signal integration.
-    Track progress in engineering backlog.
-    """
-    raise HTTPException(
-        status_code=501,
-        detail="News signals endpoint not yet implemented. Track progress in backlog."
-    )
-
-
-# Duplicate endpoint removed - see line 5981 for the actual implementation
-
-
-@router.get("/favorites")
-async def get_favorites() -> Dict[str, Any]:
-    """User favorites/watchlist — 501 Not Implemented.
-
-    Stub endpoint. Planned for future user preference system.
-    Track progress in engineering backlog.
-    """
-    raise HTTPException(
-        status_code=501,
-        detail="Favorites endpoint not yet implemented. Track progress in backlog."
-    )
-
-
-@router.post("/favorites/toggle")
-async def toggle_favorite(body: Dict[str, Any]) -> Dict[str, Any]:
-    """Toggle favorite status for a market — 501 Not Implemented.
-
-    Stub endpoint. Planned for future user preference system.
-    Track progress in engineering backlog.
-    """
-    raise HTTPException(
-        status_code=501,
-        detail="Favorites toggle endpoint not yet implemented. Track progress in backlog."
-    )
 
 
 @router.get("/sentiment/lane-snapshot")

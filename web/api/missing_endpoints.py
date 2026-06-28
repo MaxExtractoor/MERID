@@ -151,22 +151,22 @@ def _stub_list(data: List[Dict[str, Any]], *, message: str = "Simulated data") -
 async def get_pipeline_venues() -> Dict[str, Any]:
     """Venue health status for operator dashboard."""
     try:
-        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_grid_15m import get_agent_grid
         grid = get_agent_grid()
-        s = grid.summary()
-        return {
-            "venues": [{
-                "name": "kalshi",
-                "status": "online" if grid.is_running else "offline",
-                "latency_ms": 0,
-                "error_rate": 0,
-                "mode": "demo" if s.get("use_demo") else "live",
-            }],
-        }
+        if grid:
+            return {
+                "venues": [{
+                    "name": "kalshi",
+                    "status": "online" if grid._running else "offline",
+                    "latency_ms": 0,
+                    "error_rate": 0,
+                    "mode": "live",  # LeanAgentGrid15m doesn't have demo mode
+                }],
+            }
     except Exception as exc:
         logger.debug("Venue status fetch failed: %s", exc)
     return _stub({
-        "venues": [{"name": "kalshi", "status": "unknown", "latency_ms": 0, "error_rate": 0, "mode": "demo"}],
+        "venues": [{"name": "kalshi", "status": "unknown", "latency_ms": 0, "error_rate": 0, "mode": "live"}],
     }, message="Venue data unavailable")
 
 
@@ -203,17 +203,19 @@ async def get_signals_alerts_history(limit: int = 50) -> Dict[str, Any]:
     except Exception as e:
         logger.debug(f"Silent error: {e}")
     try:
-        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_grid_15m import get_agent_grid
         grid = get_agent_grid()
-        for agent in grid.agents:
-            if agent.state.orders_placed > 0:
-                fallback_alerts.append({
-                    "id": f"agent-{agent.config.name}",
-                    "type": "signal",
-                    "message": f"{agent.config.name}: {agent.state.orders_placed} orders placed, {agent.state.cycles_run} cycles",
-                    "timestamp": _now.isoformat(),
-                    "source": "agent_grid",
-                })
+        if grid:
+            # LeanAgentGrid15m doesn't track orders/cycles per agent
+            for agent in grid._agents:
+                if agent.config.enabled:
+                    fallback_alerts.append({
+                        "id": f"agent-{agent.config.name}",
+                        "type": "signal",
+                        "message": f"{agent.config.name}: agent enabled in LeanAgentGrid15m",
+                        "timestamp": _now.isoformat(),
+                        "source": "agent_grid",
+                    })
     except Exception as e:
         logger.debug(f"Silent error: {e}")
     if not fallback_alerts:
@@ -973,12 +975,14 @@ async def get_log_stats() -> Dict[str, Any]:
 
     # Add agent grid activity counts
     try:
-        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_grid_15m import get_agent_grid
         grid = get_agent_grid()
-        agent_logs = sum(a.state.cycles_run for a in grid.agents)
-        total += agent_logs
-        info_count += agent_logs
-        comp_counts["agent_grid"] = agent_logs
+        if grid:
+            # LeanAgentGrid15m doesn't track cycles per agent
+            agent_logs = len(grid._agents)  # Count agents instead of cycles
+            total += agent_logs
+            info_count += agent_logs
+            comp_counts["agent_grid"] = agent_logs
     except Exception as e:
         logger.debug(f"Silent error: {e}")
 
@@ -1528,9 +1532,9 @@ async def get_data_freshness() -> Dict[str, Any]:
                 kalshi_feeds.append({"name": "Kalshi Market Catalog", "source": "kalshi_rest", "lastUpdate": now.isoformat() + "Z", "stalenessMs": 0, "thresholdMs": 60000, "status": "unknown"})
             # Agent grid freshness
             try:
-                from merid.prediction.agent_grid import get_agent_grid
+                from merid.prediction.agent_grid_15m import get_agent_grid
                 grid = get_agent_grid()
-                running = grid.running if hasattr(grid, "running") else len(grid.agents) > 0
+                running = grid._running if grid else False
                 kalshi_feeds.append({
                     "name": "Agent Grid",
                     "source": "agent_grid",

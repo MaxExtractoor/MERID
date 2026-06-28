@@ -80,8 +80,9 @@ async def get_global_health(request: Request) -> dict:
     # BUG-L13 FIX: Skip failure in VALIDATION_MODE since MeridLoop is intentionally skipped
     _is_validation = os.environ.get("MERID_VALIDATION_MODE", "") == "1"
     try:
-        from merid.loop import get_merid_loop
-        loop = get_merid_loop()
+        # LEGACY REMOVAL: Use 15m loop instead of legacy merid.loop
+        from merid.loop_15m import get_merid_loop_15m
+        loop = get_merid_loop_15m()
         loop_status = loop.status()
         running = loop_status.get("running", False)
         metrics = loop_status.get("metrics", {})
@@ -141,7 +142,7 @@ async def get_global_health(request: Request) -> dict:
     # BUG-L13 FIX: Report ready in VALIDATION_MODE since AgentGrid is intentionally skipped
     _is_validation = os.environ.get("MERID_VALIDATION_MODE", "") == "1"
     try:
-        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_grid_15m import get_agent_grid
         ag = get_agent_grid()
         # In validation mode, report startup as complete even though skipped
         if _is_validation:

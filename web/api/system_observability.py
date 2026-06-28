@@ -1437,8 +1437,8 @@ class WSSequenceGapAlert(AlertRule):
 
     def evaluate(self) -> Dict[str, Any]:
         try:
-            from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
-            bridge = get_ws_bridge()
+            from merid.event_venues.kalshi.ws_bridge import get_bridge
+            bridge = get_bridge()
             ws = bridge._ws
             if ws is None or not bridge.is_running():
                 return {

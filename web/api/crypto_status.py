@@ -26,7 +26,7 @@ async def get_crypto_market_status() -> Dict[str, Any]:
         },
         "account_info": {
             "api_key_id": os.getenv("KALSHI_API_KEY_ID", "")[:8] + "..." if os.getenv("KALSHI_API_KEY_ID") else None,
-            "environment": "demo" if os.getenv("KALSHI_USE_DEMO", "false").lower() == "true" else "production"
+            "environment": "demo" if os.getenv("KALSHI_USE_DEMO", "false").lower() == "true" else "production"  # TODO: migrate to kalshi_config.get_kalshi_env()
         },
         "next_steps": [
             "Contact Kalshi support for crypto market access",

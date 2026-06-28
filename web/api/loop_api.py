@@ -35,14 +35,21 @@ async def _with_timeout(fn, timeout: float = 5.0, fallback=None):
 
 logger = get_logger("web.api.loop_api")
 
-loop_api_router = APIRouter(prefix="/api/v1/loop", tags=["loop"])
+loop_api_router = APIRouter(prefix="/loop", tags=["loop"])
 
 
 # ── Lazy imports ──────────────────────────────────────────────────────
 
 def _loop():
-    from merid.loop import get_merid_loop
-    return get_merid_loop()
+    try:
+        # Try 15m loop first
+        from merid.loop_15m import get_merid_loop_15m
+        return get_merid_loop_15m()
+    except ImportError:
+        # LEGACY REMOVAL: Fallback to legacy loop removed for 15m stack separation
+        # from merid.loop import get_merid_loop
+        # return get_merid_loop()
+        raise RuntimeError("15m loop not available and legacy loop fallback disabled for stack separation")
 
 def _guard():
     from merid.execution_guard import get_execution_guard
@@ -204,7 +211,7 @@ def get_guard_verdicts(
 
     # Also include agent cycle scan verdicts
     try:
-        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_grid_15m import get_agent_grid
         import datetime as _dt
         grid = get_agent_grid()
         _now = _dt.datetime.now(_dt.timezone.utc).isoformat()

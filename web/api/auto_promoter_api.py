@@ -62,9 +62,10 @@ async def get_recent_promotions(
         logger.debug("Auto-promoter promotions primary source: %s", exc)
 
     # Fallback: derive from agent grid deployment states
+    # PRODUCTION STACK: Use agent_grid_15m instead of legacy agent_grid
     fallback_evals = []
     try:
-        from merid.prediction.agent_grid import get_agent_grid
+        from merid.prediction.agent_grid_15m import get_agent_grid
         grid = get_agent_grid()
         from datetime import datetime, timezone
         _now = datetime.now(timezone.utc)
@@ -80,7 +81,7 @@ async def get_recent_promotions(
                 "result": "pending",
                 "gates_passed": [],
                 "gates_failed": [],
-                "source": "agent_grid",
+                "source": "agent_grid_15m",
             })
     except Exception:
         pass

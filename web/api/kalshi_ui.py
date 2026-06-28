@@ -15,9 +15,10 @@ from fastapi import APIRouter, HTTPException
 from typing import Any, Dict, List, Optional
 
 from merid.event_venues.kalshi.venue_adapter import get_kalshi_venue_adapter
-from merid.reconciliation.kalshi_reconciler import get_kalshi_reconciler
-from merid.signals.store import get_signal_store
-from merid.signals.kalshi_signals import get_kalshi_signal_generator
+from merid.reconciliation.venue_reconciler import get_kalshi_reconciler
+# TEMPORARILY DISABLED: merid.signals.store doesn't exist in production stack
+# from merid.signals.store import get_signal_store
+# from merid.signals.kalshi_signals import get_kalshi_signal_generator
 from utils.logger import get_logger
 
 logger = get_logger("web.api.kalshi_ui")
@@ -56,11 +57,14 @@ async def get_kalshi_ui_summary() -> Dict[str, Any]:
     """
     try:
         import time
-        from merid.paper_config import DOMAIN_CONFIGS
+        import os
+        
+        # Production stack: get mode from environment variable instead of legacy paper_config
+        mode = os.getenv("MERID_PM_TRADING_MODE", "paper")
         
         summary: Dict[str, Any] = {
             "timestamp": time.time(),
-            "mode": "paper" if DOMAIN_CONFIGS["prediction"].mode.value == "paper" else "live",
+            "mode": mode,
         }
         
         # ── Positions, Orders, Fills, Balance ────────────────────────────
@@ -100,7 +104,7 @@ async def get_kalshi_ui_summary() -> Dict[str, Any]:
             
             # Get recent fills — aggregate from agent grid
             try:
-                from merid.prediction.agent_grid import get_agent_grid as _get_ag
+                from merid.prediction.agent_grid_15m import get_agent_grid as _get_ag
                 _grid = _get_ag()
                 _all_fills: list = []
                 for _agent in _grid.agents:
@@ -254,66 +258,70 @@ async def get_kalshi_ui_summary() -> Dict[str, Any]:
             }
         
         # ── Signals ───────────────────────────────────────────────────────
-        try:
-            store = get_signal_store()
-            
-            # Get top edge signals
-            all_signals = store.list_signals(
-                signal_type="market_edge",
-                domain="prediction",
-                venue="kalshi",
-                limit=20,
-            )
-            
-            # Sort by edge_pct and take top 5
-            edge_signals = sorted(
-                all_signals,
-                key=lambda s: s.get("edge_pct", 0),
-                reverse=True,
-            )[:5]
-            
-            # Get liquidity signals
-            liquidity_signals = store.list_signals(
-                signal_type="liquidity",
-                domain="prediction",
-                venue="kalshi",
-                limit=5,
-            )
-            
-            # Get volume anomalies
-            volume_signals = store.list_signals(
-                signal_type="volume_anomaly",
-                domain="prediction",
-                venue="kalshi",
-                limit=5,
-            )
-            
-            # Get risk events
-            risk_signals = store.list_signals(
-                signal_type="risk_event",
-                domain="prediction",
-                venue="kalshi",
-                limit=5,
-            )
-            
-            summary["signals"] = {
-                "edge_top": edge_signals,
-                "liquidity": liquidity_signals,
-                "volume_anomalies": volume_signals,
-                "risk_events": risk_signals,
-            }
-        except Exception as exc:
-            logger.warning(f"Failed to fetch signals: {exc}")
-            summary["signals"] = {
-                "edge_top": [],
-                "liquidity": [],
-                "volume_anomalies": [],
-                "risk_events": [],
-            }
+        # TEMPORARILY DISABLED: merid.signals.store doesn't exist in production stack
+        # try:
+        #     store = get_signal_store()
+        #     
+        #     # Get top edge signals
+        #     all_signals = store.list_signals(
+        #         signal_type="market_edge",
+        #         domain="prediction",
+        #         venue="kalshi",
+        #         limit=20,
+        #     )
+        #     
+        #     # Sort by edge_pct and take top 5
+        #     edge_signals = sorted(
+        #         all_signals,
+        #         key=lambda s: s.get("edge_pct", 0),
+        #         reverse=True,
+        #     )[:5]
+        #     
+        #     # Get liquidity signals
+        #     liquidity_signals = store.list_signals(
+        #         signal_type="liquidity",
+        #         domain="prediction",
+        #         venue="kalshi",
+        #         limit=5,
+        #     )
+        #     
+        #     # Get volume anomalies
+        #     volume_signals = store.list_signals(
+        #         signal_type="volume_anomaly",
+        #         domain="prediction",
+        #         venue="kalshi",
+        #         limit=5,
+        #     )
+        #     
+        #     # Get risk events
+        #     risk_signals = store.list_signals(
+        #         signal_type="risk_event",
+        #         domain="prediction",
+        #         venue="kalshi",
+        #         limit=5,
+        #     )
+        #     
+        #     summary["signals"] = {
+        #         "edge_top": edge_signals,
+        #         "liquidity": liquidity_signals,
+        #         "volume_anomalies": volume_signals,
+        #         "risk_events": risk_signals,
+        #     }
+        # except Exception as exc:
+        #     logger.warning(f"Failed to fetch signals: {exc}")
+        
+        # Placeholder for signals (disabled due to missing merid.signals.store module)
+        summary["signals"] = {
+            "edge_top": [],
+            "liquidity": [],
+            "volume_anomalies": [],
+            "risk_events": [],
+            "status": "disabled - signals module not available in production stack"
+        }
         
         # ── Agent Grid ────────────────────────────────────────────────────
         try:
-            from merid.prediction.agent_grid import get_agent_grid
+            from merid.prediction.agent_grid_15m import get_agent_grid
             
             grid = get_agent_grid()
             

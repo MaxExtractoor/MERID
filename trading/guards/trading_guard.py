@@ -1,4 +1,13 @@
-"""TradingGuard and SolanaAntiRugGuard scaffolds for unified trading suite."""
+"""TradingGuard and SolanaAntiRugGuard scaffolds for unified trading suite.
+
+NOTE: This guard is NOT used by Kalshi 15m crypto trading.
+Kalshi 15m uses its own risk layer:
+- KalshiRiskManager (merid/event_venues/kalshi/kalshi_risk.py)
+- PreTradeGate (merid/event_venues/kalshi/order_gate.py)
+- Profile-driven config from kalshi_crypto_15m_v2.yaml
+
+This guard is for legacy unified trading suite paths (non-Kalshi adapters, Solana sniping, etc.).
+"""
 
 from __future__ import annotations
 
@@ -8,7 +17,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from trading.adapters.base import TradeRequest
 
@@ -19,6 +28,26 @@ from trading.config.runtime_config import (
     get_runtime_config,
     TradingRuntimeConfig,
 )
+
+
+def _required(name: str) -> float:
+    """Fail-fast helper to enforce required parameters in production.
+    
+    Used as default_factory for TradingGuardConfig fields that must be
+    provided by profile config. This prevents silent defaults and ensures
+    explicit configuration for core risk parameters.
+    
+    Args:
+        name: Name of the required field for error message
+        
+    Raises:
+        RuntimeError: If the field is not provided explicitly
+    """
+    raise RuntimeError(
+        f"TradingGuardConfig.{name} must be provided by profile config. "
+        f"Use TradingGuardConfig.from_profile() for Kalshi 15m or "
+        f"TradingGuardConfig.from_env() for non-prod adapters only."
+    )
 
 try:  # Optional import when memecoin engine is available
     from sniping.memecoin_engine import TokenRisk
@@ -73,14 +102,22 @@ class GuardDecision:
 
 @dataclass
 class TradingGuardConfig:
-    """High-level trading guard configuration."""
+    """High-level trading guard configuration.
+    
+    CRITICAL: max_notional_usd and other risk parameters are REQUIRED with no defaults.
+    For Kalshi 15m crypto trading, these should come from the profile config (kalshi_crypto_15m.yaml)
+    via KalshiRiskConfig. Silent defaults have been removed to prevent misconfiguration.
+    
+    Use TradingGuardConfig.from_profile() for Kalshi 15m production.
+    Use TradingGuardConfig.from_env() only for non-prod adapters (dev tools, generic trading).
+    """
 
     enable_trading_suite: bool = True
     allow_live_trades: bool = False
     vpn_only: bool = True
-    max_notional_usd: float = 25_000.0
+    max_notional_usd: float = field(default_factory=lambda: _required("max_notional_usd"))
     max_memecoin_notional_usd: float = 2_500.0
-    max_daily_loss_usd: float = 25_000.0
+    max_daily_loss_usd: float = field(default_factory=lambda: _required("max_daily_loss_usd"))
     max_per_symbol_exposure_usd: float = 10_000.0
     max_open_orders: int = 100
     allowed_venues: Optional[frozenset[str]] = None
@@ -91,7 +128,59 @@ class TradingGuardConfig:
     circuit_breaker_half_open_max: int = 3
 
     @classmethod
+    def from_profile(cls, risk_config: Any) -> "TradingGuardConfig":
+        """Create TradingGuardConfig from profile-driven risk constraints.
+        
+        This is the PRODUCTION path for Kalshi 15m crypto trading.
+        All risk parameters come from the single source of truth (profile config).
+        
+        Args:
+            risk_config: KalshiRiskConfig or similar risk constraints object
+            
+        Returns:
+            TradingGuardConfig with profile-driven values
+        """
+        # Extract risk parameters from KalshiRiskConfig
+        # Note: These field names should match the KalshiRiskConfig structure
+        max_notional = getattr(risk_config, 'max_single_order_notional_usd', None)
+        max_daily_loss = getattr(risk_config, 'max_daily_loss_usd', None)
+        max_total_notional = getattr(risk_config, 'max_total_notional_usd', None)
+        
+        if max_notional is None:
+            raise ValueError("risk_config must provide max_single_order_notional_usd")
+        if max_daily_loss is None:
+            raise ValueError("risk_config must provide max_daily_loss_usd")
+        
+        # For Kalshi, max_per_symbol_exposure can be derived from max_total_notional
+        # Use 20% of total notional as per-symbol cap (conservative)
+        max_per_symbol = max_total_notional * 0.2 if max_total_notional > 0 else 10_000.0
+        
+        return cls(
+            enable_trading_suite=True,
+            allow_live_trades=False,  # Profile controls this separately
+            vpn_only=True,
+            max_notional_usd=max_notional,
+            max_memecoin_notional_usd=2_500.0,  # Not used for Kalshi
+            max_daily_loss_usd=max_daily_loss,
+            max_per_symbol_exposure_usd=max_per_symbol,
+            max_open_orders=100,
+            allowed_venues=frozenset(["kalshi"]),  # Kalshi-only for this profile
+            circuit_breaker_threshold=5,
+            circuit_breaker_window_seconds=60.0,
+            circuit_breaker_cooldown_seconds=300.0,
+            circuit_breaker_half_open_max=3,
+        )
+
+    @classmethod
     def from_env(cls) -> "TradingGuardConfig":
+        """Create TradingGuardConfig from environment variables.
+        
+        WARNING: This is for NON-PRODUCTION use only (dev tools, generic adapters).
+        For Kalshi 15m production, use from_profile() to ensure single source of truth.
+        
+        Returns:
+            TradingGuardConfig with env-driven values (with fallback defaults)
+        """
         def _get_bool(name: str, default: bool) -> bool:
             value = os.getenv(name)
             if value is None:
@@ -113,6 +202,7 @@ class TradingGuardConfig:
             vpn_only=_get_bool("MERID_TRADING_VPN_ONLY", True),
             max_notional_usd=_get_float("MERID_MAX_NOTIONAL_PER_TRADE_USD", 25_000.0),
             max_memecoin_notional_usd=_get_float("MERID_MAX_MEMECOIN_NOTIONAL_USD", 2_500.0),
+            max_daily_loss_usd=_get_float("MERID_MAX_DAILY_LOSS_USD", 25_000.0),
             allowed_venues=venues,
         )
 
@@ -124,14 +214,50 @@ class TradingGuard:
         self,
         config: Optional[TradingGuardConfig] = None,
         runtime_config: Optional[TradingRuntimeConfig] = None,
+        notional_resolver: Optional[Callable[[TradeRequest], Optional[float]]] = None,
     ) -> None:
         self.config = config or TradingGuardConfig.from_env()
         self.runtime_config = runtime_config or get_runtime_config()
+        self._notional_resolver = notional_resolver or self._default_notional_resolver
         # Circuit breaker state
         self._circuit_state = CircuitBreakerState.CLOSED
         self._error_timestamps: list[float] = []
         self._circuit_opened_at: Optional[float] = None
         self._half_open_successes = 0
+
+    @classmethod
+    def from_profile(
+        cls,
+        risk_config: Any,
+        runtime_config: Optional[TradingRuntimeConfig] = None,
+    ) -> "TradingGuard":
+        """Create TradingGuard from profile-driven risk constraints.
+        
+        This is the PRODUCTION path for Kalshi 15m crypto trading.
+        All risk parameters come from the single source of truth (profile config).
+        
+        Args:
+            risk_config: KalshiRiskConfig or similar risk constraints object
+            runtime_config: Optional runtime config (defaults to get_runtime_config())
+            
+        Returns:
+            TradingGuard configured with profile-driven values
+        """
+        cfg = TradingGuardConfig.from_profile(risk_config)
+        rc = runtime_config or get_runtime_config()
+        return cls(config=cfg, runtime_config=rc)
+
+    @classmethod
+    def from_env(cls) -> "TradingGuard":
+        """Create TradingGuard from environment variables.
+        
+        WARNING: This is for NON-PRODUCTION use only (dev tools, generic adapters).
+        For Kalshi 15m production, use from_profile() to ensure single source of truth.
+        
+        Returns:
+            TradingGuard configured with env-driven values
+        """
+        return cls(config=TradingGuardConfig.from_env(), runtime_config=get_runtime_config())
 
     @property
     def circuit_state(self) -> CircuitBreakerState:
@@ -310,9 +436,15 @@ class TradingGuard:
 
         return GuardDecision(GuardDecisionStatus.ALLOW, "Approved", metadata)
 
-    def _estimate_notional(self, request: TradeRequest) -> Optional[float]:
+    def _default_notional_resolver(self, request: TradeRequest) -> Optional[float]:
+        """Default notional resolver - uses request.notional_usd if set.
+        
+        For Kalshi 15m, this should be overridden with a resolver that uses
+        the unified sizing pipeline to ensure consistency with risk constraints.
+        """
         if request.notional_usd is not None:
             return request.notional_usd
+        # Fallback to price * quantity (may diverge from sizing pipeline)
         price = request.price or request.metadata.get("reference_price")
         if price is None:
             return None
@@ -320,6 +452,14 @@ class TradingGuard:
             return float(price) * float(request.quantity)
         except (TypeError, ValueError):  # pragma: no cover - defensive
             return None
+
+    def _estimate_notional(self, request: TradeRequest) -> Optional[float]:
+        """Estimate notional using the configured notional resolver.
+        
+        For Kalshi 15m production, this should use the unified sizing pipeline
+        via a custom notional_resolver to ensure consistency with risk constraints.
+        """
+        return self._notional_resolver(request)
 
 
 @dataclass
@@ -431,13 +571,69 @@ _solana_guard: Optional[SolanaAntiRugGuard] = None
 _solana_guard_lock = threading.Lock()
 
 
+def init_trading_guard_from_profile(
+    risk_config: Any,
+    runtime_config: Optional[TradingRuntimeConfig] = None,
+) -> None:
+    """Initialize the global TradingGuard from profile-driven risk constraints.
+    
+    This is the PRODUCTION path for Kalshi 15m crypto trading.
+    Must be called once at startup before any trading operations.
+    
+    Args:
+        risk_config: KalshiRiskConfig or similar risk constraints object
+        runtime_config: Optional runtime config (defaults to get_runtime_config())
+        
+    Raises:
+        RuntimeError: If called more than once (guard already initialized)
+    """
+    global _trading_guard
+    with _trading_guard_lock:
+        if _trading_guard is not None:
+            raise RuntimeError(
+                "TradingGuard already initialized. "
+                "init_trading_guard_from_profile() should be called exactly once at startup."
+            )
+        _trading_guard = TradingGuard.from_profile(risk_config, runtime_config)
+        logger.info(
+            "[TRADING-GUARD] Initialized from profile config: max_notional=%.2f, max_daily_loss=%.2f",
+            _trading_guard.config.max_notional_usd,
+            _trading_guard.config.max_daily_loss_usd,
+        )
+
+
 def get_trading_guard() -> TradingGuard:
+    """Get the global TradingGuard instance.
+    
+    For Kalshi 15m production, this requires init_trading_guard_from_profile()
+    to have been called first. For non-prod adapters, use get_env_trading_guard().
+    
+    Returns:
+        TradingGuard instance
+        
+    Raises:
+        RuntimeError: If guard not initialized via init_trading_guard_from_profile()
+    """
     global _trading_guard
     if _trading_guard is None:
-        with _trading_guard_lock:
-            if _trading_guard is None:
-                _trading_guard = TradingGuard()
+        raise RuntimeError(
+            "TradingGuard not initialized. "
+            "Call init_trading_guard_from_profile() for Kalshi 15m production, "
+            "or use get_env_trading_guard() for non-prod adapters."
+        )
     return _trading_guard
+
+
+def get_env_trading_guard() -> TradingGuard:
+    """Get a TradingGuard instance from environment variables.
+    
+    WARNING: This is for NON-PRODUCTION use only (dev tools, generic adapters).
+    For Kalshi 15m production, use init_trading_guard_from_profile() + get_trading_guard().
+    
+    Returns:
+        TradingGuard configured with env-driven values
+    """
+    return TradingGuard.from_env()
 
 
 def get_solana_anti_rug_guard() -> SolanaAntiRugGuard:

@@ -35,9 +35,10 @@ async def get_all_agent_metrics() -> Dict[str, Any]:
         agents_dict = {agent_id: metrics.to_dict() for agent_id, metrics in all_metrics.items()}
         
         # Fallback: populate from agent grid cycle data when no trade metrics exist
+        # PRODUCTION STACK: Use agent_grid_15m instead of legacy agent_grid
         if not agents_dict:
             try:
-                from merid.prediction.agent_grid import get_agent_grid
+                from merid.prediction.agent_grid_15m import get_agent_grid
                 grid = get_agent_grid()
                 for agent in grid.agents:
                     if agent.state.cycles_run > 0:
@@ -52,7 +53,7 @@ async def get_all_agent_metrics() -> Dict[str, Any]:
                             "win_rate": 0.0,
                             "total_pnl": 0.0,
                             "sharpe_ratio": 0.0,
-                            "source": "agent_grid",
+                            "source": "agent_grid_15m",
                         }
             except Exception as e:
                 logger.debug(f"Silent error: {e}")
@@ -124,9 +125,10 @@ async def get_performance_summary() -> Dict[str, Any]:
         }
 
         # Supplement with agent grid cycle data when no trade metrics exist
+        # PRODUCTION STACK: Use agent_grid_15m instead of legacy agent_grid
         if result["total_agents"] == 0:
             try:
-                from merid.prediction.agent_grid import get_agent_grid
+                from merid.prediction.agent_grid_15m import get_agent_grid
                 grid = get_agent_grid()
                 active = [a for a in grid.agents if a.state.cycles_run > 0]
                 result["total_agents"] = len(grid.agents)
@@ -135,7 +137,7 @@ async def get_performance_summary() -> Dict[str, Any]:
                 result["active_agents"] = len(active)
                 if active:
                     result["best_agent"] = max(active, key=lambda a: a.state.cycles_run).config.name
-                result["source"] = "agent_grid"
+                result["source"] = "agent_grid_15m"
             except Exception as e:
                 logger.debug(f"Silent error: {e}")
 
@@ -243,23 +245,24 @@ async def get_execution_telemetry() -> Dict[str, Any]:
         # Supplement with agent grid data when no trade metrics exist
         if not products:
             try:
-                from merid.prediction.agent_grid import get_agent_grid
+                from merid.prediction.agent_grid_15m import get_agent_grid
                 grid = get_agent_grid()
-                for agent in grid.agents:
-                    if agent.state.cycles_run > 0:
-                        aid = agent.config.name
-                        products[aid] = {
-                            "fill_rate": 0.0,
-                            "avg_latency_ms": 0.0,
-                            "total_orders": agent.state.orders_placed,
-                            "slippage_bps": 0.0,
-                            "cycles_run": agent.state.cycles_run,
-                            "source": "agent_grid",
-                        }
-                        status[aid] = {
-                            "fill_rate": {"value": 0, "status": "info"},
-                            "avg_latency_ms": {"value": 0, "status": "good", "threshold": 500},
-                            "total_orders": {"value": agent.state.orders_placed, "status": "good"},
+                if grid:
+                    for agent in grid._agents:
+                        if agent.config.enabled:
+                            aid = agent.config.name
+                            products[aid] = {
+                                "fill_rate": 0.0,
+                                "avg_latency_ms": 0.0,
+                                "total_orders": 0,  # LeanAgent15m doesn't track orders
+                                "slippage_bps": 0.0,
+                                "cycles_run": 0,  # LeanAgent15m doesn't track cycles
+                                "source": "agent_grid",
+                            }
+                            status[aid] = {
+                                "fill_rate": {"value": 0, "status": "info"},
+                                "avg_latency_ms": {"value": 0, "status": "good", "threshold": 500},
+                                "total_orders": {"value": 0, "status": "good"},
                             "slippage_bps": {"value": 0, "status": "good", "threshold": 5},
                         }
             except Exception as e:
@@ -321,19 +324,20 @@ async def get_calibration_stats() -> Dict[str, Any]:
         # Second fallback: use agent grid cycle data
         if not agent_rows:
             try:
-                from merid.prediction.agent_grid import get_agent_grid
+                from merid.prediction.agent_grid_15m import get_agent_grid
                 grid = get_agent_grid()
-                for agent in grid.agents:
-                    if agent.state.cycles_run > 0:
-                        agent_rows.append({
-                            "agent_id": agent.config.name,
-                            "calibration_error": 0.0,
-                            "avg_confidence": 0.5,
-                            "brier_score": 0.25,
-                            "well_calibrated": True,
-                            "source": "agent_grid_cycles",
-                            "cycles": agent.state.cycles_run,
-                        })
+                if grid:
+                    for agent in grid._agents:
+                        if agent.config.enabled:
+                            agent_rows.append({
+                                "agent_id": agent.config.name,
+                                "calibration_error": 0.0,
+                                "avg_confidence": 0.5,
+                                "brier_score": 0.25,
+                                "well_calibrated": True,
+                                "source": "agent_grid_cycles",
+                                "cycles": 0,  # LeanAgent15m doesn't track cycles
+                            })
             except Exception as e:
                 logger.debug(f"Silent error: {e}")
 
