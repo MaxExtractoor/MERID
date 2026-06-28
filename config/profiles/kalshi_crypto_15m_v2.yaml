@@ -27,12 +27,21 @@
 # ═══════════════════════════════════════════════════════════════════════
 
 profile_name: kalshi_crypto_15m_v2
-profile_version: "2.1.0"
-description: "Config-only risk model for 15m crypto prediction markets on Kalshi"
+profile_version: "2.2.0"
+description: "Config-only risk model for 15m crypto prediction markets on Kalshi with profitability enhancements"
 
 # ── Change Log ──────────────────────────────────────────────────────────────────
 # Tracks implementation progress and version history for the 5-phase probability modeling roadmap
 change_log:
+  - version: "2.2.0"
+    date: "2026-06-28"
+    description: "Phase 1 profitability enhancements: YES/NO arbitrage, market making, correlation tracking"
+    changes:
+      - "Phase 1: Added yes_no_arbitrage section with enable flag and execution parameters"
+      - "Phase 1: Added market_making section with enable flag and quoting parameters"
+      - "Phase 1: Added correlation_tracking section with enable flag and threshold parameters"
+      - "Phase 1: Integrated arbitrage execution callback in duality validator"
+      - "Phase 1: Added execute_arbitrage_async function to order router"
   - version: "2.1.0"
     date: "2026-06-24"
     description: "Complete implementation of 5-phase probability modeling roadmap"
@@ -89,7 +98,39 @@ catalog_staleness_enforced: false
 # - mean_reversion: Trade against overextensions (RSI overbought/oversold zones)
 # - momentum_fvg: Trade with trend using Fair Value Gaps and Order Book Imbalance
 # - hybrid: Allow both modes (default for maximum opportunity capture)
-signal_mode: hybrid  # Options: mean_reversion, momentum_fvg, hybrid
+# - price_based: Turbine research winner - buy YES when price <= 0.50, sell when price >= 0.70
+signal_mode: price_based  # Options: mean_reversion, momentum_fvg, hybrid, price_based
+
+# ── Phase 1 Profitability Enhancements ─────────────────────────────────────────
+# YES/NO Sum Arbitrage, Market Making, and Correlation Tracking
+
+# YES/NO Sum Arbitrage Configuration
+# When YES+NO < 100c, buy both sides for risk-free profit
+yes_no_arbitrage:
+  enabled: true  # Set to true to enable arbitrage execution
+  threshold_cents: 3  # Minimum arbitrage edge to execute (3c = 3%)
+  max_size_contracts: 10  # Max contracts per arbitrage trade
+  execution_timeout_ms: 500  # Max time to execute both sides (milliseconds)
+  description: "YES/NO sum arbitrage: buy both sides when YES_ask + NO_bid < 100c"
+
+# Market Making Configuration
+# Liquidity provision to earn spread income
+market_making:
+  enabled: true  # Set to true to enable market making
+  quoting_mode: "two_sided"  # Options: one_sided, two_sided
+  spread_cents: 2  # Target spread in cents
+  inventory_limit_contracts: 50  # Max inventory per asset
+  skew_adjustment: true  # Adjust quotes based on inventory imbalance
+  description: "Market making: provide liquidity and earn spread income"
+
+# Correlation Tracking Configuration
+# Reduce exposure when assets are highly correlated
+correlation_tracking:
+  enabled: true  # Set to true to enable correlation tracking
+  threshold: 0.5  # Correlation threshold for exposure reduction
+  max_reduction: 0.4  # Reduce to 40% of combined cap at perfect correlation
+  window_days: 30  # Rolling window for correlation calculation
+  description: "Correlation tracking: reduce exposure when assets are highly correlated"
 
 # ── Momentum/FVG Mode Parameters ───────────────────────────────────────────
 # Parameters for momentum_fvg signal mode (when enabled)
@@ -151,6 +192,13 @@ momentum_fvg:
   # If spread exceeds this, require higher OBI persistence for momentum entries
   spread_gate_cents: 40  # From guardrails_max_spread_cents
   spread_gate_obi_persistence_boost: 0.75  # Require 75% persistence if spread is wide
+
+# ── Price-Based Strategy Parameters (Turbine Research Winner) ───────────────
+# Simple price-based strategy that showed +56.6% ROI in Turbine backtests
+# Buy YES when market price is cheap, sell when it recovers
+price_based:
+  buy_threshold: 0.50  # Buy YES when price <= 0.50
+  sell_threshold: 0.70  # Sell YES when price >= 0.70
 
 # ── Sentiment Isolation (Single Source of Truth) ────────────────────────────
 # For kalshi_crypto_15m_v2 profile, sentiment-based trading is disabled.
@@ -261,9 +309,10 @@ universe:
 # BALANCED SETTINGS: Optimized based on industry comparison (Polymarket 15m bot uses 30s with 93% WR)
 throttling:
   global_orders_window_sec: 60  # Rolling window for global order limit (seconds)
-  global_orders_limit: 10  # REDUCED: Max 10 orders per minute globally (was 20)
-  per_asset_cooldown_sec: 30  # ADJUSTED: 30s cooldown between orders for same asset (was 60s, Polymarket 15m bot uses 30s with 93% WR)
+  global_orders_limit: 5  # REDUCED: Max 5 orders per minute globally (was 10 - safer exposure across 5 assets)
+  per_asset_cooldown_sec: 5  # REDUCED: 5s cooldown between orders for same asset (was 30s - price-based strategy needs faster execution)
   per_strip_notional_usd: 0.0  # Max notional per strip (0.0 = disabled, set if needed)
+  max_orders_per_15m_window: 5  # NEW: Max 5 orders total per 15m window across all assets (prevents rapid execution)
   
   # REMOVED: Conflicting top-N limits - now handled by guardrails section (single source of truth)
   # - per_strip_order_limit: replaced by guardrails.max_orders_per_cycle
@@ -294,11 +343,11 @@ fractional_contract_override_threshold: 0.5  # Allow 1 contract if max_notional 
 assets:
   BTC:
     max_notional_pct:
-      value: 0.05  # INCREASED: 5% of capital for all assets (was 2%, too restrictive for small bankrolls)
+      value: 0.03  # REDUCED: 3% of capital for BTC (was 5% - safer exposure)
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for BTC (computed from bankroll)"
     max_contracts:
-      value: 5  # REDUCED: Max 5 contracts for BTC 15m (was 10)
+      value: 2  # REDUCED: Max 2 contracts for BTC 15m (was 5 - safer exposure)
       static: profile
       description: "Maximum contracts for BTC (static for this profile)"
     # REMOVED: Duplicate edge thresholds - now handled by edge_bands section (single source of truth)
@@ -318,11 +367,11 @@ assets:
     
   ETH:
     max_notional_pct:
-      value: 0.05  # INCREASED: 5% of capital for all assets (was 2%, too restrictive for small bankrolls)
+      value: 0.03  # REDUCED: 3% of capital for ETH (was 5% - safer exposure)
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for ETH (computed from bankroll)"
     max_contracts:
-      value: 5  # REDUCED: Max 5 contracts for ETH 15m (was 10)
+      value: 2  # REDUCED: Max 2 contracts for ETH 15m (was 5 - safer exposure)
       static: profile
       description: "Maximum contracts for ETH (static for this profile)"
     # REMOVED: Duplicate edge thresholds - now handled by edge_bands section (single source of truth)
@@ -342,11 +391,11 @@ assets:
     
   SOL:
     max_notional_pct:
-      value: 0.05  # INCREASED: 5% of capital for all assets (was 2%, too restrictive for small bankrolls)
+      value: 0.02  # REDUCED: 2% of capital for SOL (was 5% - safer exposure for alt assets)
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for SOL (computed from bankroll)"
     max_contracts:
-      value: 3  # REDUCED: Max 3 contracts for SOL 15m (was 5)
+      value: 1  # REDUCED: Max 1 contract for SOL 15m (was 3 - safer exposure for alt assets)
       static: profile
       description: "Maximum contracts for SOL (static for this profile)"
     # REMOVED: Duplicate edge thresholds - now handled by edge_bands section (single source of truth)
@@ -366,11 +415,11 @@ assets:
     
   XRP:
     max_notional_pct:
-      value: 0.05  # INCREASED: 5% of capital for all assets (was 2%, too restrictive for small bankrolls)
+      value: 0.02  # REDUCED: 2% of capital for XRP (was 5% - safer exposure for alt assets)
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for XRP (computed from bankroll)"
     max_contracts:
-      value: 3  # REDUCED: Max 3 contracts for XRP 15m (was 5)
+      value: 1  # REDUCED: Max 1 contract for XRP 15m (was 3 - safer exposure for alt assets)
       static: profile
       description: "Maximum contracts for XRP (static for this profile)"
     # REMOVED: Duplicate edge thresholds - now handled by edge_bands section (single source of truth)
@@ -390,11 +439,11 @@ assets:
     
   DOGE:
     max_notional_pct:
-      value: 0.05  # INCREASED: 5% of capital for all assets (was 2%, too restrictive for small bankrolls)
+      value: 0.02  # REDUCED: 2% of capital for DOGE (was 5% - safer exposure for alt assets)
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for DOGE (computed from bankroll)"
     max_contracts:
-      value: 3  # REDUCED: Max 3 contracts for DOGE 15m (was 5)
+      value: 1  # REDUCED: Max 1 contract for DOGE 15m (was 3 - safer exposure for alt assets)
       static: profile
       description: "Maximum contracts for DOGE (static for this profile)"
     # REMOVED: Duplicate edge thresholds - now handled by edge_bands section (single source of truth)
@@ -480,7 +529,7 @@ guardrails:
   max_dist_pct_trade: 2.0  # RELAXED: Maximum spot-strike distance percentage for trading (2.0% for better market coverage - was 0.75%)
   min_contract_price_cents: 10  # LOWERED: Minimum contract price floor (10 cents / $0.10) - aligned with industry standard (BeatPoly/Market Math indicate extreme-priced contracts are fee-efficient)
   max_same_side_per_strip: 4  # RELAXED: Maximum same-direction positions per strip (increased from 2 to 4 for small bankroll)
-  max_orders_per_cycle: 3  # INCREASED: Maximum orders per 15m cycle (increased from 1 to 3 for better throughput)
+  max_orders_per_cycle: 1  # REDUCED: Maximum orders per 15m cycle (reduced from 3 to 1 for safer exposure - prevents rapid execution)
   min_edge_per_trade: 0.01  # Minimum edge percentage for priority queue scheduling (1% floor, aligned with watch band)
   # Time trap prevention (entry window narrowing)
   # Aligned with TTE regimes from risk.tte_regime:
@@ -555,7 +604,7 @@ guardrails:
   # Daily loss cap (optional/soft)
   # Option A: Disable daily loss as separate hard cap (drawdown is single source of truth)
   # Option B: Set daily loss slightly below drawdown as soft stop (e.g., 12-14%)
-  daily_loss_enabled: true  # ENABLED: Daily loss limit as session-level kill switch
+  daily_loss_enabled: false  # DISABLED: Daily loss limit disabled for system fine-tuning (drawdown is primary guardrail)
   # Daily loss limits by operation mode (test vs prod)
   # CRITICAL FIX: Reduced for production safety and better risk control
   # - test: 8% of bankroll for realistic live testing (reduced from 10%)
@@ -848,6 +897,17 @@ velocity_model:
     alpha_0: 0.0
     alpha_1: 600.0   # DOGE: highest sensitivity (higher volatility)
 
+# ── Velocity Thresholds (Per-Asset) ─────────────────────────────────────────────
+# Velocity thresholds for signal generation aligned with industry standards
+# Updated 2026-06-28 based on Turbine research: thresholds barely mattered (0.0002-0.002 both worked)
+# Further lowered to 0.0002-0.0004 range to capture more trades while maintaining signal quality
+velocity_thresholds:
+  BTC: 0.0002  # 0.02% - further reduced from 0.0005 based on Turbine research (0.0002-0.002 both worked)
+  ETH: 0.0002  # 0.02% - further reduced from 0.0005 based on Turbine research (0.0002-0.002 both worked)
+  SOL: 0.0003  # 0.03% - further reduced from 0.001 for higher volatility assets
+  XRP: 0.0003  # 0.03% - further reduced from 0.001 for higher volatility assets
+  DOGE: 0.0004 # 0.04% - further reduced from 0.0015 for highest volatility assets
+
 # ── Momentum Weights (Phase 4.1) ───────────────────────────────────────────────
 # Multi-window velocity weights for momentum signal fusion
 # Weights correspond to velocity windows: [10s, 30s, 60s]
@@ -875,6 +935,26 @@ calibration_config:
   max_samples: 1000  # Maximum samples to keep for calibration (rolling window)
   regularization: 0.0001  # L2 regularization parameter for Platt scaling
   fit_interval_hours: 24  # Re-fit calibration every N hours
+
+# ── Fee-Aware Edge Gate (Phase 1) ───────────────────────────────────────────────────
+# Fee-aware edge calculation to prevent unprofitable small-edge trades
+# Based on research: small-edge trades lose money after Kalshi fees
+fee_aware_edge:
+  enabled: false  # DISABLED for price-based strategy (no edge calculation, trades based on price thresholds)
+  min_edge_cents: 2  # $0.02 minimum edge after fees
+  fee_per_contract: 0.07  # Kalshi taker fee per contract (7 cents)
+  # Fee formula: 0.07 × P × (1−P) where P is contract price
+  # Edge gate: (estimated_probability - market_price) > fees + min_edge_cents
+
+# ── Market Microstructure Filters (Phase 1) ───────────────────────────────────────────
+# Order book quality filters to reduce slippage and improve fill quality
+# Based on research: avoid wide spreads and thin books
+market_microstructure:
+  enabled: true  # Enable market microstructure filters
+  max_spread_cents: 15  # Avoid spreads > 15 cents (increased from 8c based on industry research - 5c problematic, 15c reasonable for illiquid markets)
+  min_depth_usd: 200  # Require >$200 within 3 cents of mid price
+  min_yes_depth: 1  # Minimum YES depth threshold
+  min_no_depth: 1  # Minimum NO depth threshold
 
 # ── Strategies ───────────────────────────────────────────────────────────────
 # Phase 2: Strategy definitions for multi-strategy support

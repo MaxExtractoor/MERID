@@ -116,6 +116,11 @@ class KalshiCrypto15mRiskEnvelope:
     current_risk_band: RiskBand  # Explicit band state
     resume_if_drawdown_improves: bool  # Auto-resume when drawdown improves to lower band
     
+    # ── Correlation Tracking (Phase 1 Profitability Enhancement) ─────────────
+    correlation_tracking_enabled: bool
+    correlation_threshold: float  # Threshold for exposure reduction
+    correlation_multiplier: float  # Current correlation-based size multiplier
+    
     def update_drawdown(self, current_equity_usd: float):
         """Update drawdown tracking with current equity.
         
@@ -325,6 +330,9 @@ def compute_kalshi_crypto_15m_risk_envelope(
     assets = profile_config.get('assets', {})
     guardrails = profile_config.get('guardrails', {})
     kelly_config = profile_config.get('kelly', {})
+    
+    # Extract Phase 1 profitability enhancements
+    correlation_tracking_config = profile_config.get('correlation_tracking', {})
 
     # Extract cycle risk cap (handle nested dict format)
     max_cycle_risk_pct_raw = profile_config.get('max_cycle_risk_pct', 0.02)  # Default 2%
@@ -575,6 +583,18 @@ def compute_kalshi_crypto_15m_risk_envelope(
     current_risk_band = RiskBand.NORMAL
     resume_if_drawdown_improves = False  # Default: manual operator intervention required
     
+    # ── Initialize Correlation Tracking (Phase 1 Profitability Enhancement) ──
+    correlation_tracking_enabled = correlation_tracking_config.get('enabled', False)
+    correlation_threshold = correlation_tracking_config.get('threshold', 0.5)
+    correlation_multiplier = 1.0  # Default: no reduction
+    
+    if correlation_tracking_enabled:
+        logger.info(
+            f"[RISK-ENVELOPE] Correlation tracking enabled: threshold={correlation_threshold:.2f}"
+        )
+    else:
+        logger.info("[RISK-ENVELOPE] Correlation tracking disabled")
+    
     # ── Validation ────────────────────────────────────────────────────────────
     # Ensure asset caps don't exceed total cap - enforce hard invariant
     total_asset_cap = sum(asset_max_notional_usd.values())
@@ -635,6 +655,9 @@ def compute_kalshi_crypto_15m_risk_envelope(
         is_halted=is_halted,
         current_risk_band=current_risk_band,
         resume_if_drawdown_improves=resume_if_drawdown_improves,
+        correlation_tracking_enabled=correlation_tracking_enabled,
+        correlation_threshold=correlation_threshold,
+        correlation_multiplier=correlation_multiplier,
     )
     
     # ── Log Envelope Snapshot ───────────────────────────────────────────────────
