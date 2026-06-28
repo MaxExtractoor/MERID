@@ -150,16 +150,15 @@ class DeterminismReplayer:
             Replay result with comparison
         """
         logger.debug(f"Replaying bundle {bundle.bundle_id}")
-        
-        # TODO: Implement actual replay logic
-        # This would:
-        # 1. Load the strategy and model at the appropriate version
-        # 2. Set up the system state (kill switch, risk regime)
-        # 3. Feed the feature vector into the model
-        # 4. Get the signal direction, prob_edge, size_intent
-        # 5. Compare against original outputs
-        
-        # For now, return a mock result
+
+        # NOTE: Replay logic not yet implemented
+        # This would require:
+        # 1. Loading the strategy and model at the appropriate version
+        # 2. Setting up the system state (kill switch, risk regime)
+        # 3. Feeding the feature vector into the model
+        # 4. Getting the signal direction, prob_edge, size_intent
+        # 5. Comparing against original outputs
+        # For now, return a mock result for testing
         replay_signal_direction = bundle.original_signal_direction
         replay_prob_edge = bundle.original_prob_edge
         replay_size_intent = bundle.original_size_intent
