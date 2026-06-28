@@ -15,7 +15,7 @@ Usage::
     >>> monitor.on_alert(lambda a: print(a))
 
     # From WS bridge callback:
-    monitor.process(OrderBookSnapshot(...))
+    monitor.process(OrderbookSnapshot(...))
 
     # Or attach to event bus:
     await monitor.attach_to_bridge(bridge)
@@ -31,33 +31,19 @@ from typing import Any, Callable, Deque, Dict, List, Optional
 
 from utils.logger import get_logger
 
+# Import canonical OrderbookSnapshot and microstructure utilities
+# This is the single source of truth for order book representation
+from merid.event_venues.kalshi.unified_market_state import OrderbookSnapshot, OrderbookLevel
+from merid.event_venues.kalshi.microstructure import (
+    compute_side_microstructure,
+    cents_to_dollars,
+    dollars_to_cents,
+)
+
 logger = get_logger("merid.event_venues.kalshi.liquidity_monitor")
 
 
 # ── Data Models ──────────────────────────────────────────────────────────────
-
-
-@dataclass
-class OrderBookSnapshot:
-    """Point-in-time orderbook top-of-book for a Kalshi market."""
-    market_id: str
-    best_bid: float
-    best_ask: float
-    bid_size: int
-    ask_size: int
-    ts: float = field(default_factory=time.time)
-
-    @property
-    def spread(self) -> float:
-        return self.best_ask - self.best_bid
-
-    @property
-    def depth(self) -> int:
-        return self.bid_size + self.ask_size
-
-    @property
-    def mid(self) -> float:
-        return (self.best_bid + self.best_ask) / 2
 
 
 @dataclass
@@ -92,9 +78,12 @@ AlertCallback = Callable[[LiquidityAlert], None]
 class LiquidityMonitor:
     """Monitors Kalshi orderbook health and emits liquidity alerts.
 
+    Uses canonical OrderbookSnapshot from unified_market_state.
+    Thresholds are in probability units (e.g. 0.08 = 8¢).
+
     Args:
         max_spread: Absolute spread threshold (in probability units, e.g. 0.08 = 8¢).
-        min_depth: Minimum total depth (bid_size + ask_size) before thin_book alert.
+        min_depth: Minimum total depth (yes + no) before thin_book alert.
         spike_mult: Rolling-average multiplier for spread_spike detection.
         drop_mult: Rolling-average multiplier for depth_drop detection.
         window: Number of snapshots in rolling window per market.
@@ -123,7 +112,7 @@ class LiquidityMonitor:
         self.flicker_window = flicker_window
         self.flicker_threshold = flicker_threshold
 
-        self._buffers: Dict[str, Deque[OrderBookSnapshot]] = {}
+        self._buffers: Dict[str, Deque[OrderbookSnapshot]] = {}
         self._callbacks: List[AlertCallback] = []
         self._last_alert_ts: Dict[str, float] = {}  # key = f"{market_id}:{kind}"
         self._alert_log: Deque[LiquidityAlert] = deque(maxlen=500)
@@ -171,58 +160,74 @@ class LiquidityMonitor:
 
     # ── Core processing ──────────────────────────────────────────────────
 
-    def process(self, ob: OrderBookSnapshot) -> List[LiquidityAlert]:
-        """Process an orderbook snapshot and return any alerts generated."""
-        buf = self._buffers.setdefault(ob.market_id, deque(maxlen=self.window))
+    def process(self, ob: OrderbookSnapshot) -> List[LiquidityAlert]:
+        """Process an orderbook snapshot and return any alerts generated.
+        
+        Uses canonical OrderbookSnapshot from unified_market_state.
+        Converts cents to probability units for threshold comparisons.
+        """
+        buf = self._buffers.setdefault(ob.ticker, deque(maxlen=self.window))
         buf.append(ob)
         self._snapshots_processed += 1
 
         alerts: List[LiquidityAlert] = []
 
-        spread = ob.spread
-        depth = ob.depth
+        # Convert canonical snapshot's spread_cents to probability units
+        spread_cents = ob.spread_cents if ob.spread_cents is not None else 0
+        spread = cents_to_dollars(spread_cents) if spread_cents else 0.0
+        
+        # Use microstructure utility for depth calculation
+        micro = compute_side_microstructure(ob, side="yes", size=1, depth_window_cents=10)
+        depth = micro.depth_yes_at_best + micro.depth_no_at_best
+        
+        # Get best bid/ask from canonical snapshot (YES-centric)
+        best_yes_bid = cents_to_dollars(ob.best_yes_bid) if ob.best_yes_bid else 0.0
+        best_yes_ask = cents_to_dollars(ob.best_yes_ask) if ob.best_yes_ask else 0.0
 
         # 1. Absolute spread check
         if spread > self.max_spread:
             sev = "critical" if spread > self.max_spread * 1.5 else "warning"
             alerts.append(LiquidityAlert(
-                market_id=ob.market_id,
+                market_id=ob.ticker,
                 kind="wide_spread",
                 severity=sev,
                 msg=f"Spread {spread:.3f} > {self.max_spread:.3f}",
                 ts=ob.ts,
                 details={"spread": spread, "threshold": self.max_spread,
-                         "bid": ob.best_bid, "ask": ob.best_ask},
+                         "bid": best_yes_bid, "ask": best_yes_ask},
             ))
 
         # 2. Absolute depth check (zero-depth is always critical)
         if depth == 0:
             alerts.append(LiquidityAlert(
-                market_id=ob.market_id,
+                market_id=ob.ticker,
                 kind="zero_depth",
                 severity="critical",
-                msg=f"Zero depth — book is completely empty (bid=0, ask=0)",
+                msg=f"Zero depth — book is completely empty",
                 ts=ob.ts,
-                details={"depth": 0, "bid_size": ob.bid_size, "ask_size": ob.ask_size},
+                details={"depth": 0, "depth_yes": micro.depth_yes_at_best, "depth_no": micro.depth_no_at_best},
             ))
         elif depth < self.min_depth:
             sev = "critical" if depth < self.min_depth // 2 else "warning"
             alerts.append(LiquidityAlert(
-                market_id=ob.market_id,
+                market_id=ob.ticker,
                 kind="thin_book",
                 severity=sev,
                 msg=f"Depth {depth} < {self.min_depth}",
                 ts=ob.ts,
                 details={"depth": depth, "threshold": self.min_depth,
-                         "bid_size": ob.bid_size, "ask_size": ob.ask_size},
+                         "depth_yes": micro.depth_yes_at_best, "depth_no": micro.depth_no_at_best},
             ))
 
         # 3. Spread spike vs rolling average
         if len(buf) >= 5:
-            avg_spread = sum(s.spread for s in buf) / len(buf)
+            avg_spread_cents = sum(
+                s.spread_cents if s.spread_cents else 0 for s in buf
+            ) / len(buf)
+            avg_spread = cents_to_dollars(avg_spread_cents) if avg_spread_cents else 0.0
             if avg_spread > 0 and spread > avg_spread * self.spike_mult:
                 alerts.append(LiquidityAlert(
-                    market_id=ob.market_id,
+                    market_id=ob.ticker,
                     kind="spread_spike",
                     severity="warning",
                     msg=f"Spread {spread:.3f} is {spread/avg_spread:.1f}x rolling avg {avg_spread:.3f}",
@@ -233,10 +238,14 @@ class LiquidityMonitor:
 
         # 4. Depth drop vs rolling average
         if len(buf) >= 5:
-            avg_depth = sum(s.depth for s in buf) / len(buf)
+            avg_depth = sum(
+                (compute_side_microstructure(s, side="yes", size=1).depth_yes_at_best +
+                 compute_side_microstructure(s, side="yes", size=1).depth_no_at_best)
+                for s in buf
+            ) / len(buf)
             if avg_depth > 0 and depth < avg_depth * self.drop_mult:
                 alerts.append(LiquidityAlert(
-                    market_id=ob.market_id,
+                    market_id=ob.ticker,
                     kind="depth_drop",
                     severity="warning",
                     msg=f"Depth {depth} dropped to {depth/avg_depth:.0%} of rolling avg {avg_depth:.0f}",
@@ -248,23 +257,24 @@ class LiquidityMonitor:
         # 5. Flickering: best bid oscillates rapidly over the last N ticks
         if len(buf) >= self.flicker_window:
             recent = list(buf)[-self.flicker_window:]
-            bids = [s.best_bid for s in recent]
-            alternations = sum(
-                1 for i in range(1, len(bids)) if bids[i] != bids[i - 1]
-            )
-            if alternations / (self.flicker_window - 1) >= self.flicker_threshold:
-                alerts.append(LiquidityAlert(
-                    market_id=ob.market_id,
-                    kind="flickering",
-                    severity="warning",
-                    msg=(
-                        f"Bid flickering: {alternations}/{self.flicker_window - 1} "
-                        f"ticks changed ({alternations / (self.flicker_window - 1):.0%})"
-                    ),
-                    ts=ob.ts,
-                    details={"alternations": alternations, "window": self.flicker_window,
-                             "ratio": alternations / (self.flicker_window - 1)},
-                ))
+            bids = [s.best_yes_bid for s in recent if s.best_yes_bid is not None]
+            if len(bids) >= 2:
+                alternations = sum(
+                    1 for i in range(1, len(bids)) if bids[i] != bids[i - 1]
+                )
+                if alternations / (len(bids) - 1) >= self.flicker_threshold:
+                    alerts.append(LiquidityAlert(
+                        market_id=ob.ticker,
+                        kind="flickering",
+                        severity="warning",
+                        msg=(
+                            f"Bid flickering: {alternations}/{len(bids) - 1} "
+                            f"ticks changed ({alternations / (len(bids) - 1):.0%})"
+                        ),
+                        ts=ob.ts,
+                        details={"alternations": alternations, "window": len(bids),
+                                 "ratio": alternations / (len(bids) - 1)},
+                    ))
 
         # Apply cooldown and emit
         emitted: List[LiquidityAlert] = []
@@ -293,7 +303,11 @@ class LiquidityMonitor:
         """Subscribe to orderbook events from KalshiWebSocketBridge.
 
         Listens for ``kalshi:price_update`` events (which carry bid/ask)
-        and converts them to ``OrderBookSnapshot`` for processing.
+        and converts them to canonical OrderbookSnapshot for processing.
+        
+        Note: The preferred path is to subscribe to KalshiMarketStateStore
+        directly via the market state update callbacks. This method is
+        maintained for backward compatibility with the event bus.
         """
         from core.event_bus import event_stream
 
@@ -301,16 +315,25 @@ class LiquidityMonitor:
             if event.get("type") != "kalshi:price_update":
                 return
             payload = event.get("payload", {})
-            bid = payload.get("bid")
-            ask = payload.get("ask")
-            if bid is None or ask is None:
+            
+            # Extract YES/NO bid data from event
+            yes_bid_cents = payload.get("yes_bid_cents")
+            no_bid_cents = payload.get("no_bid_cents")
+            yes_bid_size = payload.get("yes_bid_size", 0)
+            no_bid_size = payload.get("no_bid_size", 0)
+            
+            if yes_bid_cents is None or no_bid_cents is None:
                 return
-            ob = OrderBookSnapshot(
-                market_id=payload.get("market_id", ""),
-                best_bid=float(bid),
-                best_ask=float(ask),
-                bid_size=int(payload.get("bid_size", 100)),
-                ask_size=int(payload.get("ask_size", 100)),
+            
+            # Build canonical OrderbookSnapshot from event data
+            yes_levels = (OrderbookLevel(price_cents=yes_bid_cents, size=yes_bid_size),)
+            no_levels = (OrderbookLevel(price_cents=no_bid_cents, size=no_bid_size),)
+            
+            ob = OrderbookSnapshot(
+                ticker=payload.get("market_id", ""),
+                yes_bids=yes_levels,
+                no_bids=no_levels,
+                seq=payload.get("seq", 0),
                 ts=time.time(),
             )
             self.process(ob)
@@ -325,31 +348,52 @@ class LiquidityMonitor:
         return [a.to_dict() for a in list(self._alert_log)[-limit:]]
 
     def market_health(self, market_id: str) -> Dict[str, Any]:
-        """Current health snapshot for a single market."""
+        """Current health snapshot for a single market.
+        
+        Uses canonical OrderbookSnapshot from unified_market_state.
+        """
         buf = self._buffers.get(market_id)
         if not buf:
             return {"market_id": market_id, "status": "no_data"}
 
         latest = buf[-1]
-        avg_spread = sum(s.spread for s in buf) / len(buf) if buf else 0
-        avg_depth = sum(s.depth for s in buf) / len(buf) if buf else 0
+        
+        # Convert spread_cents to probability units
+        spread_cents = latest.spread_cents if latest.spread_cents else 0
+        spread = cents_to_dollars(spread_cents) if spread_cents else 0.0
+        
+        # Use microstructure utility for depth calculation
+        micro = compute_side_microstructure(latest, side="yes", size=1, depth_window_cents=10)
+        depth = micro.depth_yes_at_best + micro.depth_no_at_best
+        
+        # Calculate rolling averages
+        avg_spread_cents = sum(
+            s.spread_cents if s.spread_cents else 0 for s in buf
+        ) / len(buf) if buf else 0
+        avg_spread = cents_to_dollars(avg_spread_cents) if avg_spread_cents else 0.0
+        
+        avg_depth = sum(
+            (compute_side_microstructure(s, side="yes", size=1).depth_yes_at_best +
+             compute_side_microstructure(s, side="yes", size=1).depth_no_at_best)
+            for s in buf
+        ) / len(buf) if buf else 0
 
         status = "healthy"
-        if latest.spread > self.max_spread:
+        if spread > self.max_spread:
             status = "degraded"
-        if latest.depth < self.min_depth:
+        if depth < self.min_depth:
             status = "thin"
-        if latest.spread > self.max_spread and latest.depth < self.min_depth:
+        if spread > self.max_spread and depth < self.min_depth:
             status = "critical"
 
         return {
             "market_id": market_id,
             "status": status,
-            "spread": latest.spread,
-            "depth": latest.depth,
+            "spread": spread,
+            "depth": depth,
             "avg_spread": avg_spread,
             "avg_depth": avg_depth,
-            "mid": latest.mid,
+            "mid": cents_to_dollars(latest.mid_cents) if latest.mid_cents else 0.0,
             "snapshots": len(buf),
         }
 

@@ -430,7 +430,7 @@ def get_forecaster_bridge() -> RegimeDetectorForecasterBridge:
 def create_telegram_alert_callback() -> Callable[[RegimeChangeEvent], None]:
     """Create an alert callback that sends Telegram notifications.
     
-    SOCIAL-TRUTH (2026-05-13): Telegram alert disabled for lean 15m Kalshi trading.
+    Telegram alert disabled for lean 15m Kalshi trading.
     """
     def callback(event: RegimeChangeEvent) -> None:
         pass

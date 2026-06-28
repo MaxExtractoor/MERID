@@ -15,7 +15,6 @@ from merid.event_venues.kalshi.client import (
 )
 from merid.event_venues.kalshi.models import (
     KalshiBalance,
-    KalshiConfig,
     KalshiMarket,
     KalshiOrder,
     KalshiOrderBook,
@@ -23,6 +22,7 @@ from merid.event_venues.kalshi.models import (
     KalshiPosition,
     KalshiTrade,
 )
+from merid.event_venues.kalshi.kalshi_config import KalshiConfig
 from merid.event_venues.kalshi.trading import KalshiTrader
 from merid.event_venues.kalshi.ws import KalshiWebSocket
 from merid.event_venues.kalshi.market_catalog import (
@@ -31,19 +31,69 @@ from merid.event_venues.kalshi.market_catalog import (
     CatalogSnapshot,
     get_market_catalog,
 )
-from merid.event_venues.kalshi.kalshi_risk import (
-    KalshiRiskManager,
-    KalshiRiskConfig,
-    kalshi_fee_cents,
-    kelly_size_kalshi,
-    dynamic_position_sizes,
-    multi_market_kelly_sizes,
-    get_kalshi_risk,
-    edge_from_prediction,
-    kelly_size_from_kalman,
-    get_live_bankroll,
-    get_live_bankroll_async,
+from merid.event_venues.kalshi.kalshi_15m_time import (
+    UTCWindow,
+    utc_to_et,
+    et_to_utc,
+    get_current_utc_window,
+    get_next_utc_window,
+    get_previous_utc_window,
+    compute_minutes_to_expiry,
 )
+# CRITICAL FIX: Make kalshi_risk imports lazy to prevent import-time bankroll service initialization
+# kalshi_risk imports get_equity_for_risk_calc_sync at module level, which triggers bankroll service
+def _lazy_import_kalshi_risk():
+    """Lazy import wrapper for kalshi_risk to prevent import-time bankroll initialization."""
+    from merid.event_venues.kalshi.kalshi_risk import (
+        KalshiRiskManager,
+        KalshiRiskConfig,
+        kalshi_fee_cents,
+        kelly_size_kalshi,
+        dynamic_position_sizes,
+        multi_market_kelly_sizes,
+        get_kalshi_risk,
+        edge_from_prediction,
+        kelly_size_from_kalman,
+        get_live_bankroll,
+        get_live_bankroll_async,
+    )
+    return (KalshiRiskManager, KalshiRiskConfig, kalshi_fee_cents, kelly_size_kalshi, 
+            dynamic_position_sizes, multi_market_kelly_sizes, get_kalshi_risk,
+            edge_from_prediction, kelly_size_from_kalman, get_live_bankroll, get_live_bankroll_async)
+
+# Make these available at module level but lazily loaded
+def get_KalshiRiskManager():
+    return _lazy_import_kalshi_risk()[0]
+
+def get_KalshiRiskConfig():
+    return _lazy_import_kalshi_risk()[1]
+
+def get_kalshi_fee_cents():
+    return _lazy_import_kalshi_risk()[2]
+
+def get_kelly_size_kalshi():
+    return _lazy_import_kalshi_risk()[3]
+
+def get_dynamic_position_sizes():
+    return _lazy_import_kalshi_risk()[4]
+
+def get_multi_market_kelly_sizes():
+    return _lazy_import_kalshi_risk()[5]
+
+def get_kalshi_risk(*args, **kwargs):
+    return _lazy_import_kalshi_risk()[6](*args, **kwargs)
+
+def get_edge_from_prediction():
+    return _lazy_import_kalshi_risk()[7]
+
+def get_kelly_size_from_kalman():
+    return _lazy_import_kalshi_risk()[8]
+
+def get_live_bankroll(*args, **kwargs):
+    return _lazy_import_kalshi_risk()[9](*args, **kwargs)
+
+def get_live_bankroll_async(*args, **kwargs):
+    return _lazy_import_kalshi_risk()[10](*args, **kwargs)
 # LEGACY: Old bankroll service moved to legacy/
 # Use bankroll_service_v2 instead
 # from merid.event_venues.kalshi.legacy.bankroll_service import ...
@@ -59,13 +109,35 @@ from merid.event_venues.kalshi.types import (
     BalanceResult,
 )
 from merid.event_venues.kalshi.client_v2 import KalshiClientV2
-from merid.event_venues.kalshi.bankroll_service_v2 import (
-    BankrollServiceV2,
-    BankrollSummary,
-    get_bankroll_service,
-    get_equity_for_risk_calc_sync,
-    get_summary_sync,
-)
+# CRITICAL FIX: Make bankroll service imports lazy to prevent import-time race conditions
+# These imports were causing bankroll service initialization during KalshiVenueClient import
+# which led to timeouts before explicit bankroll initialization in startup sequence
+def _lazy_import_bankroll_service_v2():
+    """Lazy import wrapper for bankroll_service_v2 to prevent import-time initialization."""
+    from merid.event_venues.kalshi.bankroll_service_v2 import (
+        BankrollServiceV2,
+        BankrollSummary,
+        get_bankroll_service,
+        get_equity_for_risk_calc_sync,
+        get_summary_sync,
+    )
+    return BankrollServiceV2, BankrollSummary, get_bankroll_service, get_equity_for_risk_calc_sync, get_summary_sync
+
+# Make these available at module level but lazily loaded
+def get_BankrollServiceV2():
+    return _lazy_import_bankroll_service_v2()[0]
+
+def get_BankrollSummary():
+    return _lazy_import_bankroll_service_v2()[1]
+
+def get_bankroll_service(*args, **kwargs):
+    return _lazy_import_bankroll_service_v2()[2](*args, **kwargs)
+
+def get_equity_for_risk_calc_sync(*args, **kwargs):
+    return _lazy_import_bankroll_service_v2()[3](*args, **kwargs)
+
+def get_summary_sync(*args, **kwargs):
+    return _lazy_import_bankroll_service_v2()[4](*args, **kwargs)
 from merid.event_venues.kalshi.signal_router import (
     AgentSignal,
     SignalRouter,
@@ -73,12 +145,30 @@ from merid.event_venues.kalshi.signal_router import (
     subscribe_to_signals,
     submit_signal,
 )
-from merid.event_venues.kalshi.risk_policy import (
-    KalshiRiskPolicy,
-    RiskAllowance,
-    get_default_policy,
-    check_trade_allowed,
-)
+# CRITICAL FIX: Make risk_policy imports lazy to prevent import-time bankroll service initialization
+# risk_policy imports BankrollSummary from bankroll_service_v2 at module level, which triggers bankroll service
+def _lazy_import_risk_policy():
+    """Lazy import wrapper for risk_policy to prevent import-time bankroll initialization."""
+    from merid.event_venues.kalshi.risk_policy import (
+        KalshiRiskPolicy,
+        RiskAllowance,
+        get_default_policy,
+        check_trade_allowed,
+    )
+    return KalshiRiskPolicy, RiskAllowance, get_default_policy, check_trade_allowed
+
+# Make these available at module level but lazily loaded
+def get_KalshiRiskPolicy():
+    return _lazy_import_risk_policy()[0]
+
+def get_RiskAllowance():
+    return _lazy_import_risk_policy()[1]
+
+def get_default_policy(*args, **kwargs):
+    return _lazy_import_risk_policy()[2](*args, **kwargs)
+
+def get_check_trade_allowed(*args, **kwargs):
+    return _lazy_import_risk_policy()[3](*args, **kwargs)
 from merid.event_venues.kalshi.ws_bridge import (
     KalshiWebSocketBridge,
     get_ws_bridge,

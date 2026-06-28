@@ -8,6 +8,7 @@ Key features:
 - Re-evaluates WindowResolution for each resting order
 - Cancels orders when regime flips to defensive/halt
 - Cancels orders when model quality degrades below threshold
+- Cancels orders near expiry (pre-expiry cancel rule)
 - Logs all dynamic cancellations for audit trail
 - Health monitoring for loop liveness and data quality
 """
@@ -20,6 +21,13 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Set
 
 logger = logging.getLogger(__name__)
+
+# Pre-expiry cancel rule: cancel resting orders when time to expiry below threshold
+PRE_EXPIRY_CANCEL_THRESHOLD_MIN = 2  # 2 minutes before settlement
+
+# Max hold time for 15m markets: cancel unfilled limit orders after 2-3 minutes
+# This prevents stale orders from resting too long in fast-moving 15m markets
+MAX_HOLD_SECONDS_15M = 180  # 3 minutes for 15m markets
 
 # Status constants for Kalshi portfolio endpoint normalization
 TERMINAL_STATUSES = {"filled", "canceled", "expired", "rejected", "executed"}
@@ -67,6 +75,7 @@ class RestingOrderRecord:
     action: str = ""
     original_size: int = 0
     remaining_size: int = 0  # Tracked from portfolio endpoint, not calculated
+    filled_size: int = 0  # Cumulative filled size (original_size - remaining_size)
     price_cents: int = 0
     created_at: datetime = None
     asset: str = ""
@@ -171,6 +180,14 @@ class RestingOrderMonitor:
             )
             return
         
+        # Detect 15m markets and set appropriate max hold time
+        # 15m markets have ticker patterns like "KXBTC-15M" or contain "15M"
+        if "15M" in record.ticker.upper() or "-15M" in record.ticker.upper():
+            record.max_hold_seconds = MAX_HOLD_SECONDS_15M
+            logger.info(
+                f"[RESTING_ORDER_MONITOR] Set max_hold_seconds={MAX_HOLD_SECONDS_15M}s for 15m market: ticker={record.ticker}"
+            )
+        
         # Store with kalshi_order_id as primary key
         # Set initial status to "open" at registration time
         if not record.status:
@@ -183,7 +200,8 @@ class RestingOrderMonitor:
         logger.info(
             f"[RESTING_ORDER_MONITOR] Registered order: kalshi_order_id={record.kalshi_order_id} "
             f"intent_id={record.intent_id} ticker={record.ticker} risk_tier={record.risk_tier} "
-            f"original_size={record.original_size} remaining_size={record.remaining_size} status={record.status}"
+            f"original_size={record.original_size} remaining_size={record.remaining_size} status={record.status} "
+            f"max_hold_seconds={record.max_hold_seconds}"
         )
     
     def unregister_order(self, kalshi_order_id: str) -> None:
@@ -302,6 +320,22 @@ class RestingOrderMonitor:
                     model_quality_good=model_quality_good,
                 )
             
+            # 4. Pre-expiry cancel rule: cancel resting orders near settlement
+            if minutes_to_expiry is not None and minutes_to_expiry < PRE_EXPIRY_CANCEL_THRESHOLD_MIN:
+                logger.warning(
+                    "[RESTING-CANCEL-BEFORE-EXPIRY] ticker=%s kalshi_order_id=%s tte=%.1fmin < %dmin - cancelling resting order",
+                    record.ticker, record.kalshi_order_id, minutes_to_expiry, PRE_EXPIRY_CANCEL_THRESHOLD_MIN
+                )
+                return RecheckResult(
+                    intent_id=record.intent_id,
+                    ticker=record.ticker,
+                    action="cancel",
+                    reason=f"pre_expiry_cancel:{minutes_to_expiry:.1f}min",
+                    current_regime=regime,
+                    current_vol_tier=window_res.volatility_tier,
+                    model_quality_good=model_quality_good,
+                )
+            
             # 4. Max hold time exceeded
             elapsed_seconds = (now - record.created_at).total_seconds()
             if elapsed_seconds > record.max_hold_seconds:
@@ -387,17 +421,22 @@ class RestingOrderMonitor:
             record_remaining_before = record.remaining_size
             record.remaining_size = remaining_size
             
+            # Update filled_size (cumulative filled amount)
+            record.filled_size = record.original_size - remaining_size
+            
             # Partial fill detection
             if remaining_size > 0 and record_remaining_before > remaining_size:
                 fill_amount = record_remaining_before - remaining_size
                 logger.info(
                     f"[RESTING_ORDER_MONITOR] Partial fill: kalshi_order_id={record.kalshi_order_id} "
-                    f"ticker={record.ticker} filled={fill_amount} remaining={remaining_size}"
+                    f"ticker={record.ticker} filled={fill_amount} remaining={remaining_size} "
+                    f"total_filled={record.filled_size}/{record.original_size}"
                 )
                 # Emit resting_order_partially_filled event to venue event stream
                 logger.info(
                     f"[EVENT] resting_order_partially_filled | kalshi_order_id={record.kalshi_order_id} "
-                    f"ticker={record.ticker} fill_amount={fill_amount} remaining={remaining_size}"
+                    f"ticker={record.ticker} fill_amount={fill_amount} remaining={remaining_size} "
+                    f"total_filled={record.filled_size}/{record.original_size}"
                 )
             
             # Terminal handling - use terminal status as primary signal

@@ -32,9 +32,11 @@ Usage::
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import os
 import threading
-import time
+import time as _time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -93,8 +95,8 @@ class OrderRecord:
     status: OrderStatus = OrderStatus.PENDING
     venue_order_id: Optional[str] = None
     filled_count: int = 0
-    created_at: float = field(default_factory=time.time)
-    updated_at: float = field(default_factory=time.time)
+    created_at: float = field(default_factory=_time.time)
+    updated_at: float = field(default_factory=_time.time)
     decision_ts_bucket: str = ""
     intent_id: Optional[str] = None
 
@@ -119,6 +121,7 @@ class GateMetrics:
     blocked_lease_conflict: int = 0
     blocked_risk: int = 0
     blocked_stale_data: int = 0
+    blocked_invalid_transition: int = 0  # PHASE1-DUP-5: Invalid state transitions
     submitted: int = 0
     filled: int = 0
     canceled: int = 0
@@ -149,6 +152,14 @@ def _is_market_maker_agent(agent_id: str) -> bool:
     )
 
 
+def _is_15m_crypto_agent(agent_id: str) -> bool:
+    """Detect 15m crypto agents for shorter bucket width (5s cadence)."""
+    if not agent_id:
+        return False
+    aid = agent_id.lower()
+    return aid.endswith("_15m") or aid in ("btc_15m", "eth_15m", "sol_15m", "xrp_15m", "doge_15m")
+
+
 def deterministic_client_order_id(
     agent_id: str,
     strategy_group: str,
@@ -171,9 +182,15 @@ def deterministic_client_order_id(
         bucket_width_s: Override bucket width. If None, auto-detects MM agents
             and uses MM_DECISION_BUCKET_WIDTH_S (5s) vs DECISION_BUCKET_WIDTH_S (60s).
     """
-    # Auto-detect market makers for shorter bucket width (issue #2 fix)
+    # Auto-detect market makers and 15m crypto agents for shorter bucket width
+    # 15m crypto agents run at 5s cadence, need 5s bucket to avoid duplicate rejection
     if bucket_width_s is None:
-        bucket_width_s = MM_DECISION_BUCKET_WIDTH_S if _is_market_maker_agent(agent_id) else DECISION_BUCKET_WIDTH_S
+        if _is_market_maker_agent(agent_id):
+            bucket_width_s = MM_DECISION_BUCKET_WIDTH_S  # 5s for MMs
+        elif _is_15m_crypto_agent(agent_id):
+            bucket_width_s = 5  # 5s for 15m crypto agents (matches cadence)
+        else:
+            bucket_width_s = DECISION_BUCKET_WIDTH_S  # 60s default
 
     bucket = int(decision_ts) // bucket_width_s
     preimage = f"{agent_id}|{strategy_group}|{contract_id}|{side}|{target_qty}|{price_cents}|{bucket}"
@@ -186,8 +203,11 @@ def deterministic_client_order_id(
 class IdempotentOrderStore:
     """In-memory idempotent order store keyed by ``client_order_id``.
 
-    Thread-safe.  Entries are pruned after a configurable TTL so the store
+    Thread-safe and async-safe.  Entries are pruned after a configurable TTL so the store
     doesn't grow unbounded.
+    
+    PHASE1-DUP-4: Added asyncio.Lock for async dedup to prevent concurrent duplicate
+    submissions in async contexts (e.g., route_order_async).
     """
 
     # Records older than this are eligible for pruning (24 hours).
@@ -195,8 +215,16 @@ class IdempotentOrderStore:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        # EVENT-LOOP-FIX: Lazy-initialize to avoid binding to wrong event loop
+        self._async_lock: Optional[asyncio.Lock] = None  # PHASE1-DUP-4: Async lock for concurrent async submissions
         self._orders: Dict[str, OrderRecord] = {}
         self._metrics = GateMetrics()
+
+    def _ensure_async_lock(self) -> asyncio.Lock:
+        """Lazy-initialize the async lock in the current event loop."""
+        if self._async_lock is None:
+            self._async_lock = asyncio.Lock()
+        return self._async_lock
 
     # ── Lookup / insert ──────────────────────────────────────────────────
 
@@ -220,52 +248,139 @@ class IdempotentOrderStore:
             self._orders[record.client_order_id] = record
             return True, None
 
+    async def async_insert_if_absent(self, record: OrderRecord) -> Tuple[bool, Optional[OrderRecord]]:
+        """Async version of insert_if_absent using asyncio.Lock.
+
+        PHASE1-DUP-4: Prevents concurrent duplicate submissions in async contexts
+        (e.g., route_order_async) by using an async lock instead of the threading lock.
+
+        Returns:
+            (inserted, existing_or_none) — ``inserted`` is True if the record
+            was stored; False if a record already existed (returned as second
+            element).
+        """
+        async with self._ensure_async_lock():
+            existing = self._orders.get(record.client_order_id)
+            if existing is not None:
+                return False, existing
+            self._orders[record.client_order_id] = record
+            return True, None
+
     # ── Status transitions ───────────────────────────────────────────────
+
+    def _check_transition_allowed(
+        self,
+        rec: OrderRecord,
+        new_status: OrderStatus,
+        method_name: str
+    ) -> bool:
+        """PHASE1-DUP-5: Validate order state transition invariants.
+        
+        Enforces:
+        1. No status regressions (e.g., FILLED → SUBMITTED blocked)
+        2. Terminal state immutability (no transitions from FILLED/CANCELED/REJECTED/EXPIRED)
+        
+        Returns True if transition is allowed, False otherwise.
+        Logs violations for monitoring.
+        """
+        # Terminal state immutability: cannot transition from terminal states
+        if rec.status in _TERMINAL_STATES:
+            logger.error(
+                "[ORDER-STATE-INVARIANT] Terminal state transition blocked | "
+                "coid=%s current=%s attempted=%s method=%s | "
+                "Terminal states are immutable",
+                rec.client_order_id, rec.status.value, new_status.value, method_name
+            )
+            self._metrics.blocked_invalid_transition += 1
+            return False
+        
+        # No status regressions: block backward transitions
+        # Define valid forward transitions
+        valid_transitions = {
+            OrderStatus.PENDING: {OrderStatus.SUBMITTED, OrderStatus.LIVE, OrderStatus.REJECTED, OrderStatus.CANCELED},
+            OrderStatus.SUBMITTED: {OrderStatus.LIVE, OrderStatus.REJECTED, OrderStatus.CANCELED},
+            OrderStatus.LIVE: {OrderStatus.PARTIAL, OrderStatus.FILLED, OrderStatus.CANCELED},
+            OrderStatus.PARTIAL: {OrderStatus.FILLED, OrderStatus.CANCELED},
+        }
+        
+        if rec.status in valid_transitions and new_status not in valid_transitions[rec.status]:
+            logger.error(
+                "[ORDER-STATE-INVARIANT] Invalid status transition blocked | "
+                "coid=%s current=%s attempted=%s method=%s | "
+                "Valid transitions from %s: %s",
+                rec.client_order_id, rec.status.value, new_status.value, method_name,
+                rec.status.value, [s.value for s in valid_transitions[rec.status]]
+            )
+            self._metrics.blocked_invalid_transition += 1
+            return False
+        
+        return True
 
     def mark_submitted(self, client_order_id: str, venue_order_id: Optional[str] = None) -> None:
         with self._lock:
             rec = self._orders.get(client_order_id)
-            if rec and rec.status in (OrderStatus.PENDING,):
-                rec.status = OrderStatus.SUBMITTED
-                rec.venue_order_id = venue_order_id
-                rec.updated_at = time.time()
-                self._metrics.submitted += 1
+            if rec:
+                # PHASE1-DUP-5: Check transition invariants
+                if not self._check_transition_allowed(rec, OrderStatus.SUBMITTED, "mark_submitted"):
+                    return
+                if rec.status in (OrderStatus.PENDING,):
+                    rec.status = OrderStatus.SUBMITTED
+                    rec.venue_order_id = venue_order_id
+                    rec.updated_at = _time.time()
+                    self._metrics.submitted += 1
 
     def mark_live(self, client_order_id: str, venue_order_id: Optional[str] = None) -> None:
         with self._lock:
             rec = self._orders.get(client_order_id)
-            if rec and rec.status in (OrderStatus.PENDING, OrderStatus.SUBMITTED):
-                rec.status = OrderStatus.LIVE
-                if venue_order_id:
-                    rec.venue_order_id = venue_order_id
-                rec.updated_at = time.time()
+            if rec:
+                # PHASE1-DUP-5: Check transition invariants
+                if not self._check_transition_allowed(rec, OrderStatus.LIVE, "mark_live"):
+                    return
+                if rec.status in (OrderStatus.PENDING, OrderStatus.SUBMITTED):
+                    rec.status = OrderStatus.LIVE
+                    if venue_order_id:
+                        rec.venue_order_id = venue_order_id
+                    rec.updated_at = _time.time()
 
     def mark_filled(self, client_order_id: str, filled_count: int) -> None:
         with self._lock:
             rec = self._orders.get(client_order_id)
-            if rec and rec.status not in _TERMINAL_STATES:
-                rec.filled_count = filled_count
-                if filled_count >= rec.target_count:
-                    rec.status = OrderStatus.FILLED
-                else:
-                    rec.status = OrderStatus.PARTIAL
-                rec.updated_at = time.time()
-                self._metrics.filled += 1
+            if rec:
+                # PHASE1-DUP-5: Check transition invariants (allow PARTIAL → FILLED)
+                target_status = OrderStatus.FILLED if filled_count >= rec.target_count else OrderStatus.PARTIAL
+                if not self._check_transition_allowed(rec, target_status, "mark_filled"):
+                    return
+                if rec.status not in _TERMINAL_STATES:
+                    rec.filled_count = filled_count
+                    if filled_count >= rec.target_count:
+                        rec.status = OrderStatus.FILLED
+                    else:
+                        rec.status = OrderStatus.PARTIAL
+                    rec.updated_at = _time.time()
+                    self._metrics.filled += 1
 
     def mark_canceled(self, client_order_id: str) -> None:
         with self._lock:
             rec = self._orders.get(client_order_id)
-            if rec and rec.status not in _TERMINAL_STATES:
-                rec.status = OrderStatus.CANCELED
-                rec.updated_at = time.time()
-                self._metrics.canceled += 1
+            if rec:
+                # PHASE1-DUP-5: Check transition invariants
+                if not self._check_transition_allowed(rec, OrderStatus.CANCELED, "mark_canceled"):
+                    return
+                if rec.status not in _TERMINAL_STATES:
+                    rec.status = OrderStatus.CANCELED
+                    rec.updated_at = _time.time()
+                    self._metrics.canceled += 1
 
     def mark_rejected(self, client_order_id: str, reason: str = "") -> None:
         with self._lock:
             rec = self._orders.get(client_order_id)
-            if rec and rec.status in (OrderStatus.PENDING, OrderStatus.SUBMITTED):
-                rec.status = OrderStatus.REJECTED
-                rec.updated_at = time.time()
+            if rec:
+                # PHASE1-DUP-5: Check transition invariants
+                if not self._check_transition_allowed(rec, OrderStatus.REJECTED, "mark_rejected"):
+                    return
+                if rec.status in (OrderStatus.PENDING, OrderStatus.SUBMITTED):
+                    rec.status = OrderStatus.REJECTED
+                    rec.updated_at = _time.time()
 
     # ── Query helpers ────────────────────────────────────────────────────
 
@@ -297,6 +412,10 @@ class IdempotentOrderStore:
             return False
 
     # ── Duplicate Race Detection ─────────────────────────────────────────
+    # NOTE: This method is UNUSED LEGACY CODE. It has zero call sites in the codebase.
+    # Actual duplicate protection is handled via client_order_id in PreTradeGate.check()
+    # which uses IdempotentOrderStore.lookup() to block replays of the exact same intent.
+    # This method is kept for reference but should not be used.
 
     def check_duplicate_race(
         self,
@@ -306,6 +425,9 @@ class IdempotentOrderStore:
         race_window_seconds: float = 2.0,
     ) -> tuple[bool, str]:
         """Prevent same-asset duplicate orders within time window.
+        
+        DEPRECATED: This method is unused. Duplicate protection is handled via
+        client_order_id in PreTradeGate.check() using IdempotentOrderStore.
         
         MICRO-SCALPING FIX: Allow multiple orders IF they're on different sides
         (YES vs NO) or different assets. Block only true duplicates within
@@ -321,7 +443,7 @@ class IdempotentOrderStore:
             Tuple of (allowed, reason). allowed=True if no duplicate race detected.
         """
         with self._lock:
-            now = time.time()
+            now = _time.time()
             
             for rec in self._orders.values():
                 # Check for pending/submitted orders on same contract+side+strategy
@@ -345,7 +467,7 @@ class IdempotentOrderStore:
 
     def prune_old(self, ttl_s: Optional[float] = None) -> int:
         """Remove terminal records older than *ttl_s*."""
-        cutoff = time.time() - (ttl_s or self.PRUNE_TTL_S)
+        cutoff = _time.time() - (ttl_s or self.PRUNE_TTL_S)
         with self._lock:
             stale = [
                 k for k, v in self._orders.items()
@@ -387,14 +509,14 @@ class IdempotentOrderStore:
         Returns a small dict of counts for observability:
         ``{"orphaned_pending": N, "orphaned_submitted": M}``.
         """
-        pending_cutoff = time.time() - (
+        pending_cutoff = _time.time() - (
             pending_ttl_s if pending_ttl_s is not None else self.ORPHAN_PENDING_TTL_S
         )
-        submitted_cutoff = time.time() - (
+        submitted_cutoff = _time.time() - (
             submitted_ttl_s if submitted_ttl_s is not None else self.ORPHAN_SUBMITTED_TTL_S
         )
         result = {"orphaned_pending": 0, "orphaned_submitted": 0}
-        now = time.time()
+        now = _time.time()
         with self._lock:
             for rec in self._orders.values():
                 if rec.status == OrderStatus.PENDING and rec.updated_at < pending_cutoff:
@@ -501,13 +623,12 @@ class PreTradeGate:
         existing = self._store.lookup(coid)
         if existing is not None and existing.status in _BLOCK_DUPLICATE_STATES:
             self._store._metrics.blocked_duplicate += 1
-            # P2: Duplicate order blocking is expected idempotent behavior
-            # This occurs when the same intent is submitted twice (e.g., retry logic,
-            # market maker refresh, or race conditions). Not an error condition.
-            logger.info(
-                "[GATE] duplicate_order_blocked coid=%s status=%s contract=%s agent=%s "
-                "(expected idempotent behavior)",
+            # PHASE1-DUP-9: Alert for duplicate order attempts (warning level + metric)
+            logger.warning(
+                "[GATE-ALERT] duplicate_order_attempt_blocked coid=%s status=%s contract=%s agent=%s "
+                "(metric: blocked_duplicate=%d)",
                 coid, existing.status.value, contract_id, agent_id,
+                self._store._metrics.blocked_duplicate,
             )
             return GateVerdict(
                 allowed=False,
@@ -537,99 +658,109 @@ class PreTradeGate:
                 )
 
         # 4b. CRYPTO15M Timeframe Budget + Expiry Cap Check (hard gate)
-        # This is a safety check that runs regardless of allocator state
-        try:
-            from merid.prediction.crypto15mallocator import (
-                is_15m_crypto_ticker,
-                check_timeframe_budget,
-                check_expiry_open_cap,
-                is_increasing_exposure_check,
-                get_crypto15m_allocator,
-            )
-            
-            if is_15m_crypto_ticker(contract_id):
-                # Determine if this increases exposure
-                is_increasing = is_increasing_exposure_check(
-                    ticker=contract_id,
-                    side=side,
-                    requested_contracts=target_count,
-                    existing_position_contracts=existing_filled or 0,
+        # NOTE: This gate is DISABLED for lean 15m mode because the allocator (crypto15mallocator.py)
+        # is archived. The priority queue + budget/cooldown + edge thresholds provide the
+        # risk envelope instead. Set MERID_DISABLE_CRYPTO15M_GATE=1 to disable.
+        # Skip check if env disables it (emergency override for lean stack)
+        if os.getenv("MERID_DISABLE_CRYPTO15M_GATE", "").lower() in ("1", "true", "yes"):
+            logger.debug("[CRYPTO15M-GATE] Skipped (disabled by MERID_DISABLE_CRYPTO15M_GATE) for %s", contract_id)
+        else:
+            try:
+                from merid.prediction.crypto15mallocator import (
+                    is_15m_crypto_ticker,
+                    check_timeframe_budget,
+                    check_expiry_open_cap,
+                    is_increasing_exposure_check,
+                    get_crypto15m_allocator,
                 )
                 
-                # Only check caps for increasing exposure (reductions always allowed)
-                if is_increasing:
-                    allocator = get_crypto15m_allocator()
-                    phase = allocator.config.rollout_phase
-                    
-                    # Check timeframe budget
-                    tf_allowed, tf_approved, tf_reason = check_timeframe_budget(
+                if is_15m_crypto_ticker(contract_id):
+                    # Determine if this increases exposure
+                    is_increasing = is_increasing_exposure_check(
                         ticker=contract_id,
+                        side=side,
                         requested_contracts=target_count,
-                        bankroll_equity_usd=0.0,  # Will use default budget
+                        existing_position_contracts=existing_filled or 0,
                     )
                     
-                    # Check expiry cap
-                    expiry_allowed, expiry_approved, expiry_reason = check_expiry_open_cap(
-                        ticker=contract_id,
-                        requested_contracts=target_count,
-                        is_increasing_exposure=True,
-                    )
-                    
-                    # In hard_gate phase, enforce strictly
-                    if phase == "hard_gate":
-                        if not tf_allowed:
-                            self._store._metrics.blocked_risk += 1
-                            logger.warning(
-                                "[GATE] [TFBUDGET] BLOCKED hard_gate coid=%s contract=%s "
-                                "reason=timeframe_budget_exhausted agent=%s",
-                                coid, contract_id, agent_id
-                            )
-                            return GateVerdict(
-                                allowed=False,
-                                client_order_id=coid,
-                                reason="timeframe_budget_exhausted",
-                            )
+                    # Only check caps for increasing exposure (reductions always allowed)
+                    if is_increasing:
+                        allocator = get_crypto15m_allocator()
+                        phase = allocator.config.rollout_phase
                         
-                        if not expiry_allowed:
-                            self._store._metrics.blocked_risk += 1
-                            logger.warning(
-                                "[GATE] [EXPIRYLIMIT] BLOCKED hard_gate coid=%s contract=%s "
-                                "reason=expiry_limit_exhausted agent=%s",
-                                coid, contract_id, agent_id
-                            )
-                            return GateVerdict(
-                                allowed=False,
-                                client_order_id=coid,
-                                reason="expiry_limit_exhausted",
-                            )
+                        # Check timeframe budget
+                        tf_allowed, tf_approved, tf_reason = check_timeframe_budget(
+                            ticker=contract_id,
+                            requested_contracts=target_count,
+                            bankroll_equity_usd=0.0,  # Will use default budget
+                        )
                         
-                        # Check if slicing is needed
-                        min_approved = min(tf_approved, expiry_approved)
-                        if min_approved < target_count:
-                            logger.info(
-                                "[GATE] [CRYPTO15M] CAPPED coid=%s contract=%s "
-                                "requested=%d approved=%d (tf=%d, expiry=%d) agent=%s",
-                                coid, contract_id, target_count, min_approved,
-                                tf_approved, expiry_approved, agent_id
-                            )
-                            # Note: We don't return here; the slicing happens at caller
-                    
-                    # In soft_gate/dry_run, log but allow
-                    elif phase in ("soft_gate", "dry_run"):
-                        if not tf_allowed:
-                            logger.debug(
-                                "[GATE] [TFBUDGET] would_block phase=%s coid=%s contract=%s agent=%s",
-                                phase, coid, contract_id, agent_id
-                            )
-                        if not expiry_allowed:
-                            logger.debug(
-                                "[GATE] [EXPIRYLIMIT] would_block phase=%s coid=%s contract=%s agent=%s",
-                                phase, coid, contract_id, agent_id
-                            )
-        except Exception as exc:
-            # Fail-closed: block trade if CRYPTO15M check fails
-            logger.warning("[GATE] CRYPTO15M check failed (fail-closed): %s - blocking trade", exc)
-            return False, f"crypto15m_check_failed:{type(exc).__name__}"
+                        # Check expiry cap
+                        expiry_allowed, expiry_approved, expiry_reason = check_expiry_open_cap(
+                            ticker=contract_id,
+                            requested_contracts=target_count,
+                            is_increasing_exposure=True,
+                        )
+                        
+                        # In hard_gate phase, enforce strictly
+                        if phase == "hard_gate":
+                            if not tf_allowed:
+                                self._store._metrics.blocked_risk += 1
+                                logger.warning(
+                                    "[GATE] [TFBUDGET] BLOCKED hard_gate coid=%s contract=%s "
+                                    "reason=timeframe_budget_exhausted agent=%s",
+                                    coid, contract_id, agent_id
+                                )
+                                return GateVerdict(
+                                    allowed=False,
+                                    client_order_id=coid,
+                                    reason="timeframe_budget_exhausted",
+                                )
+                            
+                            if not expiry_allowed:
+                                self._store._metrics.blocked_risk += 1
+                                logger.warning(
+                                    "[GATE] [EXPIRYLIMIT] BLOCKED hard_gate coid=%s contract=%s "
+                                    "reason=expiry_limit_exhausted agent=%s",
+                                    coid, contract_id, agent_id
+                                )
+                                return GateVerdict(
+                                    allowed=False,
+                                    client_order_id=coid,
+                                    reason="expiry_limit_exhausted",
+                                )
+                            
+                            # Check if slicing is needed
+                            min_approved = min(tf_approved, expiry_approved)
+                            if min_approved < target_count:
+                                logger.info(
+                                    "[GATE] [CRYPTO15M] CAPPED coid=%s contract=%s "
+                                    "requested=%d approved=%d (tf=%d, expiry=%d) agent=%s",
+                                    coid, contract_id, target_count, min_approved,
+                                    tf_approved, expiry_approved, agent_id
+                                )
+                                # Note: We don't return here; the slicing happens at caller
+                        
+                        # In soft_gate/dry_run, log but allow
+                        elif phase in ("soft_gate", "dry_run"):
+                            if not tf_allowed:
+                                logger.debug(
+                                    "[GATE] [TFBUDGET] would_block phase=%s coid=%s contract=%s agent=%s",
+                                    phase, coid, contract_id, agent_id
+                                )
+                            if not expiry_allowed:
+                                logger.debug(
+                                    "[GATE] [EXPIRYLIMIT] would_block phase=%s coid=%s contract=%s agent=%s",
+                                    phase, coid, contract_id, agent_id
+                                )
+            except Exception as exc:
+                # Fail-closed: block trade if CRYPTO15M check fails
+                logger.warning("[GATE] CRYPTO15M check failed (fail-closed): %s - blocking trade", exc)
+                return GateVerdict(
+                    allowed=False,
+                    client_order_id=coid,
+                    reason=f"crypto15m_check_failed:{type(exc).__name__}",
+                )
 
         # 5. Insert new record (PENDING)
         record = OrderRecord(
@@ -648,6 +779,136 @@ class PreTradeGate:
         if not inserted and conflict is not None:
             # Race: another thread inserted between lookup and insert
             self._store._metrics.blocked_duplicate += 1
+            return GateVerdict(
+                allowed=False,
+                client_order_id=coid,
+                reason=f"duplicate_race:{conflict.status.value}",
+                is_duplicate=True,
+                existing_status=conflict.status.value,
+            )
+
+        self._store._metrics.allowed += 1
+        logger.info(
+            "[GATE] allowed coid=%s contract=%s agent=%s count=%d price=%d¢",
+            coid, contract_id, agent_id, target_count, price_cents,
+        )
+        return GateVerdict(allowed=True, client_order_id=coid)
+
+    async def async_check(
+        self,
+        agent_id: str,
+        strategy_group: str,
+        contract_id: str,
+        side: str,
+        action: str,
+        target_count: int,
+        price_cents: int,
+        decision_ts: float,
+        intent_id: Optional[str] = None,
+        existing_filled: Optional[int] = None,
+    ) -> GateVerdict:
+        """Async version of pre-trade gate check using asyncio.Lock.
+
+        PHASE1-DUP-4: Prevents concurrent duplicate submissions in async contexts
+        (e.g., route_order_async) by using async_insert_if_absent with asyncio.Lock.
+
+        Args:
+            agent_id:        Agent placing the order.
+            strategy_group:  Logical strategy group (e.g. "btc_15m").
+            contract_id:     Market ticker.
+            side:            "yes" or "no".
+            action:          "buy" or "sell".
+            target_count:    Contracts requested.
+            price_cents:     Limit price.
+            decision_ts:     Wall-clock epoch of the decision.
+            intent_id:       Optional intent_id for tracing.
+            existing_filled: Caller-provided filled count for this (contract,
+                             side, strategy) if known; otherwise the store's
+                             own tally is used.
+
+        Returns:
+            :class:`GateVerdict` with ``allowed``, ``client_order_id``, and
+            ``reason`` (empty string if allowed).
+        """
+        self._store._metrics.checks += 1
+
+        # 1. Deterministic client_order_id
+        coid = deterministic_client_order_id(
+            agent_id=agent_id,
+            strategy_group=strategy_group,
+            contract_id=contract_id,
+            side=side,
+            target_qty=target_count,
+            decision_ts=decision_ts,
+            price_cents=price_cents,
+        )
+
+        # 2. Lease check (done by caller before this — we trust the lease
+        #    was acquired; if not, the caller sets lease_ok=False and we
+        #    still provide the coid for logging).
+
+        # 3. Idempotency / dedup check
+        existing = self._store.lookup(coid)
+        if existing is not None and existing.status in _BLOCK_DUPLICATE_STATES:
+            self._store._metrics.blocked_duplicate += 1
+            # PHASE1-DUP-9: Alert for duplicate order attempts (warning level + metric)
+            logger.warning(
+                "[GATE-ALERT] duplicate_order_attempt_blocked coid=%s status=%s contract=%s agent=%s "
+                "(metric: blocked_duplicate=%d)",
+                coid, existing.status.value, contract_id, agent_id,
+                self._store._metrics.blocked_duplicate,
+            )
+            return GateVerdict(
+                allowed=False,
+                client_order_id=coid,
+                reason=f"duplicate:{existing.status.value}",
+                is_duplicate=True,
+                existing_status=existing.status.value,
+            )
+
+        # 4. Fill-awareness: is the target already satisfied?
+        if action == "buy":
+            already_filled = (
+                existing_filled
+                if existing_filled is not None
+                else self._store.filled_count_for_contract(contract_id, side, strategy_group)
+            )
+            if already_filled >= target_count:
+                self._store._metrics.blocked_already_satisfied += 1
+                logger.info(
+                    "[GATE] already_satisfied coid=%s contract=%s filled=%d target=%d",
+                    coid, contract_id, already_filled, target_count,
+                )
+                return GateVerdict(
+                    allowed=False,
+                    client_order_id=coid,
+                    reason=f"already_satisfied:filled={already_filled}>=target={target_count}",
+                )
+
+        # 5. Insert new record (PENDING) using async lock
+        record = OrderRecord(
+            client_order_id=coid,
+            agent_id=agent_id,
+            strategy_group=strategy_group,
+            contract_id=contract_id,
+            side=side,
+            action=action,
+            target_count=target_count,
+            price_cents=price_cents,
+            decision_ts_bucket=str(int(decision_ts) // DECISION_BUCKET_WIDTH_S),
+            intent_id=intent_id,
+        )
+        inserted, conflict = await self._store.async_insert_if_absent(record)
+        if not inserted and conflict is not None:
+            # Race: another coroutine inserted between lookup and insert
+            self._store._metrics.blocked_duplicate += 1
+            # PHASE1-DUP-9: Alert for duplicate race condition (warning level + metric)
+            logger.warning(
+                "[GATE-ALERT] duplicate_race_condition_blocked coid=%s status=%s contract=%s agent=%s "
+                "(metric: blocked_duplicate=%d)",
+                coid, conflict.status.value, contract_id, agent_id,
+                self._store._metrics.blocked_duplicate,
+            )
             return GateVerdict(
                 allowed=False,
                 client_order_id=coid,

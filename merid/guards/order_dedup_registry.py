@@ -149,10 +149,16 @@ def get_order_dedup_registry() -> OrderDedupRegistry:
         with _registry_lock:
             if _registry is None:
                 import os
-                bucket = int(os.getenv("MERID_ORDER_DEDUP_BUCKET_SECONDS", str(DEFAULT_BUCKET_SECONDS)))
+                # Auto-detect 15m crypto profile and use 5s bucket to match cadence
+                profile = os.getenv("MERID_PROFILE", "").lower()
+                if profile == "kalshi_crypto_15m_v2":
+                    default_bucket = 5
+                else:
+                    default_bucket = DEFAULT_BUCKET_SECONDS
+                bucket = int(os.getenv("MERID_ORDER_DEDUP_BUCKET_SECONDS", str(default_bucket)))
                 _registry = OrderDedupRegistry(bucket_seconds=bucket)
                 logger.info(
-                    "[ORDER-DEDUP] Registry initialized | bucket=%ds", bucket
+                    "[ORDER-DEDUP] Registry initialized | bucket=%ds (profile=%s)", bucket, profile
                 )
     return _registry
 

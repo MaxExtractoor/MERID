@@ -26,9 +26,32 @@ import time
 
 from merid.event_venues.kalshi.risk_parameters import (
     DEFAULT_KALSHI_PRICE_CENTS,
-    DEEP_OTM_THRESHOLD_CENTS,
-    DEEP_ITM_THRESHOLD_CENTS,
+    DEEP_OTM_THRESHOLD_CENTS,  # DEPRECATED: Use profile when available
+    DEEP_ITM_THRESHOLD_CENTS,  # DEPRECATED: Use profile when available
 )
+
+# Helper to get deep OTM/ITM thresholds from profile (Task 30: Single source of truth)
+def _get_deep_otm_threshold() -> int:
+    """Get deep OTM threshold from profile or fallback to deprecated constant."""
+    try:
+        from merid.risk.profiles.crypto_15m_profile import get_active_profile
+        adapter = get_active_profile()
+        if adapter is not None and adapter.profile is not None:
+            return adapter.profile.venue_invariants_deep_otm_threshold_cents
+    except Exception:
+        pass
+    return DEEP_OTM_THRESHOLD_CENTS  # Fallback
+
+def _get_deep_itm_threshold() -> int:
+    """Get deep ITM threshold from profile or fallback to deprecated constant."""
+    try:
+        from merid.risk.profiles.crypto_15m_profile import get_active_profile
+        adapter = get_active_profile()
+        if adapter is not None and adapter.profile is not None:
+            return adapter.profile.venue_invariants_deep_itm_threshold_cents
+    except Exception:
+        pass
+    return DEEP_ITM_THRESHOLD_CENTS  # Fallback
 
 # Deployment safety metrics (if available)
 try:
@@ -230,6 +253,8 @@ class KalshiFill:
     agent_id: Optional[str] = None  # Which MERID agent generated the intent
     intent_id: Optional[str] = None  # Link to our intent record
     decision_trace_id: Optional[str] = None  # End-to-end audit: swarm → sizer → order
+    # Phase 5.4: Raw logit for probability calibration
+    raw_logit: Optional[float] = None  # Raw model logit for Platt scaling calibration
     
     # P1-9: Hedge Order Lifecycle Tracking
     fill_source: str = ""  # "alpha", "hedge", "manual" — distinguishes hedge fills
@@ -240,6 +265,11 @@ class KalshiFill:
     # Reconciliation tracking
     reconciled: bool = False  # Has been matched to position ledger
     reconciliation_ts: Optional[datetime] = None
+    
+    # Slippage tracking (per-coin statistics)
+    slippage_cents: Optional[int] = None  # Slippage in cents (actual - expected)
+    expected_price_cents: Optional[int] = None  # Expected price at order time
+    asset: Optional[str] = None  # Derived from ticker (BTC, ETH, SOL, XRP, DOGE)
     
     # Strict mode tracking (production safety)
     derived_id: bool = False  # True if fill_id was synthesized (not from Kalshi)
@@ -285,15 +315,40 @@ class KalshiFill:
     @property
     def price_cents(self) -> int:
         """Get price in cents (0-100) for unified handling."""
+        # Defensive: Handle cases where API returns dict instead of Decimal
+        def safe_to_cents(price_val) -> Optional[int]:
+            if price_val is None:
+                return None
+            if isinstance(price_val, int):
+                return price_val
+            if isinstance(price_val, float):
+                return int(price_val * 100)
+            if isinstance(price_val, Decimal):
+                return int(price_val * 100)
+            # If it's a dict or other unexpected type, log and return None
+            logger.warning(
+                "[FILL-LEDGER] Unexpected price type for price_cents: type=%s value=%s",
+                type(price_val).__name__, str(price_val)[:100]
+            )
+            return None
+        
         if self.side == "yes" and self.yes_price_dollars is not None:
-            return int(self.yes_price_dollars * 100)
+            cents = safe_to_cents(self.yes_price_dollars)
+            if cents is not None:
+                return cents
         if self.side == "no" and self.no_price_dollars is not None:
-            return int(self.no_price_dollars * 100)
+            cents = safe_to_cents(self.no_price_dollars)
+            if cents is not None:
+                return cents
         # Legacy / WS: side missing or mis-set — use whichever leg has a price
         if self.yes_price_dollars is not None:
-            return int(self.yes_price_dollars * 100)
+            cents = safe_to_cents(self.yes_price_dollars)
+            if cents is not None:
+                return cents
         if self.no_price_dollars is not None:
-            return int(self.no_price_dollars * 100)
+            cents = safe_to_cents(self.no_price_dollars)
+            if cents is not None:
+                return cents
         return 0
     
     @property
@@ -309,7 +364,7 @@ class KalshiFill:
 class OrderIntent:
     """Record of an order intent before it becomes a fill."""
     intent_id: str  # Our internal ID (client_order_id)
-    market_ticker: str
+    ticker: str  # Renamed from market_ticker to match order_router.OrderIntent
     side: str  # "yes" or "no"
     action: str  # "buy" or "sell"
     count: int  # Total intended count
@@ -324,6 +379,18 @@ class OrderIntent:
     # BUG-6 FIX: Partial fill tracking
     # Track filled quantity to handle partial fills correctly
     filled_count: int = 0  # Total contracts filled so far
+    
+    # Sizing context for TRADE-TRACE observability
+    # Links fill back to original edge/sizing decision
+    edgepct: float = 0.0
+    netedgecents: float = 0.0
+    band: str = ""
+    regime: str = ""
+    size_contracts: int = 0
+    notional_usd: float = 0.0
+    
+    # Phase 5.4: Raw logit for probability calibration
+    raw_logit: Optional[float] = None  # Raw model logit for Platt scaling calibration
     
     def add_fill(self, fill_id: str, fill_count: int) -> None:
         """Add a fill to this intent and update status.
@@ -374,7 +441,7 @@ class KalshiFillsLedger:
         await ledger.ingest_ws_fill(fill_dict)
         
         # Query
-        fills = ledger.get_fills(since=datetime.now() - timedelta(hours=24))
+        fills = ledger.get_fills(since=datetime.now(timezone.utc) - timedelta(hours=24))
         
         # Reconciliation
         status = await ledger.reconcile_with_kalshi_positions()
@@ -422,12 +489,14 @@ class KalshiFillsLedger:
         self._db_path = "data/kalshi_fills.db"
         
         # Async queue for single-writer pattern (prevents DB lock contention)
-        self._persist_queue: asyncio.Queue[Optional[KalshiFill]] = asyncio.Queue(maxsize=10000)
+        # EVENT-LOOP-FIX: Lazy-initialize to avoid binding to wrong event loop
+        self._persist_queue: Optional[asyncio.Queue[Optional[KalshiFill]]] = None
         self._writer_task: Optional[asyncio.Task] = None
-        self._shutdown_event = asyncio.Event()
+        self._shutdown_event: Optional[asyncio.Event] = None
         
         # Lock for thread safety (protects all dict mutations)
-        self._mutex = asyncio.Lock()
+        # EVENT-LOOP-FIX: Lazy-initialize to avoid binding to wrong event loop
+        self._mutex: Optional[asyncio.Lock] = None
         
         # Initialize DB with WAL mode on first use
         self._db_initialized = False
@@ -477,6 +546,24 @@ class KalshiFillsLedger:
         self._load_session_metadata()
         
         logger.info("KalshiFillsLedger initialized")
+
+    def _ensure_persist_queue(self) -> asyncio.Queue[Optional[KalshiFill]]:
+        """Lazy-initialize the persist queue in the current event loop."""
+        if self._persist_queue is None:
+            self._persist_queue = asyncio.Queue(maxsize=10000)
+        return self._persist_queue
+
+    def _ensure_shutdown_event(self) -> asyncio.Event:
+        """Lazy-initialize the shutdown event in the current event loop."""
+        if self._shutdown_event is None:
+            self._shutdown_event = asyncio.Event()
+        return self._shutdown_event
+
+    def _ensure_mutex(self) -> asyncio.Lock:
+        """Lazy-initialize the mutex in the current event loop."""
+        if self._mutex is None:
+            self._mutex = asyncio.Lock()
+        return self._mutex
     
     def _classify_error(self, error: Exception) -> tuple[str, bool]:
         """Classify error as permanent (no retry) or transient (retry ok).
@@ -715,7 +802,8 @@ class KalshiFillsLedger:
                             # Re-parse and add to ledger
                             fill = self._parse_fill(fill_data, "dlq_replay")
                             if fill and fill.fill_id:
-                                async with self._mutex:
+                                mutex = self._ensure_mutex()
+                                async with mutex:
                                     self._fills[fill.fill_id] = fill
                                     self._index_fill(fill)
                                 replayed += 1
@@ -829,7 +917,8 @@ class KalshiFillsLedger:
             if removed > 0:
                 logger.warning(f"Cleared {removed} incomplete/false fills from DB (phantom fills)")
                 # Clear in-memory cache too
-                async with self._mutex:
+                mutex = self._ensure_mutex()
+                async with mutex:
                     to_remove = [fill_id for fill_id, fill in self._fills.items() if fill.is_incomplete()]
                     for fill_id in to_remove:
                         del self._fills[fill_id]
@@ -856,7 +945,8 @@ class KalshiFillsLedger:
         new_fill_ids: List[str] = []
         merged_duplicate = False
         
-        async with self._mutex:
+        mutex = self._ensure_mutex()
+        async with mutex:
             for raw in fills:
                 fill = self._parse_fill(raw, "http_poller")
                 if _is_test_fixture_fill(fill.fill_id):
@@ -925,6 +1015,9 @@ class KalshiFillsLedger:
                     intent.last_update = datetime.now(timezone.utc)
                     fill.intent_id = intent.intent_id
                     fill.agent_id = intent.agent_id
+                    # Phase 5.4: Copy raw_logit from intent for calibration
+                    if hasattr(intent, 'raw_logit') and intent.raw_logit is not None:
+                        fill.raw_logit = intent.raw_logit
                     # Resolve action from intent when fill has no explicit action.
                     if intent.action in ("buy", "sell") and fill.action not in ("buy", "sell"):
                         fill.action = intent.action
@@ -951,32 +1044,71 @@ class KalshiFillsLedger:
                 new_count += 1
                 new_fill_ids.append(fill.fill_id)
                 
+                # FILL-INGEST: Log fill with TRADE-TRACE linking to original edge/sizing decision
+                intent = self._intents.get(fill.client_order_id) if fill.client_order_id else None
+                logger.info(
+                    "[FILL-INGEST] fill_id=%s ticker=%s side=%s count=%d price_cents=%d notional_usd=%.2f "
+                    "edgepct=%.4f netedgecents=%.2f band=%s regime=%s source=%s",
+                    fill.fill_id, fill.market_ticker, fill.side, fill.count_fp, fill.price_cents, float(fill.notional_usd),
+                    intent.edgepct if intent else 0.0,
+                    intent.netedgecents if intent else 0.0,
+                    intent.band if intent else "",
+                    intent.regime if intent else "",
+                    fill.fill_source
+                )
+                
                 # CRITICAL FIX: Call on_fill to update position state for HTTP fills
                 # Without this, _open_positions is not updated when fills come via HTTP polling
                 self.on_fill(fill)
                 
                 # Track deep OTM/ITM fills for deployment safety monitoring
-                if fill.price_cents < DEEP_OTM_THRESHOLD_CENTS:
+                deep_otm_threshold = _get_deep_otm_threshold()
+                deep_itm_threshold = _get_deep_itm_threshold()
+                # Defensive: Ensure thresholds are ints (profile may return dict in some cases)
+                if isinstance(deep_otm_threshold, dict) and 'value' in deep_otm_threshold:
+                    deep_otm_threshold = deep_otm_threshold['value']
+                if not isinstance(deep_otm_threshold, int):
+                    logger.warning(
+                        "[DEPLOYMENT-SAFETY] Invalid deep_otm_threshold type: type=%s value=%s",
+                        type(deep_otm_threshold).__name__, str(deep_otm_threshold)[:100]
+                    )
+                    deep_otm_threshold = 0  # Safe fallback
+                if isinstance(deep_itm_threshold, dict) and 'value' in deep_itm_threshold:
+                    deep_itm_threshold = deep_itm_threshold['value']
+                if not isinstance(deep_itm_threshold, int):
+                    logger.warning(
+                        "[DEPLOYMENT-SAFETY] Invalid deep_itm_threshold type: type=%s value=%s",
+                        type(deep_itm_threshold).__name__, str(deep_itm_threshold)[:100]
+                    )
+                    deep_itm_threshold = 100  # Safe fallback
+                # Defensive: Ensure price_cents is an int before comparison (API may return dict in some cases)
+                price_cents = fill.price_cents
+                if not isinstance(price_cents, int):
+                    logger.warning(
+                        "[DEPLOYMENT-SAFETY] Invalid price_cents type for deep OTM/ITM check: ticker=%s price_cents=%s type=%s fill_id=%s",
+                        fill.market_ticker, price_cents, type(price_cents).__name__, fill.fill_id
+                    )
+                elif price_cents < deep_otm_threshold:
                     logger.warning(
                         "[DEPLOYMENT-SAFETY] Deep OTM fill detected (HTTP): ticker=%s price=%dc threshold=%dc fill_id=%s",
-                        fill.market_ticker, fill.price_cents, DEEP_OTM_THRESHOLD_CENTS, fill.fill_id
+                        fill.market_ticker, price_cents, deep_otm_threshold, fill.fill_id
                     )
                     if SAFETY_METRICS_AVAILABLE:
                         inc_deep_otm_fill(
                             ticker=fill.market_ticker,
                             source="http_poller",
-                            price_cents=fill.price_cents,
+                            price_cents=price_cents,
                         )
-                elif fill.price_cents > DEEP_ITM_THRESHOLD_CENTS:
+                elif price_cents > deep_itm_threshold:
                     logger.warning(
                         "[DEPLOYMENT-SAFETY] Deep ITM fill detected (HTTP): ticker=%s price=%dc threshold=%dc fill_id=%s",
-                        fill.market_ticker, fill.price_cents, DEEP_ITM_THRESHOLD_CENTS, fill.fill_id
+                        fill.market_ticker, price_cents, deep_itm_threshold, fill.fill_id
                     )
                     if SAFETY_METRICS_AVAILABLE:
                         inc_deep_itm_fill(
                             ticker=fill.market_ticker,
                             source="http_poller",
-                            price_cents=fill.price_cents,
+                            price_cents=price_cents,
                         )
                 
                 logger.info(
@@ -1017,7 +1149,8 @@ class KalshiFillsLedger:
         Returns:
             True if new fill, False if duplicate
         """
-        async with self._mutex:
+        mutex = self._ensure_mutex()
+        async with mutex:
             fill = self._parse_fill(raw, "websocket")
             
             if fill.fill_id in self._fills:
@@ -1076,28 +1209,67 @@ class KalshiFillsLedger:
             self._index_fill(fill)
             self._ws_ingested += 1
             
+            # FILL-INGEST: Log fill with TRADE-TRACE linking to original edge/sizing decision
+            intent = self._intents.get(fill.client_order_id) if fill.client_order_id else None
+            logger.info(
+                "[FILL-INGEST] fill_id=%s ticker=%s side=%s count=%d price_cents=%d notional_usd=%.2f "
+                "edgepct=%.4f netedgecents=%.2f band=%s regime=%s source=%s",
+                fill.fill_id, fill.market_ticker, fill.side, fill.count_fp, fill.price_cents, float(fill.notional_usd),
+                intent.edgepct if intent else 0.0,
+                intent.netedgecents if intent else 0.0,
+                intent.band if intent else "",
+                intent.regime if intent else "",
+                fill.fill_source
+            )
+            
             # Track deep OTM/ITM fills for deployment safety monitoring
-            if fill.price_cents < DEEP_OTM_THRESHOLD_CENTS:
+            deep_otm_threshold = _get_deep_otm_threshold()
+            deep_itm_threshold = _get_deep_itm_threshold()
+            # Defensive: Ensure thresholds are ints (profile may return dict in some cases)
+            if isinstance(deep_otm_threshold, dict) and 'value' in deep_otm_threshold:
+                deep_otm_threshold = deep_otm_threshold['value']
+            if not isinstance(deep_otm_threshold, int):
+                logger.warning(
+                    "[DEPLOYMENT-SAFETY] Invalid deep_otm_threshold type: type=%s value=%s",
+                    type(deep_otm_threshold).__name__, str(deep_otm_threshold)[:100]
+                )
+                deep_otm_threshold = 0  # Safe fallback
+            if isinstance(deep_itm_threshold, dict) and 'value' in deep_itm_threshold:
+                deep_itm_threshold = deep_itm_threshold['value']
+            if not isinstance(deep_itm_threshold, int):
+                logger.warning(
+                    "[DEPLOYMENT-SAFETY] Invalid deep_itm_threshold type: type=%s value=%s",
+                    type(deep_itm_threshold).__name__, str(deep_itm_threshold)[:100]
+                )
+                deep_itm_threshold = 100  # Safe fallback
+            # Defensive: Ensure price_cents is an int before comparison (API may return dict in some cases)
+            price_cents = fill.price_cents
+            if not isinstance(price_cents, int):
+                logger.warning(
+                    "[DEPLOYMENT-SAFETY] Invalid price_cents type for deep OTM/ITM check: ticker=%s price_cents=%s type=%s fill_id=%s",
+                    fill.market_ticker, price_cents, type(price_cents).__name__, fill.fill_id
+                )
+            elif price_cents < deep_otm_threshold:
                 logger.warning(
                     "[DEPLOYMENT-SAFETY] Deep OTM fill detected: ticker=%s price=%dc threshold=%dc fill_id=%s",
-                    fill.market_ticker, fill.price_cents, DEEP_OTM_THRESHOLD_CENTS, fill.fill_id
+                    fill.market_ticker, price_cents, deep_otm_threshold, fill.fill_id
                 )
                 if SAFETY_METRICS_AVAILABLE:
                     inc_deep_otm_fill(
                         ticker=fill.market_ticker,
                         source="websocket",
-                        price_cents=fill.price_cents,
+                        price_cents=price_cents,
                     )
-            elif fill.price_cents > DEEP_ITM_THRESHOLD_CENTS:
+            elif price_cents > deep_itm_threshold:
                 logger.warning(
                     "[DEPLOYMENT-SAFETY] Deep ITM fill detected: ticker=%s price=%dc threshold=%dc fill_id=%s",
-                    fill.market_ticker, fill.price_cents, DEEP_ITM_THRESHOLD_CENTS, fill.fill_id
+                    fill.market_ticker, price_cents, deep_itm_threshold, fill.fill_id
                 )
                 if SAFETY_METRICS_AVAILABLE:
                     inc_deep_itm_fill(
                         ticker=fill.market_ticker,
                         source="websocket",
-                        price_cents=fill.price_cents,
+                        price_cents=price_cents,
                     )
             
             # Session-based PnL tracking: call on_fill() for new fills
@@ -1138,7 +1310,7 @@ class KalshiFillsLedger:
     def record_intent(self, intent: OrderIntent) -> None:
         """Record an order intent before submission."""
         self._intents[intent.intent_id] = intent
-        logger.debug(f"Recorded intent: {intent.intent_id} for {intent.market_ticker}")
+        logger.debug(f"Recorded intent: {intent.intent_id} for {intent.ticker}")
         # Prune stale intents to prevent unbounded growth (runs every 100 adds)
         if len(self._intents) % 100 == 0:
             self._prune_stale_intents()
@@ -1309,6 +1481,7 @@ class KalshiFillsLedger:
                   since: Optional[datetime] = None,
                   market_ticker: Optional[str] = None,
                   agent_id: Optional[str] = None,
+                  asset: Optional[str] = None,
                   limit: int = 500) -> List[KalshiFill]:
         """Query fills with filters."""
         # Take snapshot to avoid dict mutation during iteration
@@ -1320,6 +1493,8 @@ class KalshiFillsLedger:
             fills = [f for f in fills if f.market_ticker == market_ticker]
         if agent_id:
             fills = [f for f in fills if f.agent_id == agent_id]
+        if asset:
+            fills = [f for f in fills if f.asset == asset]
             
         # Sort by created_time descending
         fills.sort(key=lambda f: f.created_time, reverse=True)
@@ -1328,6 +1503,136 @@ class KalshiFillsLedger:
     def get_fill_by_id(self, fill_id: str) -> Optional[KalshiFill]:
         """Get a single fill by ID."""
         return self._fills.get(fill_id)
+    
+    def get_slippage_stats(self, asset: Optional[str] = None, 
+                          since: Optional[datetime] = None) -> Dict[str, Dict[str, float]]:
+        """Get per-coin slippage statistics.
+        
+        Args:
+            asset: Optional asset filter (BTC, ETH, SOL, XRP, DOGE)
+            since: Optional time filter
+            
+        Returns:
+            Dict mapping asset -> stats dict with keys:
+            - count: number of fills with slippage data
+            - mean_slippage_cents: average slippage in cents
+            - max_slippage_cents: maximum slippage in cents
+            - min_slippage_cents: minimum slippage in cents
+            - total_slippage_cents: sum of all slippage
+        """
+        fills = list(self._fills.values())
+        
+        if since:
+            fills = [f for f in fills if f.created_time >= since]
+        if asset:
+            fills = [f for f in fills if f.asset == asset]
+        
+        # Group by asset
+        stats_by_asset: Dict[str, Dict[str, float]] = {}
+        for fill in fills:
+            if fill.asset and fill.slippage_cents is not None:
+                if fill.asset not in stats_by_asset:
+                    stats_by_asset[fill.asset] = {
+                        "count": 0,
+                        "mean_slippage_cents": 0.0,
+                        "max_slippage_cents": float('-inf'),
+                        "min_slippage_cents": float('inf'),
+                        "total_slippage_cents": 0.0,
+                    }
+                
+                stats = stats_by_asset[fill.asset]
+                stats["count"] += 1
+                stats["total_slippage_cents"] += fill.slippage_cents
+                stats["max_slippage_cents"] = max(stats["max_slippage_cents"], fill.slippage_cents)
+                stats["min_slippage_cents"] = min(stats["min_slippage_cents"], fill.slippage_cents)
+        
+        # Compute means
+        for asset_stats in stats_by_asset.values():
+            if asset_stats["count"] > 0:
+                asset_stats["mean_slippage_cents"] = asset_stats["total_slippage_cents"] / asset_stats["count"]
+            else:
+                asset_stats["mean_slippage_cents"] = 0.0
+        
+        return stats_by_asset
+    
+    def get_fill_rate_stats(self, asset: Optional[str] = None,
+                           since: Optional[datetime] = None) -> Dict[str, Dict[str, float]]:
+        """Get per-coin fill rate statistics.
+        
+        Fill rate = (number of fills) / (number of order intents)
+        
+        Args:
+            asset: Optional asset filter (BTC, ETH, SOL, XRP, DOGE)
+            since: Optional time filter
+            
+        Returns:
+            Dict mapping asset -> stats dict with keys:
+            - intents: number of order intents
+            - fills: number of fills
+            - fill_rate: fills / intents (0.0 to 1.0)
+            - partial_fills: number of partially filled orders
+        """
+        intents = list(self._intents.values())
+        fills = list(self._fills.values())
+        
+        if since:
+            intents = [i for i in intents if i.created_at >= since]
+            fills = [f for f in fills if f.created_time >= since]
+        
+        # Group intents by asset (derive from ticker)
+        intents_by_asset: Dict[str, int] = {}
+        for intent in intents:
+            asset = None
+            ticker = intent.market_ticker.upper() if intent.market_ticker else ""
+            if "KXBTC" in ticker:
+                asset = "BTC"
+            elif "KXETH" in ticker:
+                asset = "ETH"
+            elif "KXSOL" in ticker:
+                asset = "SOL"
+            elif "KXXRP" in ticker:
+                asset = "XRP"
+            elif "KXDOGE" in ticker:
+                asset = "DOGE"
+            
+            if asset:
+                intents_by_asset[asset] = intents_by_asset.get(asset, 0) + 1
+        
+        # Group fills by asset
+        fills_by_asset: Dict[str, int] = {}
+        partial_fills_by_asset: Dict[str, int] = {}
+        for fill in fills:
+            if fill.asset:
+                fills_by_asset[fill.asset] = fills_by_asset.get(fill.asset, 0) + 1
+                # Check if this was a partial fill (count < total intent count)
+                if fill.intent_id and fill.intent_id in self._intents:
+                    intent = self._intents[fill.intent_id]
+                    if fill.count_fp < intent.count:
+                        partial_fills_by_asset[fill.asset] = partial_fills_by_asset.get(fill.asset, 0) + 1
+        
+        # Compute stats for all assets
+        all_assets = set(intents_by_asset.keys()) | set(fills_by_asset.keys())
+        stats_by_asset: Dict[str, Dict[str, float]] = {}
+        
+        for asset in all_assets:
+            intents_count = intents_by_asset.get(asset, 0)
+            fills_count = fills_by_asset.get(asset, 0)
+            partial_count = partial_fills_by_asset.get(asset, 0)
+            
+            fill_rate = fills_count / intents_count if intents_count > 0 else 0.0
+            
+            stats_by_asset[asset] = {
+                "intents": float(intents_count),
+                "fills": float(fills_count),
+                "fill_rate": fill_rate,
+                "partial_fills": float(partial_count),
+            }
+        
+        # Apply asset filter if specified
+        if asset:
+            stats_by_asset = {k: v for k, v in stats_by_asset.items() if k == asset}
+        
+        return stats_by_asset
     
     # Task 9: Optimized hedge fill query methods
     def get_hedge_fills(
@@ -1617,7 +1922,7 @@ class KalshiFillsLedger:
                 if avg_price_cents is None:
                     try:
                         from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
-                        state = get_kalshi_market_state_store().get_state(ticker)
+                        state = get_kalshi_market_state_store().get_unified(ticker)
                         if state and state.mid_cents > 0:
                             avg_price_cents = state.mid_cents
                     except Exception as _exc:
@@ -2184,8 +2489,14 @@ class KalshiFillsLedger:
             cash_eod_cents = 0
             portfolio_value_eod_cents = 0
             try:
-                from merid.event_venues.kalshi.bankroll_service_v2 import get_summary_sync, get_bankroll_service
-                summary = get_summary_sync(caller_module="fills_ledger")
+                # CRITICAL FIX: Make bankroll service import lazy to prevent import-time bankroll service initialization
+                # This was triggering bankroll service initialization during KalshiVenueClient import via ws_bridge
+                try:
+                    from merid.event_venues.kalshi.bankroll_service_v2 import get_summary_sync, get_bankroll_service
+                    summary = get_summary_sync(caller_module="fills_ledger")
+                except Exception as bankroll_exc:
+                    logger.warning(f"[FILLS-LEDGER] Bankroll service unavailable during initialization: {bankroll_exc}")
+                    summary = None
                 if summary and summary.available_cash_usd is not None:
                     cash_eod_cents = int(float(summary.available_cash_usd) * 100)
                     # Use portfolio value from v2 summary if available, otherwise fall back to cash + unrealized PnL
@@ -2446,6 +2757,32 @@ class KalshiFillsLedger:
             trade_pnl = self._compute_realized_pnl(position)
             self._session_realized_pnl += trade_pnl
             self._update_cumulative_realized_pnl(trade_pnl)
+
+            # Determine exit reason based on fill context
+            exit_reason = "SETTLEMENT"  # Default for fills that close positions
+            if fill.side == "sell" and fill.action == "sell":
+                # Could be TP, SL, or manual - infer from price if possible
+                # For now, use SETTLEMENT as default
+                exit_reason = "SETTLEMENT"
+
+            # Calculate realized R
+            realized_r = 0.0
+            avg_price = position.get("avg_price_cents", 0)
+            if avg_price and avg_price > 0:
+                # Risk is max loss (entry - 0 for YES, 100 - entry for NO)
+                if position.get("side") == "yes":
+                    risk_cents = avg_price
+                else:
+                    risk_cents = 100 - avg_price
+                total_contracts = position.get("total_contracts", 1)
+                if risk_cents > 0 and total_contracts > 0:
+                    realized_r = float(trade_pnl) / (risk_cents * total_contracts)
+
+            logger.info(
+                "[EXIT] market=%s side=%s reason=%s realized_R=%.2f asset=N/A confidence=N/A time_in_trade=N/A pnl_cents=%d",
+                fill.market_ticker, position.get("side", "unknown"), exit_reason, realized_r, int(trade_pnl * 100)
+            )
+
             del self._open_positions[instrument_key]
             logger.info(
                 "Position closed: %s pnl=%s session_realized=%s cumulative_realized=%s",
@@ -2776,7 +3113,8 @@ class KalshiFillsLedger:
         Returns:
             Result dict with status and position before/after
         """
-        async with self._mutex:
+        mutex = self._ensure_mutex()
+        async with mutex:
             ticker = ticker.upper()
             closed_at = closed_at or datetime.now(timezone.utc)
             
@@ -2795,7 +3133,7 @@ class KalshiFillsLedger:
             if avg_price_cents is None:
                 try:
                     from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
-                    state = get_kalshi_market_state_store().get_state(ticker)
+                    state = get_kalshi_market_state_store().get_unified(ticker)
                     if state and state.mid_cents > 0:
                         avg_price_cents = state.mid_cents
                 except Exception as _exc:
@@ -3156,11 +3494,26 @@ class KalshiFillsLedger:
                 f"source={source} - This indicates a serious data integrity issue!"
             )
         
+        # Extract asset from ticker (BTC, ETH, SOL, XRP, DOGE)
+        ticker = (raw.get("market_ticker") or raw.get("ticker") or "").upper()
+        asset = None
+        if ticker:
+            if "KXBTC" in ticker:
+                asset = "BTC"
+            elif "KXETH" in ticker:
+                asset = "ETH"
+            elif "KXSOL" in ticker:
+                asset = "SOL"
+            elif "KXXRP" in ticker:
+                asset = "XRP"
+            elif "KXDOGE" in ticker:
+                asset = "DOGE"
+        
         return KalshiFill(
             fill_id=str(fill_id),
             trade_id=raw.get("trade_id"),
             order_id=raw.get("order_id"),
-            market_ticker=(raw.get("market_ticker") or raw.get("ticker") or "").upper(),
+            market_ticker=ticker,
             side=raw.get("side", ""),
             action=_action,
             count_fp=_count_fp,
@@ -3181,6 +3534,7 @@ class KalshiFillsLedger:
             confirmed_by_rest=(source == "http_poller"),  # HTTP fills are canonical
             decision_trace_id=raw.get("decision_trace_id"),
             is_live=is_live_trade,  # CRITICAL: Track if this was a real money trade
+            asset=asset,  # Per-coin slippage tracking
         )
     
     def _index_fill(self, fill: KalshiFill) -> None:
@@ -3417,7 +3771,7 @@ class KalshiFillsLedger:
         # We don't actually queue fills here - the writer reads from _fills dict
         # This is a signal-only pattern to wake the writer
         try:
-            self._persist_queue.put_nowait(None)  # Wake signal
+            self._ensure_persist_queue().put_nowait(None)  # Wake signal
         except asyncio.QueueFull:
             pass  # Writer is already processing
     
@@ -3457,12 +3811,12 @@ class KalshiFillsLedger:
         _last_dlq_flush = time.monotonic()
         _dlq_flush_interval = 30.0  # Flush DLQ every 30 seconds
         
-        while not self._shutdown_event.is_set():
+        while not self._ensure_shutdown_event().is_set():
             try:
                 # Wait for work signal with shorter timeout to reduce event-loop lag
                 try:
                     await asyncio.wait_for(
-                        self._persist_queue.get(),
+                        self._ensure_persist_queue().get(),
                         timeout=_FILLS_WRITER_QUEUE_TIMEOUT
                     )
                 except asyncio.TimeoutError:
@@ -3472,9 +3826,9 @@ class KalshiFillsLedger:
                 # Batch collect any additional signals (with limit to prevent starvation)
                 batch_signals = 1
                 max_batch_collect = 50  # Limit to prevent event loop blocking
-                while batch_signals < max_batch_collect and not self._persist_queue.empty():
+                while batch_signals < max_batch_collect and not self._ensure_persist_queue().empty():
                     try:
-                        self._persist_queue.get_nowait()
+                        self._ensure_persist_queue().get_nowait()
                         batch_signals += 1
                     except asyncio.QueueEmpty:
                         break
@@ -3529,7 +3883,8 @@ class KalshiFillsLedger:
             
             # Take a SNAPSHOT of fills under lock to avoid "dict changed size during iteration"
             fills_snapshot: List[KalshiFill] = []
-            async with self._mutex:
+            mutex = self._ensure_mutex()
+            async with mutex:
                 fills_snapshot = list(self._fills.values())
             
             if not fills_snapshot:
@@ -3642,11 +3997,11 @@ class KalshiFillsLedger:
     async def shutdown(self) -> None:
         """Gracefully shutdown the ledger and flush remaining fills."""
         logger.info("Shutting down KalshiFillsLedger...")
-        self._shutdown_event.set()
+        self._ensure_shutdown_event().set()
         
         # Signal writer to wake and flush
         try:
-            await self._persist_queue.put(None)
+            await self._ensure_persist_queue().put(None)
         except Exception as e:
             logger.debug(f"Persist queue put failed: {e}")
 

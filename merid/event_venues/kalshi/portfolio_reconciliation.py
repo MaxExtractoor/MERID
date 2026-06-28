@@ -30,8 +30,13 @@ from merid.event_venues.kalshi.portfolio_models import (
     Position,
 )
 from merid.event_venues.kalshi.portfolio_engine import get_portfolio_engine
-from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service
-from merid.event_venues.kalshi.client import KalshiClient
+# CRITICAL FIX: Make bankroll service import lazy to prevent import-time bankroll service initialization
+# This was triggering bankroll service initialization during KalshiVenueClient import
+def _get_bankroll_service():
+    """Lazy import wrapper for bankroll_service to prevent import-time initialization."""
+    from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service
+    return get_bankroll_service
+from merid.event_venues.kalshi.client import KalshiVenueClient as KalshiClient
 
 logger = get_logger("merid.event_venues.kalshi.portfolio_reconciliation")
 
@@ -40,25 +45,40 @@ logger = get_logger("merid.event_venues.kalshi.portfolio_reconciliation")
 # Configuration
 # ═══════════════════════════════════════════════════════════════════════════
 
-_RECONCILIATION_INTERVAL_SECONDS: int = int(
-    os.getenv("MERID_PORTFOLIO_RECONCILIATION_INTERVAL_SECONDS", "300")
-)  # 5 minutes default
+def _get_reconciliation_config() -> Dict[str, Any]:
+    """Get reconciliation thresholds from profile YAML or fallback to env vars."""
+    try:
+        from merid.risk.profiles.crypto_15m_profile import get_active_profile
+        adapter = get_active_profile()
+        if adapter is not None and hasattr(adapter, 'profile') and adapter.profile is not None:
+            # Check if profile has reconciliation section
+            if hasattr(adapter.profile, 'reconciliation'):
+                recon_config = adapter.profile.reconciliation
+                return {
+                    "interval_seconds": getattr(recon_config, 'reconciliation_interval_seconds', 300),
+                    "cash_tolerance_cents": getattr(recon_config, 'cash_tolerance_cents', 1),
+                    "pnl_tolerance_cents": getattr(recon_config, 'pnl_tolerance_cents', 10),
+                    "position_tolerance_contracts": getattr(recon_config, 'position_tolerance_contracts', 0),
+                    "discrepancy_persistence_cycles": getattr(recon_config, 'discrepancy_persistence_cycles', 2),
+                }
+    except Exception:
+        pass
+    
+    # Fallback to environment variables
+    return {
+        "interval_seconds": int(os.getenv("MERID_PORTFOLIO_RECONCILIATION_INTERVAL_SECONDS", "300")),
+        "cash_tolerance_cents": int(os.getenv("MERID_PORTFOLIO_CASH_TOLERANCE_CENTS", "1")),
+        "pnl_tolerance_cents": int(os.getenv("MERID_PORTFOLIO_PNL_TOLERANCE_CENTS", "10")),
+        "position_tolerance_contracts": int(os.getenv("MERID_PORTFOLIO_POSITION_TOLERANCE_CONTRACTS", "0")),
+        "discrepancy_persistence_cycles": int(os.getenv("MERID_PORTFOLIO_DISCREPANCY_PERSISTENCE_CYCLES", "2")),
+    }
 
-_CASH_TOLERANCE_CENTS: int = int(
-    os.getenv("MERID_PORTFOLIO_CASH_TOLERANCE_CENTS", "1")
-)
-
-_PNL_TOLERANCE_CENTS: int = int(
-    os.getenv("MERID_PORTFOLIO_PNL_TOLERANCE_CENTS", "10")
-)
-
-_POSITION_TOLERANCE_CONTRACTS: int = int(
-    os.getenv("MERID_PORTFOLIO_POSITION_TOLERANCE_CONTRACTS", "0")
-)  # Exact match required
-
-_DISCREPANCY_PERSISTENCE_CYCLES: int = int(
-    os.getenv("MERID_PORTFOLIO_DISCREPANCY_PERSISTENCE_CYCLES", "2")
-)  # Alert after 2 consecutive discrepancies
+_RECONCILIATION_CONFIG = _get_reconciliation_config()
+_RECONCILIATION_INTERVAL_SECONDS = _RECONCILIATION_CONFIG["interval_seconds"]
+_CASH_TOLERANCE_CENTS = _RECONCILIATION_CONFIG["cash_tolerance_cents"]
+_PNL_TOLERANCE_CENTS = _RECONCILIATION_CONFIG["pnl_tolerance_cents"]
+_POSITION_TOLERANCE_CONTRACTS = _RECONCILIATION_CONFIG["position_tolerance_contracts"]
+_DISCREPANCY_PERSISTENCE_CYCLES = _RECONCILIATION_CONFIG["discrepancy_persistence_cycles"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -156,6 +176,12 @@ class PortfolioReconciler:
         kalshi_cash = kalshi_balance.balance_cents if kalshi_balance else 0
         cash_diff = kalshi_cash - internal_cash
         has_cash_discrepancy = abs(cash_diff) > _CASH_TOLERANCE_CENTS
+
+        # Log equity reconciliation
+        logger.info(
+            "[EQUITY-RECON] bankroll_service_v2=%dc internal_ledger=%dc global_risk_guard=N/A diff=%dc match=%s",
+            kalshi_cash, internal_cash, cash_diff, not has_cash_discrepancy
+        )
         
         # Compare positions (detailed)
         internal_position_count = internal_snapshot.position_count

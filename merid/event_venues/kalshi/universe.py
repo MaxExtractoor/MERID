@@ -116,19 +116,30 @@ def _passes_liquidity(cm: CatalogMarket, cfg: UniverseConfig) -> bool:
     volume = float(mkt.volume) if mkt.volume else 0.0
     oi = float(mkt.open_interest) if mkt.open_interest else 0.0
 
-    if cfg.min_volume > 0 and volume < cfg.min_volume:
-        return False
-    if cfg.min_open_interest > 0 and oi < cfg.min_open_interest:
-        return False
-
     # CRITICAL FIX: Handle nested raw_data access safely
     raw = getattr(mkt, "raw_data", None) or {}
     bid = int(raw.get("yes_bid", 0) or 0)
     ask = int(raw.get("yes_ask", 0) or 0)
-    if bid > 0 and ask > 0:
-        spread = ask - bid
-        if spread > cfg.max_spread_cents:
-            return False
+    spread = ask - bid if bid > 0 and ask > 0 else None
+
+    reasons = []
+
+    if cfg.min_volume > 0 and volume < cfg.min_volume:
+        reasons.append(f"volume={volume} < min_volume={cfg.min_volume}")
+    if cfg.min_open_interest > 0 and oi < cfg.min_open_interest:
+        reasons.append(f"oi={oi} < min_open_interest={cfg.min_open_interest}")
+    if spread is not None and spread > cfg.max_spread_cents:
+        reasons.append(f"spread={spread} > max_spread_cents={cfg.max_spread_cents}")
+
+    if reasons:
+        logger.warning(
+            "[UNIVERSE-FILTER] market=%s asset=%s REJECTED: %s",
+            getattr(mkt, "market_id", getattr(mkt, "ticker", "NA")),
+            getattr(cm, "asset", None),
+            "; ".join(reasons),
+        )
+        return False
+
     return True
 
 
@@ -200,6 +211,30 @@ class KalshiUniverse:
 
         filtered = [cm for cm in markets if _passes_liquidity(cm, liq_cfg)]
         cap = limit if limit is not None else cfg.max_per_agent
+        
+        # Log universe pool result for diagnostics
+        logger.info(
+            "UNIVERSE-POOL-RESULT",
+            extra={
+                "category": category,
+                "asset": asset,
+                "timeframe": timeframe,
+                "raw_count": len(markets),
+                "filtered_count": len(filtered),
+                "min_volume": liq_cfg.min_volume,
+                "min_open_interest": liq_cfg.min_open_interest,
+                "max_spread_cents": liq_cfg.max_spread_cents,
+            },
+        )
+        
+        # Guard: warn if markets exist but all were filtered out
+        if markets and not filtered:
+            logger.warning(
+                "[UNIVERSE-EMPTY-AFTER-FILTER] category=%s asset=%s timeframe=%s raw_count=%d filtered_count=%d min_volume=%d min_open_interest=%d max_spread_cents=%d",
+                category, asset, timeframe, len(markets), len(filtered),
+                liq_cfg.min_volume, liq_cfg.min_open_interest, liq_cfg.max_spread_cents
+            )
+        
         return filtered[:cap]
 
     def get_all_open(self, limit: Optional[int] = None) -> List[CatalogMarket]:
@@ -262,7 +297,31 @@ def get_kalshi_universe(config: Optional[UniverseConfig] = None) -> KalshiUniver
     Instances are cached by allowed_categories so each distinct category set
     gets its own filter wrapper while all instances share the same underlying
     KalshiMarketCatalog singleton.
+    
+    If kalshi_crypto_15m_v2 profile is active, universe config is loaded from profile
+    to use relaxed thresholds suitable for the 5-market 15m crypto universe.
     """
+    # Check if kalshi_crypto_15m_v2 profile is active and load universe config from profile
+    if config is None:
+        try:
+            from merid.risk.profiles.crypto_15m_profile import is_profile_active, get_active_profile
+            if is_profile_active():
+                adapter = get_active_profile()
+                profile = adapter.profile
+                config = UniverseConfig(
+                    min_volume=profile.universe_min_volume,
+                    min_open_interest=profile.universe_min_open_interest,
+                    max_spread_cents=profile.universe_max_spread_cents,
+                )
+                logger.info(
+                    "[UNIVERSE-PROFILE] Loaded universe config from kalshi_crypto_15m_v2 profile: "
+                    f"min_volume={config.min_volume}, min_open_interest={config.min_open_interest}, "
+                    f"max_spread_cents={config.max_spread_cents}"
+                )
+        except Exception as e:
+            logger.debug(f"[UNIVERSE-PROFILE] Failed to load profile universe config, using defaults: {e}")
+            config = UniverseConfig()
+    
     effective_config = config or UniverseConfig()
     cache_key = frozenset(c.lower() for c in (effective_config.allowed_categories or []))
 

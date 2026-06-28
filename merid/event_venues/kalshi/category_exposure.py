@@ -69,8 +69,9 @@ _DEFAULT_CATEGORY_CAPS: Dict[str, float] = {
     "other":      float(os.getenv("MERID_CAT_CAP_OTHER_USD",      "200.0")),   # $200 default
 }
 
-# 0.0 = derive from actual Kalshi bankroll using core.settings.CORRELATED_STACK_PCT (2%)
-_DEFAULT_CORR_CAP_USD: float = float(os.getenv("MERID_CORR_STACK_CAP_USD", "0.0"))
+# 50.0 = minimum cap to prevent $0 cap from blocking trades before calibration
+# Calibration will override this with balance * CORRELATED_STACK_PCT (20%)
+_DEFAULT_CORR_CAP_USD: float = float(os.getenv("MERID_CORR_STACK_CAP_USD", "50.0"))
 
 # Per-asset USD caps for correlated-stack checks. 0.0 from env = use settings-based per-asset caps.
 # NOTE: Now reads from core.settings.ASSET_CAP_*_PCT for unified single source of truth
@@ -413,7 +414,7 @@ class CategoryExposureTracker:
                 "other":      0.05,
             }
             if corr_fraction == 0.20:
-                corr_fraction = 0.02  # 2% default
+                corr_fraction = 0.20  # 20% default (increased from 2% to allow trades)
             asset_fractions = asset_fractions or {
                 "BTC":  0.02,
                 "ETH":  0.02,

@@ -206,7 +206,7 @@ class PositionSizingInputs:
     bankroll_cents: int
     edge: float           # Range: [-1, 1], typically small (0.01-0.10)
     price_cents: int      # Current market price in cents
-    fractional_kelly: float = float(os.getenv("KELLY_FRACTION", "0.25"))  # Env-configurable (default 0.25 = quarter-Kelly)
+    fractional_kelly: float  # Kelly fraction from profile (single source of truth)
 
 
 @dataclass(frozen=True)
@@ -759,7 +759,12 @@ def fee_aware_edge(
     contracts: int = 1,
     price_cents: int = 50,
 ) -> Tuple[float, float, bool]:
-    """Calculate net edge after Kalshi fees.
+    """
+    Calculate net edge after Kalshi fees.
+
+    DEPRECATED: For Kalshi 15m crypto, use EdgeResult.edge_fee_adjusted from
+    unified_edge.py instead. This function will be removed after migration to
+    canonical fee calculation. Non-Kalshi venues can continue using this method.
 
     Uses the official Kalshi parabolic formula:
         fee = ceil(rate × C × P × (1 − P))
@@ -777,6 +782,14 @@ def fee_aware_edge(
     Invariant:
         - If net_edge <= 0, trade_worthwhile is False
     """
+    import warnings
+    warnings.warn(
+        "fee_aware_edge() is deprecated for Kalshi 15m crypto. "
+        "Use EdgeResult.edge_fee_adjusted from unified_edge.py instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
     # Determine tiered rate (use parameter if caller overrides, else auto-tier)
     if kalshi_fee_pct != 0.07:
         rate = kalshi_fee_pct

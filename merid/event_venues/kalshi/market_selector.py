@@ -509,24 +509,38 @@ async def enable_kalshi_agent(agent_name: str, series_tickers: Optional[List[str
     
     ws_subscribed = 0
     try:
-        from merid.event_venues.kalshi.ws_bridge import get_ws_bridge
-        bridge = get_ws_bridge()
+        from merid.event_venues.kalshi.ws_bridge import get_bridge
+        bridge = get_bridge()
         
-        # Unsubscribe from tickers no longer wanted by any agent
-        if to_remove and bridge.is_running():
-            await bridge.unsubscribe(to_remove)
-            logger.debug(
-                "enable_kalshi_agent(%s): unsubscribed from %d tickers (refcount reached 0)",
-                agent_name, len(to_remove)
+        # CRITICAL FIX: Validate WS bridge is running AND connected before subscription
+        if not bridge.is_running():
+            logger.warning(
+                "enable_kalshi_agent(%s): WS bridge not running - attempting to start",
+                agent_name
             )
-        
-        # Subscribe to new tickers
-        if to_add and bridge.is_running():
-            await bridge.subscribe(to_add)
-            ws_subscribed = len(to_add)
-        elif not bridge.is_running():
             await bridge.start(tickers=market_ids)
             ws_subscribed = len(market_ids)
+        else:
+            # Check if bridge is actually connected (not just running)
+            health_status = bridge.get_health_status()
+            if not health_status.get("connected", False):
+                logger.warning(
+                    "enable_kalshi_agent(%s): WS bridge running but not connected - subscription may fail",
+                    agent_name
+                )
+            
+            # Unsubscribe from tickers no longer wanted by any agent
+            if to_remove:
+                await bridge.unsubscribe(to_remove)
+                logger.debug(
+                    "enable_kalshi_agent(%s): unsubscribed from %d tickers (refcount reached 0)",
+                    agent_name, len(to_remove)
+                )
+            
+            # Subscribe to new tickers
+            if to_add:
+                await bridge.subscribe(to_add)
+                ws_subscribed = len(to_add)
         
         logger.info(
             "enable_kalshi_agent(%s): WS subscribed to %d new markets (unsubscribed %d, total agent markets=%d)",

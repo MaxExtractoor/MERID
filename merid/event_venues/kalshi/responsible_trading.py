@@ -15,7 +15,7 @@ venue data so operators see both caps in one place.
 from __future__ import annotations
 
 import threading
-import time
+import time as _time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
@@ -48,7 +48,7 @@ class ResponsibleTradingSnapshot:
     venue_cool_off_active: bool = False
 
     # Metadata
-    fetched_at: float = field(default_factory=time.time)
+    fetched_at: float = field(default_factory=_time.time)
     source: str = "live"    # "live" | "stub"
 
     def to_dict(self) -> Dict[str, Any]:
@@ -77,7 +77,7 @@ class KalshiResponsibleTradingClient:
 
     async def get_snapshot(self, force: bool = False) -> ResponsibleTradingSnapshot:
         """Return a fresh (or cached) ResponsibleTradingSnapshot."""
-        now = time.time()
+        now = _time.time()
         if not force and self._cache and (now - self._cache_ts) < _CACHE_TTL:
             return self._cache
 
@@ -137,7 +137,7 @@ class KalshiResponsibleTradingClient:
         except Exception as exc:
             logger.debug("responsible_trading: risk controller read failed: %s", exc)
 
-        snap.fetched_at = time.time()
+        snap.fetched_at = _time.time()
         return snap
 
 

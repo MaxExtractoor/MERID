@@ -85,7 +85,8 @@ class RobustKalshiClient:
 
         self._health = KalshiHealthStatus()
         self._health_checker = get_health_checker()
-        self._shutdown_event = asyncio.Event()
+        # EVENT-LOOP-FIX: Lazy-initialize to avoid binding to wrong event loop
+        self._shutdown_event: Optional[asyncio.Event] = None
 
         # Register health checks
         self._health_checker.register_check("kalshi_client", self._health_check_client)
@@ -93,6 +94,12 @@ class RobustKalshiClient:
 
         # Background tasks
         self._tasks: List[asyncio.Task] = []
+
+    def _ensure_shutdown_event(self) -> asyncio.Event:
+        """Lazy-initialize the shutdown event in the current event loop."""
+        if self._shutdown_event is None:
+            self._shutdown_event = asyncio.Event()
+        return self._shutdown_event
 
     async def start(self) -> None:
         """Start the robust client with health monitoring."""
@@ -124,7 +131,7 @@ class RobustKalshiClient:
     async def stop(self) -> None:
         """Stop the robust client gracefully."""
         logger.info("Stopping RobustKalshiClient...")
-        self._shutdown_event.set()
+        self._ensure_shutdown_event().set()
         
         # Cancel all tasks
         for task in self._tasks:
@@ -175,7 +182,7 @@ class RobustKalshiClient:
         self._state.set("connection_state", ConnectionState.RECONNECTING)
         
         for attempt in range(self._max_reconnect_attempts):
-            if self._shutdown_event.is_set():
+            if self._ensure_shutdown_event().is_set():
                 return False
             
             delay = min(
@@ -275,10 +282,10 @@ class RobustKalshiClient:
 
     async def _health_monitor_loop(self) -> None:
         """Background health monitoring loop."""
-        while not self._shutdown_event.is_set():
+        while not self._ensure_shutdown_event().is_set():
             try:
                 await asyncio.wait_for(
-                    self._shutdown_event.wait(),
+                    self._ensure_shutdown_event().wait(),
                     timeout=self._health_check_interval
                 )
                 break  # Shutdown requested
@@ -317,10 +324,10 @@ class RobustKalshiClient:
 
     async def _dedup_cleanup_loop(self) -> None:
         """Clean up old dedup entries."""
-        while not self._shutdown_event.is_set():
+        while not self._ensure_shutdown_event().is_set():
             try:
                 await asyncio.wait_for(
-                    self._shutdown_event.wait(),
+                    self._ensure_shutdown_event().wait(),
                     timeout=10.0  # Cleanup every 10 seconds
                 )
                 break

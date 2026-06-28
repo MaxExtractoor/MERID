@@ -171,8 +171,7 @@ def compute_kalshi_exchange_availability(
         elif st in {"open", "trading"}:
             is_open_from_status = True
     except Exception as e:
-        import logging
-        logging.getLogger(__name__).debug(f"Status parse failed: {e}")
+        logger.debug(f"Status parse failed: {e}")
 
     active_window: Optional[Tuple[datetime, datetime]] = None
     for s, e in win_adj:

@@ -1,3 +1,7 @@
+# LEGACY: not used by kalshi_crypto_15m_v2 profile
+# This module manages paper → live promotion for PM runtime
+# The lean 15m stack uses profile-based configuration and does not use DeploymentController
+
 """Live Deployment Controller — Config-driven paper → live switching.
 
 Manages the promotion of individual agents from PAPER to LIVE mode with:

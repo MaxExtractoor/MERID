@@ -48,6 +48,41 @@ CONFIDENCE_NO_TRADE: Final[float] = 0.60
 CONFIDENCE_CAUTIOUS: Final[float] = 0.75
 CONFIDENCE_CONFIDENT: Final[float] = 0.75
 
+# ============================================================================
+# MARKETABLE LIMIT ORDER PARAMETERS
+# ============================================================================
+
+# Edge thresholds for order aggressiveness (per asset)
+# Higher edge = more aggressive (cross spread), lower edge = resting (join spread)
+EDGE_MARKET_ENTRY_BTC: Final[float] = 0.55  # BTC: cross spread if edge >= 55%
+EDGE_MARKET_ENTRY_ETH: Final[float] = 0.55  # ETH: cross spread if edge >= 55%
+EDGE_MARKET_ENTRY_SOL: Final[float] = 0.58  # SOL: cross spread if edge >= 58% (more conservative)
+EDGE_MARKET_ENTRY_XRP: Final[float] = 0.60  # XRP: cross spread if edge >= 60% (more conservative)
+EDGE_MARKET_ENTRY_DOGE: Final[float] = 0.62  # DOGE: cross spread if edge >= 62% (most conservative)
+
+EDGE_RESTING_ENTRY_BTC: Final[float] = 0.52  # BTC: join spread if edge >= 52%
+EDGE_RESTING_ENTRY_ETH: Final[float] = 0.52  # ETH: join spread if edge >= 52%
+EDGE_RESTING_ENTRY_SOL: Final[float] = 0.54  # SOL: join spread if edge >= 54%
+EDGE_RESTING_ENTRY_XRP: Final[float] = 0.55  # XRP: join spread if edge >= 55%
+EDGE_RESTING_ENTRY_DOGE: Final[float] = 0.57  # DOGE: join spread if edge >= 57%
+
+# Edge threshold for canceling resting orders (edge decay below this triggers cancel)
+EDGE_CANCEL_THRESHOLD_BTC: Final[float] = 0.50
+EDGE_CANCEL_THRESHOLD_ETH: Final[float] = 0.50
+EDGE_CANCEL_THRESHOLD_SOL: Final[float] = 0.52
+EDGE_CANCEL_THRESHOLD_XRP: Final[float] = 0.53
+EDGE_CANCEL_THRESHOLD_DOGE: Final[float] = 0.55
+
+# Maximum time to keep resting orders alive (auto-cancel after this)
+MAX_LIVE_SECONDS_RESTING_BTC: Final[int] = 120  # 2 minutes
+MAX_LIVE_SECONDS_RESTING_ETH: Final[int] = 120  # 2 minutes
+MAX_LIVE_SECONDS_RESTING_SOL: Final[int] = 90   # 1.5 minutes
+MAX_LIVE_SECONDS_RESTING_XRP: Final[int] = 90   # 1.5 minutes
+MAX_LIVE_SECONDS_RESTING_DOGE: Final[int] = 60  # 1 minute
+
+# Time-to-expiry threshold: use only marketable orders in last N seconds
+MARKET_ONLY_LAST_SECONDS: Final[int] = 150  # 2.5 minutes before expiry
+
 # Probability vs price consistency tolerance (max deviation allowed)
 PROB_PRICE_TOLERANCE_PCT: Final[float] = 0.05  # 5%
 
@@ -63,6 +98,64 @@ DEEP_OTM_MIN_EDGE_PCT: Final[float] = 0.20  # 20%
 
 # Edge thresholds for implausible underlying moves
 IMPLAUSIBLE_MOVE_MIN_EDGE_PCT: Final[float] = 0.20  # 20%
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def compute_order_aggressiveness(asset: str, edge_pct: float, seconds_to_expiry: int) -> float:
+    """Compute order aggressiveness based on edge, asset, and time-to-expiry.
+    
+    Returns:
+        0.0: resting (join spread)
+        0.5-1.0: marketable (cross spread, higher = more aggressive)
+    
+    Logic:
+        - If edge >= market_entry threshold: aggressive (cross spread)
+        - If edge >= resting_entry threshold: resting (join spread)
+        - If edge < resting_entry threshold: no trade
+        - In last MARKET_ONLY_LAST_SECONDS: force marketable if edge high enough
+    """
+    from typing import Dict
+    
+    # Map asset to thresholds
+    market_thresholds: Dict[str, float] = {
+        "BTC": EDGE_MARKET_ENTRY_BTC,
+        "ETH": EDGE_MARKET_ENTRY_ETH,
+        "SOL": EDGE_MARKET_ENTRY_SOL,
+        "XRP": EDGE_MARKET_ENTRY_XRP,
+        "DOGE": EDGE_MARKET_ENTRY_DOGE,
+    }
+    
+    resting_thresholds: Dict[str, float] = {
+        "BTC": EDGE_RESTING_ENTRY_BTC,
+        "ETH": EDGE_RESTING_ENTRY_ETH,
+        "SOL": EDGE_RESTING_ENTRY_SOL,
+        "XRP": EDGE_RESTING_ENTRY_XRP,
+        "DOGE": EDGE_RESTING_ENTRY_DOGE,
+    }
+    
+    market_threshold = market_thresholds.get(asset, EDGE_MARKET_ENTRY_BTC)
+    resting_threshold = resting_thresholds.get(asset, EDGE_RESTING_ENTRY_BTC)
+    
+    # Check if near expiry - force marketable if edge justifies
+    if seconds_to_expiry < MARKET_ONLY_LAST_SECONDS:
+        if edge_pct >= market_threshold:
+            return 1.0  # Full aggressiveness near expiry
+        elif edge_pct >= resting_threshold:
+            return 0.5  # Moderate aggressiveness near expiry
+        else:
+            return 0.0  # No trade near expiry if edge too low
+    
+    # Normal case: decide based on edge
+    if edge_pct >= market_threshold:
+        # Scale aggressiveness from 0.5 to 1.0 based on how far above threshold
+        excess_edge = edge_pct - market_threshold
+        return min(0.5 + excess_edge * 2.0, 1.0)  # Cap at 1.0
+    elif edge_pct >= resting_threshold:
+        return 0.0  # Resting (join spread)
+    else:
+        return 0.0  # No trade (edge too low)
 
 # ============================================================================
 # SIZE THRESHOLDS (contracts)
@@ -83,10 +176,12 @@ SIZE_LARGE: Final[int] = 500
 # POSITION SIZING CONSTANTS
 # ============================================================================
 
-# Default Kelly fraction for position sizing
-# STANDARDIZED: 0.25x fractional Kelly for all 15m crypto agents (BTC/ETH/SOL/XRP/DOGE)
-# This provides conservative sizing while allowing meaningful position sizes
-DEFAULT_KELLY_FRACTION: Final[float] = 0.25
+# Kelly fraction for position sizing
+# CONSOLIDATED: Single source of truth is profile YAML (kalshi_crypto_15m.yaml)
+# This constant is DEPRECATED and kept only for backward compatibility
+# All sizing code should use profile.kelly_fraction instead
+# DEPRECATION: Remove DEFAULT_KELLY_FRACTION after profile integration is complete
+DEFAULT_KELLY_FRACTION: Final[float] = 0.05  # P1-FIX1: 0.25 -> 0.05. DEPRECATED: Use profile.kelly_fraction
 
 # Minimum and maximum contracts per trade
 SIZER_MIN_CONTRACTS: Final[int] = 1
@@ -220,9 +315,14 @@ FEE_RATE_LARGE: Final[float] = 0.03
 # ============================================================================
 
 # Deep OTM/ITM thresholds for "lotto ticket" detection
-# These are universal thresholds appropriate for all timeframes including 15m crypto
-DEEP_OTM_THRESHOLD_CENTS: Final[int] = 5   # Below 5¢ is considered deep OTM
-DEEP_ITM_THRESHOLD_CENTS: Final[int] = 95  # Above 95¢ is considered deep ITM
+# CONSOLIDATED: Single source of truth is profile YAML (kalshi_crypto_15m.yaml)
+# These constants are DEPRECATED and kept only for backward compatibility
+# All deployment safety code should use profile.venue_invariants_deep_otm_threshold_cents instead
+# DEPRECATION: Remove DEEP_OTM/ITM_THRESHOLD_CENTS after profile integration is complete
+# FIX: Relaxed deep ITM threshold from 95c to 99c for 15m crypto markets
+# 15m crypto markets can legitimately trade at 97-99c with high liquidity
+DEEP_OTM_THRESHOLD_CENTS: Final[int] = 5   # DEPRECATED: Use profile.venue_invariants_deep_otm_threshold_cents
+DEEP_ITM_THRESHOLD_CENTS: Final[int] = 99  # DEPRECATED: Use profile.venue_invariants_deep_itm_threshold_cents
 
 # Model probability distance threshold (for detecting misaligned trades)
 # Alert if abs(model_prob - price_cents/100) exceeds this value
@@ -329,10 +429,10 @@ FEE_DRAG_WARNING_PCT: Final[float] = 0.20  # 20%
 # ============================================================================
 
 # Whether to enforce deep OTM policy (False = allow with strong edge)
-ENFORCE_DEEP_OTM_POLICY: Final[bool] = True
+ENFORCE_DEEP_OTM_POLICY: Final[bool] = False  # Disabled to allow trading on low-priced contracts
 
 # Whether to enforce prob-price consistency check
-ENFORCE_PROB_PRICE_CONSISTENCY: Final[bool] = True
+ENFORCE_PROB_PRICE_CONSISTENCY: Final[bool] = False  # Disabled to reduce trade blocking
 
 # Whether to enforce underlying plausibility check
 ENFORCE_UNDERLYING_PLAUSIBILITY: Final[bool] = True

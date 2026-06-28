@@ -16,7 +16,8 @@ Usage::
 
 from __future__ import annotations
 
-import time
+import asyncio
+import time as _time
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
@@ -25,8 +26,38 @@ from merid.event_venues.kalshi.client import KalshiVenueClient
 from merid.event_venues.kalshi.market_catalog import get_market_catalog
 from merid.event_venues.base import EventMarket, VenueOrder, PlacedOrder, VenuePosition
 from merid.matching_engine import Order, Fill, OrderSide, get_matching_engine
-from merid.paper_config import InstrumentConfig, DomainMode
+# Production stack: DomainMode and InstrumentConfig from paper_config not available
+# from merid.paper_config import InstrumentConfig, DomainMode
 from utils.logger import get_logger
+from dataclasses import dataclass
+from enum import Enum
+
+
+# ── Production Stack Replacements for paper_config types ────────────────────
+
+class DomainMode(Enum):
+    """Domain trading mode (production stack replacement for paper_config.DomainMode)."""
+    PAPER = "paper"
+    LIVE = "live"
+
+
+@dataclass
+class InstrumentConfig:
+    """Instrument configuration (production stack replacement for paper_config.InstrumentConfig)."""
+    id: str
+    domain: str
+    enabled: bool = True
+    venues: List[str] = None
+    min_size: float = 1.0
+    max_size: float = 10_000.0
+    tick_size: float = 0.01
+    quote_currency: str = "USD"
+    max_stake_usd: float = 1000.0
+    settlement_source: str = "kalshi"
+    
+    def __post_init__(self):
+        if self.venues is None:
+            self.venues = ["kalshi"]
 
 logger = get_logger("merid.event_venues.kalshi.venue_adapter")
 
@@ -64,7 +95,7 @@ class KalshiVenueAdapter:
         """
         self.mode = DomainMode(mode) if isinstance(mode, str) else mode
         self._client = client
-        self._catalog = get_market_catalog()
+        self._catalog = None  # Lazy-loaded via get_market_catalog() when needed
         self._matching_engine = None
         
         # Cache
@@ -72,22 +103,29 @@ class KalshiVenueAdapter:
         self._cache_ts = 0.0
         self._cache_ttl = 300.0  # 5 minutes
 
-        logger.info(f"KalshiVenueAdapter initialized: mode={self.mode.value}")
+        logger.info(f"[KALSHI-VENUE] mode={self.mode.value} base_url={'https://external-api.kalshi.com/trade-api/v2' if self.mode.value == 'live' else 'https://demo.elections.kalshi.com/trade-api/v2'}")
 
     @property
     def venue_name(self) -> str:
         return "kalshi"
 
     @property
+    def catalog(self):
+        """Lazy-load catalog singleton when needed."""
+        if self._catalog is None:
+            from merid.event_venues.kalshi.market_catalog import get_market_catalog
+            self._catalog = get_market_catalog()
+        return self._catalog
+
+    @property
     def client(self) -> KalshiVenueClient:
         """Lazy-load Kalshi client."""
         if self._client is None:
             from merid.event_venues.kalshi.client import KalshiVenueClient
-            from merid.event_venues.kalshi.models import KalshiConfig
-            import os
+            from merid.event_venues.kalshi.kalshi_config import get_kalshi_config
 
-            # Load from env (KalshiConfig will auto-load from env in __post_init__)
-            config = KalshiConfig()
+            # Use unified config
+            config = get_kalshi_config()
             self._client = KalshiVenueClient(config)
         return self._client
 
@@ -109,7 +147,7 @@ class KalshiVenueAdapter:
         Returns:
             List of InstrumentConfig for Kalshi markets
         """
-        now = time.time()
+        now = _time.time()
         if not force_refresh and (now - self._cache_ts) < self._cache_ttl:
             instruments = self._instruments_cache
         else:

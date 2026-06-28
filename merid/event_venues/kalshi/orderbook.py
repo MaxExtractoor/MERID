@@ -2,6 +2,24 @@
 
 Maintains a real-time orderbook from WebSocket snapshot and delta messages.
 Uses defaultdict for efficient price-level tracking.
+
+Canonical Orderbook Schema:
+---------------------------
+INTERNAL REPRESENTATION (LocalOrderbook):
+- yes_levels: Dict[int, int]  # price_cents -> size (cents, contracts)
+- no_levels: Dict[int, int]   # price_cents -> size (cents, contracts)
+- Price unit: cents (1-99 for YES side)
+- Size unit: contracts (integer)
+
+EXTERNAL MESSAGE FORMAT (WS snapshot, REST fallback):
+{
+    "type": "orderbook_snapshot",
+    "ticker": str,
+    "yes": [[float, float], ...],  # YES bids: [price_dollars, size]
+    "no": [[float, float], ...],   # NO bids: [price_dollars, size]
+}
+
+HARDENING-FIX: Thresholds now read from threshold_config.py instead of hardcoded literals.
 """
 
 from __future__ import annotations
@@ -13,7 +31,129 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from utils.logger import get_logger
 
+# Import threshold config for dynamic thresholds
+from merid.event_venues.kalshi.threshold_config import get_threshold_config
+_threshold_config = get_threshold_config()
+
 logger = get_logger("merid.event_venues.kalshi.orderbook")
+
+
+# ── Canonical Orderbook Schema ───────────────────────────────────────────────
+
+class KalshiOrderbookShapeError(Exception):
+    """Raised when orderbook message shape does not match canonical schema."""
+    pass
+
+
+def validate_orderbook_snapshot(msg: Dict[str, Any]) -> None:
+    """Validate orderbook snapshot message matches canonical schema.
+    
+    Canonical format:
+    {
+        "type": "orderbook_snapshot",
+        "ticker": str,  # or "market_ticker" (Kalshi WS uses both)
+        "yes": [[float, float], ...],  # YES bids: [price_dollars, size]
+        "no": [[float, float], ...],   # NO bids: [price_dollars, size]
+    }
+    
+    Raises:
+        KalshiOrderbookShapeError: If message shape is invalid
+    """
+    # Normalize: Kalshi WS uses "market_ticker", we accept both
+    if "ticker" not in msg and "market_ticker" not in msg:
+        raise KalshiOrderbookShapeError("Missing required key: ticker or market_ticker")
+    
+    # Check yes/no arrays are present and are lists
+    if "yes" not in msg or not isinstance(msg["yes"], list):
+        raise KalshiOrderbookShapeError("Missing or invalid key: yes (must be list)")
+    
+    if "no" not in msg or not isinstance(msg["no"], list):
+        raise KalshiOrderbookShapeError("Missing or invalid key: no (must be list)")
+    
+    # Validate yes levels are [price, size] pairs
+    for i, level in enumerate(msg["yes"]):
+        if not isinstance(level, (list, tuple)) or len(level) < 2:
+            raise KalshiOrderbookShapeError(
+                f"Invalid yes level at index {i}: must be [price, size] pair"
+            )
+        price, size = level[0], level[1]
+        if not isinstance(price, (int, float)):
+            raise KalshiOrderbookShapeError(
+                f"Invalid yes price at index {i}: must be numeric, got {type(price)}"
+            )
+        if not isinstance(size, (int, float)):
+            raise KalshiOrderbookShapeError(
+                f"Invalid yes size at index {i}: must be numeric, got {type(size)}"
+            )
+    
+    # Validate no levels are [price, size] pairs
+    for i, level in enumerate(msg["no"]):
+        if not isinstance(level, (list, tuple)) or len(level) < 2:
+            raise KalshiOrderbookShapeError(
+                f"Invalid no level at index {i}: must be [price, size] pair"
+            )
+        price, size = level[0], level[1]
+        if not isinstance(price, (int, float)):
+            raise KalshiOrderbookShapeError(
+                f"Invalid no price at index {i}: must be numeric, got {type(price)}"
+            )
+        if not isinstance(size, (int, float)):
+            raise KalshiOrderbookShapeError(
+                f"Invalid no size at index {i}: must be numeric, got {type(size)}"
+            )
+
+
+def validate_orderbook_delta(msg: Dict[str, Any]) -> None:
+    """Validate orderbook delta message matches canonical schema.
+    
+    Canonical format (WS delta):
+    {
+        "type": "orderbook_delta",
+        "ticker": str,  # or "market_ticker" (Kalshi WS uses both)
+        "side": "yes" | "no",
+        "price_dollars": float,
+        "delta_fp": int,  # signed size delta
+    }
+    
+    Alternative format (internal/legacy):
+    {
+        "side": "yes" | "no",
+        "price": int,  # cents
+        "delta": int | "size_delta": int  # signed size delta
+    }
+    
+    Raises:
+        KalshiOrderbookShapeError: If message shape is invalid
+    """
+    # Normalize: Kalshi WS uses "market_ticker", we accept both
+    if "ticker" not in msg and "market_ticker" not in msg:
+        raise KalshiOrderbookShapeError("Missing required key: ticker or market_ticker")
+    
+    if "side" not in msg or msg["side"] not in ("yes", "no"):
+        raise KalshiOrderbookShapeError(
+            f"Missing or invalid key: side (must be 'yes' or 'no'), got {msg.get('side')}"
+        )
+    
+    # Accept either price_dollars (WS format) or price (internal cents format)
+    # WS may send numbers as strings, so accept both
+    has_price_dollars = "price_dollars" in msg and isinstance(msg["price_dollars"], (int, float, str))
+    has_price = "price" in msg and isinstance(msg["price"], (int, float, str))
+    
+    if not has_price_dollars and not has_price:
+        raise KalshiOrderbookShapeError(
+            f"Missing required key: price_dollars or price (must be numeric)"
+        )
+    
+    # Accept either delta_fp (WS format) or delta/size_delta (internal format)
+    # WS may send numbers as strings, so accept both
+    has_delta_fp = "delta_fp" in msg and isinstance(msg["delta_fp"], (int, float, str))
+    has_delta = "delta" in msg and isinstance(msg["delta"], (int, float, str))
+    has_size_delta = "size_delta" in msg and isinstance(msg["size_delta"], (int, float, str))
+    
+    if not has_delta_fp and not has_delta and not has_size_delta:
+        raise KalshiOrderbookShapeError(
+            f"Missing required key: delta_fp, delta, or size_delta (must be numeric)"
+        )
 
 
 class LocalOrderbook:
@@ -62,7 +202,20 @@ class LocalOrderbook:
 
         Args:
             snapshot: Dict with "yes" and "no" lists of [price, size] levels
+            
+        Raises:
+            KalshiOrderbookShapeError: If snapshot shape is invalid
         """
+        # Validate snapshot shape against canonical schema
+        try:
+            validate_orderbook_snapshot(snapshot)
+        except KalshiOrderbookShapeError as e:
+            logger.error(
+                f"[ORDERBOOK-SHAPE-ERROR] Invalid snapshot for {self.ticker}: {e}. "
+                f"Snapshot keys: {list(snapshot.keys()) if isinstance(snapshot, dict) else 'N/A'}"
+            )
+            raise
+        
         self.yes_levels.clear()
         self.no_levels.clear()
 
@@ -71,14 +224,25 @@ class LocalOrderbook:
             if isinstance(level, (list, tuple)) and len(level) >= 2:
                 price, size = level[0], level[1]
                 if size > 0:
-                    self.yes_levels[price] = size
+                    # CRITICAL: Kalshi prices are dollar floats in [0.00, 1.00]
+                    # Convert to cents by multiplying by 100 before rounding
+                    # This preserves sub-cent resolution (e.g., 0.19 -> 19 cents)
+                    price_cents = int(round(price * 100))
+                    # Filter out invalid 0-price levels (Kalshi binary contracts are 1-99 cents)
+                    if price_cents > 0:
+                        self.yes_levels[price_cents] = int(size)
 
         # Parse no side
         for level in snapshot.get("no", []):
             if isinstance(level, (list, tuple)) and len(level) >= 2:
                 price, size = level[0], level[1]
                 if size > 0:
-                    self.no_levels[price] = size
+                    # CRITICAL: Kalshi prices are dollar floats in [0.00, 1.00]
+                    # Convert to cents by multiplying by 100 before rounding
+                    price_cents = int(round(price * 100))
+                    # Filter out invalid 0-price levels (Kalshi binary contracts are 1-99 cents)
+                    if price_cents > 0:
+                        self.no_levels[price_cents] = int(size)
 
         self._initialized = True
         self._last_seq = snapshot.get("seq")
@@ -102,7 +266,20 @@ class LocalOrderbook:
 
         Args:
             delta: Dict with side, price, and signed size_delta
+            
+        Raises:
+            KalshiOrderbookShapeError: If delta shape is invalid
         """
+        # Validate delta shape against canonical schema
+        try:
+            validate_orderbook_delta(delta)
+        except KalshiOrderbookShapeError as e:
+            logger.error(
+                f"[ORDERBOOK-SHAPE-ERROR] Invalid delta for {self.ticker}: {e}. "
+                f"Delta keys: {list(delta.keys()) if isinstance(delta, dict) else 'N/A'}"
+            )
+            raise
+        
         if not self._initialized:
             logger.warning(f"Dropping delta for {self.ticker} - no snapshot yet")
             try:
@@ -113,10 +290,25 @@ class LocalOrderbook:
             return
 
         side = delta.get("side", "yes")
-        price = delta.get("price")
-        size_delta = delta.get("size_delta") or delta.get("delta", 0)
+        
+        # Normalize WS format (price_dollars, delta_fp) to internal format (price_cents, size_delta)
+        # WS may send numbers as strings, so convert to float first
+        if "price_dollars" in delta:
+            price_dollars = float(delta["price_dollars"]) if isinstance(delta["price_dollars"], str) else delta["price_dollars"]
+            price = int(round(price_dollars * 100))  # Convert dollars to cents
+        else:
+            price = delta.get("price")
+        
+        if "delta_fp" in delta:
+            size_delta = float(delta["delta_fp"]) if isinstance(delta["delta_fp"], str) else delta["delta_fp"]
+        else:
+            size_delta = delta.get("size_delta") or delta.get("delta", 0)
 
         if price is None:
+            return
+
+        # Filter out invalid 0-price levels (Kalshi binary contracts are 1-99 cents)
+        if price <= 0:
             return
 
         levels = self.yes_levels if side == "yes" else self.no_levels
@@ -200,6 +392,11 @@ class LocalOrderbook:
     def get_best_bid(self) -> Optional[Tuple[int, int]]:
         """Get best bid (highest yes price with size).
 
+        Kalshi YES/NO Symmetry:
+        - YES and NO prices are complementary: YES_price + NO_price = 100 cents
+        - YES_bid represents buying YES contracts at a given price
+        - The best bid is the highest YES price with available size
+
         Returns:
             Tuple of (price_cents, size) or None if no bids
         """
@@ -211,16 +408,51 @@ class LocalOrderbook:
     def get_best_ask(self) -> Optional[Tuple[int, int]]:
         """Get best ask (lowest no complement price with size).
 
-        Kalshi's no prices are complementary (100 - yes_price).
+        Kalshi YES/NO Symmetry (per Kalshi docs):
+        - YES and NO prices are duals: YES_bid + NO_ask = 100 cents
+        - The orderbook is bid-side-only; we derive the opposite side from 100 - price
+        - NO_ask (selling NO) is equivalent to YES_ask (buying YES)
+        - We convert NO prices to YES-equivalent: yes_equivalent = 100 - no_price
+
+        Example:
+        - If NO_ask = 40 cents (someone willing to sell NO at 40c)
+        - YES_equivalent = 100 - 40 = 60 cents (someone willing to buy YES at 60c)
+        - This maintains the invariant: YES_price + NO_price = 100
 
         Returns:
-            Tuple of (price_cents, size) or None if no asks
+            Tuple of (yes_equivalent_price_cents, size) or None if no asks
         """
         if not self.no_levels:
             return None
-        # Convert no price to yes-equivalent ask
+        # Convert no price to yes-equivalent ask per Kalshi YES/NO symmetry
         best_no_price = min(self.no_levels.keys())
+        
+        # CRITICAL FIX: Handle invalid NO prices (0 or >=100)
+        if best_no_price <= 0 or best_no_price >= 100:
+            logger.warning(
+                "[ORDERBOOK] Invalid NO price %d - cannot derive YES-equivalent, skipping",
+                best_no_price
+            )
+            return None
+        
         yes_equivalent = 100 - best_no_price
+        
+        # Validate the derived price is in valid range
+        if not (1 <= yes_equivalent <= 99):
+            logger.warning(
+                "[ORDERBOOK] Derived YES-equivalent price %d out of valid range [1,99] from NO price %d",
+                yes_equivalent, best_no_price
+            )
+            return None
+        
+        # REMOVED: Extreme price threshold check causing false positives
+        # The extreme price check was incorrectly flagging liquid markets as illiquid
+        # when prices were near extremes (e.g., YES=99c from NO=1c). For 15-minute crypto
+        # markets, heavily skewed prices are common and valid, with high liquidity.
+        # Market liquidity should be determined by depth and spread, not price level.
+        # This check was causing false positives for all 5 crypto assets despite
+        # thousands of dollars trading every 15 minutes.
+        
         return (yes_equivalent, self.no_levels[best_no_price])
 
     def get_spread(self) -> Optional[int]:

@@ -137,8 +137,9 @@ class _CacheAdapter:
         try:
             import redis
 
-            # Try localhost:6379 with default settings
-            r = redis.Redis(host="localhost", port=6379, decode_responses=True, socket_connect_timeout=2)
+            # Try Redis with configurable host
+            redis_host = os.getenv("REDIS_HOST", "localhost")
+            r = redis.Redis(host=redis_host, port=6379, decode_responses=True, socket_connect_timeout=2)
             r.ping()
             self._redis = r
             logger.info("Cache: Connected to Redis")

@@ -8,9 +8,10 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List, Set, Tuple
 from dataclasses import dataclass
-import logging
 
-logger = logging.getLogger(__name__)
+from utils.logger import get_logger
+
+logger = get_logger("merid.event_venues.kalshi.ticker_utils")
 
 # Kalshi ticker regex pattern for 15m crypto markets
 # Format: KX{ASSET}15M-{DD}{MMM}{YY}{HH}{MM}

@@ -86,6 +86,10 @@ class EntryRecord:
     planned_sl_price_cents: Optional[int] = None
     planned_tp_price_cents: Optional[int] = None
     max_hold_seconds: int = 600
+    # Phase 5.4: Raw logit for probability calibration
+    raw_logit: Optional[float] = None
+    # Phase 5.4: Agent ID for outcome recording
+    agent_id: Optional[str] = None
 
 
 @dataclass
@@ -134,6 +138,17 @@ class RoundTripMonitor:
         self._round_trips: List[RoundTripRecord] = []
         self._asset_metrics: Dict[str, AssetMetrics] = defaultdict(AssetMetrics)
         self._alerts: List[Alert] = []
+        
+        # Phase 5.4: Callback for outcome recording
+        self._outcome_callback: Optional[callable] = None
+    
+    def set_outcome_callback(self, callback: callable) -> None:
+        """Set callback for recording calibration outcomes.
+        
+        Args:
+            callback: Function with signature (agent_id: str, logit: float, outcome: int) -> None
+        """
+        self._outcome_callback = callback
         
     def record_entry(self, record: EntryRecord) -> None:
         """Record an entry order.
@@ -219,6 +234,21 @@ class RoundTripMonitor:
         # Update metrics
         self._round_trips.append(round_trip)
         self._update_metrics(round_trip, sl_violation)
+        
+        # Phase 5.4: Record outcome for probability calibration
+        if entry.raw_logit is not None and entry.agent_id and self._outcome_callback:
+            try:
+                # Determine binary outcome: 1 if profitable, 0 if loss
+                outcome = 1 if pnl_cents > 0 else 0
+                
+                # Call the callback to record outcome
+                self._outcome_callback(entry.agent_id, entry.raw_logit, outcome)
+                logger.info(
+                    "[CALIBRATION-OUTCOME] asset=%s agent=%s logit=%.4f outcome=%d pnl=%dc",
+                    entry.asset, entry.agent_id, entry.raw_logit, outcome, pnl_cents
+                )
+            except Exception as cal_err:
+                logger.warning("[CALIBRATION-OUTCOME] Failed to record outcome for %s: %s", entry.asset, cal_err)
         
         # Generate alerts
         self._check_alerts(round_trip, sl_violation)

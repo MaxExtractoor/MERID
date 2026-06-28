@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
-import time
+import time as _time
 import hashlib
 import json
 from dataclasses import asdict
@@ -126,7 +126,7 @@ class PortfolioEventLog:
                         future.result(timeout=delay + 1.0)
                 except RuntimeError:
                     # No running loop, use blocking sleep
-                    time.sleep(delay)
+                    _time.sleep(delay)
         
         raise RuntimeError("Failed to acquire database connection after retries")
     

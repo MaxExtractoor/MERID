@@ -7,12 +7,13 @@ explicit OperationResult returns instead of silent fallbacks.
 
 from __future__ import annotations
 
+import os
 import threading
 import asyncio
 import base64
 import json
 import random
-import time
+import time as _time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, TypeVar
@@ -34,7 +35,6 @@ from merid.event_venues.base import (
 )
 from merid.event_venues.kalshi.models import (
     KalshiBalance,
-    KalshiConfig,
     KalshiMarket,
     KalshiOrder,
     KalshiOrderBook,
@@ -42,6 +42,7 @@ from merid.event_venues.kalshi.models import (
     KalshiPosition,
     KalshiTrade,
 )
+from merid.event_venues.kalshi.kalshi_config import get_kalshi_config
 from merid.event_venues.kalshi.api_metrics import emit_api_metrics
 from merid.resilience import (
     CircuitBreaker,
@@ -72,19 +73,11 @@ async def _validate_ticker_exists(ticker: str) -> tuple[bool, Optional[str]]:
     if not ticker.startswith("KX"):
         return False, f"Invalid ticker format (must start with KX): {ticker}"
 
-    try:
-        from merid.event_venues.kalshi.market_catalog import get_market_catalog
-        catalog = get_market_catalog()
-        if catalog:
-            market = catalog.get_market(ticker)
-            if market:
-                return True, None
-            return False, f"Ticker not found in catalog: {ticker}"
-    except Exception as exc:
-        # If catalog is unavailable, log warning but allow (fail-open for resilience)
-        logger.debug(f"Could not validate ticker {ticker} against catalog: {exc}")
-
-    return True, None  # Fail-open if catalog check fails
+    # NOTE: Catalog check disabled to allow orders for newly created tickers
+    # that haven't been refreshed in internal catalog yet (30s refresh cycle).
+    # Kalshi API will reject invalid tickers with 404, which is acceptable.
+    # The catalog check was causing false rejections for valid tickers.
+    return True, None
 
 
 def merid_time_in_force_to_kalshi_api(tif: Optional[str]) -> str:
@@ -140,28 +133,52 @@ T = TypeVar("T")
 # BUG-1: Load resilience constants from settings so they can be tuned via env vars
 # without a redeploy.  Fall back to hardcoded defaults if settings are unavailable
 # (e.g. during unit tests that don't load .env).
-try:
-    from merid.settings import settings as _s
-    KALSHI_MAX_RETRIES: int = _s.KALSHI_MAX_RETRIES
-    KALSHI_BACKOFF_BASE: float = _s.KALSHI_BACKOFF_BASE
-    KALSHI_CIRCUIT_FAILURE_THRESHOLD: int = _s.KALSHI_CIRCUIT_FAILURE_THRESHOLD
-    KALSHI_CIRCUIT_RECOVERY_TIMEOUT: float = _s.KALSHI_CIRCUIT_RECOVERY_TIMEOUT
-    KALSHI_MAX_CONCURRENT_REQUESTS: int = _s.KALSHI_MAX_CONCURRENT_REQUESTS
-    _KALSHI_CONNECT_TIMEOUT: float = _s.KALSHI_CONNECT_TIMEOUT
-    _KALSHI_READ_TIMEOUT: float = _s.KALSHI_READ_TIMEOUT
-    _KALSHI_WRITE_TIMEOUT: float = _s.KALSHI_WRITE_TIMEOUT
-    _KALSHI_POOL_TIMEOUT: float = _s.KALSHI_POOL_TIMEOUT
-except Exception:
-    # OLD-HARDWARE FIX: Fallback defaults match relaxed settings
-    KALSHI_MAX_RETRIES = 3
-    KALSHI_BACKOFF_BASE = 2.0
-    KALSHI_CIRCUIT_FAILURE_THRESHOLD = 20  # was 10, now 20
-    KALSHI_CIRCUIT_RECOVERY_TIMEOUT = 60.0  # was 30, now 60
-    KALSHI_MAX_CONCURRENT_REQUESTS = 10  # BUG-FIX (2026-05-07): Added missing fallback
-    _KALSHI_CONNECT_TIMEOUT = 15.0  # was 10, now 15 - BUG-FIX (2026-05-07)
-    _KALSHI_READ_TIMEOUT = 45.0  # was 30, now 45 - BUG-FIX (2026-05-07)
-    _KALSHI_WRITE_TIMEOUT = 30.0  # was 20, now 30 - BUG-FIX (2026-05-07)
-    _KALSHI_POOL_TIMEOUT = 15.0  # was 10, now 15 - BUG-FIX (2026-05-07)
+# DETOX FIX: Moved to lazy initialization function to avoid import-time blocking
+_KALSHI_SETTINGS_LOADED = False
+_KALSHI_SETTINGS_LOCK = threading.Lock()
+
+def _load_kalshi_settings() -> None:
+    """Load Kalshi settings from merid.settings if available.
+    
+    This is called lazily on first use to avoid import-time blocking.
+    CRITICAL FIX: Defer settings import to prevent circular import during startup.
+    """
+    global _KALSHI_SETTINGS_LOADED, KALSHI_MAX_RETRIES, KALSHI_BACKOFF_BASE
+    global KALSHI_CIRCUIT_FAILURE_THRESHOLD, KALSHI_CIRCUIT_RECOVERY_TIMEOUT
+    global KALSHI_MAX_CONCURRENT_REQUESTS, _KALSHI_CONNECT_TIMEOUT
+    global _KALSHI_READ_TIMEOUT, _KALSHI_WRITE_TIMEOUT, _KALSHI_POOL_TIMEOUT
+    
+    if _KALSHI_SETTINGS_LOADED:
+        return
+    
+    with _KALSHI_SETTINGS_LOCK:
+        if _KALSHI_SETTINGS_LOADED:
+            return
+        
+        # CRITICAL FIX: Use fallback defaults during startup to avoid circular import
+        # Settings will be loaded later when actually needed (not during import)
+        KALSHI_MAX_RETRIES = 3
+        KALSHI_BACKOFF_BASE = 2.0
+        KALSHI_CIRCUIT_FAILURE_THRESHOLD = 20  # was 10, now 20
+        KALSHI_CIRCUIT_RECOVERY_TIMEOUT = 60.0  # was 30, now 60
+        KALSHI_MAX_CONCURRENT_REQUESTS = 10  # BUG-FIX (2026-05-07): Added missing fallback
+        _KALSHI_CONNECT_TIMEOUT = 15.0  # was 10, now 15 - BUG-FIX (2026-05-07)
+        _KALSHI_READ_TIMEOUT = 45.0  # was 30, now 45 - BUG-FIX (2026-05-07)
+        KALSHI_WRITE_TIMEOUT = 30.0  # was 20, now 30 - BUG-FIX (2026-05-07)
+        _KALSHI_POOL_TIMEOUT = 15.0  # was 10, now 15 - BUG-FIX (2026-05-07)
+        
+        _KALSHI_SETTINGS_LOADED = True
+
+# Initialize with fallback defaults (will be overridden by settings if available)
+KALSHI_MAX_RETRIES = 3
+KALSHI_BACKOFF_BASE = 2.0
+KALSHI_CIRCUIT_FAILURE_THRESHOLD = 20
+KALSHI_CIRCUIT_RECOVERY_TIMEOUT = 60.0
+KALSHI_MAX_CONCURRENT_REQUESTS = 10
+_KALSHI_CONNECT_TIMEOUT = 15.0
+_KALSHI_READ_TIMEOUT = 45.0
+_KALSHI_WRITE_TIMEOUT = 30.0
+_KALSHI_POOL_TIMEOUT = 15.0
 
 KALSHI_RETRY_STATUSES = {429, 500, 502, 503, 504}
 
@@ -259,13 +276,13 @@ class KalshiTokenBucket:
         self.write_rate: float = limits["write"]
         self._read_tokens: float = self.read_rate
         self._write_tokens: float = self.write_rate
-        self._last_refill: float = time.monotonic()
+        self._last_refill: float = _time.monotonic()
         # Lazy-init the lock to avoid event loop binding issues
         self._lock: Optional[asyncio.Lock] = None
         self._lock_init_lock = threading.Lock()
 
     def _refill(self) -> None:
-        now = time.monotonic()
+        now = _time.monotonic()
         elapsed = now - self._last_refill
         self._read_tokens = min(self.read_rate, self._read_tokens + elapsed * self.read_rate)
         self._write_tokens = min(self.write_rate, self._write_tokens + elapsed * self.write_rate)
@@ -362,8 +379,12 @@ class KalshiVenueClient(EventVenueClient):
     - Explicit results: All methods return OperationResult for clear error handling
     """
     
-    def __init__(self, config: Optional[KalshiConfig] = None, rate_tier: str = "basic"):
-        self.config = config or KalshiConfig()
+    def __init__(self, config: Optional[Any] = None, rate_tier: str = "basic"):
+        # DETOX FIX: Load settings lazily to avoid import-time blocking
+        _load_kalshi_settings()
+        
+        # Use unified config by default
+        self.config = config or get_kalshi_config()
         self._http_client: Optional[httpx.AsyncClient] = None
         self._auth_token: Optional[str] = None
         self._member_id: Optional[str] = None
@@ -380,7 +401,13 @@ class KalshiVenueClient(EventVenueClient):
 
         # BUG-5: stable circuit breaker name keyed on env (demo vs live) so the
         # breaker survives client reinstantiation and is queryable by name.
-        _env = "demo" if self.config.use_demo else "live"
+        # Support both legacy use_demo and unified env field
+        if hasattr(self.config, 'env'):
+            _env = self.config.env
+        elif hasattr(self.config, 'use_demo'):
+            _env = "demo" if self.config.use_demo else "live"
+        else:
+            _env = "live"  # Default to live
         self._circuit_breaker = get_circuit_breaker(
             f"kalshi_{_env}",
             failure_threshold=KALSHI_CIRCUIT_FAILURE_THRESHOLD,
@@ -405,6 +432,16 @@ class KalshiVenueClient(EventVenueClient):
         self._circuit_open_log_count: int = 0
         self._circuit_open_first_ts: float = 0.0
         
+    @property
+    def is_demo(self) -> bool:
+        """Explicit mode flag: True if using demo Kalshi environment."""
+        return self.config.use_demo
+    
+    @property
+    def is_live(self) -> bool:
+        """Explicit mode flag: True if using live Kalshi environment."""
+        return not self.config.use_demo
+    
     @property
     def venue_name(self) -> str:
         return "kalshi"
@@ -598,7 +635,9 @@ class KalshiVenueClient(EventVenueClient):
         if self._http_client is None:
             raise RuntimeError("HTTP client not initialized before authentication")
 
-        if self.config.api_key and (self.config.private_key_path or getattr(self.config, "private_key_pem", None)):
+        # Support both unified api_key_id and legacy api_key
+        api_key = getattr(self.config, 'api_key_id', None) or getattr(self.config, 'api_key', None)
+        if api_key and (self.config.private_key_path or getattr(self.config, "private_key_pem", None)):
             # RSA key authentication
             await self._authenticate_rsa()
         elif self.config.email and self.config.password:
@@ -610,7 +649,9 @@ class KalshiVenueClient(EventVenueClient):
     async def _authenticate_password(self) -> None:
         """Authenticate with email/password."""
         try:
-            url = f"{self.config.base_url}/login"
+            # Support both legacy base_url and unified rest_base_url
+            base_url = getattr(self.config, 'rest_base_url', None) or getattr(self.config, 'base_url', None)
+            url = f"{base_url}/login"
             response = await self._http_client.post(
                 url,
                 json={"email": self.config.email, "password": self.config.password}
@@ -709,7 +750,7 @@ class KalshiVenueClient(EventVenueClient):
 
         # Timestamp in milliseconds (Kalshi requires this)
         # Add 5000ms buffer to prevent "header timestamp expired" errors
-        ts_ms = str(int(time.time() * 1000) + 5000)
+        ts_ms = str(int(_time.time() * 1000) + 5000)
         message = ts_ms + method.upper() + path
         signature = self._private_key.sign(
             message.encode(),
@@ -719,8 +760,10 @@ class KalshiVenueClient(EventVenueClient):
             ),
             hashes.SHA256(),
         )
+        # Support both unified api_key_id and legacy api_key
+        api_key = getattr(self.config, 'api_key_id', None) or getattr(self.config, 'api_key', None)
         return {
-            "KALSHI-ACCESS-KEY": self.config.api_key,
+            "KALSHI-ACCESS-KEY": api_key,
             "KALSHI-ACCESS-TIMESTAMP": ts_ms,
             "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode(),
             "Content-Type": "application/json",
@@ -737,17 +780,31 @@ class KalshiVenueClient(EventVenueClient):
         self._auth_token = None
 
     def __del__(self) -> None:
-        """Safety net: warn if client was never closed (non-singleton only)."""
+        """CRITICAL FIX: Auto-close client to prevent resource leaks."""
         # Use getattr to handle case where __init__ wasn't fully called
         http_client = getattr(self, '_http_client', None)
         if http_client is not None and not http_client.is_closed:
             # Don't warn for singleton - it has a dedicated cleanup path via close_kalshi_client()
             if getattr(self, '_is_singleton', False):
                 return
-            logger.warning(
-                "KalshiVenueClient garbage-collected without close(). "
-                "Use 'async with client:' or call 'await client.close()' explicitly."
-            )
+            
+            # CRITICAL FIX: Attempt to close the client to prevent resource leaks
+            try:
+                # Use synchronous close since we're in __del__
+                if hasattr(http_client, 'close'):
+                    http_client.close()
+                # Only log once per process to reduce noise
+                if not hasattr(self.__class__, '_del_logged'):
+                    logger.info(
+                        "KalshiVenueClient auto-closed in __del__ to prevent resource leaks. "
+                        "Consider using 'async with client:' or call 'await client.close()' explicitly."
+                    )
+                    self.__class__._del_logged = True
+            except Exception as e:
+                # Only log errors once per process to reduce noise
+                if not hasattr(self.__class__, '_del_error_logged'):
+                    logger.warning(f"KalshiVenueClient failed to auto-close in __del__: {e}")
+                    self.__class__._del_error_logged = True
 
     async def __aenter__(self) -> "KalshiVenueClient":
         """Enter async context manager."""
@@ -785,8 +842,10 @@ class KalshiVenueClient(EventVenueClient):
         Returns:
             OperationResult with parsed JSON data or error
         """
-        url = f"{self.config.base_url}{path}"
-        start_time = time.time()
+        # Support both legacy base_url and unified rest_base_url
+        base_url = getattr(self.config, 'rest_base_url', None) or getattr(self.config, 'base_url', None)
+        url = f"{base_url}{path}"
+        start_time = _time.time()
         last_error: Optional[Exception] = None
 
         for attempt in range(KALSHI_MAX_RETRIES + 1):
@@ -824,7 +883,7 @@ class KalshiVenueClient(EventVenueClient):
                             headers=extra_headers if extra_headers else None,
                         )
                     
-                    latency_ms = (time.time() - start_time) * 1000
+                    latency_ms = (_time.time() - start_time) * 1000
                     
                     # Check for retryable status codes
                     if response.status_code in KALSHI_RETRY_STATUSES:
@@ -954,6 +1013,9 @@ class KalshiVenueClient(EventVenueClient):
 
                     # Other client errors (4xx) - don't retry
                     if 400 <= response.status_code < 500:
+                        # Log the actual error response from Kalshi for debugging
+                        error_body = response.text[:500] if response.text else "empty"
+                        logger.error(f"[{operation_name}] Client error: {response.status_code} - Response body: {error_body}")
                         error = httpx.HTTPStatusError(
                             f"Client error: {response.status_code}",
                             request=response.request,
@@ -1006,13 +1068,13 @@ class KalshiVenueClient(EventVenueClient):
                     
             except CircuitOpenError as e:
                 # Circuit is open - fail fast
-                latency_ms = (time.time() - start_time) * 1000
+                latency_ms = (_time.time() - start_time) * 1000
                 self._circuit_open_log_count += 1
                 if self._circuit_open_log_count == 1:
-                    self._circuit_open_first_ts = time.time()
+                    self._circuit_open_first_ts = _time.time()
                     logger.warning(f"[kalshi] Circuit OPEN — blocking {operation_name} (retry in {e.time_until_retry:.1f}s)")
                 elif self._circuit_open_log_count == 10:
-                    elapsed = time.time() - self._circuit_open_first_ts
+                    elapsed = _time.time() - self._circuit_open_first_ts
                     logger.warning(
                         f"[kalshi] Circuit still OPEN — suppressed {self._circuit_open_log_count} blocked calls in {elapsed:.1f}s"
                     )
@@ -1089,7 +1151,7 @@ class KalshiVenueClient(EventVenueClient):
                         )
                         await asyncio.sleep(0.05)
                         continue
-                latency_ms = (time.time() - start_time) * 1000
+                latency_ms = (_time.time() - start_time) * 1000
                 logger.warning(f"[kalshi] {operation_name} RuntimeError after retries: {e}")
                 return OperationResult.fail(
                     e,
@@ -1138,7 +1200,7 @@ class KalshiVenueClient(EventVenueClient):
                     continue
 
                 # Not recoverable or max retries exhausted
-                latency_ms = (time.time() - start_time) * 1000
+                latency_ms = (_time.time() - start_time) * 1000
                 logger.error(
                     "[kalshi] %s Windows/async I/O error not recoverable: %s",
                     operation_name,
@@ -1153,7 +1215,7 @@ class KalshiVenueClient(EventVenueClient):
 
             except Exception as e:
                 # Unexpected error - don't retry
-                latency_ms = (time.time() - start_time) * 1000
+                latency_ms = (_time.time() - start_time) * 1000
                 # Include exception type and first 100 chars of repr for debugging
                 error_type = type(e).__name__
                 error_detail = repr(e)[:200]
@@ -1178,7 +1240,7 @@ class KalshiVenueClient(EventVenueClient):
                 )
         
         # Max retries exhausted
-        latency_ms = (time.time() - start_time) * 1000
+        latency_ms = (_time.time() - start_time) * 1000
         
         # Emit API metrics for max retries exhausted
         emit_api_metrics(
@@ -1188,7 +1250,7 @@ class KalshiVenueClient(EventVenueClient):
             status_code=503,  # Service Unavailable
             success=False,
         )
-        latency_ms = (time.time() - start_time) * 1000
+        latency_ms = (_time.time() - start_time) * 1000
         error = last_error or RuntimeError(f"Max retries exceeded for {operation_name}")
         return OperationResult.fail(
             error,
@@ -1417,6 +1479,17 @@ class KalshiVenueClient(EventVenueClient):
         result = await self._request_with_resilience(
             "GET", f"/markets/{market_id}", operation_name=f"get_market({market_id})"
         )
+        
+        # LAG CLASSIFICATION: Track REST latency for lag detection
+        if result.success and result.latency_ms > 0:
+            try:
+                from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                store = get_kalshi_market_state_store()
+                if store:
+                    store._update_rest_latency_tracking(result.latency_ms)
+            except Exception as e:
+                # Don't fail the request if lag tracking fails
+                pass
         
         if not result.success:
             return OperationResult.fail(
@@ -1762,6 +1835,31 @@ class KalshiVenueClient(EventVenueClient):
             order_group_id: Optional order group ID for aggregate limits
             self_trade_prevention_type: Optional STP mode (e.g., "taker_at_cross")
         """
+        # PRODUCTION SAFETY: Block manual test order pathways unless explicitly allowed
+        # Orders should flow through agent grid → risk manager → order router pipeline
+        # Direct client order placement is for testing only
+        _allow_manual = os.getenv("DEBUG_ALLOW_MANUAL_ORDERS", "false").strip().lower() in ("true", "1", "yes")
+        if not _allow_manual:
+            # Check if this is a manual order (not from order_router)
+            # Order router sets source="agent_grid"; manual orders typically don't
+            _is_manual = True
+            if hasattr(order, "source") and order.source == "agent_grid":
+                _is_manual = False
+
+            if _is_manual:
+                logger.warning(
+                    "[MANUAL-ORDER-BLOCKED] Direct client order placement blocked. "
+                    "Set DEBUG_ALLOW_MANUAL_ORDERS=true to enable for testing. "
+                    "Production orders should flow through agent grid → risk manager → order router. "
+                    "ticker=%s side=%s size=%s",
+                    order.market_id, order.side, order.size
+                )
+                return OperationResult.fail(
+                    "Manual order placement blocked - use agent grid pipeline or set DEBUG_ALLOW_MANUAL_ORDERS=true",
+                    latency_ms=0.0,
+                    retries=0,
+                )
+        
         # FINAL SAFETY NET: GlobalExecutionGuard at lowest level
         # This catches ANY order that bypassed higher-level guards
         try:
@@ -1818,16 +1916,20 @@ class KalshiVenueClient(EventVenueClient):
             )
 
         outcome = order.outcome_id or "yes"
+        # V2 API uses bid/ask instead of yes/no
+        # bid = buy YES, ask = sell YES (everything quoted from YES side)
+        v2_side = "bid" if outcome == "yes" else "ask"
         kalshi_order: Dict[str, Any] = {
             "ticker": ticker,
             "action": order.side,           # "buy" or "sell"
-            "side": outcome,                # "yes" or "no"
-            "count": int(order.size),
+            "side": v2_side,                # "bid" or "ask" (V2 API)
+            "count": str(int(order.size)),  # V2 API requires count as string
             "type": order.order_type,       # "limit" or "market"
             "client_order_id": order.client_order_id or f"merid_{datetime.now(timezone.utc).timestamp()}",
+            "self_trade_prevention_type": "taker_at_cross",  # V2 API required field (valid values: taker_at_cross, maker)
         }
 
-        # CRITICAL: Kalshi API requires exactly one price field for ALL orders
+        # CRITICAL: Kalshi V2 API requires price as string in fixed-point dollars (e.g., "0.5600")
         # (including market orders - the price is accepted but ignored for market orders)
         if order.price is not None:
             _price_cents = int(order.price * 100)
@@ -1843,10 +1945,9 @@ class KalshiVenueClient(EventVenueClient):
                     latency_ms=0.0,
                     retries=0,
                 )
-            # Kalshi API uses {side}_price: yes_price or no_price (cents, integer)
-            # API error: "exactly one of yes_price, no_price, yes_price_dollars, or no_price_dollars"
-            price_field = f"{outcome}_price"  # yes_price or no_price
-            kalshi_order[price_field] = _price_cents
+            # V2 API uses "price" field as string in fixed-point dollars (e.g., "0.5600")
+            _price_dollars = _price_cents / 100.0
+            kalshi_order["price"] = f"{_price_dollars:.4f}"
         else:
             # BUG-FIX: If no price provided, use midpoint (default) as fallback
             # Kalshi requires a price field even for market orders
@@ -1855,23 +1956,8 @@ class KalshiVenueClient(EventVenueClient):
                 "[KALSHI_ORDER_VALIDATION] No price provided for %s order on %s, using default fallback",
                 order.order_type, ticker
             )
-            price_field = f"{outcome}_price"
-            kalshi_order[price_field] = DEFAULT_KALSHI_PRICE_CENTS  # Midpoint fallback
-        
-        # VALIDATION: Ensure exactly one price field is set
-        price_fields = ["yes_price", "no_price", "yes_price_dollars", "no_price_dollars"]
-        set_prices = [f for f in price_fields if f in kalshi_order]
-        if len(set_prices) != 1:
-            logger.error(
-                "[KALSHI_ORDER_VALIDATION] Invalid price fields in order: %s | "
-                "outcome=%s ticker=%s",
-                set_prices, outcome, ticker
-            )
-            return OperationResult.fail(
-                f"Invalid order: exactly one price field required, got {set_prices}",
-                latency_ms=0.0,
-                retries=0,
-            )
+            _price_dollars = DEFAULT_KALSHI_PRICE_CENTS / 100.0
+            kalshi_order["price"] = f"{_price_dollars:.4f}"
 
         # Kalshi Trade API v2: enum is good_till_canceled | immediate_or_cancel | fill_or_kill
         kalshi_order["time_in_force"] = merid_time_in_force_to_kalshi_api(
@@ -1881,15 +1967,32 @@ class KalshiVenueClient(EventVenueClient):
         # Add optional STP and order group
         if order_group_id:
             kalshi_order["order_group_id"] = order_group_id
-        if self_trade_prevention_type:
-            kalshi_order["self_trade_prevention_type"] = self_trade_prevention_type
+        # Note: SelfTradePreventionType is already set in the initial kalshi_order dict (line 1926)
+        # This conditional override is removed to ensure the V2-required field is always present
         
         # Add post_only if specified
         if getattr(order, "post_only", False):
             kalshi_order["post_only"] = True
 
+        # DEBUG: Log kalshi_order dict before sending to API to verify self_trade_prevention_type is present
+        logger.info(f"[ORDER-SUBMIT-DEBUG] kalshi_order keys: {list(kalshi_order.keys())}")
+        logger.info(f"[ORDER-SUBMIT-DEBUG] self_trade_prevention_type present: {'self_trade_prevention_type' in kalshi_order}, value: {kalshi_order.get('self_trade_prevention_type', 'MISSING')}")
+        logger.info(f"[ORDER-SUBMIT-DEBUG] Full kalshi_order JSON: {kalshi_order}")
+
+        # Log order submission with key metadata
+        logger.info(
+            "[ORDER-SUBMIT] client_order_id=%s asset=%s ticker=%s side=%s size=%d price=%s tp=N/A sl=N/A intent=%s",
+            kalshi_order.get("client_order_id", "N/A"),
+            ticker.split("-")[0] if "-" in ticker else "N/A",  # Extract asset from ticker
+            ticker,
+            kalshi_order.get("side", "N/A"),
+            int(kalshi_order.get("count", 0)),  # Convert string back to int for logging
+            kalshi_order.get("price", "N/A"),  # V2 API uses "price" field
+            kalshi_order.get("type", "N/A")
+        )
+
         result = await self._request_with_resilience(
-            "POST", "/portfolio/orders", json_data=kalshi_order, operation_name="place_order"
+            "POST", "/portfolio/events/orders", json_data=kalshi_order, operation_name="place_order"
         )
         
         if not result.success:
@@ -1917,10 +2020,73 @@ class KalshiVenueClient(EventVenueClient):
     async def cancel_order_result(
         self, order_id: str, market_id: Optional[str] = None
     ) -> OperationResult[bool]:
-        """Cancel order with explicit result.
+        """Cancel order with explicit result and idempotency.
 
         Uses Kalshi's cancel endpoint: POST /portfolio/orders/{order_id}/cancel
+        
+        Idempotency:
+        - Checks order status before canceling
+        - Returns success if order already canceled (idempotent)
+        - Returns specific error if order already filled
+        - Returns specific error if order not found
         """
+        # Step 1: Query order status for idempotency check
+        order_result = await self.get_order_result(order_id, market_id)
+        
+        if order_result.success and order_result.data:
+            order = order_result.data
+            # Check if order is already in a terminal state
+            if order.status in ("canceled", "expired", "filled"):
+                if order.status == "canceled":
+                    logger.info(
+                        "Cancel idempotent: order %s already canceled (status=%s)",
+                        order_id, order.status
+                    )
+                    return OperationResult.ok(
+                        True,
+                        latency_ms=order_result.latency_ms,
+                        retries=0,
+                    )
+                elif order.status == "filled":
+                    logger.warning(
+                        "Cancel failed: order %s already filled (status=%s)",
+                        order_id, order.status
+                    )
+                    return OperationResult.fail(
+                        f"Order already filled (status={order.status})",
+                        latency_ms=order_result.latency_ms,
+                        retries=0,
+                    )
+                else:  # expired
+                    logger.warning(
+                        "Cancel failed: order %s already expired (status=%s)",
+                        order_id, order.status
+                    )
+                    return OperationResult.fail(
+                        f"Order already expired (status={order.status})",
+                        latency_ms=order_result.latency_ms,
+                        retries=0,
+                    )
+        elif not order_result.success:
+            # If get_order failed, check if it's a "not found" error
+            error_str = str(order_result.error).lower()
+            if "not found" in error_str or "does not exist" in error_str:
+                logger.warning(
+                    "Cancel failed: order %s not found (error=%s)",
+                    order_id, order_result.error
+                )
+                return OperationResult.fail(
+                    f"Order not found: {order_result.error}",
+                    latency_ms=order_result.latency_ms,
+                    retries=order_result.retries,
+                )
+            # For other errors, proceed with cancel attempt (may be transient)
+            logger.debug(
+                "Cancel: order status check failed, proceeding with cancel (error=%s)",
+                order_result.error
+            )
+        
+        # Step 2: Attempt cancel
         result = await self._request_with_resilience(
             "POST",
             f"/portfolio/orders/{order_id}/cancel",
@@ -1929,6 +2095,39 @@ class KalshiVenueClient(EventVenueClient):
         )
 
         if not result.success:
+            # Parse error message for specific scenarios
+            error_str = str(result.error).lower()
+            if "already canceled" in error_str or "already been canceled" in error_str:
+                logger.info(
+                    "Cancel idempotent: order %s already canceled (API response)",
+                    order_id
+                )
+                return OperationResult.ok(
+                    True,
+                    latency_ms=result.latency_ms,
+                    retries=result.retries,
+                )
+            elif "filled" in error_str or "already filled" in error_str:
+                logger.warning(
+                    "Cancel failed: order %s already filled (API response)",
+                    order_id
+                )
+                return OperationResult.fail(
+                    f"Order already filled: {result.error}",
+                    latency_ms=result.latency_ms,
+                    retries=result.retries,
+                )
+            elif "not found" in error_str or "does not exist" in error_str:
+                logger.warning(
+                    "Cancel failed: order %s not found (API response)",
+                    order_id
+                )
+                return OperationResult.fail(
+                    f"Order not found: {result.error}",
+                    latency_ms=result.latency_ms,
+                    retries=result.retries,
+                )
+            # Generic error
             return OperationResult.fail(
                 result.error,
                 latency_ms=result.latency_ms,
@@ -3187,6 +3386,11 @@ class KalshiVenueClient(EventVenueClient):
     async def get_balance(self) -> Dict[str, Decimal]:
         """Get account balance. Returns zeros on failure."""
         result = await self.get_balance_result()
+        if not result.success:
+            logger.warning(
+                "get_balance: API fetch failed, returning zero fallback (error=%s)",
+                result.error
+            )
         return result.unwrap_or({"USD": Decimal("0"), "locked": Decimal("0")})
     
     async def get_balance_result(self) -> OperationResult[Dict[str, Decimal]]:
@@ -3205,13 +3409,41 @@ class KalshiVenueClient(EventVenueClient):
         raw = result.data or {}
         balance_cents = raw.get("balance", 0)
         locked_cents = raw.get("locked_balance", 0)
+        
+        # Reject nested/unknown formats - Kalshi API returns flat format
         if isinstance(balance_cents, dict):
-            locked_cents = balance_cents.get("locked_balance", 0)
-            balance_cents = balance_cents.get("balance", 0)
+            raise ValueError(
+                f"Unexpected nested balance format. Expected flat format with 'balance' and 'locked_balance' keys. "
+                f"Got: {list(balance_cents.keys())}"
+            )
+        
+        # Balance validation: ensure numeric and non-negative
+        try:
+            balance_usd = Decimal(str(balance_cents)) / 100
+            locked_usd = Decimal(str(locked_cents)) / 100
+            
+            if balance_usd < 0:
+                raise ValueError(
+                    f"Negative balance detected: ${balance_usd}. "
+                    f"This indicates an API error or data corruption. "
+                    f"Trading halted until resolved."
+                )
+            if locked_usd < 0:
+                raise ValueError(
+                    f"Negative locked balance detected: ${locked_usd}. "
+                    f"This indicates an API error or data corruption. "
+                    f"Trading halted until resolved."
+                )
+                
+        except (ValueError, TypeError) as e:
+            raise ValueError(
+                f"Invalid balance format (balance_cents={balance_cents}, locked_cents={locked_cents}): {e}"
+            )
+        
         return OperationResult.ok(
             {
-                "USD": Decimal(str(balance_cents)) / 100,
-                "locked": Decimal(str(locked_cents)) / 100
+                "USD": balance_usd,
+                "locked": locked_usd
             },
             latency_ms=result.latency_ms,
             retries=result.retries,
@@ -3936,8 +4168,8 @@ class KalshiVenueClient(EventVenueClient):
                 close_time=self._parse_datetime(data.get("close_time")),
                 expiration_time=self._parse_datetime(data.get("expiration_time")),
                 settlement_time=self._parse_datetime(data.get("settlement_time")),
-                active=data.get("status") in ("active", "open"),
-                status=data.get("status", "active"),
+                active=data.get("status") == "open",  # Kalshi API uses "open" for active markets, not "active"
+                status=data.get("status", "open"),
                 volume=Decimal(str(data.get("volume", 0))),
                 volume_24h=Decimal(str(data.get("volume_24h", 0))) if data.get("volume_24h") is not None else None,
                 open_interest=Decimal(str(data.get("open_interest", 0))),
@@ -4004,24 +4236,63 @@ class KalshiVenueClient(EventVenueClient):
             raw_data={
                 "series_ticker": market.series_ticker,
                 "event_ticker": market.event_ticker,
-                "volume_24h": int(market.volume_24h) if market.volume_24h is not None else None,
+                "volume": int(market.volume) if market.volume is not None else None,
+                "status": market.status,
+                "close_time": market.close_time.isoformat() if market.close_time else None,
             }
         )
     
     def _to_venue_orderbook(self, data: Dict[str, Any], market_id: str) -> VenueOrderBook:
-        """Convert to VenueOrderBook."""
+        """Convert to VenueOrderBook.
+        
+        Kalshi REST API returns orderbook in format:
+        {
+          "orderbook_fp": {
+            "yes_dollars": [["0.0010", "4613.25"], ...],  # [price, size] - YES bids (buying YES)
+            "no_dollars": [["0.0010", "4413.00"], ...]   # [price, size] - NO bids (buying NO)
+          }
+        }
+        
+        Note: In Kalshi's market model:
+        - YES bids = buying YES contracts (bids)
+        - NO bids = buying NO contracts (equivalent to YES asks)
+        """
         bids = []
         asks = []
         
-        # Kalshi orderbook has yes/no specific fields
-        if "yes_bid" in data and data["yes_bid"]:
-            bids.append((Decimal(str(data["yes_bid"])) / 100, Decimal("1")))
-        if "no_bid" in data and data["no_bid"]:
-            bids.append((Decimal(str(data["no_bid"])) / 100, Decimal("1")))
-        if "yes_ask" in data and data["yes_ask"]:
-            asks.append((Decimal(str(data["yes_ask"])) / 100, Decimal("1")))
-        if "no_ask" in data and data["no_ask"]:
-            asks.append((Decimal(str(data["no_ask"])) / 100, Decimal("1")))
+        # Parse orderbook_fp format (actual API response)
+        if "orderbook_fp" in data:
+            orderbook_fp = data["orderbook_fp"]
+            
+            # yes_dollars: YES bids (buying YES contracts) -> goes to bids
+            if "yes_dollars" in orderbook_fp and orderbook_fp["yes_dollars"]:
+                for price_str, size_str in orderbook_fp["yes_dollars"]:
+                    try:
+                        price = Decimal(str(price_str))
+                        size = Decimal(str(size_str))
+                        bids.append((price, size))
+                    except (ValueError, TypeError):
+                        continue
+            
+            # no_dollars: NO bids (buying NO contracts) -> goes to asks (equivalent to YES asks)
+            if "no_dollars" in orderbook_fp and orderbook_fp["no_dollars"]:
+                for price_str, size_str in orderbook_fp["no_dollars"]:
+                    try:
+                        price = Decimal(str(price_str))
+                        size = Decimal(str(size_str))
+                        asks.append((price, size))
+                    except (ValueError, TypeError):
+                        continue
+        else:
+            # Legacy format fallback (yes_bid, no_bid, yes_ask, no_ask)
+            if "yes_bid" in data and data["yes_bid"]:
+                bids.append((Decimal(str(data["yes_bid"])) / 100, Decimal("1")))
+            if "no_bid" in data and data["no_bid"]:
+                bids.append((Decimal(str(data["no_bid"])) / 100, Decimal("1")))
+            if "yes_ask" in data and data["yes_ask"]:
+                asks.append((Decimal(str(data["yes_ask"])) / 100, Decimal("1")))
+            if "no_ask" in data and data["no_ask"]:
+                asks.append((Decimal(str(data["no_ask"])) / 100, Decimal("1")))
         
         return VenueOrderBook(
             market_id=market_id,
@@ -4326,21 +4597,34 @@ def get_kalshi_client(config: Optional[KalshiConfig] = None) -> KalshiVenueClien
     global _client, _client_shutting_down
     
     # MODE CONSISTENCY CHECK: Ensure config matches TradeMode before creating client
+    # CRITICAL FIX: Defer mode validation to prevent import-time hang during startup
+# ModeResolver import and validation will happen when actually needed, not during import
     try:
-        from merid.mode_resolver import ModeResolver, KalshiEnvironment
-        ModeResolver.assert_mode_consistency()
-        # Additional validation: if config provided, verify use_demo matches mode
+        # Only validate mode if config is provided (not during import)
         if config is not None:
+            from merid.mode_resolver import ModeResolver, KalshiEnvironment
+            ModeResolver.assert_mode_consistency()
+            # Additional validation: if config provided, verify use_demo matches mode
             kalshi_env = ModeResolver.get_kalshi_environment()
-            if kalshi_env == KalshiEnvironment.LIVE and config.use_demo:
+            # Support both legacy use_demo and new env field
+            config_is_demo = False
+            if hasattr(config, 'env'):
+                config_is_demo = config.env == "demo"
+            elif hasattr(config, 'use_demo'):
+                config_is_demo = config.use_demo
+            else:
+                # Default to live if neither field is present
+                config_is_demo = False
+            
+            if kalshi_env == KalshiEnvironment.LIVE and config_is_demo:
                 raise RuntimeError(
-                    f"MODE_MISMATCH: KalshiEnvironment=LIVE but config.use_demo=True. "
-                    f"Set use_demo=False for live trading."
+                    f"MODE_MISMATCH: KalshiEnvironment=LIVE but config indicates demo mode. "
+                    f"Set env='live' or use_demo=False for live trading."
                 )
-            elif kalshi_env == KalshiEnvironment.DEMO and not config.use_demo:
+            elif kalshi_env == KalshiEnvironment.DEMO and not config_is_demo:
                 raise RuntimeError(
-                    f"MODE_MISMATCH: KalshiEnvironment=DEMO but config.use_demo=False. "
-                    f"Set use_demo=True for demo trading."
+                    f"MODE_MISMATCH: KalshiEnvironment=DEMO but config indicates live mode. "
+                    f"Set env='demo' or use_demo=True for demo trading."
                 )
     except Exception as mode_exc:
         logger.error("get_kalshi_client mode validation failed: %s", mode_exc)

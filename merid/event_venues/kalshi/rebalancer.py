@@ -159,7 +159,7 @@ class PortfolioRebalancer:
                 avg_price_cents = DEFAULT_KALSHI_PRICE_CENTS  # Fallback if market state unavailable
                 try:
                     from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
-                    state = get_kalshi_market_state_store().get_state(ticker)
+                    state = get_kalshi_market_state_store().get_unified(ticker)
                     if state and state.mid_cents > 0:
                         avg_price_cents = state.mid_cents
                 except Exception as _exc:
@@ -368,7 +368,7 @@ def _bootstrap_targets(rebalancer: "PortfolioRebalancer") -> None:
         # Collect active tickers from the agent grid
         tickers: list = []
         try:
-            from merid.prediction.agent_grid import get_agent_grid
+            from merid.prediction.agent_grid_15m import get_agent_grid
             grid = get_agent_grid()
             for agent in grid.agents:
                 tickers.extend(agent.state.active_tickers)

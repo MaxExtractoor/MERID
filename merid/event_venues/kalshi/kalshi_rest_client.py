@@ -29,8 +29,8 @@ class KalshiRestClient:
         """Lazy initialization of the underlying client."""
         if not self._initialized:
             from merid.event_venues.kalshi.client import KalshiVenueClient
-            from merid.event_venues.kalshi.models import KalshiConfig
-            config = KalshiConfig()
+            from merid.event_venues.kalshi.kalshi_config import get_kalshi_config
+            config = get_kalshi_config()
             self._client = KalshiVenueClient(config)
             self._initialized = True
         return self._client

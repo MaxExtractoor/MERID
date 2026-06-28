@@ -87,43 +87,43 @@ class KalshiAPIHealthMonitor:
         stats.endpoint = endpoint
         stats.total_calls += 1
             
-            if success:
-                stats.successful_calls += 1
-                stats.last_success_time = now
-            else:
-                stats.failed_calls += 1
-                stats.last_error = error
-                stats.last_error_time = now
-            
-            # Update rolling windows
-            self._call_history_5min[endpoint].append((now, success))
-            self._call_history_1min[endpoint].append((now, success))
-            
-            # Prune old entries
-            self._prune_history(endpoint, now)
-            
-            # Update error rates
-            stats.error_rate_5min = self._calculate_error_rate(
-                self._call_history_5min[endpoint]
+        if success:
+            stats.successful_calls += 1
+            stats.last_success_time = now
+        else:
+            stats.failed_calls += 1
+            stats.last_error = error
+            stats.last_error_time = now
+        
+        # Update rolling windows
+        self._call_history_5min[endpoint].append((now, success))
+        self._call_history_1min[endpoint].append((now, success))
+        
+        # Prune old entries
+        self._prune_history(endpoint, now)
+        
+        # Update error rates
+        stats.error_rate_5min = self._calculate_error_rate(
+            self._call_history_5min[endpoint]
+        )
+        stats.error_rate_1min = self._calculate_error_rate(
+            self._call_history_1min[endpoint]
+        )
+        
+        # Alert if thresholds exceeded
+        if stats.error_rate_5min > self.error_rate_threshold_5min:
+            logger.error(
+                f"[API_HEALTH] {endpoint} 5min error rate {stats.error_rate_5min:.1%} "
+                f"exceeds threshold {self.error_rate_threshold_5min:.1%} | "
+                f"last_error: {error}"
             )
-            stats.error_rate_1min = self._calculate_error_rate(
-                self._call_history_1min[endpoint]
+        
+        if stats.error_rate_1min > self.error_rate_threshold_1min:
+            logger.critical(
+                f"[API_HEALTH] {endpoint} 1min error rate {stats.error_rate_1min:.1%} "
+                f"exceeds threshold {self.error_rate_threshold_1min:.1%} | "
+                f"last_error: {error} | IMMEDIATE ACTION REQUIRED"
             )
-            
-            # Alert if thresholds exceeded
-            if stats.error_rate_5min > self.error_rate_threshold_5min:
-                logger.error(
-                    f"[API_HEALTH] {endpoint} 5min error rate {stats.error_rate_5min:.1%} "
-                    f"exceeds threshold {self.error_rate_threshold_5min:.1%} | "
-                    f"last_error: {error}"
-                )
-            
-            if stats.error_rate_1min > self.error_rate_threshold_1min:
-                logger.critical(
-                    f"[API_HEALTH] {endpoint} 1min error rate {stats.error_rate_1min:.1%} "
-                    f"exceeds threshold {self.error_rate_threshold_1min:.1%} | "
-                    f"last_error: {error} | IMMEDIATE ACTION REQUIRED"
-                )
     
     def _prune_history(self, endpoint: str, now: datetime):
         """Prune old entries from call history."""

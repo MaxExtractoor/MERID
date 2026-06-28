@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import time
 from utils.logger import get_logger
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
+from enum import Enum
+from utils.logger import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger("merid.event_venues.kalshi.models")
 
 
 @dataclass
@@ -136,10 +139,12 @@ class KalshiConfig:
     
     # API endpoints — defaults overridden by invariants.get_kalshi_base_url()
     # Kalshi's recommended URLs: external-api.kalshi.com (live), external-api.demo.kalshi.co (demo)
+    # CRITICAL FIX: Updated ws_api_url to match unified config (external-api-ws.kalshi.com)
+    # Previous value (external-api.kalshi.com) was incorrect and caused connection failures
     rest_api_url: str = "https://external-api.kalshi.com/trade-api/v2"
-    ws_api_url: str = "wss://external-api.kalshi.com/trade-api/ws/v2"
+    ws_api_url: str = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
     demo_rest_api_url: str = "https://external-api.demo.kalshi.co/trade-api/v2"
-    demo_ws_api_url: str = "wss://external-api.demo.kalshi.co/trade-api/ws/v2"
+    demo_ws_api_url: str = "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2"
     
     # Public market-data endpoint (unified, recommended host for discovery)
     public_rest_api_url: str = "https://external-api.kalshi.com/trade-api/v2"
@@ -332,9 +337,9 @@ class KalshiConfig:
                 f"use_demo=True but base URL does not contain 'demo-api.kalshi.co': {base_url}"
             )
         
-        if not self.use_demo and "api.elections.kalshi.com" not in base_url:
+        if not self.use_demo and "external-api.kalshi.com" not in base_url:
             logger.warning(
-                f"use_demo=False but base URL does not contain 'api.elections.kalshi.com': {base_url}"
+                f"use_demo=False but base URL does not contain 'external-api.kalshi.com': {base_url}"
             )
         
         logger.info("=" * 80)
@@ -385,9 +390,55 @@ class KalshiMarketState:
     # Timestamps (monotonic)
     last_book_update_ts: float = 0.0
     last_rest_update_ts: float = 0.0
-    
+    last_update: Optional[datetime] = None  # UTC datetime of last state update
+
+    # Last good book tracking (for audit - tracks last known good state)
+    last_good_bid_cents: Optional[int] = None
+    last_good_ask_cents: Optional[int] = None
+    last_good_mid_cents: Optional[int] = None
+    last_good_book_ts: Optional[datetime] = None
+
     # Market status for health check (open/closed/paused/unknown)
     status: str = "open"
+
+    # P0-1 DOWNSTREAM: Data source tracking (WS_LIVE, REST_BOOTSTRAP, STALE_WS)
+    data_source: str = "UNKNOWN"
+
+    # P0-2 UPSTREAM: Data quality tracking (GOOD, BAD_DUALITY, INCOMPLETE, UNKNOWN)
+    data_quality: str = "UNKNOWN"
+    
+    # Book consistency tracking (GOOD, SUSPECT) for queue overflow detection
+    book_consistency: str = "GOOD"
+    
+    # Trade eligibility flag (separate from quote availability)
+    # True only when: book is initialized with live data, market is not suspended,
+    # and health state allows trading. Fallback quotes are never executable.
+    executable: bool = False
+    
+    # Liquidity audit fields (for MD-HEALTH logging and validation)
+    has_bid: bool = False  # whether bid side exists
+    has_ask: bool = False  # whether ask side exists
+    min_depth_yes: int = 0  # depth on yes side at best bid
+    min_depth_no: int = 0  # depth on no side at best ask
+    last_update_ts: float = 0.0  # monotonic timestamp of last update
+    
+    # Liquidity status classification
+    # Note: Using str instead of LiquidityStatus enum to avoid circular import
+    # Values: MISSING, ONE_SIDED, DEPTH_TOO_LOW, OK
+    liquidity_status: str = "MISSING"
+    
+    # P1 FIX: Transport health fields (separate from liquidity)
+    # These track WS/REST connectivity, not market conditions
+    transport_stale: bool = False  # True if no recent updates
+    transport_mode: str = "unknown"  # "ws", "rest", "none"
+    
+    # P1 FIX: Liquidity health fields (separate from transport)
+    # These track market conditions, not pipeline health
+    illiquid: bool = False  # True if spread wide but transport OK
+    
+    # P1 FIX: State consistency field
+    # True if YES+NO != 100c (indicates orderbook application bug)
+    state_inconsistent: bool = False
 
     # ── Derived helpers for UI ─────────────────────────────────────────
 
@@ -444,6 +495,69 @@ class KalshiMarketState:
     def expiry(self) -> Optional[str]:
         """Human-readable expiration time (alias for expiration_time)."""
         return self.expiration_time
+
+    def check_health(self) -> Dict[str, Any]:
+        """Return health status separating transport from liquidity.
+        
+        This method distinguishes between:
+        - Transport health: WS/REST connectivity
+        - Liquidity health: Market conditions (spread, depth)
+        - State consistency: Orderbook application correctness
+        
+        Returns:
+            Dict with transport_healthy, liquidity_healthy, overall_healthy, and details
+        """
+        now = time.monotonic()
+        
+        # Constants for health thresholds
+        _MAX_WS_AGE_SECONDS = 5.0  # 5 seconds for transport stale
+        _MAX_REST_AGE_SECONDS = 60.0  # 60 seconds for REST stale
+        _SPREAD_THRESHOLD_CENTS = 15  # 15 cents for illiquid threshold
+        _DUALITY_EPSILON_CENTS = 2  # 2 cents tolerance for YES+NO sums
+        
+        # Transport health check
+        ws_age = now - self.last_book_update_ts if self.last_book_update_ts > 0 else float('inf')
+        rest_age = now - self.last_rest_update_ts if self.last_rest_update_ts > 0 else float('inf')
+        
+        transport_healthy = (ws_age < _MAX_WS_AGE_SECONDS) or (rest_age < _MAX_REST_AGE_SECONDS)
+        self.transport_stale = not transport_healthy
+        
+        # Determine transport mode
+        if ws_age < _MAX_WS_AGE_SECONDS:
+            self.transport_mode = "ws"
+        elif rest_age < _MAX_REST_AGE_SECONDS:
+            self.transport_mode = "rest"
+        else:
+            self.transport_mode = "none"
+        
+        # Liquidity health check (only if transport is healthy)
+        if transport_healthy:
+            # Check spread and depth
+            spread_ok = (self.spread_cents or 0) < _SPREAD_THRESHOLD_CENTS
+            depth_ok = self.min_depth_yes > 0 and self.min_depth_no > 0
+            self.illiquid = not (spread_ok and depth_ok)
+        else:
+            self.illiquid = False  # Can't determine liquidity if transport stale
+        
+        # State consistency check (YES+NO should sum to 100c for binary markets)
+        yes_plus_no = (self.best_bid_cents or 0) + (self.best_ask_cents or 0)
+        self.state_inconsistent = abs(yes_plus_no - 100) > _DUALITY_EPSILON_CENTS
+        
+        # Overall health
+        overall_healthy = transport_healthy and not self.illiquid and not self.state_inconsistent
+        
+        return {
+            "transport_healthy": transport_healthy,
+            "liquidity_healthy": not self.illiquid,
+            "state_consistent": not self.state_inconsistent,
+            "overall_healthy": overall_healthy,
+            "transport_mode": self.transport_mode,
+            "ws_age_s": ws_age,
+            "rest_age_s": rest_age,
+            "spread_cents": self.spread_cents,
+            "depth_yes": self.min_depth_yes,
+            "depth_no": self.min_depth_no,
+        }
 
 
 # ── Typed venue response objects ──────────────────────────────────────

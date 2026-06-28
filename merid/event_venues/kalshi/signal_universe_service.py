@@ -18,6 +18,9 @@ catalog internals or re-discover markets.
 from merid.event_venues.kalshi.signal_universe_service import get_signal_universe_service
 from merid.event_venues.kalshi.market_catalog import get_market_catalog
 
+# NOTE: Catalog must be started before initializing signal universe service
+# This is typically done in main_15m_lean.py startup
+
 # Initialize with the universe from catalog
 catalog = get_market_catalog()
 universe = catalog.get_market_universe()

@@ -1,5 +1,14 @@
 """Bankroll Resolver — Resilient bankroll derivation with retry and fallback.
 
+DEPRECATION NOTICE:
+====================
+This module is deprecated. The canonical single source of truth for bankroll
+management is BankrollServiceV2:
+    from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service
+
+This module is kept for test compatibility only. Live trading code should use
+BankrollServiceV2 directly.
+
 This module provides robust bankroll/equity derivation with exponential backoff
 retry and unified fallback policies, eliminating the divergence between CT
 (reject on None) and Grid (fall back to env) behaviors.
@@ -25,6 +34,7 @@ from __future__ import annotations
 import os
 import asyncio
 import time
+import warnings
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, Callable
@@ -32,6 +42,14 @@ from enum import Enum
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.bankroll_resolver")
+
+# Issue deprecation warning on module import
+warnings.warn(
+    "bankroll_resolver is deprecated. Use BankrollServiceV2 instead: "
+    "from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 
 class FallbackPolicy(Enum):
@@ -81,12 +99,21 @@ class BankrollDerivationError(Exception):
 class BankrollResolver:
     """Resilient bankroll derivation with retry and fallback.
     
+    DEPRECATED: Use BankrollServiceV2 instead.
+    
     This resolver implements exponential backoff retry for live API calls
     and provides configurable fallback policies for failure scenarios.
     """
     
     _instance: Optional[BankrollResolver] = None
-    _lock = asyncio.Lock()
+    _lock: Optional[asyncio.Lock] = None
+    
+    @classmethod
+    def _ensure_lock(cls) -> asyncio.Lock:
+        """Lazy-initialize the asyncio.Lock in the current event loop."""
+        if cls._lock is None:
+            cls._lock = asyncio.Lock()
+        return cls._lock
     
     def __new__(cls):
         if cls._instance is None:
@@ -103,6 +130,13 @@ class BankrollResolver:
         env_fallback_var: str = "MERID_INITIAL_CAPITAL",
         minimum_viable_bankroll: float = 100.0,
     ):
+        warnings.warn(
+            "BankrollResolver is deprecated. Use BankrollServiceV2 instead: "
+            "from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        
         if self._initialized:
             return
             
