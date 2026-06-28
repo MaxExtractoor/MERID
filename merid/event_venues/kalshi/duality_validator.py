@@ -105,35 +105,39 @@ class DualityValidator:
         Returns:
             DualityCheckResult with validation details
         """
-        # Check bid duality if both prices present
-        if yes_bid is not None and no_bid is not None:
-            bid_sum = yes_bid + no_bid
-            bid_error = abs(bid_sum - 100)
+        # Check correct duality invariants for binary markets:
+        # YES_bid + NO_ask = 100c (YES bid + NO ask = 100 cents)
+        # NO_bid + YES_ask = 100c (NO bid + YES ask = 100 cents)
+        
+        # Check YES_bid + NO_ask = 100c
+        if yes_bid is not None and no_ask is not None:
+            bid_ask_sum = yes_bid + no_ask
+            bid_ask_error = abs(bid_ask_sum - 100)
             
-            if bid_error > MAX_DUALITY_ERROR_CENTS:
+            if bid_ask_error > MAX_DUALITY_ERROR_CENTS:
                 result = DualityCheckResult(
                     is_valid=False,
-                    error_cents=bid_error,
-                    violation_type='bid_sum',
+                    error_cents=bid_ask_error,
+                    violation_type='bid_ask_sum',
                     raw_yes_bid=yes_bid,
-                    raw_no_bid=no_bid,
+                    raw_no_ask=no_ask,
                     ticker=ticker
                 )
                 self._record_violation(ticker, result)
                 return result
         
-        # Check ask duality if both prices present
-        if yes_ask is not None and no_ask is not None:
-            ask_sum = yes_ask + no_ask
-            ask_error = abs(ask_sum - 100)
+        # Check NO_bid + YES_ask = 100c
+        if no_bid is not None and yes_ask is not None:
+            ask_bid_sum = no_bid + yes_ask
+            ask_bid_error = abs(ask_bid_sum - 100)
             
-            if ask_error > MAX_DUALITY_ERROR_CENTS:
+            if ask_bid_error > MAX_DUALITY_ERROR_CENTS:
                 result = DualityCheckResult(
                     is_valid=False,
-                    error_cents=ask_error,
-                    violation_type='ask_sum',
+                    error_cents=ask_bid_error,
+                    violation_type='ask_bid_sum',
+                    raw_no_bid=no_bid,
                     raw_yes_ask=yes_ask,
-                    raw_no_ask=no_ask,
                     ticker=ticker
                 )
                 self._record_violation(ticker, result)
