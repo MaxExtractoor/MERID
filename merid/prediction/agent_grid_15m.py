@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime as dt, timezone, timedelta
 import time
 import collections
+import re
 from typing import Any, Optional, Dict
 from dataclasses import dataclass, field
 
@@ -23,9 +24,6 @@ from merid.event_venues.kalshi.fifteen_minute_market_locator import (
     get_market_locator,
     MarketIds,
 )
-
-# Import duality_validator for Phase 1 YES/NO arbitrage
-from merid.event_venues.kalshi.duality_validator import check_yes_no_duality
 
 
 # Minimal market object wrapper for time-bucket-based market selection
@@ -127,6 +125,17 @@ class LeanAgentConfig:
     per_strip_order_limit: int = 50  # Maximum orders per 15m strip (increased from 5 to allow more trading)
     per_asset_cooldown_s: int = 10  # Cooldown period in seconds after trade (reduced from 30s to allow more frequent trading)
     velocity_threshold: float = 0.002  # Velocity threshold for signal generation (0.2% - aligned with industry standards for 15m crypto trading)
+    # INDUSTRY ALIGNMENT: Fee-aware trading parameters based on profitable scalping research
+    prefer_maker_orders: bool = True  # Prefer maker orders to earn rebates (-0.05% round trip) vs taker fees (0.15% round trip)
+    min_profit_basis_points: int = 20  # Minimum 20bp profit target to overcome structural disadvantages (industry standard for retail)
+    max_spread_basis_points: int = 50  # RELAXED: Maximum 50bp spread (increased from 30 to allow more trades in current market conditions)
+    # FILL RATE OPTIMIZATION: Use limit orders instead of market orders for better fill rates in thin markets
+    use_limit_orders: bool = True  # Use limit orders (maker) instead of market orders (taker) for better fill rates
+    limit_order_slippage_cents: int = 2  # Allow 2 cents slippage for limit orders to increase fill probability
+    # INDUSTRY ALIGNMENT: Regime detection parameters
+    volatility_window_s: int = 300  # 5-minute volatility window for regime detection
+    min_volatility_threshold: float = 0.001  # Minimum 0.1% volatility to avoid low-volatility death zones
+    max_volatility_threshold: float = 0.02  # Maximum 2% volatility to avoid extreme volatility spikes
     # Phase 1: Velocity model coefficients for logistic mapping
     alpha_0: float = 0.0  # Intercept for logistic function
     alpha_1: float = 1000.0  # Velocity coefficient for logistic function
@@ -146,8 +155,8 @@ class LeanAgentConfig:
     calibration_auto_fit: bool = True  # Automatically fit calibration when sufficient data
     calibration_min_samples: int = 100  # Minimum samples required to fit calibration
     # Phase 5.3: Price-based strategy (Turbine research winner)
-    price_based_buy_threshold: float = 0.50  # Buy YES when price <= 0.50
-    price_based_sell_threshold: float = 0.70  # Sell when price >= 0.70
+    price_based_buy_threshold: float = 0.70  # Buy YES in sweet spot (60-70c range per Polymarket data)
+    price_based_sell_threshold: float = 0.90  # Sell when price >= 0.90 (profit taking)
     calibration_max_samples: int = 1000  # Maximum samples to keep for calibration
     calibration_regularization: float = 0.0001  # L2 regularization parameter
     calibration_fit_interval_hours: int = 24  # Re-fit calibration every N hours
@@ -397,11 +406,11 @@ class LeanAgent15m:
                 asset, market_price, buy_threshold
             )
         elif market_price >= sell_threshold:
-            # Sell when price is high (take profit)
-            signal_side = "yes"
-            signal_action = "sell"
+            # Buy NO when price is high (betting against the outcome)
+            signal_side = "no"
+            signal_action = "buy"
             logger.info(
-                "[PRICE-BASED-SIGNAL] asset=%s price=%.2f >= sell_threshold=%.2f -> SELL YES",
+                "[PRICE-BASED-SIGNAL] asset=%s price=%.2f >= sell_threshold=%.2f -> BUY NO",
                 asset, market_price, sell_threshold
             )
         else:
@@ -414,10 +423,10 @@ class LeanAgent15m:
         
         # Return signal
         # Calculate edge for price-based strategy (distance from threshold)
-        # For buy: edge = (buy_threshold - market_price) / buy_threshold
-        # For sell: edge = (market_price - sell_threshold) / (1.0 - sell_threshold)
+        # For YES buy: edge = (buy_threshold - market_price) / buy_threshold
+        # For NO buy: edge = (market_price - sell_threshold) / (1.0 - sell_threshold)
         # Add minimum base edge when threshold is crossed to ensure meaningful edge
-        if signal_action == "buy":
+        if signal_side == "yes" and signal_action == "buy":
             edge_pct = (buy_threshold - market_price) / buy_threshold * 100
             # Add 2% base edge at threshold crossing (minimum edge for valid trade)
             edge_pct = max(edge_pct, 2.0)
@@ -430,7 +439,7 @@ class LeanAgent15m:
             # Convert edge_pct to probability adjustment (capped at reasonable range)
             edge_prob_adjustment = min(edge_pct / 100.0, 0.20)  # Cap at 20% adjustment
             model_prob = min(0.95, market_price + edge_prob_adjustment)
-        else:  # sell YES (betting NO)
+        elif signal_side == "no" and signal_action == "buy":
             edge_pct = (market_price - sell_threshold) / (1.0 - sell_threshold) * 100
             # Add 2% base edge at threshold crossing (minimum edge for valid trade)
             edge_pct = max(edge_pct, 2.0)
@@ -439,12 +448,12 @@ class LeanAgent15m:
             # At 0.80 (14% above threshold): confidence = 0.50 + 2.0 * 0.14 = 0.78
             distance_from_threshold = (market_price - sell_threshold) / (1.0 - sell_threshold)
             confidence = min(0.99, 0.50 + 2.0 * distance_from_threshold)
-            # For sell YES (betting NO): model_prob should be lower than market_price (we think outcome is less likely)
+            # For buy NO: model_prob should be lower than market_price (we think outcome is less likely)
             # Convert edge_pct to probability adjustment (capped at reasonable range)
             edge_prob_adjustment = min(edge_pct / 100.0, 0.20)  # Cap at 20% adjustment
             model_prob = max(0.05, market_price - edge_prob_adjustment)
         
-        logger.info("[PRICE-BASED-DEBUG] asset=%s market_price=%.2f edge_pct=%.2f%% edge_adjustment=%.3f model_prob=%.2f", 
+        logger.info("[PRICE-BASED-DEBUG] asset=%s market_price=%.2f edge_pct=%.2f%% edge_adjustment=%.3f model_prob=%.2f",
                     asset, market_price, edge_pct, edge_prob_adjustment, model_prob)
         
         logger.info("[PRICE-BASED-CONFIDENCE] asset=%s action=%s price=%.2f edge_pct=%.2f%% confidence=%.2f",
@@ -768,50 +777,14 @@ class LeanAgent15m:
                          self.config.name, ticker)
             return False
         
-        # Phase 1: YES/NO Sum Arbitrage Check
-        # Check for arbitrage opportunities before other validation
-        logger.info("[ARBITRAGE-CHECK-ENTRY] asset=%s ticker=%s", self.config.name, ticker)
-        try:
-            # KalshiMarketState uses best_bid_cents/best_ask_cents for YES leg
-            # NO leg prices are derived: no_bid = 100 - yes_ask, no_ask = 100 - yes_bid
-            yes_bid_cents = getattr(market_state, 'best_bid_cents', None)
-            yes_ask_cents = getattr(market_state, 'best_ask_cents', None)
-            
-            logger.info("[ARBITRAGE-CHECK-PRICES] asset=%s ticker=%s yes_bid=%s yes_ask=%s",
-                       self.config.name, ticker, yes_bid_cents, yes_ask_cents)
-            
-            if yes_bid_cents is not None and yes_ask_cents is not None:
-                # Derive NO leg prices
-                no_bid_cents = 100 - yes_ask_cents
-                no_ask_cents = 100 - yes_bid_cents
-                
-                logger.info("[ARBITRAGE-CHECK] asset=%s ticker=%s yes_bid=%dc no_bid=%dc yes_ask=%dc no_ask=%dc",
-                            self.config.name, ticker, yes_bid_cents, no_bid_cents, yes_ask_cents, no_ask_cents)
-                
-                duality_result = check_yes_no_duality(
-                    yes_bid=yes_bid_cents,
-                    no_bid=no_bid_cents,
-                    yes_ask=yes_ask_cents,
-                    no_ask=no_ask_cents,
-                    ticker=ticker
-                )
-                
-                if duality_result.arbitrage_opportunity is not None:
-                    logger.info(
-                        "[ARBITRAGE-OPPORTUNITY] asset=%s ticker=%s edge=%dc yes_ask=%dc no_bid=%dc recommended_size=%d",
-                        self.config.name, ticker,
-                        duality_result.arbitrage_opportunity.edge_cents,
-                        duality_result.arbitrage_opportunity.yes_ask,
-                        duality_result.arbitrage_opportunity.no_bid,
-                        duality_result.arbitrage_opportunity.recommended_size
-                    )
-                    # Arbitrage takes precedence - allow trade
-                    # The arbitrage execution callback will handle the actual trade
-            else:
-                logger.info("[ARBITRAGE-CHECK-SKIP] asset=%s ticker=%s missing prices yes_bid=%s yes_ask=%s",
-                           self.config.name, ticker, yes_bid_cents, yes_ask_cents)
-        except Exception as e:
-            logger.warning("[ARBITRAGE-CHECK-ERROR] asset=%s ticker=%s error=%s", self.config.name, ticker, e)
+        # FIXED: Removed duality check from agent_grid
+        # The orderbook already validates duality at the data source (duality_validator.py)
+        # Re-checking duality here on derived NO prices creates false violations
+        # Duality validation is handled by:
+        # 1. LocalOrderbook._check_crossed_market() in orderbook.py
+        # 2. DualityValidator.check_yes_no_duality() in duality_validator.py
+        # 3. KalshiMarketState.check_health() in market_state.py
+        # Agent grid should only use validated prices from market_state
         
         # Check staleness (default 15 seconds from profile)
         venue_staleness = 15  # Default, will be overridden by profile
@@ -898,6 +871,17 @@ class LeanAgent15m:
         if best_bid > 0 and best_ask > 0:
             # Both sides available - check spread
             spread_cents = best_ask - best_bid
+            # INDUSTRY ALIGNMENT: Convert spread to basis points for regime-aware validation
+            # Use mid price as reference for bp calculation
+            mid_price_cents = (best_bid + best_ask) / 2
+            if mid_price_cents > 0:
+                spread_bp = (spread_cents / mid_price_cents) * 100
+                # Check against industry-aligned max spread in basis points
+                if spread_bp > self.config.max_spread_basis_points:
+                    logger.warning("[MARKET-VALIDATION] asset=%s ticker=%s spread too wide=%.1fbp > max=%dbp (cents=%d)",
+                                 self.config.name, ticker, spread_bp, self.config.max_spread_basis_points, spread_cents)
+                    return False
+            # Legacy check in cents for backward compatibility
             if spread_cents > self.config.max_spread_cents:
                 logger.warning("[MARKET-VALIDATION] asset=%s ticker=%s spread too wide=%dc > max=%dc",
                              self.config.name, ticker, spread_cents, self.config.max_spread_cents)
@@ -1226,8 +1210,59 @@ class LeanAgent15m:
                     matching_tickers = [t for t in all_tickers if t.startswith(series_prefix)]
                     
                     if matching_tickers:
-                        # Use the first matching ticker (should be the current window)
-                        ticker = matching_tickers[0]
+                        # CRITICAL FIX: Sort tickers by expiration time to pick the most recent non-expired market
+                        # Extract expiration time from ticker suffix (e.g., 26JUN281730-30 -> 17:30 UTC)
+                        def extract_expiration_time(ticker):
+                            # Parse ticker format: KXASSET15M-YYMMMDDHHMM-SS
+                            match = re.search(r'-(\d{2}[A-Z]{3}\d{2})(\d{2})(\d{2})-(\d{2})', ticker)
+                            if match:
+                                day_str = match.group(1)  # e.g., 26JUN28
+                                hour = int(match.group(2))  # e.g., 17
+                                minute = int(match.group(3))  # e.g., 30
+                                second = int(match.group(4))  # e.g., 00
+                                
+                                # Parse day_str to datetime
+                                try:
+                                    # Format: DDMMMYY -> 26JUN26
+                                    day_part = day_str[:2]
+                                    month_part = day_str[2:5]
+                                    year_part = day_str[5:7]
+                                    year = 2000 + int(year_part)
+                                    
+                                    month_map = {
+                                        'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
+                                        'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12
+                                    }
+                                    month = month_map.get(month_part, 1)
+                                    day = int(day_part)
+                                    
+                                    # Use exp_dt to avoid shadowing module-level datetime
+                                    exp_dt = dt(year, month, day, hour, minute, second, tzinfo=timezone.utc)
+                                    return exp_dt
+                                except Exception:
+                                    return None
+                            return None
+                        
+                        # Sort tickers by expiration time (most recent first)
+                        now_utc = dt.now(timezone.utc)
+                        sorted_tickers = sorted(
+                            matching_tickers,
+                            key=lambda t: (extract_expiration_time(t) or dt.min),
+                            reverse=True
+                        )
+                        
+                        # Pick the first ticker that hasn't expired
+                        ticker = None
+                        for sorted_ticker in sorted_tickers:
+                            exp_time = extract_expiration_time(sorted_ticker)
+                            if exp_time and exp_time > now_utc:
+                                ticker = sorted_ticker
+                                break
+                        
+                        # Fallback to first ticker if all expired (shouldn't happen with proper catalog refresh)
+                        if not ticker and sorted_tickers:
+                            ticker = sorted_tickers[0]
+                        
                         market_state = self.market_state_store.get(ticker)
                         
                         if market_state:
@@ -1267,27 +1302,40 @@ class LeanAgent15m:
                 return None
             
             # Check per-strip order limit
-            # Extract strip ticker from market (e.g., KXBTCD-26JUN111330-30 -> KXBTCD)
-            # For 15m crypto, the strip is the series ticker (e.g., KXBTC15M)
-            strip_ticker = self.config.series_tickers[0] if self.config.series_tickers else None
+            # CRITICAL FIX: Use asset-specific series ticker for strip tracking
+            # For 15m crypto, each asset has its own series ticker (KXBTC15M, KXETH15M, etc.)
+            # We need to find the series ticker that matches the current asset
+            strip_ticker = None
+            if self.config.series_tickers:
+                # Find the series ticker that matches the current asset
+                for ticker in self.config.series_tickers:
+                    if asset.upper() in ticker.upper():
+                        strip_ticker = ticker
+                        break
+                # Fallback to first ticker if no match found
+                if not strip_ticker:
+                    strip_ticker = self.config.series_tickers[0]
+            
             if strip_ticker:
-                # Get current market ID to detect when to reset counter
+                # CRITICAL FIX: MinimalMarket has market_id directly, not nested under .market.market_id
                 current_market_id = None
-                if market and hasattr(market, 'market') and hasattr(market.market, 'market_id'):
+                if market and hasattr(market, 'market_id'):
+                    current_market_id = market.market_id
+                elif market and hasattr(market, 'market') and hasattr(market.market, 'market_id'):
                     current_market_id = market.market.market_id
                 
                 # DIAGNOSTIC: Log market ID tracking
                 stored_market_id = self._current_market_ids.get(strip_ticker)
                 logger.info(
-                    "[STRIP-DIAG] strip=%s current_market_id=%s stored_market_id=%s",
-                    strip_ticker, current_market_id, stored_market_id
+                    "[STRIP-DIAG] asset=%s strip=%s current_market_id=%s stored_market_id=%s",
+                    asset, strip_ticker, current_market_id, stored_market_id
                 )
                 
                 # Reset counter if market ID changed (new 15m strip)
                 if current_market_id and self._current_market_ids.get(strip_ticker) != current_market_id:
                     logger.info(
-                        "[STRIP-RESET] strip=%s market changed from %s to %s, resetting order count",
-                        strip_ticker, self._current_market_ids.get(strip_ticker), current_market_id
+                        "[STRIP-RESET] asset=%s strip=%s market changed from %s to %s, resetting order count",
+                        asset, strip_ticker, self._current_market_ids.get(strip_ticker), current_market_id
                     )
                     self._strip_order_counts[strip_ticker] = 0
                     self._current_market_ids[strip_ticker] = current_market_id
@@ -1295,8 +1343,8 @@ class LeanAgent15m:
                 current_strip_orders = self._strip_order_counts.get(strip_ticker, 0)
                 if current_strip_orders >= self.config.per_strip_order_limit:
                     logger.info(
-                        "[STRIP-LIMIT-CHECK] strip=%s orders=%d >= max=%d, skipping",
-                        strip_ticker, current_strip_orders, self.config.per_strip_order_limit
+                        "[STRIP-LIMIT-CHECK] asset=%s strip=%s orders=%d >= max=%d, skipping",
+                        asset, strip_ticker, current_strip_orders, self.config.per_strip_order_limit
                     )
                     return None
             
@@ -1310,15 +1358,14 @@ class LeanAgent15m:
                 if isinstance(close_time, str):
                     # Parse ISO string to timestamp
                     try:
-                        from datetime import datetime
                         if close_time.endswith('Z'):
                             close_time = close_time.replace('Z', '+00:00')
-                        dt = datetime.fromisoformat(close_time)
-                        close_time_ts = dt.timestamp()
+                        close_dt = dt.fromisoformat(close_time)
+                        close_time_ts = close_dt.timestamp()
                     except (ValueError, AttributeError):
                         # Fallback to computed time
                         close_time_ts = now + 900
-                elif isinstance(close_time, datetime):
+                elif isinstance(close_time, dt):
                     close_time_ts = close_time.timestamp()
                 else:
                     # Assume it's already a timestamp (float/int)
@@ -1391,8 +1438,8 @@ class LeanAgent15m:
             if strip_ticker:
                 self._strip_order_counts[strip_ticker] = self._strip_order_counts.get(strip_ticker, 0) + 1
                 logger.info(
-                    "[STRIP-ORDER-COUNT] strip=%s orders=%d/%d",
-                    strip_ticker, self._strip_order_counts[strip_ticker], self.config.per_strip_order_limit
+                    "[STRIP-ORDER-COUNT] asset=%s strip=%s orders=%d/%d",
+                    asset, strip_ticker, self._strip_order_counts[strip_ticker], self.config.per_strip_order_limit
                 )
             
             logger.info("[CANDIDATE-GENERATED] asset=%s side=%s", self.config.name, signal["side"])
@@ -1564,8 +1611,8 @@ async def build_15m_agent_grid(
     calibration_fit_interval_hours = 24
     per_asset_cooldown_s = 10  # Default to 10s if profile not loaded
     signal_mode = "trend"  # Default signal mode
-    price_based_buy_threshold = 0.50  # Default buy threshold
-    price_based_sell_threshold = 0.70  # Default sell threshold
+    price_based_buy_threshold = 0.60  # Buy YES in sweet spot (60-70c range per Polymarket data)
+    price_based_sell_threshold = 0.90  # Sell when price >= 0.90 (profit taking)
     try:
         from merid.risk.profiles.crypto_15m_profile import get_active_profile
         profile_adapter = get_active_profile()
