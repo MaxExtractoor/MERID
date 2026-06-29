@@ -2265,8 +2265,25 @@ class KalshiRiskManager:
                 )
             
             # Recalculate asset_notional from actual positions (for 5 crypto assets)
+            # CRITICAL FIX (2026-06-28): Cross-reference with position_cache to avoid stale fills_ledger data
+            # Position cache is the source of truth for current open positions
             try:
                 from config.kalshi_crypto_config import kalshi_ticker_to_asset
+                from merid.event_venues.kalshi.position_cache import get_position_cache
+                
+                position_cache = get_position_cache()
+                cache_positions = position_cache.get_all_positions()
+                
+                # Build set of assets that have open positions in position cache
+                assets_with_positions = set()
+                for market_id, pos in cache_positions.items():
+                    asset = kalshi_ticker_to_asset(market_id)
+                    if asset and asset.upper() in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                        if pos.contracts != 0:
+                            assets_with_positions.add(asset.upper())
+                
+                logger.debug("[ASSET-NOTIONAL-RESYNC] Assets with open positions in cache: %s", assets_with_positions)
+                
                 for ticker, pos in computed_positions.items():
                     contracts = pos.get("contracts", 0)
                     if contracts == 0:
@@ -2274,6 +2291,13 @@ class KalshiRiskManager:
                     asset = kalshi_ticker_to_asset(ticker)
                     if asset and asset.upper() in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
                         asset_key = asset.upper()
+                        # Only add notional if asset has open positions in position cache
+                        if asset_key not in assets_with_positions:
+                            logger.debug(
+                                "[ASSET-NOTIONAL-RESYNC] Skipping %s (asset=%s) - no open position in cache",
+                                ticker, asset_key
+                            )
+                            continue
                         avg_price_cents = pos.get("avg_price_cents", DEFAULT_KALSHI_PRICE_CENTS)
                         notional = abs(contracts) * avg_price_cents / 100.0
                         self._state.asset_notional[asset_key] = notional
