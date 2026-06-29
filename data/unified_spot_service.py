@@ -84,6 +84,9 @@ class UnifiedSpotService:
         self._running = False
         self._refresh_task: Optional[asyncio.Task] = None
         self._refresh_interval_s = 5.0  # Refresh every 5 seconds (was 30s - too slow for velocity calc)
+        # Price history for volatility regime detection (2026 best practice)
+        self._price_history: Dict[str, list] = {}  # asset -> list of (timestamp, price) tuples
+        self._max_history_length = 3600  # Keep 1 hour of history (5s interval * 720 points)
         logger.info("[UNIFIED-SPOT] UnifiedSpotService initialized (simplified production version)")
 
     def is_ready(self) -> bool:
@@ -197,6 +200,13 @@ class UnifiedSpotService:
                     'timestamp': int(time.time() * 1000),
                     'source': 'coinbase_public'
                 }
+                # Add to price history for volatility regime detection
+                if asset not in self._price_history:
+                    self._price_history[asset] = []
+                self._price_history[asset].append((int(time.time() * 1000), price))
+                # Trim history to max length
+                if len(self._price_history[asset]) > self._max_history_length:
+                    self._price_history[asset] = self._price_history[asset][-self._max_history_length:]
             
             logger.info(f"[UNIFIED-SPOT] Fetched {asset}: ${price}")
             return True
@@ -267,6 +277,35 @@ class UnifiedSpotService:
             staleness_ms=staleness_ms,
             source=result.source
         )
+    
+    def get_spot_history(self, asset: str, window_s: int = 300) -> list:
+        """Get price history for volatility regime detection.
+        
+        Args:
+            asset: Asset symbol (e.g., "BTC")
+            window_s: Time window in seconds (default 300s = 5 minutes)
+        
+        Returns:
+            List of dicts with 'price' and 'timestamp' keys
+        """
+        with self._cache_lock:
+            history = self._price_history.get(asset, [])
+        
+        if not history:
+            return []
+        
+        # Filter by time window
+        now_ms = int(time.time() * 1000)
+        window_ms = window_s * 1000
+        cutoff_ms = now_ms - window_ms
+        
+        filtered = [
+            {"price": price, "timestamp": ts}
+            for ts, price in history
+            if ts >= cutoff_ms
+        ]
+        
+        return filtered
 
     async def get_spot_price(self, asset: str) -> Optional[float]:
         """Get cached spot price for asset as a float (compatibility method for agents).
