@@ -761,6 +761,9 @@ class LeanAgent15m:
             spot_data = spot_service.get_spot_history(asset, window_s=volatility_window)
             
             if not spot_data or len(spot_data) < 2:
+                # Insufficient data - default to calm regime with minimum volatility
+                logger.debug("[VOLATILITY-REGIME] asset=%s ticker=%s insufficient price history (%d points), using calm regime",
+                           self.config.name, ticker, len(spot_data) if spot_data else 0)
                 return "calm", 0.001
             
             # Calculate realized volatility (standard deviation of returns)
@@ -818,17 +821,23 @@ class LeanAgent15m:
         elevated_threshold = self.config.elevated_volatility_threshold
         
         if regime == "calm":
-            # Interpolate between calm and elevated
-            ratio = volatility / calm_threshold
-            interpolated = self.config.calm_spread_threshold_bp * (ratio ** self.config.spread_volatility_sensitivity)
-            threshold_bp = min(int(interpolated), self.config.elevated_spread_threshold_bp)
+            # If volatility is very low (insufficient data), use calm threshold directly
+            if volatility < 0.0005:  # Very low volatility indicates insufficient data
+                threshold_bp = self.config.calm_spread_threshold_bp
+            else:
+                # Interpolate between calm and elevated
+                ratio = volatility / calm_threshold
+                interpolated = self.config.calm_spread_threshold_bp * (ratio ** self.config.spread_volatility_sensitivity)
+                threshold_bp = max(int(interpolated), 10)  # Minimum 10bp to prevent 0bp
+                threshold_bp = min(threshold_bp, self.config.elevated_spread_threshold_bp)
         elif regime == "elevated":
             # Interpolate between elevated and violent
             ratio = volatility / elevated_threshold
             base = self.config.elevated_spread_threshold_bp
             target = self.config.violent_spread_threshold_bp
             interpolated = base * (ratio ** self.config.spread_volatility_sensitivity)
-            threshold_bp = min(int(interpolated), target)
+            threshold_bp = int(interpolated)
+            threshold_bp = min(threshold_bp, target)
         # violent regime uses maximum threshold
         
         logger.debug("[DYNAMIC-SPREAD] asset=%s ticker=%s regime=%s threshold=%dbp volatility=%.4f",
