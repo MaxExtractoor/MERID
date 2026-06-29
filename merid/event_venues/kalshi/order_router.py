@@ -2303,8 +2303,9 @@ def _validate_underlying_plausibility(intent: OrderIntent) -> Optional[str]:
     
     # Placeholder: if price is very cheap (implies large required move)
     # and edge is not exceptional, reject
-    # Adjusted for crypto markets: reject extremely cheap contracts (< 5 cents)
-    if intent.price_cents <= 5:
+    # CRITICAL: Use 20c threshold to match profile min_contract_price_cents guardrail
+    # This prevents deep OTM longshots that are statistically losing (7c BTC, 10c SOL, 12c trades)
+    if intent.price_cents < 20:
         if not (intent.edge_pct and intent.edge_pct > IMPLAUSIBLE_MOVE_MIN_EDGE_PCT):
             return f"{ERR_IMPLAUSIBLE_MOVE}:price_cents={intent.price_cents}"
     
