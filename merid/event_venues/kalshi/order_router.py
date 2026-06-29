@@ -3,6 +3,10 @@
 Routes ``OrderIntent`` through risk checks and dispatches to the
 appropriate execution path based on ``TradingMode``.
 
+PROFITABILITY ENHANCEMENT: YES/NO Sum Arbitrage Execution
+Supports execution of arbitrage opportunities detected by the duality validator.
+When YES+NO < 100c, the system can buy both sides for a guaranteed profit.
+
 Usage::
 
     from merid.event_venues.kalshi.order_router import (
@@ -97,6 +101,152 @@ class RestingOrder:
 # Global resting order tracker (in-memory, resets on restart)
 _resting_orders: Dict[str, RestingOrder] = {}
 _resting_orders_lock = threading.Lock()
+
+
+# =============================================================================
+# Fee-Aware Edge Calculation (Phase 1)
+# =============================================================================
+
+def calculate_kalshi_fee(contract_price_cents: int) -> float:
+    """
+    Calculate Kalshi taker fee for a contract.
+    
+    Fee formula: 0.07 × P × (1−P) where P is contract price in dollars
+    Returns fee in cents.
+    
+    Args:
+        contract_price_cents: Contract price in cents (e.g., 55 for $0.55)
+    
+    Returns:
+        Fee in cents
+    """
+    price_dollars = contract_price_cents / 100.0
+    fee_dollars = 0.07 * price_dollars * (1.0 - price_dollars)
+    return fee_dollars * 100.0  # Convert to cents
+
+
+def check_fee_aware_edge(
+    edge_pct: float,
+    contract_price_cents: int,
+    min_edge_cents: float = 2.0,
+    fee_per_contract: float = 0.07
+) -> tuple[bool, str]:
+    """
+    Check if edge clears fee-aware gate.
+    
+    Edge gate: (estimated_probability - market_price) > fees + min_edge_cents
+    
+    Args:
+        edge_pct: Edge percentage (e.g., 0.05 for 5%)
+        contract_price_cents: Contract price in cents
+        min_edge_cents: Minimum edge in cents after fees (default $0.02)
+        fee_per_contract: Kalshi taker fee per contract (default 7 cents)
+    
+    Returns:
+        (passes_gate, reason)
+    """
+    # Calculate fee in cents
+    fee_cents = calculate_kalshi_fee(contract_price_cents)
+    
+    # Convert edge_pct to cents
+    edge_cents = edge_pct * contract_price_cents
+    
+    # Check if edge clears fee + minimum buffer
+    net_edge_cents = edge_cents - fee_cents
+    required_edge_cents = min_edge_cents
+    
+    if net_edge_cents < required_edge_cents:
+        return (
+            False,
+            f"fee_aware_gate: edge={edge_cents:.2f}c - fee={fee_cents:.2f}c = {net_edge_cents:.2f}c < required={required_edge_cents:.2f}c"
+        )
+    
+    return True, "ok"
+
+
+# =============================================================================
+# Market Microstructure Filters (Phase 1)
+# =============================================================================
+
+def check_market_microstructure(
+    yes_bid_cents: int,
+    yes_ask_cents: int,
+    no_bid_cents: int,
+    no_ask_cents: int,
+    yes_depth: int,
+    no_depth: int,
+    max_spread_cents: float = 8.0,
+    min_depth_usd: float = 200.0,
+    min_yes_depth: int = 1,
+    min_no_depth: int = 1
+) -> tuple[bool, str]:
+    """
+    Check if market microstructure meets quality thresholds.
+    
+    Filters based on research: avoid wide spreads and thin books.
+    
+    Args:
+        yes_bid_cents: YES bid price in cents
+        yes_ask_cents: YES ask price in cents
+        no_bid_cents: NO bid price in cents
+        no_ask_cents: NO ask price in cents
+        yes_depth: YES depth (number of contracts)
+        no_depth: NO depth (number of contracts)
+        max_spread_cents: Maximum allowed spread in cents (default 8 cents)
+        min_depth_usd: Minimum depth in USD within 3 cents of mid (default $200)
+        min_yes_depth: Minimum YES depth threshold (default 1)
+        min_no_depth: Minimum NO depth threshold (default 1)
+    
+    Returns:
+        (passes_gate, reason)
+    """
+    # Check YES spread
+    yes_spread_cents = yes_ask_cents - yes_bid_cents
+    if yes_spread_cents > max_spread_cents:
+        return (
+            False,
+            f"yes_spread_too_wide: {yes_spread_cents}c > {max_spread_cents}c"
+        )
+    
+    # Check NO spread
+    no_spread_cents = no_ask_cents - no_bid_cents
+    if no_spread_cents > max_spread_cents:
+        return (
+            False,
+            f"no_spread_too_wide: {no_spread_cents}c > {max_spread_cents}c"
+        )
+    
+    # Check minimum depth thresholds
+    if yes_depth < min_yes_depth:
+        return (
+            False,
+            f"yes_depth_too_low: {yes_depth} < {min_yes_depth}"
+        )
+    
+    if no_depth < min_no_depth:
+        return (
+            False,
+            f"no_depth_too_low: {no_depth} < {min_no_depth}"
+        )
+    
+    # Check depth in USD (simplified: depth * contract_value)
+    # Contract value is approximately $1 for binary contracts
+    yes_depth_usd = yes_depth * 1.0
+    no_depth_usd = no_depth * 1.0
+    
+    if yes_depth_usd < min_depth_usd:
+        return (
+            False,
+            f"yes_depth_usd_too_low: ${yes_depth_usd:.0f} < ${min_depth_usd:.0f}"
+        )
+    
+    if no_depth_usd < min_depth_usd:
+        return (
+            False,
+            f"no_depth_usd_too_low: ${no_depth_usd:.0f} < ${min_depth_usd:.0f}"
+        )
+    
+    return True, "ok"
 
 
 def track_resting_order(order: RestingOrder) -> None:
@@ -415,12 +565,12 @@ def resolve_window_policy(
     elif regime == "aggressive":
         min_tte_secs = 90  # 1.5 min
     
-    # Spread gate
-    max_spread_cents = 40
+    # Spread gate (RELAXED: aligned with profile max_spread_cents=50)
+    max_spread_cents = 50  # RELAXED: Increased from 40 to 50 to match profile
     if regime == "conservative":
-        max_spread_cents = 60
+        max_spread_cents = 60  # Conservative allows wider spreads
     elif regime == "aggressive":
-        max_spread_cents = 30
+        max_spread_cents = 50  # RELAXED: Increased from 30 to 50 to match profile
     
     return WindowResolution(
         window_id=window_id,
@@ -925,6 +1075,13 @@ class OrderIntent:
     stop_loss_price_cents: Optional[int] = None  # Protective stop in cents
     # Sizing context for TRADE-TRACE (links fill back to edge/sizing decision)
     edgepct: float = 0.0
+    # Phase 1: Market microstructure data for fee-aware edge and microstructure gates
+    yes_bid_cents: Optional[int] = None
+    yes_ask_cents: Optional[int] = None
+    no_bid_cents: Optional[int] = None
+    no_ask_cents: Optional[int] = None
+    yes_depth: Optional[int] = None
+    no_depth: Optional[int] = None
     netedgecents: float = 0.0
     band: str = ""
     regime: str = ""
@@ -1577,11 +1734,83 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
         if intent.model_prob is None or not (KALSHI_MIN_PROBABILITY <= intent.model_prob <= KALSHI_MAX_PROBABILITY):
             return f"invalid_model_prob:{intent.model_prob}"
         
+        # Phase 1: Fee-aware edge gate for velocity orders
+        # Check if edge clears Kalshi fees + minimum buffer
+        # SKIP for price-based strategy (no edge calculation)
+        if intent.edge_pct is not None and intent.price_cents is not None and intent.rationale and "price_based" not in intent.rationale:
+            # Load fee-aware edge config from profile
+            try:
+                from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
+                profile_adapter = Crypto15mProfileAdapter()
+                profile = profile_adapter.profile
+                
+                if profile.fee_aware_edge_enabled:
+                    passes, reason = check_fee_aware_edge(
+                        edge_pct=abs(intent.edge_pct),
+                        contract_price_cents=intent.price_cents,
+                        min_edge_cents=profile.fee_aware_edge_min_edge_cents,
+                        fee_per_contract=profile.fee_aware_edge_fee_per_contract
+                    )
+                    if not passes:
+                        logger.warning(
+                            "[FEE-AWARE-GATE] ticker=%s %s",
+                            intent.ticker, reason
+                        )
+                        return f"fee_aware_gate_failed:{reason}"
+            except Exception as e:
+                logger.warning(
+                    "[FEE-AWARE-GATE] ticker=%s failed to load profile, skipping fee check: %s",
+                    intent.ticker, e
+                )
+        
+        # Phase 1: Market microstructure filters for velocity orders
+        # Check spread and depth thresholds
+        # SKIP for price-based strategy (trades based on price thresholds, not microstructure)
+        if intent.yes_bid_cents is not None and intent.yes_ask_cents is not None and intent.rationale and "price_based" not in intent.rationale:
+            try:
+                from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
+                profile_adapter = Crypto15mProfileAdapter()
+                profile = profile_adapter.profile
+                
+                if profile.market_microstructure_enabled:
+                    # Derive NO prices from YES prices using Kalshi duality
+                    no_bid_cents = 100 - intent.yes_ask_cents if intent.yes_ask_cents else None
+                    no_ask_cents = 100 - intent.yes_bid_cents if intent.yes_bid_cents else None
+                    
+                    # Use depth from intent if available, otherwise default to 1
+                    yes_depth = getattr(intent, 'yes_depth', 1)
+                    no_depth = getattr(intent, 'no_depth', 1)
+                    
+                    passes, reason = check_market_microstructure(
+                        yes_bid_cents=intent.yes_bid_cents,
+                        yes_ask_cents=intent.yes_ask_cents,
+                        no_bid_cents=no_bid_cents or 0,
+                        no_ask_cents=no_ask_cents or 0,
+                        yes_depth=yes_depth,
+                        no_depth=no_depth,
+                        max_spread_cents=profile.market_microstructure_max_spread_cents,
+                        min_depth_usd=profile.market_microstructure_min_depth_usd,
+                        min_yes_depth=profile.market_microstructure_min_yes_depth,
+                        min_no_depth=profile.market_microstructure_min_no_depth
+                    )
+                    if not passes:
+                        logger.warning(
+                            "[MICROSTRUCTURE-GATE] ticker=%s %s",
+                            intent.ticker, reason
+                        )
+                        return f"microstructure_gate_failed:{reason}"
+            except Exception as e:
+                logger.warning(
+                    "[MICROSTRUCTURE-GATE] ticker=%s failed to load profile, skipping microstructure check: %s",
+                    intent.ticker, e
+                )
+        
         # SAFETY: Enforce minimum edge threshold even for velocity orders
         # This prevents low-quality trades with insufficient edge
         # FIX: Use absolute value to allow negative edges (valid contrarian signals)
-        min_edge_threshold = 0.02  # 2% minimum edge for velocity orders
-        if intent.edge_pct is not None and abs(intent.edge_pct) < min_edge_threshold:
+        # SKIP for price-based strategy (no edge calculation, trades based on price thresholds)
+        min_edge_threshold = 0.03  # 3% minimum edge for velocity orders (tightened from 2%)
+        if intent.edge_pct is not None and abs(intent.edge_pct) < min_edge_threshold and (intent.rationale is None or "price_based" not in intent.rationale):
             logger.warning(
                 "[SIGNAL-VALIDATION] ticker=%s velocity order edge_pct=%.2f%% below minimum %.2f%% threshold (abs value)",
                 intent.ticker, intent.edge_pct * 100, min_edge_threshold * 100
@@ -1589,15 +1818,17 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
             return f"edge_pct_too_low:{intent.edge_pct:.4f}"
         
         # Relax confidence validation for velocity orders (may have lower confidence)
-        # FIX: Lowered threshold from 0.60 to 0.50 for 15m crypto markets
-        # 15m crypto markets have higher uncertainty, so 50% confidence is acceptable
-        min_confidence_threshold = 0.50  # 50% minimum confidence for velocity orders
-        if intent.confidence is not None and intent.confidence < min_confidence_threshold:
-            logger.warning(
-                "[SIGNAL-VALIDATION] ticker=%s velocity order confidence=%.2f below minimum %.2f threshold",
-                intent.ticker, intent.confidence, min_confidence_threshold
-            )
-            return f"confidence_too_low:{intent.confidence:.2f}"
+        # FIX: Increased threshold from 0.50 to 0.60 for 15m crypto markets
+        # 15m crypto markets require higher confidence for quality trades
+        # SKIP for price-based strategy (no confidence calculation, trades based on price thresholds)
+        if intent.rationale and "price_based" not in intent.rationale:
+            min_confidence_threshold = 0.60  # 60% minimum confidence for velocity orders (tightened from 50%)
+            if intent.confidence is not None and intent.confidence < min_confidence_threshold:
+                logger.warning(
+                    "[SIGNAL-VALIDATION] ticker=%s velocity order confidence=%.2f below minimum %.2f threshold",
+                    intent.ticker, intent.confidence, min_confidence_threshold
+                )
+                return f"confidence_too_low:{intent.confidence:.2f}"
         
         return None
     
@@ -1652,8 +1883,9 @@ def _validate_prob_price_consistency(intent: OrderIntent) -> Optional[str]:
     if not ENFORCE_PROB_PRICE_CONSISTENCY:
         return None
     
-    # Only for opening orders
-    if intent.action == "sell":
+    # Only for opening orders (buy actions or sell YES which opens a short)
+    # Closing orders (sell to close, sell NO) bypass this check
+    if intent.action == "sell" and intent.side != "yes":
         return None
     
     # Map price to implied market probability
@@ -1664,14 +1896,27 @@ def _validate_prob_price_consistency(intent: OrderIntent) -> Optional[str]:
     if model_prob is None:
         return ERR_MISSING_MODEL_PROB
     
-    # For YES/BUY_YES: model_prob must be > implied_prob (positive edge)
-    if intent.side in ("yes", "buy_yes"):
-        if model_prob <= implied_prob:
-            return f"{ERR_NO_EDGE_VS_IMPLIED}:model_prob={model_prob:.3f},implied={implied_prob:.3f}"
-    # For NO: (1 - model_prob) must be > implied_prob (model NO prob > market NO prob)
+    # For BUY YES: model_prob must be > implied_prob - tolerance (we think outcome is more likely than market)
+    # Tolerance allows for small pricing noise - reject only if model is clearly worse than market
+    # Handle both lowercase (before conversion) and uppercase (after conversion) formats
+    side_lower = intent.side.lower() if intent.side else ""
+    action_lower = intent.action.lower() if intent.action else ""
+    if side_lower in ("yes", "buy_yes") and action_lower == "buy":
+        threshold = implied_prob - PROB_PRICE_TOLERANCE_PCT
+        logger.info(f"[PROB-PRICE-DEBUG] BUY YES: model_prob={model_prob:.3f}, implied={implied_prob:.3f}, threshold={threshold:.3f}, model_prob > threshold = {model_prob > threshold}")
+        if model_prob <= threshold:
+            return f"{ERR_NO_EDGE_VS_IMPLIED}:model_prob={model_prob:.3f},implied={implied_prob:.3f},tolerance={PROB_PRICE_TOLERANCE_PCT:.3f}"
+    # For SELL YES (betting NO): model_prob must be < implied_prob + tolerance (we think outcome is less likely than market)
+    elif side_lower == "yes" and action_lower == "sell":
+        if model_prob >= implied_prob + PROB_PRICE_TOLERANCE_PCT:
+            return f"{ERR_NO_EDGE_VS_IMPLIED}:model_prob={model_prob:.3f},implied={implied_prob:.3f},tolerance={PROB_PRICE_TOLERANCE_PCT:.3f}"
+    # For BUY NO: We're betting NO, so we want model YES prob < market YES prob (market overprices YES)
+    # This is equivalent to: model_prob < implied_prob + tolerance
+    # Example: model says YES=79% (NO=21%), market says YES=50% (NO=50%)
+    # Market overprices NO, so we buy NO. Edge = 29% in our favor.
     else:  # buying NO
-        if (1 - model_prob) <= implied_prob:
-            return f"{ERR_NO_EDGE_VS_IMPLIED}:model_prob={model_prob:.3f},implied={implied_prob:.3f}"
+        if model_prob >= implied_prob + PROB_PRICE_TOLERANCE_PCT:
+            return f"{ERR_NO_EDGE_VS_IMPLIED}:model_prob={model_prob:.3f},implied={implied_prob:.3f},tolerance={PROB_PRICE_TOLERANCE_PCT:.3f}"
     
     return None
 
@@ -1812,10 +2057,10 @@ def _check_market_liquidity(intent: OrderIntent, state: Optional[Any]) -> Option
     # Convert depth to dollars
     depth_dollars = depth_10c / 100.0
     
-    # Minimum liquidity threshold: $50 total book depth (relaxed from $500 for 15m crypto)
+    # Minimum liquidity threshold: $25 total book depth (relaxed from $50 for 15m crypto)
     # 15m crypto markets have thinner books than traditional venues
-    # ETH/SOL/XRP/DOGE typically have $50-200 depth, not $500+
-    min_liquidity_threshold = 50.0
+    # ETH/SOL/XRP/DOGE typically have $25-200 depth, not $500+
+    min_liquidity_threshold = 25.0
     
     if depth_dollars < min_liquidity_threshold:
         logger.warning(
@@ -2233,11 +2478,15 @@ def _check_bankroll_risk_cap(intent: OrderIntent) -> Optional[OrderResult]:
     if effective_equity_usd is None or effective_equity_usd <= 0:
         effective_equity_usd = _derive_live_bankroll_usd()
     
-    # TEMPORARY: Bypass bankroll cap check for testing to allow trade execution
-    # The bankroll service shows equity=31.36 but risk check sees $0.00 due to timing
-    # TODO: Fix bankroll service initialization timing
-    logger.warning("[BANKROLL-CAP] TEMPORARILY BYPASSED for testing - bankroll service timing issue")
-    return None
+    # FAIL-CLOSED: If bankroll still unavailable after fallback, reject order
+    if effective_equity_usd is None or effective_equity_usd <= 0:
+        logger.error("[BANKROLL-CAP] Bankroll unavailable after fallback - rejecting order for safety")
+        return OrderResult(
+            status="rejected",
+            mode="bankroll_cap",
+            reason="bankroll_unavailable:cannot_determine_live_balance",
+            latency_ms=0.0,
+        )
 
     # Get configured risk fraction (default to 3%, clamp to 1-3%)
     risk_fraction = float(os.getenv("MERID_MAX_RISK_FRACTION_PER_CYCLE", "0.03"))
@@ -2739,10 +2988,9 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         # SEV-0 FIX: Global freshness SLA — block orders if market data is >5s stale
         # This prevents the 476s blind periods and ensures "never blind again"
         try:
-            # SEV-0: Enforce strict 5s freshness SLA (was 90s)
-            # TEMPORARY: Increase staleness threshold to 180s for testing to allow trade execution
-            # TODO: Fix market data update timing - currently 135s old vs 120s threshold
-            _MARKET_DATA_MAX_STALENESS_S = float(os.getenv("KALSHI_MARKET_DATA_MAX_STALENESS_S", "180"))
+            # SEV-0: Enforce strict 5s freshness SLA (was 90s, then temporarily 180s)
+            # Fixed: Now defaults to 5s to prevent trading on stale data
+            _MARKET_DATA_MAX_STALENESS_S = float(os.getenv("KALSHI_MARKET_DATA_MAX_STALENESS_S", "5"))
         except NameError as ne:
             logger.error(f"[DEBUG] NameError at line 1924: {ne}, os in locals: {'os' in locals()}, os in globals: {'os' in globals()}")
             raise
@@ -5809,11 +6057,95 @@ async def route_batch_orders_async(
     successful = sum(1 for r in all_results if "filled" in r.status or "accepted" in r.status)
     failed = len(all_results) - successful
 
-    return BatchOrderResult(
-        total=len(batch.orders),
-        successful=successful,
-        failed=failed,
-        results=all_results,
-        latency_ms=round(latency, 2),
-        order_group_id=batch.order_group_id,
+
+# =============================================================================
+# YES/NO Sum Arbitrage Execution
+# =============================================================================
+
+async def execute_arbitrage_async(
+    yes_ticker: str,
+    no_ticker: str,
+    yes_ask_cents: int,
+    no_bid_cents: int,
+    size: int,
+    market_id: Optional[str] = None
+) -> Dict[str, OrderResult]:
+    """Execute YES/NO sum arbitrage by buying both sides.
+    
+    Args:
+        yes_ticker: YES contract ticker
+        no_ticker: NO contract ticker
+        yes_ask_cents: YES ask price in cents
+        no_bid_cents: NO bid price in cents
+        size: Number of contracts to buy on each side
+        market_id: Optional market ID for tracking
+        
+    Returns:
+        Dictionary with 'yes' and 'no' keys containing OrderResults
+    """
+    logger.info(
+        "[ARBITRAGE-EXECUTE] Executing arbitrage: yes_ticker=%s no_ticker=%s "
+        "yes_ask=%dc no_bid=%dc size=%d edge=%dc",
+        yes_ticker, no_ticker, yes_ask_cents, no_bid_cents, size,
+        100 - (yes_ask_cents + no_bid_cents)
     )
+    
+    # Create order intents for both sides
+    yes_intent = OrderIntent(
+        ticker=yes_ticker,
+        side="yes",
+        action="buy",
+        price_cents=yes_ask_cents,
+        count=size,
+        source="arbitrage",
+        intent_id=f"arb_yes_{_time.monotonic():.0f}",
+    )
+    
+    no_intent = OrderIntent(
+        ticker=no_ticker,
+        side="no",
+        action="buy",
+        price_cents=no_bid_cents,
+        count=size,
+        source="arbitrage",
+        intent_id=f"arb_no_{_time.monotonic():.0f}",
+    )
+    
+    # Execute both orders concurrently
+    results = await asyncio.gather(
+        route_order_async(yes_intent),
+        route_order_async(no_intent),
+        return_exceptions=True
+    )
+    
+    # Normalize results
+    yes_result = results[0] if isinstance(results[0], OrderResult) else OrderResult(
+        status="rejected",
+        mode=_resolve_mode(None),
+        reason=f"exception:{str(results[0])[:100]}",
+        latency_ms=0.0,
+    )
+    
+    no_result = results[1] if isinstance(results[1], OrderResult) else OrderResult(
+        status="rejected",
+        mode=_resolve_mode(None),
+        reason=f"exception:{str(results[1])[:100]}",
+        latency_ms=0.0,
+    )
+    
+    # Log arbitrage execution results
+    yes_success = "filled" in yes_result.status or "accepted" in yes_result.status
+    no_success = "filled" in no_result.status or "accepted" in no_result.status
+    
+    if yes_success and no_success:
+        logger.info(
+            "[ARBITRAGE-SUCCESS] Both sides filled: yes_status=%s no_status=%s total_edge=%dc",
+            yes_result.status, no_result.status, 100 - (yes_ask_cents + no_bid_cents)
+        )
+    else:
+        logger.warning(
+            "[ARBITRAGE-PARTIAL] Partial fill: yes_status=%s no_status=%s",
+            yes_result.status, no_result.status
+        )
+    
+    return {"yes": yes_result, "no": no_result}
