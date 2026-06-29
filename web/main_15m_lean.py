@@ -1,7 +1,13 @@
 from __future__ import annotations
 import sys
-sys.stderr.flush()
-print("[MAIN-15M-LEAN] FILE START - Beginning execution", file=sys.stderr, flush=True)
+from pathlib import Path
+
+# CRITICAL DIAGNOSTIC: Write to file to verify execution
+try:
+    import time
+    Path("c:\\Dev\\MERID\\main_15m_execution_marker.txt").write_text(f"EXECUTED: {time.time()}")
+except:
+    pass
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -16,6 +22,9 @@ from pathlib import Path
 # This ensures all logs go through the same configured logger
 from utils.logger import get_logger
 logger = get_logger("web.main_15m_lean")
+
+# CRITICAL DIAGNOSTIC: Log file execution
+logger.info("[MAIN-15M-LEAN] FILE START - Beginning execution")
 
 MERID_HTTP_PORT = 8011
 
@@ -311,16 +320,14 @@ os.environ['MERID_RUNTIME_MODE'] = '15m_live'
 @asynccontextmanager
 async def lifespan(app):
     """Lifespan context manager for startup/shutdown events."""
-    # CRITICAL DIAGNOSTIC: Direct print at function entry to verify lifespan is called
-    print("=" * 80, file=sys.stderr, flush=True)
-    print("[LIFESPAN-ENTRY] lifespan function called - ENTRY POINT", file=sys.stderr, flush=True)
-    print("=" * 80, file=sys.stderr, flush=True)
-    logger.info("[LIFESPAN-ENTRY] lifespan function called")
+    # CRITICAL DIAGNOSTIC: Log at function entry to verify lifespan is called
+    logger.info("=" * 80)
+    logger.info("[LIFESPAN-ENTRY] lifespan function called - ENTRY POINT")
+    logger.info("=" * 80)
     
     # Mark startup as started immediately so health watcher can detect it
     startup_state.started = True
     startup_state.started_at = datetime.now(timezone.utc)
-    print("[LIFESPAN] startup_state.started set to True", file=sys.stderr, flush=True)
     logger.info("[LIFESPAN] startup_state.started set to True")
     
     # Startup
@@ -403,7 +410,6 @@ async def lifespan(app):
     logger.info("[SHUTDOWN] Graceful shutdown complete")
 
 # P0-12 DIAGNOSTIC: Log app creation
-print("[APP-CREATION] Creating FastAPI app with lifespan", file=sys.stderr, flush=True)
 logger.info("[APP-CREATION] Creating FastAPI app with lifespan")
 
 app = FastAPI(
@@ -416,7 +422,6 @@ app = FastAPI(
 )
 
 # P0-12 DIAGNOSTIC: Log app created
-print("[APP-CREATED] FastAPI app instance created", file=sys.stderr, flush=True)
 logger.info("[APP-CREATED] FastAPI app instance created")
 
 # Phase 4.4: Include only production API routers (no legacy contamination)
@@ -565,6 +570,23 @@ async def health_check():
         "error": startup_state.error,
         "started_at": startup_state.started_at.isoformat() if startup_state.started_at else None,
         "completed_at": startup_state.completed_at.isoformat() if startup_state.completed_at else None,
+    }
+
+@app.get("/api/v1/ws-bridge-status")
+async def ws_bridge_status():
+    """Return WS bridge status for diagnostics."""
+    from merid.event_venues.kalshi.ws_bridge import get_bridge
+    ws_bridge = get_bridge()
+    if ws_bridge is None:
+        return {
+            "status": "not_initialized",
+            "running": False,
+            "reason": "bridge_singleton_is_none"
+        }
+    summary = ws_bridge.summary()
+    return {
+        "status": "running" if summary.get("running", False) else "stopped",
+        "summary": summary
     }
 
 @app.get("/api/v1/loop-status")
@@ -1493,7 +1515,28 @@ async def refresh_ws_subscriptions_once(catalog, ws_bridge, iteration: int, stop
     if active_tickers:
         logger.info(f"[WS-REFRESH] Active tickers for auto-reconnect: {list(active_tickers)}")
         # Update the bridge's desired tickers so auto-reconnect knows what to subscribe to
+        old_tickers = set(ws_bridge._subscribed_tickers) if ws_bridge._subscribed_tickers else set()
+        new_tickers = set(active_tickers)
         ws_bridge._subscribed_tickers = list(active_tickers)
+        
+        # CRITICAL FIX: Trigger WS re-sync if tickers changed (catalog transition)
+        # This ensures the WebSocket subscribes to the new 15m contracts after rollover
+        if old_tickers != new_tickers:
+            logger.warning(f"[WS-REFRESH] Tickers changed from {old_tickers} to {new_tickers} - triggering WS re-sync")
+            try:
+                # Trigger async re-sync by setting the sync flag
+                if hasattr(ws_bridge, '_sync_requested'):
+                    ws_bridge._sync_requested = True
+                    logger.info("[WS-REFRESH] Set sync_requested flag for WS bridge")
+                # Also try direct sync if available
+                if hasattr(ws_bridge, 'sync_to_catalog'):
+                    import asyncio
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(ws_bridge.sync_to_catalog())
+                        logger.info("[WS-REFRESH] Scheduled sync_to_catalog task")
+            except Exception as sync_error:
+                logger.error(f"[WS-REFRESH] Failed to trigger WS re-sync: {sync_error}", exc_info=True)
     
     # MD FRESHNESS (decoupled from _rest_fallback_mode): Re-poll orderbooks via REST
     # so market data never goes stale, even when WS "connects" but delivers no deltas
@@ -1527,12 +1570,17 @@ async def refresh_ws_subscriptions_once(catalog, ws_bridge, iteration: int, stop
                     except Exception:
                         age_s = None
             
-            # Check if orderbook has actual depth (yes_levels or no_levels)
+            # Check if orderbook has actual depth (yes_bids or no_bids)
+            # KalshiMarketState stores levels in yes_bids/no_bids, not yes_levels/no_levels
             has_depth = False
             if state is not None:
-                yes_levels = getattr(state, "yes_levels", None)
-                no_levels = getattr(state, "no_levels", None)
-                if (yes_levels and len(yes_levels) > 0) or (no_levels and len(no_levels) > 0):
+                yes_bids = getattr(state, "yes_bids", None)
+                no_bids = getattr(state, "no_bids", None)
+                # Also check best_bid_cents and best_ask_cents as fallback
+                best_bid = getattr(state, "best_bid_cents", None)
+                best_ask = getattr(state, "best_ask_cents", None)
+                if ((yes_bids and len(yes_bids) > 0) or (no_bids and len(no_bids) > 0) or
+                    (best_bid is not None and best_ask is not None)):
                     has_depth = True
             
             # Skip REST only if fresh AND has depth
@@ -1845,6 +1893,52 @@ async def _run_full_startup_in_lifespan(app):
                     logger.warning("[STARTUP-STACK] P2.7: Settlement poller NOT started (Kalshi credentials unavailable)")
             except Exception as e:
                 logger.warning("[STARTUP-STACK] P2.7: Settlement poller start failed (non-fatal): %s", e)
+
+            # CRITICAL FIX: Start PositionMonitor for take profit and stop loss enforcement
+            # This was completely missing from production startup, meaning TP/SL were never enforced
+            try:
+                from merid.position_management.position_monitor import get_position_monitor
+                position_monitor = get_position_monitor()
+                
+                # Register exit intent callback to execute exit orders
+                async def exit_intent_callback(position, exit_reason, exit_price_cents):
+                    """Execute exit order when position monitor triggers exit."""
+                    try:
+                        from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
+                        from trading.trade_mode import get_trade_mode
+                        
+                        # Determine opposite side for exit
+                        exit_side = "no" if position.side == "yes" else "yes"
+                        exit_action = "sell" if position.side == "yes" else "buy"
+                        
+                        intent = OrderIntent(
+                            ticker=position.market_id,
+                            side=exit_side,
+                            action=exit_action,
+                            price_cents=exit_price_cents,
+                            count=position.size,
+                            exit_policy_id=position.exit_policy_id,
+                        )
+                        
+                        mode = get_trade_mode()
+                        result = await route_order_async(intent, mode=mode)
+                        
+                        logger.info(
+                            "[POSITION-MONITOR-EXIT] Executed exit order: position=%s reason=%s price=%dc result=%s",
+                            position.position_id[:8],
+                            exit_reason.value,
+                            exit_price_cents,
+                            result.status.value,
+                        )
+                    except Exception as e:
+                        logger.error("[POSITION-MONITOR-EXIT] Failed to execute exit order: %s", e, exc_info=True)
+                
+                position_monitor.register_exit_intent_callback(exit_intent_callback)
+                await position_monitor.start()
+                app.state.position_monitor = position_monitor
+                logger.info("[STARTUP-STACK] P2.7: PositionMonitor started (take profit/stop loss enforcement)")
+            except Exception as e:
+                logger.warning("[STARTUP-STACK] P2.7: PositionMonitor start failed (non-fatal): %s", e)
 
             # CRITICAL FIX: Do NOT block the main event loop with wait_for_shutdown()
             # The 15m loop runs as a background task, and the main event loop
@@ -2211,46 +2305,135 @@ async def _run_startup_phases_v20260530(app):
 
     # Wait for catalog to have markets before starting WS bridge
     # The catalog refresh happens in a background thread, so we need to poll
+    # CRITICAL FIX: Add retry logic with exponential backoff for robust catalog discovery
     
-    
-    
-    max_wait = 15  # CRITICAL FIX: Increased from 5s to 15s for catalog refresh
-    wait_interval = 1.0
+    max_wait = 60  # CRITICAL FIX: Increased from 15s to 60s for catalog refresh
+    # 15m markets have natural gaps between windows; 60s allows catching next window
     initial_tickers = []
+    allowed_assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
     
-    for i in range(int(max_wait / wait_interval)):
+    # Retry with exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s (total 63s)
+    retry_intervals = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0]
+    total_elapsed = 0.0
+    
+    for attempt, wait_interval in enumerate(retry_intervals):
         initial_tickers = []  # Reset on each iteration
+        
+        # Log catalog state for diagnostics
+        catalog_snapshot = catalog.snapshot()
+        logger.info(
+            f"[STARTUP] Catalog discovery attempt {attempt + 1}/{len(retry_intervals)}: "
+            f"total_markets={len(catalog_snapshot.markets)} "
+            f"elapsed={total_elapsed:.1f}s "
+            f"next_wait={wait_interval:.1f}s"
+        )
         
         # Use simple get_active_markets() for reliable market selection
         # This avoids strict ET window matching that causes catalog empty issues
-        allowed_assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+        assets_found = []
+        assets_missing = []
         
         for asset in allowed_assets:
             try:
-                # Use simple get_active_markets() for reliable market selection
-                # This avoids strict ET window matching that causes catalog empty issues
                 asset_markets = catalog.get_active_markets(asset=asset, timeframe="15m")
                 if asset_markets:
                     market = asset_markets[0]
                     ticker = market.market.market_id if hasattr(market, 'market') else market.market_id
                     initial_tickers.append(ticker)
+                    assets_found.append(asset)
                     logger.info(f"[STARTUP] Selected 15m market for {asset}: {ticker}")
                 else:
+                    assets_missing.append(asset)
                     logger.warning(f"[STARTUP] No active 15m market found for {asset}")
             except Exception as e:
+                assets_missing.append(asset)
                 logger.error(f"[STARTUP] Error getting 15m market for {asset}: {e}", exc_info=True)
         
-        
+        # Log discovery summary
+        logger.info(
+            f"[STARTUP] Catalog discovery summary: "
+            f"found={len(assets_found)}/{len(allowed_assets)} "
+            f"assets_found={assets_found} "
+            f"assets_missing={assets_missing}"
+        )
         
         if initial_tickers:
-            logger.info(f"[STARTUP] Catalog populated with {len(initial_tickers)} tickers after {i * wait_interval:.1f}s")
-            
+            logger.info(
+                f"[STARTUP] Catalog populated with {len(initial_tickers)} tickers after {total_elapsed:.1f}s "
+                f"(attempt {attempt + 1})"
+            )
             break
-        logger.info(f"[STARTUP] Waiting for catalog to populate... ({i * wait_interval:.1f}s elapsed)")
-        await asyncio.sleep(wait_interval)
+        
+        # If this is not the last attempt, wait with exponential backoff
+        if attempt < len(retry_intervals) - 1:
+            logger.info(f"[STARTUP] Waiting for catalog to populate... (next retry in {wait_interval:.1f}s)")
+            await asyncio.sleep(wait_interval)
+            total_elapsed += wait_interval
     
     if not initial_tickers:
-        logger.warning(f"[STARTUP] Catalog still empty after {max_wait}s - starting WS bridge with no tickers")
+        logger.error(
+            f"[STARTUP] Catalog still empty after {total_elapsed:.1f}s and {len(retry_intervals)} attempts - "
+            f"CRITICAL: All 5 crypto assets (BTC, ETH, SOL, XRP, DOGE) are missing. "
+            f"Attempting fallback to direct market lookup via Kalshi REST API."
+        )
+        # Log detailed catalog state for debugging
+        catalog_snapshot = catalog.snapshot()
+        logger.error(
+            f"[STARTUP] Catalog debug state: "
+            f"total_markets={len(catalog_snapshot.markets)} "
+            f"series_tickers={list(set(m.series_ticker for m in catalog_snapshot.markets if m.series_ticker))}"
+        )
+        
+        # FALLBACK: Direct market lookup via Kalshi REST API
+        # This bypasses catalog filtering to ensure critical assets are available
+        logger.info("[STARTUP] Initiating fallback to direct market lookup")
+        try:
+            from merid.event_venues.kalshi.client import get_kalshi_client
+            from config.kalshi_15m_crypto_config import KALSHI_15M_SERIES_TICKERS
+
+            client = get_kalshi_client()
+            fallback_tickers = []
+            
+            for asset in allowed_assets:
+                series_ticker = KALSHI_15M_SERIES_TICKERS.get(asset)
+                if not series_ticker:
+                    logger.error(f"[STARTUP] No series ticker configured for {asset}")
+                    continue
+                
+                try:
+                    # Query Kalshi API directly for this series
+                    logger.info(f"[STARTUP] Fallback: Querying Kalshi API for {asset} (series={series_ticker})")
+                    from merid.event_venues.kalshi.client import MarketFilter
+                    filter_params = MarketFilter(search=series_ticker, limit=10)
+                    result = await client.list_markets_result(filter_params)
+
+                    if result.success and result.data:
+                        # Find the first open market
+                        for market in result.data:
+                            if market.active:
+                                ticker = market.market_id
+                                fallback_tickers.append(ticker)
+                                logger.info(f"[STARTUP] Fallback: Found open market for {asset}: {ticker}")
+                                break
+                        else:
+                            logger.warning(f"[STARTUP] Fallback: No open markets found for {asset} (series={series_ticker})")
+                    else:
+                        logger.warning(f"[STARTUP] Fallback: No markets returned for {asset} (series={series_ticker}): {result.error}")
+                except Exception as e:
+                    logger.error(f"[STARTUP] Fallback: Error querying Kalshi API for {asset}: {e}", exc_info=True)
+            
+            if fallback_tickers:
+                initial_tickers = fallback_tickers
+                logger.info(
+                    f"[STARTUP] Fallback successful: Recovered {len(fallback_tickers)} tickers via direct API lookup"
+                )
+            else:
+                logger.error(
+                    f"[STARTUP] Fallback failed: Could not recover any tickers via direct API lookup. "
+                    f"System will start with no trading capability."
+                )
+        except Exception as e:
+            logger.error(f"[STARTUP] Fallback initialization failed: {e}", exc_info=True)
         
     
     
@@ -2289,7 +2472,7 @@ async def _run_startup_phases_v20260530(app):
     
     # CRITICAL: Start WS bridge and create background task
     # Canonical bridge uses start(tickers) instead of set_markets()
-    
+    # Note: reset_bridge() is already called at module level during import
     
     app.state.ws_bridge_task = asyncio.create_task(ws_bridge.start(initial_tickers), name="ws_bridge_start")
     

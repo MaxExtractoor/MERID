@@ -27,6 +27,10 @@ import sys
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
 
+# Add project root to path for centralized logger
+project_root = os.path.dirname(os.path.dirname(current_dir))
+sys.path.insert(0, project_root)
+
 try:
     import war_game_drills
 except ImportError as e:
@@ -41,16 +45,9 @@ class WarGameScheduler:
         self.schedule_history = []
         self.results_log = []
         
-        # Setup logging
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler('war_game_scheduler.log'),
-                logging.StreamHandler()
-            ]
-        )
-        self.logger = logging.getLogger(__name__)
+        # Use centralized logger from utils.logger
+        from utils.logger import get_logger
+        self.logger = get_logger(__name__)
     
     def _load_config(self, config_path: Optional[str]) -> Dict[str, Any]:
         """Load scheduler configuration."""
