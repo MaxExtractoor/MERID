@@ -132,10 +132,19 @@ class LeanAgentConfig:
     # FILL RATE OPTIMIZATION: Use limit orders instead of market orders for better fill rates in thin markets
     use_limit_orders: bool = True  # Use limit orders (maker) instead of market orders (taker) for better fill rates
     limit_order_slippage_cents: int = 2  # Allow 2 cents slippage for limit orders to increase fill probability
-    # INDUSTRY ALIGNMENT: Regime detection parameters
+    # INDUSTRY ALIGNMENT: Regime detection parameters (2026 best practices)
     volatility_window_s: int = 300  # 5-minute volatility window for regime detection
     min_volatility_threshold: float = 0.001  # Minimum 0.1% volatility to avoid low-volatility death zones
     max_volatility_threshold: float = 0.02  # Maximum 2% volatility to avoid extreme volatility spikes
+    # DYNAMIC SPREAD THRESHOLD: Volatility-regime-based spread filtering (2026 best practice)
+    # Based on research: "Blow your spreads out when the market's volatility does"
+    # Uses 3 regimes with different spread limits: calm, elevated, violent
+    calm_volatility_threshold: float = 0.005  # 0.5% volatility = calm regime
+    elevated_volatility_threshold: float = 0.015  # 1.5% volatility = elevated regime
+    calm_spread_threshold_bp: int = 50  # 50bp max spread in calm regime
+    elevated_spread_threshold_bp: int = 100  # 100bp max spread in elevated regime
+    violent_spread_threshold_bp: int = 150  # 150bp max spread in violent regime
+    spread_volatility_sensitivity: float = 1.5  # Lambda parameter for continuous interpolation
     # Phase 1: Velocity model coefficients for logistic mapping
     alpha_0: float = 0.0  # Intercept for logistic function
     alpha_1: float = 1000.0  # Velocity coefficient for logistic function
@@ -720,6 +729,113 @@ class LeanAgent15m:
             logger.error("[CALIBRATION] Failed to get calibration metrics: %s", e)
             return None
     
+    def _classify_volatility_regime(self, ticker: str) -> tuple[str, float]:
+        """
+        Classify volatility regime and return (regime_name, current_volatility).
+        
+        2026 best practice: Use short-horizon volatility to map to spread width.
+        Three regimes: calm, elevated, violent with corresponding spread thresholds.
+        
+        Returns:
+            tuple: (regime_name, current_volatility_pct)
+        """
+        try:
+            # Get recent price history for volatility calculation
+            if not self.market_state_store:
+                return "calm", 0.001  # Default to calm regime
+            
+            market_state = self.market_state_store.get(ticker)
+            if not market_state:
+                return "calm", 0.001
+            
+            # Get recent mid prices from market state history
+            # Use 5-minute window as configured
+            volatility_window = self.config.volatility_window_s  # 300s = 5 minutes
+            
+            # Calculate realized volatility from price changes
+            # For 15m crypto, use spot price velocity as proxy
+            from data.unified_spot_service import get_unified_spot_service
+            spot_service = get_unified_spot_service()
+            
+            asset = self.config.name.replace("_15M", "")  # Extract asset name
+            spot_data = spot_service.get_spot_history(asset, window_s=volatility_window)
+            
+            if not spot_data or len(spot_data) < 2:
+                return "calm", 0.001
+            
+            # Calculate realized volatility (standard deviation of returns)
+            prices = [p["price"] for p in spot_data]
+            returns = [(prices[i] - prices[i-1]) / prices[i-1] for i in range(1, len(prices))]
+            
+            if not returns:
+                return "calm", 0.001
+            
+            import statistics
+            volatility = statistics.stdev(returns) if len(returns) > 1 else 0.001
+            
+            # Classify regime based on volatility thresholds
+            if volatility < self.config.calm_volatility_threshold:
+                regime = "calm"
+            elif volatility < self.config.elevated_volatility_threshold:
+                regime = "elevated"
+            else:
+                regime = "violent"
+            
+            logger.debug("[VOLATILITY-REGIME] asset=%s ticker=%s regime=%s volatility=%.4f",
+                        self.config.name, ticker, regime, volatility)
+            
+            return regime, volatility
+            
+        except Exception as e:
+            logger.warning("[VOLATILITY-REGIME] Failed to classify volatility for %s: %s, using calm", ticker, e)
+            return "calm", 0.001
+    
+    def _get_dynamic_spread_threshold(self, ticker: str) -> int:
+        """
+        Calculate dynamic spread threshold based on volatility regime.
+        
+        2026 best practice: "Blow your spreads out when the market's volatility does"
+        Uses continuous interpolation between regime anchors for smooth transitions.
+        
+        Formula: spread_t = base_width * (sigma_t / sigma_bar)^lambda
+        
+        Returns:
+            int: Dynamic spread threshold in basis points
+        """
+        regime, volatility = self._classify_volatility_regime(ticker)
+        
+        # Get regime-specific thresholds
+        if regime == "calm":
+            threshold_bp = self.config.calm_spread_threshold_bp
+        elif regime == "elevated":
+            threshold_bp = self.config.elevated_spread_threshold_bp
+        else:  # violent
+            threshold_bp = self.config.violent_spread_threshold_bp
+        
+        # Apply continuous interpolation for smooth transitions
+        # Use volatility ratio to interpolate between regimes
+        calm_threshold = self.config.calm_volatility_threshold
+        elevated_threshold = self.config.elevated_volatility_threshold
+        
+        if regime == "calm":
+            # Interpolate between calm and elevated
+            ratio = volatility / calm_threshold
+            interpolated = self.config.calm_spread_threshold_bp * (ratio ** self.config.spread_volatility_sensitivity)
+            threshold_bp = min(int(interpolated), self.config.elevated_spread_threshold_bp)
+        elif regime == "elevated":
+            # Interpolate between elevated and violent
+            ratio = volatility / elevated_threshold
+            base = self.config.elevated_spread_threshold_bp
+            target = self.config.violent_spread_threshold_bp
+            interpolated = base * (ratio ** self.config.spread_volatility_sensitivity)
+            threshold_bp = min(int(interpolated), target)
+        # violent regime uses maximum threshold
+        
+        logger.debug("[DYNAMIC-SPREAD] asset=%s ticker=%s regime=%s threshold=%dbp volatility=%.4f",
+                    self.config.name, ticker, regime, threshold_bp, volatility)
+        
+        return threshold_bp
+    
     def _classify_regime(self, ticker: str) -> str:
         # Classify market regime from depth using same logic as loop_15m.py
         # Regime classification matches the one used in _validate_market_state
@@ -876,11 +992,17 @@ class LeanAgent15m:
             mid_price_cents = (best_bid + best_ask) / 2
             if mid_price_cents > 0:
                 spread_bp = (spread_cents / mid_price_cents) * 100
-                # Check against industry-aligned max spread in basis points
-                if spread_bp > self.config.max_spread_basis_points:
-                    logger.warning("[MARKET-VALIDATION] asset=%s ticker=%s spread too wide=%.1fbp > max=%dbp (cents=%d)",
-                                 self.config.name, ticker, spread_bp, self.config.max_spread_basis_points, spread_cents)
+                # 2026 BEST PRACTICE: Use dynamic spread threshold based on volatility regime
+                # "Blow your spreads out when the market's volatility does"
+                dynamic_threshold_bp = self._get_dynamic_spread_threshold(ticker)
+                if spread_bp > dynamic_threshold_bp:
+                    logger.warning("[MARKET-VALIDATION] asset=%s ticker=%s spread too wide=%.1fbp > dynamic_max=%dbp (cents=%d regime=%s)",
+                                 self.config.name, ticker, spread_bp, dynamic_threshold_bp, spread_cents,
+                                 self._classify_volatility_regime(ticker)[0])
                     return False
+                logger.info("[MARKET-VALIDATION] asset=%s ticker=%s spread OK=%.1fbp <= dynamic_max=%dbp (cents=%d regime=%s)",
+                           self.config.name, ticker, spread_bp, dynamic_threshold_bp, spread_cents,
+                           self._classify_volatility_regime(ticker)[0])
             # Legacy check in cents for backward compatibility
             if spread_cents > self.config.max_spread_cents:
                 logger.warning("[MARKET-VALIDATION] asset=%s ticker=%s spread too wide=%dc > max=%dc",
