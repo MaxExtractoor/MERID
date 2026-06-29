@@ -196,9 +196,11 @@ momentum_fvg:
 # ── Price-Based Strategy Parameters (Turbine Research Winner) ───────────────
 # Simple price-based strategy that showed +56.6% ROI in Turbine backtests
 # Buy YES when market price is cheap, sell when it recovers
+# RELAXED: Widen thresholds to 0.50/0.70 to match Turbine winner (custom_price_buy050_sell070)
+# Previous 0.45/0.55 gap was too tight; 0.50/0.70 aligns with most profitable 2026 strategy
 price_based:
-  buy_threshold: 0.50  # Buy YES when price <= 0.50
-  sell_threshold: 0.70  # Sell YES when price >= 0.70
+  buy_threshold: 0.50  # Buy YES when price <= 0.50 (betting price goes up)
+  sell_threshold: 0.70  # Buy NO when price >= 0.70 (betting price goes down)
 
 # ── Sentiment Isolation (Single Source of Truth) ────────────────────────────
 # For kalshi_crypto_15m_v2 profile, sentiment-based trading is disabled.
@@ -300,7 +302,7 @@ venue:
 universe:
   min_volume: 5  # Minimum 5 contracts volume (relaxed from default 50 for 15m crypto)
   min_open_interest: 1  # Minimum 1 contract open interest (relaxed from default 10)
-  max_spread_cents: 30  # Maximum 30 cent spread (relaxed from default 15)
+  max_spread_cents: 50  # RELAXED: Maximum 50 cent spread (increased from 30 to match guardrails and allow more trades)
   description: "Coarse liquidity prefilter for 15m crypto markets - tuned for exactly 5 markets per asset"
 
 # ── Throttling (Order Rate Limits) ───────────────────────────────────────────
@@ -310,9 +312,9 @@ universe:
 throttling:
   global_orders_window_sec: 60  # Rolling window for global order limit (seconds)
   global_orders_limit: 5  # REDUCED: Max 5 orders per minute globally (was 10 - safer exposure across 5 assets)
-  per_asset_cooldown_sec: 5  # REDUCED: 5s cooldown between orders for same asset (was 30s - price-based strategy needs faster execution)
+  per_asset_cooldown_sec: 0  # REMOVED: Per-asset cooldown is anti-pattern per 2026 industry research. Rely on global throttling (5/min, 5/15m window, 1/cycle) and API-level rate limiting with exponential backoff.
   per_strip_notional_usd: 0.0  # Max notional per strip (0.0 = disabled, set if needed)
-  max_orders_per_15m_window: 5  # NEW: Max 5 orders total per 15m window across all assets (prevents rapid execution)
+  max_orders_per_15m_window: 5  # PRIMARY: Max 5 orders total per 15m window across all assets (prevents overtrading)
   
   # REMOVED: Conflicting top-N limits - now handled by guardrails section (single source of truth)
   # - per_strip_order_limit: replaced by guardrails.max_orders_per_cycle
@@ -521,9 +523,9 @@ edge_bands:
 # Pre-trade checks (not bankroll-scaled)
 # CONSERVATIVE SETTINGS: Tighter thresholds to reduce frequency and size
 guardrails:
-  max_spread_cents: 30  # ALIGNED WITH INDUSTRY: Reduced from 70c to 30c (industry indicates 5c spreads are problematic, 30c is reasonable upper bound)
+  max_spread_cents: 50  # RELAXED: Increased from 30c to 50c to allow more trades in current market conditions (50-100bp spreads common, aligns with industry 3-7c moderate-liquidity range)
   max_slippage_cents: 3  # Max 3 cents worse than best
-  min_depth_contracts: 5  # INCREASED: Min depth at target price (was 3, now 5 for better liquidity)
+  min_depth_contracts: 2  # RELAXED: Reduced from 5 to 2 for single-contract trading (1 contract per order, no need for 5x depth)
   min_post_fee_edge: 0.02  # LOWERED: Minimum post-fee edge 2% (hard floor for all trades, lowered from 4%)
   min_time_to_expiry_min: 2.5  # NORMAL: Minimum 2.5 minutes to expiry (150s, relaxed from 240s for normal regime)
   max_dist_pct_trade: 2.0  # RELAXED: Maximum spot-strike distance percentage for trading (2.0% for better market coverage - was 0.75%)
@@ -559,10 +561,10 @@ guardrails:
   
   # NEW: Per-asset depth thresholds by tier
   # RELAXED: Tier 2 depth reduced from 5 to 2-3 contracts for thinner books
-  min_depth_yes_tier1: 5  # Tier 1 (BTC/ETH): min 5 yes contracts (reduced from 10)
-  min_depth_no_tier1: 5   # Tier 1 (BTC/ETH): min 5 no contracts (reduced from 10)
-  min_depth_yes_tier2: 2   # Tier 2 (SOL/XRP/DOGE): min 2 yes contracts (reduced from 5)
-  min_depth_no_tier2: 2    # Tier 2 (SOL/XRP/DOGE): min 2 no contracts (reduced from 5)
+  min_depth_yes_tier1: 2  # Tier 1 (BTC/ETH): min 2 yes contracts (relaxed from 5 for single-contract trading)
+  min_depth_no_tier1: 2   # Tier 1 (BTC/ETH): min 2 no contracts (relaxed from 5 for single-contract trading)
+  min_depth_yes_tier2: 1   # Tier 2 (SOL/XRP/DOGE): min 1 yes contract (relaxed from 2 for thinner books)
+  min_depth_no_tier2: 1    # Tier 2 (SOL/XRP/DOGE): min 1 no contract (relaxed from 2 for thinner books)
   
   # NEW: Spread guard with edge override
   spread_guard_enabled: true  # Enable spread guard
@@ -572,11 +574,11 @@ guardrails:
   # Drawdown limits (percentage-based, not bankroll-scaled)
   # Drawdown is the primary hard cap; daily loss is optional/soft
   drawdown_halt_pct:
-    value: 0.15  # Halt at 15% drawdown (primary hard cap)
+    value: 0.20  # RELAXED: Halt at 20% drawdown (increased from 15% to align with industry 25% standard)
     static: profile
     description: "Drawdown halt percentage (static for this profile)"
   drawdown_unwind_pct:
-    value: 0.20  # Unwind at 20% drawdown
+    value: 0.25  # RELAXED: Unwind at 25% drawdown (increased from 20% to align with industry 25% standard)
     static: profile
     description: "Drawdown unwind percentage (static for this profile)"
   

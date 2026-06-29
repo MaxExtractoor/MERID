@@ -209,12 +209,13 @@ class TestProfileSmokeTest:
             profile = adapter.profile
             
             # Verify guardrail parameters are from profile
-            assert profile.guardrails_max_spread_cents == 70  # Updated to match actual profile
+            assert profile.guardrails_max_spread_cents == 50  # RELAXED: Increased from 30 to 50 to allow more trades
             assert profile.guardrails_max_slippage_cents == 3
-            assert profile.guardrails_min_depth_contracts == 5
-            assert profile.guardrails_min_post_fee_edge == 0.04  # Updated to match actual profile
-            assert profile.guardrails_drawdown_halt_pct == 0.15  # Updated to match actual profile
-            assert profile.guardrails_drawdown_unwind_pct == 0.20  # Updated to match actual profile
+            assert profile.guardrails_min_depth_contracts == 2  # RELAXED: Reduced from 5 to 2 for single-contract trading
+            assert profile.guardrails_min_post_fee_edge == 0.02  # FIXED: Updated to match YAML (was 0.04)
+            assert profile.guardrails_min_time_to_expiry_min == 2.5  # FIXED: Updated to match YAML (was 3)
+            assert profile.guardrails_drawdown_halt_pct == 0.20  # RELAXED: Increased from 0.15 to 0.20 to align with industry standard
+            assert profile.guardrails_drawdown_unwind_pct == 0.25  # RELAXED: Increased from 0.20 to 0.25 to align with industry standard
             assert profile.guardrails_max_daily_loss_usd == 200.0
 
     def test_kelly_sizing_from_profile(self):
@@ -233,7 +234,7 @@ class TestProfileSmokeTest:
             # P1-FIX1: kelly hard cap reduced from 0.30 to 0.05 to curb oversizing
             # P2-FIX6: kelly_global_notional_cap_pct tightened from 20.0 to 0.05 (5%)
             assert profile.kelly_hard_cap == 0.05
-            assert profile.kelly_min_edge_pct == 0.04  # Updated to match actual profile
+            assert profile.kelly_min_edge_pct == 0.02  # FIXED: Updated to match YAML (was 0.04)
             assert profile.kelly_max_edge_pct == 0.25  # Updated to match actual profile
             assert profile.kelly_min_win_prob == 0.01
             assert profile.kelly_max_win_prob == 0.99
