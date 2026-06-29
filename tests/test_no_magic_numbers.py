@@ -193,7 +193,7 @@ class TestUnderlyingPlausibility:
             ticker="KXBTC15M-26MAR2501",  # BTC 15m
             action="buy",
             side="yes",
-            price_cents=5,  # Very cheap
+            price_cents=12,  # Very cheap (below 20c threshold)
             edge_pct=0.02,  # Low edge
         )
         result = _validate_underlying_plausibility(intent)
