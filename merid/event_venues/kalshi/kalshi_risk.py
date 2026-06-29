@@ -1653,10 +1653,14 @@ class KalshiRiskManager:
             cap_pct = self._derive_bankroll_cap_pct()
             global_bankroll_cap_usd = max(bankroll_cents * cap_pct / 100, 0.0)  # Ensure non-negative
 
-            # TEMPORARY: Bypass bankroll cap check for testing to allow trade execution
-            # The bankroll service shows equity=31.36 but risk check sees $0.00 due to timing
-            # TODO: Fix bankroll service initialization timing
-            logger.warning("[BANKROLL-CAP] TEMPORARILY BYPASSED in KalshiRiskManager for testing - bankroll service timing issue")
+            # Check bankroll cap
+            if total > global_bankroll_cap_usd:
+                logger.warning(
+                    "[RISK-CHECK-BANKROLL] bankroll=%.2f cap_pct=%.4f cap=%.2f order_notional=%.2f result=REJECT ticker=%s",
+                    bankroll_cents / 100.0, cap_pct, global_bankroll_cap_usd, total, ticker
+                )
+                return False, f"BANKROLL_CAP_EXCEEDED: ${total:.2f} > ${global_bankroll_cap_usd:.2f}", "bankroll_cap"
+
             logger.info(
                 "[RISK-CHECK-BANKROLL] bankroll=%.2f cap_pct=%.4f cap=%.2f order_notional=%.2f result=PASS ticker=%s",
                 bankroll_cents / 100.0, cap_pct, global_bankroll_cap_usd, total, ticker
