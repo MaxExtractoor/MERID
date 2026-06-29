@@ -244,11 +244,8 @@ class GlobalExecutionGuard:
                         },
                     ),
                 )
-                # TEMPORARY: Bypass global execution guard cap check for testing to allow trade execution
-                # The bankroll is $31.36 but the cap is $1.57 - this is a configuration issue
-                # TODO: Fix global execution guard cap configuration
-                logger.warning("[GLOBAL-GUARD-CAP] TEMPORARILY BYPASSED for testing - bankroll cap configuration issue")
-                # Continue with the check but don't reject
+                # Reject order when cap exceeded
+                return False, f"BANKROLL_CAP_EXCEEDED: ${new_total:.2f} > ${bankroll_cap_usd:.2f}"
             
             # 5. Rate limiting (per-minute, per-hour)
             now = time.time()

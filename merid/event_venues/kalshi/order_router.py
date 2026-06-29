@@ -3788,6 +3788,9 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                     VolatilityRegime,
                 )
                 
+                # Extract asset for band computation (fixes MARKET-BAND-FALLBACK error)
+                asset = extract_asset_from_ticker(intent.ticker) if intent.ticker else "UNKNOWN"
+                
                 # Get market state for band computation
                 best_bid_cents = None
                 best_ask_cents = None
