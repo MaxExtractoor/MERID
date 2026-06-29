@@ -280,6 +280,7 @@ def validate_kalshi_15m_guardrail_fields() -> None:
             )
         
         # Contract price floor: should be ≥ 20c (blocks ultra-low priced contracts)
+        # CRITICAL: 10c floor allowed losing deep OTM trades (7c BTC, 10c SOL) - restored to 20c
         if guardrails.min_contract_price_cents < 20:
             raise StartupValidationError(
                 f"Profile invalid: min_contract_price_cents ({guardrails.min_contract_price_cents}) must be ≥ 20c"

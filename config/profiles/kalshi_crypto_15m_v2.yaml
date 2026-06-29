@@ -529,7 +529,7 @@ guardrails:
   min_post_fee_edge: 0.02  # LOWERED: Minimum post-fee edge 2% (hard floor for all trades, lowered from 4%)
   min_time_to_expiry_min: 2.5  # NORMAL: Minimum 2.5 minutes to expiry (150s, relaxed from 240s for normal regime)
   max_dist_pct_trade: 2.0  # RELAXED: Maximum spot-strike distance percentage for trading (2.0% for better market coverage - was 0.75%)
-  min_contract_price_cents: 10  # LOWERED: Minimum contract price floor (10 cents / $0.10) - aligned with industry standard (BeatPoly/Market Math indicate extreme-priced contracts are fee-efficient)
+  min_contract_price_cents: 20  # CRITICAL: Minimum contract price floor (20 cents / $0.20) - blocks deep OTM longshots (10c allowed losing trades)
   max_same_side_per_strip: 4  # RELAXED: Maximum same-direction positions per strip (increased from 2 to 4 for small bankroll)
   max_orders_per_cycle: 1  # REDUCED: Maximum orders per 15m cycle (reduced from 3 to 1 for safer exposure - prevents rapid execution)
   min_edge_per_trade: 0.01  # Minimum edge percentage for priority queue scheduling (1% floor, aligned with watch band)

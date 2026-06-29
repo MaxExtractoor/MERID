@@ -190,7 +190,7 @@ SIZER_MAX_CONTRACTS: Final[int] = 50
 # Bankroll fraction caps
 # STANDARDIZED: Max 5% of bankroll per trade for all 15m crypto agents
 # This prevents any single trade from risking excessive capital
-SIZER_MAX_BANKROLL_PCT: Final[float] = 0.05  # 5% max per trade
+SIZER_MAX_BANKROLL_PCT: Final[float] = 0.03  # 3% max per trade (tightened from 5%)
 SIZER_MIN_BANKROLL_PCT: Final[float] = 0.01  # 1% min per trade
 
 # PF/expectancy gates for size scaling
@@ -429,10 +429,12 @@ FEE_DRAG_WARNING_PCT: Final[float] = 0.20  # 20%
 # ============================================================================
 
 # Whether to enforce deep OTM policy (False = allow with strong edge)
-ENFORCE_DEEP_OTM_POLICY: Final[bool] = False  # Disabled to allow trading on low-priced contracts
+# CRITICAL: Enabled for 15m crypto markets to prevent losing deep OTM trades (7c BTC, 10c SOL)
+# Edge-based filtering (20% minimum edge) was insufficient - need hard price floor
+ENFORCE_DEEP_OTM_POLICY: Final[bool] = True  # Enabled to block deep OTM longshots
 
 # Whether to enforce prob-price consistency check
-ENFORCE_PROB_PRICE_CONSISTENCY: Final[bool] = False  # Disabled to reduce trade blocking
+ENFORCE_PROB_PRICE_CONSISTENCY: Final[bool] = True  # Enabled to ensure model prob supports market price
 
 # Whether to enforce underlying plausibility check
 ENFORCE_UNDERLYING_PLAUSIBILITY: Final[bool] = True

@@ -192,8 +192,8 @@ class TestPriceFloorGuardrail:
 
             # Check that the value is set to 35 cents (from YAML)
             # RAISED from 20 to 35 based on PnL audit (1.4% win rate, -$0.649 avg PnL in 20-35c band)
-            assert profile.guardrails_min_contract_price_cents == 10, \
-                f"Expected min_contract_price_cents=10 (industry standard), got {profile.guardrails_min_contract_price_cents}"
+            assert profile.guardrails_min_contract_price_cents == 20, \
+                f"Expected min_contract_price_cents=20 (blocks deep OTM longshots), got {profile.guardrails_min_contract_price_cents}"
         except Exception as e:
             pytest.skip(f"Profile min_contract_price_cents check skipped: {e}")
 

@@ -130,6 +130,28 @@ class LegacyEdgeBackend(EdgeComputer):
             else:
                 price_cents = 50
 
+            # CRITICAL: Check minimum contract price floor (blocks deep OTM longshots)
+            # This guardrail prevents trading ultra-low priced contracts that are statistically losing
+            min_price_cents = 20  # Default fallback (20 cents / $0.20)
+            try:
+                from merid.risk.profiles.crypto_15m_profile import get_active_profile
+                profile_adapter = get_active_profile()
+                if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_min_contract_price_cents'):
+                    min_price_cents = profile_adapter.profile.guardrails_min_contract_price_cents
+            except Exception as e:
+                logger.debug("[LEGACY-EDGE] Failed to load min_contract_price_cents from profile: %s, using default 20c", e)
+
+            if price_cents < min_price_cents:
+                logger.info(
+                    "[LEGACY-EDGE] %s asset=%s ticker=%s price=%d cents < %d cents threshold (deep OTM longshot rejected)",
+                    config.name if hasattr(config, "name") else "unknown",
+                    asset,
+                    market_id,
+                    price_cents,
+                    min_price_cents,
+                )
+                return None
+
             # Compute dual-sided edge to determine best side
             implied_prob = price_cents / 100.0
             implied_prob_no = 1.0 - implied_prob
