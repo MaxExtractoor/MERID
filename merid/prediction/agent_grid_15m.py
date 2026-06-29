@@ -156,7 +156,7 @@ class LeanAgentConfig:
     calibration_min_samples: int = 100  # Minimum samples required to fit calibration
     # Phase 5.3: Price-based strategy (Turbine research winner)
     price_based_buy_threshold: float = 0.70  # Buy YES in sweet spot (60-70c range per Polymarket data)
-    price_based_sell_threshold: float = 0.90  # Sell when price >= 0.90 (profit taking)
+    price_based_sell_threshold: float = 0.95  # Sell when price >= 0.95 (raised from 0.90 to prevent bad NO trades at 70-90c)
     calibration_max_samples: int = 1000  # Maximum samples to keep for calibration
     calibration_regularization: float = 0.0001  # L2 regularization parameter
     calibration_fit_interval_hours: int = 24  # Re-fit calibration every N hours
