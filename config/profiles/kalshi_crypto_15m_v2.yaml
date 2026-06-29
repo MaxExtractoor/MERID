@@ -694,6 +694,7 @@ contract_caps:
 risk_policy:
   group_notional_cap_usd: 2000.0  # Max notional per group (asset/timeframe/overlap-window)
   max_fee_to_notional_pct: 15.0  # Max fee/notional ratio (circuit breaker)
+  max_stop_loss_usd_per_cluster: 2.50  # Max stop loss per cluster (asset/timeframe) - scales with bankroll
 
 # ── Venue Invariants ───────────────────────────────────────────────────────
 # Kalshi venue-level constants (not configurable per profile)

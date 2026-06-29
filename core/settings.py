@@ -58,9 +58,9 @@ USE_TOPN_ALLOCATOR: bool = str(os.getenv("USE_TOPN_ALLOCATOR", "true")).lower() 
 #   - Total cap: $2.80 (8%) → allows multi-cycle concurrent exposure
 #   - Daily loss: $4.20 (12%) → dynamic drawdown trigger
 # ═══════════════════════════════════════════════════════════════════════════
-_DEFAULT_CYCLE_RISK_PCT = "0.05"  # 5% per cycle - allows 3+ agents to trade simultaneously
-# Force 5% regardless of env var to prevent 2% override from blocking trades
-MAX_CYCLE_RISK_PCT: float = float(_DEFAULT_CYCLE_RISK_PCT)
+_DEFAULT_CYCLE_RISK_PCT = "0.10"  # 10% per cycle - matches profile kalshi_crypto_15m_v2.yaml
+# Read from env var to allow profile-driven configuration
+MAX_CYCLE_RISK_PCT: float = float(os.getenv("MAX_CYCLE_RISK_PCT", _DEFAULT_CYCLE_RISK_PCT))
 MAX_TOTAL_RISK_PCT: float = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.08"))  # 8% total max
 
 # Daily and cluster risk caps (auto-scale with bankroll)

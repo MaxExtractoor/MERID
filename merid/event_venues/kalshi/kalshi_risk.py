@@ -1094,6 +1094,28 @@ class KalshiRiskManager:
         self._lock = threading.RLock()
         self._last_reset_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         self._alert_last_fired: Dict[str, float] = {}  # reason-prefix -> monotonic timestamp
+        
+        # CRITICAL FIX: Initialize equity from bankroll service to prevent $0.00 default
+        # This fixes the "Equity is $0.00 but contracts=1 > 0" warning
+        try:
+            from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+            initial_equity = get_equity_for_risk_calc_sync()
+            if initial_equity and initial_equity > 0:
+                self._state.current_equity_usd = initial_equity
+                self._state.peak_equity_usd = initial_equity
+                logger.info("[KalshiRiskManager] Initialized with equity=%.2f from bankroll service", initial_equity)
+            else:
+                logger.warning("[KalshiRiskManager] Bankroll service returned invalid equity=%.2f, using default 0.0", initial_equity)
+        except Exception as e:
+            logger.warning("[KalshiRiskManager] Failed to initialize equity from bankroll service: %s", e)
+
+        # CRITICAL FIX: Resync asset_notional from actual positions on startup
+        # This prevents stale asset_notional values from previous sessions from blocking new orders
+        try:
+            self.resync_category_contracts_from_positions()
+            logger.info("[KalshiRiskManager] Resynced asset_notional from actual positions on startup")
+        except Exception as e:
+            logger.warning("[KalshiRiskManager] Failed to resync asset_notional on startup: %s", e)
 
     def _sync_pnl_from_ledger(self) -> None:
         """Pull daily P&L from fills_ledger (canonical source).
@@ -1426,6 +1448,7 @@ class KalshiRiskManager:
                 return False, reason, "max_single_order_contracts"
 
             notional_usd = contracts * price_cents / 100.0
+            logger.info("[RISK-NOTIONAL-CALC] ticker=%s contracts=%d price_cents=%d notional_usd=%.2f", ticker, contracts, price_cents, notional_usd)
             # ZERO-FIX: Skip check if max_single_order_notional_usd is 0 (meaning derive from bankroll)
             if self._config.max_single_order_notional_usd > 0 and notional_usd > self._config.max_single_order_notional_usd:
                 reason = f"Order notional ${notional_usd:.2f} exceeds max ${self._config.max_single_order_notional_usd:.2f}"
@@ -2158,6 +2181,16 @@ class KalshiRiskManager:
         self._state.category_contracts.clear()
         logger.info("Category notional reset complete - will be recalculated on next resync")
 
+    def reset_asset_notional(self) -> None:
+        """Reset asset_notional to zero (emergency fix for incorrect accumulation)."""
+        logger.warning(
+            "EMERGENCY RESET: Clearing asset_notional state - was %s",
+            {k: round(v, 2) for k, v in self._state.asset_notional.items()}
+        )
+        self._state.asset_notional.clear()
+        self._state.asset_contracts.clear()
+        logger.info("Asset notional reset complete - will be recalculated on next resync")
+
     def resync_category_contracts_from_positions(self) -> None:
         """Resync category_contracts counter with actual positions from fills_ledger.
         
@@ -2180,8 +2213,10 @@ class KalshiRiskManager:
             # Reset both counters to zero before recalculating
             old_contracts = dict(self._state.category_contracts)
             old_notional = dict(self._state.category_notional)
+            old_asset_notional = dict(self._state.asset_notional)
             self._state.category_contracts.clear()
             self._state.category_notional.clear()
+            self._state.asset_notional.clear()
             
             # Get computed net positions from fills_ledger (filters out manually closed positions)
             computed_positions = ledger.compute_net_positions()
@@ -2237,9 +2272,7 @@ class KalshiRiskManager:
                         asset_key = asset.upper()
                         avg_price_cents = pos.get("avg_price_cents", DEFAULT_KALSHI_PRICE_CENTS)
                         notional = abs(contracts) * avg_price_cents / 100.0
-                        self._state.asset_notional[asset_key] = (
-                            self._state.asset_notional.get(asset_key, 0.0) + notional
-                        )
+                        self._state.asset_notional[asset_key] = notional
                         logger.debug(
                             "[ASSET-NOTIONAL-DEBUG] %s | asset=%s | contracts=%d | notional=$%.2f",
                             ticker, asset_key, contracts, notional
@@ -2251,20 +2284,25 @@ class KalshiRiskManager:
             # Normalize comparison to treat missing keys as zero (no data loss, just empty categories)
             all_contract_keys = set(old_contracts.keys()) | set(self._state.category_contracts.keys())
             all_notional_keys = set(old_notional.keys()) | set(self._state.category_notional.keys())
+            all_asset_notional_keys = set(old_asset_notional.keys()) | set(self._state.asset_notional.keys())
             
             normalized_old_contracts = {k: old_contracts.get(k, 0) for k in all_contract_keys}
             normalized_new_contracts = {k: self._state.category_contracts.get(k, 0) for k in all_contract_keys}
             normalized_old_notional = {k: round(old_notional.get(k, 0.0), 2) for k in all_notional_keys}
             normalized_new_notional = {k: round(self._state.category_notional.get(k, 0.0), 2) for k in all_notional_keys}
+            normalized_old_asset_notional = {k: round(old_asset_notional.get(k, 0.0), 2) for k in all_asset_notional_keys}
+            normalized_new_asset_notional = {k: round(self._state.asset_notional.get(k, 0.0), 2) for k in all_asset_notional_keys}
             
             logger.debug(
-                "CATEGORY_RESYNC contracts: old=%s new=%s total_positions=%d positions_with_contracts=%d | notional: old=%s new=%s",
+                "CATEGORY_RESYNC contracts: old=%s new=%s total_positions=%d positions_with_contracts=%d | notional: old=%s new=%s | asset_notional: old=%s new=%s",
                 normalized_old_contracts,
                 normalized_new_contracts,
                 len(computed_positions),
                 positions_with_contracts,
                 normalized_old_notional,
-                normalized_new_notional
+                normalized_new_notional,
+                normalized_old_asset_notional,
+                normalized_new_asset_notional
             )
             
         except Exception as exc:
@@ -3032,11 +3070,9 @@ class KalshiRiskManager:
             post_cluster_loss,
         )
 
-        # TEMPORARY: Bypass cluster stop loss check for testing to allow trade execution
-        # The cluster stop loss is set to $0.00, blocking all trades
-        # TODO: Fix cluster stop loss configuration
-        logger.warning("[CLUSTER-STOP-LOSS] TEMPORARILY BYPASSED for testing - cluster stop loss is $0.00")
-        # Continue with the check but don't reject
+        # Reject if cluster stop loss would be breached
+        if post_cluster_loss > max_stop_loss_usd_per_cluster:
+            return (False, f"CLUSTER_STOP_LOSS: ${post_cluster_loss:.2f} > ${max_stop_loss_usd_per_cluster:.2f}", cluster_unrealized_loss_usd, post_cluster_loss)
 
         return (True, "OK", cluster_unrealized_loss_usd, post_cluster_loss)
 
@@ -3457,6 +3493,8 @@ def get_kalshi_risk() -> KalshiRiskManager:
                     logger.warning("[PROFILE_WIRING] Failed to apply profile config: %s. Using default config.", e)
                 
                 _risk = KalshiRiskManager(config=config)
+                # CRITICAL FIX: Reset asset_notional on startup to clear stale exposure data from previous sessions
+                _risk.reset_asset_notional()
     return _risk
 
 
