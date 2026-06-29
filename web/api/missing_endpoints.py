@@ -947,31 +947,47 @@ async def get_log_stats() -> Dict[str, Any]:
     total = 0
     comp_counts: Dict[str, int] = {}
 
-    # Parse the most recent server startup log
-    import glob
-    log_candidates = sorted(glob.glob(str(Path(__file__).resolve().parent.parent.parent / "server_startup*.log")), reverse=True)
-    for log_path in log_candidates[:1]:
-        try:
+    # Parse the centralized production log
+    log_path = Path(__file__).resolve().parent.parent.parent / "logs" / "full.log"
+    try:
+        if log_path.exists():
             with open(log_path, encoding="utf-8", errors="replace") as f:
                 for line in f:
                     total += 1
-                    ll = line.lower()
-                    if "| error |" in ll or "| critical |" in ll:
-                        error_count += 1
-                    elif "| warning |" in ll:
-                        warn_count += 1
-                    elif "| info |" in ll:
-                        info_count += 1
-                    elif "| debug |" in ll:
-                        debug_count += 1
-                    # Extract component from structured log: "ts | LEVEL | component |"
-                    parts = line.split(" | ")
-                    if len(parts) >= 3:
-                        comp = parts[2].strip()
+                    # Try JSON parsing first for centralized logger format
+                    try:
+                        log_entry = json.loads(line.strip())
+                        level = log_entry.get("level", "").lower()
+                        if level == "error" or level == "critical":
+                            error_count += 1
+                        elif level == "warning":
+                            warn_count += 1
+                        elif level == "info":
+                            info_count += 1
+                        elif level == "debug":
+                            debug_count += 1
+                        comp = log_entry.get("logger", "system")
                         if comp:
                             comp_counts[comp] = comp_counts.get(comp, 0) + 1
-        except Exception as e:
-            logger.debug(f"Silent error: {e}")
+                    except json.JSONDecodeError:
+                        # Fallback to text format parsing
+                        ll = line.lower()
+                        if "| error |" in ll or "| critical |" in ll:
+                            error_count += 1
+                        elif "| warning |" in ll:
+                            warn_count += 1
+                        elif "| info |" in ll:
+                            info_count += 1
+                        elif "| debug |" in ll:
+                            debug_count += 1
+                        # Extract component from structured log: "ts | LEVEL | component |"
+                        parts = line.split(" | ")
+                        if len(parts) >= 3:
+                            comp = parts[2].strip()
+                            if comp:
+                                comp_counts[comp] = comp_counts.get(comp, 0) + 1
+    except Exception as e:
+        logger.debug(f"Silent error: {e}")
 
     # Add agent grid activity counts
     try:

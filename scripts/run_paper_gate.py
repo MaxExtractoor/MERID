@@ -43,7 +43,12 @@ class PaperGateRunner:
     def __init__(self, args: argparse.Namespace):
         self.duration = args.duration
         self.gate_id = args.gate_id or f"gate_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
-        self.output_dir = Path(args.output_dir)
+        # Default to logs directory to avoid root directory contamination
+        if args.output_dir == Path("."):
+            self.output_dir = Path(__file__).parent.parent / "logs"
+        else:
+            self.output_dir = Path(args.output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         self.dry_run = args.dry_run
         self.sample_interval = args.sample_interval
         

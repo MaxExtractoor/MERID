@@ -98,27 +98,38 @@ async def get_logs() -> List[Dict[str, Any]]:
     logs: List[Dict[str, Any]] = []
     now = datetime.now(timezone.utc)
 
-    # Parse the most recent server startup log
+    # Parse the centralized production log
     log_dir = Path(__file__).resolve().parent.parent.parent
-    candidates = sorted(
-        glob.glob(str(log_dir / "server_startup*.log")), reverse=True,
-    )
-    for log_path in candidates[:1]:
-        try:
+    log_path = log_dir / "logs" / "full.log"
+    
+    try:
+        if log_path.exists():
             with open(log_path, encoding="utf-8", errors="replace") as f:
                 lines = f.readlines()
             for i, line in enumerate(lines[-200:]):
-                parts = line.strip().split(" | ")
-                if len(parts) >= 4:
+                # Parse JSON-formatted logs from centralized logger
+                try:
+                    log_entry = json.loads(line.strip())
                     logs.append({
                         "id": f"log-{i}",
-                        "timestamp": parts[0].strip() if parts[0].strip() else now.isoformat() + "Z",
-                        "level": parts[1].strip().lower() if len(parts) > 1 else "info",
-                        "component": parts[2].strip() if len(parts) > 2 else "system",
-                        "message": " | ".join(parts[3:]).strip(),
+                        "timestamp": log_entry.get("ts", now.isoformat() + "Z"),
+                        "level": log_entry.get("level", "info").lower(),
+                        "component": log_entry.get("logger", "system"),
+                        "message": log_entry.get("message", ""),
                     })
-        except Exception:
-            pass
+                except json.JSONDecodeError:
+                    # Fallback to text format parsing for non-JSON lines
+                    parts = line.strip().split(" | ")
+                    if len(parts) >= 4:
+                        logs.append({
+                            "id": f"log-{i}",
+                            "timestamp": parts[0].strip() if parts[0].strip() else now.isoformat() + "Z",
+                            "level": parts[1].strip().lower() if len(parts) > 1 else "info",
+                            "component": parts[2].strip() if len(parts) > 2 else "system",
+                            "message": " | ".join(parts[3:]).strip(),
+                        })
+    except Exception:
+        pass
 
     if not logs:
         logs.append({
@@ -139,30 +150,46 @@ async def get_log_stats() -> Dict[str, Any]:
     comp_counts: Dict[str, int] = {}
 
     log_dir = Path(__file__).resolve().parent.parent.parent
-    candidates = sorted(
-        glob.glob(str(log_dir / "server_startup*.log")), reverse=True,
-    )
-    for log_path in candidates[:1]:
-        try:
+    log_path = log_dir / "logs" / "full.log"
+    
+    try:
+        if log_path.exists():
             with open(log_path, encoding="utf-8", errors="replace") as f:
                 for line in f:
                     total += 1
-                    ll = line.lower()
-                    if "| error |" in ll or "| critical |" in ll:
-                        error_count += 1
-                    elif "| warning |" in ll:
-                        warn_count += 1
-                    elif "| info |" in ll:
-                        info_count += 1
-                    elif "| debug |" in ll:
-                        debug_count += 1
-                    parts = line.split(" | ")
-                    if len(parts) >= 3:
-                        comp = parts[2].strip()
+                    # Try JSON parsing first for centralized logger format
+                    try:
+                        log_entry = json.loads(line.strip())
+                        level = log_entry.get("level", "").lower()
+                        if level == "error" or level == "critical":
+                            error_count += 1
+                        elif level == "warning":
+                            warn_count += 1
+                        elif level == "info":
+                            info_count += 1
+                        elif level == "debug":
+                            debug_count += 1
+                        comp = log_entry.get("logger", "system")
                         if comp:
                             comp_counts[comp] = comp_counts.get(comp, 0) + 1
-        except Exception:
-            pass
+                    except json.JSONDecodeError:
+                        # Fallback to text format parsing
+                        ll = line.lower()
+                        if "| error |" in ll or "| critical |" in ll:
+                            error_count += 1
+                        elif "| warning |" in ll:
+                            warn_count += 1
+                        elif "| info |" in ll:
+                            info_count += 1
+                        elif "| debug |" in ll:
+                            debug_count += 1
+                        parts = line.split(" | ")
+                        if len(parts) >= 3:
+                            comp = parts[2].strip()
+                            if comp:
+                                comp_counts[comp] = comp_counts.get(comp, 0) + 1
+    except Exception:
+        pass
 
     return {
         "totalLogs": total,
