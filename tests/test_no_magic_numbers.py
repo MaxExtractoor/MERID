@@ -85,7 +85,7 @@ class TestProbPriceConsistency:
         assert "missing_model_prob" in result
     
     def test_sell_order_bypass(self):
-        """Sell orders should bypass prob-price check."""
+        """Sell orders should bypass prob-price check (for exit orders)."""
         intent = MockOrderIntent(
             ticker="KXBTC15M-26MAR2501",
             action="sell",
@@ -95,6 +95,31 @@ class TestProbPriceConsistency:
         )
         result = _validate_prob_price_consistency(intent)
         assert result is None, "Sell orders should bypass"
+    
+    def test_sell_yes_order_with_negative_edge(self):
+        """SELL YES order should pass when model_prob < implied_prob (betting NO)."""
+        intent = MockOrderIntent(
+            ticker="KXBTC15M-26MAR2501",
+            action="sell",  # SELL YES is action=sell with side=yes
+            side="yes",
+            price_cents=74,  # implied_prob = 0.74
+            model_prob=0.60,  # model says 60%, we think outcome is less likely (negative edge for YES)
+        )
+        result = _validate_prob_price_consistency(intent)
+        assert result is None, "Should pass with negative edge for SELL YES"
+    
+    def test_sell_yes_order_with_no_edge(self):
+        """SELL YES order should fail when model_prob >= implied_prob."""
+        intent = MockOrderIntent(
+            ticker="KXBTC15M-26MAR2501",
+            action="sell",  # SELL YES is action=sell with side=yes
+            side="yes",
+            price_cents=50,  # implied_prob = 0.50
+            model_prob=0.60,  # model says 60%, no negative edge (we think outcome is MORE likely)
+        )
+        result = _validate_prob_price_consistency(intent)
+        assert result is not None, "Should fail with no negative edge for SELL YES"
+        assert "no_edge_vs_implied" in result
     
     def test_no_order_with_positive_edge(self):
         """NO order should pass when (1 - model_prob) > (1 - implied_prob)."""
@@ -295,7 +320,7 @@ class TestRiskParametersConstants:
     """Tests that risk_parameters.py has all required constants."""
     
     def test_risk_parameters_import(self):
-        """Test that risk_parameters module can be imported."""
+        """Test that risk_parameters module can be imported and has correct values."""
         try:
             from merid.event_venues.kalshi.risk_parameters import (
                 MIN_KALSHI_PRICE_CENTS,
@@ -304,6 +329,8 @@ class TestRiskParametersConstants:
                 DEEP_OTM_EXPENSIVE_CENTS,
                 MIN_EDGE_PCT,
                 ENFORCE_DEEP_OTM_POLICY,
+                ENFORCE_PROB_PRICE_CONSISTENCY,
+                SIZER_MAX_BANKROLL_PCT,
                 ERR_DEEP_OTM_DISALLOWED,
             )
             assert MIN_KALSHI_PRICE_CENTS == 1
@@ -311,6 +338,10 @@ class TestRiskParametersConstants:
             assert DEEP_OTM_CHEAP_CENTS == 5
             assert DEEP_OTM_EXPENSIVE_CENTS == 95
             assert isinstance(ENFORCE_DEEP_OTM_POLICY, bool)
+            assert ENFORCE_DEEP_OTM_POLICY is True, "ENFORCE_DEEP_OTM_POLICY should be True (enabled to block deep OTM longshots)"
+            assert isinstance(ENFORCE_PROB_PRICE_CONSISTENCY, bool)
+            assert ENFORCE_PROB_PRICE_CONSISTENCY is True, "ENFORCE_PROB_PRICE_CONSISTENCY should be True (tightened)"
+            assert SIZER_MAX_BANKROLL_PCT == 0.03, "SIZER_MAX_BANKROLL_PCT should be 3% (tightened from 5%)"
         except ImportError as e:
             pytest.fail(f"Failed to import risk_parameters: {e}")
 
