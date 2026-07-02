@@ -5031,9 +5031,9 @@ async def sizing_metrics_endpoint() -> Dict[str, Any]:
         try:
             from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
             risk_config = get_kalshi_risk()
-            kelly_f = float(getattr(risk_config, 'kelly_fraction', 0.30))
+            kelly_f = float(getattr(risk_config, 'kelly_fraction', 0.05))
         except Exception:
-            kelly_f = 0.30  # Fallback to profile default if risk config unavailable
+            kelly_f = 0.02  # CRITICAL FIX: Fallback to 2% (aligned with unified risk limit, was 0.05)
         live_equity = risk_summary.get("current_equity_usd", 0)
         live_notional = risk_summary.get("total_notional_usd", 0)
         effective = kelly_f

@@ -545,7 +545,7 @@ async def get_risk_metrics_real() -> Dict[str, Any]:
         leverage = margin_used / total_equity if total_equity > 0 else 0
 
         # Pull real risk limits for marginCallLevel
-        margin_call_level = 80.0
+        margin_call_level = float(os.getenv("MERID_MARGIN_CALL_LEVEL_PCT", "80.0"))  # Configurable default
         try:
             from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk as _gkr2
             _krm2 = _gkr2()

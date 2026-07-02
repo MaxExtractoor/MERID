@@ -94,7 +94,7 @@ def check_11a2_testclient_setup():
     
     # Check if app can be imported
     success, stdout, stderr = run_command(
-        "python -c 'from web.main import app; print(\"OK\")'"
+        "python -c 'from web.main_15m_lean import app; print(\"OK\")'"
     )
     
     if success and "OK" in stdout:
