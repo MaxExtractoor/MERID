@@ -32,8 +32,8 @@ class StrategyAgent(StreamingAgent):
         # Strategy parameters
         self.base_position_size = 0.02  # 2% of portfolio
         self.max_position_size = 0.10   # 10% max
-        self.max_leverage = 10
-        self.min_leverage = 1
+        self.max_leverage = 2.0  # STANDARDIZED: Production leverage limit (matches trading/execution.py, risk/risk_guard.py)
+        self.min_leverage = 1.0
         
         # Risk parameters
         self.risk_per_trade = 0.02  # 2% risk per trade

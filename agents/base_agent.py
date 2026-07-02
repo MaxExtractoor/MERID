@@ -40,12 +40,23 @@ except ImportError:
     import time
     current_time = time.time
     _TIME_AUTHORITY_AVAILABLE = False
-from merid.tools.web_search import web_search
+from tools.web_search import web_search
 from utils.logger import get_logger
-from merid.agents.reflection.integration import get_reflection_system
-from merid.agents.explainability import (
-    get_explainability_tracker, create_reasoning_builder, DecisionType
-)
+try:
+    from merid.agents.reflection.integration import get_reflection_system
+except ImportError:
+    from agents.reflection.integration import get_reflection_system
+try:
+    from merid.agents.explainability import (
+        get_explainability_tracker, create_reasoning_builder, DecisionType
+    )
+except ImportError:
+    # Explainability module not available - use stubs
+    def get_explainability_tracker():
+        return None
+    def create_reasoning_builder():
+        return None
+    DecisionType = None
 
 _OLLAMA_URL = f"{OLLAMA_BASE_URL.rstrip('/')}{OLLAMA_GENERATE_ENDPOINT}"
 _TRUE_VALUES = {"1", "true", "yes", "on"}

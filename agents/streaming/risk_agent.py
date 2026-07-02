@@ -39,7 +39,7 @@ class RiskAgent(StreamingAgent):
         # Risk thresholds
         self.max_volatility = 0.05  # 5% volatility threshold
         self.max_drawdown = 0.10    # 10% max drawdown
-        self.min_confidence = 0.60  # Minimum confidence for approval
+        self.min_confidence = 0.50  # Minimum confidence for approval
         
         # State tracking
         self.price_history: Dict[str, list] = {}
