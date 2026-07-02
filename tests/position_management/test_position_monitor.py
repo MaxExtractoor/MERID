@@ -6,6 +6,7 @@ Tests polling, exit intents, and callback mechanism.
 
 import pytest
 import asyncio
+import unittest
 from datetime import datetime
 from unittest.mock import Mock, patch
 from merid.position_management.position import Position, PositionSide
@@ -186,6 +187,9 @@ class TestPositionMonitorExitCallback:
         
         # Move price up to set trail
         position.update_runtime_state(60)
+        
+        # Activate trailing (simulating break-even trigger)
+        position.trailing_activated = True
         
         # Drop below trail
         asyncio.run(monitor._check_position(position, 53))
@@ -526,5 +530,339 @@ class TestPositionMonitorPositionCacheIntegration:
         if hasattr(cache, '_positions') and "KXBTC15M-TEST" in cache._positions:
             del cache._positions["KXBTC15M-TEST"]
         risk_mgr._state.asset_notional["BTC"] = 0.0
+
+
+class TestPositionMonitorTrailingStopConfiguration:
+    """Test trailing stop configuration aligned with 15m best practices."""
+    
+    @pytest.mark.asyncio
+    async def test_position_cache_configures_r_multiple_trailing(self):
+        """Test that position_cache configures R-multiple trailing with 0.5R trail distance.
+        
+        This test verifies the fix for aligning trailing stops with 15m research:
+        - Move to break-even at +0.5R
+        - Trail with 0.5R distance
+        """
+        from merid.position_management.position_monitor import get_position_monitor
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+        from merid.position_management.position import TrailingType
+        from unittest.mock import Mock, patch
+        
+        # Get monitor and cache
+        monitor = get_position_monitor()
+        cache = get_position_cache()
+        
+        # Mock fills_ledger to avoid database dependency
+        mock_ledger = Mock()
+        mock_ledger.get_fill.return_value = None
+        
+        with patch('merid.event_venues.kalshi.fills_ledger.get_fills_ledger', return_value=mock_ledger):
+            # Simulate a fill creating a new position
+            await cache.on_fill(
+                market_id="KXBTC15M-TEST",
+                contracts=5,
+                price_cents=50,
+                fee_cents=0,
+                side="yes",
+                client_order_id="test-order-123",
+                fill_id="test-fill-456",
+                action="buy",
+            )
+        
+        # Position should be in monitor with trailing configuration
+        monitored_position = monitor.get_position_by_market("KXBTC15M-TEST")
+        assert monitored_position is not None
+        assert monitored_position.market_id == "KXBTC15M-TEST"
+        
+        # Verify trailing stop configuration
+        assert monitored_position.trailing_type == TrailingType.R_MULTIPLE
+        assert monitored_position.trailing_param == 0.5  # 0.5R trail distance per research
+        
+        # Clean up
+        monitor.remove_position("KXBTC15M-TEST")
+        if hasattr(cache, '_positions') and "KXBTC15M-TEST" in cache._positions:
+            del cache._positions["KXBTC15M-TEST"]
+    
+    def test_trailing_stop_0_5r_distance(self):
+        """Test that 0.5R trailing distance is correctly calculated."""
+        from merid.position_management.position import Position, PositionSide, TrailingType
+        
+        position = Position(
+            market_id="KXBTC15M-1234",
+            series_ticker="KXBTC15M",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,
+            stop_loss_price_cents=40,  # 10c risk
+            trailing_type=TrailingType.R_MULTIPLE,
+            trailing_param=0.5,  # 0.5R trail
+        )
+        
+        # Initial risk is 10c (50 - 40)
+        assert position.initial_risk_cents == 10
+        
+        # Move price up to 60 (max favorable)
+        position.update_runtime_state(60)
+        assert position.max_favorable_price_cents == 60
+        
+        # Trail level should be max_favorable - (0.5 * risk) = 60 - 5 = 55
+        trail_level = position.get_trail_level()
+        assert trail_level == 55
+        
+        # Price at 55 should trigger trail
+        assert position.should_trigger_trail(55) is True
+        
+        # Price at 56 should not trigger trail
+        assert position.should_trigger_trail(56) is False
+
+
+class TestPositionBreakEvenTrigger(unittest.IsolatedAsyncioTestCase):
+    """Test break-even trigger at 1R (research: capital preservation)."""
+    
+    def test_break_even_triggers_at_1r(self):
+        """Break-even should trigger when position reaches 1R profit."""
+        from merid.position_management.position import Position, PositionSide, TrailingType
+        
+        position = Position(
+            position_id="test_position",
+            market_id="TEST-MARKET",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,
+            stop_loss_price_cents=40,  # 10 cents risk
+            trailing_type=TrailingType.R_MULTIPLE,
+            trailing_param=0.5,
+        )
+        
+        # Initial risk should be 10 cents
+        assert position.initial_risk_cents == 10
+        
+        # At 60 cents (10 cents profit = 1R), break-even should trigger
+        assert position.should_trigger_break_even(60) is True
+        
+        # At 55 cents (5 cents profit = 0.5R), break-even should not trigger
+        assert position.should_trigger_break_even(55) is False
+        
+        # At 50 cents (breakeven), break-even should not trigger
+        assert position.should_trigger_break_even(50) is False
+    
+    def test_break_even_moves_sl_to_entry(self):
+        """Triggering break-even should move SL to entry price."""
+        from merid.position_management.position import Position, PositionSide, TrailingType
+        
+        position = Position(
+            position_id="test_position",
+            market_id="TEST-MARKET",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,
+            stop_loss_price_cents=40,  # Original SL at 40
+            trailing_type=TrailingType.R_MULTIPLE,
+            trailing_param=0.5,
+        )
+        
+        # Trigger break-even
+        position.trigger_break_even()
+        
+        # SL should be moved to entry price (50)
+        assert position.stop_loss_price_cents == 50
+        assert position.break_even_triggered is True
+        assert position.break_even_price_cents == 50
+    
+    def test_break_even_only_triggers_once(self):
+        """Break-even should only trigger once per position."""
+        from merid.position_management.position import Position, PositionSide, TrailingType
+        
+        position = Position(
+            position_id="test_position",
+            market_id="TEST-MARKET",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,
+            stop_loss_price_cents=40,
+            trailing_type=TrailingType.R_MULTIPLE,
+            trailing_param=0.5,
+        )
+        
+        # Trigger break-even
+        position.trigger_break_even()
+        
+        # Should not trigger again
+        assert position.should_trigger_break_even(70) is False
+
+
+class TestPositionScaleOut(unittest.IsolatedAsyncioTestCase):
+    """Test partial scale-out at 1.5-2R (research: Pay Yourself strategy)."""
+    
+    def test_scale_out_triggers_at_target(self):
+        """Scale-out should trigger when position reaches scale-out price."""
+        from merid.position_management.position import Position, PositionSide, TrailingType
+        
+        position = Position(
+            position_id="test_position",
+            market_id="TEST-MARKET",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,
+            stop_loss_price_cents=40,
+            scale_out_price_cents=65,  # Scale-out at 65 cents
+            trailing_type=TrailingType.R_MULTIPLE,
+            trailing_param=0.5,
+        )
+        
+        # At 65 cents, scale-out should trigger
+        assert position.should_trigger_scale_out(65) is True
+        
+        # At 64 cents, scale-out should not trigger
+        assert position.should_trigger_scale_out(64) is False
+    
+    def test_scale_out_closes_half_position(self):
+        """Scale-out should close 50% of position."""
+        from merid.position_management.position import Position, PositionSide, TrailingType
+        
+        position = Position(
+            position_id="test_position",
+            market_id="TEST-MARKET",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,
+            stop_loss_price_cents=40,
+            scale_out_price_cents=65,
+            trailing_type=TrailingType.R_MULTIPLE,
+            trailing_param=0.5,
+        )
+        
+        # Trigger scale-out
+        contracts_to_close = position.trigger_scale_out()
+        
+        # Should close 5 contracts (50% of 10)
+        assert contracts_to_close == 5
+        assert position.scale_out_triggered is True
+        assert position.scale_out_remaining_size == 5
+    
+    def test_scale_out_only_triggers_once(self):
+        """Scale-out should only trigger once per position."""
+        from merid.position_management.position import Position, PositionSide, TrailingType
+        
+        position = Position(
+            position_id="test_position",
+            market_id="TEST-MARKET",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,
+            stop_loss_price_cents=40,
+            scale_out_price_cents=65,
+            trailing_type=TrailingType.R_MULTIPLE,
+            trailing_param=0.5,
+        )
+        
+        # Trigger scale-out
+        position.trigger_scale_out()
+        
+        # Should not trigger again
+        assert position.should_trigger_scale_out(70) is False
+
+
+class TestDelayedTrailingActivation(unittest.IsolatedAsyncioTestCase):
+    """Test trailing activation delayed until after 1R (research: prevent early whipsaws)."""
+    
+    def test_trailing_not_active_initially(self):
+        """Trailing should not be active initially (before 1R)."""
+        from merid.position_management.position import Position, PositionSide, TrailingType
+        
+        position = Position(
+            position_id="test_position",
+            market_id="TEST-MARKET",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,
+            stop_loss_price_cents=40,
+            trailing_type=TrailingType.R_MULTIPLE,
+            trailing_param=0.5,
+        )
+        
+        # Trailing should not be active initially
+        assert position.trailing_activated is False
+    
+    def test_trailing_can_be_manually_activated(self):
+        """Trailing can be manually activated (by PositionMonitor after break-even)."""
+        from merid.position_management.position import Position, PositionSide, TrailingType
+        
+        position = Position(
+            position_id="test_position",
+            market_id="TEST-MARKET",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,
+            stop_loss_price_cents=40,
+            trailing_type=TrailingType.R_MULTIPLE,
+            trailing_param=0.5,
+        )
+        
+        # Trailing should not be active initially
+        assert position.trailing_activated is False
+        
+        # Manually activate trailing (simulating PositionMonitor behavior)
+        position.trailing_activated = True
+        
+        # Trailing should now be active
+        assert position.trailing_activated is True
+
+
+class TestTimeBasedTrailingTightening(unittest.IsolatedAsyncioTestCase):
+    """Test time-based trailing tightening as expiry approaches (research: lock in gains)."""
+    
+    def test_trailing_tightens_near_expiry(self):
+        """Trailing distance should reduce as expiry approaches."""
+        from merid.position_management.position import Position, PositionSide, TrailingType
+        from datetime import datetime, timedelta
+        
+        position = Position(
+            position_id="test_position",
+            market_id="TEST-MARKET",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,
+            stop_loss_price_cents=40,
+            trailing_type=TrailingType.R_MULTIPLE,
+            trailing_param=0.5,
+        )
+        
+        # Set opened_at to 10 minutes ago (last 5 minutes of 15m window)
+        position.opened_at = datetime.utcnow() - timedelta(minutes=10)
+        position.max_favorable_price_cents = 60
+        
+        # Update runtime state to trigger time-based calculation
+        position.update_runtime_state(60)
+        
+        # Trail level should be tighter (50% reduction in last 5 minutes)
+        # Normal: 60 - (0.5 * 10) = 55
+        # Tightened: 60 - (0.25 * 10) = 57.5 -> 57
+        trail_level = position.get_trail_level()
+        assert trail_level > 55  # Should be tighter (higher for YES)
+    
+    def test_trailing_normal_early_in_window(self):
+        """Trailing distance should be normal early in window."""
+        from merid.position_management.position import Position, PositionSide, TrailingType
+        
+        position = Position(
+            position_id="test_position",
+            market_id="TEST-MARKET",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,
+            stop_loss_price_cents=40,
+            trailing_type=TrailingType.R_MULTIPLE,
+            trailing_param=0.5,
+        )
+        
+        # Set opened_at to 2 minutes ago (early in window)
+        position.max_favorable_price_cents = 60
+        position.update_runtime_state(60)
+        
+        # Trail level should be normal (no tightening)
+        # Normal: 60 - (0.5 * 10) = 55
+        trail_level = position.get_trail_level()
+        assert trail_level == 55
 
 

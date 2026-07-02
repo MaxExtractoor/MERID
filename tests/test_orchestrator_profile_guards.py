@@ -114,7 +114,7 @@ class TestOrchestratorProfileGuards:
         
         # Mock the risk config to return profile-driven Kelly
         class MockRiskConfig:
-            kelly_fraction = 0.30  # From kalshi_crypto_15m.yaml
+            kelly_fraction = 0.02  # CRITICAL FIX: From kalshi_crypto_15m_v2.yaml (2% Kelly hard cap, was 0.05)
         
         def mock_get_kalshi_risk():
             return MockRiskConfig()
@@ -124,14 +124,15 @@ class TestOrchestratorProfileGuards:
             from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
             with patch('merid.event_venues.kalshi.kalshi_risk.get_kalshi_risk', mock_get_kalshi_risk):
                 risk_config = get_kalshi_risk()
-                kelly_f = float(getattr(risk_config, 'kelly_fraction', 0.30))
+                kelly_f = float(getattr(risk_config, 'kelly_fraction', 0.05))
         except Exception:
-            kelly_f = 0.30
+            kelly_f = 0.05
         
-        # Assert Kelly matches profile (0.30), not old hardcoded (0.25 or 0.10)
-        assert kelly_f == 0.30, f"Expected Kelly 0.30 from profile, got {kelly_f}"
+        # Assert Kelly matches profile (0.05), not old hardcoded (0.30, 0.25, or 0.20)
+        assert kelly_f == 0.05, f"Expected Kelly 0.05 from profile, got {kelly_f}"
+        assert kelly_f != 0.30, "Kelly should not be old hardcoded 0.30"
         assert kelly_f != 0.25, "Kelly should not be old hardcoded 0.25"
-        assert kelly_f != 0.10, "Kelly should not be old hardcoded 0.10"
+        assert kelly_f != 0.20, "Kelly should not be old hardcoded 0.20"
         
         # Clean up
         del os.environ["MERID_PROFILE"]

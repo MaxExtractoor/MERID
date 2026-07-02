@@ -19,8 +19,8 @@ import unittest
 from pathlib import Path
 
 os.environ["USE_TOPN_ALLOCATOR"] = "true"
-os.environ["MAX_CYCLE_RISK_PCT"] = "0.03"
-os.environ["MAX_TOTAL_RISK_PCT"] = "0.08"
+os.environ["MAX_CYCLE_RISK_PCT"] = "0.03"  # 2026 best practice: 3% per cycle
+os.environ["MAX_TOTAL_RISK_PCT"] = "0.06"  # 2026 best practice: 6% total
 
 # Force settings reload so env vars take effect
 for _mod in ("core.settings",):
@@ -143,7 +143,7 @@ class TestBankrollSourceAlignment(unittest.TestCase):
         self.assertIn("_get_global_risk_guard()", source)
         # Canonical pct values are still enforced by core.settings.
         self.assertEqual(MAX_CYCLE_RISK_PCT, 0.03)
-        self.assertEqual(MAX_TOTAL_RISK_PCT, 0.08)
+        self.assertEqual(MAX_TOTAL_RISK_PCT, 0.06)
         self.assertTrue(USE_TOPN_ALLOCATOR)
         # The shared singleton reads those same canonical values at init.
         from merid.guards.global_risk_guard import (

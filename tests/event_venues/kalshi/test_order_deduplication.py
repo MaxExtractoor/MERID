@@ -212,9 +212,10 @@ class TestOrderRouterDedupIntegration:
     @pytest.mark.asyncio
     async def test_cross_caller_dedup_registry(self):
         """PHASE1-DUP-8: Verify cross-caller dedup registry prevents duplicate orders across different callers."""
-        from merid.guards.order_dedup_registry import get_order_dedup_registry
+        from merid.guards.order_dedup_registry import OrderDedupRegistry
         
-        registry = get_order_dedup_registry()
+        # Use a fresh registry with 60-second buckets for this test
+        registry = OrderDedupRegistry(bucket_seconds=60)
         
         # First caller should be admitted
         admitted1, entry1 = registry.try_admit(
@@ -241,12 +242,13 @@ class TestOrderRouterDedupIntegration:
         assert entry2.caller == "caller_1"  # First caller's entry
         
         # Different time bucket should allow new order
+        # Use a timestamp that's 60 seconds later to ensure different bucket
         admitted3, entry3 = registry.try_admit(
             ticker="KXBTC-T3550",
             side="yes",
             action="buy",
             caller="caller_3",
-            ts=1234567950.0  # Different bucket
+            ts=1234567950.0  # Different bucket (60 seconds later)
         )
         assert admitted3 is True
         assert entry3.caller == "caller_3"

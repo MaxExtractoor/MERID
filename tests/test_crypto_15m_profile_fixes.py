@@ -302,8 +302,8 @@ class TestStrategyPolicyFixes:
         except Exception as e:
             pytest.skip(f"Strategy policy min_edge check skipped: {e}")
 
-    def test_strategy_policy_min_confidence_standardized_to_60_percent(self):
-        """Test that strategy policy min_confidence is standardized to 60% (was 70%)."""
+    def test_strategy_policy_min_confidence_standardized_to_50_percent(self):
+        """Test that strategy policy min_confidence is standardized to 50% (was 55%)."""
         try:
             from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
 
@@ -313,8 +313,8 @@ class TestStrategyPolicyFixes:
             adapter = Crypto15mProfileAdapter()
             profile = adapter.profile
 
-            assert profile.strategy_policy_min_confidence == 0.55, \
-                f"Expected strategy_policy_min_confidence=0.55, got {profile.strategy_policy_min_confidence}"
+            assert profile.strategy_policy_min_confidence == 0.50, \
+                f"Expected strategy_policy_min_confidence=0.50, got {profile.strategy_policy_min_confidence}"
         except Exception as e:
             pytest.skip(f"Strategy policy min_confidence check skipped: {e}")
 

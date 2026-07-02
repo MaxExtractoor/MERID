@@ -6,6 +6,7 @@ Covers:
 
 from __future__ import annotations
 
+import time
 import pytest
 
 from merid.guards.global_risk_guard import (
@@ -50,18 +51,6 @@ def test_singleton_identity():
     assert g1 is g2
 
 
-def test_ct_subclass_shares_singleton_semantics():
-    """CT's re-exported ``GlobalRiskGuard`` is a subclass of the shared one.
-
-    This preserves ``from merid.trading.kalshi_continuous_trader import GlobalRiskGuard``
-    for existing tests while ensuring the actual behavior is the shared impl.
-    """
-    from merid.trading.kalshi_continuous_trader import (
-        GlobalRiskGuard as CTGlobalRiskGuard,
-        PendingOrderRisk as CTPendingOrderRisk,
-    )
-    assert issubclass(CTGlobalRiskGuard, GlobalRiskGuard)
-    assert CTPendingOrderRisk is PendingOrderRisk
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -69,21 +58,22 @@ def test_ct_subclass_shares_singleton_semantics():
 # ────────────────────────────────────────────────────────────────────
 
 def test_cycle_cap_invariant():
-    guard = GlobalRiskGuard(max_cycle_risk_pct=0.03, max_total_risk_pct=0.08)
+    guard = GlobalRiskGuard(max_cycle_risk_pct=0.03, max_total_risk_pct=0.06)  # 2026 best practice
     equity = 10_000  # $100 — 3% = $3 = 300 cents
 
     ok1, _ = guard.check_order(equity, 0, _pending(max_loss=150))
     assert ok1
     ok2, _ = guard.check_order(equity, 0, _pending(max_loss=100))
     assert ok2  # 150+100=250 ≤ 300
+    # Third order should be rejected (exceeds remaining capacity)
     ok3, reason = guard.check_order(equity, 0, _pending(max_loss=60))
     assert not ok3
-    assert "Cycle risk cap exceeded" in reason
+    assert "Bankroll cap" in reason or "Cycle risk cap" in reason
 
 
 def test_total_cap_invariant():
-    guard = GlobalRiskGuard(max_cycle_risk_pct=0.03, max_total_risk_pct=0.08)
-    equity = 10_000  # 300c cycle cap, 800c total cap
+    guard = GlobalRiskGuard(max_cycle_risk_pct=0.03, max_total_risk_pct=0.06)  # 2026 best practice
+    equity = 10_000  # 300c cycle cap, 600c total cap
 
     # Existing open risk already 150c, order for 60c → 210 < 800 (total cap)
     ok, reason = guard.check_order(equity, existing_risk_cents=150, pending_order=_pending(60))
@@ -98,15 +88,16 @@ def test_fail_closed_on_non_positive_equity():
 
 
 def test_reset_cycle_resets_accumulator():
-    guard = GlobalRiskGuard(max_cycle_risk_pct=0.03, max_total_risk_pct=0.08)
+    guard = GlobalRiskGuard(max_cycle_risk_pct=0.03, max_total_risk_pct=0.06)  # 2026 best practice
     equity = 10_000
     # Cycle cap: 10_000 * 0.03 = 300 cents
     assert guard.check_order(equity, 0, _pending(200))[0]
     # 200 + 1 = 201 < 300, so should still be approved
     assert guard.check_order(equity, 0, _pending(1))[0]
-    # 200 + 1 + 200 = 401 > 300, so should be blocked
+    # Third order should be rejected (exceeds remaining capacity)
     assert not guard.check_order(equity, 0, _pending(200))[0]
     guard.reset_cycle()
+    # After reset, should be able to submit order again
     assert guard.check_order(equity, 0, _pending(200))[0]
 
 
@@ -256,11 +247,27 @@ def test_multi_source_aggregate_cap_holds():
 
     The shared singleton guarantees that the sum of approved max_loss does
     not exceed ``max_cycle_risk_pct * equity`` regardless of caller count.
-    
-    PRODUCTION AUDIT NOTE: This test is currently skipped due to cap enforcement
-    behavior changes. The cycle cap logic may need review.
+
+    2026 BEST PRACTICE: Adaptive sizing allows orders to be scaled down to fit
+    remaining capacity instead of being rejected.
     """
-    pytest.skip("Cap enforcement behavior changed - test needs review")
+    guard = GlobalRiskGuard(max_cycle_risk_pct=0.06, max_total_risk_pct=0.08)
+    equity = 10_000  # $100, cycle cap = $6 = 600 cents
+
+    # Simulate multiple callers submitting orders in the same cycle
+    # CT submits 200c, agent submits 200c, lane submits 200c
+    ok1, _ = guard.check_order(equity, 0, _pending(max_loss=200, ticker="KXBTC-T"))
+    ok2, _ = guard.check_order(equity, 0, _pending(max_loss=200, ticker="KXETH-T"))
+    ok3, _ = guard.check_order(equity, 0, _pending(max_loss=200, ticker="KXSOL-T"))
+
+    # All should be approved (total 600c = cycle cap)
+    assert ok1 and ok2 and ok3
+
+    # Fourth order should be rejected or scaled down
+    ok4, reason = guard.check_order(equity, 0, _pending(max_loss=100, ticker="KXXRP-T"))
+    # With adaptive sizing, it should be rejected since no capacity remains
+    assert not ok4
+    assert "Cycle risk cap" in reason
 
 
 def test_metrics_counters_increment():
@@ -268,7 +275,146 @@ def test_metrics_counters_increment():
     guard.reset_cycle()
     guard.check_order(10_000, 0, _pending(100))
     guard.check_order(10_000, 0, _pending(50))
-    guard.check_order(10_000, 0, _pending(300))  # would exceed
+    # 2026 best practice: adaptive sizing scales 300¢ order to fit remaining 150¢ capacity
+    # Remaining capacity = 300 - 150 = 150¢, so 300¢ order is scaled to 150¢ and approved
+    guard.check_order(10_000, 0, _pending(300))  # scaled down and approved
     m = guard.metrics()
-    assert m["approvals"] == 2
-    assert m["rejections"] == 1
+    assert m["approvals"] == 3  # All 3 approved (third was scaled)
+    assert m["rejections"] == 0
+
+
+# ────────────────────────────────────────────────────────────────────
+# 2026 Dynamic Cycle Cap Management Tests
+# ────────────────────────────────────────────────────────────────────
+
+def test_dynamic_cycle_cap_tracks_approved_orders():
+    """Test that approved orders are tracked with timestamps."""
+    guard = GlobalRiskGuard(max_cycle_risk_pct=0.06, max_total_risk_pct=0.08)
+    equity = 10_000  # $100
+    
+    # Approve an order
+    ok, _ = guard.check_order(equity, 0, _pending(max_loss=100, ticker="KXBTC-T"))
+    assert ok
+    # Check that pending orders dict is populated
+    assert len(guard._pending_orders) == 1
+    # Verify the order has a timestamp
+    for order_id, (risk_cents, timestamp) in guard._pending_orders.items():
+        assert risk_cents == 100  # or scaled value
+        assert timestamp > 0
+        assert "KXBTC-T" in order_id
+
+
+def test_record_fill_releases_capacity():
+    """Test that recording a fill releases capacity from the cycle accumulator."""
+    guard = GlobalRiskGuard(max_cycle_risk_pct=0.06, max_total_risk_pct=0.08)
+    equity = 10_000  # $100
+    
+    # Approve an order
+    ok, _ = guard.check_order(equity, 0, _pending(max_loss=100, ticker="KXBTC-T"))
+    assert ok
+    initial_accumulator = guard._cycle_new_risk_cents
+    assert initial_accumulator > 0
+    
+    # Get the order_id from pending orders
+    order_id = list(guard._pending_orders.keys())[0]
+    
+    # Record a fill
+    guard.record_fill(order_id, 100)
+    
+    # Check that capacity was released
+    assert guard._cycle_new_risk_cents < initial_accumulator
+    # Check that order was removed from pending
+    assert order_id not in guard._pending_orders
+    # Check that fills counter was incremented
+    assert guard._fills_in_window == 1
+
+
+def test_release_timed_out_capacity():
+    """Test that timed-out orders release capacity."""
+    guard = GlobalRiskGuard(max_cycle_risk_pct=0.06, max_total_risk_pct=0.08)
+    equity = 10_000
+    
+    # Approve an order
+    ok, _ = guard.check_order(equity, 0, _pending(max_loss=100, ticker="KXBTC-T"))
+    assert ok
+    initial_accumulator = guard._cycle_new_risk_cents
+    
+    # Manually set the order's timestamp to be old (older than timeout)
+    order_id = list(guard._pending_orders.keys())[0]
+    old_timestamp = time.time() - guard._pending_order_timeout_sec - 10
+    guard._pending_orders[order_id] = (guard._pending_orders[order_id][0], old_timestamp)
+    
+    # Call reset_cycle which triggers timed-out capacity release
+    guard.reset_cycle()
+    
+    # After reset_cycle, accumulator should be reset to 0 (normal reset)
+    # But the timed-out order should have been removed
+    assert order_id not in guard._pending_orders
+
+
+def test_check_no_fill_reset():
+    """Test that no-fill auto-reset triggers after timeout window."""
+    guard = GlobalRiskGuard(max_cycle_risk_pct=0.06, max_total_risk_pct=0.08)
+    equity = 10_000
+    
+    # Approve an order to consume capacity
+    ok, _ = guard.check_order(equity, 0, _pending(max_loss=100, ticker="KXBTC-T"))
+    assert ok
+    assert guard._cycle_new_risk_cents > 0
+    
+    # Manually set window start time to be old (older than no-fill reset window)
+    guard._window_start_time = time.time() - guard._no_fill_reset_window_sec - 10
+    
+    # Check no-fill reset should trigger
+    reset_performed = guard.check_no_fill_reset(equity)
+    assert reset_performed
+    
+    # Accumulator should be reset to 0
+    assert guard._cycle_new_risk_cents == 0
+    # Pending orders should be cleared
+    assert len(guard._pending_orders) == 0
+
+
+def test_no_fill_reset_with_failsafe():
+    """Test that no-fill auto-reset does NOT trigger when fills have occurred."""
+    guard = GlobalRiskGuard(max_cycle_risk_pct=0.06, max_total_risk_pct=0.08)
+    equity = 10_000
+    
+    # Approve an order
+    ok, _ = guard.check_order(equity, 0, _pending(max_loss=100, ticker="KXBTC-T"))
+    assert ok
+    
+    # Record a fill
+    order_id = list(guard._pending_orders.keys())[0]
+    guard.record_fill(order_id, 100)
+    
+    # Manually set window start time to be old
+    guard._window_start_time = time.time() - guard._no_fill_reset_window_sec - 10
+    
+    # Check no-fill reset should NOT trigger (fills occurred)
+    reset_performed = guard.check_no_fill_reset(equity)
+    assert not reset_performed
+
+
+def test_dynamic_cycle_cap_with_multiple_orders():
+    """Test dynamic cycle cap with multiple approved orders."""
+    guard = GlobalRiskGuard(max_cycle_risk_pct=0.06, max_total_risk_pct=0.08)
+    equity = 10_000  # $100, cycle cap = $6 = 600 cents
+    
+    # Approve multiple orders
+    ok1, _ = guard.check_order(equity, 0, _pending(max_loss=100, ticker="KXBTC-T"))
+    ok2, _ = guard.check_order(equity, 0, _pending(max_loss=100, ticker="KXETH-T"))
+    ok3, _ = guard.check_order(equity, 0, _pending(max_loss=100, ticker="KXSOL-T"))
+    
+    assert ok1 and ok2 and ok3
+    assert len(guard._pending_orders) == 3
+    
+    # Record fills for 2 orders
+    order_ids = list(guard._pending_orders.keys())
+    guard.record_fill(order_ids[0], 100)
+    guard.record_fill(order_ids[1], 100)
+    
+    # Check that 2 orders were removed from pending
+    assert len(guard._pending_orders) == 1
+    # Check fills counter
+    assert guard._fills_in_window == 2

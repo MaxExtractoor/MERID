@@ -9,6 +9,7 @@ Run live: pytest tests/test_unified_spot_service.py::TestLiveIntegration -v -s
 import pytest
 import asyncio
 import time
+import base64
 from unittest.mock import Mock, patch, AsyncMock, MagicMock
 from decimal import Decimal
 from datetime import datetime, timezone
@@ -18,9 +19,10 @@ import os
 from data.unified_spot_service import (
     UnifiedSpotService, 
     SpotPrice,
-    SpotCacheEntry,
-    SpotSource,
-    get_unified_spot_service
+    SpotError,
+    get_unified_spot_service,
+    _get_coinbase_credentials,
+    _generate_coinbase_signature
 )
 
 
@@ -35,81 +37,88 @@ class TestUnifiedSpotService:
         
         # Stop if already running
         if service._running:
-            await service.stop_streaming()
+            await service.stop_refresh_loop()
         
         # Reset internal state
         service._cache = {}
-        service._fetch_counts = {}
-        service._fallback_counts = {}
         service._running = False
         
         yield service
         
         # Cleanup
         if service._running:
-            await service.stop_streaming()
+            await service.stop_refresh_loop()
     
     @pytest.mark.asyncio
     async def test_initialization_and_startup(self, spot_service):
         """Test service initializes and starts correctly"""
         assert not spot_service._running
         assert spot_service._cache == {}
-        assert spot_service._fetch_counts == {}
         
-        await spot_service.start_streaming()
+        await spot_service.start_refresh_loop()
         assert spot_service._running
         
-        await spot_service.stop_streaming()
+        await spot_service.stop_refresh_loop()
         assert not spot_service._running
     
     @pytest.mark.asyncio
     async def test_get_spot_returns_valid_structure(self, spot_service):
         """Test that get returns correct SpotPrice structure"""
         # Prime cache with mock data
-        spot_service._cache["BTC"] = SpotCacheEntry(
-            price=67000.0,
-            timestamp=time.time(),
-            source=SpotSource.COINBASE,
-            confidence=1.0,
-            contributing_exchanges=['coinbase']
-        )
+        spot_service._cache["BTC"] = {
+            'price': 67000.0,
+            'timestamp': int(time.time() * 1000),
+            'source': 'coinbase_public',
+            'open': 67000.0,
+            'high': 67000.0,
+            'low': 67000.0,
+            'volume': 12345.67  # Volume for volume confirmation filter
+        }
         
         spot = spot_service.get("BTC")
         
         assert spot is not None
+        assert isinstance(spot, SpotPrice)
         assert hasattr(spot, 'price')
         assert hasattr(spot, 'timestamp')
         assert hasattr(spot, 'source')
-        assert hasattr(spot, 'is_stale')
         assert hasattr(spot, 'confidence')
+        assert hasattr(spot, 'open')
+        assert hasattr(spot, 'high')
+        assert hasattr(spot, 'low')
+        assert hasattr(spot, 'volume')  # CRITICAL: Volume field for volume confirmation filter
         
-        assert isinstance(spot.price, (float, Decimal))
+        assert isinstance(spot.price, float)
         assert spot.price > 0
-        assert spot.source.value in ["composite", "coinbase", "kraken", "fallback", "coinbase_public"]
+        assert spot.source in ["coinbase_public", "coinbase_exchange_authenticated"]
         assert 0.0 <= spot.confidence <= 1.0
-        assert isinstance(spot.timestamp, (int, float))
+        assert isinstance(spot.timestamp, int)
         assert spot.timestamp > 0
+        # Test volume field
+        assert spot.volume == 12345.67 or spot.volume is None  # Volume may be None if not available
     
     @pytest.mark.asyncio
-    async def test_unsupported_asset_returns_none(self, spot_service):
-        """Test that unsupported assets return None"""
+    async def test_unsupported_asset_returns_spot_error(self, spot_service):
+        """Test that unsupported assets return SpotError"""
         spot = spot_service.get("INVALID")
-        assert spot is None
+        assert isinstance(spot, SpotError)
+        assert spot.reason == "no_data"
         
         spot = spot_service.get("AAPL")  # Stock, not crypto
-        assert spot is None
+        assert isinstance(spot, SpotError)
     
     @pytest.mark.asyncio
     async def test_cache_hit_avoids_refetch(self, spot_service):
         """Test that cached values are reused within TTL"""
         # Prime cache
-        spot_service._cache["BTC"] = SpotCacheEntry(
-            price=67000.0,
-            timestamp=time.time(),
-            source=SpotSource.COINBASE,
-            confidence=1.0,
-            contributing_exchanges=['coinbase']
-        )
+        spot_service._cache["BTC"] = {
+            'price': 67000.0,
+            'timestamp': int(time.time() * 1000),
+            'source': 'coinbase_public',
+            'open': 67000.0,
+            'high': 67000.0,
+            'low': 67000.0
+        }
         
         # First fetch
         spot1 = spot_service.get("BTC")
@@ -139,73 +148,60 @@ class TestSourceFailover:
         """Create service with clean state"""
         service = get_unified_spot_service()
         if service._running:
-            await service.stop_streaming()
+            await service.stop_refresh_loop()
         service._cache = {}
-        service._fetch_counts = {}
-        service._fallback_counts = {}
         yield service
         if service._running:
-            await service.stop_streaming()
+            await service.stop_refresh_loop()
     
     @pytest.mark.asyncio
-    async def test_coinbase_down_uses_kraken(self, spot_service):
-        """CRITICAL: Test that Coinbase failure triggers Kraken fallback"""
-        # This test would require mocking the streaming loop
-        # For now, test at the cache level
-        spot_service._cache["BTC"] = SpotCacheEntry(
-            price=67000.0,
-            timestamp=time.time(),
-            source=SpotSource.KRAKEN,
-            confidence=1.0,
-            contributing_exchanges=['kraken']
-        )
+    async def test_authenticated_ohlc_fallback_to_public(self, spot_service):
+        """Test that authenticated API failure triggers public API fallback"""
+        # Mock the authenticated fetch to fail
+        with patch.object(spot_service, '_fetch_ohlc_authenticated', side_effect=Exception("Auth failed")):
+            # Mock the ticker to fail as well (to force public fallback)
+            with patch.object(spot_service, '_fetch_ticker_public', side_effect=Exception("Ticker failed")):
+                # Mock the public fallback to succeed
+                with patch.object(spot_service, '_fetch_spot_price_fallback_async', return_value={
+                    'open': 67000.0,
+                    'high': 67000.0,
+                    'low': 67000.0,
+                    'close': 67000.0
+                }):
+                    result = await spot_service._fetch_asset("BTC")
+                    assert result is True
+                    # Check cache was updated with public source
+                    assert spot_service._cache["BTC"]["source"] == "coinbase_public"
+    
+    @pytest.mark.asyncio
+    async def test_all_sources_fail_returns_spot_error(self, spot_service):
+        """Test that all source failures return SpotError"""
+        # Mock all fetches to fail (authenticated, ticker, and public)
+        with patch.object(spot_service, '_fetch_ohlc_authenticated', side_effect=Exception("Auth failed")):
+            with patch.object(spot_service, '_fetch_ticker_public', side_effect=Exception("Ticker failed")):
+                with patch.object(spot_service, '_fetch_spot_price_fallback_async', side_effect=Exception("Public failed")):
+                    result = await spot_service._fetch_asset("BTC")
+                    assert result is False
+    
+    @pytest.mark.asyncio
+    async def test_stale_data_returns_spot_error(self, spot_service):
+        """Test that stale data returns SpotError"""
+        # Prime cache with old data
+        old_timestamp = int((time.time() - 120) * 1000)  # 120 seconds old
+        spot_service._cache["BTC"] = {
+            'price': 67000.0,
+            'timestamp': old_timestamp,
+            'source': 'coinbase_public',
+            'open': 67000.0,
+            'high': 67000.0,
+            'low': 67000.0
+        }
         
         spot = spot_service.get("BTC")
         
-        assert spot is not None, "Failover failed - no spot returned"
-        assert spot.source.value in ["kraken", "fallback"], f"Wrong source: {spot.source}"
-        assert spot.price == 67000.0
-        print(f"  ✓ Kraken fallback works: ${spot.price:,.2f}")
-    
-    @pytest.mark.asyncio
-    async def test_all_sources_fail_returns_stale_cache(self, spot_service):
-        """Test that all source failures still return stale cache if available"""
-        # Prime cache with valid data
-        spot_service._cache["BTC"] = SpotCacheEntry(
-            price=67000.0,
-            timestamp=time.time() - 10,  # 10 seconds old (stale)
-            source=SpotSource.COINBASE,
-            confidence=0.5,
-            contributing_exchanges=['coinbase']
-        )
-        
-        spot = spot_service.get("BTC")
-        
-        assert spot is not None, "Should return stale cache"
-        assert spot.is_stale == True, "Not marked as stale"
-        assert spot.confidence < 1.0, f"Stale should have reduced confidence: {spot.confidence}"
-        assert spot.price == 67000.0, "Stale price should match cached"
-        print(f"  ✓ All sources down → returned stale cache (confidence={spot.confidence:.2f})")
-    
-    @pytest.mark.asyncio
-    async def test_partial_source_degradation_graceful(self, spot_service):
-        """Test that partial source failures still provide prices for all assets"""
-        # Simulate cache with data from different sources
-        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-            spot_service._cache[asset] = SpotCacheEntry(
-                price=1000.0 if asset == "BTC" else 500.0,
-                timestamp=time.time(),
-                source=SpotSource.KRAKEN,
-                confidence=1.0,
-                contributing_exchanges=['kraken']
-            )
-        
-        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-            spot = spot_service.get(asset)
-            assert spot is not None, f"Failed to get {asset}"
-            assert spot.source.value in ["kraken", "fallback"], f"{asset} used wrong source"
-            assert not spot.is_stale, f"{asset} marked stale despite fresh cache"
-            print(f"  ✓ {asset}: ${spot.price:,.2f} from {spot.source}")
+        assert isinstance(spot, SpotError)
+        assert spot.reason == "stale"
+        assert spot.age_s > 60  # Should be older than 60s threshold
 
 
 class TestStalenessDetection:
@@ -215,54 +211,51 @@ class TestStalenessDetection:
     async def spot_service(self):
         service = get_unified_spot_service()
         if service._running:
-            await service.stop_streaming()
+            await service.stop_refresh_loop()
         service._cache = {}
         yield service
         if service._running:
-            await service.stop_streaming()
+            await service.stop_refresh_loop()
     
     @pytest.mark.asyncio
     async def test_fresh_data_not_stale(self, spot_service):
         """Test that fresh data is marked as not stale"""
-        spot_service._cache["BTC"] = SpotCacheEntry(
-            price=67000.0,
-            timestamp=time.time(),
-            source=SpotSource.COINBASE,
-            confidence=1.0,
-            contributing_exchanges=['coinbase']
-        )
+        spot_service._cache["BTC"] = {
+            'price': 67000.0,
+            'timestamp': int(time.time() * 1000),
+            'source': 'coinbase_public',
+            'open': 67000.0,
+            'high': 67000.0,
+            'low': 67000.0,
+            'volume': 12345.67  # Volume for volume confirmation filter
+        }
         
         spot = spot_service.get("BTC")
         
-        assert spot is not None
-        assert spot.is_stale == False, "Fresh data marked as stale"
-        assert spot.confidence >= 0.8, f"Fresh data low confidence: {spot.confidence}"
-        
-        # Check timestamp is recent (within last 10 seconds)
-        now_sec = time.time()
-        age_sec = now_sec - spot.timestamp
-        assert age_sec < 10, f"Fresh data timestamp too old: {age_sec:.1f}s"
+        assert isinstance(spot, SpotPrice)
+        assert spot.price == 67000.0
+        assert spot.volume == 12345.67  # Volume should be preserved
     
     @pytest.mark.asyncio
     async def test_staleness_flagged(self, spot_service):
         """CRITICAL: Test that old cached data is marked as stale"""
         # Manually inject old data into cache
-        old_timestamp = time.time() - 10  # 10 seconds old
-        spot_service._cache["ETH"] = SpotCacheEntry(
-            price=3500.0,
-            timestamp=old_timestamp,
-            source=SpotSource.COINBASE,
-            confidence=0.5,
-            contributing_exchanges=['coinbase']
-        )
+        old_timestamp = int((time.time() - 120) * 1000)  # 120 seconds old
+        spot_service._cache["ETH"] = {
+            'price': 3500.0,
+            'timestamp': old_timestamp,
+            'source': 'coinbase_public',
+            'open': 3500.0,
+            'high': 3500.0,
+            'low': 3500.0,
+            'volume': 9876.54  # Volume for volume confirmation filter
+        }
         
         spot = spot_service.get("ETH")
         
-        assert spot is not None, "Stale cache should still be returned"
-        assert spot.is_stale == True, "Old data not marked stale"
-        assert spot.confidence < 1.0, f"Stale confidence too high: {spot.confidence}"
-        assert spot.price == 3500.0, "Stale price doesn't match cache"
-        print(f"  ✓ Stale data flagged correctly (age=10s, confidence={spot.confidence:.2f})")
+        assert isinstance(spot, SpotError)
+        assert spot.reason == "stale"
+        assert spot.age_s > 60
 
 
 class TestCrossComponentConsistency:
@@ -272,23 +265,25 @@ class TestCrossComponentConsistency:
     async def spot_service(self):
         service = get_unified_spot_service()
         if service._running:
-            await service.stop_streaming()
+            await service.stop_refresh_loop()
         service._cache = {}
-        await service.start_streaming()
         yield service
-        await service.stop_streaming()
+        if service._running:
+            await service.stop_refresh_loop()
     
     @pytest.mark.asyncio
     async def test_no_split_brain(self, spot_service):
         """CRITICAL: Verify PM model and execution adapter see identical prices"""
         # Prime cache
-        spot_service._cache["BTC"] = SpotCacheEntry(
-            price=67000.0,
-            timestamp=time.time(),
-            source=SpotSource.COINBASE,
-            confidence=1.0,
-            contributing_exchanges=['coinbase']
-        )
+        spot_service._cache["BTC"] = {
+            'price': 67000.0,
+            'timestamp': int(time.time() * 1000),
+            'source': 'coinbase_public',
+            'open': 67000.0,
+            'high': 67000.0,
+            'low': 67000.0,
+            'volume': 12345.67  # Volume for volume confirmation filter
+        }
         
         # Simulate what PM model does
         pm_spot = spot_service.get("BTC")
@@ -300,7 +295,7 @@ class TestCrossComponentConsistency:
         assert pm_spot.price == exec_spot.price, "PM and execution prices diverged!"
         assert pm_spot.timestamp == exec_spot.timestamp, "PM and execution timestamps differ"
         assert pm_spot.source == exec_spot.source, "PM and execution sources differ"
-        assert pm_spot.is_stale == exec_spot.is_stale, "PM and execution staleness differs"
+        assert pm_spot.volume == exec_spot.volume, "PM and execution volumes differ"  # Volume consistency
         
         print(f"  ✓ No split-brain: PM and execution both see ${pm_spot.price:,.2f} from {pm_spot.source}")
     
@@ -308,13 +303,15 @@ class TestCrossComponentConsistency:
     async def test_filter_pipeline_consistency(self, spot_service):
         """Test that filter pipeline sees same spot as other components"""
         # Prime cache
-        spot_service._cache["ETH"] = SpotCacheEntry(
-            price=3500.0,
-            timestamp=time.time(),
-            source=SpotSource.KRAKEN,
-            confidence=1.0,
-            contributing_exchanges=['kraken']
-        )
+        spot_service._cache["ETH"] = {
+            'price': 3500.0,
+            'timestamp': int(time.time() * 1000),
+            'source': 'coinbase_public',
+            'open': 3500.0,
+            'high': 3500.0,
+            'low': 3500.0,
+            'volume': 9876.54  # Volume for volume confirmation filter
+        }
         
         # Get spot directly
         direct_spot = spot_service.get("ETH")
@@ -324,6 +321,7 @@ class TestCrossComponentConsistency:
         
         assert direct_spot.price == filter_spot.price
         assert direct_spot.timestamp == filter_spot.timestamp
+        assert direct_spot.volume == filter_spot.volume  # Volume consistency
         
         print(f"  ✓ Filter pipeline consistent: ${filter_spot.price:,.2f}")
 
@@ -335,57 +333,49 @@ class TestProductionScenarios:
     async def spot_service(self):
         service = get_unified_spot_service()
         if service._running:
-            await service.stop_streaming()
+            await service.stop_refresh_loop()
         service._cache = {}
-        service._fetch_counts = {}
-        service._fallback_counts = {}
         yield service
         if service._running:
-            await service.stop_streaming()
+            await service.stop_refresh_loop()
     
     @pytest.mark.asyncio
     async def test_rate_limiting(self, spot_service):
         """CRITICAL: Test that rapid requests use cache, not hammering APIs"""
         # Prime cache
-        spot_service._cache["BTC"] = SpotCacheEntry(
-            price=67000.0,
-            timestamp=time.time(),
-            source=SpotSource.COINBASE,
-            confidence=1.0,
-            contributing_exchanges=['coinbase']
-        )
-        
-        fetch_count_before = spot_service._fetch_counts.get("BTC", 0)
+        spot_service._cache["BTC"] = {
+            'price': 67000.0,
+            'timestamp': int(time.time() * 1000),
+            'source': 'coinbase_public',
+            'open': 67000.0,
+            'high': 67000.0,
+            'low': 67000.0
+        }
         
         # Make 20 rapid requests
         prices = []
         for i in range(20):
             spot = spot_service.get("BTC")
-            assert spot is not None, f"Request {i} failed"
+            assert isinstance(spot, SpotPrice), f"Request {i} failed"
             prices.append(spot.price)
-        
-        fetch_count_after = spot_service._fetch_counts.get("BTC", 0)
-        new_fetches = fetch_count_after - fetch_count_before
-        
-        # Should only have made 0 fetches (all cache hits)
-        assert new_fetches == 0, f"Made {new_fetches} fetches for 20 requests - cache not working!"
         
         # All prices should be identical (from cache)
         assert len(set(prices)) == 1, "Prices varied - cache not consistent"
         
-        print(f"  ✓ 20 requests → {new_fetches} API calls (caching effective)")
+        print(f"  ✓ 20 requests → consistent cache hits")
     
     @pytest.mark.asyncio
     async def test_high_frequency_requests_performance(self, spot_service):
         """Test that cached requests are fast (< 1ms p95)"""
         # Prime cache
-        spot_service._cache["BTC"] = SpotCacheEntry(
-            price=67000.0,
-            timestamp=time.time(),
-            source=SpotSource.COINBASE,
-            confidence=1.0,
-            contributing_exchanges=['coinbase']
-        )
+        spot_service._cache["BTC"] = {
+            'price': 67000.0,
+            'timestamp': int(time.time() * 1000),
+            'source': 'coinbase_public',
+            'open': 67000.0,
+            'high': 67000.0,
+            'low': 67000.0
+        }
         
         # Benchmark cached calls
         latencies = []
@@ -394,7 +384,7 @@ class TestProductionScenarios:
             spot = spot_service.get("BTC")
             elapsed_ms = (time.perf_counter() - start) * 1000
             latencies.append(elapsed_ms)
-            assert spot is not None
+            assert isinstance(spot, SpotPrice)
         
         latencies.sort()
         p50 = latencies[50]
@@ -410,19 +400,20 @@ class TestProductionScenarios:
     async def test_cache_stampede_prevention(self, spot_service):
         """Test that concurrent requests don't cause cache stampede"""
         # Prime cache
-        spot_service._cache["SOL"] = SpotCacheEntry(
-            price=100.0,
-            timestamp=time.time(),
-            source=SpotSource.KRAKEN,
-            confidence=1.0,
-            contributing_exchanges=['kraken']
-        )
+        spot_service._cache["SOL"] = {
+            'price': 100.0,
+            'timestamp': int(time.time() * 1000),
+            'source': 'coinbase_public',
+            'open': 100.0,
+            'high': 100.0,
+            'low': 100.0
+        }
         
         # Fire 10 concurrent requests (get() is synchronous, so just loop)
         results = [spot_service.get("SOL") for _ in range(10)]
         
         # All should succeed
-        assert all(r is not None for r in results)
+        assert all(isinstance(r, SpotPrice) for r in results)
         
         # All should have same price (no race condition)
         prices = [r.price for r in results]
@@ -431,30 +422,113 @@ class TestProductionScenarios:
         print(f"  ✓ 10 concurrent requests → consistent prices (stampede prevented)")
 
 
-class TestShadowMode:
-    """Test shadow mode comparison logic"""
+class TestCoinbaseAuthentication:
+    """Test Coinbase Exchange API authentication helpers"""
+    
+    def test_get_coinbase_credentials(self):
+        """Test credential retrieval from environment"""
+        api_key, api_secret = _get_coinbase_credentials()
+        # Either both are None (no credentials) or both are strings
+        if api_key is None:
+            assert api_secret is None
+        else:
+            assert isinstance(api_key, str)
+            assert isinstance(api_secret, str)
+    
+    def test_generate_coinbase_signature(self):
+        """Test HMAC signature generation"""
+        # Test with known values
+        timestamp = "1234567890"
+        method = "GET"
+        request_path = "/products/BTC-USD/candles"
+        body = ""
+        api_secret = base64.b64encode(b"test_secret_key_12345").decode('utf-8')
+        
+        signature = _generate_coinbase_signature(timestamp, method, request_path, body, api_secret)
+        
+        assert isinstance(signature, str)
+        assert len(signature) > 0
+        # Signature should be base64 encoded
+        try:
+            base64.b64decode(signature)
+        except Exception:
+            pytest.fail("Signature is not valid base64")
     
     @pytest.mark.asyncio
-    async def test_shadow_mode_logs_diffs(self):
-        """Test that shadow mode correctly logs price differences"""
+    async def test_authenticated_ohlc_fetch_structure(self):
+        """Test that authenticated OHLC fetch returns correct structure"""
         service = get_unified_spot_service()
         
-        # Prime cache with data
-        service._cache["BTC"] = SpotCacheEntry(
-            price=68000.0,
-            timestamp=time.time(),
-            source=SpotSource.COINBASE,
-            confidence=1.0,
-            contributing_exchanges=['coinbase']
-        )
+        # Mock the HTTP response
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = [
+            [1234567890, 66000.0, 68000.0, 66500.0, 67000.0, 1000.0]
+        ]
         
-        # This should log the shadow diff
-        with patch('data.unified_spot_service.logger') as mock_logger:
-            service._log_shadow_diff("BTC")
+        # Use base64-encoded secret (as expected by the function)
+        api_secret = base64.b64encode(b"test_secret_key_12345").decode('utf-8')
+        
+        with patch('requests.get', return_value=mock_response):
+            result = await service._fetch_ohlc_authenticated("BTC-USD", "test_key", api_secret)
             
-            # Should have logged the difference (shadow mode fetches old service internally)
-            # (Note: _log_shadow_diff only takes asset, not old/new spots)
-            # The method handles fetching both internally
+            assert result is not None
+            assert 'open' in result
+            assert 'high' in result
+            assert 'low' in result
+            assert 'close' in result
+            assert result['open'] == 66500.0
+            assert result['high'] == 68000.0
+            assert result['low'] == 66000.0
+            assert result['close'] == 67000.0
+    
+    @pytest.mark.asyncio
+    async def test_authenticated_ohlc_fallback_on_error(self):
+        """Test that authenticated fetch falls back to public on error"""
+        service = get_unified_spot_service()
+        
+        # Mock authenticated fetch to fail
+        with patch.object(service, '_fetch_ohlc_authenticated', side_effect=Exception("Auth failed")):
+            # Mock public fallback to succeed
+            with patch.object(service, '_fetch_spot_price_fallback_async', return_value={
+                'open': 67000.0,
+                'high': 67000.0,
+                'low': 67000.0,
+                'close': 67000.0
+            }):
+                result = await service._fetch_asset("BTC")
+                assert result is True
+    
+    @pytest.mark.asyncio
+    async def test_ohlc_data_includes_true_values(self):
+        """Test that OHLC data includes distinct high/low values when available"""
+        service = get_unified_spot_service()
+        
+        # Mock the authenticated fetch to return distinct OHLC values
+        api_secret = base64.b64encode(b"test_secret_key_12345").decode('utf-8')
+        
+        with patch('data.unified_spot_service._get_coinbase_credentials', return_value=("key", api_secret)):
+            with patch.object(service, '_fetch_ohlc_authenticated', return_value={
+                'open': 66500.0,
+                'high': 68000.0,
+                'low': 66000.0,
+                'close': 67000.0,
+                'volume': 12345.67  # Volume for volume confirmation filter
+            }):
+                # Also mock ticker to prevent real API calls
+                with patch.object(service, '_fetch_ticker_public', return_value=None):
+                    result = await service._fetch_asset("BTC")
+                    assert result is True
+                    
+                    # Check cache has distinct OHLC values
+                    cached = service._cache["BTC"]
+                    assert cached['open'] == 66500.0
+                    assert cached['high'] == 68000.0
+                    assert cached['low'] == 66000.0
+                    assert cached['price'] == 67000.0  # Cache uses 'price' not 'close'
+                    assert cached['volume'] == 12345.67  # Volume should be preserved
+                    # Verify they are not all the same (true OHLC, not proxy)
+                    assert not (cached['open'] == cached['high'] == cached['low'] == cached['price'])
 
 
 # Smoke tests for live integration (run manually before deployment)
@@ -468,79 +542,57 @@ class TestLiveIntegration:
         service = get_unified_spot_service()
         
         if service._running:
-            await service.stop_streaming()
+            await service.stop_refresh_loop()
         
         service._cache = {}
-        await service.start_streaming()
+        await service.start_refresh_loop()
         
         print("\n🔴 LIVE API TEST - Fetching real prices...")
         
         for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
             spot = service.get(asset)
             
-            assert spot is not None, f"Live fetch failed for {asset}"
+            assert isinstance(spot, SpotPrice), f"Live fetch failed for {asset}"
             assert spot.price > 0, f"{asset} returned invalid price"
-            assert not spot.is_stale, f"{asset} marked stale on fresh fetch"
-            assert spot.confidence > 0.8, f"{asset} low confidence: {spot.confidence}"
+            assert spot.source in ["coinbase_public", "coinbase_exchange_authenticated"]
             
             print(f"  {asset}: ${spot.price:,.4f} from {spot.source} "
-                  f"(confidence={spot.confidence:.2f}, stale={spot.is_stale})")
+                  f"(confidence={spot.confidence:.2f})")
         
-        await service.stop_streaming()
+        await service.stop_refresh_loop()
         print("✅ All assets fetched successfully\n")
     
     @pytest.mark.asyncio
-    async def test_live_coinbase_public_api(self):
-        """Test real Coinbase public API specifically"""
+    async def test_live_coinbase_authenticated_api(self):
+        """Test real Coinbase authenticated API if credentials available"""
         service = get_unified_spot_service()
         
         if service._running:
-            await service.stop_streaming()
+            await service.stop_refresh_loop()
         
         service._cache = {}
-        await service.start_streaming()
         
-        print("\n🔴 LIVE COINBASE TEST...")
+        # Check if credentials are available
+        api_key, api_secret = _get_coinbase_credentials()
+        if not api_key or not api_secret:
+            print("\n⚠️  Skipping authenticated test - no credentials available\n")
+            return
         
-        # Force Coinbase fetch by clearing cache
-        service._cache = {}
-        await asyncio.sleep(2)  # Let streaming populate cache
+        await service.start_refresh_loop()
+        
+        print("\n🔴 LIVE AUTHENTICATED COINBASE TEST...")
+        
+        # Let refresh populate cache
+        await asyncio.sleep(2)
         
         spot = service.get("BTC")
         
-        assert spot is not None
-        assert spot.source.value in ["coinbase", "kraken", "composite"], \
-            f"Expected Coinbase source, got {spot.source}"
-        
-        print(f"  ✅ Coinbase public API: ${spot.price:,.2f}\n")
-        
-        await service.stop_streaming()
-    
-    @pytest.mark.asyncio
-    async def test_live_kraken_fallback(self):
-        """Test real Kraken API as fallback"""
-        service = get_unified_spot_service()
-        
-        if service._running:
-            await service.stop_streaming()
-        
-        service._cache = {}
-        await service.start_streaming()
-        
-        print("\n🔴 LIVE KRAKEN FALLBACK TEST...")
-        
-        # Let streaming populate cache from either source
-        await asyncio.sleep(2)
-        
-        spot = service.get("ETH")
-        
-        assert spot is not None
-        assert spot.source.value in ["coinbase", "kraken", "composite"], \
-            f"Expected Kraken or Coinbase source, got {spot.source}"
+        assert isinstance(spot, SpotPrice)
+        assert spot.source in ["coinbase_public", "coinbase_exchange_authenticated"]
         
         print(f"  ✅ Source: ${spot.price:,.2f} from {spot.source}\n")
         
-        await service.stop_streaming()
+        await service.stop_refresh_loop()
 
 
 # Performance benchmarks
@@ -555,19 +607,19 @@ class TestPerformance:
         service = get_unified_spot_service()
         
         if service._running:
-            await service.stop_streaming()
+            await service.stop_refresh_loop()
         
         service._cache = {}
-        await service.start_streaming()
         
         # Warm cache
-        service._cache["BTC"] = SpotCacheEntry(
-            price=67000.0,
-            timestamp=time.time(),
-            source=SpotSource.COINBASE,
-            confidence=1.0,
-            contributing_exchanges=['coinbase']
-        )
+        service._cache["BTC"] = {
+            'price': 67000.0,
+            'timestamp': int(time.time() * 1000),
+            'source': 'coinbase_public',
+            'open': 67000.0,
+            'high': 67000.0,
+            'low': 67000.0
+        }
         
         # Benchmark
         iterations = 1000
@@ -575,7 +627,7 @@ class TestPerformance:
         
         for _ in range(iterations):
             spot = service.get("BTC")
-            assert spot is not None
+            assert isinstance(spot, SpotPrice)
         
         elapsed = time.perf_counter() - start
         avg_ms = (elapsed / iterations) * 1000
@@ -585,8 +637,6 @@ class TestPerformance:
         print(f"   Throughput: {iterations/elapsed:.0f} calls/sec\n")
         
         assert avg_ms < 1.0, f"Cached calls too slow: {avg_ms:.3f}ms"
-        
-        await service.stop_streaming()
 
 
 if __name__ == "__main__":
