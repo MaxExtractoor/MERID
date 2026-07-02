@@ -1,0 +1,216 @@
+[2026-05-30T18:28:12.325436+00:00] started setter called with value=True
+STACK TRACE:
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 716, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 736, in app
+    await route.handle(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 290, in handle
+    await self.app(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 130, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 116, in app
+    response = await f(request)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 670, in app
+    raw_response = await run_endpoint_function(
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 324, in run_endpoint_function
+    return await dependant.call(**values)
+  File "C:\Dev\MERID\web\main_15m_lean.py", line 101, in health_check
+    startup_state.started = True
+  File "C:\Dev\MERID\web\startup_state.py", line 39, in started
+    f.write("STACK TRACE:\n" + "".join(traceback.format_stack(limit=10)) + "\n")
+
+================================================================================
+[2026-05-30T18:29:34.772235+00:00] started setter called with value=True
+STACK TRACE:
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 716, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 736, in app
+    await route.handle(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 290, in handle
+    await self.app(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 130, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 116, in app
+    response = await f(request)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 670, in app
+    raw_response = await run_endpoint_function(
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 324, in run_endpoint_function
+    return await dependant.call(**values)
+  File "C:\Dev\MERID\web\main_15m_lean.py", line 101, in health_check
+    startup_state.started = True
+  File "C:\Dev\MERID\web\startup_state.py", line 39, in started
+    f.write("STACK TRACE:\n" + "".join(traceback.format_stack(limit=10)) + "\n")
+
+================================================================================
+[2026-05-30T18:30:53.513565+00:00] started setter called with value=True
+STACK TRACE:
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 716, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 736, in app
+    await route.handle(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 290, in handle
+    await self.app(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 130, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 116, in app
+    response = await f(request)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 670, in app
+    raw_response = await run_endpoint_function(
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 324, in run_endpoint_function
+    return await dependant.call(**values)
+  File "C:\Dev\MERID\web\main_15m_lean.py", line 101, in health_check
+    startup_state.started = True
+  File "C:\Dev\MERID\web\startup_state.py", line 39, in started
+    f.write("STACK TRACE:\n" + "".join(traceback.format_stack(limit=10)) + "\n")
+
+================================================================================
+[2026-05-30T18:35:47.078830+00:00] started setter called with value=True
+STACK TRACE:
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 716, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 736, in app
+    await route.handle(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 290, in handle
+    await self.app(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 130, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 116, in app
+    response = await f(request)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 670, in app
+    raw_response = await run_endpoint_function(
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 324, in run_endpoint_function
+    return await dependant.call(**values)
+  File "C:\Dev\MERID\web\main_15m_lean.py", line 101, in health_check
+    startup_state.started = True
+  File "C:\Dev\MERID\web\startup_state.py", line 39, in started
+    f.write("STACK TRACE:\n" + "".join(traceback.format_stack(limit=10)) + "\n")
+
+================================================================================
+[2026-05-30T18:47:03.652490+00:00] started setter called with value=True
+STACK TRACE:
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 716, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 736, in app
+    await route.handle(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 290, in handle
+    await self.app(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 130, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 116, in app
+    response = await f(request)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 670, in app
+    raw_response = await run_endpoint_function(
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 324, in run_endpoint_function
+    return await dependant.call(**values)
+  File "C:\Dev\MERID\web\main_15m_lean.py", line 101, in health_check
+    startup_state.started = True
+  File "C:\Dev\MERID\web\startup_state.py", line 39, in started
+    f.write("STACK TRACE:\n" + "".join(traceback.format_stack(limit=10)) + "\n")
+
+================================================================================
+[2026-05-30T19:02:09.870079+00:00] started setter called with value=True
+STACK TRACE:
+  File "C:\Dev\MERID\debug_startup.py", line 54, in <module>
+    asyncio.run(main())
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 190, in run
+    return runner.run(main)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 641, in run_until_complete
+    self.run_forever()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\asyncio\windows_events.py", line 321, in run_forever
+    super().run_forever()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 608, in run_forever
+    self._run_once()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\asyncio\base_events.py", line 1936, in _run_once
+    handle._run()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\asyncio\events.py", line 84, in _run
+    self._context.run(self._callback, *self._args)
+  File "C:\Dev\MERID\debug_startup.py", line 26, in main
+    startup_state.started = True
+  File "C:\Dev\MERID\web\startup_state.py", line 39, in started
+    f.write("STACK TRACE:\n" + "".join(traceback.format_stack(limit=10)) + "\n")
+
+================================================================================
+[2026-05-30T19:03:56.703828+00:00] started setter called with value=True
+STACK TRACE:
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 716, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 736, in app
+    await route.handle(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 290, in handle
+    await self.app(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 130, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 116, in app
+    response = await f(request)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 670, in app
+    raw_response = await run_endpoint_function(
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 324, in run_endpoint_function
+    return await dependant.call(**values)
+  File "C:\Dev\MERID\web\main_15m_lean.py", line 101, in health_check
+    startup_state.started = True
+  File "C:\Dev\MERID\web\startup_state.py", line 39, in started
+    f.write("STACK TRACE:\n" + "".join(traceback.format_stack(limit=10)) + "\n")
+
+================================================================================
+[2026-05-30T19:20:39.186852+00:00] started setter called with value=True
+STACK TRACE:
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 716, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 736, in app
+    await route.handle(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 290, in handle
+    await self.app(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 130, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 116, in app
+    response = await f(request)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 670, in app
+    raw_response = await run_endpoint_function(
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 324, in run_endpoint_function
+    return await dependant.call(**values)
+  File "C:\Dev\MERID\web\main_15m_lean.py", line 103, in health_check
+    startup_state.started = True
+  File "C:\Dev\MERID\web\startup_state.py", line 39, in started
+    f.write("STACK TRACE:\n" + "".join(traceback.format_stack(limit=10)) + "\n")
+
+================================================================================
+[2026-05-30T19:22:55.800854+00:00] started setter called with value=True
+STACK TRACE:
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\middleware\cors.py", line 79, in __call__
+    await self.app(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\middleware\exceptions.py", line 49, in __call__
+    await self.app(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\middleware\asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 716, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 725, in app
+    await self.lifespan(scope, receive, send)
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\starlette\routing.py", line 694, in lifespan
+    async with self.lifespan_context(app) as maybe_state:
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 237, in __aenter__
+    await self._router._startup()
+  File "C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\fastapi\routing.py", line 4880, in _startup
+    await handler()
+  File "C:\Dev\MERID\web\main_15m_lean.py", line 979, in on_startup
+    startup_state.started = True
+  File "C:\Dev\MERID\web\startup_state.py", line 39, in started
+    f.write("STACK TRACE:\n" + "".join(traceback.format_stack(limit=10)) + "\n")
+
+================================================================================

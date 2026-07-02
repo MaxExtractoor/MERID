@@ -1,0 +1,12 @@
+﻿[start_15m] MERID_PROFILE=kalshi_crypto_15m_v2
+[start_15m] Launching server on http://0.0.0.0:8011
+[start_15m] Health watcher started (job id 1). It will trigger startup automatically.
+[start_15m] ---- server logs below ----
+[15M-LEAN] WindowsSelectorEventLoopPolicy set for Windows compatibility
+=== [15M-LEAN] FILE EXECUTING - TOP OF main_15m_lean.py ===
+>>> [STARTUP-STATE] StartupState initialized with started=False
+[15M-LEAN] MODULE IMPORTED - main_15m_lean.py v20260530 - PRINT
+[STARTUP-EVENT] on_startup() CALLED - DISABLED (use /api/v1/health to trigger startup)
+[start_15m] Server stopped - cleaning up health watcher
+[health_trigger] Startup triggered (HTTP 200)
+[health_trigger] startup_started=true - watcher exiting

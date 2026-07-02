@@ -1,0 +1,99 @@
+================================================================================
+TRADING STACK DIAGNOSTIC REPORT
+Generated: 2026-06-14T15:59:07.564189+00:00
+================================================================================
+
+SUMMARY
+----------------------------------------
+Critical Issues: 6
+Warnings: 5
+Info Messages: 16
+
+================================================================================
+CRITICAL ISSUES
+================================================================================
+
+1. [ACTIVE_MARKETS] No active 15m markets found for BTC
+   asset: BTC
+   timeframe: 15m
+   window: UTCWindow(start_utc=datetime.datetime(2026, 6, 14, 15, 45, tzinfo=datetime.timezone.utc), end_utc=datetime.datetime(2026, 6, 14, 16, 0, tzinfo=datetime.timezone.utc), suffix='26JUN141545-45')
+
+2. [ACTIVE_MARKETS] No active 15m markets found for ETH
+   asset: ETH
+   timeframe: 15m
+   window: UTCWindow(start_utc=datetime.datetime(2026, 6, 14, 15, 45, tzinfo=datetime.timezone.utc), end_utc=datetime.datetime(2026, 6, 14, 16, 0, tzinfo=datetime.timezone.utc), suffix='26JUN141545-45')
+
+3. [ACTIVE_MARKETS] No active 15m markets found for SOL
+   asset: SOL
+   timeframe: 15m
+   window: UTCWindow(start_utc=datetime.datetime(2026, 6, 14, 15, 45, tzinfo=datetime.timezone.utc), end_utc=datetime.datetime(2026, 6, 14, 16, 0, tzinfo=datetime.timezone.utc), suffix='26JUN141545-45')
+
+4. [ACTIVE_MARKETS] No active 15m markets found for XRP
+   asset: XRP
+   timeframe: 15m
+   window: UTCWindow(start_utc=datetime.datetime(2026, 6, 14, 15, 45, tzinfo=datetime.timezone.utc), end_utc=datetime.datetime(2026, 6, 14, 16, 0, tzinfo=datetime.timezone.utc), suffix='26JUN141545-45')
+
+5. [ACTIVE_MARKETS] No active 15m markets found for DOGE
+   asset: DOGE
+   timeframe: 15m
+   window: UTCWindow(start_utc=datetime.datetime(2026, 6, 14, 15, 45, tzinfo=datetime.timezone.utc), end_utc=datetime.datetime(2026, 6, 14, 16, 0, tzinfo=datetime.timezone.utc), suffix='26JUN141545-45')
+
+6. [PIPELINE] Cannot import UnifiedSpotService: No module named 'merid.data.unified_spot_service'
+   component: UnifiedSpotService
+   module: merid.data.unified_spot_service
+   error: No module named 'merid.data.unified_spot_service'
+
+================================================================================
+WARNINGS
+================================================================================
+
+1. [TIME_ALIGNMENT] System time drift detected: 6.20s
+   drift_seconds: 6.197876
+
+2. [AGENT_GRID] Agent grid singleton is None (may not be initialized)
+
+3. [PRICE_FEED] Cannot import KalshiSpotService or KalshiSpotProvider
+
+4. [RISK_ENFORCEMENT] Cannot find get_kill_switch_state function
+
+5. [RISK_ENFORCEMENT] Cannot import KalshiBankrollServiceV2: cannot import name 'KalshiBankrollServiceV2' from 'merid.event_venues.kalshi.bankroll_service_v2' (C:\Dev\MERID\merid\event_venues\kalshi\bankroll_service_v2.py)
+
+================================================================================
+INFORMATION
+================================================================================
+
+1. [INITIALIZATION] Kalshi client and catalog initialized successfully
+
+2. [TIME_WINDOW] Current UTC window: 2026-06-14 15:45:00+00:00 to 2026-06-14 16:00:00+00:00
+
+3. [CATALOG_ALIGNMENT] Catalog alignment check complete: 0 total markets
+
+4. [TIME_ALIGNMENT] Current window: 2026-06-14 15:45:00+00:00 to 2026-06-14 16:00:00+00:00
+
+5. [WS_SUBSCRIPTION] WebSocket subscriptions: 0 tickers
+
+6. [AGENT_GRID] build_15m_agent_grid function is importable
+
+7. [PRICE_FEED] Available items in merid.data: ['settlement_rti_buffer']
+
+8. [RISK_ENFORCEMENT] Available items in kill_switches: ['AUDIT_SPEC_VERSION', 'Any', 'Callable', 'Counter', 'Dict', 'Enum', 'FORMULAS_VERSION', 'KillSwitchEvent', 'KillSwitchReason', 'KillSwitchState', 'List', 'Optional', 'PROMETHEUS_AVAILABLE', 'Path', 'RiskController', 'Union', 'annotations', 'can_trade', 'daily_loss_limit_hits_total', 'dataclass', 'datetime', 'emergency_stop', 'field', 'get_logger', 'get_profile_daily_loss_limit', 'get_profile_drawdown_state', 'get_profile_max_position_value', 'get_risk_status', 'invalidate_promotion_cache', 'json', 'logger', 'os', 'risk_controller', 'threading', 'time', 'timezone']
+
+9. [PIPELINE] KalshiClientV2 is importable from merid.event_venues.kalshi.client_v2
+
+10. [PIPELINE] KalshiMarketCatalog is importable from merid.event_venues.kalshi.market_catalog
+
+11. [PIPELINE] KalshiCryptoCatalog is importable from merid.event_venues.kalshi.crypto_catalog
+
+12. [PIPELINE] LeanAgentGrid15m is importable from merid.prediction.agent_grid_15m
+
+13. [PIPELINE] Kalshi15mLoop is importable from merid.loop_15m
+
+14. [PIPELINE] KillSwitchManager is importable from merid.risk.kill_switches
+
+15. [PIPELINE] kalshi_crypto_config is importable
+
+16. [PIPELINE] kalshi_universe is importable
+
+================================================================================
+END OF REPORT
+================================================================================

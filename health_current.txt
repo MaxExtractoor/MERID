@@ -1,0 +1,300 @@
+﻿[2026-06-04 22:05:41.602798+00:00] 15M-LOOP: CATALOG-CHECK-START cycle=78 catalog_ready=True
+[2026-06-04 22:05:41.602798+00:00] 15M-LOOP: CATALOG-OBJECT-CHECK cycle=78 has_catalog=True catalog_not_none=True
+[2026-06-04 22:05:41.625865+00:00] 15M-EXECUTION-DEGRADED: cycle=78 catalog_fresh=False catalog_age=366.4s catalog_age_ok=False md_fresh=0/5 depth_sufficient=0/5 ws_forwarder_healthy=False bankroll_valid=True bankroll=15.51 bankroll_source=kalshi bankroll_source_valid=True fake_bankroll_used=False risk_profile_loaded=True top3_gate_available=False
+[2026-06-04 22:05:41.635599+00:00] [WS-AUTO-RECOVERY] WebSocket bridge restarted successfully
+[2026-06-04 22:05:41.637170+00:00] 🚨 CRITICAL: NO LIVE MARKET DATA - ALL 5 ASSETS STALE. SYSTEM IS BLIND.
+[2026-06-04 22:05:41.646336+00:00] 15M-LOOP: BEFORE risk envelope update cycle=78
+[2026-06-04 22:05:41.646336+00:00] 15M-LOOP: AFTER risk envelope update cycle=78 success=True
+[2026-06-04 22:05:41.648506+00:00] 15M-LOOP: BEFORE agent grid cycle cycle=78
+[2026-06-04 22:05:41.648506+00:00] 15M-LOOP: BEFORE direct await cycle=78
+[2026-06-04 22:05:41.649100+00:00] 15M-LOOP: _run_agent_grid_with_timeout ENTRY cycle=78
+[2026-06-04 22:05:41.649100+00:00] 15M-LOOP: BEFORE agent_grid.run_cycle cycle=78
+[2026-06-04 22:05:41.649619+00:00] 15M-LOOP: IMMEDIATELY BEFORE await agent_grid.run_cycle cycle=78
+[2026-06-04 22:05:41.657586+00:00] AGENT-GRID: run_cycle ENTRY tick=78
+[2026-06-04 22:05:41.770236+00:00] AGENT-GRID: BEFORE sync_from_rest tick=78
+[2026-06-04 22:05:41.779222+00:00] AGENT-GRID: AFTER sync_from_rest tick=78
+[2026-06-04 22:05:41.944410+00:00] 15M-LOOP: AFTER agent_grid.run_cycle cycle=78
+[2026-06-04 22:05:41.948013+00:00] 15M-LOOP: CYCLE-WRAPPER-EXIT cycle=78 duration=0.344s completed=True
+[2026-06-04 22:05:41.948021+00:00] 15M-LOOP: AFTER _on_tick_async tick=78
+[2026-06-04 22:05:46.595159+00:00] 15M-LOOP: tick=79 bar_index=88 window=22:00-22:15
+[2026-06-04 22:05:46.623077+00:00] 15M-LOOP: BEFORE _on_tick_async tick=79
+[2026-06-04 22:05:46.623584+00:00] 15M-LOOP: ON-TICK-ENTRY running=True tick_before=78
+[2026-06-04 22:05:46.623584+00:00] 15M-LOOP-CYCLE-WRAPPER: ENTER cycle=79
+[2026-06-04 22:05:46.625593+00:00] 15M-LOOP-CYCLE: ENTER cycle=79
+[2026-06-04 22:05:46.626082+00:00] 15M-LOOP: ABOUT-TO-ENTER-CATALOG-CHECK cycle=79
+[2026-06-04 22:05:46.643600+00:00] 15M-LOOP: ABOUT-TO-ENTER-TRY-BLOCK cycle=79
+[2026-06-04 22:05:46.644546+00:00] 15M-LOOP: ABOUT-TO-ENTER-PROFILER-PHASE cycle=79
+[2026-06-04 22:05:46.644546+00:00] 15M-LOOP: INSIDE-TRY-BLOCK cycle=79
+[2026-06-04 22:05:46.644546+00:00] 15M-LOOP: CATALOG-CHECK-START cycle=79 catalog_ready=True
+[2026-06-04 22:05:46.645545+00:00] 15M-LOOP: CATALOG-OBJECT-CHECK cycle=79 has_catalog=True catalog_not_none=True
+[2026-06-04 22:05:46.708778+00:00] 15M-EXECUTION-DEGRADED: cycle=79 catalog_fresh=False catalog_age=371.5s catalog_age_ok=False md_fresh=0/5 depth_sufficient=0/5 ws_forwarder_healthy=False bankroll_valid=True bankroll=15.51 bankroll_source=kalshi bankroll_source_valid=True fake_bankroll_used=False risk_profile_loaded=True top3_gate_available=False
+[2026-06-04 22:05:46.720845+00:00] [WS-AUTO-RECOVERY] WebSocket bridge restarted successfully
+[2026-06-04 22:05:46.722844+00:00] 🚨 CRITICAL: NO LIVE MARKET DATA - ALL 5 ASSETS STALE. SYSTEM IS BLIND.
+[2026-06-04 22:05:46.735812+00:00] 15M-LOOP: BEFORE risk envelope update cycle=79
+[2026-06-04 22:05:46.736657+00:00] 15M-LOOP: AFTER risk envelope update cycle=79 success=True
+[2026-06-04 22:05:46.737656+00:00] 15M-LOOP: BEFORE agent grid cycle cycle=79
+[2026-06-04 22:05:46.738655+00:00] 15M-LOOP: BEFORE direct await cycle=79
+[2026-06-04 22:05:46.738655+00:00] 15M-LOOP: _run_agent_grid_with_timeout ENTRY cycle=79
+[2026-06-04 22:05:46.739655+00:00] 15M-LOOP: BEFORE agent_grid.run_cycle cycle=79
+[2026-06-04 22:05:46.739953+00:00] 15M-LOOP: IMMEDIATELY BEFORE await agent_grid.run_cycle cycle=79
+[2026-06-04 22:05:46.750169+00:00] AGENT-GRID: run_cycle ENTRY tick=79
+[2026-06-04 22:05:46.856156+00:00] AGENT-GRID: BEFORE sync_from_rest tick=79
+[2026-06-04 22:05:46.867862+00:00] AGENT-GRID: AFTER sync_from_rest tick=79
+[2026-06-04 22:05:47.228366+00:00] 15M-LOOP: AFTER agent_grid.run_cycle cycle=79
+[2026-06-04 22:05:47.231579+00:00] 15M-LOOP: CYCLE-WRAPPER-EXIT cycle=79 duration=0.609s completed=True
+[2026-06-04 22:05:47.231579+00:00] 15M-LOOP: AFTER _on_tick_async tick=79
+[2026-06-04 22:05:51.609626+00:00] 15M-LOOP: tick=80 bar_index=88 window=22:00-22:15
+[2026-06-04 22:05:51.611623+00:00] 15M-LOOP: BEFORE _on_tick_async tick=80
+[2026-06-04 22:05:51.612433+00:00] 15M-LOOP: ON-TICK-ENTRY running=True tick_before=79
+[2026-06-04 22:05:51.613091+00:00] 15M-LOOP-CYCLE-WRAPPER: ENTER cycle=80
+[2026-06-04 22:05:51.613714+00:00] 15M-LOOP-CYCLE: ENTER cycle=80
+[2026-06-04 22:05:51.614225+00:00] 15M-LOOP: ABOUT-TO-ENTER-CATALOG-CHECK cycle=80
+[2026-06-04 22:05:51.616238+00:00] 15M-LOOP: ABOUT-TO-ENTER-TRY-BLOCK cycle=80
+[2026-06-04 22:05:51.616238+00:00] 15M-LOOP: ABOUT-TO-ENTER-PROFILER-PHASE cycle=80
+[2026-06-04 22:05:51.616238+00:00] 15M-LOOP: INSIDE-TRY-BLOCK cycle=80
+[2026-06-04 22:05:51.617236+00:00] 15M-LOOP: CATALOG-CHECK-START cycle=80 catalog_ready=True
+[2026-06-04 22:05:51.617236+00:00] 15M-LOOP: CATALOG-OBJECT-CHECK cycle=80 has_catalog=True catalog_not_none=True
+[2026-06-04 22:05:51.643618+00:00] 15M-EXECUTION-DEGRADED: cycle=80 catalog_fresh=False catalog_age=376.4s catalog_age_ok=False md_fresh=0/5 depth_sufficient=0/5 ws_forwarder_healthy=False bankroll_valid=True bankroll=15.51 bankroll_source=kalshi bankroll_source_valid=True fake_bankroll_used=False risk_profile_loaded=True top3_gate_available=False
+[2026-06-04 22:05:51.654709+00:00] [WS-AUTO-RECOVERY] WebSocket bridge restarted successfully
+[2026-06-04 22:05:51.656708+00:00] 🚨 CRITICAL: NO LIVE MARKET DATA - ALL 5 ASSETS STALE. SYSTEM IS BLIND.
+[2026-06-04 22:05:51.667253+00:00] 15M-LOOP: BEFORE risk envelope update cycle=80
+[2026-06-04 22:05:51.667253+00:00] 15M-LOOP: AFTER risk envelope update cycle=80 success=True
+[2026-06-04 22:05:51.669251+00:00] 15M-LOOP: BEFORE agent grid cycle cycle=80
+[2026-06-04 22:05:51.669251+00:00] 15M-LOOP: BEFORE direct await cycle=80
+[2026-06-04 22:05:51.669251+00:00] 15M-LOOP: _run_agent_grid_with_timeout ENTRY cycle=80
+[2026-06-04 22:05:51.670252+00:00] 15M-LOOP: BEFORE agent_grid.run_cycle cycle=80
+[2026-06-04 22:05:51.670252+00:00] 15M-LOOP: IMMEDIATELY BEFORE await agent_grid.run_cycle cycle=80
+[2026-06-04 22:05:51.679252+00:00] AGENT-GRID: run_cycle ENTRY tick=80
+[2026-06-04 22:05:51.788516+00:00] AGENT-GRID: BEFORE sync_from_rest tick=80
+[2026-06-04 22:05:51.797975+00:00] AGENT-GRID: AFTER sync_from_rest tick=80
+[2026-06-04 22:05:51.982439+00:00] 15M-LOOP: AFTER agent_grid.run_cycle cycle=80
+[2026-06-04 22:05:51.985109+00:00] 15M-LOOP: CYCLE-WRAPPER-EXIT cycle=80 duration=0.375s completed=True
+[2026-06-04 22:05:51.985109+00:00] 15M-LOOP: AFTER _on_tick_async tick=80
+[2026-06-04 22:05:56.585264+00:00] 15M-LOOP: tick=81 bar_index=88 window=22:00-22:15
+[2026-06-04 22:05:56.587407+00:00] 15M-LOOP: BEFORE _on_tick_async tick=81
+[2026-06-04 22:05:56.587949+00:00] 15M-LOOP: ON-TICK-ENTRY running=True tick_before=80
+[2026-06-04 22:05:56.587949+00:00] 15M-LOOP-CYCLE-WRAPPER: ENTER cycle=81
+[2026-06-04 22:05:56.588470+00:00] 15M-LOOP-CYCLE: ENTER cycle=81
+[2026-06-04 22:05:56.589029+00:00] 15M-LOOP: ABOUT-TO-ENTER-CATALOG-CHECK cycle=81
+[2026-06-04 22:05:56.590666+00:00] 15M-LOOP: ABOUT-TO-ENTER-TRY-BLOCK cycle=81
+[2026-06-04 22:05:56.591209+00:00] 15M-LOOP: ABOUT-TO-ENTER-PROFILER-PHASE cycle=81
+[2026-06-04 22:05:56.591736+00:00] 15M-LOOP: INSIDE-TRY-BLOCK cycle=81
+[2026-06-04 22:05:56.591749+00:00] 15M-LOOP: CATALOG-CHECK-START cycle=81 catalog_ready=True
+[2026-06-04 22:05:56.592285+00:00] 15M-LOOP: CATALOG-OBJECT-CHECK cycle=81 has_catalog=True catalog_not_none=True
+[2026-06-04 22:05:56.613988+00:00] 15M-EXECUTION-DEGRADED: cycle=81 catalog_fresh=False catalog_age=381.4s catalog_age_ok=False md_fresh=0/5 depth_sufficient=0/5 ws_forwarder_healthy=False bankroll_valid=True bankroll=15.51 bankroll_source=kalshi bankroll_source_valid=True fake_bankroll_used=False risk_profile_loaded=True top3_gate_available=False
+[2026-06-04 22:05:56.623884+00:00] [WS-AUTO-RECOVERY] WebSocket bridge restarted successfully
+[2026-06-04 22:05:56.625520+00:00] 🚨 CRITICAL: NO LIVE MARKET DATA - ALL 5 ASSETS STALE. SYSTEM IS BLIND.
+[2026-06-04 22:05:56.635045+00:00] 15M-LOOP: BEFORE risk envelope update cycle=81
+[2026-06-04 22:05:56.635045+00:00] 15M-LOOP: AFTER risk envelope update cycle=81 success=True
+[2026-06-04 22:05:56.635977+00:00] 15M-LOOP: BEFORE agent grid cycle cycle=81
+[2026-06-04 22:05:56.637446+00:00] 15M-LOOP: BEFORE direct await cycle=81
+[2026-06-04 22:05:56.637446+00:00] 15M-LOOP: _run_agent_grid_with_timeout ENTRY cycle=81
+[2026-06-04 22:05:56.638031+00:00] 15M-LOOP: BEFORE agent_grid.run_cycle cycle=81
+[2026-06-04 22:05:56.638031+00:00] 15M-LOOP: IMMEDIATELY BEFORE await agent_grid.run_cycle cycle=81
+[2026-06-04 22:05:56.646769+00:00] AGENT-GRID: run_cycle ENTRY tick=81
+[2026-06-04 22:05:56.760076+00:00] AGENT-GRID: BEFORE sync_from_rest tick=81
+[2026-06-04 22:05:56.769396+00:00] AGENT-GRID: AFTER sync_from_rest tick=81
+[2026-06-04 22:05:56.934452+00:00] 15M-LOOP: AFTER agent_grid.run_cycle cycle=81
+[2026-06-04 22:05:56.936610+00:00] 15M-LOOP: CYCLE-WRAPPER-EXIT cycle=81 duration=0.344s completed=True
+[2026-06-04 22:05:56.937130+00:00] 15M-LOOP: AFTER _on_tick_async tick=81
+[2026-06-04 22:06:01.575334+00:00] 15M-LOOP: tick=82 bar_index=88 window=22:00-22:15
+[2026-06-04 22:06:01.577342+00:00] 15M-LOOP: BEFORE _on_tick_async tick=82
+[2026-06-04 22:06:01.578342+00:00] 15M-LOOP: ON-TICK-ENTRY running=True tick_before=81
+[2026-06-04 22:06:01.578342+00:00] 15M-LOOP-CYCLE-WRAPPER: ENTER cycle=82
+[2026-06-04 22:06:01.579835+00:00] 15M-LOOP-CYCLE: ENTER cycle=82
+[2026-06-04 22:06:01.580343+00:00] 15M-LOOP: ABOUT-TO-ENTER-CATALOG-CHECK cycle=82
+[2026-06-04 22:06:01.582343+00:00] 15M-LOOP: ABOUT-TO-ENTER-TRY-BLOCK cycle=82
+[2026-06-04 22:06:01.582343+00:00] 15M-LOOP: ABOUT-TO-ENTER-PROFILER-PHASE cycle=82
+[2026-06-04 22:06:01.583344+00:00] 15M-LOOP: INSIDE-TRY-BLOCK cycle=82
+[2026-06-04 22:06:01.583865+00:00] 15M-LOOP: CATALOG-CHECK-START cycle=82 catalog_ready=True
+[2026-06-04 22:06:01.583865+00:00] 15M-LOOP: CATALOG-OBJECT-CHECK cycle=82 has_catalog=True catalog_not_none=True
+[2026-06-04 22:06:01.612034+00:00] 15M-EXECUTION-DEGRADED: cycle=82 catalog_fresh=False catalog_age=386.4s catalog_age_ok=False md_fresh=0/5 depth_sufficient=0/5 ws_forwarder_healthy=False bankroll_valid=True bankroll=15.51 bankroll_source=kalshi bankroll_source_valid=True fake_bankroll_used=False risk_profile_loaded=True top3_gate_available=False
+[2026-06-04 22:06:01.625508+00:00] [WS-AUTO-RECOVERY] WebSocket bridge restarted successfully
+[2026-06-04 22:06:01.627211+00:00] 🚨 CRITICAL: NO LIVE MARKET DATA - ALL 5 ASSETS STALE. SYSTEM IS BLIND.
+[2026-06-04 22:06:01.639139+00:00] 15M-LOOP: BEFORE risk envelope update cycle=82
+[2026-06-04 22:06:01.640225+00:00] 15M-LOOP: AFTER risk envelope update cycle=82 success=True
+[2026-06-04 22:06:01.641140+00:00] 15M-LOOP: BEFORE agent grid cycle cycle=82
+[2026-06-04 22:06:01.642140+00:00] 15M-LOOP: BEFORE direct await cycle=82
+[2026-06-04 22:06:01.642140+00:00] 15M-LOOP: _run_agent_grid_with_timeout ENTRY cycle=82
+[2026-06-04 22:06:01.643139+00:00] 15M-LOOP: BEFORE agent_grid.run_cycle cycle=82
+[2026-06-04 22:06:01.643139+00:00] 15M-LOOP: IMMEDIATELY BEFORE await agent_grid.run_cycle cycle=82
+[2026-06-04 22:06:01.653608+00:00] AGENT-GRID: run_cycle ENTRY tick=82
+[2026-06-04 22:06:01.767908+00:00] AGENT-GRID: BEFORE sync_from_rest tick=82
+[2026-06-04 22:06:01.780534+00:00] AGENT-GRID: AFTER sync_from_rest tick=82
+[2026-06-04 22:06:02.090657+00:00] 15M-LOOP: AFTER agent_grid.run_cycle cycle=82
+[2026-06-04 22:06:02.094657+00:00] 15M-LOOP: CYCLE-WRAPPER-EXIT cycle=82 duration=0.516s completed=True
+[2026-06-04 22:06:02.094657+00:00] 15M-LOOP: AFTER _on_tick_async tick=82
+[2026-06-04 22:06:06.554074+00:00] 15M-LOOP: tick=83 bar_index=88 window=22:00-22:15
+[2026-06-04 22:06:06.555922+00:00] 15M-LOOP: BEFORE _on_tick_async tick=83
+[2026-06-04 22:06:06.555922+00:00] 15M-LOOP: ON-TICK-ENTRY running=True tick_before=82
+[2026-06-04 22:06:06.556932+00:00] 15M-LOOP-CYCLE-WRAPPER: ENTER cycle=83
+[2026-06-04 22:06:06.556932+00:00] 15M-LOOP-CYCLE: ENTER cycle=83
+[2026-06-04 22:06:06.557923+00:00] 15M-LOOP: ABOUT-TO-ENTER-CATALOG-CHECK cycle=83
+[2026-06-04 22:06:06.558781+00:00] 15M-LOOP: ABOUT-TO-ENTER-TRY-BLOCK cycle=83
+[2026-06-04 22:06:06.559741+00:00] 15M-LOOP: ABOUT-TO-ENTER-PROFILER-PHASE cycle=83
+[2026-06-04 22:06:06.559741+00:00] 15M-LOOP: INSIDE-TRY-BLOCK cycle=83
+[2026-06-04 22:06:06.560478+00:00] 15M-LOOP: CATALOG-CHECK-START cycle=83 catalog_ready=True
+[2026-06-04 22:06:06.560478+00:00] 15M-LOOP: CATALOG-OBJECT-CHECK cycle=83 has_catalog=True catalog_not_none=True
+[2026-06-04 22:06:06.583469+00:00] 15M-EXECUTION-DEGRADED: cycle=83 catalog_fresh=False catalog_age=391.4s catalog_age_ok=False md_fresh=0/5 depth_sufficient=0/5 ws_forwarder_healthy=False bankroll_valid=True bankroll=15.51 bankroll_source=kalshi bankroll_source_valid=True fake_bankroll_used=False risk_profile_loaded=True top3_gate_available=False
+[2026-06-04 22:06:06.592304+00:00] [WS-AUTO-RECOVERY] WebSocket bridge restarted successfully
+[2026-06-04 22:06:06.594303+00:00] 🚨 CRITICAL: NO LIVE MARKET DATA - ALL 5 ASSETS STALE. SYSTEM IS BLIND.
+[2026-06-04 22:06:06.603785+00:00] 15M-LOOP: BEFORE risk envelope update cycle=83
+[2026-06-04 22:06:06.604309+00:00] 15M-LOOP: AFTER risk envelope update cycle=83 success=True
+[2026-06-04 22:06:06.605410+00:00] 15M-LOOP: BEFORE agent grid cycle cycle=83
+[2026-06-04 22:06:06.605959+00:00] 15M-LOOP: BEFORE direct await cycle=83
+[2026-06-04 22:06:06.606496+00:00] 15M-LOOP: _run_agent_grid_with_timeout ENTRY cycle=83
+[2026-06-04 22:06:06.606496+00:00] 15M-LOOP: BEFORE agent_grid.run_cycle cycle=83
+[2026-06-04 22:06:06.607019+00:00] 15M-LOOP: IMMEDIATELY BEFORE await agent_grid.run_cycle cycle=83
+[2026-06-04 22:06:06.615144+00:00] AGENT-GRID: run_cycle ENTRY tick=83
+[2026-06-04 22:06:06.707070+00:00] AGENT-GRID: BEFORE sync_from_rest tick=83
+[2026-06-04 22:06:06.716877+00:00] AGENT-GRID: AFTER sync_from_rest tick=83
+[2026-06-04 22:06:06.887862+00:00] 15M-LOOP: AFTER agent_grid.run_cycle cycle=83
+[2026-06-04 22:06:06.890860+00:00] 15M-LOOP: CYCLE-WRAPPER-EXIT cycle=83 duration=0.328s completed=True
+[2026-06-04 22:06:06.890860+00:00] 15M-LOOP: AFTER _on_tick_async tick=83
+[2026-06-04 22:06:11.547265+00:00] 15M-LOOP: tick=84 bar_index=88 window=22:00-22:15
+[2026-06-04 22:06:11.549398+00:00] 15M-LOOP: BEFORE _on_tick_async tick=84
+[2026-06-04 22:06:11.549971+00:00] 15M-LOOP: ON-TICK-ENTRY running=True tick_before=83
+[2026-06-04 22:06:11.549971+00:00] 15M-LOOP-CYCLE-WRAPPER: ENTER cycle=84
+[2026-06-04 22:06:11.550496+00:00] 15M-LOOP-CYCLE: ENTER cycle=84
+[2026-06-04 22:06:11.551061+00:00] 15M-LOOP: ABOUT-TO-ENTER-CATALOG-CHECK cycle=84
+[2026-06-04 22:06:11.553225+00:00] 15M-LOOP: ABOUT-TO-ENTER-TRY-BLOCK cycle=84
+[2026-06-04 22:06:11.553225+00:00] 15M-LOOP: ABOUT-TO-ENTER-PROFILER-PHASE cycle=84
+[2026-06-04 22:06:11.553762+00:00] 15M-LOOP: INSIDE-TRY-BLOCK cycle=84
+[2026-06-04 22:06:11.553762+00:00] 15M-LOOP: CATALOG-CHECK-START cycle=84 catalog_ready=True
+[2026-06-04 22:06:11.553762+00:00] 15M-LOOP: CATALOG-OBJECT-CHECK cycle=84 has_catalog=True catalog_not_none=True
+[2026-06-04 22:06:11.576610+00:00] 15M-EXECUTION-DEGRADED: cycle=84 catalog_fresh=False catalog_age=396.4s catalog_age_ok=False md_fresh=0/5 depth_sufficient=0/5 ws_forwarder_healthy=False bankroll_valid=True bankroll=15.51 bankroll_source=kalshi bankroll_source_valid=True fake_bankroll_used=False risk_profile_loaded=True top3_gate_available=False
+[2026-06-04 22:06:11.586872+00:00] [WS-AUTO-RECOVERY] WebSocket bridge restarted successfully
+[2026-06-04 22:06:11.587884+00:00] 🚨 CRITICAL: NO LIVE MARKET DATA - ALL 5 ASSETS STALE. SYSTEM IS BLIND.
+[2026-06-04 22:06:11.597127+00:00] 15M-LOOP: BEFORE risk envelope update cycle=84
+[2026-06-04 22:06:11.598126+00:00] 15M-LOOP: AFTER risk envelope update cycle=84 success=True
+[2026-06-04 22:06:11.599126+00:00] 15M-LOOP: BEFORE agent grid cycle cycle=84
+[2026-06-04 22:06:11.599126+00:00] 15M-LOOP: BEFORE direct await cycle=84
+[2026-06-04 22:06:11.600070+00:00] 15M-LOOP: _run_agent_grid_with_timeout ENTRY cycle=84
+[2026-06-04 22:06:11.600671+00:00] 15M-LOOP: BEFORE agent_grid.run_cycle cycle=84
+[2026-06-04 22:06:11.601197+00:00] 15M-LOOP: IMMEDIATELY BEFORE await agent_grid.run_cycle cycle=84
+[2026-06-04 22:06:11.608869+00:00] AGENT-GRID: run_cycle ENTRY tick=84
+[2026-06-04 22:06:11.693524+00:00] AGENT-GRID: BEFORE sync_from_rest tick=84
+[2026-06-04 22:06:11.701969+00:00] AGENT-GRID: AFTER sync_from_rest tick=84
+[2026-06-04 22:06:11.869748+00:00] 15M-LOOP: AFTER agent_grid.run_cycle cycle=84
+[2026-06-04 22:06:11.871748+00:00] 15M-LOOP: CYCLE-WRAPPER-EXIT cycle=84 duration=0.328s completed=True
+[2026-06-04 22:06:11.871748+00:00] 15M-LOOP: AFTER _on_tick_async tick=84
+[2026-06-04 22:06:16.544563+00:00] 15M-LOOP: tick=85 bar_index=88 window=22:00-22:15
+[2026-06-04 22:06:16.549134+00:00] 15M-LOOP: BEFORE _on_tick_async tick=85
+[2026-06-04 22:06:16.549134+00:00] 15M-LOOP: ON-TICK-ENTRY running=True tick_before=84
+[2026-06-04 22:06:16.549134+00:00] 15M-LOOP-CYCLE-WRAPPER: ENTER cycle=85
+[2026-06-04 22:06:16.550136+00:00] 15M-LOOP-CYCLE: ENTER cycle=85
+[2026-06-04 22:06:16.550136+00:00] 15M-LOOP: ABOUT-TO-ENTER-CATALOG-CHECK cycle=85
+[2026-06-04 22:06:16.552134+00:00] 15M-LOOP: ABOUT-TO-ENTER-TRY-BLOCK cycle=85
+[2026-06-04 22:06:16.553134+00:00] 15M-LOOP: ABOUT-TO-ENTER-PROFILER-PHASE cycle=85
+[2026-06-04 22:06:16.553134+00:00] 15M-LOOP: INSIDE-TRY-BLOCK cycle=85
+[2026-06-04 22:06:16.554135+00:00] 15M-LOOP: CATALOG-CHECK-START cycle=85 catalog_ready=True
+[2026-06-04 22:06:16.554135+00:00] 15M-LOOP: CATALOG-OBJECT-CHECK cycle=85 has_catalog=True catalog_not_none=True
+[2026-06-04 22:06:16.589252+00:00] 15M-EXECUTION-DEGRADED: cycle=85 catalog_fresh=False catalog_age=401.4s catalog_age_ok=False md_fresh=0/5 depth_sufficient=0/5 ws_forwarder_healthy=False bankroll_valid=True bankroll=15.51 bankroll_source=kalshi bankroll_source_valid=True fake_bankroll_used=False risk_profile_loaded=True top3_gate_available=False
+[2026-06-04 22:06:16.602954+00:00] [WS-AUTO-RECOVERY] WebSocket bridge restarted successfully
+[2026-06-04 22:06:16.603950+00:00] 🚨 CRITICAL: NO LIVE MARKET DATA - ALL 5 ASSETS STALE. SYSTEM IS BLIND.
+[2026-06-04 22:06:16.618323+00:00] 15M-LOOP: BEFORE risk envelope update cycle=85
+[2026-06-04 22:06:16.618323+00:00] 15M-LOOP: AFTER risk envelope update cycle=85 success=True
+[2026-06-04 22:06:16.620325+00:00] 15M-LOOP: BEFORE agent grid cycle cycle=85
+[2026-06-04 22:06:16.620325+00:00] 15M-LOOP: BEFORE direct await cycle=85
+[2026-06-04 22:06:16.621323+00:00] 15M-LOOP: _run_agent_grid_with_timeout ENTRY cycle=85
+[2026-06-04 22:06:16.621323+00:00] 15M-LOOP: BEFORE agent_grid.run_cycle cycle=85
+[2026-06-04 22:06:16.622324+00:00] 15M-LOOP: IMMEDIATELY BEFORE await agent_grid.run_cycle cycle=85
+[2026-06-04 22:06:16.632807+00:00] AGENT-GRID: run_cycle ENTRY tick=85
+[2026-06-04 22:06:16.753776+00:00] AGENT-GRID: BEFORE sync_from_rest tick=85
+[2026-06-04 22:06:16.765446+00:00] AGENT-GRID: AFTER sync_from_rest tick=85
+[2026-06-04 22:06:17.011535+00:00] 15M-LOOP: AFTER agent_grid.run_cycle cycle=85
+[2026-06-04 22:06:17.015196+00:00] 15M-LOOP: CYCLE-WRAPPER-EXIT cycle=85 duration=0.469s completed=True
+[2026-06-04 22:06:17.015725+00:00] 15M-LOOP: AFTER _on_tick_async tick=85
+[2026-06-04 22:06:21.546706+00:00] 15M-LOOP: tick=86 bar_index=88 window=22:00-22:15
+[2026-06-04 22:06:21.558504+00:00] 15M-LOOP: BEFORE _on_tick_async tick=86
+[2026-06-04 22:06:21.558504+00:00] 15M-LOOP: ON-TICK-ENTRY running=True tick_before=85
+[2026-06-04 22:06:21.559501+00:00] 15M-LOOP-CYCLE-WRAPPER: ENTER cycle=86
+[2026-06-04 22:06:21.561591+00:00] 15M-LOOP-CYCLE: ENTER cycle=86
+[2026-06-04 22:06:21.562384+00:00] 15M-LOOP: ABOUT-TO-ENTER-CATALOG-CHECK cycle=86
+[2026-06-04 22:06:21.567971+00:00] 15M-LOOP: ABOUT-TO-ENTER-TRY-BLOCK cycle=86
+[2026-06-04 22:06:21.568487+00:00] 15M-LOOP: ABOUT-TO-ENTER-PROFILER-PHASE cycle=86
+[2026-06-04 22:06:21.568487+00:00] 15M-LOOP: INSIDE-TRY-BLOCK cycle=86
+[2026-06-04 22:06:21.569486+00:00] 15M-LOOP: CATALOG-CHECK-START cycle=86 catalog_ready=True
+[2026-06-04 22:06:21.569486+00:00] 15M-LOOP: CATALOG-OBJECT-CHECK cycle=86 has_catalog=True catalog_not_none=True
+[2026-06-04 22:06:21.603110+00:00] 15M-EXECUTION-DEGRADED: cycle=86 catalog_fresh=False catalog_age=406.4s catalog_age_ok=False md_fresh=0/5 depth_sufficient=0/5 ws_forwarder_healthy=False bankroll_valid=True bankroll=15.51 bankroll_source=kalshi bankroll_source_valid=True fake_bankroll_used=False risk_profile_loaded=True top3_gate_available=False
+[2026-06-04 22:06:21.613931+00:00] [WS-AUTO-RECOVERY] WebSocket bridge restarted successfully
+[2026-06-04 22:06:21.615929+00:00] 🚨 CRITICAL: NO LIVE MARKET DATA - ALL 5 ASSETS STALE. SYSTEM IS BLIND.
+[2026-06-04 22:06:21.625545+00:00] 15M-LOOP: BEFORE risk envelope update cycle=86
+[2026-06-04 22:06:21.625545+00:00] 15M-LOOP: AFTER risk envelope update cycle=86 success=True
+[2026-06-04 22:06:21.627544+00:00] 15M-LOOP: BEFORE agent grid cycle cycle=86
+[2026-06-04 22:06:21.627544+00:00] 15M-LOOP: BEFORE direct await cycle=86
+[2026-06-04 22:06:21.628543+00:00] 15M-LOOP: _run_agent_grid_with_timeout ENTRY cycle=86
+[2026-06-04 22:06:21.629046+00:00] 15M-LOOP: BEFORE agent_grid.run_cycle cycle=86
+[2026-06-04 22:06:21.629046+00:00] 15M-LOOP: IMMEDIATELY BEFORE await agent_grid.run_cycle cycle=86
+[2026-06-04 22:06:21.637056+00:00] AGENT-GRID: run_cycle ENTRY tick=86
+[2026-06-04 22:06:21.730636+00:00] AGENT-GRID: BEFORE sync_from_rest tick=86
+[2026-06-04 22:06:21.738717+00:00] AGENT-GRID: AFTER sync_from_rest tick=86
+[2026-06-04 22:06:21.909155+00:00] 15M-LOOP: AFTER agent_grid.run_cycle cycle=86
+[2026-06-04 22:06:21.911155+00:00] 15M-LOOP: CYCLE-WRAPPER-EXIT cycle=86 duration=0.343s completed=True
+[2026-06-04 22:06:21.912155+00:00] 15M-LOOP: AFTER _on_tick_async tick=86
+[2026-06-04 22:06:26.559457+00:00] 15M-LOOP: tick=87 bar_index=88 window=22:00-22:15
+[2026-06-04 22:06:26.562999+00:00] 15M-LOOP: BEFORE _on_tick_async tick=87
+[2026-06-04 22:06:26.562999+00:00] 15M-LOOP: ON-TICK-ENTRY running=True tick_before=86
+[2026-06-04 22:06:26.563999+00:00] 15M-LOOP-CYCLE-WRAPPER: ENTER cycle=87
+[2026-06-04 22:06:26.563999+00:00] 15M-LOOP-CYCLE: ENTER cycle=87
+[2026-06-04 22:06:26.564997+00:00] 15M-LOOP: ABOUT-TO-ENTER-CATALOG-CHECK cycle=87
+[2026-06-04 22:06:26.567083+00:00] 15M-LOOP: ABOUT-TO-ENTER-TRY-BLOCK cycle=87
+[2026-06-04 22:06:26.567083+00:00] 15M-LOOP: ABOUT-TO-ENTER-PROFILER-PHASE cycle=87
+[2026-06-04 22:06:26.568082+00:00] 15M-LOOP: INSIDE-TRY-BLOCK cycle=87
+[2026-06-04 22:06:26.568082+00:00] 15M-LOOP: CATALOG-CHECK-START cycle=87 catalog_ready=True
+[2026-06-04 22:06:26.568082+00:00] 15M-LOOP: CATALOG-OBJECT-CHECK cycle=87 has_catalog=True catalog_not_none=True
+[2026-06-04 22:06:26.619198+00:00] 15M-EXECUTION-DEGRADED: cycle=87 catalog_fresh=False catalog_age=411.4s catalog_age_ok=False md_fresh=0/5 depth_sufficient=0/5 ws_forwarder_healthy=False bankroll_valid=True bankroll=15.51 bankroll_source=kalshi bankroll_source_valid=True fake_bankroll_used=False risk_profile_loaded=True top3_gate_available=False
+[2026-06-04 22:06:26.634838+00:00] [WS-AUTO-RECOVERY] WebSocket bridge restarted successfully
+[2026-06-04 22:06:26.637840+00:00] 🚨 CRITICAL: NO LIVE MARKET DATA - ALL 5 ASSETS STALE. SYSTEM IS BLIND.
+[2026-06-04 22:06:26.650120+00:00] 15M-LOOP: BEFORE risk envelope update cycle=87
+[2026-06-04 22:06:26.651122+00:00] 15M-LOOP: AFTER risk envelope update cycle=87 success=True
+[2026-06-04 22:06:26.655088+00:00] 15M-LOOP: BEFORE agent grid cycle cycle=87
+[2026-06-04 22:06:26.655607+00:00] 15M-LOOP: BEFORE direct await cycle=87
+[2026-06-04 22:06:26.656113+00:00] 15M-LOOP: _run_agent_grid_with_timeout ENTRY cycle=87
+[2026-06-04 22:06:26.656113+00:00] 15M-LOOP: BEFORE agent_grid.run_cycle cycle=87
+[2026-06-04 22:06:26.657123+00:00] 15M-LOOP: IMMEDIATELY BEFORE await agent_grid.run_cycle cycle=87
+[2026-06-04 22:06:26.669679+00:00] AGENT-GRID: run_cycle ENTRY tick=87
+[2026-06-04 22:06:26.792377+00:00] AGENT-GRID: BEFORE sync_from_rest tick=87
+[2026-06-04 22:06:26.801628+00:00] AGENT-GRID: AFTER sync_from_rest tick=87
+[2026-06-04 22:07:17.767950+00:00] [WS-START-VERY-FIRST] start() method entry point reached
+[2026-06-04 22:07:17.767950+00:00] [WS-START-ENTRY] start() called with raw_tickers=5: ['KXBTC15M-26JUN041815-15', 'KXETH15M-26JUN041815-15', 'KXSOL15M-26JUN041815-15', 'KXXRP15M-26JUN041815-15', 'KXDOGE15M-26JUN041815-15']
+[2026-06-04 22:07:17.768486+00:00] [WS-START] About to call _ensure_start_lock()
+[2026-06-04 22:07:17.770088+00:00] [WS-DEBUG-LOCK] _ensure_start_lock() entry
+[2026-06-04 22:07:17.770606+00:00] [WS-DEBUG-LOCK] Acquiring threading lock for start_lock initialization
+[2026-06-04 22:07:17.771138+00:00] [WS-DEBUG-LOCK] Threading lock acquired, checking _start_lock
+[2026-06-04 22:07:17.771138+00:00] [WS-DEBUG-LOCK] Creating new asyncio.Lock for start_lock
+[2026-06-04 22:07:17.771695+00:00] [WS-DEBUG-LOCK] asyncio.Lock created
+[2026-06-04 22:07:17.772219+00:00] [WS-DEBUG-LOCK] Threading lock released
+[2026-06-04 22:07:17.772782+00:00] [WS-DEBUG-LOCK] _ensure_start_lock() returning lock
+[2026-06-04 22:07:17.887608+00:00] [WS-DEBUG-LOCK] Starting WS bridge initialization
+[2026-06-04 22:07:17.888609+00:00] [WS-DEBUG] About to cache market_state_store
+[2026-06-04 22:07:17.888609+00:00] [WS-DEBUG] Market state store cached successfully
+[2026-06-04 22:07:17.889609+00:00] [WS-BOOT] bridge started tickers=0 channels=['orderbook_delta', 'ticker', 'trade', 'fill'] env=kalshi_crypto_15m_v2 log_level=INFO demo=False rest_fallback_removed=True
+[2026-06-04 22:07:17.889609+00:00] [WS-BOOT] url=wss://api.elections.kalshi.com/trade-api/ws/v2 has_api_key=True has_private_key=True
+[2026-06-04 22:07:17.889609+00:00] [WS-CONNECT] url=wss://api.elections.kalshi.com/trade-api/ws/v2 demo=False has_api_key=True has_private_key=True
+[2026-06-04 22:07:17.890609+00:00] [WS-DEBUG] Checking private key path: C:\Dev\MERID\kalshi_private_key.pem
+[2026-06-04 22:07:17.890609+00:00] [WS-BOOT] config OK (key=18e1cc92..., key_file=C:\Dev\MERID\kalshi_private_key.pem)
+[2026-06-04 22:07:17.890609+00:00] [WS-DEBUG-POST-CONFIG] About to check circuit breaker and start connection loop
+[2026-06-04 22:07:17.891611+00:00] [WS-DEBUG] Circuit breaker tripped=False
+[2026-06-04 22:07:17.891611+00:00] [WS-DEBUG] Circuit breaker check passed, about to start connection loop
+[2026-06-04 22:07:17.892609+00:00] [WS-BRIDGE-CONNECT] Attempt 1/3 starting (profile=kalshi_crypto_15m_v2, tickers=5)
+[2026-06-04 22:07:17.893094+00:00] [WS-BRIDGE-CONNECT] About to call _ws.connect() with timeout
+[2026-06-04 22:07:25.212548+00:00] [WS-BRIDGE-CONNECT] Attempt 1/3 connected in 7.33s
+[2026-06-04 22:07:25.729710+00:00] [WS-START-VERY-FIRST] start() method entry point reached
+[2026-06-04 22:07:25.729710+00:00] [WS-START-ENTRY] start() called with raw_tickers=1: ['KXBTC15M-26JUN041815-15']
+[2026-06-04 22:07:25.730278+00:00] [WS-START] About to call _ensure_start_lock()
+[2026-06-04 22:07:25.731793+00:00] [WS-DEBUG-LOCK] _ensure_start_lock() entry
+[2026-06-04 22:07:25.731793+00:00] [WS-DEBUG-LOCK] _ensure_start_lock() returning lock
+[2026-06-04 22:07:25.928895+00:00] [WS-DEBUG-LOCK] Starting WS bridge initialization
+[2026-06-04 22:07:25.928895+00:00] [WS-DEBUG] About to cache market_state_store
+[2026-06-04 22:07:25.929896+00:00] [WS-DEBUG] Market state store cached successfully
+[2026-06-04 22:07:25.929896+00:00] [WS-BOOT] bridge started tickers=5 channels=['orderbook_delta', 'ticker', 'trade', 'fill'] env=kalshi_crypto_15m_v2 log_level=INFO demo=False rest_fallback_removed=True
+[2026-06-04 22:07:25.930895+00:00] [WS-BOOT] url=wss://api.elections.kalshi.com/trade-api/ws/v2 has_api_key=True has_private_key=True
+[2026-06-04 22:07:25.930895+00:00] [WS-CONNECT] url=wss://api.elections.kalshi.com/trade-api/ws/v2 demo=False has_api_key=True has_private_key=True
+[2026-06-04 22:07:25.931894+00:00] [WS-DEBUG] Checking private key path: C:\Dev\MERID\kalshi_private_key.pem
+[2026-06-04 22:07:25.931894+00:00] [WS-BOOT] config OK (key=18e1cc92..., key_file=C:\Dev\MERID\kalshi_private_key.pem)
+[2026-06-04 22:07:25.932895+00:00] [WS-DEBUG-POST-CONFIG] About to check circuit breaker and start connection loop
+[2026-06-04 22:07:25.932895+00:00] [WS-DEBUG] Circuit breaker tripped=False
+[2026-06-04 22:07:25.932895+00:00] [WS-DEBUG] Circuit breaker check passed, about to start connection loop
+[2026-06-04 22:07:25.933894+00:00] [WS-BRIDGE-CONNECT] Attempt 1/3 starting (profile=kalshi_crypto_15m_v2, tickers=1)
+[2026-06-04 22:07:25.934252+00:00] [WS-BRIDGE-CONNECT] About to call _ws.connect() with timeout

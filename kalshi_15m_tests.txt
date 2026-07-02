@@ -1,0 +1,1675 @@
+﻿tests/kalshi_15m/test_config_signature.py::TestConfigSignature::test_load_kalshi_15m_config
+tests/kalshi_15m/test_config_signature.py::TestConfigSignature::test_load_kalshi_15m_series_universe
+tests/kalshi_15m/test_config_signature.py::TestConfigSignature::test_compute_config_signature
+tests/kalshi_15m/test_config_signature.py::TestConfigSignature::test_config_signature_stability
+tests/kalshi_15m/test_config_signature.py::TestConfigSignature::test_config_signature_detects_changes
+tests/kalshi_15m/test_config_signature.py::TestConfigSignature::test_config_signature_key_order_independence
+tests/kalshi_15m/test_config_signature.py::TestConfigSignature::test_get_kalshi_15m_config_signature
+tests/kalshi_15m/test_config_signature.py::TestConfigSignature::test_verify_config_signature_no_expected
+tests/kalshi_15m/test_config_signature.py::TestConfigSignature::test_verify_config_signature_matches
+tests/kalshi_15m/test_config_signature.py::TestConfigSignature::test_verify_config_signature_mismatch
+tests/kalshi_15m/test_config_signature.py::TestConfigSignature::test_empty_config_signature
+tests/kalshi_15m/test_dry_run.py::TestDryRunMode::test_get_kalshi_15m_dry_run_default
+tests/kalshi_15m/test_dry_run.py::TestDryRunMode::test_get_kalshi_15m_dry_run_wrong_profile
+tests/kalshi_15m/test_dry_run.py::TestDryRunMode::test_is_dry_run_enabled_false
+tests/kalshi_15m/test_dry_run.py::TestDryRunMode::test_log_dry_run_order
+tests/kalshi_15m/test_dry_run.py::TestDryRunMode::test_log_dry_run_order_with_all_fields
+tests/kalshi_15m/test_dry_run.py::TestDryRunMode::test_dry_run_config_parsing
+tests/kalshi_15m/test_import_isolation.py::TestImportIsolation::test_skip_for_other_profiles
+tests/kalshi_15m/test_import_isolation.py::TestImportIsolation::test_skip_for_empty_profile
+tests/kalshi_15m/test_import_isolation.py::TestImportIsolation::test_no_forbidden_modules_passes
+tests/kalshi_15m/test_import_isolation.py::TestImportIsolation::test_forbidden_module_raises_error
+tests/kalshi_15m/test_import_isolation.py::TestImportIsolation::test_multiple_forbidden_modules_all_reported
+tests/kalshi_15m/test_import_isolation.py::TestImportIsolation::test_allowed_modules_do_not_trigger_error
+tests/kalshi_15m/test_import_isolation.py::TestImportIsolation::test_submodule_of_forbidden_prefix_triggers_error
+tests/kalshi_15m/test_order_error_handling.py::TestKalshiOrderErrorCode::test_error_code_metadata
+tests/kalshi_15m/test_order_error_handling.py::TestKalshiOrderErrorCode::test_error_code_from_string
+tests/kalshi_15m/test_order_error_handling.py::TestKalshiOrderErrorCode::test_critical_errors_not_retryable
+tests/kalshi_15m/test_order_error_handling.py::TestKalshiOrderErrorCode::test_system_errors_retryable
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_400_validation_error
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_400_kill_switch
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_400_position_limit
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_400_insufficient_funds
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_400_market_closed
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_401_auth_error
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_403_kill_switch
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_403_daily_loss_limit
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_403_drawdown_halt
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_403_live_not_enabled
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_403_forbidden
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_404_order_group_not_found
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_404_market_not_found
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_409_order_group_triggered
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_422_insufficient_funds
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_422_position_limit
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_429_rate_limit
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_503_circuit_breaker
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_503_exchange_error
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_500_exchange_error
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_unknown_status_code
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_error_code_from_response_json
+tests/kalshi_15m/test_order_error_handling.py::TestRaiseForOrderStatus::test_error_context_in_details
+tests/kalshi_15m/test_order_error_handling.py::TestErrorUtilities::test_is_retryable_error
+tests/kalshi_15m/test_order_error_handling.py::TestErrorUtilities::test_get_user_message
+tests/kalshi_15m/test_order_error_handling.py::TestErrorUtilities::test_get_error_breakdown
+tests/kalshi_15m/test_order_error_handling.py::TestErrorToDict::test_to_dict_includes_all_fields
+tests/kalshi_15m/test_order_error_handling.py::TestErrorStringRepresentation::test_str_includes_status_code
+tests/kalshi_15m/test_order_error_handling.py::TestErrorStringRepresentation::test_str_without_status_code
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestSeverityThresholds::test_default_thresholds_are_defined
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestSeverityThresholds::test_custom_thresholds_override
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestDiscrepancyMetrics::test_no_discrepancy
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestDiscrepancyMetrics::test_quantity_mismatch
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestDiscrepancyMetrics::test_side_inversion
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestDiscrepancyMetrics::test_phantom_position
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestDiscrepancyMetrics::test_percentage_diff_calculation
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestDiscrepancyMetrics::test_percentage_diff_zero_division
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestSeverityCalculation::test_no_discrepancy_info_severity
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestSeverityCalculation::test_critical_contract_count
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestSeverityCalculation::test_warning_contract_count
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestSeverityCalculation::test_critical_percentage_diff
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestSeverityCalculation::test_warning_percentage_diff
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestSeverityCalculation::test_side_inversion_critical
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestSeverityCalculation::test_phantom_critical
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestSeverityCalculation::test_custom_thresholds_override
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestSeverityReason::test_info_reason
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestSeverityReason::test_critical_contract_delta_reason
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestSeverityReason::test_critical_percentage_diff_reason
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestSeverityReason::test_side_inversion_reason
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestSeverityReason::test_phantom_reason
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestPhantomDetectionThresholds::test_phantom_detection_config_defaults
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestReconciliationMetricsEmission::test_metrics_collector_singleton
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestReconciliationMetricsEmission::test_emit_recon_metrics
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestReconciliationAlerts::test_alert_manager_singleton
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestReconciliationAlerts::test_alert_on_status_change
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestReconciliationAlerts::test_critical_alert_on_broken_status
+tests/kalshi_15m/test_reconciliation_thresholds.py::TestReconciliationAlerts::test_alert_reminder_interval
+tests/kalshi_15m/test_series_tickers.py::TestSeriesTickers::test_agent_grid_15m_series_tickers
+tests/kalshi_15m/test_series_tickers.py::TestSeriesTickers::test_kalshi_universe_15m_products
+tests/kalshi_15m/test_series_tickers.py::TestSeriesTickers::test_catalog_series_tickers
+tests/kalshi_15m/test_series_tickers.py::TestSeriesTickers::test_kalshi_ct_default_series_tickers
+tests/kalshi_15m/test_series_tickers.py::TestSeriesTickers::test_kalshi_15m_series_tickers_config
+tests/kalshi_15m/test_series_tickers.py::TestSeriesTickers::test_kalshi_agent_grid_catalog_series_tickers
+tests/kalshi_15m/test_series_tickers.py::TestSeriesTickers::test_kalshi_ct_default_series_tickers_detailed
+tests/kalshi_15m/test_series_tickers.py::TestSeriesTickers::test_series_ticker_consistency
+tests/test_kalshi_client.py::TestTokenBucket::test_init_basic_tier
+tests/test_kalshi_client.py::TestTokenBucket::test_init_premier_tier
+tests/test_kalshi_client.py::TestTokenBucket::test_acquire_read_token
+tests/test_kalshi_client.py::TestTokenBucket::test_acquire_write_token
+tests/test_kalshi_client.py::TestCircuitBreaker::test_circuit_opens_after_failures
+tests/test_kalshi_client.py::TestCircuitBreaker::test_circuit_recover_after_timeout
+tests/test_kalshi_client.py::TestPagination::test_list_markets_pagination
+tests/test_kalshi_client.py::TestPagination::test_get_positions_pagination
+tests/test_kalshi_client.py::TestFilters::test_list_markets_with_event_ticker_filter
+tests/test_kalshi_client.py::TestFilters::test_get_positions_with_filters
+tests/test_kalshi_client.py::TestRiskCalculations::test_compute_var
+tests/test_kalshi_client.py::TestRiskCalculations::test_compute_portfolio_risk
+tests/test_kalshi_client.py::TestOrderOperations::test_cancel_order_uses_correct_endpoint
+tests/test_kalshi_client.py::TestOrderOperations::test_batch_cancel_limits_to_20
+tests/test_kalshi_client.py::TestOrderOperations::test_place_order_converts_price_to_cents
+tests/test_kalshi_client.py::TestSubaccountOperations::test_aggregate_positions_by_subaccount
+tests/test_kalshi_client.py::TestSingleton::test_get_kalshi_client_returns_same_instance
+tests/test_kalshi_config_drift.py::TestConfigDriftDetection::test_unified_config_has_correct_urls
+tests/test_kalshi_config_drift.py::TestConfigDriftDetection::test_demo_config_has_correct_urls
+tests/test_kalshi_config_drift.py::TestConfigDriftDetection::test_config_logging_on_ws_init
+tests/test_kalshi_config_drift.py::TestAPIKeyValidationGuards::test_ws_client_raises_on_missing_api_key
+tests/test_kalshi_config_drift.py::TestAPIKeyValidationGuards::test_ws_client_raises_on_empty_api_key
+tests/test_kalshi_config_drift.py::TestAPIKeyValidationGuards::test_ws_client_accepts_valid_api_key
+tests/test_kalshi_config_drift.py::TestAPIKeyValidationGuards::test_ws_client_supports_legacy_api_key_field
+tests/test_kalshi_config_drift.py::TestUnifiedConfigMigration::test_ws_client_uses_unified_config_by_default
+tests/test_kalshi_config_drift.py::TestUnifiedConfigMigration::test_rest_client_uses_unified_config_by_default
+tests/test_kalshi_config_drift.py::TestConfigFieldCompatibility::test_unified_config_api_key_id_field
+tests/test_kalshi_config_drift.py::TestConfigFieldCompatibility::test_unified_config_private_key_pem_support
+tests/test_kalshi_config_drift.py::TestConfigFieldCompatibility::test_unified_config_private_key_path_support
+tests/test_kalshi_market_state_schema.py::test_kalshi_market_state_has_all_liquidity_fields
+tests/test_kalshi_market_state_schema.py::test_validator_fields_exist_on_state
+tests/test_kalshi_market_state_schema.py::test_md_health_fields_match_validator
+tests/test_kalshi_market_state_schema.py::test_validate_market_state_for_entry_depth_validation
+tests/test_kalshi_market_state_schema.py::test_validate_market_state_for_entry_md_staleness
+tests/test_kalshi_market_state_schema.py::test_validate_market_state_for_entry_bid_ask_patterns
+tests/test_kalshi_market_state_schema.py::test_validate_market_state_for_entry_expiry_gate
+tests/test_kalshi_market_state_schema.py::test_strip_limit_behavior
+tests/test_kalshi_only_guardrails.py::TestNoLegacyImports::test_no_legacy_imports_in_active_code
+tests/test_kalshi_only_guardrails.py::TestKalshiFacadeExports::test_facade_has_all_required_exports
+tests/test_kalshi_only_guardrails.py::TestAgentDomainSplit::test_crypto_package_exports_agents
+tests/test_kalshi_only_guardrails.py::TestAgentDomainSplit::test_event_package_exports_agents
+tests/test_kalshi_only_guardrails.py::TestAgentDomainSplit::test_kalshi_crypto_package_exists
+tests/test_kalshi_only_guardrails.py::TestAgentDomainSplit::test_kalshi_event_package_exists
+tests/test_kalshi_only_guardrails.py::TestKalshiMarketFixtures::test_crypto_market_construction
+tests/test_kalshi_only_guardrails.py::TestKalshiMarketFixtures::test_event_market_construction
+tests/test_kalshi_only_guardrails.py::TestKalshiMarketFixtures::test_is_crypto_market_helper
+tests/test_kalshi_only_guardrails.py::TestOrderIntentFormatting::test_crypto_opinion_intent
+tests/test_kalshi_only_guardrails.py::TestOrderIntentFormatting::test_order_intent_construction
+tests/test_kalshi_only_guardrails.py::TestLegacyDirectoriesExist::test_legacy_dirs_present
+tests/test_kalshi_only_guardrails.py::TestSettingsKalshiOnly::test_go_live_default_venues_is_kalshi_only
+tests/test_kalshi_only_guardrails.py::TestSettingsKalshiOnly::test_legacy_fields_marked
+tests/test_kalshi_only_guardrails.py::TestFrontendVenueValidator::test_validator_defaults_to_kalshi
+tests/test_p0_critical_fixes.py::TestP0PositionValueMultiplier::test_settings_loads_position_value_correctly
+tests/test_p0_critical_fixes.py::TestP0PositionValueMultiplier::test_position_limit_check_uses_correct_value
+tests/test_p0_critical_fixes.py::TestP0PositionValueMultiplier::test_env_var_overrides_without_multiplier
+tests/test_p0_critical_fixes.py::TestP0PositionCacheRounding::test_avg_price_calculation_uses_rounding
+tests/test_p0_critical_fixes.py::TestP0PositionCacheRounding::test_avg_price_rounding_with_non_divisible_values
+tests/test_p0_critical_fixes.py::TestP0PnLFalsyHandling::test_zero_pnl_preserved_explicitly
+tests/test_p0_critical_fixes.py::TestP0PnLFalsyHandling::test_none_pnl_uses_fallback
+tests/test_p0_critical_fixes.py::TestP0PnLFalsyHandling::test_non_zero_pnl_preserved
+tests/test_p0_critical_fixes.py::TestP0PaginationBounds::test_pagination_respects_max_pages
+tests/test_p0_critical_fixes.py::TestP0OrderGroupRollback::test_order_group_manager_refreshes_before_use
+tests/test_p0_critical_fixes.py::TestP0KillSwitchFailSafe::test_kill_switch_defaults_to_active_on_import_error
+tests/test_p0_critical_fixes.py::TestP0KillSwitchFailSafe::test_kill_switch_updates_when_monitoring_succeeds
+tests/test_p0_critical_fixes.py::TestP1ConfigurableDrawdown::test_drawdown_limits_respect_env_vars
+tests/test_p0_critical_fixes.py::TestP1ConfigurableDrawdown::test_drawdown_limits_validate_range
+
+=================================== ERRORS ====================================
+__________ ERROR collecting tests/agents/core/test_market_analyst.py __________
+ImportError while importing test module 'C:\Dev\MERID\tests\agents\core\test_market_analyst.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\agents\core\test_market_analyst.py:4: in <module>
+    from agents.core.market_analyst import (
+agents\__init__.py:20: in <module>
+    from agents.base_agent import BaseAgent
+agents\base_agent.py:14: in <module>
+    from merid.core.event_bus import event_stream
+E   ModuleNotFoundError: No module named 'merid.core.event_bus'
+______________ ERROR collecting tests/agents/test_agent_fixed.py ______________
+ImportError while importing test module 'C:\Dev\MERID\tests\agents\test_agent_fixed.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\agents\test_agent_fixed.py:12: in <module>
+    from agents.crypto_prediction_agent import CryptoPredictionAgent
+agents\__init__.py:20: in <module>
+    from agents.base_agent import BaseAgent
+agents\base_agent.py:14: in <module>
+    from merid.core.event_bus import event_stream
+E   ModuleNotFoundError: No module named 'merid.core.event_bus'
+______________ ERROR collecting tests/agents/test_base_agent.py _______________
+ImportError while importing test module 'C:\Dev\MERID\tests\agents\test_base_agent.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\agents\test_base_agent.py:5: in <module>
+    from agents.base_agent import (
+agents\__init__.py:20: in <module>
+    from agents.base_agent import BaseAgent
+agents\base_agent.py:14: in <module>
+    from merid.core.event_bus import event_stream
+E   ModuleNotFoundError: No module named 'merid.core.event_bus'
+______________ ERROR collecting tests/agents/test_social_bots.py ______________
+ImportError while importing test module 'C:\Dev\MERID\tests\agents\test_social_bots.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\agents\test_social_bots.py:10: in <module>
+    from agents.twitter_agent import get_twitter_agent
+agents\__init__.py:20: in <module>
+    from agents.base_agent import BaseAgent
+agents\base_agent.py:14: in <module>
+    from merid.core.event_bus import event_stream
+E   ModuleNotFoundError: No module named 'merid.core.event_bus'
+_________ ERROR collecting tests/alignment/test_spot_basis_tracker.py _________
+ImportError while importing test module 'C:\Dev\MERID\tests\alignment\test_spot_basis_tracker.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\alignment\test_spot_basis_tracker.py:19: in <module>
+    from merid.alignment.spot_basis_tracker import (
+E   ModuleNotFoundError: No module named 'merid.alignment.spot_basis_tracker'
+____________ ERROR collecting tests/analytics/test_brier_score.py _____________
+ImportError while importing test module 'C:\Dev\MERID\tests\analytics\test_brier_score.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\analytics\test_brier_score.py:9: in <module>
+    from agents.prediction_arbitrage_analyst import PredictionArbitrageAnalystAgent
+agents\__init__.py:20: in <module>
+    from agents.base_agent import BaseAgent
+agents\base_agent.py:14: in <module>
+    from merid.core.event_bus import event_stream
+E   ModuleNotFoundError: No module named 'merid.core.event_bus'
+__________ ERROR collecting tests/analytics/test_bucket_analysis.py ___________
+ImportError while importing test module 'C:\Dev\MERID\tests\analytics\test_bucket_analysis.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\analytics\test_bucket_analysis.py:9: in <module>
+    from agents.prediction_arbitrage_analyst import PredictionArbitrageAnalystAgent
+agents\__init__.py:20: in <module>
+    from agents.base_agent import BaseAgent
+agents\base_agent.py:14: in <module>
+    from merid.core.event_bus import event_stream
+E   ModuleNotFoundError: No module named 'merid.core.event_bus'
+______________ ERROR collecting tests/api/test_mock_responses.py ______________
+ImportError while importing test module 'C:\Dev\MERID\tests\api\test_mock_responses.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\api\test_mock_responses.py:5: in <module>
+    from agents.prediction_arbitrage_analyst import PredictionArbitrageAnalystAgent
+agents\__init__.py:20: in <module>
+    from agents.base_agent import BaseAgent
+agents\base_agent.py:14: in <module>
+    from merid.core.event_bus import event_stream
+E   ModuleNotFoundError: No module named 'merid.core.event_bus'
+______________ ERROR collecting tests/api/test_vertical_slice.py ______________
+ImportError while importing test module 'C:\Dev\MERID\tests\api\test_vertical_slice.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\api\test_vertical_slice.py:13: in <module>
+    from agents.crypto_prediction_agent import CryptoPredictionAgent
+agents\__init__.py:20: in <module>
+    from agents.base_agent import BaseAgent
+agents\base_agent.py:14: in <module>
+    from merid.core.event_bus import event_stream
+E   ModuleNotFoundError: No module named 'merid.core.event_bus'
+________ ERROR collecting tests/ci/test_settlement_guard_timeframes.py ________
+ImportError while importing test module 'C:\Dev\MERID\tests\ci\test_settlement_guard_timeframes.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\ci\test_settlement_guard_timeframes.py:12: in <module>
+    from merid.event_venues.kalshi.cfb_settlement import (
+E   ModuleNotFoundError: No module named 'merid.event_venues.kalshi.cfb_settlement'
+_________ ERROR collecting tests/ci/test_strike_asset_consistency.py __________
+ImportError while importing test module 'C:\Dev\MERID\tests\ci\test_strike_asset_consistency.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\ci\test_strike_asset_consistency.py:12: in <module>
+    from merid.prediction.kalshi_strike_selector import asset_in_ticker, RejectionReason
+E   ModuleNotFoundError: No module named 'merid.prediction.kalshi_strike_selector'
+_________ ERROR collecting tests/config/test_kalshi_crypto_config.py __________
+ImportError while importing test module 'C:\Dev\MERID\tests\config\test_kalshi_crypto_config.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\config\test_kalshi_crypto_config.py:5: in <module>
+    from config.kalshi_crypto_config import (
+E   ImportError: cannot import name 'active_crypto_asset_mood_timeframe_grid' from 'config.kalshi_crypto_config' (C:\Dev\MERID\config\kalshi_crypto_config.py)
+_____________ ERROR collecting tests/core/test_data_validation.py _____________
+ImportError while importing test module 'C:\Dev\MERID\tests\core\test_data_validation.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\core\test_data_validation.py:5: in <module>
+    from merid.core.data_validation import SchemaValidator, DependencyContainer, container
+E   ModuleNotFoundError: No module named 'merid.core.data_validation'
+______________ ERROR collecting tests/core/test_drift_monitor.py ______________
+ImportError while importing test module 'C:\Dev\MERID\tests\core\test_drift_monitor.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\core\test_drift_monitor.py:5: in <module>
+    from merid.core.drift_monitor import (
+E   ModuleNotFoundError: No module named 'merid.core.drift_monitor'
+_________________ ERROR collecting tests/core/test_oracle.py __________________
+ImportError while importing test module 'C:\Dev\MERID\tests\core\test_oracle.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\core\test_oracle.py:12: in <module>
+    from oracles.binanceus_oracle import BinanceUSOracle, BinanceUSConfig
+E   ModuleNotFoundError: No module named 'oracles.binanceus_oracle'
+___________ ERROR collecting tests/core/test_system_orchestrator.py ___________
+ImportError while importing test module 'C:\Dev\MERID\tests\core\test_system_orchestrator.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\core\test_system_orchestrator.py:11: in <module>
+    from core.system_orchestrator import (
+core\system_orchestrator.py:42: in <module>
+    from core.consensus_engine import get_consensus_engine
+E   ModuleNotFoundError: No module named 'core.consensus_engine'
+_ ERROR collecting tests/event_venues/kalshi/test_invariants_crypto_universe.py _
+ImportError while importing test module 'C:\Dev\MERID\tests\event_venues\kalshi\test_invariants_crypto_universe.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\event_venues\kalshi\test_invariants_crypto_universe.py:23: in <module>
+    from merid.trading.kalshi_continuous_trader import TraderConfig
+E   ModuleNotFoundError: No module named 'merid.trading.kalshi_continuous_trader'
+_ ERROR collecting tests/event_venues/kalshi/test_kalshi_runtime_config_snapshot.py _
+ImportError while importing test module 'C:\Dev\MERID\tests\event_venues\kalshi\test_kalshi_runtime_config_snapshot.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\event_venues\kalshi\test_kalshi_runtime_config_snapshot.py:10: in <module>
+    from merid.diagnostics.kalshi_runtime_config import build_kalshi_crypto_runtime_snapshot
+E   ModuleNotFoundError: No module named 'merid.diagnostics.kalshi_runtime_config'
+_____ ERROR collecting tests/event_venues/kalshi/test_kalshi_stop_loss.py _____
+ImportError while importing test module 'C:\Dev\MERID\tests\event_venues\kalshi\test_kalshi_stop_loss.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\event_venues\kalshi\test_kalshi_stop_loss.py:8: in <module>
+    from merid.event_venues.kalshi.stop_loss import (
+E   ModuleNotFoundError: No module named 'merid.event_venues.kalshi.stop_loss'
+____ ERROR collecting tests/event_venues/kalshi/test_liquidity_monitor.py _____
+ImportError while importing test module 'C:\Dev\MERID\tests\event_venues\kalshi\test_liquidity_monitor.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\event_venues\kalshi\test_liquidity_monitor.py:6: in <module>
+    from merid.event_venues.kalshi.liquidity_monitor import (
+E   ImportError: cannot import name 'OrderBookSnapshot' from 'merid.event_venues.kalshi.liquidity_monitor' (C:\Dev\MERID\merid\event_venues\kalshi\liquidity_monitor.py)
+________ ERROR collecting tests/event_venues/kalshi/test_robustness.py ________
+ImportError while importing test module 'C:\Dev\MERID\tests\event_venues\kalshi\test_robustness.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\event_venues\kalshi\test_robustness.py:25: in <module>
+    from merid.event_venues.kalshi.robustness_integration import (
+merid\event_venues\kalshi\robustness_integration.py:13: in <module>
+    from merid.event_venues.kalshi.client import KalshiVenueClient, KalshiConfig
+E   ImportError: cannot import name 'KalshiConfig' from 'merid.event_venues.kalshi.client' (C:\Dev\MERID\merid\event_venues\kalshi\client.py)
+______ ERROR collecting tests/event_venues/kalshi/test_trading_system.py ______
+tests\event_venues\kalshi\test_trading_system.py:13: in <module>
+    from trading._legacy.perp.binance_perp import BinancePerpAdapter
+trading\_legacy\perp\binance_perp.py:19: in <module>
+    raise RuntimeError(
+E   RuntimeError: Legacy execution module cannot be imported in production. Set MERID_ALLOW_LEGACY_EXECUTION=true only in non-prod environments.
+_ ERROR collecting tests/event_venues/polymarket/test_polymarket_client_refactored.py _
+ImportError while importing test module 'C:\Dev\MERID\tests\event_venues\polymarket\test_polymarket_client_refactored.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\event_venues\polymarket\test_polymarket_client_refactored.py:8: in <module>
+    from merid.event_venues._legacy.polymarket.client import PolymarketVenueClient
+E   ModuleNotFoundError: No module named 'merid.event_venues._legacy'
+_ ERROR collecting tests/event_venues/polymarket/test_polymarket_venue_client.py _
+ImportError while importing test module 'C:\Dev\MERID\tests\event_venues\polymarket\test_polymarket_venue_client.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\event_venues\polymarket\test_polymarket_venue_client.py:8: in <module>
+    from merid.event_venues._legacy.polymarket.client import PolymarketVenueClient
+E   ModuleNotFoundError: No module named 'merid.event_venues._legacy'
+_ ERROR collecting tests/event_venues/polymarket/test_polymarket_venue_models.py _
+ImportError while importing test module 'C:\Dev\MERID\tests\event_venues\polymarket\test_polymarket_venue_models.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\event_venues\polymarket\test_polymarket_venue_models.py:9: in <module>
+    from merid.event_venues._legacy.polymarket.models import (
+E   ModuleNotFoundError: No module named 'merid.event_venues._legacy'
+_______ ERROR collecting tests/event_venues/polymarket/test_trading.py ________
+ImportError while importing test module 'C:\Dev\MERID\tests\event_venues\polymarket\test_trading.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\event_venues\polymarket\test_trading.py:8: in <module>
+    from merid.event_venues._legacy.polymarket.trading import PolymarketTrader
+E   ModuleNotFoundError: No module named 'merid.event_venues._legacy'
+__________ ERROR collecting tests/event_venues/polymarket/test_ws.py __________
+ImportError while importing test module 'C:\Dev\MERID\tests\event_venues\polymarket\test_ws.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\event_venues\polymarket\test_ws.py:9: in <module>
+    from merid.event_venues._legacy.polymarket.ws import PolymarketWebSocket
+E   ModuleNotFoundError: No module named 'merid.event_venues._legacy'
+_____ ERROR collecting tests/event_venues/polymarket/test_ws_reconnect.py _____
+ImportError while importing test module 'C:\Dev\MERID\tests\event_venues\polymarket\test_ws_reconnect.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\event_venues\polymarket\test_ws_reconnect.py:10: in <module>
+    from merid.event_venues._legacy.polymarket.ws import PolymarketWebSocket
+E   ModuleNotFoundError: No module named 'merid.event_venues._legacy'
+________ ERROR collecting tests/event_venues/test_polymarket_client.py ________
+ImportError while importing test module 'C:\Dev\MERID\tests\event_venues\test_polymarket_client.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\event_venues\test_polymarket_client.py:7: in <module>
+    from merid.event_venues._legacy.polymarket.client import PolymarketVenueClient
+E   ModuleNotFoundError: No module named 'merid.event_venues._legacy'
+________ ERROR collecting tests/event_venues/test_polymarket_models.py ________
+ImportError while importing test module 'C:\Dev\MERID\tests\event_venues\test_polymarket_models.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\event_venues\test_polymarket_models.py:8: in <module>
+    from merid.event_venues._legacy.polymarket.models import (
+E   ModuleNotFoundError: No module named 'merid.event_venues._legacy'
+_________ ERROR collecting tests/execution/executors/test_coinbase.py _________
+ImportError while importing test module 'C:\Dev\MERID\tests\execution\executors\test_coinbase.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\execution\executors\test_coinbase.py:11: in <module>
+    from merid.execution.executors.coinbase import CoinbaseExecutor, CoinbasePriceFeed
+E   ModuleNotFoundError: No module named 'merid.execution.executors.coinbase'
+_________ ERROR collecting tests/execution/executors/test_jupiter.py __________
+ImportError while importing test module 'C:\Dev\MERID\tests\execution\executors\test_jupiter.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\execution\executors\test_jupiter.py:8: in <module>
+    from merid.execution.executors.jupiter import JupiterExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.jupiter'
+_____ ERROR collecting tests/execution/executors/test_kalshi_enhanced.py ______
+ImportError while importing test module 'C:\Dev\MERID\tests\execution\executors\test_kalshi_enhanced.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\execution\executors\test_kalshi_enhanced.py:22: in <module>
+    from merid.event_venues.kalshi.client_enhanced import EnhancedKalshiClient
+merid\event_venues\kalshi\client_enhanced.py:4: in <module>
+    from merid.event_venues.kalshi.legacy.client_enhanced import (
+E   ModuleNotFoundError: No module named 'merid.event_venues.kalshi.legacy'
+_ ERROR collecting tests/execution/executors/test_kalshi_enhanced_resilience_contract.py _
+ImportError while importing test module 'C:\Dev\MERID\tests\execution\executors\test_kalshi_enhanced_resilience_contract.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\execution\executors\test_kalshi_enhanced_resilience_contract.py:36: in <module>
+    from merid.event_venues.kalshi.client_enhanced import EnhancedKalshiClient
+merid\event_venues\kalshi\client_enhanced.py:4: in <module>
+    from merid.event_venues.kalshi.legacy.client_enhanced import (
+E   ModuleNotFoundError: No module named 'merid.event_venues.kalshi.legacy'
+________ ERROR collecting tests/execution/test_additional_executors.py ________
+ImportError while importing test module 'C:\Dev\MERID\tests\execution\test_additional_executors.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\execution\test_additional_executors.py:7: in <module>
+    from merid.execution.executors.jupiter import JupiterExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.jupiter'
+_________ ERROR collecting tests/executors/test_coinbase_executor.py __________
+ImportError while importing test module 'C:\Dev\MERID\tests\executors\test_coinbase_executor.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\executors\test_coinbase_executor.py:6: in <module>
+    from merid.execution.executors.coinbase import CoinbaseExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.coinbase'
+________ ERROR collecting tests/integration/test_kalshi_e2e_stress.py _________
+ImportError while importing test module 'C:\Dev\MERID\tests\integration\test_kalshi_e2e_stress.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\integration\test_kalshi_e2e_stress.py:38: in <module>
+    from agents.explainability import (
+agents\__init__.py:20: in <module>
+    from agents.base_agent import BaseAgent
+agents\base_agent.py:14: in <module>
+    from merid.core.event_bus import event_stream
+E   ModuleNotFoundError: No module named 'merid.core.event_bus'
+___________ ERROR collecting tests/integration/test_scalability.py ____________
+C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\_pytest\python.py:493: in importtestmodule
+    mod = import_path(
+C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\_pytest\pathlib.py:549: in import_path
+    mod = _import_module_using_spec(
+C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\_pytest\pathlib.py:725: in _import_module_using_spec
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\_pytest\assertion\rewrite.py:185: in exec_module
+    exec(co, module.__dict__)
+tests\integration\test_scalability.py:14: in <module>
+    from scaling.cache_manager import CacheManager, CacheConfig
+E     File "C:\Dev\MERID\scaling\cache_manager.py", line 101
+E       ADVISORY: This fallback allows system to operate without Redis.
+E                      ^^^^^^^^
+E   SyntaxError: invalid syntax
+_______ ERROR collecting tests/integration/test_swarm_health_gating.py ________
+ImportError while importing test module 'C:\Dev\MERID\tests\integration\test_swarm_health_gating.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\integration\test_swarm_health_gating.py:21: in <module>
+    from agents.explainability import get_explainability_tracker, DecisionType
+agents\__init__.py:20: in <module>
+    from agents.base_agent import BaseAgent
+agents\base_agent.py:14: in <module>
+    from merid.core.event_bus import event_stream
+E   ModuleNotFoundError: No module named 'merid.core.event_bus'
+____________ ERROR collecting tests/integration/test_trade_flow.py ____________
+ImportError while importing test module 'C:\Dev\MERID\tests\integration\test_trade_flow.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\integration\test_trade_flow.py:18: in <module>
+    from risk.risk_guard import (
+risk\__init__.py:14: in <module>
+    from merid.risk.capital_engine import (
+E   ModuleNotFoundError: No module named 'merid.risk.capital_engine'
+_______ ERROR collecting tests/integration/test_venue_failure_modes.py ________
+ImportError while importing test module 'C:\Dev\MERID\tests\integration\test_venue_failure_modes.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\integration\test_venue_failure_modes.py:13: in <module>
+    from merid.execution.executors.coinbase import CoinbaseExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.coinbase'
+____________ ERROR collecting tests/kalshi/test_mm_integration.py _____________
+ImportError while importing test module 'C:\Dev\MERID\tests\kalshi\test_mm_integration.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\kalshi\test_mm_integration.py:15: in <module>
+    from merid.kalshi.mm_integration import (
+merid\kalshi\mm_integration.py:28: in <module>
+    from merid.signals.unified_regime_classifier import (
+E   ModuleNotFoundError: No module named 'merid.signals.unified_regime_classifier'
+__________ ERROR collecting tests/kalshi_15m/test_profile_wiring.py ___________
+ImportError while importing test module 'C:\Dev\MERID\tests\kalshi_15m\test_profile_wiring.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\kalshi_15m\test_profile_wiring.py:4: in <module>
+    from web.main import _init_kalshi_crypto_15m_app
+E   ModuleNotFoundError: No module named 'web.main'
+_________ ERROR collecting tests/kalshi_15m/test_router_isolation.py __________
+ImportError while importing test module 'C:\Dev\MERID\tests\kalshi_15m\test_router_isolation.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\kalshi_15m\test_router_isolation.py:3: in <module>
+    from web.main import _register_routers_for_profile
+E   ModuleNotFoundError: No module named 'web.main'
+__________ ERROR collecting tests/legacy/test_sports_live_betting.py __________
+ImportError while importing test module 'C:\Dev\MERID\tests\legacy\test_sports_live_betting.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\legacy\test_sports_live_betting.py:22: in <module>
+    from merid.betting.live_sports import (
+merid\betting\__init__.py:49: in <module>
+    from merid.betting.sports_debate import (
+E   ModuleNotFoundError: No module named 'merid.betting.sports_debate'
+____ ERROR collecting tests/legacy/test_swarm_vs_single_agent_benchmark.py ____
+ImportError while importing test module 'C:\Dev\MERID\tests\legacy\test_swarm_vs_single_agent_benchmark.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\legacy\test_swarm_vs_single_agent_benchmark.py:18: in <module>
+    from core.consensus_math import Vote, compute_consensus
+E   ModuleNotFoundError: No module named 'core.consensus_math'
+_____________ ERROR collecting tests/logging/test_run_logging.py ______________
+ImportError while importing test module 'C:\Dev\MERID\tests\logging\test_run_logging.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\logging\test_run_logging.py:10: in <module>
+    from agents.prediction_arbitrage_analyst import PredictionArbitrageAnalystAgent, log_agent_run, AgentRunLog, BucketAnalysis
+agents\__init__.py:20: in <module>
+    from agents.base_agent import BaseAgent
+agents\base_agent.py:14: in <module>
+    from merid.core.event_bus import event_stream
+E   ModuleNotFoundError: No module named 'merid.core.event_bus'
+__________ ERROR collecting tests/logging/test_structured_logging.py __________
+ImportError while importing test module 'C:\Dev\MERID\tests\logging\test_structured_logging.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\logging\test_structured_logging.py:10: in <module>
+    from agents.prediction_arbitrage_analyst import PredictionArbitrageAnalystAgent, log_agent_run, AgentRunLog, BucketAnalysis
+agents\__init__.py:20: in <module>
+    from agents.base_agent import BaseAgent
+agents\base_agent.py:14: in <module>
+    from merid.core.event_bus import event_stream
+E   ModuleNotFoundError: No module named 'merid.core.event_bus'
+_ ERROR collecting tests/merid/execution/executors/test_coinbase_batch114.py __
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_coinbase_batch114.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_coinbase_batch114.py:5: in <module>
+    from merid.execution.executors.coinbase import CoinbaseExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.coinbase'
+_ ERROR collecting tests/merid/execution/executors/test_coinbase_executor_coverage.py _
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_coinbase_executor_coverage.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_coinbase_executor_coverage.py:6: in <module>
+    from merid.execution.executors.coinbase import CoinbaseExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.coinbase'
+___ ERROR collecting tests/merid/execution/executors/test_cronos_onchain.py ___
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_cronos_onchain.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_cronos_onchain.py:7: in <module>
+    from merid.execution.executors.cronos_onchain import CronosOnchainExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.cronos_onchain'
+_ ERROR collecting tests/merid/execution/executors/test_cronos_onchain_batch56.py _
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_cronos_onchain_batch56.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_cronos_onchain_batch56.py:5: in <module>
+    from merid.execution.executors.cronos_onchain import CronosOnchainExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.cronos_onchain'
+_ ERROR collecting tests/merid/execution/executors/test_cronos_onchain_batch65.py _
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_cronos_onchain_batch65.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_cronos_onchain_batch65.py:5: in <module>
+    from merid.execution.executors.cronos_onchain import CronosOnchainExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.cronos_onchain'
+_ ERROR collecting tests/merid/execution/executors/test_cronos_onchain_coverage.py _
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_cronos_onchain_coverage.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_cronos_onchain_coverage.py:6: in <module>
+    from merid.execution.executors.cronos_onchain import CronosOnchainExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.cronos_onchain'
+_____ ERROR collecting tests/merid/execution/executors/test_crypto_com.py _____
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_crypto_com.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_crypto_com.py:7: in <module>
+    from merid.execution.executors.crypto_com import CryptoComExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.crypto_com'
+_ ERROR collecting tests/merid/execution/executors/test_crypto_com_batch118.py _
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_crypto_com_batch118.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_crypto_com_batch118.py:5: in <module>
+    from merid.execution.executors.crypto_com import CryptoComExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.crypto_com'
+_ ERROR collecting tests/merid/execution/executors/test_crypto_com_batch57.py _
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_crypto_com_batch57.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_crypto_com_batch57.py:5: in <module>
+    from merid.execution.executors.crypto_com import CryptoComExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.crypto_com'
+_ ERROR collecting tests/merid/execution/executors/test_crypto_com_batch61.py _
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_crypto_com_batch61.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_crypto_com_batch61.py:5: in <module>
+    from merid.execution.executors.crypto_com import CryptoComExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.crypto_com'
+_ ERROR collecting tests/merid/execution/executors/test_crypto_com_coverage.py _
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_crypto_com_coverage.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_crypto_com_coverage.py:7: in <module>
+    from merid.execution.executors.crypto_com import CryptoComExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.crypto_com'
+______ ERROR collecting tests/merid/execution/executors/test_fulcrom.py _______
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_fulcrom.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_fulcrom.py:7: in <module>
+    from merid.execution.executors.fulcrom import FulcromExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.fulcrom'
+__ ERROR collecting tests/merid/execution/executors/test_fulcrom_batch117.py __
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_fulcrom_batch117.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_fulcrom_batch117.py:5: in <module>
+    from merid.execution.executors.fulcrom import FulcromExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.fulcrom'
+__ ERROR collecting tests/merid/execution/executors/test_fulcrom_batch58.py ___
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_fulcrom_batch58.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_fulcrom_batch58.py:5: in <module>
+    from merid.execution.executors.fulcrom import FulcromExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.fulcrom'
+__ ERROR collecting tests/merid/execution/executors/test_fulcrom_batch62.py ___
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_fulcrom_batch62.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_fulcrom_batch62.py:5: in <module>
+    from merid.execution.executors.fulcrom import FulcromExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.fulcrom'
+__ ERROR collecting tests/merid/execution/executors/test_fulcrom_coverage.py __
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_fulcrom_coverage.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_fulcrom_coverage.py:6: in <module>
+    from merid.execution.executors.fulcrom import FulcromExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.fulcrom'
+__ ERROR collecting tests/merid/execution/executors/test_jupiter_batch115.py __
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_jupiter_batch115.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_jupiter_batch115.py:5: in <module>
+    from merid.execution.executors.jupiter import JupiterExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.jupiter'
+__ ERROR collecting tests/merid/execution/executors/test_jupiter_batch59.py ___
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_jupiter_batch59.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_jupiter_batch59.py:5: in <module>
+    from merid.execution.executors.jupiter import JupiterExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.jupiter'
+__ ERROR collecting tests/merid/execution/executors/test_jupiter_batch63.py ___
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_jupiter_batch63.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_jupiter_batch63.py:5: in <module>
+    from merid.execution.executors.jupiter import JupiterExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.jupiter'
+__ ERROR collecting tests/merid/execution/executors/test_jupiter_coverage.py __
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_jupiter_coverage.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_jupiter_coverage.py:6: in <module>
+    from merid.execution.executors.jupiter import JupiterExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.jupiter'
+_ ERROR collecting tests/merid/execution/executors/test_merid_coinbase_executor.py _
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_merid_coinbase_executor.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_merid_coinbase_executor.py:7: in <module>
+    from merid.execution.executors.coinbase import CoinbasePriceFeed, CoinbaseExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.coinbase'
+_ ERROR collecting tests/merid/execution/executors/test_merid_jupiter_executor.py _
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_merid_jupiter_executor.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_merid_jupiter_executor.py:7: in <module>
+    from merid.execution.executors.jupiter import JupiterExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.jupiter'
+_______ ERROR collecting tests/merid/execution/executors/test_webull.py _______
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_webull.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_webull.py:7: in <module>
+    from merid.execution.executors.webull import WebullExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.webull'
+__ ERROR collecting tests/merid/execution/executors/test_webull_batch116.py ___
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_webull_batch116.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_webull_batch116.py:5: in <module>
+    from merid.execution.executors.webull import WebullExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.webull'
+___ ERROR collecting tests/merid/execution/executors/test_webull_batch60.py ___
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_webull_batch60.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_webull_batch60.py:5: in <module>
+    from merid.execution.executors.webull import WebullExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.webull'
+___ ERROR collecting tests/merid/execution/executors/test_webull_batch64.py ___
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_webull_batch64.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_webull_batch64.py:5: in <module>
+    from merid.execution.executors.webull import WebullExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.webull'
+__ ERROR collecting tests/merid/execution/executors/test_webull_coverage.py ___
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\execution\executors\test_webull_coverage.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\execution\executors\test_webull_coverage.py:6: in <module>
+    from merid.execution.executors.webull import WebullExecutor
+E   ModuleNotFoundError: No module named 'merid.execution.executors.webull'
+_______ ERROR collecting tests/merid/test_agent_grid_startup_health.py ________
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\test_agent_grid_startup_health.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\test_agent_grid_startup_health.py:5: in <module>
+    from merid.prediction import agent_grid as ag_mod
+E   ImportError: cannot import name 'agent_grid' from 'merid.prediction' (C:\Dev\MERID\merid\prediction\__init__.py)
+_________ ERROR collecting tests/merid/test_neutral_streak_tracker.py _________
+ImportError while importing test module 'C:\Dev\MERID\tests\merid\test_neutral_streak_tracker.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\merid\test_neutral_streak_tracker.py:5: in <module>
+    from merid.sentiment.neutral_streak_tracker import advance_neutral_streak, reset_streak_state
+E   ModuleNotFoundError: No module named 'merid.sentiment'
+_____________ ERROR collecting tests/pipeline/test_robustness.py ______________
+ImportError while importing test module 'C:\Dev\MERID\tests\pipeline\test_robustness.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\pipeline\test_robustness.py:24: in <module>
+    from merid.publishing.kalshi_insight_pipeline_robust import (
+E   ModuleNotFoundError: No module named 'merid.publishing.kalshi_insight_pipeline_robust'
+__________ ERROR collecting tests/pipelines/test_backtest_harness.py __________
+ImportError while importing test module 'C:\Dev\MERID\tests\pipelines\test_backtest_harness.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\pipelines\test_backtest_harness.py:10: in <module>
+    from merid.pipelines.feature_bundle import FifteenMinuteFeatureBundle, TradeDecision
+merid\pipelines\__init__.py:10: in <module>
+    from merid.pipelines.feature_bundle import (
+E   ModuleNotFoundError: No module named 'merid.pipelines.feature_bundle'
+___________ ERROR collecting tests/pipelines/test_feature_bundle.py ___________
+ImportError while importing test module 'C:\Dev\MERID\tests\pipelines\test_feature_bundle.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\pipelines\test_feature_bundle.py:9: in <module>
+    from merid.pipelines.feature_bundle import (
+merid\pipelines\__init__.py:10: in <module>
+    from merid.pipelines.feature_bundle import (
+E   ModuleNotFoundError: No module named 'merid.pipelines.feature_bundle'
+___________ ERROR collecting tests/pipelines/test_observability.py ____________
+ImportError while importing test module 'C:\Dev\MERID\tests\pipelines\test_observability.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\pipelines\test_observability.py:9: in <module>
+    from merid.pipelines.feature_bundle import (
+merid\pipelines\__init__.py:10: in <module>
+    from merid.pipelines.feature_bundle import (
+E   ModuleNotFoundError: No module named 'merid.pipelines.feature_bundle'
+______ ERROR collecting tests/pipelines/test_orchestrator_integration.py ______
+ImportError while importing test module 'C:\Dev\MERID\tests\pipelines\test_orchestrator_integration.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\pipelines\test_orchestrator_integration.py:10: in <module>
+    from merid.pipelines.feature_bundle import (
+merid\pipelines\__init__.py:10: in <module>
+    from merid.pipelines.feature_bundle import (
+E   ModuleNotFoundError: No module named 'merid.pipelines.feature_bundle'
+__________ ERROR collecting tests/pipelines/test_pipeline_schema.py ___________
+ImportError while importing test module 'C:\Dev\MERID\tests\pipelines\test_pipeline_schema.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\pipelines\test_pipeline_schema.py:8: in <module>
+    from merid.pipelines.pipeline_schema import (
+merid\pipelines\__init__.py:10: in <module>
+    from merid.pipelines.feature_bundle import (
+E   ModuleNotFoundError: No module named 'merid.pipelines.feature_bundle'
+___________ ERROR collecting tests/pipelines/test_pre_trade_risk.py ___________
+ImportError while importing test module 'C:\Dev\MERID\tests\pipelines\test_pre_trade_risk.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\pipelines\test_pre_trade_risk.py:8: in <module>
+    from merid.pipelines.feature_bundle import TradeDecision
+merid\pipelines\__init__.py:10: in <module>
+    from merid.pipelines.feature_bundle import (
+E   ModuleNotFoundError: No module named 'merid.pipelines.feature_bundle'
+____________ ERROR collecting tests/policy/test_qinline_policy.py _____________
+ImportError while importing test module 'C:\Dev\MERID\tests\policy\test_qinline_policy.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\policy\test_qinline_policy.py:16: in <module>
+    from merid.policy.qinline_policy import (
+merid\policy\qinline_policy.py:29: in <module>
+    from merid.signals.unified_regime_classifier import (
+E   ModuleNotFoundError: No module named 'merid.signals.unified_regime_classifier'
+__________ ERROR collecting tests/prediction/test_check_edge_lag.py ___________
+ImportError while importing test module 'C:\Dev\MERID\tests\prediction\test_check_edge_lag.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\prediction\test_check_edge_lag.py:16: in <module>
+    from merid.prediction.unified_edge import (
+E   ImportError: cannot import name 'OrderBookSnapshot' from 'merid.prediction.unified_edge' (C:\Dev\MERID\merid\prediction\unified_edge.py)
+__________ ERROR collecting tests/prediction/test_golden_path_15m.py __________
+ImportError while importing test module 'C:\Dev\MERID\tests\prediction\test_golden_path_15m.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\prediction\test_golden_path_15m.py:25: in <module>
+    from merid.signals.crypto_15m_indicators import Crypto15MIndicators
+E   ImportError: cannot import name 'Crypto15MIndicators' from 'merid.signals.crypto_15m_indicators' (C:\Dev\MERID\merid\signals\crypto_15m_indicators.py)
+_________ ERROR collecting tests/prediction/test_unified_edge_lag.py __________
+ImportError while importing test module 'C:\Dev\MERID\tests\prediction\test_unified_edge_lag.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\prediction\test_unified_edge_lag.py:15: in <module>
+    from merid.prediction.unified_edge import EdgeResult, SpotReference, OrderBookSnapshot
+E   ImportError: cannot import name 'OrderBookSnapshot' from 'merid.prediction.unified_edge' (C:\Dev\MERID\merid\prediction\unified_edge.py)
+______ ERROR collecting tests/publishing/test_kalshi_insight_pipeline.py ______
+ImportError while importing test module 'C:\Dev\MERID\tests\publishing\test_kalshi_insight_pipeline.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\publishing\test_kalshi_insight_pipeline.py:10: in <module>
+    from merid.publishing.kalshi_insight_pipeline import (
+E   ModuleNotFoundError: No module named 'merid.publishing.kalshi_insight_pipeline'
+_ ERROR collecting tests/reconciliation/test_kalshi_reconciler_kill_guard.py __
+ImportError while importing test module 'C:\Dev\MERID\tests\reconciliation\test_kalshi_reconciler_kill_guard.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\reconciliation\test_kalshi_reconciler_kill_guard.py:9: in <module>
+    from merid.reconciliation.kalshi_reconciler import KalshiReconciler, reset_kalshi_reconciler
+E   ModuleNotFoundError: No module named 'merid.reconciliation.kalshi_reconciler'
+_ ERROR collecting tests/reconciliation/test_kalshi_reconciler_operator_matrix.py _
+ImportError while importing test module 'C:\Dev\MERID\tests\reconciliation\test_kalshi_reconciler_operator_matrix.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\reconciliation\test_kalshi_reconciler_operator_matrix.py:10: in <module>
+    from merid.reconciliation.kalshi_reconciler import KalshiReconciler, reset_kalshi_reconciler
+E   ModuleNotFoundError: No module named 'merid.reconciliation.kalshi_reconciler'
+_____________ ERROR collecting tests/risk/test_capital_engine.py ______________
+ImportError while importing test module 'C:\Dev\MERID\tests\risk\test_capital_engine.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\risk\test_capital_engine.py:22: in <module>
+    from merid.risk.capital_engine import (
+E   ModuleNotFoundError: No module named 'merid.risk.capital_engine'
+__________ ERROR collecting tests/risk/test_integration_lifecycle.py __________
+ImportError while importing test module 'C:\Dev\MERID\tests\risk\test_integration_lifecycle.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\risk\test_integration_lifecycle.py:15: in <module>
+    from merid.risk.capital_engine import CapitalEngine
+E   ModuleNotFoundError: No module named 'merid.risk.capital_engine'
+_______________ ERROR collecting tests/risk/test_invariants.py ________________
+ImportError while importing test module 'C:\Dev\MERID\tests\risk\test_invariants.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\risk\test_invariants.py:14: in <module>
+    from merid.risk.capital_engine import (
+E   ModuleNotFoundError: No module named 'merid.risk.capital_engine'
+___________ ERROR collecting tests/risk/test_kalshi_crypto_risk.py ____________
+C:\\Users\\Chris\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\site-packages\\_pytest\\python.py:493: in importtestmodule\n    mod = import_path(\nC:\\Users\\Chris\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\site-packages\\_pytest\\pathlib.py:549: in import_path\n    mod = _import_module_using_spec(\nC:\\Users\\Chris\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\site-packages\\_pytest\\pathlib.py:725: in _import_module_using_spec\n    spec.loader.exec_module(mod)  # type: ignore[union-attr]\nC:\\Users\\Chris\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\site-packages\\_pytest\\assertion\\rewrite.py:176: in exec_module\n    source_stat, co = _rewrite_test(fn, self.config)\nC:\\Users\\Chris\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\site-packages\\_pytest\\assertion\\rewrite.py:356: in _rewrite_test\n    tree = ast.parse(source, filename=strfn)\nC:\\Users\\Chris\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\ast.py:50: in parse\n    return compile(source, filename, mode, flags,\nE     File "C:\\Dev\\MERID\\tests\\risk\\test_kalshi_crypto_risk.py", line 14\nE       - Risk \u2192 gate integration (limit breach \u2192 reduce-only/block)\nE              ^\nE   SyntaxError: invalid character '\u2192' (U+2192)
+_________ ERROR collecting tests/rti/test_rti_settlement_contracts.py _________
+ImportError while importing test module 'C:\Dev\MERID\tests\rti\test_rti_settlement_contracts.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\rti\test_rti_settlement_contracts.py:8: in <module>
+    from merid.signals.cfb_rti_adapter import CFBRTIConfigurationError, require_cfb_for_live_trading
+E   ModuleNotFoundError: No module named 'merid.signals.cfb_rti_adapter'
+_____________ ERROR collecting tests/rti/test_settlement_abuse.py _____________
+ImportError while importing test module 'C:\Dev\MERID\tests\rti\test_settlement_abuse.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\rti\test_settlement_abuse.py:6: in <module>
+    from merid.data.settlement_offline import build_view_or_none, replay_ticks
+merid\data\settlement_offline.py:18: in <module>
+    from merid.signals.settlement_view import SettlementView, build_settlement_view_from_buffer
+E   ModuleNotFoundError: No module named 'merid.signals.settlement_view'
+_________ ERROR collecting tests/safety/test_integration_validator.py _________
+ImportError while importing test module 'C:\Dev\MERID\tests\safety\test_integration_validator.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\safety\test_integration_validator.py:15: in <module>
+    from merid.safety.integration_validator import (
+merid\safety\integration_validator.py:31: in <module>
+    from merid.signals.momentum_ranker import get_momentum_ranker
+E   ModuleNotFoundError: No module named 'merid.signals.momentum_ranker'
+___________ ERROR collecting tests/scenario/test_pass9_scenarios.py ___________
+ImportError while importing test module 'C:\Dev\MERID\tests\scenario\test_pass9_scenarios.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\scenario\test_pass9_scenarios.py:27: in <module>
+    from web.main import app
+E   ModuleNotFoundError: No module named 'web.main'
+
+During handling of the above exception, another exception occurred:
+tests\scenario\test_pass9_scenarios.py:32: in <module>
+    from web.main import app
+E   ModuleNotFoundError: No module named 'web.main'
+___________ ERROR collecting tests/signals/test_btc_anchor_gate.py ____________
+ImportError while importing test module 'C:\Dev\MERID\tests\signals\test_btc_anchor_gate.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\signals\test_btc_anchor_gate.py:13: in <module>
+    from merid.signals.btc_anchor_gate import (
+E   ModuleNotFoundError: No module named 'merid.signals.btc_anchor_gate'
+___________ ERROR collecting tests/signals/test_decision_logger.py ____________
+ImportError while importing test module 'C:\Dev\MERID\tests\signals\test_decision_logger.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\signals\test_decision_logger.py:15: in <module>
+    from merid.signals.decision_logger import (
+E   ModuleNotFoundError: No module named 'merid.signals.decision_logger'
+___________ ERROR collecting tests/signals/test_momentum_ranker.py ____________
+ImportError while importing test module 'C:\Dev\MERID\tests\signals\test_momentum_ranker.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\signals\test_momentum_ranker.py:16: in <module>
+    from merid.signals.momentum_ranker import (
+E   ModuleNotFoundError: No module named 'merid.signals.momentum_ranker'
+____________ ERROR collecting tests/signals/test_regime_engine.py _____________
+ImportError while importing test module 'C:\Dev\MERID\tests\signals\test_regime_engine.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\signals\test_regime_engine.py:11: in <module>
+    from merid.signals.regime_engine import RegimeEngine, get_regime_engine
+E   ModuleNotFoundError: No module named 'merid.signals.regime_engine'
+___________ ERROR collecting tests/signals/test_timeframe_fusion.py ___________
+ImportError while importing test module 'C:\Dev\MERID\tests\signals\test_timeframe_fusion.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\signals\test_timeframe_fusion.py:11: in <module>
+    from merid.signals.timeframe_fusion import TimeframeFusionEngine, FusionConfig
+E   ModuleNotFoundError: No module named 'merid.signals.timeframe_fusion'
+______ ERROR collecting tests/signals/test_unified_regime_classifier.py _______
+ImportError while importing test module 'C:\Dev\MERID\tests\signals\test_unified_regime_classifier.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\signals\test_unified_regime_classifier.py:15: in <module>
+    from merid.signals.unified_regime_classifier import (
+E   ModuleNotFoundError: No module named 'merid.signals.unified_regime_classifier'
+_______________ ERROR collecting tests/test_asset_extraction.py _______________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_asset_extraction.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_asset_extraction.py:8: in <module>
+    from merid.prediction.trading_agent import (
+E   ModuleNotFoundError: No module named 'merid.prediction.trading_agent'
+______________ ERROR collecting tests/test_band_strategy_15m.py _______________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_band_strategy_15m.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_band_strategy_15m.py:19: in <module>
+    from merid.strategies.band_strategy_15m import (
+E   ModuleNotFoundError: No module named 'merid.strategies.band_strategy_15m'
+________ ERROR collecting tests/test_bankroll_reconciliation_fixes.py _________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_bankroll_reconciliation_fixes.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_bankroll_reconciliation_fixes.py:19: in <module>
+    from merid.signals.arbitrage import (
+E   ModuleNotFoundError: No module named 'merid.signals.arbitrage'
+_______________ ERROR collecting tests/test_canonical_agents.py _______________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_canonical_agents.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_canonical_agents.py:29: in <module>
+    from merid.agents.research import (
+E   ModuleNotFoundError: No module named 'merid.agents.research'
+_______ ERROR collecting tests/test_continuous_trader_vol_benchmark.py ________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_continuous_trader_vol_benchmark.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_continuous_trader_vol_benchmark.py:7: in <module>
+    from merid.trading.kalshi_continuous_trader import KalshiContinuousTrader
+E   ModuleNotFoundError: No module named 'merid.trading.kalshi_continuous_trader'
+_____________ ERROR collecting tests/test_crypto15m_allocator.py ______________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_crypto15m_allocator.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_crypto15m_allocator.py:18: in <module>
+    from merid.prediction.crypto15mallocator import (
+E   ModuleNotFoundError: No module named 'merid.prediction.crypto15mallocator'
+_____________ ERROR collecting tests/test_crypto_alert_router.py ______________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_crypto_alert_router.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_crypto_alert_router.py:6: in <module>
+    from merid.alerts.crypto_alert_router import (
+E   ModuleNotFoundError: No module named 'merid.alerts.crypto_alert_router'
+___________ ERROR collecting tests/test_crypto_kalshi_sizing_fix.py ___________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_crypto_kalshi_sizing_fix.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_crypto_kalshi_sizing_fix.py:13: in <module>
+    from merid.prediction.dynamic_sizing import (
+E   ModuleNotFoundError: No module named 'merid.prediction.dynamic_sizing'
+__________ ERROR collecting tests/test_crypto_threshold_matrix_v2.py __________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_crypto_threshold_matrix_v2.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_crypto_threshold_matrix_v2.py:12: in <module>
+    from merid.prediction.crypto_threshold_matrix import (
+E   ModuleNotFoundError: No module named 'merid.prediction.crypto_threshold_matrix'
+_______________ ERROR collecting tests/test_crypto_top_edge.py ________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_crypto_top_edge.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_crypto_top_edge.py:19: in <module>
+    from merid.prediction.crypto_top_edge import (
+E   ModuleNotFoundError: No module named 'merid.prediction.crypto_top_edge'
+____________ ERROR collecting tests/test_crypto_top_edge_stress.py ____________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_crypto_top_edge_stress.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_crypto_top_edge_stress.py:18: in <module>
+    from merid.prediction.crypto_top_edge import (
+E   ModuleNotFoundError: No module named 'merid.prediction.crypto_top_edge'
+_______________ ERROR collecting tests/test_e2e_golden_path.py ________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_e2e_golden_path.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_e2e_golden_path.py:59: in <module>
+    from merid.signals.decay import DecayEnvelope, SignalSnapshot
+E   ModuleNotFoundError: No module named 'merid.signals.decay'
+__________ ERROR collecting tests/test_edge_priority_enforcement.py ___________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_edge_priority_enforcement.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_edge_priority_enforcement.py:22: in <module>
+    from merid.trading.topn_allocator import (
+E   ModuleNotFoundError: No module named 'merid.trading.topn_allocator'
+_____________ ERROR collecting tests/test_entry_window_metrics.py _____________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_entry_window_metrics.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_entry_window_metrics.py:8: in <module>
+    from merid.prediction.dynamic_entry_window import (
+E   ModuleNotFoundError: No module named 'merid.prediction.dynamic_entry_window'
+____________ ERROR collecting tests/test_exit_policy_resolution.py ____________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_exit_policy_resolution.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_exit_policy_resolution.py:6: in <module>
+    from merid.prediction.dynamic_entry_window import (
+E   ModuleNotFoundError: No module named 'merid.prediction.dynamic_entry_window'
+__________ ERROR collecting tests/test_full_pipeline_integration.py ___________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_full_pipeline_integration.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_full_pipeline_integration.py:16: in <module>
+    from core.consensus_graph import (
+E   ModuleNotFoundError: No module named 'core.consensus_graph'
+________________ ERROR collecting tests/test_fvg_hierarchy.py _________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_fvg_hierarchy.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_fvg_hierarchy.py:25: in <module>
+    from merid.sentiment.crypto_registry import get_crypto_registry
+E   ModuleNotFoundError: No module named 'merid.sentiment'
+_______________ ERROR collecting tests/test_fvg_integration.py ________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_fvg_integration.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_fvg_integration.py:25: in <module>
+    from merid.sentiment.crypto_registry import (
+E   ModuleNotFoundError: No module named 'merid.sentiment'
+__________________ ERROR collecting tests/test_hardening.py ___________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_hardening.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_hardening.py:69: in <module>
+    from merid.signals.ws_price_feed import (
+E   ModuleNotFoundError: No module named 'merid.signals.ws_price_feed'
+___________ ERROR collecting tests/test_inference_explainability.py ___________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_inference_explainability.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_inference_explainability.py:23: in <module>
+    from merid.prediction.opinion_strategy import (
+E   ModuleNotFoundError: No module named 'merid.prediction.opinion_strategy'
+__________ ERROR collecting tests/test_kalshi_crypto_e2e_coverage.py __________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_kalshi_crypto_e2e_coverage.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_kalshi_crypto_e2e_coverage.py:28: in <module>
+    from merid.prediction.trading_agent import KalshiTradingAgent, AgentConfig
+E   ModuleNotFoundError: No module named 'merid.prediction.trading_agent'
+___________ ERROR collecting tests/test_kalshi_grid_integration.py ____________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_kalshi_grid_integration.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_kalshi_grid_integration.py:10: in <module>
+    from merid.prediction.agent_grid import AgentGrid
+E   ModuleNotFoundError: No module named 'merid.prediction.agent_grid'
+______________ ERROR collecting tests/test_kalshi_reconciler.py _______________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_kalshi_reconciler.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_kalshi_reconciler.py:15: in <module>
+    from merid.reconciliation.kalshi_reconciler import (
+E   ModuleNotFoundError: No module named 'merid.reconciliation.kalshi_reconciler'
+____________ ERROR collecting tests/test_kalshi_risk_15m_budget.py ____________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_kalshi_risk_15m_budget.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_kalshi_risk_15m_budget.py:16: in <module>
+    from merid.prediction.crypto15mallocator import (
+E   ModuleNotFoundError: No module named 'merid.prediction.crypto15mallocator'
+________________ ERROR collecting tests/test_kalshi_signals.py ________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_kalshi_signals.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_kalshi_signals.py:14: in <module>
+    from merid.signals.kalshi_signals import (
+E   ModuleNotFoundError: No module named 'merid.signals.kalshi_signals'
+__________________ ERROR collecting tests/test_live_feeds.py __________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_live_feeds.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_live_feeds.py:13: in <module>
+    from merid.signals.features import FeatureService, FeatureSet
+E   ModuleNotFoundError: No module named 'merid.signals.features'
+____________ ERROR collecting tests/test_opinion_strategy_eval.py _____________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_opinion_strategy_eval.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_opinion_strategy_eval.py:19: in <module>
+    from merid.prediction.opinion_strategy import (
+E   ModuleNotFoundError: No module named 'merid.prediction.opinion_strategy'
+________________ ERROR collecting tests/test_paper_session.py _________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_paper_session.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_paper_session.py:25: in <module>
+    from merid.prediction.paper_session import (
+E   ModuleNotFoundError: No module named 'merid.prediction.paper_session'
+____________ ERROR collecting tests/test_per_market_kill_switch.py ____________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_per_market_kill_switch.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_per_market_kill_switch.py:14: in <module>
+    from merid.guard.trading_hours import get_trading_hours_guard
+E   ModuleNotFoundError: No module named 'merid.guard.trading_hours'
+______________ ERROR collecting tests/test_pm_agent_opinions.py _______________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_pm_agent_opinions.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_pm_agent_opinions.py:20: in <module>
+    from merid.agents.research import PredictionMarketAgentV2
+E   ModuleNotFoundError: No module named 'merid.agents.research'
+_________ ERROR collecting tests/test_portfolio_optimizer_extended.py _________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_portfolio_optimizer_extended.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_portfolio_optimizer_extended.py:9: in <module>
+    from risk.portfolio_optimizer import (
+E   ModuleNotFoundError: No module named 'risk.portfolio_optimizer'
+_______________ ERROR collecting tests/test_position_sizing.py ________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_position_sizing.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_position_sizing.py:5: in <module>
+    from risk.position_sizing import (
+E   ModuleNotFoundError: No module named 'risk.position_sizing'
+___________ ERROR collecting tests/test_post_remediation_wiring.py ____________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_post_remediation_wiring.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_post_remediation_wiring.py:21: in <module>
+    from agents.governance_event_bus import (
+agents\__init__.py:20: in <module>
+    from agents.base_agent import BaseAgent
+agents\base_agent.py:14: in <module>
+    from merid.core.event_bus import event_stream
+E   ModuleNotFoundError: No module named 'merid.core.event_bus'
+_____________ ERROR collecting tests/test_proposal_generation.py ______________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_proposal_generation.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_proposal_generation.py:14: in <module>
+    from agents.news_monitor_agent import NewsMonitorAgent, NewsItem, HeadlineImpact
+agents\__init__.py:20: in <module>
+    from agents.base_agent import BaseAgent
+agents\base_agent.py:14: in <module>
+    from merid.core.event_bus import event_stream
+E   ModuleNotFoundError: No module named 'merid.core.event_bus'
+________ ERROR collecting tests/test_reliability_audit_regressions.py _________
+C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\_pytest\python.py:493: in importtestmodule
+    mod = import_path(
+C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\_pytest\pathlib.py:549: in import_path
+    mod = _import_module_using_spec(
+C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\_pytest\pathlib.py:725: in _import_module_using_spec
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\_pytest\assertion\rewrite.py:176: in exec_module
+    source_stat, co = _rewrite_test(fn, self.config)
+C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\_pytest\assertion\rewrite.py:358: in _rewrite_test
+    co = compile(tree, strfn, "exec", dont_inherit=True)
+E     File "C:\Dev\MERID\tests\test_reliability_audit_regressions.py", line 27
+E       from __future__ import annotations
+E       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   SyntaxError: from __future__ imports must occur at the beginning of the file
+________________ ERROR collecting tests/test_replay_grading.py ________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_replay_grading.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_replay_grading.py:31: in <module>
+    from merid.prediction.market_opinion import (
+E   ModuleNotFoundError: No module named 'merid.prediction.market_opinion'
+__________________ ERROR collecting tests/test_risk_guard.py __________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_risk_guard.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_risk_guard.py:19: in <module>
+    from risk.risk_guard import (
+E   ModuleNotFoundError: No module named 'risk.risk_guard'
+_______________ ERROR collecting tests/test_risk_management.py ________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_risk_management.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_risk_management.py:15: in <module>
+    from risk.portfolio_optimizer import PortfolioOptimizer, Asset
+E   ModuleNotFoundError: No module named 'risk.portfolio_optimizer'
+_________________ ERROR collecting tests/test_risk_monitor.py _________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_risk_monitor.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_risk_monitor.py:8: in <module>
+    from risk.risk_monitor import (
+E   ModuleNotFoundError: No module named 'risk.risk_monitor'
+_________________ ERROR collecting tests/test_sections_1_7.py _________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_sections_1_7.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_sections_1_7.py:46: in <module>
+    from agents.manifest import (
+agents\__init__.py:20: in <module>
+    from agents.base_agent import BaseAgent
+agents\base_agent.py:14: in <module>
+    from merid.core.event_bus import event_stream
+E   ModuleNotFoundError: No module named 'merid.core.event_bus'
+_______ ERROR collecting tests/test_settlement_poller_contract_audit.py _______
+ImportError while importing test module 'C:\Dev\MERID\tests\test_settlement_poller_contract_audit.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_settlement_poller_contract_audit.py:48: in <module>
+    from merid.prediction.market_opinion import BenchmarkThresholds
+E   ModuleNotFoundError: No module named 'merid.prediction.market_opinion'
+_________________ ERROR collecting tests/test_signal_layer.py _________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_signal_layer.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_signal_layer.py:27: in <module>
+    from merid.signals.decay import (
+E   ModuleNotFoundError: No module named 'merid.signals.decay'
+___________________ ERROR collecting tests/test_signals.py ____________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_signals.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_signals.py:16: in <module>
+    from merid.signals.events import (
+E   ModuleNotFoundError: No module named 'merid.signals.events'
+______________ ERROR collecting tests/test_social_broadcaster.py ______________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_social_broadcaster.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_social_broadcaster.py:4: in <module>
+    from merid.prediction.social_broadcaster import KalshiSocialBroadcaster
+E   ModuleNotFoundError: No module named 'merid.prediction.social_broadcaster'
+______________ ERROR collecting tests/test_strategy_real_eval.py ______________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_strategy_real_eval.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_strategy_real_eval.py:19: in <module>
+    from merid.prediction.opinion_strategy import (
+E   ModuleNotFoundError: No module named 'merid.prediction.opinion_strategy'
+_________________ ERROR collecting tests/test_take_profit.py __________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_take_profit.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_take_profit.py:28: in <module>
+    from merid.event_venues.kalshi.take_profit import (
+E   ModuleNotFoundError: No module named 'merid.event_venues.kalshi.take_profit'
+_______________ ERROR collecting tests/test_telegram_execute.py _______________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_telegram_execute.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_telegram_execute.py:12: in <module>
+    from agents.telegram_agent import TelegramAgent, TelegramMessage
+agents\__init__.py:20: in <module>
+    from agents.base_agent import BaseAgent
+agents\base_agent.py:14: in <module>
+    from merid.core.event_bus import event_stream
+E   ModuleNotFoundError: No module named 'merid.core.event_bus'
+____________ ERROR collecting tests/test_telegram_market_batch.py _____________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_telegram_market_batch.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_telegram_market_batch.py:6: in <module>
+    from merid.alerts.crypto_alert_router import MarketSelectionItem, MarketTag
+E   ModuleNotFoundError: No module named 'merid.alerts.crypto_alert_router'
+________ ERROR collecting tests/test_trading_agent_canonical_config.py ________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_trading_agent_canonical_config.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_trading_agent_canonical_config.py:10: in <module>
+    from merid.prediction.trading_agent import ALLOWED_ASSETS, EXECUTION_TIMEFRAMES
+E   ModuleNotFoundError: No module named 'merid.prediction.trading_agent'
+_____________ ERROR collecting tests/test_trading_hours_guard.py ______________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_trading_hours_guard.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_trading_hours_guard.py:14: in <module>
+    from merid.guard.trading_hours import KalshiTradingHoursGuard, get_trading_hours_guard
+E   ModuleNotFoundError: No module named 'merid.guard.trading_hours'
+___________ ERROR collecting tests/test_unified_edge_integration.py ___________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_unified_edge_integration.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_unified_edge_integration.py:9: in <module>
+    from merid.prediction.agent_grid_15m import KalshiTradingAgent
+E   ImportError: cannot import name 'KalshiTradingAgent' from 'merid.prediction.agent_grid_15m' (C:\Dev\MERID\merid\prediction\agent_grid_15m.py)
+_____________ ERROR collecting tests/test_unified_spot_service.py _____________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_unified_spot_service.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_unified_spot_service.py:18: in <module>
+    from data.unified_spot_service import (
+E   ImportError: cannot import name 'SpotCacheEntry' from 'data.unified_spot_service' (C:\Dev\MERID\data\unified_spot_service.py)
+________________ ERROR collecting tests/test_ws_price_feed.py _________________
+ImportError while importing test module 'C:\Dev\MERID\tests\test_ws_price_feed.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\test_ws_price_feed.py:17: in <module>
+    from merid.signals.ws_price_feed import (
+E   ModuleNotFoundError: No module named 'merid.signals.ws_price_feed'
+______ ERROR collecting tests/trading/test_kalshi_crypto_configurator.py ______
+ImportError while importing test module 'C:\Dev\MERID\tests\trading\test_kalshi_crypto_configurator.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\trading\test_kalshi_crypto_configurator.py:9: in <module>
+    from merid.trading.kalshi_crypto_configurator import (
+E   ModuleNotFoundError: No module named 'merid.trading.kalshi_crypto_configurator'
+_____ ERROR collecting tests/trading/test_kalshi_ct_bankroll_refactor.py ______
+ImportError while importing test module 'C:\Dev\MERID\tests\trading\test_kalshi_ct_bankroll_refactor.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\trading\test_kalshi_ct_bankroll_refactor.py:16: in <module>
+    from merid.trading.kalshi_continuous_trader import TraderConfig
+E   ModuleNotFoundError: No module named 'merid.trading.kalshi_continuous_trader'
+______ ERROR collecting tests/trading/test_risk_oversizing_regression.py ______
+ImportError while importing test module 'C:\Dev\MERID\tests\trading\test_risk_oversizing_regression.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\trading\test_risk_oversizing_regression.py:43: in <module>
+    from merid.trading.topn_allocator import (
+E   ModuleNotFoundError: No module named 'merid.trading.topn_allocator'
+____________ ERROR collecting tests/trading/test_topn_allocator.py ____________
+ImportError while importing test module 'C:\Dev\MERID\tests\trading\test_topn_allocator.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\trading\test_topn_allocator.py:21: in <module>
+    from merid.trading.topn_allocator import (
+E   ModuleNotFoundError: No module named 'merid.trading.topn_allocator'
+___________ ERROR collecting tests/trading/test_topn_integration.py ___________
+ImportError while importing test module 'C:\Dev\MERID\tests\trading\test_topn_integration.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\trading\test_topn_integration.py:22: in <module>
+    from merid.trading.topn_allocator import (
+E   ModuleNotFoundError: No module named 'merid.trading.topn_allocator'
+_________ ERROR collecting tests/trading/test_topn_top3_alignment.py __________
+ImportError while importing test module 'C:\Dev\MERID\tests\trading\test_topn_top3_alignment.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\trading\test_topn_top3_alignment.py:31: in <module>
+    from merid.trading.topn_allocator import (
+E   ModuleNotFoundError: No module named 'merid.trading.topn_allocator'
+__ ERROR collecting tests/web/api/test_explainability_decisions_endpoint.py ___
+ImportError while importing test module 'C:\Dev\MERID\tests\web\api\test_explainability_decisions_endpoint.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\web\api\test_explainability_decisions_endpoint.py:10: in <module>
+    import web.api.explainability as explainability_api
+web\api\explainability.py:10: in <module>
+    from agents.explainability import get_explainability_tracker
+agents\__init__.py:20: in <module>
+    from agents.base_agent import BaseAgent
+agents\base_agent.py:14: in <module>
+    from merid.core.event_bus import event_stream
+E   ModuleNotFoundError: No module named 'merid.core.event_bus'
+________________ ERROR collecting tests/web/test_kalshi_api.py ________________
+ImportError while importing test module 'C:\Dev\MERID\tests\web\test_kalshi_api.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests\web\test_kalshi_api.py:6: in <module>
+    from web.main import create_app
+E   ModuleNotFoundError: No module named 'web.main'
+============================== warnings summary ===============================
+tests\agents\test_agent_constraint_compliance.py:51
+  C:\Dev\MERID\tests\agents\test_agent_constraint_compliance.py:51: PytestUnknownMarkWarning: Unknown pytest.mark.kalshi_agent_constraints - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.kalshi_agent_constraints
+
+tests\agents\test_agent_constraint_compliance.py:88
+  C:\Dev\MERID\tests\agents\test_agent_constraint_compliance.py:88: PytestUnknownMarkWarning: Unknown pytest.mark.kalshi_agent_constraints - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.kalshi_agent_constraints
+
+tests\agents\test_agent_constraint_compliance.py:126
+  C:\Dev\MERID\tests\agents\test_agent_constraint_compliance.py:126: PytestUnknownMarkWarning: Unknown pytest.mark.kalshi_agent_constraints - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.kalshi_agent_constraints
+
+tests\agents\test_agent_constraint_compliance.py:163
+  C:\Dev\MERID\tests\agents\test_agent_constraint_compliance.py:163: PytestUnknownMarkWarning: Unknown pytest.mark.kalshi_agent_constraints - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.kalshi_agent_constraints
+
+tests\agents\test_agent_constraint_compliance.py:208
+  C:\Dev\MERID\tests\agents\test_agent_constraint_compliance.py:208: PytestUnknownMarkWarning: Unknown pytest.mark.kalshi_agent_constraints - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.kalshi_agent_constraints
+
+tests\agents\test_agent_constraint_compliance.py:244
+  C:\Dev\MERID\tests\agents\test_agent_constraint_compliance.py:244: PytestUnknownMarkWarning: Unknown pytest.mark.kalshi_agent_constraints - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.kalshi_agent_constraints
+
+tests\agents\test_agent_constraint_compliance.py:289
+  C:\Dev\MERID\tests\agents\test_agent_constraint_compliance.py:289: PytestUnknownMarkWarning: Unknown pytest.mark.kalshi_agent_constraints - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.kalshi_agent_constraints
+
+tests\agents\test_agent_constraint_compliance.py:326
+  C:\Dev\MERID\tests\agents\test_agent_constraint_compliance.py:326: PytestUnknownMarkWarning: Unknown pytest.mark.kalshi_agent_constraints - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.kalshi_agent_constraints
+
+tests\chaos\test_chaos_engineering.py:391
+  C:\Dev\MERID\tests\chaos\test_chaos_engineering.py:391: PytestUnknownMarkWarning: Unknown pytest.mark.chaos - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.chaos
+
+tests\event_venues\test_kalshi_crypto_series.py:630
+  C:\Dev\MERID\tests\event_venues\test_kalshi_crypto_series.py:630: PytestUnknownMarkWarning: Unknown pytest.mark.coverage - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.coverage
+
+tests\integration\test_expiry_invariants.py:557
+  C:\Dev\MERID\tests\integration\test_expiry_invariants.py:557: PytestUnknownMarkWarning: Unknown pytest.mark.expiry_invariant - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytest.mark.expiry_invariant,
+
+testing\final_validation.py:29
+  C:\Dev\MERID\testing\final_validation.py:29: PytestCollectionWarning: cannot collect test class 'TestType' because it has a __init__ constructor (from: tests/monitoring/test_final_validation.py)
+    class TestType(Enum):
+
+testing\final_validation.py:39
+  C:\Dev\MERID\testing\final_validation.py:39: PytestCollectionWarning: cannot collect test class 'TestStatus' because it has a __init__ constructor (from: tests/monitoring/test_final_validation.py)
+    class TestStatus(Enum):
+
+tests\test_invariant_validation.py:38
+  C:\Dev\MERID\tests\test_invariant_validation.py:38: PytestCollectionWarning: cannot collect test class 'TestMarketState' because it has a __init__ constructor (from: tests/test_invariant_validation.py)
+    @dataclass
+
+..\..\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\websockets\legacy\__init__.py:6
+  C:\Users\Chris\AppData\Local\Programs\Python\Python311\Lib\site-packages\websockets\legacy\__init__.py:6: DeprecationWarning: websockets.legacy is deprecated; see https://websockets.readthedocs.io/en/stable/howto/upgrade.html for upgrade instructions
+    warnings.warn(  # deprecated in 14.0 - 2024-11-09
+
+tests\trading\test_spectator.py:9
+  C:\Dev\MERID\tests\trading\test_spectator.py:9: PytestCollectionWarning: cannot collect test class 'TestEvent' because it has a __init__ constructor (from: tests/trading/test_spectator.py)
+    @dataclass
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+ERROR tests/agents/core/test_market_analyst.py
+ERROR tests/agents/test_agent_fixed.py
+ERROR tests/agents/test_base_agent.py
+ERROR tests/agents/test_social_bots.py
+ERROR tests/alignment/test_spot_basis_tracker.py
+ERROR tests/analytics/test_brier_score.py
+ERROR tests/analytics/test_bucket_analysis.py
+ERROR tests/api/test_mock_responses.py
+ERROR tests/api/test_vertical_slice.py
+ERROR tests/ci/test_settlement_guard_timeframes.py
+ERROR tests/ci/test_strike_asset_consistency.py
+ERROR tests/config/test_kalshi_crypto_config.py
+ERROR tests/core/test_data_validation.py
+ERROR tests/core/test_drift_monitor.py
+ERROR tests/core/test_oracle.py
+ERROR tests/core/test_system_orchestrator.py
+ERROR tests/event_venues/kalshi/test_invariants_crypto_universe.py
+ERROR tests/event_venues/kalshi/test_kalshi_runtime_config_snapshot.py
+ERROR tests/event_venues/kalshi/test_kalshi_stop_loss.py
+ERROR tests/event_venues/kalshi/test_liquidity_monitor.py
+ERROR tests/event_venues/kalshi/test_robustness.py
+ERROR tests/event_venues/kalshi/test_trading_system.py - RuntimeError: Legacy...
+ERROR tests/event_venues/polymarket/test_polymarket_client_refactored.py
+ERROR tests/event_venues/polymarket/test_polymarket_venue_client.py
+ERROR tests/event_venues/polymarket/test_polymarket_venue_models.py
+ERROR tests/event_venues/polymarket/test_trading.py
+ERROR tests/event_venues/polymarket/test_ws.py
+ERROR tests/event_venues/polymarket/test_ws_reconnect.py
+ERROR tests/event_venues/test_polymarket_client.py
+ERROR tests/event_venues/test_polymarket_models.py
+ERROR tests/execution/executors/test_coinbase.py
+ERROR tests/execution/executors/test_jupiter.py
+ERROR tests/execution/executors/test_kalshi_enhanced.py
+ERROR tests/execution/executors/test_kalshi_enhanced_resilience_contract.py
+ERROR tests/execution/test_additional_executors.py
+ERROR tests/executors/test_coinbase_executor.py
+ERROR tests/integration/test_kalshi_e2e_stress.py
+ERROR tests/integration/test_scalability.py
+ERROR tests/integration/test_swarm_health_gating.py
+ERROR tests/integration/test_trade_flow.py
+ERROR tests/integration/test_venue_failure_modes.py
+ERROR tests/kalshi/test_mm_integration.py
+ERROR tests/kalshi_15m/test_profile_wiring.py
+ERROR tests/kalshi_15m/test_router_isolation.py
+ERROR tests/legacy/test_sports_live_betting.py
+ERROR tests/legacy/test_swarm_vs_single_agent_benchmark.py
+ERROR tests/logging/test_run_logging.py
+ERROR tests/logging/test_structured_logging.py
+ERROR tests/merid/execution/executors/test_coinbase_batch114.py
+ERROR tests/merid/execution/executors/test_coinbase_executor_coverage.py
+ERROR tests/merid/execution/executors/test_cronos_onchain.py
+ERROR tests/merid/execution/executors/test_cronos_onchain_batch56.py
+ERROR tests/merid/execution/executors/test_cronos_onchain_batch65.py
+ERROR tests/merid/execution/executors/test_cronos_onchain_coverage.py
+ERROR tests/merid/execution/executors/test_crypto_com.py
+ERROR tests/merid/execution/executors/test_crypto_com_batch118.py
+ERROR tests/merid/execution/executors/test_crypto_com_batch57.py
+ERROR tests/merid/execution/executors/test_crypto_com_batch61.py
+ERROR tests/merid/execution/executors/test_crypto_com_coverage.py
+ERROR tests/merid/execution/executors/test_fulcrom.py
+ERROR tests/merid/execution/executors/test_fulcrom_batch117.py
+ERROR tests/merid/execution/executors/test_fulcrom_batch58.py
+ERROR tests/merid/execution/executors/test_fulcrom_batch62.py
+ERROR tests/merid/execution/executors/test_fulcrom_coverage.py
+ERROR tests/merid/execution/executors/test_jupiter_batch115.py
+ERROR tests/merid/execution/executors/test_jupiter_batch59.py
+ERROR tests/merid/execution/executors/test_jupiter_batch63.py
+ERROR tests/merid/execution/executors/test_jupiter_coverage.py
+ERROR tests/merid/execution/executors/test_merid_coinbase_executor.py
+ERROR tests/merid/execution/executors/test_merid_jupiter_executor.py
+ERROR tests/merid/execution/executors/test_webull.py
+ERROR tests/merid/execution/executors/test_webull_batch116.py
+ERROR tests/merid/execution/executors/test_webull_batch60.py
+ERROR tests/merid/execution/executors/test_webull_batch64.py
+ERROR tests/merid/execution/executors/test_webull_coverage.py
+ERROR tests/merid/test_agent_grid_startup_health.py
+ERROR tests/merid/test_neutral_streak_tracker.py
+ERROR tests/pipeline/test_robustness.py
+ERROR tests/pipelines/test_backtest_harness.py
+ERROR tests/pipelines/test_feature_bundle.py
+ERROR tests/pipelines/test_observability.py
+ERROR tests/pipelines/test_orchestrator_integration.py
+ERROR tests/pipelines/test_pipeline_schema.py
+ERROR tests/pipelines/test_pre_trade_risk.py
+ERROR tests/policy/test_qinline_policy.py
+ERROR tests/prediction/test_check_edge_lag.py
+ERROR tests/prediction/test_golden_path_15m.py
+ERROR tests/prediction/test_unified_edge_lag.py
+ERROR tests/publishing/test_kalshi_insight_pipeline.py
+ERROR tests/reconciliation/test_kalshi_reconciler_kill_guard.py
+ERROR tests/reconciliation/test_kalshi_reconciler_operator_matrix.py
+ERROR tests/risk/test_capital_engine.py
+ERROR tests/risk/test_integration_lifecycle.py
+ERROR tests/risk/test_invariants.py
+ERROR tests/risk/test_kalshi_crypto_risk.py
+ERROR tests/rti/test_rti_settlement_contracts.py
+ERROR tests/rti/test_settlement_abuse.py
+ERROR tests/safety/test_integration_validator.py
+ERROR tests/scenario/test_pass9_scenarios.py
+ERROR tests/signals/test_btc_anchor_gate.py
+ERROR tests/signals/test_decision_logger.py
+ERROR tests/signals/test_momentum_ranker.py
+ERROR tests/signals/test_regime_engine.py
+ERROR tests/signals/test_timeframe_fusion.py
+ERROR tests/signals/test_unified_regime_classifier.py
+ERROR tests/test_asset_extraction.py
+ERROR tests/test_band_strategy_15m.py
+ERROR tests/test_bankroll_reconciliation_fixes.py
+ERROR tests/test_canonical_agents.py
+ERROR tests/test_continuous_trader_vol_benchmark.py
+ERROR tests/test_crypto15m_allocator.py
+ERROR tests/test_crypto_alert_router.py
+ERROR tests/test_crypto_kalshi_sizing_fix.py
+ERROR tests/test_crypto_threshold_matrix_v2.py
+ERROR tests/test_crypto_top_edge.py
+ERROR tests/test_crypto_top_edge_stress.py
+ERROR tests/test_e2e_golden_path.py
+ERROR tests/test_edge_priority_enforcement.py
+ERROR tests/test_entry_window_metrics.py
+ERROR tests/test_exit_policy_resolution.py
+ERROR tests/test_full_pipeline_integration.py
+ERROR tests/test_fvg_hierarchy.py
+ERROR tests/test_fvg_integration.py
+ERROR tests/test_hardening.py
+ERROR tests/test_inference_explainability.py
+ERROR tests/test_kalshi_crypto_e2e_coverage.py
+ERROR tests/test_kalshi_grid_integration.py
+ERROR tests/test_kalshi_reconciler.py
+ERROR tests/test_kalshi_risk_15m_budget.py
+ERROR tests/test_kalshi_signals.py
+ERROR tests/test_live_feeds.py
+ERROR tests/test_opinion_strategy_eval.py
+ERROR tests/test_paper_session.py
+ERROR tests/test_per_market_kill_switch.py
+ERROR tests/test_pm_agent_opinions.py
+ERROR tests/test_portfolio_optimizer_extended.py
+ERROR tests/test_position_sizing.py
+ERROR tests/test_post_remediation_wiring.py
+ERROR tests/test_proposal_generation.py
+ERROR tests/test_reliability_audit_regressions.py
+ERROR tests/test_replay_grading.py
+ERROR tests/test_risk_guard.py
+ERROR tests/test_risk_management.py
+ERROR tests/test_risk_monitor.py
+ERROR tests/test_sections_1_7.py
+ERROR tests/test_settlement_poller_contract_audit.py
+ERROR tests/test_signal_layer.py
+ERROR tests/test_signals.py
+ERROR tests/test_social_broadcaster.py
+ERROR tests/test_strategy_real_eval.py
+ERROR tests/test_take_profit.py
+ERROR tests/test_telegram_execute.py
+ERROR tests/test_telegram_market_batch.py
+ERROR tests/test_trading_agent_canonical_config.py
+ERROR tests/test_trading_hours_guard.py
+ERROR tests/test_unified_edge_integration.py
+ERROR tests/test_unified_spot_service.py
+ERROR tests/test_ws_price_feed.py
+ERROR tests/trading/test_kalshi_crypto_configurator.py
+ERROR tests/trading/test_kalshi_ct_bankroll_refactor.py
+ERROR tests/trading/test_risk_oversizing_regression.py
+ERROR tests/trading/test_topn_allocator.py
+ERROR tests/trading/test_topn_integration.py
+ERROR tests/trading/test_topn_top3_alignment.py
+ERROR tests/web/api/test_explainability_decisions_endpoint.py
+ERROR tests/web/test_kalshi_api.py
+!!!!!!!!!!!!!!!!!! Interrupted: 166 errors during collection !!!!!!!!!!!!!!!!!!
+159/18795 tests collected (18636 deselected), 166 errors in 384.43s (0:06:24)
