@@ -1,0 +1,26 @@
+TAIL=5000  total_msgs=5001
+--- pipeline stage counts ---
+select_markets_returned_1 : 40
+ASSET-GATE-INPUT pre_gate=1: 40
+CHECKPOINT-3              : 80
+AFTER-GENERATE-CANDIDATES : 0
+OPTIMIZER-RESULT          : 40
+COLLECT-CANDIDATE-TIMEOUT : 0
+CANDIDATE-GATE            : 0
+candidates_built>=1       : 40
+VENUE-GATE                : 0
+ORDER (any)               : 0
+FILL/order_id             : 13
+--- last 3 OPTIMIZER-RESULT ---
+[COLLECT-CANDIDATE OPTIMIZER-RESULT] asset=SOL tick=31 markets_seen=1 markets_with_md=1 markets_with_spot=1 passing_filters=1 candidates_built=1
+[COLLECT-CANDIDATE OPTIMIZER-RESULT] asset=XRP tick=31 markets_seen=1 markets_with_md=1 markets_with_spot=1 passing_filters=1 candidates_built=1
+[COLLECT-CANDIDATE OPTIMIZER-RESULT] asset=DOGE tick=31 markets_seen=1 markets_with_md=1 markets_with_spot=1 passing_filters=1 candidates_built=1
+--- last 3 CANDIDATE-GATE ---
+--- last 5 ERROR/CRITICAL (non-noise) ---
+x6: Kalshi WS bridge started with no tickers — no orderbook/ticker/trade subscriptions; multi-asset crypto grid will not receive live 
+x7: [MARKET-STATE] Failed to read from KalshiMarketStateStore for KXETH15M: 'LeanAgent15m' object has no attribute '_allow_new_entries
+x7: [MARKET-STATE] Failed to read from KalshiMarketStateStore for KXXRP15M: 'LeanAgent15m' object has no attribute '_allow_new_entries
+x8: [MARKET-STATE] Failed to read from KalshiMarketStateStore for KXDOGE15M: 'LeanAgent15m' object has no attribute '_allow_new_entrie
+x3: [MARKET-STATE] Failed to read from KalshiMarketStateStore for KXBTC15M: 'LeanAgent15m' object has no attribute '_allow_new_entries
+x1: [MARKET-STATE] Failed to read from KalshiMarketStateStore for KXSOL15M: 'LeanAgent15m' object has no attribute '_allow_new_entries
+--- last 3 COLLECT-CANDIDATE-EXCEPTION (raw, truncated) ---

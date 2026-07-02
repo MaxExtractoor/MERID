@@ -1,0 +1,63 @@
+# Current Live Cycle Logs - Strict Consistency Audit Request
+
+## Single Complete Cycle (cycle=1) from 2026-06-03 20:24:17
+
+### 15M-EXECUTION-DEGRADED Log Entry:
+```
+[2026-06-03 20:24:17.106936+00:00] 15M-EXECUTION-DEGRADED: cycle=1 catalog_fresh=True catalog_age=4.4s catalog_age_ok=True md_fresh=5/5 depth_sufficient=2/5 ws_forwarder_healthy=False bankroll_valid=True bankroll=15.51 risk_profile_loaded=True top3_gate_available=False
+```
+
+### Contextual Logs Around Same Time Period:
+
+#### Market Data and Catalog:
+```
+[2026-06-03 20:24:12.699257+00:00] [CATALOG-SNAPSHOT] Returning 5 tickers: ['KXBTC15M-26JUN031630-30', 'KXDOGE15M-26JUN031630-30', 'KXETH15M-26JUN031630-30', 'KXSOL15M-26JUN031630-30', 'KXXRP15M-26JUN031630-30'] (last_refresh=2026-06-03T20:24:12.699257+00:00, time_since=5.3s)
+```
+
+#### Agent Grid Results:
+```
+[2026-06-03 20:24:18 | INFO | merid.prediction.agent_grid_15m | [AGENT-GRID-RESULTS] tick=1 candidates=0 signals_generated=0 reasons=no_candidates_evaluated
+```
+
+#### Loop Timing:
+```
+[2026-06-03 20:24:18 | INFO | merid.loop_15m | [LOOP-TIMING] tick=1 duration_ms=989.76 streak=1 bar_index=81 window=20:15-20:30
+```
+
+#### WebSocket Health Status:
+```
+[2026-06-03 20:24:18 | INFO | merid.event_venues.kalshi.ws_bridge | [WS-FORWARDER-HEALTH] OK: last_event=-1780503051.2s ago events/sec=0.0 queue_size=0
+[2026-06-03 20:24:19 | CRITICAL | merid.event_venues.kalshi.ws | [WS-HEALTH] No messages for 15205.9s > 5.0s, connection appears stale, forcing reconnect
+```
+
+#### Spot Service Health:
+```
+[2026-06-03 20:24:19 | INFO | data.unified_spot_service | [SPOT-HEALTH] cycle=2 source=HEALTHY assets_fetched=5/5 cache=FRESH assets_cached=5/5
+```
+
+## Critical Issue: Missing E2E-AUDIT-SNAPSHOT
+
+**Expected:** Should see E2E-AUDIT-SNAPSHOT marker immediately after 15M-EXECUTION log
+**Actual:** No E2E-AUDIT-SNAPSHOT marker appears in any logs
+
+**Debug Status:** Added debug print statements - NONE appear in logs, confirming code path not reached
+
+## Fields Present in Execution-Ready Log:
+✅ catalog_fresh=True
+✅ catalog_age=4.4s  
+✅ catalog_age_ok=True
+✅ md_fresh=5/5
+❌ depth_sufficient=2/5 (only 2/5 assets)
+❌ ws_forwarder_healthy=False (stale connection)
+✅ bankroll_valid=True
+✅ bankroll=15.51
+✅ risk_profile_loaded=True
+❌ top3_gate_available=False (expected in dev)
+
+## Request for Strict Consistency Audit
+
+Please audit this single cycle for:
+1. Field consistency across all log sources
+2. Logical consistency of gate decision vs component states
+3. Any missing or inconsistent data
+4. Whether the E2E-AUDIT-SNAPSHOT should appear based on the execution path

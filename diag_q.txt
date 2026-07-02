@@ -1,0 +1,20 @@
+[COLLECT-CANDIDATE] BTC_15M _select_markets() returned 1 markets
+[ASSET-GATE-INPUT] asset=BTC markets_pre_gate=1 tick=115
+[COLLECT-CANDIDATE] ETH_15M _select_markets() returned 1 markets
+[ASSET-GATE-INPUT] asset=ETH markets_pre_gate=1 tick=115
+[COLLECT-CANDIDATE] SOL_15M _select_markets() returned 1 markets
+[ASSET-GATE-INPUT] asset=SOL markets_pre_gate=1 tick=115
+[COLLECT-CANDIDATE] XRP_15M _select_markets() returned 1 markets
+[ASSET-GATE-INPUT] asset=XRP markets_pre_gate=1 tick=115
+[COLLECT-CANDIDATE] DOGE_15M _select_markets() returned 1 markets
+[ASSET-GATE-INPUT] asset=DOGE markets_pre_gate=1 tick=115
+[COLLECT-CANDIDATE] BTC_15M _select_markets() returned 1 markets
+[ASSET-GATE-INPUT] asset=BTC markets_pre_gate=1 tick=116
+[COLLECT-CANDIDATE] ETH_15M _select_markets() returned 1 markets
+[ASSET-GATE-INPUT] asset=ETH markets_pre_gate=1 tick=116
+[COLLECT-CANDIDATE] SOL_15M _select_markets() returned 1 markets
+[ASSET-GATE-INPUT] asset=SOL markets_pre_gate=1 tick=116
+[COLLECT-CANDIDATE] XRP_15M _select_markets() returned 1 markets
+[ASSET-GATE-INPUT] asset=XRP markets_pre_gate=1 tick=116
+[COLLECT-CANDIDATE] DOGE_15M _select_markets() returned 1 markets
+[ASSET-GATE-INPUT] asset=DOGE markets_pre_gate=1 tick=116
