@@ -3,7 +3,7 @@ Top-3 Edge Selector & Allocator — Production Implementation
 
 Implements the cross-agent "Top-3 Edge Selector & Allocator" that:
 1. Selects only the top 3 edge cases across 5 assets (BTC, ETH, SOL, XRP, DOGE)
-2. Allocates at most 1-2% of bankroll in total across all new positions per cycle
+2. Allocates at most 3% of bankroll in total across all new positions per cycle (2026 best practice)
 3. Dynamically sizes positions by relative edge (highest edge gets largest size)
 4. Enforces a position batch regime: no new trades until current top-3 are closed
 
@@ -226,7 +226,7 @@ class Top3SelectionSpec:
         
     Invariant 2 (Bankroll allocation cap per cycle):
         Let bankroll_notional(t) be live account equity (or configured bankroll).
-        Let cycle_risk_cap_pct ∈ [0.01, 0.02] (1-2%).
+        Let cycle_risk_cap_pct = 0.03 (3% - 2026 best practice).
         
         Formal: sum(position_notional_for_new_entries(t)) <= cycle_risk_cap_pct * bankroll_notional(t)
         
@@ -255,8 +255,9 @@ class Top3SelectionSpec:
     
     # Configuration - ENV-DRIVEN (no hardcoded defaults)
     # These read from environment at runtime, defaulting only if env not set
-    DEFAULT_CYCLE_RISK_CAP_PCT_MIN: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MIN", "0.01"))
-    DEFAULT_CYCLE_RISK_CAP_PCT_MAX: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MAX", "0.02"))
+    # 2026 BEST PRACTICE: 3% cycle risk cap (aligned with core.settings)
+    DEFAULT_CYCLE_RISK_CAP_PCT_MIN: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MIN", "0.03"))
+    DEFAULT_CYCLE_RISK_CAP_PCT_MAX: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MAX", "0.03"))
     DEFAULT_EPS: float = float(os.getenv("MERID_TOP3_EDGE_EPS", "1e-6"))
     MAX_ASSETS: int = int(os.getenv("MERID_TOP3_MAX_ASSETS", "3"))
     MIN_ALLOCATION_CENTS: int = int(os.getenv("MERID_TOP3_MIN_ALLOCATION_CENTS", "50"))  # $0.50 minimum
@@ -288,7 +289,7 @@ def select_top3_allocations(
 
     Args:
         bankroll_notional: Current bankroll in cents
-        cycle_risk_cap_pct: Risk cap as fraction (0.01-0.02)
+        cycle_risk_cap_pct: Risk cap as fraction (0.03 - 2026 best practice)
         candidates: List of edge candidates (all 5 assets potentially)
         eps: Epsilon for floating point comparisons (uses env if None)
         min_allocation_cents: Minimum allocation in cents (uses env if None)
@@ -449,7 +450,7 @@ class Top3EdgeAllocator:
     def _load_cycle_risk_cap_pct(self) -> float:
         """Load cycle risk cap from environment/config.
         
-        Returns value in [0.01, 0.02] defaulting to 0.02 if not set.
+        Returns value defaulting to 0.03 (2026 best practice) if not set.
         """
         env_val = os.getenv("TOP3_CYCLE_RISK_CAP_PCT", "")
         if env_val:
