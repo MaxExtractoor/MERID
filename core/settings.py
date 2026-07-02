@@ -44,30 +44,36 @@ USE_TOPN_ALLOCATOR: bool = str(os.getenv("USE_TOPN_ALLOCATOR", "true")).lower() 
 # All other modules (topn_allocator, global_risk_guard, kalshi_continuous_trader)
 # MUST read from these settings. Do NOT add duplicate env vars or YAML settings.
 # 
-# OPTIMIZED REGIME (2026-05-07): Relaxed from 2%/5% to 3%/8% for better throughput
-# while maintaining safety. Replaces binary SCALPER_MODE_BLOCK with concurrent exposure.
+# 2026 BEST PRACTICES ALIGNMENT (2026-06-28): Aligned with leading algorithmic trading platforms
+# Based on research from KlawTrade, GCC Brokers, and Algorier:
+#   - Max daily loss: 3-5% (halt trading - most critical rule)
+#   - Max weekly loss: 7-10%
+#   - Max drawdown: 15%
+#   - Max single position: 10%
+#   - Max single trade loss: 1-2%
+#   - Risk management as platform-level infrastructure
 #
 # Configuration:
-#   - MAX_CYCLE_RISK_PCT: 5% of bankroll per cycle (allows 3+ agents to trade simultaneously)
-#   - MAX_TOTAL_RISK_PCT: 8% of bankroll total (allows 2-3 concurrent cycles of exposure)
-#   - DAILY_LOSS_CAP_PCT: 12% of bankroll (dynamic drawdown)
-#   - CLUSTER_STOP_PCT: 6% of bankroll (half of daily cap)
+#   - MAX_CYCLE_RISK_PCT: 3% of bankroll per cycle (allows 2-3 agents to trade simultaneously)
+#   - MAX_TOTAL_RISK_PCT: 6% of bankroll total (allows 2 concurrent cycles of exposure)
+#   - DAILY_LOSS_CAP_PCT: 5% of bankroll (2026 best practice - halt trading)
+#   - CLUSTER_STOP_PCT: 3% of bankroll (half of daily cap)
 #
-# With $35 equity:
-#   - Cycle cap: $1.75 (5%) → 3+ contract winners at 50c/contract
-#   - Total cap: $2.80 (8%) → allows multi-cycle concurrent exposure
-#   - Daily loss: $4.20 (12%) → dynamic drawdown trigger
+# With $40 equity:
+#   - Cycle cap: $1.20 (3%) → 2-3 contract winners at 50c/contract
+#   - Total cap: $2.40 (6%) → allows multi-cycle concurrent exposure
+#   - Daily loss: $2.00 (5%) → automatic halt trigger
 # ═══════════════════════════════════════════════════════════════════════════
-_DEFAULT_CYCLE_RISK_PCT = "0.10"  # 10% per cycle - matches profile kalshi_crypto_15m_v2.yaml
-# Read from env var to allow profile-driven configuration
+_DEFAULT_CYCLE_RISK_PCT = "0.03"  # 3% per cycle - 2026 best practice
+# Read from env var to allow profile-driven configuration (but default to 2026 best practice)
 MAX_CYCLE_RISK_PCT: float = float(os.getenv("MAX_CYCLE_RISK_PCT", _DEFAULT_CYCLE_RISK_PCT))
-MAX_TOTAL_RISK_PCT: float = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.08"))  # 8% total max
+MAX_TOTAL_RISK_PCT: float = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.06"))  # 6% total max (2026 best practice)
 
 # Daily and cluster risk caps (auto-scale with bankroll)
-# DAILY_LOSS_CAP_PCT = 99% of bankroll (effectively disabled for burn-in data collection)
-DAILY_LOSS_CAP_PCT: float = float(os.getenv("DAILY_LOSS_CAP_PCT", "0.99"))  # 99% default (disabled)
-# CLUSTER_STOP_PCT = DAILY_LOSS_CAP_PCT / 2 = 6-7%
-CLUSTER_STOP_PCT: float = float(os.getenv("CLUSTER_STOP_PCT", "0.06"))  # 6% default
+# DAILY_LOSS_CAP_PCT = 5% of bankroll (2026 best practice - halt trading)
+DAILY_LOSS_CAP_PCT: float = float(os.getenv("DAILY_LOSS_CAP_PCT", "0.05"))  # 5% default (2026 best practice)
+# CLUSTER_STOP_PCT = DAILY_LOSS_CAP_PCT / 2 = 2.5%
+CLUSTER_STOP_PCT: float = float(os.getenv("CLUSTER_STOP_PCT", "0.025"))  # 2.5% default
 
 # ═══════════════════════════════════════════════════════════════════════════
 # UNIFIED KELLY AND EXPOSURE SETTINGS (SINGLE SOURCE OF TRUTH)
@@ -78,14 +84,14 @@ CLUSTER_STOP_PCT: float = float(os.getenv("CLUSTER_STOP_PCT", "0.06"))  # 6% def
 # Configuration:
 #   - Kelly fraction: Single source of truth is profile YAML (kalshi_crypto_15m.yaml)
 #   - MAX_CATEGORY_CRYPTO_PCT: 0.30 (30% category cap for crypto)
-#   - CORRELATED_STACK_PCT: 0.02 (2% for same underlying across all timeframes)
+#   - CORRELATED_STACK_PCT: 0.20 (20% for same underlying across all timeframes)
 #   - DRAWDOWN_HALT_PCT: 0.10 (10% drawdown triggers halt)
 #   - DRAWDOWN_UNWIND_PCT: 0.15 (15% drawdown triggers unwind)
 # ═══════════════════════════════════════════════════════════════════════════
 # KELLY_FRACTION env var is DEPRECATED - use profile YAML instead
 # KELLY_FRACTION: float = float(os.getenv("KELLY_FRACTION", "0.20"))  # DEPRECATED
 MAX_CATEGORY_CRYPTO_PCT: float = float(os.getenv("MAX_CATEGORY_CRYPTO_PCT", "0.30"))  # 30% category cap
-CORRELATED_STACK_PCT: float = float(os.getenv("CORRELATED_STACK_PCT", "0.20"))  # 20% correlated stack cap (increased from 2% to allow trades)
+CORRELATED_STACK_PCT: float = float(os.getenv("CORRELATED_STACK_PCT", "0.25"))  # 25% correlated stack cap (for highly correlated crypto assets)
 DRAWDOWN_HALT_PCT: float = float(os.getenv("DRAWDOWN_HALT_PCT", "0.10"))  # 10% drawdown halt
 DRAWDOWN_UNWIND_PCT: float = float(os.getenv("DRAWDOWN_UNWIND_PCT", "0.15"))  # 15% drawdown unwind
 

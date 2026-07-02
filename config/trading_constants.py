@@ -43,8 +43,8 @@ EDGE_FLOOR_LATE: float = float(os.getenv("MERID_PM_MIN_EDGE_LATE", "0.06"))
 EDGE_FLOOR_TERMINAL: float = float(os.getenv("MERID_PM_MIN_EDGE_TERMINAL", "0.06"))
 
 # Minimum model confidence (0–1) before a signal may proceed to consensus+execution.
-# Aligned with StrategyConfig.min_confidence (0.60 default).
-CONFIDENCE_MIN_THRESHOLD: float = float(os.getenv("MERID_PM_MIN_CONFIDENCE", "0.60"))
+# Aligned with StrategyConfig.min_confidence (0.50 default).
+CONFIDENCE_MIN_THRESHOLD: float = float(os.getenv("MERID_PM_MIN_CONFIDENCE", "0.50"))
 
 # Max single position as % of total bankroll
 POSITION_MAX_PCT: float = float(os.getenv("MERID_POSITION_MAX_PCT", "0.075"))  # tightened from 0.10

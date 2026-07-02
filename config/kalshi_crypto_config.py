@@ -62,6 +62,10 @@ __all__ = [
 
     "check_ws_ticker_asset_coverage",
 
+    "MARKET_ORDER_FALLBACK_ENABLED",
+
+    "MARKET_ORDER_FALLBACK_CONFIG",
+
 ]
 
 
@@ -273,4 +277,40 @@ def check_ws_ticker_asset_coverage(
 
 
     return ok, counts, missing
+
+
+# Market order fallback configuration
+# Enable/disable market order fallback for resting limit orders
+MARKET_ORDER_FALLBACK_ENABLED = os.getenv("MERID_MARKET_ORDER_FALLBACK_ENABLED", "true").lower() in ("1", "true", "yes")
+
+# Fallback configuration parameters
+MARKET_ORDER_FALLBACK_CONFIG = {
+    # Time-based triggers
+    "fallback_after_seconds": int(os.getenv("MERID_FALLBACK_AFTER_SECONDS", "90")),  # Convert after 90s
+    "min_age_before_fallback": int(os.getenv("MERID_MIN_AGE_BEFORE_FALLBACK", "30")),  # Minimum age
+    
+    # Conviction thresholds
+    "min_edge_pct": float(os.getenv("MERID_MIN_EDGE_PCT", "0.04")),  # 4% minimum edge
+    "min_confidence": float(os.getenv("MERID_MIN_CONFIDENCE", "0.70")),  # 70% minimum confidence
+    
+    # Time to expiry
+    "max_tte_for_fallback": int(os.getenv("MERID_MAX_TTE_FOR_FALLBACK", "300")),  # Max 5 minutes
+    "urgent_tte_threshold": int(os.getenv("MERID_URGENT_TTE_THRESHOLD", "120")),  # Urgent if < 2 minutes
+    
+    # Market conditions
+    "max_spread_cents": int(os.getenv("MERID_MAX_SPREAD_CENTS", "10")),  # Max 10 cent spread
+    "min_depth_contracts": int(os.getenv("MERID_MIN_DEPTH_CONTRACTS", "5")),  # Minimum 5 contracts depth
+    
+    # Asset-specific overrides (lower thresholds for high-volume assets)
+    "asset_overrides": {
+        "BTC": {
+            "min_edge_pct": float(os.getenv("MERID_BTC_MIN_EDGE_PCT", "0.03")),  # 3% for BTC
+            "fallback_after_seconds": int(os.getenv("MERID_BTC_FALLBACK_AFTER_SECONDS", "60")),  # Faster for BTC
+        },
+        "ETH": {
+            "min_edge_pct": float(os.getenv("MERID_ETH_MIN_EDGE_PCT", "0.03")),  # 3% for ETH
+            "fallback_after_seconds": int(os.getenv("MERID_ETH_FALLBACK_AFTER_SECONDS", "60")),  # Faster for ETH
+        },
+    }
+}
 
