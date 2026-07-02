@@ -484,8 +484,10 @@ class IdempotentOrderStore:
     # SUBMITTED without an ack past the longer TTL is a zombie that will
     # later be resolved by the reconciler — we only mark it so operators can
     # see it in the gate metrics.
-    ORPHAN_PENDING_TTL_S: float = 300.0       # 5 minutes
-    ORPHAN_SUBMITTED_TTL_S: float = 3600.0    # 1 hour
+    # 2026 FIX: Reduced ORPHAN_PENDING_TTL_S from 300s to 15s for 15m crypto trading
+    # 15m markets move fast - 5 minutes is too long for orphan cleanup
+    ORPHAN_PENDING_TTL_S: float = 15.0        # 15 seconds (was 5 minutes - too slow for 15m crypto)
+    ORPHAN_SUBMITTED_TTL_S: float = 60.0      # 1 minute (was 1 hour - too slow for 15m crypto)
 
     def prune_stale_pending(
         self,
@@ -777,12 +779,16 @@ class PreTradeGate:
         )
         inserted, conflict = self._store.insert_if_absent(record)
         if not inserted and conflict is not None:
-            # Race: another thread inserted between lookup and insert
+            # 2026 IDEMPOTENCY STANDARD (Stripe model): a duplicate deterministic
+            # client_order_id means this exact logical order is already known. Do NOT
+            # reject as an error and do NOT blindly resubmit — return an idempotent
+            # verdict carrying the existing order's status so the router can skip the
+            # redundant venue call (avoids duplicate API calls / 409 storms).
             self._store._metrics.blocked_duplicate += 1
             return GateVerdict(
                 allowed=False,
                 client_order_id=coid,
-                reason=f"duplicate_race:{conflict.status.value}",
+                reason=f"idempotent_duplicate:{conflict.status.value}",
                 is_duplicate=True,
                 existing_status=conflict.status.value,
             )
@@ -900,19 +906,15 @@ class PreTradeGate:
         )
         inserted, conflict = await self._store.async_insert_if_absent(record)
         if not inserted and conflict is not None:
-            # Race: another coroutine inserted between lookup and insert
+            # 2026 IDEMPOTENCY STANDARD (Stripe model): duplicate deterministic
+            # client_order_id → return idempotent verdict with the existing order's
+            # status instead of erroring. The router treats is_duplicate as a graceful
+            # no-op (the order is already working), avoiding duplicate venue calls.
             self._store._metrics.blocked_duplicate += 1
-            # PHASE1-DUP-9: Alert for duplicate race condition (warning level + metric)
-            logger.warning(
-                "[GATE-ALERT] duplicate_race_condition_blocked coid=%s status=%s contract=%s agent=%s "
-                "(metric: blocked_duplicate=%d)",
-                coid, conflict.status.value, contract_id, agent_id,
-                self._store._metrics.blocked_duplicate,
-            )
             return GateVerdict(
                 allowed=False,
                 client_order_id=coid,
-                reason=f"duplicate_race:{conflict.status.value}",
+                reason=f"idempotent_duplicate:{conflict.status.value}",
                 is_duplicate=True,
                 existing_status=conflict.status.value,
             )

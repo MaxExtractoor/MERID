@@ -379,6 +379,62 @@ class KalshiPositionCache:
                     logger.warning("[POSITION-CACHE] Failed to record entry in RoundTripMonitor: %s", rt_err)
                 self._positions[market_id] = new_position
 
+                # CRITICAL FIX: Add position to PositionMonitor for TP/SL enforcement
+                # This wires the position cache into the exit policy system
+                try:
+                    from merid.position_management.position_monitor import get_position_monitor
+                    from merid.position_management.position import Position, PositionSide, TrailingType
+                    
+                    monitor = get_position_monitor()
+                    
+                    # Convert CachedPosition to Position for monitoring
+                    side_enum = PositionSide.YES if side.lower() == "yes" else PositionSide.NO
+                    
+                    # CRITICAL: Configure trailing stop based on 15m best practices
+                    # Research: Move to break-even at +1R, then trail with 0.5R distance
+                    # This locks in profits while allowing upside
+                    tp_r = tp_targets.get("tp_r", 1.0)
+                    sl_price = tp_targets.get("sl_price", price_cents - 5)
+                    risk_cents = abs(price_cents - sl_price) if sl_price else 5
+                    
+                    # Enable R-multiple trailing with 0.5R trail distance
+                    # This means the stop will trail 0.5R below the max favorable price
+                    trailing_type = TrailingType.R_MULTIPLE
+                    trailing_param = 0.5  # 0.5R trail distance
+                    
+                    # Research: Configure scale-out target at 1.5-2R (Pay Yourself strategy)
+                    # Close 50% at 1.5-2R to lock profits while letting "runner" capture larger moves
+                    scale_out_r = 1.5  # Scale out at 1.5R
+                    scale_out_price = price_cents + int(risk_cents * scale_out_r)
+                    if tp_targets.get("tp_price"):
+                        # If TP is set, scale out at 75% of TP (between 1.5-2R)
+                        scale_out_price = price_cents + int((tp_targets.get("tp_price") - price_cents) * 0.75)
+                    
+                    monitor_position = Position(
+                        position_id=market_id,  # Use market_id as position_id
+                        market_id=market_id,
+                        side=side_enum,
+                        size=contracts,
+                        avg_entry_price_cents=price_cents,
+                        take_profit_price_cents=tp_targets.get("tp_price"),
+                        stop_loss_price_cents=tp_targets.get("sl_price"),
+                        trailing_type=trailing_type,
+                        trailing_param=trailing_param,
+                        scale_out_price_cents=scale_out_price,  # Research: Scale-out at 1.5-2R
+                        exit_policy_id=client_order_id or fill_id or "unknown",
+                    )
+                    
+                    monitor.add_position(monitor_position)
+                    logger.info(
+                        "[POSITION-MONITOR-INTEGRATION] Added position to monitor: market=%s side=%s size=%d TP=%dc SL=%dc trail=%sR",
+                        market_id, side, contracts,
+                        tp_targets.get('tp_price') or 0,
+                        tp_targets.get('sl_price') or 0,
+                        trailing_param
+                    )
+                except Exception as monitor_err:
+                    logger.warning("[POSITION-MONITOR-INTEGRATION] Failed to add position to monitor: %s", monitor_err)
+
                 # Log entry timing for audit (correlate with [SCHEDULER-CHECK] for full timing metrics)
                 asset = market_id.split("-")[0].replace("KX", "") if "-" in market_id else "UNKNOWN"
                 logger.info(
@@ -451,6 +507,43 @@ class KalshiPositionCache:
                         self._pending_tp_targets.pop(client_order_id, None)
                     if position.client_order_id:
                         self._pending_tp_targets.pop(position.client_order_id, None)
+
+                    # CRITICAL FIX: Remove position from PositionMonitor when closed
+                    # This ensures the monitor doesn't track closed positions
+                    try:
+                        from merid.position_management.position_monitor import get_position_monitor
+                        monitor = get_position_monitor()
+                        monitor.remove_position(market_id)
+                        logger.info(
+                            "[POSITION-MONITOR-INTEGRATION] Removed position from monitor: market=%s",
+                            market_id
+                        )
+                    except Exception as monitor_err:
+                        logger.warning("[POSITION-MONITOR-INTEGRATION] Failed to remove position from monitor: %s", monitor_err)
+
+                    # CRITICAL FIX: Record position close in KalshiRiskManager for asset_notional tracking
+                    # This ensures per-asset notional exposure is decremented when positions close
+                    try:
+                        from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+                        from config.kalshi_crypto_config import kalshi_ticker_to_asset
+                        risk_mgr = get_kalshi_risk()
+                        
+                        # Extract asset from ticker
+                        asset = kalshi_ticker_to_asset(market_id)
+                        if asset and asset.upper() in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                            # Record close with category="crypto" and asset for notional tracking
+                            risk_mgr.record_close(
+                                category="crypto",
+                                contracts=pre_contracts,  # Use pre-fill contracts (the amount being closed)
+                                price_cents=price_cents,
+                                asset=asset.upper(),  # CRITICAL: Pass asset for per-asset notional tracking
+                            )
+                            logger.info(
+                                "[POSITION-CACHE] Recorded position close in risk manager: asset=%s category=crypto contracts=%d price=%dc",
+                                asset.upper(), pre_contracts, price_cents
+                            )
+                    except Exception as risk_err:
+                        logger.warning("[POSITION-CACHE] Failed to record position close in risk manager: %s", risk_err)
 
                     # SELL-SIDE FIX: Release contract lease when position is fully closed
                     # This ensures the lease is freed for future orders and prevents
@@ -1387,14 +1480,26 @@ class KalshiPositionCache:
                         confidence = 0.6  # Default confidence for trailing
                         time_to_expiry_minutes = 10.0  # Default for 15m contracts
 
+                        # Create a TakeProfitPlan for trailing (using default parameters)
+                        from merid.prediction.dynamic_takeprofit import TakeProfitPlan, TakeProfitLevel
+                        trailing_plan = TakeProfitPlan(
+                            tp_price=0.0,  # Not used for trailing stop calculation
+                            tp_r_multiple=trailing_activation_r,
+                            tp_level=TakeProfitLevel.BASE,
+                            trailing_trigger_r=trailing_activation_r,
+                            trailing_distance_r=0.5,  # Default 0.5R trail distance
+                        )
+
                         # Compute new trailing stop price
                         new_sl_cents = dtp_engine.compute_trailing_stop(
-                            entry_price_cents=entry_price_cents,
-                            current_price_cents=current_price_cents,
-                            side=position.side,
-                            confidence=confidence,
-                            time_to_expiry_minutes=time_to_expiry_minutes
+                            current_price=current_price_cents / 100.0,  # Convert cents to dollars
+                            entry_price=entry_price_cents / 100.0,
+                            direction='LONG' if position.side == 'yes' else 'SHORT',
+                            plan=trailing_plan,
+                            stop_price=sl_price_cents / 100.0,
                         )
+                        # Convert back to cents
+                        new_sl_cents = int(new_sl_cents * 100) if new_sl_cents is not None else None
 
                         # Only update if new SL is better (higher for longs, lower for shorts)
                         should_update = False

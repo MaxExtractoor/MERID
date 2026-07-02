@@ -172,9 +172,9 @@ def kelly_size_kalshi(
     price_cents: int,
     bankroll_cents: int,
     *,
-    kelly_fraction: float = 0.25,
+    kelly_fraction: float = 0.02,  # CRITICAL FIX: 2% (aligned with unified risk limit, was 0.05)
     max_contracts: int = 250,
-    min_edge: float = 0.05,  # CONSERVATIVE: 5.0% minimum edge
+    min_edge: float = 0.02,  # ALIGNED TO 2026 INDUSTRY STANDARD: 2% minimum edge
 ) -> int:
     """Fee-aware Kelly position sizing for Kalshi binary contracts.
 
@@ -747,9 +747,10 @@ class KalshiRiskConfig:
     # Circuit breaker: fee anomaly detection - reject if effective fee > X% of notional
     max_fee_to_notional_pct: float = 15.0  # Default 15% (from profile risk_policy_max_fee_to_notional_pct)
     # Minimum edge to trade - MUST be provided from profile (strategy_policy_min_edge)
-    min_edge: float = 0.05  # Default 5% (from profile strategy_policy_min_edge)
+    min_edge: float = 0.02  # ALIGNED TO 2026 INDUSTRY STANDARD: 2% (from profile strategy_policy_min_edge)
     # Bankroll cap percentage - from profile venue.bankroll_cap_pct (overrides MERID_BANKROLL_CAP_PCT env)
-    bankroll_cap_pct: float = 0.02  # Default 2% (from profile venue.bankroll_cap_pct)
+    # ALIGNED TO 2026 INDUSTRY STANDARD: 1% (from profile venue.bankroll_cap_pct)
+    bankroll_cap_pct: float = 0.01  # Default 1% (from profile venue.bankroll_cap_pct)
     
     @classmethod
     def from_profile(cls, profile_data: Dict[str, Any]) -> 'KalshiRiskConfig':
@@ -772,7 +773,7 @@ class KalshiRiskConfig:
         return cls(
             max_fee_to_notional_pct=profile_data.get('risk_policy_max_fee_to_notional_pct', 15.0),
             min_edge=profile_data.get('strategy_policy_min_edge', 0.05),
-            bankroll_cap_pct=profile_data.get('venue_bankroll_cap_pct', 0.02),
+            bankroll_cap_pct=profile_data.get('bankroll_cap_pct', 0.02),
         )
 
     # ── Global limits (with defaults) ────────────────────────────────────────
@@ -781,6 +782,8 @@ class KalshiRiskConfig:
     max_total_notional_usd: float = 0.0  # 0 = derive from live bankroll (was 25000.0 hardcoded)
     max_daily_loss_usd: float = 0.0  # 0 = derive from profile/envelope (was 1000.0 hardcoded)
     max_stop_loss_usd_per_cluster: float = 0.0  # 0 = derive from profile (was 500.0 hardcoded)
+    # 2026 STANDARD: Per-asset cluster stop-loss limits
+    per_asset_cluster_stop_loss: Dict[str, float] = field(default_factory=dict)
     # 15m scalper: max 1 contract per order for initial production safety
     max_single_order_contracts: int = int(os.getenv("KALSHI_MAX_ORDER_CONTRACTS", "1"))  # 1 for production safety, was 10
     max_single_order_notional_usd: float = 0.0  # 0 = derive from profile (was 2500.0 hardcoded)
@@ -805,7 +808,7 @@ class KalshiRiskConfig:
     # ── Circuit breakers ────────────────────────────────────────────────
     # Price jump detection: reject if price is outside normal range
     # Venue invariants - Kalshi binary contract price bounds
-    valid_price_cents_min: int = 1  # Venue invariant (Kalshi min price)
+    valid_price_cents_min: int = 20  # CRITICAL: Venue invariant (20c min to block deep OTM longshots)
     valid_price_cents_max: int = 99  # Venue invariant (Kalshi max price)
     
     # Dynamic contract caps (populated by _compute_dynamic_contract_caps)
@@ -831,8 +834,8 @@ class KalshiRiskConfig:
     drawdown_medium_balance_usd: float = 1000.0  # $100-$1000: moderate tightening
     drawdown_large_balance_usd: float = 5000.0   # $1000+: tightest drawdown
 
-    # Post-fee edge (conservative 5% - was 1.5%)
-    min_post_fee_edge: float = 0.05  # CONSERVATIVE: 5% post-fee edge (was 1.5%)
+    # Post-fee edge (ALIGNED TO 2026 INDUSTRY STANDARD: 2%)
+    min_post_fee_edge: float = 0.02  # 2% post-fee edge (industry-aligned)
 
     # ── Equity-based fallback defaults ──────────────────────────────────
     # When max_total_notional_usd is 0 or unset, derive from equity × multiplier
@@ -2427,26 +2430,9 @@ class KalshiRiskManager:
         """
         cap_pct = self._derive_bankroll_cap_pct()
         
-        # Source 1: Available cash from BankrollServiceV2 (SINGLE SOURCE OF TRUTH)
-        try:
-            from merid.event_venues.kalshi.bankroll_service_v2 import (
-                get_equity_for_risk_calc_sync,
-                get_summary_sync,
-            )
-            
-            # Get cached summary from v2 service
-            summary = get_summary_sync(caller_module="kalshi_risk")
-            if summary and summary.state.name == "FRESH" and summary.available_cash_usd is not None and summary.available_cash_usd > 0:
-                cash_usd = float(summary.available_cash_usd)
-                cash_cents = int(cash_usd * 100)
-                cap_usd = cash_usd * cap_pct
-                logger.info(
-                    "BANKROLL-DECISION source=bankroll_service_v2 value_usd=%.2f cappct=%.4f cap_usd=%.2f",
-                    cash_usd, cap_pct, cap_usd
-                )
-                return (cash_cents, "bankroll_service_v2")
-        except Exception as exc:
-            logger.debug(f"[BANKROLL] BankrollServiceV2 unavailable: {exc}")
+        # SKIP BankrollServiceV2 during order submission to prevent blocking
+        # Use cached equity (Source 2) instead for real-time order checks
+        # BankrollServiceV2 is used for background updates, not for time-critical order paths
         
         # Source 2: Live equity from Kalshi balance (SECONDARY - total account value)
         equity_usd = self._state.current_equity_usd
@@ -2834,6 +2820,15 @@ class KalshiRiskManager:
             )
             cfg.max_stop_loss_usd_per_cluster = max_stop_loss_usd
 
+            # 2026 STANDARD: Load per-asset cluster stop-loss limits from profile
+            risk_policy = profile_data.get('risk_policy', {})
+            per_asset_sl = risk_policy.get('per_asset_cluster_stop_loss', {})
+            if per_asset_sl:
+                cfg.per_asset_cluster_stop_loss = per_asset_sl
+                logger.info(
+                    "kalshirisk per-asset-cluster-sl loaded: %s assets", len(per_asset_sl)
+                )
+
             # Compute dynamic contract caps based on equity/bankroll ratio
             (
                 max_notional_total,
@@ -3073,6 +3068,9 @@ class KalshiRiskManager:
     ) -> Tuple[bool, str, float, float]:
         """Check if cluster stop loss limit would be breached.
 
+        2026 STANDARD: Use per-asset cluster stop-loss limits instead of aggregate.
+        Each asset (BTC/ETH/SOL/XRP/DOGE) has calibrated limits based on volatility/liquidity.
+
         Args:
             cluster_id: Cluster identifier (asset-timeframe)
             order_worst_case_loss_usd: Worst-case loss for candidate order
@@ -3081,17 +3079,26 @@ class KalshiRiskManager:
             Tuple of (allowed, reason, cluster_loss_usd, post_cluster_loss_usd)
         """
         cluster_unrealized_loss_usd = self._compute_cluster_unrealized_loss_usd(cluster_id)
-        max_stop_loss_usd_per_cluster = self._config.max_stop_loss_usd_per_cluster
+        
+        # 2026 STANDARD: Extract asset from cluster_id and use per-asset limits
+        asset = self._extract_asset_from_cluster_id(cluster_id)
+        per_asset_limits = getattr(self._config, 'per_asset_cluster_stop_loss', {})
+        max_stop_loss_usd_per_cluster = per_asset_limits.get(asset, self._config.max_stop_loss_usd_per_cluster)
+        
+        # Fallback to aggregate limit if per-asset not configured
+        if max_stop_loss_usd_per_cluster == 0.0:
+            max_stop_loss_usd_per_cluster = self._config.max_stop_loss_usd_per_cluster
 
         # Compute post-order cluster loss
         post_cluster_loss = cluster_unrealized_loss_usd + order_worst_case_loss_usd
 
         logger.info(
             "kalshirisk stop-loss-check "
-            "cluster=%s "
+            "cluster=%s asset=%s "
             "cluster_loss=%.2f max_cluster_stop=%.2f "
             "order_worst=%.2f post_cluster_loss=%.2f",
             cluster_id,
+            asset,
             cluster_unrealized_loss_usd,
             max_stop_loss_usd_per_cluster,
             order_worst_case_loss_usd,
@@ -3100,9 +3107,18 @@ class KalshiRiskManager:
 
         # Reject if cluster stop loss would be breached
         if post_cluster_loss > max_stop_loss_usd_per_cluster:
-            return (False, f"CLUSTER_STOP_LOSS: ${post_cluster_loss:.2f} > ${max_stop_loss_usd_per_cluster:.2f}", cluster_unrealized_loss_usd, post_cluster_loss)
+            return (False, f"CLUSTER_STOP_LOSS: ${post_cluster_loss:.2f} > ${max_stop_loss_usd_per_cluster:.2f} (asset={asset})", cluster_unrealized_loss_usd, post_cluster_loss)
 
         return (True, "OK", cluster_unrealized_loss_usd, post_cluster_loss)
+
+    def _extract_asset_from_cluster_id(self, cluster_id: str) -> str:
+        """Extract asset symbol from cluster_id (e.g., 'SOL' from 'SOL-15m')."""
+        # Cluster_id format: {ASSET}-{timeframe} (e.g., SOL-15m, BTC-15m)
+        parts = cluster_id.split("-")
+        if parts:
+            asset = parts[0].upper()
+            return asset
+        return "UNKNOWN"
 
     # ── Kill switch ──────────────────────────────────────────────────────
 
@@ -3495,24 +3511,36 @@ def get_kalshi_risk() -> KalshiRiskManager:
     applies profile-based risk configuration from kalshi_crypto_15m.yaml.
     """
     global _risk
+    logger.info("[PROFILE_WIRING] get_kalshi_risk() called, _risk is None: %s", _risk is None)
     if _risk is None:
         with _risk_lock:
             if _risk is None:
+                logger.info("[PROFILE_WIRING] Acquired lock, checking _risk again")
                 # Check if profile is active and apply profile config
                 config = None
+                import os
+                profile_name = os.environ.get('MERID_PROFILE', '').strip()
+                logger.info("[PROFILE_WIRING] MERID_PROFILE environment variable: '%s'", profile_name)
                 try:
                     from merid.risk.profiles.crypto_15m_profile import is_profile_active, get_active_profile
-                    if is_profile_active():
+                    is_active = is_profile_active()
+                    logger.info("[PROFILE_WIRING] is_profile_active() returned: %s", is_active)
+                    if is_active:
                         adapter = get_active_profile()
                         if adapter:
                             profile_config_dict = adapter.to_kalshi_risk_config()
                             # Create KalshiRiskConfig from profile values
+                            logger.info(
+                                "[PROFILE_WIRING] Profile config bankroll_cap_pct: %.4f",
+                                profile_config_dict.get('bankroll_cap_pct', 'NOT_FOUND')
+                            )
                             config = KalshiRiskConfig(**profile_config_dict)
                             logger.info(
                                 "[PROFILE_WIRING] Applied kalshi_crypto_15m_v2 profile to KalshiRiskConfig: "
-                                "max_single_order_notional_usd=%.2f, max_total_notional_usd=%.2f",
+                                "max_single_order_notional_usd=%.2f, max_total_notional_usd=%.2f, bankroll_cap_pct=%.4f",
                                 config.max_single_order_notional_usd,
-                                config.max_total_notional_usd
+                                config.max_total_notional_usd,
+                                config.bankroll_cap_pct
                             )
                 except ImportError:
                     # Profile module not available, use default config

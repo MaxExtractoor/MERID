@@ -639,13 +639,43 @@ class KalshiMarketCatalog:
         # Catalog is stale if refresh interval is 5s but no refresh for >15s
         is_stale = time_since_refresh > (self._refresh_interval * 3)
         
+        # CRITICAL: Check health of 5 crypto assets
+        critical_assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+        asset_health = {}
+        missing_assets = []
+        
+        snapshot = self.snapshot()
+        for asset in critical_assets:
+            asset_markets = [m for m in snapshot.markets if m.asset == asset and m.timeframe == "15m"]
+            tradeable_markets = [m for m in asset_markets if m.tradeable]
+            
+            asset_health[asset] = {
+                "total_15m_markets": len(asset_markets),
+                "tradeable_15m_markets": len(tradeable_markets),
+                "has_tradeable": len(tradeable_markets) > 0
+            }
+            
+            if len(tradeable_markets) == 0:
+                missing_assets.append(asset)
+        
+        # CRITICAL ALERT: Log if any critical assets are missing
+        if missing_assets:
+            logger.error(
+                "[CATALOG-HEALTH] CRITICAL: Missing tradeable 15m markets for assets: %s. "
+                "This will cause trading failures for these assets.",
+                missing_assets
+            )
+        
         return {
             "last_refresh": last_refresh.isoformat() if last_refresh else None,
             "last_refresh_age_s": time_since_refresh,
             "thread_alive": thread_alive,
             "total_markets": len(self._markets),
             "refresh_count": self._refresh_count,
-            "status": "stale" if is_stale else ("dead" if not thread_alive else "ok")
+            "status": "stale" if is_stale else ("dead" if not thread_alive else "ok"),
+            "critical_assets_health": asset_health,
+            "missing_critical_assets": missing_assets,
+            "all_critical_assets_present": len(missing_assets) == 0
         }
 
     # ── Lifecycle ────────────────────────────────────────────────────────
@@ -831,6 +861,7 @@ class KalshiMarketCatalog:
         logger.debug("[CATALOG-REFRESH-ENTRY] refresh() called, force=%s", force)
 
         refresh_start = datetime.now(timezone.utc)
+        now_utc = datetime.now(timezone.utc)
 
         # CRITICAL FIX: Remove lock to prevent deadlock
         # The refresh loop runs in a separate thread with its own event loop
@@ -857,17 +888,21 @@ class KalshiMarketCatalog:
 
             # 1. Fetch priority series with rate limiting and retry logic for 429 errors
             # CRITICAL FIX: Use REST API directly for crypto 15m series to bypass public API rate limits
-            # CRITICAL FIX: Add time-based filtering to only fetch markets within 48 hours to prevent future market contamination
-            async def _fetch_series_with_retry(series: str, max_retries: int = 3):
+            # CRITICAL FIX: Add max_expiration_time filter to fetch only markets within 16 minutes to prevent old tickers
+            async def _fetch_series_with_retry(series: str, now_utc: datetime, max_retries: int = 3):
                 for attempt in range(max_retries):
                     try:
                         logger.info("[CATALOG-FETCH] Fetching series=%s with REST API (attempt %d/%d)", series, attempt + 1, max_retries)
-                        
+
                         # Use REST API directly via _request_with_resilience
-                        # NOTE: No max_expiration_time filter - rely on snapshot() 0-30min expiry filtering instead
+                        # CRITICAL FIX: Add max_expiration_time filter to fetch only markets within 16 minutes
+                        # This reduces data transfer and prevents old tickers from being fetched at the source
+                        max_expiry = now_utc + timedelta(minutes=16)
+                        max_expiry_str = max_expiry.strftime("%Y-%m-%dT%H:%M:%SZ")
+
                         result = await self._client._request_with_resilience(
                             "GET",
-                            f"/markets?series_ticker={series}&status=open&limit=200",
+                            f"/markets?series_ticker={series}&limit=200&max_expiration_time={max_expiry_str}",
                             operation_name=f"fetch_series_{series}"
                         )
                         
@@ -912,7 +947,7 @@ class KalshiMarketCatalog:
             # 200ms was insufficient - still getting 429 errors
             tasks = []
             for i, series in enumerate(_PRIORITY_SERIES):
-                task = asyncio.create_task(_fetch_series_with_retry(series))
+                task = asyncio.create_task(_fetch_series_with_retry(series, now_utc))
                 tasks.append(task)
                 # Stagger by 1 second between each fetch to avoid rate limiting
                 if i < len(_PRIORITY_SERIES) - 1:
@@ -978,10 +1013,12 @@ class KalshiMarketCatalog:
                             series
                         )
                         try:
-                            # NOTE: No max_expiration_time filter - rely on snapshot() 0-30min expiry filtering instead
+                            # CRITICAL FIX: Add max_expiration_time filter to prevent fetching markets expired hours ago
+                            # This prevents old markets from being logged and processed
+                            max_expiry = now_utc + timedelta(minutes=16)
                             debug_result = await asyncio.wait_for(
                                 self._client.list_markets_result(
-                                    MarketFilter(active_only=False, limit=200, search=series)
+                                    MarketFilter(active_only=False, limit=200, search=series, max_expiration_time=max_expiry)
                                 ),
                                 timeout=15.0
                             )
@@ -1013,8 +1050,17 @@ class KalshiMarketCatalog:
                     series_to_markets[series] = markets_list if r.success else []
                     logger.debug("CATALOG-FILTER-DEBUG: AFTER series_to_markets assignment, series=%s, r.success=%s, markets_list length=%d", series, r.success, len(markets_list))
                     for m in markets_list:
-                        # Don't filter here - let the snapshot filter handle time window selection
-                        # This ensures we have all markets available and the snapshot picks the right ones
+                        # CRITICAL FIX: Filter out expired markets before adding to raw_markets
+                        # This prevents markets expired hours ago from being logged and processed
+                        if m.end_date:
+                            minutes_to_expiry = (m.end_date - now_utc).total_seconds() / 60.0
+                            if minutes_to_expiry < -5.0:  # Allow slight buffer, but reject truly old markets
+                                logger.debug(
+                                    "[CATALOG-FILTER-EXPIRED] Skipping expired market: ticker=%s minutes_to_expiry=%.1f",
+                                    m.market_id, minutes_to_expiry
+                                )
+                                continue
+                        
                         if m.market_id not in seen_tickers:
                             raw_markets.append(m)
                             seen_tickers.add(m.market_id)
@@ -1087,48 +1133,75 @@ class KalshiMarketCatalog:
         )
 
         # CRITICAL FIX: Add time-based filtering to prevent future market contamination
-        # Filter to only markets within 0-30 minutes to expiry (current trade window)
-        # This prevents 4-day future markets from being fed to the state store
+        # Filter to only markets within 0-15.5 minutes to expiry (current 15m window)
+        # This prevents 4-day future markets and old tickers from previous windows from being fed to the state store
         from merid.event_venues.kalshi.kalshi_15m_time import compute_minutes_to_expiry
         now_utc = datetime.now(timezone.utc)
         
-        time_filtered_markets = []
+        # Visibility filter: markets visible for data/WS subscription (-5 to 15.5 min)
+        # CRITICAL FIX: Include markets from -5 minutes to account for Kalshi's lifecycle
+        # where markets open ~5 minutes before the window starts (unopened -> open)
+        # This ensures unopened markets that are about to become open are visible
+        visible_markets = []
         for cm in filtered_markets:
             if cm.expires_at:
                 mte = compute_minutes_to_expiry(cm.expires_at, now_utc)
                 # CRITICAL FIX: Validate mte is not None and is reasonable
                 if mte is None:
                     logger.warning(
-                        "[CATALOG-TIME-FILTER] Skipping market=%s (mte is None)",
+                        "[CATALOG-VISIBILITY-FILTER] Skipping market=%s (mte is None)",
                         cm.market.market_id
                     )
                     continue
                 if not (-1000 <= mte <= 10000):
                     logger.warning(
-                        "[CATALOG-TIME-FILTER] Skipping market=%s extreme mte=%.1fmin",
+                        "[CATALOG-VISIBILITY-FILTER] Skipping market=%s extreme mte=%.1fmin",
                         cm.market.market_id, mte
                     )
                     continue
-                if 0.0 <= mte <= 30.0:  # Current trade window
-                    time_filtered_markets.append(cm)
+                if 0.0 <= mte <= 15.5:  # Only include non-expired markets (0 to 15.5 min to expiry)
+                    visible_markets.append(cm)
                 else:
                     logger.debug(
-                        "[CATALOG-TIME-FILTER] Skipping market=%s mte=%.1fmin (outside 0-30min window)",
+                        "[CATALOG-VISIBILITY-FILTER] Skipping market=%s mte=%.1fmin (outside -5 to 15.5min window)",
                         cm.market.market_id, mte
                     )
             else:
                 logger.warning(
-                    "[CATALOG-TIME-FILTER] Skipping market=%s (no expiry time)",
+                    "[CATALOG-VISIBILITY-FILTER] Skipping market=%s (no expiry time)",
                     cm.market.market_id
                 )
-        
+
         logger.info(
-            "[CATALOG-TIME-FILTER] Post-time-filter: %d markets in 0-30min window (from %d)",
-            len(time_filtered_markets), len(filtered_markets)
+            "[CATALOG-VISIBILITY-FILTER] Post-visibility-filter: %d markets in 0 to 15.5min window (from %d)",
+            len(visible_markets), len(filtered_markets)
         )
         
-        # Use time-filtered markets for indexing and feed
-        filtered_markets = time_filtered_markets
+        # Tradeability filter: markets eligible for agent entry (2-12 min entry window)
+        # This is separate from visibility to allow agents to see markets but only enter in optimal window
+        tradeable_markets = []
+        for cm in visible_markets:
+            if cm.expires_at:
+                mte = compute_minutes_to_expiry(cm.expires_at, now_utc)
+                if 2.0 <= mte <= 12.0:  # Entry window for optimal trading
+                    tradeable_markets.append(cm)
+                    # Mark as tradeable in the CatalogMarket object
+                    cm.tradeable = True
+                else:
+                    # Market is visible but not tradeable (outside entry window)
+                    cm.tradeable = False
+                    logger.debug(
+                        "[CATALOG-TRADEABILITY-FILTER] Market=%s mte=%.1fmin is visible but not tradeable (outside 2-12min entry window)",
+                        cm.market.market_id, mte
+                    )
+        
+        logger.info(
+            "[CATALOG-TRADEABILITY-FILTER] Post-tradeability-filter: %d markets in 2-12min entry window (from %d visible)",
+            len(tradeable_markets), len(visible_markets)
+        )
+        
+        # Use visible markets for indexing and feed (includes all markets in current 15m window)
+        filtered_markets = visible_markets
 
         # Create MarketUniverse from filtered markets
         # This is the canonical source of truth for allowed markets
@@ -1150,6 +1223,11 @@ class KalshiMarketCatalog:
         if loop.is_closed() or not loop.is_running():
             logger.error("[CATALOG-REFRESH] Event loop is closed or not running - cannot build indexes")
             raise RuntimeError("Event loop shutdown during catalog refresh")
+        
+        # CRITICAL FIX: Check if shutdown was requested before submitting to executor
+        if self._ensure_shutdown_event().is_set():
+            logger.info("[CATALOG-REFRESH] Shutdown requested - skipping index build")
+            raise RuntimeError("Shutdown requested during catalog refresh")
         
         # CRITICAL FIX: Use try/except to handle executor shutdown gracefully
         try:
@@ -2749,14 +2827,27 @@ class KalshiMarketCatalog:
             return None
 
         # Use canonical selector to find live markets
-        # CRITICAL FIX: Increase min_minutes_to_expiry to 15.0 to avoid routing orders to markets
-        # that are too close to expiry (Kalshi rejects orders with <5 minutes to expiry)
-        # This accounts for extreme order routing latency (observed up to 46s) and Kalshi pre-close period
-        logger.info("[GET-CURRENT-15M] Filtering %d markets for asset=%s with min_minutes_to_expiry=15.0", len(asset_markets), asset)
+        # 2026 FIX: Read min_entry_mins from profile instead of hardcoding 12.0
+        # Profile has min_entry_mins: 2.0 and max_entry_mins: 15.0
+        # Previous hardcoded value of 12.0 was filtering out all markets
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+            profile_adapter = get_active_profile()
+            if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_min_entry_mins'):
+                min_entry_mins = profile_adapter.profile.guardrails_min_entry_mins
+            else:
+                min_entry_mins = 2.0  # Fallback to profile default
+        except Exception as e:
+            logger.warning("[GET-CURRENT-15M] Failed to load min_entry_mins from profile: %s, using fallback 2.0", e)
+            min_entry_mins = 2.0  # Fallback to profile default
+        
+        max_entry_mins = 15.0  # Profile max_entry_mins
+        
+        logger.info("[GET-CURRENT-15M] Filtering %d markets for asset=%s with min_minutes_to_expiry=%.1f", len(asset_markets), asset, min_entry_mins)
         live_markets = select_live_markets_by_ts(
             asset_markets,
-            min_minutes_to_expiry=15.0,
-            max_minutes_to_expiry=16.0,
+            min_minutes_to_expiry=min_entry_mins,
+            max_minutes_to_expiry=max_entry_mins,
             require_exactly_one_per_asset=False
         )
         logger.info("[GET-CURRENT-15M] Filter returned %d live markets for asset=%s", len(live_markets) if live_markets else 0, asset)
@@ -2878,15 +2969,22 @@ _catalog: Optional[KalshiMarketCatalog] = None
 _catalog_lock = threading.Lock()
 
 
-def get_market_catalog() -> KalshiMarketCatalog:
-    """Get or create the singleton KalshiMarketCatalog."""
+def get_market_catalog() -> Optional[KalshiMarketCatalog]:
+    """Get the singleton KalshiMarketCatalog.
+    
+    Returns None if the catalog has not been initialized through the proper startup path.
+    This prevents premature catalog creation that bypasses the FastAPI lifespan startup.
+    The catalog must be created in the startup function and set via set_market_catalog().
+    """
     global _catalog
     if _catalog is None:
         with _catalog_lock:
             if _catalog is None:
-                logger.info("[CATALOG-SINGLETON] Creating new catalog instance (was None)")
-                _catalog = KalshiMarketCatalog()
-                logger.info("[CATALOG-SINGLETON] Created catalog instance id=%s", id(_catalog))
+                # CRITICAL FIX: Do NOT create catalog automatically
+                # This prevents bypassing the FastAPI lifespan startup
+                logger.warning("[CATALOG-SINGLETON] Catalog not initialized - called before startup")
+                logger.warning("[CATALOG-SINGLETON] Catalog must be created in startup and set via set_market_catalog()")
+                return None
             else:
                 logger.info("[CATALOG-SINGLETON] Returning existing catalog instance id=%s (double-checked)", id(_catalog))
     else:

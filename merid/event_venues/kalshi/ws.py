@@ -1192,11 +1192,14 @@ class KalshiWebSocket(EventVenueStream):
                     msg_type = data_preview.get("type", "unknown")
                     ticker = data_preview.get("ticker", data_preview.get("market_ticker", "unknown"))
                     logger.info("[WS-RAW-DELIVERY] event_type=%s ticker=%s size=%d", msg_type, ticker, len(raw))
-                except (json.JSONDecodeError, ValueError):
-                    # Truncated JSON is expected - don't log as error, just mark as unknown
+                except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
+                    # Truncated JSON is expected - don't log as error, just mark as unknown.
+                    # AttributeError/TypeError guard the case where the (possibly truncated)
+                    # preview parses to a non-dict (e.g. a JSON array), so .get() would fail.
+                    # This is diagnostic-only; never let it drop the real message below.
                     msg_type = "unknown"
                     ticker = "unknown"
-                    logger.debug("[WS-RAW-DELIVERY] truncated_json_preview size=%d", len(raw))
+                    logger.debug("[WS-RAW-DELIVERY] non_dict_or_truncated_preview size=%d", len(raw))
 
                 # P0-1 WS UPSTREAM: Update idle timer for connection stall detection
                 self._last_raw_delivery_ts = _time.monotonic()
@@ -1218,6 +1221,18 @@ class KalshiWebSocket(EventVenueStream):
 
                 try:
                     data = json.loads(raw)
+
+                    # ROBUSTNESS FIX: Kalshi WS v2 always sends JSON objects with a "type"
+                    # field. A non-dict payload (e.g., a JSON array) is malformed/unexpected.
+                    # Treat it like a JSON decode error (log + skip) instead of letting the
+                    # subsequent data.get() raise AttributeError, which the broad except below
+                    # would misinterpret as a disconnect and trigger a needless reconnect storm.
+                    if not isinstance(data, dict):
+                        logger.warning(
+                            "[WS-RAW] Non-dict WS payload (dropped): type=%s preview=%s",
+                            type(data).__name__, raw[:200]
+                        )
+                        continue
 
                     # CRITICAL DIAGNOSTIC: Channel-classified counter for orderbook messages
                     msg_type = data.get("type", "unknown")
@@ -1323,6 +1338,18 @@ class KalshiWebSocket(EventVenueStream):
                 if self._running:
                     logger.warning("Kalshi WebSocket error (%s): %s", type(e).__name__, e)
                     await self._reconnect()
+            except (AttributeError, KeyError, TypeError, IndexError) as e:
+                # ROBUSTNESS FIX: Data-processing errors on a malformed/unexpected
+                # message must NOT be treated as a disconnect. Previously these
+                # bubbled into the generic handler below and triggered a needless
+                # reconnect storm (e.g. "'list' object has no attribute 'get'" on a
+                # non-dict WS payload). Skip the offending message and keep the
+                # connection alive so the event stream is not interrupted.
+                logger.warning(
+                    "Kalshi WS message processing error (skipping message, connection kept): %s: %s",
+                    type(e).__name__, e,
+                )
+                continue
             except Exception as e:  # BUG-10: catch websockets.ConnectionClosed and any other
                 if self._running:
                     logger.warning(
@@ -1697,7 +1724,7 @@ class KalshiWebSocket(EventVenueStream):
             )
         finally:
             elapsed = _time.monotonic() - t0
-            if elapsed > 0.100:  # > 100ms callback is concerning
+            if elapsed > 0.500:  # > 500ms callback is concerning (increased from 100ms to reduce noise during startup)
                 logger.warning(
                     f"Slow WS callback: {elapsed*1000:.1f}ms for "
                     f"type={raw_data.get('type')} market={raw_data.get('ticker', '?')}"

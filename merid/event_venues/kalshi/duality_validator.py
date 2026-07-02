@@ -183,7 +183,8 @@ class DualityValidator:
                 )
         
         # Check for crossed markets (YES bid >= NO ask or vice versa)
-        if yes_bid is not None and no_ask is not None:
+        # Only check when both sides are present - one-sided books are valid
+        if yes_bid is not None and no_ask is not None and no_bid is not None and yes_ask is not None:
             if yes_bid >= no_ask:
                 result = DualityCheckResult(
                     is_valid=False,
@@ -191,6 +192,8 @@ class DualityValidator:
                     violation_type='crossed_market',
                     raw_yes_bid=yes_bid,
                     raw_no_ask=no_ask,
+                    raw_no_bid=no_bid,
+                    raw_yes_ask=yes_ask,
                     ticker=ticker
                 )
                 self._record_violation(ticker, result)

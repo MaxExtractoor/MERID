@@ -1764,8 +1764,24 @@ class KalshiWebSocketBridge:
                         "[WS-BRIDGE] Starting WS listener with callback=%r",
                         self._enqueue_event
                     )
+                    
+                    # CRITICAL FIX: Bypass listen() method's connection logic since we already connected
+                    # The listen() method tries to connect again and manages its own reconnection loop,
+                    # which conflicts with the bridge's connection management. Instead, we:
+                    # 1. Store the callback directly
+                    # 2. Start the processor task that drains the internal queue and calls the callback
+                    # 3. Start the message receive loop
+                    self._ws._callback = self._enqueue_event
+                    
+                    # Start the async processor that drains the queue
+                    self._ws._processor_task = asyncio.create_task(
+                        self._ws._process_queue(self._enqueue_event),
+                        name="kalshi-ws-processor",
+                    )
+                    
+                    # Start the message receive loop
                     self._task = asyncio.create_task(
-                        self._ws.listen(self._enqueue_event),
+                        self._ws._process_messages_until_disconnect(),
                         name="kalshi-ws-bridge",
                     )
                 self._task.add_done_callback(_task_done_cb)
@@ -2977,6 +2993,18 @@ class KalshiWebSocketBridge:
                         _ws_forward_stalled = False
                         with self._total_events_processed_lock:
                             events_processed = self._total_events_processed
+                        
+                        # CRITICAL FIX: Trigger reconnect if IDLE with subscriptions for > 60s
+                        # This handles the case where catalog transitions to new tickers but WS doesn't re-subscribe
+                        time_since_start = _time.monotonic() - self._start_ts if hasattr(self, '_start_ts') else 0.0
+                        if has_subscriptions and time_since_start > 60.0 and not self._shutdown.is_set() and not self._reconnect_in_progress:
+                            logger.critical(
+                                "[WS-AUTO-RECONNECT] IDLE with %d subscriptions for %.1fs - triggering automatic reconnection (catalog transition detected)",
+                                len(self._subscribed_tickers), time_since_start
+                            )
+                            self._reconnect_in_progress = True
+                            asyncio.create_task(self._auto_reconnect_on_stall())
+                        
                         logger.info(
                             "[WS-FORWARD-HEALTH] IDLE: never received events (events/sec=%.1f queue_size=%d) "
                             "pipeline: raw=%d enqueued=%d processed=%d",
@@ -3182,30 +3210,35 @@ class KalshiWebSocketBridge:
                     
                     # P0 FIX: Increment counter before publish to track all orderbook events processed
                     # This ensures events_processed reflects actual orderbook updates even if event bus publish fails
-                    # DIAGNOSTIC: Log event type check (always log for debugging)
-                    if event_counter % 100 == 0:
+                    # DISABLED: Excessive logging - every 100 events = 720+ log lines for 18K events
+                    # Changed to every 5000 events to reduce log volume
+                    if event_counter % 5000 == 0:
                         logger.info("[WS-FORWARD-EVENT-TYPE] event_type=%s is_orderbook=%s", event_type, event_type in ("orderbook_snapshot", "orderbook_delta"))
                     
                     if event_type in ("orderbook_snapshot", "orderbook_delta"):
                         with self._total_events_processed_lock:
                             self._total_events_processed += 1
-                            # DIAGNOSTIC: Log counter increment more frequently
-                            if self._total_events_processed % 10 == 0:
+                            # DISABLED: Excessive logging - every 10 events = 1.8K log lines for 18K events
+                            # Changed to every 5000 events
+                            if self._total_events_processed % 5000 == 0:
                                 logger.info("[WS-FORWARD-COUNTER] events_processed=%d ticker=%s", self._total_events_processed, ticker)
                         self._last_message_at = _time.time()
                     else:
-                        # DIAGNOSTIC: Log why counter not incremented
-                        if event_counter % 100 == 0:
+                        # DISABLED: Excessive logging - every 100 events = 180+ log lines for 18K events
+                        # Changed to every 5000 events
+                        if event_counter % 5000 == 0:
                             logger.info("[WS-FORWARD-SKIP-COUNTER] event_type=%s not orderbook, skipping counter", event_type)
                     
                     # FIX: Add timeout to prevent forward loop hang on slow event bus
                     try:
-                        # DIAGNOSTIC: Log before publish
-                        if event_counter % 100 == 0:
+                        # DISABLED: Excessive logging - every 100 events = 360+ log lines for 18K events
+                        # Changed to every 5000 events
+                        if event_counter % 5000 == 0:
                             logger.info("[WS-FORWARD] About to publish event #%d type=%s", event_counter, event_type)
                         await asyncio.wait_for(self._publish_event(event), timeout=1.0)
-                        # DIAGNOSTIC: Log after publish
-                        if event_counter % 100 == 0:
+                        # DISABLED: Excessive logging - every 100 events = 360+ log lines for 18K events
+                        # Changed to every 5000 events
+                        if event_counter % 5000 == 0:
                             logger.info("[WS-FORWARD] Published event #%d successfully", event_counter)
                     except asyncio.TimeoutError:
                         logger.warning("[WS-FORWARD] Event publish timeout - dropping event to prevent forward loop stall")
@@ -3325,13 +3358,15 @@ class KalshiWebSocketBridge:
                             if isinstance(value, slice):
                                 logger.warning("[WS-FORWARDER-WRITE] Found slice object in nested_msg key=%s, removing", key)
                                 nested_msg[key] = None
-                logger.info("[WS-FORWARDER-WRITE] ticker=%s event_type=%s seq=%s",
-                           ticker, event_type, msg_body.get("seq", "N/A"))
+                # DISABLED: Excessive logging - 1 log line per event (18K+ events = massive log volume)
+                # Logging moved to forwarder loop which has access to event_counter
+                # DISABLED: Excessive diagnostic logging - generating 2 log lines per orderbook_delta event
+                # With 18K+ events, this creates massive log volume (128KB+ truncated)
                 # DIAGNOSTIC: Log raw message structure to understand schema
-                if event_type == "orderbook_delta":
-                    logger.info("[WS-FORWARDER-DIAG] orderbook_delta keys=%s", list(msg_body.keys()))
-                    if "msg" in msg_body and isinstance(msg_body["msg"], dict):
-                        logger.info("[WS-FORWARDER-DIAG] nested msg keys=%s", list(msg_body["msg"].keys()))
+                # if event_type == "orderbook_delta":
+                #     logger.info("[WS-FORWARDER-DIAG] orderbook_delta keys=%s", list(msg_body.keys()))
+                #     if "msg" in msg_body and isinstance(msg_body["msg"], dict):
+                #         logger.info("[WS-FORWARDER-DIAG] nested msg keys=%s", list(msg_body["msg"].keys()))
                 try:
                     from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
                     store = get_kalshi_market_state_store()
@@ -3351,7 +3386,8 @@ class KalshiWebSocketBridge:
                     except Exception:
                         pass
             
-            logger.info("[WS-APPLY] %s type=%s", event_id, event_type)
+            # DISABLED: Excessive logging - 1 log line per event (18K+ events = massive log volume)
+            # logger.info("[WS-APPLY] %s type=%s", event_id, event_type)
             
             # DIAGNOSTIC: Log all dict events to understand message routing
             if isinstance(event, dict):
@@ -3494,8 +3530,9 @@ class KalshiWebSocketBridge:
                 # Previous comment claimed WS client handles this, but no such handler exists in ws.py
                 # This was causing orderbook WS messages to never be written to the state store
                 
+                # DISABLED: Excessive logging - 2 log lines per orderbook event (18K+ events = massive log volume)
                 # P0-1 MIDSTREAM: Add WS-FORWARD-APPLY log before store call
-                logger.info("[WS-FORWARD-APPLY] event_type=%s ticker=%s", event_type, ticker)
+                # logger.info("[WS-FORWARD-APPLY] event_type=%s ticker=%s", event_type, ticker)
                 
                 # Apply orderbook message to state store (single writer path)
                 try:
@@ -3503,7 +3540,7 @@ class KalshiWebSocketBridge:
                     store = get_kalshi_market_state_store()
                     # P0 FIX: Use explicit via parameter for provenance tracking
                     store.apply_orderbook_message(event, "bridge_queue")
-                    logger.info("[WS-FORWARD-APPLY-DONE] event_type=%s ticker=%s", event_type, ticker)
+                    # logger.info("[WS-FORWARD-APPLY-DONE] event_type=%s ticker=%s", event_type, ticker)
                 except Exception as apply_exc:
                     logger.error("[WS-FORWARD-APPLY-ERROR] event_type=%s ticker=%s error=%s", event_type, ticker, apply_exc)
 

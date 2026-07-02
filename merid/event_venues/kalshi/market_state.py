@@ -449,12 +449,16 @@ class KalshiMarketStateStore:
         # Kalshi sends many deltas per second, we need to process them all for fresh MD
         self._last_delta_update: Dict[str, float] = {}
         self._min_delta_interval = 0.0  # Disabled - process all delta updates
+        # PERFORMANCE FIX: Cache scope validation results to avoid repeated checks
+        self._scope_validation_cache: Dict[str, tuple[bool, Optional[str]]] = {}
         # HARDENING-FIX: Per-ticker locks to reduce contention
         # Each ticker has its own lock for orderbook/state updates
         self._ticker_locks: Dict[str, threading.Lock] = {}
         self._ticker_locks_lock = threading.Lock()  # Protects _ticker_locks dict itself
         # Global lock for multi-ticker operations (get_all, prune_stale, etc.)
-        self._global_lock = threading.Lock()
+        # CRITICAL FIX: Use RLock (reentrant) to prevent deadlock when apply_rest_market calls _get_or_create
+        # Regular Lock is not reentrant and causes deadlock when the same thread tries to acquire it twice
+        self._global_lock = threading.RLock()
         # P0-3 FIX: Add _lock as alias to _global_lock for backward compatibility
         # Some code (market_catalog.py) expects store._lock to exist
         self._lock = self._global_lock
@@ -654,7 +658,7 @@ class KalshiMarketStateStore:
                                     if loop.is_running():
                                         asyncio.create_task(self._sync_invariant_violation_with_rest(ticker))
                                 except Exception as e:
-                                    logger.debug("[BATCH-WORKER] Failed to schedule REST bootstrap for %s: %s", ticker, e)
+                                    logger.error("[BATCH-WORKER] Failed to schedule REST bootstrap for %s: %s", ticker, e, exc_info=True)
                             # Clear queue to prevent further overflow
                             with self._ticker_locks_lock:
                                 self._delta_queues[ticker].clear()
@@ -683,7 +687,7 @@ class KalshiMarketStateStore:
                                         self._apply_delta_internal(ticker, msg)
                                         batch_count += 1
                                     except Exception as e:
-                                        logger.debug("[BATCH-WORKER] Failed to apply delta for %s: %s", ticker, e)
+                                        logger.error("[BATCH-WORKER] Failed to apply delta for %s: %s", ticker, e, exc_info=True)
                                 
                                 if batch_count > 0:
                                     batch_duration_ms = (time.monotonic() - batch_start) * 1000
@@ -903,7 +907,7 @@ class KalshiMarketStateStore:
                     str(no_levels[:3]) if no_levels else []
                 )
             except Exception as e:
-                logger.debug("[OB-SUMMARY] Failed to compute summary for %s: %s", ticker, e)
+                logger.warning("[OB-SUMMARY] Failed to compute summary for %s: %s", ticker, e)
         
         # Log parsed book after computing top prices
         if state.best_bid_cents is not None or state.best_ask_cents is not None:
@@ -1190,7 +1194,7 @@ class KalshiMarketStateStore:
                                 asset, stats["mean_ms"], stats["p95_ms"], stats["count"]
                             )
                 except Exception as e:
-                    logger.debug("[LAG-METRICS] Failed to export lag metrics: %s", e)
+                    logger.warning("[LAG-METRICS] Failed to export lag metrics: %s", e)
 
             # PRODUCTION AUDIT (Step 7): Green state heartbeat summary
             logger.info(
@@ -1241,7 +1245,8 @@ class KalshiMarketStateStore:
                 age_ms = (now - last_update) * 1000 if last_update > 0 else float('inf')
                 
                 # Calculate timing-aware staleness threshold based on minutes_to_expiry
-                minutes_to_expiry = state.seconds_to_expiry / 60.0 if hasattr(state, 'seconds_to_expiry') and state.seconds_to_expiry else None
+                seconds_to_expiry = getattr(state, 'seconds_to_expiry', None)
+                minutes_to_expiry = seconds_to_expiry / 60.0 if seconds_to_expiry is not None else None
                 staleness_threshold_ms = get_md_max_age_seconds(minutes_to_expiry) * 1000 if minutes_to_expiry is not None else MAX_BOOK_STALENESS_MS
 
                 reasons = []
@@ -1564,20 +1569,21 @@ class KalshiMarketStateStore:
                 channel,
                 msg_keys,
             )
+        # DISABLED: Excessive logging - 1 log line per orderbook message (80K+ events = massive log volume)
         # This detects if any path is bypassing the bridge queue
-        logger.info(
-            "[WS-MSTATE-INGEST] via=%s type=%s ticker=%s",
-            via, channel, ticker
-        )
+        # logger.info(
+        #     "[WS-MSTATE-INGEST] via=%s type=%s ticker=%s",
+        #     via, channel, ticker
+        # )
 
         # Note: delta_fp messages without bids/asks are valid Kalshi orderbook deltas
         # They are applied to the internal book representation in apply_delta
 
-        # Log raw message structure for debugging
-        logger.debug(
-            "[market-state] apply_orderbook_message: RAW msg keys=%s, channel=%s, ticker=%s",
-            msg_keys, channel, ticker
-        )
+        # DISABLED: Excessive diagnostic logging - causing slow WS callbacks
+        # logger.debug(
+        #     "[market-state] apply_orderbook_message: RAW msg keys=%s, channel=%s, ticker=%s",
+        #     msg_keys, channel, ticker
+        # )
         
         # Try multiple possible channel/type field names
         channel = msg.get("type") or msg.get("channel") or msg.get("msg_type") or ""
@@ -1590,35 +1596,35 @@ class KalshiMarketStateStore:
             )
             return None
 
-        # Log when orderbook message is received for tracking (DEBUG to avoid log spam)
-        logger.debug(
-            "[market-state] apply_orderbook_message RECEIVED ticker=%s channel=%s",
-            ticker, channel
-        )
+        # DISABLED: Excessive logging - 1 log line per orderbook message (80K+ events = massive log volume)
+        # logger.debug(
+        #     "[market-state] apply_orderbook_message RECEIVED ticker=%s channel=%s",
+        #     ticker, channel
+        # )
         
-        # DIAGNOSTIC: Log first N bytes of snapshot and delta messages for verification
-        if "snapshot" in channel.lower() or "delta" in channel.lower():
-            import json
-            msg_str = json.dumps(msg, default=str)
-            logger.info(
-                "[WS-RAW] channel=%s ticker=%s first_200_bytes=%s",
-                channel, ticker, msg_str[:200]
-            )
-            # DIAGNOSTIC: Log payload structure to understand nested format
-            if "msg" in msg and isinstance(msg["msg"], dict):
-                payload_keys = list(msg["msg"].keys())
-                logger.info(
-                    "[WS-RAW-PAYLOAD] channel=%s ticker=%s payload_keys=%s",
-                    channel, ticker, payload_keys
-                )
-                # Check for bids/asks in payload
-                has_bids = "bids" in msg["msg"]
-                has_asks = "asks" in msg["msg"]
-                has_delta_fp = "delta_fp" in msg["msg"]
-                logger.info(
-                    "[WS-RAW-PAYLOAD] channel=%s ticker=%s has_bids=%s has_asks=%s has_delta_fp=%s",
-                    channel, ticker, has_bids, has_asks, has_delta_fp
-                )
+        # DISABLED: Excessive diagnostic logging for snapshot/delta messages - causing slow WS callbacks
+        # if "snapshot" in channel.lower() or "delta" in channel.lower():
+        #     import json
+        #     msg_str = json.dumps(msg, default=str)
+        #     logger.info(
+        #         "[WS-RAW] channel=%s ticker=%s first_200_bytes=%s",
+        #         channel, ticker, msg_str[:200]
+        #     )
+        #     # DIAGNOSTIC: Log payload structure to understand nested format
+        #     if "msg" in msg and isinstance(msg["msg"], dict):
+        #         payload_keys = list(msg["msg"].keys())
+        #         logger.info(
+        #             "[WS-RAW-PAYLOAD] channel=%s ticker=%s payload_keys=%s",
+        #             channel, ticker, payload_keys
+        #         )
+        #         # Check for bids/asks in payload
+        #         has_bids = "bids" in msg["msg"]
+        #         has_asks = "asks" in msg["msg"]
+        #         has_delta_fp = "delta_fp" in msg["msg"]
+        #         logger.info(
+        #             "[WS-RAW-PAYLOAD] channel=%s ticker=%s has_bids=%s has_asks=%s has_delta_fp=%s",
+        #             channel, ticker, has_bids, has_asks, has_delta_fp
+        #         )
         
         # ORDERBOOK-SHAPE-ASSERTION: Validate message shape against canonical schema
         # This catches malformed messages before they reach LocalOrderbook
@@ -1638,10 +1644,11 @@ class KalshiMarketStateStore:
                     validate_orderbook_snapshot(msg)
                 elif "delta" in channel.lower():
                     validate_orderbook_delta(msg)
-                    logger.info(
-                        "[market-state] Delta validation passed for ticker=%s channel=%s",
-                        ticker, channel
-                    )
+                    # DISABLED: Excessive logging - 1 log line per delta (20K+ events = massive log volume)
+                    # logger.info(
+                    #     "[market-state] Delta validation passed for ticker=%s channel=%s",
+                    #     ticker, channel
+                    # )
         except KalshiOrderbookShapeError as e:
             logger.error(
                 f"[ORDERBOOK-SHAPE-ERROR] KalshiMarketStateStore rejecting malformed orderbook message: {e}. "
@@ -1655,45 +1662,60 @@ class KalshiMarketStateStore:
             )
             return None
         
-        # MONITORING: Track when orderbook_delta messages are being applied (DEBUG to avoid log spam)
+        # PERFORMANCE FIX: Selective delta throttling to prevent event loop overload
+        # Prediction markets are thin - we don't need ultra-high frequency updates
+        # 10/sec (100ms interval) provides fresh market data without overwhelming the event loop
         if "delta" in channel.lower():
-            # EVENT-STORM-FIX: Throttle delta processing to prevent event loop deadlock
             now = time.monotonic()
             last_update = self._last_delta_update.get(ticker, 0)
-            if now - last_update < self._min_delta_interval:
+            # Allow up to 10 deltas per second per ticker (100ms interval)
+            min_interval = 0.100  # 100ms = 10/sec
+            if now - last_update < min_interval:
                 # Skip this update - too frequent
                 return None
             self._last_delta_update[ticker] = now
-            logger.debug(f"[market-state] MONITOR: Applying orderbook_delta for ticker={ticker}")
 
-        # PRODUCTION AUDIT (Step 4): Scope validation on WS orderbook messages
+        # PERFORMANCE FIX: Cache scope validation results to avoid repeated checks
+        # Asset extraction and validation adds ~5-10ms per callback
+        # We'll validate once per ticker and cache the result
         if TRADING_SCOPE_AVAILABLE:
-            # Extract asset from ticker
-            asset = None
-            if ticker.startswith("KXBTC"):
-                asset = "BTC"
-            elif ticker.startswith("KXETH"):
-                asset = "ETH"
-            elif ticker.startswith("KXSOL"):
-                asset = "SOL"
-            elif ticker.startswith("KXXRP"):
-                asset = "XRP"
-            elif ticker.startswith("KXDOGE"):
-                asset = "DOGE"
-            
-            # Check if asset is allowed
-            if asset and not validate_asset_for_trading(asset):
-                logger.warning(
-                    f"[SCOPE_FILTER] WS orderbook rejected: asset={asset} not in production whitelist | ticker={ticker}"
-                )
-                return None
-            
-            # Check if ticker is 15m series
-            if not validate_series_ticker_for_trading(ticker):
-                logger.warning(
-                    f"[SCOPE_FILTER] WS orderbook rejected: ticker={ticker} not 15m timeframe"
-                )
-                return None
+            # Check cache first
+            if ticker in self._scope_validation_cache:
+                is_valid, reason = self._scope_validation_cache[ticker]
+                if not is_valid:
+                    return None
+            else:
+                # Extract asset from ticker
+                asset = None
+                if ticker.startswith("KXBTC"):
+                    asset = "BTC"
+                elif ticker.startswith("KXETH"):
+                    asset = "ETH"
+                elif ticker.startswith("KXSOL"):
+                    asset = "SOL"
+                elif ticker.startswith("KXXRP"):
+                    asset = "XRP"
+                elif ticker.startswith("KXDOGE"):
+                    asset = "DOGE"
+                
+                # Check if asset is allowed
+                if asset and not validate_asset_for_trading(asset):
+                    self._scope_validation_cache[ticker] = (False, "asset_not_whitelisted")
+                    logger.warning(
+                        f"[SCOPE_FILTER] WS orderbook rejected: asset={asset} not in production whitelist | ticker={ticker}"
+                    )
+                    return None
+                
+                # Check if ticker is 15m series
+                if not validate_series_ticker_for_trading(ticker):
+                    self._scope_validation_cache[ticker] = (False, "not_15m_series")
+                    logger.warning(
+                        f"[SCOPE_FILTER] WS orderbook rejected: ticker={ticker} not 15m timeframe"
+                    )
+                    return None
+                
+                # Cache valid result
+                self._scope_validation_cache[ticker] = (True, None)
 
         # Accept messages with empty channel if they have orderbook data (msg field with bids/asks or yes/no)
         # This handles cases where the channel field is missing but the payload is valid
@@ -1803,7 +1825,7 @@ class KalshiMarketStateStore:
                         if loop.is_running():
                             asyncio.create_task(self._sync_invariant_violation_with_rest(ticker))
                     except Exception as e:
-                        logger.debug("[market-state] Failed to schedule REST bootstrap for %s: %s", ticker, e)
+                        logger.error("[market-state] Failed to schedule REST bootstrap for %s: %s", ticker, e, exc_info=True)
             else:
                 # DIAGNOSTIC: Log successful enqueue
                 queue = self._delta_queues.get(ticker)
@@ -1862,6 +1884,7 @@ class KalshiMarketStateStore:
                 state.data_source = "WS_ORDERBOOK_SNAPSHOT_BOOTSTRAP"  # More specific: REST snapshot for WS bootstrap
                 state.data_quality = "GOOD"
                 state.book_initialized = True  # CRITICAL FIX: Mark as initialized after snapshot
+                state.executable = True  # CRITICAL FIX: Mark as executable when book is initialized via WS snapshot
                 
                 # CRITICAL FIX: Ensure transport_mode is set to WS for WS snapshots
                 # This aligns with the data_source being WS-based
@@ -1929,9 +1952,12 @@ class KalshiMarketStateStore:
             return None
 
         logger.info("[APPLY-REST-MARKET] ENTER ticker=%s thread=%s", ticker, threading.current_thread().name)
-        logger.info("[APPLY-REST-MARKET] BEFORE acquire state lock ticker=%s", ticker)
+        
+        # CRITICAL FIX: Use with statement for RLock (reentrant lock)
+        # RLock allows the same thread to acquire the lock multiple times, preventing deadlock
+        # when apply_rest_market calls _get_or_create which also acquires the lock
         with self._lock:
-            logger.info("[APPLY-REST-MARKET] AFTER acquire state lock ticker=%s", ticker)
+            logger.info("[APPLY-REST-MARKET] Acquired state lock ticker=%s", ticker)
             state = self._get_or_create(ticker)
 
             v24 = data.get("volume_24h")
@@ -1973,6 +1999,17 @@ class KalshiMarketStateStore:
             floor = data.get("floor_strike")
             if floor is not None:
                 state.floor_strike = float(floor)
+                # CRITICAL: Capture window strike price for 15-minute markets
+                # For 15m UP/DOWN markets, floor_strike is Kalshi's reference price at window start
+                # This is the authoritative source for strike price determination
+                if state.window_strike_price is None or state.window_strike_source == "":
+                    state.window_strike_price = float(floor)
+                    state.window_strike_source = "kalshi_floor_strike"
+                    state.window_strike_ts = time.time()
+                    logger.info(
+                        "[WINDOW-STRIKE-CAPTURE] ticker=%s floor_strike=%.2f captured as window_strike_price (source=kalshi_floor_strike)",
+                        ticker, float(floor)
+                    )
 
             cap = data.get("cap_strike")
             if cap is not None:
@@ -1982,6 +2019,38 @@ class KalshiMarketStateStore:
             spot = data.get("external_spot")
             if spot is not None:
                 state.external_spot = float(spot)
+                
+                # CRITICAL: 2026-07-01 - Update strike divergence tracking
+                # Calculate how far spot has moved from window strike price
+                if state.window_strike_price is not None and state.window_strike_price > 0:
+                    current_spot = float(spot)
+                    strike = state.window_strike_price
+                    divergence_pct = abs((current_spot - strike) / strike) * 100
+                    
+                    # Update current divergence
+                    state.current_divergence_pct = divergence_pct
+                    state.last_divergence_update_ts = time.time()
+                    
+                    # Track maximum divergence
+                    if divergence_pct > state.max_divergence_pct:
+                        state.max_divergence_pct = divergence_pct
+                    
+                    # Add to history (keep last 180 points = 15 minutes at 5-second cadence)
+                    state.strike_divergence_history.append((time.time(), divergence_pct, current_spot))
+                    if len(state.strike_divergence_history) > 180:
+                        state.strike_divergence_history = state.strike_divergence_history[-180:]
+                    
+                    # Divergence alerts (2026 best practice from Buildix)
+                    if divergence_pct >= 10.0:
+                        logger.warning(
+                            "[DIVERGENCE-CRITICAL] ticker=%s strike=%.2f spot=%.2f divergence=%.2f%% (threshold=10%%)",
+                            ticker, strike, current_spot, divergence_pct
+                        )
+                    elif divergence_pct >= 5.0:
+                        logger.info(
+                            "[DIVERGENCE-WARNING] ticker=%s strike=%.2f spot=%.2f divergence=%.2f%% (threshold=5%%)",
+                            ticker, strike, current_spot, divergence_pct
+                        )
 
             # REST updated_time cross-check: track exchange timestamp for lag detection
             updated_time = data.get("updated_time")
@@ -2009,7 +2078,7 @@ class KalshiMarketStateStore:
                                 ticker, lag
                             )
                 except Exception as e:
-                    logger.debug("[APPLY-REST-MARKET] Failed to parse updated_time for %s: %s", ticker, e)
+                    logger.warning("[APPLY-REST-MARKET] Failed to parse updated_time for %s: %s", ticker, e)
 
             state.last_rest_update_ts = time.monotonic()
             logger.info("[APPLY-REST-MARKET] BEFORE _recompute_seconds_to_expiry ticker=%s", ticker)
@@ -2038,8 +2107,8 @@ class KalshiMarketStateStore:
                 callbacks = list(self._subscribers[ticker])
             logger.info("[APPLY-REST-MARKET] Captured %d callbacks for ticker=%s", len(callbacks), ticker)
 
-        # Lock is now released - notify subscribers without re-acquiring lock
-        logger.info("[APPLY-REST-MARKET] RELEASED state lock, calling _notify_subscribers ticker=%s", ticker)
+        # Lock is now released by with statement - notify subscribers without re-acquiring lock
+        logger.info("[APPLY-REST-MARKET] Released state lock, calling _notify_subscribers ticker=%s", ticker)
         self._notify_subscribers(ticker, state, callbacks)
         logger.info("[APPLY-REST-MARKET] AFTER _notify_subscribers ticker=%s", ticker)
         logger.info("[APPLY-REST-MARKET] EXIT ticker=%s", ticker)
@@ -3826,14 +3895,18 @@ class KalshiMarketStateStore:
         # The catalog already filters to only allowed markets (BTC/ETH/SOL/XRP/DOGE 15m)
         # The state store should accept any ticker that the catalog feeds it
         # This ensures expiry data is persisted for all 5 markets
-        if ticker not in self._states:
-            self._states[ticker] = KalshiMarketState(ticker=ticker)
-            underlying, timeframe = _parse_market_ticker(ticker)
-            logger.info(
-                "[MARKET-STATE] book_registered ticker=%s underlying=%s timeframe=%s total_states=%d",
-                ticker, underlying, timeframe, len(self._states)
-            )
-        return self._states[ticker]
+        # RACE CONDITION FIX: Use global lock to prevent concurrent creation of same ticker state
+        # This method is called from multiple code paths with different locks held, so we need
+        # to ensure atomic check-and-create to avoid duplicate state objects
+        with self._global_lock:
+            if ticker not in self._states:
+                self._states[ticker] = KalshiMarketState(ticker=ticker)
+                underlying, timeframe = _parse_market_ticker(ticker)
+                logger.info(
+                    "[MARKET-STATE] book_registered ticker=%s underlying=%s timeframe=%s total_states=%d",
+                    ticker, underlying, timeframe, len(self._states)
+                )
+            return self._states[ticker]
 
     def _get_or_create_unified(self, ticker: str) -> UnifiedMarketState:
         """Return the ``UnifiedMarketState`` for *ticker*, creating it if absent.
@@ -4298,7 +4371,7 @@ def _recompute_seconds_to_expiry_fallback(state: KalshiMarketState) -> None:
         if expiry_dt.tzinfo is None:
             expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
         now_dt = datetime.now(timezone.utc)
-        state.seconds_to_expiry = max(0.0, (expiry_dt - now_dt).total_seconds())
+        state.seconds_to_expiry = (expiry_dt - now_dt).total_seconds()
     except (ValueError, TypeError) as exc:
         # P0 FIX: Set to 0 (already expired) instead of None to prevent downstream issues
         state.seconds_to_expiry = 0.0

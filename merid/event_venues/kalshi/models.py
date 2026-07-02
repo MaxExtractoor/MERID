@@ -7,7 +7,7 @@ from utils.logger import get_logger
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from enum import Enum
 from utils.logger import get_logger
 
@@ -372,9 +372,24 @@ class KalshiMarketState:
     # NEW: Underlying asset and strike info (from catalog REST data)
     underlying: Optional[str] = None  # BTC, ETH, SOL, XRP, DOGE, etc.
     strike_price: Optional[float] = None  # Single strike for binary markets
-    floor_strike: Optional[float] = None  # Floor for range markets
+    floor_strike: Optional[float] = None  # Floor for range markets (Kalshi's reference for 15m UP/DOWN)
     cap_strike: Optional[float] = None    # Cap for range markets
     external_spot: Optional[float] = None  # CF Benchmarks RTI / external feed
+    
+    # Dual-source strike price capture for 15-minute markets
+    window_strike_price: Optional[float] = None  # Captured strike at window start (primary: floor_strike)
+    window_strike_source: str = ""  # Source: "kalshi_floor_strike", "candle_open", "spot_fallback"
+    window_strike_ts: float = 0.0  # Timestamp when strike was captured
+    candle_open_price: Optional[float] = None  # 15-minute candle open price (secondary validation)
+    candle_open_ts: float = 0.0  # Timestamp when candle open was captured
+    
+    # CRITICAL: 2026-07-01 - Continuous strike divergence tracking for 15-minute markets
+    # Tracks how far spot price moves from strike throughout the 15-minute window
+    # Best practice: Real-time monitoring for exit decisions and risk management
+    strike_divergence_history: List[Tuple[float, float, float]] = field(default_factory=list)  # (timestamp, divergence_pct, spot_price)
+    max_divergence_pct: float = 0.0  # Maximum divergence observed during window
+    current_divergence_pct: float = 0.0  # Current divergence from strike
+    last_divergence_update_ts: float = 0.0  # Timestamp of last divergence calculation
 
     # Book-owned fields (dynamic from WS orderbook)
     book_initialized: bool = False
