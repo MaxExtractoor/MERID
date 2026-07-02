@@ -83,7 +83,7 @@ class StrategyAgent(AgentInterface):
     
     DEFAULT_RISK_PER_TRADE = 0.02
     MAX_POSITION_SIZE = 0.10
-    MIN_REWARD_RISK_RATIO = 2.0
+    MIN_REWARD_RISK_RATIO = 2.5  # 2026 OPTIMIZATION: Increased from 2.0 to 2.5 (industry standard)
     
     def __init__(self) -> None:
         """Initialize strategy agent."""
