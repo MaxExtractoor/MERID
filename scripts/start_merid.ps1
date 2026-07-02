@@ -137,7 +137,7 @@ Write-Status "══════════════════════
 
 # Start uvicorn with all output going to console
 try {
-    python -m uvicorn web.main:app `
+    python -m uvicorn web.main_15m_lean:app `
         --host 0.0.0.0 `
         --port $Port `
         --log-level $LogLevel `

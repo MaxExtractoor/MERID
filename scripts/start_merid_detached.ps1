@@ -80,7 +80,7 @@ if ($FreshStart)     { $env:MERID_FRESH_START = "1" }     else { $env:MERID_FRES
 # (recommended for 24/7 because the reloader spawns a child watcher that gets
 # its own console and complicates the SetConsoleCtrlHandler story).
 $uvicornArgs = @(
-    "-m", "uvicorn", "web.main:app",
+    "-m", "uvicorn", "web.main_15m_lean:app",
     "--host", "0.0.0.0",
     "--port", "$Port",
     "--log-level", $LogLevel,

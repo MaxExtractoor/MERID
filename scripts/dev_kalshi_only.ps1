@@ -75,4 +75,4 @@ Write-Host "[pre-flight] OK" -ForegroundColor Green
 Write-Host ""
 
 # Start the server
-py -m uvicorn web.main:app --host 0.0.0.0 --port $Port --reload
+py -m uvicorn web.main_15m_lean:app --host 0.0.0.0 --port $Port --reload

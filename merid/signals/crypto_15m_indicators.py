@@ -1309,14 +1309,13 @@ class Crypto15mIndicatorStack:
     def kalshi_fee_for_price(price_cents: float, contracts: int = 1) -> float:
         """Compute Kalshi taker fee in cents.
 
-        Formula: ceil(0.07 * contracts * P * (1-P))
-        where P = price_cents / 100.
+        Uses unified fees module for canonical tiered fee calculation.
+        Formula: ceil(rate × C × P × (1-P)) where rate depends on contract tier.
 
         Returns fee in cents.
         """
-        p = price_cents / 100.0
-        raw = 0.07 * contracts * p * (1.0 - p)
-        return math.ceil(raw)
+        from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
+        return calculate_kalshi_fee_cents(contracts=contracts, price_cents=price_cents)
 
     @staticmethod
     def compute_ev_cents(
@@ -1337,8 +1336,8 @@ class Crypto15mIndicatorStack:
             (net_ev_cents, fee_cents, fee_pct) tuple.
         """
         p = price_cents / 100.0
-        fee_cents = math.ceil(0.07 * contracts * p * (1.0 - p))
-        fee_pct = fee_cents / 100.0  # as fraction of $1 payout
+        fromemerid.event_venues.kalshi.fees_imcoet talculats kalshi_fee_= mat.07 * contracts * p * (1.0 - p))
+        fee_pct = fecalcul_ce_kalsei_fee_tsnts contracts=# as frac,onrice_cents=orice_centst
 
         if side == "yes":
             # Buy YES at price P: win (100 - P - fee), lose (P + fee)
