@@ -221,7 +221,8 @@ class OrchestratorAgentManager:
             from merid.event_venues.kalshi.types import BalanceSuccess
             from core.price_feed import get_price_feed
             from merid.event_venues.kalshi.risk_bus import get_risk_bus
-            from merid.portfolio.manager import get_portfolio_manager
+            # REMOVED: merid.portfolio.manager import (test_portfolio_optimizer_yaml_has_no_live_importer)
+            # Portfolio manager is not needed for 15m crypto production stack
             
             _profile = __import__("os").environ.get("MERID_PROFILE", "").lower()
             logger.info(f"[ORCHESTRATOR-CANONICAL] Crypto15MLane startup for profile={_profile}")
@@ -240,7 +241,7 @@ class OrchestratorAgentManager:
                     _kalshi_client = get_kalshi_client()
                     _price_feed = get_price_feed()
                     _risk_bus = get_risk_bus()
-                    _portfolio = get_portfolio_manager()
+                    # REMOVED: _portfolio = get_portfolio_manager() (not needed for 15m crypto)
                     _lane_control = None  # Optional, can be None
                     
                     logger.info("[LANE-STARTUP] Calling build_crypto_lanes()...")
@@ -248,7 +249,7 @@ class OrchestratorAgentManager:
                         kalshi_client=_kalshi_client,
                         price_feed=_price_feed,
                         risk_bus=_risk_bus,
-                        portfolio=_portfolio,
+                        portfolio=None,  # Not needed for 15m crypto
                         lane_control=_lane_control,
                     )
                     logger.info("[LANE-STARTUP] ✅ Crypto lanes built successfully")
