@@ -483,10 +483,9 @@ class _LocalBankrollManager:
 
     @staticmethod
     def kalshi_fee_cents(contracts: int, price_cents: int) -> int:
-        """Compute Kalshi taker fee: ceil(0.07 * C * P * (1-P))."""
-        p = price_cents / 100.0
-        raw = 0.07 * contracts * p * (1.0 - p)
-        return max(1, math.ceil(raw * 100))
+        """Compute Kalshi taker fee using unified fees module."""
+        from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
+        return calculate_kalshi_fee_cents(contracts=contracts, price_cents=price_cents)
 
     # ── Anti-churn hysteresis ──────────────────────────────────────
 

@@ -11,12 +11,17 @@ from merid.risk.agent_metrics import (
     PerformanceSnapshot,
     get_agent_metrics_tracker,
 )
-from merid.risk.capital_engine import (
-    AssetCapitalConfig,
-    CapitalEngine,
-    CapitalSnapshot,
-    RiskBudget,
-)
+try:
+    from merid.risk.capital_engine import (
+        AssetCapitalConfig,
+        CapitalEngine,
+        CapitalSnapshot,
+        RiskBudget,
+    )
+except ImportError:
+    # capital_engine module may not exist in all deployments
+    # This is a legacy component that may have been archived
+    pass
 from merid.risk.kill_switches import (
     KillSwitchEvent,
     KillSwitchReason,

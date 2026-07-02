@@ -153,7 +153,7 @@ class RiskManager:
         self.max_notional_per_order = 50000.0
         self.max_position_per_symbol = 1000.0
         self.max_daily_loss = 10000.0
-        self.margin_requirement = 0.5  # 50% margin requirement
+        self.margin_requirement = float(os.getenv("SIMULATOR_MARGIN_REQUIREMENT", "0.5"))  # 50% margin requirement (configurable)
     
     def check_order_risk(self, account: Account, order: Order, market_data: Optional[MarketData] = None) -> tuple[bool, str]:
         """Check if order passes risk rules."""

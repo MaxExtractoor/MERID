@@ -141,7 +141,7 @@ class MultiAgentRiskControls:
             dimension="firm",
             entity="all",
             max_notional=1000000.0,
-            max_leverage=5.0,
+            max_leverage=3.0,  # STANDARDIZED: Production leverage limit (matches trading/execution.py, risk/risk_guard.py)
             max_concentration_pct=0.30,
         )
         
@@ -150,7 +150,7 @@ class MultiAgentRiskControls:
             dimension="asset_class",
             entity="crypto",
             max_notional=500000.0,
-            max_leverage=3.0,
+            max_leverage=2.0,  # STANDARDIZED: Production leverage limit (matches merid/risk/position_sizing.py)
             max_concentration_pct=0.50,
         )
         

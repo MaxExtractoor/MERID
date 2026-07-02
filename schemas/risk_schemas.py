@@ -116,7 +116,7 @@ class PositionRisk:
     max_concentration_pct: float = 25.0
     
     leverage_used: int = 1
-    max_leverage: int = 10
+    max_leverage: int = 3  # STANDARDIZED: Production leverage limit (matches trading/execution.py, risk/risk_guard.py)
     
     margin_required: float = 0.0
     available_margin: float = 0.0

@@ -99,9 +99,17 @@ class PositionSizer:
         # Portfolio state
         self.current_positions: Dict[str, float] = {}  # symbol -> position_size
         self.portfolio_value: float = config.get("portfolio_value", 1000000.0)
+        self.peak_portfolio_value: float = self.portfolio_value  # Track peak for drawdown calculation
         
         # Sizing history
         self.sizing_history: deque = deque(maxlen=1000)
+        
+        # Drawdown tracking for position sizing adjustment
+        self.drawdown_thresholds = config.get("drawdown_thresholds", {
+            "warning": 0.05,    # 5% drawdown - reduce to 80% size
+            "critical": 0.10,   # 10% drawdown - reduce to 50% size
+            "severe": 0.15      # 15% drawdown - reduce to 25% size
+        })
         
         # Sizing methods
         self.sizing_methods = config.get("sizing_methods", [
@@ -148,6 +156,46 @@ class PositionSizer:
         except Exception as e:
             logger.error(f"Failed to update correlation matrix: {e}")
             return False
+    
+    def update_portfolio_value(self, new_value: float) -> None:
+        """Update portfolio value and track peak for drawdown calculation."""
+        self.portfolio_value = new_value
+        if new_value > self.peak_portfolio_value:
+            self.peak_portfolio_value = new_value
+            logger.debug(f"Updated peak portfolio value to ${self.peak_portfolio_value:.2f}")
+    
+    def get_current_drawdown(self) -> float:
+        """Calculate current drawdown as percentage from peak."""
+        if self.peak_portfolio_value <= 0:
+            return 0.0
+        drawdown = (self.peak_portfolio_value - self.portfolio_value) / self.peak_portfolio_value
+        return max(0.0, drawdown)
+    
+    def get_drawdown_size_multiplier(self) -> float:
+        """Get position size multiplier based on current drawdown.
+        
+        Returns:
+            Multiplier between 0.0 and 1.0 based on drawdown thresholds:
+            - < 5% drawdown: 1.0 (full size)
+            - 5-10% drawdown: 0.8 (80% size)
+            - 10-15% drawdown: 0.5 (50% size)
+            - > 15% drawdown: 0.25 (25% size)
+        """
+        drawdown = self.get_current_drawdown()
+        
+        if drawdown < self.drawdown_thresholds["warning"]:
+            multiplier = 1.0
+        elif drawdown < self.drawdown_thresholds["critical"]:
+            multiplier = 0.8
+        elif drawdown < self.drawdown_thresholds["severe"]:
+            multiplier = 0.5
+        else:
+            multiplier = 0.25
+        
+        logger.debug(
+            f"Drawdown-adjusted sizing: drawdown={drawdown:.2%}, multiplier={multiplier:.2f}"
+        )
+        return multiplier
     
     async def calculate_position_size(self, symbol: str, method: str = "volatility_based",
                                     signal_strength: float = 1.0,
@@ -196,7 +244,7 @@ class PositionSizer:
     
     async def _volatility_based_sizing(self, position: Position, signal_strength: float,
                                      portfolio_context: Optional[Dict[str, Any]]) -> PositionSizingResult:
-        """Volatility-based position sizing."""
+        """Volatility-based position sizing with drawdown adjustment."""
         try:
             # Calculate ATR (simplified as 2 * daily volatility)
             atr = 2 * position.volatility * position.current_price
@@ -219,6 +267,11 @@ class PositionSizer:
             
             # Apply position limits
             position_size = np.clip(position_size, position.min_position_size, position.max_position_size)
+            
+            # CRITICAL: Apply drawdown-adjusted sizing multiplier
+            # This reduces position sizes during drawdowns to protect capital
+            drawdown_multiplier = self.get_drawdown_size_multiplier()
+            position_size = position_size * drawdown_multiplier
 
             # Recalculate shares — ensure at least 1 when a non-zero position is allocated
             if position.current_price > 0 and position_size > 0:
@@ -269,9 +322,29 @@ class PositionSizer:
     
     async def _kelly_criterion_sizing(self, position: Position, signal_strength: float,
                                    portfolio_context: Optional[Dict[str, Any]]) -> PositionSizingResult:
-        """Kelly criterion position sizing."""
+        """Kelly criterion position sizing.
+        
+        IMPORTANT: This is a HEURISTIC APPROXIMATION, not true Kelly criterion.
+        
+        True Kelly criterion requires:
+        - Historical win/loss ratio from actual trade data
+        - Historical average win and loss amounts
+        - Statistical estimation of edge
+        
+        This implementation uses simplified assumptions:
+        - Win rate estimated as 50% + (signal_strength * 30%)
+        - Average win estimated as 3x volatility * price
+        - Average loss estimated as 1x volatility * price
+        
+        These assumptions are NOT based on historical performance data and may
+        significantly overestimate or underestimate optimal position sizes.
+        
+        For production use, replace with true Kelly based on historical trade
+        statistics, or use volatility-based sizing instead.
+        """
         try:
             # Expected return (simplified - based on signal strength)
+            # NOTE: This is a heuristic assumption, not statistically derived
             win_rate = 0.5 + (signal_strength * 0.3)  # 50% to 80% win rate
             avg_win = position.volatility * position.current_price * 3  # 3x volatility
             avg_loss = position.volatility * position.current_price * 1  # 1x volatility
@@ -288,6 +361,10 @@ class PositionSizer:
             # Position size
             position_size = kelly_fraction * signal_strength
             position_size = np.clip(position_size, position.min_position_size, position.max_position_size)
+            
+            # CRITICAL: Apply drawdown-adjusted sizing multiplier
+            drawdown_multiplier = self.get_drawdown_size_multiplier()
+            position_size = position_size * drawdown_multiplier
             
             # Calculate shares and value
             position_value = position_size * self.portfolio_value
@@ -348,6 +425,10 @@ class PositionSizer:
             # Calculate position size
             position_size = fixed_fraction * volatility_adjustment * signal_strength
             position_size = np.clip(position_size, position.min_position_size, position.max_position_size)
+            
+            # CRITICAL: Apply drawdown-adjusted sizing multiplier
+            drawdown_multiplier = self.get_drawdown_size_multiplier()
+            position_size = position_size * drawdown_multiplier
             
             # Calculate shares and value
             position_value = position_size * self.portfolio_value
@@ -411,6 +492,10 @@ class PositionSizer:
                 return None
             position_size = risk_per_position / vol_signal
             position_size = np.clip(position_size, position.min_position_size, position.max_position_size)
+            
+            # CRITICAL: Apply drawdown-adjusted sizing multiplier
+            drawdown_multiplier = self.get_drawdown_size_multiplier()
+            position_size = position_size * drawdown_multiplier
             
             # Calculate shares and value
             position_value = position_size * self.portfolio_value
@@ -499,8 +584,12 @@ class PositionSizer:
                                 idx_i = list(self.positions.keys()).index(symbols[i])
                                 idx_j = list(self.positions.keys()).index(symbols[j])
                                 corr = self.correlation_matrix[idx_i, idx_j]
-                            except (ValueError, IndexError):
-                                logger.debug("silent catch in position_sizing:492")
+                            except (ValueError, IndexError) as e:
+                                logger.warning(
+                                    "[POSITION-SIZING] Correlation matrix lookup failed for %s-%s: %s. "
+                                    "Using default correlation=0. This may underestimate portfolio risk.",
+                                    symbols[i], symbols[j], e
+                                )
                             
                             correlation_risk += position_risks[symbols[i]] * position_risks[symbols[j]] * corr
             

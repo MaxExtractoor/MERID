@@ -122,6 +122,16 @@ class ExecutionCoordinator:
                 logger.info(f"Skipping execution for FLAT decision on {decision.symbol}")
                 return
             
+            # Handle REDUCE/CLOSE decisions by converting to sell orders
+            # REDUCE: partial position reduction (sell 50% of current position)
+            # CLOSE: full position exit (sell 100% of current position)
+            if decision.decision in (OpinionDirection.REDUCE, OpinionDirection.CLOSE):
+                logger.info(f"Handling {decision.decision.value} decision for {decision.symbol}")
+                # These will be handled by the position monitor's exit logic
+                # For now, we skip execution and let the position monitor handle TP/SL
+                # In the future, we could wire this to trigger immediate exit orders
+                return
+            
             # Create trade intent
             intent = await self._create_trade_intent(decision)
             

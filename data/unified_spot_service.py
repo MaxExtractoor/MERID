@@ -36,6 +36,8 @@ import asyncio
 import threading
 import time
 import requests
+import hmac
+import base64
 from typing import Optional, Dict, Any, Union
 from dataclasses import dataclass
 
@@ -43,6 +45,60 @@ from utils.logger import get_logger
 from data.spot_sla_config import get_spot_max_age
 
 logger = get_logger("data.unified_spot_service")
+
+# =============================================================================
+# Coinbase Exchange API Authentication Helpers
+# =============================================================================
+
+def _get_coinbase_credentials() -> tuple[Optional[str], Optional[str]]:
+    """Get Coinbase Exchange API credentials from environment.
+    
+    Returns:
+        Tuple of (api_key, api_secret) or (None, None) if not available
+    """
+    try:
+        from merid.coinbase_env import coinbase_api_key, coinbase_api_secret
+        api_key = coinbase_api_key()
+        api_secret = coinbase_api_secret()
+        return api_key, api_secret
+    except Exception as e:
+        logger.warning(f"[UNIFIED-SPOT] Failed to get Coinbase credentials: {e}")
+        return None, None
+
+def _generate_coinbase_signature(
+    timestamp: str,
+    method: str,
+    request_path: str,
+    body: str,
+    api_secret: str
+) -> str:
+    """Generate Coinbase Exchange API HMAC signature.
+    
+    Args:
+        timestamp: Unix timestamp in seconds
+        method: HTTP method (e.g., "GET")
+        request_path: API endpoint path (e.g., "/products/BTC-USD/candles")
+        body: Request body (empty string for GET requests)
+        api_secret: Coinbase API secret key
+    
+    Returns:
+        Base64-encoded HMAC signature
+    """
+    # Create prehash string: timestamp + method + requestPath + body
+    message = timestamp + method + request_path + body
+    
+    # Decode base64 secret
+    secret_bytes = base64.b64decode(api_secret)
+    
+    # Create HMAC-SHA256 signature
+    signature = hmac.new(
+        secret_bytes,
+        message.encode('utf-8'),
+        digestmod='sha256'
+    ).digest()
+    
+    # Base64 encode the signature
+    return base64.b64encode(signature).decode('utf-8')
 
 # =============================================================================
 # Data Classes
@@ -55,6 +111,12 @@ class SpotPrice:
     timestamp: int  # milliseconds since epoch
     source: str
     confidence: float = 1.0  # Data quality confidence score (default 1.0 for high quality)
+    # OHLC data for ADX/ATR calculations
+    open: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    # Volume data for volume confirmation filter (2026 best practice)
+    volume: Optional[float] = None
 
 @dataclass
 class SpotError:
@@ -163,7 +225,16 @@ class UnifiedSpotService:
         logger.info(f"[UNIFIED-SPOT] Refresh complete: {success_count}/{len(self.SUPPORTED_ASSETS)} successful")
     
     async def _fetch_asset(self, asset: str) -> bool:
-        """Fetch single asset from Coinbase API."""
+        """Fetch single asset data from Coinbase Exchange API.
+        
+        Priority order:
+        1. Coinbase Exchange API (authenticated) - true OHLC data for ATR/ADX
+        2. Coinbase Public Ticker API - real-time price for velocity calculation
+        3. Coinbase Public Spot API - fallback with OHLC proxy
+        
+        CRITICAL FIX: Use ticker endpoint for real-time price updates (every 5s) for velocity calculation.
+        Use OHLC candles for ATR/ADX calculation.
+        """
         pair_map = {
             "BTC": "BTC-USD",
             "ETH": "ETH-USD",
@@ -177,43 +248,191 @@ class UnifiedSpotService:
             logger.error(f"[UNIFIED-SPOT] Unsupported asset: {asset}")
             return False
         
-        url = f"https://api.coinbase.com/v2/prices/{pair}/spot"
+        # Try authenticated Exchange API first (true OHLC data for ATR/ADX)
+        api_key, api_secret = _get_coinbase_credentials()
+        ohlc_data = None
+        if api_key and api_secret:
+            try:
+                ohlc_data = await self._fetch_ohlc_authenticated(pair, api_key, api_secret)
+                if ohlc_data:
+                    volume = ohlc_data.get('volume', 0)
+                    logger.info(f"[UNIFIED-SPOT] Fetched {asset} OHLC: O={ohlc_data['open']:.8f} H={ohlc_data['high']:.8f} L={ohlc_data['low']:.8f} C={ohlc_data['close']:.8f} V={volume:.2f}")
+            except Exception as e:
+                logger.warning(f"[UNIFIED-SPOT] Authenticated OHLC fetch failed for {asset}, falling back to ticker: {e}")
         
+        # Always try ticker endpoint for real-time price (more frequent than candles)
+        ticker_data = None
         try:
-            # Use requests in thread pool to avoid blocking
-            loop = asyncio.get_running_loop()
-            
-            def fetch_sync():
-                response = requests.get(url, timeout=5.0)
-                if response.status_code != 200:
-                    raise Exception(f"HTTP {response.status_code}")
-                data = response.json()
-                price = float(data['data']['amount'])
-                return price
-            
-            price = await loop.run_in_executor(None, fetch_sync)
-            
-            # Update cache
-            with self._cache_lock:
-                self._cache[asset] = {
-                    'price': price,
-                    'timestamp': int(time.time() * 1000),
-                    'source': 'coinbase_public'
-                }
-                # Add to price history for volatility regime detection
-                if asset not in self._price_history:
-                    self._price_history[asset] = []
-                self._price_history[asset].append((int(time.time() * 1000), price))
-                # Trim history to max length
-                if len(self._price_history[asset]) > self._max_history_length:
-                    self._price_history[asset] = self._price_history[asset][-self._max_history_length:]
-            
-            logger.info(f"[UNIFIED-SPOT] Fetched {asset}: ${price}")
+            ticker_data = await self._fetch_ticker_public(pair)
+            if ticker_data:
+                logger.info(f"[UNIFIED-SPOT] Fetched {asset} ticker: ${ticker_data['price']:.8f}")
+        except Exception as e:
+            logger.warning(f"[UNIFIED-SPOT] Ticker fetch failed for {asset}: {e}")
+        
+        # Combine data: use ticker price for velocity, OHLC for ATR/ADX
+        if ticker_data:
+            # Use ticker price as close, use OHLC for open/high/low if available
+            final_data = {
+                'open': ohlc_data['open'] if ohlc_data else ticker_data['price'],
+                'high': ohlc_data['high'] if ohlc_data else ticker_data['price'],
+                'low': ohlc_data['low'] if ohlc_data else ticker_data['price'],
+                'close': ticker_data['price']  # Use ticker price for velocity calculation
+            }
+            source = 'coinbase_ticker_hybrid' if ohlc_data else 'coinbase_ticker'
+            self._update_cache(asset, final_data, source=source)
             return True
-            
+        
+        # Fallback to OHLC-only if ticker failed
+        if ohlc_data:
+            self._update_cache(asset, ohlc_data, source='coinbase_exchange_authenticated')
+            return True
+        
+        # Final fallback to public spot price endpoint (OHLC proxy)
+        try:
+            ohlc_data = await self._fetch_spot_price_fallback_async(pair)
+            if ohlc_data:
+                self._update_cache(asset, ohlc_data, source='coinbase_public')
+                logger.info(f"[UNIFIED-SPOT] Fetched {asset}: ${ohlc_data['close']:.8f} (OHLC proxy: O=H=L=C)")
+                return True
         except Exception as e:
             logger.error(f"[UNIFIED-SPOT] Failed to fetch {asset}: {e}")
             return False
+        
+        return False
+    
+    async def _fetch_ohlc_authenticated(self, pair: str, api_key: str, api_secret: str) -> Optional[dict]:
+        """Fetch OHLC data from Coinbase Exchange API (authenticated).
+        
+        Args:
+            pair: Trading pair (e.g., "BTC-USD")
+            api_key: Coinbase API key
+            api_secret: Coinbase API secret
+        
+        Returns:
+            Dict with 'open', 'high', 'low', 'close' or None on failure
+        """
+        # Coinbase Exchange API endpoint for candles
+        url = f"https://api.exchange.coinbase.com/products/{pair}/candles"
+        
+        # Request parameters for 60-second candles (more frequent price updates for velocity calculation)
+        params = {
+            'granularity': '60',  # 60 seconds in seconds (1 minute)
+            'limit': 1  # Only need the most recent candle
+        }
+        
+        # Generate timestamp and signature
+        timestamp = str(int(time.time()))
+        request_path = f"/products/{pair}/candles?granularity=60&limit=1"
+        signature = _generate_coinbase_signature(timestamp, "GET", request_path, "", api_secret)
+        
+        # Headers for authenticated request
+        headers = {
+            'CB-ACCESS-KEY': api_key,
+            'CB-ACCESS-SIGN': signature,
+            'CB-ACCESS-TIMESTAMP': timestamp,
+            'Content-Type': 'application/json'
+        }
+        
+        # Use requests in thread pool to avoid blocking
+        loop = asyncio.get_running_loop()
+        
+        def fetch_sync():
+            response = requests.get(url, params=params, headers=headers, timeout=5.0)
+            if response.status_code != 200:
+                raise Exception(f"HTTP {response.status_code}: {response.text}")
+            data = response.json()
+            if not data or not isinstance(data, list) or len(data) == 0:
+                raise Exception("No candles data returned")
+            
+            # Candle format: [timestamp, low, high, open, close, volume]
+            candle = data[0]
+            return {
+                'open': float(candle[3]),
+                'high': float(candle[2]),
+                'low': float(candle[1]),
+                'close': float(candle[4]),
+                'volume': float(candle[5]) if len(candle) > 5 else None  # Volume for volume confirmation filter
+            }
+        
+        return await loop.run_in_executor(None, fetch_sync)
+    
+    async def _fetch_ticker_public(self, pair: str) -> Optional[dict]:
+        """Fetch ticker data from Coinbase public API (real-time price).
+        
+        Args:
+            pair: Trading pair (e.g., "BTC-USD")
+        
+        Returns:
+            Dict with 'price' or None on failure
+        """
+        # Use Coinbase Exchange API ticker endpoint (public, no auth required)
+        ticker_url = f"https://api.exchange.coinbase.com/products/{pair}/ticker"
+        
+        loop = asyncio.get_running_loop()
+        
+        def fetch_sync():
+            response = requests.get(ticker_url, timeout=5.0)
+            if response.status_code != 200:
+                raise Exception(f"HTTP {response.status_code}: {response.text}")
+            data = response.json()
+            price = float(data['price'])
+            return {'price': price}
+        
+        return await loop.run_in_executor(None, fetch_sync)
+    
+    async def _fetch_spot_price_fallback_async(self, pair: str) -> Optional[dict]:
+        """Fetch spot price from public API as fallback (async wrapper).
+        
+        Args:
+            pair: Trading pair (e.g., "BTC-USD")
+        
+        Returns:
+            Dict with 'open', 'high', 'low', 'close' (all same as close) or None on failure
+        """
+        url = f"https://api.coinbase.com/v2/prices/{pair}/spot"
+        
+        loop = asyncio.get_running_loop()
+        
+        def fetch_sync():
+            response = requests.get(url, timeout=5.0)
+            if response.status_code != 200:
+                raise Exception(f"HTTP {response.status_code}")
+            data = response.json()
+            close_price = float(data['data']['amount'])
+            return {
+                'open': close_price,
+                'high': close_price,
+                'low': close_price,
+                'close': close_price
+            }
+        
+        return await loop.run_in_executor(None, fetch_sync)
+    
+    def _update_cache(self, asset: str, ohlc_data: dict, source: str):
+        """Update cache with OHLC data.
+        
+        Args:
+            asset: Asset symbol (e.g., "BTC")
+            ohlc_data: Dict with 'open', 'high', 'low', 'close', 'volume'
+            source: Data source identifier
+        """
+        with self._cache_lock:
+            self._cache[asset] = {
+                'price': ohlc_data['close'],
+                'timestamp': int(time.time() * 1000),
+                'source': source,
+                'open': ohlc_data['open'],
+                'high': ohlc_data['high'],
+                'low': ohlc_data['low'],
+                'volume': ohlc_data.get('volume')  # Volume for volume confirmation filter
+            }
+            # Add to price history for volatility regime detection
+            if asset not in self._price_history:
+                self._price_history[asset] = []
+            self._price_history[asset].append((int(time.time() * 1000), ohlc_data['close']))
+            # Trim history to max length
+            if len(self._price_history[asset]) > self._max_history_length:
+                self._price_history[asset] = self._price_history[asset][-self._max_history_length:]
 
     def get(self, asset: str) -> Union[SpotPrice, SpotError]:
         """Get cached spot price for asset with freshness check.
@@ -248,7 +467,11 @@ class UnifiedSpotService:
             price=data['price'],
             timestamp=data['timestamp'],
             source=data['source'],
-            confidence=1.0  # High confidence for fresh data
+            confidence=1.0,  # High confidence for fresh data
+            open=data.get('open'),
+            high=data.get('high'),
+            low=data.get('low'),
+            volume=data.get('volume')  # Volume for volume confirmation filter
         )
 
     async def get_spot(self, asset: str) -> Optional[Any]:
