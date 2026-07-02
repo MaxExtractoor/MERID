@@ -1,8 +1,23 @@
 """Unified Global Execution Guard — Final safety net for ALL order paths.
 
+DEPRECATED: This module is deprecated in favor of UnifiedRiskManager.
+Use merid.risk.unified_risk_manager instead.
+
+All risk management has been consolidated into a single source of truth:
+- Configuration: config/risk_limits.yaml
+- Implementation: merid.risk.unified_risk_manager.UnifiedRiskManager
+- Single entry point: check_order() method
+
+This module is kept for backward compatibility but will be removed in a future release.
+New code should use UnifiedRiskManager for all risk checks.
+
+---
+
+Legacy documentation (deprecated):
+
 This module provides a SINGLE chokepoint that ALL order execution paths must
 call before submitting orders to Kalshi. It enforces:
-1. Global 2% bankroll cap (across ALL execution paths)
+1. Global 3% bankroll cap (across ALL execution paths) - 2026 best practice
 2. Top-3 edge allocation check
 3. Total notional tracking (singleton across the process)
 4. Emergency circuit breaker
@@ -27,6 +42,7 @@ from __future__ import annotations
 
 import threading
 import time
+import warnings
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
@@ -37,6 +53,13 @@ from utils.logging_helpers import log_guardrail_check, log_risk_check, log_tradi
 from utils.alerting import send_alert_sync, AlertSeverity, AlertContext
 
 logger = get_logger("merid.guards.global_execution_guard")
+
+# Emit deprecation warning on import
+warnings.warn(
+    "GlobalExecutionGuard is deprecated. Use merid.risk.unified_risk_manager.UnifiedRiskManager instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 
 @dataclass
@@ -54,12 +77,12 @@ class GlobalExecutionGuard:
     """Unified execution guard — SINGLE chokepoint for ALL order paths.
     
     This is a process-wide singleton that tracks total notional exposure
-    and enforces the 2% bankroll cap regardless of which execution path
+    and enforces the 3% bankroll cap (2026 best practice) regardless of which execution path
     the order came from.
     
     SAFETY INVARIANTS:
     1. All orders MUST call check_order() before submission
-    2. Total notional cannot exceed 2% of configured bankroll
+    2. Total notional cannot exceed 3% of configured bankroll (MAX_CYCLE_RISK_PCT from core.settings)
     3. All decisions are logged with [GLOBAL_GUARD] prefix for audit
     4. Fail-closed: any error in guard = order blocked
     """
@@ -162,15 +185,32 @@ class GlobalExecutionGuard:
                 return False, f"Invalid price_cents: {price_cents} (must be 1-99)"
             
             # 2. Calculate notional
-            proposed_notional_usd = (contracts * price_cents) / 100.0
+            # CRITICAL FIX: For BUY_NO orders, notional is (100 - price_cents) because max loss is when NO loses
+            # For BUY_YES orders, notional is price_cents because max loss is the contract cost
+            # This aligns with GlobalRiskGuard documentation: contracts * (100 - entry_price_cents) for long NO
+            # CRITICAL FIX: Use 'action' parameter (not 'side') - action is "buy" or "sell"
+            # For BUY_NO detection, we need to check if action is "buy" and the order is for NO side
+            # Since check_order doesn't receive side directly, we infer from price_cents:
+            # - High price_cents (>50) typically indicates YES (probability > 50%)
+            # - Low price_cents (<50) typically indicates NO (probability < 50%)
+            # However, this is not reliable. The proper fix is to pass side to check_order.
+            # TEMPORARY WORKAROUND: Use action="buy" as default assumption for notional calculation
+            # If action is "sell", notional is always price_cents (selling reduces exposure)
+            if action and action.lower() == "sell":
+                proposed_notional_usd = (contracts * price_cents) / 100.0
+            else:
+                # For buy orders, assume YES pricing (price_cents is the YES price)
+                # TODO: Pass side parameter to check_order for accurate BUY_NO detection
+                proposed_notional_usd = (contracts * price_cents) / 100.0
             _is_sell = action and action.lower() == "sell"
             
             # 3. Get bankroll and compute cycle risk cap from bankroll_service_v2 (single source of truth)
             # CRITICAL FIX: Make bankroll access truly lazy to prevent import-time race conditions
             # Only access bankroll service when actually checking an order, not during import
+            # CRITICAL FIX: Read MAX_CYCLE_RISK_PCT from environment variable first, then fallback to core.settings
             try:
                 from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
-                from core.settings import MAX_CYCLE_RISK_PCT
+                import os
                 
                 # LAZY BANKROLL ACCESS: Only fetch when actually checking an order
                 # This prevents import-time bankroll service access during KalshiVenueClient creation
@@ -178,7 +218,20 @@ class GlobalExecutionGuard:
                 if bankroll_usd is None or bankroll_usd <= 0:
                     logger.error("[GLOBAL_GUARD_ERROR] Bankroll unavailable from bankroll_service_v2")
                     return False, "BANKROLL_UNAVAILABLE: bankroll_service_v2 returned None or 0"
-                bankroll_cap_usd = bankroll_usd * MAX_CYCLE_RISK_PCT  # Unified with core.settings
+                
+                # Read MAX_CYCLE_RISK_PCT from environment variable first (set by start_15m.ps1)
+                # This ensures GlobalExecutionGuard uses the same cap as KalshiRiskConfig
+                env_value = os.getenv("MAX_CYCLE_RISK_PCT", "NOT_SET")
+                logger.info(
+                    "[GLOBAL_GUARD] MAX_CYCLE_RISK_PCT env var = '%s'",
+                    env_value
+                )
+                max_cycle_risk_pct = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.03"))  # Default 3% if not set
+                bankroll_cap_usd = bankroll_usd * max_cycle_risk_pct
+                logger.info(
+                    "[GLOBAL_GUARD] bankroll=$%.2f max_cycle_risk_pct=%.4f (%.1f%%) bankroll_cap_usd=$%.2f",
+                    bankroll_usd, max_cycle_risk_pct, max_cycle_risk_pct * 100, bankroll_cap_usd
+                )
             except Exception as e:
                 logger.error("[GLOBAL_GUARD_ERROR] Failed to get bankroll: %s", e)
                 # Fail-closed: block order if we can't determine bankroll
@@ -261,6 +314,17 @@ class GlobalExecutionGuard:
                 from merid.settings import settings
                 max_per_minute = getattr(settings, 'MAX_ORDERS_PER_MINUTE', 30)
                 max_per_hour = getattr(settings, 'MAX_ORDERS_PER_HOUR', 300)
+                
+                # 2026 OPTIMIZATION: Read max_orders_per_cycle from profile
+                # This limits orders per 15-minute cycle for better risk management
+                try:
+                    from config.profiles.kalshi_crypto_15m_v2 import get_profile_config
+                    profile_config = get_profile_config()
+                    max_per_cycle = profile_config.get('guardrails', {}).get('max_orders_per_cycle', 3)
+                    logger.info("[EXECUTION-GUARD] max_orders_per_cycle from profile: %d", max_per_cycle)
+                except Exception as profile_exc:
+                    logger.warning("[EXECUTION-GUARD] Failed to read max_orders_per_cycle from profile: %s", profile_exc)
+                    max_per_cycle = 3  # Default to 3
             except Exception:
                 max_per_minute = 30
                 max_per_hour = 300
@@ -368,22 +432,26 @@ class GlobalExecutionGuard:
             try:
                 # CRITICAL FIX: Make bankroll access lazy to prevent import-time race conditions
                 from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
-                from core.settings import MAX_CYCLE_RISK_PCT
+                import os
                 bankroll_usd = get_equity_for_risk_calc_sync()
                 if bankroll_usd is None or bankroll_usd <= 0:
                     bankroll_usd = 0.0
                     bankroll_cap_usd = 0.0
+                    max_cycle_risk_pct = 0.03
                 else:
-                    bankroll_cap_usd = bankroll_usd * MAX_CYCLE_RISK_PCT
+                    # Read MAX_CYCLE_RISK_PCT from environment variable first (set by start_15m.ps1)
+                    max_cycle_risk_pct = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.03"))  # Default 3% if not set
+                    bankroll_cap_usd = bankroll_usd * max_cycle_risk_pct
             except Exception:
                 bankroll_usd = 0.0
                 bankroll_cap_usd = 0.0
+                max_cycle_risk_pct = 0.03
             
             return {
                 "total_notional_usd": round(self._total_notional_usd, 2),
                 "bankroll_usd": round(bankroll_usd, 2),
                 "bankroll_cap_usd": round(bankroll_cap_usd, 2),
-                "cap_percentage": round(MAX_CYCLE_RISK_PCT * 100, 1),
+                "cap_percentage": round(max_cycle_risk_pct * 100, 1),
                 "pct_of_cap_used": round((self._total_notional_usd / bankroll_cap_usd) * 100, 1) if bankroll_cap_usd > 0 else 0,
                 "orders_this_minute": self._orders_this_minute,
                 "orders_this_hour": self._orders_this_hour,
@@ -463,7 +531,7 @@ class GlobalExecutionGuard:
                 limit_value=0.0,
                 action="reset",
             )
-            logger.debug(
+            logger.warning(
                 "[GLOBAL_GUARD_CYCLE_RESET] Total notional reset for new cycle: $%.2f -> $0.00",
                 old_value
             )

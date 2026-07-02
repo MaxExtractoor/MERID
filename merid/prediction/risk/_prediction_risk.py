@@ -885,11 +885,11 @@ class PredictionMarketRisk:
             else:
                 payout_per = Decimal("100") - _effective_price_cents  # YES pays 100-price
             post_fee_edge = edge - (fee_per / payout_per) if payout_per > 0 else Decimal("0")
-            if post_fee_edge < Decimal("0.05"):  # CONSERVATIVE: 5% post-fee edge
+            if post_fee_edge < Decimal("0.02"):  # ALIGNED TO 2026 INDUSTRY STANDARD: 2% post-fee edge
                 return PreTradeCheck(
                     allowed=False,
                     action=RiskAction.REJECT,
-                    reason=f"Post-fee edge {post_fee_edge:.4f} below minimum 0.05",
+                    reason=f"Post-fee edge {post_fee_edge:.4f} below minimum 0.02",
                     market_id=market_id,
                 )
 
@@ -1143,9 +1143,9 @@ class CycleCapConfig:
     Bankroll MUST come from live Kalshi API via bankroll_service_v2.
     NO hardcoded fallbacks permitted - fail closed if bankroll unavailable.
     
-    UNIFIED 3%/8% RISK REGIME (2026-05-07): Aligned with MAX_CYCLE_RISK_PCT/MAX_TOTAL_RISK_PCT from core.settings
+    UNIFIED 3%/6% RISK REGIME (2026-06-28): Aligned with MAX_CYCLE_RISK_PCT/MAX_TOTAL_RISK_PCT from core.settings
     """
-    max_cycle_risk_pct: float = 0.03  # 3% of bankroll per cycle (unified regime - optimized 2026-05-07)
+    max_cycle_risk_pct: float = 0.03  # 3% of bankroll per cycle (2026 best practice)
     bankroll_source: str = "live"  # "live" = from bankroll service ONLY
 
 

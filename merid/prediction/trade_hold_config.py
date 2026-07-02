@@ -54,12 +54,12 @@ class EntryWindowConfig:
 
 @dataclass
 class StrategyThresholds:
-    min_edge_early: Decimal = Decimal("0.08")
-    min_edge_mid: Decimal = Decimal("0.06")
-    min_edge_late: Decimal = Decimal("0.05")
-    min_edge_terminal: Decimal = Decimal("0.10")
+    min_edge_early: Decimal = Decimal("0.04")  # ALIGNED TO 2026 INDUSTRY STANDARD: 4% upper bound
+    min_edge_mid: Decimal = Decimal("0.03")  # ALIGNED TO 2026 INDUSTRY STANDARD: 3% mid-range
+    min_edge_late: Decimal = Decimal("0.02")  # ALIGNED TO 2026 INDUSTRY STANDARD: 2% floor
+    min_edge_terminal: Decimal = Decimal("0.04")  # ALIGNED TO 2026 INDUSTRY STANDARD: 4% terminal
     min_arb_edge: Decimal = Decimal("0.005")
-    min_confidence: Decimal = Decimal("0.60")  # Increased from 0.45 to stop low-conviction trades (2026-05-07)
+    min_confidence: Decimal = Decimal("0.50")  # ALIGNED TO 2026 INDUSTRY STANDARD: 50% (was 60%)
     min_volume: Decimal = Decimal("0")
     min_open_interest: Decimal = Decimal("0")
     snapshot_stale_seconds: int = 120
@@ -105,7 +105,7 @@ class RiskThresholds:
     # Execution guards
     min_order_size: int = 1
     max_order_size: int = 0  # 0 = derive from allocation%
-    min_post_fee_edge: Decimal = Decimal("0.05")  # CONSERVATIVE: 5% min edge after fees
+    min_post_fee_edge: Decimal = Decimal("0.02")  # ALIGNED TO 2026 INDUSTRY STANDARD: 2% min edge after fees
     tick_size_cents: int = 1
     max_spread_cents: int = 10
     max_slippage_cents: int = 3

@@ -61,7 +61,7 @@ class ExecutionDecision:
 # Thresholds
 _NARROW_SPREAD = 0.03    # 3 cents — cheap to cross
 _WIDE_SPREAD = 0.08      # 8 cents — expensive to cross
-_HIGH_EDGE = 0.06        # 6% edge — worth crossing for
+_HIGH_EDGE = 0.04        # 4% edge — worth crossing for (ALIGNED TO 2026 INDUSTRY STANDARD)
 _URGENT_MINUTES = 30.0   # < 30 min = urgent
 _DEEP_QUEUE = 200        # > 200 contracts at touch = long wait
 
@@ -135,7 +135,7 @@ class ExecutionIntelligence:
         # 2. Edge magnitude: big edge → cross to capture
         if abs(edge) >= _HIGH_EDGE:
             scores["edge"] = 0.9
-        elif abs(edge) >= 0.05:  # CONSERVATIVE: 5% edge threshold
+        elif abs(edge) >= 0.02:  # ALIGNED TO 2026 INDUSTRY STANDARD: 2% edge threshold
             scores["edge"] = 0.5
         else:
             scores["edge"] = 0.2

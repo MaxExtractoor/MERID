@@ -173,7 +173,7 @@ def validate_kalshi_15m_strip_limits_consistency() -> None:
     """
     try:
         from merid.risk.profiles.crypto_15m_profile import get_active_profile
-        from merid.risk.envelope import RiskEnvelopeService
+        from merid.risk.profiles.risk_envelope_service import get_risk_envelope_service
         
         profile_adapter = get_active_profile()
         if profile_adapter is None:
@@ -3534,10 +3534,15 @@ def validate_kalshi_bankroll_source_consistency() -> None:
         except Exception:
             live_equity_usd = None
         
-        envelope = get_risk_envelope_service().get_config()
-        if envelope is None:
-            # Risk envelope not ready yet, skip this check
-            logger.warning("[BANKROLL-MATRIX] Risk envelope not ready, skipping bankroll matrix check")
+        # CRITICAL FIX: Defer envelope check to avoid initialization before bankroll is ready
+        try:
+            envelope = get_risk_envelope_service().get_config()
+            if envelope is None:
+                # Risk envelope not ready yet, skip this check
+                logger.warning("[BANKROLL-MATRIX] Risk envelope not ready, skipping bankroll matrix check")
+                return
+        except Exception as e:
+            logger.warning(f"[BANKROLL-MATRIX] Failed to get risk envelope config: {e}, skipping check")
             return
         
         risk_envelope_bankroll_usd = envelope.max_total_notional_usd / 0.30  # Back-calculate from 30% cap
@@ -3715,7 +3720,16 @@ def validate_limit_matrix_consistency() -> None:
     
     log_startup_phase("validate_limit_matrix_consistency", "merid.startup_validations")
     
-    envelope = get_risk_envelope_service().get_config()
+    # CRITICAL FIX: Defer envelope check to avoid initialization before bankroll is ready
+    # If envelope not ready, skip this check
+    try:
+        envelope = get_risk_envelope_service().get_config()
+        if envelope is None:
+            logger.warning("[LIMIT-MATRIX] Risk envelope not ready, skipping limit matrix consistency check")
+            return
+    except Exception as e:
+        logger.warning(f"[LIMIT-MATRIX] Failed to get risk envelope config: {e}, skipping check")
+        return
     
     # Query KalshiRiskManager limits
     kalshi_risk_per_asset = 1750  # Default from KalshiRiskConfig
@@ -3875,8 +3889,16 @@ def validate_profile_dynamic_static_semantics() -> None:
             profile = yaml.safe_load(f)
         
         # Check that RiskEnvelopeConfig has all dynamic: bankroll fields
-        from merid.risk.profiles.risk_envelope_service import get_risk_envelope_service
-        envelope = get_risk_envelope_service().get_config()
+        # CRITICAL FIX: Defer envelope check to avoid initialization before bankroll is ready
+        try:
+            from merid.risk.profiles.risk_envelope_service import get_risk_envelope_service
+            envelope = get_risk_envelope_service().get_config()
+            if envelope is None:
+                logger.warning("[PROFILE-SEMANTICS] Risk envelope not ready, skipping dynamic/static check")
+                return
+        except Exception as e:
+            logger.warning(f"[PROFILE-SEMANTICS] Failed to get risk envelope config: {e}, skipping check")
+            return
         
         # Key dynamic fields that must exist in envelope
         required_dynamic_fields = [

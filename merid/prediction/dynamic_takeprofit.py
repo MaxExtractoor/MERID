@@ -102,6 +102,8 @@ class DynamicTakeProfitEngine:
         direction: str,
         confidence: float,
         kelly_fraction: Optional[float] = None,
+        use_60_70_rule: bool = True,  # Enable 60-70% profit capture rule
+        time_to_expiry_seconds: Optional[float] = None,  # For TTE compression
     ) -> TakeProfitPlan:
         """Compute dynamic take-profit price based on R-multiple and confidence.
         
@@ -111,6 +113,8 @@ class DynamicTakeProfitEngine:
             direction: 'LONG' (buy YES) or 'SHORT' (buy NO)
             confidence: Signal confidence 0-1 (can use Kelly fraction)
             kelly_fraction: Optional Kelly fraction 0-1 (if None, uses confidence)
+            use_60_70_rule: Apply 60-70% profit capture rule (research-backed)
+            time_to_expiry_seconds: Time to expiry in seconds (for TTE compression)
             
         Returns:
             TakeProfitPlan with computed TP price and parameters
@@ -133,11 +137,15 @@ class DynamicTakeProfitEngine:
         r_multiple, tp_level, trail_trigger, trail_distance = self._map_confidence_to_r(
             effective_confidence
         )
-
-        logger.info(
-            "[CONF-TP-SL] confidence=%.2f r_multiple=%.2f tp_level=%s trail_trigger=%.2f trail_distance=%.2f",
-            effective_confidence, r_multiple, tp_level.value, trail_trigger or 0, trail_distance or 0
-        )
+        
+        # Apply time-to-expiry compression for trailing parameters
+        # Research: Compress AT and TD as resolution approaches (Prevayo)
+        if time_to_expiry_seconds is not None and trail_trigger is not None:
+            trail_trigger, trail_distance = self._apply_tte_compression(
+                trail_trigger=trail_trigger,
+                trail_distance=trail_distance,
+                time_to_expiry_seconds=time_to_expiry_seconds
+            )
 
         # Calculate TP offset from entry
         tp_offset = r_multiple * risk_per_contract
@@ -145,11 +153,31 @@ class DynamicTakeProfitEngine:
         # Apply direction
         direction_upper = direction.upper()
         if direction_upper == 'LONG':
-            tp_price = entry_price + tp_offset
+            tp_price_r_based = entry_price + tp_offset
         elif direction_upper == 'SHORT':
-            tp_price = entry_price - tp_offset
+            tp_price_r_based = entry_price - tp_offset
         else:
             raise ValueError(f"Invalid direction: {direction}. Use 'LONG' or 'SHORT'")
+        
+        # Apply 60-70% profit capture rule (research-backed)
+        # This prevents holding for last 20-30% of gain which takes disproportionately longer
+        if use_60_70_rule:
+            tp_price = self._apply_60_70_rule(
+                entry_price=entry_price,
+                tp_price_r_based=tp_price_r_based,
+                direction=direction_upper
+            )
+            logger.info(
+                "[DTP-60-70-RULE] entry=%.3f r_based_tp=%.3f adjusted_tp=%.3f (capturing 60-70%% of max gain)",
+                entry_price, tp_price_r_based, tp_price
+            )
+        else:
+            tp_price = tp_price_r_based
+
+        logger.info(
+            "[CONF-TP-SL] confidence=%.2f r_multiple=%.2f tp_level=%s trail_trigger=%.2f trail_distance=%.2f",
+            effective_confidence, r_multiple, tp_level.value, trail_trigger or 0, trail_distance or 0
+        )
         
         logger.debug(
             "[DTP] %s: entry=%.3f, stop=%.3f, conf=%.2f, R=%.2f, tp=%.3f (%s)",
@@ -164,6 +192,124 @@ class DynamicTakeProfitEngine:
             trailing_trigger_r=trail_trigger,
             trailing_distance_r=trail_distance,
         )
+    
+    def _apply_60_70_rule(
+        self,
+        entry_price: float,
+        tp_price_r_based: float,
+        direction: str,
+    ) -> float:
+        """
+        Apply 60-70% profit capture rule based on Polymarket research.
+        
+        Research shows:
+        - 80% of gain comes in first 60% of holding period
+        - Last 20-30% takes disproportionately longer (time decay)
+        - Opportunity cost of waiting for final cents
+        - Tail risk from unexpected events near resolution
+        
+        Args:
+            entry_price: Entry price
+            tp_price_r_based: TP price calculated from R-multiple
+            direction: 'LONG' or 'SHORT'
+            
+        Returns:
+            Adjusted TP price capturing 60-70% of theoretical max gain
+        """
+        direction_upper = direction.upper()
+        
+        if direction_upper == 'LONG':
+            # For YES: max theoretical gain is 1.00 - entry_price
+            max_gain = 1.00 - entry_price
+            r_based_gain = tp_price_r_based - entry_price
+            
+            # Calculate what percentage of max gain the R-based TP represents
+            gain_pct = r_based_gain / max_gain if max_gain > 0 else 0
+            
+            # Cap at 70% of max gain (research-backed optimal)
+            if gain_pct > 0.70:
+                adjusted_gain = max_gain * 0.70
+                tp_price = entry_price + adjusted_gain
+            elif gain_pct < 0.60:
+                # Ensure minimum 60% capture if R-based is too conservative
+                adjusted_gain = max_gain * 0.60
+                tp_price = entry_price + adjusted_gain
+            else:
+                # R-based is already in 60-70% range, use it
+                tp_price = tp_price_r_based
+        
+        else:  # SHORT
+            # For NO: max theoretical gain is entry_price - 0.00
+            max_gain = entry_price - 0.00
+            r_based_gain = entry_price - tp_price_r_based
+            
+            # Calculate what percentage of max gain the R-based TP represents
+            gain_pct = r_based_gain / max_gain if max_gain > 0 else 0
+            
+            # Cap at 70% of max gain
+            if gain_pct > 0.70:
+                adjusted_gain = max_gain * 0.70
+                tp_price = entry_price - adjusted_gain
+            elif gain_pct < 0.60:
+                # Ensure minimum 60% capture
+                adjusted_gain = max_gain * 0.60
+                tp_price = entry_price - adjusted_gain
+            else:
+                # R-based is already in 60-70% range, use it
+                tp_price = tp_price_r_based
+        
+        return tp_price
+    
+    def _apply_tte_compression(
+        self,
+        trail_trigger: float,
+        trail_distance: float,
+        time_to_expiry_seconds: float,
+    ) -> tuple[float, float]:
+        """
+        Apply time-to-expiry compression to trailing parameters.
+        
+        Research (Prevayo): Compress activation threshold (AT) and trail distance (TD)
+        as resolution approaches. This tighter control near expiry prevents
+        slippage and captures profits faster in volatile final minutes.
+        
+        Compression schedule for 15m contracts (900s total):
+        - > 600s (10m): No compression (normal parameters)
+        - 300-600s (5-10m): 20% compression
+        - 120-300s (2-5m): 40% compression
+        - < 120s (2m): 60% compression (very tight)
+        
+        Args:
+            trail_trigger: Original trail trigger R-multiple
+            trail_distance: Original trail distance R-multiple
+            time_to_expiry_seconds: Time to expiry in seconds
+            
+        Returns:
+            Tuple of (compressed_trail_trigger, compressed_trail_distance)
+        """
+        if time_to_expiry_seconds >= 600:
+            # No compression - more than 10 minutes remaining
+            compression_factor = 1.0
+        elif time_to_expiry_seconds >= 300:
+            # 20% compression - 5-10 minutes remaining
+            compression_factor = 0.8
+        elif time_to_expiry_seconds >= 120:
+            # 40% compression - 2-5 minutes remaining
+            compression_factor = 0.6
+        else:
+            # 60% compression - less than 2 minutes remaining
+            compression_factor = 0.4
+        
+        compressed_trigger = trail_trigger * compression_factor
+        compressed_distance = trail_distance * compression_factor
+        
+        logger.debug(
+            "[DTP-TTE-COMPRESSION] tte=%.1fs compression=%.0f%% trigger=%.2f->%.2f distance=%.2f->%.2f",
+            time_to_expiry_seconds, (1 - compression_factor) * 100,
+            trail_trigger, compressed_trigger, trail_distance, compressed_distance
+        )
+        
+        return compressed_trigger, compressed_distance
     
     def _map_confidence_to_r(
         self, confidence: float
@@ -246,6 +392,7 @@ class DynamicTakeProfitEngine:
         entry_price: float,
         direction: str,
         plan: TakeProfitPlan,
+        stop_price: Optional[float] = None,
     ) -> float:
         """Compute trailing stop price.
         
@@ -254,6 +401,7 @@ class DynamicTakeProfitEngine:
             entry_price: Original entry price
             direction: 'LONG' or 'SHORT'
             plan: Take-profit plan with trailing parameters
+            stop_price: Original stop loss price (required for R calculation)
             
         Returns:
             Trailing stop price
@@ -262,11 +410,18 @@ class DynamicTakeProfitEngine:
             # No trailing configured, return original stop logic
             return None
         
-        # Calculate R distance for trailing
-        risk_per_contract = abs(entry_price - (entry_price - plan.trailing_trigger_r * 0.01))
-        # Actually we need the original stop distance... this is simplified
-        # In production, you'd track the original stop distance
-        trail_offset = plan.trailing_distance_r * abs(current_price - entry_price) / plan.trailing_trigger_r
+        # Calculate original risk per contract (R)
+        if stop_price is not None:
+            risk_per_contract = abs(entry_price - stop_price)
+        else:
+            # Fallback: estimate from trailing trigger R
+            risk_per_contract = abs(current_price - entry_price) / max(plan.trailing_trigger_r, 0.01)
+        
+        if risk_per_contract <= 0:
+            risk_per_contract = entry_price * 0.005  # 0.5% fallback
+        
+        # Calculate trail offset based on trailing distance R
+        trail_offset = plan.trailing_distance_r * risk_per_contract
         
         direction_upper = direction.upper()
         if direction_upper == 'LONG':
@@ -293,6 +448,8 @@ def compute_dynamic_tp(
     direction: str,
     confidence: float,
     kelly_fraction: Optional[float] = None,
+    use_60_70_rule: bool = True,
+    time_to_expiry_seconds: Optional[float] = None,
 ) -> TakeProfitPlan:
     """Convenience function to compute take-profit using singleton engine."""
     return get_dtp_engine().compute_tp(
@@ -301,4 +458,6 @@ def compute_dynamic_tp(
         direction=direction,
         confidence=confidence,
         kelly_fraction=kelly_fraction,
+        use_60_70_rule=use_60_70_rule,
+        time_to_expiry_seconds=time_to_expiry_seconds,
     )

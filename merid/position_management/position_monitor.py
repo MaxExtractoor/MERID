@@ -182,8 +182,44 @@ class PositionMonitor:
             self._emit_exit_intent(position, ExitReason.TAKE_PROFIT, current_price_cents)
             return
         
-        # Check trailing stop
-        if position.should_trigger_trail(current_price_cents):
+        # Research: Check break-even trigger at 1R (capital preservation)
+        if position.should_trigger_break_even(current_price_cents):
+            position.trigger_break_even()
+            logger.info(
+                "[POSITION-MONITOR] BREAK-EVEN triggered: position=%s price=%dc R=%.2f SL moved to entry",
+                position.position_id[:8],
+                current_price_cents,
+                position.r_multiple,
+            )
+            # Don't exit, just update SL - continue monitoring
+        
+        # Research: Check partial scale-out at 1.5-2R (Pay Yourself strategy)
+        if position.should_trigger_scale_out(current_price_cents):
+            contracts_to_close = position.trigger_scale_out()
+            logger.info(
+                "[POSITION-MONITOR] SCALE-OUT triggered: position=%s price=%dc R=%.2f closing %d of %d contracts",
+                position.position_id[:8],
+                current_price_cents,
+                position.r_multiple,
+                contracts_to_close,
+                position.size,
+            )
+            # Emit scale-out intent (partial exit)
+            self._emit_scale_out_intent(position, contracts_to_close, current_price_cents)
+            # Continue monitoring with reduced size
+        
+        # Research: Only activate trailing after 1R (break-even)
+        if not position.trailing_activated and position.break_even_triggered:
+            position.trailing_activated = True
+            logger.info(
+                "[POSITION-MONITOR] TRAILING activated: position=%s price=%dc R=%.2f",
+                position.position_id[:8],
+                current_price_cents,
+                position.r_multiple,
+            )
+        
+        # Check trailing stop (only if activated)
+        if position.trailing_activated and position.should_trigger_trail(current_price_cents):
             trail_level = position.get_trail_level()
             logger.info(
                 "[POSITION-MONITOR] TRAIL triggered: position=%s price=%dc trail=%dc max_fav=%dc R=%.2f",
@@ -258,6 +294,40 @@ class PositionMonitor:
             except Exception as e:
                 logger.error(
                     "[POSITION-MONITOR] Exit intent callback failed: %s",
+                    e,
+                    exc_info=True
+                )
+    
+    def _emit_scale_out_intent(
+        self,
+        position: Position,
+        contracts_to_close: int,
+        exit_price_cents: int
+    ) -> None:
+        """
+        Emit partial scale-out intent via callback.
+        
+        Research: Close 50% of position at 1.5-2R to lock profits while
+        letting "runner" capture larger moves (Pay Yourself strategy).
+        
+        Args:
+            position: Position to partially exit
+            contracts_to_close: Number of contracts to close
+            exit_price_cents: Exit price in cents
+        """
+        # Call callback if registered with scale-out flag
+        if self._exit_intent_callback:
+            try:
+                # Pass scale-out info via exit_reason
+                self._exit_intent_callback(
+                    position,
+                    ExitReason.SCALE_OUT,
+                    exit_price_cents,
+                    contracts_to_close
+                )
+            except Exception as e:
+                logger.error(
+                    "[POSITION-MONITOR] Scale-out intent callback failed: %s",
                     e,
                     exc_info=True
                 )

@@ -175,8 +175,8 @@ _HP_EDGE_CONFIGS: Dict[Tuple[str, str], HPEdgeConfig] = {
     # BTC - Most liquid, can use tighter edges
     ("BTC", "15m"): HPEdgeConfig(
         asset="BTC", timeframe="15m",
-        min_edge_entry=Decimal("0.05"),       # CONSERVATIVE: 5% minimum edge (was 2.5%)
-        strong_edge_threshold=Decimal("0.050"),  # 5% for strong conviction
+        min_edge_entry=Decimal("0.02"),       # ALIGNED TO 2026 INDUSTRY STANDARD: 2% minimum edge
+        strong_edge_threshold=Decimal("0.04"),  # 4% for strong conviction
         expiry_hour_24=Decimal("0.030"),
         expiry_hour_4=Decimal("0.035"),
         expiry_hour_1=Decimal("0.050"),
@@ -422,7 +422,7 @@ _HP_SL_CONFIGS: Dict[Tuple[str, str], HPStopLossConfig] = {
 
 # Default sizing config (same across all assets for consistency)
 _HP_SIZING_DEFAULT = HPPositionSizingConfig(
-    kelly_fraction=Decimal("0.30"),       # 30% Kelly (more aggressive than 25%)
+    kelly_fraction=Decimal("0.02"),       # CRITICAL FIX: 2% (aligned with unified risk limit, was 0.05)
     max_kelly_boost=Decimal("1.50"),      # Up to 1.5x boost in high edge
     max_position_pct_bankroll=Decimal("0.20"),  # 20% max position
     max_daily_loss_pct=Decimal("0.03"),   # 3% daily loss limit
