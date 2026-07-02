@@ -61,7 +61,7 @@ class UniversalAgentConfig:
     categories: List[str] = field(default_factory=list)
     max_markets: int = 50
     cycle_secs: float = 60.0
-    min_edge: float = 0.05  # CONSERVATIVE: 5% minimum edge
+    min_edge: float = 0.02  # ALIGNED TO 2026 INDUSTRY STANDARD: 2% minimum edge (was 5%)
     # CRITICAL FIX: 0 = derive from live bankroll (was 50/$500 - dangerous for micro bankrolls)
     max_contracts: int = 0  # 0 = derive: 1% of bankroll / price
     max_notional: float = 0.0  # 0 = derive: 1% of bankroll

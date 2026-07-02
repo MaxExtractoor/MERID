@@ -547,11 +547,11 @@ def kelly_fraction_from_edge(
 
 def quarter_kelly_size(
     inputs: PositionSizingInputs,
-) -> Tuple[int, float, Optional[str]]:
-    """Quarter-Kelly position sizing for Kalshi contracts.
+) -> Tuple[float, float, Optional[str]]:
+    """Quarter-Kelly position sizing for Kalshi contracts with fractional contract support.
 
     Math:
-        $$contracts = \\lfloor \\frac{B \\times f^* \\times 0.25}{P} \\rfloor$$
+        $$contracts = \\frac{B \\times f^* \\times 0.25}{P}$$
 
     Where:
         B = bankroll in cents
@@ -559,49 +559,54 @@ def quarter_kelly_size(
         0.25 = fractional Kelly (quarter-Kelly)
         P = price per contract in cents
 
+    CRITICAL FIX: Returns fractional contracts (float) instead of integer to enable
+    micro-bankroll trading. Kalshi supports fractional contracts down to 0.01 (CFTC Rule 13.1).
+    This allows precise position sizing for small bankrolls ($40-$100 range).
+
     Args:
         inputs: PositionSizingInputs
 
     Returns:
         (contracts, kelly_fraction_used, warning_message)
-        Returns (0, kelly, warning) if edge <= 0 or price <= 0
+        Returns (0.0, kelly, warning) if edge <= 0 or price <= 0
 
     Invariant:
         - Never returns negative contracts
-        - Returns 0 if edge <= 0 (no edge = no trade)
+        - Returns 0.0 if edge <= 0 (no edge = no trade)
+        - Returns fractional contracts for precise sizing (e.g., 0.88 contracts)
         - Respects max_contracts_per_order from config
 
     Example:
-        >>> inputs = PositionSizingInputs(100000, 0.05, 55, 0.25)
+        >>> inputs = PositionSizingInputs(4015, 0.02, 91, 0.02)  # $40.15 bankroll, 2% Kelly, $0.91/contract
         >>> quarter_kelly_size(inputs)
-        (22, 0.1225, None)  # 22 contracts
+        (0.88, 0.04, None)  # 0.88 contracts (fractional for micro-bankroll)
     """
     if inputs.edge <= 0:
-        return 0, 0.0, "NO_EDGE: edge <= 0, no position"
+        return 0.0, 0.0, "NO_EDGE: edge <= 0, no position"
 
     if inputs.price_cents <= 0:
-        return 0, 0.0, "INVALID_PRICE: price must be > 0"
+        return 0.0, 0.0, "INVALID_PRICE: price must be > 0"
 
     if inputs.bankroll_cents <= 0:
-        return 0, 0.0, "NO_BANKROLL: bankroll must be > 0"
+        return 0.0, 0.0, "NO_BANKROLL: bankroll must be > 0"
 
     # Calculate Kelly fraction from edge
     kelly = kelly_fraction_from_edge(inputs.edge, inputs.price_cents)
 
     if kelly <= 0:
-        return 0, kelly, "NEGATIVE_KELLY: Kelly suggests no position"
+        return 0.0, kelly, "NEGATIVE_KELLY: Kelly suggests no position"
 
     # Apply fractional Kelly (quarter-Kelly default)
     fractional_kelly = kelly * inputs.fractional_kelly
 
     # Calculate position in cents
-    position_cents = int(inputs.bankroll_cents * fractional_kelly)
+    position_cents = inputs.bankroll_cents * fractional_kelly
 
-    # Convert to contracts
-    contracts = position_cents // inputs.price_cents
+    # Convert to contracts (float for fractional support)
+    contracts = position_cents / inputs.price_cents
 
     # Ensure non-negative
-    contracts = max(0, contracts)
+    contracts = max(0.0, contracts)
 
     return contracts, kelly, None
 

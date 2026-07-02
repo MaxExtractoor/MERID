@@ -335,9 +335,10 @@ def compute_kalshi_crypto_15m_risk_envelope(
     correlation_tracking_config = profile_config.get('correlation_tracking', {})
 
     # Extract cycle risk cap (handle nested dict format)
-    max_cycle_risk_pct_raw = profile_config.get('max_cycle_risk_pct', 0.02)  # Default 2%
+    # 2026 BEST PRACTICE: Default 3% (aligned with core.settings)
+    max_cycle_risk_pct_raw = profile_config.get('max_cycle_risk_pct', 0.03)  # Default 3%
     if isinstance(max_cycle_risk_pct_raw, dict):
-        max_cycle_risk_pct = max_cycle_risk_pct_raw.get('value', 0.02)
+        max_cycle_risk_pct = max_cycle_risk_pct_raw.get('value', 0.03)
     else:
         max_cycle_risk_pct = max_cycle_risk_pct_raw
     
@@ -411,9 +412,9 @@ def compute_kalshi_crypto_15m_risk_envelope(
         max_single_order_pct = max_single_order_pct_raw
     max_single_order_notional_usd = effective_capital * max_single_order_pct
     
-    max_total_notional_pct_raw = venue.get('max_total_notional_pct', 0.30)
+    max_total_notional_pct_raw = venue.get('max_total_notional_pct', 0.25)  # FIXED: Default 0.25 to match YAML (was 0.30)
     if isinstance(max_total_notional_pct_raw, dict):
-        max_total_notional_pct = max_total_notional_pct_raw.get('value', 0.30)
+        max_total_notional_pct = max_total_notional_pct_raw.get('value', 0.25)  # FIXED: Default 0.25 to match YAML (was 0.30)
     else:
         max_total_notional_pct = max_total_notional_pct_raw
     max_total_notional_usd = effective_capital * max_total_notional_pct
@@ -429,7 +430,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
     
     # ── Compute Per-Asset Caps ────────────────────────────────────────────────
     # Apply minimum floor to ensure trades are possible with small bankrolls
-    min_max_notional_usd = profile_config.get('min_max_notional_usd', 0.0)
+    min_max_notional_usd = profile_config.get('min_max_notional_usd', 0.50)  # FIXED: Default 0.50 to match YAML (was 0.0)
     
     asset_max_notional_usd = {}
     asset_depth_thresholds = {}
@@ -476,8 +477,8 @@ def compute_kalshi_crypto_15m_risk_envelope(
         )
         
         # Extract depth thresholds from profile YAML (single source of truth)
-        min_depth_yes = asset_config.get('min_depth_yes', 25)
-        min_depth_no = asset_config.get('min_depth_no', 25)
+        min_depth_yes = asset_config.get('min_depth_yes', 1)  # FIXED: Default 1 to match YAML (was 25)
+        min_depth_no = asset_config.get('min_depth_no', 1)  # FIXED: Default 1 to match YAML (was 25)
         asset_depth_thresholds[asset_symbol] = {
             'min_depth_yes': min_depth_yes,
             'min_depth_no': min_depth_no
@@ -487,9 +488,9 @@ def compute_kalshi_crypto_15m_risk_envelope(
         )
     
     # ── Compute Per-Agent Defaults ────────────────────────────────────────────
-    agent_max_notional_pct = agent_defaults.get('max_notional_pct', 0.03)
+    agent_max_notional_pct = agent_defaults.get('max_notional_pct', 0.02)  # FIXED: Default 0.02 to match YAML (was 0.03)
     agent_max_notional_usd = effective_capital * agent_max_notional_pct
-    agent_max_orders_per_window = agent_defaults.get('max_orders_per_window', 3)
+    agent_max_orders_per_window = agent_defaults.get('max_orders_per_window', 20)  # FIXED: Default 20 to match YAML (was 3)
     agent_max_yes_position = agent_defaults.get('max_yes_position', 3)
     agent_max_no_position = agent_defaults.get('max_no_position', 3)
     

@@ -297,7 +297,21 @@ class UnifiedEdgeBackend(EdgeComputer):
                     )
 
             # Build contract state
-            strike_price = spot_price if spot_price else 0  # Fallback
+            # CRITICAL: Use window_strike_price from market state for 15m markets
+            # This is the dual-source captured strike (Kalshi's floor_strike at window start)
+            if state and hasattr(state, 'window_strike_price'):
+                window_strike = getattr(state, 'window_strike_price', None)
+                if window_strike is not None and window_strike > 0:
+                    strike_price = window_strike
+                    logger.debug(
+                        "[EDGE-COMPUTER] asset=%s ticker=%s using window_strike_price=%.2f (dual-source capture)",
+                        asset, market_id, strike_price
+                    )
+                else:
+                    strike_price = spot_price if spot_price else 0
+            else:
+                strike_price = spot_price if spot_price else 0
+            
             mid_price_cents = getattr(state, "mid_cents", 50) if state else 50
 
             contract_state = ContractState(

@@ -174,32 +174,45 @@ class GlobalRiskManager:
         return self._exposure_lock
 
     def _build_default_domain_configs(
-        self, total_capital_usd: Decimal
+        self, 
+        total_capital_usd: Decimal,
+        allocation_pcts: Optional[Dict[TradeDomain, Decimal]] = None,
+        daily_loss_pcts: Optional[Dict[TradeDomain, Decimal]] = None,
+        single_order_pcts: Optional[Dict[TradeDomain, Decimal]] = None,
     ) -> Dict[TradeDomain, DomainRiskConfig]:
         """
         Build domain risk configs DYNAMICALLY from actual capital.
         
         CRITICAL: Replaces hardcoded $5K/$25K/$20K/$10K defaults with bankroll-derived values.
         All percentages remain the same, but absolute USD values now scale with actual capital.
+        
+        Args:
+            total_capital_usd: Total capital in USD
+            allocation_pcts: Optional custom allocation percentages per domain
+            daily_loss_pcts: Optional custom daily loss percentages per domain (as % of domain allocation)
+            single_order_pcts: Optional custom single order percentages per domain (as % of domain allocation)
+        
+        Returns:
+            Dictionary of DomainRiskConfig per domain
         """
-        # Domain allocation percentages (unchanged from original)
-        allocations = {
+        # Domain allocation percentages (configurable with defaults)
+        allocations = allocation_pcts or {
             TradeDomain.PREDICTION: Decimal("0.10"),   # 10% of capital
             TradeDomain.CRYPTO: Decimal("0.50"),       # 50% of capital
             TradeDomain.EQUITY: Decimal("0.40"),       # 40% of capital
             TradeDomain.MACRO: Decimal("0.20"),        # 20% of capital
         }
         
-        # Daily loss as % of domain allocation
-        daily_loss_pcts = {
+        # Daily loss as % of domain allocation (configurable with defaults)
+        daily_loss_pcts = daily_loss_pcts or {
             TradeDomain.PREDICTION: Decimal("0.05"),   # 5% of domain allocation
             TradeDomain.CRYPTO: Decimal("0.04"),         # 4% of domain allocation
             TradeDomain.EQUITY: Decimal("0.025"),        # 2.5% of domain allocation
             TradeDomain.MACRO: Decimal("0.03"),          # 3% of domain allocation
         }
         
-        # Single order as % of domain allocation
-        single_order_pcts = {
+        # Single order as % of domain allocation (configurable with defaults)
+        single_order_pcts = single_order_pcts or {
             TradeDomain.PREDICTION: Decimal("0.10"),   # 10% of domain allocation per order
             TradeDomain.CRYPTO: Decimal("0.20"),       # 20% of domain allocation per order
             TradeDomain.EQUITY: Decimal("0.10"),       # 10% of domain allocation per order

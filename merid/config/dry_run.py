@@ -16,7 +16,7 @@ logger = get_logger("merid.config.dry_run")
 def get_kalshi_15m_dry_run() -> bool:
     """Check if Kalshi 15m dry-run mode is enabled.
     
-    Reads the dry_run flag from the kalshi_crypto_15m.yaml profile config.
+    Reads the dry_run flag from the active profile config (e.g., kalshi_crypto_15m_v2.yaml).
     
     Returns:
         True if dry-run mode is enabled, False otherwise
@@ -28,9 +28,10 @@ def get_kalshi_15m_dry_run() -> bool:
         return False
     
     try:
-        config_path = Path("config/profiles/kalshi_crypto_15m.yaml")
-        if not config_path.exists():
-            config_path = Path("config/kalshi_crypto_15m.yaml")
+        # 2026 FIX: Read from the ACTIVE profile file, not the legacy v1 file.
+        # Previous implementation read kalshi_crypto_15m.yaml (v1) even when the
+        # active profile was kalshi_crypto_15m_v2, causing legacy contamination.
+        config_path = Path(f"config/profiles/{os.getenv('MERID_PROFILE', 'kalshi_crypto_15m_v2')}.yaml")
         
         if not config_path.exists():
             logger.warning(f"Kalshi 15m config file not found at {config_path}, defaulting dry_run=False")

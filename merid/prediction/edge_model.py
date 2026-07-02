@@ -156,7 +156,21 @@ class EdgeModel:
             try:
                 cm = self._catalog.get_market(ticker)
                 if cm:
-                    strike_price = cm.strike_price if hasattr(cm, 'strike_price') else None
+                    # CRITICAL: Use window_strike_price from market state for 15m markets
+                    # This is the dual-source captured strike (Kalshi's floor_strike at window start)
+                    # Falls back to catalog strike_price if window_strike not available
+                    if hasattr(cm, 'market_state') and cm.market_state:
+                        window_strike = getattr(cm.market_state, 'window_strike_price', None)
+                        if window_strike is not None and window_strike > 0:
+                            strike_price = window_strike
+                            logger.debug(
+                                "[EDGE-MODEL] ticker=%s using window_strike_price=%.2f (dual-source capture)",
+                                ticker, strike_price
+                            )
+                        else:
+                            strike_price = cm.strike_price if hasattr(cm, 'strike_price') else None
+                    else:
+                        strike_price = cm.strike_price if hasattr(cm, 'strike_price') else None
                     minutes_to_expiry = cm.minutes_to_expiry
                     volume = float(cm.market.volume) if cm.market.volume else 0
                     if cm.market.outcomes:

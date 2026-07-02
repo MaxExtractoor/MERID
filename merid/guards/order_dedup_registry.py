@@ -149,10 +149,13 @@ def get_order_dedup_registry() -> OrderDedupRegistry:
         with _registry_lock:
             if _registry is None:
                 import os
-                # Auto-detect 15m crypto profile and use 5s bucket to match cadence
+                # 2026 STANDARD: Use deterministic clientOrderId deduplication instead of time-based buckets
+                # Time-based deduplication is outdated; 2026 systems use intent-based deduplication
                 profile = os.getenv("MERID_PROFILE", "").lower()
                 if profile == "kalshi_crypto_15m_v2":
-                    default_bucket = 5
+                    # Use larger bucket (300s = 5min) as fallback for 2026 systems that rely on clientOrderId
+                    # Primary deduplication should be via deterministic clientOrderId in order_gate
+                    default_bucket = 300
                 else:
                     default_bucket = DEFAULT_BUCKET_SECONDS
                 bucket = int(os.getenv("MERID_ORDER_DEDUP_BUCKET_SECONDS", str(default_bucket)))

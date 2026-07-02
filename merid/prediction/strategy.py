@@ -63,12 +63,13 @@ def _load_distance_config() -> Dict[str, Any]:
 
 def _get_min_edge_for_phase(phase: ExpiryPhase) -> Decimal:
     """Get min edge from profile edge_bands (single source of truth).
-    
+
     DELETED: kalshi_distance.yaml and env var overrides - now uses profile edge_bands
-    (2-4% watch, 4-6% small, >=6% standard) with 4% hard floor for all phases.
+    (1-2% watch, 2-4% small, >=4% standard) with 2% hard floor for all phases.
+    FIXED: Changed from 4% to 2% to match YAML edge_bands small band and kelly_min_edge_pct.
     """
-    # Single source of truth: 4% minimum edge from profile edge_bands
-    return Decimal("0.04")
+    # Single source of truth: 2% minimum edge from profile edge_bands (small band floor)
+    return Decimal("0.02")
 
 
 # Validate config loaded at module import time
@@ -134,8 +135,8 @@ class StrategyConfig:
     # Previous hardcoded values (100/25) were dangerous for micro bankrolls
     max_contracts_per_market: int = 0  # 0 = derive: 1 per $10 of bankroll, max 100
     max_contracts_per_order: int = 0  # 0 = derive: 1% of bankroll / price, max 25
-    # P2-001 FIX: Aligned to 0.20 to match trading_constants.py
-    kelly_fraction: Decimal = Decimal("0.20")       # Fifth-Kelly (conservative)
+    # ALIGNED TO PROFILE: 0.05 from kalshi_crypto_15m_v2.yaml (5% Kelly hard cap)
+    kelly_fraction: Decimal = Decimal("0.02")       # CRITICAL FIX: 2% Kelly (aligned with unified risk limit, was 0.05 causing rejections)
 
     # Exit rules
     profit_target_pct: Decimal = Decimal("0.15")    # Take profit at 15 %
@@ -155,11 +156,11 @@ class StrategyConfig:
     mm_inventory_limit: int = 50                     # Max contracts to hold per side
     mm_skew_factor: Decimal = Decimal("0.5")         # How much to lean based on inventory
 
-    # Confidence — CONSERVATIVE SURE BET (2026-05-10): Raised to 0.58.
-    # With 5-10% edge thresholds, model must have genuine conviction (58%+) to trade.
-    # Below 53.5% is negative EV after Kalshi's ~7% total cost (fees + spread).
-    # Override per-agent via YAML ``strategy: min_confidence: 0.60`` or env MERID_PM_MIN_CONFIDENCE.
-    min_confidence: Decimal = Decimal("0.58")  # 58% — minimum for profitability after fees
+    # Confidence — ALIGNED TO 2026 INDUSTRY STANDARD: 50% threshold
+    # Research: Predict & Profit uses 30%, voltage-kalshi uses 55%, GRDazzle uses 75%
+    # 50% balances signal quality with trade volume for 15m crypto markets
+    # Override per-agent via YAML ``strategy: min_confidence: 0.50`` or env MERID_PM_MIN_CONFIDENCE.
+    min_confidence: Decimal = Decimal("0.50")  # 50% — industry-aligned threshold
 
     # Archetype sentiment / regime tunables (YAML ``strategy:`` + pm_profiles + env)
     # PRODUCTION FIX v8 (2026-04-30): Lowered to 15.0 to match realistic market sentiment (was 35.0)
@@ -837,7 +838,9 @@ class KalshiStrategy:
             # FIX: Pass ticker (market_id) to fetch actual price from market state instead of using fallback
             # _cycle_cap = get_cycle_sizing_cap(_bankroll_usd, price_cents, ticker=edge.market_id if edge else None)
             # _hard_cap = min(self.config.max_contracts_per_order, _cycle_cap.max_contracts_per_winner)
-            _hard_cap = self.config.max_contracts_per_order
+            _hard_cap = float(self.config.max_contracts_per_order)
+            # CRITICAL FIX: Handle fractional contracts for micro-bankroll trading
+            # contracts is now float (e.g., 0.88), apply hard cap as float
             return min(contracts, _hard_cap)
             
         except Exception as _formula_err:

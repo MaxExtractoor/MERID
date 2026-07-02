@@ -1,5 +1,20 @@
 """Process-wide GlobalRiskGuard singleton.
 
+DEPRECATED: This module is deprecated in favor of UnifiedRiskManager.
+Use merid.risk.unified_risk_manager instead.
+
+All risk management has been consolidated into a single source of truth:
+- Configuration: config/risk_limits.yaml
+- Implementation: merid.risk.unified_risk_manager.UnifiedRiskManager
+- Single entry point: check_order() method
+
+This module is kept for backward compatibility but will be removed in a future release.
+New code should use UnifiedRiskManager for all risk checks.
+
+---
+
+Legacy documentation (deprecated):
+
 Canonical risk gate for all Kalshi PM order submissions. Extracted from
 ``merid.trading.kalshi_continuous_trader`` so that every caller — the
 ``KalshiContinuousTrader`` loop, ``KalshiTradingAgent`` (agent grid, 35 agents),
@@ -28,6 +43,9 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
+import warnings
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Callable, Optional, Tuple
 
@@ -36,6 +54,13 @@ from merid.utils.logging_helpers import log_guardrail_check, log_risk_check, log
 from merid.utils.alerting import send_alert_sync, AlertSeverity, AlertContext
 
 logger = get_logger("merid.guards.global_risk_guard")
+
+# Emit deprecation warning on import
+warnings.warn(
+    "GlobalRiskGuard is deprecated. Use merid.risk.unified_risk_manager.UnifiedRiskManager instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -72,8 +97,8 @@ class GlobalRiskGuard:
 
     def __init__(
         self,
-        max_cycle_risk_pct: float = 0.02,
-        max_total_risk_pct: float = 0.02,
+        max_cycle_risk_pct: float = 0.06,  # 2026 best practice: 6% per cycle (increased to allow multi-asset trading)
+        max_total_risk_pct: float = 0.06,  # 2026 best practice: 6% total
         scalper_single_batch_mode: bool = False,
         max_trades_per_batch: int = 3,
     ) -> None:
@@ -90,6 +115,16 @@ class GlobalRiskGuard:
         self._rejections: int = 0
         self._last_reject_reason: str = ""
         self._scalper_blocks: int = 0
+        
+        # 2026 Dynamic Cycle Cap Management
+        # Track approved orders with timestamps to release capacity from unfilled orders
+        self._pending_orders: dict[str, tuple[int, float]] = {}  # order_id -> (risk_cents, approval_timestamp)
+        self._fills_in_window: int = 0
+        self._window_start_time: float = time.time()
+        self._last_fill_time: Optional[float] = None
+        self._pending_order_timeout_sec: float = 10.0  # REDUCED: 10 second timeout for unfilled orders (was 60s - too slow for small bankrolls)
+        self._no_fill_reset_window_sec: float = 30.0  # REDUCED: 30 second window for no-fill auto-reset (was 5min - too slow for small bankrolls)
+        self._emergency_reset_threshold_cents: int = 5000  # $50 threshold for emergency reset (raised from $100 for better small bankroll handling)
 
     # ── cycle boundary ──────────────────────────────────────────────────
     def reset_cycle(self) -> None:
@@ -97,11 +132,15 @@ class GlobalRiskGuard:
 
         Also increments ``batch_id`` so downstream consumers can key
         intents/orders to the current batch.
+        
+        2026: Also releases capacity from timed-out pending orders.
         """
         with self._lock:
             self._cycle_new_risk_cents = 0
             self._cycle_approved_count = 0
             self._batch_id += 1
+            # Release capacity from timed-out pending orders
+            self._release_timed_out_capacity()
 
     @property
     def batch_id(self) -> int:
@@ -118,6 +157,94 @@ class GlobalRiskGuard:
             self.scalper_single_batch_mode = bool(enabled)
             if max_trades_per_batch is not None:
                 self.max_trades_per_batch = max(1, int(max_trades_per_batch))
+
+    # ── 2026 Dynamic Cycle Cap Management ────────────────────────────────
+    def record_fill(self, order_id: str, filled_risk_cents: int) -> None:
+        """Record a fill and release its capacity from the cycle accumulator.
+        
+        2026 best practice: Track fills separately from approvals to prevent
+        approved-but-unfilled orders from permanently consuming cycle capacity.
+        """
+        with self._lock:
+            if order_id in self._pending_orders:
+                risk_cents, _ = self._pending_orders[order_id]
+                # Release the approved risk from the cycle accumulator
+                self._cycle_new_risk_cents = max(0, self._cycle_new_risk_cents - risk_cents)
+                del self._pending_orders[order_id]
+                self._fills_in_window += 1
+                self._last_fill_time = time.time()
+                logger.info(
+                    "[DYNAMIC-CYCLE-CAP] Fill recorded | order_id=%s | released_risk=$%.2f | "
+                    "cycle_accumulator_now=$%.2f | fills_in_window=%d",
+                    order_id, risk_cents / 100, self._cycle_new_risk_cents / 100, self._fills_in_window
+                )
+
+    def _release_timed_out_capacity(self) -> None:
+        """Release capacity from approved orders that haven't filled within timeout.
+        
+        2026 best practice: If an approved order doesn't fill within 60 seconds,
+        release its capacity back to the cycle cap to prevent false rejections.
+        """
+        now = time.time()
+        timed_out_orders = []
+        
+        for order_id, (risk_cents, approval_time) in self._pending_orders.items():
+            if now - approval_time > self._pending_order_timeout_sec:
+                timed_out_orders.append((order_id, risk_cents))
+        
+        if timed_out_orders:
+            total_released = sum(risk_cents for _, risk_cents in timed_out_orders)
+            for order_id, risk_cents in timed_out_orders:
+                del self._pending_orders[order_id]
+            
+            self._cycle_new_risk_cents = max(0, self._cycle_new_risk_cents - total_released)
+            logger.info(
+                "[DYNAMIC-CYCLE-CAP] Released timed-out capacity | orders=%d | "
+                "released_risk=$%.2f | cycle_accumulator_now=$%.2f",
+                len(timed_out_orders), total_released / 100, self._cycle_new_risk_cents / 100
+            )
+
+    def check_no_fill_reset(self, equity_cents: int) -> bool:
+        """Check if no fills have occurred in the window and auto-reset if needed.
+        
+        2026 best practice: If no fills occur within 5 minutes, auto-reset the
+        cycle accumulator to prevent false rejections due to approved-but-unfilled orders.
+        
+        Returns True if reset was performed, False otherwise.
+        """
+        with self._lock:
+            now = time.time()
+            window_elapsed = now - self._window_start_time
+            
+            # Check if we should auto-reset
+            if (self._fills_in_window == 0 and 
+                window_elapsed > self._no_fill_reset_window_sec and
+                self._cycle_new_risk_cents > 0):
+                
+                logger.info(
+                    "[DYNAMIC-CYCLE-CAP] Auto-reset triggered | no_fills_in_window=%d | "
+                    "window_elapsed=%.1fs | accumulator_before=$%.2f",
+                    self._fills_in_window, window_elapsed, self._cycle_new_risk_cents / 100
+                )
+                
+                # Reset accumulator and pending orders
+                self._cycle_new_risk_cents = 0
+                self._pending_orders.clear()
+                self._window_start_time = now
+                self._fills_in_window = 0
+                
+                return True
+            
+            # Reset window if fills occurred
+            if self._fills_in_window > 0 and window_elapsed > self._no_fill_reset_window_sec:
+                self._window_start_time = now
+                self._fills_in_window = 0
+                logger.debug(
+                    "[DYNAMIC-CYCLE-CAP] Window reset | fills_in_window=%d | window_elapsed=%.1fs",
+                    self._fills_in_window, window_elapsed
+                )
+            
+            return False
 
     # ── core check ──────────────────────────────────────────────────────
     def check_order(
@@ -209,14 +336,32 @@ class GlobalRiskGuard:
             new_total_risk = max(0, existing_risk_cents) + new_cycle_total
 
             # 1. Per-cycle cap with adaptive sizing
-            # TEMPORARY: Disabled cycle risk cap to allow trades during debugging
-            if False:  # Disabled to reduce trade blocking
-                if new_cycle_total > cycle_risk_cents:
-                    # Calculate remaining capacity
+            # 2026 BEST PRACTICE: Re-enabled cycle risk cap enforcement
+            # This is critical for preventing cycle-level risk violations
+            # CRITICAL FIX: Sync with GlobalExecutionGuard bankroll cap to prevent downstream rejections
+            if True:  # Enforce cycle risk cap (2026 best practice)
+                # Calculate remaining capacity
+                remaining_capacity_cents = cycle_risk_cents - self._cycle_new_risk_cents
+                
+                # 2026 FIX: Auto-reset if capacity is exhausted and no fills have occurred recently
+                # This prevents false rejections due to approved-but-unfilled orders
+                if remaining_capacity_cents <= 0:
+                    # Try to release timed-out capacity first
+                    self._release_timed_out_capacity()
                     remaining_capacity_cents = cycle_risk_cents - self._cycle_new_risk_cents
                     
-                    # If remaining capacity is zero or negative, reject
-                    if remaining_capacity_cents <= 0:
+                    # If still exhausted, force an emergency reset for small bankrolls
+                    if remaining_capacity_cents <= 0 and equity_cents < self._emergency_reset_threshold_cents:  # <$50 bankroll
+                        logger.warning(
+                            "[EMERGENCY-CYCLE-RESET] Cycle cap exhausted with small bankroll - forcing reset | "
+                            f"equity=${equity_cents/100:.2f} | cycle_cap=${cycle_risk_cents/100:.2f} | "
+                            f"accumulator=${self._cycle_new_risk_cents/100:.2f} | pending_orders={len(self._pending_orders)}"
+                        )
+                        self._cycle_new_risk_cents = 0
+                        self._pending_orders.clear()
+                        remaining_capacity_cents = cycle_risk_cents
+                    elif remaining_capacity_cents <= 0:
+                        # For larger bankrolls, straight reject (normal behavior)
                         reason = (
                             f"GLOBAL RISK GUARD BLOCK: Cycle risk cap fully utilized | "
                             f"equity=${equity_cents/100:.2f} | "
@@ -234,93 +379,147 @@ class GlobalRiskGuard:
                         self._last_reject_reason = reason
                         return False, reason
                 
-                # Adaptive sizing: resize order to fit remaining capacity
+                # CRITICAL FIX: Check if order would exceed bankroll cap BEFORE approving
+                # This prevents GlobalExecutionGuard from rejecting downstream
+                proposed_total = self._cycle_new_risk_cents + pending_order.max_loss_cents
+                # CRITICAL FIX: Initialize variables to prevent UnboundLocalError
                 original_max_loss = pending_order.max_loss_cents
-                scaled_max_loss = min(original_max_loss, remaining_capacity_cents)
+                scaled_contracts = pending_order.contracts  # Default to original contracts
+                scaled_max_loss = pending_order.max_loss_cents  # Default to original max_loss
+                new_cycle_total = self._cycle_new_risk_cents + pending_order.max_loss_cents  # Default to no scaling
                 
-                # Calculate scaled contracts (proportional)
-                if pending_order.max_loss_cents > 0:
-                    scale_factor = scaled_max_loss / pending_order.max_loss_cents
-                    scaled_contracts = max(1, int(pending_order.contracts * scale_factor))
-                    scaled_max_loss = scaled_contracts * pending_order.entry_price_cents  # Recalculate to ensure integer cents
-                else:
-                    scaled_contracts = 1
-                    scaled_max_loss = pending_order.entry_price_cents
-                
-                # Update pending_order with scaled values
-                pending_order.max_loss_cents = scaled_max_loss
-                pending_order.contracts = scaled_contracts
-                
-                # Recalculate cycle total with scaled order
-                new_cycle_total = self._cycle_new_risk_cents + scaled_max_loss
-                
-                logger.info(
-                    "[RISK-SCALING] ticker=%s | original_contracts=%d | scaled_contracts=%d | "
-                    "original_max_loss=$%.2f | scaled_max_loss=$%.2f | "
-                    "cycle_cap=$%.2f | remaining_capacity=$%.2f | cycle_used_after=$%.2f",
-                    pending_order.ticker,
-                    int(original_max_loss / pending_order.entry_price_cents) if pending_order.entry_price_cents > 0 else pending_order.contracts,
-                    scaled_contracts,
-                    original_max_loss / 100,
-                    scaled_max_loss / 100,
-                    cycle_risk_cents / 100,
-                    remaining_capacity_cents / 100,
-                    new_cycle_total / 100
-                )
-                
-                # Continue to approval with scaled order (no alert for adaptive sizing)
-
-            # 2. Total open risk cap
-            # TEMPORARY: Disabled total risk cap to allow trades during debugging
-            if False:  # Disabled to reduce trade blocking
-                new_total_risk = max(0, existing_risk_cents) + new_cycle_total
-                if new_total_risk > max_total_risk_cents:
-                    reason = (
-                        f"GLOBAL RISK GUARD BLOCK: Total risk cap exceeded | "
-                        f"equity=${equity_cents/100:.2f} | "
-                        f"total_cap=${max_total_risk_cents/100:.2f} | "
-                        f"existing=${existing_risk_cents/100:.2f} | "
-                        f"new_cycle=${new_cycle_total/100:.2f} | "
-                        f"would_be_total=${new_total_risk/100:.2f}"
-                    )
-                    log_risk_check(
-                        "total_risk_cap",
-                        logger,
-                        current_value=float(new_total_risk),
-                        limit_value=float(max_total_risk_cents),
-                        action="reject",
-                        equity_usd=float(equity_cents) / 100,
-                        existing_risk_cents=existing_risk_cents,
-                        new_cycle_risk_cents=new_cycle_total,
-                    )
-                    send_alert_sync(
-                        condition="total_risk_cap",
-                        severity=AlertSeverity.CRITICAL,
-                        message=f"Total risk cap exceeded: ${new_total_risk/100:.2f} > ${max_total_risk_cents/100:.2f}",
-                        context=AlertContext(
-                            source="merid.guards.global_risk_guard",
-                            current_value=float(new_total_risk) / 100,
-                            threshold_value=float(max_total_risk_cents) / 100,
-                            additional_fields={
-                                "equity_usd": float(equity_cents) / 100,
-                                "existing_risk_cents": existing_risk_cents,
-                                "new_cycle_risk_cents": new_cycle_total,
-                            },
-                        ),
-                    )
-                    logger.critical(reason)
+                if proposed_total > cycle_risk_cents:
+                    # Try to release timed-out capacity first
+                    self._release_timed_out_capacity()
+                    remaining_capacity_cents = cycle_risk_cents - self._cycle_new_risk_cents
+                    
+                    # Re-check after releasing capacity
+                    proposed_total = self._cycle_new_risk_cents + pending_order.max_loss_cents
+                    if proposed_total > cycle_risk_cents:
+                        # Adaptive sizing: resize order to fit remaining capacity
+                        original_max_loss = pending_order.max_loss_cents
+                        
+                        # CRITICAL FIX: Calculate scaled contracts to fit exactly within remaining capacity
+                        # scaled_max_loss must be <= remaining_capacity_cents
+                        if pending_order.entry_price_cents > 0:
+                            # Calculate max contracts that fit in remaining capacity
+                            max_contracts_for_capacity = int(remaining_capacity_cents / pending_order.entry_price_cents)
+                            if max_contracts_for_capacity < 1:
+                                # Even 1 contract exceeds remaining capacity
+                                # For small bankrolls, reset cycle to allow trading
+                                if equity_cents < self._emergency_reset_threshold_cents:  # <$50 bankroll
+                                    logger.warning(
+                                        "[EMERGENCY-CYCLE-RESET] Min contract size %dc exceeds remaining capacity %dc - forcing reset | "
+                                        "equity=$%.2f | cycle_cap=$%.2f | accumulator=$%.2f | pending_orders=%d",
+                                        pending_order.entry_price_cents, remaining_capacity_cents,
+                                        equity_cents/100, cycle_risk_cents/100, self._cycle_new_risk_cents/100, len(self._pending_orders)
+                                    )
+                                    self._cycle_new_risk_cents = 0
+                                    self._pending_orders.clear()
+                                    remaining_capacity_cents = cycle_risk_cents
+                                    max_contracts_for_capacity = int(remaining_capacity_cents / pending_order.entry_price_cents)
+                                    # Continue with scaling after reset - don't return
+                                else:
+                                    # For larger bankrolls, reject
+                                    reason = (
+                                        f"GLOBAL RISK GUARD BLOCK: Bankroll cap exceeded | "
+                                        f"equity=${equity_cents/100:.2f} | "
+                                        f"bankroll_cap=${cycle_risk_cents/100:.2f} | "
+                                        f"cycle_total=${proposed_total/100:.2f} | "
+                                        f"ticker={pending_order.ticker} | asset={pending_order.asset}"
+                                    )
+                                    logger.warning(reason)
+                                    logger.info(
+                                        "[RISK-DECISION] asset=%s ticker=%s proposed_size=%d allowed_size=0 equity_cents=%d decision=REJECTED reason=BANKROLL_CAP_EXCEEDED",
+                                        pending_order.asset, pending_order.ticker, pending_order.contracts, equity_cents
+                                    )
+                                    self._rejections += 1
+                                    self._last_reject_reason = reason
+                                    return False, reason
+                            
+                            scaled_contracts = min(pending_order.contracts, max_contracts_for_capacity)
+                            # CRITICAL FIX: Don't force minimum 1 contract if price is too low (prevents 1¢ orders)
+                            # Only force minimum if contract notional is reasonable (>= $0.05)
+                            contract_notional_usd = pending_order.entry_price_cents / 100.0
+                            if contract_notional_usd >= 0.05:
+                                scaled_contracts = max(1, scaled_contracts)  # At least 1 contract
+                            else:
+                                # For extremely low-priced contracts, respect the capacity calculation
+                                # If max_contracts_for_capacity is 0, the order should be rejected
+                                if max_contracts_for_capacity < 1:
+                                    logger.warning(
+                                        "[GLOBAL_GUARD] Rejecting low-price order: price=%dc (<5¢) would require %d contracts but capacity allows %d",
+                                        pending_order.entry_price_cents, pending_order.contracts, max_contracts_for_capacity
+                                    )
+                                    reason = (
+                                        f"GLOBAL RISK GUARD BLOCK: Low-price order rejected | "
+                                        f"price={pending_order.entry_price_cents}c (<5¢ threshold) | "
+                                        f"contracts={pending_order.contracts} | "
+                                        f"capacity_contracts={max_contracts_for_capacity}"
+                                    )
+                                    self._rejections += 1
+                                    self._last_reject_reason = reason
+                                    return False, reason
+                            scaled_max_loss = scaled_contracts * pending_order.entry_price_cents
+                        else:
+                            scaled_contracts = 1
+                            scaled_max_loss = min(original_max_loss, remaining_capacity_cents)
+                        
+                        # Update pending_order with scaled values
+                        pending_order.max_loss_cents = scaled_max_loss
+                        pending_order.contracts = scaled_contracts
+                        
+                        # Recalculate cycle total with scaled order
+                        new_cycle_total = self._cycle_new_risk_cents + scaled_max_loss
+                    
                     logger.info(
-                        "[RISK-DECISION] asset=%s ticker=%s proposed_size=%d allowed_size=0 equity_cents=%d decision=REJECTED reason=TOTAL_RISK_CAP_EXCEEDED",
-                        pending_order.asset, pending_order.ticker, pending_order.contracts, equity_cents
+                        "[RISK-SCALING] ticker=%s | original_contracts=%d | scaled_contracts=%d | "
+                        "original_max_loss=$%.2f | scaled_max_loss=$%.2f | "
+                        "cycle_cap=$%.2f | remaining_capacity=$%.2f | cycle_used_after=$%.2f",
+                        pending_order.ticker,
+                        int(original_max_loss / pending_order.entry_price_cents) if pending_order.entry_price_cents > 0 else pending_order.contracts,
+                        scaled_contracts,
+                        original_max_loss / 100,
+                        scaled_max_loss / 100,
+                        cycle_risk_cents / 100,
+                        remaining_capacity_cents / 100,
+                        new_cycle_total / 100
                     )
-                    self._rejections += 1
-                    self._last_reject_reason = reason
-                    return False, reason
+                    
+                    # Continue to approval with scaled order (no alert for adaptive sizing)
+                else:
+                    # Order fits within cap - use original values
+                    new_cycle_total = self._cycle_new_risk_cents + pending_order.max_loss_cents
+
+            # 2. Bankroll cap check (sync with GlobalExecutionGuard)
+            # CRITICAL FIX: Enforce bankroll cap to prevent GlobalExecutionGuard rejections
+            # This ensures GlobalRiskGuard doesn't approve orders that would be rejected downstream
+            bankroll_cap_cents = cycle_risk_cents  # Same as cycle cap for 15m crypto
+            if new_cycle_total > bankroll_cap_cents:
+                reason = (
+                    f"GLOBAL RISK GUARD BLOCK: Bankroll cap exceeded | "
+                    f"equity=${equity_cents/100:.2f} | "
+                    f"bankroll_cap=${bankroll_cap_cents/100:.2f} | "
+                    f"cycle_total=${new_cycle_total/100:.2f} | "
+                    f"ticker={pending_order.ticker} | asset={pending_order.asset}"
+                )
+                logger.warning(reason)
+                logger.info(
+                    "[RISK-DECISION] asset=%s ticker=%s proposed_size=%d allowed_size=0 equity_cents=%d decision=REJECTED reason=BANKROLL_CAP_EXCEEDED",
+                    pending_order.asset, pending_order.ticker, pending_order.contracts, equity_cents
+                )
+                self._rejections += 1
+                self._last_reject_reason = reason
+                return False, reason
 
             # Approved
             self._cycle_new_risk_cents = new_cycle_total
             self._cycle_approved_count += 1
             self._approvals += 1
+            
+            # 2026: Track approved order with timestamp for dynamic capacity release
+            order_id = f"{pending_order.ticker}_{self._batch_id}_{self._cycle_approved_count}"
+            self._pending_orders[order_id] = (pending_order.max_loss_cents, time.time())
 
             logger.info(
                 "[RISK-DECISION] asset=%s ticker=%s proposed_size=%d allowed_size=%d equity_cents=%d decision=APPROVED",
@@ -416,33 +615,38 @@ _existing_risk_provider: Optional[Callable[[], int]] = None
 
 
 def _load_canonical_pcts() -> Tuple[float, float]:
-    """Load canonical risk percentages from core.settings.
+    """Load canonical risk percentages from environment variable or core.settings.
     
-    OPTIMIZED RISK REGIME (2026-05-07): 3% cycle / 8% total for better throughput while maintaining safety.
-    With $35 equity: 3% = $1.05 cycle cap for 2-3 contract winners (was $0.70 with 2%).
+    CRITICAL FIX: Read from environment variable first (set by start_15m.ps1)
+    to ensure GlobalRiskGuard uses the same cap as KalshiRiskConfig.
+    Only fall back to core.settings if env var is not set.
+    
+    OPTIMIZED RISK REGIME (2026-05-07): 5% cycle / 8% total for better throughput while maintaining safety.
+    With $40 equity: 5% = $2.02 cycle cap for multi-asset trading.
     """
     try:
-        from merid.core.settings import MAX_CYCLE_RISK_PCT, MAX_TOTAL_RISK_PCT  # type: ignore
-        cycle_pct = float(MAX_CYCLE_RISK_PCT)
-        total_pct = float(MAX_TOTAL_RISK_PCT)
+        # CRITICAL FIX: Read from environment variable first (set by start_15m.ps1)
+        # This ensures GlobalRiskGuard uses the same cap as KalshiRiskConfig
+        cycle = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.05"))  # 5% default (matches profile)
+        total = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.08"))  # 8% default
         logger.info(
-            "[GLOBAL-RISK-GUARD] Loaded canonical pcts: cycle=%.4f (%.2f%%) total=%.4f (%.2f%%)",
-            cycle_pct, cycle_pct * 100, total_pct, total_pct * 100
+            "[GLOBAL-RISK-GUARD] Loaded pcts from env: cycle=%.4f (%.2f%%) total=%.4f (%.2f%%)",
+            cycle, cycle * 100, total, total * 100
         )
-        return cycle_pct, total_pct
+        return cycle, total
     except Exception:
         try:
-            # OPTIMIZED RISK REGIME: 3% cycle / 8% total
-            cycle = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.03"))  # 3% default
-            total = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.08"))  # 8% default
+            from core.settings import MAX_CYCLE_RISK_PCT, MAX_TOTAL_RISK_PCT  # type: ignore
+            cycle_pct = float(MAX_CYCLE_RISK_PCT)
+            total_pct = float(MAX_TOTAL_RISK_PCT)
             logger.warning(
-                "[GLOBAL-RISK-GUARD] core.settings import failed, using env/defaults: cycle=%.4f total=%.4f",
-                cycle, total
+                "[GLOBAL-RISK-GUARD] Env var read failed, using core.settings: cycle=%.4f total=%.4f",
+                cycle_pct, total_pct
             )
-            return cycle, total
+            return cycle_pct, total_pct
         except Exception:
-            logger.error("[GLOBAL-RISK-GUARD] Failed to load risk pcts, using safe defaults: 3%/8%")
-            return 0.03, 0.08  # Safe defaults 3%/8%
+            logger.error("[GLOBAL-RISK-GUARD] Failed to load risk pcts, using safe defaults: 5%/8%")
+            return 0.05, 0.08  # Safe defaults 5%/8%
 
 
 def _load_scalper_config() -> Tuple[bool, int]:

@@ -400,6 +400,34 @@ async def _kalshi_place_order(
             latency_ms=round((time.time() - t0) * 1000, 2),
         )
     
+    # FAT-FINGER LIMIT: Reject orders exceeding max order size
+    # This prevents accidental large orders that could cause significant losses
+    try:
+        from merid.settings import settings as _settings
+        max_order_size_usd = getattr(_settings, 'MERID_MAX_ORDER_SIZE_USD', None)
+        
+        if max_order_size_usd is not None and max_order_size_usd > 0:
+            # Calculate order notional: price_cents * count / 100
+            order_notional_usd = (price_cents * count) / 100.0
+            
+            if order_notional_usd > max_order_size_usd:
+                logger.error(
+                    "[FAT-FINGER-GUARD] Order rejected: notional $%.2f exceeds max_order_size $%.2f. "
+                    "ticker=%s price_cents=%d count=%d agent=%s",
+                    order_notional_usd, max_order_size_usd, ticker, price_cents, count, agent_name
+                )
+                return ToolResult.fail(
+                    ToolErrorCode.INVALID_INPUT,
+                    f"Order notional ${order_notional_usd:.2f} exceeds maximum allowed ${max_order_size_usd:.2f}",
+                    tool_name="kalshi_place_order",
+                )
+            logger.debug(
+                "[FAT-FINGER-GUARD] Order notional $%.2f within max_order_size $%.2f",
+                order_notional_usd, max_order_size_usd
+            )
+    except Exception as _ff_exc:
+        logger.warning("[FAT-FINGER-GUARD] Failed to validate order size: %s", _ff_exc)
+
     # MARKET UNIVERSE GUARD: Reject orders for non-allowed markets
     _orders_rejected_disallowed_market = 0
     try:

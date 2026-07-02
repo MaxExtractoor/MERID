@@ -99,9 +99,35 @@ class PositionSizer:
         # Portfolio state
         self.current_positions: Dict[str, float] = {}  # symbol -> position_size
         self.portfolio_value: float = config.get("portfolio_value", 1000000.0)
+        self.peak_portfolio_value: float = self.portfolio_value  # Track peak for drawdown calculation
+        
+        # Price history for dynamic correlation calculation
+        self.price_history: Dict[str, deque] = {}  # symbol -> deque of prices
+        self.correlation_window = config.get("correlation_window", 30)  # Rolling window in days
+        
+        # Volatility regime detection
+        self.volatility_history: Dict[str, deque] = {}  # symbol -> deque of volatilities
+        self.volatility_window = config.get("volatility_window", 20)  # Window for regime detection
+        self.volatility_thresholds = config.get("volatility_thresholds", {
+            "low": 0.01,      # < 1% daily vol = low regime
+            "normal": 0.03,   # 1-3% daily vol = normal regime
+            "high": 0.05      # > 3% daily vol = high regime
+        })
+        self.current_volatility_regime = "normal"
+        
+        # Cross-strategy correlation monitoring
+        self.strategy_positions: Dict[str, Dict[str, float]] = {}  # strategy -> {symbol -> position_size}
+        self.strategy_correlation_threshold = config.get("strategy_correlation_threshold", 0.7)
         
         # Sizing history
         self.sizing_history: deque = deque(maxlen=1000)
+        
+        # Drawdown tracking for position sizing adjustment
+        self.drawdown_thresholds = config.get("drawdown_thresholds", {
+            "warning": 0.05,    # 5% drawdown - reduce to 80% size
+            "critical": 0.10,   # 10% drawdown - reduce to 50% size
+            "severe": 0.15      # 15% drawdown - reduce to 25% size
+        })
         
         # Sizing methods
         self.sizing_methods = config.get("sizing_methods", [
@@ -148,6 +174,269 @@ class PositionSizer:
         except Exception as e:
             logger.error(f"Failed to update correlation matrix: {e}")
             return False
+    
+    def update_price(self, symbol: str, price: float) -> None:
+        """Update price history for a symbol for dynamic correlation calculation."""
+        if symbol not in self.price_history:
+            self.price_history[symbol] = deque(maxlen=self.correlation_window)
+        
+        self.price_history[symbol].append(price)
+    
+    def update_volatility(self, symbol: str, volatility: float) -> None:
+        """Update volatility history for regime detection."""
+        if symbol not in self.volatility_history:
+            self.volatility_history[symbol] = deque(maxlen=self.volatility_window)
+        
+        self.volatility_history[symbol].append(volatility)
+    
+    def detect_volatility_regime(self) -> str:
+        """Detect current volatility regime across all positions.
+        
+        Returns:
+            Regime string: "low", "normal", or "high"
+        """
+        if not self.volatility_history:
+            return "normal"
+        
+        # Calculate average volatility across all positions
+        all_volatilities = []
+        for symbol, vol_history in self.volatility_history.items():
+            if len(vol_history) > 0:
+                all_volatilities.extend(list(vol_history))
+        
+        if not all_volatilities:
+            return "normal"
+        
+        avg_volatility = np.mean(all_volatilities)
+        
+        # Determine regime based on thresholds
+        if avg_volatility < self.volatility_thresholds["low"]:
+            regime = "low"
+        elif avg_volatility < self.volatility_thresholds["normal"]:
+            regime = "normal"
+        else:
+            regime = "high"
+        
+        self.current_volatility_regime = regime
+        logger.debug(f"Volatility regime: {regime} (avg vol: {avg_volatility:.2%})")
+        
+        return regime
+    
+    def get_volatility_regime_multiplier(self) -> float:
+        """Get position size multiplier based on volatility regime.
+        
+        Returns:
+            Multiplier based on regime:
+            - low: 1.2 (can increase size in calm markets)
+            - normal: 1.0 (standard sizing)
+            - high: 0.7 (reduce size in volatile markets)
+        """
+        regime = self.detect_volatility_regime()
+        
+        multipliers = {
+            "low": 1.2,
+            "normal": 1.0,
+            "high": 0.7,
+        }
+        
+        multiplier = multipliers.get(regime, 1.0)
+        logger.debug(f"Volatility regime multiplier: {multiplier:.2f} (regime: {regime})")
+        
+        return multiplier
+    
+    def add_strategy_position(self, strategy_name: str, symbol: str, position_size: float) -> None:
+        """Add a position for a specific strategy for cross-strategy correlation monitoring."""
+        if strategy_name not in self.strategy_positions:
+            self.strategy_positions[strategy_name] = {}
+        
+        self.strategy_positions[strategy_name][symbol] = position_size
+        logger.debug(f"Added position for strategy {strategy_name}: {symbol}={position_size}")
+    
+    def detect_cross_strategy_correlation(self) -> Dict[str, float]:
+        """Detect correlation between strategies based on their positions.
+        
+        Returns:
+            Dictionary mapping strategy pairs to their correlation coefficient
+        """
+        if len(self.strategy_positions) < 2:
+            return {}
+        
+        # Build position vectors for each strategy
+        all_symbols = set()
+        for strategy_positions in self.strategy_positions.values():
+            all_symbols.update(strategy_positions.keys())
+        
+        if not all_symbols:
+            return {}
+        
+        # Create position vectors
+        strategy_vectors = {}
+        for strategy_name, positions in self.strategy_positions.items():
+            vector = []
+            for symbol in sorted(all_symbols):
+                vector.append(positions.get(symbol, 0.0))
+            strategy_vectors[strategy_name] = np.array(vector)
+        
+        # Calculate correlations between strategy pairs
+        correlations = {}
+        strategy_names = list(strategy_vectors.keys())
+        
+        for i in range(len(strategy_names)):
+            for j in range(i + 1, len(strategy_names)):
+                strategy_a = strategy_names[i]
+                strategy_b = strategy_names[j]
+                
+                vector_a = strategy_vectors[strategy_a]
+                vector_b = strategy_vectors[strategy_b]
+                
+                # Calculate correlation
+                std_a = np.std(vector_a)
+                std_b = np.std(vector_b)
+                if std_a > 0 and std_b > 0:
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        correlation = np.corrcoef(vector_a, vector_b)[0, 1]
+                    correlation = np.nan_to_num(correlation, nan=0.0)
+                    
+                    pair_key = f"{strategy_a}_{strategy_b}"
+                    correlations[pair_key] = correlation
+                    
+                    # Log warning if correlation is high
+                    if abs(correlation) > self.strategy_correlation_threshold:
+                        logger.warning(
+                            f"High cross-strategy correlation detected: {strategy_a} vs {strategy_b} = {correlation:.2f}"
+                        )
+        
+        return correlations
+    
+    def get_cross_strategy_risk_multiplier(self) -> float:
+        """Get position size multiplier based on cross-strategy correlation.
+        
+        Returns:
+            Multiplier based on correlation:
+            - < 0.5 correlation: 1.0 (no reduction)
+            - 0.5-0.7 correlation: 0.9 (10% reduction)
+            - > 0.7 correlation: 0.8 (20% reduction)
+        """
+        correlations = self.detect_cross_strategy_correlation()
+        
+        if not correlations:
+            return 1.0
+        
+        # Get maximum absolute correlation
+        max_correlation = max(abs(c) for c in correlations.values())
+        
+        if max_correlation < 0.5:
+            multiplier = 1.0
+        elif max_correlation < 0.7:
+            multiplier = 0.9
+        else:
+            multiplier = 0.8
+        
+        logger.debug(f"Cross-strategy correlation multiplier: {multiplier:.2f} (max corr: {max_correlation:.2f})")
+        
+        return multiplier
+    
+    def calculate_dynamic_correlation_matrix(self) -> Optional[np.ndarray]:
+        """Calculate dynamic correlation matrix from price history.
+        
+        Returns:
+            Correlation matrix as numpy array, or None if insufficient data
+        """
+        position_symbols = list(self.positions.keys())
+        
+        if len(position_symbols) < 2:
+            return None
+        
+        # Check if we have enough price history for all symbols
+        for symbol in position_symbols:
+            if symbol not in self.price_history or len(self.price_history[symbol]) < 10:
+                logger.warning(f"Insufficient price history for {symbol} to calculate correlations")
+                return None
+        
+        # Build price matrix
+        price_matrix = []
+        for symbol in position_symbols:
+            prices = list(self.price_history[symbol])
+            price_matrix.append(prices)
+        
+        price_matrix = np.array(price_matrix)
+        
+        # Calculate returns
+        with np.errstate(divide='ignore', invalid='ignore'):
+            returns = np.diff(price_matrix, axis=1) / price_matrix[:, :-1]
+        
+        # Check for zero variance rows and handle them
+        std_devs = np.std(returns, axis=1)
+        zero_variance_mask = std_devs == 0
+        
+        # Filter out zero-variance rows for correlation calculation
+        non_zero_variance_indices = [i for i, has_variance in enumerate(zero_variance_mask) if not has_variance]
+        
+        if len(non_zero_variance_indices) < 2:
+            # Not enough assets with variance - return identity matrix
+            correlation_matrix = np.eye(len(position_symbols))
+        else:
+            # Calculate correlation matrix only on assets with variance
+            returns_filtered = returns[non_zero_variance_indices]
+            with np.errstate(divide='ignore', invalid='ignore'):
+                correlation_matrix_filtered = np.corrcoef(returns_filtered)
+            
+            # Handle NaN values
+            correlation_matrix_filtered = np.nan_to_num(correlation_matrix_filtered, nan=0.0)
+            
+            # Rebuild full correlation matrix
+            correlation_matrix = np.zeros((len(position_symbols), len(position_symbols)))
+            for i, idx_i in enumerate(non_zero_variance_indices):
+                for j, idx_j in enumerate(non_zero_variance_indices):
+                    correlation_matrix[idx_i, idx_j] = correlation_matrix_filtered[i, j]
+        
+        # Ensure diagonal is 1.0
+        np.fill_diagonal(correlation_matrix, 1.0)
+        
+        self.correlation_matrix = correlation_matrix
+        logger.debug(f"Calculated dynamic correlation matrix for {len(position_symbols)} positions")
+        
+        return correlation_matrix
+    
+    def update_portfolio_value(self, new_value: float) -> None:
+        """Update portfolio value and track peak for drawdown calculation."""
+        self.portfolio_value = new_value
+        if new_value > self.peak_portfolio_value:
+            self.peak_portfolio_value = new_value
+            logger.debug(f"Updated peak portfolio value to ${self.peak_portfolio_value:.2f}")
+    
+    def get_current_drawdown(self) -> float:
+        """Calculate current drawdown as percentage from peak."""
+        if self.peak_portfolio_value <= 0:
+            return 0.0
+        drawdown = (self.peak_portfolio_value - self.portfolio_value) / self.peak_portfolio_value
+        return max(0.0, drawdown)
+    
+    def get_drawdown_size_multiplier(self) -> float:
+        """Get position size multiplier based on current drawdown.
+        
+        Returns:
+            Multiplier between 0.0 and 1.0 based on drawdown thresholds:
+            - < 5% drawdown: 1.0 (full size)
+            - 5-10% drawdown: 0.8 (80% size)
+            - 10-15% drawdown: 0.5 (50% size)
+            - > 15% drawdown: 0.25 (25% size)
+        """
+        drawdown = self.get_current_drawdown()
+        
+        if drawdown < self.drawdown_thresholds["warning"]:
+            multiplier = 1.0
+        elif drawdown < self.drawdown_thresholds["critical"]:
+            multiplier = 0.8
+        elif drawdown < self.drawdown_thresholds["severe"]:
+            multiplier = 0.5
+        else:
+            multiplier = 0.25
+        
+        logger.debug(
+            f"Drawdown-adjusted sizing: drawdown={drawdown:.2%}, multiplier={multiplier:.2f}"
+        )
+        return multiplier
     
     async def calculate_position_size(self, symbol: str, method: str = "volatility_based",
                                     signal_strength: float = 1.0,
@@ -220,6 +509,21 @@ class PositionSizer:
             # Apply position limits
             position_size = np.clip(position_size, position.min_position_size, position.max_position_size)
             
+            # CRITICAL: Apply drawdown-adjusted sizing multiplier
+            # This reduces position sizes during drawdowns to protect capital
+            drawdown_multiplier = self.get_drawdown_size_multiplier()
+            position_size = position_size * drawdown_multiplier
+            
+            # CRITICAL: Apply volatility regime multiplier
+            # This adjusts position sizes based on market volatility regime
+            volatility_multiplier = self.get_volatility_regime_multiplier()
+            position_size = position_size * volatility_multiplier
+            
+            # CRITICAL: Apply cross-strategy correlation multiplier
+            # This reduces position sizes when strategies are highly correlated
+            cross_strategy_multiplier = self.get_cross_strategy_risk_multiplier()
+            position_size = position_size * cross_strategy_multiplier
+            
             # Recalculate shares — ensure at least 1 when a non-zero position is allocated
             if position.current_price > 0 and position_size > 0:
                 raw_shares = (position_size * self.portfolio_value) / position.current_price
@@ -289,6 +593,14 @@ class PositionSizer:
             position_size = kelly_fraction * signal_strength
             position_size = np.clip(position_size, position.min_position_size, position.max_position_size)
             
+            # CRITICAL: Apply drawdown-adjusted sizing multiplier
+            drawdown_multiplier = self.get_drawdown_size_multiplier()
+            position_size = position_size * drawdown_multiplier
+            
+            # CRITICAL: Apply volatility regime multiplier
+            volatility_multiplier = self.get_volatility_regime_multiplier()
+            position_size = position_size * volatility_multiplier
+            
             # Calculate shares and value
             position_value = position_size * self.portfolio_value
             shares = int(position_value / position.current_price) if position.current_price > 0 else 0
@@ -348,6 +660,14 @@ class PositionSizer:
             # Calculate position size
             position_size = fixed_fraction * volatility_adjustment * signal_strength
             position_size = np.clip(position_size, position.min_position_size, position.max_position_size)
+            
+            # CRITICAL: Apply drawdown-adjusted sizing multiplier
+            drawdown_multiplier = self.get_drawdown_size_multiplier()
+            position_size = position_size * drawdown_multiplier
+            
+            # CRITICAL: Apply volatility regime multiplier
+            volatility_multiplier = self.get_volatility_regime_multiplier()
+            position_size = position_size * volatility_multiplier
             
             # Calculate shares and value
             position_value = position_size * self.portfolio_value
@@ -411,6 +731,14 @@ class PositionSizer:
                 return None
             position_size = risk_per_position / vol_signal
             position_size = np.clip(position_size, position.min_position_size, position.max_position_size)
+            
+            # CRITICAL: Apply drawdown-adjusted sizing multiplier
+            drawdown_multiplier = self.get_drawdown_size_multiplier()
+            position_size = position_size * drawdown_multiplier
+            
+            # CRITICAL: Apply volatility regime multiplier
+            volatility_multiplier = self.get_volatility_regime_multiplier()
+            position_size = position_size * volatility_multiplier
             
             # Calculate shares and value
             position_value = position_size * self.portfolio_value
@@ -608,10 +936,6 @@ class PositionSizer:
         
         logger.info("Risk parameters updated")
     
-    def update_portfolio_value(self, new_value: float):
-        """Update portfolio value."""
-        self.portfolio_value = new_value
-        logger.info(f"Portfolio value updated: ${new_value:,.2f}")
     
     def get_sizing_summary(self) -> Dict[str, Any]:
         """Get comprehensive sizing summary."""
