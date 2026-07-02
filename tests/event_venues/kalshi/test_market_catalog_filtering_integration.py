@@ -196,6 +196,7 @@ class TestKalshiMarketCatalogSnapshot:
                 def __init__(self, asset, status):
                     self.asset = asset
                     self.timeframe = "15m"
+                    self.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
                     self.market = type('obj', (object,), {
                         'raw_data': {'status': status},
                         'market_id': f"KX{asset}15M-TEST"
@@ -228,6 +229,7 @@ class TestKalshiMarketCatalogSnapshot:
                 def __init__(self, asset, status):
                     self.asset = asset
                     self.timeframe = "15m"
+                    self.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
                     self.market = type('obj', (object,), {
                         'raw_data': {'status': status},
                         'market_id': f"KX{asset}15M-TEST"
@@ -260,6 +262,7 @@ class TestKalshiMarketCatalogSnapshot:
                 def __init__(self, asset, status):
                     self.asset = asset
                     self.timeframe = "15m"
+                    self.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
                     self.market = type('obj', (object,), {
                         'raw_data': {'status': status},
                         'market_id': f"KX{asset}15M-TEST"
@@ -292,6 +295,7 @@ class TestKalshiMarketCatalogSnapshot:
                 def __init__(self, asset, status):
                     self.asset = asset
                     self.timeframe = "15m"
+                    self.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
                     self.market = type('obj', (object,), {
                         'raw_data': {'status': status},
                         'market_id': f"KX{asset}15M-TEST"
@@ -324,6 +328,7 @@ class TestKalshiMarketCatalogSnapshot:
                 def __init__(self, asset, status):
                     self.asset = asset
                     self.timeframe = "15m"
+                    self.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
                     self.market = type('obj', (object,), {
                         'raw_data': {'status': status},
                         'market_id': f"KX{asset}15M-TEST"
@@ -342,6 +347,258 @@ class TestKalshiMarketCatalogSnapshot:
             assets_in_snapshot = {m.asset for m in snapshot.markets}
             assert assets_in_snapshot == {"BTC", "ETH", "SOL", "XRP", "DOGE"}, \
                 "Should only have BTC, ETH, SOL, XRP, DOGE"
+
+        except ImportError:
+            pytest.skip("market_catalog not available")
+
+
+class TestMarketCatalogTimeWindowFiltering:
+    """Tests for the new time window filtering logic (visibility and tradeability)."""
+
+    def test_visibility_filter_excludes_old_tickers(self):
+        """Test that visibility filter (0-15.5 min) excludes markets from previous window (15-30 min)."""
+        try:
+            from merid.event_venues.kalshi.market_catalog import CatalogMarket
+            from merid.event_venues.base import EventMarket, EventOutcome
+            from datetime import datetime, timezone, timedelta
+            from decimal import Decimal
+
+            now_utc = datetime(2024, 6, 15, 10, 0, 0, tzinfo=timezone.utc)
+
+            # Create market in current window (5 min to expiry) - should be visible
+            current_market = EventMarket(
+                market_id="KXBTC15M-26JUN151000-50000",
+                venue="kalshi",
+                question="Will BTC be above 50000?",
+                description="Test market",
+                outcomes=[EventOutcome(outcome_id="yes", outcome_name="Yes", price=Decimal("0.5"), probability=Decimal("0.5"))],
+                end_date=now_utc + timedelta(minutes=5),
+                active=True,
+                raw_data={"status": "open"}
+            )
+
+            # Create market in previous window (20 min to expiry) - should NOT be visible
+            old_market = EventMarket(
+                market_id="KXBTC15M-26JUN142000-50000",
+                venue="kalshi",
+                question="Will BTC be above 50000?",
+                description="Test market",
+                outcomes=[EventOutcome(outcome_id="yes", outcome_name="Yes", price=Decimal("0.5"), probability=Decimal("0.5"))],
+                end_date=now_utc + timedelta(minutes=20),
+                active=True,
+                raw_data={"status": "open"}
+            )
+
+            current_cm = CatalogMarket(
+                market=current_market,
+                asset="BTC",
+                timeframe="15m",
+                expires_at=now_utc + timedelta(minutes=5),
+                minutes_to_expiry=5.0,
+                api_status="open",
+                health_status="ok",
+                tradeable=True
+            )
+
+            old_cm = CatalogMarket(
+                market=old_market,
+                asset="BTC",
+                timeframe="15m",
+                expires_at=now_utc + timedelta(minutes=20),
+                minutes_to_expiry=20.0,
+                api_status="open",
+                health_status="ok",
+                tradeable=True
+            )
+
+            # Apply visibility filter logic (0-15.5 min)
+            from merid.event_venues.kalshi.kalshi_15m_time import compute_minutes_to_expiry
+            visible_markets = []
+            for cm in [current_cm, old_cm]:
+                if cm.expires_at:
+                    mte = compute_minutes_to_expiry(cm.expires_at, now_utc)
+                    if 0.0 <= mte <= 15.5:
+                        visible_markets.append(cm)
+
+            # Assert only current market is visible
+            assert len(visible_markets) == 1, "Should only include current window market"
+            assert visible_markets[0].market.market_id == "KXBTC15M-26JUN151000-50000"
+
+        except ImportError:
+            pytest.skip("market_catalog not available")
+
+    def test_tradeability_filter_sets_tradeable_flag(self):
+        """Test that tradeability filter (2-12 min) correctly sets tradeable flag."""
+        try:
+            from merid.event_venues.kalshi.market_catalog import CatalogMarket
+            from merid.event_venues.base import EventMarket, EventOutcome
+            from datetime import datetime, timezone, timedelta
+            from decimal import Decimal
+
+            now_utc = datetime(2024, 6, 15, 10, 0, 0, tzinfo=timezone.utc)
+
+            # Create market in entry window (5 min to expiry) - should be tradeable
+            entry_window_market = EventMarket(
+                market_id="KXBTC15M-26JUN151000-50000",
+                venue="kalshi",
+                question="Will BTC be above 50000?",
+                description="Test market",
+                outcomes=[EventOutcome(outcome_id="yes", outcome_name="Yes", price=Decimal("0.5"), probability=Decimal("0.5"))],
+                end_date=now_utc + timedelta(minutes=5),
+                active=True,
+                raw_data={"status": "open"}
+            )
+
+            # Create market outside entry window (1 min to expiry) - should NOT be tradeable
+            too_soon_market = EventMarket(
+                market_id="KXBTC15M-26JUN150100-50000",
+                venue="kalshi",
+                question="Will BTC be above 50000?",
+                description="Test market",
+                outcomes=[EventOutcome(outcome_id="yes", outcome_name="Yes", price=Decimal("0.5"), probability=Decimal("0.5"))],
+                end_date=now_utc + timedelta(minutes=1),
+                active=True,
+                raw_data={"status": "open"}
+            )
+
+            # Create market outside entry window (14 min to expiry) - should NOT be tradeable
+            too_far_market = EventMarket(
+                market_id="KXBTC15M-26JUN151400-50000",
+                venue="kalshi",
+                question="Will BTC be above 50000?",
+                description="Test market",
+                outcomes=[EventOutcome(outcome_id="yes", outcome_name="Yes", price=Decimal("0.5"), probability=Decimal("0.5"))],
+                end_date=now_utc + timedelta(minutes=14),
+                active=True,
+                raw_data={"status": "open"}
+            )
+
+            entry_cm = CatalogMarket(
+                market=entry_window_market,
+                asset="BTC",
+                timeframe="15m",
+                expires_at=now_utc + timedelta(minutes=5),
+                minutes_to_expiry=5.0,
+                api_status="open",
+                health_status="ok",
+                tradeable=False  # Will be set by filter
+            )
+
+            too_soon_cm = CatalogMarket(
+                market=too_soon_market,
+                asset="BTC",
+                timeframe="15m",
+                expires_at=now_utc + timedelta(minutes=1),
+                minutes_to_expiry=1.0,
+                api_status="open",
+                health_status="ok",
+                tradeable=False
+            )
+
+            too_far_cm = CatalogMarket(
+                market=too_far_market,
+                asset="BTC",
+                timeframe="15m",
+                expires_at=now_utc + timedelta(minutes=14),
+                minutes_to_expiry=14.0,
+                api_status="open",
+                health_status="ok",
+                tradeable=False
+            )
+
+            # Apply tradeability filter logic (2-12 min)
+            from merid.event_venues.kalshi.kalshi_15m_time import compute_minutes_to_expiry
+            for cm in [entry_cm, too_soon_cm, too_far_cm]:
+                if cm.expires_at:
+                    mte = compute_minutes_to_expiry(cm.expires_at, now_utc)
+                    if 2.0 <= mte <= 12.0:
+                        cm.tradeable = True
+                    else:
+                        cm.tradeable = False
+
+            # Assert tradeable flags are set correctly
+            assert entry_cm.tradeable == True, "Market in entry window should be tradeable"
+            assert too_soon_cm.tradeable == False, "Market too close to expiry should not be tradeable"
+            assert too_far_cm.tradeable == False, "Market too far from expiry should not be tradeable"
+
+        except ImportError:
+            pytest.skip("market_catalog not available")
+
+    def test_combined_visibility_and_tradeability_filters(self):
+        """Test that visibility and tradeability filters work together correctly."""
+        try:
+            from merid.event_venues.kalshi.market_catalog import CatalogMarket
+            from merid.event_venues.base import EventMarket, EventOutcome
+            from datetime import datetime, timezone, timedelta
+            from decimal import Decimal
+
+            now_utc = datetime(2024, 6, 15, 10, 0, 0, tzinfo=timezone.utc)
+
+            # Create markets at different expiry times
+            markets_data = [
+                ("KXBTC15M-26JUN150100-50000", 1.0),   # Visible but not tradeable (too soon)
+                ("KXBTC15M-26JUN150500-50000", 5.0),   # Visible and tradeable (entry window)
+                ("KXBTC15M-26JUN151000-50000", 10.0),  # Visible and tradeable (entry window)
+                ("KXBTC15M-26JUN151300-50000", 13.0),  # Visible but not tradeable (too far)
+                ("KXBTC15M-26JUN152000-50000", 20.0),  # Not visible (old ticker)
+            ]
+
+            catalog_markets = []
+            for ticker, mte in markets_data:
+                event_market = EventMarket(
+                    market_id=ticker,
+                    venue="kalshi",
+                    question="Will BTC be above 50000?",
+                    description="Test market",
+                    outcomes=[EventOutcome(outcome_id="yes", outcome_name="Yes", price=Decimal("0.5"), probability=Decimal("0.5"))],
+                    end_date=now_utc + timedelta(minutes=mte),
+                    active=True,
+                    raw_data={"status": "open"}
+                )
+                catalog_markets.append(CatalogMarket(
+                    market=event_market,
+                    asset="BTC",
+                    timeframe="15m",
+                    expires_at=now_utc + timedelta(minutes=mte),
+                    minutes_to_expiry=mte,
+                    api_status="open",
+                    health_status="ok",
+                    tradeable=False
+                ))
+
+            # Apply visibility filter (0-15.5 min)
+            from merid.event_venues.kalshi.kalshi_15m_time import compute_minutes_to_expiry
+            visible_markets = []
+            for cm in catalog_markets:
+                if cm.expires_at:
+                    mte = compute_minutes_to_expiry(cm.expires_at, now_utc)
+                    if 0.0 <= mte <= 15.5:
+                        visible_markets.append(cm)
+
+            # Apply tradeability filter (2-12 min)
+            tradeable_markets = []
+            for cm in visible_markets:
+                if cm.expires_at:
+                    mte = compute_minutes_to_expiry(cm.expires_at, now_utc)
+                    if 2.0 <= mte <= 12.0:
+                        cm.tradeable = True
+                        tradeable_markets.append(cm)
+                    else:
+                        cm.tradeable = False
+
+            # Assert results
+            assert len(visible_markets) == 4, "Should have 4 visible markets (exclude 20min)"
+            assert len(tradeable_markets) == 2, "Should have 2 tradeable markets (5min and 10min)"
+
+            # Verify specific markets
+            visible_tickers = {cm.market.market_id for cm in visible_markets}
+            assert "KXBTC15M-26JUN152000-50000" not in visible_tickers, "20min market should not be visible"
+
+            tradeable_tickers = {cm.market.market_id for cm in tradeable_markets}
+            assert "KXBTC15M-26JUN150500-50000" in tradeable_tickers, "5min market should be tradeable"
+            assert "KXBTC15M-26JUN151000-50000" in tradeable_tickers, "10min market should be tradeable"
+            assert "KXBTC15M-26JUN150100-50000" not in tradeable_tickers, "1min market should not be tradeable"
+            assert "KXBTC15M-26JUN151300-50000" not in tradeable_tickers, "13min market should not be tradeable"
 
         except ImportError:
             pytest.skip("market_catalog not available")

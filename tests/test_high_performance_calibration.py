@@ -168,13 +168,13 @@ class TestHPStopLossCalibration:
 class TestHPPositionSizing:
     """Test position sizing calibration."""
     
-    def test_kelly_fraction_is_30_percent(self):
-        """Kelly fraction should be 30% (more aggressive than standard 25%)."""
+    def test_kelly_fraction_is_2_percent(self):
+        """Kelly fraction should be 2% (aligned with kalshi_crypto_15m_v2.yaml profile)."""
         from merid.prediction.high_performance_calibration import get_hp_config
         
         config = get_hp_config("BTC", "15m")
-        assert config.sizing.kelly_fraction == Decimal("0.30"), \
-            f"Kelly {config.sizing.kelly_fraction} != 0.30"
+        assert config.sizing.kelly_fraction == Decimal("0.02"), \
+            f"Kelly {config.sizing.kelly_fraction} != 0.02"
     
     def test_max_position_limited_to_20_percent(self):
         """Max position should be 20% of bankroll."""

@@ -255,16 +255,54 @@ class Test15mArchitecturalInvariants:
         # Should NOT use legacy entrypoint
         assert "web.main:app" not in content
 
+    def test_all_startup_scripts_use_correct_entrypoint(self):
+        """Test that all startup scripts use the production 15m entrypoint."""
+        scripts_to_check = [
+            Path(__file__).parent.parent / "start_15m.ps1",
+            Path(__file__).parent.parent / "scripts" / "dev_kalshi_only.ps1",
+            Path(__file__).parent.parent / "scripts" / "start_merid.ps1",
+            Path(__file__).parent.parent / "scripts" / "start_merid_detached.ps1",
+            Path(__file__).parent.parent / "ops" / "live_start_and_monitor.ps1",
+            Path(__file__).parent.parent / "tools" / "prime_screen_cli.py",
+        ]
+        
+        for script_path in scripts_to_check:
+            if not script_path.exists():
+                # Skip if script doesn't exist (e.g., optional tools)
+                continue
+                
+            with open(script_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Should use production entrypoint
+            assert "web.main_15m_lean:app" in content, f"{script_path} should use web.main_15m_lean:app"
+            
+            # Should NOT use legacy entrypoint in actual execution commands
+            # (allow in comments/docstrings)
+            lines = content.split('\n')
+            for i, line in enumerate(lines):
+                # Skip comment lines and docstrings
+                if line.strip().startswith('#') or line.strip().startswith('"""') or line.strip().startswith("'"):
+                    continue
+                # Skip print statements (documentation only)
+                if 'print' in line and 'web.main:app' in line:
+                    continue
+                # If we find web.main:app in non-comment, non-print code, that's a problem
+                if 'web.main:app' in line and 'uvicorn' in line:
+                    raise AssertionError(f"{script_path} line {i+1} uses legacy web.main:app in execution: {line.strip()}")
+
     def test_legacy_main_is_quarantined(self):
-        """Test that legacy main.py is quarantined."""
+        """Test that legacy main.py properly delegates to production main_15m_lean."""
         legacy_main = Path(__file__).parent.parent / "web" / "main.py"
-        quarantined_main = Path(__file__).parent.parent / "web" / "main_legacy.py"
         
-        # Legacy main should NOT exist
-        assert not legacy_main.exists(), "Legacy main.py should be quarantined"
-        
-        # Quarantined version should exist
-        assert quarantined_main.exists(), "Quarantined main_legacy.py should exist"
+        # Legacy main exists but should delegate to main_15m_lean
+        if legacy_main.exists():
+            with open(legacy_main, 'r', encoding='utf-8') as f:
+                content = f.read()
+            # Should import from main_15m_lean (the production version)
+            assert "main_15m_lean" in content, "main.py should import from main_15m_lean"
+            # Should indicate it's not the actual application
+            assert "main_15m_lean.py" in content or "actual application" in content.lower(), "main.py should indicate it delegates to main_15m_lean"
 
 
 if __name__ == "__main__":

@@ -46,8 +46,8 @@ def _pending(max_loss: int, ticker: str = "KXBTC-T", asset: str = "BTC") -> Pend
 
 def _scalper_guard(max_trades: int = 3) -> GlobalRiskGuard:
     return GlobalRiskGuard(
-        max_cycle_risk_pct=0.03,
-        max_total_risk_pct=0.08,
+        max_cycle_risk_pct=0.03,  # 2026 best practice
+        max_total_risk_pct=0.06,  # 2026 best practice
         scalper_single_batch_mode=True,
         max_trades_per_batch=max_trades,
     )
@@ -121,7 +121,7 @@ def test_scalper_reset_cycle_starts_new_batch():
 
 
 def test_scalper_disabled_by_default():
-    guard = GlobalRiskGuard(max_cycle_risk_pct=0.03, max_total_risk_pct=0.08)
+    guard = GlobalRiskGuard(max_cycle_risk_pct=0.03, max_total_risk_pct=0.06)  # 2026 best practice
     assert guard.scalper_single_batch_mode is False
     # With scalper off, open risk does NOT block by itself
     ok, _ = guard.check_order(

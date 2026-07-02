@@ -252,6 +252,52 @@ class TestNoLegacyRiskConfigImports:
             pytest.skip("PM risk config already imported by other tests")
 
 
+class TestRiskEnvelopeConfigLiveBankroll:
+    """Test that RiskEnvelopeConfig includes live_bankroll_usd field."""
+
+    def test_risk_envelope_config_has_live_bankroll_field(self):
+        """Test that RiskEnvelopeConfig dataclass has live_bankroll_usd field."""
+        from merid.risk.profiles.risk_envelope_service import RiskEnvelopeConfig
+        
+        # Create a RiskEnvelopeConfig instance
+        config = RiskEnvelopeConfig(
+            live_bankroll_usd=50.0,
+            per_trade_risk_pct=0.04,
+            max_cycle_risk_pct=0.025,
+            max_total_notional_usd=15.0,
+            max_single_order_notional_usd=2.5,
+            asset_max_notional_usd={"BTC": 4.0, "ETH": 3.0, "SOL": 2.5, "XRP": 2.5, "DOGE": 2.0},
+            max_concurrent_trades=3,
+            agent_max_yes_position=3,
+            agent_max_no_position=3,
+            agent_max_orders_per_window=10,
+            max_position_per_contract=500,
+            max_book_staleness_ms=30000,
+            dynamic_sources={},
+        )
+        
+        # Verify live_bankroll_usd field exists and has correct value
+        assert hasattr(config, 'live_bankroll_usd'), "RiskEnvelopeConfig should have live_bankroll_usd field"
+        assert config.live_bankroll_usd == 50.0, "live_bankroll_usd should be 50.0"
+
+    @patch.dict("os.environ", {"MERID_PROFILE": "kalshi_crypto_15m_v2"})
+    @patch("merid.event_venues.kalshi.bankroll_service_v2.get_equity_for_risk_calc_sync")
+    def test_risk_envelope_service_populates_live_bankroll(self, mock_bankroll):
+        """Test that RiskEnvelopeService populates live_bankroll_usd from bankroll service."""
+        from merid.risk.profiles.risk_envelope_service import get_risk_envelope_service
+        
+        # Mock bankroll service to return $50
+        mock_bankroll.return_value = 50.0
+        
+        # Get risk envelope service (should refresh envelope)
+        service = get_risk_envelope_service()
+        config = service.get_config()
+        
+        # Verify live_bankroll_usd is populated from bankroll service
+        assert config is not None, "Config should not be None"
+        assert config.live_bankroll_usd == 50.0, "live_bankroll_usd should be 50.0 from bankroll service"
+
+
 class TestEdgeBandConfiguration:
     """Test that edge band thresholds are lowered for small bankroll regime."""
 

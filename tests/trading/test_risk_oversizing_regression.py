@@ -32,8 +32,8 @@ from unittest.mock import MagicMock, patch
 # ═══════════════════════════════════════════════════════════════════════════
 # This mimics how production sets the flag via environment -> core.settings
 os.environ["USE_TOPN_ALLOCATOR"] = "true"
-os.environ["MAX_CYCLE_RISK_PCT"] = "0.03"
-os.environ["MAX_TOTAL_RISK_PCT"] = "0.08"
+os.environ["MAX_CYCLE_RISK_PCT"] = "0.03"  # 2026 best practice: 3% per cycle
+os.environ["MAX_TOTAL_RISK_PCT"] = "0.06"  # 2026 best practice: 6% total
 
 # Force reload of settings module to pick up env vars
 if 'core.settings' in sys.modules:
@@ -127,7 +127,7 @@ class TestRiskOversizingRegression(unittest.TestCase):
         This test must NEVER be removed or weakened. It protects against the
         exact bug that caused production risk violations.
         """
-        guard = GlobalRiskGuard(max_cycle_risk_pct=0.03, max_total_risk_pct=0.08)
+        guard = GlobalRiskGuard(max_cycle_risk_pct=0.03, max_total_risk_pct=0.06)  # 2026 best practice
         
         # Equity = $28, 3% cap = $0.84
         equity_cents = 2800
@@ -175,7 +175,7 @@ class TestRiskOversizingRegression(unittest.TestCase):
 
     def test_global_risk_guard_reset_cycle(self):
         """Test that cycle reset works correctly."""
-        guard = GlobalRiskGuard(max_cycle_risk_pct=0.03, max_total_risk_pct=0.08)
+        guard = GlobalRiskGuard(max_cycle_risk_pct=0.03, max_total_risk_pct=0.06)  # 2026 best practice
         
         equity_cents = 2800
         
@@ -287,7 +287,7 @@ class TestRiskOversizingRegression(unittest.TestCase):
 
     def test_short_position_max_loss_calculation(self):
         """Test that short positions correctly compute max loss."""
-        guard = GlobalRiskGuard(max_cycle_risk_pct=0.03, max_total_risk_pct=0.08)
+        guard = GlobalRiskGuard(max_cycle_risk_pct=0.03, max_total_risk_pct=0.06)  # 2026 best practice
         
         equity_cents = 2800
         
@@ -314,16 +314,16 @@ class TestRiskOversizingRegression(unittest.TestCase):
 
     def test_total_risk_cap_includes_existing_positions(self):
         """Test that total risk cap includes existing open positions."""
-        guard = GlobalRiskGuard(max_cycle_risk_pct=0.03, max_total_risk_pct=0.08)
+        guard = GlobalRiskGuard(max_cycle_risk_pct=0.03, max_total_risk_pct=0.06)  # 2026 best practice
         
         equity_cents = 2800
-        max_total_risk = int(equity_cents * 0.08)  # 224¢
+        max_total_risk = int(equity_cents * 0.06)  # 168¢ (2026 best practice: 6% total)
         
         # Existing position using 40¢ of risk
         existing_risk = 40
         
         # New order with 50¢ max loss (within cycle cap of 84¢)
-        # Total would be 90¢ < 224¢ total cap — should be allowed
+        # Total would be 90¢ < 168¢ total cap — should be allowed
         new_order = PendingOrderRisk(
             ticker="KXBTC-NEW",
             asset="BTC",
@@ -431,8 +431,8 @@ class TestCanonicalSettingsImport(unittest.TestCase):
                        "USE_TOPN_ALLOCATOR from core.settings must be True")
         self.assertEqual(MAX_CYCLE_RISK_PCT, 0.03,
                         "MAX_CYCLE_RISK_PCT from core.settings must be 0.03")
-        self.assertEqual(MAX_TOTAL_RISK_PCT, 0.08,
-                        "MAX_TOTAL_RISK_PCT from core.settings must be 0.08")
+        self.assertEqual(MAX_TOTAL_RISK_PCT, 0.06,
+                        "MAX_TOTAL_RISK_PCT from core.settings must be 0.06")
 
     def test_module_flag_matches_settings(self):
         """Verify _USE_TOPN_ALLOCATOR in continuous trader matches settings."""

@@ -530,17 +530,27 @@ def _reset_global_risk_guard_between_tests():
     Reference: PRODUCTION_AUDIT_SUMMARY_2026-04-15.md
     """
     try:
-        from merid.guards.global_risk_guard import reset_global_risk_guard_for_tests
-        reset_global_risk_guard_for_tests()
-    except ImportError:
-        # Module not available, skip reset
-        pass
+        from merid.risk.unified_risk_manager import UnifiedRiskManager
+        UnifiedRiskManager.reset_for_tests()
+    except (ImportError, AttributeError):
+        # Fallback to legacy global_risk_guard if unified manager not available
+        try:
+            from merid.guards.global_risk_guard import reset_global_risk_guard_for_tests
+            reset_global_risk_guard_for_tests()
+        except (ImportError, AttributeError):
+            # Module not available or method not found, skip reset
+            pass
     yield
     try:
-        from merid.guards.global_risk_guard import reset_global_risk_guard_for_tests
-        reset_global_risk_guard_for_tests()
-    except ImportError:
-        pass
+        from merid.risk.unified_risk_manager import UnifiedRiskManager
+        UnifiedRiskManager.reset_for_tests()
+    except (ImportError, AttributeError):
+        # Fallback to legacy global_risk_guard if unified manager not available
+        try:
+            from merid.guards.global_risk_guard import reset_global_risk_guard_for_tests
+            reset_global_risk_guard_for_tests()
+        except (ImportError, AttributeError):
+            pass
 
 
 @pytest.fixture

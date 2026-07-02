@@ -540,6 +540,106 @@ class TestAssetNotionalTracking:
         # Asset notional should be corrected to 2.5 (5 contracts * 50 cents / 100)
         assert self.risk._state.asset_notional.get("BTC", 0.0) == 2.5
 
+    def test_asset_notional_resync_clears_before_recalculate(self):
+        """Test that asset_notional is cleared before recalculation to prevent accumulation.
+        
+        This test verifies the fix for the bug where asset_notional was accumulating
+        values across multiple resync calls instead of being cleared first.
+        """
+        # Set initial asset_notional to a high value (simulating stale state)
+        self.risk._state.asset_notional["BTC"] = 100.0
+        self.risk._state.asset_notional["ETH"] = 50.0
+        
+        # Mock fills_ledger to return a single position
+        from unittest.mock import Mock, patch
+        mock_ledger = Mock()
+        mock_ledger.compute_net_positions.return_value = {
+            "KXBTC15M-TEST": {
+                "contracts": 2,
+                "avg_price_cents": 50,
+            }
+        }
+        
+        with patch('merid.event_venues.kalshi.fills_ledger.get_fills_ledger', return_value=mock_ledger):
+            # Call the actual resync method
+            self.risk.resync_category_contracts_from_positions()
+        
+        # After resync, BTC should be 1.0 (2 contracts * 50 cents / 100)
+        # NOT 101.0 (100.0 + 1.0) which would indicate accumulation bug
+        assert self.risk._state.asset_notional.get("BTC", 0.0) == 1.0
+        
+        # ETH should be 0.0 since it has no positions (was 50.0 before, should be cleared)
+        assert self.risk._state.asset_notional.get("ETH", 0.0) == 0.0
+
+
+class TestAssetNotionalTracking:
+    """Test asset_notional tracking via record_order() and record_close().
+    
+    These tests verify the fix for the bug where record_order() and record_close()
+    were not being called with the asset parameter, causing asset_notional to not
+    track actual exposure correctly.
+    """
+    
+    def setup_method(self):
+        """Setup fresh risk manager for each test."""
+        self.risk = KalshiRiskManager()
+    
+    def test_record_order_increments_asset_notional(self):
+        """Test that record_order() correctly increments asset_notional when asset parameter is provided."""
+        # Initial state should be empty
+        assert self.risk._state.asset_notional.get("BTC", 0.0) == 0.0
+        
+        # Record an order for BTC
+        self.risk.record_order(
+            category="crypto",
+            contracts=5,
+            price_cents=82,
+            fee_cents=0,
+            asset="BTC",
+        )
+        
+        # BTC notional should be 5 * 82 / 100 = 4.1
+        assert self.risk._state.asset_notional.get("BTC", 0.0) == 4.1
+        
+        # Record another order for BTC
+        self.risk.record_order(
+            category="crypto",
+            contracts=3,
+            price_cents=50,
+            fee_cents=0,
+            asset="BTC",
+        )
+        
+        # BTC notional should be 4.1 + (3 * 50 / 100) = 4.1 + 1.5 = 5.6
+        assert self.risk._state.asset_notional.get("BTC", 0.0) == 5.6
+
+    def test_record_close_decrements_asset_notional(self):
+        """Test that record_close() correctly decrements asset_notional when asset parameter is provided."""
+        # Set initial asset_notional
+        self.risk._state.asset_notional["BTC"] = 5.6
+        
+        # Record a close for BTC
+        self.risk.record_close(
+            category="crypto",
+            contracts=3,
+            price_cents=50,
+            asset="BTC",
+        )
+        
+        # BTC notional should be 5.6 - (3 * 50 / 100) = 5.6 - 1.5 = 4.1
+        assert self.risk._state.asset_notional.get("BTC", 0.0) == 4.1
+        
+        # Record another close for BTC
+        self.risk.record_close(
+            category="crypto",
+            contracts=5,
+            price_cents=82,
+            asset="BTC",
+        )
+        
+        # BTC notional should be 4.1 - (5 * 82 / 100) = 4.1 - 4.1 = 0.0
+        assert self.risk._state.asset_notional.get("BTC", 0.0) == 0.0
+
 
 class TestConfigIntegration:
     """Test configuration integration with risk manager."""

@@ -39,6 +39,60 @@ from merid.event_venues.kalshi.kalshi_risk import (
 # Fee calculation tests
 # ─────────────────────────────────────────────────────────────────────────────
 
+class TestKalshiRiskManagerEquityInitialization:
+    """Test KalshiRiskManager equity initialization from bankroll service."""
+
+    def test_kalshi_risk_manager_initializes_equity_from_bankroll_service(self):
+        """Test that KalshiRiskManager initializes equity from bankroll service on startup.
+        
+        This test verifies the fix for the "Equity is $0.00" warning.
+        """
+        from unittest.mock import patch, MagicMock
+        
+        # Mock bankroll service to return $50
+        with patch('merid.event_venues.kalshi.bankroll_service_v2.get_equity_for_risk_calc_sync') as mock_bankroll:
+            mock_bankroll.return_value = 50.0
+            
+            # Create KalshiRiskManager (should initialize equity from bankroll service)
+            risk_manager = KalshiRiskManager()
+            
+            # Verify equity was initialized from bankroll service
+            assert risk_manager._state.current_equity_usd == 50.0, \
+                "current_equity_usd should be initialized to 50.0 from bankroll service"
+            assert risk_manager._state.peak_equity_usd == 50.0, \
+                "peak_equity_usd should be initialized to 50.0 from bankroll service"
+
+    def test_kalshi_risk_manager_handles_invalid_bankroll_value(self):
+        """Test that KalshiRiskManager handles invalid bankroll values gracefully."""
+        from unittest.mock import patch
+        
+        # Mock bankroll service to return invalid value (0 or negative)
+        with patch('merid.event_venues.kalshi.bankroll_service_v2.get_equity_for_risk_calc_sync') as mock_bankroll:
+            mock_bankroll.return_value = 0.0
+            
+            # Create KalshiRiskManager (should handle invalid value)
+            risk_manager = KalshiRiskManager()
+            
+            # Verify equity defaults to 0.0 when bankroll returns invalid value
+            assert risk_manager._state.current_equity_usd == 0.0, \
+                "current_equity_usd should default to 0.0 when bankroll returns invalid value"
+
+    def test_kalshi_risk_manager_handles_bankroll_service_error(self):
+        """Test that KalshiRiskManager handles bankroll service errors gracefully."""
+        from unittest.mock import patch
+        
+        # Mock bankroll service to raise an error
+        with patch('merid.event_venues.kalshi.bankroll_service_v2.get_equity_for_risk_calc_sync') as mock_bankroll:
+            mock_bankroll.side_effect = Exception("Bankroll service unavailable")
+            
+            # Create KalshiRiskManager (should handle error gracefully)
+            risk_manager = KalshiRiskManager()
+            
+            # Verify equity defaults to 0.0 when bankroll service fails
+            assert risk_manager._state.current_equity_usd == 0.0, \
+                "current_equity_usd should default to 0.0 when bankroll service fails"
+
+
 class TestKalshiFeeCents:
     """Test fee calculation with tiered schedule."""
 

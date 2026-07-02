@@ -245,13 +245,13 @@ class TestBug13VelocityThresholdConfigurable:
         assert 'velocity_threshold' in field_names
 
     def test_velocity_threshold_uses_config_value(self):
-        """Verify velocity threshold uses configurable value."""
+        """Verify velocity threshold uses configurable value aligned with industry standards."""
         from merid.prediction.agent_grid_15m import LeanAgentConfig, LeanAgent15m
         
         config = LeanAgentConfig(
             name="BTC_15M",
             series_tickers=["KXBTC15M"],
-            velocity_threshold=0.0005,  # Higher threshold
+            velocity_threshold=0.002,  # Industry standard 0.2% for BTC
         )
         
         agent = LeanAgent15m(
@@ -267,9 +267,53 @@ class TestBug13VelocityThresholdConfigurable:
         market = Mock()
         market.asset = "BTC"
         
-        # Velocity 0.0003 is < threshold 0.0005, should return None
+        # Velocity 0.001 is < threshold 0.002, should return None
         signal = agent._generate_signal(50000.0, market, 10.0)
         assert signal is None  # Should not trade due to insufficient velocity
+
+    def test_per_asset_velocity_thresholds(self):
+        """Verify per-asset velocity thresholds are configured correctly."""
+        from merid.prediction.agent_grid_15m import LeanAgentConfig, LeanAgent15m
+        
+        # Test BTC threshold (0.2%)
+        config_btc = LeanAgentConfig(
+            name="BTC_15M",
+            series_tickers=["KXBTC15M"],
+            velocity_threshold=0.002,  # 0.2% for BTC
+        )
+        assert config_btc.velocity_threshold == 0.002
+        
+        # Test ETH threshold (0.2%)
+        config_eth = LeanAgentConfig(
+            name="ETH_15M",
+            series_tickers=["KXETH15M"],
+            velocity_threshold=0.002,  # 0.2% for ETH
+        )
+        assert config_eth.velocity_threshold == 0.002
+        
+        # Test SOL threshold (0.3%)
+        config_sol = LeanAgentConfig(
+            name="SOL_15M",
+            series_tickers=["KXSOL15M"],
+            velocity_threshold=0.003,  # 0.3% for SOL
+        )
+        assert config_sol.velocity_threshold == 0.003
+        
+        # Test XRP threshold (0.3%)
+        config_xrp = LeanAgentConfig(
+            name="XRP_15M",
+            series_tickers=["KXXRP15M"],
+            velocity_threshold=0.003,  # 0.3% for XRP
+        )
+        assert config_xrp.velocity_threshold == 0.003
+        
+        # Test DOGE threshold (0.4%)
+        config_doge = LeanAgentConfig(
+            name="DOGE_15M",
+            series_tickers=["KXDOGE15M"],
+            velocity_threshold=0.004,  # 0.4% for DOGE
+        )
+        assert config_doge.velocity_threshold == 0.004
 
 
 class TestBug11CooldownTracking:
