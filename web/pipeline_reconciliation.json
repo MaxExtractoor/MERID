@@ -1,0 +1,164 @@
+{
+  "timestamp": "2026-06-14T16:53:22.997102+00:00",
+  "stages": {
+    "market_discovery": {
+      "stage": "market_discovery",
+      "status": "pass",
+      "details": {
+        "window": {
+          "start_utc": "2026-06-14T16:45:00+00:00",
+          "end_utc": "2026-06-14T17:00:00+00:00",
+          "suffix": "26JUN141645-45"
+        },
+        "total_markets": 5,
+        "crypto_15m_markets": 5,
+        "asset_coverage": {
+          "BTC": 1,
+          "ETH": 1,
+          "SOL": 1,
+          "XRP": 1,
+          "DOGE": 1
+        },
+        "active_markets": 5
+      },
+      "gaps": []
+    },
+    "market_data_availability": {
+      "stage": "market_data_availability",
+      "status": "partial",
+      "details": {
+        "market_state_status": {
+          "KXBTC15M-26JUN141300-00": "NO_STATE",
+          "KXETH15M-26JUN141300-00": "NO_STATE",
+          "KXSOL15M-26JUN141300-00": "NO_STATE",
+          "KXXRP15M-26JUN141300-00": "NO_STATE",
+          "KXDOGE15M-26JUN141300-00": "NO_STATE"
+        },
+        "spot_status": {
+          "BTC": "NO_DATA",
+          "ETH": "NO_DATA",
+          "SOL": "NO_DATA",
+          "XRP": "NO_DATA",
+          "DOGE": "NO_DATA"
+        }
+      },
+      "gaps": [
+        "No market state for KXBTC15M-26JUN141300-00",
+        "No market state for KXETH15M-26JUN141300-00",
+        "No market state for KXSOL15M-26JUN141300-00",
+        "No market state for KXXRP15M-26JUN141300-00",
+        "No market state for KXDOGE15M-26JUN141300-00",
+        "No spot data for BTC",
+        "No spot data for ETH",
+        "No spot data for SOL",
+        "No spot data for XRP",
+        "No spot data for DOGE"
+      ]
+    },
+    "candidate_generation": {
+      "stage": "candidate_generation",
+      "status": "partial",
+      "details": {
+        "optimizer_available": true,
+        "candidate_status": {
+          "BTC": "NO_MD",
+          "ETH": "NO_MD",
+          "SOL": "NO_MD",
+          "XRP": "NO_MD",
+          "DOGE": "NO_MD"
+        }
+      },
+      "gaps": [
+        "No market state for candidate generation: BTC",
+        "No market state for candidate generation: ETH",
+        "No market state for candidate generation: SOL",
+        "No market state for candidate generation: XRP",
+        "No market state for candidate generation: DOGE"
+      ]
+    },
+    "signal_generation": {
+      "stage": "signal_generation",
+      "status": "pass",
+      "details": {
+        "signal_status": {
+          "BTC": "AGENT_AVAILABLE",
+          "ETH": "AGENT_AVAILABLE",
+          "SOL": "AGENT_AVAILABLE",
+          "XRP": "AGENT_AVAILABLE",
+          "DOGE": "AGENT_AVAILABLE"
+        },
+        "ta_available": true
+      },
+      "gaps": []
+    },
+    "edge_calculation": {
+      "stage": "edge_calculation",
+      "status": "partial",
+      "details": {
+        "edge_calculator_available": true,
+        "edge_status": {
+          "BTC": "NO_ORDERBOOK",
+          "ETH": "NO_ORDERBOOK",
+          "SOL": "NO_ORDERBOOK",
+          "XRP": "NO_ORDERBOOK",
+          "DOGE": "NO_ORDERBOOK"
+        }
+      },
+      "gaps": [
+        "No orderbook for edge calculation: BTC",
+        "No orderbook for edge calculation: ETH",
+        "No orderbook for edge calculation: SOL",
+        "No orderbook for edge calculation: XRP",
+        "No orderbook for edge calculation: DOGE"
+      ]
+    },
+    "order_intent_creation": {
+      "stage": "order_intent_creation",
+      "status": "pass",
+      "details": {
+        "order_intent_available": true,
+        "required_fields": [
+          "action",
+          "count",
+          "price_cents",
+          "market_id",
+          "agent_id",
+          "source",
+          "group_id",
+          "edge_pct"
+        ]
+      },
+      "gaps": []
+    },
+    "order_placement": {
+      "stage": "order_placement",
+      "status": "pass",
+      "details": {
+        "order_router_available": true,
+        "kalshi_client_available": true
+      },
+      "gaps": []
+    },
+    "fill_execution": {
+      "stage": "fill_execution",
+      "status": "pass",
+      "details": {
+        "venue_fill_available": true,
+        "position_tracker_available": true
+      },
+      "gaps": []
+    },
+    "execution_reconciliation": {
+      "stage": "execution_reconciliation",
+      "status": "pass",
+      "details": {
+        "reconciliation_available": true,
+        "trade_logger_available": true
+      },
+      "gaps": []
+    }
+  },
+  "gaps": [],
+  "issues": [],
+  "summary": {}
+}

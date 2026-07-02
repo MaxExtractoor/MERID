@@ -1,0 +1,202 @@
+{
+  "timestamp": "2026-06-14T15:59:07.564189+00:00",
+  "summary": {
+    "critical_issues": 6,
+    "warnings": 5,
+    "info": 16
+  },
+  "issues": [
+    {
+      "category": "ACTIVE_MARKETS",
+      "message": "No active 15m markets found for BTC",
+      "details": {
+        "asset": "BTC",
+        "timeframe": "15m",
+        "window": "UTCWindow(start_utc=datetime.datetime(2026, 6, 14, 15, 45, tzinfo=datetime.timezone.utc), end_utc=datetime.datetime(2026, 6, 14, 16, 0, tzinfo=datetime.timezone.utc), suffix='26JUN141545-45')"
+      },
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "ACTIVE_MARKETS",
+      "message": "No active 15m markets found for ETH",
+      "details": {
+        "asset": "ETH",
+        "timeframe": "15m",
+        "window": "UTCWindow(start_utc=datetime.datetime(2026, 6, 14, 15, 45, tzinfo=datetime.timezone.utc), end_utc=datetime.datetime(2026, 6, 14, 16, 0, tzinfo=datetime.timezone.utc), suffix='26JUN141545-45')"
+      },
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "ACTIVE_MARKETS",
+      "message": "No active 15m markets found for SOL",
+      "details": {
+        "asset": "SOL",
+        "timeframe": "15m",
+        "window": "UTCWindow(start_utc=datetime.datetime(2026, 6, 14, 15, 45, tzinfo=datetime.timezone.utc), end_utc=datetime.datetime(2026, 6, 14, 16, 0, tzinfo=datetime.timezone.utc), suffix='26JUN141545-45')"
+      },
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "ACTIVE_MARKETS",
+      "message": "No active 15m markets found for XRP",
+      "details": {
+        "asset": "XRP",
+        "timeframe": "15m",
+        "window": "UTCWindow(start_utc=datetime.datetime(2026, 6, 14, 15, 45, tzinfo=datetime.timezone.utc), end_utc=datetime.datetime(2026, 6, 14, 16, 0, tzinfo=datetime.timezone.utc), suffix='26JUN141545-45')"
+      },
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "ACTIVE_MARKETS",
+      "message": "No active 15m markets found for DOGE",
+      "details": {
+        "asset": "DOGE",
+        "timeframe": "15m",
+        "window": "UTCWindow(start_utc=datetime.datetime(2026, 6, 14, 15, 45, tzinfo=datetime.timezone.utc), end_utc=datetime.datetime(2026, 6, 14, 16, 0, tzinfo=datetime.timezone.utc), suffix='26JUN141545-45')"
+      },
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "PIPELINE",
+      "message": "Cannot import UnifiedSpotService: No module named 'merid.data.unified_spot_service'",
+      "details": {
+        "component": "UnifiedSpotService",
+        "module": "merid.data.unified_spot_service",
+        "error": "No module named 'merid.data.unified_spot_service'"
+      },
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    }
+  ],
+  "warnings": [
+    {
+      "category": "TIME_ALIGNMENT",
+      "message": "System time drift detected: 6.20s",
+      "details": {
+        "drift_seconds": 6.197876
+      },
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "AGENT_GRID",
+      "message": "Agent grid singleton is None (may not be initialized)",
+      "details": {},
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "PRICE_FEED",
+      "message": "Cannot import KalshiSpotService or KalshiSpotProvider",
+      "details": {},
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "RISK_ENFORCEMENT",
+      "message": "Cannot find get_kill_switch_state function",
+      "details": {},
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "RISK_ENFORCEMENT",
+      "message": "Cannot import KalshiBankrollServiceV2: cannot import name 'KalshiBankrollServiceV2' from 'merid.event_venues.kalshi.bankroll_service_v2' (C:\\Dev\\MERID\\merid\\event_venues\\kalshi\\bankroll_service_v2.py)",
+      "details": {},
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    }
+  ],
+  "info": [
+    {
+      "category": "INITIALIZATION",
+      "message": "Kalshi client and catalog initialized successfully",
+      "details": {},
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "TIME_WINDOW",
+      "message": "Current UTC window: 2026-06-14 15:45:00+00:00 to 2026-06-14 16:00:00+00:00",
+      "details": {},
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "CATALOG_ALIGNMENT",
+      "message": "Catalog alignment check complete: 0 total markets",
+      "details": {},
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "TIME_ALIGNMENT",
+      "message": "Current window: 2026-06-14 15:45:00+00:00 to 2026-06-14 16:00:00+00:00",
+      "details": {},
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "WS_SUBSCRIPTION",
+      "message": "WebSocket subscriptions: 0 tickers",
+      "details": {},
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "AGENT_GRID",
+      "message": "build_15m_agent_grid function is importable",
+      "details": {},
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "PRICE_FEED",
+      "message": "Available items in merid.data: ['settlement_rti_buffer']",
+      "details": {},
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "RISK_ENFORCEMENT",
+      "message": "Available items in kill_switches: ['AUDIT_SPEC_VERSION', 'Any', 'Callable', 'Counter', 'Dict', 'Enum', 'FORMULAS_VERSION', 'KillSwitchEvent', 'KillSwitchReason', 'KillSwitchState', 'List', 'Optional', 'PROMETHEUS_AVAILABLE', 'Path', 'RiskController', 'Union', 'annotations', 'can_trade', 'daily_loss_limit_hits_total', 'dataclass', 'datetime', 'emergency_stop', 'field', 'get_logger', 'get_profile_daily_loss_limit', 'get_profile_drawdown_state', 'get_profile_max_position_value', 'get_risk_status', 'invalidate_promotion_cache', 'json', 'logger', 'os', 'risk_controller', 'threading', 'time', 'timezone']",
+      "details": {},
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "PIPELINE",
+      "message": "KalshiClientV2 is importable from merid.event_venues.kalshi.client_v2",
+      "details": {},
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "PIPELINE",
+      "message": "KalshiMarketCatalog is importable from merid.event_venues.kalshi.market_catalog",
+      "details": {},
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "PIPELINE",
+      "message": "KalshiCryptoCatalog is importable from merid.event_venues.kalshi.crypto_catalog",
+      "details": {},
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "PIPELINE",
+      "message": "LeanAgentGrid15m is importable from merid.prediction.agent_grid_15m",
+      "details": {},
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "PIPELINE",
+      "message": "Kalshi15mLoop is importable from merid.loop_15m",
+      "details": {},
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "PIPELINE",
+      "message": "KillSwitchManager is importable from merid.risk.kill_switches",
+      "details": {},
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "PIPELINE",
+      "message": "kalshi_crypto_config is importable",
+      "details": {},
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    },
+    {
+      "category": "PIPELINE",
+      "message": "kalshi_universe is importable",
+      "details": {},
+      "timestamp": "2026-06-14T15:59:07.564189+00:00"
+    }
+  ]
+}
