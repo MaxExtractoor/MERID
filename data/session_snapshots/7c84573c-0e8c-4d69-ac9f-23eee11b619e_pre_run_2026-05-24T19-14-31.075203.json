@@ -1,0 +1,33 @@
+{
+  "run_id": "7c84573c-0e8c-4d69-ac9f-23eee11b619e",
+  "phase": "pre_run",
+  "timestamp": "2026-05-24T19:14:31.075203",
+  "bankroll_usd": 36.58,
+  "kelly_fraction": null,
+  "max_drawdown_pct": null,
+  "asset_exposure": {
+    "BTC": {
+      "exposure_usd": 0.0,
+      "exposure_pct": 0.0
+    },
+    "ETH": {
+      "exposure_usd": 0.0,
+      "exposure_pct": 0.0
+    },
+    "SOL": {
+      "exposure_usd": 0.0,
+      "exposure_pct": 0.0
+    },
+    "XRP": {
+      "exposure_usd": 0.0,
+      "exposure_pct": 0.0
+    },
+    "DOGE": {
+      "exposure_usd": 0.0,
+      "exposure_pct": 0.0
+    }
+  },
+  "open_positions": 0,
+  "pending_orders": 0,
+  "additional_metrics": {}
+}

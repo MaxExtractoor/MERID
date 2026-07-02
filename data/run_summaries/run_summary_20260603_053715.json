@@ -1,0 +1,75 @@
+{
+  "timestamp": "2026-06-03T05:37:15.025943+00:00",
+  "run_start": "2026-06-03T05:35:12.079079+00:00",
+  "loop": {
+    "running": false,
+    "tick": 24,
+    "cycle_count": 23,
+    "error_count": 0,
+    "cadence_seconds": 5.0,
+    "uptime_seconds": 122.934001,
+    "last_cycle_at": "2026-06-03T05:37:14.854246+00:00",
+    "started_at": "2026-06-03T05:35:12.091942+00:00",
+    "agent_count": 5,
+    "halted_due_to_drawdown": false
+  },
+  "agents": {
+    "total_agents": 5,
+    "agents": [
+      {
+        "name": "BTC_15M",
+        "enabled": true
+      },
+      {
+        "name": "ETH_15M",
+        "enabled": true
+      },
+      {
+        "name": "SOL_15M",
+        "enabled": true
+      },
+      {
+        "name": "XRP_15M",
+        "enabled": true
+      },
+      {
+        "name": "DOGE_15M",
+        "enabled": true
+      }
+    ]
+  },
+  "pnl": {
+    "total_pnl_usd": 0.0,
+    "daily_pnl_usd": 0.0,
+    "by_asset": {
+      "BTC": {
+        "metric_exists": true
+      },
+      "ETH": {
+        "metric_exists": true
+      },
+      "SOL": {
+        "metric_exists": true
+      },
+      "XRP": {
+        "metric_exists": true
+      },
+      "DOGE": {
+        "metric_exists": true
+      }
+    },
+    "current_equity_usd": 15.51
+  },
+  "orders": {
+    "orders_submitted": 0,
+    "orders_filled": 0,
+    "orders_cancelled": 0,
+    "orders_rejected": 0,
+    "metrics_available": true
+  },
+  "edge_rejections": {
+    "no_valid_contract_rejections": 0,
+    "by_asset": {},
+    "metrics_available": true
+  }
+}

@@ -1,0 +1,187 @@
+# ═══════════════════════════════════════════════════════════════════════
+# Kalshi Crypto 15m Strategy Profile
+# ═══════════════════════════════════════════════════════════════════════
+# SINGLE SOURCE OF TRUTH for strategy thresholds and filters for BTC/ETH/SOL/XRP/DOGE 15m trading.
+#
+# This profile defines the canonical strategy behavior for Kalshi 15m crypto:
+# - Edge thresholds per asset and time bucket
+# - Spread filters and liquidity guards
+# - Time-to-expiry bounds
+# - Entry/exit rules
+#
+# Strategy implementation: merid/prediction/agent_grid_15m.py::_generate_signal()
+# Sizing implementation: merid/prediction/unified_sizing.py
+# Risk envelope: config/profiles/kalshi_crypto_15m.yaml (via RiskEnvelopeService)
+# ═══════════════════════════════════════════════════════════════════════
+
+profile_name: kalshi_crypto_15m_strategy
+profile_version: "1.0.0"
+description: "Strategy thresholds and filters for 15m crypto prediction markets on Kalshi"
+
+# ── Edge Thresholds ────────────────────────────────────────────────────────
+# Minimum edge required to enter a trade, expressed in basis points (bp).
+# 1% = 100 bp, 2% = 200 bp, etc.
+# These thresholds are asset-specific and time-bucket-specific to account for
+# different volatility profiles and time decay characteristics.
+edge_thresholds:
+  # BTC - higher volatility, higher edge requirement
+  BTC:
+    early:  # 12-8 minutes to expiry
+      min_edge_bp: 150  # 1.5% minimum edge
+    mid:    # 8-4 minutes to expiry
+      min_edge_bp: 120  # 1.2% minimum edge
+    late:   # 4-2 minutes to expiry
+      min_edge_bp: 100  # 1.0% minimum edge
+    terminal:  # < 2 minutes to expiry (no entries allowed)
+      min_edge_bp: 9999  # Effectively infinite - block entries
+  
+  # ETH - similar volatility to BTC
+  ETH:
+    early:
+      min_edge_bp: 150
+    mid:
+      min_edge_bp: 120
+    late:
+      min_edge_bp: 100
+    terminal:
+      min_edge_bp: 9999
+  
+  # SOL - higher volatility, higher edge requirement
+  SOL:
+    early:
+      min_edge_bp: 200  # 2.0% minimum edge
+    mid:
+      min_edge_bp: 150  # 1.5% minimum edge
+    late:
+      min_edge_bp: 120  # 1.2% minimum edge
+    terminal:
+      min_edge_bp: 9999
+  
+  # XRP - moderate volatility
+  XRP:
+    early:
+      min_edge_bp: 120
+    mid:
+      min_edge_bp: 100
+    late:
+      min_edge_bp: 80   # 0.8% minimum edge
+    terminal:
+      min_edge_bp: 9999
+  
+  # DOGE - lower price, higher relative volatility
+  DOGE:
+    early:
+      min_edge_bp: 200  # 2.0% minimum edge
+    mid:
+      min_edge_bp: 150  # 1.5% minimum edge
+    late:
+      min_edge_bp: 120  # 1.2% minimum edge
+    terminal:
+      min_edge_bp: 9999
+
+# ── Spread Filters ───────────────────────────────────────────────────────────
+# Maximum spread allowed for trading. If spread exceeds this threshold, trade is rejected.
+# Expressed in cents (Kalshi contract price units).
+spread_filters:
+  max_spread_cents: 10  # Maximum 10 cent spread
+  # Asset-specific overrides (optional)
+  asset_max_spread_cents:
+    BTC: 10
+    ETH: 10
+    SOL: 15  # SOL may have wider spreads
+    XRP: 8
+    DOGE: 5   # DOGE is lower-priced, tighter spread
+
+# ── Time-to-Expiry Bounds ───────────────────────────────────────────────────────
+# Time-to-expiry bounds for entry and exit.
+# Expressed in seconds.
+time_to_expiry:
+  min_for_entry_s: 180    # 3 minutes minimum for new entries
+  max_for_entry_s: 720    # 12 minutes maximum for new entries
+  min_for_exit_s: 30      # 30 seconds minimum for exit (close positions)
+  
+  # Time bucket definitions (for edge thresholds)
+  buckets:
+    early:
+      min_s: 480   # 8 minutes
+      max_s: 720   # 12 minutes
+    mid:
+      min_s: 240   # 4 minutes
+      max_s: 480   # 8 minutes
+    late:
+      min_s: 120   # 2 minutes
+      max_s: 240   # 4 minutes
+    terminal:
+      min_s: 0
+      max_s: 120   # 2 minutes
+
+# ── Edge Computation Mode ─────────────────────────────────────────────────────
+# Controls which edge computation method to use.
+edge_computation:
+  mode: "unified"  # Options: "unified", "legacy_spread"
+  
+  # Unified edge configuration (when mode = "unified")
+  unified:
+    enabled: false  # Controlled by MERID_UNIFIED_EDGE_ENABLED env var
+    use_spot_reference: true
+    use_orderbook: true
+    apply_slippage_adjustment: true
+  
+  # Legacy spread-based edge configuration (when mode = "legacy_spread")
+  legacy_spread:
+    min_edge_pct: 0.01  # 1% base edge
+    spread_multiplier: 2.0  # Edge = max(min_edge_pct, spread * multiplier)
+
+# ── Entry Timing Filters ───────────────────────────────────────────────────────
+# Entry timing quality filters to adjust position size based on timing.
+entry_timing:
+  enabled: false  # Controlled by entry timing filter config
+  size_scaling_enabled: false
+  early_entry_cost_r: 0.2  # Cost of early entry in R units
+
+# ── Strategy Invariants ────────────────────────────────────────────────────────
+# These invariants are enforced by the strategy implementation and unit tests.
+# Any violation of these invariants is a bug.
+invariants:
+  # Preconditions that must all be true to proceed
+  preconditions:
+    - market_state_exists
+    - book_initialized
+    - bid_ask_not_zero_100
+    - state_executable
+    - valid_bid_ask
+    - bankroll_available
+    - time_to_expiry_gte_3min
+  
+  # Filters that cause hard rejections
+  hard_filters:
+    - time_to_expiry_lt_3min
+    - no_valid_bid_ask
+    - state_not_executable
+    - pattern_zero_100
+  
+  # Monotonicity: higher edge should not produce smaller size
+  monotonicity:
+    enabled: true
+    description: "Given same risk envelope, if edge1 > edge2 then size1 >= size2"
+  
+  # Risk envelope: no position may violate envelope caps
+  risk_envelope:
+    enforce_per_asset_cap: true
+    enforce_per_cycle_cap: true
+    enforce_per_trade_cap: true
+
+# ── Validation Rules ───────────────────────────────────────────────────────────
+# Startup validation rules to ensure strategy profile is correctly configured.
+validation:
+  # Ensure edge thresholds are in reasonable ranges
+  min_edge_bp_range: [50, 500]  # 0.5% to 5%
+  
+  # Ensure spread filters are positive
+  max_spread_cents_min: 1
+  
+  # Ensure time bounds are positive
+  min_time_to_expiry_s_min: 30
+  
+  # Ensure no duplicate threshold definitions
+  check_duplicates: true

@@ -1,0 +1,76 @@
+# Kalshi Crypto Hedging Configuration
+# This file configures the CryptoHedgeEngine for hedging crypto positions on Kalshi
+
+hedging:
+  enabled: true
+  use_cross_asset_hedging: false
+  max_drawdown_pct: 40.0
+
+  # Asset-specific bankroll slices
+  asset_slices:
+    BTC:
+      slice_pct_of_bankroll: 0.20
+      per_trade_risk_pct_of_slice: 1.0
+      max_drawdown_pct_of_slice: 3.0
+    ETH:
+      slice_pct_of_bankroll: 0.20
+      per_trade_risk_pct_of_slice: 1.0
+      max_drawdown_pct_of_slice: 3.0
+    SOL:
+      slice_pct_of_bankroll: 0.20
+      per_trade_risk_pct_of_slice: 1.0
+      max_drawdown_pct_of_slice: 3.0
+    XRP:
+      slice_pct_of_bankroll: 0.20
+      per_trade_risk_pct_of_slice: 1.0
+      max_drawdown_pct_of_slice: 3.0
+    DOGE:
+      slice_pct_of_bankroll: 0.20
+      per_trade_risk_pct_of_slice: 1.0
+      max_drawdown_pct_of_slice: 3.0
+
+  # Timeframe-specific hedge rules
+  timeframes:
+    15m:
+      max_net_exposure_pct_of_slice: 10.0
+      target_hedge_ratio: 0.5
+      prefer_same_timeframe: true
+      allow_adjacent_horizons: []
+
+  # Cross-asset hedging (disabled for now)
+  cross_asset:
+    enabled: false
+    max_pair_correlation: 0.85
+    max_cross_hedge_pct_of_base: 0.20
+    pairs: []
+
+  # Take profit configuration for hedge positions
+  take_profit:
+    enabled: true
+    BTC:
+      tp_1: 2.0
+      tp_2: 4.0
+      stop_loss: 1.5
+    ETH:
+      tp_1: 2.0
+      tp_2: 4.0
+      stop_loss: 1.5
+    SOL:
+      tp_1: 2.0
+      tp_2: 4.0
+      stop_loss: 1.5
+    XRP:
+      tp_1: 2.0
+      tp_2: 4.0
+      stop_loss: 1.5
+    DOGE:
+      tp_1: 2.0
+      tp_2: 4.0
+      stop_loss: 1.5
+
+  # Auto-exit configuration for hedge positions
+  auto_exit:
+    enabled: true
+    close_hedge_when_alpha_closed: true
+    max_hedge_hold_minutes: 120
+    reduce_on_exposure_flip: true

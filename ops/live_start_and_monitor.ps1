@@ -242,7 +242,7 @@ function Start-Backend {
         $env:MAX_TOTAL_RISK_PCT = $TotalRiskPct
         $env:SCALPER_SINGLE_BATCH_MODE = $ScalperSingleBatch
         $env:SCALPER_MAX_TRADES_PER_BATCH = $ScalperMaxTrades
-        & py -m uvicorn web.main:app --host "0.0.0.0" --port $Port --workers 2 --log-level info 2>&1
+        & py -m uvicorn web.main_15m_lean:app --host "0.0.0.0" --port $Port --workers 2 --log-level info 2>&1
     }
     
     $port = $env:PORT -or 8011

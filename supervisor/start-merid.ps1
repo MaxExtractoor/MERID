@@ -19,7 +19,7 @@ $env:MERID_API_BASE_URL = "http://127.0.0.1:8011"
 $env:MERID_LOG_LEVEL = "INFO"
 
 # Risk Management Configuration (Optimized Regime 2026-05-07)
-$env:MAX_CYCLE_RISK_PCT = "0.03"  # 3% per cycle (was 2%)
+$env:MAX_CYCLE_RISK_PCT = "0.06"  # 6% per cycle (increased to allow multi-asset trading)
 $env:MAX_TOTAL_RISK_PCT = "0.08"  # 8% total max (was 5%)
 $env:SCALPER_SINGLE_BATCH_MODE = "false"  # Allow multi-batch (was true)
 $env:SCALPER_MAX_TRADES_PER_BATCH = "5"  # Increased from 3

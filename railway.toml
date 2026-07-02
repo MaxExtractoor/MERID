@@ -24,15 +24,17 @@ HOST = "0.0.0.0"
 PORT = "8011"
 RELOAD = "false"
 
-# Trading Mode (paper for safety)
-MERID_TRADING_MODE = "paper"
-MERID_PM_TRADING_MODE = "paper"
-MERID_PM_LIVE_ENABLED = "false"
-MERID_LIVE_TRADING_UNLOCKED = "false"
+# Trading Mode (LIVE for production - 2026-06-29: Fixed to enable live trading)
+MERID_TRADING_MODE = "live"
+MERID_PM_TRADING_MODE = "live"
+MERID_PM_LIVE_ENABLED = "true"
+MERID_LIVE_TRADING_UNLOCKED = "true"
+MERID_ALLOW_LIVE_TRADES = "true"
+MERID_EXECUTION_MODE = "normal"
 
 # Kalshi Configuration
 KALSHI_ONLY = "true"
-KALSHI_USE_DEMO = "true"
+KALSHI_USE_DEMO = "false"
 KALSHI_API_HOST = "https://api.elections.kalshi.com/trade-api/v2"
 
 # Safety Limits

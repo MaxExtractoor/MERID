@@ -1,0 +1,92 @@
+# Unified Risk Limits Configuration
+# Single Source of Truth for all risk management parameters
+# All caps are percentages of live bankroll unless otherwise specified
+
+# Bankroll-based risk limits for highly correlated crypto assets
+# BTC, ETH, SOL, XRP, DOGE have 0.8+ correlation and are treated as single position
+# Based on 2026 HFT best practices: Quarter Kelly (0.25x) for crypto, 1-3% per trade
+bankroll:
+  # Maximum total exposure per trading cycle (0.5% for 5-second cycles)
+  # 2026 best practice: 0.5-1% per cycle for HFT to prevent catastrophic compounding
+  # With 180 cycles/hour, even 0.5% compounds to significant exposure
+  max_cycle_risk_pct: 0.005
+  
+  # Maximum total exposure across all positions (25% total)
+  # Increased to 25% to allow 5% per asset across 5 assets (5 × 5% = 25%)
+  # Industry standard: 15-25% total exposure for binary options
+  max_total_risk_pct: 0.25
+  
+  # Maximum daily loss limit (5% - triggers trading halt)
+  # Standard institutional practice: 3-5% daily loss limit
+  daily_loss_pct: 0.05
+  
+  # Maximum cluster loss (2.5% - half of daily limit)
+  cluster_stop_pct: 0.025
+
+# Category-level caps
+categories:
+  crypto:
+    # Maximum total exposure to crypto category (25% of bankroll)
+    # Increased to 25% to allow 5% per asset across 5 assets (5 × 5% = 25%)
+    # Industry standard: 15-25% for category-level exposure in binary options
+    max_notional_pct: 0.25
+    # Minimum floor in USD (prevents impossibly small caps)
+    min_cap_usd: 100.0
+
+# Correlated stack caps (same underlying across timeframes)
+correlated_stack:
+  # Maximum exposure to same underlying (15% for highly correlated assets)
+  # BTC, ETH, SOL, XRP, DOGE treated as single position due to 0.8+ correlation
+  # Increased from 10% to 15% to allow 2-3 trades per asset per session
+  # Industry standard: 10-15% for correlated positions in binary options
+  max_notional_pct: 0.15
+  # Minimum floor in USD
+  min_cap_usd: 10.0
+
+# Per-asset caps (DISABLED for highly correlated crypto assets)
+# When assets have 0.8+ correlation, per-asset caps block legitimate trades
+# Use portfolio-level correlated stack cap instead
+per_asset:
+  enabled: false
+  # If enabled, these would be per-asset percentages of bankroll
+  # BTC: 0.02  # 2%
+  # ETH: 0.02  # 2%
+  # SOL: 0.015 # 1.5%
+  # XRP: 0.015 # 1.5%
+  # DOGE: 0.01 # 1%
+  min_cap_usd: 5.0
+
+# Per-trade limits
+per_trade:
+  # Maximum notional for single trade (2% of bankroll)
+  # ALIGNED TO 2026 INDUSTRY STANDARDS: 1-2% per trade for binary options
+  # Research: Daytrading.com recommends 0.5-2% (prefer 0.5% for safety, 1-2% for growth)
+  # Trades-Trend recommends 1-2% as standard benchmark (5% is high risk)
+  # BinaryOptionsAE recommends 1-2% for small accounts to survive losing streaks
+  # CRITICAL FIX: This is the SINGLE SOURCE OF TRUTH for per-trade risk
+  # All upstream sizing (Kelly fraction, profile per_trade_risk_pct) must align with this value
+  # to prevent systematic rejections due to misalignment
+  max_notional_pct: 0.02
+  # Maximum contracts per trade
+  max_contracts: 10
+
+# Drawdown limits
+drawdown:
+  # Drawdown percentage that triggers trading halt (10%)
+  halt_pct: 0.10
+  # Drawdown percentage that triggers position unwind (15%)
+  unwind_pct: 0.15
+
+# Rate limiting
+rate_limit:
+  # Maximum trades per hour
+  max_trades_per_hour: 20
+  # Minimum time between trades (seconds)
+  min_time_between_trades: 60.0
+
+# Emergency controls
+emergency:
+  # Emergency halt flag (set to true to halt all trading)
+  halt: false
+  # Reason for halt (if halt is true)
+  halt_reason: ""
