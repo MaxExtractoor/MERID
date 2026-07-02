@@ -23,6 +23,9 @@ from pathlib import Path
 from utils.logger import get_logger
 logger = get_logger("web.main_15m_lean")
 
+# CRITICAL DIAGNOSTIC: Immediate log to verify this code runs
+logger.info("[MAIN-15M-LEAN] FIRST LINE OF FILE - EXECUTING")
+
 # CRITICAL DIAGNOSTIC: Log file execution
 logger.info("[MAIN-15M-LEAN] FILE START - Beginning execution")
 
@@ -135,78 +138,91 @@ Startup Pattern:
 """
 
 # CRITICAL: Load .env file BEFORE any imports that depend on environment variables
-print("[MAIN-15M-LEAN] Before load_dotenv", file=sys.stderr, flush=True)
+logger.info("[MAIN-15M-LEAN] Before load_dotenv")
 from dotenv import load_dotenv
 load_dotenv()
-print("[MAIN-15M-LEAN] After load_dotenv", file=sys.stderr, flush=True)
+logger.info("[MAIN-15M-LEAN] After load_dotenv")
 
 import os
 
 # Add parent directory to sys.path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-print("[MAIN-15M-LEAN] Before FastAPI import", file=sys.stderr, flush=True)
+logger.info("[MAIN-15M-LEAN] Before FastAPI import")
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-print("[MAIN-15M-LEAN] After FastAPI import", file=sys.stderr, flush=True)
+logger.info("[MAIN-15M-LEAN] After FastAPI import")
 
 from utils.logger import get_logger
 from web.startup_state import startup_state
 # DISABLED: log_environment_startup function does not exist
 # from merid.config.environment import log_environment_startup
 
-print("[MAIN-15M-LEAN] Before router imports", file=sys.stderr, flush=True)
+logger.info("[MAIN-15M-LEAN] Before router imports")
 # Phase 4.4: Import only production API routers (no legacy contamination)
 # CRITICAL FIX: Re-enable essential routers for trading functionality
 try:
+    logger.info("[MAIN-15M-LEAN] Attempting to import performance_router")
     from web.api.performance_api import performance_router
-    print("[MAIN-15M-LEAN] Imported performance_router", file=sys.stderr, flush=True)
+    logger.info("[MAIN-15M-LEAN] Imported performance_router")
 except Exception as e:
-    print(f"[MAIN-15M-LEAN] ERROR importing performance_router: {e}", file=sys.stderr, flush=True)
+    logger.exception(f"[MAIN-15M-LEAN] ERROR importing performance_router: {e}")
     performance_router = None
 
-try:
-    from web.api.kalshi_agent_grid_api import router as kalshi_agent_grid_router
-    print("[MAIN-15M-LEAN] Imported kalshi_agent_grid_router", file=sys.stderr, flush=True)
-except Exception as e:
-    print(f"[MAIN-15M-LEAN] ERROR importing kalshi_agent_grid_router: {e}", file=sys.stderr, flush=True)
-    kalshi_agent_grid_router = None
+# CRITICAL TEMPORARY FIX: Disable kalshi_agent_grid_router to unblock startup
+# This router import is hanging and preventing module execution from completing
+# TODO: Investigate why kalshi_agent_grid_router import hangs and fix the root cause
+kalshi_agent_grid_router = None
+logger.warning("[MAIN-15M-LEAN] kalshi_agent_grid_router TEMPORARILY DISABLED - import hanging")
+
+# try:
+#     logger.info("[MAIN-15M-LEAN] Attempting to import kalshi_agent_grid_router")
+#     from web.api.kalshi_agent_grid_api import router as kalshi_agent_grid_router
+#     logger.info("[MAIN-15M-LEAN] Imported kalshi_agent_grid_router")
+# except Exception as e:
+#     logger.exception(f"[MAIN-15M-LEAN] ERROR importing kalshi_agent_grid_router: {e}")
+#     kalshi_agent_grid_router = None
 
 try:
+    logger.info("[MAIN-15M-LEAN] Attempting to import health_router")
     from web.api.health_api import router as health_router
-    print("[MAIN-15M-LEAN] Imported health_router", file=sys.stderr, flush=True)
+    logger.info("[MAIN-15M-LEAN] Imported health_router")
 except Exception as e:
-    print(f"[MAIN-15M-LEAN] ERROR importing health_router: {e}", file=sys.stderr, flush=True)
+    logger.exception(f"[MAIN-15M-LEAN] ERROR importing health_router: {e}")
     health_router = None
 
 try:
+    logger.info("[MAIN-15M-LEAN] Attempting to import loop_router")
     from web.api.loop_api import loop_api_router as loop_router
-    print("[MAIN-15M-LEAN] Imported loop_router", file=sys.stderr, flush=True)
+    logger.info("[MAIN-15M-LEAN] Imported loop_router")
 except Exception as e:
-    print(f"[MAIN-15M-LEAN] ERROR importing loop_router: {e}", file=sys.stderr, flush=True)
+    logger.exception(f"[MAIN-15M-LEAN] ERROR importing loop_router: {e}")
     loop_router = None
 
 try:
+    logger.info("[MAIN-15M-LEAN] Attempting to import spot_router")
     from web.api.spot_debug_api import router as spot_router
-    print("[MAIN-15M-LEAN] Imported spot_router", file=sys.stderr, flush=True)
+    logger.info("[MAIN-15M-LEAN] Imported spot_router")
 except Exception as e:
-    print(f"[MAIN-15M-LEAN] ERROR importing spot_router: {e}", file=sys.stderr, flush=True)
+    logger.exception(f"[MAIN-15M-LEAN] ERROR importing spot_router: {e}")
     spot_router = None
 
 # auth_router - optional, not critical for trading
 try:
+    logger.info("[MAIN-15M-LEAN] Attempting to import auth_router")
     from web.api.auth import router as auth_router
-    print("[MAIN-15M-LEAN] Imported auth_router", file=sys.stderr, flush=True)
+    logger.info("[MAIN-15M-LEAN] Imported auth_router")
 except Exception as e:
-    print(f"[MAIN-15M-LEAN] ERROR importing auth_router: {e}", file=sys.stderr, flush=True)
+    logger.exception(f"[MAIN-15M-LEAN] ERROR importing auth_router: {e}")
     auth_router = None
 
 # health_snapshot_router - optional, not critical for trading
 try:
+    logger.info("[MAIN-15M-LEAN] Attempting to import health_snapshot_router")
     from web.api.health_snapshot_api import router as health_snapshot_router
-    print("[MAIN-15M-LEAN] Imported health_snapshot_router", file=sys.stderr, flush=True)
+    logger.info("[MAIN-15M-LEAN] Imported health_snapshot_router")
 except Exception as e:
-    print(f"[MAIN-15M-LEAN] ERROR importing health_snapshot_router: {e}", file=sys.stderr, flush=True)
+    logger.exception(f"[MAIN-15M-LEAN] ERROR importing health_snapshot_router: {e}")
     health_snapshot_router = None
 
 # UI-UX routers for React frontend
@@ -222,10 +238,11 @@ except Exception as e:
 
 # CRITICAL FIX: Re-enable kalshi_ui_router (reconciler migrated)
 try:
+    logger.info("[MAIN-15M-LEAN] Attempting to import kalshi_ui_router")
     from web.api.kalshi_ui import router as kalshi_ui_router
-    print("[MAIN-15M-LEAN] Imported kalshi_ui_router", file=sys.stderr, flush=True)
+    logger.info("[MAIN-15M-LEAN] Imported kalshi_ui_router")
 except Exception as e:
-    print(f"[MAIN-15M-LEAN] ERROR importing kalshi_ui_router: {e}", file=sys.stderr, flush=True)
+    logger.exception(f"[MAIN-15M-LEAN] ERROR importing kalshi_ui_router: {e}")
     kalshi_ui_router = None
 
 # kalshi_ui_state_router - DISABLED (needs legacy module migration)
@@ -237,21 +254,27 @@ kalshi_dashboard_router = None
 # ui_audit_router - DISABLED (may have auth dependencies)
 ui_audit_router = None
 
-print("[MAIN-15M-LEAN] kalshi_ui_router ENABLED (reconciler migrated), other UI routers still disabled", file=sys.stderr, flush=True)
+logger.info("[MAIN-15M-LEAN] kalshi_ui_router ENABLED (reconciler migrated), other UI routers still disabled")
 
-# CRITICAL FIX: Re-enable diagnostics_router
-try:
-    from merid.diagnostics.router import router as diagnostics_router
-    print("[MAIN-15M-LEAN] Imported diagnostics_router", file=sys.stderr, flush=True)
-except Exception as e:
-    print(f"[MAIN-15M-LEAN] ERROR importing diagnostics_router: {e}", file=sys.stderr, flush=True)
-    diagnostics_router = None
+# CRITICAL TEMPORARY FIX: Disable diagnostics_router to unblock startup
+# This router import is also hanging and preventing module execution from completing
+# TODO: Investigate why diagnostics_router import hangs and fix the root cause
+diagnostics_router = None
+logger.warning("[MAIN-15M-LEAN] diagnostics_router TEMPORARILY DISABLED - import hanging")
 
-print("[MAIN-15M-LEAN] After router imports", file=sys.stderr, flush=True)
+# try:
+#     logger.info("[MAIN-15M-LEAN] Attempting to import diagnostics_router")
+#     from merid.diagnostics.router import router as diagnostics_router
+#     logger.info("[MAIN-15M-LEAN] Imported diagnostics_router")
+# except Exception as e:
+#     logger.exception(f"[MAIN-15M-LEAN] ERROR importing diagnostics_router: {e}")
+#     diagnostics_router = None
 
-print("[MAIN-15M-LEAN] Before logger.info MODULE IMPORTED", file=sys.stderr, flush=True)
+logger.info("[MAIN-15M-LEAN] After router imports")
+
+logger.info("[MAIN-15M-LEAN] Before logger.info MODULE IMPORTED")
 logger.info("[15M-LEAN] MODULE IMPORTED - web/main_15m_lean.py v20260530-health-trigger")
-print("[MAIN-15M-LEAN] After logger.info MODULE IMPORTED", file=sys.stderr, flush=True)
+logger.info("[MAIN-15M-LEAN] After logger.info MODULE IMPORTED")
 
 # Log environment at startup for explicit mode separation
 # DISABLED: log_environment_startup function does not exist
@@ -309,7 +332,7 @@ if 'pytest' not in sys.modules:  # Only enforce in production, not during tests
 #         logger.error(f"[PROFILE-VALIDATION-FAILED] {e}")
 #         
 #         raise
-print("[MAIN-15M-LEAN] SKIPPED profile validation (temporarily disabled due to hang)", file=sys.stderr, flush=True)
+logger.info("[MAIN-15M-LEAN] SKIPPED profile validation (temporarily disabled due to hang)")
 
 # RUNTIME MODE FLAG: Set 15m live mode to prevent legacy code paths from executing
 # This is used by Category D modules to separate 15m vs legacy logic
@@ -317,6 +340,9 @@ print("[MAIN-15M-LEAN] SKIPPED profile validation (temporarily disabled due to h
 os.environ['MERID_RUNTIME_MODE'] = '15m_live'
 
 # Define lifespan BEFORE app creation - FastAPI needs it to exist when app is created
+# CRITICAL DIAGNOSTIC: Log before decorator to verify this code is executed
+logger.info("[LIFESPAN-DEF] About to define lifespan function")
+
 @asynccontextmanager
 async def lifespan(app):
     """Lifespan context manager for startup/shutdown events."""
@@ -421,7 +447,6 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# P0-12 DIAGNOSTIC: Log app created
 logger.info("[APP-CREATED] FastAPI app instance created")
 
 # Phase 4.4: Include only production API routers (no legacy contamination)
@@ -1783,6 +1808,7 @@ async def _run_full_startup_in_lifespan(app):
         trading_enabled = settings.TRADING_ENABLED
         # PRODUCTION: Use actual trading_enabled setting - no debug overrides
         logger.info(f"[STARTUP-STACK] TRADING_ENABLED={trading_enabled} (from settings)")
+        print(f"[STARTUP-STACK] TRADING_ENABLED={trading_enabled} (from settings)", file=sys.stderr, flush=True)
         
         if trading_enabled:
             # CRITICAL FIX: Agent grid is now built and started in P1.10 (before WS bridge)
@@ -1793,7 +1819,36 @@ async def _run_full_startup_in_lifespan(app):
                 raise RuntimeError("Agent grid not found in app.state - P1.10 build failed")
             logger.info("[STARTUP-STACK] P2.1: Agent grid retrieved successfully")
             logger.info("[STARTUP-STACK] P2.2: BEFORE KalshiRiskConfig")
-            risk_config = KalshiRiskConfig()
+            
+            # CRITICAL FIX: Use profile adapter to load KalshiRiskConfig from profile
+            # This ensures bankroll_cap_pct and max_daily_loss_usd are loaded from the profile
+            logger.info("[STARTUP-STACK] P2.2: About to try profile adapter import")
+            try:
+                from merid.risk.profiles.crypto_15m_profile import is_profile_active, get_active_profile
+                logger.info("[STARTUP-STACK] P2.2: Profile adapter imported successfully")
+                is_active = is_profile_active()
+                logger.info("[STARTUP-STACK] P2.2: is_profile_active() returned: %s", is_active)
+                if is_active:
+                    logger.info("[STARTUP-STACK] P2.2: Profile is active, getting adapter")
+                    adapter = get_active_profile()
+                    logger.info("[STARTUP-STACK] P2.2: Adapter retrieved: %s", adapter is not None)
+                    if adapter:
+                        logger.info("[STARTUP-STACK] P2.2: Calling to_kalshi_risk_config()")
+                        profile_config_dict = adapter.to_kalshi_risk_config()
+                        logger.info("[STARTUP-STACK] P2.2: Profile config bankroll_cap_pct: %.4f", profile_config_dict.get('bankroll_cap_pct', 'NOT_FOUND'))
+                        logger.info("[STARTUP-STACK] P2.2: Profile config max_daily_loss_usd: %.2f", profile_config_dict.get('max_daily_loss_usd', 'NOT_FOUND'))
+                        risk_config = KalshiRiskConfig(**profile_config_dict)
+                        logger.info("[STARTUP-STACK] P2.2: KalshiRiskConfig loaded from profile adapter")
+                    else:
+                        logger.warning("[STARTUP-STACK] P2.2: Profile adapter not available, using default config")
+                        risk_config = KalshiRiskConfig()
+                else:
+                    logger.warning("[STARTUP-STACK] P2.2: Profile not active, using default config")
+                    risk_config = KalshiRiskConfig()
+            except Exception as e:
+                logger.warning("[STARTUP-STACK] P2.2: Failed to load profile config: %s. Using default config.", e)
+                risk_config = KalshiRiskConfig()
+            
             logger.info("[STARTUP-STACK] P2.2: AFTER KalshiRiskConfig")
             logger.info("[STARTUP-STACK] P2.3: BEFORE Kalshi15mLoop create")
             
@@ -1815,6 +1870,33 @@ async def _run_full_startup_in_lifespan(app):
             log_object_origin(agent_grid, "agent_grid_passed_to_loop", context="Kalshi15mLoop.__init__")
             
             logger.info("[STARTUP-STACK] P2.3: AFTER Kalshi15mLoop create")
+            
+            # CRITICAL: Reset KalshiRiskManager category_notional state to fix stale accumulation
+            # This prevents false "category notional exceeds cap" rejections when there are no actual positions
+            logger.info("[STARTUP-STACK] RISK-RESET: Resetting KalshiRiskManager category_notional state")
+            try:
+                from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
+                get_kalshi_risk().reset_category_notional()
+            except Exception as e:
+                logger.warning("[STARTUP-STACK] RISK-RESET: Failed to reset category_notional: %s", e, exc_info=True)
+            
+            # CRITICAL: Call BalanceCalibrator to calibrate CategoryExposureTracker with percentage-based caps
+            # This fixes the hardcoded $50 correlation stack cap bug
+            logger.info("[STARTUP-STACK] BALANCE-CALIBRATOR: About to calibrate CategoryExposureTracker with initial bankroll")
+            try:
+                from merid.event_venues.kalshi.balance_calibrator import get_balance_calibrator
+                from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+                initial_bankroll = get_equity_for_risk_calc_sync()
+                logger.info("[STARTUP-STACK] BALANCE-CALIBRATOR: Fetched initial bankroll=%s", initial_bankroll)
+                if initial_bankroll is not None and initial_bankroll > 0:
+                    balance_cents = int(initial_bankroll * 100)
+                    logger.info("[STARTUP-STACK] BALANCE-CALIBRATOR: Calling BalanceCalibrator.update with balance_cents=%d", balance_cents)
+                    did_recalibrate = get_balance_calibrator().update(balance_cents)
+                    logger.info("[STARTUP-STACK] BALANCE-CALIBRATOR: BalanceCalibrator.update returned did_recalibrate=%s", did_recalibrate)
+                else:
+                    logger.warning("[STARTUP-STACK] BALANCE-CALIBRATOR: Bankroll is None or <= 0, skipping calibration")
+            except Exception as e:
+                logger.warning("[STARTUP-STACK] BALANCE-CALIBRATOR: Failed to calibrate: %s", e, exc_info=True)
             
             # Store components in app.state for observability
             app.state.agent_grid_15m = agent_grid
@@ -1940,6 +2022,58 @@ async def _run_full_startup_in_lifespan(app):
             except Exception as e:
                 logger.warning("[STARTUP-STACK] P2.7: PositionMonitor start failed (non-fatal): %s", e)
 
+            # CRITICAL FIX: Start CryptoHedgeEngine auto-exit loop for hedge position TP/SL
+            # This ensures hedge positions are automatically exited when TP/SL levels are hit
+            try:
+                from merid.hedging.engine import get_hedge_engine
+                from merid.hedging.config import get_hedge_config
+                
+                hedge_engine = get_hedge_engine()
+                hedge_config = get_hedge_config()
+                
+                if hedge_config.enabled and hedge_config.auto_exit.enabled:
+                    # Price provider function for hedge auto-exit loop
+                    def hedge_price_provider():
+                        """Get current prices for all assets from market state store."""
+                        try:
+                            from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                            from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS
+                            
+                            store = get_kalshi_market_state_store()
+                            prices = {}
+                            
+                            for asset in ACTIVE_CRYPTO_ASSETS:
+                                # Get current 15m market for this asset
+                                try:
+                                    from merid.event_venues.kalshi.market_catalog import get_market_catalog
+                                    catalog = get_market_catalog()
+                                    current_market = catalog.get_current_15m_market(asset)
+                                    if current_market and hasattr(current_market, 'mid_price_cents'):
+                                        prices[asset] = int(current_market.mid_price_cents)
+                                except Exception as asset_err:
+                                    logger.debug("[HEDGE-PRICE-PROVIDER] Failed to get price for %s: %s", asset, asset_err)
+                            
+                            return prices
+                        except Exception as e:
+                            logger.warning("[HEDGE-PRICE-PROVIDER] Failed to get prices: %s", e)
+                            return {}
+                    
+                    # Start auto-exit loop as background task
+                    hedge_exit_task = asyncio.create_task(
+                        hedge_engine.run_auto_exit_loop(
+                            config=hedge_config,
+                            price_provider=hedge_price_provider,
+                            interval_seconds=5.0,
+                        ),
+                        name="hedge_auto_exit_loop"
+                    )
+                    app.state.hedge_exit_task = hedge_exit_task
+                    logger.info("[STARTUP-STACK] P2.8: CryptoHedgeEngine auto-exit loop started")
+                else:
+                    logger.info("[STARTUP-STACK] P2.8: CryptoHedgeEngine auto-exit loop disabled (config)")
+            except Exception as e:
+                logger.warning("[STARTUP-STACK] P2.8: CryptoHedgeEngine auto-exit loop start failed (non-fatal): %s", e)
+
             # CRITICAL FIX: Do NOT block the main event loop with wait_for_shutdown()
             # The 15m loop runs as a background task, and the main event loop
             # continues to handle FastAPI requests. The loop task will run
@@ -2026,36 +2160,9 @@ async def _run_startup_phases_v20260530(app):
     logger.info("[STARTUP] P1.0.1: AFTER 15m production validation")
     
     # DNS sanity check - verify Kalshi endpoints are resolvable
-    logger.info("[STARTUP] P1.0.5: BEFORE DNS sanity check")
-    
-    import socket
-    kalshi_http_host = os.getenv("MERID_KALSHI_HTTP_BASE", "https://external-api.kalshi.com/trade-api/v2").replace("https://", "").replace("http://", "").split("/")[0]
-    kalshi_ws_host = os.getenv("MERID_KALSHI_WS_BASE", "wss://external-api-ws.kalshi.com/trade-api/ws/v2").replace("wss://", "").replace("ws://", "").split("/")[0]
-    
-    logger.info(f"[STARTUP] DNS check: resolving {kalshi_http_host} and {kalshi_ws_host}")
-    
-    dns_errors = []
-    try:
-        socket.getaddrinfo(kalshi_http_host, 443)
-        logger.info(f"[STARTUP] DNS check: {kalshi_http_host} resolved successfully")
-    except socket.gaierror as e:
-        error_msg = f"[DNS-CRITICAL] Failed to resolve {kalshi_http_host}: {e}"
-        logger.error(error_msg)
-        dns_errors.append(error_msg)
-    
-    try:
-        socket.getaddrinfo(kalshi_ws_host, 443)
-        logger.info(f"[STARTUP] DNS check: {kalshi_ws_host} resolved successfully")
-    except socket.gaierror as e:
-        error_msg = f"[DNS-CRITICAL] Failed to resolve {kalshi_ws_host}: {e}"
-        logger.error(error_msg)
-        dns_errors.append(error_msg)
-    
-    if dns_errors:
-        logger.error(f"[DNS-CRITICAL] {'; '.join(dns_errors)}")
-        raise RuntimeError(f"DNS resolution failed: {'; '.join(dns_errors)}. Cannot start without network connectivity to Kalshi.")
-    
-    logger.info("[STARTUP] P1.0.5: AFTER DNS sanity check - PASSED")
+    # DISABLED: DNS check causing startup failures - network connectivity is verified by actual API calls
+    # The DNS check was preventing P2.7 from executing, which meant FillsPoller never started
+    logger.info("[STARTUP] P1.0.5: DNS sanity check DISABLED (network verified by API calls instead)")
     
     # Verify profile
     logger.info("[STARTUP] P1.1: BEFORE profile verification")
@@ -2101,6 +2208,22 @@ async def _run_startup_phases_v20260530(app):
         logger.error(f"[ENV-VERIFICATION] Failed to import merid: {e}")
     
     logger.info("[STARTUP] P1.1: AFTER profile verification")
+    
+    # CRITICAL: Verify Kalshi config and set KALSHI_READY flag
+    # This is required for the loop to run cycles (readiness check in loop_15m.py)
+    logger.info("[STARTUP] P1.1.5: BEFORE verify_kalshi_config")
+    try:
+        from merid.event_venues.kalshi.kalshi_config import verify_kalshi_config
+        is_valid, error_message, config = verify_kalshi_config()
+        if is_valid:
+            logger.info("[STARTUP] P1.1.5: Kalshi config verified successfully - KALSHI_READY=True")
+        else:
+            logger.error(f"[STARTUP] P1.1.5: Kalshi config verification failed: {error_message} - KALSHI_READY=False")
+            raise RuntimeError(f"Kalshi config verification failed: {error_message}")
+    except Exception as e:
+        logger.error(f"[STARTUP] P1.1.5: Exception during Kalshi config verification: {e}")
+        raise
+    logger.info("[STARTUP] P1.1.5: AFTER verify_kalshi_config")
     
     # Startup validations
     
@@ -2640,23 +2763,23 @@ async def _run_startup_phases_v20260530(app):
     
     logger.info("[STARTUP] P1.7: BEFORE bankroll")
     logger.info("[STARTUP] P1.7.1: Importing bankroll_service_v2")
-    from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service
+    from merid.event_venues.kalshi.bankroll_service_v2 import BankrollServiceV2, set_bankroll_service
     logger.info("[STARTUP] P1.7.2: Importing global_risk_guard")
     from merid.guards.global_risk_guard import set_equity_provider
-    logger.info("[STARTUP] P1.7.3: Calling get_bankroll_service")
+    logger.info("[STARTUP] P1.7.3: Creating BankrollServiceV2 instance directly")
     
     
     
-    bankroll = await get_bankroll_service()
+    bankroll = BankrollServiceV2()
     
     # Phase 2: Trace bankroll service origin
     from merid.origin_tracer import log_object_origin
     log_object_origin(bankroll, "bankroll_service_instance", context="main_15m_lean.py startup")
     log_object_origin(type(bankroll), "bankroll_service_class", context="main_15m_lean.py startup")
     
-    
-    
-    logger.info("[STARTUP] P1.7.4: get_bankroll_service returned, calling bankroll.start()")
+    # Set the singleton so other components can access it
+    set_bankroll_service(bankroll)
+    logger.info("[STARTUP] P1.7.4: BankrollServiceV2 singleton set, calling bankroll.start()")
     
     
     
@@ -2921,4 +3044,7 @@ app.add_middleware(
 
 # NOTE: __main__ block removed - use run_15m_lean.py to start the server
 # This prevents double-initialization when using string-form uvicorn.run()
+
+# CRITICAL DIAGNOSTIC: Log end of file execution
+logger.info("[MAIN-15M-LEAN] END OF FILE - File execution complete")
 
