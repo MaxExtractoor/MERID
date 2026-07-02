@@ -9,18 +9,15 @@ from contextlib import asynccontextmanager
 from typing import Callable, Awaitable, Any
 
 # Import the app from main_15m_lean
-# We need to import it this way to avoid circular imports
+# CRITICAL FIX: Direct import to ensure main_15m_lean.py executes module-level code
 import sys
 from pathlib import Path
 
 # Add parent directory to sys.path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-# Lazy import to avoid importing the entire main_15m_lean module at module load time
-def _get_app():
-    """Lazy import and return the FastAPI app from main_15m_lean."""
-    from web.main_15m_lean import app
-    return app
+# CRITICAL FIX: Direct import instead of lazy import to ensure module-level code executes
+from web.main_15m_lean import app, lifespan as original_lifespan
 
 
 def create_app(lifespan: Callable[[Any], Awaitable[Any]] | None = None) -> Any:
@@ -32,7 +29,6 @@ def create_app(lifespan: Callable[[Any], Awaitable[Any]] | None = None) -> Any:
     Returns:
         FastAPI application instance
     """
-    from web.main_15m_lean import app, lifespan as original_lifespan
     
     if lifespan is not None:
         # For testing, use the provided lifespan instead of the original
@@ -43,7 +39,3 @@ def create_app(lifespan: Callable[[Any], Awaitable[Any]] | None = None) -> Any:
         app.router.lifespan_context = test_lifespan
     
     return app
-
-
-# Export the app for direct access
-app = _get_app()

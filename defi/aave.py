@@ -434,7 +434,7 @@ class AaveClient:
         if total_debt <= 0:
             return 10.0
         
-        liquidation_threshold = 0.85
+        liquidation_threshold = self.config.min_health_factor  # Use configurable threshold (default 1.5)
         return (total_collateral * liquidation_threshold) / total_debt
     
     def _get_simulated_account_data(self) -> AaveAccountData:
@@ -445,8 +445,8 @@ class AaveClient:
         return AaveAccountData(
             total_collateral_usd=total_collateral,
             total_debt_usd=total_debt,
-            available_borrow_usd=total_collateral * 0.5 - total_debt,
-            current_liquidation_threshold=0.85,
+            available_borrow_usd=total_collateral * self.config.max_ltv_ratio - total_debt,
+            current_liquidation_threshold=self.config.min_health_factor,
             ltv=total_debt / total_collateral if total_collateral > 0 else 0,
             health_factor=self._calculate_simulated_health(),
         )

@@ -1,0 +1,33 @@
+{
+  "run_id": "0d198daa-371d-4ad2-9595-7286acc64509",
+  "phase": "post_run",
+  "timestamp": "2026-05-24T14:40:09.842261",
+  "bankroll_usd": 36.58,
+  "kelly_fraction": null,
+  "max_drawdown_pct": null,
+  "asset_exposure": {},
+  "open_positions": 0,
+  "pending_orders": 0,
+  "additional_metrics": {},
+  "deltas": {
+    "bankroll_usd": 0.0,
+    "asset_exposure_usd": {}
+  },
+  "fill_statistics": {
+    "total": {
+      "submitted": 0,
+      "filled": 0,
+      "partial": 0,
+      "cancelled": 0,
+      "expired": 0,
+      "rejected": 0,
+      "fill_rate_pct": 0.0,
+      "avg_time_on_book_seconds": 0.0
+    },
+    "by_asset": {},
+    "by_price_band": {}
+  },
+  "profile_version": null,
+  "profile_name": null,
+  "execution_mode": null
+}

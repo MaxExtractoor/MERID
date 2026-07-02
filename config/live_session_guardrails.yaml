@@ -1,0 +1,66 @@
+# Live Session Guardrails for First Restart
+# These are hard limits that will be enforced during the first live session
+
+guardrails:
+  # Per-market and per-cycle caps
+  per_market:
+    max_open_risk_usd: 100.0  # Maximum open risk per single market ($100)
+    max_contracts_per_market: 10  # Maximum contracts per single market
+    max_notional_per_market_usd: 500.0  # Maximum notional per market ($500)
+  
+  per_cycle:
+    max_total_risk_usd: 300.0  # Maximum total risk per cycle across all markets ($300)
+    max_total_notional_usd: 1500.0  # Maximum total notional per cycle ($1500)
+    max_orders_per_cycle: 5  # Maximum orders per cycle
+    max_markets_per_cycle: 3  # Maximum markets to trade per cycle
+  
+  per_asset:
+    BTC:
+      max_cycle_risk_usd: 100.0
+      max_total_risk_usd: 200.0
+    ETH:
+      max_cycle_risk_usd: 100.0
+      max_total_risk_usd: 200.0
+    SOL:
+      max_cycle_risk_usd: 50.0
+      max_total_risk_usd: 100.0
+    XRP:
+      max_cycle_risk_usd: 50.0
+      max_total_risk_usd: 100.0
+    DOGE:
+      max_cycle_risk_usd: 50.0
+      max_total_risk_usd: 100.0
+  
+  # Order rate limits (per minute)
+  rate_limits:
+    max_orders_per_minute: 10  # Maximum orders per minute across all assets
+    max_orders_per_minute_per_asset: 3  # Maximum orders per minute per asset
+    max_api_calls_per_minute: 60  # Maximum API calls per minute
+  
+  # Kill-switch configuration
+  kill_switch:
+    enabled: true
+    auto_disable_on:
+      consecutive_failures: 3  # Disable after 3 consecutive failed cycles
+      api_error_rate_threshold: 0.5  # Disable if >50% API calls error
+      daily_loss_threshold_usd: 500.0  # Disable if daily loss > $500
+    allow_exits_only: true  # When disabled, allow exits but block new entries
+  
+  # Abort conditions (immediate shutdown)
+  abort_conditions:
+    zero_fills_duration_minutes: 15  # Abort if 0 fills for 15 minutes
+    api_error_duration_minutes: 5  # Abort if API errors for 5 minutes
+    position_stuck_duration_minutes: 30  # Abort if position stuck for 30 minutes
+  
+  # Alert thresholds
+  alerts:
+    low_fill_rate_threshold: 0.2  # Alert if fill rate < 20%
+    high_rejection_rate_threshold: 0.5  # Alert if rejection rate > 50%
+    high_latency_threshold_ms: 5000  # Alert if order latency > 5s
+
+# Environment variable overrides
+# These can be set to override the above values for specific sessions
+env_overrides:
+  MERID_LIVE_SESSION_MAX_RISK_USD:  # Override max_total_risk_usd
+  MERID_LIVE_SESSION_MAX_ORDERS_PER_CYCLE:  # Override max_orders_per_cycle
+  MERID_LIVE_SESSION_KILL_SWITCH_ENABLED:  # Override kill_switch.enabled

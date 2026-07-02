@@ -63,7 +63,7 @@ class YieldContractSpec:
     yield_sources: List[YieldSource] = field(default_factory=list)
     
     # Limits
-    max_leverage: Decimal = Decimal("1.0")  # No leverage by default
+    max_leverage: Decimal = Decimal("3.0")  # STANDARDIZED: Production leverage limit (matches trading/execution.py, risk/risk_guard.py)
     max_external_protocol_exposure_pct: float = 50.0
     max_per_strategy_loss_usd: Decimal = Decimal("10000")
     max_per_epoch_loss_pct: float = 5.0

@@ -1,0 +1,12 @@
+{
+  "run_id": "4e780355-89cf-47cd-ab75-2aa534a7746a",
+  "phase": "pre_run",
+  "timestamp": "2026-05-24T04:11:34.770579",
+  "bankroll_usd": 36.58,
+  "kelly_fraction": null,
+  "max_drawdown_pct": null,
+  "asset_exposure": {},
+  "open_positions": 0,
+  "pending_orders": 0,
+  "additional_metrics": {}
+}

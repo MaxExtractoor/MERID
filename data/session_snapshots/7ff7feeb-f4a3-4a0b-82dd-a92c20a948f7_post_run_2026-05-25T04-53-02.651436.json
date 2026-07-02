@@ -1,0 +1,60 @@
+{
+  "run_id": "7ff7feeb-f4a3-4a0b-82dd-a92c20a948f7",
+  "phase": "post_run",
+  "timestamp": "2026-05-25T04:53:02.651436",
+  "bankroll_usd": 36.32,
+  "kelly_fraction": null,
+  "max_drawdown_pct": null,
+  "asset_exposure": {
+    "BTC": {
+      "exposure_usd": 0.0,
+      "exposure_pct": 0.0
+    },
+    "ETH": {
+      "exposure_usd": 0.0,
+      "exposure_pct": 0.0
+    },
+    "SOL": {
+      "exposure_usd": 0.0,
+      "exposure_pct": 0.0
+    },
+    "XRP": {
+      "exposure_usd": 0.0,
+      "exposure_pct": 0.0
+    },
+    "DOGE": {
+      "exposure_usd": 0.0,
+      "exposure_pct": 0.0
+    }
+  },
+  "open_positions": 0,
+  "pending_orders": 0,
+  "additional_metrics": {},
+  "deltas": {
+    "bankroll_usd": 0.0,
+    "asset_exposure_usd": {
+      "SOL": 0.0,
+      "DOGE": 0.0,
+      "BTC": 0.0,
+      "ETH": 0.0,
+      "XRP": 0.0
+    }
+  },
+  "fill_statistics": {
+    "total": {
+      "submitted": 0,
+      "filled": 0,
+      "partial": 0,
+      "cancelled": 0,
+      "expired": 0,
+      "rejected": 0,
+      "fill_rate_pct": 0.0,
+      "avg_time_on_book_seconds": 0.0
+    },
+    "by_asset": {},
+    "by_price_band": {}
+  },
+  "profile_version": null,
+  "profile_name": null,
+  "execution_mode": null
+}

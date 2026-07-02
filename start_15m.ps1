@@ -95,14 +95,19 @@ Write-Host "[start_15m] MERID_LOOP_DIAG_FILE=$($env:MERID_LOOP_DIAG_FILE) - loop
 $env:MERID_YES_NO_ARBITRAGE_ENABLED = "true"
 Write-Host "[start_15m] MERID_YES_NO_ARBITRAGE_ENABLED=$($env:MERID_YES_NO_ARBITRAGE_ENABLED) - YES/NO arbitrage enabled" -ForegroundColor Green
 
+# 6. Risk Management Configuration
+# DEPRECATED: Environment variable overrides removed in favor of unified risk management
+# All risk limits are now configured in config/risk_limits.yaml (single source of truth)
+# UnifiedRiskManager reads from this file and enforces all risk checks
+Write-Host "[start_15m] Risk limits configured in config/risk_limits.yaml (UnifiedRiskManager)" -ForegroundColor Cyan
+
 # Market making and correlation tracking are controlled by profile config (kalshi_crypto_15m_v2.yaml)
 # These are already enabled in the profile config
 
-# CRITICAL FIX: Use WindowsSelectorEventLoopPolicy for WebSocket header support
-# Windows ProactorEventLoop doesn't support passing headers to create_connection()
-# which causes websockets.connect() to fail with "extra_headers not supported"
+# CRITICAL FIX: Event loop policy is now set inside main_15m_lean.py
+# This ensures it's set in the same process that runs uvicorn
 $env:PYTHONUNBUFFERED = "1"
-Write-Host "[start_15m] Setting asyncio event loop policy to WindowsSelectorEventLoopPolicy for WebSocket header support" -ForegroundColor Cyan
+Write-Host "[start_15m] Event loop policy will be set inside main_15m_lean.py" -ForegroundColor Cyan
 
 Write-Host "[start_15m] Launching server on http://${ServerHost}:${Port}" -ForegroundColor Cyan
 Write-Host "[start_15m] Startup is handled by FastAPI lifespan events - no health watcher needed" -ForegroundColor Green
@@ -110,7 +115,9 @@ Write-Host "[start_15m] ---- server logs below ----" -ForegroundColor Yellow
 
 # Start the server - FastAPI lifespan will handle startup automatically
 # Use --log-level debug to see more output
-# Use --reload to automatically reload code changes during development
+# CRITICAL FIX: Remove --log-config to prevent interference with lifespan event
+# CRITICAL FIX: Remove --reload after clearing __pycache__ to force fresh import
+# CRITICAL FIX: Add --lifespan on to force lifespan protocol and show actual errors
 $env:PYTHONUNBUFFERED = "1"
 $ErrorActionPreference = "Continue"
-& uvicorn web.main_15m_lean:app --host $ServerHost --port $Port --log-level debug
+& py -m uvicorn web.main_15m_lean:app --host $ServerHost --port $Port --log-level debug --lifespan on

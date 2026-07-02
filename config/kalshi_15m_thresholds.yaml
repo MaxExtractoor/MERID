@@ -1,0 +1,109 @@
+# Kalshi 15m Crypto Trading - Threshold Configuration
+# This file defines per-asset and per-timeframe thresholds for market quality checks.
+# All hardcoded literals in market_state/orderbook should be replaced with values from this config.
+
+# Profile metadata
+profile:
+  name: kalshi_crypto_15m_v2
+  version: "1.0"
+  description: "15m crypto trading thresholds for BTC, ETH, SOL, XRP, DOGE"
+
+# Spread thresholds (in cents)
+# max_spread_cents: Maximum allowed bid-ask spread before market is considered illiquid
+spread_thresholds:
+  # Per-asset overrides (more lenient for liquid assets)
+  BTC:
+    max_spread_cents: 3  # 3 cents for BTC (very liquid)
+  ETH:
+    max_spread_cents: 4  # 4 cents for ETH
+  SOL:
+    max_spread_cents: 5  # 5 cents for SOL
+  XRP:
+    max_spread_cents: 6  # 6 cents for XRP
+  DOGE:
+    max_spread_cents: 7  # 7 cents for DOGE (less liquid)
+  
+  # Default for any asset not specified above
+  default:
+    max_spread_cents: 5
+
+# Extreme price thresholds (YES-equivalent cents)
+# extreme_yes_price_min/max: Valid range for YES prices (outside = illiquid or data anomaly)
+extreme_price_thresholds:
+  # Per-asset overrides
+  BTC:
+    extreme_yes_price_min: 5   # Below 5c = extremely illiquid
+    extreme_yes_price_max: 95  # Above 95c = extremely illiquid
+  ETH:
+    extreme_yes_price_min: 5
+    extreme_yes_price_max: 95
+  SOL:
+    extreme_yes_price_min: 8   # More lenient for SOL
+    extreme_yes_price_max: 92
+  XRP:
+    extreme_yes_price_min: 8
+    extreme_yes_price_max: 92
+  DOGE:
+    extreme_yes_price_min: 10  # Most lenient for DOGE
+    extreme_yes_price_max: 90
+  
+  # Default
+  default:
+    extreme_yes_price_min: 5
+    extreme_yes_price_max: 95
+
+# Liquidity thresholds
+# min_depth_contracts: Minimum contracts at top of book to consider liquid
+# max_one_sidedness_ratio: Max ratio of one-sided depth (one side / total)
+liquidity_thresholds:
+  # Per-asset overrides
+  BTC:
+    min_depth_contracts: 50    # BTC is very liquid
+    max_one_sidedness_ratio: 0.7  # Allow up to 70% one-sided
+  ETH:
+    min_depth_contracts: 30
+    max_one_sidedness_ratio: 0.75
+  SOL:
+    min_depth_contracts: 20
+    max_one_sidedness_ratio: 0.8
+  XRP:
+    min_depth_contracts: 15
+    max_one_sidedness_ratio: 0.85
+  DOGE:
+    min_depth_contracts: 10    # DOGE is less liquid
+    max_one_sidedness_ratio: 0.9
+  
+  # Default
+  default:
+    min_depth_contracts: 20
+    max_one_sidedness_ratio: 0.8
+
+# Depth window for depth_10c calculation
+# depth_window_cents: Price range around mid to calculate depth
+depth_thresholds:
+  depth_window_cents: 10  # ±10 cents around mid
+
+# Staleness thresholds (in seconds)
+# max_book_staleness_s: Maximum age of orderbook before considered stale
+staleness_thresholds:
+  max_book_staleness_s: 15  # 15 seconds for 15m markets
+  max_quote_staleness_s: 30  # 30 seconds for quotes
+
+# Duality validation thresholds
+# duality_tolerance_cents: Allowed deviation from YES + NO = 100c
+duality_thresholds:
+  duality_tolerance_cents: 15  # Allow 15c tolerance for market noise/API rounding
+
+# Market lifecycle thresholds
+# min_seconds_to_expiry: Minimum time to expiry before market is considered "terminal"
+# cutoff_seconds_to_expiry: Hard cutoff - no orders after this
+expiry_thresholds:
+  min_seconds_to_expiry: 150  # 2.5 minutes
+  cutoff_seconds_to_expiry: 60  # 1 minute hard cutoff
+
+# Volume and open interest thresholds
+# min_volume_24h: Minimum 24h volume to consider market
+# min_open_interest: Minimum open interest to consider market
+volume_thresholds:
+  min_volume_24h: 1000  # $1000 minimum 24h volume
+  min_open_interest: 10  # 10 contracts minimum open interest

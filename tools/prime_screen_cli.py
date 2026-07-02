@@ -1,7 +1,7 @@
 """Local-first Prime Screen launcher.
 
 This CLI orchestrates the local MERID stack that powers the Prime Screen:
-- FastAPI backend (web.main:app)
+- FastAPI backend (web.main_15m_lean:app)
 - Swarm/consensus workers
 - Data/news ingestors
 - Optional explainer + Flutter desktop shell
@@ -141,7 +141,7 @@ def build_web_command(config: Config) -> ServiceCommand:
         sys.executable,
         "-m",
         "uvicorn",
-        "web.main:app",
+        "web.main_15m_lean:app",
         "--host",
         host,
         "--port",
