@@ -260,14 +260,23 @@ class UnifiedMarketState:
 
     @property
     def book_age_s(self) -> float:
+        # 2026 FIX: Handle None timestamp gracefully - return infinity (stale/unknown)
+        if self.book_updated_ts is None:
+            return float('inf')
         return _time.time() - self.book_updated_ts
 
     @property
     def candle_age_s(self) -> float:
+        # 2026 FIX: Handle None timestamp gracefully - return infinity (stale/unknown)
+        if self.candle_updated_ts is None:
+            return float('inf')
         return _time.time() - self.candle_updated_ts
 
     @property
     def index_age_s(self) -> float:
+        # 2026 FIX: Handle None timestamp gracefully - return infinity (stale/unknown)
+        if self.index_updated_ts is None:
+            return float('inf')
         return _time.time() - self.index_updated_ts
 
     def is_tradeable(

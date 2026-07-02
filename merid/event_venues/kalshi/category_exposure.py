@@ -1,5 +1,20 @@
 """Cross-agent category exposure cap and correlated-market stacking guard.
 
+DEPRECATED: This module is deprecated in favor of UnifiedRiskManager.
+Use merid.risk.unified_risk_manager instead.
+
+All risk management has been consolidated into a single source of truth:
+- Configuration: config/risk_limits.yaml
+- Implementation: merid.risk.unified_risk_manager.UnifiedRiskManager
+- Single entry point: check_order() method
+
+This module is kept for backward compatibility but will be removed in a future release.
+New code should use UnifiedRiskManager for all risk checks.
+
+---
+
+Legacy documentation (deprecated):
+
 Prevents:
 1. Total notional across **all agents** in the same Kalshi category
    (e.g. all crypto markets) from exceeding a configurable USD cap.
@@ -38,12 +53,20 @@ from __future__ import annotations
 import os
 import threading
 import time
+import warnings
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 
 from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.category_exposure")
+
+# Emit deprecation warning on import
+warnings.warn(
+    "CategoryExposureTracker is deprecated. Use merid.risk.unified_risk_manager.UnifiedRiskManager instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 
 # ── Default caps (overridden by env vars) ─────────────────────────────────
@@ -71,6 +94,7 @@ _DEFAULT_CATEGORY_CAPS: Dict[str, float] = {
 
 # 50.0 = minimum cap to prevent $0 cap from blocking trades before calibration
 # Calibration will override this with balance * CORRELATED_STACK_PCT (20%)
+# CRITICAL: For 15m crypto profile, calibration is enabled to use percentage-based caps
 _DEFAULT_CORR_CAP_USD: float = float(os.getenv("MERID_CORR_STACK_CAP_USD", "50.0"))
 
 # Per-asset USD caps for correlated-stack checks. 0.0 from env = use settings-based per-asset caps.
@@ -320,8 +344,8 @@ class CategoryExposureTracker:
 
     # Minimum caps to prevent impossibly small trading limits with low balances
     _MIN_CATEGORY_CAP_USD: float = 100.0   # Min $100 per category
-    _MIN_CORR_CAP_USD: float = 50.0         # Min $50 for correlated stack
-    _MIN_ASSET_CAP_USD: float = 25.0       # Min $25 per asset
+    _MIN_CORR_CAP_USD: float = 10.0         # Min $10 for correlated stack (reduced from $50 for small bankrolls)
+    _MIN_ASSET_CAP_USD: float = 5.0        # Min $5 per asset (reduced from $25 for small bankrolls)
 
     def calibrate_from_balance(
         self,
@@ -388,14 +412,11 @@ class CategoryExposureTracker:
             if corr_fraction == 0.20:  # Default value, use settings
                 corr_fraction = CORRELATED_STACK_PCT  # 2% from settings
             
-            # Use settings defaults for per-asset caps if not overridden by asset_fractions
-            asset_fractions = asset_fractions or {
-                "BTC":  ASSET_CAP_BTC_PCT,   # 2% from settings
-                "ETH":  ASSET_CAP_ETH_PCT,   # 2% from settings
-                "SOL":  ASSET_CAP_SOL_PCT,   # 1.5% from settings
-                "XRP":  ASSET_CAP_XRP_PCT,   # 1.5% from settings
-                "DOGE": ASSET_CAP_DOGE_PCT,  # 1% from settings
-            }
+            # CRITICAL FIX: Remove per-asset caps for highly correlated crypto assets
+            # BTC, ETH, SOL, XRP, DOGE have 0.8+ correlation and should be treated as single position
+            # Use portfolio-level correlated stack cap only (20% of bankroll)
+            # This prevents per-asset caps from blocking legitimate trades
+            asset_fractions = None  # Disable per-asset caps, use global corr_cap only
         except Exception as e:
             logger.warning("CategoryExposureTracker: failed to read from core.settings, using defaults: %s", e)
             fractions = category_fractions or {
@@ -415,13 +436,8 @@ class CategoryExposureTracker:
             }
             if corr_fraction == 0.20:
                 corr_fraction = 0.20  # 20% default (increased from 2% to allow trades)
-            asset_fractions = asset_fractions or {
-                "BTC":  0.02,
-                "ETH":  0.02,
-                "SOL":  0.015,
-                "XRP":  0.015,
-                "DOGE": 0.01,
-            }
+            # CRITICAL FIX: Disable per-asset caps for highly correlated crypto assets
+            asset_fractions = None  # Disable per-asset caps, use global corr_cap only
         
         with self._lock:
             for cat, frac in fractions.items():

@@ -15,7 +15,7 @@ from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.order_deduplication")
 
-_TTL_SECONDS: int = 1800  # 30 minutes — GTC orders on illiquid markets can remain pending well beyond 5 minutes, so a short TTL would allow duplicate submissions after expiry.
+_TTL_SECONDS: int = 60  # 1 minute — Reduced from 30 minutes for 15m crypto trading to allow retries while preventing immediate duplicates
 
 
 @dataclass
@@ -30,6 +30,7 @@ class PendingOrder:
     count: int
     submitted_at: datetime
     order_id: Optional[str] = None  # filled once Kalshi confirms
+    submitted_to_exchange: bool = False  # CRITICAL: Track if order was actually submitted
 
 
 class OrderDeduplicationCache:
@@ -89,13 +90,25 @@ class OrderDeduplicationCache:
                 and pending.count == count
                 and pending.order_id is None  # not yet confirmed
             ):
-                logger.warning(
-                    "Duplicate order detected for %s %s %s %s×%d — "
-                    "reusing client_order_id %s",
-                    ticker, side, outcome, price_cents, count,
-                    pending.client_order_id,
-                )
-                return pending.client_order_id, True
+                # CRITICAL FIX: Only treat as duplicate if it was actually submitted to exchange
+                # If the order was cached but never submitted (e.g., rejected before submission),
+                # we should allow it to be submitted now
+                if pending.submitted_to_exchange:
+                    logger.warning(
+                        "Duplicate order detected for %s %s %s %s×%d — "
+                        "reusing client_order_id %s (already submitted to exchange)",
+                        ticker, side, outcome, price_cents, count,
+                        pending.client_order_id,
+                    )
+                    return pending.client_order_id, True
+                else:
+                    logger.info(
+                        "Cached order %s %s %s %s×%d was never submitted to exchange - allowing submission",
+                        ticker, side, outcome, price_cents, count
+                    )
+                    # Remove the stale entry and continue to create a new one
+                    del self._cache[pending.client_order_id]
+                    break
 
         coid = str(uuid.uuid4())
         self._cache[coid] = PendingOrder(
@@ -113,8 +126,16 @@ class OrderDeduplicationCache:
         """Record the Kalshi order_id once the API confirms the order."""
         if client_order_id in self._cache:
             self._cache[client_order_id].order_id = order_id
+            self._cache[client_order_id].submitted_to_exchange = True
         else:
             logger.debug("mark_completed called for unknown coid %s", client_order_id)
+    
+    def mark_submitted(self, client_order_id: str) -> None:
+        """Record that the order was actually submitted to the exchange."""
+        if client_order_id in self._cache:
+            self._cache[client_order_id].submitted_to_exchange = True
+        else:
+            logger.debug("mark_submitted called for unknown coid %s", client_order_id)
 
     def get_metrics(self) -> Dict[str, int]:
         """Return cache metrics for observability."""

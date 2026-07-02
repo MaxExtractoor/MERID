@@ -18,9 +18,21 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Optional, Dict, List, Set
+from typing import Optional, Dict, List, Set, Any
 
 logger = logging.getLogger(__name__)
+
+# Market order fallback integration
+try:
+    from merid.event_venues.kalshi.market_order_fallback import (
+        MarketOrderFallbackEngine,
+        FallbackConfig,
+        get_market_order_fallback_engine
+    )
+    _FALLBACK_AVAILABLE = True
+except ImportError:
+    _FALLBACK_AVAILABLE = False
+    logger.warning("[RESTING_ORDER_MONITOR] Market order fallback module not available")
 
 # Pre-expiry cancel rule: cancel resting orders when time to expiry below threshold
 PRE_EXPIRY_CANCEL_THRESHOLD_MIN = 2  # 2 minutes before settlement
@@ -98,6 +110,7 @@ class RestingOrderRecord:
     # Original signal context
     original_minutes_to_expiry: Optional[float] = None
     original_edge_pct: Optional[float] = None
+    confidence: Optional[float] = None
     
     # Status tracking (from portfolio endpoint)
     status: str = ""  # Set at registration time, not as default
@@ -153,6 +166,10 @@ class RestingOrderMonitor:
         self._keep_count = 0
         self._poll_count = 0
         self._last_poll_time: Optional[datetime] = None  # Health monitoring
+        
+        # Market order fallback engine
+        self._fallback_engine: Optional[MarketOrderFallbackEngine] = None
+        self._fallback_enabled: bool = False
         
     def register_order(self, record: RestingOrderRecord) -> None:
         """Register a resting order for monitoring.
@@ -226,6 +243,42 @@ class RestingOrderMonitor:
         if intent_id in self._intent_to_order_id:
             kalshi_order_id = self._intent_to_order_id[intent_id]
             self.unregister_order(kalshi_order_id)
+    
+    def enable_fallback(self, config: Optional[FallbackConfig] = None) -> None:
+        """Enable market order fallback.
+        
+        Args:
+            config: Optional FallbackConfig with custom settings
+        """
+        if not _FALLBACK_AVAILABLE:
+            logger.warning("[RESTING_ORDER_MONITOR] Cannot enable fallback - module not available")
+            return
+        
+        if config:
+            self._fallback_engine = MarketOrderFallbackEngine(config)
+        else:
+            self._fallback_engine = get_market_order_fallback_engine()
+        
+        self._fallback_enabled = True
+        logger.info("[RESTING_ORDER_MONITOR] Market order fallback enabled")
+    
+    def disable_fallback(self) -> None:
+        """Disable market order fallback."""
+        self._fallback_enabled = False
+        logger.info("[RESTING_ORDER_MONITOR] Market order fallback disabled")
+    
+    async def _execute_fallback_async(self, decision: Any) -> None:
+        """Execute market order fallback asynchronously.
+        
+        Args:
+            decision: FallbackDecision with should_fallback=True
+        """
+        try:
+            if self._fallback_engine:
+                result = await self._fallback_engine.execute_fallback(decision)
+                logger.info(f"[RESTING_ORDER_MONITOR] Fallback result: {result}")
+        except Exception as e:
+            logger.error(f"[RESTING_ORDER_MONITOR] Fallback execution failed: {e}")
     
     async def _recheck_order(self, record: RestingOrderRecord) -> RecheckResult:
         """Re-check a single resting order against current signals.
@@ -348,6 +401,37 @@ class RestingOrderMonitor:
                     current_vol_tier=window_res.volatility_tier,
                     model_quality_good=model_quality_good,
                 )
+            
+            # 5. Market order fallback check (NEW)
+            if self._fallback_enabled and self._fallback_engine and _FALLBACK_AVAILABLE:
+                try:
+                    from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                    market_state_store = get_kalshi_market_state_store()
+                    market_state = market_state_store.get(record.ticker) if market_state_store else None
+                    
+                    fallback_decision = self._fallback_engine.evaluate_fallback(record, market_state)
+                    
+                    if fallback_decision.should_fallback:
+                        logger.info(
+                            "[RESTING_ORDER_MONITOR] Market order fallback triggered: kalshi_order_id=%s "
+                            "ticker=%s reason=%s",
+                            record.kalshi_order_id, record.ticker, fallback_decision.reason
+                        )
+                        # Execute fallback asynchronously (don't block recheck loop)
+                        asyncio.create_task(self._execute_fallback_async(fallback_decision))
+                        
+                        # Unregister order (will be replaced by market order)
+                        return RecheckResult(
+                            intent_id=record.intent_id,
+                            ticker=record.ticker,
+                            action="cancel",
+                            reason=f"market_order_fallback:{fallback_decision.reason}",
+                            current_regime=regime,
+                            current_vol_tier=window_res.volatility_tier,
+                            model_quality_good=model_quality_good,
+                        )
+                except Exception as e:
+                    logger.error(f"[RESTING_ORDER_MONITOR] Fallback evaluation failed: {e}")
             
             # Keep the order
             return RecheckResult(

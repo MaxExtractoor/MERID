@@ -1919,11 +1919,20 @@ class KalshiVenueClient(EventVenueClient):
         # V2 API uses bid/ask instead of yes/no
         # bid = buy YES, ask = sell YES (everything quoted from YES side)
         v2_side = "bid" if outcome == "yes" else "ask"
+        # CRITICAL FIX: Format count_fp as fixed-point decimal with 0-2 decimal places
+        # Kalshi API requires: "must be a fixed-point decimal string with 0-2 decimal places"
+        # Use 0 decimal places for whole numbers (e.g., "1"), 2 for fractional (e.g., "1.50")
+        if order.size == int(order.size):
+            count_fp_str = str(int(order.size))
+        else:
+            count_fp_str = f"{order.size:.2f}"
+        
         kalshi_order: Dict[str, Any] = {
             "ticker": ticker,
             "action": order.side,           # "buy" or "sell"
             "side": v2_side,                # "bid" or "ask" (V2 API)
             "count": str(int(order.size)),  # V2 API requires count as string
+            "count_fp": count_fp_str,       # CRITICAL FIX: Use count_fp for fractional contracts (0-2 decimal places, no trailing zeros)
             "type": order.order_type,       # "limit" or "market"
             "client_order_id": order.client_order_id or f"merid_{datetime.now(timezone.utc).timestamp()}",
             "self_trade_prevention_type": "taker_at_cross",  # V2 API required field (valid values: taker_at_cross, maker)

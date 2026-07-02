@@ -47,7 +47,7 @@ def log_bankroll_service_version() -> None:
 # CRITICAL FIX: Increased timeout to prevent startup failures on slower connections
 # EVIDENCE-BASED FIX: Increased to 45s based on production logs showing occasional API delays
 _BANKROLL_EQUITY_TIMEOUT_S = float(os.getenv("MERID_BANKROLL_EQUITY_TIMEOUT_S", "45.0"))  # increased from 30 to 45 for production stability
-_BANKROLL_SUMMARY_TIMEOUT_S = float(os.getenv("MERID_BANKROLL_SUMMARY_TIMEOUT_S", "1.0"))  # reduced from 5 to 1 to reduce order routing latency
+_BANKROLL_SUMMARY_TIMEOUT_S = float(os.getenv("MERID_BANKROLL_SUMMARY_TIMEOUT_S", "10.0"))  # increased from 5 to 10 to prevent order blocking
 from merid.event_venues.kalshi.types import (
     BalanceResult, BalanceSuccess, BalanceTemporaryError, BalancePermanentError,
     InternalBankroll, BalanceState,
@@ -318,7 +318,18 @@ class BankrollServiceV2:
             result = await self._client.get_balance()
             elapsed_ms = (time.time() - start_time) * 1000
             logger.info("[BANKROLL-API] get_balance() completed in %.1fms, result_type=%s", elapsed_ms, type(result).__name__)
-            logger.info(f"[BANKROLL-DIVERGENCE] get_balance() SUCCESS - equity=${getattr(result, 'equity', 'unknown')}")
+            
+            # CRITICAL FIX: Properly access nested equity structure
+            # result is BalanceSuccess with .bankroll attribute containing .equity_usd
+            equity_value = "unknown"
+            if hasattr(result, 'bankroll') and hasattr(result.bankroll, 'equity_usd'):
+                equity_value = f"${result.bankroll.equity_usd}"
+            elif hasattr(result, 'equity'):
+                equity_value = f"${result.equity}"
+            else:
+                equity_value = "unknown (structure mismatch)"
+            
+            logger.info(f"[BANKROLL-DIVERGENCE] get_balance() SUCCESS - equity={equity_value}")
         except Exception as e:
             elapsed_ms = (time.time() - start_time) * 1000
             logger.error("[BANKROLL-API] get_balance() failed after %.1fms: %s", elapsed_ms, str(e), exc_info=True)
@@ -882,21 +893,33 @@ def _ensure_bankroll_lock() -> asyncio.Lock:
 async def get_bankroll_service(
     max_riskable_frac: Optional[Decimal] = None,
     refresh_interval_seconds: float = 30.0,
-) -> BankrollServiceV2:
-    """Get or create the global bankroll service v2."""
+) -> Optional[BankrollServiceV2]:
+    """Get the global bankroll service v2.
+    
+    Returns None if the service has not been initialized through the proper startup path.
+    This prevents premature service creation that bypasses the FastAPI lifespan startup.
+    The service must be created in the startup function and set via set_bankroll_service().
+    """
     global _BANKROLL_SERVICE_V2
     
     if _BANKROLL_SERVICE_V2 is None:
-        lock = _ensure_bankroll_lock()
-        async with lock:
-            if _BANKROLL_SERVICE_V2 is None:
-                _BANKROLL_SERVICE_V2 = BankrollServiceV2(
-                    max_riskable_frac=max_riskable_frac,
-                    refresh_interval_seconds=refresh_interval_seconds,
-                )
-                await _BANKROLL_SERVICE_V2.start()
+        # CRITICAL FIX: Do NOT create service automatically
+        # This prevents bypassing the FastAPI lifespan startup
+        logger.warning("[BANKROLL-SINGLETON] Bankroll service not initialized - called before startup")
+        logger.warning("[BANKROLL-SINGLETON] Service must be created in startup and set via set_bankroll_service()")
+        return None
     
     return _BANKROLL_SERVICE_V2
+
+
+def set_bankroll_service(service: BankrollServiceV2) -> None:
+    """Set the singleton BankrollServiceV2 instance.
+    
+    This is used during startup to ensure all components use the same service instance.
+    """
+    global _BANKROLL_SERVICE_V2
+    _BANKROLL_SERVICE_V2 = service
+    logger.info("[BANKROLL-SINGLETON] Setting singleton bankroll service id=%s", id(service))
 
 
 async def stop_bankroll_service():
@@ -1087,7 +1110,8 @@ async def _get_summary_async(caller_module: str = "unknown") -> Optional[Bankrol
                 return summary
             await asyncio.sleep(0.5)
         
-        logger.warning("[_get_summary_async] Timeout waiting for balance fetch after %.0fs", _BANKROLL_SUMMARY_TIMEOUT_S)
-        return await service.get_summary(caller_module=caller_module)  # Return whatever we have
+        logger.warning("[_get_summary_async] Timeout waiting for balance fetch after %.0fs - returning None to unblock orders", _BANKROLL_SUMMARY_TIMEOUT_S)
+        return None  # Return None to unblock orders instead of hanging
     except Exception:
+        logger.warning("[_get_summary_async] Exception during bankroll fetch - returning None to unblock orders")
         return None

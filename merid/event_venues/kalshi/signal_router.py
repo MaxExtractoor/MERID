@@ -73,6 +73,10 @@ class AgentSignal:
     # ── Trade trace integration (P1: Feed lag calibration) ──────────
     trace_id: Optional[str] = None  # TradeTrace ID for calibration
 
+    # ── Strike price metadata (for 15m markets dual-source capture) ──
+    strike_price: Optional[float] = None  # Strike price used for signal
+    strike_source: str = ""  # Source: "kalshi_floor_strike", "candle_open", "spot_fallback"
+
     # ── Validation / readiness ────────────────────────────────────────
     executable: bool = False  # True = all execution fields must be present
     validation_errors: List[str] = field(default_factory=list)

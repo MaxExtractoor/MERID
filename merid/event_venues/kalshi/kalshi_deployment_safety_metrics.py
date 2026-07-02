@@ -74,7 +74,7 @@ if PROMETHEUS_AVAILABLE:
         "kalshi_model_prob_distance_histogram",
         "Histogram of abs(model_prob - price_cents/100) for all orders",
         ["kalshi_env", "kalshi_host"],
-        buckets=(0.01, 0.02, 0.03, 0.05, 0.10, 0.20, 0.50, 1.0)
+        buckets=(0.01, 0.02, 0.03, 0.05, 0.08, 0.10, 0.20, 0.50, 1.0)  # Added 0.08 bucket for new 0.05 threshold
     )
     
     KALSHI_MODEL_PROB_DISTANCE_VIOLATION_TOTAL = Counter(
