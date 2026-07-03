@@ -600,6 +600,12 @@ class Kalshi15mLoop:
         for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
             self._best_edge_per_asset[asset] = None
         
+        # Swing mode tracking: allows YES/NO reversal after trailing exit
+        # When trailing stop exits in profit, enable swing mode to allow opposite-side entry
+        self._swing_mode: Dict[str, Dict] = {}  # asset -> {enabled: bool, exited_side: str, exit_time: datetime}
+        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+            self._swing_mode[asset] = {"enabled": False, "exited_side": None, "exit_time": None}
+        
         # Per-asset position tracking for risk enforcement
         self._asset_positions: Dict[str, float] = {}  # asset -> current notional exposure
         for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
@@ -1094,6 +1100,29 @@ class Kalshi15mLoop:
                             "[POSITION-MONITOR-CALLBACK] Exit intent: position=%s reason=%s price=%dc contracts=%s",
                             position.position_id[:8], exit_reason, exit_price_cents, contracts_to_close or "all"
                         )
+                        
+                        # CRITICAL: Enable swing mode after trailing exit in profit
+                        # This allows YES/NO reversal to capture profits from price swings in both directions
+                        if exit_reason == ExitReason.TRAIL:
+                            # Extract asset from market_id (e.g., KXBTC15M-TEST -> BTC)
+                            asset = None
+                            for prefix in ["KXBTC", "KXETH", "KXSOL", "KXXRP", "KXDOGE"]:
+                                if position.market_id.startswith(prefix):
+                                    asset = prefix.replace("KX", "")
+                                    break
+                            
+                            if asset:
+                                # Enable swing mode for this asset
+                                self._swing_mode[asset] = {
+                                    "enabled": True,
+                                    "exited_side": position.side.value if hasattr(position.side, 'value') else str(position.side),
+                                    "exit_time": datetime.utcnow()
+                                }
+                                logger.info(
+                                    "[SWING-MODE] Enabled for asset=%s after trailing exit: exited_side=%s exit_price=%dc",
+                                    asset, self._swing_mode[asset]["exited_side"], exit_price_cents
+                                )
+                        
                         # Route exit order through order router
                         asyncio.create_task(self._execute_exit_order(position, exit_reason, exit_price_cents, contracts_to_close))
                     except Exception as cb_err:
@@ -1131,12 +1160,16 @@ class Kalshi15mLoop:
             count = contracts_to_close if contracts_to_close is not None else position.size
 
             # Create exit OrderIntent
+            # CRITICAL: Use limit order with GTC to create resting order for better fill rate
+            # This allows the exit order to sit on the book and get filled at the desired price
             intent = OrderIntent(
                 ticker=position.market_id,
                 side=side_str,
                 action=action,
                 price_cents=exit_price_cents,
                 count=count,
+                order_type="limit",  # Limit order to create resting order
+                time_in_force="gtc",  # Good till canceled - allows order to rest on book
                 source="position_monitor_exit",
                 agent_id="merid.position_management.position_monitor",
                 exit_reason=exit_reason,
@@ -1279,6 +1312,11 @@ class Kalshi15mLoop:
                             self._best_edge_per_asset[asset] = None
                         logger.info("[15m-LOOP] Reset best-edge tracking for new window")
                         
+                        # Reset swing mode for new window (swing mode only valid within same 15m window)
+                        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+                            self._swing_mode[asset] = {"enabled": False, "exited_side": None, "exit_time": None}
+                        logger.info("[15m-LOOP] Reset swing mode for new window")
+                        
                         # Reset GlobalRiskGuard cycle tracking
                         from merid.guards.global_risk_guard import get_global_risk_guard
                         risk_guard = get_global_risk_guard()
@@ -1297,52 +1335,91 @@ class Kalshi15mLoop:
                     candidates = await self.agent_grid.run_cycle(tick_id, allow_new_entries=True)
                     logger.info("[15m-LOOP] Generated %d candidates in tick %d", len(candidates), tick_id)
                     
+                    # CRITICAL: Log candidate details for debugging execution flow
+                    for i, candidate in enumerate(candidates):
+                        logger.info(
+                            "[15m-LOOP] Candidate %d: ticker=%s side=%s edge=%s edge_pct=%s",
+                            i, candidate.get("ticker"), candidate.get("side"), candidate.get("edge"), candidate.get("edge_pct")
+                        )
+                    
                     # Execute candidates using best-edge selection
                     # Signal generation runs continuously (every 5s), but only best edge per asset executes
+                    logger.info("[15m-LOOP] Starting execution loop for %d candidates", len(candidates))
                     for candidate in candidates:
                         try:
                             # Extract asset from ticker (e.g., "KXBTC15M-26JUN300345-45" -> "BTC")
                             ticker = candidate.get("ticker", "")
-                            asset = ticker.split("15M")[0].replace("KX", "") if "15M" in ticker else ticker.replace("KX", "")
+                            logger.info("[15m-LOOP] Processing candidate: ticker=%s", ticker)
+                            
+                            # CRITICAL FIX: More robust asset extraction
+                            # Handle both full market IDs (KXBTC15M-26JUN300345-45) and series tickers (KXBTC15M)
+                            if "15M" in ticker:
+                                # Split on "15M" and take the part before it
+                                asset_part = ticker.split("15M")[0]
+                            else:
+                                asset_part = ticker
+                            
+                            # Remove "KX" prefix if present
+                            asset = asset_part.replace("KX", "")
                             
                             # Normalize asset name
                             asset_map = {"BTC": "BTC", "ETH": "ETH", "SOL": "SOL", "XRP": "XRP", "DOGE": "DOGE"}
                             asset = asset_map.get(asset, asset)
                             
+                            logger.info("[15m-LOOP] Extracted asset=%s from ticker=%s", asset, ticker)
+                            
                             if asset not in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-                                logger.warning("[15m-LOOP] Unknown asset from ticker %s: %s - skipping", ticker, asset)
+                                logger.warning("[15m-LOOP] Unknown asset from ticker %s: extracted=%s - skipping", ticker, asset)
                                 continue
                             
                             # Get candidate edge
                             edge = candidate.get("edge", 0.0) or candidate.get("edge_pct", 0.0)
                             side = candidate.get("side", "")
+                            logger.info("[15m-LOOP] Candidate details: edge=%.6f side=%s", edge, side)
                             
                             # Check if we have an open position for this asset
                             current_position = self._asset_positions.get(asset, 0.0)
                             has_position = abs(current_position) > 0.01  # Small threshold for floating point
+                            logger.info("[15m-LOOP] Position check: asset=%s position=%.2f has_position=%s", asset, current_position, has_position)
                             
                             # Get current best edge for this asset
                             current_best = self._best_edge_per_asset.get(asset)
                             current_best_edge = current_best.get("edge", 0.0) if current_best else 0.0
+                            logger.info("[15m-LOOP] Best edge check: asset=%s current_best=%.6f", asset, current_best_edge)
                             
                             # Best-edge selection logic:
                             # - If no position: execute if edge > current best edge OR if edge meets minimum threshold
                             # - If position exists: only execute if edge > current best edge (edge improvement)
+                            # - SWING MODE: If swing mode enabled after trailing exit, allow opposite-side entry
                             # - This prevents over-trading and ensures we always execute the best opportunity
                             # CRITICAL FIX: For velocity-based signals, use minimum edge threshold instead of best-edge comparison
                             # Velocity-based signals have tiny edges (0.01-0.05%) due to velocity magnitude calculation
                             # The best-edge logic was blocking all trades because edges were too small to beat current_best
                             should_execute = False
-                            min_edge_threshold = 0.005  # 0.5% minimum edge for velocity-based signals
+                            min_edge_threshold = 0.0001  # 0.01% minimum edge for velocity-based signals (was 0.5% - too high)
+                            
+                            # Check swing mode status for this asset
+                            swing_enabled = self._swing_mode.get(asset, {}).get("enabled", False)
+                            exited_side = self._swing_mode.get(asset, {}).get("exited_side", None)
+                            
+                            # Determine if this is a swing reversal (opposite side to exited position)
+                            is_swing_reversal = swing_enabled and exited_side and side != exited_side
                             
                             if not has_position:
                                 # No position: execute if edge meets minimum threshold OR beats current best
-                                if edge > min_edge_threshold or edge > current_best_edge:
+                                # OR if swing mode enabled and this is opposite-side reversal
+                                if edge > min_edge_threshold or edge > current_best_edge or is_swing_reversal:
                                     should_execute = True
-                                    logger.info(
-                                        "[15m-LOOP] Best-edge selection: asset=%s edge=%.2f%% > min_threshold=%.2f%% or current_best=%.2f%% - will execute",
-                                        asset, edge, min_edge_threshold, current_best_edge
-                                    )
+                                    if is_swing_reversal:
+                                        logger.info(
+                                            "[SWING-MODE] Reversal entry: asset=%s from %s to %s edge=%.2f%% - swing mode enabled",
+                                            asset, exited_side, side, edge
+                                        )
+                                    else:
+                                        logger.info(
+                                            "[15m-LOOP] Best-edge selection: asset=%s edge=%.2f%% > min_threshold=%.2f%% or current_best=%.2f%% - will execute",
+                                            asset, edge, min_edge_threshold, current_best_edge
+                                        )
                                     # Update best edge tracking
                                     self._best_edge_per_asset[asset] = {
                                         "ticker": ticker,
@@ -1350,32 +1427,61 @@ class Kalshi15mLoop:
                                         "edge": edge,
                                         "candidate": candidate
                                     }
+                                    # Disable swing mode after executing reversal
+                                    if is_swing_reversal:
+                                        self._swing_mode[asset] = {"enabled": False, "exited_side": None, "exit_time": None}
+                                        logger.info("[SWING-MODE] Disabled for asset=%s after reversal entry", asset)
                                 else:
                                     logger.debug(
                                         "[15m-LOOP] Best-edge selection: asset=%s edge=%.2f%% <= min_threshold=%.2f%% and <= current_best=%.2f%% - skipping",
                                         asset, edge, min_edge_threshold, current_best_edge
                                     )
                             else:
-                                # Has position: only execute if edge improves significantly (threshold: 5% improvement)
-                                edge_improvement_threshold = 5.0  # 5% edge improvement required
-                                if edge > current_best_edge + edge_improvement_threshold:
-                                    should_execute = True
-                                    logger.info(
-                                        "[15m-LOOP] Edge improvement: asset=%s edge=%.2f%% > current_best=%.2f%% + threshold=%.2f%% - will execute",
-                                        asset, edge, current_best_edge, edge_improvement_threshold
-                                    )
-                                    # Update best edge tracking
-                                    self._best_edge_per_asset[asset] = {
-                                        "ticker": ticker,
-                                        "side": side,
-                                        "edge": edge,
-                                        "candidate": candidate
-                                    }
+                                # Has position: only execute if edge improves significantly
+                                # CRITICAL FIX: Use relative improvement (percentage) instead of absolute for velocity-based signals
+                                # Velocity-based signals have tiny edges (0.01-0.07%), so absolute 5% threshold is impossible
+                                # Use 20% relative improvement instead: edge must be 20% better than current best
+                                if current_best_edge > 0:
+                                    edge_improvement_ratio = (edge - current_best_edge) / current_best_edge
+                                    edge_improvement_threshold = 0.20  # 20% relative improvement required
+                                    if edge_improvement_ratio > edge_improvement_threshold:
+                                        should_execute = True
+                                        logger.info(
+                                            "[15m-LOOP] Edge improvement: asset=%s edge=%.6f (ratio=%.2f%%) > current_best=%.6f + threshold=%.2f%% - will execute",
+                                            asset, edge, edge_improvement_ratio * 100, current_best_edge, edge_improvement_threshold * 100
+                                        )
+                                        # Update best edge tracking
+                                        self._best_edge_per_asset[asset] = {
+                                            "ticker": ticker,
+                                            "side": side,
+                                            "edge": edge,
+                                            "candidate": candidate
+                                        }
+                                    else:
+                                        logger.debug(
+                                            "[15m-LOOP] Edge improvement: asset=%s edge=%.6f (ratio=%.2f%%) <= current_best=%.6f + threshold=%.2f%% - skipping (position exists)",
+                                            asset, edge, edge_improvement_ratio * 100, current_best_edge, edge_improvement_threshold * 100
+                                        )
                                 else:
-                                    logger.debug(
-                                        "[15m-LOOP] Edge improvement: asset=%s edge=%.2f%% <= current_best=%.2f%% + threshold=%.2f%% - skipping (position exists)",
-                                        asset, edge, current_best_edge, edge_improvement_threshold
-                                    )
+                                    # No current best edge (first signal with position), execute if edge meets minimum threshold
+                                    if edge > min_edge_threshold:
+                                        should_execute = True
+                                        logger.info(
+                                            "[15m-LOOP] First signal with position: asset=%s edge=%.6f > min_threshold=%.6f - will execute",
+                                            asset, edge, min_edge_threshold
+                                        )
+                                        # Update best edge tracking
+                                        self._best_edge_per_asset[asset] = {
+                                            "ticker": ticker,
+                                            "side": side,
+                                            "edge": edge,
+                                            "candidate": candidate
+                                        }
+                                    else:
+                                        logger.debug(
+                                            "[15m-LOOP] First signal with position: asset=%s edge=%.6f <= min_threshold=%.6f - skipping",
+                                            asset, edge, min_edge_threshold
+                                        )
                             
                             if not should_execute:
                                 continue
@@ -1424,7 +1530,7 @@ class Kalshi15mLoop:
                                 candidate["count"] = count
                                 logger.info(
                                     "[15m-LOOP] Dynamic sizing: ticker=%s edge=%.4f confidence=%.4f count=%d notional=%.2f",
-                                    ticker, edge_pct, confidence, count, notional
+                                    ticker, float(edge_pct), float(confidence), count, float(notional)
                                 )
                             except Exception as sizing_err:
                                 logger.warning("[15m-LOOP] Dynamic sizing failed, using default count=1: %s", sizing_err)
