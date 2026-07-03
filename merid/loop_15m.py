@@ -1326,17 +1326,22 @@ class Kalshi15mLoop:
                             current_best_edge = current_best.get("edge", 0.0) if current_best else 0.0
                             
                             # Best-edge selection logic:
-                            # - If no position: execute if edge > current best edge
+                            # - If no position: execute if edge > current best edge OR if edge meets minimum threshold
                             # - If position exists: only execute if edge > current best edge (edge improvement)
                             # - This prevents over-trading and ensures we always execute the best opportunity
+                            # CRITICAL FIX: For velocity-based signals, use minimum edge threshold instead of best-edge comparison
+                            # Velocity-based signals have tiny edges (0.01-0.05%) due to velocity magnitude calculation
+                            # The best-edge logic was blocking all trades because edges were too small to beat current_best
                             should_execute = False
+                            min_edge_threshold = 0.005  # 0.5% minimum edge for velocity-based signals
+                            
                             if not has_position:
-                                # No position: execute if this is the best edge so far
-                                if edge > current_best_edge:
+                                # No position: execute if edge meets minimum threshold OR beats current best
+                                if edge > min_edge_threshold or edge > current_best_edge:
                                     should_execute = True
                                     logger.info(
-                                        "[15m-LOOP] Best-edge selection: asset=%s edge=%.2f%% > current_best=%.2f%% - will execute",
-                                        asset, edge, current_best_edge
+                                        "[15m-LOOP] Best-edge selection: asset=%s edge=%.2f%% > min_threshold=%.2f%% or current_best=%.2f%% - will execute",
+                                        asset, edge, min_edge_threshold, current_best_edge
                                     )
                                     # Update best edge tracking
                                     self._best_edge_per_asset[asset] = {
@@ -1347,8 +1352,8 @@ class Kalshi15mLoop:
                                     }
                                 else:
                                     logger.debug(
-                                        "[15m-LOOP] Best-edge selection: asset=%s edge=%.2f%% <= current_best=%.2f%% - skipping",
-                                        asset, edge, current_best_edge
+                                        "[15m-LOOP] Best-edge selection: asset=%s edge=%.2f%% <= min_threshold=%.2f%% and <= current_best=%.2f%% - skipping",
+                                        asset, edge, min_edge_threshold, current_best_edge
                                     )
                             else:
                                 # Has position: only execute if edge improves significantly (threshold: 5% improvement)
@@ -1380,9 +1385,50 @@ class Kalshi15mLoop:
                                 logger.warning("[15m-LOOP] Candidate edge validation failed: %s - skipping execution", ticker)
                                 continue
                             
-                            # Limit to 1 contract per execution to prevent over-trading
-                            candidate["count"] = 1
-                            logger.info("[15m-LOOP] Limiting to 1 contract for best-edge execution: %s", ticker)
+                            # Use dynamic position sizing if enabled
+                            try:
+                                from merid.prediction.unified_sizing import compute_order_size
+                                from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+                                from decimal import Decimal
+                                
+                                # Use sync version to avoid coroutine error in async context
+                                bankroll_usd = get_equity_for_risk_calc_sync()
+                                if bankroll_usd is None:
+                                    bankroll_usd = 100.0
+                                
+                                # Get price from candidate or market state
+                                price_cents = candidate.get("price_cents", 50)
+                                if price_cents == 0:
+                                    # Fallback to market state
+                                    if self.market_state_store:
+                                        market_state = self.market_state_store.get(ticker)
+                                        if market_state:
+                                            price_cents = getattr(market_state, 'last_price_cents', 50)
+                            
+                                # Get edge and confidence from candidate
+                                edge_pct = Decimal(str(candidate.get("edge_pct", 0.0)))
+                                confidence = Decimal(str(candidate.get("confidence", 0.5)))
+                                
+                                # Extract asset from ticker
+                                asset = ticker.split("-")[0].replace("KX", "") if "-" in ticker else "BTC"
+                                
+                                # Compute dynamic size
+                                count, notional, metadata = compute_order_size(
+                                    bankroll_usd=Decimal(str(bankroll_usd)),
+                                    price_cents=int(price_cents),
+                                    asset=asset,
+                                    edge_pct=edge_pct,
+                                    confidence=confidence
+                                )
+                                
+                                candidate["count"] = count
+                                logger.info(
+                                    "[15m-LOOP] Dynamic sizing: ticker=%s edge=%.4f confidence=%.4f count=%d notional=%.2f",
+                                    ticker, edge_pct, confidence, count, notional
+                                )
+                            except Exception as sizing_err:
+                                logger.warning("[15m-LOOP] Dynamic sizing failed, using default count=1: %s", sizing_err)
+                                candidate["count"] = 1
                             
                             await self._execute_candidate(candidate, tick_id)
                             
@@ -3278,17 +3324,19 @@ class Kalshi15mLoop:
         # Check both "edge" and "edge_pct" fields for compatibility
         edge = candidate.get("edge", candidate.get("edge_pct", 0.0))
         
-        # CRITICAL: Allow zero edge for velocity-based signals
-        # Velocity-based signals use momentum, not price-based edge calculation
-        # The edge validation should only apply to price-based strategies
+        # CRITICAL: Only validate edge for price-based signals
+        # Velocity-based signals use velocity magnitude as signal strength, not probability edge
+        # The "edge" in momentum trading is the velocity itself, not probability difference
         rationale = candidate.get("rationale", "")
-        if "velocity_based" in rationale or edge == 0.0:
+        if "velocity_based" in rationale:
+            # Velocity-based signals: skip edge validation (validated by velocity threshold in agent_grid)
             logger.info(
                 "[EDGE-VALIDATION] Skipping edge check for velocity-based signal: ticker=%s rationale=%s",
                 candidate.get("ticker", "unknown"), rationale
             )
             return True
         
+        # Price-based signals: require positive edge
         if edge <= 0:
             logger.warning(
                 "[EDGE-VALIDATION] Candidate edge is not positive: edge=%.2f ticker=%s",
@@ -3603,7 +3651,7 @@ class Kalshi15mLoop:
             
             intent = OrderIntent(
                 ticker=ticker,
-                side=side_raw,  # Keep as lowercase "yes"/"no" for early validation
+                side=kalshi_side,  # CRITICAL FIX: Use Kalshi-formatted side (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
                 action=action_raw,  # Keep as lowercase "buy"/"sell" for early validation
                 price_cents=price_cents,  # BUG #2 FIX: Add required price_cents field
                 count=count,
