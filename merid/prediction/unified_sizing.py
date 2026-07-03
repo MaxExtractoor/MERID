@@ -250,6 +250,138 @@ def _get_min_edge_risk_pct() -> Decimal:
         raise RuntimeError(f"Profile read failed: {e}") from e
 
 
+def _is_dynamic_sizing_enabled() -> bool:
+    """Check if dynamic position sizing is enabled from profile config.
+    
+    This reads from kalshi_crypto_15m.yaml dynamic_sizing.enabled.
+    
+    Returns:
+        True if dynamic sizing is enabled, False otherwise.
+    """
+    if not _PROFILE_AVAILABLE:
+        return False  # Disable if profile unavailable
+    
+    try:
+        if is_profile_active():
+            adapter = get_active_profile()
+            profile = adapter.profile
+            return profile.dynamic_sizing_enabled
+    except Exception as e:
+        logger.warning("[UNIFIED-SIZING] Failed to read dynamic_sizing_enabled: %s", e)
+    
+    return False
+
+
+def _get_dynamic_sizing_base_contracts() -> int:
+    """Get base contracts for dynamic sizing from profile config.
+    
+    This reads from kalshi_crypto_15m.yaml dynamic_sizing.base_contracts.
+    
+    Returns:
+        Base contracts as int.
+    """
+    if not _PROFILE_AVAILABLE:
+        return 1  # Default
+    
+    try:
+        if is_profile_active():
+            adapter = get_active_profile()
+            profile = adapter.profile
+            return profile.dynamic_sizing_base_contracts
+    except Exception as e:
+        logger.warning("[UNIFIED-SIZING] Failed to read dynamic_sizing_base_contracts: %s", e)
+    
+    return 1  # Default
+
+
+def _get_dynamic_sizing_edge_multiplier() -> float:
+    """Get edge multiplier for dynamic sizing from profile config.
+    
+    This reads from kalshi_crypto_15m.yaml dynamic_sizing.edge_multiplier.
+    
+    Returns:
+        Edge multiplier as float.
+    """
+    if not _PROFILE_AVAILABLE:
+        return 0.5  # Default
+    
+    try:
+        if is_profile_active():
+            adapter = get_active_profile()
+            profile = adapter.profile
+            return profile.dynamic_sizing_edge_multiplier
+    except Exception as e:
+        logger.warning("[UNIFIED-SIZING] Failed to read dynamic_sizing_edge_multiplier: %s", e)
+    
+    return 0.5  # Default
+
+
+def _get_dynamic_sizing_confidence_multiplier() -> float:
+    """Get confidence multiplier for dynamic sizing from profile config.
+    
+    This reads from kalshi_crypto_15m.yaml dynamic_sizing.confidence_multiplier.
+    
+    Returns:
+        Confidence multiplier as float.
+    """
+    if not _PROFILE_AVAILABLE:
+        return 0.3  # Default
+    
+    try:
+        if is_profile_active():
+            adapter = get_active_profile()
+            profile = adapter.profile
+            return profile.dynamic_sizing_confidence_multiplier
+    except Exception as e:
+        logger.warning("[UNIFIED-SIZING] Failed to read dynamic_sizing_confidence_multiplier: %s", e)
+    
+    return 0.3  # Default
+
+
+def _get_dynamic_sizing_max_contracts() -> int:
+    """Get max contracts for dynamic sizing from profile config.
+    
+    This reads from kalshi_crypto_15m.yaml dynamic_sizing.max_contracts.
+    
+    Returns:
+        Max contracts as int.
+    """
+    if not _PROFILE_AVAILABLE:
+        return 3  # Default
+    
+    try:
+        if is_profile_active():
+            adapter = get_active_profile()
+            profile = adapter.profile
+            return profile.dynamic_sizing_max_contracts
+    except Exception as e:
+        logger.warning("[UNIFIED-SIZING] Failed to read dynamic_sizing_max_contracts: %s", e)
+    
+    return 3  # Default
+
+
+def _get_dynamic_sizing_min_contracts() -> int:
+    """Get min contracts for dynamic sizing from profile config.
+    
+    This reads from kalshi_crypto_15m.yaml dynamic_sizing.min_contracts.
+    
+    Returns:
+        Min contracts as int.
+    """
+    if not _PROFILE_AVAILABLE:
+        return 1  # Default
+    
+    try:
+        if is_profile_active():
+            adapter = get_active_profile()
+            profile = adapter.profile
+            return profile.dynamic_sizing_min_contracts
+    except Exception as e:
+        logger.warning("[UNIFIED-SIZING] Failed to read dynamic_sizing_min_contracts: %s", e)
+    
+    return 1  # Default
+
+
 # =============================================================================
 # Unified Sizing Function
 # =============================================================================
@@ -387,7 +519,42 @@ def compute_order_size(
     # Step 3: Get per-asset max contracts cap
     max_contracts_cap = _get_max_contracts_per_asset(asset)
     
-    # Step 4: Check existing positions for position-aware sizing
+    # Step 4: Apply dynamic position sizing if enabled
+    # Scale position size based on edge and confidence
+    dynamic_sizing_multiplier = 1.0  # Default: no scaling
+    if _is_dynamic_sizing_enabled():
+        edge_pct = edge_pct if edge_pct is not None else 0.0
+        confidence = confidence if confidence is not None else 0.5
+        
+        # Get dynamic sizing parameters from profile
+        base_contracts = _get_dynamic_sizing_base_contracts()
+        edge_multiplier = _get_dynamic_sizing_edge_multiplier()
+        confidence_multiplier = _get_dynamic_sizing_confidence_multiplier()
+        max_contracts = _get_dynamic_sizing_max_contracts()
+        min_contracts = _get_dynamic_sizing_min_contracts()
+        
+        # Calculate dynamic size: base + (edge × edge_multiplier) + (confidence × confidence_multiplier)
+        # Convert Decimal to float for multiplication with float multipliers
+        edge_pct_float = float(edge_pct) if edge_pct is not None else 0.0
+        confidence_float = float(confidence) if confidence is not None else 0.5
+        dynamic_size = base_contracts + (edge_pct_float * 100 * edge_multiplier) + (confidence_float * 100 * confidence_multiplier)
+        dynamic_size = max(min_contracts, min(max_contracts, int(dynamic_size)))
+        
+        # Calculate multiplier to apply to notional
+        # If dynamic_size > 1, we want to increase notional proportionally
+        dynamic_sizing_multiplier = float(dynamic_size) / float(base_contracts)
+        
+        logger.info(
+            "[DYNAMIC-SIZING] edge=%.4f confidence=%.4f base=%d edge_mult=%.2f conf_mult=%.2f "
+            "dynamic_size=%d multiplier=%.2f asset=%s",
+            edge_pct, confidence, base_contracts, edge_multiplier, confidence_multiplier,
+            dynamic_size, dynamic_sizing_multiplier, asset
+        )
+        
+        # Apply multiplier to max_notional
+        max_notional_usd = max_notional_usd * Decimal(str(dynamic_sizing_multiplier))
+    
+    # Step 5: Check existing positions for position-aware sizing
     # Reduce max_notional if we already have exposure to this asset
     existing_position_notional = Decimal("0")
     try:
