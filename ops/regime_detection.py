@@ -741,6 +741,57 @@ class RegimeDetector:
             return REGIME_CONSTRAINTS[MarketRegime.UNKNOWN]
         return self._current_state.constraints
     
+    def update_from_adapter(self, canonical_regime: str, confidence: float = 0.7) -> None:
+        """Update regime state from external adapter (e.g., agent_grid_15m detector).
+        
+        This allows the canonical regime detector to receive updates from simpler
+        detectors while still providing the canonical risk controls.
+        
+        Args:
+            canonical_regime: Canonical regime string (e.g., "trending_bull", "mean_reverting")
+            confidence: Confidence score from source detector
+        """
+        try:
+            # Map string to MarketRegime enum
+            regime_enum = MarketRegime(canonical_regime)
+        except ValueError:
+            logger.warning(
+                "[REGIME-DETECTOR] Invalid canonical regime from adapter: %s, using UNKNOWN",
+                canonical_regime
+            )
+            regime_enum = MarketRegime.UNKNOWN
+        
+        # Get current time for regime_start_time
+        current_time = time.time()
+        
+        # Get previous observations count if state exists
+        prev_observations = self._current_state.observations_in_regime if self._current_state else 0
+        
+        # Create new regime state from adapter input
+        new_state = RegimeState(
+            current_regime=regime_enum,
+            confidence=confidence,
+            regime_start_time=current_time,
+            observations_in_regime=prev_observations + 1,
+            transition_probability={r: 0.0 for r in MarketRegime},  # Reset transitions
+            constraints=REGIME_CONSTRAINTS[regime_enum],
+            stability_score=confidence,  # Use confidence as stability proxy
+            time_in_regime_seconds=0.0,  # Reset time in regime
+        )
+        
+        # Log regime transition if changed
+        if self._current_state and self._current_state.current_regime != regime_enum:
+            logger.info(
+                "[REGIME-DETECTOR] Regime transition from adapter: %s -> %s",
+                self._current_state.current_regime.value, regime_enum.value
+            )
+        
+        self._current_state = new_state
+        logger.debug(
+            "[REGIME-DETECTOR] Updated state from adapter: regime=%s confidence=%.2f",
+            regime_enum.value, confidence
+        )
+    
     def is_trading_allowed(self, strategy_type: str) -> Tuple[bool, str]:
         """
         Check if trading is allowed for a strategy type.

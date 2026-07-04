@@ -14,6 +14,14 @@ logger = get_logger("merid.prediction.agent_grid_15m")
 # Import regime detection module
 from merid.prediction.regime_detector import RegimeDetector, Regime
 
+# Import regime adapter to bridge to canonical ops.regime_detection
+try:
+    from ops.regime_adapter import get_regime_adapter
+    _REGIME_ADAPTER_AVAILABLE = True
+except ImportError:
+    _REGIME_ADAPTER_AVAILABLE = False
+    logger.warning("[AGENT-GRID] Regime adapter not available, canonical regime updates disabled")
+
 # Lean AgentGrid for Kalshi 15m Crypto Trading.
 # This module provides a minimal, focused agent grid for 15-minute crypto trading.
 # It uses Coinbase velocity-based signals (2026 #1 winning strategy) and simplified gates.
@@ -2759,6 +2767,23 @@ class LeanAgent15m:
                     "[REGIME-AWARE] asset=%s regime=%s mode=%s confidence=%.2f",
                     asset, regime_detection.regime.value, strategy_mode, regime_detection.confidence
                 )
+                
+                # CRITICAL FIX: Update canonical ops.regime_detection via adapter
+                # This ensures the canonical risk controls (position_size_multiplier, leverage_multiplier)
+                # are applied based on the regime detected by agent_grid_15m's detector
+                if _REGIME_ADAPTER_AVAILABLE:
+                    try:
+                        adapter = get_regime_adapter()
+                        adapter.update_from_prediction_detector(
+                            regime=hmm_regime,
+                            confidence=hmm_regime_confidence
+                        )
+                        logger.debug(
+                            "[REGIME-ADAPTER] Updated canonical regime from agent_grid detector: %s -> %s",
+                            hmm_regime, adapter.get_canonical_regime()
+                        )
+                    except Exception as e:
+                        logger.warning("[REGIME-ADAPTER] Failed to update canonical regime: %s", e)
         
         # Priority 4: Regime-aware threshold adjustment
         # Adjust velocity threshold based on HMM regime to account for market state

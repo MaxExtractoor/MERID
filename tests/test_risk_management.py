@@ -12,9 +12,9 @@ from datetime import datetime, timedelta
 # Add the project root to Python path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from risk.portfolio_optimizer import PortfolioOptimizer, Asset
-from risk.position_sizing import PositionSizer, Position, RiskParameters
-from risk.risk_monitor import RiskMonitor
+from merid.risk.portfolio_optimizer import PortfolioOptimizer, Asset
+from merid.risk.position_sizing import PositionSizer, Position, RiskParameters
+from merid.risk.risk_monitor import RiskMonitor
 from utils.logger import get_logger
 
 logger = get_logger("test_risk_management")

@@ -32,6 +32,88 @@ except ImportError:
     _PROFILE_AVAILABLE = False
     logger.warning("[UNIFIED-SIZING] Profile adapter not available, using hardcoded values")
 
+# Regime detection integration
+try:
+    from ops.regime_detection import get_regime_detector
+    _REGIME_DETECTION_AVAILABLE = True
+except ImportError:
+    _REGIME_DETECTION_AVAILABLE = False
+    logger.warning("[UNIFIED-SIZING] Regime detection not available, multipliers not applied")
+
+# TTE regime integration
+try:
+    from merid.risk.tte_regime import get_tte_classifier
+    _TTE_REGIME_AVAILABLE = True
+except ImportError:
+    _TTE_REGIME_AVAILABLE = False
+    logger.warning("[UNIFIED-SIZING] TTE regime not available, multipliers not applied")
+
+
+def _get_regime_position_size_multiplier() -> float:
+    """Get position size multiplier from current regime constraints.
+    
+    This reads from ops.regime_detection.RegimeConstraints.position_size_multiplier.
+    The multiplier reduces position sizes based on market regime risk:
+    - TRENDING_BULL: 1.0 (normal)
+    - TRENDING_BEAR: 0.7 (reduce in bear markets)
+    - MEAN_REVERTING: 0.8 (moderate reduction)
+    - HIGH_VOLATILITY: 0.4 (significant reduction)
+    - CRISIS: 0.1 (minimal trading)
+    - UNKNOWN: 0.0 (no trading)
+    
+    Returns:
+        Multiplier between 0.0 and 1.0. Returns 1.0 if regime detection unavailable.
+    """
+    if not _REGIME_DETECTION_AVAILABLE:
+        return 1.0
+    
+    try:
+        detector = get_regime_detector()
+        constraints = detector.get_constraints()
+        if constraints:
+            multiplier = constraints.position_size_multiplier
+            logger.debug(
+                "[REGIME-SIZING] Applied regime position_size_multiplier=%.2f",
+                multiplier
+            )
+            return multiplier
+    except Exception as e:
+        logger.warning("[REGIME-SIZING] Failed to get regime multiplier: %s", e)
+    
+    return 1.0
+
+
+def _get_tte_position_size_multiplier(tte_seconds: Optional[float] = None) -> float:
+    """Get position size multiplier from TTE regime.
+    
+    This reads from merid.risk.tte_regime.TTERegimeConfig size multipliers:
+    - NORMAL: 1.0 (normal)
+    - APPROACHING: 0.75 (reduce as expiry approaches)
+    - CRITICAL: 0.5 (significant reduction near expiry)
+    - TERMINAL: 0.25 (minimal trading very close to expiry)
+    
+    Args:
+        tte_seconds: Time to expiry in seconds. If None, returns 1.0.
+    
+    Returns:
+        Multiplier between 0.0 and 1.0. Returns 1.0 if TTE regime unavailable or tte_seconds is None.
+    """
+    if not _TTE_REGIME_AVAILABLE or tte_seconds is None:
+        return 1.0
+    
+    try:
+        classifier = get_tte_classifier()
+        multiplier = classifier.get_size_multiplier(tte_seconds)
+        logger.debug(
+            "[TTE-SIZING] Applied TTE regime size_multiplier=%.2f (tte_seconds=%.0f)",
+            multiplier, tte_seconds
+        )
+        return multiplier
+    except Exception as e:
+        logger.warning("[TTE-SIZING] Failed to get TTE multiplier: %s", e)
+    
+    return 1.0
+
 
 # =============================================================================
 # Venue-Aware Minimum Notional
@@ -398,6 +480,7 @@ def compute_order_size(
     min_contracts: Optional[int] = None,
     max_notional_usd: Optional[Decimal] = None,  # NEW: explicit max_notional from profile
     time_of_day_multiplier: float = 1.0,  # 2026 Research-Based Risk Management: Time-of-day risk scaling
+    tte_seconds: Optional[float] = None,  # Time to expiry in seconds for TTE regime multiplier
 ) -> Tuple[int, Decimal, dict]:
     """Compute order size from bankroll, risk percentage, and market constraints.
     
@@ -562,6 +645,28 @@ def compute_order_size(
         logger.info(
             "[TIME-OF-DAY-SCALING] Applied multiplier=%.2f to max_notional for asset=%s (new max_notional=%.2f)",
             time_of_day_multiplier, asset, float(max_notional_usd)
+        )
+    
+    # Step 4.6: Apply regime-based position size multiplier
+    # CRITICAL FIX: Apply ops.regime_detection.RegimeConstraints.position_size_multiplier
+    # This reduces position sizes based on market regime risk (BEAR, HIGH_VOLATILITY, CRISIS)
+    regime_multiplier = _get_regime_position_size_multiplier()
+    if regime_multiplier != 1.0:
+        max_notional_usd = max_notional_usd * Decimal(str(regime_multiplier))
+        logger.info(
+            "[REGIME-SIZING] Applied regime multiplier=%.2f to max_notional for asset=%s (new max_notional=%.2f)",
+            regime_multiplier, asset, float(max_notional_usd)
+        )
+    
+    # Step 4.7: Apply TTE-based position size multiplier
+    # CRITICAL FIX: Apply merid.risk.tte_regime.TTERegimeConfig size multipliers
+    # This reduces position sizes as contracts approach expiry
+    tte_multiplier = _get_tte_position_size_multiplier(tte_seconds)
+    if tte_multiplier != 1.0:
+        max_notional_usd = max_notional_usd * Decimal(str(tte_multiplier))
+        logger.info(
+            "[TTE-SIZING] Applied TTE multiplier=%.2f to max_notional for asset=%s (new max_notional=%.2f)",
+            tte_multiplier, asset, float(max_notional_usd)
         )
     
     # Step 5: Check existing positions for position-aware sizing
