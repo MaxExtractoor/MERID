@@ -1363,14 +1363,15 @@ class Settings(BaseSettings):
                     "Cannot proceed without valid bankroll from Kalshi balance."
                 )
             
-            # Derive caps from bankroll using 3% unified cycle risk (aligned with MAX_CYCLE_RISK_PCT)
-            # No per-asset differentiation - 3% across top-3 edges is the single source of truth
+            # Derive caps from bankroll using 0.5% unified cycle risk (aligned with MAX_CYCLE_RISK_PCT)
+            # FIX: Changed from 3% to 0.5% to align with profile value
+            # No per-asset differentiation - 0.5% across top-3 edges is the single source of truth
             logger.warning(
-                "[FALLBACK] Using 3% unified cycle risk caps: bankroll=$%.2f", bankroll_usd
+                "[FALLBACK] Using 0.5% unified cycle risk caps: bankroll=$%.2f", bankroll_usd
             )
-            # All assets get same cap: 3% of bankroll (the cycle risk cap)
+            # All assets get same cap: 0.5% of bankroll (the cycle risk cap)
             # This aligns with the top-3 edge allocation system
-            unified_cap = bankroll_usd * 0.03  # 3% unified cycle risk
+            unified_cap = bankroll_usd * 0.005  # 0.5% unified cycle risk
             return {
                 "BTC": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
                 "ETH": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
@@ -1508,14 +1509,15 @@ class Settings(BaseSettings):
                     "Cannot proceed without valid bankroll from Kalshi balance."
                 )
             
-            # Derive caps from bankroll using 3% unified cycle risk (aligned with MAX_CYCLE_RISK_PCT)
-            # No per-asset differentiation - 3% across top-3 edges is the single source of truth
+            # Derive caps from bankroll using 0.5% unified cycle risk (aligned with MAX_CYCLE_RISK_PCT)
+            # FIX: Changed from 3% to 0.5% to align with profile value
+            # No per-asset differentiation - 0.5% across top-3 edges is the single source of truth
             logger.warning(
-                "[FALLBACK] Using 3% unified cycle risk caps: bankroll=$%.2f", bankroll_usd
+                "[FALLBACK] Using 0.5% unified cycle risk caps: bankroll=$%.2f", bankroll_usd
             )
-            # All assets get same cap: 3% of bankroll (the cycle risk cap)
+            # All assets get same cap: 0.5% of bankroll (the cycle risk cap)
             # This aligns with the top-3 edge allocation system
-            unified_cap = bankroll_usd * 0.03  # 3% unified cycle risk
+            unified_cap = bankroll_usd * 0.005  # 0.5% unified cycle risk
             return {
                 "BTC": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),
                 "ETH": AssetCapConfig(max_daily_notional_usd=unified_cap, max_single_trade_usd=unified_cap),

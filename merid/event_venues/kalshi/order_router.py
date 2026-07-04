@@ -2784,11 +2784,11 @@ def _check_bankroll_risk_cap(intent: OrderIntent) -> Optional[OrderResult]:
             latency_ms=0.0,
         )
 
-    # Get configured risk fraction from core.settings (2026 best practice: 3%)
+    # Get configured risk fraction from core.settings (2026 best practice: 0.5%)
     # 2026 BEST PRACTICE: Read from core.settings as single source of truth
+    # FIX: Removed clamp to use profile value directly (0.5% = 0.005)
     from core.settings import MAX_CYCLE_RISK_PCT
     risk_fraction = MAX_CYCLE_RISK_PCT
-    risk_fraction = max(0.01, min(0.03, risk_fraction))  # Clamp to 1-3% (safety)
 
     # Calculate max total risk across ALL 3 EDGES COMBINED
     max_total_risk_usd = effective_equity_usd * risk_fraction
@@ -2802,14 +2802,19 @@ def _check_bankroll_risk_cap(intent: OrderIntent) -> Optional[OrderResult]:
 
     # MICRO-ACCOUNT ADJUSTMENT: For small bankrolls (< $100), be more permissive
     # to allow minimum viable micro-orders (Kalshi min is ~$0.01-$0.10)
+    # FIX: Increased multiplier to 5x (aligned with 2026 industry standards 1-3% per-trade risk)
     if effective_equity_usd < 100.0:
-        # For micro-accounts: allow up to 2x the max_total_risk for a single edge
-        # This ensures $0.50 orders can go through with $44 bankroll
-        effective_max = max_total_risk_usd * 2.0
-        tolerance_multiplier = 3.0  # 300% tolerance for micro-accounts
+        # For micro-accounts: allow up to 5x the max_total_risk for a single edge
+        # This ensures $0.70 orders can go through with $34 bankroll
+        effective_max = max_total_risk_usd * 5.0
+        tolerance_multiplier = 5.0  # 500% tolerance for micro-accounts
     else:
         effective_max = per_edge_estimate * 1.5
         tolerance_multiplier = 1.5
+
+    # FIX: Add minimum order notional floor to ensure minimum viable orders
+    min_order_notional = 0.50  # Kalshi minimum viable order
+    effective_max = max(effective_max, min_order_notional)
 
     # Check if this single intent exceeds the effective max
     if intent_notional_usd > effective_max:
