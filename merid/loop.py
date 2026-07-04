@@ -21,8 +21,12 @@ Usage:
     await loop.tick()
 """
 
+from __future__ import annotations
+
 # PROFILE GUARD: This module is legacy and should not be used in kalshi_crypto_15m_v2
 # Use merid.loop_15m.Kalshi15mLoop instead for 15m crypto trading
+# HashtagMonitor skipped for kalshi_crypto_15m_v2 (not needed for 15m crypto)
+# Canonical agent cycle skipped for kalshi_crypto_15m_v2 (uses loop_15m instead)
 from merid.profile_resolver import is_kalshi_crypto_15m_v2
 
 if is_kalshi_crypto_15m_v2():
@@ -32,8 +36,6 @@ if is_kalshi_crypto_15m_v2():
         "Use merid.loop_15m.Kalshi15mLoop instead for 15m crypto trading. "
         f"Module: {__name__}"
     )
-
-from __future__ import annotations
 
 import asyncio
 import json

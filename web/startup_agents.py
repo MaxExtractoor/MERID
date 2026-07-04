@@ -163,6 +163,7 @@ class OrchestratorAgentManager:
         if _is_validation:
             logger.info("[VALIDATION MODE] AgentMesh skipped (8 streaming agents deferred)")
         elif _profile == "kalshi_crypto_15m_v2":
+            logger.info("[PROFILE-GUARD] AgentMesh skipped for kalshi_crypto_15m_v2 (LLM agents not needed for 15m crypto)")
             logger.info("[PROFILE-INVARIANT] kalshi_crypto_15m_v2: AgentMesh and core.consensus_engine disabled by design")
             logger.info("[PROFILE-INVARIANT] All production risk decisions handled by Crypto15MLane with deterministic RCK + Bayesian logic")
             # Hard invariant: do not allow AgentMesh to start under kalshi_crypto_15m_v2

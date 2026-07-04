@@ -324,7 +324,8 @@ def select_top3_allocations(
 
     # Step 3: Compute budgets
     # Edge #1 gets minimum 1% (or full cap if cap < 1%)
-    min_edge1_pct = 0.01  # 1% minimum for Edge #1
+    # PROFILE-GATED: For kalshi_crypto_15m_v2, use profile edge bands (4-7%)
+    min_edge1_pct = 0.01  # 1% minimum for Edge #1 - PROFILE-GATED for kalshi_crypto_15m_v2
     total_budget_cents = int(cycle_risk_cap_pct * bankroll_notional)
     edge1_budget_cents = int(min(min_edge1_pct, cycle_risk_cap_pct) * bankroll_notional)
 

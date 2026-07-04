@@ -9,7 +9,8 @@ logger = get_logger("merid.swarm.orchestrator")
 
 
 # Kalshi 15m guardrail constants
-MIN_EDGE_BPS = 10.0
+# PROFILE-GATED: For kalshi_crypto_15m_v2, use profile edge bands (4-7% = 400-700 bps)
+MIN_EDGE_BPS = 10.0  # 0.10% - PROFILE-GATED for kalshi_crypto_15m_v2
 MAX_F_USED = 0.35
 MAX_SIZE_CONTRACTS = 100
 

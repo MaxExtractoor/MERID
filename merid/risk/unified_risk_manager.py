@@ -78,8 +78,9 @@ class RiskLimits:
     per_asset_min_cap_usd: float = 5.0
     
     # Per-trade limits (aligned with profile YAML)
-    per_trade_max_notional_pct: float = 0.02  # 2% (was 0.05 - aligned with profile)
+    per_trade_max_notional_pct: float = 0.03  # 3% (increased from 2% for better trade buffer)
     per_trade_max_contracts: int = 2  # CRITICAL FIX: Aligned with profile per-asset max_contracts (was 10)
+    # NOTE: DOGE has max_contracts=1 in profile - this global limit should be asset-aware for kalshi_crypto_15m_v2
     
     # Drawdown limits (aligned with profile YAML)
     drawdown_halt_pct: float = 0.20  # 20% (was 0.10 - aligned with profile)
@@ -205,7 +206,7 @@ class UnifiedRiskManager:
             
             # Per-trade limits
             if 'per_trade' in config:
-                limits.per_trade_max_notional_pct = config['per_trade'].get('max_notional_pct', 0.02)  # CRITICAL FIX: 2% - aligned with profile (was 0.05)
+                limits.per_trade_max_notional_pct = config['per_trade'].get('max_notional_pct', 0.03)  # 3% - aligned with profile
                 limits.per_trade_max_contracts = config['per_trade'].get('max_contracts', 10)
             
             # Drawdown limits
