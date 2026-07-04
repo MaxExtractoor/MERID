@@ -381,7 +381,7 @@ class ExitPolicyResolution:
     # Trailing stop configuration
     trailing_enabled: bool = False
     trailing_activation_r: float = 0.8  # Activate trailing at 0.8R
-    trailing_giveback_cents: int = 3  # Giveback in cents
+    trailing_giveback_cents: int = 5  # Giveback in cents (40-50% of 12¢ activation threshold per 2026 research)
     
     # Scale-out configuration
     scale_out_enabled: bool = False
@@ -533,7 +533,7 @@ def resolve_exit_policy(
         sl_r_multiple=0.5,  # 0.5R stop loss
         trailing_enabled=True,
         trailing_activation_r=0.8,
-        trailing_giveback_cents=3,
+        trailing_giveback_cents=5,
         scale_out_enabled=True,
         scale_out_trigger_r=0.7,
         scale_out_fraction=0.5,

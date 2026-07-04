@@ -311,7 +311,7 @@ class Crypto15mProfile:
     # Position Management: Trailing Stop Configuration
     trailing_stop_enabled: bool = False
     trailing_stop_trailing_distance_cents: int = 5
-    trailing_stop_min_profit_cents: int = 3
+    trailing_stop_min_profit_cents: int = 12  # Updated from 3 to 12 (align with 2026 research: 10-15¢ threshold to avoid noise-triggered exits)
     trailing_stop_activation_delay_sec: int = 30
     
     # Position Management: Dynamic Sizing Configuration

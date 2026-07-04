@@ -211,10 +211,10 @@ class PositionMonitor:
         # CRITICAL FIX: Activate trailing stop after minimum profit threshold (not 1R)
         # For 15-minute binary options, waiting for 1R break-even is too conservative
         # Many trades never reach 1R before reversing, causing avoidable losses
-        # Activate trailing after min_profit_cents from profile (default 3 cents)
+        # Activate trailing after min_profit_cents from profile (default 12 cents, align with 2026 research)
         if not position.trailing_activated:
             # Check if position has minimum profit to activate trailing
-            min_profit_cents = 3  # Default from profile
+            min_profit_cents = 12  # Default from profile (align with 2026 research)
             try:
                 from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
                 if is_profile_active():
