@@ -2,6 +2,8 @@
 
 This module provides the create_app function for test compatibility.
 The actual application is defined in main_15m_lean.py.
+
+PROFILE-GUARD: This file is a legacy wrapper for testing. Production uses main_15m_lean.py directly.
 """
 from __future__ import annotations
 

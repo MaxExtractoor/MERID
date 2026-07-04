@@ -49,6 +49,8 @@ KALSHI_15M_CRYPTO_ASSETS: Tuple[str, ...] = (
 KALSHI_15M_TIMEFRAME: Literal["15m"] = "15m"
 
 # Series tickers for 15m crypto (from kalshi_crypto_series_meta)
+# NOTE: This is the CANONICAL source for series tickers - NOT deprecated
+# Only ASSET_RISK_LIMITS and GLOBAL_RISK_LIMITS are superseded by profile
 KALSHI_15M_SERIES_TICKERS: Dict[str, str] = {
     "BTC": "KXBTC15M",
     "ETH": "KXETH15M",

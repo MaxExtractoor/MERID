@@ -83,9 +83,10 @@ class RiskProfile:
     
     # ═══════════════════════════════════════════════════════════════════════
     # Edge thresholds (basis points)
+    # PROFILE-GATED: For kalshi_crypto_15m_v2, use profile edge bands (4-7%)
     # ═══════════════════════════════════════════════════════════════════════
     min_edge_bps: int = 75
-    """Base minimum edge threshold (75 bps = 0.75%)."""
+    """Base minimum edge threshold (75 bps = 0.75%). PROFILE-GATED for kalshi_crypto_15m_v2."""
     
     min_edge_by_phase: Dict[str, int] = field(default_factory=lambda: {
         "early": 120,      # > 24h to expiry
@@ -93,7 +94,7 @@ class RiskProfile:
         "late": 60,        # 1-4h
         "terminal": 100,   # < 1h
     })
-    """Phase-aware edge thresholds."""
+    """Phase-aware edge thresholds. PROFILE-GATED for kalshi_crypto_15m_v2."""
     
     # ═══════════════════════════════════════════════════════════════════════
     # Volatility scaling
