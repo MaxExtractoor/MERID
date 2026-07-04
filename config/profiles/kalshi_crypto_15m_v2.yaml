@@ -499,14 +499,17 @@ min_decision_minute:
 # Low volatility: reduce min edge by 0.5% (more opportunities)
 # High volatility: increase min edge by 1.0% (higher quality signals)
 volatility_regime_edge_adjustment:
-  enabled: true  # Enable volatility-regime edge adjustment
+  enabled: false  # DISABLED: 2026-07-04 - Edge adjustment was crushing edge to 0.01% in low vol regime
+  # Research shows DOGE with 100% annual vol should never be in low vol regime
+  # The adjustment logic was incorrectly reducing edges below minimum viable thresholds
+  # Per-asset edge thresholds in profile are already calibrated for asset volatility
   lookback_days: 30  # 30-day rolling window for volatility calculation
   low_volatility_threshold: 0.30  # Below 30-day avg = low volatility
   high_volatility_threshold: 0.70  # Above 30-day avg = high volatility
-  # Edge adjustments
+  # Edge adjustments (DISABLED - not applied when enabled=false)
   low_volatility_adjustment: -0.005  # Reduce min edge by 0.5% in low vol
   high_volatility_adjustment: +0.010  # Increase min edge by 1.0% in high vol
-  description: "Volatility-regime edge adjustment: adapt thresholds to market conditions"
+  description: "Volatility-regime edge adjustment: adapt thresholds to market conditions (DISABLED)"
 
 # 2026 OPTIMIZATION: Portfolio Heat Tracking
 # Industry standard: Track aggregate exposure considering correlation
@@ -882,7 +885,9 @@ guardrails:
   # NEW: Spread guard with edge override
   spread_guard_enabled: true  # Enable spread guard
   spread_guard_edge_multiplier: 1.1  # Require edge >= 1.1x spread to trade (relaxed from 1.5x)
-  min_spread_gate_cents: 15  # 2026-07-04: Unified to 15c - aligned with guardrails and market_microstructure (eliminates 50c conflicts)
+  # 2026-07-04 FIX: Increased to 50c based on 2026 industry research (Kalena: altcoin spreads 5-30%)
+  # DOGE observed at 79c spread (1.3% on 59c price) - 15c threshold was blocking all trades
+  min_spread_gate_cents: 50  # Unified to 50c - aligned with guardrails and realistic for Tier 2 assets
   
   # Drawdown limits (percentage-based, not bankroll-scaled)
   # Drawdown is the primary hard cap; daily loss is optional/soft
