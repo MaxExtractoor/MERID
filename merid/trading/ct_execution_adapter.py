@@ -86,12 +86,29 @@ class CTExecutionAdapter:
 
         # Extract fields from CT order_data
         ticker = order_data.get("ticker", "")
-        side = order_data.get("side", "yes")
+        side_raw = order_data.get("side", "yes")
         action = order_data.get("action", "buy")
         count = int(order_data.get("count", 1))
         price_cents = int(order_data.get("yes_price", order_data.get("no_price", 50)))
         client_order_id = order_data.get("client_order_id")
         group_id = order_data.get("group_id")
+
+        # CRITICAL FIX: Convert to Kalshi format (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
+        # CT uses lowercase 'yes'/'no' for side, but order_router expects Kalshi format
+        side_upper = side_raw.upper()
+        action_lower = action.lower()
+        action_upper = action.upper()
+        if side_upper == "YES" and action_lower == "buy":
+            kalshi_side = "BUY_YES"
+        elif side_upper == "YES" and action_lower == "sell":
+            kalshi_side = "SELL_YES"
+        elif side_upper == "NO" and action_lower == "buy":
+            kalshi_side = "BUY_NO"
+        elif side_upper == "NO" and action_lower == "sell":
+            kalshi_side = "SELL_NO"
+        else:
+            # Fallback for unexpected combinations
+            kalshi_side = f"{action_upper}_{side_upper}"
 
         # CT always uses limit orders
         order_type = "limit"
@@ -132,7 +149,7 @@ class CTExecutionAdapter:
         # Build canonical OrderIntent
         intent = OrderIntent(
             ticker=ticker,
-            side=side,
+            side=kalshi_side,  # CRITICAL FIX: Use Kalshi-formatted side (BUY_YES, SELL_YES, etc.)
             action=action,
             price_cents=price_cents,
             count=count,

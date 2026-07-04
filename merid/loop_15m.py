@@ -1148,13 +1148,28 @@ class Kalshi15mLoop:
         try:
             from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
 
-            # CRITICAL FIX: Always sell to exit regardless of side
-            # YES position: sell YES to exit long position
-            # NO position: sell NO to exit long position (NO contracts are held, not shorted)
+            # CRITICAL FIX: Convert to Kalshi format (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
+            # For exit orders, we always sell to close the position
+            # YES position: sell YES to exit long position -> SELL_YES
+            # NO position: sell NO to exit long position -> SELL_NO
             action = "sell"
 
             # Convert PositionSide enum to string for OrderIntent
             side_str = position.side.value if hasattr(position.side, 'value') else str(position.side)
+            side_upper = side_str.upper()
+
+            # Map to Kalshi side format for exit orders
+            if side_upper == "YES" and action == "sell":
+                kalshi_side = "SELL_YES"
+            elif side_upper == "NO" and action == "sell":
+                kalshi_side = "SELL_NO"
+            else:
+                # Fallback for unexpected combinations
+                logger.warning(
+                    "[EXIT-ORDER] Unexpected side/action combination: side=%s action=%s, using fallback",
+                    side_str, action
+                )
+                kalshi_side = f"{action.upper()}_{side_upper}"
 
             # Determine count (partial or full exit)
             count = contracts_to_close if contracts_to_close is not None else position.size
@@ -1164,8 +1179,8 @@ class Kalshi15mLoop:
             # This allows the exit order to sit on the book and get filled at the desired price
             intent = OrderIntent(
                 ticker=position.market_id,
-                side=side_str,
-                action=action,
+                side=kalshi_side,  # CRITICAL FIX: Use Kalshi-formatted side (SELL_YES, SELL_NO)
+                action=action,  # Keep as lowercase "buy"/"sell" for early validation
                 price_cents=exit_price_cents,
                 count=count,
                 order_type="limit",  # Limit order to create resting order
