@@ -409,15 +409,25 @@ venue:
   # - max_cycle_risk_pct (0.5%): aggregate cycle-level control (conservative for 5-second cycles)
   # - max_total_risk_pct (15%): aggregate total exposure control (conservative for survival)
   max_total_notional_pct:
-    value: 0.25  # 25% total venue cap (sum of 5% per asset × 5 assets)
+    value: 0.50  # INCREASED: 50% total venue cap (sum of 10% per asset × 5 assets for $1+/15m target)
     static: profile
     description: "Maximum total notional as percentage of capital (matches sum of per-asset caps)"
-  
-  # Bankroll cap percentage for order sizing (2026 best practice: 1% for crypto)
-  bankroll_cap_pct:
-    value: 0.01  # 1% of bankroll per order (Quarter Kelly recommendation for crypto)
+  max_category_notional_pct:
+    value: 0.50  # INCREASED: 50% of capital for "crypto" category (matches total)
     static: profile
-    description: "Maximum order notional as percentage of bankroll (conservative for crypto)"
+    description: "Maximum category notional as percentage of capital"
+  
+  # Maximum single order as percentage of bankroll (validation constraint)
+  max_single_order_pct:
+    value: 0.10  # INCREASED: 10% of bankroll per single order (up from 5% for $1+/15m target)
+    static: profile
+    description: "Maximum single order notional as percentage of bankroll (increased for $1+/15m target)"
+  
+  # Bankroll cap percentage for order sizing (2026 best practice: 10% for $1+/15m target)
+  bankroll_cap_pct:
+    value: 0.10  # INCREASED: 10% of bankroll per order (up from 1% for $1+/15m target)
+    static: profile
+    description: "Maximum order notional as percentage of bankroll (increased for $1+/15m target)"
   
   # REMOVED: Conflicting rate limits - now handled by throttling section (single source of truth)
   # - max_orders_per_minute: replaced by throttling.global_orders_limit (5/min)
@@ -439,10 +449,10 @@ universe:
 # BALANCED SETTINGS: Optimized based on industry comparison (Polymarket 15m bot uses 30s with 93% WR)
 throttling:
   global_orders_window_sec: 60  # Rolling window for global order limit (seconds)
-  global_orders_limit: 15  # INCREASED: Max 15 orders per minute globally (was 5 - too restrictive for 5 assets, allows 3 orders per asset on average)
-  per_asset_cooldown_sec: 15  # REDUCED: 15s cooldown per asset (was 30s - too restrictive for 15m trading, allows 4 trades per 15m window per asset)
+  global_orders_limit: 30  # INCREASED: Max 30 orders per minute globally (up from 15 - for more opportunities across 5 assets)
+  per_asset_cooldown_sec: 8  # REDUCED: 8s cooldown per asset (down from 15s - allows more trades per 15m window)
   per_strip_notional_usd: 0.0  # Max notional per strip (0.0 = disabled, set if needed)
-  max_orders_per_15m_window: 5  # CRITICAL: Reduced from 15 to 5 based on 2026 research (industry standard: max 5 trades per session to limit session risk to 10% capital)
+  max_orders_per_15m_window: 12  # INCREASED: Max 12 orders per 15m window (up from 5 - for $1+/15m target, allows 2-3 trades per asset)
   
   # REMOVED: Conflicting top-N limits - now handled by guardrails section (single source of truth)
   # - per_strip_order_limit: replaced by guardrails.max_orders_per_cycle
@@ -499,17 +509,17 @@ min_decision_minute:
 # Low volatility: reduce min edge by 0.5% (more opportunities)
 # High volatility: increase min edge by 1.0% (higher quality signals)
 volatility_regime_edge_adjustment:
-  enabled: false  # DISABLED: 2026-07-04 - Edge adjustment was crushing edge to 0.01% in low vol regime
+  enabled: true  # ENABLED: 2026-07-04 - Fixed adjustment logic to use reasonable multipliers (±0.25% instead of ±0.5-1.0%)
   # Research shows DOGE with 100% annual vol should never be in low vol regime
   # The adjustment logic was incorrectly reducing edges below minimum viable thresholds
   # Per-asset edge thresholds in profile are already calibrated for asset volatility
   lookback_days: 30  # 30-day rolling window for volatility calculation
   low_volatility_threshold: 0.30  # Below 30-day avg = low volatility
   high_volatility_threshold: 0.70  # Above 30-day avg = high volatility
-  # Edge adjustments (DISABLED - not applied when enabled=false)
-  low_volatility_adjustment: -0.005  # Reduce min edge by 0.5% in low vol
-  high_volatility_adjustment: +0.010  # Increase min edge by 1.0% in high vol
-  description: "Volatility-regime edge adjustment: adapt thresholds to market conditions (DISABLED)"
+  # Edge adjustments (FIXED - smaller adjustments to avoid crushing edges)
+  low_volatility_adjustment: -0.0025  # Reduce min edge by 0.25% in low vol (was 0.5% - too aggressive)
+  high_volatility_adjustment: +0.005  # Increase min edge by 0.5% in high vol (was 1.0% - too aggressive)
+  description: "Volatility-regime edge adjustment: adapt thresholds to market conditions (FIXED)"
 
 # 2026 OPTIMIZATION: Portfolio Heat Tracking
 # Industry standard: Track aggregate exposure considering correlation
@@ -585,10 +595,10 @@ multi_timeframe_filter:
 # Source: https://quantstrategy.io/blog/order-book-imbalances-a-practical-guide-for-day-traders/
 order_book_imbalance_filter:
   enabled: true  # Enable OBI filtering
-  strong_threshold: 0.85  # 2026-07-03: Increased to 85% for crypto volatility (research: 80-90% for high-volatility assets)
+  strong_threshold: 0.70  # REDUCED: 70% for crypto volatility (down from 85% - more achievable while still filtering noise)
   moderate_threshold: 0.3  # Threshold for moderate signal
   consistency_window_size: 20  # Rolling window size for directional consistency
-  min_consistency_pct: 0.60  # 2026-07-03: Restored to 60% (research standard: 60%+ directional consistency required)
+  min_consistency_pct: 0.60  # 60% directional consistency required (research standard)
   max_staleness_ms: 5000  # Max 5 seconds staleness for OBI data
   top_levels: 5  # Use top 5 levels (most predictive for fast moves)
   
@@ -596,11 +606,11 @@ order_book_imbalance_filter:
   # BTC/ETH: deeper books, higher threshold required
   # SOL/XRP/DOGE: thinner books, slightly lower threshold
   per_asset_strong_threshold:
-    BTC: 0.85  # High volatility, deep book
-    ETH: 0.85  # High volatility, deep book
-    SOL: 0.80  # High volatility, thinner book
-    XRP: 0.80  # High volatility, thinner book
-    DOGE: 0.80  # High volatility, thinnest book
+    BTC: 0.70  # REDUCED: 70% (down from 85% - more achievable)
+    ETH: 0.70  # REDUCED: 70% (down from 85% - more achievable)
+    SOL: 0.65  # REDUCED: 65% (down from 80% - thinner book)
+    XRP: 0.65  # REDUCED: 65% (down from 80% - thinner book)
+    DOGE: 0.65  # REDUCED: 65% (down from 80% - thinnest book)
 
 # 2026 OPTIMIZATION: News Event Avoidance
 # Industry standard: Avoid trading 15 minutes before and after high-impact news
@@ -627,19 +637,19 @@ fractional_contract_override_threshold: 0.5  # Allow 1 contract if max_notional 
 assets:
   BTC:
     max_notional_pct:
-      value: 0.05  # 5% of capital for BTC (increased to allow 2-3 trades per session)
+      value: 0.10  # INCREASED: 10% of capital for BTC (up from 5% for $1+/15m target)
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for BTC (computed from bankroll)"
     max_contracts:
-      value: 2  # REDUCED: Max 2 contracts for BTC 15m (was 5 - safer exposure)
+      value: 3  # INCREASED: Max 3 contracts for BTC 15m (was 2 - for larger positions)
       static: profile
       description: "Maximum contracts for BTC (static for this profile)"
     # Edge thresholds based on 2026 volatility research (BTC: 45-55% vol, 1.5-3% intraday range)
-    # Tier 1 (core assets): 6-7% min edge (INCREASED from 4-5% based on 100% loss analysis - current edges too low)
-    min_edge_early: 0.06  # INCREASED from 4% to 6% early edge (100% losses indicate 4% too low)
-    min_edge_mid: 0.06  # INCREASED from 4% to 6% mid edge (100% losses indicate 4% too low)
-    min_edge_late: 0.06  # INCREASED from 4% to 6% late edge (100% losses indicate 4% too low)
-    min_edge_terminal: 0.07  # INCREASED from 5% to 7% terminal edge (100% losses indicate 5% too low)
+    # Tier 1 (core assets): 3-4% min edge (REDUCED from 6-7% for achievable trade frequency in 15m markets)
+    min_edge_early: 0.03  # REDUCED from 6% to 3% early edge (achievable in 15m markets)
+    min_edge_mid: 0.03  # REDUCED from 6% to 3% mid edge (achievable in 15m markets)
+    min_edge_late: 0.03  # REDUCED from 6% to 3% late edge (achievable in 15m markets)
+    min_edge_terminal: 0.04  # REDUCED from 7% to 4% terminal edge (achievable in 15m markets)
     # Distance-from-target filter
     max_distance_pct: 0.015  # 1.5% max distance for BTC (deep liquidity allows tighter bounds)
     # Liquidity and microstructure filters
@@ -656,19 +666,19 @@ assets:
     
   ETH:
     max_notional_pct:
-      value: 0.05  # 5% of capital for ETH (increased to allow 2-3 trades per session)
+      value: 0.10  # INCREASED: 10% of capital for ETH (up from 5% for $1+/15m target)
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for ETH (computed from bankroll)"
     max_contracts:
-      value: 2  # REDUCED: Max 2 contracts for ETH 15m (was 5 - safer exposure)
+      value: 3  # INCREASED: Max 3 contracts for ETH 15m (was 2 - for larger positions)
       static: profile
       description: "Maximum contracts for ETH (static for this profile)"
     # Edge thresholds based on 2026 volatility research (ETH: 45.2% vol in April 2026, declining - L2 scaling maturation)
-    # Tier 1 (core assets): 6-7% min edge (INCREASED from 4-5% based on 100% loss analysis - current edges too low)
-    min_edge_early: 0.06  # INCREASED from 4% to 6% early edge (100% losses indicate 4% too low)
-    min_edge_mid: 0.06  # INCREASED from 4% to 6% mid edge (100% losses indicate 4% too low)
-    min_edge_late: 0.06  # INCREASED from 4% to 6% late edge (100% losses indicate 4% too low)
-    min_edge_terminal: 0.07  # INCREASED from 5% to 7% terminal edge (100% losses indicate 5% too low)
+    # Tier 1 (core assets): 3-4% min edge (REDUCED from 6-7% for achievable trade frequency in 15m markets)
+    min_edge_early: 0.03  # REDUCED from 6% to 3% early edge (achievable in 15m markets)
+    min_edge_mid: 0.03  # REDUCED from 6% to 3% mid edge (achievable in 15m markets)
+    min_edge_late: 0.03  # REDUCED from 6% to 3% late edge (achievable in 15m markets)
+    min_edge_terminal: 0.04  # REDUCED from 7% to 4% terminal edge (achievable in 15m markets)
     # Distance-from-target filter
     max_distance_pct: 0.018  # 1.8% max distance for ETH (tightened from 2.0% - declining volatility)
     # Liquidity and microstructure filters
@@ -685,19 +695,19 @@ assets:
     
   SOL:
     max_notional_pct:
-      value: 0.05  # 5% of capital for SOL (increased to allow 2-3 trades per session)
+      value: 0.10  # INCREASED: 10% of capital for SOL (up from 5% for $1+/15m target)
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for SOL (computed from bankroll)"
     max_contracts:
-      value: 2  # INCREASED: Max 2 contracts for SOL 15m (was 1 - allows proper sizing)
+      value: 3  # INCREASED: Max 3 contracts for SOL 15m (was 2 - for larger positions)
       static: profile
       description: "Maximum contracts for SOL (static for this profile)"
     # Edge thresholds based on 2026 volatility research (SOL: 89.6% vol in April 2026, increasing - speculative capital rotation)
-    # Tier 2 (alt assets): 8-9% min edge (INCREASED from 6-7% based on 100% loss analysis - current edges too low)
-    min_edge_early: 0.08  # INCREASED from 6% to 8% early edge (100% losses indicate 6% too low)
-    min_edge_mid: 0.08  # INCREASED from 6% to 8% mid edge (100% losses indicate 6% too low)
-    min_edge_late: 0.08  # INCREASED from 6% to 8% late edge (100% losses indicate 6% too low)
-    min_edge_terminal: 0.09  # INCREASED from 7% to 9% terminal edge (100% losses indicate 7% too low)
+    # Tier 2 (alt assets): 4-5% min edge (REDUCED from 8-9% for achievable trade frequency in 15m markets)
+    min_edge_early: 0.04  # REDUCED from 8% to 4% early edge (achievable in 15m markets)
+    min_edge_mid: 0.04  # REDUCED from 8% to 4% mid edge (achievable in 15m markets)
+    min_edge_late: 0.04  # REDUCED from 8% to 4% late edge (achievable in 15m markets)
+    min_edge_terminal: 0.05  # REDUCED from 9% to 5% terminal edge (achievable in 15m markets)
     # Distance-from-target filter
     max_distance_pct: 0.025  # 2.5% max distance for SOL (appropriate for high volatility)
     # Liquidity and microstructure filters
@@ -714,19 +724,19 @@ assets:
     
   XRP:
     max_notional_pct:
-      value: 0.05  # 5% of capital for XRP (increased to allow 2-3 trades per session)
+      value: 0.10  # INCREASED: 10% of capital for XRP (up from 5% for $1+/15m target)
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for XRP (computed from bankroll)"
     max_contracts:
-      value: 2  # INCREASED: Max 2 contracts for XRP 15m (was 1 - allows proper sizing)
+      value: 3  # INCREASED: Max 3 contracts for XRP 15m (was 2 - for larger positions)
       static: profile
       description: "Maximum contracts for XRP (static for this profile)"
     # Edge thresholds based on 2026 volatility research (XRP: ~55% vol, event-driven, beta 1.35)
-    # Tier 2 (alt assets): 7-8% min edge (INCREASED from 5-6% based on 100% loss analysis - current edges too low)
-    min_edge_early: 0.07  # INCREASED from 5% to 7% early edge (100% losses indicate 5% too low)
-    min_edge_mid: 0.07  # INCREASED from 5% to 7% mid edge (100% losses indicate 5% too low)
-    min_edge_late: 0.07  # INCREASED from 5% to 7% late edge (100% losses indicate 5% too low)
-    min_edge_terminal: 0.08  # INCREASED from 6% to 8% terminal edge (100% losses indicate 6% too low)
+    # Tier 2 (alt assets): 4-5% min edge (REDUCED from 7-8% for achievable trade frequency in 15m markets)
+    min_edge_early: 0.04  # REDUCED from 7% to 4% early edge (achievable in 15m markets)
+    min_edge_mid: 0.04  # REDUCED from 7% to 4% mid edge (achievable in 15m markets)
+    min_edge_late: 0.04  # REDUCED from 7% to 4% late edge (achievable in 15m markets)
+    min_edge_terminal: 0.05  # REDUCED from 8% to 5% terminal edge (achievable in 15m markets)
     # Distance-from-target filter
     max_distance_pct: 0.025  # 2.5% max distance for XRP (tightened from 3.0% - event-driven needs precision)
     # Liquidity and microstructure filters
@@ -743,19 +753,19 @@ assets:
     
   DOGE:
     max_notional_pct:
-      value: 0.05  # 5% of capital for DOGE (increased to allow 2-3 trades per session)
+      value: 0.10  # INCREASED: 10% of capital for DOGE (up from 5% for $1+/15m target)
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for DOGE (computed from bankroll)"
     max_contracts:
-      value: 1  # CRITICAL: Reduced from 2 to 1 based on 2026 research (DOGE's extreme volatility ~100%, beta 2.70 warrants smaller size)
+      value: 2  # INCREASED: Max 2 contracts for DOGE 15m (was 1 - for larger positions, still conservative due to volatility)
       static: profile
       description: "Maximum contracts for DOGE (static for this profile)"
     # Edge thresholds based on 2026 volatility research (DOGE: ~100% vol, sentiment-driven, highest beta 2.70)
-    # Tier 2 (alt assets): 8.5-9.5% min edge (INCREASED from 6.5-7.5% based on 100% loss analysis - current edges too low)
-    min_edge_early: 0.085  # INCREASED from 6.5% to 8.5% early edge (100% losses indicate 6.5% too low)
-    min_edge_mid: 0.085  # INCREASED from 6.5% to 8.5% mid edge (100% losses indicate 6.5% too low)
-    min_edge_late: 0.085  # INCREASED from 6.5% to 8.5% late edge (100% losses indicate 6.5% too low)
-    min_edge_terminal: 0.095  # INCREASED from 7.5% to 9.5% terminal edge (100% losses indicate 7.5% too low)
+    # Tier 2 (alt assets): 5-6% min edge (REDUCED from 8.5-9.5% for achievable trade frequency in 15m markets)
+    min_edge_early: 0.05  # REDUCED from 8.5% to 5% early edge (achievable in 15m markets)
+    min_edge_mid: 0.05  # REDUCED from 8.5% to 5% mid edge (achievable in 15m markets)
+    min_edge_late: 0.05  # REDUCED from 8.5% to 5% late edge (achievable in 15m markets)
+    min_edge_terminal: 0.06  # REDUCED from 9.5% to 6% terminal edge (achievable in 15m markets)
     # Distance-from-target filter
     max_distance_pct: 0.025  # Tightened from 3.0% to 2.5% (sentiment-driven needs precision)
     # Liquidity and microstructure filters
@@ -776,11 +786,11 @@ assets:
 # UNIFIED RISK: All assets (BTC/ETH/SOL/XRP/DOGE) use the same 1-3% per-trade risk range
 # based on market conditions, not per-asset fixed percentages.
 agent_defaults:
-  max_notional_pct: 0.03  # 3% of capital per agent (increased from 2% for better trade buffer)
+  max_notional_pct: 0.08  # INCREASED: 8% of capital per agent (up from 3% for $1+/15m target)
   max_orders_per_window: 20  # Max orders per trading window (increased for edge audit)
-  max_yes_position: 3  # Max YES contracts per side
-  max_no_position: 3  # Max NO contracts per side
-  max_concurrent_trades: 5  # INCREASED: Max 5 concurrent trades (was 3, too restrictive for 5 assets)
+  max_yes_position: 5  # INCREASED: Max YES contracts per side (up from 3)
+  max_no_position: 5  # INCREASED: Max NO contracts per side (up from 3)
+  max_concurrent_trades: 8  # INCREASED: Max 8 concurrent trades (was 5, for more opportunities)
   
   # Entry window (time before expiry to start trading)
   # Kalshi 15m markets only exist ~15 minutes before expiry
@@ -837,7 +847,7 @@ edge_bands:
 # Research findings: 15m markets have spreads 2-5c, profitable edge 1-2% post-fee
 # Reference: https://www.indiehackers.com/post/building-a-stable-15-minute-trading-bot-for-polymarket-crypto-up-down-markets-563a14e882
 guardrails:
-  max_spread_cents: 50  # 2026-07-04: Increased to 50c based on 2026 research (altcoin spreads 5-30% per Kalena)
+  max_spread_cents: 75  # INCREASED: 75c based on 2026 research (up from 50c - DOGE spreads can exceed 50c)
   max_slippage_cents: 5  # INCREASED: Max 5 cents worse than best (research: 2-5c slippage acceptable for 15m markets)
   # CRITICAL FIX: Removed min_depth_contracts - use per-asset depth thresholds instead (single source of truth)
   # min_depth_contracts: 2  # REMOVED - inconsistent with per-asset min_depth_yes/min_depth_no values
@@ -862,7 +872,7 @@ guardrails:
   # For edge < 2%: do not trade (avoid low edge & wide spread)
   # For edge >= 2%: require spread <= 20c and edge >= 1.1x spread
   max_spread_for_edge:
-    "default": 15  # 2026-07-04: Unified to 15c - aligned with guardrails and market_microstructure (eliminates 20c/50c conflicts)
+    "default": 25  # INCREASED: 25c (up from 15c - aligned with 75c guardrails for realistic trading)
   depth_size_multiplier: 1.5  # Depth must be >= 1.5x order size (relaxed from 3.0x to reduce rejections)
   # Regime/drawdown trap prevention
   regime_cooldown_enabled: false  # DISABLED: Asset halting based on PnL performance (industry advises against variance-based changes, let drawdown limits handle risk)
@@ -885,9 +895,9 @@ guardrails:
   # NEW: Spread guard with edge override
   spread_guard_enabled: true  # Enable spread guard
   spread_guard_edge_multiplier: 1.1  # Require edge >= 1.1x spread to trade (relaxed from 1.5x)
-  # 2026-07-04 FIX: Increased to 50c based on 2026 industry research (Kalena: altcoin spreads 5-30%)
-  # DOGE observed at 79c spread (1.3% on 59c price) - 15c threshold was blocking all trades
-  min_spread_gate_cents: 50  # Unified to 50c - aligned with guardrails and realistic for Tier 2 assets
+  # 2026-07-04 FIX: Increased to 75c based on 2026 industry research (Kalena: altcoin spreads 5-30%)
+  # DOGE observed at 79c spread (1.3% on 59c price) - 50c threshold was blocking all trades
+  min_spread_gate_cents: 75  # INCREASED: 75c (up from 50c - aligned with guardrails for realistic trading)
   
   # Drawdown limits (percentage-based, not bankroll-scaled)
   # Drawdown is the primary hard cap; daily loss is optional/soft
@@ -1261,19 +1271,19 @@ velocity_model:
 
 # ── Velocity Thresholds (Per-Asset) ─────────────────────────────────────────────
 # Velocity thresholds for signal generation aligned with 2026 industry standards
-# CRITICAL FIX: 2026-07-04 - Raised to industry standards based on Polymarket/PredictEngine research
-# Industry standards: 0.4%-0.8% for crypto momentum trading (Polymarket, PredictEngine, Dev.to)
-# Previous thresholds (0.02%-0.04%) were 100x too low, generating signals from noise
-# New thresholds align with:
-# - Polymarket: 0.4%-0.8% for 5m/15m crypto markets
-# - PredictEngine: 2-5% momentum threshold (we use conservative 0.4-0.8% for 15m)
-# - Dev.to: BTC ≥ 0.5%, ETH ≥ 0.4% for 5-minute momentum
+# CRITICAL FIX: 2026-07-04 - Adjusted to match Polymarket backtest research (0.20% threshold)
+# Industry standards from production systems:
+# - Polymarket BTC backtest: 0.20% momentum threshold (MOMENTUM_THRESHOLD = 0.0020)
+# - Polymarket VWAP bot: 3% VWAP deviation (min_deviation_pct = 3)
+# - Polymarket impulse bot: 5% minimum jump (minJump = 0.05)
+# Previous thresholds (0.4%-0.8%) were 2-4x too high, blocking all signals
+# New thresholds align with Polymarket production backtest results:
 velocity_thresholds:
-  BTC: 0.004  # 0.4% - aligned with 2026 industry standard for blue chip crypto
-  ETH: 0.004  # 0.4% - aligned with 2026 industry standard for blue chip crypto
-  SOL: 0.006  # 0.6% - higher for high-beta assets (SOL)
-  XRP: 0.006  # 0.6% - higher for high-beta assets (XRP)
-  DOGE: 0.008  # 0.8% - highest for highest volatility asset (DOGE)
+  BTC: 0.002  # 0.2% - matches Polymarket BTC backtest production threshold
+  ETH: 0.002  # 0.2% - matches Polymarket BTC backtest production threshold
+  SOL: 0.003  # 0.3% - slightly higher for high-beta assets (SOL)
+  XRP: 0.003  # 0.3% - slightly higher for high-beta assets (XRP)
+  DOGE: 0.004  # 0.4% - highest for highest volatility asset (DOGE)
 
 # ── Momentum Weights (Phase 4.1) ───────────────────────────────────────────────
 # Multi-window velocity weights for momentum signal fusion

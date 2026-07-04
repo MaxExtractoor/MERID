@@ -230,8 +230,8 @@ class TestThresholdOptimization:
                  volatility_regime_edge_adjustment_lookback_days=30,
                  volatility_regime_edge_adjustment_low_volatility_threshold=0.30,
                  volatility_regime_edge_adjustment_high_volatility_threshold=0.70,
-                 volatility_regime_edge_adjustment_low_volatility_adjustment=-0.005,
-                 volatility_regime_edge_adjustment_high_volatility_adjustment=0.010
+                 volatility_regime_edge_adjustment_low_volatility_adjustment=-0.0025,  # UPDATED: -0.25% (was -0.5%)
+                 volatility_regime_edge_adjustment_high_volatility_adjustment=0.005  # UPDATED: +0.5% (was +1.0%)
              ))):
             from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
             
@@ -244,8 +244,8 @@ class TestThresholdOptimization:
                 assert profile.volatility_regime_edge_adjustment_lookback_days == 30
                 assert profile.volatility_regime_edge_adjustment_low_volatility_threshold == 0.30
                 assert profile.volatility_regime_edge_adjustment_high_volatility_threshold == 0.70
-                assert profile.volatility_regime_edge_adjustment_low_volatility_adjustment == -0.005
-                assert profile.volatility_regime_edge_adjustment_high_volatility_adjustment == 0.010
+                assert profile.volatility_regime_edge_adjustment_low_volatility_adjustment == -0.0025  # UPDATED
+                assert profile.volatility_regime_edge_adjustment_high_volatility_adjustment == 0.005  # UPDATED
 
     def test_portfolio_heat_tracking_enabled(self):
         """Test that portfolio heat tracking is enabled with correlation-adjusted exposure."""

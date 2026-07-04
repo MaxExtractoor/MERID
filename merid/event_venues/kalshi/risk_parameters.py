@@ -183,7 +183,7 @@ SIZE_LARGE: Final[int] = 500
 # This constant is DEPRECATED and kept only for backward compatibility
 # All sizing code should use profile.kelly_fraction instead
 # DEPRECATION: Remove DEFAULT_KELLY_FRACTION after profile integration is complete
-DEFAULT_KELLY_FRACTION: Final[float] = 0.05  # P1-FIX1: 0.25 -> 0.05. DEPRECATED: Use profile.kelly_fraction
+DEFAULT_KELLY_FRACTION: Final[float] = 0.02  # HIGH LEVERAGE FIX: 0.05 -> 0.02 (matches profile kelly_hard_cap). DEPRECATED: Use profile.kelly_fraction
 
 # Minimum and maximum contracts per trade
 SIZER_MIN_CONTRACTS: Final[int] = 1
