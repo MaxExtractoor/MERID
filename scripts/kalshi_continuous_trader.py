@@ -762,11 +762,15 @@ def compute_edge(candidate: MarketCandidate, config: TraderConfig) -> MarketCand
         candidate.best_side = "yes"
         candidate.best_edge = yes_edge
         # Limit price = implied YES price in cents (we bid at model value)
-        candidate.limit_price_cents = max(1, min(99, int(implied_yes * 100)))
+        # CRITICAL FIX: Clamp to 15-70 cents to prevent $0.99 purchases
+        # This aligns with order_router.py _check_intent_risk validation [15, 70]
+        candidate.limit_price_cents = max(15, min(70, int(implied_yes * 100)))
     elif no_edge > Decimal("0"):
         candidate.best_side = "no"
         candidate.best_edge = no_edge
-        candidate.limit_price_cents = max(1, min(99, int(implied_no * 100)))
+        # CRITICAL FIX: Clamp to 15-70 cents to prevent $0.99 purchases
+        # This aligns with order_router.py _check_intent_risk validation [15, 70]
+        candidate.limit_price_cents = max(15, min(70, int(implied_no * 100)))
     else:
         candidate.best_side = ""
         candidate.best_edge = max(yes_edge, no_edge)
