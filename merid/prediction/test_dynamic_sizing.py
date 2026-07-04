@@ -13,10 +13,11 @@ class TestDynamicSizing:
         from merid.prediction.unified_sizing import compute_order_size
         
         with patch('merid.prediction.unified_sizing._is_dynamic_sizing_enabled', return_value=False), \
-             patch('merid.prediction.unified_sizing._get_max_single_order_pct', return_value=Decimal("0.05")), \
+             patch('merid.prediction.unified_sizing._get_max_single_order_pct', return_value=Decimal("0.10")), \
              patch('merid.prediction.unified_sizing._get_bankroll_cap_pct', return_value=Decimal("0.02")), \
              patch('merid.prediction.unified_sizing._get_min_edge_risk_pct', return_value=Decimal("0.02")), \
-             patch('merid.prediction.unified_sizing._get_max_contracts_per_asset', return_value=10):
+             patch('merid.prediction.unified_sizing._get_max_contracts_per_asset', return_value=10), \
+             patch('merid.prediction.unified_sizing._get_regime_position_size_multiplier', return_value=1.0):  # No regime reduction
             
             count, notional, metadata = compute_order_size(
                 bankroll_usd=Decimal("1000.0"),
@@ -40,10 +41,11 @@ class TestDynamicSizing:
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_confidence_multiplier', return_value=0.3), \
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_max_contracts', return_value=3), \
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_min_contracts', return_value=1), \
-             patch('merid.prediction.unified_sizing._get_max_single_order_pct', return_value=Decimal("0.05")), \
+             patch('merid.prediction.unified_sizing._get_max_single_order_pct', return_value=Decimal("0.10")), \
              patch('merid.prediction.unified_sizing._get_bankroll_cap_pct', return_value=Decimal("0.02")), \
              patch('merid.prediction.unified_sizing._get_min_edge_risk_pct', return_value=Decimal("0.02")), \
-             patch('merid.prediction.unified_sizing._get_max_contracts_per_asset', return_value=10):
+             patch('merid.prediction.unified_sizing._get_max_contracts_per_asset', return_value=10), \
+             patch('merid.prediction.unified_sizing._get_regime_position_size_multiplier', return_value=1.0):  # No regime reduction
             
             # High edge (5%) should increase size
             count, notional, metadata = compute_order_size(
@@ -68,10 +70,11 @@ class TestDynamicSizing:
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_confidence_multiplier', return_value=0.3), \
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_max_contracts', return_value=3), \
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_min_contracts', return_value=1), \
-             patch('merid.prediction.unified_sizing._get_max_single_order_pct', return_value=Decimal("0.05")), \
+             patch('merid.prediction.unified_sizing._get_max_single_order_pct', return_value=Decimal("0.10")), \
              patch('merid.prediction.unified_sizing._get_bankroll_cap_pct', return_value=Decimal("0.02")), \
              patch('merid.prediction.unified_sizing._get_min_edge_risk_pct', return_value=Decimal("0.02")), \
-             patch('merid.prediction.unified_sizing._get_max_contracts_per_asset', return_value=10):
+             patch('merid.prediction.unified_sizing._get_max_contracts_per_asset', return_value=10), \
+             patch('merid.prediction.unified_sizing._get_regime_position_size_multiplier', return_value=1.0):  # No regime reduction
             
             # Low edge (1%) should keep size at minimum
             count, notional, metadata = compute_order_size(
@@ -96,10 +99,11 @@ class TestDynamicSizing:
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_confidence_multiplier', return_value=0.3), \
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_max_contracts', return_value=3), \
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_min_contracts', return_value=1), \
-             patch('merid.prediction.unified_sizing._get_max_single_order_pct', return_value=Decimal("0.05")), \
+             patch('merid.prediction.unified_sizing._get_max_single_order_pct', return_value=Decimal("0.10")), \
              patch('merid.prediction.unified_sizing._get_bankroll_cap_pct', return_value=Decimal("0.02")), \
              patch('merid.prediction.unified_sizing._get_min_edge_risk_pct', return_value=Decimal("0.02")), \
-             patch('merid.prediction.unified_sizing._get_max_contracts_per_asset', return_value=10):
+             patch('merid.prediction.unified_sizing._get_max_contracts_per_asset', return_value=10), \
+             patch('merid.prediction.unified_sizing._get_regime_position_size_multiplier', return_value=1.0):  # No regime reduction
             
             # High confidence (80%) should increase size
             count, notional, metadata = compute_order_size(
@@ -114,31 +118,60 @@ class TestDynamicSizing:
             assert count >= 1
     
     def test_dynamic_sizing_max_contracts_cap(self):
-        """Test that dynamic sizing respects per-asset max contracts cap."""
+        """Test that dynamic sizing respects per-asset max contracts cap.
+        
+        Updated for $1+/15m target: BTC/ETH/SOL/XRP max 3 contracts, DOGE max 2 contracts.
+        """
         from merid.prediction.unified_sizing import compute_order_size
         
+        # Test BTC/ETH/SOL/XRP with max 3 contracts
+        for asset in ["BTC", "ETH", "SOL", "XRP"]:
+            with patch('merid.prediction.unified_sizing._is_dynamic_sizing_enabled', return_value=True), \
+                 patch('merid.prediction.unified_sizing._get_dynamic_sizing_base_contracts', return_value=1), \
+                 patch('merid.prediction.unified_sizing._get_dynamic_sizing_edge_multiplier', return_value=0.5), \
+                 patch('merid.prediction.unified_sizing._get_dynamic_sizing_confidence_multiplier', return_value=0.3), \
+                 patch('merid.prediction.unified_sizing._get_dynamic_sizing_max_contracts', return_value=3), \
+                 patch('merid.prediction.unified_sizing._get_dynamic_sizing_min_contracts', return_value=1), \
+                 patch('merid.prediction.unified_sizing._get_max_single_order_pct', return_value=Decimal("0.10")), \
+                 patch('merid.prediction.unified_sizing._get_bankroll_cap_pct', return_value=Decimal("0.02")), \
+                 patch('merid.prediction.unified_sizing._get_min_edge_risk_pct', return_value=Decimal("0.02")), \
+                 patch('merid.prediction.unified_sizing._get_max_contracts_per_asset', return_value=3):
+                
+                # Even with high edge/confidence, should cap at per-asset max_contracts (3)
+                count, notional, metadata = compute_order_size(
+                    bankroll_usd=Decimal("1000.0"),
+                    price_cents=50,
+                    asset=asset,
+                    edge_pct=Decimal("0.10"),  # 10% edge
+                    confidence=Decimal("0.9")  # 90% confidence
+                )
+                
+                # Should not exceed per-asset max_contracts (3)
+                assert count <= 3, f"{asset} should cap at 3 contracts, got {count}"
+        
+        # Test DOGE with max 2 contracts (conservative due to volatility)
         with patch('merid.prediction.unified_sizing._is_dynamic_sizing_enabled', return_value=True), \
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_base_contracts', return_value=1), \
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_edge_multiplier', return_value=0.5), \
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_confidence_multiplier', return_value=0.3), \
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_max_contracts', return_value=2), \
              patch('merid.prediction.unified_sizing._get_dynamic_sizing_min_contracts', return_value=1), \
-             patch('merid.prediction.unified_sizing._get_max_single_order_pct', return_value=Decimal("0.05")), \
+             patch('merid.prediction.unified_sizing._get_max_single_order_pct', return_value=Decimal("0.10")), \
              patch('merid.prediction.unified_sizing._get_bankroll_cap_pct', return_value=Decimal("0.02")), \
              patch('merid.prediction.unified_sizing._get_min_edge_risk_pct', return_value=Decimal("0.02")), \
              patch('merid.prediction.unified_sizing._get_max_contracts_per_asset', return_value=2):
             
-            # Even with high edge/confidence, should cap at per-asset max_contracts
+            # Even with high edge/confidence, should cap at per-asset max_contracts (2)
             count, notional, metadata = compute_order_size(
                 bankroll_usd=Decimal("1000.0"),
                 price_cents=50,
-                asset="BTC",
+                asset="DOGE",
                 edge_pct=Decimal("0.10"),  # 10% edge
                 confidence=Decimal("0.9")  # 90% confidence
             )
             
             # Should not exceed per-asset max_contracts (2)
-            assert count <= 2
+            assert count <= 2, f"DOGE should cap at 2 contracts, got {count}"
     
     def test_dynamic_sizing_helper_functions(self):
         """Test dynamic sizing helper function defaults."""

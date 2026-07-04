@@ -352,8 +352,42 @@ _obi_filter: Optional[OrderBookImbalanceFilter] = None
 
 
 def get_obi_filter() -> OrderBookImbalanceFilter:
-    """Get or create the global OBI filter instance."""
+    """Get or create the global OBI filter instance.
+    
+    Loads configuration from profile (kalshi_crypto_15m_v2.yaml) if available.
+    """
     global _obi_filter
     if _obi_filter is None:
-        _obi_filter = OrderBookImbalanceFilter()
+        # Try to load config from profile
+        config = OBIConfig()
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
+            if is_profile_active():
+                adapter = get_active_profile()
+                profile = adapter.profile
+                
+                # Load OBI filter config from profile
+                obi_filter_config = profile.raw.get('order_book_imbalance_filter', {})
+                
+                # Load thresholds
+                config.strong_threshold = obi_filter_config.get('strong_threshold', 0.70)
+                config.moderate_threshold = obi_filter_config.get('moderate_threshold', 0.3)
+                config.consistency_window_size = obi_filter_config.get('consistency_window_size', 20)
+                config.min_consistency_pct = obi_filter_config.get('min_consistency_pct', 0.60)
+                config.max_staleness_ms = obi_filter_config.get('max_staleness_ms', 5000)
+                config.top_levels = obi_filter_config.get('top_levels', 5)
+                
+                # Load per-asset thresholds
+                per_asset = obi_filter_config.get('per_asset_strong_threshold', {})
+                config.per_asset_strong_threshold = per_asset
+                
+                logger.info(
+                    "[OBI-FILTER-INIT] Loaded config from profile: strong_threshold=%.2f per_asset=%s",
+                    config.strong_threshold,
+                    list(config.per_asset_strong_threshold.keys())
+                )
+        except Exception as e:
+            logger.warning("[OBI-FILTER-INIT] Failed to load config from profile: %s, using defaults", e)
+        
+        _obi_filter = OrderBookImbalanceFilter(config)
     return _obi_filter
