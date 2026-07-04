@@ -912,6 +912,8 @@ class LeanAgent15m:
             
             def parse_time_range(time_str: str) -> tuple[float, float]:
                 """Parse 'HH:MM-HH:MM ET' to UTC hours."""
+                # Strip ' ET' suffix if present
+                time_str = time_str.replace(' ET', '')
                 start_str, end_str = time_str.split('-')
                 start_h, start_m = map(int, start_str.split(':'))
                 end_h, end_m = map(int, end_str.split(':'))
@@ -3557,19 +3559,16 @@ class LeanAgent15m:
                     time_to_expiry = market.close_time - time.time()
                 
                 # Determine max price based on time-to-expiry
-                max_price_cents = 70  # Default cap
-                if time_to_expiry is not None and time_to_expiry < 120:  # Less than 2 minutes
-                    max_price_cents = 90  # Allow higher prices near expiry
-                    logger.debug("[PRICE-CLAMP-DYNAMIC] asset=%s time_to_expiry=%.1fs < 120s, using max_price=90c", asset, time_to_expiry)
-                
-                if price_cents < 15:
-                    price_cents = 15
-                    logger.info("[PRICE-CLAMP-YES] asset=%s clamped YES price to minimum 15c (was below threshold)", asset)
-                elif price_cents > max_price_cents:
+                # Optimized for scaling: clamp to [50, 70] range
+                # Mid-range prices have better liquidity depth for child orders
+                if price_cents < 50:
+                    price_cents = 50
+                    logger.info("[PRICE-CLAMP-YES] asset=%s clamped YES price to minimum 50c (was below threshold)", asset)
+                elif price_cents > 70:
                     original_price = price_cents
-                    price_cents = max_price_cents
-                    logger.info("[PRICE-CLAMP-YES] asset=%s clamped YES price to maximum %dc (was %dc, time_to_expiry=%.1fs)", 
-                               asset, max_price_cents, original_price, time_to_expiry if time_to_expiry else 0)
+                    price_cents = 70
+                    logger.info("[PRICE-CLAMP-YES] asset=%s clamped YES price to maximum 70c (was %dc, time_to_expiry=%.1fs)",
+                               asset, original_price, time_to_expiry if time_to_expiry else 0)
             else:  # signal_side == "no"
                 # NO: calculate NO bid/ask from YES bid/ask, then use NO mid-price
                 # NO_bid = 100 - YES_ask, NO_ask = 100 - YES_bid
@@ -3579,62 +3578,50 @@ class LeanAgent15m:
                 logger.info("[PRICE-CALC-NO] asset=%s YES_bid=%d YES_ask=%d -> NO_bid=%d NO_ask=%d NO_mid=%d",
                            asset, best_bid, best_ask, no_bid, no_ask, price_cents)
                 
-                # CRITICAL FIX: Dynamic price clamping based on time-to-expiry (NO side)
-                # When YES prices are high (93-99c), NO prices become very low (1-7c)
-                # Dynamic limits: 70c cap for normal trading, up to 90c when expiry < 2 minutes
-                # Calculate time to expiry
-                time_to_expiry = None
-                if hasattr(market, 'close_time'):
-                    time_to_expiry = market.close_time - time.time()
-                
-                # Determine max price based on time-to-expiry
-                max_price_cents = 70  # Default cap
-                if time_to_expiry is not None and time_to_expiry < 120:  # Less than 2 minutes
-                    max_price_cents = 90  # Allow higher prices near expiry
-                    logger.debug("[PRICE-CLAMP-DYNAMIC] asset=%s time_to_expiry=%.1fs < 120s, using max_price=90c", asset, time_to_expiry)
-                
-                if price_cents < 15:
-                    price_cents = 15
-                    logger.info("[PRICE-CLAMP-NO] asset=%s clamped NO price to minimum 15c (was below threshold)", asset)
-                elif price_cents > max_price_cents:
+                # Optimized for scaling: clamp to [50, 70] range
+                # Mid-range prices have better liquidity depth for child orders
+                if price_cents < 50:
+                    price_cents = 50
+                    logger.info("[PRICE-CLAMP-NO] asset=%s clamped NO price to minimum 50c (was below threshold)", asset)
+                elif price_cents > 70:
                     original_price = price_cents
-                    price_cents = max_price_cents
-                    logger.info("[PRICE-CLAMP-NO] asset=%s clamped NO price to maximum %dc (was %dc, time_to_expiry=%.1fs)", 
-                               asset, max_price_cents, original_price, time_to_expiry if time_to_expiry else 0)
+                    price_cents = 70
+                    logger.info("[PRICE-CLAMP-NO] asset=%s clamped NO price to maximum 70c (was %dc, time_to_expiry=%.1fs)",
+                               asset, original_price, time_to_expiry if time_to_expiry else 0)
         elif best_bid:
             # Fallback to bid only
             if signal_side == "yes":
                 price_cents = best_bid
-                # Clamp to 55-75c range (aligned with profile price_range)
-                if price_cents < 55:
-                    price_cents = 55
-                elif price_cents > 75:
-                    price_cents = 75
+                # Clamp to [50, 70] range (aligned with profile price_range)
+                if price_cents < 50:
+                    price_cents = 50
+                elif price_cents > 70:
+                    price_cents = 70
             else:
                 # NO: NO_ask = 100 - YES_bid
                 price_cents = 100 - best_bid
-                # Clamp to 55-75c range (aligned with profile price_range)
-                if price_cents < 55:
-                    price_cents = 55
-                elif price_cents > 75:
-                    price_cents = 75
+                # Clamp to [50, 70] range (aligned with profile price_range)
+                if price_cents < 50:
+                    price_cents = 50
+                elif price_cents > 70:
+                    price_cents = 70
         elif best_ask:
             # Fallback to ask only
             if signal_side == "yes":
                 price_cents = best_ask
-                # Clamp to 55-75c range (aligned with profile price_range)
-                if price_cents < 55:
-                    price_cents = 55
-                elif price_cents > 75:
-                    price_cents = 75
+                # Clamp to [50, 70] range (aligned with profile price_range)
+                if price_cents < 50:
+                    price_cents = 50
+                elif price_cents > 70:
+                    price_cents = 70
             else:
                 # NO: NO_bid = 100 - YES_ask
                 price_cents = 100 - best_ask
-                # Clamp to 55-75c range (aligned with profile price_range)
-                if price_cents < 55:
-                    price_cents = 55
-                elif price_cents > 75:
-                    price_cents = 75
+                # Clamp to [50, 70] range (aligned with profile price_range)
+                if price_cents < 50:
+                    price_cents = 50
+                elif price_cents > 70:
+                    price_cents = 70
         else:
             # No market data - use neutral price
             price_cents = 50
@@ -3724,9 +3711,10 @@ class LeanAgent15m:
                 asset, signal_side, best_bid, best_ask, price_cents, minutes_to_expiry, edge_pct
             )
         
-        # Clamp to valid range [55, 75] (enforce price validation range - aligned with profile price_range)
+        # Clamp to valid range [50, 70] (enforce price validation range - aligned with profile price_range)
+        # Optimized for scaling: mid-range prices have better liquidity depth for child orders
         # Note: This clamp is a safety rail; mid-spread optimization should naturally stay within range
-        price_cents = max(55, min(75, price_cents))
+        price_cents = max(50, min(70, price_cents))
         
         # Construct signal dictionary
         signal = {
@@ -4324,7 +4312,7 @@ class LeanAgentGrid15m:
         try:
             from merid.event_venues.kalshi.position_cache import get_position_cache
             from merid.event_venues.kalshi.client import KalshiVenueClient
-            from merid.event_venues.kalshi.config import get_kalshi_config
+            from merid.event_venues.kalshi.kalshi_config import get_kalshi_config
             position_cache = get_position_cache()
             if position_cache:
                 # Get positions directly from Kalshi REST API

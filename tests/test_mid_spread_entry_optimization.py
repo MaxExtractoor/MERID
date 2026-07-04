@@ -341,37 +341,37 @@ class TestMidSpreadEntryOptimization:
 
 
 class TestPriceClamping:
-    """Test price clamping to 55-75c range."""
+    """Test price clamping to 50-70c range (optimized for scaling)."""
     
     def test_price_below_minimum_clamped(self):
-        """Test that prices below 55c are clamped to 55c."""
+        """Test that prices below 50c are clamped to 50c."""
         price_cents = 40
-        clamped = max(55, min(75, price_cents))
-        assert clamped == 55, f"Expected 55, got {clamped}"
+        clamped = max(50, min(70, price_cents))
+        assert clamped == 50, f"Expected 50, got {clamped}"
     
     def test_price_above_maximum_clamped(self):
-        """Test that prices above 75c are clamped to 75c."""
+        """Test that prices above 70c are clamped to 70c."""
         price_cents = 80
-        clamped = max(55, min(75, price_cents))
-        assert clamped == 75, f"Expected 75, got {clamped}"
+        clamped = max(50, min(70, price_cents))
+        assert clamped == 70, f"Expected 70, got {clamped}"
     
     def test_price_within_range_unchanged(self):
-        """Test that prices within 55-75c range are unchanged."""
+        """Test that prices within 50-70c range are unchanged."""
         price_cents = 60
-        clamped = max(55, min(75, price_cents))
+        clamped = max(50, min(70, price_cents))
         assert clamped == 60, f"Expected 60, got {clamped}"
     
     def test_price_at_minimum_unchanged(self):
-        """Test that price at 55c is unchanged."""
-        price_cents = 55
-        clamped = max(55, min(75, price_cents))
-        assert clamped == 55, f"Expected 55, got {clamped}"
+        """Test that price at 50c is unchanged."""
+        price_cents = 50
+        clamped = max(50, min(70, price_cents))
+        assert clamped == 50, f"Expected 50, got {clamped}"
     
     def test_price_at_maximum_unchanged(self):
-        """Test that price at 75c is unchanged."""
-        price_cents = 75
-        clamped = max(55, min(75, price_cents))
-        assert clamped == 75, f"Expected 75, got {clamped}"
+        """Test that price at 70c is unchanged."""
+        price_cents = 70
+        clamped = max(50, min(70, price_cents))
+        assert clamped == 70, f"Expected 70, got {clamped}"
 
 
 if __name__ == "__main__":

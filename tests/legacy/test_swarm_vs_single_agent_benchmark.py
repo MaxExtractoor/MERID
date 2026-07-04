@@ -339,10 +339,10 @@ def generate_kalshi_scenarios(n: int, seed: int = 99) -> List[MarketScenario]:
         true_signal = +1 if resolved_yes else -1
 
         # Market prices with noise around true probability
-        # CRITICAL FIX: Updated to use [55, 75] range to align with profile price_range
+        # CRITICAL FIX: Updated to use [50, 70] range to align with profile price_range (optimized for scaling)
         noise = rng.gauss(0, 0.08)
-        yes_ask = max(55, min(75, int((true_prob + noise) * 100)))
-        no_ask = max(55, min(75, 100 - yes_ask + rng.randint(-3, 3)))
+        yes_ask = max(50, min(70, int((true_prob + noise) * 100)))
+        no_ask = max(50, min(70, 100 - yes_ask + rng.randint(-3, 3)))
         spread = abs(yes_ask + no_ask - 100)
 
         scenarios.append(MarketScenario(
