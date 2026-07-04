@@ -420,7 +420,7 @@ class WindowResolution:
     min_tte_secs: int  # Minimum time to expiry
     max_tte_secs: int  # Maximum time to expiry
     
-    # DELETED: Edge thresholds - now handled by profile edge_bands (2-4% watch, 4-6% small, >=6% standard)
+    # DELETED: Edge thresholds - now handled by profile edge_bands (4-5% watch, 5-7% small, >=7% standard)
     
     # Market structure requirements
     min_depth_yes: int  # Minimum YES depth
@@ -566,7 +566,7 @@ def resolve_window_policy(
     
     window_id = f"window_{uuid.uuid4().hex[:12]}"
     
-    # DELETED: Edge thresholds - now handled by profile edge_bands (2-4% watch, 4-6% small, >=6% standard)
+    # DELETED: Edge thresholds - now handled by profile edge_bands (4-5% watch, 5-7% small, >=7% standard)
     # This layer focuses on order routing and execution, not edge validation
     
     # Depth thresholds (from profile YAML - single source of truth for 15m stack)

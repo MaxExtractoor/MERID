@@ -768,10 +768,14 @@ class MarketFilterConfig:
     max_spread_cents: int = 12
 
     # Minimum best-bid price (filter out near-zero contracts)
-    min_price_cents: int = 10
+    # CRITICAL FIX: Increased from 10c to 50c to match kalshi_crypto_15m_v2.yaml profile
+    # Prevents low-price trades (2-5c) that caused 100% losses in recent trading data
+    min_price_cents: int = 50
 
     # Maximum best-bid price (filter out near-certain contracts)
-    max_price_cents: int = 90
+    # CRITICAL FIX: Reduced from 90c to 70c to match kalshi_crypto_15m_v2.yaml profile
+    # Prevents low-profit trades at high prices (70-90c) with poor risk/reward
+    max_price_cents: int = 70
 
     # Only include markets for these underlyings.
     # Empty list = allow all underlyings (full Kalshi platform coverage).
