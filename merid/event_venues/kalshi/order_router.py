@@ -1148,7 +1148,7 @@ def _is_exit_order(intent: OrderIntent) -> bool:
     
     # Check source for exit-specific markers
     source = (intent.source or "").lower()
-    exit_markers = ["take_profit", "stop_loss", "micro_scalp", "exit", "close"]
+    exit_markers = ["take_profit", "stop_loss", "micro_scalp", "exit", "close", "ratchet"]
     if any(marker in source for marker in exit_markers):
         return True
     
