@@ -645,10 +645,10 @@ async def _kalshi_place_order(
         try:
             from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
 
-            # CRITICAL FIX: Clamp to 15-70 cents to prevent $0.99 purchases
-            # This aligns with order_router.py _check_intent_risk validation [15, 70]
+            # CRITICAL FIX: Clamp to 55-75 cents to prevent extreme purchases
+            # This aligns with kalshi_crypto_15m_v2.yaml price_range [55, 75]
             # and profile guardrails_max_contract_price_cents (70c for 43% minimum payout)
-            _pc = max(15, min(70, int(price_cents or 50)))
+            _pc = max(55, min(75, int(price_cents or 50)))
 
             # Map side/action to Kalshi format
             side_lower = side.lower() if side else ""
@@ -1043,9 +1043,9 @@ def build_live_route_order_intent(
         pc = 0
         otype = "market"
     else:
-        # CRITICAL FIX: Clamp to 15-70 cents to prevent $0.99 purchases
-        # This aligns with order_router.py _check_intent_risk validation [15, 70]
-        pc = max(15, min(70, int(price_cents)))
+        # CRITICAL FIX: Clamp to 55-75 cents to prevent extreme purchases
+        # This aligns with kalshi_crypto_15m_v2.yaml price_range [55, 75]
+        pc = max(55, min(75, int(price_cents)))
         otype = "limit"
 
     # Compute default TP/SL for 15m crypto entry orders if not provided

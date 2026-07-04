@@ -3235,17 +3235,17 @@ class LeanAgent15m:
             else:
                 # NO: NO_bid = 100 - YES_ask
                 price_cents = 100 - best_ask
-                # Clamp to 15-70c range (aligned with global 15¢ price guard and profile max_price_cents)
-                if price_cents < 15:
-                    price_cents = 15
-                elif price_cents > 70:
-                    price_cents = 70
+                # Clamp to 55-75c range (aligned with profile price_range)
+                if price_cents < 55:
+                    price_cents = 55
+                elif price_cents > 75:
+                    price_cents = 75
         else:
             # No market data - use neutral price
             price_cents = 50
         
-        # Clamp to valid range [15, 70] (enforce price validation range - aligned with global 15¢ price guard and profile max_price_cents)
-        price_cents = max(15, min(70, price_cents))
+        # Clamp to valid range [55, 75] (enforce price validation range - aligned with profile price_range)
+        price_cents = max(55, min(75, price_cents))
         
         # Construct signal dictionary
         signal = {

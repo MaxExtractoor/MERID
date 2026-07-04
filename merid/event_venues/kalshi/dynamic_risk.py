@@ -894,9 +894,9 @@ class DynamicRiskEngine:
             # Sell: go down from mid towards bid
             limit_price_cents = max(best_bid_cents, mid_cents - ticks_from_mid)
         
-        # CRITICAL FIX: Clamp to 15-70 cents to prevent $0.99 purchases
-        # This aligns with order_router.py _check_intent_risk validation [15, 70]
-        limit_price_cents = max(15, min(70, limit_price_cents))
+        # CRITICAL FIX: Clamp to 55-75 cents to prevent extreme purchases
+        # This aligns with kalshi_crypto_15m_v2.yaml price_range [55, 75]
+        limit_price_cents = max(55, min(75, limit_price_cents))
         
         computation_time_ms = (time.time() - t0) * 1000
         
