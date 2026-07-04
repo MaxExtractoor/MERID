@@ -3218,20 +3218,20 @@ class LeanAgent15m:
             else:
                 # NO: NO_ask = 100 - YES_bid
                 price_cents = 100 - best_bid
-                # Clamp to 15-70c range (aligned with global 15¢ price guard and profile max_price_cents)
-                if price_cents < 15:
-                    price_cents = 15
-                elif price_cents > 70:
-                    price_cents = 70
+                # Clamp to 55-75c range (aligned with profile price_range)
+                if price_cents < 55:
+                    price_cents = 55
+                elif price_cents > 75:
+                    price_cents = 75
         elif best_ask:
             # Fallback to ask only
             if signal_side == "yes":
                 price_cents = best_ask
-                # Clamp to 15-70c range (aligned with global 15¢ price guard and profile max_price_cents)
-                if price_cents < 15:
-                    price_cents = 15
-                elif price_cents > 70:
-                    price_cents = 70
+                # Clamp to 55-75c range (aligned with profile price_range)
+                if price_cents < 55:
+                    price_cents = 55
+                elif price_cents > 75:
+                    price_cents = 75
             else:
                 # NO: NO_bid = 100 - YES_ask
                 price_cents = 100 - best_ask
