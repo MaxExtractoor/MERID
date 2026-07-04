@@ -1462,9 +1462,9 @@ def simulate_paper_fill(
 
     # Buy pays up; sell receives down.
     side_sign = 1 if intent.action == "buy" else -1
-    # CRITICAL FIX: Clamp to 15-70 cents to prevent $0.99 purchases
-    # This aligns with _check_intent_risk validation [15, 70]
-    fill_price = max(15, min(70, requested_price + (side_sign * slippage_cents)))
+    # CRITICAL FIX: Clamp to 55-75 cents to prevent extreme purchases
+    # This aligns with kalshi_crypto_15m_v2.yaml price_range [55, 75]
+    fill_price = max(55, min(75, requested_price + (side_sign * slippage_cents)))
 
     # Partial fill simulation when size > 1 contract.
     partial_fill = False
