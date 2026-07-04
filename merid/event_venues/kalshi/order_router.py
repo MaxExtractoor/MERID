@@ -529,8 +529,9 @@ def resolve_exit_policy(
         tp_r_multiple=tp_r_multiple,
         tp_min_cents=tp_min_cents,
         tp_time_based_r=tp_time_based_r,
-        sl_mode=StopLossMode.R_MULTIPLE,
-        sl_r_multiple=0.5,  # 0.5R stop loss
+        sl_mode=StopLossMode.FIXED_CENTS,  # CRITICAL FIX: Use fixed cent SL for binary options
+        sl_cents=5,  # 5 cent fixed stop loss (conservative for 15m crypto)
+        sl_r_multiple=0.5,  # Fallback R-multiple for legacy compatibility
         trailing_enabled=True,
         trailing_activation_r=0.8,
         trailing_giveback_cents=5,
@@ -3623,24 +3624,29 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
     _rm_category = _infer_cat(_get_underlying(intent.ticker))
     _underlying = _get_underlying(intent.ticker)
     
-    # Unified risk check - single entry point
-    allowed, reason = unified_risk.check_order(
-        ticker=intent.ticker,
-        contracts=intent.count,
-        price_cents=intent.price_cents,
-        category=_rm_category,
-        underlying=_underlying
-    )
-    
-    if not allowed:
-        logger.warning(f"[ORDER-ROUTER] Unified risk check rejected: {reason}")
-        return OrderResult(
-            status="rejected",
-            mode=intent.mode,
-            fill=None,
-            reason=f"Unified risk check: {reason}",
-            latency_ms=0.0
+    # EXIT ORDERS BYPASS: Unified risk check for exits - they REDUCE exposure
+    # Exit orders should execute even if risk limits are hit to secure profits
+    if _is_exit:
+        logger.info("[order-router] EXIT ORDER: %s — bypassing unified risk check (reduces exposure)", intent.ticker)
+    else:
+        # Unified risk check - single entry point (only for entry orders)
+        allowed, reason = unified_risk.check_order(
+            ticker=intent.ticker,
+            contracts=intent.count,
+            price_cents=intent.price_cents,
+            category=_rm_category,
+            underlying=_underlying
         )
+        
+        if not allowed:
+            logger.warning(f"[ORDER-ROUTER] Unified risk check rejected: {reason}")
+            return OrderResult(
+                status="rejected",
+                mode=intent.mode,
+                fill=None,
+                reason=f"Unified risk check: {reason}",
+                latency_ms=0.0
+            )
     
     # Look up existing position so per-contract limit check is accurate
     # CRASH-004: Use sentinel value for cache failure, never poison calculation
@@ -5880,6 +5886,28 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
     
     # ── PRICING VALIDATION: Ensure valid price format ─────────────────────
     # Guardrail: Prevent dollar amounts being passed as prices
+    # First check if price_cents is an integer (not string or float)
+    if not isinstance(intent.price_cents, int):
+        latency = (_time.monotonic() - t0) * 1000
+        logger.error(
+            f"[INVALID-PRICE] Order rejected: price_cents={intent.price_cents} (must be integer) | "
+            f"ticker={intent.ticker} | side={intent.side} | count={intent.count}"
+        )
+        logger.info(
+            "[ORDER-BLOCKED] ticker=%s reason=INVALID_PRICE side=%s count=%d price_cents=%s",
+            intent.ticker,
+            intent.side,
+            intent.count,
+            intent.price_cents,
+        )
+        return OrderResult(
+            status="rejected",
+            mode=get_venue_gate().mode,
+            reason="invalid_price:price_not_integer",
+            latency_ms=round(latency, 2),
+        )
+    
+    # Then check if price is in valid range (1-99 cents)
     if not (1 <= intent.price_cents <= 99):
         latency = (_time.monotonic() - t0) * 1000
         logger.error(
@@ -5897,6 +5925,30 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
             status="rejected",
             mode=get_venue_gate().mode,
             reason=f"invalid_price:price_cents={intent.price_cents}",
+            latency_ms=round(latency, 2),
+        )
+    
+    # CRITICAL: Enforce 50c minimum entry price to match agent grid constraints
+    # This prevents orders at lottery-ticket prices (e.g., 5c) that have
+    # statistically poor win rates (10.4% for prices < $0.30 based on 2026-07-03 analysis)
+    # Exception: Allow orders below 50c if source is "hedge_engine" (hedge orders have their own checks)
+    if intent.price_cents < 50 and intent.source != "hedge_engine":
+        latency = (_time.monotonic() - t0) * 1000
+        logger.error(
+            f"[MIN-PRICE-VIOLATION] Order rejected: price_cents={intent.price_cents} < 50c minimum | "
+            f"ticker={intent.ticker} | side={intent.side} | count={intent.count} | source={intent.source}"
+        )
+        logger.info(
+            "[ORDER-BLOCKED] ticker=%s reason=MIN_PRICE_VIOLATION side=%s count=%d price_cents=%d",
+            intent.ticker,
+            intent.side,
+            intent.count,
+            intent.price_cents,
+        )
+        return OrderResult(
+            status="rejected",
+            mode=get_venue_gate().mode,
+            reason=f"min_price_violation:price_cents={intent.price_cents}<50",
             latency_ms=round(latency, 2),
         )
     
