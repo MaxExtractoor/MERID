@@ -1146,6 +1146,21 @@ class Kalshi15mLoop:
             contracts_to_close: Number of contracts to close (None = full exit)
         """
         try:
+            logger.info(
+                "[EXIT-ORDER] Starting exit order execution: position=%s market=%s side=%s reason=%s exit_price=%dc "
+                "entry_price=%dc pnl=%dc R=%.2f size=%d contracts_to_close=%s",
+                position.position_id[:8],
+                position.market_id,
+                position.side.value,
+                exit_reason.value,
+                exit_price_cents,
+                position.avg_entry_price_cents,
+                position.unrealized_pnl_cents,
+                position.r_multiple,
+                position.size,
+                contracts_to_close or "full",
+            )
+            
             from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
 
             # CRITICAL FIX: Convert to Kalshi format (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
@@ -1174,6 +1189,11 @@ class Kalshi15mLoop:
             # Determine count (partial or full exit)
             count = contracts_to_close if contracts_to_close is not None else position.size
 
+            logger.info(
+                "[EXIT-ORDER] Kalshi side conversion: side_str=%s action=%s -> kalshi_side=%s",
+                side_str, action, kalshi_side
+            )
+
             # Create exit OrderIntent
             # CRITICAL: Use limit order with GTC to create resting order for better fill rate
             # This allows the exit order to sit on the book and get filled at the desired price
@@ -1200,13 +1220,13 @@ class Kalshi15mLoop:
 
             if result.success:
                 logger.info(
-                    "[EXIT-ORDER] Exit order executed successfully: order_id=%s",
-                    result.order_id
+                    "[EXIT-ORDER] Exit order executed successfully: order_id=%s status=%s",
+                    result.order_id, result.status
                 )
             else:
                 logger.error(
-                    "[EXIT-ORDER] Exit order failed: error=%s",
-                    result.error
+                    "[EXIT-ORDER] Exit order failed: status=%s error=%s reason=%s",
+                    result.status, result.error, result.reason
                 )
 
         except Exception as e:
@@ -1534,12 +1554,15 @@ class Kalshi15mLoop:
                                 asset = ticker.split("-")[0].replace("KX", "") if "-" in ticker else "BTC"
                                 
                                 # Compute dynamic size
+                                # 2026 Research-Based Risk Management: Apply time-of-day risk scaling
+                                time_of_day_multiplier = candidate.get("time_of_day_multiplier", 1.0)
                                 count, notional, metadata = compute_order_size(
                                     bankroll_usd=Decimal(str(bankroll_usd)),
                                     price_cents=int(price_cents),
                                     asset=asset,
                                     edge_pct=edge_pct,
-                                    confidence=confidence
+                                    confidence=confidence,
+                                    time_of_day_multiplier=time_of_day_multiplier
                                 )
                                 
                                 candidate["count"] = count
@@ -3819,10 +3842,23 @@ class Kalshi15mLoop:
                 take_profit_price_cents = None
                 take_profit_r_multiple = None
             
-            if exit_policy and exit_policy.sl_r_multiple:
-                stop_loss_price_cents = int(price_cents * (1 - exit_policy.sl_r_multiple))
+            # CRITICAL FIX: Use fixed cent SL instead of R-multiple for binary options
+            # Binary options have max loss = entry price (can go to 0), so R-multiple SL
+            # doesn't make sense. Use fixed cent SL from exit_policy.sl_cents instead.
+            # If sl_cents is not set, use a conservative 5 cent SL.
+            if exit_policy and exit_policy.sl_cents:
+                stop_loss_price_cents = exit_policy.sl_cents
+            elif exit_policy and exit_policy.sl_r_multiple:
+                # Fallback to R-multiple if sl_cents not set (legacy path)
+                # For YES: SL = entry - (entry * sl_r_multiple)
+                # For NO: SL = entry + (entry * sl_r_multiple)
+                if side_raw == "YES":
+                    stop_loss_price_cents = int(price_cents * (1 - exit_policy.sl_r_multiple))
+                else:  # NO
+                    stop_loss_price_cents = int(price_cents * (1 + exit_policy.sl_r_multiple))
             else:
-                stop_loss_price_cents = None
+                # Default to 5 cent SL if no policy
+                stop_loss_price_cents = max(1, price_cents - 5) if side_raw == "YES" else price_cents + 5
             
             intent = OrderIntent(
                 ticker=ticker,
