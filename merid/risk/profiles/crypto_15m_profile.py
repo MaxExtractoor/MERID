@@ -216,6 +216,9 @@ class Crypto15mProfile:
     throttling_per_asset_cooldown_sec: float
     throttling_per_strip_order_limit: int
     throttling_per_strip_notional_usd: float
+    throttling_max_orders_per_15m_window: int  # 2026 research: Max 5 trades per session
+    throttling_consecutive_loss_pause: int  # 2026 research: Pause after N consecutive losses
+    throttling_max_session_risk_pct: float  # 2026 research: Max session risk as % of capital
     
     # Failsafe configuration (emergency brake)
     failsafe_max_contracts_per_order: int
@@ -309,7 +312,7 @@ class Crypto15mProfile:
     offset_hedging_max_hedge_contracts: int = 3
     
     # Position Management: Trailing Stop Configuration
-    trailing_stop_enabled: bool = False
+    trailing_stop_enabled: bool = True  # CRITICAL FIX: Default to True to match YAML config (was False - trailing stops were disabled)
     trailing_stop_trailing_distance_cents: int = 5
     trailing_stop_min_profit_cents: int = 12  # Updated from 3 to 12 (align with 2026 research: 10-15¢ threshold to avoid noise-triggered exits)
     trailing_stop_activation_delay_sec: int = 30
@@ -357,6 +360,55 @@ class Crypto15mProfile:
 
     # Phase 2: Strategy definitions for multi-strategy support
     strategies: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    
+    # 2026 Research-Based Risk Management
+    # Correlation-aware position sizing
+    correlation_tracking_enabled: bool = False
+    correlation_tracking_real_time_monitoring: bool = False
+    correlation_tracking_threshold_high: float = 0.80
+    correlation_tracking_threshold_moderate: float = 0.50
+    correlation_tracking_threshold_alert: float = 0.85
+    correlation_tracking_max_correlated_assets: int = 3
+    
+    # Volatility-regime edge adjustment
+    volatility_regime_edge_adjustment_enabled: bool = False
+    volatility_regime_edge_adjustment_lookback_days: int = 30
+    volatility_regime_edge_adjustment_low_volatility_threshold: float = 0.30
+    volatility_regime_edge_adjustment_high_volatility_threshold: float = 0.70
+    volatility_regime_edge_adjustment_low_volatility_adjustment: float = -0.005
+    volatility_regime_edge_adjustment_high_volatility_adjustment: float = 0.010
+    
+    # Portfolio heat tracking
+    portfolio_heat_enabled: bool = False
+    portfolio_heat_calculation_method: str = "correlation_adjusted_exposure"
+    portfolio_heat_heat_threshold_warning: float = 0.70
+    portfolio_heat_heat_threshold_critical: float = 0.85
+    
+    # Time-of-day risk scaling
+    time_of_day_risk_scaling_enabled: bool = False
+    time_of_day_risk_scaling_us_market_hours: str = "09:30-16:00 ET"
+    time_of_day_risk_scaling_asian_session: str = "20:00-02:00 ET"
+    time_of_day_risk_scaling_european_session: str = "02:00-09:30 ET"
+    time_of_day_risk_scaling_us_market_multiplier: float = 1.0
+    time_of_day_risk_scaling_asian_multiplier: float = 0.8
+    time_of_day_risk_scaling_european_multiplier: float = 0.9
+    time_of_day_risk_scaling_weekend_multiplier: float = 0.5
+    
+    # Asset-specific rolling PnL limits
+    asset_specific_rolling_pnl_enabled: bool = False
+    asset_specific_rolling_pnl_btc_rolling_1h_halt_pct: float = 0.04
+    asset_specific_rolling_pnl_btc_rolling_4h_halt_pct: float = 0.07
+    asset_specific_rolling_pnl_eth_rolling_1h_halt_pct: float = 0.04
+    asset_specific_rolling_pnl_eth_rolling_4h_halt_pct: float = 0.07
+    asset_specific_rolling_pnl_sol_rolling_1h_halt_pct: float = 0.06
+    asset_specific_rolling_pnl_sol_rolling_4h_halt_pct: float = 0.09
+    asset_specific_rolling_pnl_xrp_rolling_1h_halt_pct: float = 0.06
+    asset_specific_rolling_pnl_xrp_rolling_4h_halt_pct: float = 0.09
+    asset_specific_rolling_pnl_doge_rolling_1h_halt_pct: float = 0.08
+    asset_specific_rolling_pnl_doge_rolling_4h_halt_pct: float = 0.12
+    
+    # Updated adaptive risk bands (2026 research: more granular)
+    guardrails_adaptive_risk_bands: list = field(default_factory=list)
 
 
 @dataclass
@@ -802,6 +854,9 @@ class Crypto15mProfileAdapter:
                 throttling_per_asset_cooldown_sec=float(throttling.get('per_asset_cooldown_sec', 10.0)),
                 throttling_per_strip_order_limit=int(throttling.get('per_strip_order_limit', 1)),
                 throttling_per_strip_notional_usd=float(throttling.get('per_strip_notional_usd', 0.0)),
+                throttling_max_orders_per_15m_window=int(throttling.get('max_orders_per_15m_window', 5)),
+                throttling_consecutive_loss_pause=int(throttling.get('consecutive_loss_pause', 3)),
+                throttling_max_session_risk_pct=self._normalize_percentage_value(throttling.get('max_session_risk_pct', 0.10)),
                 
                 # Universe liquidity filters (coarse prefilter)
                 universe_min_volume=int(universe.get('min_volume', 5)),
@@ -887,6 +942,55 @@ class Crypto15mProfileAdapter:
                 dynamic_sizing_min_contracts=raw.get('dynamic_sizing', {}).get('min_contracts', 1),
                 # Phase 2: Strategy definitions
                 strategies=strategies,
+                
+                # 2026 Research-Based Risk Management
+                # Correlation-aware position sizing
+                correlation_tracking_enabled=raw.get('correlation_tracking', {}).get('enabled', False),
+                correlation_tracking_real_time_monitoring=raw.get('correlation_tracking', {}).get('real_time_monitoring', False),
+                correlation_tracking_threshold_high=raw.get('correlation_tracking', {}).get('threshold_high', 0.80),
+                correlation_tracking_threshold_moderate=raw.get('correlation_tracking', {}).get('threshold_moderate', 0.50),
+                correlation_tracking_threshold_alert=raw.get('correlation_tracking', {}).get('threshold_alert', 0.85),
+                correlation_tracking_max_correlated_assets=int(raw.get('correlation_tracking', {}).get('max_correlated_assets', 3)),
+                
+                # Volatility-regime edge adjustment
+                volatility_regime_edge_adjustment_enabled=raw.get('volatility_regime_edge_adjustment', {}).get('enabled', False),
+                volatility_regime_edge_adjustment_lookback_days=int(raw.get('volatility_regime_edge_adjustment', {}).get('lookback_days', 30)),
+                volatility_regime_edge_adjustment_low_volatility_threshold=raw.get('volatility_regime_edge_adjustment', {}).get('low_volatility_threshold', 0.30),
+                volatility_regime_edge_adjustment_high_volatility_threshold=raw.get('volatility_regime_edge_adjustment', {}).get('high_volatility_threshold', 0.70),
+                volatility_regime_edge_adjustment_low_volatility_adjustment=raw.get('volatility_regime_edge_adjustment', {}).get('low_volatility_adjustment', -0.005),
+                volatility_regime_edge_adjustment_high_volatility_adjustment=raw.get('volatility_regime_edge_adjustment', {}).get('high_volatility_adjustment', 0.010),
+                
+                # Portfolio heat tracking
+                portfolio_heat_enabled=raw.get('portfolio_heat', {}).get('enabled', False),
+                portfolio_heat_calculation_method=raw.get('portfolio_heat', {}).get('calculation_method', 'correlation_adjusted_exposure'),
+                portfolio_heat_heat_threshold_warning=raw.get('portfolio_heat', {}).get('heat_threshold_warning', 0.70),
+                portfolio_heat_heat_threshold_critical=raw.get('portfolio_heat', {}).get('heat_threshold_critical', 0.85),
+                
+                # Time-of-day risk scaling
+                time_of_day_risk_scaling_enabled=raw.get('time_of_day_risk_scaling', {}).get('enabled', False),
+                time_of_day_risk_scaling_us_market_hours=raw.get('time_of_day_risk_scaling', {}).get('us_market_hours', '09:30-16:00 ET'),
+                time_of_day_risk_scaling_asian_session=raw.get('time_of_day_risk_scaling', {}).get('asian_session', '20:00-02:00 ET'),
+                time_of_day_risk_scaling_european_session=raw.get('time_of_day_risk_scaling', {}).get('european_session', '02:00-09:30 ET'),
+                time_of_day_risk_scaling_us_market_multiplier=raw.get('time_of_day_risk_scaling', {}).get('us_market_multiplier', 1.0),
+                time_of_day_risk_scaling_asian_multiplier=raw.get('time_of_day_risk_scaling', {}).get('asian_multiplier', 0.8),
+                time_of_day_risk_scaling_european_multiplier=raw.get('time_of_day_risk_scaling', {}).get('european_multiplier', 0.9),
+                time_of_day_risk_scaling_weekend_multiplier=raw.get('time_of_day_risk_scaling', {}).get('weekend_multiplier', 0.5),
+                
+                # Asset-specific rolling PnL limits
+                asset_specific_rolling_pnl_enabled=raw.get('asset_specific_rolling_pnl', {}).get('enabled', False),
+                asset_specific_rolling_pnl_btc_rolling_1h_halt_pct=raw.get('asset_specific_rolling_pnl', {}).get('btc_rolling_1h_halt_pct', 0.04),
+                asset_specific_rolling_pnl_btc_rolling_4h_halt_pct=raw.get('asset_specific_rolling_pnl', {}).get('btc_rolling_4h_halt_pct', 0.07),
+                asset_specific_rolling_pnl_eth_rolling_1h_halt_pct=raw.get('asset_specific_rolling_pnl', {}).get('eth_rolling_1h_halt_pct', 0.04),
+                asset_specific_rolling_pnl_eth_rolling_4h_halt_pct=raw.get('asset_specific_rolling_pnl', {}).get('eth_rolling_4h_halt_pct', 0.07),
+                asset_specific_rolling_pnl_sol_rolling_1h_halt_pct=raw.get('asset_specific_rolling_pnl', {}).get('sol_rolling_1h_halt_pct', 0.06),
+                asset_specific_rolling_pnl_sol_rolling_4h_halt_pct=raw.get('asset_specific_rolling_pnl', {}).get('sol_rolling_4h_halt_pct', 0.09),
+                asset_specific_rolling_pnl_xrp_rolling_1h_halt_pct=raw.get('asset_specific_rolling_pnl', {}).get('xrp_rolling_1h_halt_pct', 0.06),
+                asset_specific_rolling_pnl_xrp_rolling_4h_halt_pct=raw.get('asset_specific_rolling_pnl', {}).get('xrp_rolling_4h_halt_pct', 0.09),
+                asset_specific_rolling_pnl_doge_rolling_1h_halt_pct=raw.get('asset_specific_rolling_pnl', {}).get('doge_rolling_1h_halt_pct', 0.08),
+                asset_specific_rolling_pnl_doge_rolling_4h_halt_pct=raw.get('asset_specific_rolling_pnl', {}).get('doge_rolling_4h_halt_pct', 0.12),
+                
+                # Updated adaptive risk bands (2026 research: more granular)
+                guardrails_adaptive_risk_bands=guardrails.get('adaptive_risk_bands', []),
             )
             
             logger.info(f"[Crypto15mProfileAdapter] Loaded profile {self._profile.profile_name} v{self._profile.profile_version}")
