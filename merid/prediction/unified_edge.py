@@ -290,9 +290,10 @@ class UnifiedEdgeComputer:
         self.calibration = calibration or PerAssetCalibration()
         self.alignment_threshold_cents = 50  # Trigger degraded mode if gap > 50 cents
 
-        # DELETED: Edge thresholds - now handled by profile edge_bands (2% unified minimum)
+        # DELETED: Edge thresholds - now handled by profile edge_bands (4% unified minimum)
         # This module focuses on edge computation, not edge validation
-        self.min_edge_cents = 2.0  # FIXED: Changed from 4.0 to 2.0 to match YAML edge_bands small band (2% edge)
+        # INCREASED from 2.0 to 4.0 to match YAML edge_bands small band (4% edge) and prevent 100% losses
+        self.min_edge_cents = 4.0
         self.max_spread_pct = 0.70  # Maximum spread as percentage of mid (70%) - adjusted for crypto markets
         # CRITICAL FIX: Load max_spread_cents from profile guardrails_max_spread_cents
         self.max_spread_cents = self._load_max_spread_cents_from_profile()
@@ -372,7 +373,7 @@ class UnifiedEdgeComputer:
         best_yes_ask = contract.orderbook.best_yes_ask if contract.orderbook else None
         
         # DELETED: Dynamic edge thresholds based on volatility regime
-        # Edge validation now handled by profile edge_bands (2-4% watch, 4-6% small, >=6% standard)
+        # Edge validation now handled by profile edge_bands (4-5% watch, 5-7% small, >=7% standard)
         min_edge_cents = self.min_edge_cents
         max_spread_pct = self.max_spread_pct
         

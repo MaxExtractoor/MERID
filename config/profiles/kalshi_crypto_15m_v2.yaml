@@ -621,11 +621,11 @@ assets:
       static: profile
       description: "Maximum contracts for BTC (static for this profile)"
     # Edge thresholds based on 2026 volatility research (BTC: 45-55% vol, 1.5-3% intraday range)
-    # Tier 1 (core assets): 4-5% min edge (INCREASED from 3-4% based on industry 20% edge standard)
-    min_edge_early: 0.04  # INCREASED from 3% to 4% early edge
-    min_edge_mid: 0.04  # INCREASED from 3% to 4% mid edge
-    min_edge_late: 0.04  # INCREASED from 3% to 4% late edge
-    min_edge_terminal: 0.05  # INCREASED from 4% to 5% terminal edge (tighter near expiry)
+    # Tier 1 (core assets): 6-7% min edge (INCREASED from 4-5% based on 100% loss analysis - current edges too low)
+    min_edge_early: 0.06  # INCREASED from 4% to 6% early edge (100% losses indicate 4% too low)
+    min_edge_mid: 0.06  # INCREASED from 4% to 6% mid edge (100% losses indicate 4% too low)
+    min_edge_late: 0.06  # INCREASED from 4% to 6% late edge (100% losses indicate 4% too low)
+    min_edge_terminal: 0.07  # INCREASED from 5% to 7% terminal edge (100% losses indicate 5% too low)
     # Distance-from-target filter
     max_distance_pct: 0.015  # 1.5% max distance for BTC (deep liquidity allows tighter bounds)
     # Liquidity and microstructure filters
@@ -650,11 +650,11 @@ assets:
       static: profile
       description: "Maximum contracts for ETH (static for this profile)"
     # Edge thresholds based on 2026 volatility research (ETH: 45.2% vol in April 2026, declining - L2 scaling maturation)
-    # Tier 1 (core assets): 4-5% min edge (INCREASED from 3% based on industry 20% edge standard)
-    min_edge_early: 0.04  # INCREASED from 3% to 4% early edge
-    min_edge_mid: 0.04  # INCREASED from 3% to 4% mid edge
-    min_edge_late: 0.04  # INCREASED from 3% to 4% late edge
-    min_edge_terminal: 0.05  # INCREASED from 4% to 5% terminal edge (tighter near expiry)
+    # Tier 1 (core assets): 6-7% min edge (INCREASED from 4-5% based on 100% loss analysis - current edges too low)
+    min_edge_early: 0.06  # INCREASED from 4% to 6% early edge (100% losses indicate 4% too low)
+    min_edge_mid: 0.06  # INCREASED from 4% to 6% mid edge (100% losses indicate 4% too low)
+    min_edge_late: 0.06  # INCREASED from 4% to 6% late edge (100% losses indicate 4% too low)
+    min_edge_terminal: 0.07  # INCREASED from 5% to 7% terminal edge (100% losses indicate 5% too low)
     # Distance-from-target filter
     max_distance_pct: 0.018  # 1.8% max distance for ETH (tightened from 2.0% - declining volatility)
     # Liquidity and microstructure filters
@@ -679,11 +679,11 @@ assets:
       static: profile
       description: "Maximum contracts for SOL (static for this profile)"
     # Edge thresholds based on 2026 volatility research (SOL: 89.6% vol in April 2026, increasing - speculative capital rotation)
-    # Tier 2 (alt assets): 6-7% min edge (INCREASED from 5-6% based on industry 20% edge standard)
-    min_edge_early: 0.06  # INCREASED from 5% to 6% early edge
-    min_edge_mid: 0.06  # INCREASED from 5% to 6% mid edge
-    min_edge_late: 0.06  # INCREASED from 5% to 6% late edge
-    min_edge_terminal: 0.07  # INCREASED from 6% to 7% terminal edge (tightest for high volatility asset)
+    # Tier 2 (alt assets): 8-9% min edge (INCREASED from 6-7% based on 100% loss analysis - current edges too low)
+    min_edge_early: 0.08  # INCREASED from 6% to 8% early edge (100% losses indicate 6% too low)
+    min_edge_mid: 0.08  # INCREASED from 6% to 8% mid edge (100% losses indicate 6% too low)
+    min_edge_late: 0.08  # INCREASED from 6% to 8% late edge (100% losses indicate 6% too low)
+    min_edge_terminal: 0.09  # INCREASED from 7% to 9% terminal edge (100% losses indicate 7% too low)
     # Distance-from-target filter
     max_distance_pct: 0.025  # 2.5% max distance for SOL (appropriate for high volatility)
     # Liquidity and microstructure filters
@@ -708,11 +708,11 @@ assets:
       static: profile
       description: "Maximum contracts for XRP (static for this profile)"
     # Edge thresholds based on 2026 volatility research (XRP: ~55% vol, event-driven, beta 1.35)
-    # Tier 2 (alt assets): 5-6% min edge (INCREASED from 4-5% based on industry 20% edge standard)
-    min_edge_early: 0.05  # INCREASED from 4% to 5% early edge
-    min_edge_mid: 0.05  # INCREASED from 4% to 5% mid edge
-    min_edge_late: 0.05  # INCREASED from 4% to 5% late edge
-    min_edge_terminal: 0.06  # INCREASED from 5% to 6% terminal edge (tighter near expiry)
+    # Tier 2 (alt assets): 7-8% min edge (INCREASED from 5-6% based on 100% loss analysis - current edges too low)
+    min_edge_early: 0.07  # INCREASED from 5% to 7% early edge (100% losses indicate 5% too low)
+    min_edge_mid: 0.07  # INCREASED from 5% to 7% mid edge (100% losses indicate 5% too low)
+    min_edge_late: 0.07  # INCREASED from 5% to 7% late edge (100% losses indicate 5% too low)
+    min_edge_terminal: 0.08  # INCREASED from 6% to 8% terminal edge (100% losses indicate 6% too low)
     # Distance-from-target filter
     max_distance_pct: 0.025  # 2.5% max distance for XRP (tightened from 3.0% - event-driven needs precision)
     # Liquidity and microstructure filters
@@ -737,11 +737,11 @@ assets:
       static: profile
       description: "Maximum contracts for DOGE (static for this profile)"
     # Edge thresholds based on 2026 volatility research (DOGE: ~100% vol, sentiment-driven, highest beta 2.70)
-    # Tier 2 (alt assets): 6.5-7.5% min edge (INCREASED from 6-7% based on 100% loss in sample data)
-    min_edge_early: 0.065  # INCREASED from 6% to 6.5% early edge (highest for most volatile asset)
-    min_edge_mid: 0.065  # INCREASED from 6% to 6.5% mid edge
-    min_edge_late: 0.065  # INCREASED from 6% to 6.5% late edge
-    min_edge_terminal: 0.075  # INCREASED from 7% to 7.5% terminal edge (tightest for most volatile asset)
+    # Tier 2 (alt assets): 8.5-9.5% min edge (INCREASED from 6.5-7.5% based on 100% loss analysis - current edges too low)
+    min_edge_early: 0.085  # INCREASED from 6.5% to 8.5% early edge (100% losses indicate 6.5% too low)
+    min_edge_mid: 0.085  # INCREASED from 6.5% to 8.5% mid edge (100% losses indicate 6.5% too low)
+    min_edge_late: 0.085  # INCREASED from 6.5% to 8.5% late edge (100% losses indicate 6.5% too low)
+    min_edge_terminal: 0.095  # INCREASED from 7.5% to 9.5% terminal edge (100% losses indicate 7.5% too low)
     # Distance-from-target filter
     max_distance_pct: 0.025  # Tightened from 3.0% to 2.5% (sentiment-driven needs precision)
     # Liquidity and microstructure filters
@@ -790,23 +790,22 @@ confidence:
 
 # ── Tiered Edge Band Configuration ───────────────────────────────────────────
 # TIERED STRUCTURE: 1-2% watch, 2-4% small, ≥4% standard
-# 2026 OPTIMIZATION: Lowered thresholds for increased trade frequency
-# Industry standard: Trade edges down to 1-2% with 53%+ win rate floor
-# Reference: https://github.com/usmanch96/binary-options-ml (58.47% win rate at 9.5% coverage)
+# 2026 FIX: RAISED thresholds based on 100% loss analysis - previous 1-3% edges too low
+# CRITICAL: Edge bands are the ACTUAL thresholds used (per-asset min_edge fields are ignored)
 edge_bands:
   enabled: true  # Enable tiered edge band logic
   watch_band:
-    min_edge_pct: 0.008  # 0.8% minimum edge for watch band (lowered from 1% for more coverage)
-    max_edge_pct: 0.015  # 1.5% maximum edge for watch band (lowered from 2%)
+    min_edge_pct: 0.04  # 4% minimum edge for watch band (INCREASED from 0.8% to prevent 100% losses)
+    max_edge_pct: 0.05  # 5% maximum edge for watch band (INCREASED from 1.5%)
     action: "log_only"  # Log candidates but don't trade
     kelly_multiplier: 0.0  # No sizing in watch band
   small_band:
-    min_edge_pct: 0.015  # 1.5% minimum edge for small band (lowered from 2%)
-    max_edge_pct: 0.03  # 3% maximum edge for small band (lowered from 4%)
+    min_edge_pct: 0.05  # 5% minimum edge for small band (INCREASED from 1.5% to prevent 100% losses)
+    max_edge_pct: 0.07  # 7% maximum edge for small band (INCREASED from 3%)
     action: "trade_small"  # Trade with reduced size
     kelly_multiplier: 0.25  # 0.25x Kelly for small band
   standard_band:
-    min_edge_pct: 0.03  # 3% minimum edge for standard band (lowered from 4%)
+    min_edge_pct: 0.07  # 7% minimum edge for standard band (INCREASED from 3% to prevent 100% losses)
     max_edge_pct: 1.0  # No upper limit
     action: "trade_standard"  # Trade with standard size
     kelly_multiplier: 0.50  # 0.5x Kelly for standard band

@@ -65,11 +65,12 @@ def _get_min_edge_for_phase(phase: ExpiryPhase) -> Decimal:
     """Get min edge from profile edge_bands (single source of truth).
 
     DELETED: kalshi_distance.yaml and env var overrides - now uses profile edge_bands
-    (1-2% watch, 2-4% small, >=4% standard) with 2% hard floor for all phases.
-    FIXED: Changed from 4% to 2% to match YAML edge_bands small band and kelly_min_edge_pct.
+    (4-5% watch, 5-7% small, >=7% standard) with 4% hard floor for all phases.
+    FIXED: Changed from 2% to 4% to match YAML edge_bands small band and prevent 100% losses.
     """
-    # Single source of truth: 2% minimum edge from profile edge_bands (small band floor)
-    return Decimal("0.02")
+    # Single source of truth: 4% minimum edge from profile edge_bands (small band floor)
+    # INCREASED from 2% to 4% based on 100% loss analysis - previous 2% too low
+    return Decimal("0.04")
 
 
 # Validate config loaded at module import time

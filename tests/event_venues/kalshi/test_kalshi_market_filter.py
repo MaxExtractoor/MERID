@@ -90,7 +90,7 @@ class TestEvaluate:
         assert "spread" in reason
 
     def test_price_too_low_rejected(self):
-        cfg = MarketFilterConfig(min_price_cents=15)
+        cfg = MarketFilterConfig(min_price_cents=50)
         filt = MarketFilter(cfg)
         m = _market(bid=5, ask=10)  # mid=7
         passed, reason = filt.evaluate(m)
@@ -98,7 +98,7 @@ class TestEvaluate:
         assert "price" in reason
 
     def test_price_too_high_rejected(self):
-        cfg = MarketFilterConfig(max_price_cents=85)
+        cfg = MarketFilterConfig(max_price_cents=70)
         filt = MarketFilter(cfg)
         m = _market(bid=90, ask=95)  # mid=92
         passed, reason = filt.evaluate(m)
@@ -219,3 +219,28 @@ class TestSummary:
         assert "filter" in s
         assert "overlap_groups" in s
         assert s["filter"]["total_input"] == 2
+
+
+# ── DEFAULT_FILTER_CONFIG Validation ───────────────────────────────────
+
+class TestDefaultFilterConfig:
+    """Test that DEFAULT_FILTER_CONFIG has correct thresholds to prevent 100% losses."""
+
+    def test_default_config_min_price_is_50(self):
+        """Test that DEFAULT_FILTER_CONFIG min_price_cents is 50 (INCREASED from 10 to prevent 100% losses)."""
+        assert DEFAULT_FILTER_CONFIG.min_price_cents == 50, \
+            f"Expected min_price_cents=50, got {DEFAULT_FILTER_CONFIG.min_price_cents}"
+
+    def test_default_config_max_price_is_70(self):
+        """Test that DEFAULT_FILTER_CONFIG max_price_cents is 70 (REDUCED from 90 to prevent low-profit trades)."""
+        assert DEFAULT_FILTER_CONFIG.max_price_cents == 70, \
+            f"Expected max_price_cents=70, got {DEFAULT_FILTER_CONFIG.max_price_cents}"
+
+    def test_default_config_price_range_is_50_70(self):
+        """Test that DEFAULT_FILTER_CONFIG price range is [50, 70] to match profile."""
+        assert DEFAULT_FILTER_CONFIG.min_price_cents == 50, \
+            f"Expected min_price_cents=50, got {DEFAULT_FILTER_CONFIG.min_price_cents}"
+        assert DEFAULT_FILTER_CONFIG.max_price_cents == 70, \
+            f"Expected max_price_cents=70, got {DEFAULT_FILTER_CONFIG.max_price_cents}"
+        assert DEFAULT_FILTER_CONFIG.min_price_cents < DEFAULT_FILTER_CONFIG.max_price_cents, \
+            "min_price_cents should be less than max_price_cents"
