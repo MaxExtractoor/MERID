@@ -484,9 +484,13 @@ class KalshiStrategy:
                 # LEGACY REMOVAL: dynamic_sizing moved to archive/legacy/ during 15m stack cleanup
                 price_cents = None
                 if price_cents is None or price_cents <= 0:
-                    price_cents = max(1, min(99, int(round(market_prob * 100))))
+                    # CRITICAL FIX: Clamp to 15-70 cents to prevent $0.99 purchases
+                    # This aligns with order_router.py _check_intent_risk validation [15, 70]
+                    price_cents = max(15, min(70, int(round(market_prob * 100))))
             except Exception:
-                price_cents = max(1, min(99, int(round(market_prob * 100))))
+                # CRITICAL FIX: Clamp to 15-70 cents to prevent $0.99 purchases
+                # This aligns with order_router.py _check_intent_risk validation [15, 70]
+                price_cents = max(15, min(70, int(round(market_prob * 100))))
 
             # FIX: Validate actual price against max_price_cents from threshold matrix
             # This prevents momentum scalping from trading high-priced (low-edge) contracts
@@ -2701,7 +2705,9 @@ class KalshiStrategy:
 
         # Mid price (integer cents) for risk sizing, PM logs, and TradeProposal.intent_risk —
         # QUOTE previously omitted limit_price_cents, which made intent_risk=0 downstream.
-        mid_cents = max(1, min(99, int((bid + ask) // 2)))
+        # CRITICAL FIX: Clamp to 15-70 cents to prevent $0.99 purchases
+        # This aligns with order_router.py _check_intent_risk validation [15, 70]
+        mid_cents = max(15, min(70, int((bid + ask) // 2)))
 
         _depth = int(self.config.min_depth_contracts)
         _vm = self._pm_vol_band_size_factor(snapshot)

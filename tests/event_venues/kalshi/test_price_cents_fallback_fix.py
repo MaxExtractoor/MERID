@@ -6,6 +6,8 @@ market_prob was very low, causing the position sizer to return 0 contracts.
 
 Fix: Changed fallback from probability-derived (max(1, min(99, int(round(market_prob * 100)))))
 to safe default of 50 cents, which is the midpoint for binary options.
+
+2026 UPDATE: Price clamping now uses [15, 70] range instead of [1, 99] to prevent $0.99 purchases.
 """
 
 import pytest

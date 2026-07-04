@@ -645,7 +645,10 @@ async def _kalshi_place_order(
         try:
             from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
 
-            _pc = max(1, min(99, int(price_cents or 50)))
+            # CRITICAL FIX: Clamp to 15-70 cents to prevent $0.99 purchases
+            # This aligns with order_router.py _check_intent_risk validation [15, 70]
+            # and profile guardrails_max_contract_price_cents (70c for 43% minimum payout)
+            _pc = max(15, min(70, int(price_cents or 50)))
 
             # Map side/action to Kalshi format
             side_lower = side.lower() if side else ""
@@ -655,12 +658,42 @@ async def _kalshi_place_order(
                           "BUY_NO" if side_lower == "no" and action_lower == "buy" else \
                           "SELL_NO" if side_lower == "no" and action_lower == "sell" else "BUY_YES"
 
+            # CRITICAL FIX: Clamp count to asset-specific max_contracts limit to prevent overspending
+            # Read from kalshi_crypto_15m_v2.yaml assets.{asset}.max_contracts (default 2)
+            # Extract asset from ticker
+            asset = None
+            ticker_upper = ticker.upper()
+            if "BTC" in ticker_upper:
+                asset = "BTC"
+            elif "ETH" in ticker_upper:
+                asset = "ETH"
+            elif "SOL" in ticker_upper:
+                asset = "SOL"
+            elif "XRP" in ticker_upper:
+                asset = "XRP"
+            elif "DOGE" in ticker_upper:
+                asset = "DOGE"
+            
+            max_contracts_limit = 2  # Default fallback (per-asset limit)
+            if asset:
+                try:
+                    from merid.risk.profiles.crypto_15m_profile import get_active_profile
+                    profile_adapter = get_active_profile()
+                    if profile_adapter and hasattr(profile_adapter.profile, 'assets'):
+                        assets_config = profile_adapter.profile.assets
+                        if assets_config and asset in assets_config:
+                            asset_config = assets_config[asset]
+                            if hasattr(asset_config, 'max_contracts'):
+                                max_contracts_limit = asset_config.max_contracts
+                except Exception as e:
+                    logger.debug("[kalshi_tools] Failed to load max_contracts from profile: %s, using default 2", e)
+            
             intent = OrderIntent(
                 ticker=ticker,
                 side=kalshi_side,
                 action=action,
                 price_cents=_pc,
-                count=max(1, int(count)),
+                count=max(1, min(max_contracts_limit, int(count))),
                 source="kalshi_tools",
                 agent_id=_agent_name if _agent_name else "kalshi_tools",
             )
@@ -1010,7 +1043,9 @@ def build_live_route_order_intent(
         pc = 0
         otype = "market"
     else:
-        pc = max(1, min(99, int(price_cents)))
+        # CRITICAL FIX: Clamp to 15-70 cents to prevent $0.99 purchases
+        # This aligns with order_router.py _check_intent_risk validation [15, 70]
+        pc = max(15, min(70, int(price_cents)))
         otype = "limit"
 
     # Compute default TP/SL for 15m crypto entry orders if not provided
@@ -1039,12 +1074,42 @@ def build_live_route_order_intent(
                 if stop_loss_price_cents is None:
                     stop_loss_price_cents = max(1, pc - 5)
 
+    # CRITICAL FIX: Clamp count to asset-specific max_contracts limit to prevent overspending
+    # Read from kalshi_crypto_15m_v2.yaml assets.{asset}.max_contracts (default 2)
+    # Extract asset from ticker
+    asset = None
+    ticker_upper = ticker.upper()
+    if "BTC" in ticker_upper:
+        asset = "BTC"
+    elif "ETH" in ticker_upper:
+        asset = "ETH"
+    elif "SOL" in ticker_upper:
+        asset = "SOL"
+    elif "XRP" in ticker_upper:
+        asset = "XRP"
+    elif "DOGE" in ticker_upper:
+        asset = "DOGE"
+    
+    max_contracts_limit = 2  # Default fallback (per-asset limit)
+    if asset:
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+            profile_adapter = get_active_profile()
+            if profile_adapter and hasattr(profile_adapter.profile, 'assets'):
+                assets_config = profile_adapter.profile.assets
+                if assets_config and asset in assets_config:
+                    asset_config = assets_config[asset]
+                    if hasattr(asset_config, 'max_contracts'):
+                        max_contracts_limit = asset_config.max_contracts
+        except Exception as e:
+            logger.debug("[kalshi_tools] Failed to load max_contracts from profile: %s, using default 2", e)
+
     intent = OrderIntent(
         ticker=ticker,
         side=side,
         action=action,
         price_cents=pc,
-        count=max(1, int(count)),
+        count=max(1, min(max_contracts_limit, int(count))),
         mode=None,
         order_type=otype,
         source=source,

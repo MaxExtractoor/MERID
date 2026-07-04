@@ -120,7 +120,9 @@ class CanonicalOrderIntent:
         action = parts[0] if len(parts) == 2 else "buy"
         side = parts[1] if len(parts) == 2 else "yes"
         price_float = float(d.get("price", 0.5))
-        price_cents = max(1, min(99, round(price_float * 100)))
+        # CRITICAL FIX: Clamp to 15-70 cents to prevent $0.99 purchases
+        # This aligns with order_router.py _check_intent_risk validation [15, 70]
+        price_cents = max(15, min(70, round(price_float * 100)))
         return cls(
             ticker=d.get("market_ticker", ""),
             side=side,
