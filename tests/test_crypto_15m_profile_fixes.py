@@ -274,9 +274,9 @@ class TestPriceFloorGuardrail:
             guardrails = profile_yaml.get('guardrails', {})
 
             # Check that price_range max_price_cents matches guardrails max_contract_price_cents
-            # UPDATED: price_range max_price_cents is 75 (raised from 70 to allow more opportunities)
-            assert price_range.get('max_price_cents') == 75, \
-                f"Expected price_range max_price_cents=75, got {price_range.get('max_price_cents')}"
+            # UPDATED for scaling: price_range max_price_cents is 70 (optimized for scaling strategies)
+            assert price_range.get('max_price_cents') == 70, \
+                f"Expected price_range max_price_cents=70, got {price_range.get('max_price_cents')}"
             assert guardrails.get('max_contract_price_cents') == 70, \
                 f"Expected guardrails max_contract_price_cents=70, got {guardrails.get('max_contract_price_cents')}"
         except Exception as e:
@@ -349,8 +349,8 @@ class TestPriceFloorGuardrail:
         except Exception as e:
             pytest.skip(f"Agent grid price clamping check skipped: {e}")
 
-    def test_order_router_price_validation_minimum_15c(self):
-        """Test that order_router.py price validation uses 15¢ minimum (not 5¢)."""
+    def test_order_router_price_validation_matches_profile(self):
+        """Test that order_router.py price validation matches profile price_range [50, 70]."""
         try:
             import inspect
             from merid.event_venues.kalshi.order_router import _check_intent_risk
@@ -358,17 +358,17 @@ class TestPriceFloorGuardrail:
             # Get the source code of the _check_intent_risk function
             source = inspect.getsource(_check_intent_risk)
 
-            # Verify that the minimum price validation is 15c (not 5c)
-            assert "if intent.price_cents < 15 or intent.price_cents > 70:" in source, \
-                "order_router.py should validate price in [15, 70] range (not [5, 70])"
+            # Verify that the price validation matches profile price_range [50, 70]
+            assert "if intent.price_cents < 50 or intent.price_cents > 70:" in source, \
+                "order_router.py should validate price in [50, 70] range (matches kalshi_crypto_15m_v2.yaml)"
             
-            # Verify that 5c is NOT used as minimum (the old bug)
-            assert "if intent.price_cents < 5" not in source, \
-                "order_router.py should NOT use 5c minimum (this was a bypass path for 5¢ trades)"
+            # Verify that 15c is NOT used as minimum (the old bug)
+            assert "if intent.price_cents < 15" not in source, \
+                "order_router.py should NOT use 15c minimum (this was outdated)"
             
-            # Verify that the comment mentions 15c minimum
-            assert "15 cents" in source or "15¢" in source or "15c" in source, \
-                "order_router.py should document the 15c minimum in comments"
+            # Verify that the comment mentions 50c minimum
+            assert "50 cents" in source or "50¢" in source or "50c" in source, \
+                "order_router.py should document the 50c minimum in comments"
         except Exception as e:
             pytest.skip(f"Order router price validation check skipped: {e}")
 

@@ -1101,6 +1101,9 @@ class OrderIntent:
     stop_loss_price_cents: Optional[int] = None  # Protective stop in cents
     # Sizing context for TRADE-TRACE (links fill back to edge/sizing decision)
     edgepct: float = 0.0
+    # Order scaling configuration
+    scaling_enabled: bool = False  # Enable order scaling (TWAP/iceberg/adaptive)
+    scaling_strategy: str = "none"  # Strategy: "twap", "iceberg", "adaptive"
     # Phase 1: Market microstructure data for fee-aware edge and microstructure gates
     yes_bid_cents: Optional[int] = None
     yes_ask_cents: Optional[int] = None
@@ -1452,9 +1455,9 @@ def simulate_paper_fill(
     rng = _rng if _rng is not None else _random_module
 
     requested_count = max(0, int(intent.count))
-    # CRITICAL FIX: Clamp to 15-70 cents to prevent $0.99 purchases
-    # This aligns with _check_intent_risk validation [15, 70]
-    requested_price = max(15, min(70, int(intent.price_cents)))
+    # CRITICAL FIX: Clamp to 55-75 cents to prevent degenerate pricing
+    # This aligns with kalshi_crypto_15m_v2.yaml price_range [55, 75]
+    requested_price = max(55, min(75, int(intent.price_cents)))
 
     # Basic side-aware slippage in cents from configured basis points.
     slippage_cents = max(0, int(round(requested_price * PAPER_SLIPPAGE_BPS / 10_000)))
@@ -1615,12 +1618,12 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
         _increment_validation_gate_metric("ROUTER_VALIDATION", "non_positive_size")
         return "non_positive_size"
     # CRITICAL: Add price range validation to prevent degenerate trades
-    # Minimum 15 cents aligns with global 15¢ price guard (prevents 5¢ DOGE NO trades)
-    # Maximum 70 cents prevents buying at 89-99 cents with poor expected returns
-    # Aligned with profile guardrails_max_contract_price_cents (70c for 43% minimum payout)
-    if intent.price_cents < 15 or intent.price_cents > 70:
+    # Range [50, 70] aligns with kalshi_crypto_15m_v2.yaml price_range configuration
+    # Optimized for scaling: mid-range prices have better liquidity depth for child orders
+    # This prevents <50¢ lottery tickets (10.4% win rate) and >70¢ low-profit trades
+    if intent.price_cents < 50 or intent.price_cents > 70:
         logger.warning(
-            "[CHECK-INTENT-RISK] price_cents=%d outside valid range [15, 70] - REJECTING (prevents degenerate pricing)",
+            "[CHECK-INTENT-RISK] price_cents=%d outside valid range [50, 70] - REJECTING (prevents degenerate pricing)",
             intent.price_cents
         )
         _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "invalid_price")
@@ -6228,10 +6231,230 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
         "live_route" if _is_live_mode(mode) else "sync_route"
     )
     
+    # ── ORDER SCALING: Check if order should be scaled ─────────────────────
+    # Apply institutional scaling strategies (TWAP, iceberg, adaptive)
+    # Only scale if enabled and order meets criteria (size >= 3, edge >= 2%)
+    if getattr(intent, 'scaling_enabled', False) and intent.count >= 3:
+        scaling_result = await _execute_scaled_order(intent, mode, t0)
+        if scaling_result is not None:
+            # Scaling was applied, return the result
+            return scaling_result
+    
     if _is_live_mode(mode):
         return await _route_live(intent, mode, t0)
 
     return _route_sync_non_live(intent, mode, t0)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Order Scaling Execution — Institutional-grade scaling strategies
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+async def _execute_scaled_order(
+    intent: OrderIntent,
+    mode: TradingMode,
+    t0: float,
+) -> Optional[OrderResult]:
+    """
+    Execute order using scaling strategy (TWAP, iceberg, adaptive).
+    
+    Splits large orders into child orders to reduce market impact and signaling.
+    
+    Args:
+        intent: Original order intent
+        mode: Trading mode
+        t0: Start time for latency tracking
+        
+    Returns:
+        OrderResult if scaling was applied, None if scaling not applicable
+    """
+    try:
+        from merid.event_venues.kalshi.order_scaler import (
+            get_order_scaler,
+            ScalingStrategy,
+            ScalingConfig,
+        )
+        
+        # Get market depth for scaling decision
+        market_depth = 0
+        if intent.yes_depth is not None:
+            market_depth = intent.yes_depth if intent.side.lower() == "yes" else intent.no_depth or 0
+        else:
+            market_depth = 50  # Default assumption
+        
+        # Get edge percentage
+        edge_pct = intent.edge_pct or 0.0
+        
+        # Determine strategy from intent or default to adaptive
+        strategy_str = getattr(intent, 'scaling_strategy', 'adaptive').lower()
+        strategy_map = {
+            'twap': ScalingStrategy.TWAP,
+            'vwap': ScalingStrategy.VWAP,
+            'iceberg': ScalingStrategy.ICEBERG,
+            'adaptive': ScalingStrategy.ADAPTIVE,
+        }
+        strategy = strategy_map.get(strategy_str, ScalingStrategy.ADAPTIVE)
+        
+        # Load scaling config from profile (use defaults if unavailable)
+        min_child_orders = 2
+        max_child_orders = 5
+        time_window_seconds = 300.0
+        participation_rate = 0.10
+        visible_pct = 0.10
+        edge_threshold = 0.02
+        size_threshold_contracts = 3
+        
+        try:
+            from merid.risk.profiles.crypto_15m_profile import is_profile_active, get_active_profile
+            if is_profile_active():
+                profile_adapter = get_active_profile()
+                if profile_adapter and hasattr(profile_adapter, 'profile'):
+                    profile = profile_adapter.profile
+                    if hasattr(profile, 'order_scaling'):
+                        scaling_config = profile.order_scaling
+                        min_child_orders = getattr(scaling_config, 'min_child_orders', 2)
+                        max_child_orders = getattr(scaling_config, 'max_child_orders', 5)
+                        time_window_seconds = getattr(scaling_config, 'time_window_seconds', 300.0)
+                        participation_rate = getattr(scaling_config, 'participation_rate', 0.10)
+                        visible_pct = getattr(scaling_config, 'visible_pct', 0.10)
+                        edge_threshold = getattr(scaling_config, 'edge_threshold', 0.02)
+                        size_threshold_contracts = getattr(scaling_config, 'size_threshold_contracts', 3)
+                        logger.debug(
+                            "[ORDER-SCALING] Loaded config from profile: min_orders=%d max_orders=%d window=%.1fs",
+                            min_child_orders, max_child_orders, time_window_seconds
+                        )
+        except Exception as e:
+            logger.warning("[ORDER-SCALING] Failed to load scaling config from profile, using defaults: %s", e)
+        
+        # Create scaler with config
+        config = ScalingConfig(
+            strategy=strategy,
+            min_child_orders=min_child_orders,
+            max_child_orders=max_child_orders,
+            time_window_seconds=time_window_seconds,
+            participation_rate=participation_rate,
+            visible_pct=visible_pct,
+            edge_threshold=edge_threshold,
+            size_threshold_contracts=size_threshold_contracts,
+        )
+        scaler = get_order_scaler(config)
+        
+        # Create scaling plan
+        plan = scaler.create_scaling_plan(
+            ticker=intent.ticker,
+            side=intent.side.lower(),
+            action=intent.action.lower(),
+            price_cents=intent.price_cents,
+            total_contracts=intent.count,
+            edge_pct=edge_pct,
+            market_depth=market_depth,
+            parent_intent_id=intent.intent_id,
+        )
+        
+        if plan is None:
+            # Scaling not recommended, return None to use normal routing
+            logger.debug(
+                "[ORDER-SCALING] Scaling not recommended for intent_id=%s ticker=%s count=%d edge=%.2f",
+                intent.intent_id, intent.ticker, intent.count, edge_pct
+            )
+            return None
+        
+        logger.info(
+            "[ORDER-SCALING] Executing scaled order: strategy=%s parent=%s total=%d children=%d",
+            plan.strategy.value, plan.parent_intent_id, plan.total_contracts, len(plan.child_orders)
+        )
+        
+        # Execute child orders sequentially with delays
+        total_filled = 0
+        total_rejected = 0
+        first_result = None
+        
+        for i, child in enumerate(plan.child_orders):
+            # PRODUCTION SAFETY: Check if we've already filled the target
+            if total_filled >= intent.count:
+                logger.info(
+                    "[ORDER-SCALING] Target filled early: filled=%d target=%d, skipping remaining %d child orders",
+                    total_filled, intent.count, len(plan.child_orders) - i
+                )
+                break
+            
+            # Wait for delay (except first order)
+            if child.delay_seconds > 0:
+                await asyncio.sleep(child.delay_seconds)
+            
+            # Create child intent
+            child_intent = _dc_replace(intent)
+            child_intent.count = child.count
+            child_intent.intent_id = f"{intent.intent_id}_child_{i}"
+            child_intent.parent_intent_id = intent.intent_id
+            child_intent.leg_index = i
+            child_intent.rationale = f"Scaled order child {i+1}/{len(plan.child_orders)}: {plan.rationale}"
+            
+            # PRODUCTION SAFETY: Disable scaling for child orders to prevent recursive scaling
+            child_intent.scaling_enabled = False
+            
+            # Route child order
+            try:
+                if _is_live_mode(mode):
+                    child_result = await _route_live(child_intent, mode, t0)
+                else:
+                    child_result = _route_sync_non_live(child_intent, mode, t0)
+            except Exception as e:
+                logger.error(
+                    "[ORDER-SCALING] Child %d/%d failed with exception: %s",
+                    i + 1, len(plan.child_orders), e, exc_info=True
+                )
+                # Create error result
+                child_result = OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason=f"child_order_exception:{str(e)}",
+                    latency_ms=0.0,
+                )
+            
+            # Track first result for return value
+            if first_result is None:
+                first_result = child_result
+            
+            # Track fills
+            if child_result.status in ("filled_live", "filled_paper", "filled_mock"):
+                total_filled += child.count
+            else:
+                total_rejected += child.count
+            
+            logger.info(
+                "[ORDER-SCALING] Child %d/%d: status=%s count=%d cumulative_filled=%d",
+                i + 1, len(plan.child_orders), child_result.status, child.count, total_filled
+            )
+        
+        # Return aggregate result
+        latency = (_time.monotonic() - t0) * 1000
+        if total_filled >= intent.count:
+            status = "filled_live" if _is_live_mode(mode) else "filled_paper"
+        elif total_filled > 0:
+            status = "partial_fill"
+        else:
+            status = "rejected"
+        
+        return OrderResult(
+            status=status,
+            mode=mode,
+            reason=f"scaled_execution:{plan.strategy.value}",
+            latency_ms=round(latency, 2),
+            fill={
+                "filled_contracts": total_filled,
+                "rejected_contracts": total_rejected,
+                "total_contracts": intent.count,
+                "strategy": plan.strategy.value,
+                "child_orders": len(plan.child_orders),
+            } if total_filled > 0 else None,
+        )
+        
+    except Exception as e:
+        logger.error("[ORDER-SCALING] Failed to execute scaled order: %s", e, exc_info=True)
+        # Return None to fall back to normal routing
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════

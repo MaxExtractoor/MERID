@@ -3905,6 +3905,30 @@ class Kalshi15mLoop:
                 no_depth=candidate.get("no_depth"),
             )
             
+            # Load order scaling configuration from profile
+            scaling_enabled = False
+            scaling_strategy = "adaptive"
+            try:
+                from merid.risk.profiles.crypto_15m_profile import is_profile_active, get_active_profile
+                if is_profile_active():
+                    profile_adapter = get_active_profile()
+                    if profile_adapter and hasattr(profile_adapter, 'profile'):
+                        profile = profile_adapter.profile
+                        if hasattr(profile, 'order_scaling'):
+                            scaling_config = profile.order_scaling
+                            scaling_enabled = getattr(scaling_config, 'enabled', False)
+                            scaling_strategy = getattr(scaling_config, 'strategy', 'adaptive')
+                            logger.debug(
+                                "[15M-LOOP] Loaded scaling config from profile: enabled=%s strategy=%s",
+                                scaling_enabled, scaling_strategy
+                            )
+            except Exception as e:
+                logger.warning("[15M-LOOP] Failed to load scaling config from profile: %s", e)
+            
+            # Apply scaling configuration to intent
+            intent.scaling_enabled = scaling_enabled
+            intent.scaling_strategy = scaling_strategy
+            
             # Route order
             result = await route_order_async(intent)
             logger.info("[15M-LOOP] Order routed successfully: ticker=%s side=%s count=%d result=%s", 
