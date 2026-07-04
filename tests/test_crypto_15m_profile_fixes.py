@@ -304,15 +304,16 @@ class TestPriceFloorGuardrail:
                 f"Expected ETH max_distance_pct=0.018 (1.8%), got {eth_config.get('max_distance_pct')}"
 
             # SOL: increasing volatility (89.6% in April 2026) - higher min_edge
+            # 2026-07-04: Updated to 8-9% based on 100% loss analysis (6-7% was too low)
             sol_config = assets.get('SOL', {})
-            assert sol_config.get('min_edge_early') == 0.06, \
-                f"Expected SOL min_edge_early=0.06 (6%), got {sol_config.get('min_edge_early')}"
-            assert sol_config.get('min_edge_mid') == 0.06, \
-                f"Expected SOL min_edge_mid=0.06 (6%), got {sol_config.get('min_edge_mid')}"
-            assert sol_config.get('min_edge_late') == 0.06, \
-                f"Expected SOL min_edge_late=0.06 (6%), got {sol_config.get('min_edge_late')}"
-            assert sol_config.get('min_edge_terminal') == 0.07, \
-                f"Expected SOL min_edge_terminal=0.07 (7%), got {sol_config.get('min_edge_terminal')}"
+            assert sol_config.get('min_edge_early') == 0.08, \
+                f"Expected SOL min_edge_early=0.08 (8%), got {sol_config.get('min_edge_early')}"
+            assert sol_config.get('min_edge_mid') == 0.08, \
+                f"Expected SOL min_edge_mid=0.08 (8%), got {sol_config.get('min_edge_mid')}"
+            assert sol_config.get('min_edge_late') == 0.08, \
+                f"Expected SOL min_edge_late=0.08 (8%), got {sol_config.get('min_edge_late')}"
+            assert sol_config.get('min_edge_terminal') == 0.09, \
+                f"Expected SOL min_edge_terminal=0.09 (9%), got {sol_config.get('min_edge_terminal')}"
 
             # XRP: event-driven - tighter max_distance for precision
             xrp_config = assets.get('XRP', {})
