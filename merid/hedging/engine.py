@@ -253,7 +253,13 @@ class CryptoHedgeEngine:
         # Use mid-price heuristic (50¢) unless catalog provides better data
         mid_price_cents = self._resolve_mid_price(asset, tf, market_catalog)
         if mid_price_cents <= 0:
-            mid_price_cents = 50  # safe fallback
+            # CRITICAL: Skip hedge when price is below 50c minimum (lottery ticket behavior)
+            # _resolve_mid_price returns 0 to signal "skip this hedge"
+            logger.info(
+                "[hedge-engine] asset=%s tf=%s skipping hedge - price below 50c minimum",
+                asset, tf
+            )
+            return []  # Return empty list to skip hedge
 
         count = max(1, hedge_count_cents // mid_price_cents)
 
@@ -334,6 +340,10 @@ class CryptoHedgeEngine:
         """Resolve a mid-price for the (asset, tf) cell.
 
         Uses market catalog if available, otherwise falls back to 50¢.
+        
+        CRITICAL: Enforces 50c minimum entry price to match agent grid constraints.
+        This prevents hedge orders at lottery-ticket prices (e.g., 5c) that have
+        statistically poor win rates (10.4% for prices < $0.30 based on 2026-07-03 analysis).
         """
         if market_catalog is not None:
             try:
@@ -342,16 +352,30 @@ class CryptoHedgeEngine:
                     current_market = market_catalog.get_current_15m_market(asset)
                     if current_market:
                         mid = getattr(current_market, "mid_price_cents", 0) or 0
-                        if 1 <= mid <= 99:
+                        # CRITICAL: Enforce 50c minimum to match agent grid min_entry_prices
+                        if 50 <= mid <= 99:
                             return int(mid)
+                        elif mid > 0 and mid < 50:
+                            logger.warning(
+                                "[hedge-engine] asset=%s tf=%s mid_price=%dc < 50c minimum - skipping hedge (lottery ticket behavior)",
+                                asset, tf, mid
+                            )
+                            return 0  # Signal to skip hedge
                 else:
                     # For other timeframes, use get_markets_by_asset (legacy behavior)
                     markets = market_catalog.get_markets_by_asset(asset, timeframe=tf)
                     if markets:
                         best = markets[0]
                         mid = getattr(best, "mid_price_cents", 0) or 0
-                        if 1 <= mid <= 99:
+                        # CRITICAL: Enforce 50c minimum to match agent grid min_entry_prices
+                        if 50 <= mid <= 99:
                             return int(mid)
+                        elif mid > 0 and mid < 50:
+                            logger.warning(
+                                "[hedge-engine] asset=%s tf=%s mid_price=%dc < 50c minimum - skipping hedge (lottery ticket behavior)",
+                                asset, tf, mid
+                            )
+                            return 0  # Signal to skip hedge
             except Exception as e:
                 logger.debug(f"Market catalog price lookup failed: {e}")
         return 50
