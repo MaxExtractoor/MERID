@@ -167,7 +167,7 @@ offset_hedging:
 trailing_stop:
   enabled: true  # Set to true to enable trailing stop
   trailing_distance_cents: 5  # 5 cents trailing distance
-  min_profit_cents: 3  # Only activate after 3c profit
+  min_profit_cents: 12  # Only activate after 12c profit (align with 2026 research: 10-15¢ threshold to avoid noise-triggered exits)
   activation_delay_sec: 30  # Wait 30s before activating
   description: "Trailing stop: lock in profits as price moves favorably"
 
@@ -1053,7 +1053,7 @@ exit_policy:
     # Trailing activation threshold in R-multiples
     activation_r_multiple: 0.8  # Activate trailing at 0.8R (80% of target profit)
     # Giveback amount in cents (how much profit to give back before locking in)
-    giveback_cents: 3  # 3 cent giveback
+    giveback_cents: 5  # 5 cent giveback (40-50% of 12¢ activation threshold per 2026 research)
     # Scale-out configuration
     scale_out_enabled: true  # Enable scale-out at partial profit
     scale_out_trigger_r: 0.7  # Scale out at 0.7R (70% of target profit)

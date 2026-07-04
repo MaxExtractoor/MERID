@@ -2,7 +2,7 @@
 Test trailing stop with FIXED_CENTS type for 15-minute binary options.
 
 This test verifies the critical fix for trailing stop activation:
-- Trailing should activate at min_profit_cents (3 cents) not 1R break-even
+- Trailing should activate at min_profit_cents (12 cents) not 1R break-even
 - FIXED_CENTS trailing type should work correctly
 - Exit callback should be triggered when trail level is crossed
 """
@@ -61,7 +61,7 @@ class TestTrailingStopFixedCents:
         assert trail_level == 45
 
     def test_trailing_activation_at_min_profit_cents(self):
-        """Test trailing activates at min_profit_cents (3 cents) not 1R."""
+        """Test trailing activates at min_profit_cents (12 cents) not 1R."""
         position = Position(
             position_id="test-3",
             market_id="KXBTC15M-TEST",
@@ -80,12 +80,12 @@ class TestTrailingStopFixedCents:
         position.update_runtime_state(52)
         assert position.trailing_activated is False
         
-        # Price moves to 53 cents (3 cent profit) - SHOULD activate
-        position.update_runtime_state(53)
+        # Price moves to 62 cents (12 cent profit) - SHOULD activate
+        position.update_runtime_state(62)
         # Note: Activation is handled by position_monitor, not position itself
         # This test verifies the threshold logic
-        profit_cents = 53 - 50
-        assert profit_cents >= 3  # Meets threshold
+        profit_cents = 62 - 50
+        assert profit_cents >= 12  # Meets threshold
 
     def test_trailing_trigger_on_cross(self):
         """Test trailing stop triggers when price crosses trail level."""
@@ -187,19 +187,19 @@ class TestTrailingStopFixedCents:
         )
         
         # Simulate profit calculation for activation
-        current_price = 53
-        min_profit_cents = 3  # From profile
+        current_price = 62
+        min_profit_cents = 12  # From profile (align with 2026 research)
         
         if position.side == PositionSide.YES:
             profit_cents = current_price - position.avg_entry_price_cents
         else:
             profit_cents = position.avg_entry_price_cents - current_price
         
-        # Should activate at 3 cents profit
+        # Should activate at 12 cents profit
         assert profit_cents >= min_profit_cents
         
-        # Should NOT activate at 2 cents profit
-        current_price = 52
+        # Should NOT activate at 11 cents profit
+        current_price = 61
         if position.side == PositionSide.YES:
             profit_cents = current_price - position.avg_entry_price_cents
         else:

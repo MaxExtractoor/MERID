@@ -517,7 +517,7 @@ class KalshiPositionCache:
                     # Read from kalshi_crypto_15m.yaml trailing_stop section
                     trailing_enabled = False
                     trailing_distance_cents = 5
-                    min_profit_cents = 3
+                    min_profit_cents = 12  # Default from profile (align with 2026 research)
                     activation_delay_sec = 30
                     
                     try:
@@ -1402,7 +1402,7 @@ class KalshiPositionCache:
         try:
             from pathlib import Path
             import yaml
-            profile_yaml_path = Path(__file__).parent.parent.parent.parent / "config" / "profiles" / "kalshi_crypto_15m.yaml"
+            profile_yaml_path = Path(__file__).parent.parent.parent.parent / "config" / "profiles" / "kalshi_crypto_15m_v2.yaml"
             if profile_yaml_path.exists():
                 with open(profile_yaml_path, 'r', encoding='utf-8') as f:
                     profile_config = yaml.safe_load(f)
@@ -1753,79 +1753,10 @@ class KalshiPositionCache:
                         pnl_cents = entry_price_cents - current_price_cents
                     current_r = pnl_cents / risk_cents if risk_cents > 0 else 0.0
 
-                    # P3-FIX8: Get trailing activation threshold from profile (default 0.8R)
-                    try:
-                        from pathlib import Path
-                        import yaml
-                        profile_yaml_path = Path(__file__).parent.parent.parent.parent / "config" / "profiles" / "kalshi_crypto_15m.yaml"
-                        trailing_activation_r = 0.8  # Default fallback
-                        if profile_yaml_path.exists():
-                            with open(profile_yaml_path, 'r', encoding='utf-8') as f:
-                                profile_config = yaml.safe_load(f)
-                            trailing_config = profile_config.get("exit_policy", {}).get("trailing", {})
-                            if trailing_config.get("enabled", False):
-                                trailing_activation_r = trailing_config.get("activation_r_multiple", 0.8)
-                                logger.debug("[TRAIL-CONFIG] Loaded trailing_activation_r=%.2f from profile", trailing_activation_r)
-                    except Exception as exc:
-                        logger.warning(
-                            "[TRAIL-CONFIG] Failed to load trailing activation from profile, using default 0.8R: %s",
-                            exc
-                        )
-                        trailing_activation_r = 0.8  # Fallback
-
-                    # Check if trailing should activate
-                    if current_r >= trailing_activation_r:
-                        logger.info(
-                            "[TRAIL-ACTIVATION] market=%s threshold=%.2fR current=%.2fR",
-                            position.market_id, trailing_activation_r, current_r
-                        )
-                        # Compute new trailing stop using DynamicTakeProfitEngine
-                        confidence = 0.6  # Default confidence for trailing
-                        time_to_expiry_minutes = 10.0  # Default for 15m contracts
-
-                        # Create a TakeProfitPlan for trailing (using default parameters)
-                        from merid.prediction.dynamic_takeprofit import TakeProfitPlan, TakeProfitLevel
-                        trailing_plan = TakeProfitPlan(
-                            tp_price=0.0,  # Not used for trailing stop calculation
-                            tp_r_multiple=trailing_activation_r,
-                            tp_level=TakeProfitLevel.BASE,
-                            trailing_trigger_r=trailing_activation_r,
-                            trailing_distance_r=0.5,  # Default 0.5R trail distance
-                        )
-
-                        # Compute new trailing stop price
-                        new_sl_cents = dtp_engine.compute_trailing_stop(
-                            current_price=current_price_cents / 100.0,  # Convert cents to dollars
-                            entry_price=entry_price_cents / 100.0,
-                            direction='LONG' if position.side == 'yes' else 'SHORT',
-                            plan=trailing_plan,
-                            stop_price=sl_price_cents / 100.0,
-                        )
-                        # Convert back to cents
-                        new_sl_cents = int(new_sl_cents * 100) if new_sl_cents is not None else None
-
-                        # Only update if new SL is better (higher for longs, lower for shorts)
-                        should_update = False
-                        if position.side == "yes":
-                            should_update = new_sl_cents > sl_price_cents
-                        else:  # "no"
-                            should_update = new_sl_cents < sl_price_cents
-
-                        if should_update:
-                            logger.info(
-                                "[TRAIL-UPDATE] market=%s side=%s entry=%dc current=%dc old_sl=%dc new_sl=%dc R=%.2f confidence=%.2f",
-                                position.market_id, position.side, entry_price_cents,
-                                current_price_cents, sl_price_cents, new_sl_cents, current_r, confidence
-                            )
-                            # TODO: Submit order to update SL via order_router
-                            # This requires:
-                            # 1. Cancel existing SL bracket order (if resting brackets enabled)
-                            # 2. Submit new SL order at new_sl_cents
-                        else:
-                            logger.debug(
-                                "[TRAIL-CHECK] market=%s side=%s R=%.2f - no update needed (new_sl=%dc not better than old_sl=%dc)",
-                                position.market_id, position.side, current_r, new_sl_cents, sl_price_cents
-                            )
+                    # P3-FIX8: Get trailing activation threshold from profile (min_profit_cents for 15m binary options)
+                    # NOTE: PositionMonitor handles trailing activation using min_profit_cents (12¢ per 2026 research)
+                    # This loop only handles time-based forced exit, not trailing activation
+                    # Trailing activation is delegated to PositionMonitor to avoid duplicate logic
 
             except Exception as exc:
                 logger.error("[TRAIL-MONITOR] Error in monitoring loop: %s", exc, exc_info=True)

@@ -62,7 +62,7 @@ class Position:
     trailing_type: TrailingType = TrailingType.NONE
     trailing_param: float = 0.0  # e.g., 1.0 R or 1% trail
     max_favorable_price_cents: int = 0  # Updated as price moves favorably
-    trailing_activated: bool = False  # Research: only activate trailing after 1R
+    trailing_activated: bool = False  # Research: activate trailing after min_profit_cents (12¢ per 2026 research)
     
     # Policy references
     window_resolution_id: str = ""
