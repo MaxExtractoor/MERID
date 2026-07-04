@@ -450,6 +450,65 @@ class LeanAgent15m:
         except Exception as e:
             logger.warning("[AGENT-INIT] %s failed to load session risk cap from profile: %s", config.name, e)
         
+        # 2026 Research-Based Risk Management: Portfolio heat tracking
+        self._portfolio_heat_enabled: bool = False
+        self._portfolio_heat_threshold_warning: float = 0.70
+        self._portfolio_heat_threshold_critical: float = 0.85
+        
+        # 2026 Research-Based Risk Management: Asset-specific rolling PnL limits
+        self._rolling_pnl_enabled: bool = False
+        self._rolling_pnl_history: Dict[str, List[Tuple[float, float]]] = {}  # asset -> [(timestamp, pnl_usd)]
+        self._rolling_pnl_1h_window: int = 3600  # 1 hour in seconds
+        self._rolling_pnl_4h_window: int = 14400  # 4 hours in seconds
+        self._rolling_pnl_limits: Dict[str, Dict[str, float]] = {}  # asset -> {1h_limit_pct, 4h_limit_pct}
+        
+        # Initialize rolling PnL history for all assets
+        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+            self._rolling_pnl_history[asset] = []
+        
+        # Load 2026 risk management parameters from profile
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+            profile_adapter = get_active_profile()
+            if profile_adapter and profile_adapter._profile:
+                profile = profile_adapter._profile
+                # Portfolio heat tracking
+                self._portfolio_heat_enabled = profile.portfolio_heat_enabled
+                self._portfolio_heat_threshold_warning = profile.portfolio_heat_heat_threshold_warning
+                self._portfolio_heat_threshold_critical = profile.portfolio_heat_heat_threshold_critical
+                logger.info("[AGENT-INIT] %s portfolio_heat_enabled=%s warning=%.2f%% critical=%.2f%%",
+                           config.name, self._portfolio_heat_enabled,
+                           self._portfolio_heat_threshold_warning * 100,
+                           self._portfolio_heat_threshold_critical * 100)
+                
+                # Asset-specific rolling PnL limits
+                self._rolling_pnl_enabled = profile.asset_specific_rolling_pnl_enabled
+                self._rolling_pnl_limits = {
+                    "BTC": {
+                        "1h_limit_pct": profile.asset_specific_rolling_pnl_btc_rolling_1h_halt_pct,
+                        "4h_limit_pct": profile.asset_specific_rolling_pnl_btc_rolling_4h_halt_pct
+                    },
+                    "ETH": {
+                        "1h_limit_pct": profile.asset_specific_rolling_pnl_eth_rolling_1h_halt_pct,
+                        "4h_limit_pct": profile.asset_specific_rolling_pnl_eth_rolling_4h_halt_pct
+                    },
+                    "SOL": {
+                        "1h_limit_pct": profile.asset_specific_rolling_pnl_sol_rolling_1h_halt_pct,
+                        "4h_limit_pct": profile.asset_specific_rolling_pnl_sol_rolling_4h_halt_pct
+                    },
+                    "XRP": {
+                        "1h_limit_pct": profile.asset_specific_rolling_pnl_xrp_rolling_1h_halt_pct,
+                        "4h_limit_pct": profile.asset_specific_rolling_pnl_xrp_rolling_4h_halt_pct
+                    },
+                    "DOGE": {
+                        "1h_limit_pct": profile.asset_specific_rolling_pnl_doge_rolling_1h_halt_pct,
+                        "4h_limit_pct": profile.asset_specific_rolling_pnl_doge_rolling_4h_halt_pct
+                    }
+                }
+                logger.info("[AGENT-INIT] %s rolling_pnl_enabled=%s", config.name, self._rolling_pnl_enabled)
+        except Exception as e:
+            logger.warning("[AGENT-INIT] %s failed to load 2026 risk management parameters: %s", config.name, e)
+        
         logger.info("[AGENT-INIT] %s initialized with velocity-based signal strategy", config.name)
     
     def _update_price_history(self, asset: str, spot_price: float, spot_data: Any = None) -> None:
@@ -667,7 +726,236 @@ class LeanAgent15m:
                            self.config.name, asset, self._consecutive_losses[asset])
                 self._consecutive_losses[asset] = 0
         
+        # 2026 Research-Based Risk Management: Track rolling PnL for asset-specific limits
+        if self._rolling_pnl_enabled and asset in self._rolling_pnl_history:
+            current_time = time.time()
+            self._rolling_pnl_history[asset].append((current_time, pnl_usd))
+            # Prune old entries outside 4-hour window
+            self._rolling_pnl_history[asset] = [
+                (ts, pnl) for ts, pnl in self._rolling_pnl_history[asset]
+                if current_time - ts < self._rolling_pnl_4h_window
+            ]
+            logger.info("[ROLLING-PNL] agent=%s asset=%s pnl=%.2f history_size=%d",
+                       self.config.name, asset, pnl_usd, len(self._rolling_pnl_history[asset]))
+        
         logger.info("[COOLDOWN-UPDATE] asset=%s cooldown timestamp updated on fill", asset)
+    
+    def _check_portfolio_heat(self) -> tuple[bool, str]:
+        """
+        Check if portfolio heat exceeds thresholds.
+        
+        2026 Research-Based Risk Management: Portfolio heat tracking monitors
+        correlation-adjusted exposure across all assets to prevent over-concentration.
+        
+        Returns:
+            tuple: (allow_trading, reason) - True if heat is acceptable, False if too high
+        """
+        if not self._portfolio_heat_enabled:
+            return True, "portfolio_heat_disabled"
+        
+        try:
+            from merid.event_venues.kalshi.position_cache import get_position_cache
+            position_cache = get_position_cache()
+            if not position_cache:
+                return True, "no_position_cache"
+            
+            # Get all open positions
+            all_positions = position_cache.get_all_positions(validate_freshness=False)
+            open_positions = {k: v for k, v in all_positions.items() if v.contracts > 0}
+            
+            if not open_positions:
+                return True, "no_open_positions"
+            
+            # Calculate total exposure (simplified: sum of contract values)
+            total_exposure = sum(pos.contracts * pos.avg_price_cents / 100.0 for pos in open_positions.values())
+            
+            # Get capital from profile for heat calculation
+            try:
+                from merid.risk.profiles.crypto_15m_profile import get_active_profile
+                profile_adapter = get_active_profile()
+                if profile_adapter and profile_adapter._profile:
+                    capital = profile_adapter._profile.capital_usd
+                    if capital > 0:
+                        heat_ratio = total_exposure / capital
+                    else:
+                        heat_ratio = 0.0
+                else:
+                    heat_ratio = 0.0
+            except Exception:
+                heat_ratio = 0.0
+            
+            # Check thresholds
+            if heat_ratio >= self._portfolio_heat_threshold_critical:
+                logger.warning(
+                    "[PORTFOLIO-HEAT] agent=%s heat=%.2f%% >= critical=%.2f%% -> HALT (portfolio too hot)",
+                    self.config.name, heat_ratio * 100, self._portfolio_heat_threshold_critical * 100
+                )
+                return False, f"portfolio_heat_critical_{heat_ratio:.2%}"
+            elif heat_ratio >= self._portfolio_heat_threshold_warning:
+                logger.info(
+                    "[PORTFOLIO-HEAT] agent=%s heat=%.2f%% >= warning=%.2f%% -> CAUTION (portfolio heating up)",
+                    self.config.name, heat_ratio * 100, self._portfolio_heat_threshold_warning * 100
+                )
+                return True, f"portfolio_heat_warning_{heat_ratio:.2%}"
+            else:
+                logger.debug(
+                    "[PORTFOLIO-HEAT] agent=%s heat=%.2f%% < warning=%.2f%% -> OK",
+                    self.config.name, heat_ratio * 100, self._portfolio_heat_threshold_warning * 100
+                )
+                return True, f"portfolio_heat_ok_{heat_ratio:.2%}"
+        except Exception as e:
+            logger.warning("[PORTFOLIO-HEAT] agent=%s failed to check portfolio heat: %s", self.config.name, e)
+            return True, "portfolio_heat_error"
+    
+    def _check_rolling_pnl_limit(self, asset: str) -> tuple[bool, str]:
+        """
+        Check if asset-specific rolling PnL limits are exceeded.
+        
+        2026 Research-Based Risk Management: Asset-specific rolling PnL limits
+        halt trading for an asset if losses exceed thresholds over 1h or 4h windows.
+        
+        Returns:
+            tuple: (allow_trading, reason) - True if within limits, False if limit exceeded
+        """
+        if not self._rolling_pnl_enabled or asset not in self._rolling_pnl_limits:
+            return True, "rolling_pnl_disabled"
+        
+        try:
+            current_time = time.time()
+            asset_history = self._rolling_pnl_history.get(asset, [])
+            
+            if not asset_history:
+                return True, "no_pnl_history"
+            
+            # Calculate rolling PnL for 1h and 4h windows
+            pnl_1h = sum(pnl for ts, pnl in asset_history if current_time - ts < self._rolling_pnl_1h_window)
+            pnl_4h = sum(pnl for ts, pnl in asset_history if current_time - ts < self._rolling_pnl_4h_window)
+            
+            # Get limits for this asset
+            limits = self._rolling_pnl_limits[asset]
+            limit_1h_pct = limits["1h_limit_pct"]
+            limit_4h_pct = limits["4h_limit_pct"]
+            
+            # Get capital for percentage calculation
+            try:
+                from merid.risk.profiles.crypto_15m_profile import get_active_profile
+                profile_adapter = get_active_profile()
+                if profile_adapter and profile_adapter._profile:
+                    capital = profile_adapter._profile.capital_usd
+                    if capital > 0:
+                        limit_1h_usd = capital * limit_1h_pct
+                        limit_4h_usd = capital * limit_4h_pct
+                    else:
+                        limit_1h_usd = 0.0
+                        limit_4h_usd = 0.0
+                else:
+                    limit_1h_usd = 0.0
+                    limit_4h_usd = 0.0
+            except Exception:
+                limit_1h_usd = 0.0
+                limit_4h_usd = 0.0
+            
+            # Check 4h limit first (more conservative)
+            if pnl_4h < -limit_4h_usd and limit_4h_usd > 0:
+                logger.warning(
+                    "[ROLLING-PNL] agent=%s asset=%s pnl_4h=%.2f < -limit=%.2f -> HALT (4h limit exceeded)",
+                    self.config.name, asset, pnl_4h, limit_4h_usd
+                )
+                return False, f"rolling_pnl_4h_exceeded_{pnl_4h:.2f}"
+            
+            # Check 1h limit
+            if pnl_1h < -limit_1h_usd and limit_1h_usd > 0:
+                logger.warning(
+                    "[ROLLING-PNL] agent=%s asset=%s pnl_1h=%.2f < -limit=%.2f -> HALT (1h limit exceeded)",
+                    self.config.name, asset, pnl_1h, limit_1h_usd
+                )
+                return False, f"rolling_pnl_1h_exceeded_{pnl_1h:.2f}"
+            
+            logger.debug(
+                "[ROLLING-PNL] agent=%s asset=%s pnl_1h=%.2f pnl_4h=%.2f -> OK (within limits)",
+                self.config.name, asset, pnl_1h, pnl_4h
+            )
+            return True, f"rolling_pnl_ok_1h={pnl_1h:.2f}_4h={pnl_4h:.2f}"
+        except Exception as e:
+            logger.warning("[ROLLING-PNL] agent=%s asset=%s failed to check rolling PnL: %s", self.config.name, asset, e)
+            return True, "rolling_pnl_error"
+    
+    def _apply_time_of_day_risk_scaling(self, asset: str) -> float:
+        """
+        Apply time-of-day risk scaling multiplier.
+        
+        2026 Research-Based Risk Management: Adjust position sizing based on
+        trading session (US market, Asian, European, weekend).
+        
+        Returns:
+            float: Risk multiplier (e.g., 1.0 for normal, 0.8 for reduced risk)
+        """
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+            profile_adapter = get_active_profile()
+            if not profile_adapter or not profile_adapter._profile:
+                return 1.0
+            
+            profile = profile_adapter._profile
+            if not profile.time_of_day_risk_scaling_enabled:
+                return 1.0
+            
+            from datetime import datetime, timezone
+            current_utc_hour = datetime.now(timezone.utc).hour
+            current_utc_minute = datetime.now(timezone.utc).minute
+            current_time_utc = current_utc_hour + current_utc_minute / 60.0
+            
+            # Parse session windows from profile (format: "HH:MM-HH:MM ET")
+            # Convert ET to UTC (ET = UTC-4 or UTC-5 depending on DST)
+            # For simplicity, assume ET = UTC-4 (daylight time)
+            et_offset = 4
+            
+            def parse_time_range(time_str: str) -> tuple[float, float]:
+                """Parse 'HH:MM-HH:MM ET' to UTC hours."""
+                start_str, end_str = time_str.split('-')
+                start_h, start_m = map(int, start_str.split(':'))
+                end_h, end_m = map(int, end_str.split(':'))
+                start_utc = (start_h + et_offset) % 24
+                end_utc = (end_h + et_offset) % 24
+                return start_utc + start_m / 60.0, end_utc + end_m / 60.0
+            
+            us_market_start, us_market_end = parse_time_range(profile.time_of_day_risk_scaling_us_market_hours)
+            asian_start, asian_end = parse_time_range(profile.time_of_day_risk_scaling_asian_session)
+            european_start, european_end = parse_time_range(profile.time_of_day_risk_scaling_european_session)
+            
+            # Determine current session
+            in_us_market = us_market_start <= current_time_utc < us_market_end
+            in_asian = asian_start <= current_time_utc < asian_end
+            in_european = european_start <= current_time_utc < european_end
+            
+            # Check if weekend (Saturday/Sunday in UTC)
+            is_weekend = datetime.now(timezone.utc).weekday() >= 5
+            
+            # Apply multiplier based on session
+            if is_weekend:
+                multiplier = profile.time_of_day_risk_scaling_weekend_multiplier
+                session_name = "weekend"
+            elif in_us_market:
+                multiplier = profile.time_of_day_risk_scaling_us_market_multiplier
+                session_name = "us_market"
+            elif in_asian:
+                multiplier = profile.time_of_day_risk_scaling_asian_multiplier
+                session_name = "asian"
+            elif in_european:
+                multiplier = profile.time_of_day_risk_scaling_european_multiplier
+                session_name = "european"
+            else:
+                multiplier = 1.0
+                session_name = "other"
+            
+            logger.info(
+                "[TIME-OF-DAY-SCALING] agent=%s asset=%s time_utc=%.2f session=%s multiplier=%.2f",
+                self.config.name, asset, current_time_utc, session_name, multiplier
+            )
+            return multiplier
+        except Exception as e:
+            logger.warning("[TIME-OF-DAY-SCALING] agent=%s asset=%s failed to apply scaling: %s", self.config.name, asset, e)
+            return 1.0
     
     def _check_volume_confirmation(self, asset: str) -> bool:
         """
@@ -3449,6 +3737,34 @@ class LeanAgent15m:
                 )
                 return None
             
+            # 2026 Research-Based Risk Management: Portfolio heat tracking
+            heat_allowed, heat_reason = self._check_portfolio_heat()
+            if not heat_allowed:
+                logger.info(
+                    "[PORTFOLIO-HEAT] agent=%s asset=%s reason=%s -> SKIP (portfolio too hot)",
+                    self.config.name, asset, heat_reason
+                )
+                return None
+            
+            # 2026 Research-Based Risk Management: Asset-specific rolling PnL limits
+            pnl_allowed, pnl_reason = self._check_rolling_pnl_limit(asset)
+            if not pnl_allowed:
+                logger.info(
+                    "[ROLLING-PNL] agent=%s asset=%s reason=%s -> SKIP (rolling PnL limit exceeded)",
+                    self.config.name, asset, pnl_reason
+                )
+                return None
+            
+            # 2026 Research-Based Risk Management: Time-of-day risk scaling
+            # Get multiplier (will be applied to position size later)
+            time_of_day_multiplier = self._apply_time_of_day_risk_scaling(asset)
+            if time_of_day_multiplier <= 0:
+                logger.info(
+                    "[TIME-OF-DAY-SCALING] agent=%s asset=%s multiplier=%.2f -> SKIP (risk scaling zero)",
+                    self.config.name, asset, time_of_day_multiplier
+                )
+                return None
+            
             # 2026 FIX: Check max concurrent positions limit to prevent over-accumulation
             # Industry standard: 10-25 concurrent positions (Kalshibot, PolyTrack, production bots)
             # Position cache is synced from REST API via fills_poller and venue_adapter
@@ -3794,6 +4110,8 @@ class LeanAgent15m:
                 # CRITICAL FIX: Add price_cents and count for candidate deduplication
                 "price_cents": signal.get("price_cents", 0),  # Will be set by order router
                 "count": signal.get("count", 0),  # Will be set by order router
+                # 2026 Research-Based Risk Management: Apply time-of-day risk scaling to position size
+                "time_of_day_multiplier": time_of_day_multiplier,  # Carry multiplier for order router
                 # CRITICAL FIX: Add exit targets to satisfy "no trade without exit" invariant
                 "take_profit_r_multiple": 0.5,  # 0.5R take profit (conservative)
                 "stop_loss_r_multiple": 0.25,  # 0.25R stop loss (tight risk control)

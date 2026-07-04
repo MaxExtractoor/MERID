@@ -397,6 +397,7 @@ def compute_order_size(
     min_notional_usd: Optional[Decimal] = None,
     min_contracts: Optional[int] = None,
     max_notional_usd: Optional[Decimal] = None,  # NEW: explicit max_notional from profile
+    time_of_day_multiplier: float = 1.0,  # 2026 Research-Based Risk Management: Time-of-day risk scaling
 ) -> Tuple[int, Decimal, dict]:
     """Compute order size from bankroll, risk percentage, and market constraints.
     
@@ -553,6 +554,15 @@ def compute_order_size(
         
         # Apply multiplier to max_notional
         max_notional_usd = max_notional_usd * Decimal(str(dynamic_sizing_multiplier))
+    
+    # Step 4.5: Apply time-of-day risk scaling multiplier
+    # 2026 Research-Based Risk Management: Scale position size based on trading session
+    if time_of_day_multiplier != 1.0:
+        max_notional_usd = max_notional_usd * Decimal(str(time_of_day_multiplier))
+        logger.info(
+            "[TIME-OF-DAY-SCALING] Applied multiplier=%.2f to max_notional for asset=%s (new max_notional=%.2f)",
+            time_of_day_multiplier, asset, float(max_notional_usd)
+        )
     
     # Step 5: Check existing positions for position-aware sizing
     # Reduce max_notional if we already have exposure to this asset
