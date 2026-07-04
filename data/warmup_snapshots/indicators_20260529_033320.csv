@@ -1,0 +1,11 @@
+timestamp,asset,gate_decision,gate_reason,ema_fast,ema_slow,volatility,regime_score,bars_count,indicator_gate_status
+2026-05-29T03:33:21.150006+00:00,BTC,UNKNOWN,Not implemented yet,,,,,,UNKNOWN
+2026-05-29T03:33:21.150006+00:00,ETH,UNKNOWN,Not implemented yet,,,,,,UNKNOWN
+2026-05-29T03:33:21.150006+00:00,SOL,UNKNOWN,Not implemented yet,,,,,,UNKNOWN
+2026-05-29T03:33:21.150006+00:00,XRP,UNKNOWN,Not implemented yet,,,,,,UNKNOWN
+2026-05-29T03:33:21.150006+00:00,DOGE,UNKNOWN,Not implemented yet,,,,,,UNKNOWN
+2026-05-29T03:33:57.387005+00:00,BTC,UNKNOWN,Not implemented yet,,,,,,UNKNOWN
+2026-05-29T03:33:57.387005+00:00,ETH,UNKNOWN,Not implemented yet,,,,,,UNKNOWN
+2026-05-29T03:33:57.387005+00:00,SOL,UNKNOWN,Not implemented yet,,,,,,UNKNOWN
+2026-05-29T03:33:57.387005+00:00,XRP,UNKNOWN,Not implemented yet,,,,,,UNKNOWN
+2026-05-29T03:33:57.387005+00:00,DOGE,UNKNOWN,Not implemented yet,,,,,,UNKNOWN

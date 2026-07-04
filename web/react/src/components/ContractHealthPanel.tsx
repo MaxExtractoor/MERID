@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react';
 import { Shield, ShieldCheck, ShieldAlert, Wifi, Activity, Tag, ToggleLeft, ToggleRight } from '../ui/icons';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
 
 interface ContractHealthData {
@@ -13,9 +13,9 @@ interface ContractHealthData {
 }
 
 export default function ContractHealthPanel() {
-  const { data, loading, error } = useApiData<ContractHealthData>(
+  const { data, isLoading, error } = useApiQuery<ContractHealthData>(
     API_ENDPOINTS.SYSTEM_CONTRACT_HEALTH,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
   );
 
   const [flagOverrides, setFlagOverrides] = useState<Record<string, boolean>>({});
@@ -41,7 +41,7 @@ export default function ContractHealthPanel() {
     }
   }, []);
 
-  if (loading && !data) {
+  if (isLoading && !data) {
     return (
       <div className="bg-slate-900 rounded-xl border border-slate-800 p-4 animate-pulse">
         <div className="h-4 bg-slate-700 rounded w-1/3 mb-3" />
@@ -123,7 +123,7 @@ export default function ContractHealthPanel() {
               return (
                 <button
                   key={name}
-                  onClick={() => toggleFlag(name, enabled)}
+                  onClick={() => toggleFlag(name, enabled as boolean)}
                   disabled={isToggling}
                   className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-xs cursor-pointer transition-opacity ${
                     isToggling ? 'opacity-50' : 'hover:opacity-80'

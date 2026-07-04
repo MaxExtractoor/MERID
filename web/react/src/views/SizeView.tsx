@@ -20,7 +20,7 @@ import {
   Wallet, GitBranch, Sliders, Activity,
   Play, Square
 } from '../ui/icons';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { DRAWDOWN_TIER_CONFIG } from '../shared/config/riskConfig';
 import { getAuthHeaders } from '../services/auth';
@@ -148,24 +148,24 @@ const SizeView: React.FC = () => {
   const [promoterLoading, setPromoterLoading] = useState(false);
   
   // Data fetching
-  const lanesRes = useApiData<{ signals: XtfSignal[] }>(
+  const lanesRes = useApiQuery<{ signals: XtfSignal[] }>(
     API_ENDPOINTS.XTF_SIGNALS_ALL,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );
   
-  const deploymentRes = useApiData<DeploymentStatus>(
+  const deploymentRes = useApiQuery<DeploymentStatus>(
     API_ENDPOINTS.KALSHI_DEPLOYMENT_STATUS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );
   
-  const promoterRes = useApiData<AutoPromoterStatus>(
+  const promoterRes = useApiQuery<AutoPromoterStatus>(
     API_ENDPOINTS.AUTO_PROMOTER_STATUS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
   );
   
-  const sizingRes = useApiData<SizingMetrics>(
+  const sizingRes = useApiQuery<SizingMetrics>(
     API_ENDPOINTS.KALSHI_SIZING_METRICS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );
 
   const sizing = sizingRes.data;
@@ -173,7 +173,7 @@ const SizeView: React.FC = () => {
   const promoter = promoterRes.data;
   const lanes = lanesRes.data?.signals || [];
 
-  const tier = sizing ? DRAWDOWN_TIER_CONFIG[sizing.drawdown_tier] : DRAWDOWN_TIER_CONFIG.normal;
+  const tier = sizing ? DRAWDOWN_TIER_CONFIG[sizing.drawdown_tier as keyof typeof DRAWDOWN_TIER_CONFIG] : DRAWDOWN_TIER_CONFIG.normal;
 
   // Auto-promoter toggle
   const togglePromoter = useCallback(async () => {
@@ -368,7 +368,7 @@ const SizeView: React.FC = () => {
                   </div>
                 ) : (
                   <div className="space-y-3">
-                    {lanes.map(signal => (
+                    {lanes.map((signal: XtfSignal) => (
                       <div key={signal.asset} className="bg-slate-800 rounded-lg p-4">
                         <div className="flex items-center justify-between mb-3">
                           <div className="flex items-center gap-3">
@@ -388,7 +388,7 @@ const SizeView: React.FC = () => {
                         
                         {/* Lanes */}
                         <div className="grid grid-cols-4 gap-2">
-                          {signal.lanes.map(lane => (
+                          {signal.lanes.map((lane: LaneSnapshot) => (
                             <div 
                               key={lane.timeframe} 
                               className={`p-2 rounded border ${lane.stale ? 'border-slate-700 bg-slate-800/50' : 'border-slate-700 bg-slate-800'}`}

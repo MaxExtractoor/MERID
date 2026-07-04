@@ -18,7 +18,7 @@ import {
   Activity, Filter,
   Zap
 } from '../ui/icons';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { authHeaders } from '../api/auth';
 import type { View } from '../types/views';
@@ -27,7 +27,7 @@ import type { View } from '../types/views';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
 import KalshiModeBadge from '../components/KalshiModeBadge';
 import KalshiTradeTicket from '../components/KalshiTradeTicket';
-import ConsensusPill from '../components/ConsensusPill';
+// import ConsensusPill from '../components/ConsensusPill'; // TODO: Create this component
 import { KALSHI_CATEGORY_COLORS } from '../ui/constants';
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -209,14 +209,14 @@ const DiscoverView: React.FC<DiscoverViewProps> = ({
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   
   // Data fetching
-  const marketsRes = useApiData<PoolResponse>(
+  const marketsRes = useApiQuery<PoolResponse>(
     `${API_ENDPOINTS.KALSHI_CATALOG}/pool?limit=500${quickFilter !== 'all' && quickFilter !== 'favorites' ? `&category=${quickFilter}` : ''}`,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );
   
-  const favoritesRes = useApiData<{ favorites: string[] }>(
+  const favoritesRes = useApiQuery<{ favorites: string[] }>(
     API_ENDPOINTS.KALSHI_FAVORITES,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
   );
 
   // Update favorites when loaded
@@ -254,15 +254,15 @@ const DiscoverView: React.FC<DiscoverViewProps> = ({
     
     // Apply quick filters
     if (quickFilter === 'favorites') {
-      markets = markets.filter(m => favorites.has(m.ticker));
+      markets = markets.filter((m: Market) => favorites.has(m.ticker));
     } else if (quickFilter !== 'all') {
-      markets = markets.filter(m => m.category?.toLowerCase() === quickFilter.toLowerCase());
+      markets = markets.filter((m: Market) => m.category?.toLowerCase() === quickFilter.toLowerCase());
     }
     
     // Apply search
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
-      markets = markets.filter(m => 
+      markets = markets.filter((m: Market) => 
         m.ticker.toLowerCase().includes(q) ||
         m.question.toLowerCase().includes(q)
       );
@@ -366,7 +366,7 @@ const DiscoverView: React.FC<DiscoverViewProps> = ({
         <div className="xl:col-span-2 bg-slate-900 rounded-xl border border-slate-800 overflow-hidden">
           {/* Mobile-first card view, table on larger screens */}
           <div className="sm:hidden">
-            {marketsRes.loading && paginatedMarkets.length === 0 ? (
+            {marketsRes.isLoading && paginatedMarkets.length === 0 ? (
               <div className="p-8 text-center text-slate-500">
                 <div className="w-6 h-6 border-2 border-slate-600 border-t-blue-500 rounded-full animate-spin mx-auto mb-2" />
                 Loading markets...
@@ -375,7 +375,7 @@ const DiscoverView: React.FC<DiscoverViewProps> = ({
               <div className="p-8 text-center text-slate-500">No markets found</div>
             ) : (
               <div className="divide-y divide-slate-800">
-                {paginatedMarkets.map(market => (
+                {paginatedMarkets.map((market: Market) => (
                   <div
                     key={market.ticker}
                     onClick={() => setSelectedMarket(market)}
@@ -426,7 +426,7 @@ const DiscoverView: React.FC<DiscoverViewProps> = ({
                 </tr>
               </thead>
               <tbody>
-                {marketsRes.loading && paginatedMarkets.length === 0 ? (
+                {marketsRes.isLoading && paginatedMarkets.length === 0 ? (
                   <tr>
                     <td colSpan={6} className="text-center py-8 text-slate-500">
                       <div className="flex items-center justify-center gap-2">
@@ -442,7 +442,7 @@ const DiscoverView: React.FC<DiscoverViewProps> = ({
                     </td>
                   </tr>
                 ) : (
-                  paginatedMarkets.map(market => (
+                  paginatedMarkets.map((market: Market) => (
                     <tr
                       key={market.ticker}
                       onClick={() => setSelectedMarket(market)}
@@ -590,11 +590,11 @@ const DiscoverView: React.FC<DiscoverViewProps> = ({
                     <Activity className="w-4 h-4 text-cyan-400" />
                     Agent Consensus
                   </h3>
-                  <ConsensusPill
+                  {/* <ConsensusPill
                     direction={selectedMarket.consensus.direction}
                     confidence={selectedMarket.consensus.confidence}
                     agents={selectedMarket.consensus.agents}
-                  />
+                  /> */}
                 </div>
               )}
             </div>

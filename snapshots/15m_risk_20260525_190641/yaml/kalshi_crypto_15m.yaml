@@ -1,0 +1,333 @@
+# ═══════════════════════════════════════════════════════════════════════
+# Kalshi Crypto 15m Risk Profile (LIVE-ONLY)
+# ═══════════════════════════════════════════════════════════════════════
+# SINGLE SOURCE OF TRUTH for BTC/ETH/SOL/XRP/DOGE 15m trading on Kalshi.
+#
+# LIVE MODE ONLY: This profile is configured for live trading on Kalshi.
+# - Uses live bankroll from Kalshi API (capital_usd: 0)
+# - Submits real orders to external-api.kalshi.com
+# - Probability-based signals enabled (KALSHI_ENABLE_PROB_BASED_SIGNALS=true)
+# - No separate paper mode; dry-run testing must use a different profile.
+#
+# OPERATIONAL CADENCE:
+# - Kalshi15mLoop runs at 5-second cadence (configurable via merid.loop_15m.py)
+# - Market catalog refreshes every 60 seconds (KalshiMarketCatalog)
+# - Fills polling every 20 seconds (FillsPoller)
+# - Settlement polling every 60 seconds (SettlementPoller)
+# - Bankroll balance polling every 30 seconds (BankrollServiceV2)
+#
+# When MERID_PROFILE=kalshi_crypto_15m_v2 is active, this profile overrides
+# all other risk configuration sources:
+#   - kalshi_agent_grid.yaml risk_limits (set to 0 = profile-gated)
+#   - kalshi_15m_crypto_config.py GLOBAL_RISK_LIMITS (profile takes precedence)
+#   - KalshiRiskConfig defaults (profile values applied at initialization)
+#   - capabilities.py max_concurrent_trades (profile value used)
+#
+# Profile values are applied via get_kalshi_risk() in kalshi_risk.py.
+# ═══════════════════════════════════════════════════════════════════════
+
+profile_name: kalshi_crypto_15m_v2
+profile_version: "2.0.0"
+description: "Config-only risk model for 15m crypto prediction markets on Kalshi"
+
+# ── Sandbox/Dry-Run Mode (Extra 1) ─────────────────────────────────────────
+# When enabled, orders are logged but NOT submitted to Kalshi API.
+# Useful for testing strategies without risking real capital.
+# Set to true for paper/demo mode, false for live trading.
+dry_run: false
+
+# ── Drawdown Semantics ───────────────────────────────────────────────────────
+# Time horizon: "since process start" (not rolling window)
+# - Peak equity tracks highest equity since FastAPI startup
+# - Drawdown is computed as (peak - current) / peak
+# - Fresh start resets peak equity to current equity
+#
+# PnL basis: "equity including open positions" (realized + unrealized)
+# - Uses Kalshi account balance (total equity)
+# - Not based on realized PnL only
+#
+# Deposits/Withdrawals:
+# - Deposits: treated as PnL (increase equity, may update peak)
+# - Withdrawals: treated as PnL (decrease equity, peak unchanged)
+# - This ensures drawdown reflects actual account performance
+#
+# Fresh Start Behavior:
+# - When MERID_FRESH_START=1, peak_equity resets to current_equity
+# - This prevents old drawdown state from persisting across sessions
+drawdown_semantics:
+  time_horizon: "since_process_start"
+  pnl_basis: "equity_including_positions"
+  deposit_withdrawal_treatment: "as_pnl"
+
+# ── Global Capital and Cycle Risk ────────────────────────────────────────
+# Capital for this strategy. Set to 0 to derive from live Kalshi bankroll API.
+# For paper/demo mode, you can set a fixed value (e.g., 10000.0).
+# For live trading, set to 0 to use actual account balance.
+# For validation/calibration mode, set to fixed value (e.g., 50.0) to ensure consistent caps regardless of live balance.
+capital_usd: 0  # Live mode: derive from live Kalshi equity via router/bankroll engine
+
+# Minimum trade size (floor) - single source of truth for all agents
+min_notional_usd: 0.05  # $0.05 minimum notional per trade (allows low-priced contracts like DOGE at 1c)
+min_contracts: 1  # Minimum 1 contract per trade (Kalshi venue invariant)
+
+# Fallback pricing configuration
+# When live market data is unavailable, the system can use a fallback price (50c)
+# DISABLED: Fallback trades are not allowed in production (Task 32: Remove temporary flag)
+# Live market data is required for all trading decisions
+allow_fallback_trades: false  # DISABLED: Require live market data
+max_fallback_notional_usd: 0.35  # If fallback allowed, cap at min_notional (unused when disabled)
+max_fallback_cycles: 0  # DISABLED: No fallback cycles allowed
+
+# Maximum risk per cycle as percentage of capital
+# Increased to 3% to account for min_max_notional_usd floor distortion with small bankrolls
+# With $36.58 bankroll and $1.00 min floor, effective risk is 2.73%, so 3% provides headroom
+max_cycle_risk_pct: 0.03  # 3% of capital per cycle (unified risk regime)
+
+# Optional absolute cap on cycle risk (overrides percentage if set)
+# Set to 0 to use percentage-based only
+max_cycle_risk_usd: 0.0
+
+# ── Venue-Level Caps (Kalshi) ──────────────────────────────────────────────
+# These caps are derived as percentages of capital, NOT hardcoded values.
+# This ensures risk scales with actual account balance.
+venue:
+  name: kalshi
+  # Risk percentages applied to capital (not absolute USD values)
+  max_single_order_pct: 0.05  # 5% of capital per single order
+  max_total_notional_pct: 0.30  # 30% of capital total exposure (5 assets × ~6% each)
+  max_category_notional_pct: 0.30  # 30% of capital for "crypto" category (matches total)
+  # Bankroll cap percentage (overrides MERID_BANKROLL_CAP_PCT env var)
+  # This allows the profile to control the global bankroll cap instead of the hardcoded 2% default
+  bankroll_cap_pct: 0.05  # 5% of capital for bankroll cap (matches max_single_order_pct)
+  
+  # Rate limits (not bankroll-scaled)
+  max_orders_per_minute: 30
+  max_orders_per_hour: 300
+
+# ── Per-Asset Caps (BTC/ETH/SOL/XRP/DOGE) ─────────────────────────────────
+# Each asset has its own notional as percentage of capital, NOT hardcoded USD values.
+# Edge thresholds override crypto_threshold_matrix.yaml for this profile.
+# MINIMUM FLOOR: max_notional_usd will be at least min_notional_usd regardless of bankroll size
+# This ensures trades are possible even with small bankrolls (e.g., $36.58)
+# Set to 0.0 to disable floor and use pure percentage-based sizing
+min_max_notional_usd: 0.25  # Minimum floor for per-asset max_notional (lowered from 1.00 to reduce risk distortion)
+
+# FRACTIONAL CONTRACT OVERRIDE: Allow 1 contract if max_notional is close to contract cost
+# This enables trading with small bankrolls where percentage caps are too restrictive
+# Set to 0.0 to disable override and enforce strict percentage-based sizing
+fractional_contract_override_threshold: 0.5  # Allow 1 contract if max_notional >= 50% of contract cost
+assets:
+  BTC:
+    max_notional_pct: 0.02  # 2% of capital for BTC 15m (controlled live session)
+    max_contracts: 10  # Max contracts for BTC 15m (controlled live session)
+    # Edge thresholds override crypto_threshold_matrix.yaml for this profile
+    min_edge_early: 0.020  # 2.0% early edge
+    min_edge_mid: 0.020  # 2.0% mid edge
+    min_edge_late: 0.020  # 2.0% late edge
+    min_edge_terminal: 0.025  # 2.5% terminal edge
+    # Distance-from-target filter
+    max_distance_pct: 0.015  # 1.5% max distance for BTC (deep liquidity allows tighter bounds)
+    # Liquidity and microstructure filters
+    min_order_book_depth_usd: 1000.0  # Minimum order book depth in USD
+    min_volume_24h_usd: 5000.0  # Minimum 24h volume in USD
+    max_skew_ratio: 0.70  # Max price skew (avoid extreme 0.01/0.99 unless large edge)
+    
+  ETH:
+    max_notional_pct: 0.015  # 1.5% of capital for ETH 15m (controlled live session)
+    max_contracts: 10  # Max contracts for ETH 15m (controlled live session)
+    min_edge_early: 0.020
+    min_edge_mid: 0.020
+    min_edge_late: 0.020
+    min_edge_terminal: 0.025
+    # Distance-from-target filter
+    max_distance_pct: 0.020  # 2.0% max distance for ETH (slightly looser than BTC)
+    # Liquidity and microstructure filters
+    min_order_book_depth_usd: 800.0  # Slightly lower than BTC
+    min_volume_24h_usd: 4000.0
+    max_skew_ratio: 0.70
+    
+  SOL:
+    max_notional_pct: 0.01  # 1% of capital for SOL 15m (controlled live session)
+    max_contracts: 5  # Max contracts for SOL 15m (controlled live session)
+    min_edge_early: 0.025  # 2.5% early edge
+    min_edge_mid: 0.025
+    min_edge_late: 0.025
+    min_edge_terminal: 0.030
+    # Distance-from-target filter
+    max_distance_pct: 0.025  # 2.5% max distance for SOL (higher volatility)
+    # Liquidity and microstructure filters
+    min_order_book_depth_usd: 500.0  # Lower liquidity than majors
+    min_volume_24h_usd: 3000.0
+    max_skew_ratio: 0.65  # Stricter on skew due to higher volatility
+    
+  XRP:
+    max_notional_pct: 0.01  # 1% of capital for XRP 15m (controlled live session)
+    max_contracts: 5  # Max contracts for XRP 15m (controlled live session)
+    min_edge_early: 0.025
+    min_edge_mid: 0.025
+    min_edge_late: 0.025
+    min_edge_terminal: 0.030
+    # Distance-from-target filter
+    max_distance_pct: 0.030  # 3.0% max distance for XRP (higher volatility)
+    # Liquidity and microstructure filters
+    min_order_book_depth_usd: 400.0
+    min_volume_24h_usd: 2500.0
+    max_skew_ratio: 0.65
+    
+  DOGE:
+    max_notional_pct: 0.01  # 1% of capital for DOGE 15m (controlled live session)
+    max_contracts: 5  # Max contracts for DOGE 15m (controlled live session)
+    min_edge_early: 0.030  # 3.0% early edge
+    min_edge_mid: 0.030
+    min_edge_late: 0.030
+    min_edge_terminal: 0.035
+    # Distance-from-target filter
+    max_distance_pct: 0.040  # 4.0% max distance for DOGE (highest volatility, most loose)
+    # Liquidity and microstructure filters
+    min_order_book_depth_usd: 200.0  # Lowest liquidity threshold
+    min_volume_24h_usd: 1500.0
+    max_skew_ratio: 0.60  # Strictest skew filter for most volatile asset
+
+# ── Per-Agent Caps ─────────────────────────────────────────────────────────
+# Default limits for agents using this profile (can be overridden per-agent).
+# Max notional is derived as percentage of capital, NOT hardcoded USD value.
+agent_defaults:
+  max_notional_pct: 0.03  # 3% of capital per agent
+  max_orders_per_window: 20  # Max orders per trading window (increased for edge audit)
+  max_yes_position: 3  # Max YES contracts per side
+  max_no_position: 3  # Max NO contracts per side
+  max_concurrent_trades: 3  # Max concurrent trades (top 3 edges per cycle)
+  
+  # Entry window (time before expiry to start trading)
+  # Kalshi 15m markets only exist ~15 minutes before expiry
+  # Realistic trading window is 2-12 minutes (sweet spot: 5-10 minutes)
+  minutes_before_expiry: 12
+  cutoff_minutes_before_expiry: 2  # Stop trading 2 minutes before expiry
+
+# ── Edge / Confidence Thresholds ────────────────────────────────────────────
+# Edge thresholds are defined per-asset in the assets section above.
+# For kalshi_crypto_15m_v2, crypto_threshold_matrix.yaml is profile-guarded and NOT used.
+# All edge configuration comes from this YAML file only.
+confidence:
+  # PROFILE-GUARD: crypto_threshold_matrix.yaml is disabled for kalshi_crypto_15m_v2
+  use_crypto_threshold_matrix: false
+  profile_name: null  # Not used when use_crypto_threshold_matrix=false
+  
+  # Optional: Override Kelly multipliers for this profile
+  # If set, these override crypto_threshold_matrix.yaml
+  kelly_multiplier_no_trade: 0.0
+  kelly_multiplier_cautious: 0.5
+  kelly_multiplier_quick_win: 0.6
+  kelly_multiplier_confident: 1.0
+
+# ── Guardrails ───────────────────────────────────────────────────────────
+# Pre-trade checks (not bankroll-scaled)
+guardrails:
+  max_spread_cents: 60  # Reject if spread > 60 cents (15m crypto options typically 30-60c)
+  max_slippage_cents: 3  # Max 3 cents worse than best
+  min_depth_contracts: 5  # Min depth at target price
+  min_post_fee_edge: 0.01  # Minimum post-fee edge (1%)
+  
+  # Drawdown limits (percentage-based, not bankroll-scaled)
+  # Drawdown is the primary hard cap; daily loss is optional/soft
+  drawdown_halt_pct: 0.15  # Halt at 15% drawdown (primary hard cap)
+  drawdown_unwind_pct: 0.20  # Unwind at 20% drawdown
+  
+  # Per-trade risk derived from drawdown (survive 15-20 consecutive full-risk losses)
+  per_trade_risk_pct: 0.008  # 0.8% of capital per trade (15% / 18 losses ≈ 0.83%)
+  
+  # Daily loss cap (optional/soft)
+  # Option A: Disable daily loss as separate hard cap (drawdown is single source of truth)
+  # Option B: Set daily loss slightly below drawdown as soft stop (e.g., 12-14%)
+  daily_loss_enabled: false  # Disable daily loss; drawdown is primary guardrail
+  max_daily_loss_pct: null  # Not used when daily_loss_enabled=false
+  
+  # ── Adaptive Risk Scaling ───────────────────────────────────────────────────
+  # Risk scaling bands based on drawdown percentage.
+  # As drawdown approaches halt, risk multiplier decreases to give recovery chance.
+  # 
+  # Example with $10,000 bankroll and 0.8% per-trade risk:
+  # - 0-10% drawdown: $80 per trade (100% of normal)
+  # - 10-12% drawdown: $40 per trade (50% of normal)
+  # - 12-15% drawdown: $20 per trade (25% of normal)
+  # - 15%+ drawdown: $0 per trade (halted)
+  adaptive_risk_bands:
+    - max_drawdown_pct: 0.10  # 10% - normal risk (100% multiplier)
+      multiplier: 1.0
+    - max_drawdown_pct: 0.12  # 12% - reduced risk (50% multiplier)
+      multiplier: 0.5
+    - max_drawdown_pct: 0.15  # 15% - critical risk (25% multiplier)
+      multiplier: 0.25
+    - max_drawdown_pct: 1.00  # halt (0% multiplier)
+      multiplier: 0.0
+
+# ── Kelly Sizing ──────────────────────────────────────────────────────────
+# Kelly fraction: maximum fraction of bankroll to risk per trade
+# 0.30 = 30% of bankroll maximum (very conservative)
+# This is a hard cap; actual sizing may be lower based on signal quality
+kelly:
+  kelly_fraction: 0.30  # 30% Kelly hard cap (from profile)
+  kelly_hard_cap: 0.30  # Legacy field, kept for compatibility
+  kelly_min_edge_pct: 1.0  # Min 1% edge to trade
+  kelly_max_edge_pct: 25.0  # Max 25% edge (catches data errors)
+  kelly_min_win_prob: 0.01
+  kelly_max_win_prob: 0.99
+  kelly_global_notional_cap_pct: 20.0  # Max 20% capital total exposure (increased from 2% to allow trades)
+
+# ── Contract Caps ─────────────────────────────────────────────────────────
+# Hard caps on total contracts across all positions (not bankroll-scaled)
+# These are venue-level limits to prevent excessive position concentration
+contract_caps:
+  max_contracts_total: 5000  # Max total contracts across all assets
+  max_contracts_per_asset: 1750  # Max contracts per asset (BTC, ETH, etc.)
+  max_contracts_per_cluster: 750  # Max contracts per asset/timeframe/overlap-window
+  max_single_order_contracts: 10  # Max contracts per single order
+
+# ── Risk Policy ───────────────────────────────────────────────────────────
+# Risk limits that affect order acceptance and sizing
+risk_policy:
+  group_notional_cap_usd: 2000.0  # Max notional per group (asset/timeframe/overlap-window)
+  max_fee_to_notional_pct: 15.0  # Max fee/notional ratio (circuit breaker)
+
+# ── Venue Invariants ───────────────────────────────────────────────────────
+# Kalshi venue-level constants (not configurable per profile)
+venue_invariants:
+  valid_price_cents_min: 1  # Kalshi binary contract minimum price (1 cent)
+  valid_price_cents_max: 99  # Kalshi binary contract maximum price (99 cents)
+  deep_otm_threshold_cents: 5  # Deep OTM threshold for deployment safety (5 cents)
+  deep_itm_threshold_cents: 95  # Deep ITM threshold for deployment safety (95 cents)
+  ioc_auto_below_seconds: 120  # IOC auto-below threshold: use IOC if expiry within N seconds
+
+# ── Strategy Policy ───────────────────────────────────────────────────────
+# Strategy-level thresholds for trade execution
+strategy_policy:
+  min_edge: 0.05  # Minimum edge percentage to trade (5% conservative threshold)
+  min_confidence: 0.60  # Minimum model confidence (60% for REST fallback compatibility)
+
+# ── Legacy Path Control ───────────────────────────────────────────────────
+# Explicitly disable balance-derived behavior for this profile
+legacy:
+  # Disable calibrate_from_balance() for this profile
+  disable_balance_calibration: true
+  
+  # Disable _compute_dynamic_contract_caps() for this profile
+  disable_dynamic_contract_caps: true
+  
+  # Disable bankroll-derived CategoryLimit for this profile
+  disable_bankroll_category_limits: true
+  
+  # Disable bankroll-derived PredictionRiskConfig for this profile
+  disable_bankroll_prediction_risk: true
+  
+  # Disable bankroll-derived GuardrailConfig for this profile
+  disable_bankroll_guardrails: true
+
+# ── Metadata ──────────────────────────────────────────────────────────────
+metadata:
+  created_at: "2026-05-13"
+  created_by: "Risk Audit Refactor"
+  replaces: 
+    - "KalshiRiskConfig.calibrate_from_balance() for 15m crypto"
+    - "config/kalshi_agent_grid.yaml 0→derive from bankroll for 15m crypto"
+    - "PredictionRiskConfig bankroll-derived defaults for 15m crypto"
+    - "GuardrailConfig bankroll-derived defaults for 15m crypto"

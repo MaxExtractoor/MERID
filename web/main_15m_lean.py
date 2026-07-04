@@ -382,6 +382,16 @@ async def lifespan(app):
         raise
     logger.info("[LIFESPAN] After _run_full_startup_in_lifespan")
     
+    # CRITICAL: Start trailing stop monitoring loop
+    # This monitors positions for trailing stop activation and time-based forced exit
+    logger.info("[LIFESPAN] Starting trailing stop monitoring")
+    try:
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+        position_cache = get_position_cache()
+        position_cache.start_monitoring()
+        logger.info("[LIFESPAN] Trailing stop monitoring started")
+    except Exception as exc:
+        logger.warning("[LIFESPAN] Failed to start trailing stop monitoring: %s", exc)
     
     # NOTE: Kalshi15mLoop background task is now created in _run_full_startup_in_lifespan()
     # This avoids duplicate task creation since the health-trigger startup pattern
@@ -398,6 +408,13 @@ async def lifespan(app):
     logger.info("[SHUTDOWN] Stopping unified spot service refresh loop")
     await unified_spot.stop_refresh_loop()
     logger.info("[SHUTDOWN] Unified spot service stopped")
+    
+    # Stop trailing stop monitoring
+    from merid.event_venues.kalshi.position_cache import get_position_cache
+    position_cache = get_position_cache()
+    logger.info("[SHUTDOWN] Stopping trailing stop monitoring")
+    position_cache.stop_monitoring()
+    logger.info("[SHUTDOWN] Trailing stop monitoring stopped")
     
     # Cancel Kalshi15mLoop background task
     kalshi_task = getattr(app.state, "kalshi_15m_task", None)

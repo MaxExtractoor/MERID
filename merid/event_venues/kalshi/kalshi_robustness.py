@@ -366,6 +366,29 @@ class RobustKalshiClient:
     
     async def place_order(self, order: Any) -> Optional[Any]:
         """Place order with robustness."""
+        # CRITICAL: Price guard before robustness wrapper
+        if order and hasattr(order, 'price') and order.price is not None:
+            _price_cents = int(order.price * 100)
+            min_price_cents = 15  # 15 cents / $0.15 minimum
+            try:
+                from merid.risk.profiles.crypto_15m_profile import get_active_profile
+                profile_adapter = get_active_profile()
+                if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_min_contract_price_cents'):
+                    min_price_cents = profile_adapter.profile.guardrails_min_contract_price_cents
+            except Exception as e:
+                from utils.logger import get_logger
+                logger = get_logger("merid.event_venues.kalshi.kalshi_robustness")
+                logger.debug("[ROBUST_CLIENT] Failed to load min_contract_price_cents from profile: %s, using default 15c", e)
+            
+            if _price_cents < min_price_cents:
+                from utils.logger import get_logger
+                logger = get_logger("merid.event_venues.kalshi.kalshi_robustness")
+                logger.critical(
+                    "[ROBUST_CLIENT_BLOCKED] Deep OTM longshot rejected: price=%dc < %dc threshold | ticker=%s",
+                    _price_cents, min_price_cents, getattr(order, 'market_id', 'unknown')
+                )
+                return None
+        
         return await self.execute_with_robustness(
             self._client.place_order if self._client else lambda x: None,
             order,

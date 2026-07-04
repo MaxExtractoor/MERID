@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { ShieldAlert, ShieldCheck, Pause, Play, Clock, AlertTriangle } from '../ui/icons';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import ErrorBar from './ErrorBar';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY} from '../config/constants';
 
@@ -44,13 +44,13 @@ export default function TradingHaltBanner() {
   const [showHistory, setShowHistory] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  const { data: haltStatus, error: haltError, refetch: refetchHalt } = useApiData<HaltStatus>(
+  const { data: haltStatus, error: haltError, refetch: refetchHalt } = useApiQuery<HaltStatus>(
     API_ENDPOINTS.RISK_HALT_STATUS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
   );
-  const { data: staleness } = useApiData<StalenessInfo>(
+  const { data: staleness } = useApiQuery<StalenessInfo>(
     API_ENDPOINTS.RISK_STALENESS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
   );
 
   if (haltError && !haltStatus) {
@@ -198,7 +198,7 @@ export default function TradingHaltBanner() {
           {haltStatus.history
             .slice()
             .reverse()
-            .map((entry, i) => (
+            .map((entry: any, i: number) => (
               <div key={i} className="flex items-center gap-2 text-slate-300">
                 <span className="text-slate-500 w-20 shrink-0">
                   {new Date(entry.timestamp * 1000).toLocaleTimeString()}

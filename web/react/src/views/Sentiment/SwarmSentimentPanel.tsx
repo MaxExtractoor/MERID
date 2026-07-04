@@ -6,25 +6,25 @@
 
 import { useMemo } from 'react';
 import { AlertTriangle, Zap, Activity } from '../../ui/icons';
-import { useApiData } from '../../hooks/useApiData';
+import { useApiQuery } from '../../hooks/useTanStackQuery';
 import { API_ENDPOINTS, DEFAULTS } from '../../config/constants';
 
 export function SwarmSentimentPanel() {
-  const { data: assets, loading: assetsLoading } = useApiData<Record<string, any>>(
+  const { data: assets, isLoading: assetsLoading } = useApiQuery<Record<string, any>>(
     API_ENDPOINTS.SENTIMENT_ASSETS_ALL,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SENTIMENT }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.SENTIMENT }
   );
-  const { data: signalsData } = useApiData<{ count: number; signals: unknown[] }>(
+  const { data: signalsData } = useApiQuery<{ count: number; signals: unknown[] }>(
     API_ENDPOINTS.SENTIMENT_HASHTAG_SIGNALS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SENTIMENT }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.SENTIMENT }
   );
-  const { data: monitor } = useApiData<Record<string, any>>(
+  const { data: monitor } = useApiQuery<Record<string, any>>(
     API_ENDPOINTS.SENTIMENT_MONITOR_STATUS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.BACKGROUND }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.BACKGROUND }
   );
-  const { data: swarmHealth } = useApiData<{ ok: boolean; warnings: string[]; sentiment_tagged_fills_last_15m: number }>(
-    API_ENDPOINTS.KALSHI_SWARM_HEALTH,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
+  const { data: swarmHealth } = useApiQuery<{ ok: boolean; warnings: string[]; sentiment_tagged_fills_last_15m: number }>(
+    API_ENDPOINTS.KALSHI_HEALTH,
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
   );
 
   const assetList = useMemo(() => {
@@ -81,7 +81,7 @@ export function SwarmSentimentPanel() {
       </div>
       {swarmHealth?.warnings && swarmHealth.warnings.length > 0 && (
         <div className="space-y-1">
-          {swarmHealth.warnings.map((w, i) => (
+          {swarmHealth.warnings.map((w: string, i: number) => (
             <div key={i} className="flex items-center gap-1.5 text-[10px] text-amber-400 bg-amber-500/10 rounded px-2 py-1">
               <AlertTriangle className="w-3 h-3 shrink-0" />
               {w}

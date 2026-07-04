@@ -1,5 +1,7 @@
 import React, { useState, useRef, useCallback, lazy, Suspense } from "react";
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useFillToast } from "./hooks/useFillToast";
+import { useKeyboardShortcuts, KeyboardShortcut } from "./hooks/useKeyboardShortcuts";
 import Sidebar from "./components/Sidebar";
 import TopBar from "./components/TopBar";
 
@@ -40,6 +42,17 @@ const VIEW_COMPONENTS: Record<string, React.LazyExoticComponent<React.ComponentT
   logs: Logs,
   settings: Settings,
 };
+
+// Configure TanStack Query
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 30_000, // 30 seconds
+      refetchOnWindowFocus: false,
+      retry: 1,
+    },
+  },
+});
 
 function FillToastWatcher() {
   useFillToast();
@@ -92,7 +105,23 @@ export default function App() {
     setSidebarOpen(false);
   }, []);
 
+  // Keyboard shortcuts for navigation
+  const shortcuts: KeyboardShortcut[] = [
+    { key: '1', description: 'Navigate to Dashboard', action: () => handleNavigate('dashboard') },
+    { key: '2', description: 'Navigate to Trade', action: () => handleNavigate('trade') },
+    { key: '3', description: 'Navigate to Monitor', action: () => handleNavigate('monitor') },
+    { key: '4', description: 'Navigate to Grid', action: () => handleNavigate('grid') },
+    { key: '5', description: 'Navigate to Risk', action: () => handleNavigate('risk') },
+    { key: '6', description: 'Navigate to Calibration', action: () => handleNavigate('calibration') },
+    { key: '7', description: 'Navigate to Logs', action: () => handleNavigate('logs') },
+    { key: '8', description: 'Navigate to Settings', action: () => handleNavigate('settings') },
+    { key: 'k', ctrl: true, description: 'Open command palette', action: () => openPaletteRef.current?.() },
+  ];
+
+  useKeyboardShortcuts(shortcuts);
+
   return (
+    <QueryClientProvider client={queryClient}>
     <ThemeProvider>
     <NetworkProvider>
     <KalshiModeProvider>
@@ -170,5 +199,6 @@ export default function App() {
     </KalshiModeProvider>
     </NetworkProvider>
     </ThemeProvider>
+    </QueryClientProvider>
   );
 }

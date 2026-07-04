@@ -2,7 +2,7 @@
  * CryptoLanesGrid — Grid view for crypto trading lanes.
  *
  * Shows:
- *   - Live and paper crypto lanes (BTC, ETH, SOL, XRP)
+ *   - Live and paper crypto lanes (BTC, ETH, SOL, XRP, DOGE)
  *   - Lane status, positions, and performance metrics
  *   - Controls for starting/stopping individual lanes
  *   - Fear & Greed integration and edge metrics
@@ -15,14 +15,23 @@ import { API_BASE_URL } from '../config/constants';
 import { authHeaders } from '../api/auth';
 import {
   Play, Square, RefreshCw,
-  Activity, Clock, DollarSign, Target, Zap,
+  Activity, Clock, Target, Zap,
   CheckCircle
 } from '../ui/icons';
+
+// Asset metadata for 5-asset crypto stack
+const ASSET_META: Record<string, { color: string; icon: string }> = {
+  BTC: { color: "text-orange-400", icon: "₿" },
+  ETH: { color: "text-blue-400", icon: "Ξ" },
+  SOL: { color: "text-purple-400", icon: "◎" },
+  XRP: { color: "text-green-400", icon: "✕" },
+  DOGE: { color: "text-yellow-400", icon: "Ð" },
+};
 
 // Types
 type CryptoLaneStatus = {
   lane_id: string;
-  symbol: "BTC" | "ETH" | "SOL" | "XRP";
+  symbol: "BTC" | "ETH" | "SOL" | "XRP" | "DOGE";
   enabled: boolean;
   running: boolean;
   open_positions: number;
@@ -91,11 +100,17 @@ export function CryptoLanesGrid() {
     return new Date(timestamp * 1000).toLocaleTimeString();
   };
 
-  // Format edge with color
+  // Format edge with color and arrow for color-blind safety
   const formatEdge = (edgeBps: number) => {
     const color = edgeBps > 0 ? 'text-green-600' : edgeBps < 0 ? 'text-red-600' : 'text-gray-600';
     const sign = edgeBps > 0 ? '+' : '';
-    return <span className={color}>{sign}{edgeBps.toFixed(1)}</span>;
+    const Arrow = edgeBps > 0 ? Activity : edgeBps < 0 ? Activity : null;
+    return (
+      <span className={color}>
+        {Arrow && <Arrow className="w-3 h-3 inline mr-1" />}
+        {sign}{edgeBps.toFixed(1)}
+      </span>
+    );
   };
 
   // Get status badge
@@ -200,7 +215,9 @@ export function CryptoLanesGrid() {
                     <tr key={lane.lane_id}>
                       <td>
                         <div className="flex items-center gap-2">
-                          <DollarSign className="w-4 h-4 text-blue-600" />
+                          <span className={`font-medium ${ASSET_META[lane.symbol]?.color || 'text-blue-600'}`}>
+                            {ASSET_META[lane.symbol]?.icon || lane.symbol}
+                          </span>
                           <span className="font-medium">{lane.symbol}</span>
                         </div>
                       </td>

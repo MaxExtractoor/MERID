@@ -18,3 +18,7 @@ export { Skeleton, SkeletonText, SkeletonCard } from './Skeleton';
 // export { Tabs, TabList, Tab, TabPanel } from './Tabs'; // Module does not exist
 export { type MetricCard, type MetricTrend } from './MetricCard';
 export { type StatusIndicator, type StatusSize } from './StatusIndicator';
+export { Separator } from './Separator';
+export { Alert } from './Alert';
+export { Dialog } from './Dialog';
+export { Input } from './Input';

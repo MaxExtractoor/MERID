@@ -437,6 +437,17 @@ class KalshiMarketState:
     min_depth_no: int = 0  # depth on no side at best ask
     last_update_ts: float = 0.0  # monotonic timestamp of last update
     
+    # Aliases for backward compatibility (OBI filter uses these names)
+    @property
+    def depth_yes(self) -> int:
+        """Alias for min_depth_yes for backward compatibility."""
+        return self.min_depth_yes
+    
+    @property
+    def depth_no(self) -> int:
+        """Alias for min_depth_no for backward compatibility."""
+        return self.min_depth_no
+    
     # Liquidity status classification
     # Note: Using str instead of LiquidityStatus enum to avoid circular import
     # Values: MISSING, ONE_SIDED, DEPTH_TOO_LOW, OK

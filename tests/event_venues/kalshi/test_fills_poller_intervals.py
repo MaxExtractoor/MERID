@@ -33,6 +33,13 @@ def test_default_backfill_interval_is_300s(monkeypatch):
     assert val == 300.0
 
 
+def test_default_cache_cleanup_interval_is_900s(monkeypatch):
+    """Without env override, DEFAULT_CACHE_CLEANUP_INTERVAL must be 900.0 (15 minutes)."""
+    monkeypatch.delenv("MERID_CACHE_CLEANUP_INTERVAL_SEC", raising=False)
+    val = float(os.getenv("MERID_CACHE_CLEANUP_INTERVAL_SEC", "900.0"))
+    assert val == 900.0
+
+
 def test_env_overrides_poll_interval(monkeypatch):
     """MERID_FILLS_POLL_INTERVAL_SEC=10 must produce 10.0."""
     monkeypatch.setenv("MERID_FILLS_POLL_INTERVAL_SEC", "10.0")
@@ -45,3 +52,10 @@ def test_env_overrides_reconcile_interval(monkeypatch):
     monkeypatch.setenv("MERID_FILLS_RECONCILE_INTERVAL_SEC", "30.0")
     val = float(os.getenv("MERID_FILLS_RECONCILE_INTERVAL_SEC", "60.0"))
     assert val == 30.0
+
+
+def test_env_overrides_cache_cleanup_interval(monkeypatch):
+    """MERID_CACHE_CLEANUP_INTERVAL_SEC=600 must produce 600.0."""
+    monkeypatch.setenv("MERID_CACHE_CLEANUP_INTERVAL_SEC", "600.0")
+    val = float(os.getenv("MERID_CACHE_CLEANUP_INTERVAL_SEC", "900.0"))
+    assert val == 600.0

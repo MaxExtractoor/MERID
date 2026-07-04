@@ -398,6 +398,45 @@ class IdempotentOrderStore:
                     total += rec.filled_count
             return total
 
+    def find_resting_duplicate(
+        self,
+        contract_id: str,
+        side: str,
+        action: str,
+        price_cents: int,
+        exclude_coid: Optional[str] = None,
+    ) -> Optional[OrderRecord]:
+        """Find an identical resting order (same contract, side, action, price).
+        
+        This prevents duplicate resting orders even when they have different
+        client_order_ids due to different 5-second time buckets.
+        
+        Args:
+            contract_id: Market ticker
+            side: "yes" or "no"
+            action: "buy" or "sell"
+            price_cents: Limit price in cents
+            exclude_coid: Optional client_order_id to exclude (current order)
+            
+        Returns:
+            OrderRecord if duplicate found, None otherwise
+        """
+        with self._lock:
+            for rec in self._orders.values():
+                # Skip if this is the current order we're checking
+                if exclude_coid and rec.client_order_id == exclude_coid:
+                    continue
+                # Check for identical resting order
+                if (
+                    rec.contract_id == contract_id
+                    and rec.side == side
+                    and rec.action == action
+                    and rec.price_cents == price_cents
+                    and rec.status in (OrderStatus.PENDING, OrderStatus.SUBMITTED, OrderStatus.LIVE)
+                ):
+                    return rec
+            return None
+
     def has_live_order(self, contract_id: str, side: str, strategy_group: str) -> bool:
         """Check if there's an active (non-terminal) order for this combo."""
         with self._lock:
@@ -640,6 +679,58 @@ class PreTradeGate:
                 existing_status=existing.status.value,
             )
 
+        # 3b. Resting order deduplication (across time buckets)
+        # Prevent identical resting orders even with different client_order_ids
+        # This catches duplicates when the 5s time bucket changes between submissions
+        resting_duplicate = self._store.find_resting_duplicate(
+            contract_id=contract_id,
+            side=side,
+            action=action,
+            price_cents=price_cents,
+            exclude_coid=coid,  # Exclude the current order we just checked
+        )
+        if resting_duplicate is not None:
+            self._store._metrics.blocked_duplicate += 1
+            logger.warning(
+                "[GATE-ALERT] resting_order_duplicate_blocked contract=%s side=%s action=%s price=%dc "
+                "existing_coid=%s new_coid=%s agent=%s (metric: blocked_duplicate=%d)",
+                contract_id, side, action, price_cents, resting_duplicate.client_order_id, coid, agent_id,
+                self._store._metrics.blocked_duplicate,
+            )
+            return GateVerdict(
+                allowed=False,
+                client_order_id=coid,
+                reason=f"resting_duplicate:{resting_duplicate.client_order_id}",
+                is_duplicate=True,
+                existing_status=resting_duplicate.status.value,
+            )
+
+        # 3.5. Price guard: prevent deep OTM longshots (critical guardrail)
+        # Load min_contract_price_cents from profile with fallback to 15 cents
+        min_price_cents = 15  # Default fallback (15 cents / $0.15)
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+            profile_adapter = get_active_profile()
+            if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_min_contract_price_cents'):
+                min_price_cents = profile_adapter.profile.guardrails_min_contract_price_cents
+        except Exception as e:
+            logger.debug("[GATE] Failed to load min_contract_price_cents from profile: %s, using default 15c", e)
+        
+        # For both YES and NO contracts, check the price directly
+        # - Low YES price (e.g., 5¢) = deep OTM longshot (betting on low-probability event)
+        # - Low NO price (e.g., 5¢) = deep OTM longshot (betting against high-probability event)
+        if price_cents < min_price_cents:
+            self._store._metrics.blocked_price_guard += 1
+            logger.warning(
+                "[GATE-ALERT] deep_otm_longshot_blocked coid=%s contract=%s side=%s price=%dc < %dc threshold (deep OTM longshot rejected)",
+                coid, contract_id, side, price_cents, min_price_cents,
+            )
+            return GateVerdict(
+                allowed=False,
+                client_order_id=coid,
+                reason=f"deep_otm_longshot:price={price_cents}c < {min_price_cents}c threshold",
+            )
+
         # 4. Fill-awareness: is the target already satisfied?
         if action == "buy":
             already_filled = (
@@ -870,6 +961,58 @@ class PreTradeGate:
                 reason=f"duplicate:{existing.status.value}",
                 is_duplicate=True,
                 existing_status=existing.status.value,
+            )
+
+        # 3b. Resting order deduplication (across time buckets)
+        # Prevent identical resting orders even with different client_order_ids
+        # This catches duplicates when the 5s time bucket changes between submissions
+        resting_duplicate = self._store.find_resting_duplicate(
+            contract_id=contract_id,
+            side=side,
+            action=action,
+            price_cents=price_cents,
+            exclude_coid=coid,  # Exclude the current order we just checked
+        )
+        if resting_duplicate is not None:
+            self._store._metrics.blocked_duplicate += 1
+            logger.warning(
+                "[GATE-ALERT] resting_order_duplicate_blocked contract=%s side=%s action=%s price=%dc "
+                "existing_coid=%s new_coid=%s agent=%s (metric: blocked_duplicate=%d)",
+                contract_id, side, action, price_cents, resting_duplicate.client_order_id, coid, agent_id,
+                self._store._metrics.blocked_duplicate,
+            )
+            return GateVerdict(
+                allowed=False,
+                client_order_id=coid,
+                reason=f"resting_duplicate:{resting_duplicate.client_order_id}",
+                is_duplicate=True,
+                existing_status=resting_duplicate.status.value,
+            )
+
+        # 3.5. Price guard: prevent deep OTM longshots (critical guardrail)
+        # Load min_contract_price_cents from profile with fallback to 15 cents
+        min_price_cents = 15  # Default fallback (15 cents / $0.15)
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+            profile_adapter = get_active_profile()
+            if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_min_contract_price_cents'):
+                min_price_cents = profile_adapter.profile.guardrails_min_contract_price_cents
+        except Exception as e:
+            logger.debug("[GATE] Failed to load min_contract_price_cents from profile: %s, using default 15c", e)
+        
+        # For both YES and NO contracts, check the price directly
+        # - Low YES price (e.g., 5¢) = deep OTM longshot (betting on low-probability event)
+        # - Low NO price (e.g., 5¢) = deep OTM longshot (betting against high-probability event)
+        if price_cents < min_price_cents:
+            self._store._metrics.blocked_price_guard += 1
+            logger.warning(
+                "[GATE-ALERT] deep_otm_longshot_blocked coid=%s contract=%s side=%s price=%dc < %dc threshold (deep OTM longshot rejected)",
+                coid, contract_id, side, price_cents, min_price_cents,
+            )
+            return GateVerdict(
+                allowed=False,
+                client_order_id=coid,
+                reason=f"deep_otm_longshot:price={price_cents}c < {min_price_cents}c threshold",
             )
 
         # 4. Fill-awareness: is the target already satisfied?

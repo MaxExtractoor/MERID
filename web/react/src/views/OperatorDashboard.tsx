@@ -13,7 +13,7 @@ import CryptoAlertStatusPanel from '../components/CryptoAlertStatusPanel';
 import SpotBasisPanel from '../components/SpotBasisPanel';
 import ContractHealthPanel from '../components/ContractHealthPanel';
 import { Kalshi15mAlignmentPanel, Kalshi15mHealthPanel, Kalshi15mShadowModePanel, Kalshi15mPreflightCheck } from '../components';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import type { OperatorRiskState } from '../types/risk';
 import { formatCurrency } from '../utils/formatters';
@@ -27,19 +27,19 @@ export default function OperatorDashboard() {
     lastUpdated,
   } = useOperatorSummary();
 
-  const { data: kalshiBalance } = useApiData<{ total_value_cents?: number; balance_cents?: number; portfolio_cents?: number; available?: number; usd?: number; usd_dollars?: number }>(
+  const { data: kalshiBalance } = useApiQuery<{ total_value_cents?: number; balance_cents?: number; portfolio_cents?: number; available?: number; usd?: number; usd_dollars?: number }>(
     API_ENDPOINTS.KALSHI_BALANCE,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
   );
-  const { data: kalshiPnl } = useApiData<{ daily_pnl_usd?: number; daily_total_pnl_usd?: number }>(
+  const { data: kalshiPnl } = useApiQuery<{ daily_pnl_usd?: number; daily_total_pnl_usd?: number }>(
     API_ENDPOINTS.KALSHI_PNL,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
   );
-  const { data: kalshiPositions } = useApiData<{ positions: unknown[] }>(
+  const { data: kalshiPositions } = useApiQuery<{ positions: unknown[] }>(
     API_ENDPOINTS.KALSHI_POSITIONS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
   );
-  const { data: kalshiGridStatus } = useApiData<{
+  const { data: kalshiGridStatus } = useApiQuery<{
     agent_count?: number;
     running?: boolean;
     metrics?: {
@@ -50,20 +50,20 @@ export default function OperatorDashboard() {
     };
   }>(
     API_ENDPOINTS.KALSHI_GRID_STATUS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
   );
-  const { data: operatorRiskState } = useApiData<OperatorRiskState>(
+  const { data: operatorRiskState } = useApiQuery<OperatorRiskState>(
     API_ENDPOINTS.OPERATOR_RISK_STATE,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );
-  const { data: agentActivity } = useApiData<{
+  const { data: agentActivity } = useApiQuery<{
     agents: Array<{ agent_id: string; status: string; tasks_completed: number }>;
     total_agents: number;
     active_agents: number;
     total_tasks_1h: number;
   }>(
     API_ENDPOINTS.OPERATOR_AGENT_ACTIVITY,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );
 
   const kalshiBalanceUsd = (() => {
@@ -232,7 +232,7 @@ export default function OperatorDashboard() {
               </div>
             </div>
             <div className="max-h-[140px] overflow-y-auto space-y-1">
-              {agentActivity.agents.slice(0, 8).map((a) => (
+              {agentActivity.agents.slice(0, 8).map((a: { agent_id: string; status: string; tasks_completed: number }) => (
                 <div key={a.agent_id} className="flex items-center justify-between px-2 py-1 rounded bg-slate-800/50 text-xs">
                   <span className="font-mono text-slate-300 truncate max-w-[120px]">{a.agent_id}</span>
                   <div className="flex items-center gap-2 shrink-0">
@@ -319,13 +319,24 @@ export default function OperatorDashboard() {
                 </thead>
                 <tbody>
                   {Object.entries(operatorRiskState.crypto_pm_feed.assets).map(([sym, row]) => {
-                    const feed = row.live_price_feed as {
+                    const assetRow = row as {
+                      live_price_feed?: {
+                        cache_age_seconds?: number;
+                        feed_ttl_expired?: boolean;
+                      };
+                      pm_spot_effective_ok?: boolean;
+                      pm_spot_ok?: boolean;
+                      live_price_feed_healthy?: boolean;
+                      last_stream_tick_age_seconds?: number;
+                      pm_spot_unusable_reason?: string;
+                    };
+                    const feed = assetRow.live_price_feed as {
                       cache_age_seconds?: number;
                       feed_ttl_expired?: boolean;
                     } | undefined;
-                    const ok = row.pm_spot_effective_ok ?? row.pm_spot_ok;
-                    const lfOk = row.live_price_feed_healthy;
-                    const tickAge = row.last_stream_tick_age_seconds;
+                    const ok = assetRow.pm_spot_effective_ok ?? assetRow.pm_spot_ok;
+                    const lfOk = assetRow.live_price_feed_healthy;
+                    const tickAge = assetRow.last_stream_tick_age_seconds;
                     return (
                       <tr key={sym} className="border-b border-slate-800/60">
                         <td className="py-1.5 pr-3 font-mono text-slate-300">{sym}</td>
@@ -345,7 +356,7 @@ export default function OperatorDashboard() {
                           {lfOk === undefined || lfOk === null ? '—' : String(lfOk)}
                         </td>
                         <td className="py-1.5 pr-3 text-slate-400 max-w-[240px]">
-                          {ok ? '—' : row.pm_spot_unusable_reason ?? 'unknown'}
+                          {ok ? '—' : assetRow.pm_spot_unusable_reason ?? 'unknown'}
                         </td>
                         <td className="py-1.5 pr-3 text-slate-400">
                           {feed?.cache_age_seconds != null ? feed.cache_age_seconds : '—'}

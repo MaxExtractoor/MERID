@@ -17,7 +17,7 @@ import ExecutionGateStrip from '../components/ExecutionGateStrip';
 import CollapsibleConsole from '../components/CollapsibleConsole';
 import AgentActivityPanel from '../components/AgentActivityPanel';
 import { useDiscoverHealth } from '../hooks/useDiscoverHealth';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY} from '../config/constants';
 import { fmtTimestamp } from '../utils/formatters';
 import type { KalshiBalance, KalshiPosition, KalshiOrder, KalshiFill } from '../types/kalshi';
@@ -373,36 +373,36 @@ function KalshiRecentOrders({ orders, fills, isPortfolioEmpty }: { orders: Kalsh
 
 /* ── Main Overview ─────────────────────────────────── */
 export default function Overview() {
-  const { data: balance } = useApiData<KalshiBalance>(API_ENDPOINTS.KALSHI_BALANCE, {
-    pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD,
+  const { data: balance } = useApiQuery<KalshiBalance>(API_ENDPOINTS.KALSHI_BALANCE, {
+    refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD,
   });
-  const { data: pnl } = useApiData<KalshiPnL>(API_ENDPOINTS.KALSHI_PNL, {
-    pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD,
+  const { data: pnl } = useApiQuery<KalshiPnL>(API_ENDPOINTS.KALSHI_PNL, {
+    refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD,
   });
   
   // Legacy positions fetch for backward compatibility (will be removed)
-  // const { data: posData } = useApiData<{ positions: KalshiPosition[] }>(API_ENDPOINTS.KALSHI_POSITIONS, {
-  //   pollingInterval: DEFAULTS.POLLING_INTERVALS.POSITIONS,
+  // const { data: posData } = useApiQuery<{ positions: KalshiPosition[] }>(API_ENDPOINTS.KALSHI_POSITIONS, {
+  //   refetchInterval: DEFAULTS.POLLING_INTERVALS.POSITIONS,
   // });
-  const { data: ordData } = useApiData<{ orders: KalshiOrder[] }>(API_ENDPOINTS.KALSHI_ORDERS, {
-    pollingInterval: DEFAULTS.POLLING_INTERVALS.ORDERS,
+  const { data: ordData } = useApiQuery<{ orders: KalshiOrder[] }>(API_ENDPOINTS.KALSHI_ORDERS, {
+    refetchInterval: DEFAULTS.POLLING_INTERVALS.ORDERS,
   });
-  const { data: fillData } = useApiData<{ fills: KalshiFill[] }>(API_ENDPOINTS.KALSHI_FILLS, {
-    pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW, // 30s — fills change infrequently; use STANDARD for faster updates if needed
+  const { data: fillData } = useApiQuery<{ fills: KalshiFill[] }>(API_ENDPOINTS.KALSHI_FILLS, {
+    refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW, // 30s — fills change infrequently; use STANDARD for faster updates if needed
   });
   // Use centralized discover health polling (replaces individual /fills, /positions, /risk, /pnl polling)
   const { isPortfolioEmpty, isDiscoverGreen: _isDiscoverGreen } = useDiscoverHealth({
     pollIntervalMs: 2000, // 2s polling to reduce server load
     enabled: true,
   });
-  const { data: killSwitch, refetch: refetchKillSwitch } = useApiData<OperatorKillSwitchState>(API_ENDPOINTS.OPERATOR_KILL_SWITCH_STATUS, {
-    pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH,
+  const { data: killSwitch, refetch: refetchKillSwitch } = useApiQuery<OperatorKillSwitchState>(API_ENDPOINTS.OPERATOR_KILL_SWITCH_STATUS, {
+    refetchInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH,
   });
-  const { data: gridStatus, refetch: refetchGridStatus } = useApiData<GridStatusLite>(API_ENDPOINTS.KALSHI_GRID_STATUS, {
-    pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD,
+  const { data: gridStatus, refetch: refetchGridStatus } = useApiQuery<GridStatusLite>(API_ENDPOINTS.KALSHI_GRID_STATUS, {
+    refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD,
   });
-  const { data: catalog, refetch: refetchCatalog } = useApiData<CatalogResponseLite>(API_ENDPOINTS.KALSHI_CATALOG, {
-    pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW,
+  const { data: catalog, refetch: refetchCatalog } = useApiQuery<CatalogResponseLite>(API_ENDPOINTS.KALSHI_CATALOG, {
+    refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW,
   });
 
   const { wsKillActive, wsKillAt } = useKalshiMode();
@@ -414,8 +414,8 @@ export default function Overview() {
 
   // Continuously sync gridStartMode with actual server mode so changes
   // made from other views (Portfolio, VolDash, GridView) are reflected here.
-  const { data: venueModeData } = useApiData<{ mode: string; is_live: boolean }>(API_ENDPOINTS.KALSHI_GRID_MODE, {
-    pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD,
+  const { data: venueModeData } = useApiQuery<{ mode: string; is_live: boolean }>(API_ENDPOINTS.KALSHI_GRID_MODE, {
+    refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD,
   });
   useEffect(() => {
     if (!venueModeData?.mode) return;

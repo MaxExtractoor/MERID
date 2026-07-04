@@ -4,7 +4,7 @@
 
 import { useEffect } from 'react';
 import { useKalshiStore, selectGrid, selectConnected } from '../store';
-import { LayoutGrid, Activity, Play, Square } from '../ui/icons';
+import { LayoutGrid, Play, Square } from '../ui/icons';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/Card';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui';

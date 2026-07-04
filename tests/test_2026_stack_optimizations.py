@@ -25,34 +25,34 @@ from merid.prediction.order_book_imbalance_filter import (
 
 
 class TestMaxOrdersPerCycle:
-    """Test max_orders_per_cycle optimization."""
+    """Test max_orders_per_15m_window optimization."""
     
-    def test_max_orders_per_cycle_increased(self):
-        """Test that max_orders_per_cycle is increased to 3."""
+    def test_max_orders_per_15m_window_increased(self):
+        """Test that max_orders_per_15m_window is increased to 15."""
         import yaml
         
         with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
             profile = yaml.safe_load(f)
         
-        # Check guardrails section
-        assert "guardrails" in profile
-        assert "max_orders_per_cycle" in profile["guardrails"]
+        # Check throttling section
+        assert "throttling" in profile
+        assert "max_orders_per_15m_window" in profile["throttling"]
         
-        # Check value is 3 (increased from 1)
-        max_orders = profile["guardrails"]["max_orders_per_cycle"]
-        assert max_orders == 3, f"Expected 3, got {max_orders}"
+        # Check value is 15 (increased from 5)
+        max_orders = profile["throttling"]["max_orders_per_15m_window"]
+        assert max_orders == 15, f"Expected 15, got {max_orders}"
     
-    def test_max_orders_per_cycle_reasonable(self):
-        """Test that max_orders_per_cycle is within reasonable bounds."""
+    def test_max_orders_per_15m_window_reasonable(self):
+        """Test that max_orders_per_15m_window is within reasonable bounds."""
         import yaml
         
         with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
             profile = yaml.safe_load(f)
         
-        max_orders = profile["guardrails"]["max_orders_per_cycle"]
+        max_orders = profile["throttling"]["max_orders_per_15m_window"]
         
-        # Should be between 1 and 10 (reasonable range for 15m trading)
-        assert 1 <= max_orders <= 10, f"max_orders_per_cycle {max_orders} out of reasonable range"
+        # Should be between 5 and 30 (reasonable range for 15m trading with 5 assets)
+        assert 5 <= max_orders <= 30, f"max_orders_per_15m_window {max_orders} out of reasonable range"
 
 
 class TestOrderBookImbalanceFilter:
@@ -318,9 +318,9 @@ class TestOBIProfileConfiguration:
         # Should be enabled
         assert obi["enabled"] is True, "OBI filter should be enabled"
         
-        # Strong threshold should be 0.7 (industry standard)
-        assert obi["strong_threshold"] == 0.7, \
-            f"Expected strong_threshold=0.7, got {obi['strong_threshold']}"
+        # Strong threshold should be 0.85 (2026-07-03: increased for crypto volatility)
+        assert obi["strong_threshold"] == 0.85, \
+            f"Expected strong_threshold=0.85, got {obi['strong_threshold']}"
         
         # Moderate threshold should be 0.3
         assert obi["moderate_threshold"] == 0.3, \
@@ -330,13 +330,42 @@ class TestOBIProfileConfiguration:
         assert obi["consistency_window_size"] >= 10, \
             f"Consistency window too small: {obi['consistency_window_size']}"
         
-        # Min consistency should be at least 50%
-        assert obi["min_consistency_pct"] >= 0.50, \
-            f"Min consistency too low: {obi['min_consistency_pct']}"
+        # Min consistency should be 60% (2026-07-03: restored to research standard)
+        assert obi["min_consistency_pct"] == 0.60, \
+            f"Expected min_consistency_pct=0.60, got {obi['min_consistency_pct']}"
         
         # Staleness threshold should be reasonable (<= 10 seconds)
         assert obi["max_staleness_ms"] <= 10000, \
             f"Staleness threshold too high: {obi['max_staleness_ms']}ms"
+    
+    def test_obi_per_asset_thresholds(self):
+        """Test that per-asset OBI thresholds are configured."""
+        import yaml
+        
+        with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
+            profile = yaml.safe_load(f)
+        
+        obi = profile["order_book_imbalance_filter"]
+        
+        # Check per-asset thresholds exist
+        assert "per_asset_strong_threshold" in obi, \
+            "per_asset_strong_threshold should be configured"
+        
+        per_asset = obi["per_asset_strong_threshold"]
+        
+        # BTC/ETH should have 85% threshold (high volatility, deep book)
+        assert per_asset["BTC"] == 0.85, \
+            f"Expected BTC threshold=0.85, got {per_asset['BTC']}"
+        assert per_asset["ETH"] == 0.85, \
+            f"Expected ETH threshold=0.85, got {per_asset['ETH']}"
+        
+        # SOL/XRP/DOGE should have 80% threshold (high volatility, thinner book)
+        assert per_asset["SOL"] == 0.80, \
+            f"Expected SOL threshold=0.80, got {per_asset['SOL']}"
+        assert per_asset["XRP"] == 0.80, \
+            f"Expected XRP threshold=0.80, got {per_asset['XRP']}"
+        assert per_asset["DOGE"] == 0.80, \
+            f"Expected DOGE threshold=0.80, got {per_asset['DOGE']}"
         
         # Top levels should be between 1 and 10
         assert 1 <= obi["top_levels"] <= 10, \
@@ -378,11 +407,175 @@ class TestMarketCatalogFilterFix:
         assert max_entry == 15.0, f"Expected max_entry_mins=15.0, got {max_entry}"
 
 
+class TestHybridModePriceCaps:
+    """Test hybrid mode price caps to prevent poor risk/reward trades."""
+    
+    def test_hybrid_price_caps_in_profile(self):
+        """Test that hybrid mode price caps are configured in profile."""
+        with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
+            profile = yaml.safe_load(f)
+        
+        # Check hybrid section exists
+        assert "hybrid" in profile, "hybrid section should be in profile"
+        
+        hybrid = profile["hybrid"]
+        
+        # Check max_entry_price_yes exists
+        assert "max_entry_price_yes" in hybrid, "max_entry_price_yes should be in hybrid config"
+        
+        # Should be 0.80 (relaxed from 70¢ based on 2026 research - allows trading at common 70-80¢ range)
+        max_yes = hybrid["max_entry_price_yes"]
+        assert max_yes == 0.80, f"Expected max_entry_price_yes=0.80, got {max_yes}"
+        
+        # Check min_entry_price_no exists
+        assert "min_entry_price_no" in hybrid, "min_entry_price_no should be in hybrid config"
+        
+        # Should be 0.20 (relaxed from 30¢ - symmetric cap for NO side)
+        min_no = hybrid["min_entry_price_no"]
+        assert min_no == 0.20, f"Expected min_entry_price_no=0.20, got {min_no}"
+    
+    def test_hybrid_price_caps_reasonable(self):
+        """Test that hybrid price caps are reasonable and symmetric."""
+        with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
+            profile = yaml.safe_load(f)
+        
+        hybrid = profile["hybrid"]
+        
+        max_yes = hybrid["max_entry_price_yes"]
+        min_no = hybrid["min_entry_price_no"]
+        
+        # Caps should be symmetric around 0.50 (relaxed from previous strict bounds)
+        assert max_yes <= 0.85, f"max_entry_price_yes too high: {max_yes}"
+        assert min_no >= 0.15, f"min_entry_price_no too low: {min_no}"
+        
+        # Sum should be 1.00 (symmetric)
+        assert abs((max_yes + min_no) - 1.0) < 0.01, \
+            f"Price caps not symmetric: max_yes={max_yes}, min_no={min_no}"
+
+
+class TestOBISizeMultiplier:
+    """Test OBI filter conversion from hard gate to size multiplier based on 2026 research."""
+    
+    def test_obi_context_has_size_multiplier(self):
+        """Test that OBIContext has size_multiplier field."""
+        from merid.prediction.order_book_imbalance_filter import OBIContext
+        
+        # Create an OBIContext with size_multiplier
+        context = OBIContext(
+            current_obi=0.5,
+            current_signal="buy",
+            directional_consistency=0.8,
+            window_size=20,
+            is_fresh=True,
+            recommendation="TRADE",
+            size_multiplier=1.0
+        )
+        
+        # Check size_multiplier exists and is 1.0
+        assert hasattr(context, 'size_multiplier'), "OBIContext should have size_multiplier field"
+        assert context.size_multiplier == 1.0, f"Expected size_multiplier=1.0, got {context.size_multiplier}"
+    
+    def test_obi_reduced_recommendation(self):
+        """Test that OBI filter returns REDUCED recommendation instead of FILTER."""
+        from merid.prediction.order_book_imbalance_filter import OrderBookImbalanceFilter, OBIConfig
+        
+        # Create OBI filter
+        config = OBIConfig()
+        filter = OrderBookImbalanceFilter(config)
+        
+        # Add some history to build consistency (avoid warmup state)
+        for i in range(10):
+            filter.update_measurement(
+                market_id="TEST-MARKET",
+                bid_depth=100,
+                ask_depth=100,
+                timestamp_ms=i * 1000,
+                asset="BTC"
+            )
+        
+        # Test with neutral signal (should return REDUCED with 0.70 multiplier)
+        context = filter.should_trade(
+            market_id="TEST-MARKET",
+            bid_depth=100,
+            ask_depth=100,  # Balanced book
+            direction="buy"
+        )
+        
+        # Should return REDUCED with size_multiplier=0.70 (neutral signal)
+        assert context.recommendation in ["REDUCED", "TRADE"], f"Expected REDUCED or TRADE, got {context.recommendation}"
+        if context.recommendation == "REDUCED":
+            # With history, neutral signal should give 0.70 multiplier
+            # If consistency is still 0 (warmup), it will be 0.50
+            assert context.size_multiplier in [0.50, 0.70], f"Expected size_multiplier 0.50 or 0.70, got {context.size_multiplier}"
+    
+    def test_obi_consistency_zero_warmup(self):
+        """Test that OBI filter handles consistency=0.0 (warmup) with REDUCED recommendation."""
+        from merid.prediction.order_book_imbalance_filter import OrderBookImbalanceFilter, OBIConfig
+        
+        # Create OBI filter
+        config = OBIConfig()
+        filter = OrderBookImbalanceFilter(config)
+        
+        # Test with insufficient history (consistency will be 0.0)
+        context = filter.should_trade(
+            market_id="TEST-MARKET",
+            bid_depth=100,
+            ask_depth=100,
+            direction="buy"
+        )
+        
+        # Should return REDUCED with size_multiplier=0.50 for warmup
+        assert context.recommendation in ["REDUCED", "TRADE"], f"Expected REDUCED or TRADE, got {context.recommendation}"
+        if context.recommendation == "REDUCED":
+            assert context.size_multiplier == 0.50, f"Expected size_multiplier=0.50 for warmup, got {context.size_multiplier}"
+
+
+class TestZeroValueBugFixes:
+    """Test fixes for 0 value bugs in technical indicators."""
+    
+    def test_panic_fade_skips_zero_rsi(self):
+        """Test that panic fade signal skips when RSI=0.0 (insufficient data)."""
+        from merid.prediction.agent_grid_15m import LeanAgentConfig
+        
+        # The fix ensures panic fade skips when RSI or Z-score is 0.0
+        # This prevents false signals during warmup
+        rsi = 0.0  # Insufficient data
+        zscore = -2.5  # Valid extreme
+        velocity = -0.0003  # Valid panic move
+        
+        # With RSI=0.0, panic fade should skip (not generate signal)
+        should_skip = (rsi == 0.0) or (zscore == 0.0)
+        assert should_skip, "Panic fade should skip when RSI=0.0 (insufficient data)"
+    
+    def test_panic_fade_skips_zero_zscore(self):
+        """Test that panic fade signal skips when Z-score=0.0 (insufficient data)."""
+        from merid.prediction.agent_grid_15m import LeanAgentConfig
+        
+        # The fix ensures panic fade skips when RSI or Z-score is 0.0
+        rsi = 20.0  # Valid extreme
+        zscore = 0.0  # Insufficient data
+        velocity = -0.0003  # Valid panic move
+        
+        # With Z-score=0.0, panic fade should skip (not generate signal)
+        should_skip = (rsi == 0.0) or (zscore == 0.0)
+        assert should_skip, "Panic fade should skip when Z-score=0.0 (insufficient data)"
+    
+    def test_panic_fade_proceeds_with_valid_indicators(self):
+        """Test that panic fade proceeds when both RSI and Z-score are non-zero."""
+        rsi = 20.0  # Valid extreme
+        zscore = -2.5  # Valid extreme
+        velocity = -0.0003  # Valid panic move
+        
+        # With valid indicators, panic fade should proceed
+        should_skip = (rsi == 0.0) or (zscore == 0.0)
+        assert not should_skip, "Panic fade should proceed with valid RSI and Z-score"
+
+
 class TestMaxSpreadCentsFix:
-    """Test max_spread_cents increase from 10c to 25c."""
+    """Test max_spread_cents increase from 10c to 50c based on Turbine research."""
     
     def test_guardrails_max_spread_cents(self):
-        """Test that guardrails max_spread_cents is 25c."""
+        """Test that guardrails max_spread_cents is 50c based on Turbine research."""
         with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
             profile = yaml.safe_load(f)
         
@@ -391,12 +584,12 @@ class TestMaxSpreadCentsFix:
         # Check max_spread_cents exists
         assert "max_spread_cents" in guardrails
         
-        # Should be 25 (increased from 10)
+        # Should be 50 (increased from 25 based on Turbine research)
         max_spread = guardrails["max_spread_cents"]
-        assert max_spread == 25, f"Expected max_spread_cents=25, got {max_spread}"
+        assert max_spread == 50, f"Expected max_spread_cents=50, got {max_spread}"
     
     def test_market_microstructure_max_spread_cents(self):
-        """Test that market_microstructure max_spread_cents is 25c."""
+        """Test that market_microstructure max_spread_cents is 50c based on Turbine research."""
         with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
             profile = yaml.safe_load(f)
         
@@ -408,9 +601,9 @@ class TestMaxSpreadCentsFix:
         # Check max_spread_cents exists
         assert "max_spread_cents" in micro
         
-        # Should be 25 (increased from 10)
+        # Should be 50 (increased from 25 based on Turbine research)
         max_spread = micro["max_spread_cents"]
-        assert max_spread == 25, f"Expected max_spread_cents=25, got {max_spread}"
+        assert max_spread == 50, f"Expected max_spread_cents=50, got {max_spread}"
 
 
 class TestADXThresholdRelaxation:

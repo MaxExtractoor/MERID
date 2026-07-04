@@ -3,7 +3,7 @@ import {
   Brain, ChevronDown, ChevronRight, RefreshCw,
   AlertTriangle, CheckCircle, XCircle, Clock, Zap
 } from '../ui/icons';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import ErrorBar from './ErrorBar';
 import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
@@ -40,9 +40,9 @@ export default function ExplainabilityTimeline() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [phaseFilter, setPhaseFilter] = useState<string>('all');
 
-  const { data: rawData, loading, error: fetchError, refetch } = useApiData<{ decisions: DecisionEvent[] }>(
+  const { data: rawData, isLoading, error: fetchError, refetch } = useApiQuery<{ decisions: DecisionEvent[] }>(
     API_ENDPOINTS.EXPLAINABILITY_DECISIONS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
   );
 
   if (fetchError && !rawData) {
@@ -52,7 +52,7 @@ export default function ExplainabilityTimeline() {
 
   const filtered = phaseFilter === 'all'
     ? events
-    : events.filter(e => e.phase === phaseFilter);
+    : events.filter((e: DecisionEvent) => e.phase === phaseFilter);
 
   const formatTime = (ts: string) => {
     const d = new Date(ts);
@@ -66,7 +66,7 @@ export default function ExplainabilityTimeline() {
     return `${Math.floor(ms / 3600000)}h ago`;
   };
 
-  if (loading) {
+  if (isLoading) {
     return (
       <div className="bg-slate-800/50 rounded-lg border border-slate-700/50 p-6">
         <div className="flex items-center gap-2 text-gray-400">
@@ -115,7 +115,7 @@ export default function ExplainabilityTimeline() {
         <div className="absolute left-4 top-0 bottom-0 w-px bg-slate-700" />
 
         <div className="space-y-3">
-          {filtered.map(event => {
+          {filtered.map((event: DecisionEvent) => {
             const isExpanded = expandedId === event.id;
             const phaseCfg = PHASE_COLORS[event.phase] || PHASE_COLORS.REVIEW;
             const outcomeCfg = OUTCOME_CONFIG[event.outcome] || OUTCOME_CONFIG.pending;

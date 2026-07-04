@@ -73,6 +73,14 @@ export type LegacyView =
 
 // Unified View Type
 export type View =
+  | 'dashboard'
+  | 'trade'
+  | 'monitor'
+  | 'grid'
+  | 'risk'
+  | 'calibration'
+  | 'logs'
+  | 'settings'
   | DiscoverView
   | AnalyzeView
   | ConsensusView
@@ -82,8 +90,7 @@ export type View =
   | PromoteView
   | ProtectView
   | SystemView
-  | LegacyView
-  | NewView;
+  | LegacyView;
 
 // View Stage Mapping for Navigation
 export const VIEW_STAGES: Record<string, { label: string; color: string; icon: string }> = {

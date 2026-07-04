@@ -200,6 +200,90 @@ class TestExitPolicy:
         assert policy.action == ExitAction.HOLD
         assert policy.reason is None
     
+    def test_evaluate_loss_cap_triggers(self):
+        """Test loss cap triggers at 80% loss (2026 FIX)."""
+        position = Position(
+            market_id="KXBTC15M-1234",
+            series_ticker="KXBTC15M",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,  # Entry at 50c
+        )
+        
+        # 80% loss: current price = 10c (50c * 0.20)
+        # Unrealized PnL = -40c per contract = -400c total
+        # Max loss = 50c * 10 = 500c
+        # Loss percentage = 400 / 500 = 80%
+        policy = ExitPolicy(
+            position=position,
+            current_price_cents=10,
+            unrealized_pnl_cents=-400,  # Directly set to 80% loss
+            r_multiple=-8.0,
+            time_since_entry_seconds=100.0,
+            time_to_expiry_seconds=800.0,
+        )
+        
+        policy.evaluate()
+        
+        assert policy.action == ExitAction.EXIT_MARKET
+        assert policy.reason == ExitReason.LOSS_CAP
+    
+    def test_evaluate_loss_cap_no_trigger_below_threshold(self):
+        """Test loss cap does NOT trigger below 80% loss."""
+        position = Position(
+            market_id="KXBTC15M-1234",
+            series_ticker="KXBTC15M",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,  # Entry at 50c
+        )
+        
+        # Update position runtime state to calculate unrealized PnL
+        position.update_runtime_state(current_price_cents=20)
+        
+        # 60% loss: current price = 20c (50c * 0.40)
+        # Unrealized PnL = -30c per contract = -300c total
+        policy = ExitPolicy(
+            position=position,
+            current_price_cents=20,
+            unrealized_pnl_cents=position.unrealized_pnl_cents,
+            r_multiple=position.r_multiple,
+            time_since_entry_seconds=100.0,
+            time_to_expiry_seconds=800.0,
+        )
+        
+        policy.evaluate()
+        
+        assert policy.action == ExitAction.HOLD
+        assert policy.reason is None
+    
+    def test_evaluate_loss_cap_no_trigger_profitable(self):
+        """Test loss cap does NOT trigger on profitable position."""
+        position = Position(
+            market_id="KXBTC15M-1234",
+            series_ticker="KXBTC15M",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,
+        )
+        
+        # Update position runtime state to calculate unrealized PnL
+        position.update_runtime_state(current_price_cents=60)
+        
+        policy = ExitPolicy(
+            position=position,
+            current_price_cents=60,
+            unrealized_pnl_cents=position.unrealized_pnl_cents,
+            r_multiple=position.r_multiple,
+            time_since_entry_seconds=100.0,
+            time_to_expiry_seconds=800.0,
+        )
+        
+        policy.evaluate()
+        
+        assert policy.action == ExitAction.HOLD
+        assert policy.reason is None
+    
     def test_get_effective_max_hold_volatility_adjustment(self):
         """Test volatility-adjusted max hold time."""
         position = Position(

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Clock, ShieldOff, Zap, RefreshCw, Radio, Settings, Filter, Lightbulb } from '../ui/icons';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { HelpPopover } from './HelpPopover';
 
@@ -71,9 +71,9 @@ export default function SessionLogPanel() {
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
 
   const queryParam = categoryFilter === 'all' ? '' : `&category=${categoryFilter}`;
-  const { data, loading, refetch } = useApiData<SessionLogData>(
+  const { data, isLoading, refetch } = useApiQuery<SessionLogData>(
     `${API_ENDPOINTS.SYSTEM_SESSION_LOG}?limit=50${queryParam}`,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
   );
 
   const events = data?.events ?? [];
@@ -104,7 +104,7 @@ export default function SessionLogPanel() {
             className="p-1 rounded hover:bg-slate-700 text-gray-400 hover:text-white transition-colors"
             title="Refresh"
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
           </button>
         </div>
       </div>
@@ -131,11 +131,11 @@ export default function SessionLogPanel() {
       {/* Event list */}
       {events.length === 0 ? (
         <div className="text-center text-slate-600 py-6 text-xs">
-          {loading ? 'Loading...' : 'No events yet this session'}
+          {isLoading ? 'Loading...' : 'No events yet this session'}
         </div>
       ) : (
         <div className="space-y-1 max-h-[300px] overflow-y-auto">
-          {events.map((evt, i) => {
+          {events.map((evt: SessionEvent, i: number) => {
             const Icon = CATEGORY_ICONS[evt.category] ?? Clock;
             const iconColor = CATEGORY_COLORS[evt.category] ?? 'text-slate-400';
             const style = SEVERITY_STYLES[evt.severity] ?? SEVERITY_STYLES.info;

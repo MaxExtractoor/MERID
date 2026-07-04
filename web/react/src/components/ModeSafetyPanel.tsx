@@ -1,6 +1,6 @@
 import React from 'react';
 import { Shield, ShieldAlert, ShieldCheck, ShieldOff, Wifi, WifiOff, Zap, ZapOff, Clock, AlertTriangle } from '../ui/icons';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { useExecutionGate } from '../hooks/useExecutionGate';
 import { HelpPopover } from './HelpPopover';
@@ -60,13 +60,13 @@ function StatusDot({ ok }: { ok: boolean }) {
 }
 
 function ModeSafetyPanel() {
-  const { data, loading, error } = useApiData<ModeSafetyData>(
+  const { data, isLoading, error } = useApiQuery<ModeSafetyData>(
     API_ENDPOINTS.SYSTEM_MODE_SAFETY,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
   );
   const gate = useExecutionGate();
 
-  if (loading && !data) {
+  if (isLoading && !data) {
     return (
       <div className="bg-slate-900/70 rounded-xl border border-slate-800 p-5">
         <div className="flex items-center gap-2 text-slate-500">
@@ -275,7 +275,7 @@ function ModeSafetyPanel() {
             <span className="text-[10px] font-medium text-slate-500 uppercase tracking-wide">Kill Switch History</span>
           </div>
           <div className="space-y-1 max-h-[160px] overflow-y-auto">
-            {data.kill_switch_history.map((evt, i) => {
+            {data.kill_switch_history.map((evt: KillSwitchEvent, i: number) => {
               const isActivation = evt.new_state === 'killed' || evt.new_state === 'active';
               return (
                 <div key={i} className="flex items-start gap-2 text-[10px] bg-slate-800/50 rounded px-2 py-1.5">

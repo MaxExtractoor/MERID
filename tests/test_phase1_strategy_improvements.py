@@ -242,7 +242,7 @@ class TestMarketMicrostructureFilters:
         assert profile.market_microstructure_enabled == True, "Market microstructure filters should be enabled"
         
         assert hasattr(profile, 'market_microstructure_max_spread_cents'), "Profile should have market_microstructure_max_spread_cents"
-        assert profile.market_microstructure_max_spread_cents == 50.0, f"Max spread should be 50.0, got {profile.market_microstructure_max_spread_cents}"
+        assert profile.market_microstructure_max_spread_cents == 50.0, f"Max spread should be 50.0 (Turbine research), got {profile.market_microstructure_max_spread_cents}"
         
         assert hasattr(profile, 'market_microstructure_min_depth_usd'), "Profile should have market_microstructure_min_depth_usd"
         assert profile.market_microstructure_min_depth_usd == 50.0, f"Min depth should be 50.0, got {profile.market_microstructure_min_depth_usd}"

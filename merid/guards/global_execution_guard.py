@@ -184,6 +184,24 @@ class GlobalExecutionGuard:
             if price_cents <= 0 or price_cents >= 100:
                 return False, f"Invalid price_cents: {price_cents} (must be 1-99)"
             
+            # CRITICAL: Price guard - prevent deep OTM longshots (15¢ minimum)
+            # This is the final safety net before order submission to Kalshi
+            min_price_cents = 15  # 15 cents / $0.15 minimum
+            try:
+                from merid.risk.profiles.crypto_15m_profile import get_active_profile
+                profile_adapter = get_active_profile()
+                if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_min_contract_price_cents'):
+                    min_price_cents = profile_adapter.profile.guardrails_min_contract_price_cents
+            except Exception as e:
+                logger.debug("[GLOBAL_GUARD] Failed to load min_contract_price_cents from profile: %s, using default 15c", e)
+            
+            if price_cents < min_price_cents:
+                logger.critical(
+                    "[GLOBAL_GUARD_BLOCKED] Deep OTM longshot rejected: price=%dc < %dc threshold | ticker=%s source=%s",
+                    price_cents, min_price_cents, ticker, source
+                )
+                return False, f"DEEP_OTM_LONGSHOT:price={price_cents}c < {min_price_cents}c threshold"
+            
             # 2. Calculate notional
             # CRITICAL FIX: For BUY_NO orders, notional is (100 - price_cents) because max loss is when NO loses
             # For BUY_YES orders, notional is price_cents because max loss is the contract cost

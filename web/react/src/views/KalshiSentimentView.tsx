@@ -14,7 +14,7 @@ import { useMemo } from 'react';
 import {
   Activity, AlertTriangle, RefreshCw, Flame, ArrowUp, ArrowDown, Snowflake, Target, ArrowRight,
 } from '../ui/icons';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import KalshiModeBadge from '../components/KalshiModeBadge';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
@@ -28,16 +28,16 @@ import type { SentimentData, SizingEffectCardData } from './Sentiment/types';
 // ── Sizing Effect Card ──────────────────────────────────────────────────────
 
 function SizingEffectCard() {
-  const { data, loading } = useApiData<{
+  const { data, isLoading } = useApiQuery<{
     assets: Record<string, SizingEffectCardData>;
   }>(
     API_ENDPOINTS.SENTIMENT_VOL_ASSETS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SENTIMENT }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.SENTIMENT }
   );
 
   const primaryAsset = data?.assets?.['BTC'] ?? Object.values(data?.assets ?? {})[0];
 
-  if (loading && !primaryAsset) {
+  if (isLoading && !primaryAsset) {
     return (
       <div className="bg-slate-900/80 rounded-2xl border border-slate-800 p-4 animate-pulse">
         <div className="h-4 bg-slate-800 rounded w-32 mb-2" />
@@ -146,16 +146,16 @@ function isContrarianOpportunity(asset: SizingEffectCardData): boolean {
 // ── Main View ───────────────────────────────────────────────────────────────
 
 export default function KalshiSentimentView() {
-  const { data, loading, refetch } = useApiData<SentimentData>(
+  const { data, isLoading, refetch } = useApiQuery<SentimentData>(
     API_ENDPOINTS.KALSHI_GRID_SENTIMENT,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SENTIMENT }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.SENTIMENT }
   );
 
   const categories = useMemo(() => {
     if (!data?.by_category) return [];
     return Object.entries(data.by_category)
-      .filter(([, v]) => v.sample_count > 0)
-      .sort((a, b) => b[1].sample_count - a[1].sample_count);
+      .filter(([, v]: [string, any]) => v.sample_count > 0)
+      .sort((a: [string, any], b: [string, any]) => b[1].sample_count - a[1].sample_count);
   }, [data?.by_category]);
 
   const topMarkets = useMemo(() => {
@@ -166,7 +166,7 @@ export default function KalshiSentimentView() {
   const globalScore = data?.global?.score ?? 50;
   const globalRegime = data?.global?.regime ?? 'greed';
 
-  if (loading && !data) {
+  if (isLoading && !data) {
     return (
       <div className="flex items-center justify-center h-64 text-slate-500">
         <RefreshCw className="w-5 h-5 animate-spin mr-2" />
@@ -191,7 +191,7 @@ export default function KalshiSentimentView() {
           className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors"
           aria-label="Refresh sentiment"
         >
-          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
         </button>
       </div>
 
@@ -259,7 +259,7 @@ export default function KalshiSentimentView() {
           <h2 className="text-sm font-semibold text-slate-300 mb-3">By Category</h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {categories.map(([name, score]) => (
-              <CategoryCard key={name} name={name} data={score} />
+              <CategoryCard key={name} name={name} data={score as any} />
             ))}
           </div>
         </div>
@@ -286,7 +286,7 @@ export default function KalshiSentimentView() {
               </tr>
             </thead>
             <tbody>
-              {topMarkets.map((m) => {
+              {topMarkets.map((m: any) => {
                 const mc = regimeCfg(m.regime);
                 const dir = m.score >= 50;
                 return (
@@ -326,7 +326,7 @@ export default function KalshiSentimentView() {
       )}
 
       {/* ── Empty State ──────────────────────────────────────── */}
-      {!data?.tracked_markets && !loading && (
+      {!data?.tracked_markets && !isLoading && (
         <div className="flex flex-col items-center justify-center py-16 text-slate-500">
           <Snowflake className="w-10 h-10 mb-3 text-slate-600" />
           <p className="text-sm font-medium">No sentiment data yet</p>

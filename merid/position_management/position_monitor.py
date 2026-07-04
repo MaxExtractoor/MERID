@@ -208,15 +208,39 @@ class PositionMonitor:
             self._emit_scale_out_intent(position, contracts_to_close, current_price_cents)
             # Continue monitoring with reduced size
         
-        # Research: Only activate trailing after 1R (break-even)
-        if not position.trailing_activated and position.break_even_triggered:
-            position.trailing_activated = True
-            logger.info(
-                "[POSITION-MONITOR] TRAILING activated: position=%s price=%dc R=%.2f",
-                position.position_id[:8],
-                current_price_cents,
-                position.r_multiple,
-            )
+        # CRITICAL FIX: Activate trailing stop after minimum profit threshold (not 1R)
+        # For 15-minute binary options, waiting for 1R break-even is too conservative
+        # Many trades never reach 1R before reversing, causing avoidable losses
+        # Activate trailing after min_profit_cents from profile (default 3 cents)
+        if not position.trailing_activated:
+            # Check if position has minimum profit to activate trailing
+            min_profit_cents = 3  # Default from profile
+            try:
+                from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
+                if is_profile_active():
+                    adapter = get_active_profile()
+                    profile = adapter.profile
+                    min_profit_cents = profile.trailing_stop_min_profit_cents
+            except Exception as e:
+                logger.debug("[POSITION-MONITOR] Could not read min_profit_cents from profile: %s", e)
+            
+            # Calculate current profit in cents
+            if position.side == PositionSide.YES:
+                profit_cents = current_price_cents - position.avg_entry_price_cents
+            else:
+                profit_cents = position.avg_entry_price_cents - current_price_cents
+            
+            # Activate trailing if minimum profit threshold reached
+            if profit_cents >= min_profit_cents:
+                position.trailing_activated = True
+                logger.info(
+                    "[POSITION-MONITOR] TRAILING activated: position=%s price=%dc profit=%dc R=%.2f threshold=%dc",
+                    position.position_id[:8],
+                    current_price_cents,
+                    profit_cents,
+                    position.r_multiple,
+                    min_profit_cents,
+                )
         
         # Check trailing stop (only if activated)
         if position.trailing_activated and position.should_trigger_trail(current_price_cents):
@@ -232,7 +256,7 @@ class PositionMonitor:
             self._emit_exit_intent(position, ExitReason.TRAIL, current_price_cents)
             return
         
-        # Check exit policy (time stop, edge decay, risk)
+        # Check exit policy (time stop, edge decay, risk, candle reversal)
         resolver = get_exit_policy_resolver()
         
         # Get time to expiry from market state if available
@@ -246,12 +270,49 @@ class PositionMonitor:
         except Exception as e:
             logger.debug("[POSITION-MONITOR] Could not get time to expiry: %s", e)
         
+        # Get recent candles for candle pattern detection
+        candles = None
+        try:
+            from merid.data.unified_spot_service import get_unified_spot_service
+            from merid.signals.ta_engine import TAEngine, IndicatorConfig
+            
+            # Get asset from market_id
+            asset = None
+            if "BTC" in position.market_id:
+                asset = "BTC"
+            elif "ETH" in position.market_id:
+                asset = "ETH"
+            elif "SOL" in position.market_id:
+                asset = "SOL"
+            elif "XRP" in position.market_id:
+                asset = "XRP"
+            elif "DOGE" in position.market_id:
+                asset = "DOGE"
+            
+            if asset:
+                spot_service = get_unified_spot_service()
+                ohlcv_buffer = spot_service.get_ohlcv_buffer(asset, "15m")
+                if ohlcv_buffer and len(ohlcv_buffer) >= 3:
+                    # Convert to candle format for pattern detection
+                    candles = []
+                    for ohlcv in ohlcv_buffer[-3:]:  # Last 3 candles
+                        candles.append({
+                            'open': ohlcv.open,
+                            'high': ohlcv.high,
+                            'low': ohlcv.low,
+                            'close': ohlcv.close,
+                            'timestamp': ohlcv.timestamp_window_end
+                        })
+        except Exception as e:
+            logger.debug("[POSITION-MONITOR] Could not get candles for pattern detection: %s", e)
+        
         # Resolve exit policy
         policy = resolver.resolve(
             position=position,
             current_price_cents=current_price_cents,
             time_to_expiry_seconds=time_to_expiry,
             volatility_regime=None,  # TODO: add volatility regime
+            candles=candles,
         )
         
         if policy.action == ExitAction.EXIT_MARKET:

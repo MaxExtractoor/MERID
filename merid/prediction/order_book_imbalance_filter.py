@@ -49,8 +49,11 @@ class OBIConfig:
     """Configuration for order book imbalance filter."""
     
     # OBI calculation thresholds
-    strong_threshold: float = 0.7  # Threshold for strong signal (tails)
+    strong_threshold: float = 0.85  # Threshold for strong signal (tails) - 2026-07-03: increased for crypto volatility
     moderate_threshold: float = 0.3  # Threshold for moderate signal
+    
+    # Per-asset strong thresholds (crypto volatility varies by asset)
+    per_asset_strong_threshold: Dict[str, float] = None  # Asset-specific overrides
     
     # Directional consistency filter
     consistency_window_size: int = 20  # Number of snapshots in rolling window
@@ -61,6 +64,14 @@ class OBIConfig:
     
     # Depth levels to include
     top_levels: int = 5  # Use top 5 levels (most predictive for fast moves)
+    
+    def __post_init__(self):
+        if self.per_asset_strong_threshold is None:
+            self.per_asset_strong_threshold = {}
+    
+    def get_strong_threshold(self, asset: str) -> float:
+        """Get asset-specific strong threshold, or default if not configured."""
+        return self.per_asset_strong_threshold.get(asset, self.strong_threshold)
 
 
 @dataclass
@@ -82,6 +93,7 @@ class OBIContext:
     window_size: int
     is_fresh: bool  # True if data within staleness threshold
     recommendation: str  # "TRADE", "FILTER", "HOLD"
+    size_multiplier: float = 1.0  # Size multiplier based on OBI confidence (0.0 to 1.0)
 
 
 class OrderBookImbalanceFilter:
@@ -132,13 +144,20 @@ class OrderBookImbalanceFilter:
         obi = (bid_depth - ask_depth) / total_depth
         return obi
     
-    def classify_signal(self, obi: float) -> OBISignal:
-        """Classify OBI value into signal category."""
-        if obi >= self.config.strong_threshold:
+    def classify_signal(self, obi: float, asset: str = None) -> OBISignal:
+        """Classify OBI value into signal category.
+        
+        Args:
+            obi: OBI value between -1.0 and 1.0
+            asset: Asset identifier for per-asset thresholds (optional)
+        """
+        strong_threshold = self.config.get_strong_threshold(asset) if asset else self.config.strong_threshold
+        
+        if obi >= strong_threshold:
             return OBISignal.STRONG_BUY
         elif obi >= self.config.moderate_threshold:
             return OBISignal.BUY
-        elif obi <= -self.config.strong_threshold:
+        elif obi <= -strong_threshold:
             return OBISignal.STRONG_SELL
         elif obi <= -self.config.moderate_threshold:
             return OBISignal.SELL
@@ -158,7 +177,8 @@ class OrderBookImbalanceFilter:
         market_id: str,
         bid_depth: float,
         ask_depth: float,
-        timestamp_ms: Optional[int] = None
+        timestamp_ms: Optional[int] = None,
+        asset: str = None
     ) -> OBIMeasurement:
         """
         Update OBI measurement for a market.
@@ -168,6 +188,7 @@ class OrderBookImbalanceFilter:
             bid_depth: Total resting bid liquidity
             ask_depth: Total resting ask liquidity
             timestamp_ms: Timestamp in milliseconds (default: current time)
+            asset: Asset identifier for per-asset thresholds (optional)
             
         Returns:
             OBIMeasurement with computed OBI and signal
@@ -176,7 +197,7 @@ class OrderBookImbalanceFilter:
             timestamp_ms = int(time.time() * 1000)
         
         obi = self.compute_obi(bid_depth, ask_depth)
-        signal = self.classify_signal(obi)
+        signal = self.classify_signal(obi, asset)
         
         measurement = OBIMeasurement(
             obi_value=obi,
@@ -192,8 +213,8 @@ class OrderBookImbalanceFilter:
         self._last_update[market_id] = timestamp_ms
         
         logger.debug(
-            "[OBI-MEASUREMENT] market=%s obi=%.3f signal=%s bid=%.0f ask=%.0f",
-            market_id, obi, signal.value, bid_depth, ask_depth
+            "[OBI-MEASUREMENT] market=%s asset=%s obi=%.3f signal=%s bid=%.0f ask=%.0f",
+            market_id, asset or "N/A", obi, signal.value, bid_depth, ask_depth
         )
         
         return measurement
@@ -253,7 +274,8 @@ class OrderBookImbalanceFilter:
         bid_depth: float,
         ask_depth: float,
         direction: str,
-        timestamp_ms: Optional[int] = None
+        timestamp_ms: Optional[int] = None,
+        asset: str = None
     ) -> OBIContext:
         """
         Determine if we should trade based on OBI filter.
@@ -264,13 +286,14 @@ class OrderBookImbalanceFilter:
             ask_depth: Total resting ask liquidity
             direction: Proposed trade direction ("buy" or "sell")
             timestamp_ms: Timestamp in milliseconds (default: current time)
+            asset: Asset identifier for per-asset thresholds (optional)
             
         Returns:
             OBIContext with recommendation and reasoning
         """
         # Update measurement
         measurement = self.update_measurement(
-            market_id, bid_depth, ask_depth, timestamp_ms
+            market_id, bid_depth, ask_depth, timestamp_ms, asset
         )
         
         # Check freshness
@@ -279,15 +302,25 @@ class OrderBookImbalanceFilter:
         # Compute directional consistency
         consistency = self.compute_directional_consistency(market_id, direction)
         
-        # Make recommendation
+        # Make recommendation and size multiplier based on 2026 research
+        # Research: "OBI doesn't replace momentum signals. it filters and sizes them"
+        # Use size multiplier instead of hard gate to allow more trades
         if not is_fresh:
             recommendation = "HOLD"  # Data too stale
+            size_multiplier = 0.0
+        elif consistency == 0.0:
+            # Not enough data for consistency calculation (warmup)
+            recommendation = "REDUCED"  # Insufficient data, reduce size
+            size_multiplier = 0.50  # Warmup -> 50% size
         elif measurement.signal == OBISignal.NEUTRAL:
-            recommendation = "FILTER"  # Balanced book, no signal
+            recommendation = "REDUCED"  # Balanced book, reduce size
+            size_multiplier = 0.70  # Neutral book -> 70% size
         elif consistency < self.config.min_consistency_pct:
-            recommendation = "FILTER"  # Inconsistent direction
+            recommendation = "REDUCED"  # Inconsistent direction, reduce size
+            size_multiplier = 0.55  # Low consistency -> 55% size
         else:
             recommendation = "TRADE"  # All checks passed
+            size_multiplier = 1.0  # Full size
         
         context = OBIContext(
             current_obi=measurement.obi_value,
@@ -295,13 +328,15 @@ class OrderBookImbalanceFilter:
             directional_consistency=consistency,
             window_size=len(self._history.get(market_id, [])),
             is_fresh=is_fresh,
-            recommendation=recommendation
+            recommendation=recommendation,
+            size_multiplier=size_multiplier
         )
         
         logger.info(
-            "[OBI-DECISION] market=%s obi=%.3f signal=%s consistency=%.0f%% "
+            "[OBI-DECISION] market=%s asset=%s obi=%.3f signal=%s consistency=%.0f%% "
             "fresh=%s recommendation=%s",
             market_id,
+            asset or "N/A",
             context.current_obi,
             context.current_signal.value,
             context.directional_consistency * 100,

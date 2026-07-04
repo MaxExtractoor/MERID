@@ -23,7 +23,7 @@ import {
   ArrowDownRight, Gauge
 } from '../ui/icons';
 import { DRAWDOWN_TIER_CONFIG } from '../shared/config/riskConfig';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { getAuthHeaders } from '../services/auth';
 import { fmtTimestamp } from '../utils/formatters';
@@ -163,24 +163,24 @@ const ProtectView: React.FC = () => {
   const [downsizeResult, setDownsizeResult] = useState<string | null>(null);
 
   // Data fetching
-  const riskRes = useApiData<RiskSummary>(
+  const riskRes = useApiQuery<RiskSummary>(
     API_ENDPOINTS.KALSHI_RISK,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );
 
-  const ksRes = useApiData<KillSwitchState>(
+  const ksRes = useApiQuery<KillSwitchState>(
     API_ENDPOINTS.KALSHI_KILL_SWITCH,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.FAST }
   );
 
-  const sizingRes = useApiData<SizingMetrics>(
+  const sizingRes = useApiQuery<SizingMetrics>(
     API_ENDPOINTS.KALSHI_SIZING_METRICS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );
 
-  const alertsRes = useApiData<{ alerts: RiskAlert[] }>(
+  const alertsRes = useApiQuery<{ alerts: RiskAlert[] }>(
     API_ENDPOINTS.KALSHI_RISK_EVENTS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );
 
   const risk = riskRes.data;
@@ -270,12 +270,12 @@ const ProtectView: React.FC = () => {
 
   const tabs = [
     { id: 'overview' as const, label: 'Overview', icon: Shield },
-    { id: 'alerts' as const, label: `Alerts (${alerts.filter(a => !a.acknowledged).length})`, icon: Bell },
+    { id: 'alerts' as const, label: `Alerts (${alerts.filter((a: RiskAlert) => !a.acknowledged).length})`, icon: Bell },
     { id: 'kill-switch' as const, label: 'Kill Switch', icon: ShieldAlert },
     { id: 'context' as const, label: 'Context', icon: Activity },
   ];
 
-  const tier = sizing ? DRAWDOWN_TIER_CONFIG[sizing.drawdown_tier] : DRAWDOWN_TIER_CONFIG.normal;
+  const tier = sizing ? DRAWDOWN_TIER_CONFIG[sizing.drawdown_tier as keyof typeof DRAWDOWN_TIER_CONFIG] : DRAWDOWN_TIER_CONFIG.normal;
 
   return (
     <div className="space-y-4">
@@ -528,7 +528,7 @@ const ProtectView: React.FC = () => {
                 </div>
               ) : (
                 <div className="space-y-2">
-                  {alerts.map(alert => (
+                  {alerts.map((alert: RiskAlert) => (
                     <div 
                       key={alert.id}
                       className={`flex items-start gap-3 p-3 rounded-lg border ${
@@ -624,7 +624,7 @@ const ProtectView: React.FC = () => {
                 </CardHeader>
                 <CardContent>
                   <div className="space-y-2">
-                    {risk?.recent_breaches?.map((breach) => (
+                    {risk?.recent_breaches?.map((breach: { check: string; ts: string; reason?: string }) => (
                       <div key={`${breach.check}:${breach.ts}`} className="flex items-start gap-3 text-sm">
                         <AlertTriangle className="w-4 h-4 text-yellow-400 mt-0.5" />
                         <div>

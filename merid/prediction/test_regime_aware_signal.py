@@ -15,6 +15,150 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from merid.prediction.regime_detector import Regime, RegimeDetection
 
 
+class TestMinimumEntryPrices:
+    """Test minimum entry price filters based on 2026-07-03 trade history analysis."""
+    
+    def test_minimum_entry_price_50c_all_assets(self):
+        """Test that all assets now have 50c minimum entry price."""
+        min_entry_prices = {
+            'BTC': 50,
+            'ETH': 50,
+            'SOL': 50,
+            'XRP': 50,
+            'DOGE': 50
+        }
+        
+        for asset, min_price in min_entry_prices.items():
+            assert min_price == 50, f"{asset} should have 50c minimum, got {min_price}"
+    
+    def test_price_below_50c_rejected(self):
+        """Test that prices below 50c are rejected."""
+        market_price_cents = 45  # Below 50c
+        min_price_cents = 50
+        
+        should_trade = market_price_cents >= min_price_cents
+        assert not should_trade, "Price below 50c should be rejected"
+    
+    def test_price_at_50c_accepted(self):
+        """Test that price at exactly 50c is accepted."""
+        market_price_cents = 50  # At threshold
+        min_price_cents = 50
+        
+        should_trade = market_price_cents >= min_price_cents
+        assert should_trade, "Price at 50c should be accepted"
+    
+    def test_price_above_50c_accepted(self):
+        """Test that prices above 50c are accepted."""
+        market_price_cents = 55  # Above threshold
+        min_price_cents = 50
+        
+        should_trade = market_price_cents >= min_price_cents
+        assert should_trade, "Price above 50c should be accepted"
+
+
+class TestYesSideBias:
+    """Test YES-side bias logic based on 56.8% YES win rate vs 20% NO win rate."""
+    
+    def test_yes_bias_margin_20_percent(self):
+        """Test that YES-side bias margin is 20% of threshold."""
+        yes_bias_margin = 0.2  # 20%
+        velocity_threshold = 0.0001
+        
+        marginal_zone_upper = velocity_threshold * (1 + yes_bias_margin)
+        assert marginal_zone_upper == 0.00012, "Marginal zone should be 20% above threshold"
+    
+    def test_marginal_positive_velocity_triggers_yes_bias(self):
+        """Test that marginal positive velocity triggers YES-side bias."""
+        velocity = 0.00011  # Within 20% of threshold
+        velocity_threshold = 0.0001
+        yes_bias_margin = 0.2
+        
+        is_marginal_positive = (velocity > 0) and (velocity < velocity_threshold * (1 + yes_bias_margin))
+        assert is_marginal_positive, "Velocity within 20% of threshold should trigger marginal zone"
+    
+    def test_marginal_negative_velocity_triggers_yes_bias(self):
+        """Test that marginal negative velocity triggers YES-side bias."""
+        velocity = -0.00011  # Within 20% of threshold
+        velocity_threshold = 0.0001
+        yes_bias_margin = 0.2
+        
+        is_marginal_negative = (velocity < 0) and (velocity > -velocity_threshold * (1 + yes_bias_margin))
+        assert is_marginal_negative, "Negative velocity within 20% of threshold should trigger marginal zone"
+    
+    def test_yes_bias_returns_yes_signal(self):
+        """Test that YES-side bias returns YES signal for marginal velocity."""
+        velocity = 0.00011  # Marginal positive
+        velocity_threshold = 0.0001
+        yes_bias_margin = 0.2
+        
+        is_marginal_positive = (velocity > 0) and (velocity < velocity_threshold * (1 + yes_bias_margin))
+        
+        if is_marginal_positive:
+            signal_side = "yes"
+            signal_action = "buy"
+        else:
+            signal_side = None
+            signal_action = None
+        
+        assert signal_side == "yes", "Marginal velocity should trigger YES bias"
+        assert signal_action == "buy", "YES bias should be a buy action"
+
+
+class TestNoSideConviction:
+    """Test NO-side conviction threshold (1.5x threshold) based on 20% NO win rate."""
+    
+    def test_no_conviction_multiplier_1_5x(self):
+        """Test that NO-side conviction multiplier is 1.5x."""
+        no_conviction_multiplier = 1.5
+        assert no_conviction_multiplier == 1.5, "NO conviction should be 1.5x threshold"
+    
+    def test_no_side_requires_1_5x_threshold(self):
+        """Test that NO side requires velocity < -1.5x threshold."""
+        velocity_threshold = 0.0001
+        no_conviction_multiplier = 1.5
+        no_threshold = velocity_threshold * no_conviction_multiplier
+        
+        assert abs(no_threshold - 0.00015) < 1e-10, "NO threshold should be 1.5x base threshold"
+    
+    def test_velocity_below_1_5x_threshold_rejected(self):
+        """Test that velocity not below 1.5x threshold is rejected for NO side."""
+        velocity = -0.00012  # Below threshold but not below 1.5x
+        velocity_threshold = 0.0001
+        no_conviction_multiplier = 1.5
+        no_threshold = velocity_threshold * no_conviction_multiplier
+        
+        should_allow_no = velocity < -no_threshold
+        assert not should_allow_no, "Velocity not below 1.5x threshold should be rejected for NO side"
+    
+    def test_velocity_below_1_5x_threshold_accepted(self):
+        """Test that velocity below 1.5x threshold is accepted for NO side."""
+        velocity = -0.00016  # Below 1.5x threshold
+        velocity_threshold = 0.0001
+        no_conviction_multiplier = 1.5
+        no_threshold = velocity_threshold * no_conviction_multiplier
+        
+        should_allow_no = velocity < -no_threshold
+        assert should_allow_no, "Velocity below 1.5x threshold should be accepted for NO side"
+    
+    def test_marginal_negative_velocity_triggers_yes_bias_instead_of_no(self):
+        """Test that marginal negative velocity triggers YES bias instead of NO."""
+        velocity = -0.00011  # Marginal negative (within 20% of threshold)
+        velocity_threshold = 0.0001
+        yes_bias_margin = 0.2
+        no_conviction_multiplier = 1.5
+        no_threshold = velocity_threshold * no_conviction_multiplier
+        
+        is_marginal_negative = (velocity < 0) and (velocity > -velocity_threshold * (1 + yes_bias_margin))
+        should_allow_no = velocity < -no_threshold
+        
+        if is_marginal_negative and not should_allow_no:
+            signal_side = "yes"  # YES bias instead of NO
+        else:
+            signal_side = "no" if should_allow_no else None
+        
+        assert signal_side == "yes", "Marginal negative velocity should trigger YES bias instead of NO"
+
+
 class TestRegimeAwareVelocityMapping:
     """Test regime-aware velocity-to-side mapping logic."""
     

@@ -192,8 +192,18 @@ export const API_ENDPOINTS = {
   KALSHI_EDGE: "/api/v1/kalshi/edge",
   KALSHI_RISK_EVENTS: "/api/v1/kalshi/risk/events",
   KALSHI_RISK_DOWNSIZE: "/api/v1/kalshi/risk/downsize",
+  
+  // ── Dev/Swarm Endpoints ───────────────────────────────────────────────
+  DEV_SWARM_PAUSE: "/api/v1/dev/swarm/pause",
+  DEV_SWARM_RESUME: "/api/v1/dev/swarm/resume",
+  SWARM_RECALIBRATION: "/api/v1/swarm/recalibration",
+  SWARM_CRITIC_HISTORY: "/api/v1/swarm/critic-history",
+  SWARM_EXECUTION_STATS: "/api/v1/swarm/execution-stats",
+  KALSHI_FAVORITES: "/api/v1/kalshi/favorites",
+  KALSHI_FAVORITES_TOGGLE: "/api/v1/kalshi/favorites/toggle",
   KALSHI_RISK_ENVELOPE: "/api/v1/kalshi/risk/envelope",
   KALSHI_CONSENSUS_SIGNALS: "/api/v1/kalshi/consensus-signals",
+  PRIME_STATUS: "/api/v1/prime/status",
   // NOTE: Removed unused constants with no backend implementation:
   // - KALSHI_NEWS_SIGNALS (unused)
   // - KALSHI_PUBLISH_PIPELINE (no backend)

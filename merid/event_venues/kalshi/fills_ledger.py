@@ -930,6 +930,46 @@ class KalshiFillsLedger:
             logger.error(f"Failed to clear incomplete fills: {e}")
             return 0
     
+    async def clear_all_fills(self) -> int:
+        """Clear all fills from the fills ledger DB and in-memory cache.
+        
+        This is used when REST API returns 0 positions but fills ledger has stale data.
+        REST API is the single source of truth - if it says 0 positions, fills ledger should be 0.
+        
+        Returns:
+            Number of fills removed.
+        """
+        try:
+            import aiosqlite
+            
+            removed = 0
+            async with aiosqlite.connect(self._db_path) as db:
+                # Get count before deletion
+                async with db.execute("SELECT COUNT(*) FROM kalshi_fills") as cursor:
+                    count_row = await cursor.fetchone()
+                    removed = count_row[0] if count_row else 0
+                
+                # Delete all fills
+                await db.execute("DELETE FROM kalshi_fills")
+                await db.commit()
+            
+            if removed > 0:
+                logger.warning(f"Cleared {removed} fills from DB (sync with REST API ground truth)")
+                # Clear in-memory cache too
+                mutex = self._ensure_mutex()
+                async with mutex:
+                    self._fills.clear()
+                    self._fills_by_order.clear()
+                    self._fills_by_market.clear()
+                    self._intents.clear()
+                    logger.info(f"Cleared all fills from in-memory cache")
+            
+            return removed
+            
+        except Exception as e:
+            logger.error(f"Failed to clear all fills: {e}")
+            return 0
+    
     async def ingest_http_fills(self, fills: List[Dict[str, Any]], 
                                 agent_map: Optional[Dict[str, str]] = None) -> Tuple[int, List[str]]:
         """Ingest fills from HTTP /portfolio/fills endpoint.
@@ -1873,16 +1913,80 @@ class KalshiFillsLedger:
             "total_fees_usd": float(fees),
             "computed_from_fills": len(fill_ids),
         }
+    
+    def _compute_position_from_fill_ids(self, market_ticker: str, fill_ids: List[str]) -> Optional[Dict[str, Any]]:
+        """Compute position from a specific list of fill IDs (helper for time-filtered positions)."""
+        if not fill_ids:
+            return None
+            
+        yes_contracts = 0
+        no_contracts = 0
+        yes_cost = Decimal("0")
+        no_cost = Decimal("0")
+        fees = Decimal("0")
+        
+        for fill_id in fill_ids:
+            fill = self._fills.get(fill_id)
+            if not fill:
+                continue
+            fees += fill.fee_cost
+            
+            if fill.side == "yes":
+                if fill.action == "buy":
+                    yes_contracts += fill.count_fp
+                    yes_cost += fill.notional_usd
+                else:  # sell — reduce cost basis proportionally to maintain correct avg price
+                    if yes_contracts > 0:
+                        yes_cost -= (yes_cost / yes_contracts) * fill.count_fp
+                    yes_contracts -= fill.count_fp
+            else:  # side == "no"
+                if fill.action == "buy":
+                    no_contracts += fill.count_fp
+                    no_cost += fill.notional_usd
+                else:  # sell — reduce cost basis proportionally
+                    if no_contracts > 0:
+                        no_cost -= (no_cost / no_contracts) * fill.count_fp
+                    no_contracts -= fill.count_fp
+        
+        # Net position (positive = long, negative = short)
+        net_contracts = yes_contracts - no_contracts
+        
+        if net_contracts == 0:
+            return None
+            
+        side = "yes" if net_contracts > 0 else "no"
+        avg_price = (
+            (yes_cost / Decimal(yes_contracts) if yes_contracts > 0 else Decimal("0")) if net_contracts > 0
+            else (no_cost / Decimal(no_contracts) if no_contracts > 0 else Decimal("0"))
+        )
+        
+        return {
+            "market_ticker": market_ticker,
+            "side": side,
+            "contracts": abs(net_contracts),
+            "avg_price_dollars": float(avg_price),
+            "avg_price_cents": int(avg_price * 100),
+            "total_fees_usd": float(fees),
+            "computed_from_fills": len(fill_ids),
+        }
 
-    def compute_net_positions(self) -> Dict[str, Dict[str, Any]]:
+    def compute_net_positions(self, since_hours: int = 24) -> Dict[str, Dict[str, Any]]:
         """Compute positions for all markets from fills ledger.
         
         PRODUCTION FIX (2026-05-10): Filter out test positions to prevent bleeding into production.
+        PRODUCTION FIX (2026-07-03): Filter by time to exclude stale fills from previous sessions.
+        
+        Args:
+            since_hours: Only include fills from the last N hours (default: 24)
         
         Returns:
             Dict mapping market_ticker -> position dict (same format as compute_position_from_fills)
         """
+        from datetime import datetime, timedelta, timezone
+        
         positions: Dict[str, Dict[str, Any]] = {}
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+        
         # Iterate over all markets that have fills
         for market_ticker in self._fills_by_market.keys():
             # PRODUCTION FIX (2026-05-10): Skip test tickers
@@ -1890,9 +1994,21 @@ class KalshiFillsLedger:
                 logger.debug(f"Skipping test ticker in compute_net_positions: {market_ticker}")
                 continue
             
-            pos = self.compute_position_from_fills(market_ticker)
+            # PRODUCTION FIX (2026-07-03): Time-filter fills to exclude stale data
+            fill_ids = self._fills_by_market.get(market_ticker, [])
+            recent_fill_ids = [
+                fill_id for fill_id in fill_ids
+                if self._fills[fill_id].created_time >= cutoff_time
+            ]
+            
+            if not recent_fill_ids:
+                continue
+            
+            # Compute position from recent fills only
+            pos = self._compute_position_from_fill_ids(market_ticker, recent_fill_ids)
             if pos:  # Only include non-zero positions
                 positions[market_ticker] = pos
+        
         return positions
     
     def get_open_exposure_usd(self) -> float:

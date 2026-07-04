@@ -4,7 +4,7 @@ import { Activity, AlertCircle, CheckCircle, TrendingUp, Cpu } from '../ui/icons
 import { api } from '../services/api';
 import type { SystemHealth } from '../services/api';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
-import { useApiData } from './useApiData';
+import { useApiQuery } from './useTanStackQuery';
 import { logUiError } from '../utils/logger';
 
 const RETRY_DELAY_MS = 500;
@@ -198,11 +198,11 @@ interface HealthStatus {
 }
 
 export function useKalshiHealth() {
-  const { data, loading, error } = useApiData<HealthStatus>(
+  const { data, isLoading, error } = useApiQuery<HealthStatus>(
     API_ENDPOINTS.KALSHI_GRID_STATUS, // Use status for full data including health
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );
-  return { health: data, loading, error };
+  return { health: data, loading: isLoading, error };
 }
 
 // LEGACY REMOVAL: usePrimeStatus removed - PRIME_STATUS endpoint not used in 15m stack

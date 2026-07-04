@@ -769,3 +769,353 @@ def test_all_five_crypto_assets_tracked():
     # Verify all assets are tracked
     assert set(best_edge_per_asset.keys()) == set(expected_assets)
     assert len(best_edge_per_asset) == 5
+
+
+def test_client_tag_generated_for_tp_sl_registration():
+    """Test that client_tag is generated for TP/SL registration.
+    
+    The order router requires client_tag to register TP targets with position cache.
+    Without client_tag, TP/SL targets are never registered and trailing stops won't work.
+    """
+    import uuid
+    
+    # Simulate client_tag generation as done in loop_15m.py
+    ticker = "KXBTC15M-26JUN300345-45"
+    client_tag = f"15m_{ticker}_{uuid.uuid4().hex[:12]}"
+    
+    # Verify client_tag format
+    assert client_tag.startswith("15m_")
+    assert ticker in client_tag
+    assert len(client_tag.split("_")[-1]) == 12  # UUID suffix length
+    
+    # Verify client_tag is passed to OrderIntent
+    from merid.event_venues.kalshi.order_router import OrderIntent
+    intent = OrderIntent(
+        ticker=ticker,
+        side="yes",
+        action="buy",
+        price_cents=50,
+        count=1,
+        source="merid.prediction.agent_grid_15m",
+        client_tag=client_tag,
+    )
+    
+    assert intent.client_tag == client_tag
+
+
+def test_tp_price_computed_from_r_multiple():
+    """Test that take profit price is computed from R-multiple correctly.
+    
+    For binary options, R (risk per contract) = entry price (max loss is contract price).
+    TP = entry_price + (R * tp_r_multiple) for long positions.
+    """
+    # Mock exit policy with tp_r_multiple
+    class MockExitPolicy:
+        tp_r_multiple = 1.0
+        sl_r_multiple = 0.5
+    
+    exit_policy = MockExitPolicy()
+    price_cents = 50  # Entry price
+    
+    # Compute TP price as done in loop_15m.py
+    if exit_policy and exit_policy.tp_r_multiple:
+        take_profit_price_cents = int(price_cents * (1 + exit_policy.tp_r_multiple))
+        take_profit_r_multiple = exit_policy.tp_r_multiple
+    else:
+        take_profit_price_cents = None
+        take_profit_r_multiple = None
+    
+    # Verify TP calculation: 50 + (50 * 1.0) = 100
+    assert take_profit_price_cents == 100
+    assert take_profit_r_multiple == 1.0
+
+
+def test_sl_price_computed_from_r_multiple():
+    """Test that stop loss price is computed from R-multiple correctly.
+    
+    For binary options, R (risk per contract) = entry price (max loss is contract price).
+    SL = entry_price - (R * sl_r_multiple) for long positions.
+    """
+    # Mock exit policy with sl_r_multiple
+    class MockExitPolicy:
+        tp_r_multiple = 1.0
+        sl_r_multiple = 0.5
+    
+    exit_policy = MockExitPolicy()
+    price_cents = 50  # Entry price
+    
+    # Compute SL price as done in loop_15m.py
+    if exit_policy and exit_policy.sl_r_multiple:
+        stop_loss_price_cents = int(price_cents * (1 - exit_policy.sl_r_multiple))
+    else:
+        stop_loss_price_cents = None
+    
+    # Verify SL calculation: 50 - (50 * 0.5) = 25
+    assert stop_loss_price_cents == 25
+
+
+def test_tp_sl_computed_for_different_regimes():
+    """Test that TP/SL are computed correctly for different regimes.
+    
+    Conservative regime: tp_r_multiple=0.75, sl_r_multiple=0.5
+    Normal regime: tp_r_multiple=1.0, sl_r_multiple=0.5
+    Aggressive regime: tp_r_multiple=1.2, sl_r_multiple=0.5
+    """
+    test_cases = [
+        ("conservative", 0.75, 50, 87, 25),  # TP: 50 + (50 * 0.75) = 87.5 -> 87 (int truncates), SL: 25
+        ("normal", 1.0, 50, 100, 25),  # TP: 50 + (50 * 1.0) = 100, SL: 25
+        ("aggressive", 1.2, 50, 110, 25),  # TP: 50 + (50 * 1.2) = 110, SL: 25
+    ]
+    
+    for regime, tp_r, price_cents, expected_tp, expected_sl in test_cases:
+        class MockExitPolicy:
+            tp_r_multiple = tp_r
+            sl_r_multiple = 0.5
+        
+        exit_policy = MockExitPolicy()
+        
+        # Compute TP/SL
+        if exit_policy and exit_policy.tp_r_multiple:
+            take_profit_price_cents = int(price_cents * (1 + exit_policy.tp_r_multiple))
+        else:
+            take_profit_price_cents = None
+        
+        if exit_policy and exit_policy.sl_r_multiple:
+            stop_loss_price_cents = int(price_cents * (1 - exit_policy.sl_r_multiple))
+        else:
+            stop_loss_price_cents = None
+        
+        assert take_profit_price_cents == expected_tp, f"Regime {regime}: TP mismatch"
+        assert stop_loss_price_cents == expected_sl, f"Regime {regime}: SL mismatch"
+
+
+def test_tp_sl_none_when_exit_policy_missing():
+    """Test that TP/SL are None when exit policy is not available.
+    
+    This ensures graceful fallback when exit policy resolution fails.
+    """
+    exit_policy = None
+    price_cents = 50
+    
+    # Compute TP/SL with missing exit policy
+    if exit_policy and exit_policy.tp_r_multiple:
+        take_profit_price_cents = int(price_cents * (1 + exit_policy.tp_r_multiple))
+        take_profit_r_multiple = exit_policy.tp_r_multiple
+    else:
+        take_profit_price_cents = None
+        take_profit_r_multiple = None
+    
+    if exit_policy and exit_policy.sl_r_multiple:
+        stop_loss_price_cents = int(price_cents * (1 - exit_policy.sl_r_multiple))
+    else:
+        stop_loss_price_cents = None
+    
+    # Verify all are None
+    assert take_profit_price_cents is None
+    assert take_profit_r_multiple is None
+    assert stop_loss_price_cents is None
+
+
+def test_order_intent_includes_tp_sl_and_client_tag():
+    """Test that OrderIntent includes TP/SL targets and client_tag.
+    
+    This ensures all required fields are passed for trailing stop functionality.
+    """
+    from merid.event_venues.kalshi.order_router import OrderIntent
+    import uuid
+    
+    # Simulate TP/SL computation
+    class MockExitPolicy:
+        tp_r_multiple = 1.0
+        sl_r_multiple = 0.5
+        policy_id = "test_policy_123"
+        max_hold_seconds = 600
+    
+    exit_policy = MockExitPolicy()
+    price_cents = 50
+    ticker = "KXBTC15M-26JUN300345-45"
+    
+    # Compute TP/SL
+    if exit_policy and exit_policy.tp_r_multiple:
+        take_profit_price_cents = int(price_cents * (1 + exit_policy.tp_r_multiple))
+        take_profit_r_multiple = exit_policy.tp_r_multiple
+    else:
+        take_profit_price_cents = None
+        take_profit_r_multiple = None
+    
+    if exit_policy and exit_policy.sl_r_multiple:
+        stop_loss_price_cents = int(price_cents * (1 - exit_policy.sl_r_multiple))
+    else:
+        stop_loss_price_cents = None
+    
+    # Generate client_tag
+    client_tag = f"15m_{ticker}_{uuid.uuid4().hex[:12]}"
+    
+    # Construct OrderIntent with all TP/SL fields
+    intent = OrderIntent(
+        ticker=ticker,
+        side="yes",
+        action="buy",
+        price_cents=price_cents,
+        count=1,
+        source="merid.prediction.agent_grid_15m",
+        client_tag=client_tag,
+        take_profit_price_cents=take_profit_price_cents,
+        take_profit_r_multiple=take_profit_r_multiple,
+        stop_loss_price_cents=stop_loss_price_cents,
+        exit_policy_id=exit_policy.policy_id,
+    )
+    
+    # Verify all TP/SL fields are set
+    assert intent.client_tag == client_tag
+    assert intent.take_profit_price_cents == 100
+    assert intent.take_profit_r_multiple == 1.0
+    assert intent.stop_loss_price_cents == 25
+    assert intent.exit_policy_id == "test_policy_123"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Hedge Pass Integration Tests
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_hedge_pass_called_after_alpha_orders():
+    """Test that hedge pass is called after alpha orders are executed in the 15m loop."""
+    # This test verifies the hedge pass wiring in loop_15m.py
+    # The hedge pass should call compute_hedge_intents and route hedge orders
+    
+    # Read loop_15m.py to verify hedge pass exists
+    with open("merid/loop_15m.py", "r", encoding="utf-8") as f:
+        loop_source = f.read()
+    
+    # Verify hedge pass code exists
+    assert "compute_hedge_intents" in loop_source, \
+        "compute_hedge_intents call not found in loop_15m.py"
+    assert "hedge_intents" in loop_source, \
+        "hedge_intents variable not found in loop_15m.py"
+    
+    # Verify hedge pass is after alpha order execution
+    assert "await self._execute_candidate" in loop_source, \
+        "Alpha order execution not found in loop_15m.py"
+    
+    # Verify hedge pass logs
+    assert "Generated" in loop_source and "hedge intents" in loop_source, \
+        "Hedge intent logging not found in loop_15m.py"
+
+
+def test_hedge_pass_imports_correct_modules():
+    """Test that hedge pass imports the correct modules."""
+    with open("merid/loop_15m.py", "r", encoding="utf-8") as f:
+        loop_source = f.read()
+    
+    # Verify imports for hedge pass
+    assert "from merid.event_venues.kalshi.order_router import compute_hedge_intents" in loop_source or \
+           "compute_hedge_intents" in loop_source, \
+        "compute_hedge_intents import not found in loop_15m.py"
+    
+    assert "from merid.services.bankroll_service import get_bankroll_service" in loop_source or \
+           "get_bankroll_service" in loop_source, \
+        "get_bankroll_service import not found in loop_15m.py"
+
+
+def test_hedge_pass_handles_errors_gracefully():
+    """Test that hedge pass handles errors gracefully and doesn't fail the cycle."""
+    with open("merid/loop_15m.py", "r", encoding="utf-8") as f:
+        loop_source = f.read()
+    
+    # Verify hedge pass is wrapped in try-except
+    hedge_section = loop_source[loop_source.find("compute_hedge_intents"):loop_source.find("compute_hedge_intents") + 2000]
+    
+    # Should have exception handling
+    assert "except" in hedge_section or "try:" in hedge_section, \
+        "Hedge pass missing exception handling"
+    
+    # Should log errors - look for the outer exception handler
+    assert "hedge_exc" in loop_source or "hedge_err" in loop_source, \
+        "Hedge pass missing error logging"
+
+
+def test_hedge_pass_uses_bankroll_for_sizing():
+    """Test that hedge pass uses bankroll for hedge sizing."""
+    with open("merid/loop_15m.py", "r", encoding="utf-8") as f:
+        loop_source = f.read()
+    
+    # Verify bankroll is fetched and passed to hedge computation
+    assert "bankroll_cents" in loop_source, \
+        "bankroll_cents variable not found in loop_15m.py"
+    
+    assert "get_bankroll_service" in loop_source, \
+        "get_bankroll_service call not found in loop_15m.py"
+    
+    # Verify bankroll is passed to compute_hedge_intents
+    assert "compute_hedge_intents(bankroll_cents=" in loop_source or \
+           "compute_hedge_intents" in loop_source and "bankroll_cents" in loop_source, \
+        "bankroll_cents not passed to compute_hedge_intents"
+
+
+def test_hedge_pass_routes_hedge_orders():
+    """Test that hedge pass routes generated hedge orders."""
+    with open("merid/loop_15m.py", "r", encoding="utf-8") as f:
+        loop_source = f.read()
+    
+    # Verify hedge orders are routed
+    assert "route_order_async" in loop_source, \
+        "route_order_async call not found in loop_15m.py"
+    
+    # Verify hedge intent iteration
+    assert "for hedge_intent in hedge_intents" in loop_source or \
+           "for hedge_intent" in loop_source, \
+        "Hedge intent iteration not found in loop_15m.py"
+    
+    # Verify hedge order routing logs
+    assert "Hedge order routed" in loop_source or "hedge" in loop_source.lower(), \
+        "Hedge order routing logging not found in loop_15m.py"
+
+
+def test_order_id_to_client_tag_mapping():
+    """Test that order_id -> client_tag mapping is registered for fill-to-intent linkage."""
+    # Test position cache has the mapping registration function
+    with open("merid/event_venues/kalshi/position_cache.py", "r", encoding="utf-8") as f:
+        cache_source = f.read()
+    
+    # Verify register_order_id_mapping function exists
+    assert "def register_order_id_mapping" in cache_source, \
+        "register_order_id_mapping function not found in position_cache.py"
+    
+    # Verify the mapping dictionary exists
+    assert "_order_id_to_client_tag" in cache_source, \
+        "_order_id_to_client_tag dictionary not found in position_cache.py"
+    
+    # Test order_router registers the mapping after order submission
+    with open("merid/event_venues/kalshi/order_router.py", "r", encoding="utf-8") as f:
+        router_source = f.read()
+    
+    # Verify order_router calls register_order_id_mapping
+    assert "register_order_id_mapping" in router_source, \
+        "register_order_id_mapping call not found in order_router.py"
+    
+    # Verify mapping is registered after getting Kalshi order_id
+    assert "_venue_oid" in router_source and "register_order_id_mapping" in router_source, \
+        "Order ID mapping not registered after getting Kalshi order_id"
+
+
+def test_fill_to_intent_linkage_via_order_id():
+    """Test that position cache recovers client_order_id from order_id during fill processing."""
+    with open("merid/event_venues/kalshi/position_cache.py", "r", encoding="utf-8") as f:
+        cache_source = f.read()
+    
+    # Verify on_fill has logic to recover client_order_id from order_id
+    assert "if not client_order_id and fill_id" in cache_source, \
+        "Missing client_order_id recovery logic in on_fill"
+    
+    # Verify it uses fills_ledger to get order_id
+    assert "fill_record.order_id" in cache_source, \
+        "Missing order_id lookup from fills_ledger"
+    
+    # Verify it uses _order_id_to_client_tag mapping
+    assert "_order_id_to_client_tag.get" in cache_source, \
+        "Missing _order_id_to_client_tag lookup in on_fill"
+    
+    # Verify logging for successful recovery
+    assert "FILL-INTENT-LINK" in cache_source or "Recovered client_order_id" in cache_source, \
+        "Missing logging for client_order_id recovery"

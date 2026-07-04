@@ -3374,6 +3374,38 @@ class Kalshi15mLoop:
                     except Exception as e:
                         logger.error("[15M-LOOP] Failed to execute candidate: %s", e, exc_info=True)
                 
+                # CRITICAL FIX: Wire systematic exposure-based hedging
+                # After alpha orders are executed, compute and route hedge orders
+                # to offset net directional exposure per (asset, timeframe) cell
+                try:
+                    from merid.event_venues.kalshi.order_router import compute_hedge_intents, route_order_async
+                    from merid.services.bankroll_service import get_bankroll_service
+                    
+                    # Get current bankroll for hedge sizing
+                    bankroll_service = get_bankroll_service()
+                    bankroll_cents = int(bankroll_service.get_equity() * 100) if bankroll_service else 100000
+                    
+                    # Compute hedge intents based on current exposure
+                    hedge_intents = compute_hedge_intents(bankroll_cents=bankroll_cents)
+                    
+                    if hedge_intents:
+                        logger.info("[15M-LOOP] Generated %d hedge intents, routing to execution", len(hedge_intents))
+                        
+                        # Route hedge orders
+                        for hedge_intent in hedge_intents:
+                            try:
+                                result = await route_order_async(hedge_intent)
+                                logger.info(
+                                    "[15M-LOOP] Hedge order routed: ticker=%s side=%s count=%d status=%s",
+                                    hedge_intent.ticker, hedge_intent.side, hedge_intent.count, result.status
+                                )
+                            except Exception as hedge_err:
+                                logger.error("[15M-LOOP] Failed to route hedge order: %s", hedge_err, exc_info=True)
+                    else:
+                        logger.debug("[15M-LOOP] No hedge orders needed (exposure within bounds)")
+                except Exception as hedge_exc:
+                    logger.warning("[15M-LOOP] Hedge pass failed (non-fatal): %s", hedge_exc, exc_info=True)
+                
                 # Log after call
                 log_object_origin(self.agent_grid, "agent_grid_after_run_cycle_call", context=f"cycle_id={tick}")
             except Exception as exc:
@@ -3755,6 +3787,28 @@ class Kalshi15mLoop:
             except Exception as e:
                 logger.warning("[15M-LOOP] Failed to get effective_equity_usd from risk envelope: %s", e)
             
+            # CRITICAL FIX: Generate client_tag for TP/SL registration
+            # The order router requires client_tag to register TP targets with position cache
+            import uuid
+            client_tag = f"15m_{ticker}_{uuid.uuid4().hex[:12]}"
+            
+            # CRITICAL FIX: Compute TP/SL from exit policy before OrderIntent creation
+            # For binary options, R (risk per contract) = entry price (max loss is contract price)
+            # TP = entry_price + (R * tp_r_multiple) for long positions
+            # SL = entry_price - (R * sl_r_multiple) for long positions
+            # For 15m crypto, we use the entry price as R since contracts can go to 0
+            if exit_policy and exit_policy.tp_r_multiple:
+                take_profit_price_cents = int(price_cents * (1 + exit_policy.tp_r_multiple))
+                take_profit_r_multiple = exit_policy.tp_r_multiple
+            else:
+                take_profit_price_cents = None
+                take_profit_r_multiple = None
+            
+            if exit_policy and exit_policy.sl_r_multiple:
+                stop_loss_price_cents = int(price_cents * (1 - exit_policy.sl_r_multiple))
+            else:
+                stop_loss_price_cents = None
+            
             intent = OrderIntent(
                 ticker=ticker,
                 side=kalshi_side,  # CRITICAL FIX: Use Kalshi-formatted side (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
@@ -3777,13 +3831,12 @@ class Kalshi15mLoop:
                 # Industry standard: Use limit orders (maker) to earn rebates (-0.05% round trip) vs taker fees (0.15% round trip)
                 # Reference: https://www.polytrackhq.app/blog/polymarket-15-minute-crypto-guide
                 order_type=candidate.get("order_type", "limit"),  # Default to limit for maker rebate
+                # CRITICAL FIX: Add client_tag for TP/SL registration with position cache
+                client_tag=client_tag,
                 # CRITICAL FIX: Add exit targets from resolved exit policy
-                # Use R-multiple for TP (dynamic based on time to expiry)
-                take_profit_r_multiple=exit_policy.tp_r_multiple if exit_policy else None,
-                # Use R-multiple for SL (converted to price by order router)
-                # Note: OrderIntent field is stop_loss_price_cents, but we can use R-multiple via the router
-                # For now, use a simple SL based on entry price and R-multiple
-                stop_loss_price_cents=int(price_cents * (1 - 0.5)) if exit_policy else None,  # 0.5R SL as fallback
+                take_profit_price_cents=take_profit_price_cents,
+                take_profit_r_multiple=take_profit_r_multiple,
+                stop_loss_price_cents=stop_loss_price_cents,
                 exit_policy_id=exit_policy.policy_id if exit_policy else None,
                 # CRITICAL FIX: Add risk contract linkage fields to satisfy _validate_risk_contract_linkage
                 # These are required for crypto 15m markets to pass the risk contract validation
