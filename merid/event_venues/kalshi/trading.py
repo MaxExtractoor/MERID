@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 from typing import List, Optional
 
@@ -48,6 +49,16 @@ class KalshiTrader:
 
         Returns (allowed, reason).  Fail-closed: any import/runtime error blocks the order.
         """
+        # 0. Price range validation (min/max entry constraints)
+        # Aligns with production stack: kalshi_tools.py and order_router.py enforce [50, 70] cents
+        # This prevents <50¢ lottery tickets (10.4% win rate) and >70¢ low-profit trades
+        if price_cents < 50 or price_cents > 70:
+            logger.warning(
+                "[TRADING-PY-PRICE-VALIDATION] price_cents=%d outside valid range [50, 70] - REJECTING (prevents degenerate pricing)",
+                price_cents
+            )
+            return False, f"invalid_price_range:{price_cents}c (must be 50-70c)"
+
         # 1. Global kill switch
         try:
             from merid.risk.kill_switches import risk_controller

@@ -4,12 +4,15 @@ DEPRECATED: This module is deprecated in favor of UnifiedRiskManager.
 Use merid.risk.unified_risk_manager instead.
 
 All risk management has been consolidated into a single source of truth:
-- Configuration: config/risk_limits.yaml
+- Configuration: config/profiles/kalshi_crypto_15m_v2.yaml (for 15m Kalshi)
 - Implementation: merid.risk.unified_risk_manager.UnifiedRiskManager
 - Single entry point: check_order() method
 
 This module is kept for backward compatibility but will be removed in a future release.
 New code should use UnifiedRiskManager for all risk checks.
+
+CRITICAL: For kalshi_crypto_15m_v2 profile, risk parameters are loaded from profile YAML.
+This module's defaults (3% bankroll cap) are NOT used by the 15m production stack.
 
 ---
 
@@ -47,6 +50,14 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timezone
+
+# Emit deprecation warning when module is imported
+warnings.warn(
+    "GlobalExecutionGuard is DEPRECATED. Use UnifiedRiskManager instead. "
+    "For kalshi_crypto_15m_v2 profile, risk parameters are loaded from profile YAML.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 from utils.logger import get_logger
 from utils.logging_helpers import log_guardrail_check, log_risk_check, log_trading_operation
@@ -184,23 +195,36 @@ class GlobalExecutionGuard:
             if price_cents <= 0 or price_cents >= 100:
                 return False, f"Invalid price_cents: {price_cents} (must be 1-99)"
             
-            # CRITICAL: Price guard - prevent deep OTM longshots (15¢ minimum)
-            # This is the final safety net before order submission to Kalshi
-            min_price_cents = 15  # 15 cents / $0.15 minimum
+            # CRITICAL: Price range guard - enforce 50-70c range for Kalshi crypto 15m
+            # This aligns with production stack: kalshi_tools.py, order_router.py, trading.py
+            # Prevents <50¢ lottery tickets (10.4% win rate) and >70¢ low-profit trades
+            min_price_cents = 50  # 50 cents minimum
+            max_price_cents = 70  # 70 cents maximum
+            
+            # Allow profile override for different strategies
             try:
                 from merid.risk.profiles.crypto_15m_profile import get_active_profile
                 profile_adapter = get_active_profile()
                 if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_min_contract_price_cents'):
                     min_price_cents = profile_adapter.profile.guardrails_min_contract_price_cents
+                if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_max_contract_price_cents'):
+                    max_price_cents = profile_adapter.profile.guardrails_max_contract_price_cents
             except Exception as e:
-                logger.debug("[GLOBAL_GUARD] Failed to load min_contract_price_cents from profile: %s, using default 15c", e)
+                logger.debug("[GLOBAL_GUARD] Failed to load price limits from profile: %s, using defaults 50-70c", e)
             
             if price_cents < min_price_cents:
                 logger.critical(
-                    "[GLOBAL_GUARD_BLOCKED] Deep OTM longshot rejected: price=%dc < %dc threshold | ticker=%s source=%s",
+                    "[GLOBAL_GUARD_BLOCKED] Price below minimum: price=%dc < %dc threshold | ticker=%s source=%s",
                     price_cents, min_price_cents, ticker, source
                 )
-                return False, f"DEEP_OTM_LONGSHOT:price={price_cents}c < {min_price_cents}c threshold"
+                return False, f"MIN_PRICE_VIOLATION:price={price_cents}c < {min_price_cents}c threshold"
+            
+            if price_cents > max_price_cents:
+                logger.critical(
+                    "[GLOBAL_GUARD_BLOCKED] Price above maximum: price=%dc > %dc threshold | ticker=%s source=%s",
+                    price_cents, max_price_cents, ticker, source
+                )
+                return False, f"MAX_PRICE_VIOLATION:price={price_cents}c > {max_price_cents}c threshold"
             
             # 2. Calculate notional
             # CRITICAL FIX: For BUY_NO orders, notional is (100 - price_cents) because max loss is when NO loses
