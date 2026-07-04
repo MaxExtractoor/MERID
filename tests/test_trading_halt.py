@@ -102,18 +102,18 @@ class TestDailyLossAutoHalt(unittest.TestCase):
         self.mgr = TradingHaltManager(max_daily_loss_pct=0.20)  # CRITICAL FIX: 20% aligned with drawdown halt
 
     def test_loss_below_threshold_no_halt(self):
-        halted = self.mgr.check_daily_loss(-400, 10000)  # 4%
+        halted = self.mgr.check_daily_loss(-1500, 10000)  # 15% (below 20% threshold)
         self.assertFalse(halted)
         self.assertFalse(self.mgr.is_halted)
 
     def test_loss_at_threshold_halts(self):
-        halted = self.mgr.check_daily_loss(-500, 10000)  # 5%
+        halted = self.mgr.check_daily_loss(-2000, 10000)  # 20% (at threshold)
         self.assertTrue(halted)
         self.assertTrue(self.mgr.is_halted)
-        self.assertIn("5.0%", self.mgr.halt_reason)
+        self.assertIn("20.0%", self.mgr.halt_reason)
 
     def test_loss_above_threshold_halts(self):
-        halted = self.mgr.check_daily_loss(-800, 10000)  # 8%
+        halted = self.mgr.check_daily_loss(-2500, 10000)  # 25% (above threshold)
         self.assertTrue(halted)
         self.assertTrue(self.mgr.is_halted)
 
