@@ -157,6 +157,7 @@ class Crypto15mProfile:
     # OTM filtering for 15-minute crypto
     guardrails_max_dist_pct_trade: float  # Maximum spot-strike distance percentage for trading
     guardrails_min_contract_price_cents: float  # Minimum contract price floor (prevents deep OTM longshots)
+    guardrails_max_contract_price_cents: float  # Maximum contract price ceiling (prevents low-profit trades, 2026 research: 80% payout recommended)
     guardrails_max_same_side_per_strip: int  # Maximum same-direction positions per strip across all assets
     # Time trap prevention (entry window narrowing)
     guardrails_max_entry_mins: float  # Maximum time to expiry for entry (e.g., 12min)
@@ -297,6 +298,29 @@ class Crypto15mProfile:
 
     # Phase 5.2: Calibration configuration for probability calibration
     # CRITICAL FIX: Enable calibration based on 2026 research showing domain-specific biases
+    
+    # Position Management: Offset Hedging Configuration
+    offset_hedging_enabled: bool = False
+    offset_hedging_hedge_ratio: float = 0.30
+    offset_hedging_min_edge_for_hedge: float = 0.03
+    offset_hedging_max_hedge_notional_pct: float = 0.02
+    offset_hedging_rebalance_threshold: float = 0.05
+    offset_hedging_min_hedge_contracts: int = 1
+    offset_hedging_max_hedge_contracts: int = 3
+    
+    # Position Management: Trailing Stop Configuration
+    trailing_stop_enabled: bool = False
+    trailing_stop_trailing_distance_cents: int = 5
+    trailing_stop_min_profit_cents: int = 3
+    trailing_stop_activation_delay_sec: int = 30
+    
+    # Position Management: Dynamic Sizing Configuration
+    dynamic_sizing_enabled: bool = False
+    dynamic_sizing_base_contracts: int = 1
+    dynamic_sizing_edge_multiplier: float = 0.5
+    dynamic_sizing_confidence_multiplier: float = 0.3
+    dynamic_sizing_max_contracts: int = 3
+    dynamic_sizing_min_contracts: int = 1
     # Crypto markets are near well-calibrated (slope ~1.08) but still benefit from dynamic adjustment
     calibration_enabled: bool = True  # Enable/disable probability calibration (ENABLED for dynamic adjustment)
     calibration_auto_fit: bool = True  # Automatically fit calibration when sufficient data
@@ -319,8 +343,14 @@ class Crypto15mProfile:
     # 2026-07-01 FIX: Reduced spread threshold to 10c to align with 2026 industry standards
     # Industry research shows 5-10c is standard for 15m binary options to ensure good fills
     # Previous 100c was too permissive, accepting illiquid markets with poor fill quality
+    # Research shows BTC typically has 2c spreads in middle of window, other assets slightly wider
+    # 95c spreads observed in logs are abnormal (data quality or extreme thinness)
+    # 2026-07-03: INCREASED to 50c based on Turbine research - spread gating reduces returns
+    # Reference: https://www.turbinefi.com/blog/1000-strategy-backtest-kalshi-btc-15m
+    # "Volume-gating, spread-gating, compound 3-predicate rules, all basically tied the simple price_threshold at the same thresholds. Adding conditions did not improve returns. It just filtered more trades."
+    # 50c threshold blocks extreme data quality issues (82-91c spreads with YES ask=99c) while allowing normal trading
     market_microstructure_enabled: bool = True  # Enable market microstructure filters
-    market_microstructure_max_spread_cents: float = 10.0  # Avoid spreads > 10 cents (aligned with 2026 industry standard)
+    market_microstructure_max_spread_cents: float = 50.0  # Increased to 50c based on Turbine research - spread gating reduces returns
     market_microstructure_min_depth_usd: float = 0.0  # DISABLED: System uses limit orders which wait for fills, not market orders. Kalshi 15m crypto markets have sufficient liquidity. Depth thresholds are primarily for market orders to prevent slippage.
     market_microstructure_min_yes_depth: int = 1  # Minimum YES depth threshold
     market_microstructure_min_no_depth: int = 1  # Minimum NO depth threshold
@@ -632,11 +662,11 @@ class Crypto15mProfileAdapter:
                 momentum_fvg_obi_persistence_min=momentum_fvg_config.get('obi_persistence_min', 0.6),
                 momentum_fvg_obi_persistence_window_sec=momentum_fvg_config.get('obi_persistence_window_sec', 10.0),
                 momentum_fvg_obi_ewma_alpha=momentum_fvg_config.get('obi_ewma_alpha', 0.15),
-                momentum_fvg_obi_strong_btc=momentum_fvg_config.get('obi_strong_btc', 0.55),
-                momentum_fvg_obi_strong_eth=momentum_fvg_config.get('obi_strong_eth', 0.55),
-                momentum_fvg_obi_strong_sol=momentum_fvg_config.get('obi_strong_sol', 0.45),
-                momentum_fvg_obi_strong_xrp=momentum_fvg_config.get('obi_strong_xrp', 0.45),
-                momentum_fvg_obi_strong_doge=momentum_fvg_config.get('obi_strong_doge', 0.45),
+                momentum_fvg_obi_strong_btc=momentum_fvg_config.get('obi_strong_btc', 0.85),  # 2026-07-03: Increased to 85% for crypto volatility
+                momentum_fvg_obi_strong_eth=momentum_fvg_config.get('obi_strong_eth', 0.85),  # 2026-07-03: Increased to 85% for crypto volatility
+                momentum_fvg_obi_strong_sol=momentum_fvg_config.get('obi_strong_sol', 0.80),  # 2026-07-03: Increased to 80% for crypto volatility
+                momentum_fvg_obi_strong_xrp=momentum_fvg_config.get('obi_strong_xrp', 0.80),  # 2026-07-03: Increased to 80% for crypto volatility
+                momentum_fvg_obi_strong_doge=momentum_fvg_config.get('obi_strong_doge', 0.80),  # 2026-07-03: Increased to 80% for crypto volatility
                 momentum_fvg_obi_ewma_alpha_btc=momentum_fvg_config.get('obi_ewma_alpha_btc', 0.15),
                 momentum_fvg_obi_ewma_alpha_eth=momentum_fvg_config.get('obi_ewma_alpha_eth', 0.15),
                 momentum_fvg_obi_ewma_alpha_sol=momentum_fvg_config.get('obi_ewma_alpha_sol', 0.20),
@@ -716,6 +746,7 @@ class Crypto15mProfileAdapter:
                 # OTM filtering for 15-minute crypto
                 guardrails_max_dist_pct_trade=guardrails.get('max_dist_pct_trade', 2.0),  # Default 2%
                 guardrails_min_contract_price_cents=guardrails.get('min_contract_price_cents', 20),  # Default 20 cents
+                guardrails_max_contract_price_cents=guardrails.get('max_contract_price_cents', 70),  # Default 70 cents (2026 research: 80% payout recommended)
                 guardrails_max_same_side_per_strip=guardrails.get('max_same_side_per_strip', 2),  # Default 2 per strip
                 # Time trap prevention (entry window narrowing)
                 guardrails_max_entry_mins=guardrails.get('max_entry_mins', 12.0),  # Default 12 minutes
@@ -834,6 +865,26 @@ class Crypto15mProfileAdapter:
                 calibration_max_samples=raw.get('calibration_config', {}).get('max_samples', 1000),
                 calibration_regularization=raw.get('calibration_config', {}).get('regularization', 0.0001),
                 calibration_fit_interval_hours=raw.get('calibration_config', {}).get('fit_interval_hours', 24),
+                # Position Management: Offset Hedging Configuration
+                offset_hedging_enabled=raw.get('offset_hedging', {}).get('enabled', False),
+                offset_hedging_hedge_ratio=raw.get('offset_hedging', {}).get('hedge_ratio', 0.30),
+                offset_hedging_min_edge_for_hedge=raw.get('offset_hedging', {}).get('min_edge_for_hedge', 0.03),
+                offset_hedging_max_hedge_notional_pct=raw.get('offset_hedging', {}).get('max_hedge_notional_pct', 0.02),
+                offset_hedging_rebalance_threshold=raw.get('offset_hedging', {}).get('rebalance_threshold', 0.05),
+                offset_hedging_min_hedge_contracts=raw.get('offset_hedging', {}).get('min_hedge_contracts', 1),
+                offset_hedging_max_hedge_contracts=raw.get('offset_hedging', {}).get('max_hedge_contracts', 3),
+                # Position Management: Trailing Stop Configuration
+                trailing_stop_enabled=raw.get('trailing_stop', {}).get('enabled', False),
+                trailing_stop_trailing_distance_cents=raw.get('trailing_stop', {}).get('trailing_distance_cents', 5),
+                trailing_stop_min_profit_cents=raw.get('trailing_stop', {}).get('min_profit_cents', 3),
+                trailing_stop_activation_delay_sec=raw.get('trailing_stop', {}).get('activation_delay_sec', 30),
+                # Position Management: Dynamic Sizing Configuration
+                dynamic_sizing_enabled=raw.get('dynamic_sizing', {}).get('enabled', False),
+                dynamic_sizing_base_contracts=raw.get('dynamic_sizing', {}).get('base_contracts', 1),
+                dynamic_sizing_edge_multiplier=raw.get('dynamic_sizing', {}).get('edge_multiplier', 0.5),
+                dynamic_sizing_confidence_multiplier=raw.get('dynamic_sizing', {}).get('confidence_multiplier', 0.3),
+                dynamic_sizing_max_contracts=raw.get('dynamic_sizing', {}).get('max_contracts', 3),
+                dynamic_sizing_min_contracts=raw.get('dynamic_sizing', {}).get('min_contracts', 1),
                 # Phase 2: Strategy definitions
                 strategies=strategies,
             )

@@ -13,7 +13,7 @@ import React, { useMemo, useState } from 'react';
 import {
   Gauge, RefreshCw, ToggleLeft, ToggleRight, ArrowRight, ShieldOff,
 } from '../ui/icons';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY } from '../config/constants';
 import KalshiModeBadge from '../components/KalshiModeBadge';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
@@ -28,41 +28,41 @@ import type { VolDashHealthStatus, VolDashGridStatus, PnlPoint, LiquidityAlertDa
 // ── Component ───────────────────────────────────────────────────────────────
 
 const KalshiVolDashboardView: React.FC = () => {
-  const slow = { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW };
-  const verySlow = { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW * 2 }; // Reduce polling frequency
-  const std  = { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD };
+  const slow = { refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW };
+  const verySlow = { refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW * 2 }; // Reduce polling frequency
+  const std  = { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD };
 
   // ── Data fetches ──────────────────────────────────────────────────────────
   // Critical data - standard polling
-  const healthRes   = useApiData<VolDashHealthStatus>(API_ENDPOINTS.KALSHI_HEALTH, std);
-  const riskRes         = useApiData<KalshiRiskSummary>(API_ENDPOINTS.KALSHI_RISK, std);
-  const modeRes         = useApiData<{ mode: string; is_live: boolean; live_enabled: boolean }>(
+  const healthRes   = useApiQuery<VolDashHealthStatus>(API_ENDPOINTS.KALSHI_HEALTH, std);
+  const riskRes         = useApiQuery<KalshiRiskSummary>(API_ENDPOINTS.KALSHI_RISK, std);
+  const modeRes         = useApiQuery<{ mode: string; is_live: boolean; live_enabled: boolean }>(
     API_ENDPOINTS.KALSHI_GRID_MODE, std,
   );
-  const killRes         = useApiData<{ active: boolean; can_trade: boolean; kill_reason: string | null }>(
+  const killRes         = useApiQuery<{ active: boolean; can_trade: boolean; kill_reason: string | null }>(
     API_ENDPOINTS.OPERATOR_KILL_SWITCH_STATUS, std,
   );
 
   // Less critical data - slow polling
-  const sizingRes       = useApiData<SizingMetrics>(API_ENDPOINTS.KALSHI_SIZING_METRICS, slow);
-  const gridRes         = useApiData<VolDashGridStatus>(API_ENDPOINTS.KALSHI_GRID_STATUS, verySlow);
-  const consensusRes    = useApiData<{
+  const sizingRes       = useApiQuery<SizingMetrics>(API_ENDPOINTS.KALSHI_SIZING_METRICS, slow);
+  const gridRes         = useApiQuery<VolDashGridStatus>(API_ENDPOINTS.KALSHI_GRID_STATUS, verySlow);
+  const consensusRes    = useApiQuery<{
     signals: Array<{ ticker: string; direction: string; confidence: number; vote_count: number; agents: string[] }>;
     consensus_rate: number;
     engine_running: boolean;
   }>(API_ENDPOINTS.KALSHI_CONSENSUS_SIGNALS, verySlow);
 
   // Alert/volume data - very slow polling (tab-based, not always visible)
-  const alertsRes       = useApiData<{ alerts: LiquidityAlertData[] }>(API_ENDPOINTS.KALSHI_VOLUME_ALERTS, verySlow);
-  const liqAlertsRes    = useApiData<{ alerts: LiquidityAlertData[] }>(API_ENDPOINTS.KALSHI_LIQUIDITY_ALERTS, verySlow);
-  const volChangesRes   = useApiData<{ changes: VolumeChange[] }>(API_ENDPOINTS.KALSHI_VOLUME_CHANGES, verySlow);
-  const volAnomaliesRes = useApiData<{ anomalies: VolumeAnomaly[] }>(API_ENDPOINTS.KALSHI_VOLUME_ANOMALIES, verySlow);
+  const alertsRes       = useApiQuery<{ alerts: LiquidityAlertData[] }>(API_ENDPOINTS.KALSHI_VOLUME_ALERTS, verySlow);
+  const liqAlertsRes    = useApiQuery<{ alerts: LiquidityAlertData[] }>(API_ENDPOINTS.KALSHI_LIQUIDITY_ALERTS, verySlow);
+  const volChangesRes   = useApiQuery<{ changes: VolumeChange[] }>(API_ENDPOINTS.KALSHI_VOLUME_CHANGES, verySlow);
+  const volAnomaliesRes = useApiQuery<{ anomalies: VolumeAnomaly[] }>(API_ENDPOINTS.KALSHI_VOLUME_ANOMALIES, verySlow);
 
   // PNL history - very slow polling (chart data)
-  const pnlRes          = useApiData<{ points: PnlPoint[] }>(API_ENDPOINTS.KALSHI_PNL_HISTORY, verySlow);
+  const pnlRes          = useApiQuery<{ points: PnlPoint[] }>(API_ENDPOINTS.KALSHI_PNL_HISTORY, verySlow);
 
   // Sentiment/Vol context - slow polling
-  const sentimentVolRes = useApiData<{
+  const sentimentVolRes = useApiQuery<{
     assets: Record<string, {
       sentiment: { value: number; regime: string; confidence: number } | null;
       sizing_multiplier: { value: number; regime_label: string; reasoning: string };
@@ -109,8 +109,7 @@ const KalshiVolDashboardView: React.FC = () => {
     if (!risk) return [];
     return Object.entries(risk.category_notional ?? {}).map(([asset, notional]) => ({
       asset,
-      notional,
-      contracts: (risk.category_contracts ?? {})[asset] ?? 0,
+      notional: notional as number,
       cap: risk.limits?.[`max_${asset}_notional_usd`] ?? risk.limits?.max_notional_usd ?? 1000,
     }));
   }, [risk]);

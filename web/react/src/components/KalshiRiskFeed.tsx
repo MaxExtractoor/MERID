@@ -16,7 +16,7 @@ import {
   ArrowDownCircle, PauseCircle, ExternalLink, Wifi, WifiOff,
   Search, ShieldOff, Minimize2, RefreshCw,
 } from '../ui/icons';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { API_ENDPOINTS, API_BASE_URL, DEFAULTS, AUTH_TOKEN_KEY } from '../config/constants';
 import { logUxEvent } from '../utils/uxTelemetry';
 import { useKalshiRiskStream } from '../hooks/useKalshiRiskStream';
@@ -159,9 +159,9 @@ const KalshiRiskFeed: React.FC<RiskFeedProps> = ({
       onOpenMarket(ticker);
     }
   }, [onOpenMarket]);
-  const { data, loading, refetch } = useApiData<RiskFeedResponse>(
+  const { data, isLoading, refetch } = useApiQuery<RiskFeedResponse>(
     API_ENDPOINTS.KALSHI_RISK_EVENTS,
-    { pollingInterval: enhanced && autoRefresh && connectionStatus === 'connected' ? refreshInterval : DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
+    { refetchInterval: enhanced && autoRefresh && connectionStatus === 'connected' ? refreshInterval : DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
   );
   
   // Enhanced: Manual refresh
@@ -177,16 +177,16 @@ const KalshiRiskFeed: React.FC<RiskFeedProps> = ({
   }, [enhanced, refetch]);
 
   // Also pull from liquidity alerts
-  const liqResult = useApiData<{ alerts: Array<{ ticker: string; message: string; severity: string; ts: string }> }>(
+  const liqResult = useApiQuery<{ alerts: Array<{ ticker: string; message: string; severity: string; ts: string }> }>(
     API_ENDPOINTS.KALSHI_LIQUIDITY_ALERTS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
   );
 
   const events = useMemo(() => {
     const riskEvents: RiskEvent[] = (data?.events ?? []).slice(0, maxItems);
 
     // Merge liquidity alerts as risk events
-    const liqAlerts: RiskEvent[] = (liqResult.data?.alerts ?? []).map((a, i) => ({
+    const liqAlerts: RiskEvent[] = (liqResult.data?.alerts ?? []).map((a: any, i: number) => ({
       id: `liq-${i}`,
       ts: a.ts,
       severity: (a.severity === 'critical' ? 'critical' : a.severity === 'warning' ? 'warning' : 'info') as RiskEvent['severity'],
@@ -294,7 +294,7 @@ const KalshiRiskFeed: React.FC<RiskFeedProps> = ({
 
       {/* Event list */}
       <div className="max-h-[320px] overflow-y-auto divide-y divide-slate-800/50">
-        {loading && events.length === 0 ? (
+        {isLoading && events.length === 0 ? (
           <div className="px-4 py-8 text-center text-gray-500 text-xs">Loading risk events...</div>
         ) : events.length === 0 ? (
           <div className="px-4 py-8 text-center text-gray-500 text-xs">

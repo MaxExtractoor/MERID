@@ -1,0 +1,6 @@
+timestamp,asset,ticker,bid_cents,ask_cents,spread_cents,mid_cents,depth_yes,depth_no,volume_24h,open_interest,seconds_to_expiry,book_initialized,liquidity
+2026-05-29T22:15:11.147390+00:00,BTC,KXBTC15M,,,,,,,,,,False,UNKNOWN
+2026-05-29T22:15:11.147390+00:00,ETH,KXETH15M,,,,,,,,,,False,UNKNOWN
+2026-05-29T22:15:11.147390+00:00,SOL,KXSOL15M,,,,,,,,,,False,UNKNOWN
+2026-05-29T22:15:11.147390+00:00,XRP,KXXRP15M,,,,,,,,,,False,UNKNOWN
+2026-05-29T22:15:11.147390+00:00,DOGE,KXDOGE15M,,,,,,,,,,False,UNKNOWN

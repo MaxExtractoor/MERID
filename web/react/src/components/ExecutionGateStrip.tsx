@@ -1,6 +1,6 @@
 import { ShieldAlert, ShieldCheck, AlertTriangle, TrendingUp, Activity, Radio, RefreshCw } from '../ui/icons';
 import { useState, useCallback } from 'react';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY } from '../config/constants';
 import { useKalshiMode } from '../context/KalshiModeContext';
 import { MODE_COLORS, resolveModeKey } from '../config/modeColors';
@@ -36,13 +36,13 @@ interface RiskData {
  *   3. What to do if gate is closed
  */
 export default function ExecutionGateStrip() {
-  const { data: gate } = useApiData<StripExecutionGateData>(
+  const { data: gate } = useApiQuery<StripExecutionGateData>(
     API_ENDPOINTS.SYSTEM_EXECUTION_GATE,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
   );
-  const { data: risk } = useApiData<RiskData>(
+  const { data: risk } = useApiQuery<RiskData>(
     API_ENDPOINTS.KALSHI_RISK,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD },
   );
   const { data: modeData } = useKalshiMode();
 
@@ -75,8 +75,8 @@ export default function ExecutionGateStrip() {
 
   const blocked = gate.blocked;
   const gateState = gate.gate_state ?? 'unknown';
-  const criticals = gate.reasons?.filter(r => r.severity === 'critical') ?? [];
-  const warnings = gate.reasons?.filter(r => r.severity === 'warning') ?? [];
+  const criticals = gate.reasons?.filter((r: GateBlockReason) => r.severity === 'critical') ?? [];
+  const warnings = gate.reasons?.filter((r: GateBlockReason) => r.severity === 'warning') ?? [];
 
   // Near-limit calculations
   const exposurePct = risk && risk.max_exposure > 0

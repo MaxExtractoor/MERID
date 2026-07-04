@@ -5,7 +5,7 @@ Resolves exit policies and evaluates position exit conditions.
 """
 
 import logging
-from typing import Optional
+from typing import Optional, List
 from merid.position_management.exit_policy import ExitPolicy, ExitAction, ExitReason
 from merid.position_management.position import Position
 
@@ -57,6 +57,7 @@ class ExitPolicyResolver:
         time_to_expiry_seconds: float,
         current_edge_pct: Optional[float] = None,
         volatility_regime: Optional[str] = None,
+        candles: Optional[List] = None,
     ) -> ExitPolicy:
         """
         Resolve exit policy for a position.
@@ -67,6 +68,7 @@ class ExitPolicyResolver:
             time_to_expiry_seconds: Time to expiry in seconds
             current_edge_pct: Current edge percentage (optional)
             volatility_regime: Volatility regime (optional)
+            candles: Recent candle data for pattern detection (optional)
             
         Returns:
             ExitPolicy with action and reason
@@ -89,7 +91,7 @@ class ExitPolicyResolver:
         )
         
         # Evaluate policy
-        policy.evaluate(current_edge_pct)
+        policy.evaluate(current_edge_pct, candles)
         
         logger.debug(
             "[EXIT-POLICY-RESOLVER] position=%s action=%s reason=%s R=%.2f",

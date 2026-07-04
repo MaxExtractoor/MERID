@@ -85,6 +85,7 @@ class FillsPoller:
     DEFAULT_POLL_INTERVAL: float = float(_os.getenv("MERID_FILLS_POLL_INTERVAL_SEC", "10.0"))
     DEFAULT_RECONCILE_INTERVAL: float = float(_os.getenv("MERID_FILLS_RECONCILE_INTERVAL_SEC", "60.0"))
     DEFAULT_BACKFILL_INTERVAL: float = float(_os.getenv("MERID_FILLS_BACKFILL_INTERVAL_SEC", "300.0"))
+    DEFAULT_CACHE_CLEANUP_INTERVAL: float = float(_os.getenv("MERID_CACHE_CLEANUP_INTERVAL_SEC", "900.0"))  # 15 minutes
     
     def __new__(cls):
         if cls._instance is None:
@@ -104,6 +105,7 @@ class FillsPoller:
         self._poll_task: Optional[asyncio.Task] = None
         self._reconcile_task: Optional[asyncio.Task] = None
         self._backfill_task: Optional[asyncio.Task] = None
+        self._cache_cleanup_task: Optional[asyncio.Task] = None
         
         # State
         self._running = False
@@ -113,6 +115,7 @@ class FillsPoller:
         self._poll_interval = self.DEFAULT_POLL_INTERVAL
         self._reconcile_interval = self.DEFAULT_RECONCILE_INTERVAL
         self._backfill_interval = self.DEFAULT_BACKFILL_INTERVAL
+        self._cache_cleanup_interval = self.DEFAULT_CACHE_CLEANUP_INTERVAL
         
         # Metrics
         self._polls_completed = 0
@@ -188,6 +191,11 @@ class FillsPoller:
             name="fills-backfill"
         )
         self._backfill_task.add_done_callback(_task_done_cb)
+        self._cache_cleanup_task = asyncio.create_task(
+            self._cache_cleanup_loop(),
+            name="position-cache-cleanup"
+        )
+        self._cache_cleanup_task.add_done_callback(_task_done_cb)
         
         logger.info("FillsPoller started")
     
@@ -313,11 +321,13 @@ class FillsPoller:
     
     async def _reconcile_loop(self) -> None:
         """Periodic reconciliation loop."""
+        logger.info("[RECONCILE-LOOP] Starting reconciliation loop")
         # Wait for first poll to complete
         await asyncio.sleep(5)
         
         while not self._shutdown.is_set():
             try:
+                logger.info("[RECONCILE-LOOP] Starting reconciliation cycle")
                 await self._do_reconcile()
                 self._last_reconcile_time = datetime.now(timezone.utc)
             except Exception as e:
@@ -334,11 +344,14 @@ class FillsPoller:
     
     async def _do_reconcile(self) -> Dict[str, Any]:
         """Execute one reconciliation cycle."""
+        logger.info("[RECONCILE] Starting reconciliation cycle")
         client = self._get_client()
         if not client:
+            logger.warning("[RECONCILE] No client available")
             return {"status": "no_client"}
         
         try:
+            logger.info("[RECONCILE] Connecting to Kalshi client")
             await client.connect()
             
             # Get positions from Kalshi
@@ -346,6 +359,7 @@ class FillsPoller:
             # CRITICAL FIX: Remove "nonzero" filter to get ALL positions including zero-quantity ones
             # The "nonzero": "position" filter was causing REST to return empty positions
             # when positions were closed/settled but still in the system.
+            logger.info("[RECONCILE] Fetching positions from Kalshi API")
             pos_result = await client.get_positions_with_filters({})
             
             if not pos_result.success:
@@ -381,6 +395,7 @@ class FillsPoller:
             # Sync position cache with ground truth from Kalshi REST API
             # SINGLE SOURCE OF TRUTH: Use ONLY Kalshi REST API positions, never computed from fills
             # Orders do NOT count as positions - only actual open positions from REST API
+            # FALLBACK: If REST returns 0 positions but fills ledger shows positions, use fills as fallback
             if report.get("status") in ("ok", "degraded", "broken"):
                 try:
                     from merid.event_venues.kalshi.position_cache import get_position_cache
@@ -389,6 +404,23 @@ class FillsPoller:
                     # BUG-FIX: await added - sync_from_rest is now async with mutex protection
                     await cache.sync_from_rest(positions)
                     logger.info(f"Position cache synced from REST API (single source of truth): {len(positions)} positions")
+                    
+                    # CRITICAL FALLBACK: If REST returns 0 positions but we have fills suggesting positions,
+                    # use fills ledger as fallback to ensure PositionMonitor can track positions for trailing stop
+                    if len(positions) == 0:
+                        computed_positions = ledger.compute_net_positions()
+                        if computed_positions:
+                            logger.warning(
+                                f"[POSITION-FALLBACK] REST API returned 0 positions but fills ledger shows {len(computed_positions)} positions. "
+                                f"This indicates fills ledger has stale data. Clearing fills ledger to sync with REST API ground truth."
+                            )
+                            # Clear fills ledger to sync with REST API ground truth
+                            # REST API is the single source of truth - if it says 0 positions, fills ledger should be 0
+                            await ledger.clear_all_fills()
+                            logger.info("[POSITION-FALLBACK] Cleared fills ledger to sync with REST API (single source of truth)")
+                            # Sync empty positions to cache
+                            await cache.sync_from_rest([])
+                            logger.info("[POSITION-FALLBACK] Synced 0 positions from REST API (fills ledger cleared)")
 
                     # CRITICAL FIX: Resync category_contracts counter with actual positions
                     # This fixes the desync where category_contracts accumulates incorrectly
@@ -507,6 +539,36 @@ class FillsPoller:
                 await asyncio.wait_for(
                     self._shutdown.wait(),
                     timeout=self._backfill_interval
+                )
+            except asyncio.TimeoutError:
+                pass
+
+    async def _cache_cleanup_loop(self) -> None:
+        """Periodic position cache cleanup to remove expired positions.
+        
+        Runs every 15 minutes (default) to ensure the position cache doesn't
+        accumulate stale positions from expired 15-minute markets.
+        """
+        # Wait for startup
+        await asyncio.sleep(30)
+        logger.info("[CACHE-CLEANUP] Starting position cache cleanup loop")
+
+        while not self._shutdown.is_set():
+            try:
+                from merid.event_venues.kalshi.position_cache import get_position_cache
+                cache = get_position_cache()
+                if cache:
+                    removed = await cache.clear_expired_positions()
+                    logger.info(f"[CACHE-CLEANUP] Cleanup cycle completed: {removed} expired positions removed")
+                else:
+                    logger.warning("[CACHE-CLEANUP] Position cache not available for cleanup")
+            except Exception as e:
+                logger.warning(f"Position cache cleanup failed: {e}", exc_info=True)
+
+            try:
+                await asyncio.wait_for(
+                    self._shutdown.wait(),
+                    timeout=self._cache_cleanup_interval
                 )
             except asyncio.TimeoutError:
                 pass

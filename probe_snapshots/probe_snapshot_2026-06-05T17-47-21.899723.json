@@ -1,0 +1,42 @@
+{
+  "timestamp": "2026-06-05T21:47:21.903999+00:00",
+  "ws": {
+    "connection_state": "DISCONNECTED",
+    "latency_ms": 0.0,
+    "heartbeat_age_s": 0.002526521682739258,
+    "is_connected": false
+  },
+  "spot": {
+    "last_update_age_s": 0.0,
+    "service_running": true,
+    "is_stale": false,
+    "stale_reason": null
+  },
+  "book": {
+    "book_consistency": "SUSPECT",
+    "suspect_reason": "ws_disconnected",
+    "last_update_age_s": 0.0,
+    "is_dual_sided": false,
+    "best_bid_cents": null,
+    "best_ask_cents": null,
+    "spread_cents": null,
+    "spread_pct": null,
+    "is_stale": true
+  },
+  "risk": {
+    "utilization_pct": 0.0,
+    "has_capacity": true,
+    "is_exhausted": false
+  },
+  "gates": {
+    "spot_age": "PASS",
+    "book_freshness": "PASS",
+    "liquidity": "PASS",
+    "data_quality": "PASS",
+    "edge": "PASS",
+    "risk": "PASS",
+    "overall": "PASS",
+    "reason": null
+  },
+  "scenario_mapping": "test_ws_down_scenario"
+}

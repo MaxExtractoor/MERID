@@ -1,0 +1,1 @@
+timestamp,asset,ticker,bid_cents,ask_cents,spread_cents,mid_cents,depth_yes,depth_no,volume_24h,open_interest,seconds_to_expiry,book_initialized,liquidity

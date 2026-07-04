@@ -24,12 +24,12 @@ from typing import Final
 MIN_KALSHI_PRICE_CENTS: Final[int] = 1
 MAX_KALSHI_PRICE_CENTS: Final[int] = 99
 DEFAULT_KALSHI_PRICE_CENTS: Final[int] = 50  # Midpoint fallback when market price unavailable
-DEEP_OTM_CHEAP_CENTS: Final[int] = 5
+DEEP_OTM_CHEAP_CENTS: Final[int] = 50  # Updated 2026-07-03 to align with profile guardrails (50¢ minimum based on trade history)
 DEEP_OTM_EXPENSIVE_CENTS: Final[int] = 95
 MAX_PRICE_DIFFERENCE_CENTS: Final[int] = 50  # Max realistic price jump (data error threshold)  
 
 # Mid-band - reasonable pricing
-MID_BAND_LOW_CENTS: Final[int] = 20
+MID_BAND_LOW_CENTS: Final[int] = 50  # Updated 2026-07-03 to align with 50¢ minimum
 MID_BAND_HIGH_CENTS: Final[int] = 80
 
 # Minimum price for opening orders (anti-dust)
@@ -440,7 +440,7 @@ FEE_DRAG_WARNING_PCT: Final[float] = 0.20  # 20%
 # Whether to enforce deep OTM policy (False = allow with strong edge)
 # CRITICAL: Temporarily disabled to allow trade execution during system tuning
 # Edge-based filtering (20% minimum edge) was insufficient - need hard price floor
-ENFORCE_DEEP_OTM_POLICY: Final[bool] = False  # Temporarily disabled to allow trades
+ENFORCE_DEEP_OTM_POLICY: Final[bool] = True  # Enabled to prevent deep OTM longshots (15¢ minimum)
 
 # Whether to enforce prob-price consistency check
 ENFORCE_PROB_PRICE_CONSISTENCY: Final[bool] = True  # Enabled to ensure model prob supports market price

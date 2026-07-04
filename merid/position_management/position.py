@@ -22,6 +22,7 @@ class TrailingType(str, Enum):
     NONE = "none"
     PERCENT = "percent"
     R_MULTIPLE = "r_multiple"
+    FIXED_CENTS = "fixed_cents"  # Fixed cent stop (e.g., 5 cents)
 
 
 @dataclass
@@ -136,6 +137,9 @@ class Position:
         Research: Apply time-based tightening as expiry approaches.
         As time to expiry decreases, reduce trail distance to lock in gains.
         
+        Research: Apply volatility-based adjustment using ATR.
+        Higher volatility = wider stops, lower volatility = tighter stops.
+        
         Returns:
             Trailing stop price in cents, or None if trailing not active
         """
@@ -163,6 +167,41 @@ class Position:
                 # Reduce trail distance by 25% in last 10 minutes
                 trailing_param *= 0.75
         
+        # Research: Volatility-based trailing adjustment using ATR
+        # Higher volatility = wider stops, lower volatility = tighter stops
+        try:
+            from merid.signals.ta_engine import TAEngine, IndicatorConfig
+            from merid.data.unified_spot_service import get_unified_spot_service
+            
+            # Get asset from market_id (e.g., "KXBTC15M-..." -> "BTC")
+            asset = None
+            if "BTC" in self.market_id:
+                asset = "BTC"
+            elif "ETH" in self.market_id:
+                asset = "ETH"
+            elif "SOL" in self.market_id:
+                asset = "SOL"
+            elif "XRP" in self.market_id:
+                asset = "XRP"
+            elif "DOGE" in self.market_id:
+                asset = "DOGE"
+            
+            if asset:
+                spot_service = get_unified_spot_service()
+                spot_data = spot_service.get_spot_data(asset)
+                if spot_data and hasattr(spot_data, 'atr_pct') and spot_data.atr_pct > 0:
+                    # Baseline ATR is ~1% for crypto (adjustment factor = 1.0)
+                    baseline_atr_pct = 0.01
+                    atr_multiplier = spot_data.atr_pct / baseline_atr_pct
+                    
+                    # Apply ATR adjustment: widen stops in high vol, tighten in low vol
+                    # Clamp multiplier to reasonable range [0.5, 2.0]
+                    atr_multiplier = max(0.5, min(2.0, atr_multiplier))
+                    trailing_param *= atr_multiplier
+        except Exception as e:
+            # If ATR data unavailable, use base trailing_param
+            pass
+        
         if self.trailing_type == TrailingType.PERCENT:
             # Percent trail: trail_level = max_favorable * (1 - trail_percent)
             # trailing_param is already a decimal (e.g., 0.10 for 10%)
@@ -178,6 +217,18 @@ class Position:
             # R-multiple trail: trail_level = max_favorable - trail_r * initial_risk
             trail_r = trailing_param
             trail_level = int(self.max_favorable_price_cents - (trail_r * self.initial_risk_cents))
+            return trail_level
+        
+        elif self.trailing_type == TrailingType.FIXED_CENTS:
+            # Fixed cent trail: trail_level = max_favorable - fixed_distance
+            # trailing_param is the fixed distance in cents (e.g., 5 cents)
+            fixed_distance = int(trailing_param)
+            if self.side == PositionSide.YES:
+                # YES: trail below max favorable
+                trail_level = self.max_favorable_price_cents - fixed_distance
+            else:
+                # NO: trail above max favorable (since we want price to go down)
+                trail_level = self.max_favorable_price_cents + fixed_distance
             return trail_level
         
         return None

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { Search, ArrowRight, LayoutDashboard, ShieldAlert, Terminal, Settings, Briefcase, Gauge, Activity, Grid, Sliders, Rocket, FileText, Crosshair, Award } from '../ui/icons';
+import { Search, ArrowRight, LayoutDashboard, ShieldAlert, Terminal, Settings, Briefcase, Gauge, Activity, Sliders, Rocket, FileText, Crosshair, Award } from '../ui/icons';
 import type { View } from '../types/views';
 import { DEFAULTS } from '../config/constants';
 import { useFeatureFlags } from '../config/featureFlags';

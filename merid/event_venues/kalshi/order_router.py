@@ -176,7 +176,7 @@ def check_market_microstructure(
     no_ask_cents: int,
     yes_depth: int,
     no_depth: int,
-    max_spread_cents: float = 8.0,
+    max_spread_cents: float = 20.0,  # Increased from 8.0 to 20.0 for 15m markets
     min_depth_usd: float = 200.0,
     min_yes_depth: int = 1,
     min_no_depth: int = 1
@@ -1520,11 +1520,74 @@ def simulate_paper_fill(
 
 # ── Risk check ────────────────────────────────────────────────────────────
 
+# Global rate limiter to prevent rapid-fire execution
+_global_order_timestamps = []
+_MAX_ORDERS_PER_MINUTE = 30  # Hard cap: 30 orders per minute across all assets (increased from 10 to support 5 assets trading simultaneously)
+_MIN_SECONDS_BETWEEN_ORDERS = 0.3  # Minimum 0.3 seconds between orders (reduced from 0.5s to allow sweet spot execution while preventing rapid-fire)
+_startup_time = _time.time()
+_MIN_STARTUP_GRACE_PERIOD = 20.0  # Minimum 20 seconds before allowing any orders (reduced from 60s for faster trading after restart)
+
+def _check_global_rate_limit() -> Optional[str]:
+    """Check global rate limit to prevent rapid-fire execution.
+    
+    Returns rejection reason string, or None if OK.
+    """
+    global _global_order_timestamps
+    current_time = _time.time()
+    
+    # CRITICAL: Check startup grace period to prevent immediate orders after restart
+    time_since_startup = current_time - _startup_time
+    if time_since_startup < _MIN_STARTUP_GRACE_PERIOD:
+        logger.warning(
+            "[GLOBAL-RATE-LIMIT] Startup grace period active: %.1fs < %.1fs - REJECTING",
+            time_since_startup, _MIN_STARTUP_GRACE_PERIOD
+        )
+        return f"startup_grace_period: {time_since_startup:.1f}s < {_MIN_STARTUP_GRACE_PERIOD}s grace period"
+    
+    # Remove timestamps older than 1 minute
+    _global_order_timestamps = [ts for ts in _global_order_timestamps if current_time - ts < 60.0]
+    
+    # Check orders per minute limit
+    if len(_global_order_timestamps) >= _MAX_ORDERS_PER_MINUTE:
+        logger.warning(
+            "[GLOBAL-RATE-LIMIT] Orders per minute exceeded: %d >= %d - REJECTING",
+            len(_global_order_timestamps), _MAX_ORDERS_PER_MINUTE
+        )
+        return f"global_rate_limit_exceeded: {len(_global_order_timestamps)}/{_MAX_ORDERS_PER_MINUTE} per minute"
+    
+    # Check minimum time between orders
+    if _global_order_timestamps:
+        last_order_time = _global_order_timestamps[-1]
+        time_since_last = current_time - last_order_time
+        if time_since_last < _MIN_SECONDS_BETWEEN_ORDERS:
+            logger.warning(
+                "[GLOBAL-RATE-LIMIT] Time since last order %.1fs < %.1fs - REJECTING",
+                time_since_last, _MIN_SECONDS_BETWEEN_ORDERS
+            )
+            return f"global_rate_limit_exceeded: {time_since_last:.1f}s < {_MIN_SECONDS_BETWEEN_ORDERS}s between orders"
+    
+    # If passed, add current timestamp
+    _global_order_timestamps.append(current_time)
+    logger.info(
+        "[GLOBAL-RATE-LIMIT] Rate check passed: orders_in_last_minute=%d/%d time_since_last=%.1fs",
+        len(_global_order_timestamps) - 1, _MAX_ORDERS_PER_MINUTE,
+        current_time - _global_order_timestamps[-2] if len(_global_order_timestamps) > 1 else 0
+    )
+    return None
+
+
 def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
     """Basic pre-flight risk checks on an OrderIntent.
 
     Returns rejection reason string, or None if OK.
     """
+    # CRITICAL: Check global rate limit FIRST to prevent rapid-fire
+    rate_limit_rejection = _check_global_rate_limit()
+    if rate_limit_rejection:
+        _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "global_rate_limit")
+        _increment_validation_gate_metric("ROUTER_VALIDATION", "global_rate_limit")
+        return rate_limit_rejection
+    
     # TEMPORARY: Convert side/action to Kalshi format before validation
     # Handle both lowercase ("yes"/"no" + "buy"/"sell") and uppercase ("YES"/"NO" + "BUY"/"SELL")
     # Convert to "BUY_YES"/"SELL_YES"/"BUY_NO"/"SELL_NO"
@@ -1546,7 +1609,15 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
         _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "non_positive_size")
         _increment_validation_gate_metric("ROUTER_VALIDATION", "non_positive_size")
         return "non_positive_size"
-    if intent.price_cents <= 0 or intent.price_cents >= 100:
+    # CRITICAL: Add price range validation to prevent degenerate trades
+    # Minimum 15 cents aligns with global 15¢ price guard (prevents 5¢ DOGE NO trades)
+    # Maximum 70 cents prevents buying at 89-99 cents with poor expected returns
+    # Aligned with profile guardrails_max_contract_price_cents (70c for 43% minimum payout)
+    if intent.price_cents < 15 or intent.price_cents > 70:
+        logger.warning(
+            "[CHECK-INTENT-RISK] price_cents=%d outside valid range [15, 70] - REJECTING (prevents degenerate pricing)",
+            intent.price_cents
+        )
         _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "invalid_price")
         _increment_validation_gate_metric("ROUTER_VALIDATION", "invalid_price")
         return "invalid_price"
@@ -1562,6 +1633,86 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
         _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "invalid_action")
         _increment_validation_gate_metric("ROUTER_VALIDATION", "invalid_action")
         return "invalid_action"
+    
+    # CRITICAL: Check total position limits to prevent over-trading
+    # This prevents using 100% of bankroll in positions
+    try:
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+        
+        position_cache = get_position_cache()
+        risk_envelope = get_kalshi_crypto_15m_risk_envelope()
+        
+        # Extract asset from ticker
+        asset = None
+        ticker = intent.ticker.upper()
+        if "BTC" in ticker:
+            asset = "BTC"
+        elif "ETH" in ticker:
+            asset = "ETH"
+        elif "SOL" in ticker:
+            asset = "SOL"
+        elif "XRP" in ticker:
+            asset = "XRP"
+        elif "DOGE" in ticker:
+            asset = "DOGE"
+        
+        if asset:
+            # Get current position for this ticker using actual position cache API
+            current_position_obj = position_cache.get_position(ticker)
+            current_contracts = current_position_obj.contracts if current_position_obj else 0
+            current_notional = (current_contracts * intent.price_cents) / 100.0
+            
+            # Calculate new position notional after this order
+            new_contracts = current_contracts + intent.count
+            new_notional = (new_contracts * intent.price_cents) / 100.0
+            
+            # Check per-asset limit
+            asset_max_notional = risk_envelope.asset_max_notional_usd.get(asset, 0.0)
+            if new_notional > asset_max_notional:
+                logger.warning(
+                    "[CHECK-INTENT-RISK] asset=%s new_notional=%.2f > asset_max=%.2f - REJECTING",
+                    asset, new_notional, asset_max_notional
+                )
+                _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "asset_notional_exceeded")
+                _increment_validation_gate_metric("ROUTER_VALIDATION", "asset_notional_exceeded")
+                return f"asset_notional_exceeded: {new_notional:.2f} > {asset_max_notional:.2f}"
+            
+            # Check total position limit across all assets using actual position cache API
+            all_positions = position_cache.get_all_positions(validate_freshness=False)
+            total_position_notional = 0.0
+            for pos_ticker, pos_obj in all_positions.items():
+                if pos_obj and pos_obj.contracts > 0:
+                    # Use current price from position object or estimate
+                    pos_price = pos_obj.current_price_cents if hasattr(pos_obj, 'current_price_cents') else intent.price_cents
+                    total_position_notional += (pos_obj.contracts * pos_price) / 100.0
+            
+            # Add this order's notional
+            order_notional = (intent.count * intent.price_cents) / 100.0
+            total_with_order = total_position_notional + order_notional
+            
+            # Check against total notional cap (venue_cap)
+            max_total_notional = risk_envelope.max_total_notional_usd
+            if total_with_order > max_total_notional:
+                logger.warning(
+                    "[CHECK-INTENT-RISK] total_with_order=%.2f > max_total=%.2f - REJECTING",
+                    total_with_order, max_total_notional
+                )
+                _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "total_notional_exceeded")
+                _increment_validation_gate_metric("ROUTER_VALIDATION", "total_notional_exceeded")
+                return f"total_notional_exceeded: {total_with_order:.2f} > {max_total_notional:.2f}"
+            
+            logger.info(
+                "[CHECK-INTENT-RISK] Position check passed: asset=%s new_notional=%.2f asset_max=%.2f total=%.2f max_total=%.2f",
+                asset, new_notional, asset_max_notional, total_with_order, max_total_notional
+            )
+    except Exception as risk_check_err:
+        # CRITICAL: If risk check fails, REJECT the order to prevent over-trading
+        logger.error("[CHECK-INTENT-RISK] Risk check failed: %s - REJECTING order for safety", risk_check_err)
+        _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "risk_check_failed")
+        _increment_validation_gate_metric("ROUTER_VALIDATION", "risk_check_failed")
+        return f"risk_check_failed: {str(risk_check_err)}"
+    
     return None
 
 
@@ -2204,8 +2355,8 @@ def _validate_price_against_orderbook(intent: OrderIntent, state: Optional[Any])
         )
     
     # Check 1: Price should be within reasonable range of mid price
-    # Allow up to 10 cents deviation from mid for limit orders
-    max_deviation_cents = 10
+    # Allow up to 25 cents deviation from mid for limit orders (increased from 10 for 15m scalping)
+    max_deviation_cents = 25
     if abs(order_price - validation_mid_cents) > max_deviation_cents:
         logger.warning(
             "[PRICE-VALIDATION] ticker=%s limit order price=%dc too far from mid=%dc (deviation=%dc > %dc threshold)",
@@ -4069,10 +4220,28 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         elif "NO" in intent.side:
             outcome_id = "no"
         
+        # CRITICAL FIX: Extract action from Kalshi-formatted side (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
+        # The intent.action field contains the lowercase action ("buy"/"sell") from signal generation
+        # But after conversion in loop_15m.py, intent.side contains the full Kalshi format (BUY_YES, etc.)
+        # We need to extract the action from the Kalshi-formatted side, not use intent.action
+        # This prevents side inversion when intent.action doesn't match the Kalshi side format
+        if "BUY" in intent.side:
+            order_action = "buy"
+        elif "SELL" in intent.side:
+            order_action = "sell"
+        else:
+            # Fallback to intent.action if not in Kalshi format
+            order_action = intent.action.lower() if intent.action else "buy"
+        
+        logger.info(
+            "[VENUE-ORDER-MAPPING] intent.side=%s intent.action=%s -> outcome_id=%s order_action=%s",
+            intent.side, intent.action, outcome_id, order_action
+        )
+        
         # Create VenueOrder with computed price and order_type
         order = VenueOrder(
             market_id=_normalized_ticker,
-            side=intent.action,
+            side=order_action,  # CRITICAL FIX: Use extracted action from Kalshi side, not intent.action
             size=Decimal(intent.count),
             price=Decimal(final_price_cents) / Decimal("100"),
             order_type=final_order_type,  # Always "limit" after market band conversion
@@ -4098,6 +4267,10 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 )
             except Exception as _tp_reg_err:
                 logger.debug("[order-router] TP registration failed (non-fatal): %s", _tp_reg_err)
+
+        # PRODUCTION FIX: Register order_id -> client_tag mapping for fill-to-intent linkage
+        # This is needed because HTTP fills from Kalshi API don't include client_order_id
+        # We'll register the mapping after successful order submission (after we get the Kalshi order_id)
         
         # Track resting orders for edge decay monitoring (if aggressiveness=0.0)
         if intent.aggressiveness == 0.0 and intent.client_tag:
@@ -4188,15 +4361,18 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
 
         # DRY-RUN-TRACE: Fee computation using canonical kalshi_fee_cents
         # CRASH-007: Validate inputs before fee calculation
-        if intent.price_cents <= 0 or intent.count <= 0:
+        # CRITICAL: Add price range validation to prevent degenerate trades
+        # Minimum 5 cents prevents 1 cent data quality issues
+        # Maximum 75 cents prevents buying at 89-99 cents with poor expected returns
+        if intent.price_cents < 5 or intent.price_cents > 75 or intent.count <= 0:
             logger.error(
-                "[CRASH-007] Invalid order parameters for %s: price_cents=%s count=%s — rejecting",
+                "[CRASH-007] Invalid order parameters for %s: price_cents=%s count=%s — rejecting (price must be 5-75 cents)",
                 intent.ticker, intent.price_cents, intent.count
             )
             return OrderResult(
                 status="rejected",
                 mode=mode,
-                reason=f"invalid_order_params:price={intent.price_cents}:count={intent.count}",
+                reason=f"invalid_order_params:price={intent.price_cents}:count={intent.count}:price_out_of_range",
                 latency_ms=round((_time.monotonic() - t0) * 1000, 2),
             )
         _fee_pre = _kalshi_fee_cents(intent.price_cents, intent.count)
@@ -4533,7 +4709,20 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         fill_price_cents = int((placed.price or Decimal(intent.price_cents) / Decimal("100")) * 100)
         fee_cents = _kalshi_fee_cents(fill_price_cents, filled_count)
         _venue_oid = getattr(placed, "order_id", None) or "unknown"
-        
+
+        # PRODUCTION FIX: Register order_id -> client_tag mapping for fill-to-intent linkage
+        # This is needed because HTTP fills from Kalshi API don't include client_order_id
+        if _venue_oid and _venue_oid != "unknown" and intent.client_tag:
+            try:
+                from merid.event_venues.kalshi.position_cache import get_position_cache
+                get_position_cache().register_order_id_mapping(_venue_oid, intent.client_tag)
+                logger.debug(
+                    "[ORDER-ID-MAPPING] Registered kalshi_order_id=%s -> client_tag=%s",
+                    _venue_oid, intent.client_tag
+                )
+            except Exception as _map_err:
+                logger.debug("[order-router] Order ID mapping registration failed (non-fatal): %s", _map_err)
+
         # PHASE1-DUP-2: Mark dedup cache entry as completed with Kalshi order_id
         # This ensures future retries with the same dedup key can short-circuit or lookup the existing order.
         try:
@@ -5158,6 +5347,29 @@ def _run_pre_trade_gate(
         if _upstream_coid:
             _existing = gate.store.lookup(_upstream_coid)
             if _existing is not None:
+                # CRITICAL: Still run price guard even with upstream reservation
+                # to prevent deep OTM longshots from bypassing the check
+                min_price_cents = 15  # Default fallback (15 cents / $0.15)
+                try:
+                    from merid.risk.profiles.crypto_15m_profile import get_active_profile
+                    profile_adapter = get_active_profile()
+                    if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_min_contract_price_cents'):
+                        min_price_cents = profile_adapter.profile.guardrails_min_contract_price_cents
+                except Exception as e:
+                    logger.debug("[order-router] Failed to load min_contract_price_cents from profile: %s, using default 15c", e)
+                
+                if intent.price_cents < min_price_cents:
+                    logger.warning(
+                        "[order-router] PRICE_GUARD_BYPASS_BLOCKED coid=%s ticker=%s side=%s price=%dc < %dc threshold (deep OTM longshot rejected - upstream reservation path)",
+                        _upstream_coid[:16], intent.ticker, intent.side, intent.price_cents, min_price_cents,
+                    )
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason=f"deep_otm_longshot:price={intent.price_cents}c < {min_price_cents}c threshold",
+                        latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                    )
+                
                 logger.debug(
                     "[order-router] pre_trade_gate using upstream reservation coid=%s ticker=%s",
                     _upstream_coid[:16], intent.ticker,

@@ -12,7 +12,7 @@ import {
   AlertTriangle, Shield, Gauge, BarChart3,
   ChevronDown, ChevronUp, StopCircle,
 } from '../ui/icons';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { getAuthToken } from '../services/auth';
 
@@ -230,9 +230,9 @@ export default function KalshiBankrollPanel() {
   const [stopping, setStopping] = useState(false);
 
   // Use FAST_REFRESH (5s) for real-time bankroll updates - critical for trading UI
-  const { data, loading } = useApiData<TraderStatus>(
+  const { data, isLoading } = useApiQuery<TraderStatus>(
     API_ENDPOINTS.KALSHI_CONTINUOUS_TRADER_STATUS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH }
   );
 
   const handleStop = useCallback(async () => {
@@ -253,7 +253,7 @@ export default function KalshiBankrollPanel() {
 
   /* ── Loading / unavailable ────────────────────────────────────── */
 
-  if (loading && !data) {
+  if (isLoading && !data) {
     return (
       <div className="rounded-xl border border-slate-700/50 bg-slate-900/60 p-4">
         <div className="flex items-center gap-2 text-slate-500 text-sm">
@@ -348,7 +348,7 @@ export default function KalshiBankrollPanel() {
               }`}
               title={
                 d.execution_gate_reasons?.length
-                  ? d.execution_gate_reasons.map((r) => r.message).join(' · ')
+                  ? d.execution_gate_reasons.map((r: any) => r.message).join(' · ')
                   : undefined
               }
             >
@@ -410,7 +410,7 @@ export default function KalshiBankrollPanel() {
               sparkline={
                 !snapshotFailed && d.cycle_history && d.cycle_history.length >= 2
                   ? <Sparkline
-                      data={d.cycle_history.map(h => num(h.drawdown_pct, 0))}
+                      data={d.cycle_history.map((h: any) => num(h.drawdown_pct, 0))}
                       color="#f87171"
                       warnThreshold={(d.config?.drawdown_reduce_pct ?? 0) * 100}
                       dangerThreshold={(d.config?.drawdown_halt_pct ?? 0) * 100}
@@ -457,7 +457,7 @@ export default function KalshiBankrollPanel() {
               sparkline={
                 !snapshotFailed && d.cycle_history && d.cycle_history.length >= 2
                   ? <Sparkline
-                      data={d.cycle_history.map(h => num(h.fee_drag_pct, 0))}
+                      data={d.cycle_history.map((h: any) => num(h.fee_drag_pct, 0))}
                       color="#fb923c"
                       dangerThreshold={(d.config?.max_fee_drag_pct ?? 0) * 100}
                     />

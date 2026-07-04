@@ -14,7 +14,7 @@ import {
   Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea, Legend,
 } from 'recharts';
 import { TrendingUp, TrendingDown, BarChart3, LineChart } from '../ui/icons';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { API_ENDPOINTS, DEFAULTS, CHART_COLORS } from '../config/constants';
 
 interface ChartPnlPoint {
@@ -46,18 +46,18 @@ const KalshiPnlChart: React.FC<PnlChartProps> = ({ riskAlerts }) => {
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('');
   const [chartMode, setChartMode] = useState<ChartMode>('equity');
 
-  const { data, loading } = useApiData<PnlHistoryResponse>(
+  const { data, isLoading } = useApiQuery<PnlHistoryResponse>(
     API_ENDPOINTS.KALSHI_PNL_HISTORY,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW },
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW },
   );
 
   const chartData = useMemo(() => {
     if (!data?.points?.length) return [];
     let pts = data.points;
     if (categoryFilter) {
-      pts = pts.filter(p => (p.category ?? '').toLowerCase().includes(categoryFilter));
+      pts = pts.filter((p: ChartPnlPoint) => (p.category ?? '').toLowerCase().includes(categoryFilter));
     }
-    return pts.map(p => ({
+    return pts.map((p: ChartPnlPoint) => ({
       time: new Date(p.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       equity: Number((p.equity ?? 0).toFixed(2)),
       pnl: Number((p.cumulative_pnl ?? 0).toFixed(2)),
@@ -67,7 +67,7 @@ const KalshiPnlChart: React.FC<PnlChartProps> = ({ riskAlerts }) => {
 
   const breachTimes = useMemo(() => {
     if (!data?.breaches?.length) return [];
-    return data.breaches.map(b => ({
+    return data.breaches.map((b: { ts: string; check: string; reason: string }) => ({
       time: new Date(b.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       label: b.check,
     }));
@@ -78,17 +78,17 @@ const KalshiPnlChart: React.FC<PnlChartProps> = ({ riskAlerts }) => {
 
   const stats = useMemo(() => {
     if (chartData.length < 2) return null;
-    const dailyPnls = chartData.map(d => d.dailyPnl);
-    const peak = Math.max(...chartData.map(d => d.pnl));
-    const trough = Math.min(...chartData.map(d => d.pnl));
+    const dailyPnls = chartData.map((d: any) => d.dailyPnl);
+    const peak = Math.max(...chartData.map((d: any) => d.pnl));
+    const trough = Math.min(...chartData.map((d: any) => d.pnl));
     const maxDD = peak > 0 ? peak - trough : 0;
-    const winDays = dailyPnls.filter(d => d > 0).length;
-    const lossDays = dailyPnls.filter(d => d < 0).length;
-    const avg = dailyPnls.reduce((a, b) => a + b, 0) / dailyPnls.length;
+    const winDays = dailyPnls.filter((d: number) => d > 0).length;
+    const lossDays = dailyPnls.filter((d: number) => d < 0).length;
+    const avg = dailyPnls.reduce((a: number, b: number) => a + b, 0) / dailyPnls.length;
     return { peak, maxDD, winDays, lossDays, avgDaily: avg };
   }, [chartData]);
 
-  if (loading && !data) {
+  if (isLoading && !data) {
     return (
       <div className="bg-slate-900 rounded-xl p-4 border border-slate-800">
         <div className="animate-pulse h-48 bg-slate-800 rounded-lg" />
@@ -219,7 +219,7 @@ const KalshiPnlChart: React.FC<PnlChartProps> = ({ riskAlerts }) => {
               {/* Drawdown tier background bands */}
               {(() => {
                 if (!chartData.length) return null;
-                const pnls = chartData.map(d => d.pnl);
+                const pnls = chartData.map((d: any) => d.pnl);
                 const peak = Math.max(...pnls, 0);
                 // Tier thresholds as dollar amounts from peak
                 const warnLine = peak * 0.95;  // 5% drawdown = warning
@@ -236,7 +236,7 @@ const KalshiPnlChart: React.FC<PnlChartProps> = ({ riskAlerts }) => {
                 );
               })()}
               {/* Breach event markers */}
-              {breachTimes.map((b, i) => (
+              {breachTimes.map((b: any, i: number) => (
                 <ReferenceLine
                   key={`breach-${i}`}
                   yAxisId="left"

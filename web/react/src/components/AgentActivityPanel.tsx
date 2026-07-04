@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
 import { Bot, Brain, Shield, TrendingUp, AlertTriangle, CheckCircle, Clock } from '../ui/icons';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { API_ENDPOINTS, DEFAULTS, AGENT_STATUS } from '../config/constants';
 
 interface AgentActivity {
@@ -31,14 +31,14 @@ const getAgentIcon = (agentName: string) => {
 };
 
 function AgentActivityPanel() {
-  const { data, loading } = useApiData<{ agents: AgentActivity[]; active_agents: number; total_tasks_1h: number }>(
+  const { data, isLoading } = useApiQuery<{ agents: AgentActivity[]; active_agents: number; total_tasks_1h: number }>(
     API_ENDPOINTS.OPERATOR_AGENT_ACTIVITY,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
   );
 
   const agents = useMemo(() => data?.agents ?? [], [data]);
 
-  if (loading) {
+  if (isLoading) {
     return (
       <div className="bg-slate-900/70 rounded-xl p-6 border border-slate-800">
         <div className="animate-pulse space-y-4">
@@ -51,8 +51,8 @@ function AgentActivityPanel() {
     );
   }
 
-  const activeCount = data?.active_agents ?? agents.filter(a => a.status === AGENT_STATUS.RUNNING || a.status === AGENT_STATUS.ACTIVE).length;
-  const totalTasks = data?.total_tasks_1h ?? agents.reduce((sum, a) => sum + a.tasks_completed, 0);
+  const activeCount = data?.active_agents ?? agents.filter((a: AgentActivity) => a.status === AGENT_STATUS.RUNNING || a.status === AGENT_STATUS.ACTIVE).length;
+  const totalTasks = data?.total_tasks_1h ?? agents.reduce((sum: number, a: AgentActivity) => sum + a.tasks_completed, 0);
 
   return (
     <div className="bg-slate-900/70 rounded-xl p-6 border border-slate-800">
@@ -70,7 +70,7 @@ function AgentActivityPanel() {
       </div>
 
       <div className="space-y-3">
-        {agents.map((agent) => {
+        {agents.map((agent: AgentActivity) => {
           const displayName = agent.agent_name || agent.agent_id;
           const Icon = getAgentIcon(displayName);
           const isActive = agent.status === AGENT_STATUS.RUNNING || agent.status === AGENT_STATUS.ACTIVE;
@@ -121,7 +121,7 @@ function AgentActivityPanel() {
             </div>
           );
         })}
-        {agents.length === 0 && !loading && (
+        {agents.length === 0 && !isLoading && (
           <div className="text-center py-6 text-slate-500 text-sm">
             No agents running — start the Kalshi grid from Overview
           </div>

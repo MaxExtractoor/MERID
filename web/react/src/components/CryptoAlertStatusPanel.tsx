@@ -1,4 +1,4 @@
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 
 interface RouterStatus {
@@ -30,24 +30,24 @@ function tagCountsForSymbol(counters: Record<string, number>, symbol: string): R
 }
 
 export default function CryptoAlertStatusPanel() {
-  const { data: status } = useApiData<RouterStatus>(
+  const { data: status } = useApiQuery<RouterStatus>(
     API_ENDPOINTS.CRYPTO_ALERTS_STATUS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.CRYPTO_ALERTS }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.CRYPTO_ALERTS }
   );
-  const { data: metrics } = useApiData<RouterMetrics>(
+  const { data: metrics } = useApiQuery<RouterMetrics>(
     API_ENDPOINTS.CRYPTO_ALERTS_METRICS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.CRYPTO_ALERTS }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.CRYPTO_ALERTS }
   );
 
   const counters = metrics?.counters ?? {};
 
   const riskTotal = Object.entries(counters)
     .filter(([k]) => k.startsWith('merid_risk_alerts_total'))
-    .reduce((s, [, v]) => s + v, 0);
+    .reduce((s: number, [, v]) => s + (v as number), 0);
 
   const selTotal = Object.entries(counters)
     .filter(([k]) => k.startsWith('merid_crypto_selected_markets_total'))
-    .reduce((s, [, v]) => s + v, 0);
+    .reduce((s: number, [, v]) => s + (v as number), 0);
 
   const isRunning = status?.running ?? false;
 

@@ -3,7 +3,7 @@ import {
   Bell, RefreshCw, Search, AlertTriangle,
   AlertOctagon, Info, CheckCircle
 } from '../ui/icons';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import ErrorBar from './ErrorBar';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 
@@ -28,9 +28,9 @@ export default function AlertHistoryPanel() {
   const [search, setSearch] = useState('');
   const [sevFilter, setSevFilter] = useState<string>('all');
 
-  const { data: rawData, loading, error: fetchError, refetch } = useApiData<{ alerts: AlertRecord[] }>(
+  const { data: rawData, isLoading, error: fetchError, refetch } = useApiQuery<{ alerts: AlertRecord[] }>(
     API_ENDPOINTS.SIGNALS_ALERTS_HISTORY,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.MEDIUM },
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.MEDIUM },
   );
 
   if (fetchError && !rawData) {
@@ -39,8 +39,8 @@ export default function AlertHistoryPanel() {
   const alerts = rawData?.alerts ?? [];
 
   const filtered = alerts
-    .filter(a => sevFilter === 'all' || a.severity === sevFilter)
-    .filter(a => !search || a.title.toLowerCase().includes(search.toLowerCase()) || a.source.toLowerCase().includes(search.toLowerCase()));
+    .filter((a: AlertRecord) => sevFilter === 'all' || a.severity === sevFilter)
+    .filter((a: AlertRecord) => !search || a.title.toLowerCase().includes(search.toLowerCase()) || a.source.toLowerCase().includes(search.toLowerCase()));
 
   const formatTime = (ts: string) => {
     const ms = Date.now() - new Date(ts).getTime();
@@ -49,9 +49,9 @@ export default function AlertHistoryPanel() {
     return `${Math.floor(ms / 3600000)}h ago`;
   };
 
-  const critCount = alerts.filter(a => a.severity === 'critical' && !a.acknowledged).length;
+  const critCount = alerts.filter((a: AlertRecord) => a.severity === 'critical' && !a.acknowledged).length;
 
-  if (loading) {
+  if (isLoading) {
     return (
       <div className="bg-slate-800/50 rounded-lg border border-slate-700/50 p-6">
         <div className="flex items-center gap-2 text-gray-400">
@@ -107,7 +107,7 @@ export default function AlertHistoryPanel() {
       </div>
 
       <div className="space-y-2 max-h-[400px] overflow-y-auto">
-        {filtered.map(alert => {
+        {filtered.map((alert: AlertRecord) => {
           const cfg = SEV_CONFIG[alert.severity] || SEV_CONFIG.info;
           const Icon = cfg.icon;
           return (

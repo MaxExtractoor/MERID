@@ -18,7 +18,7 @@ import {
 } from '../ui/icons';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY } from '../config/constants';
 
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { logUxEvent } from '../utils/uxTelemetry';
 // LEGACY REMOVAL: SentimentBundleCard removed - social sentiment not used in 15m stack
 import { useFillToast } from '../hooks/useFillToast';
@@ -115,9 +115,9 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
   balance,
 }) => {
   // Execution gate — prevent order submission when trading is halted
-  const { data: gateData } = useApiData<{ blocked: boolean; safe_to_trade: boolean }>(
+  const { data: gateData } = useApiQuery<{ blocked: boolean; safe_to_trade: boolean }>(
     API_ENDPOINTS.SYSTEM_EXECUTION_GATE,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
   );
   // Safe default: block when gate data is unavailable (null = still loading or endpoint down)
   const executionBlocked = mode === 'live' && (gateData == null || gateData.blocked);
@@ -134,6 +134,7 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
   const [useLimit, setUseLimit] = useState(false);
   const [limitPrice, setLimitPrice] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [submitGuard, setSubmitGuard] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tradeError, setTradeError] = useState<TradeError | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -202,8 +203,15 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
   }, [effectiveContracts, priceCents, useLimit, limitPrice, enhanced, balance, cost]);
 
   const handleSubmit = useCallback(async () => {
+    // Submit guard to prevent double-submit
+    if (submitGuard) {
+      return;
+    }
+    setSubmitGuard(true);
+
     const err = validate();
     if (err) { 
+      setSubmitGuard(false);
       if (enhanced) {
         setTradeError({ type: 'validation', message: err, recoverable: true });
       } else {
@@ -249,6 +257,7 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
       submitTimeoutRef.current = setTimeout(() => {
         setTradeError({ type: 'network', message: 'Order submission timed out.', recoverable: true });
         setSubmitting(false);
+        setSubmitGuard(false);
       }, 15000);
     }
 
@@ -293,7 +302,9 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
         order_group_id: selectedGroupId,
       });
       onOrderPlaced?.();
+      setSubmitGuard(false);
     } catch (e) {
+      setSubmitGuard(false);
       const errorMessage = e instanceof Error ? e.message : 'Order submission failed';
       if (enhanced) {
         setTradeError({
@@ -597,7 +608,7 @@ const KalshiTradeTicket: React.FC<TradeTicketProps> = ({
       <button
         type="button"
         onClick={handleSubmit}
-        disabled={submitting || effectiveContracts <= 0 || executionBlocked || fillsIntegrityBroken}
+        disabled={submitting || submitGuard || effectiveContracts <= 0 || executionBlocked || fillsIntegrityBroken}
         title={fillsIntegrityBroken ? 'Trading disabled: fills reconciliation broken' : executionBlocked ? 'Trading halted: execution gate blocked' : undefined}
         className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-bold transition-all disabled:opacity-50 ${
           side === 'yes'

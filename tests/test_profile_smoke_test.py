@@ -210,13 +210,17 @@ class TestProfileSmokeTest:
             
             # Verify guardrail parameters are from profile
             assert profile.guardrails_max_spread_cents == 50  # RELAXED: Increased from 30 to 50 to allow more trades
-            assert profile.guardrails_max_slippage_cents == 3
+            assert profile.guardrails_max_slippage_cents == 5  # INCREASED from 3 to 5 based on 2026 research
             assert profile.guardrails_min_depth_contracts == 2  # RELAXED: Reduced from 5 to 2 for single-contract trading
-            assert profile.guardrails_min_post_fee_edge == 0.02  # FIXED: Updated to match YAML (was 0.04)
-            assert profile.guardrails_min_time_to_expiry_min == 2.5  # FIXED: Updated to match YAML (was 3)
+            assert profile.guardrails_min_post_fee_edge == 0.015  # LOWERED from 0.02 to 0.015 based on 2026 research
+            assert profile.guardrails_min_time_to_expiry_min == 2.0  # RELAXED from 2.5 to 2.0 for more 15m opportunities
             assert profile.guardrails_drawdown_halt_pct == 0.20  # RELAXED: Increased from 0.15 to 0.20 to align with industry standard
             assert profile.guardrails_drawdown_unwind_pct == 0.25  # RELAXED: Increased from 0.20 to 0.25 to align with industry standard
-            assert profile.guardrails_max_daily_loss_usd == 200.0
+            assert profile.guardrails_max_daily_loss_usd == 2.00  # Fallback USD value for small bankrolls (5% of $40)
+            # Verify 2026-07-03 Phase 1 changes (signal_mode)
+            assert profile.signal_mode == 'momentum_fvg'  # SWITCHED from hybrid to momentum_fvg
+            # Note: Confidence threshold and price range changes are in YAML sections
+            # These are validated at runtime by the trading system
 
     def test_kelly_sizing_from_profile(self):
         """
@@ -231,14 +235,17 @@ class TestProfileSmokeTest:
             profile = adapter.profile
             
             # Verify Kelly parameters are from profile
-            # P1-FIX1: kelly hard cap reduced from 0.30 to 0.05 to curb oversizing
-            # P2-FIX6: kelly_global_notional_cap_pct tightened from 20.0 to 0.05 (5%)
-            assert profile.kelly_hard_cap == 0.05
-            assert profile.kelly_min_edge_pct == 0.02  # FIXED: Updated to match YAML (was 0.04)
+            # P1-FIX1: kelly hard cap reduced from 0.30 to 0.02 to curb oversizing
+            # P2-FIX6: kelly_global_notional_cap_pct tightened from 20.0 to 0.02 (2%)
+            assert profile.kelly_hard_cap == 0.02  # CRITICAL FIX: 2% Kelly hard cap (aligned with unified risk limit)
+            assert profile.kelly_min_edge_pct == 0.015  # 2026-07-01 FIX: Lowered to 1.5% from 2% to increase trade frequency
             assert profile.kelly_max_edge_pct == 0.25  # Updated to match actual profile
             assert profile.kelly_min_win_prob == 0.01
             assert profile.kelly_max_win_prob == 0.99
-            assert profile.kelly_global_notional_cap_pct == 0.05
+            assert profile.kelly_global_notional_cap_pct == 0.02  # CRITICAL FIX: 2% of equity (aligned with per-trade limit)
+            # Note: Edge thresholds are now in edge_bands section, not asset_configs
+            # The asset_configs.min_edge_* fields are 0.0 (removed from profile)
+            # Edge thresholds are applied via edge_bands configuration
 
     def test_confidence_bands_from_profile(self):
         """
@@ -274,15 +281,15 @@ class TestProfileSmokeTest:
             adapter = get_active_profile()
             profile = adapter.profile
             
-            # Verify all legacy disable flags are True
-            assert profile.legacy_disable_balance_calibration is True
-            assert profile.legacy_disable_dynamic_contract_caps is True
-            assert profile.legacy_disable_bankroll_category_limits is True
-            assert profile.legacy_disable_bankroll_prediction_risk is True
-            assert profile.legacy_disable_bankroll_guardrails is True
+            # Verify legacy flags (from YAML legacy section)
+            assert profile.legacy_disable_balance_calibration is False  # Balance calibration enabled (YAML: false)
+            assert profile.legacy_disable_dynamic_contract_caps is True  # Dynamic contract caps disabled (YAML: true)
+            assert profile.legacy_disable_bankroll_category_limits is True  # Bankroll category limits disabled (YAML: true)
+            assert profile.legacy_disable_bankroll_prediction_risk is True  # Bankroll prediction risk disabled (YAML: true)
+            assert profile.legacy_disable_bankroll_guardrails is True  # Bankroll guardrails disabled (YAML: true)
             
-            # Verify adapter methods return True
-            assert adapter.should_disable_balance_calibration() is True
+            # Verify adapter methods return values matching YAML
+            assert adapter.should_disable_balance_calibration() is False
             assert adapter.should_disable_dynamic_contract_caps() is True
             assert adapter.should_disable_bankroll_category_limits() is True
             assert adapter.should_disable_bankroll_prediction_risk() is True

@@ -16,7 +16,7 @@
  *   ● red    = missing (>30s stale)
  */
 import type { JSX } from 'react';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -120,17 +120,17 @@ function AlignmentBadge({ alignment }: { alignment: AlignmentState }): JSX.Eleme
 // ── Component ──────────────────────────────────────────────────────────────────
 
 export default function SpotBasisPanel(): JSX.Element {
-  const { data, loading, error } = useApiData<SpotBasisResponse>(
+  const { data, isLoading, error } = useApiQuery<SpotBasisResponse>(
     API_ENDPOINTS.SPOT_BASIS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SPOT_BASIS }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.SPOT_BASIS }
   );
 
   const offside = data
     ? ASSET_ORDER.filter(a => data.assets[a]?.alignment === 'offside')
     : [];
 
-  // ── Error / loading states ─────────────────────────────────────────────────
-  if (loading && !data) {
+  // ── Error / isLoading states ─────────────────────────────────────────────────
+  if (isLoading && !data) {
     return (
       <div className="bg-gray-900 rounded-lg p-4 border border-gray-700">
         <h3 className="text-sm font-semibold text-gray-300 mb-2">Spot / Kalshi Basis</h3>

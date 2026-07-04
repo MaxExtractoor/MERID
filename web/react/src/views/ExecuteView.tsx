@@ -20,7 +20,7 @@ import {
   Terminal, ClipboardList, TrendingUp,
   X, RefreshCw, AlertTriangle
 } from '../ui/icons';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { subscribeToPortfolio, PortfolioSnapshot, PositionSnapshot } from '../lib/portfolioClient';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { authHeaders } from '../api/auth';
@@ -122,14 +122,14 @@ const ExecuteView: React.FC<ExecuteViewProps> = ({
   }, []);
   
   // Data fetching
-  const ordersRes = useApiData<{ orders: Order[] }>(
+  const ordersRes = useApiQuery<{ orders: Order[] }>(
     API_ENDPOINTS.KALSHI_ORDERS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );
   
-  const marketsRes = useApiData<{ markets: Market[] }>(
+  const marketsRes = useApiQuery<{ markets: Market[] }>(
     `${API_ENDPOINTS.KALSHI_MARKETS}?limit=100`,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
   );
 
   // Derived data
@@ -158,13 +158,13 @@ const ExecuteView: React.FC<ExecuteViewProps> = ({
   const markets = marketsRes.data?.markets || [];
   
   const selectedMarket = useMemo(() => 
-    markets.find(m => m.ticker === selectedTicker),
+    markets.find((m: Market) => m.ticker === selectedTicker),
     [markets, selectedTicker]
   );
   
   const filteredOrders = useMemo(() => {
     if (orderFilter === 'all') return orders;
-    return orders.filter(o => o.status === orderFilter);
+    return orders.filter((o: Order) => o.status === orderFilter);
   }, [orders, orderFilter]);
   
   const totalExposure = useMemo(() => {
@@ -198,7 +198,7 @@ const ExecuteView: React.FC<ExecuteViewProps> = ({
 
   // Cancel all resting orders
   const cancelAllResting = useCallback(async () => {
-    const resting = orders.filter(o => o.status === 'resting');
+    const resting = orders.filter((o: Order) => o.status === 'resting');
     if (resting.length === 0) return;
     
     if (!confirm(`Cancel all ${resting.length} resting orders?`)) return;
@@ -207,7 +207,7 @@ const ExecuteView: React.FC<ExecuteViewProps> = ({
       const res = await fetch(`${API_BASE_URL}${API_ENDPOINTS.KALSHI_ORDERS_BATCH_CANCEL}`, {
         method: 'POST',
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ order_ids: resting.map(o => o.order_id) }),
+        body: JSON.stringify({ order_ids: resting.map((o: Order) => o.order_id) }),
       });
       if (!res.ok) throw new Error('Batch cancel failed');
       ordersRes.refetch();
@@ -218,7 +218,7 @@ const ExecuteView: React.FC<ExecuteViewProps> = ({
 
   const tabs = [
     { id: 'terminal' as const, label: 'Terminal', icon: Terminal },
-    { id: 'orders' as const, label: `Orders (${orders.filter(o => o.status === 'resting').length})`, icon: ClipboardList },
+    { id: 'orders' as const, label: `Orders (${orders.filter((o: Order) => o.status === 'resting').length})`, icon: ClipboardList },
     { id: 'positions' as const, label: `Positions (${positions.length})`, icon: TrendingUp },
   ];
 
@@ -292,7 +292,7 @@ const ExecuteView: React.FC<ExecuteViewProps> = ({
                     className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"
                   >
                     <option value="">Choose a market...</option>
-                    {markets.map(m => (
+                    {markets.map((m: Market) => (
                       <option key={m.ticker} value={m.ticker}>
                         {m.ticker} — {m.question.slice(0, 50)}...
                       </option>
@@ -364,7 +364,7 @@ const ExecuteView: React.FC<ExecuteViewProps> = ({
                   >
                     Refresh
                   </Button>
-                  {orders.filter(o => o.status === 'resting').length > 0 && (
+                  {orders.filter((o: Order) => o.status === 'resting').length > 0 && (
                     <Button
                       variant="danger"
                       size="sm"
@@ -400,7 +400,7 @@ const ExecuteView: React.FC<ExecuteViewProps> = ({
                         </td>
                       </tr>
                     ) : (
-                      filteredOrders.map(order => (
+                      filteredOrders.map((order: Order) => (
                         <tr key={order.order_id} className="border-b border-slate-800/50 hover:bg-slate-800/30">
                           <td className="p-3">
                             <div className="font-medium text-white">{order.ticker}</div>

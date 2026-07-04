@@ -11,8 +11,8 @@
  */
 
 import React from 'react';
-import { useApiData } from '../hooks/useApiData';
-import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { useApiQuery } from '../hooks/useTanStackQuery';
+import { DEFAULTS } from '../config/constants';
 import { XCircle, AlertTriangle, Clock, TrendingDown } from '../ui/icons';
 
 interface BlockedCandidate {
@@ -113,14 +113,15 @@ const BlockedCandidateRow: React.FC<{ candidate: BlockedCandidate }> = ({ candid
 };
 
 const Kalshi15mShadowModePanel: React.FC = () => {
-  const { data, loading, error, refetch } = useApiData<ShadowResponse>(
+  const { data, isLoading, error, refetch } = useApiQuery<ShadowResponse>(
     '/api/v1/kalshi/15m/shadow',
     {
-      pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST,
+      refetchInterval: DEFAULTS.POLLING_INTERVALS.FAST,
+      staleTime: 10_000,
     }
   );
 
-  if (loading && !data) {
+  if (isLoading && !data) {
     return (
       <div className="bg-slate-900 rounded-xl border border-slate-800 p-6">
         <div className="flex items-center gap-2 text-slate-400">
@@ -138,10 +139,10 @@ const Kalshi15mShadowModePanel: React.FC = () => {
           <XCircle className="w-4 h-4" />
           <span className="font-semibold">Shadow Mode Unavailable</span>
         </div>
-        <p className="text-sm text-slate-400 mb-3">{error}</p>
+        <p className="text-sm text-slate-400 mb-3">{String(error)}</p>
         <button
           type="button"
-          onClick={refetch}
+          onClick={() => refetch()}
           className="text-sm text-blue-400 hover:text-blue-300"
         >
           Retry
@@ -192,7 +193,7 @@ const Kalshi15mShadowModePanel: React.FC = () => {
         <div className="space-y-2">
           <h4 className="text-sm font-semibold text-slate-300 mb-2">Recent Blocks</h4>
           <div className="space-y-2 max-h-96 overflow-y-auto">
-            {data.blocked_candidates.map((candidate, idx) => (
+            {data.blocked_candidates.map((candidate: BlockedCandidate, idx: number) => (
               <BlockedCandidateRow key={`${candidate.market_id}-${idx}`} candidate={candidate} />
             ))}
           </div>
@@ -212,7 +213,7 @@ const Kalshi15mShadowModePanel: React.FC = () => {
             {Object.entries(data.summary.by_reason).map(([reason, count]) => (
               <div key={reason} className="flex justify-between">
                 <span className="text-slate-500">{reason}:</span>
-                <span className="font-mono text-white">{count}</span>
+                <span className="font-mono text-white">{String(count)}</span>
               </div>
             ))}
           </div>

@@ -4,7 +4,7 @@
 
 import { useState } from 'react';
 import { Award, Download, BarChart3, Activity, Trophy, Crosshair } from '../ui/icons';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS, AUTH_TOKEN_KEY} from '../config/constants';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
 import KalshiModeBadge from '../components/KalshiModeBadge';
@@ -67,31 +67,31 @@ function Skeleton({ className = '' }: { className?: string }) {
 export default function KalshiAgentPerformanceView() {
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   
-  const { data: agentsResponse, loading: loadingAgents } = useApiData<{ agents: Record<string, AgentMetrics>; count: number }>(
+  const { data: agentsResponse, isLoading: isLoadingAgents } = useApiQuery<{ agents: Record<string, AgentMetrics>; count: number }>(
     API_ENDPOINTS.KALSHI_GRID_PERFORMANCE_AGENTS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
   );
   
-  const { data: summary, loading: loadingSummary } = useApiData<PerformanceSummary>(
+  const { data: summary, isLoading: isLoadingSummary } = useApiQuery<PerformanceSummary>(
     API_ENDPOINTS.KALSHI_GRID_PERFORMANCE_SUMMARY,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
   );
-  const { data: topAgentsResponse } = useApiData<{ top: TopAgent[] }>(
+  const { data: topAgentsResponse } = useApiQuery<{ top: TopAgent[] }>(
     API_ENDPOINTS.KALSHI_GRID_PERFORMANCE_TOP,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
   );
-  const { data: calibrationResponse } = useApiData<{ agents: CalibrationEntry[] }>(
+  const { data: calibrationResponse } = useApiQuery<{ agents: CalibrationEntry[] }>(
     API_ENDPOINTS.KALSHI_GRID_PERFORMANCE_CALIBRATION,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
   );
-  const { data: agentDetail } = useApiData<AgentMetrics>(
+  const { data: agentDetail } = useApiQuery<AgentMetrics>(
     selectedAgent ? API_ENDPOINTS.KALSHI_GRID_PERFORMANCE_AGENT(selectedAgent) : '',
-    { pollingInterval: selectedAgent ? DEFAULTS.POLLING_INTERVALS.SLOW : 0 }
+    { refetchInterval: selectedAgent ? DEFAULTS.POLLING_INTERVALS.SLOW : 0 }
   );
 
   // Convert agents object to array for rendering
   const agents = agentsResponse?.agents 
-    ? Object.values(agentsResponse.agents)
+    ? (Object.values(agentsResponse.agents) as AgentMetrics[])
     : [];
 
   const handleExport = async () => {
@@ -145,7 +145,7 @@ export default function KalshiAgentPerformanceView() {
       </div>
 
       {/* Summary Cards */}
-      {loadingSummary ? (
+      {isLoadingSummary ? (
         <div className="grid grid-cols-4 gap-4">
           {[...Array(4)].map((_, i) => (
             <div key={i} className="bg-slate-900/70 rounded-xl border border-slate-800 p-4">
@@ -231,7 +231,7 @@ export default function KalshiAgentPerformanceView() {
             <h2 className="text-sm font-semibold text-slate-200">Top Performers</h2>
           </div>
           <div className="divide-y divide-slate-800">
-            {topAgentsResponse.top.map((a) => (
+            {topAgentsResponse.top.map((a: TopAgent) => (
               <div key={a.agent_id} className="px-4 py-3 flex items-center gap-4">
                 <span className={`text-lg font-bold w-6 text-center ${
                   a.rank === 1 ? 'text-yellow-400' : a.rank === 2 ? 'text-slate-300' : 'text-orange-400'
@@ -255,7 +255,7 @@ export default function KalshiAgentPerformanceView() {
           </h2>
         </div>
         
-        {loadingAgents ? (
+        {isLoadingAgents ? (
           <div className="p-5 space-y-3">
             {[...Array(5)].map((_, i) => (
               <Skeleton key={i} className="h-16" />
@@ -279,8 +279,8 @@ export default function KalshiAgentPerformanceView() {
               </thead>
               <tbody className="divide-y divide-slate-800">
                 {agents
-                  .sort((a, b) => b.win_rate - a.win_rate)
-                  .map((agent) => (
+                  .sort((a: AgentMetrics, b: AgentMetrics) => b.win_rate - a.win_rate)
+                  .map((agent: AgentMetrics) => (
                     <tr
                       key={agent.agent_id}
                       className="hover:bg-slate-800/30 cursor-pointer transition-colors"
@@ -354,8 +354,8 @@ export default function KalshiAgentPerformanceView() {
               </thead>
               <tbody className="divide-y divide-slate-800">
                 {calibrationResponse.agents
-                  .sort((a, b) => a.calibration_error - b.calibration_error)
-                  .map((c) => (
+                  .sort((a: CalibrationEntry, b: CalibrationEntry) => a.calibration_error - b.calibration_error)
+                  .map((c: CalibrationEntry) => (
                     <tr key={c.agent_id} className="hover:bg-slate-800/30">
                       <td className="px-4 py-3 text-sm font-mono text-slate-200">{c.agent_id.replace('kalshi-', '')}</td>
                       <td className="px-4 py-3 text-sm text-center">

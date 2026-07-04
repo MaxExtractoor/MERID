@@ -1,6 +1,6 @@
 import React from 'react';
 import { Clock, AlertTriangle, CheckCircle, XCircle, RefreshCw } from '../ui/icons';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import ErrorBar from './ErrorBar';
 import { API_ENDPOINTS, DEFAULTS} from '../config/constants';
 
@@ -20,9 +20,9 @@ const STATUS_CONFIG: Record<string, { icon: typeof CheckCircle; color: string; b
 };
 
 function DataFreshnessPanel() {
-  const { data: rawData, loading, error: fetchError, refetch } = useApiData<{ feeds: DataFeed[] }>(
+  const { data: rawData, isLoading, error: fetchError, refetch } = useApiQuery<{ feeds: DataFeed[] }>(
     API_ENDPOINTS.DATA_FRESHNESS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.FAST_REFRESH },
   );
 
   if (fetchError && !rawData) {
@@ -30,21 +30,21 @@ function DataFreshnessPanel() {
   }
   const feeds = rawData?.feeds ?? [];
 
-  const sortedFeeds = [...feeds].sort((a, b) => {
-    const order = { dead: 0, stale: 1, fresh: 2 };
+  const sortedFeeds = [...feeds].sort((a: DataFeed, b: DataFeed) => {
+    const order: Record<string, number> = { dead: 0, stale: 1, fresh: 2 };
     return order[a.status] - order[b.status];
   });
 
   const formatStaleness = (ms: number): string => {
     if (ms < 1000) return `${ms}ms`;
-    if (ms < 60000) return `${((ms / 1000) ?? 0).toFixed(1)}s`;
-    return `${((ms / 60000) ?? 0).toFixed(1)}m`;
+    if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+    return `${(ms / 60000).toFixed(1)}m`;
   };
 
-  const staleCount = feeds.filter(f => f.status === 'stale').length;
-  const deadCount = feeds.filter(f => f.status === 'dead').length;
+  const staleCount = feeds.filter((f: DataFeed) => f.status === 'stale').length;
+  const deadCount = feeds.filter((f: DataFeed) => f.status === 'dead').length;
 
-  if (loading) {
+  if (isLoading) {
     return (
       <div className="bg-slate-800/50 rounded-lg border border-slate-700/50 p-6">
         <div className="flex items-center gap-2 text-gray-400">

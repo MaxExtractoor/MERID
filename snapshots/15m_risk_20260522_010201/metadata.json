@@ -1,0 +1,15 @@
+{
+  "timestamp": "20260522_010201",
+  "git_sha": "1a494158481151d41c97665bb47810d3b80f1105",
+  "profile": "kalshi_crypto_15m_v2",
+  "yaml_files_copied": [
+    "kalshi_crypto_15m.yaml",
+    "kalshi_agent_grid.yaml"
+  ],
+  "env_vars_captured": [
+    "MERID_PROFILE",
+    "MERID_PM_PROFILE",
+    "KALSHI_ENV",
+    "MERID_PM_TRADING_MODE"
+  ]
+}

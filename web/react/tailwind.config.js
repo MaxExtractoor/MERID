@@ -16,6 +16,20 @@ module.exports = {
           800: '#1e40af',
           900: '#1e3a8a',
         },
+        /* Design system elevation colors */
+        'bg-void': 'var(--bg-void)',
+        'bg-primary': 'var(--bg-primary)',
+        'bg-secondary': 'var(--bg-secondary)',
+        'bg-surface': 'var(--bg-surface)',
+        /* Semantic colors */
+        'semantic-green': 'var(--green)',
+        'semantic-red': 'var(--red)',
+        'semantic-warning': 'var(--warning)',
+        'semantic-info': 'var(--info)',
+      },
+      fontFamily: {
+        sans: ['var(--font-sans)', 'system-ui', 'sans-serif'],
+        mono: ['var(--font-mono)', 'monospace'],
       },
       animation: {
         'gradient': 'gradient 15s ease infinite',

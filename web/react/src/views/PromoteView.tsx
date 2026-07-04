@@ -19,7 +19,7 @@ import {
   Rocket, LayoutGrid, Play, Square, Pause, RotateCcw,
   ChevronRight, Zap, Activity, TrendingUp
 } from '../ui/icons';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { API_BASE_URL, API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { getAuthHeaders } from '../services/auth';
 import { fmtTimestamp } from '../utils/formatters';
@@ -168,14 +168,14 @@ const PromoteView: React.FC = () => {
   const [gridLoading, setGridLoading] = useState(false);
   
   // Data fetching
-  const gridRes = useApiData<GridStatus>(
+  const gridRes = useApiQuery<GridStatus>(
     API_ENDPOINTS.KALSHI_GRID_STATUS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );
   
-  const transitionsRes = useApiData<{ transitions: DeploymentTransition[] }>(
+  const transitionsRes = useApiQuery<{ transitions: DeploymentTransition[] }>(
     API_ENDPOINTS.KALSHI_DEPLOYMENT_TRANSITIONS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
   );
 
   const grid = gridRes.data;
@@ -218,9 +218,9 @@ const PromoteView: React.FC = () => {
     return assets.map(asset => ({
       asset,
       lanes: timeframes.map(tf => {
-        const agent = agents.find(a => 
+        const agent = agents.find((a: AgentSummary) => 
           a.config.assets?.includes(asset) && 
-          a.config.timeframes?.some(t => t.toLowerCase().includes(tf))
+          a.config.timeframes?.some((t: string) => t.toLowerCase().includes(tf))
         );
         return { timeframe: tf, agent };
       }),
@@ -388,7 +388,7 @@ const PromoteView: React.FC = () => {
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {transitions.slice(0, 10).map((t) => (
+                    {transitions.slice(0, 10).map((t: DeploymentTransition) => (
                       <div key={`${t.agent}:${t.ts}`} className="flex items-center gap-4 p-3 bg-slate-800 rounded-lg">
                         <div className="text-xs text-slate-500 w-24">
                           {fmtTimestamp(t.ts, { timeOnly: true })}
@@ -465,7 +465,7 @@ const PromoteView: React.FC = () => {
               </CardHeader>
               <CardContent>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {agents.map(agent => (
+                  {agents.map((agent: AgentSummary) => (
                     <AgentCard 
                       key={agent.name} 
                       agent={agent} 

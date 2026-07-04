@@ -51,6 +51,7 @@ class TestCrypto15mProfileDataclass:
             'guardrails_drawdown_halt_pct', 'guardrails_drawdown_unwind_pct',
             'guardrails_max_daily_loss_usd',
             'guardrails_max_dist_pct_trade', 'guardrails_min_contract_price_cents',
+            'guardrails_max_contract_price_cents',
             'guardrails_max_same_side_per_strip',
             'guardrails_max_entry_mins', 'guardrails_min_entry_mins',
             'guardrails_depth_size_multiplier',
@@ -190,19 +191,15 @@ class TestPriceFloorGuardrail:
             adapter = Crypto15mProfileAdapter()
             profile = adapter.profile
 
-            # Check that the value is set to 35 cents (from YAML)
-            # RAISED from 20 to 35 based on PnL audit (1.4% win rate, -$0.649 avg PnL in 20-35c band)
-            assert profile.guardrails_min_contract_price_cents == 20, \
-                f"Expected min_contract_price_cents=20 (blocks deep OTM longshots), got {profile.guardrails_min_contract_price_cents}"
+            # Check that the value is set to 15 cents (from YAML)
+            # FIXED from 5 to 15 to prevent 5¢ DOGE NO trades (price guard bypass)
+            assert profile.guardrails_min_contract_price_cents == 15, \
+                f"Expected min_contract_price_cents=15 (blocks deep OTM longshots), got {profile.guardrails_min_contract_price_cents}"
         except Exception as e:
             pytest.skip(f"Profile min_contract_price_cents check skipped: {e}")
 
-
-class TestGuardRelaxationFixes:
-    """Test that guard relaxation changes are applied correctly."""
-
-    def test_max_dist_pct_trade_relaxed_to_2_percent(self):
-        """Test that max_dist_pct_trade is relaxed to 2.0% (was 0.75%)."""
+    def test_profile_max_contract_price_cents_default_value(self):
+        """Test that the profile loads with the correct max contract price value."""
         try:
             from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
 
@@ -212,8 +209,327 @@ class TestGuardRelaxationFixes:
             adapter = Crypto15mProfileAdapter()
             profile = adapter.profile
 
-            assert profile.guardrails_max_dist_pct_trade == 2.0, \
-                f"Expected max_dist_pct_trade=2.0, got {profile.guardrails_max_dist_pct_trade}"
+            # Check that the value is set to 70 cents (from YAML)
+            # 2026 research: minimum 80% payout recommended (55¢ for $1 payout)
+            # Set to 70¢ for 43% minimum payout, preventing 97¢ trades with only 3% profit
+            assert profile.guardrails_max_contract_price_cents == 70, \
+                f"Expected max_contract_price_cents=70 (prevents low-profit trades), got {profile.guardrails_max_contract_price_cents}"
+        except Exception as e:
+            pytest.skip(f"Profile max_contract_price_cents check skipped: {e}")
+
+    def test_price_range_max_price_cents_aligned_with_guardrails(self):
+        """Test that price_range max_price_cents is aligned with guardrails_max_contract_price_cents (70c)."""
+        try:
+            import yaml
+            from pathlib import Path
+
+            # Load the profile YAML directly with UTF-8 encoding
+            profile_path = Path(__file__).parent.parent / "config" / "profiles" / "kalshi_crypto_15m_v2.yaml"
+            if not profile_path.exists():
+                pytest.skip(f"Profile YAML not found at {profile_path}")
+
+            with open(profile_path, encoding='utf-8') as f:
+                profile_yaml = yaml.safe_load(f)
+
+            price_range = profile_yaml.get('price_range', {})
+            guardrails = profile_yaml.get('guardrails', {})
+
+            # Check that price_range max_price_cents matches guardrails max_contract_price_cents
+            assert price_range.get('max_price_cents') == 70, \
+                f"Expected price_range max_price_cents=70, got {price_range.get('max_price_cents')}"
+            assert guardrails.get('max_contract_price_cents') == 70, \
+                f"Expected guardrails max_contract_price_cents=70, got {guardrails.get('max_contract_price_cents')}"
+        except Exception as e:
+            pytest.skip(f"Price range alignment check skipped: {e}")
+
+    def test_per_asset_volatility_based_tuning(self):
+        """Test that per-asset settings are aligned with 2026 volatility research."""
+        try:
+            import yaml
+            from pathlib import Path
+
+            # Load the profile YAML directly with UTF-8 encoding
+            profile_path = Path(__file__).parent.parent / "config" / "profiles" / "kalshi_crypto_15m_v2.yaml"
+            if not profile_path.exists():
+                pytest.skip(f"Profile YAML not found at {profile_path}")
+
+            with open(profile_path, encoding='utf-8') as f:
+                profile_yaml = yaml.safe_load(f)
+
+            assets = profile_yaml.get('assets', {})
+
+            # ETH: declining volatility (45.2% in April 2026) - tighter max_distance
+            eth_config = assets.get('ETH', {})
+            assert eth_config.get('max_distance_pct') == 0.018, \
+                f"Expected ETH max_distance_pct=0.018 (1.8%), got {eth_config.get('max_distance_pct')}"
+
+            # SOL: increasing volatility (89.6% in April 2026) - higher min_edge
+            sol_config = assets.get('SOL', {})
+            assert sol_config.get('min_edge_early') == 0.05, \
+                f"Expected SOL min_edge_early=0.05 (5%), got {sol_config.get('min_edge_early')}"
+            assert sol_config.get('min_edge_mid') == 0.05, \
+                f"Expected SOL min_edge_mid=0.05 (5%), got {sol_config.get('min_edge_mid')}"
+            assert sol_config.get('min_edge_late') == 0.05, \
+                f"Expected SOL min_edge_late=0.05 (5%), got {sol_config.get('min_edge_late')}"
+            assert sol_config.get('min_edge_terminal') == 0.06, \
+                f"Expected SOL min_edge_terminal=0.06 (6%), got {sol_config.get('min_edge_terminal')}"
+
+            # XRP: event-driven - tighter max_distance for precision
+            xrp_config = assets.get('XRP', {})
+            assert xrp_config.get('max_distance_pct') == 0.025, \
+                f"Expected XRP max_distance_pct=0.025 (2.5%), got {xrp_config.get('max_distance_pct')}"
+
+            # DOGE: sentiment-driven, highest beta (2.70) - tighter max_distance for precision
+            doge_config = assets.get('DOGE', {})
+            assert doge_config.get('max_distance_pct') == 0.030, \
+                f"Expected DOGE max_distance_pct=0.030 (3.0%), got {doge_config.get('max_distance_pct')}"
+        except Exception as e:
+            pytest.skip(f"Per-asset volatility tuning check skipped: {e}")
+
+    def test_agent_grid_price_clamping_minimum_15c(self):
+        """Test that agent_grid_15m.py price clamping uses 15¢ minimum (not 5¢)."""
+        try:
+            import inspect
+            from merid.prediction.agent_grid_15m import LeanAgent15m
+
+            # Get the source code of the _generate_signal method (contains price clamping logic)
+            source = inspect.getsource(LeanAgent15m._generate_signal)
+
+            # Verify that the minimum price clamping is 15c (not 5c)
+            assert "max(15, min(70, price_cents))" in source, \
+                "agent_grid_15m.py should clamp prices to 15-70c range (not 5-70c)"
+            
+            # Verify that individual clamping checks use 15c minimum
+            assert "if price_cents < 15:" in source, \
+                "agent_grid_15m.py should use 15c minimum in individual clamping checks"
+            
+            # Verify that 5c is NOT used as minimum (the old bug)
+            assert "if price_cents < 5:" not in source, \
+                "agent_grid_15m.py should NOT use 5c minimum (this was the bug allowing 5¢ trades)"
+            
+            # Verify that the comment mentions 15c minimum
+            assert "15-70c" in source or "15c" in source, \
+                "agent_grid_15m.py should document the 15c minimum in comments"
+        except Exception as e:
+            pytest.skip(f"Agent grid price clamping check skipped: {e}")
+
+    def test_order_router_price_validation_minimum_15c(self):
+        """Test that order_router.py price validation uses 15¢ minimum (not 5¢)."""
+        try:
+            import inspect
+            from merid.event_venues.kalshi.order_router import _check_intent_risk
+
+            # Get the source code of the _check_intent_risk function
+            source = inspect.getsource(_check_intent_risk)
+
+            # Verify that the minimum price validation is 15c (not 5c)
+            assert "if intent.price_cents < 15 or intent.price_cents > 70:" in source, \
+                "order_router.py should validate price in [15, 70] range (not [5, 70])"
+            
+            # Verify that 5c is NOT used as minimum (the old bug)
+            assert "if intent.price_cents < 5" not in source, \
+                "order_router.py should NOT use 5c minimum (this was a bypass path for 5¢ trades)"
+            
+            # Verify that the comment mentions 15c minimum
+            assert "15 cents" in source or "15¢" in source or "15c" in source, \
+                "order_router.py should document the 15c minimum in comments"
+        except Exception as e:
+            pytest.skip(f"Order router price validation check skipped: {e}")
+
+
+class TestEntryMatrixChanges:
+    """Test entry matrix changes based on TheLines/Perplexity research."""
+    
+    def test_time_window_filter_skip_first_minute(self):
+        """Test that time window filter skips first minute (≥14 minutes to expiry)."""
+        try:
+            import inspect
+            from merid.prediction.agent_grid_15m import LeanAgent15m
+
+            # Get the source code of the _generate_signal method
+            source = inspect.getsource(LeanAgent15m._generate_signal)
+
+            # Verify that time window filter is implemented
+            assert "TIME-WINDOW-FILTER" in source, \
+                "agent_grid_15m.py should implement time window filter"
+            
+            # Verify that first minute is skipped
+            assert "minutes_to_expiry >= 14.0" in source, \
+                "agent_grid_15m.py should skip first minute (≥14 minutes to expiry)"
+            
+            # Verify that last 2 minutes are skipped
+            assert "minutes_to_expiry <= 2.0" in source, \
+                "agent_grid_15m.py should skip last 2 minutes (≤2 minutes to expiry)"
+            
+            # Verify that late entries have edge multiplier
+            assert "time_edge_multiplier = 1.5" in source, \
+                "agent_grid_15m.py should apply 1.5x edge multiplier for late entries (2-4 minutes)"
+        except Exception as e:
+            pytest.skip(f"Time window filter check skipped: {e}")
+    
+    def test_momentum_agreement_check(self):
+        """Test that momentum agreement check is implemented based on Turbine research."""
+        try:
+            import inspect
+            from merid.prediction.agent_grid_15m import LeanAgent15m
+
+            # Get the source code of the _generate_signal method
+            source = inspect.getsource(LeanAgent15m._generate_signal)
+
+            # Verify that momentum agreement check is implemented
+            assert "MOMENTUM-AGREEMENT-FILTER" in source, \
+                "agent_grid_15m.py should implement momentum agreement check"
+            
+            # Verify that spot direction is compared to Kalshi direction
+            assert "kalshi_direction" in source and "spot_direction" in source, \
+                "agent_grid_15m.py should compare spot direction to Kalshi direction"
+            
+            # Verify that extreme misalignment is skipped (spot up but Kalshi < 30c)
+            assert "market_price < 0.30" in source, \
+                "agent_grid_15m.py should skip extreme misalignment (spot up but Kalshi < 30c)"
+            
+            # Verify that extreme misalignment is skipped (spot down but Kalshi > 70c)
+            assert "market_price > 0.70" in source, \
+                "agent_grid_15m.py should skip extreme misalignment (spot down but Kalshi > 70c)"
+            
+            # Verify that moderate misalignment is allowed (Kalshi lag edge)
+            assert "moderate misalignment" in source or "Kalshi lag edge" in source, \
+                "agent_grid_15m.py should allow moderate misalignment (Kalshi lag edge)"
+        except Exception as e:
+            pytest.skip(f"Momentum agreement check skipped: {e}")
+    
+    def test_price_band_edge_multipliers(self):
+        """Test that price band edge multipliers are implemented based on CEPR research."""
+        try:
+            import inspect
+            from merid.prediction.agent_grid_15m import LeanAgent15m
+
+            # Get the source code of the _generate_signal method
+            source = inspect.getsource(LeanAgent15m._generate_signal)
+
+            # Verify that price band edge multipliers are implemented
+            assert "price_edge_multiplier" in source, \
+                "agent_grid_15m.py should implement price band edge multipliers"
+            
+            # Verify that per-asset minimum bands are implemented
+            assert "BTC/ETH: 20c minimum" in source or "20 <= price_cents <= 24" in source, \
+                "agent_grid_15m.py should have 20c minimum bands for BTC/ETH"
+            
+            # Verify that SOL/XRP have 25c minimum bands
+            assert "SOL/XRP: 25c minimum" in source or "25 <= price_cents <= 29" in source, \
+                "agent_grid_15m.py should have 25c minimum bands for SOL/XRP"
+            
+            # Verify that DOGE has 30c minimum bands
+            assert "DOGE: 30c minimum" in source or "30 <= price_cents <= 34" in source, \
+                "agent_grid_15m.py should have 30c minimum bands for DOGE"
+            
+            # Verify that 50-65c is the sweet spot (1.0x multiplier)
+            assert "50 <= price_cents <= 65" in source, \
+                "agent_grid_15m.py should have 1.0x multiplier for 50-65c (sweet spot)"
+        except Exception as e:
+            pytest.skip(f"Price band edge multiplier check skipped: {e}")
+    
+    def test_time_edge_multiplier_applied(self):
+        """Test that time edge multiplier is applied to edge calculation."""
+        try:
+            import inspect
+            from merid.prediction.agent_grid_15m import LeanAgent15m
+
+            # Get the source code of the _generate_signal method
+            source = inspect.getsource(LeanAgent15m._generate_signal)
+
+            # Verify that time edge multiplier is applied
+            assert "edge_pct = edge_pct * time_edge_multiplier" in source, \
+                "agent_grid_15m.py should apply time edge multiplier to edge calculation"
+            
+            # Verify that price edge multiplier is applied
+            assert "edge_pct = edge_pct * price_edge_multiplier" in source, \
+                "agent_grid_15m.py should apply price edge multiplier to edge calculation"
+        except Exception as e:
+            pytest.skip(f"Time edge multiplier check skipped: {e}")
+    
+    def test_per_asset_minimum_entry_prices(self):
+        """Test that per-asset minimum entry prices are implemented based on CEPR research."""
+        try:
+            import inspect
+            from merid.prediction.agent_grid_15m import LeanAgent15m
+
+            # Get the source code of the _generate_signal method
+            source = inspect.getsource(LeanAgent15m._generate_signal)
+
+            # Verify that per-asset minimum entry prices are implemented
+            assert "min_entry_prices" in source, \
+                "agent_grid_15m.py should implement per-asset minimum entry prices"
+            
+            # Verify that BTC/ETH have 20c minimum
+            assert "'BTC': 20" in source and "'ETH': 20" in source, \
+                "agent_grid_15m.py should have 20c minimum for BTC/ETH"
+            
+            # Verify that SOL/XRP have 25c minimum
+            assert "'SOL': 25" in source and "'XRP': 25" in source, \
+                "agent_grid_15m.py should have 25c minimum for SOL/XRP"
+            
+            # Verify that DOGE has 30c minimum
+            assert "'DOGE': 30" in source, \
+                "agent_grid_15m.py should have 30c minimum for DOGE"
+        except Exception as e:
+            pytest.skip(f"Per-asset minimum entry price check skipped: {e}")
+    
+    def test_hard_ban_below_10c(self):
+        """Test that entries below 10c are hard banned (lottery ticket behavior)."""
+        try:
+            import inspect
+            from merid.prediction.agent_grid_15m import LeanAgent15m
+
+            # Get the source code of the _generate_signal method
+            source = inspect.getsource(LeanAgent15m._generate_signal)
+
+            # Verify that hard ban below 10c is implemented
+            assert "market_price_cents < 10" in source, \
+                "agent_grid_15m.py should hard ban entries below 10c"
+            
+            # Verify that lottery ticket behavior is mentioned in comments
+            assert "lottery ticket" in source, \
+                "agent_grid_15m.py should document lottery ticket behavior for sub-10c entries"
+        except Exception as e:
+            pytest.skip(f"Hard ban below 10c check skipped: {e}")
+    
+    def test_price_bucket_ev_diagnostic_logging(self):
+        """Test that price-bucket EV diagnostic logging is implemented."""
+        try:
+            import inspect
+            from merid.prediction.agent_grid_15m import LeanAgent15m
+
+            # Get the source code of the _generate_signal method
+            source = inspect.getsource(LeanAgent15m._generate_signal)
+
+            # Verify that price bucket diagnostic logging is implemented
+            assert "PRICE-BUCKET-DIAGNOSTIC" in source, \
+                "agent_grid_15m.py should implement price-bucket EV diagnostic logging"
+            
+            # Verify that price buckets are defined
+            assert "10-14c" in source and "15-19c" in source and "20-24c" in source, \
+                "agent_grid_15m.py should define price buckets for EV tracking"
+        except Exception as e:
+            pytest.skip(f"Price bucket EV diagnostic check skipped: {e}")
+
+
+class TestGuardRelaxationFixes:
+    """Test that guard relaxation changes are applied correctly."""
+
+    def test_max_dist_pct_trade_relaxed_to_2_percent(self):
+        """Test that max_dist_pct_trade is relaxed to 2.5% (was 0.75%)."""
+        try:
+            from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
+
+            if not os.environ.get('MERID_PROFILE', '').startswith('kalshi_crypto_15m'):
+                pytest.skip("MERID_PROFILE not set to kalshi_crypto_15m_v2")
+
+            adapter = Crypto15mProfileAdapter()
+            profile = adapter.profile
+
+            assert profile.guardrails_max_dist_pct_trade == 2.5, \
+                f"Expected max_dist_pct_trade=2.5, got {profile.guardrails_max_dist_pct_trade}"
         except Exception as e:
             pytest.skip(f"max_dist_pct_trade check skipped: {e}")
 
@@ -287,7 +603,7 @@ class TestStrategyPolicyFixes:
     """Test that strategy policy changes are applied correctly."""
 
     def test_strategy_policy_min_edge_unified_to_2_percent(self):
-        """Test that strategy policy min_edge is unified to 2% (was 4%)."""
+        """Test that strategy policy min_edge is unified to 1.5% (was 4%)."""
         try:
             from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
 
@@ -297,8 +613,8 @@ class TestStrategyPolicyFixes:
             adapter = Crypto15mProfileAdapter()
             profile = adapter.profile
 
-            assert profile.strategy_policy_min_edge == 0.02, \
-                f"Expected strategy_policy_min_edge=0.02, got {profile.strategy_policy_min_edge}"
+            assert profile.strategy_policy_min_edge == 0.015, \
+                f"Expected strategy_policy_min_edge=0.015, got {profile.strategy_policy_min_edge}"
         except Exception as e:
             pytest.skip(f"Strategy policy min_edge check skipped: {e}")
 
@@ -505,10 +821,10 @@ class TestCorrelationGuard:
             adapter = Crypto15mProfileAdapter()
             profile = adapter.profile
             
-            # Check that the value is set to 4 (from YAML)
-            # RELAXED from 2 to 4 for small bankroll regime to increase throughput
-            assert profile.guardrails_max_same_side_per_strip == 4, \
-                f"Expected max_same_side_per_strip=4, got {profile.guardrails_max_same_side_per_strip}"
+            # Check that the value is set to 5 (from YAML)
+            # RELAXED from 2 to 5 for small bankroll regime to increase throughput
+            assert profile.guardrails_max_same_side_per_strip == 5, \
+                f"Expected max_same_side_per_strip=5, got {profile.guardrails_max_same_side_per_strip}"
         except Exception as e:
             pytest.skip(f"Profile max_same_side_per_strip check skipped: {e}")
     

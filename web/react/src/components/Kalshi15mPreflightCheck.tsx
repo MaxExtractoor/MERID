@@ -15,7 +15,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { CheckCircle, XCircle, AlertTriangle, RefreshCw, Shield, Clock, Activity } from '../ui/icons';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 
 interface PreflightCheck {
   name: string;
@@ -67,10 +67,10 @@ const CheckRow: React.FC<{ check: PreflightCheck }> = ({ check }) => {
 
 const Kalshi15mPreflightCheck: React.FC = () => {
   const [isRunning, setIsRunning] = useState(false);
-  const { data, loading, error, refetch } = useApiData<PreflightResponse>(
+  const { data, isLoading, error, refetch } = useApiQuery<PreflightResponse>(
     '/api/v1/kalshi/15m/preflight',
     {
-      pollingInterval: 0, // Manual refresh only
+      staleTime: 30_000,
     }
   );
 
@@ -85,7 +85,7 @@ const Kalshi15mPreflightCheck: React.FC = () => {
     handleRunCheck();
   }, []);
 
-  if (loading && !data) {
+  if (isLoading && !data) {
     return (
       <div className="bg-slate-900 rounded-xl border border-slate-800 p-6">
         <div className="flex items-center gap-2 text-slate-400">
@@ -130,9 +130,9 @@ const Kalshi15mPreflightCheck: React.FC = () => {
     warning: 'bg-amber-500/10 border-amber-500/30 text-amber-400',
   };
 
-  const passCount = data.checks.filter(c => c.status === 'pass').length;
-  const failCount = data.checks.filter(c => c.status === 'fail').length;
-  const warningCount = data.checks.filter(c => c.status === 'warning').length;
+  const passCount = data.checks.filter((c: PreflightCheck) => c.status === 'pass').length;
+  const failCount = data.checks.filter((c: PreflightCheck) => c.status === 'fail').length;
+  const warningCount = data.checks.filter((c: PreflightCheck) => c.status === 'warning').length;
 
   return (
     <div className="bg-slate-900 rounded-xl border border-slate-800 p-6">
@@ -145,7 +145,7 @@ const Kalshi15mPreflightCheck: React.FC = () => {
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <div className={`px-3 py-1.5 rounded-lg text-sm font-bold ${overallColors[data.overall_status]}`}>
+          <div className={`px-3 py-1.5 rounded-lg text-sm font-bold ${overallColors[data.overall_status as keyof typeof overallColors]}`}>
             {data.overall_status.toUpperCase()}
           </div>
           <button
@@ -178,7 +178,7 @@ const Kalshi15mPreflightCheck: React.FC = () => {
 
       {/* Checks */}
       <div className="space-y-2">
-        {data.checks.map((check, idx) => (
+        {data.checks.map((check: PreflightCheck, idx: number) => (
           <CheckRow key={idx} check={check} />
         ))}
       </div>

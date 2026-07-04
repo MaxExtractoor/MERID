@@ -19,6 +19,7 @@ import { useKalshiStore, selectPortfolio, selectSystem } from '../store';
 import { Briefcase, Activity, CheckCircle, XCircle, DollarSign, TrendingUp } from '../ui/icons';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/Card';
 import { Badge } from '../ui/Badge';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 const Monitor = () => {
   const portfolio = useKalshiStore(selectPortfolio);
@@ -30,6 +31,13 @@ const Monitor = () => {
   const totalExposure = positions.reduce((acc: number, p: any) => acc + Math.abs(p.quantity), 0);
   const totalUnrealizedPnl = positions.reduce((acc: number, p: any) => acc + (p.unrealized_pnl_cents || 0), 0) / 100;
   const totalRealizedPnl = fills.reduce((acc: number, f: any) => acc + (f.pnl_cents || 0), 0) / 100;
+
+  // Generate PnL history data from fills
+  const pnlHistory = fills.slice(0, 20).map((fill: any, idx: number) => ({
+    time: new Date(fill.filled_at).toLocaleTimeString(),
+    pnl: (fill.pnl_cents / 100).toFixed(2),
+    cumulative: fills.slice(0, idx + 1).reduce((sum: number, f: any) => sum + (f.pnl_cents / 100), 0).toFixed(2)
+  })).reverse();
 
   return (
     <div className="space-y-6">
@@ -57,6 +65,37 @@ const Monitor = () => {
           </div>
         </div>
       </div>
+
+      {/* PnL Chart */}
+      <Card>
+        <CardHeader>
+          <CardTitle>PnL History</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {pnlHistory.length === 0 ? (
+            <div className="text-center py-8 text-slate-500">No PnL data available</div>
+          ) : (
+            <ResponsiveContainer width="100%" height={200}>
+              <LineChart data={pnlHistory}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                <XAxis dataKey="time" stroke="#94a3b8" fontSize={12} />
+                <YAxis stroke="#94a3b8" fontSize={12} />
+                <Tooltip
+                  contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155' }}
+                  labelStyle={{ color: '#f1f5f9' }}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="cumulative"
+                  stroke="#22c55e"
+                  strokeWidth={2}
+                  dot={false}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Summary Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

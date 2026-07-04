@@ -228,6 +228,25 @@ class OrderManager:
                 return None
         except ImportError:
             logger.warning("[order-manager] kill_switches module not available — proceeding without kill switch check")
+        
+        # CRITICAL: Price guard - prevent deep OTM longshots (15¢ minimum)
+        if order and hasattr(order, 'price') and order.price is not None:
+            _price_cents = int(order.price * 100)
+            min_price_cents = 15  # 15 cents / $0.15 minimum
+            try:
+                from merid.risk.profiles.crypto_15m_profile import get_active_profile
+                profile_adapter = get_active_profile()
+                if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_min_contract_price_cents'):
+                    min_price_cents = profile_adapter.profile.guardrails_min_contract_price_cents
+            except Exception as e:
+                logger.debug("[order-manager] Failed to load min_contract_price_cents from profile: %s, using default 15c", e)
+            
+            if _price_cents < min_price_cents:
+                logger.critical(
+                    "[order-manager] Deep OTM longshot rejected: price=%dc < %dc threshold | ticker=%s",
+                    _price_cents, min_price_cents, getattr(order, 'market_id', 'unknown')
+                )
+                return None
 
         # G6: VenueGate — block real orders in SIM/PAPER/MOCK mode
         try:

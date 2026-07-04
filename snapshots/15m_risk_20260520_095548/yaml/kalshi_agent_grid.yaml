@@ -1,0 +1,188 @@
+venue:
+  name: kalshi
+  base_url: https://api.elections.kalshi.com/trade-api/v2
+  use_demo: false
+  # DEPRECATED for kalshi_crypto_15m_v2 profile: Use config/profiles/kalshi_crypto_15m.yaml instead
+  # This venue-level setting is still used by other profiles (sports, paper, generic prediction)
+  max_notional_per_expiry_usd: 0  # 0 = derive from actual Kalshi bankroll (was $1000)
+  max_open_markets_per_asset: 20
+session:
+  maintenance_day: 3
+  maintenance_start_et: 03:00
+  maintenance_end_et: 05:00
+agents:
+- name: BTC_15M
+  # PROFILE-GATED: When MERID_PROFILE=kalshi_crypto_15m_v2, risk_limits, edge thresholds, and time windows come from profile
+  # Removed duplicate strategy.edge and entry_window definitions to avoid contradictions with profile config
+  series_tickers:
+  - KXBTC15M
+  assets:
+  - BTC
+  timeframes:
+  - 15m
+  archetype: directional
+  market_filter:
+    category: crypto
+    frequency: fifteen_min
+  take_profit:
+    enabled: true
+    # OPTIMIZED (2026-05-10): Time-based dynamic TP for 15m contracts
+    time_based_r_multiple:
+      over_7_min: 0.4
+      between_4_7_min: 0.25
+      under_4_min: 0.15
+    min_cents: 3
+    scale_out_fraction: 0.5
+    trailing_enabled: true
+    trailing_activation_r_multiple: 0.3
+    trailing_giveback_cents: 5
+    max_round_trips_per_contract: 2
+    min_price_move_for_reentry: 5
+    min_edge_after_fees_cents: 2.0
+  strike_selection:
+    max_spot_to_strike_pct: 0.15   # 15% max distance for 15m BTC (calibrated v2)
+    target_spot_band_pct: 0.06     # prefer contracts within 6% of spot
+    deep_otm_allowed: false
+- name: ETH_15M
+  enabled: true
+  # PROFILE-GATED: When MERID_PROFILE=kalshi_crypto_15m_v2, risk_limits, edge thresholds, and time windows come from profile
+  # Removed duplicate strategy.edge and entry_window definitions to avoid contradictions with profile config
+  series_tickers:
+  - KXETH15M
+  assets:
+  - ETH
+  timeframes:
+  - 15m
+  archetype: directional
+  market_filter:
+    category: crypto
+    frequency: fifteen_min
+  take_profit:
+    enabled: true
+    # OPTIMIZED (2026-05-10): Time-based dynamic TP for 15m contracts
+    time_based_r_multiple:
+      over_7_min: 0.4
+      between_4_7_min: 0.25
+      under_4_min: 0.15
+    min_cents: 3
+    scale_out_fraction: 0.5
+    trailing_enabled: true
+    trailing_activation_r_multiple: 0.3
+    trailing_giveback_cents: 6
+    max_round_trips_per_contract: 2
+    min_price_move_for_reentry: 5
+    min_edge_after_fees_cents: 2.0
+  strike_selection:
+    max_spot_to_strike_pct: 0.15   # 15% max distance for 15m ETH (calibrated v2)
+    target_spot_band_pct: 0.06     # prefer contracts within 6% of spot
+    deep_otm_allowed: false
+- name: SOL_15M
+  enabled: true
+  # PROFILE-GATED: When MERID_PROFILE=kalshi_crypto_15m_v2, risk_limits, edge thresholds, and time windows come from profile
+  # Removed duplicate strategy.edge and entry_window definitions to avoid contradictions with profile config
+  series_tickers:
+  - KXSOL15M
+  assets:
+  - SOL
+  timeframes:
+  - 15m
+  archetype: directional
+  market_filter:
+    category: crypto
+    frequency: fifteen_min
+  take_profit:
+    enabled: true
+    # OPTIMIZED (2026-05-10): Time-based dynamic TP for 15m contracts
+    time_based_r_multiple:
+      over_7_min: 0.4
+      between_4_7_min: 0.25
+      under_4_min: 0.15
+- name: XRP_15M
+  enabled: true
+  # PROFILE-GATED: When MERID_PROFILE=kalshi_crypto_15m_v2, risk_limits, edge thresholds, and time windows come from profile
+  # Removed duplicate strategy.edge and entry_window definitions to avoid contradictions with profile config
+  series_tickers:
+  - KXXRP15M
+  assets:
+  - XRP
+  timeframes:
+  - 15m
+  archetype: directional
+  market_filter:
+    category: crypto
+    frequency: fifteen_min
+  strike_selection:
+    max_spot_to_strike_pct: 0.20   # 20% max distance for 15m XRP (calibrated v2)
+    target_spot_band_pct: 0.08     # prefer contracts within 8% of spot
+    deep_otm_allowed: false
+  take_profit:
+    enabled: true
+    # OPTIMIZED (2026-05-10): Time-based dynamic TP for 15m contracts
+    time_based_r_multiple:
+      over_7_min: 0.4
+      between_4_7_min: 0.25
+      under_4_min: 0.15
+    min_cents: 3
+    scale_out_fraction: 0.6
+    trailing_enabled: true
+    trailing_activation_r_multiple: 0.3
+    trailing_giveback_cents: 8
+    max_round_trips_per_contract: 2
+    min_price_move_for_reentry: 6
+    min_edge_after_fees_cents: 2.5
+- name: DOGE_15M
+  enabled: true
+  # PROFILE-GATED: When MERID_PROFILE=kalshi_crypto_15m_v2, risk_limits, edge thresholds, and time windows come from profile
+  # Removed duplicate strategy.edge and entry_window definitions to avoid contradictions with profile config
+  series_tickers:
+  - KXDOGE15M
+  assets:
+  - DOGE
+  timeframes:
+  - 15m
+  archetype: directional
+  market_filter:
+    category: crypto
+    frequency: fifteen_min
+  strike_selection:
+    max_spot_to_strike_pct: 0.20   # 20% max distance for 15m DOGE (calibrated v2)
+    target_spot_band_pct: 0.08     # prefer contracts within 8% of spot
+    deep_otm_allowed: false
+  take_profit:
+    enabled: true
+    # OPTIMIZED (2026-05-10): Time-based dynamic TP for 15m contracts
+    time_based_r_multiple:
+      over_7_min: 0.4
+      between_4_7_min: 0.25
+      under_4_min: 0.15
+    min_cents: 3
+    scale_out_fraction: 0.6
+    trailing_enabled: true
+    trailing_activation_r_multiple: 0.3
+    trailing_giveback_cents: 8
+    max_round_trips_per_contract: 2
+    min_price_move_for_reentry: 6
+    min_edge_after_fees_cents: 2.5
+strike_selection_defaults:
+  # Global defaults for spot-to-strike distance thresholds.
+  # These are used when an agent doesn't have per-asset/timeframe overrides.
+  # Per-agent YAML blocks override these; these override hardcoded Python defaults.
+  # v2 (2026-04-17): Calibrated to match actual Kalshi market availability
+  max_spot_to_strike_pct: 0.20     # max |spot-strike|/strike (fraction) - 20% default
+  target_spot_band_pct: 0.08       # preferred ATM band (fraction) - 8% default
+  deep_otm_allowed: false
+  deep_otm_max_risk_pct: 0.005    # max risk per trade when deep OTM (0.5%)
+  rejection_log_throttle_seconds: 30  # throttle STRIKE_REJECT logs
+
+portfolio_risk:
+  # BANKROLL SCALING: All USD limits derived from merid.settings bankroll percentages.
+  # Set 0 (or omit) to auto-derive from KALSHI_PORTFOLIO_BANKROLL_CENTS × PCT env vars.
+  # Override env vars: KALSHI_PORTFOLIO_BANKROLL_CENTS, KALSHI_PORTFOLIO_MAX_NOTIONAL_PCT, etc.
+  max_total_notional_usd: 0         # 0 = derive from settings (bankroll × 50%)
+  max_notional_per_asset_usd: 0     # 0 = derive from settings (bankroll × 16%)
+  max_open_markets: 50
+  max_daily_loss_usd: 0             # 0 = derive from settings (bankroll × 10%)
+  max_margin_utilization_pct: 0     # 0 = derive from settings (default 75%)
+  rebalance_check_interval_seconds: 30
+  max_margin_utilization_pct: 0     # 0 = derive from settings (default 75%)
+  rebalance_check_interval_seconds: 30

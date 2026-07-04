@@ -27,7 +27,7 @@ import {
   CheckCircle,
   XCircle
 } from '../ui/icons';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/Card';
 import ExecutionGateStrip from '../components/ExecutionGateStrip';
@@ -113,34 +113,34 @@ const MonitorView: React.FC = () => {
   }, []);
   
   // Legacy positions fetch for backward compatibility (will be removed)
-  // const posRes = useApiData<{ positions: KalshiPosition[] }>(
+  // const posRes = useApiQuery<{ positions: KalshiPosition[] }>(
   //   `${API_ENDPOINTS.KALSHI_POSITIONS}?fresh=true`,
-  //   { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
+  //   { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   // );
   
-  const ordRes = useApiData<{ orders: KalshiOrder[] }>(
+  const ordRes = useApiQuery<{ orders: KalshiOrder[] }>(
     API_ENDPOINTS.KALSHI_ORDERS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );
   
-  const riskRes = useApiData<KalshiRiskSummary>(
+  const riskRes = useApiQuery<KalshiRiskSummary>(
     API_ENDPOINTS.KALSHI_RISK,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );
   
-  const healthRes = useApiData<HealthStatus>(
+  const healthRes = useApiQuery<HealthStatus>(
     API_ENDPOINTS.SYSTEM_HEALTH,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );
   
-  const fillsRes = useApiData<{ fills: Fill[] }>(
+  const fillsRes = useApiQuery<{ fills: Fill[] }>(
     API_ENDPOINTS.KALSHI_GRID_FILLS,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD }
   );
   
-  const pnlRes = useApiData<PnlHistory>(
+  const pnlRes = useApiQuery<PnlHistory>(
     API_ENDPOINTS.KALSHI_PNL_HISTORY,
-    { pollingInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
+    { refetchInterval: DEFAULTS.POLLING_INTERVALS.SLOW }
   );
 
   const positions = portfolio?.positions.map((p: PositionSnapshot) => ({
@@ -249,7 +249,7 @@ const MonitorView: React.FC = () => {
               />
               <MetricCard 
                 label="Open Orders" 
-                value={orders.filter(o => o.status === 'resting').length}
+                value={orders.filter((o: KalshiOrder) => o.status === 'resting').length}
                 subtext={`${orders.length} total`}
                 icon={<Zap className="w-4 h-4 text-slate-500" />}
               />
@@ -334,7 +334,7 @@ const MonitorView: React.FC = () => {
                         </tr>
                       </thead>
                       <tbody>
-                        {fills.slice(0, 10).map(fill => (
+                        {fills.slice(0, 10).map((fill: Fill) => (
                           <tr key={fill.fill_id} className="border-b border-slate-800/50 hover:bg-slate-800/30">
                             <td className="p-3 text-xs text-slate-400">
                               {fmtTimestamp(fill.filled_at, { timeOnly: true })}
@@ -445,33 +445,36 @@ const MonitorView: React.FC = () => {
 
                     {/* Service Status */}
                     <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                      {Object.entries(healthRes.data.services || {}).map(([name, status]) => (
+                      {Object.entries(healthRes.data.services || {}).map(([name, status]) => {
+                        const serviceStatus = status as { ok: boolean; latency_ms: number; error?: string };
+                        return (
                         <div 
                           key={name}
                           className={`p-3 rounded-lg border ${
-                            status.ok 
+                            serviceStatus.ok 
                               ? 'bg-green-500/10 border-green-500/30' 
                               : 'bg-red-500/10 border-red-500/30'
                           }`}
                         >
                           <div className="flex items-center gap-2">
-                            {status.ok ? (
+                            {serviceStatus.ok ? (
                               <CheckCircle className="w-4 h-4 text-green-400" />
                             ) : (
                               <AlertTriangle className="w-4 h-4 text-red-400" />
                             )}
-                            <span className={`text-sm font-medium ${status.ok ? 'text-green-400' : 'text-red-400'}`}>
+                            <span className={`text-sm font-medium ${serviceStatus.ok ? 'text-green-400' : 'text-red-400'}`}>
                               {name}
                             </span>
                           </div>
                           <div className="text-xs text-slate-400 mt-1">
-                            {status.latency_ms}ms
+                            {serviceStatus.latency_ms}ms
                           </div>
-                          {status.error && (
-                            <div className="text-xs text-red-400 mt-1">{status.error}</div>
+                          {serviceStatus.error && (
+                            <div className="text-xs text-red-400 mt-1">{serviceStatus.error}</div>
                           )}
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </div>
                 ) : (

@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { useApiData } from '../hooks/useApiData';
+import { useApiQuery } from '../hooks/useTanStackQuery';
 import { useKalshiRiskStream } from '../hooks/useKalshiRiskStream';
 import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
 
@@ -34,8 +34,8 @@ const KalshiModeContext = createContext<KalshiModeContextValue>({
 });
 
 export function KalshiModeProvider({ children }: { children: React.ReactNode }) {
-  const { data, loading, error, refetch } = useApiData<KalshiModeData>(API_ENDPOINTS.KALSHI_GRID_MODE, {
-    pollingInterval: DEFAULTS.POLLING_INTERVALS.STANDARD,
+  const { data, isLoading, error, refetch } = useApiQuery<KalshiModeData>(API_ENDPOINTS.KALSHI_GRID_MODE, {
+    refetchInterval: DEFAULTS.POLLING_INTERVALS.STANDARD,
   });
 
   const [wsKillActive, setWsKillActive] = useState(false);
@@ -55,9 +55,9 @@ export function KalshiModeProvider({ children }: { children: React.ReactNode }) 
 
   return (
     <KalshiModeContext.Provider value={{
-      data,
-      loading,
-      isLoading: loading,
+      data: data ?? null,
+      loading: isLoading,
+      isLoading,
       isLive: data?.is_live ?? false,
       error: error ?? null,
       refetch,

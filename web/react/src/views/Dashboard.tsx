@@ -14,15 +14,18 @@
  * Data: System health, kill switch, key metrics, alerts (all from store)
  */
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useKalshiStore, selectPortfolio, selectRisk, selectSystem, selectConnected } from '../store';
 import { LayoutDashboard, ShieldAlert, Activity, DollarSign, Briefcase, AlertTriangle } from '../ui/icons';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/Card';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui';
+import Kalshi15mAlignmentPanel from '../components/Kalshi15mAlignmentPanel';
+import Kalshi15mHealthPanel from '../components/Kalshi15mHealthPanel';
 
 const Dashboard = () => {
   const refreshAll = useKalshiStore(state => state.refreshAll);
+  const [togglingKillSwitch, setTogglingKillSwitch] = useState(false);
 
   // Fetch initial data on mount (WebSocket disabled - using API polling)
   useEffect(() => {
@@ -44,6 +47,18 @@ const Dashboard = () => {
   const positionsCount = portfolio.positions?.length || 0;
   const agentsRunning = system.health.services?.agent_grid?.ok ? 5 : 0; // TODO: Get from grid slice
   const recentAlerts = risk.alerts?.slice(0, 5) || [];
+  
+  // Per-asset metrics for 5-asset crypto stack
+  const assets = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
+  const perAssetMetrics = assets.map(asset => {
+    const assetPositions = portfolio.positions?.filter(p => p.ticker.includes(asset)) || [];
+    const assetPnL = assetPositions.reduce((sum, p) => sum + (p.unrealized_pnl_cents / 100), 0);
+    return {
+      asset,
+      positions: assetPositions.length,
+      pnl: assetPnL,
+    };
+  });
 
   return (
     <div className="space-y-6">
@@ -89,6 +104,46 @@ const Dashboard = () => {
         />
       </div>
 
+      {/* Per-Asset Metrics */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Per-Asset Performance (BTC, ETH, SOL, XRP, DOGE)</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+            {perAssetMetrics.map(({ asset, positions, pnl }) => (
+              <div key={asset} className="p-4 rounded-lg border border-slate-700 bg-slate-800/50">
+                <div className="text-sm text-slate-400 mb-1">{asset}</div>
+                <div className="text-lg font-bold tabular-nums">{positions} pos</div>
+                <div className={`text-sm tabular-nums ${pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                  {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+                </div>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* 15m Alignment Status */}
+      <Card>
+        <CardHeader>
+          <CardTitle>15m Kalshi Alignment Status</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Kalshi15mAlignmentPanel />
+        </CardContent>
+      </Card>
+
+      {/* 15m Health Status */}
+      <Card>
+        <CardHeader>
+          <CardTitle>15m Kalshi Health Status</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Kalshi15mHealthPanel />
+        </CardContent>
+      </Card>
+
       {/* Kill Switch Status */}
       <Card>
         <CardHeader>
@@ -114,12 +169,32 @@ const Dashboard = () => {
               </div>
               <div className="flex gap-2">
                 {risk.kill_switch_active ? (
-                  <Button variant="outline" size="sm">
-                    Reset Kill Switch
+                  <Button 
+                    variant="outline" 
+                    size="sm"
+                    onClick={() => {
+                      if (togglingKillSwitch) return;
+                      setTogglingKillSwitch(true);
+                      // TODO: Implement kill switch reset API call
+                      setTimeout(() => setTogglingKillSwitch(false), 500);
+                    }}
+                    disabled={togglingKillSwitch}
+                  >
+                    {togglingKillSwitch ? 'Resetting...' : 'Reset Kill Switch'}
                   </Button>
                 ) : (
-                  <Button variant="danger" size="sm">
-                    Activate Kill Switch
+                  <Button 
+                    variant="danger" 
+                    size="sm"
+                    onClick={() => {
+                      if (togglingKillSwitch) return;
+                      setTogglingKillSwitch(true);
+                      // TODO: Implement kill switch activation API call
+                      setTimeout(() => setTogglingKillSwitch(false), 500);
+                    }}
+                    disabled={togglingKillSwitch}
+                  >
+                    {togglingKillSwitch ? 'Activating...' : 'Activate Kill Switch'}
                   </Button>
                 )}
               </div>

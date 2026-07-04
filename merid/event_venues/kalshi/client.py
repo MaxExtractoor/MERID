@@ -1917,8 +1917,14 @@ class KalshiVenueClient(EventVenueClient):
 
         outcome = order.outcome_id or "yes"
         # V2 API uses bid/ask instead of yes/no
-        # bid = buy YES, ask = sell YES (everything quoted from YES side)
-        v2_side = "bid" if outcome == "yes" else "ask"
+        # bid = buy YES = sell NO, ask = sell YES = buy NO (everything quoted from YES side)
+        # CRITICAL FIX: Must consider both outcome AND action for correct mapping
+        if outcome == "yes":
+            # BUY_YES = bid, SELL_YES = ask
+            v2_side = "bid" if order.side == "buy" else "ask"
+        else:  # outcome == "no"
+            # BUY_NO = ask (equivalent to sell YES), SELL_NO = bid (equivalent to buy YES)
+            v2_side = "ask" if order.side == "buy" else "bid"
         # CRITICAL FIX: Format count_fp as fixed-point decimal with 0-2 decimal places
         # Kalshi API requires: "must be a fixed-point decimal string with 0-2 decimal places"
         # Use 0 decimal places for whole numbers (e.g., "1"), 2 for fractional (e.g., "1.50")
@@ -1954,6 +1960,29 @@ class KalshiVenueClient(EventVenueClient):
                     latency_ms=0.0,
                     retries=0,
                 )
+            
+            # CRITICAL: Price guard - prevent deep OTM longshots (15¢ minimum)
+            # This is the FINAL safety net before API call
+            min_price_cents = 15  # 15 cents / $0.15 minimum
+            try:
+                from merid.risk.profiles.crypto_15m_profile import get_active_profile
+                profile_adapter = get_active_profile()
+                if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_min_contract_price_cents'):
+                    min_price_cents = profile_adapter.profile.guardrails_min_contract_price_cents
+            except Exception as e:
+                logger.debug("[KALSHI_CLIENT] Failed to load min_contract_price_cents from profile: %s, using default 15c", e)
+            
+            if _price_cents < min_price_cents:
+                logger.critical(
+                    "[KALSHI_CLIENT_BLOCKED] Deep OTM longshot rejected: price=%dc < %dc threshold | ticker=%s outcome=%s",
+                    _price_cents, min_price_cents, ticker, outcome
+                )
+                return OperationResult.fail(
+                    f"Deep OTM longshot blocked: price={_price_cents}c < {min_price_cents}c threshold",
+                    latency_ms=0.0,
+                    retries=0,
+                )
+            
             # V2 API uses "price" field as string in fixed-point dollars (e.g., "0.5600")
             _price_dollars = _price_cents / 100.0
             kalshi_order["price"] = f"{_price_dollars:.4f}"

@@ -26,19 +26,21 @@ jest.mock('../../context/KalshiModeContext', () => ({
   useKalshiMode: () => ({ data: null, isLive: false }),
 }));
 
-// Expected nav items in the current 8-stage Sidebar implementation
-// (see Sidebar.tsx: STAGE_NAV + SYSTEM_NAV)
+// Expected nav items in the current 8-View Architecture Sidebar implementation
+// (see Sidebar.tsx: DASHBOARD_NAV, OPERATIONS_NAV, ANALYTICS_NAV, SYSTEM_NAV)
 const EXPECTED_ITEMS: Array<{ name: string; href: string }> = [
-  { name: 'Markets', href: 'discover' },
-  { name: 'Sentiment', href: 'analyze-sentiment' },
-  { name: 'Volatility', href: 'analyze-vol' },
-  { name: 'Overview', href: 'overview' },
-  { name: 'Operator', href: 'operator' },
+  { name: 'Dashboard', href: 'dashboard' },
+  { name: 'Trade', href: 'trade' },
+  { name: 'Monitor', href: 'monitor' },
+  { name: 'Grid', href: 'grid' },
+  { name: 'Risk', href: 'risk' },
+  { name: 'Calibration', href: 'calibration' },
   { name: 'Logs', href: 'logs' },
+  { name: 'Settings', href: 'settings' },
 ];
 
 const EXPECTED_SECTION_LABELS = [
-  'Discover', 'Analyze', 'Consensus', 'System',
+  'Dashboard', 'Operations', 'Analytics', 'System',
 ];
 
 describe('Sidebar Smoke Tests', () => {
@@ -48,8 +50,8 @@ describe('Sidebar Smoke Tests', () => {
     mockOnChange.mockClear();
   });
 
-  it('renders all section headers for the 8-stage workflow', () => {
-    render(<Sidebar current="overview" onChange={mockOnChange} />);
+  it('renders all section headers for the 8-View Architecture', () => {
+    render(<Sidebar current="dashboard" onChange={mockOnChange} />);
     for (const label of EXPECTED_SECTION_LABELS) {
       const matches = screen.getAllByText(label);
       expect(matches.length).toBeGreaterThan(0);
@@ -57,7 +59,7 @@ describe('Sidebar Smoke Tests', () => {
   });
 
   it('renders all expected nav items by name', () => {
-    render(<Sidebar current="overview" onChange={mockOnChange} />);
+    render(<Sidebar current="dashboard" onChange={mockOnChange} />);
     for (const item of EXPECTED_ITEMS) {
       const matches = screen.getAllByText(item.name);
       expect(matches.length).toBeGreaterThan(0);
@@ -65,7 +67,7 @@ describe('Sidebar Smoke Tests', () => {
   });
 
   it('renders navigation buttons for all items (+ collapse toggle)', () => {
-    render(<Sidebar current="overview" onChange={mockOnChange} />);
+    render(<Sidebar current="dashboard" onChange={mockOnChange} />);
     const allButtons = screen.getAllByRole('button');
     // one nav button per item + one collapse/expand button at top
     expect(allButtons.length).toBeGreaterThanOrEqual(EXPECTED_ITEMS.length);
@@ -90,7 +92,7 @@ describe('Sidebar Smoke Tests', () => {
     'clicking "%s"',
     (name, expectedHref) => {
       it(`fires onChange with "${expectedHref}"`, () => {
-        render(<Sidebar current="overview" onChange={mockOnChange} />);
+        render(<Sidebar current="dashboard" onChange={mockOnChange} />);
         const matches = screen.getAllByText(name as string);
         const button = matches.map(el => el.closest('button')).find(Boolean);
         expect(button).toBeTruthy();
@@ -105,14 +107,14 @@ describe('Sidebar Collapsed Mode', () => {
   const mockOnChange = jest.fn();
 
   it('hides item names when collapsed', () => {
-    render(<Sidebar current="overview" onChange={mockOnChange} collapsed={true} />);
+    render(<Sidebar current="dashboard" onChange={mockOnChange} collapsed={true} />);
     for (const item of EXPECTED_ITEMS) {
       expect(screen.queryByText(item.name)).not.toBeInTheDocument();
     }
   });
 
   it('hides section headers when collapsed', () => {
-    render(<Sidebar current="overview" onChange={mockOnChange} collapsed={true} />);
+    render(<Sidebar current="dashboard" onChange={mockOnChange} collapsed={true} />);
     for (const label of EXPECTED_SECTION_LABELS) {
       expect(screen.queryByText(label)).not.toBeInTheDocument();
     }

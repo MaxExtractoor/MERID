@@ -17,8 +17,8 @@
  */
 
 import React from 'react';
-import { useApiData } from '../hooks/useApiData';
-import { API_ENDPOINTS, DEFAULTS } from '../config/constants';
+import { useApiQuery } from '../hooks/useTanStackQuery';
+import { DEFAULTS } from '../config/constants';
 import { CheckCircle, AlertTriangle, XCircle, Clock } from '../ui/icons';
 
 interface InvariantStatus {
@@ -93,14 +93,15 @@ const InvariantCard: React.FC<{ invariant: InvariantStatus }> = ({ invariant }) 
 };
 
 const Kalshi15mAlignmentPanel: React.FC = () => {
-  const { data, loading, error, refetch } = useApiData<AlignmentResponse>(
+  const { data, isLoading, error, refetch } = useApiQuery<AlignmentResponse>(
     '/api/v1/kalshi/15m/alignment',
     {
-      pollingInterval: DEFAULTS.POLLING_INTERVALS.FAST,
+      refetchInterval: DEFAULTS.POLLING_INTERVALS.FAST,
+      staleTime: 10_000,
     }
   );
 
-  if (loading && !data) {
+  if (isLoading && !data) {
     return (
       <div className="bg-slate-900 rounded-xl border border-slate-800 p-6">
         <div className="flex items-center gap-2 text-slate-400">
@@ -118,10 +119,10 @@ const Kalshi15mAlignmentPanel: React.FC = () => {
           <XCircle className="w-4 h-4" />
           <span className="font-semibold">Alignment Status Unavailable</span>
         </div>
-        <p className="text-sm text-slate-400 mb-3">{error}</p>
+        <p className="text-sm text-slate-400 mb-3">{String(error)}</p>
         <button
           type="button"
-          onClick={refetch}
+          onClick={() => refetch()}
           className="text-sm text-blue-400 hover:text-blue-300"
         >
           Retry
@@ -151,7 +152,7 @@ const Kalshi15mAlignmentPanel: React.FC = () => {
           <h3 className="text-lg font-semibold text-white">15m Kalshi Alignment</h3>
           <p className="text-sm text-slate-400">Profile: {data.profile}</p>
         </div>
-        <div className={`px-3 py-1 rounded-full border ${overallColors[data.overall_status]} text-sm font-semibold uppercase`}>
+        <div className={`px-3 py-1 rounded-full border ${overallColors[data.overall_status as keyof typeof overallColors]} text-sm font-semibold uppercase`}>
           {data.overall_status}
         </div>
       </div>
@@ -175,7 +176,7 @@ const Kalshi15mAlignmentPanel: React.FC = () => {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-        {data.invariants.map((inv) => (
+        {data.invariants.map((inv: InvariantStatus) => (
           <InvariantCard key={inv.name} invariant={inv} />
         ))}
       </div>

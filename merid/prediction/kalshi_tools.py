@@ -639,55 +639,63 @@ async def _kalshi_place_order(
                 tool_name="kalshi_place_order",
             )
 
-        # Route through Signal Router (Single Executor Principle)
-        # SIGNAL-ONLY AGENT: kalshi_tools submits signals to trading_agent for execution.
-        # trading_agent is the SOLE EXECUTOR that calls route_order_async.
+        # CRITICAL FIX: Direct routing to route_order_async for proper risk checks
+        # SignalRouter has no subscribers in 15m production stack (no trading_agent)
+        # Bypassing SignalRouter to ensure global rate limit and cooldown are enforced
         try:
-            from merid.event_venues.kalshi import submit_signal
+            from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
 
             _pc = max(1, min(99, int(price_cents or 50)))
 
-            signal = submit_signal(
-                agent_id=_agent_name if _agent_name else "kalshi_tools",
-                agent_type="kalshi_tools",
-                market_id=ticker,
+            # Map side/action to Kalshi format
+            side_lower = side.lower() if side else ""
+            action_lower = action.lower() if action else ""
+            kalshi_side = "BUY_YES" if side_lower == "yes" and action_lower == "buy" else \
+                          "SELL_YES" if side_lower == "yes" and action_lower == "sell" else \
+                          "BUY_NO" if side_lower == "no" and action_lower == "buy" else \
+                          "SELL_NO" if side_lower == "no" and action_lower == "sell" else "BUY_YES"
+
+            intent = OrderIntent(
+                ticker=ticker,
+                side=kalshi_side,
                 action=action,
-                side=side,
-                size=max(1, int(count)),
                 price_cents=_pc,
-                confidence=0.7,
-                reasoning=f"Tool-based order: {action} {side} on {ticker}",
-                metadata={
-                    "is_shadow": _is_shadow,
-                    "original_price_cents": price_cents,
-                },
-                origin_agent=_agent_name if _agent_name else "kalshi_tools",
-                risk_bucket="tool_manual",
+                count=max(1, int(count)),
+                source="kalshi_tools",
+                agent_id=_agent_name if _agent_name else "kalshi_tools",
             )
 
             logger.info(
-                "[kalshi_tools] Signal submitted to trading_agent: %s | %s %s on %s count=%d price=%d¢",
-                signal.signal_id, action, side, ticker, count, _pc
+                "[kalshi_tools] Routing to order_router: %s | %s %s on %s count=%d price=%d¢",
+                intent.intent_id, action, side, ticker, count, _pc
             )
-            
-            # P1: Wire TradeTrace into order submission (update order_submit_time)
-            # Check if signal has trace_id from agent_grid_15m.py (now in AgentSignal.trace_id)
-            if _TRACE_AVAILABLE and hasattr(signal, 'trace_id') and signal.trace_id:
-                update_trace(signal.trace_id, order_submit_time=time.time())
-                logger.debug("[TRACE-UPDATE] Updated trace_id=%s with order_submit_time", signal.trace_id)
+
+            # Route through order_router which enforces global rate limit and cooldown
+            result = await route_order_async(intent)
+
+            if result.status == "rejected":
+                logger.warning(
+                    "[kalshi_tools] Order rejected by router: %s reason=%s",
+                    ticker, result.reason
+                )
+                return ToolResult.fail(
+                    ToolErrorCode.POLICY_BLOCKED,
+                    f"Order rejected: {result.reason}",
+                    tool_name="kalshi_place_order",
+                )
 
             payload = {
-                "order_id": signal.signal_id,
+                "order_id": result.order_id if hasattr(result, 'order_id') else intent.intent_id,
                 "ticker": ticker,
                 "side": side,
                 "action": action,
                 "price_cents": price_cents or _pc,
                 "count": count,
-                "status": "signal_submitted",
-                "simulated": False,
+                "status": result.status,
+                "simulated": result.mode == "paper",
                 "shadow": _is_shadow,
-                "signal_id": signal.signal_id,
-                "message": "Signal submitted to trading_agent for execution",
+                "reason": result.reason,
+                "message": f"Order {result.status} via route_order_async",
             }
 
             if _is_shadow and _agent_name:
@@ -705,7 +713,7 @@ async def _kalshi_place_order(
                         )
                 except Exception as _she:
                     logger.warning("shadow parallel paper record failed: %s", _she)
-            elif _agent_name:
+            elif _agent_name and result.mode == "live":
                 try:
                     from merid.event_venues.kalshi.deployment import get_deployment_controller
                     get_deployment_controller().record_live_trade(_agent_name)
@@ -722,10 +730,10 @@ async def _kalshi_place_order(
             )
 
         except ImportError as _imp:
-            logger.error(f"[kalshi_tools] Signal router import failed: {_imp}")
+            logger.error(f"[kalshi_tools] Order router import failed: {_imp}")
             return ToolResult.fail(
                 ToolErrorCode.INTERNAL,
-                "Signal router unavailable — order rejected for safety",
+                "Order router unavailable — order rejected for safety",
                 tool_name="kalshi_place_order",
             )
 

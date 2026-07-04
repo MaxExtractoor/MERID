@@ -7,6 +7,7 @@ import { useKalshiMode } from '../context/KalshiModeContext';
 import type { View } from '../types/views';
 import LiveNotifications from './LiveNotifications';
 import ConnectionStatusIndicator from './ConnectionStatusIndicator';
+import WebSocketIndicator from './WebSocketIndicator';
 
 export interface TopBarProps {
   onMenuClick: () => void;
@@ -108,6 +109,9 @@ function TopBar({ onMenuClick }: TopBarProps) {
 
       {/* Right side */}
       <div className="flex items-center gap-2">
+        {/* WebSocket Indicator */}
+        <WebSocketIndicator />
+
         {/* Theme toggle */}
         <button type="button"
           onClick={toggleTheme}
