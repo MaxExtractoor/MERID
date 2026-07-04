@@ -209,14 +209,14 @@ class TestProfileSmokeTest:
             profile = adapter.profile
             
             # Verify guardrail parameters are from profile
-            assert profile.guardrails_max_spread_cents == 50  # RELAXED: Increased from 30 to 50 to allow more trades
+            assert profile.guardrails_max_spread_cents == 15  # 2026-07-04: Unified to 15c based on 2026 industry research (eliminates 20c/50c conflicts)
             assert profile.guardrails_max_slippage_cents == 5  # INCREASED from 3 to 5 based on 2026 research
-            assert profile.guardrails_min_depth_contracts == 2  # RELAXED: Reduced from 5 to 2 for single-contract trading
+            # min_depth_contracts removed - now uses per-asset depth thresholds (single source of truth)
             assert profile.guardrails_min_post_fee_edge == 0.015  # LOWERED from 0.02 to 0.015 based on 2026 research
             assert profile.guardrails_min_time_to_expiry_min == 2.0  # RELAXED from 2.5 to 2.0 for more 15m opportunities
             assert profile.guardrails_drawdown_halt_pct == 0.20  # RELAXED: Increased from 0.15 to 0.20 to align with industry standard
             assert profile.guardrails_drawdown_unwind_pct == 0.25  # RELAXED: Increased from 0.20 to 0.25 to align with industry standard
-            assert profile.guardrails_max_daily_loss_usd == 2.00  # Fallback USD value for small bankrolls (5% of $40)
+            assert profile.guardrails_max_daily_loss_usd == 8.0  # Fallback USD value for small bankrolls (20% of $40)
             # Verify 2026-07-03 Phase 1 changes (signal_mode)
             assert profile.signal_mode == 'momentum_fvg'  # SWITCHED from hybrid to momentum_fvg
             # Note: Confidence threshold and price range changes are in YAML sections
