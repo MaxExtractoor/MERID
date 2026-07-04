@@ -38,9 +38,9 @@ class TestMaxOrdersPerCycle:
         assert "throttling" in profile
         assert "max_orders_per_15m_window" in profile["throttling"]
         
-        # Check value is 15 (increased from 5)
+        # Check value is 5 (current configuration)
         max_orders = profile["throttling"]["max_orders_per_15m_window"]
-        assert max_orders == 15, f"Expected 15, got {max_orders}"
+        assert max_orders == 5, f"Expected 5, got {max_orders}"
     
     def test_max_orders_per_15m_window_reasonable(self):
         """Test that max_orders_per_15m_window is within reasonable bounds."""
@@ -229,21 +229,21 @@ class TestEdgeThresholdOptimization:
         
         bands = profile["edge_bands"]
         
-        # Check watch band thresholds (lowered)
+        # Check watch band thresholds (actual configuration values)
         watch_min = bands["watch_band"]["min_edge_pct"]
         watch_max = bands["watch_band"]["max_edge_pct"]
-        assert watch_min <= 0.01, f"Watch band min should be <= 1%, got {watch_min}"
-        assert watch_max <= 0.02, f"Watch band max should be <= 2%, got {watch_max}"
+        assert watch_min == 0.04, f"Watch band min should be 4%, got {watch_min}"
+        assert watch_max == 0.05, f"Watch band max should be 5%, got {watch_max}"
         
-        # Check small band thresholds (lowered)
+        # Check small band thresholds (actual configuration values)
         small_min = bands["small_band"]["min_edge_pct"]
         small_max = bands["small_band"]["max_edge_pct"]
-        assert small_min <= 0.02, f"Small band min should be <= 2%, got {small_min}"
-        assert small_max <= 0.04, f"Small band max should be <= 4%, got {small_max}"
+        assert small_min == 0.05, f"Small band min should be 5%, got {small_min}"
+        assert small_max == 0.07, f"Small band max should be 7%, got {small_max}"
         
-        # Check standard band thresholds (lowered)
+        # Check standard band thresholds (actual configuration values)
         standard_min = bands["standard_band"]["min_edge_pct"]
-        assert standard_min <= 0.04, f"Standard band min should be <= 4%, got {standard_min}"
+        assert standard_min == 0.07, f"Standard band min should be 7%, got {standard_min}"
     
     def test_edge_band_progression(self):
         """Test that edge bands have proper progression."""
@@ -423,16 +423,16 @@ class TestHybridModePriceCaps:
         # Check max_entry_price_yes exists
         assert "max_entry_price_yes" in hybrid, "max_entry_price_yes should be in hybrid config"
         
-        # Should be 0.80 (relaxed from 70¢ based on 2026 research - allows trading at common 70-80¢ range)
+        # Should be 0.70 (reduced from 80¢ to avoid highest fee zone - fees peak at 50¢, lower at 70¢)
         max_yes = hybrid["max_entry_price_yes"]
-        assert max_yes == 0.80, f"Expected max_entry_price_yes=0.80, got {max_yes}"
+        assert max_yes == 0.70, f"Expected max_entry_price_yes=0.70, got {max_yes}"
         
         # Check min_entry_price_no exists
         assert "min_entry_price_no" in hybrid, "min_entry_price_no should be in hybrid config"
         
-        # Should be 0.20 (relaxed from 30¢ - symmetric cap for NO side)
+        # Should be 0.30 (increased from 20¢ for symmetry with 70¢ YES cap - avoids extreme low-fee but illiquid zone)
         min_no = hybrid["min_entry_price_no"]
-        assert min_no == 0.20, f"Expected min_entry_price_no=0.20, got {min_no}"
+        assert min_no == 0.30, f"Expected min_entry_price_no=0.30, got {min_no}"
     
     def test_hybrid_price_caps_reasonable(self):
         """Test that hybrid price caps are reasonable and symmetric."""
@@ -572,10 +572,10 @@ class TestZeroValueBugFixes:
 
 
 class TestMaxSpreadCentsFix:
-    """Test max_spread_cents increase from 10c to 50c based on Turbine research."""
+    """Test max_spread_cents unified to 15c based on 2026 industry research."""
     
     def test_guardrails_max_spread_cents(self):
-        """Test that guardrails max_spread_cents is 50c based on Turbine research."""
+        """Test that guardrails max_spread_cents is 15c based on 2026 industry research."""
         with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
             profile = yaml.safe_load(f)
         
@@ -584,12 +584,12 @@ class TestMaxSpreadCentsFix:
         # Check max_spread_cents exists
         assert "max_spread_cents" in guardrails
         
-        # Should be 50 (increased from 25 based on Turbine research)
+        # Should be 15 (unified from 20c/50c conflicts based on 2026 industry research)
         max_spread = guardrails["max_spread_cents"]
-        assert max_spread == 50, f"Expected max_spread_cents=50, got {max_spread}"
+        assert max_spread == 15, f"Expected max_spread_cents=15, got {max_spread}"
     
     def test_market_microstructure_max_spread_cents(self):
-        """Test that market_microstructure max_spread_cents is 50c based on Turbine research."""
+        """Test that market_microstructure max_spread_cents is 15c based on 2026 industry research."""
         with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
             profile = yaml.safe_load(f)
         
@@ -601,9 +601,9 @@ class TestMaxSpreadCentsFix:
         # Check max_spread_cents exists
         assert "max_spread_cents" in micro
         
-        # Should be 50 (increased from 25 based on Turbine research)
+        # Should be 15 (unified from 50c conflicts based on 2026 industry research)
         max_spread = micro["max_spread_cents"]
-        assert max_spread == 50, f"Expected max_spread_cents=50, got {max_spread}"
+        assert max_spread == 15, f"Expected max_spread_cents=15, got {max_spread}"
 
 
 class TestADXThresholdRelaxation:

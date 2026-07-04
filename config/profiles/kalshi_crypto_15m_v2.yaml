@@ -304,7 +304,7 @@ momentum_fvg:
   
   # Spread guard interaction with momentum
   # If spread exceeds this, require higher OBI persistence for momentum entries
-  spread_gate_cents: 50  # INCREASED: Aligned with guardrails_max_spread_cents (50c for realistic 15m market spreads)
+  spread_gate_cents: 15  # 2026-07-04: Unified to 15c - aligned with guardrails and market_microstructure (eliminates 50c conflicts)
   spread_gate_obi_persistence_boost: 0.75  # Require 75% persistence if spread is wide
 
 # ── Price-Based Strategy Parameters (2026 Optimized for Swing Trading) ───────────
@@ -324,8 +324,8 @@ price_based:
 # Kalshi guide: "An Up contract for $0.85 means you will only make $0.15 profit"
 # Solution: Enforce price caps to prevent overpriced entries while keeping momentum signals
 hybrid:
-  max_entry_price_yes: 0.80  # Maximum price to buy YES (relaxed from 70¢ based on 2026 research - allows trading at common 70-80¢ range while still avoiding extreme 90-99¢ entries)
-  min_entry_price_no: 0.20  # Minimum price to buy NO (relaxed from 30¢ - symmetric cap for NO side)
+  max_entry_price_yes: 0.70  # 2026-07-04: Reduced from 80¢ to avoid highest fee zone (fees peak at 50¢, lower at 70¢)
+  min_entry_price_no: 0.30  # 2026-07-04: Increased from 20¢ for symmetry with 70¢ YES cap (avoids extreme low-fee but illiquid zone)
   # Rationale: Based on Kalshi 2026 guide, 85¢ is typical market price. 80¢ cap allows trading while still avoiding extreme 90-99¢ poor risk/reward entries
 
 # ── Sentiment Isolation (Single Source of Truth) ────────────────────────────
@@ -430,7 +430,7 @@ venue:
 universe:
   min_volume: 5  # Minimum 5 contracts volume (relaxed from default 50 for 15m crypto)
   min_open_interest: 1  # Minimum 1 contract open interest (relaxed from default 10)
-  max_spread_cents: 50  # CRITICAL FIX: Aligned with guardrails.max_spread_cents (was 10c - inconsistent)
+  max_spread_cents: 15  # 2026-07-04: Unified to 15c - aligned with guardrails and market_microstructure (eliminates 50c conflicts)
   description: "Coarse liquidity prefilter for 15m crypto markets - tuned for exactly 5 markets per asset"
 
 # ── Throttling (Order Rate Limits) ───────────────────────────────────────────
@@ -773,7 +773,7 @@ assets:
 # UNIFIED RISK: All assets (BTC/ETH/SOL/XRP/DOGE) use the same 1-3% per-trade risk range
 # based on market conditions, not per-asset fixed percentages.
 agent_defaults:
-  max_notional_pct: 0.02  # 2% of capital per agent (midpoint of 1-3% range)
+  max_notional_pct: 0.03  # 3% of capital per agent (increased from 2% for better trade buffer)
   max_orders_per_window: 20  # Max orders per trading window (increased for edge audit)
   max_yes_position: 3  # Max YES contracts per side
   max_no_position: 3  # Max NO contracts per side
@@ -834,7 +834,7 @@ edge_bands:
 # Research findings: 15m markets have spreads 2-5c, profitable edge 1-2% post-fee
 # Reference: https://www.indiehackers.com/post/building-a-stable-15-minute-trading-bot-for-polymarket-crypto-up-down-markets-563a14e882
 guardrails:
-  max_spread_cents: 50  # INCREASED: 50c to accommodate realistic 15m market spreads (research: 2-5c typical, up to 10c in volatile conditions)
+  max_spread_cents: 15  # 2026-07-04: Unified to 15c based on 2026 industry research (liquid: 1-3c, medium: 3-8c, thin: 10-30c) - eliminates 20c/50c conflicts
   max_slippage_cents: 5  # INCREASED: Max 5 cents worse than best (research: 2-5c slippage acceptable for 15m markets)
   # CRITICAL FIX: Removed min_depth_contracts - use per-asset depth thresholds instead (single source of truth)
   # min_depth_contracts: 2  # REMOVED - inconsistent with per-asset min_depth_yes/min_depth_no values
@@ -859,7 +859,7 @@ guardrails:
   # For edge < 2%: do not trade (avoid low edge & wide spread)
   # For edge >= 2%: require spread <= 20c and edge >= 1.1x spread
   max_spread_for_edge:
-    "default": 20  # Single rule: max spread = 20c for edge >= 2%
+    "default": 15  # 2026-07-04: Unified to 15c - aligned with guardrails and market_microstructure (eliminates 20c/50c conflicts)
   depth_size_multiplier: 1.5  # Depth must be >= 1.5x order size (relaxed from 3.0x to reduce rejections)
   # Regime/drawdown trap prevention
   regime_cooldown_enabled: false  # DISABLED: Asset halting based on PnL performance (industry advises against variance-based changes, let drawdown limits handle risk)
@@ -882,7 +882,7 @@ guardrails:
   # NEW: Spread guard with edge override
   spread_guard_enabled: true  # Enable spread guard
   spread_guard_edge_multiplier: 1.1  # Require edge >= 1.1x spread to trade (relaxed from 1.5x)
-  min_spread_gate_cents: 50  # INCREASED: Minimum spread gate at 50 cents (aligned with guardrails_max_spread_cents)
+  min_spread_gate_cents: 15  # 2026-07-04: Unified to 15c - aligned with guardrails and market_microstructure (eliminates 50c conflicts)
   
   # Drawdown limits (percentage-based, not bankroll-scaled)
   # Drawdown is the primary hard cap; daily loss is optional/soft
@@ -1226,23 +1226,26 @@ legacy:
 # - At velocity = -0.0002, p_model ≈ 0.45 (slightly bearish)
 # - At velocity = 0, p_model = 0.50 (neutral)
 #
-# These are conservative starting values. Calibrate with historical data after deployment.
+# CRITICAL FIX: 2026-07-04 - Increased alpha_1 to make velocity-to-probability mapping responsive
+# Previous values (1.5-2.5) were too low, causing p_model to stay near 50% regardless of velocity
+# New values (200-500) align with 2026 industry standards for momentum trading
+# With velocity threshold=0.4%-0.8%, these coefficients produce meaningful probability shifts
 velocity_model:
   BTC:
     alpha_0: 0.0
-    alpha_1: 1.5  # BTC: moderate sensitivity (lower volatility) - FIXED: reduced from 1000.0 to account for ATR normalization
+    alpha_1: 200.0  # BTC: moderate sensitivity - increased from 1.5 to 200.0 for responsive mapping
   ETH:
     alpha_0: 0.0
-    alpha_1: 1.5  # ETH: moderate sensitivity (lower volatility) - FIXED: reduced from 1000.0 to account for ATR normalization
+    alpha_1: 200.0  # ETH: moderate sensitivity - increased from 1.5 to 200.0 for responsive mapping
   SOL:
     alpha_0: 0.0
-    alpha_1: 2.0   # SOL: higher sensitivity (higher volatility) - FIXED: reduced from 800.0 to account for ATR normalization
+    alpha_1: 300.0   # SOL: higher sensitivity - increased from 2.0 to 300.0 for responsive mapping
   XRP:
     alpha_0: 0.0
-    alpha_1: 2.0   # XRP: higher sensitivity (higher volatility) - FIXED: reduced from 800.0 to account for ATR normalization
+    alpha_1: 300.0   # XRP: higher sensitivity - increased from 2.0 to 300.0 for responsive mapping
   DOGE:
     alpha_0: 0.0
-    alpha_1: 2.5   # DOGE: highest sensitivity (higher volatility) - FIXED: reduced from 600.0 to account for ATR normalization
+    alpha_1: 500.0   # DOGE: highest sensitivity - increased from 2.5 to 500.0 for responsive mapping
 
   # Phase 4.1: Multi-window velocity configuration
   velocity_windows: [10, 30, 60]  # Velocity windows in seconds
@@ -1252,18 +1255,20 @@ velocity_model:
   zscore_period: 20  # Z-score period for extreme detection (industry standard)
 
 # ── Velocity Thresholds (Per-Asset) ─────────────────────────────────────────────
-# Velocity thresholds for signal generation aligned with actual observed market velocities
-# CRITICAL FIX: 2026-07-03 - Further lowered to match actual velocity values from production logs
-# Actual observed velocities: 0.0002-0.0004 (0.02%-0.04%) for BTC/ETH/SOL/XRP/DOGE
-# Previous thresholds (0.03%-0.05%) were still slightly too high, blocking trades
-# The velocity calculation returns percentage change per second, not per 15m period
-# Thresholds set to 0.02%-0.04% to capture actual market moves observed in production
+# Velocity thresholds for signal generation aligned with 2026 industry standards
+# CRITICAL FIX: 2026-07-04 - Raised to industry standards based on Polymarket/PredictEngine research
+# Industry standards: 0.4%-0.8% for crypto momentum trading (Polymarket, PredictEngine, Dev.to)
+# Previous thresholds (0.02%-0.04%) were 100x too low, generating signals from noise
+# New thresholds align with:
+# - Polymarket: 0.4%-0.8% for 5m/15m crypto markets
+# - PredictEngine: 2-5% momentum threshold (we use conservative 0.4-0.8% for 15m)
+# - Dev.to: BTC ≥ 0.5%, ETH ≥ 0.4% for 5-minute momentum
 velocity_thresholds:
-  BTC: 0.0002  # 0.02% - matches actual observed BTC velocities
-  ETH: 0.0002  # 0.02% - matches actual observed ETH velocities
-  SOL: 0.0003  # 0.03% - higher for high-beta assets
-  XRP: 0.0003  # 0.03% - higher for high-beta assets
-  DOGE: 0.0004  # 0.04% - highest for highest volatility asset
+  BTC: 0.004  # 0.4% - aligned with 2026 industry standard for blue chip crypto
+  ETH: 0.004  # 0.4% - aligned with 2026 industry standard for blue chip crypto
+  SOL: 0.006  # 0.6% - higher for high-beta assets (SOL)
+  XRP: 0.006  # 0.6% - higher for high-beta assets (XRP)
+  DOGE: 0.008  # 0.8% - highest for highest volatility asset (DOGE)
 
 # ── Momentum Weights (Phase 4.1) ───────────────────────────────────────────────
 # Multi-window velocity weights for momentum signal fusion
@@ -1312,7 +1317,7 @@ fee_aware_edge:
 # 50c threshold blocks extreme data quality issues (82-91c spreads with YES ask=99c) while allowing normal trading
 market_microstructure:
   enabled: true  # Enable market microstructure filters
-  max_spread_cents: 50  # 2026-07-03: Increased to 50c based on Turbine research - spread gating reduces returns
+  max_spread_cents: 15  # 2026-07-04: Unified to 15c based on 2026 industry research (liquid: 1-3c, medium: 3-8c, thin: 10-30c) - eliminates spread gating conflicts
   min_depth_usd: 50  # Require >$50 within 3 cents of mid price (reduced from $200 for single-contract trading)
   min_yes_depth: 1  # Minimum YES depth threshold
   min_no_depth: 1  # Minimum NO depth threshold
