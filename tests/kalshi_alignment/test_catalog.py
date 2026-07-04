@@ -60,7 +60,7 @@ class TestCatalogRollOverDetection:
         mock_ws_bridge = MagicMock()
         mock_ws_bridge._sync_requested = False
         
-        with patch('merid.event_venues.kalshi.market_catalog.get_ws_bridge') as mock_get_bridge:
+        with patch('merid.event_venues.kalshi.ws_bridge.get_bridge') as mock_get_bridge:
             mock_get_bridge.return_value = mock_ws_bridge
             
             # Simulate catalog processing logic
@@ -103,7 +103,7 @@ class TestCatalogRollOverDetection:
         mock_ws_bridge = MagicMock()
         mock_ws_bridge._sync_requested = False
         
-        with patch('merid.event_venues.kalshi.market_catalog.get_ws_bridge') as mock_get_bridge:
+        with patch('merid.event_venues.kalshi.ws_bridge.get_bridge') as mock_get_bridge:
             mock_get_bridge.return_value = mock_ws_bridge
             
             # Simulate catalog processing logic
@@ -138,7 +138,7 @@ class TestCatalogRollOverDetection:
         mock_ws_bridge = MagicMock()
         mock_ws_bridge._sync_requested = False
         
-        with patch('merid.event_venues.kalshi.market_catalog.get_ws_bridge') as mock_get_bridge:
+        with patch('merid.event_venues.kalshi.ws_bridge.get_bridge') as mock_get_bridge:
             mock_get_bridge.return_value = mock_ws_bridge
             
             # Try to trigger roll-over detection within cooldown
@@ -185,7 +185,7 @@ class TestCatalogRollOverDetection:
         mock_ws_bridge = MagicMock()
         mock_ws_bridge._sync_requested = False
         
-        with patch('merid.event_venues.kalshi.market_catalog.get_ws_bridge') as mock_get_bridge:
+        with patch('merid.event_venues.kalshi.ws_bridge.get_bridge') as mock_get_bridge:
             mock_get_bridge.return_value = mock_ws_bridge
             
             # Try to trigger roll-over detection after cooldown
@@ -232,7 +232,7 @@ class TestCatalogRollOverDetection:
         mock_ws_bridge = MagicMock()
         mock_ws_bridge._sync_requested = False
         
-        with patch('merid.event_venues.kalshi.market_catalog.get_ws_bridge') as mock_get_bridge:
+        with patch('merid.event_venues.kalshi.ws_bridge.get_bridge') as mock_get_bridge:
             mock_get_bridge.return_value = mock_ws_bridge
             
             # Process each series
@@ -291,7 +291,7 @@ class TestCatalogIntegration:
         catalog._last_catalog_ticker[series_ticker] = old_ticker
         
         # Mock WS bridge as unavailable
-        with patch('merid.event_venues.kalshi.market_catalog.get_ws_bridge') as mock_get_bridge:
+        with patch('merid.event_venues.kalshi.ws_bridge.get_bridge') as mock_get_bridge:
             mock_get_bridge.return_value = None
             
             # Simulate roll-over detection
@@ -322,7 +322,7 @@ class TestCatalogIntegration:
         catalog._last_catalog_ticker[series_ticker] = old_ticker
         
         # Mock import error
-        with patch('merid.event_venues.kalshi.market_catalog.get_ws_bridge') as mock_get_bridge:
+        with patch('merid.event_venues.kalshi.ws_bridge.get_bridge') as mock_get_bridge:
             mock_get_bridge.side_effect = ImportError("ws_bridge not available")
             
             # Simulate roll-over detection
@@ -359,7 +359,7 @@ class TestCatalogIntegration:
         
         mock_ws_bridge = MagicMock()
         
-        with patch('merid.event_venues.kalshi.market_catalog.get_ws_bridge') as mock_get_bridge:
+        with patch('merid.event_venues.kalshi.ws_bridge.get_bridge') as mock_get_bridge:
             mock_get_bridge.return_value = mock_ws_bridge
             
             # Try to trigger roll-over at time 1050
