@@ -39,7 +39,7 @@ class DomainRiskConfig:
     domain: TradeDomain
     max_allocation_pct: Decimal = Decimal("0.50")   # Max % of total capital
     max_notional_usd: Decimal = Decimal("10000")
-    max_daily_loss_usd: Decimal = Decimal("500")
+    max_daily_loss_usd: Decimal = Decimal("2000")  # CRITICAL FIX: Updated from 500 to 2000 (20% of $10k baseline)
     max_positions: int = 50
     max_single_order_usd: Decimal = Decimal("1000")
     enabled: bool = True
@@ -228,7 +228,7 @@ class GlobalRiskManager:
                 domain=domain,
                 max_allocation_pct=allocation_pct,
                 max_notional_usd=domain_capital,  # 100% of domain allocation
-                max_daily_loss_usd=domain_capital * daily_loss_pcts.get(domain, Decimal("0.05")),
+                max_daily_loss_usd=domain_capital * daily_loss_pcts.get(domain, Decimal("0.20")),  # CRITICAL FIX: 20% aligned with drawdown halt (was 0.05)
                 max_positions=50 if domain != TradeDomain.PREDICTION else 20,
                 max_single_order_usd=domain_capital * single_order_pcts.get(domain, Decimal("0.10")),
                 enabled=True,

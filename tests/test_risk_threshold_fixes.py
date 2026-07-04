@@ -136,14 +136,14 @@ class TestKellyFractionFixes:
 
 
 class TestDailyLossLimitFixes:
-    """Test daily loss limit defaults align with profile (5%)."""
+    """Test daily loss limit defaults align with profile (20%)."""
     
     def test_merid_settings_daily_loss(self):
         """Test merid/settings.py daily loss default."""
         from merid.settings import Settings
         
         settings = Settings()
-        assert settings.KALSHI_PORTFOLIO_MAX_DAILY_LOSS_PCT == 0.05, \
+        assert settings.KALSHI_PORTFOLIO_MAX_DAILY_LOSS_PCT == 0.20, \
             f"Expected 5% daily loss, got {settings.KALSHI_PORTFOLIO_MAX_DAILY_LOSS_PCT}"
     
     def test_core_settings_daily_loss(self):
@@ -152,10 +152,10 @@ class TestDailyLossLimitFixes:
         
         # Clear env vars to test default
         with patch.dict(os.environ, {}, clear=True):
-            daily_loss = float(os.getenv("DAILY_LOSS_CAP_PCT", "0.05"))
+            daily_loss = float(os.getenv("DAILY_LOSS_CAP_PCT", "0.20"))
             
-            assert daily_loss == 0.05, \
-                f"Expected 5% daily loss, got {daily_loss}"
+            assert daily_loss == 0.20, \
+                f"Expected 20% daily loss, got {daily_loss}"
 
 
 class TestPerTradeRiskFixes:

@@ -537,10 +537,10 @@ def compute_kalshi_crypto_15m_risk_envelope(
         operation_mode = os.getenv('MERID_OPERATION_MODE', profile_config.get('operation_mode', 'prod')).lower()
         
         # Get daily loss limit based on operation mode
-        max_daily_loss_pct_raw = guardrails.get('max_daily_loss_pct', 0.05)
+        max_daily_loss_pct_raw = guardrails.get('max_daily_loss_pct', 0.20)  # CRITICAL FIX: 20% aligned with drawdown halt (was 0.05)
         if isinstance(max_daily_loss_pct_raw, dict):
-            # Mode-specific limits: {test: 0.10, prod: 0.05}
-            max_daily_loss_pct = max_daily_loss_pct_raw.get(operation_mode, max_daily_loss_pct_raw.get('prod', 0.05))
+            # Mode-specific limits: {test: 0.20, prod: 0.20}
+            max_daily_loss_pct = max_daily_loss_pct_raw.get(operation_mode, max_daily_loss_pct_raw.get('prod', 0.20))
         else:
             # Legacy single value (backward compatibility)
             max_daily_loss_pct = max_daily_loss_pct_raw

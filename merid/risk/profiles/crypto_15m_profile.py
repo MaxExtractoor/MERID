@@ -401,7 +401,7 @@ class Crypto15mProfile:
     time_of_day_risk_scaling_us_market_multiplier: float = 1.0
     time_of_day_risk_scaling_asian_multiplier: float = 0.8
     time_of_day_risk_scaling_european_multiplier: float = 0.9
-    time_of_day_risk_scaling_weekend_multiplier: float = 0.5
+    time_of_day_risk_scaling_weekend_multiplier: float = 0.8  # RELAXED: 0.8 (was 0.5) - use volatility regime instead of fixed weekend reduction
     
     # Asset-specific rolling PnL limits
     asset_specific_rolling_pnl_enabled: bool = False
@@ -989,7 +989,7 @@ class Crypto15mProfileAdapter:
                 time_of_day_risk_scaling_us_market_multiplier=raw.get('time_of_day_risk_scaling', {}).get('us_market_multiplier', 1.0),
                 time_of_day_risk_scaling_asian_multiplier=raw.get('time_of_day_risk_scaling', {}).get('asian_multiplier', 0.8),
                 time_of_day_risk_scaling_european_multiplier=raw.get('time_of_day_risk_scaling', {}).get('european_multiplier', 0.9),
-                time_of_day_risk_scaling_weekend_multiplier=raw.get('time_of_day_risk_scaling', {}).get('weekend_multiplier', 0.5),
+                time_of_day_risk_scaling_weekend_multiplier=raw.get('time_of_day_risk_scaling', {}).get('weekend_multiplier', 0.8),  # RELAXED: 0.8 (was 0.5)
                 
                 # Asset-specific rolling PnL limits
                 asset_specific_rolling_pnl_enabled=raw.get('asset_specific_rolling_pnl', {}).get('enabled', False),

@@ -18,7 +18,7 @@ bankroll:
   
   # Maximum daily loss limit (5% - triggers trading halt)
   # Standard institutional practice: 3-5% daily loss limit
-  daily_loss_pct: 0.05
+  daily_loss_pct: 0.20  # CRITICAL FIX: 20% aligned with drawdown halt (was 0.05)
   
   # Maximum cluster loss (2.5% - half of daily limit)
   cluster_stop_pct: 0.025

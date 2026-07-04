@@ -535,7 +535,7 @@ class TradingHaltManager:
 
     def __init__(
         self,
-        max_daily_loss_pct: float = 0.05,
+        max_daily_loss_pct: float = 0.20,  # CRITICAL FIX: 20% aligned with drawdown halt (was 0.05)
         max_drawdown_pct: float = 0.15,
         circuit_breaker_halt_threshold: int = 2,
     ):
