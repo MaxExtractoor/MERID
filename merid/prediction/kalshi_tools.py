@@ -645,19 +645,19 @@ async def _kalshi_place_order(
         try:
             from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
 
-            # CRITICAL FIX: Clamp to 55-75 cents to prevent extreme purchases
-            # This aligns with kalshi_crypto_15m_v2.yaml price_range [55, 75]
-            # and profile guardrails_max_contract_price_cents (70c for 43% minimum payout)
+            # CRITICAL FIX: Clamp to 50-70 cents to prevent extreme purchases
+            # This aligns with kalshi_crypto_15m_v2.yaml price_range [50, 70]
+            # Optimized for scaling: mid-range prices have better liquidity depth for child orders
             # MID-SPREAD ENTRY OPTIMIZATION (2026-07-04): Respect calculated entry price from agent_grid
             # The agent_grid_15m.py now calculates optimal entry prices using mid-spread strategy
             # This clamp is a safety rail to ensure we never submit orders outside valid range
             original_price = int(price_cents or 50)
-            _pc = max(55, min(75, original_price))
+            _pc = max(50, min(70, original_price))
             
             # Log if price was clamped (indicates mid-spread optimization may need adjustment)
             if _pc != original_price:
                 logger.warning(
-                    "[KALSHI-TOOLS-PRICE-CLAMP] ticker=%s original_price=%d clamped_to=%d (safety rail 55-75c)",
+                    "[KALSHI-TOOLS-PRICE-CLAMP] ticker=%s original_price=%d clamped_to=%d (safety rail 50-70c)",
                     ticker, original_price, _pc
                 )
             else:
@@ -1059,9 +1059,10 @@ def build_live_route_order_intent(
         pc = 0
         otype = "market"
     else:
-        # CRITICAL FIX: Clamp to 55-75 cents to prevent extreme purchases
-        # This aligns with kalshi_crypto_15m_v2.yaml price_range [55, 75]
-        pc = max(55, min(75, int(price_cents)))
+        # CRITICAL FIX: Clamp to 50-70 cents to prevent extreme purchases
+        # This aligns with kalshi_crypto_15m_v2.yaml price_range [50, 70]
+        # Optimized for scaling: mid-range prices have better liquidity depth for child orders
+        pc = max(50, min(70, int(price_cents)))
         otype = "limit"
 
     # Compute default TP/SL for 15m crypto entry orders if not provided

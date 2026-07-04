@@ -14,31 +14,31 @@ from decimal import Decimal
 
 
 class TestPriceClampingFixes:
-    """Test that price clamping uses [15, 70] range instead of [1, 99]."""
+    """Test that price clamping uses [50, 70] range instead of [1, 99]."""
 
     def test_build_live_route_order_intent_clamps_price(self):
-        """Test that build_live_route_order_intent clamps price to [55, 75] range."""
+        """Test that build_live_route_order_intent clamps price to [50, 70] range."""
         from merid.prediction.kalshi_tools import build_live_route_order_intent
         
-        # Test price above 75c should be clamped to 75c
+        # Test price above 70c should be clamped to 70c
         intent = build_live_route_order_intent(
             ticker="KXBTC15M-26APR191645-45",
             side="yes",
             action="buy",
-            price_cents=99,  # Should be clamped to 75
+            price_cents=99,  # Should be clamped to 70
             count=1,
         )
-        assert intent.price_cents == 75, f"Expected 75c, got {intent.price_cents}c"
+        assert intent.price_cents == 70, f"Expected 70c, got {intent.price_cents}c"
         
-        # Test price below 55c should be clamped to 55c
+        # Test price below 50c should be clamped to 50c
         intent = build_live_route_order_intent(
             ticker="KXBTC15M-26APR191645-45",
             side="yes",
             action="buy",
-            price_cents=5,  # Should be clamped to 55
+            price_cents=5,  # Should be clamped to 50
             count=1,
         )
-        assert intent.price_cents == 55, f"Expected 55c, got {intent.price_cents}c"
+        assert intent.price_cents == 50, f"Expected 50c, got {intent.price_cents}c"
         
         # Test price within range should not be clamped
         intent = build_live_route_order_intent(
