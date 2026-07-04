@@ -130,6 +130,9 @@ class LeanAgentConfig:
     max_time_to_expiry_s: int = 900  # Maximum time to expiry in seconds
     per_strip_order_limit: int = 200  # Maximum orders per 15m strip (increased from 50 to 200 for 2026 high-frequency standards)
     per_asset_cooldown_s: int = 10  # Cooldown period in seconds after trade (reduced from 30s to allow more frequent trading)
+    max_orders_per_15m_window: int = 5  # 2026 research: Max 5 trades per 15m session window
+    consecutive_loss_pause: int = 3  # 2026 research: Pause after N consecutive losses
+    max_session_risk_pct: float = 0.10  # 2026 research: Max session risk as % of capital
     velocity_threshold: float = 0.0002  # Velocity threshold for signal generation (0.02% - aligned with actual market velocities)
     # Asset-specific velocity thresholds (deeper markets = lower threshold, more volatile = higher threshold)
     # CRITICAL FIX: Lowered from 0.13%-0.20% to 0.02%-0.04% to match actual market velocities
@@ -415,6 +418,38 @@ class LeanAgent15m:
         for ticker in self.config.series_tickers:
             self._current_market_ids[ticker] = None
         
+        # 2026 Research-Based Risk Management
+        # Session-level order tracking (max 5 trades per 15m window)
+        self._session_order_count: int = 0
+        self._session_start_time: float = time.time()
+        self._session_window_sec: int = 900  # 15 minutes in seconds
+        
+        # Consecutive loss tracking (pause after N consecutive losses)
+        self._consecutive_losses: Dict[str, int] = {}  # asset -> consecutive loss count
+        self._consecutive_loss_pause_until: Dict[str, float] = {}  # asset -> pause until timestamp
+        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+            self._consecutive_losses[asset] = 0
+            self._consecutive_loss_pause_until[asset] = 0.0
+        
+        # Session risk cap tracking (max 10% risk per session)
+        self._session_risk_usd: float = 0.0
+        self._session_risk_cap_usd: float = 0.0  # Will be set from profile/capital
+        
+        # Initialize session risk cap from profile if available
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+            profile_adapter = get_active_profile()
+            if profile_adapter and profile_adapter._profile:
+                profile = profile_adapter._profile
+                # Calculate session risk cap as percentage of capital
+                if profile.capital_usd > 0:
+                    self._session_risk_cap_usd = profile.capital_usd * profile.throttling_max_session_risk_pct
+                    logger.info("[AGENT-INIT] %s session_risk_cap=%.2f (capital=%.2f * %.2f%%)", 
+                               config.name, self._session_risk_cap_usd, profile.capital_usd, 
+                               profile.throttling_max_session_risk_pct * 100)
+        except Exception as e:
+            logger.warning("[AGENT-INIT] %s failed to load session risk cap from profile: %s", config.name, e)
+        
         logger.info("[AGENT-INIT] %s initialized with velocity-based signal strategy", config.name)
     
     def _update_price_history(self, asset: str, spot_price: float, spot_data: Any = None) -> None:
@@ -585,14 +620,53 @@ class LeanAgent15m:
         
         return clamped_cooldown
     
-    def update_cooldown_on_fill(self, asset: str) -> None:
+    def update_cooldown_on_fill(self, asset: str, pnl_usd: float = 0.0, trade_risk_usd: float = 0.0) -> None:
         """Update cooldown timestamp when a trade actually executes (fills).
         
         This should be called from the fill handler (position_cache.on_fill) to ensure
         the cooldown is only reset when a trade actually executes, not when a candidate
         is generated. This prevents perpetual cooldown blocks.
+        
+        Args:
+            asset: Asset symbol (BTC, ETH, SOL, XRP, DOGE)
+            pnl_usd: PnL of the trade in USD (positive for profit, negative for loss)
+            trade_risk_usd: Risk amount of the trade in USD (for session risk cap tracking)
         """
         self._last_trade_time[asset] = time.time()
+        
+        # 2026 Research-Based Risk Management: Increment session order count
+        self._session_order_count += 1
+        logger.info("[SESSION-ORDER] agent=%s session_orders=%d", self.config.name, self._session_order_count)
+        
+        # 2026 Research-Based Risk Management: Track session risk
+        if trade_risk_usd > 0:
+            self._session_risk_usd += trade_risk_usd
+            logger.info("[SESSION-RISK] agent=%s session_risk=%.2f (added %.2f) cap=%.2f", 
+                       self.config.name, self._session_risk_usd, trade_risk_usd, self._session_risk_cap_usd)
+        
+        # 2026 Research-Based Risk Management: Track consecutive losses
+        if pnl_usd < 0:
+            self._consecutive_losses[asset] += 1
+            logger.info("[CONSECUTIVE-LOSS] agent=%s asset=%s consecutive_losses=%d", 
+                       self.config.name, asset, self._consecutive_losses[asset])
+            
+            # Check if consecutive loss threshold reached
+            if self._consecutive_losses[asset] >= self.config.consecutive_loss_pause:
+                # Set pause for 15 minutes (900 seconds)
+                pause_duration = 900
+                self._consecutive_loss_pause_until[asset] = time.time() + pause_duration
+                logger.warning(
+                    "[CONSECUTIVE-LOSS-PAUSE] agent=%s asset=%s consecutive_losses=%d >= threshold=%d, pausing for %d seconds",
+                    self.config.name, asset, self._consecutive_losses[asset], 
+                    self.config.consecutive_loss_pause, pause_duration
+                )
+        else:
+            # Reset consecutive loss count on profit
+            if self._consecutive_losses[asset] > 0:
+                logger.info("[CONSECUTIVE-LOSS-RESET] agent=%s asset=%s consecutive_losses reset from %d to 0 (profit)",
+                           self.config.name, asset, self._consecutive_losses[asset])
+                self._consecutive_losses[asset] = 0
+        
         logger.info("[COOLDOWN-UPDATE] asset=%s cooldown timestamp updated on fill", asset)
     
     def _check_volume_confirmation(self, asset: str) -> bool:
@@ -3121,6 +3195,39 @@ class LeanAgent15m:
         # Minimum edge threshold for signal quality
         # Reject signals with edge < 0.02% to filter out weak momentum signals
         min_edge_threshold = 0.02  # 0.02% minimum edge for signal quality
+        
+        # 2026 Research-Based Risk Management: Volatility-regime edge adjustment
+        # Adjust min_edge_threshold based on volatility regime from profile
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+            profile_adapter = get_active_profile()
+            if profile_adapter and profile_adapter._profile:
+                profile = profile_adapter._profile
+                if profile.volatility_regime_edge_adjustment_enabled:
+                    # Get current volatility regime for this asset
+                    ticker = market.market.market_id if hasattr(market, 'market') else market.market_id
+                    regime, current_volatility = self._classify_volatility_regime(ticker)
+                    
+                    # Calculate volatility ratio against 30-day average
+                    # For now, use current_volatility as proxy (would need historical data for true ratio)
+                    volatility_ratio = current_volatility / 0.01  # Normalize against 1% baseline
+                    
+                    # Apply edge adjustment based on regime
+                    if volatility_ratio < profile.volatility_regime_edge_adjustment_low_volatility_threshold:
+                        # Low volatility: reduce min edge by 0.5%
+                        edge_adjustment = profile.volatility_regime_edge_adjustment_low_volatility_adjustment
+                        min_edge_threshold = max(0.01, min_edge_threshold + edge_adjustment)
+                        logger.info("[VOLATILITY-REGIME-EDGE] asset=%s regime=LOW volatility_ratio=%.2f adjustment=%.3f%% min_edge=%.2f%%",
+                                   asset, volatility_ratio, edge_adjustment * 100, min_edge_threshold)
+                    elif volatility_ratio > profile.volatility_regime_edge_adjustment_high_volatility_threshold:
+                        # High volatility: increase min edge by 1.0%
+                        edge_adjustment = profile.volatility_regime_edge_adjustment_high_volatility_adjustment
+                        min_edge_threshold = min_edge_threshold + edge_adjustment
+                        logger.info("[VOLATILITY-REGIME-EDGE] asset=%s regime=HIGH volatility_ratio=%.2f adjustment=%.3f%% min_edge=%.2f%%",
+                                   asset, volatility_ratio, edge_adjustment * 100, min_edge_threshold)
+        except Exception as e:
+            logger.warning("[VOLATILITY-REGIME-EDGE] Failed to apply volatility-regime edge adjustment: %s", e)
+        
         if abs(edge_pct) < min_edge_threshold:
             logger.debug(
                 "[EDGE-FILTER] asset=%s side=%s velocity=%.6f edge_pct=%.2f%% < min_edge=%.2f%% - filtering weak signal",
@@ -3210,11 +3317,11 @@ class LeanAgent15m:
             # Fallback to bid only
             if signal_side == "yes":
                 price_cents = best_bid
-                # Clamp to 15-70c range (aligned with global 15¢ price guard and profile max_price_cents)
-                if price_cents < 15:
-                    price_cents = 15
-                elif price_cents > 70:
-                    price_cents = 70
+                # Clamp to 55-75c range (aligned with profile price_range)
+                if price_cents < 55:
+                    price_cents = 55
+                elif price_cents > 75:
+                    price_cents = 75
             else:
                 # NO: NO_ask = 100 - YES_bid
                 price_cents = 100 - best_bid
@@ -3307,6 +3414,38 @@ class LeanAgent15m:
                 logger.info(
                     "[COOLDOWN-CHECK] asset=%s time_since_last=%.1fs < cooldown=%.1fs, skipping",
                     asset, time_since_last_trade, cooldown_seconds
+                )
+                return None
+            
+            # 2026 Research-Based Risk Management: Session limit (max 5 trades per 15m window)
+            current_time = time.time()
+            if current_time - self._session_start_time > self._session_window_sec:
+                # Reset session counters
+                self._session_order_count = 0
+                self._session_start_time = current_time
+                logger.info("[SESSION-RESET] agent=%s session window reset", self.config.name)
+            
+            if self._session_order_count >= self.config.max_orders_per_15m_window:
+                logger.info(
+                    "[SESSION-LIMIT] agent=%s session_orders=%d >= max_orders_per_15m_window=%d -> SKIP (session limit reached)",
+                    self.config.name, self._session_order_count, self.config.max_orders_per_15m_window
+                )
+                return None
+            
+            # 2026 Research-Based Risk Management: Consecutive loss pause
+            pause_until = self._consecutive_loss_pause_until.get(asset, 0.0)
+            if current_time < pause_until:
+                logger.info(
+                    "[CONSECUTIVE-LOSS-PAUSE] agent=%s asset=%s paused until %s (consecutive losses=%d) -> SKIP",
+                    self.config.name, asset, pause_until, self._consecutive_losses.get(asset, 0)
+                )
+                return None
+            
+            # 2026 Research-Based Risk Management: Session risk cap (10% of capital)
+            if self._session_risk_cap_usd > 0 and self._session_risk_usd >= self._session_risk_cap_usd:
+                logger.info(
+                    "[SESSION-RISK-CAP] agent=%s session_risk=%.2f >= cap=%.2f -> SKIP (session risk cap reached)",
+                    self.config.name, self._session_risk_usd, self._session_risk_cap_usd
                 )
                 return None
             
@@ -3960,6 +4099,10 @@ async def build_15m_agent_grid(
             calibration_fit_interval_hours = profile.calibration_fit_interval_hours
             # Load throttling config from profile
             per_asset_cooldown_s = int(profile.throttling_per_asset_cooldown_sec)
+            # 2026 Research-Based Risk Management: Load new throttling parameters
+            max_orders_per_15m_window = int(profile.throttling_max_orders_per_15m_window)
+            consecutive_loss_pause = int(profile.throttling_consecutive_loss_pause)
+            max_session_risk_pct = float(profile.throttling_max_session_risk_pct)
             # Phase 5.3: Load signal mode and price-based strategy config from profile
             signal_mode = profile.signal_mode
             price_based_buy_threshold = profile.price_based_buy_threshold
@@ -4012,6 +4155,10 @@ async def build_15m_agent_grid(
             calibration_regularization=calibration_regularization,
             calibration_fit_interval_hours=calibration_fit_interval_hours,
             per_asset_cooldown_s=per_asset_cooldown_s,
+            # 2026 Research-Based Risk Management: Pass new throttling parameters
+            max_orders_per_15m_window=max_orders_per_15m_window,
+            consecutive_loss_pause=consecutive_loss_pause,
+            max_session_risk_pct=max_session_risk_pct,
             signal_mode=signal_mode,
             price_based_buy_threshold=price_based_buy_threshold,
             price_based_sell_threshold=price_based_sell_threshold,
