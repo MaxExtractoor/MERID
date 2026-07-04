@@ -299,6 +299,22 @@ class KalshiUniversalAgent:
         price_cents = int(signal.limit_price_cents or 50)
         contracts = max(1, min(int(signal.contracts or 1), self.config.max_contracts))
 
+        # CRITICAL FIX: Convert to Kalshi format (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
+        # universal_agent uses lowercase 'yes'/'no' for side, but order_router expects Kalshi format
+        side_upper = side.upper()
+        action_lower = action.lower()
+        if side_upper == "YES" and action_lower == "buy":
+            kalshi_side = "BUY_YES"
+        elif side_upper == "YES" and action_lower == "sell":
+            kalshi_side = "SELL_YES"
+        elif side_upper == "NO" and action_lower == "buy":
+            kalshi_side = "BUY_NO"
+        elif side_upper == "NO" and action_lower == "sell":
+            kalshi_side = "SELL_NO"
+        else:
+            # Fallback for unexpected combinations
+            kalshi_side = f"{action.upper()}_{side_upper}"
+
         # Risk check
         if self._risk:
             try:
@@ -356,7 +372,7 @@ class KalshiUniversalAgent:
             from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
             intent = OrderIntent(
                 ticker=ticker,
-                side=side,
+                side=kalshi_side,  # CRITICAL FIX: Use Kalshi-formatted side (BUY_YES, SELL_YES, etc.)
                 action=action,
                 price_cents=price_cents,
                 count=contracts,
