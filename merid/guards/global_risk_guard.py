@@ -135,7 +135,7 @@ class GlobalRiskGuard:
         self._last_fill_time: Optional[float] = None
         self._pending_order_timeout_sec: float = 10.0  # REDUCED: 10 second timeout for unfilled orders (was 60s - too slow for small bankrolls)
         self._no_fill_reset_window_sec: float = 30.0  # REDUCED: 30 second window for no-fill auto-reset (was 5min - too slow for small bankrolls)
-        self._emergency_reset_threshold_cents: int = 5000  # $50 threshold for emergency reset (raised from $100 for better small bankroll handling)
+        self._emergency_reset_threshold_cents: int = 10000  # FIX: $100 threshold (aligned with micro-account threshold)
 
     # ── cycle boundary ──────────────────────────────────────────────────
     def reset_cycle(self) -> None:

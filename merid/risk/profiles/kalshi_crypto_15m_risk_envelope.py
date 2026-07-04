@@ -208,14 +208,15 @@ class KalshiCrypto15mRiskEnvelope:
         """Get per-trade risk percentage from profile with bankroll-tiered logic.
         
         BANKROLL-TIERED: Higher risk for small bankrolls to ensure tradable sizes
-        - bankroll < $100: 4% per trade (aggressive to overcome minimum lot granularity)
+        FIX: Aligned to 2% fractional Kelly (consistent with cycle risk)
+        - bankroll < $100: 2% per trade (fractional Kelly for micro-accounts)
         - bankroll $100-$1k: 1.5% per trade (moderate scaling)
         - bankroll > $1k: 0.8% per trade (conservative for larger capital)
         """
         # Extract tier thresholds from profile config (if available in envelope)
         # For now, implement tiered logic directly based on live bankroll
         if self.live_bankroll_usd < 100.0:
-            return 0.04  # 4% for small bankroll
+            return 0.02  # 2% for small bankroll (fractional Kelly)
         elif self.live_bankroll_usd < 1000.0:
             return 0.015  # 1.5% for medium bankroll
         else:
