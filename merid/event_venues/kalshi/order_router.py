@@ -176,7 +176,7 @@ def check_market_microstructure(
     no_ask_cents: int,
     yes_depth: int,
     no_depth: int,
-    max_spread_cents: float = 20.0,  # Increased from 8.0 to 20.0 for 15m markets
+    max_spread_cents: float = 50.0,  # 2026-07-04: Increased to 50c to match profile and align with 2026 research (altcoin spreads 5-30%)
     min_depth_usd: float = 200.0,
     min_yes_depth: int = 1,
     min_no_depth: int = 1
@@ -1539,6 +1539,8 @@ def _check_global_rate_limit() -> Optional[str]:
     """Check global rate limit to prevent rapid-fire execution.
     
     Returns rejection reason string, or None if OK.
+    NOTE: This is a pure validation function - it does NOT record timestamps.
+    Timestamps are recorded only after successful order submission via _record_successful_order().
     """
     global _global_order_timestamps
     current_time = _time.time()
@@ -1574,14 +1576,27 @@ def _check_global_rate_limit() -> Optional[str]:
             )
             return f"global_rate_limit_exceeded: {time_since_last:.1f}s < {_MIN_SECONDS_BETWEEN_ORDERS}s between orders"
     
-    # If passed, add current timestamp
-    _global_order_timestamps.append(current_time)
+    # Rate check passed - caller will record timestamp after successful submission
     logger.info(
         "[GLOBAL-RATE-LIMIT] Rate check passed: orders_in_last_minute=%d/%d time_since_last=%.1fs",
-        len(_global_order_timestamps) - 1, _MAX_ORDERS_PER_MINUTE,
-        current_time - _global_order_timestamps[-2] if len(_global_order_timestamps) > 1 else 0
+        len(_global_order_timestamps), _MAX_ORDERS_PER_MINUTE,
+        current_time - _global_order_timestamps[-1] if _global_order_timestamps else 0
     )
     return None
+
+
+def _record_successful_order() -> None:
+    """Record a successfully submitted order in the rate limiter.
+    
+    This should only be called after an order is successfully submitted to the exchange.
+    """
+    global _global_order_timestamps
+    current_time = _time.time()
+    _global_order_timestamps.append(current_time)
+    logger.info(
+        "[GLOBAL-RATE-LIMIT] Recorded successful order: orders_in_last_minute=%d/%d",
+        len(_global_order_timestamps), _MAX_ORDERS_PER_MINUTE
+    )
 
 
 def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
@@ -1975,21 +1990,31 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
                             state = market_state_store.get(intent.ticker) if market_state_store else None
                             
                             if state:
-                                # Extract depth from market state
-                                # KalshiMarketState stores depth in min_depth_yes/min_depth_no
-                                yes_depth = getattr(state, 'min_depth_yes', 1) if yes_depth is None else yes_depth
-                                no_depth = getattr(state, 'min_depth_no', 1) if no_depth is None else no_depth
+                                # CRITICAL FIX: Use window-based depth (depth_10c_yes/depth_10c_no) instead of single-level depth
+                                # depth_10c_yes/depth_10c_no represent contracts within ±10c of mid price (industry standard)
+                                # min_depth_yes/min_depth_no only capture best bid/ask size (1 price level)
+                                # This fixes false rejections when liquidity exists across multiple levels
+                                depth_10c_yes = getattr(state, 'depth_10c_yes', 0)
+                                depth_10c_no = getattr(state, 'depth_10c_no', 0)
                                 
-                                # Also check for depth_yes/depth_no attributes (alternative naming)
-                                if yes_depth == 1:
-                                    yes_depth = getattr(state, 'depth_yes', 1)
-                                if no_depth == 1:
-                                    no_depth = getattr(state, 'depth_no', 1)
-                                
-                                logger.debug(
-                                    "[MICROSTRUCTURE-GATE] Populated depth from market state: ticker=%s yes_depth=%d no_depth=%d",
-                                    intent.ticker, yes_depth, no_depth
-                                )
+                                if depth_10c_yes > 0 or depth_10c_no > 0:
+                                    # Use actual window-based depth for each side (not split total)
+                                    yes_depth = depth_10c_yes if yes_depth is None else yes_depth
+                                    no_depth = depth_10c_no if no_depth is None else no_depth
+                                    
+                                    logger.debug(
+                                        "[MICROSTRUCTURE-GATE] Using window-based depth: ticker=%s depth_10c_yes=%d depth_10c_no=%d yes_depth=%d no_depth=%d",
+                                        intent.ticker, depth_10c_yes, depth_10c_no, yes_depth, no_depth
+                                    )
+                                else:
+                                    # Fallback to single-level depth if window-based depth unavailable
+                                    yes_depth = getattr(state, 'min_depth_yes', 1) if yes_depth is None else yes_depth
+                                    no_depth = getattr(state, 'min_depth_no', 1) if no_depth is None else no_depth
+                                    
+                                    logger.debug(
+                                        "[MICROSTRUCTURE-GATE] Window-based depth unavailable, using single-level depth: ticker=%s yes_depth=%d no_depth=%d",
+                                        intent.ticker, yes_depth, no_depth
+                                    )
                             else:
                                 # Fallback to default if market state unavailable
                                 yes_depth = yes_depth or 1
@@ -2082,7 +2107,7 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
     # Get strategy policy (Phase 2: use strategy_type)
     policy = _get_strategy_policy(intent)
     min_edge = policy.get("min_edge", 0.02)
-    min_confidence = policy.get("min_confidence", 0.55)
+    min_confidence = policy.get("min_confidence", 0.65)  # FIX: Aligned with production config (was 0.55)
     
     # Validate edge_pct
     # FIX: Use absolute value to allow negative edges (valid contrarian signals)
@@ -4612,6 +4637,8 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                         getattr(order_data, "order_id", "unknown"),
                         getattr(order_data, "status", "unknown"),
                     )
+                    # Order was successfully submitted (on prior attempt) - record in rate limiter
+                    _record_successful_order()
                     # Treat as success: update gate and return filled/submitted result
                     try:
                         from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
@@ -4724,6 +4751,9 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 reason=reason,
                 latency_ms=round(latency, 2),
             )
+
+        # Order successfully submitted to exchange - record in rate limiter
+        _record_successful_order()
 
         placed = placed_res.data
         requested_count = int(placed.size)
