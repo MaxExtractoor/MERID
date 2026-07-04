@@ -1,9 +1,9 @@
-"""Tests for risk/position_sizing.py."""
+"""Tests for merid/risk/position_sizing.py."""
 import unittest
 import pytest
 import numpy as np
 from unittest.mock import Mock, patch, AsyncMock
-from risk.position_sizing import (
+from merid.risk.position_sizing import (
     Position, RiskParameters, PositionSizingResult, PortfolioRisk,
     PositionSizer
 )

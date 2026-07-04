@@ -2869,14 +2869,24 @@ def _check_market_regime_gate(
                 latency_ms=round(latency, 2),
             )
 
-        # Log REDUCE state for observability (but don't block)
+        # CRITICAL FIX: Apply REDUCE state sizing reduction
+        # Previously only logged, now actually reduces position sizes by 50%
         if last_decision.action == RegimeAction.REDUCE:
-            logger.debug(
-                "[order-router] Market regime REDUCE active: %s — sizing reduced (%d/%d flat)",
+            logger.info(
+                "[order-router] Market regime REDUCE active: %s — sizing reduced by 50%% (%d/%d flat)",
                 intent.ticker,
                 last_decision.flat_count,
                 last_decision.total_assets,
             )
+            # Apply 50% size reduction by modifying intent.contracts if present
+            # This is a downstream reduction after all other sizing calculations
+            if hasattr(intent, 'contracts') and intent.contracts is not None:
+                original_contracts = intent.contracts
+                intent.contracts = max(1, int(original_contracts * 0.5))  # Reduce by 50%, min 1
+                logger.info(
+                    "[order-router] REDUCE: Reduced contracts from %d to %d for %s",
+                    original_contracts, intent.contracts, intent.ticker
+                )
 
     except Exception as exc:
         # Fail-open: log but don't block if gate evaluation fails
