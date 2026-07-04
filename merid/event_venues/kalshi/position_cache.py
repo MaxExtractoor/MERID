@@ -278,6 +278,11 @@ class KalshiPositionCache:
         self._monitoring_task: Optional[asyncio.Task] = None
         self._monitoring_interval_seconds: float = 5.0  # Check every 5 seconds
         self._initialized = True
+        
+        # CRITICAL FIX: Register exit intent callback for PositionMonitor
+        # This ensures extreme profit exits (99c YES / 1c NO) actually place orders
+        self._register_exit_intent_callback()
+        
         logger.info("KalshiPositionCache initialized")
 
     def _ensure_mutex(self) -> asyncio.Lock:
@@ -292,6 +297,133 @@ class KalshiPositionCache:
             from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
             self._fills_ledger = get_fills_ledger()
         return self._fills_ledger
+
+    def _register_exit_intent_callback(self) -> None:
+        """Register exit intent callback with PositionMonitor.
+        
+        CRITICAL FIX: This callback is triggered when PositionMonitor detects
+        extreme profit exits (99c YES / 1c NO) or other exit conditions.
+        It creates an OrderIntent and routes it through the order router to
+        actually place the exit order.
+        
+        Without this callback, the PositionMonitor would detect the exit condition
+        but no order would be placed, leaving the position open.
+        """
+        try:
+            from merid.position_management.position_monitor import get_position_monitor
+            from merid.position_management.exit_policy import ExitReason
+            
+            monitor = get_position_monitor()
+            
+            def exit_intent_callback(position, exit_reason, exit_price_cents, contracts_to_close=None):
+                """Callback to place exit order when PositionMonitor triggers exit.
+                
+                Args:
+                    position: Position object from PositionMonitor
+                    exit_reason: ExitReason enum (EXTREME_PROFIT, STOP_LOSS, TAKE_PROFIT, etc.)
+                    exit_price_cents: Exit price in cents
+                    contracts_to_close: Optional number of contracts for partial exits (scale-out)
+                """
+                try:
+                    from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
+                    from merid.position_management.position import PositionSide
+                    
+                    # Determine exit side and action
+                    # For YES positions: exit by selling YES
+                    # For NO positions: exit by buying YES (to close the NO)
+                    if position.side == PositionSide.YES:
+                        exit_action = "sell"
+                        exit_side = "yes"
+                    else:  # NO position
+                        exit_action = "buy"
+                        exit_side = "yes"
+                    
+                    # Determine order size (full position or partial scale-out)
+                    exit_size = contracts_to_close if contracts_to_close else position.size
+                    
+                    # Determine order type based on exit reason
+                    # Extreme profit exits use market orders for immediate execution
+                    # Other exits use limit orders for better fill prices
+                    if exit_reason == ExitReason.EXTREME_PROFIT:
+                        order_type = "market"
+                        time_in_force = "ioc"  # Immediate or cancel
+                        logger.info(
+                            "[EXIT-CALLBACK] EXTREME-PROFIT exit: market order for immediate execution "
+                            "position=%s side=%s size=%d price=%dc",
+                            position.position_id[:8], position.side.value, exit_size, exit_price_cents
+                        )
+                    else:
+                        order_type = "limit"
+                        time_in_force = "gtc"  # Good till cancelled
+                        logger.info(
+                            "[EXIT-CALLBACK] %s exit: limit order for better fill "
+                            "position=%s side=%s size=%d price=%dc",
+                            exit_reason.value, position.position_id[:8], position.side.value, exit_size, exit_price_cents
+                        )
+                    
+                    # Create exit intent
+                    exit_intent = OrderIntent(
+                        ticker=position.market_id,
+                        side=exit_side,
+                        action=exit_action,
+                        price_cents=exit_price_cents,
+                        count=exit_size,
+                        order_type=order_type,
+                        time_in_force=time_in_force,
+                        source="position_monitor",
+                        agent_id="position_monitor",
+                        rationale=f"Exit triggered: {exit_reason.value}",
+                    )
+                    
+                    # Submit order asynchronously
+                    async def submit_exit():
+                        try:
+                            result = await route_order_async(exit_intent)
+                            logger.info(
+                                "[EXIT-CALLBACK] Exit order submitted: position=%s status=%s reason=%s",
+                                position.position_id[:8], result.status, result.reason
+                            )
+                            
+                            # Record exit in RoundTripMonitor if entry intent ID is available
+                            if hasattr(position, 'exit_policy_id') and position.exit_policy_id:
+                                try:
+                                    from merid.event_venues.kalshi.round_trip_monitor import get_round_trip_monitor
+                                    rt_monitor = get_round_trip_monitor()
+                                    rt_monitor.record_exit(
+                                        exit_intent_id=exit_intent.intent_id,
+                                        entry_intent_id=position.exit_policy_id,
+                                        exit_price_cents=exit_price_cents,
+                                        exit_reason=exit_reason.value,
+                                    )
+                                    logger.info(
+                                        "[EXIT-CALLBACK] Recorded exit in RoundTripMonitor: position=%s",
+                                        position.position_id[:8]
+                                    )
+                                except Exception as rt_err:
+                                    logger.debug("[EXIT-CALLBACK] Failed to record exit in RoundTripMonitor: %s", rt_err)
+                        except Exception as submit_err:
+                            logger.error(
+                                "[EXIT-CALLBACK] Failed to submit exit order: position=%s error=%s",
+                                position.position_id[:8], submit_err, exc_info=True
+                            )
+                    
+                    # Schedule async submission
+                    import asyncio
+                    loop = asyncio.get_event_loop()
+                    loop.create_task(submit_exit())
+                    
+                except Exception as callback_err:
+                    logger.error(
+                        "[EXIT-CALLBACK] Exit intent callback failed: position=%s error=%s",
+                        position.position_id[:8], callback_err, exc_info=True
+                    )
+            
+            # Register the callback
+            monitor.register_exit_intent_callback(exit_intent_callback)
+            logger.info("[POSITION-CACHE] Registered exit intent callback with PositionMonitor")
+            
+        except Exception as init_err:
+            logger.error("[POSITION-CACHE] Failed to register exit intent callback: %s", init_err, exc_info=True)
 
     def register_tp_targets(
         self,
@@ -476,10 +608,10 @@ class KalshiPositionCache:
                 if fill_source != "hedge":
                     try:
                         from merid.event_venues.kalshi.offset_hedging import handle_fill_for_hedging
-                        from merid.services.bankroll_service import get_bankroll_service
+                        from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service
                         
-                        # Get current bankroll for hedge sizing
-                        bankroll_service = get_bankroll_service()
+                        # Get current bankroll for hedge sizing (async version)
+                        bankroll_service = await get_bankroll_service()
                         bankroll_usd = bankroll_service.get_equity() if bankroll_service else 100.0
                         
                         # Get edge from fills_ledger if available
@@ -536,15 +668,11 @@ class KalshiPositionCache:
                     sl_price = tp_targets.get("sl_price", price_cents - 5)
                     risk_cents = abs(price_cents - sl_price) if sl_price else 5
                     
-                    # Enable trailing stop if configured in profile
-                    if trailing_enabled:
-                        # Use fixed cent trailing distance from profile
-                        trailing_type = TrailingType.FIXED_CENTS
-                        trailing_param = trailing_distance_cents  # e.g., 5 cents
-                    else:
-                        # Fallback to R-multiple trailing if not configured
-                        trailing_type = TrailingType.R_MULTIPLE
-                        trailing_param = 0.5  # 0.5R trail distance
+                    # CRITICAL: Clamp trailing stops to mandatory FIXED_CENTS mode
+                    # This ensures all positions have trailing stop protection regardless of profile config
+                    # Trailing stops are mandatory for production safety
+                    trailing_type = TrailingType.FIXED_CENTS
+                    trailing_param = trailing_distance_cents  # e.g., 5 cents
                     
                     # Research: Configure scale-out target at 1.5-2R (Pay Yourself strategy)
                     # Close 50% at 1.5-2R to lock profits while letting "runner" capture larger moves
@@ -766,6 +894,53 @@ class KalshiPositionCache:
                     self._pending_tp_targets.pop(client_order_id, None)
                 if position.client_order_id:
                     self._pending_tp_targets.pop(position.client_order_id, None)
+
+            # 2026 Research-Based Risk Management: Update agent grid session tracking
+            # This integrates session limit, consecutive loss pause, and session risk cap
+            try:
+                from merid.prediction.agent_grid_15m import get_agent_grid
+                from config.kalshi_crypto_config import kalshi_ticker_to_asset
+                
+                grid = get_agent_grid()
+                if grid and grid._agents:
+                    # Extract asset from ticker
+                    asset = kalshi_ticker_to_asset(market_id)
+                    if asset and asset.upper() in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                        asset_upper = asset.upper()
+                        
+                        # Find the agent for this asset
+                        for agent in grid._agents:
+                            if agent.config.name.startswith(asset_upper):
+                                # Calculate PnL and trade risk
+                                pnl_usd = 0.0
+                                trade_risk_usd = 0.0
+                                
+                                if position is None:
+                                    # New position: calculate trade risk as contracts * price
+                                    trade_risk_usd = (contracts * price_cents) / 100.0
+                                elif position.contracts == 0:
+                                    # Position closed: calculate realized PnL
+                                    # For YES: pnl = (exit_price - entry_price) * contracts
+                                    # For NO: pnl = (entry_price - exit_price) * contracts
+                                    if position.side == "yes":
+                                        pnl_cents = price_cents - position.avg_price_cents
+                                    else:
+                                        pnl_cents = position.avg_price_cents - price_cents
+                                    pnl_usd = (pnl_cents * pre_contracts) / 100.0
+                                
+                                # Call update_cooldown_on_fill with PnL and trade risk
+                                agent.update_cooldown_on_fill(
+                                    asset=asset_upper,
+                                    pnl_usd=pnl_usd,
+                                    trade_risk_usd=trade_risk_usd
+                                )
+                                logger.info(
+                                    "[AGENT-GRID-SESSION] Updated session tracking: asset=%s pnl=%.2f trade_risk=%.2f",
+                                    asset_upper, pnl_usd, trade_risk_usd
+                                )
+                                break
+            except Exception as agent_err:
+                logger.debug("[POSITION-CACHE] Failed to update agent grid session tracking: %s", agent_err)
 
     async def update_position_price(self, market_id: str, price_cents: int) -> None:
         """Update current price and unrealized PnL when market price changes.
