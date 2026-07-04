@@ -587,7 +587,8 @@ class PositionSizer:
                 kelly_fraction = 0.0
             
             # Apply Kelly fraction with safety factor (half-Kelly)
-            kelly_fraction = max(0, min(kelly_fraction * 0.5, 0.25))  # Cap at 25%
+            # CRITICAL FIX: Cap at 2% - aligned with profile (was 25%)
+            kelly_fraction = max(0, min(kelly_fraction * 0.5, 0.02))
             
             # Position size
             position_size = kelly_fraction * signal_strength

@@ -45,21 +45,23 @@ class RiskProfile:
     
     # ═══════════════════════════════════════════════════════════════════════
     # Kelly sizing parameters
+    # CRITICAL FIX: Aligned with kalshi_crypto_15m_v2.yaml profile (2026-07-04)
+    # Profile specifies: kelly_fraction: 0.02 (2%)
     # ═══════════════════════════════════════════════════════════════════════
-    base_kelly_fraction: float = 0.20
-    """Base Kelly fraction (0.20 = 20% of full Kelly)."""
+    base_kelly_fraction: float = 0.02
+    """Base Kelly fraction (0.02 = 2% of full Kelly - aligned with profile)."""
     
-    min_kelly_fraction: float = 0.10
+    min_kelly_fraction: float = 0.01
     """Floor under stress/drawdown."""
     
-    max_kelly_fraction: float = 0.25
+    max_kelly_fraction: float = 0.03
     """Cap in favorable regimes."""
     
     # ═══════════════════════════════════════════════════════════════════════
     # Exposure limits
     # ═══════════════════════════════════════════════════════════════════════
-    max_risk_per_trade_pct: float = 0.015
-    """Maximum risk per individual trade (1.5%)."""
+    max_risk_per_trade_pct: float = 0.02
+    """Maximum risk per individual trade (2% - aligned with profile)."""
     
     max_risk_per_event_pct: float = 0.04
     """Maximum risk per event/market (4.0%)."""

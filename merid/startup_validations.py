@@ -3545,7 +3545,7 @@ def validate_kalshi_bankroll_source_consistency() -> None:
             logger.warning(f"[BANKROLL-MATRIX] Failed to get risk envelope config: {e}, skipping check")
             return
         
-        risk_envelope_bankroll_usd = envelope.max_total_notional_usd / 0.30  # Back-calculate from 30% cap
+        risk_envelope_bankroll_usd = envelope.max_total_notional_usd / 0.15  # CRITICAL FIX: 15% - aligned with profile (was 0.30)
         
         logger.info(
             "[BANKROLL-MATRIX] "

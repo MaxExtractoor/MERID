@@ -5057,7 +5057,7 @@ async def sizing_metrics_endpoint() -> Dict[str, Any]:
         try:
             from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
             risk_config = get_kalshi_risk()
-            kelly_f = float(getattr(risk_config, 'kelly_fraction', 0.05))
+            kelly_f = float(getattr(risk_config, 'kelly_fraction', 0.02))  # CRITICAL FIX: 2% - aligned with profile (was 0.05)
         except Exception:
             kelly_f = 0.02  # CRITICAL FIX: Fallback to 2% (aligned with unified risk limit, was 0.05)
         live_equity = risk_summary.get("current_equity_usd", 0)
@@ -5242,9 +5242,9 @@ async def edge_signals_endpoint(
         try:
             from merid.event_venues.kalshi.kalshi_risk import get_kalshi_risk
             risk_config = get_kalshi_risk()
-            base_kelly = float(getattr(risk_config, 'kelly_fraction', 0.30))
+            base_kelly = float(getattr(risk_config, 'kelly_fraction', 0.02))  # CRITICAL FIX: 2% - aligned with profile (was 0.30)
         except Exception:
-            base_kelly = 0.30  # Fallback to profile default if risk config unavailable
+            base_kelly = 0.02  # CRITICAL FIX: Fallback to 2% - aligned with profile (was 0.30)
         effective = base_kelly * 0.1  # Conservative effective fraction for sizing tier
 
     dd_pct = risk_summary.get("drawdown_pct", 0)
@@ -8660,7 +8660,7 @@ async def get_bracket_risk() -> Dict[str, Any]:
             "config": {
                 "max_loss_per_contract_pct": 1.0,
                 "max_loss_per_bracket_cents": 5000.0,
-                "max_contracts_per_hour": 50,
+                "max_contracts_per_hour": 20,  # CRITICAL FIX: 20 - aligned with profile (5 per 15m ≈ 20 per hour, was 50)
                 "max_notional_per_hour_cents": float(max_notional_cents),  # Derived from config sizing policy
                 "max_consecutive_losers": 5,
                 "max_unhedged_delta": 100,

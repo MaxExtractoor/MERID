@@ -752,7 +752,7 @@ class Settings(BaseSettings):
     #   - CLUSTER_STOP_PCT: 6% cluster stop (replaces KALSHI_PORTFOLIO_CLUSTER_STOP_PCT)
     # These legacy fields are kept for backward compatibility but should not be used.
     KALSHI_PORTFOLIO_MAX_NOTIONAL_PCT: float = Field(default=0.50, description="DEPRECATED - use MAX_TOTAL_RISK_PCT from core.settings")
-    KALSHI_PORTFOLIO_MAX_DAILY_LOSS_PCT: float = Field(default=0.155, description="DEPRECATED - use DAILY_LOSS_CAP_PCT from core.settings")
+    KALSHI_PORTFOLIO_MAX_DAILY_LOSS_PCT: float = Field(default=0.05, description="DEPRECATED - use DAILY_LOSS_CAP_PCT from core.settings - CRITICAL FIX: 5% aligned with profile (was 0.155)")
     KALSHI_PORTFOLIO_MAX_PER_ASSET_PCT: float = Field(default=0.16, description="DEPRECATED - use MAX_CYCLE_RISK_PCT from core.settings")
     KALSHI_PORTFOLIO_MAX_MARGIN_UTIL_PCT: float = Field(default=0.75, description="DEPRECATED - use core.settings")
     KALSHI_PORTFOLIO_CHECK_INTERVAL_S: int = Field(default=30, description="Portfolio risk check interval in seconds")
@@ -958,8 +958,10 @@ class Settings(BaseSettings):
     # =============================================================================
     # KALSHI RATE LIMIT SETTINGS (prevents fallback warning)
     # =============================================================================
-    KALSHI_MAX_ORDERS_PER_MINUTE: int = Field(default=60, description="Max orders per minute (self-throttle)")
-    KALSHI_MAX_ORDERS_PER_HOUR: int = Field(default=1000, description="Max orders per hour (self-throttle)")
+    # CRITICAL FIX: Aligned with kalshi_crypto_15m_v2.yaml profile (2026-07-04)
+    # Profile specifies: global_orders_limit: 15/min, max_orders_per_15m_window: 5
+    KALSHI_MAX_ORDERS_PER_MINUTE: int = Field(default=15, description="Max orders per minute (self-throttle) - aligned with profile")
+    KALSHI_MAX_ORDERS_PER_HOUR: int = Field(default=20, description="Max orders per hour (self-throttle) - aligned with profile (5 per 15m ≈ 20 per hour)")
 
     # =============================================================================
     # WEB SERVER SETTINGS

@@ -268,7 +268,7 @@ class GlobalExecutionGuard:
                     "[GLOBAL_GUARD] MAX_CYCLE_RISK_PCT env var = '%s'",
                     env_value
                 )
-                max_cycle_risk_pct = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.03"))  # Default 3% if not set
+                max_cycle_risk_pct = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.005"))  # CRITICAL FIX: 0.5% - aligned with profile (was 0.03)
                 bankroll_cap_usd = bankroll_usd * max_cycle_risk_pct
                 logger.info(
                     "[GLOBAL_GUARD] bankroll=$%.2f max_cycle_risk_pct=%.4f (%.1f%%) bankroll_cap_usd=$%.2f",
@@ -479,15 +479,15 @@ class GlobalExecutionGuard:
                 if bankroll_usd is None or bankroll_usd <= 0:
                     bankroll_usd = 0.0
                     bankroll_cap_usd = 0.0
-                    max_cycle_risk_pct = 0.03
+                    max_cycle_risk_pct = 0.005  # CRITICAL FIX: 0.5% - aligned with profile (was 0.03)
                 else:
                     # Read MAX_CYCLE_RISK_PCT from environment variable first (set by start_15m.ps1)
-                    max_cycle_risk_pct = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.03"))  # Default 3% if not set
+                    max_cycle_risk_pct = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.005"))  # CRITICAL FIX: 0.5% - aligned with profile (was 0.03)
                     bankroll_cap_usd = bankroll_usd * max_cycle_risk_pct
             except Exception:
                 bankroll_usd = 0.0
                 bankroll_cap_usd = 0.0
-                max_cycle_risk_pct = 0.03
+                max_cycle_risk_pct = 0.005  # CRITICAL FIX: 0.5% - aligned with profile (was 0.03)
             
             return {
                 "total_notional_usd": round(self._total_notional_usd, 2),

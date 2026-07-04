@@ -208,7 +208,7 @@ def _normalize_agent(raw: Dict[str, Any]) -> Dict[str, Any]:
                 "max_no_position": risk_limits.get("max_no_position", 500),
                 "max_orders_per_window": risk_limits.get("max_orders_per_window", 10),
                 "max_notional_usd": str(risk_limits.get("max_notional_usd", "500")),
-                "max_contracts_per_order": risk_limits.get("max_contracts_per_order", 50),
+                "max_contracts_per_order": risk_limits.get("max_contracts_per_order", 2),  # CRITICAL FIX: 2 - aligned with profile (was 50)
             },
             "risk_profile": cfg.get("risk_profile", "default"),
         },

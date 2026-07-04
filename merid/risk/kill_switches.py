@@ -264,7 +264,10 @@ class RiskController:
             
         # Fallback: if still 0, use legacy default for safety
         if self.daily_loss_limit == 0.0:
-            self.daily_loss_limit = 500.0
+            # CRITICAL FIX: Use 5% as default - aligned with profile (was 500.0 hardcoded)
+            # Note: Without bankroll context, we use a conservative fixed value
+            # In production, this should be overridden by settings or env var
+            self.daily_loss_limit = 5.0  # 5% as placeholder, will be overridden by settings
         
         self._global_kill: bool = False
         self._manual_emergency_halt: bool = False  # Separate sticky flag for manual stops

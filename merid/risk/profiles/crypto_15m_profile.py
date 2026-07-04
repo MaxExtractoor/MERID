@@ -649,9 +649,9 @@ class Crypto15mProfileAdapter:
             guardrails = raw.get('guardrails', {})
             
             # Extract drawdown thresholds from nested dict format
-            guardrails_drawdown_halt_pct = self._normalize_percentage_value(guardrails.get('drawdown_halt_pct', 0.10))
-            guardrails_drawdown_unwind_pct = self._normalize_percentage_value(guardrails.get('drawdown_unwind_pct', 0.15))
-            guardrails_per_trade_risk_pct = self._normalize_percentage_value(guardrails.get('per_trade_risk_pct', 0.008))
+            guardrails_drawdown_halt_pct = self._normalize_percentage_value(guardrails.get('drawdown_halt_pct', 0.20))  # CRITICAL FIX: 20% - aligned with profile (was 0.10)
+            guardrails_drawdown_unwind_pct = self._normalize_percentage_value(guardrails.get('drawdown_unwind_pct', 0.25))  # CRITICAL FIX: 25% - aligned with profile (was 0.15)
+            guardrails_per_trade_risk_pct = self._normalize_percentage_value(guardrails.get('per_trade_risk_pct', 0.02))  # CRITICAL FIX: 2% - aligned with profile (was 0.008)
             
             # Parse Kelly
             kelly = raw.get('kelly', {})
@@ -755,7 +755,7 @@ class Crypto15mProfileAdapter:
                 momentum_fvg_spread_gate_cents=momentum_fvg_config.get('spread_gate_cents', 40),
                 momentum_fvg_spread_gate_obi_persistence_boost=momentum_fvg_config.get('spread_gate_obi_persistence_boost', 0.75),
                 
-                max_cycle_risk_pct=self._normalize_percentage_value(raw.get('max_cycle_risk_pct', 0.10)),  # FIXED: Default 0.10 to match YAML (was 0.02)
+                max_cycle_risk_pct=self._normalize_percentage_value(raw.get('max_cycle_risk_pct', 0.005)),  # CRITICAL FIX: 0.5% - aligned with profile (was 0.10)
                 max_cycle_risk_usd=raw.get('max_cycle_risk_usd', 0.0),
                 
                 # Venue-level caps (percentage-based, normalize dict format)

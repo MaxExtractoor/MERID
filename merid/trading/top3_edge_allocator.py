@@ -255,9 +255,10 @@ class Top3SelectionSpec:
     
     # Configuration - ENV-DRIVEN (no hardcoded defaults)
     # These read from environment at runtime, defaulting only if env not set
-    # 2026 BEST PRACTICE: 3% cycle risk cap (aligned with core.settings)
-    DEFAULT_CYCLE_RISK_CAP_PCT_MIN: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MIN", "0.03"))
-    DEFAULT_CYCLE_RISK_CAP_PCT_MAX: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MAX", "0.03"))
+    # CRITICAL FIX: Aligned with kalshi_crypto_15m_v2.yaml profile (2026-07-04)
+    # Profile specifies: max_cycle_risk_pct: 0.005 (0.5%)
+    DEFAULT_CYCLE_RISK_CAP_PCT_MIN: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MIN", "0.005"))  # CRITICAL FIX: 0.5% (was 0.03)
+    DEFAULT_CYCLE_RISK_CAP_PCT_MAX: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MAX", "0.005"))  # CRITICAL FIX: 0.5% (was 0.03)
     DEFAULT_EPS: float = float(os.getenv("MERID_TOP3_EDGE_EPS", "1e-6"))
     MAX_ASSETS: int = int(os.getenv("MERID_TOP3_MAX_ASSETS", "3"))
     MIN_ALLOCATION_CENTS: int = int(os.getenv("MERID_TOP3_MIN_ALLOCATION_CENTS", "50"))  # $0.50 minimum
