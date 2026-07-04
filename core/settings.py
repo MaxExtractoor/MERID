@@ -73,7 +73,7 @@ MAX_TOTAL_RISK_PCT: float = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.15"))  # 15
 
 # Daily and cluster risk caps (auto-scale with bankroll)
 # DAILY_LOSS_CAP_PCT = 5% of bankroll (2026 best practice - halt trading)
-DAILY_LOSS_CAP_PCT: float = float(os.getenv("DAILY_LOSS_CAP_PCT", "0.05"))  # 5% default (2026 best practice)
+DAILY_LOSS_CAP_PCT: float = float(os.getenv("DAILY_LOSS_CAP_PCT", "0.20"))  # 20% default (aligned with drawdown halt)
 # CLUSTER_STOP_PCT = DAILY_LOSS_CAP_PCT / 2 = 2.5%
 CLUSTER_STOP_PCT: float = float(os.getenv("CLUSTER_STOP_PCT", "0.025"))  # 2.5% default
 

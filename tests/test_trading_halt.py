@@ -31,7 +31,7 @@ class TestTradingHaltManager(unittest.TestCase):
 
     def setUp(self):
         self.mgr = TradingHaltManager(
-            max_daily_loss_pct=0.05,
+            max_daily_loss_pct=0.20,  # CRITICAL FIX: 20% aligned with drawdown halt
             max_drawdown_pct=0.15,
             circuit_breaker_halt_threshold=2,
         )
@@ -99,7 +99,7 @@ class TestDailyLossAutoHalt(unittest.TestCase):
     """Daily loss breach → auto-halt."""
 
     def setUp(self):
-        self.mgr = TradingHaltManager(max_daily_loss_pct=0.05)
+        self.mgr = TradingHaltManager(max_daily_loss_pct=0.20)  # CRITICAL FIX: 20% aligned with drawdown halt
 
     def test_loss_below_threshold_no_halt(self):
         halted = self.mgr.check_daily_loss(-400, 10000)  # 4%

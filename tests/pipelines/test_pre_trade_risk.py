@@ -187,7 +187,7 @@ class TestPreTradeRiskChecker:
     
     def test_check_daily_loss_cap_veto(self):
         """Test veto when daily loss cap exceeded."""
-        checker = PreTradeRiskChecker(max_daily_loss_pct=0.05)
+        checker = PreTradeRiskChecker(max_daily_loss_pct=0.20)  # CRITICAL FIX: 20% aligned with drawdown halt
         
         decision = TradeDecision(
             asset="BTC",
@@ -214,7 +214,7 @@ class TestPreTradeRiskChecker:
     
     def test_check_daily_loss_cap_pass(self):
         """Test passes when under daily loss cap."""
-        checker = PreTradeRiskChecker(max_daily_loss_pct=0.05)
+        checker = PreTradeRiskChecker(max_daily_loss_pct=0.20)  # CRITICAL FIX: 20% aligned with drawdown halt
         
         decision = TradeDecision(
             asset="BTC",

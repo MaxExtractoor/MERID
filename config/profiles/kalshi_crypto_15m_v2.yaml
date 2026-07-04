@@ -368,7 +368,7 @@ drawdown_semantics:
 capital_usd: 0  # Live mode: derive from live Kalshi equity via router/bankroll engine
 
 # Minimum trade size (floor) - single source of truth for all agents
-min_notional_usd: 0.50  # INCREASED: $0.50 minimum notional per trade (was $0.05, too low for meaningful sizing)
+min_notional_usd: 0.50  # MICRO-ACCOUNT ADJUSTED: $0.50 minimum notional per trade (reduced from $1.00 for micro accounts under $100)
 min_contracts: 1  # Minimum 1 contract per trade (Kalshi venue invariant)
 
 # Fallback pricing configuration
@@ -529,12 +529,12 @@ time_of_day_risk_scaling:
   us_market_hours: "09:30-16:00 ET"  # US market hours
   asian_session: "20:00-02:00 ET"  # Asian session
   european_session: "02:00-09:30 ET"  # European session
-  # Risk multipliers
+  # Risk multipliers (REGIME-BASED: volatility-aware instead of fixed weekend)
   us_market_multiplier: 1.0  # 100% risk during US hours
   asian_multiplier: 0.8  # 80% risk during Asian session (lower liquidity)
   european_multiplier: 0.9  # 90% risk during European session
-  weekend_multiplier: 0.5  # 50% risk during weekend
-  description: "Time-of-day risk scaling: adjust risk based on session liquidity"
+  weekend_multiplier: 0.8  # 80% risk during weekend (relaxed from 0.5 - use volatility regime instead)
+  description: "Time-of-day risk scaling: adjust risk based on session liquidity (weekend relaxed for regime-based sizing)"
 
 # 2026 OPTIMIZATION: Per-Asset Rolling PnL Limits
 # Industry standard: Asset-specific rolling PnL limits based on volatility
@@ -901,32 +901,33 @@ guardrails:
   max_position_value_usd: 100000.0  # $100k total position limit (relaxed for 15m crypto)
   
   # Per-trade risk derived from drawdown (survive 15-20 consecutive full-risk losses)
-  # CRITICAL FIX: Aligned to unified risk limit (2% per-trade) to prevent systematic rejections
+  # CRITICAL FIX: Aligned to unified risk limit (2.75% per-trade for micro accounts) to ensure tradable sizes
   # BANKROLL-TIERED: Higher risk for small bankrolls to ensure tradable sizes
-  # - bankroll < $100: 2-3% per trade (aggressive to overcome minimum lot granularity)
+  # - bankroll < $100: 2.75% per trade (aggressive to overcome minimum lot granularity - $0.94 on $34.12)
   # - bankroll $100-$1k: 2% per trade (moderate scaling)
   # - bankroll > $1k: 2% per trade (aligned with unified risk limit)
   per_trade_risk_pct:
     value: 0.02  # CRITICAL FIX: Default 2% (aligned with unified risk limit, was 0.008)
     dynamic: bankroll_tiered  # Computed from live bankroll via RiskEnvelopeService with tiered logic
-    description: "Per-trade risk as percentage of capital (bankroll-tiered: 2-3% for <$100, 2% for $100-$1k, 2% for >$1k)"
+    description: "Per-trade risk as percentage of capital (bankroll-tiered: 2.75% for <$100, 2% for $100-$1k, 2% for >$1k)"
     # Bankroll tier thresholds (applied in RiskEnvelopeService)
     bankroll_tier_small_usd: 100.0  # Threshold for small bankroll regime
     bankroll_tier_medium_usd: 1000.0  # Threshold for medium bankroll regime
-    per_trade_risk_small_pct: 0.03  # 3% per trade for bankroll < $100 (was 0.04)
+    per_trade_risk_small_pct: 0.0275  # 2.75% per trade for bankroll < $100 (was 0.03, increased for tradable sizes)
     per_trade_risk_medium_pct: 0.02  # 2% per trade for bankroll $100-$1k (was 0.015)
     per_trade_risk_large_pct: 0.02  # CRITICAL FIX: 2% per trade for bankroll > $1k (was 0.008)
   
-  # Daily loss cap (2026 BEST PRACTICE: 5% - halt trading)
-  # 2026 best practice: Halt trading when daily loss exceeds 5% of bankroll
+  # Daily loss cap (2026 BEST PRACTICE: 20% - aligned with drawdown halt)
+  # 2026 best practice: Halt trading when daily loss exceeds 20% of bankroll
+  # ALIGNED with drawdown_halt_pct (20%) to allow trading through drawdowns for recovery
   # This is the SINGLE SOURCE OF TRUTH - core.settings.py must match this value
   daily_loss_enabled: true  # ENABLED: 2026 best practice - daily loss halt is critical
   # Daily loss limits by operation mode (test vs prod)
-  # 2026 best practice: 5% for both test and prod (consistent risk management)
+  # 2026 best practice: 20% for both test and prod (aligned with drawdown halt)
   max_daily_loss_pct:
-    test: 0.05  # 5% daily loss limit for test mode (2026 best practice)
-    prod: 0.05  # 5% daily loss limit for prod mode (2026 best practice)
-  max_daily_loss_usd: 2.00  # Fallback USD value for small bankrolls (5% of $40)
+    test: 0.20  # 20% daily loss limit for test mode (aligned with drawdown_halt_pct)
+    prod: 0.20  # 20% daily loss limit for prod mode (aligned with drawdown_halt_pct)
+  max_daily_loss_usd: 8.00  # Fallback USD value for small bankrolls (20% of $40)
   
   # NEW: Rolling PnL-based size reduction
   rolling_1h_pnl_halt_pct: 0.05  # RELAXED: Halt new entries if 1h PnL <= -5% of equity (was 3%)

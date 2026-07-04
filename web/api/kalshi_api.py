@@ -4348,7 +4348,7 @@ async def get_risk() -> Dict[str, Any]:
     # DYNAMIC: Get defaults from settings instead of hardcoded fallbacks
     from merid.settings import settings as _gate_settings
     _default_max_exp = getattr(_gate_settings, 'MAX_NOTIONAL_USD', 5000)
-    _default_daily_loss_limit = getattr(_gate_settings, 'MAX_DAILY_LOSS_USD', 500)
+    _default_daily_loss_limit = getattr(_gate_settings, 'MAX_DAILY_LOSS_USD', 2000)  # CRITICAL FIX: Updated from 500 to 2000 (20% of $10k baseline)
     
     base.setdefault("total_exposure", base.get("total_notional_usd", 0))
     base.setdefault("max_exposure", base.get("limits", {}).get("max_notional_usd", _default_max_exp))

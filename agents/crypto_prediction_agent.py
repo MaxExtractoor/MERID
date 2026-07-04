@@ -365,7 +365,7 @@ class CryptoPredictionAgent(AgentInterface):
             risk_limits = {
                 "max_position_size": self.max_position_size,
                 "max_risk_per_trade": 0.02,  # 2% max risk per trade
-                "max_daily_loss": 0.05  # 5% max daily loss
+                "max_daily_loss": 0.20  # 20% max daily loss (aligned with drawdown halt)
             }
             
             return DecisionContext(
@@ -719,9 +719,10 @@ class CryptoPredictionAgent(AgentInterface):
             confidence = outcome.get("confidence", 0.5)
             
             # Adjust confidence threshold based on performance
+            # FIX: Constrain floor to 0.65 (production config) to prevent bypassing guardrails
             if success and confidence > 0.8:
                 # Successful high-confidence prediction - slightly lower threshold
-                self.confidence_threshold = max(0.4, self.confidence_threshold - 0.01)
+                self.confidence_threshold = max(0.65, self.confidence_threshold - 0.01)  # Floor at 0.65 (was 0.40)
             elif not success and confidence > 0.8:
                 # Failed high-confidence prediction - raise threshold
                 self.confidence_threshold = min(0.8, self.confidence_threshold + 0.01)
