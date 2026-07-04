@@ -837,7 +837,7 @@ edge_bands:
 # Research findings: 15m markets have spreads 2-5c, profitable edge 1-2% post-fee
 # Reference: https://www.indiehackers.com/post/building-a-stable-15-minute-trading-bot-for-polymarket-crypto-up-down-markets-563a14e882
 guardrails:
-  max_spread_cents: 15  # 2026-07-04: Unified to 15c based on 2026 industry research (liquid: 1-3c, medium: 3-8c, thin: 10-30c) - eliminates 20c/50c conflicts
+  max_spread_cents: 50  # 2026-07-04: Increased to 50c based on 2026 research (altcoin spreads 5-30% per Kalena)
   max_slippage_cents: 5  # INCREASED: Max 5 cents worse than best (research: 2-5c slippage acceptable for 15m markets)
   # CRITICAL FIX: Removed min_depth_contracts - use per-asset depth thresholds instead (single source of truth)
   # min_depth_contracts: 2  # REMOVED - inconsistent with per-asset min_depth_yes/min_depth_no values
