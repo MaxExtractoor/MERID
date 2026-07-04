@@ -53,6 +53,12 @@ class TakeProfitPlan:
     tp_level: TakeProfitLevel
     trailing_trigger_r: Optional[float] = None  # When to start trailing (e.g., 1.0R)
     trailing_distance_r: Optional[float] = None  # Trailing stop distance in R
+    # Ratchet profit floor parameters (research-backed profit locking)
+    ratchet_enabled: bool = False  # Whether ratchet is enabled for this position
+    ratchet_activation_threshold_cents: int = 85  # Price threshold to activate ratchet
+    ratchet_floor_offset_cents: int = 5  # Floor offset below activation
+    ratchet_force_exit_on_breach: bool = True  # Mandatory exit on floor breach
+    ratchet_min_hold_after_activation_sec: int = 30  # Minimum hold after activation
     
     def to_dict(self) -> dict:
         return {
@@ -61,6 +67,11 @@ class TakeProfitPlan:
             "tp_level": self.tp_level.value,
             "trailing_trigger_r": self.trailing_trigger_r,
             "trailing_distance_r": self.trailing_distance_r,
+            "ratchet_enabled": self.ratchet_enabled,
+            "ratchet_activation_threshold_cents": self.ratchet_activation_threshold_cents,
+            "ratchet_floor_offset_cents": self.ratchet_floor_offset_cents,
+            "ratchet_force_exit_on_breach": self.ratchet_force_exit_on_breach,
+            "ratchet_min_hold_after_activation_sec": self.ratchet_min_hold_after_activation_sec,
         }
 
 
@@ -104,6 +115,11 @@ class DynamicTakeProfitEngine:
         kelly_fraction: Optional[float] = None,
         use_60_70_rule: bool = True,  # Enable 60-70% profit capture rule
         time_to_expiry_seconds: Optional[float] = None,  # For TTE compression
+        ratchet_enabled: bool = True,  # Enable ratchet profit floor
+        ratchet_activation_threshold_cents: int = 85,
+        ratchet_floor_offset_cents: int = 5,
+        ratchet_force_exit_on_breach: bool = True,
+        ratchet_min_hold_after_activation_sec: int = 30,
     ) -> TakeProfitPlan:
         """Compute dynamic take-profit price based on R-multiple and confidence.
         
@@ -191,6 +207,11 @@ class DynamicTakeProfitEngine:
             tp_level=tp_level,
             trailing_trigger_r=trail_trigger,
             trailing_distance_r=trail_distance,
+            ratchet_enabled=ratchet_enabled,
+            ratchet_activation_threshold_cents=ratchet_activation_threshold_cents,
+            ratchet_floor_offset_cents=ratchet_floor_offset_cents,
+            ratchet_force_exit_on_breach=ratchet_force_exit_on_breach,
+            ratchet_min_hold_after_activation_sec=ratchet_min_hold_after_activation_sec,
         )
     
     def _apply_60_70_rule(
@@ -428,6 +449,99 @@ class DynamicTakeProfitEngine:
             return current_price - trail_offset
         else:
             return current_price + trail_offset
+    
+    def should_activate_ratchet(
+        self,
+        current_price_cents: int,
+        direction: str,
+        plan: TakeProfitPlan,
+    ) -> bool:
+        """Check if ratchet should be activated based on current price.
+        
+        Args:
+            current_price_cents: Current market price in cents
+            direction: 'LONG' or 'SHORT'
+            plan: Take-profit plan with ratchet parameters
+            
+        Returns:
+            True if ratchet should be activated
+        """
+        if not plan.ratchet_enabled:
+            return False
+        
+        threshold = plan.ratchet_activation_threshold_cents
+        direction_upper = direction.upper()
+        
+        if direction_upper == 'LONG':
+            # For YES: activate when price >= threshold
+            return current_price_cents >= threshold
+        else:  # SHORT
+            # For NO: activate when price <= threshold (lower is better)
+            return current_price_cents <= threshold
+    
+    def compute_ratchet_floor(
+        self,
+        activation_price_cents: int,
+        plan: TakeProfitPlan,
+        direction: str = "LONG",
+    ) -> int:
+        """Compute the ratchet floor price based on activation price.
+        
+        Args:
+            activation_price_cents: Price at which ratchet activated
+            plan: Take-profit plan with ratchet parameters
+            direction: "LONG" for YES, "SHORT" for NO
+            
+        Returns:
+            Floor price in cents (never changes once set)
+        """
+        offset = plan.ratchet_floor_offset_cents
+        
+        if direction.upper() == 'LONG':
+            # For YES: floor is below activation (exit if price drops)
+            floor = activation_price_cents - offset
+        else:  # SHORT
+            # For NO: floor is above activation (exit if price rises)
+            floor = activation_price_cents + offset
+            
+        return max(1, min(99, floor))  # Clamp to valid Kalshi range [1, 99]
+    
+    def should_exit_on_ratchet_floor(
+        self,
+        current_price_cents: int,
+        floor_price_cents: int,
+        direction: str,
+        activation_timestamp: Optional[float] = None,
+        min_hold_seconds: int = 30,
+    ) -> bool:
+        """Check if position should exit due to ratchet floor breach.
+        
+        Args:
+            current_price_cents: Current market price in cents
+            floor_price_cents: Ratchet floor price in cents
+            direction: 'LONG' or 'SHORT'
+            activation_timestamp: Unix timestamp when ratchet activated (optional)
+            min_hold_seconds: Minimum seconds to hold after activation
+            
+        Returns:
+            True if should exit due to floor breach
+        """
+        import time
+        
+        # Check minimum hold time to prevent noise-triggered exits
+        if activation_timestamp is not None:
+            elapsed = time.time() - activation_timestamp
+            if elapsed < min_hold_seconds:
+                return False
+        
+        direction_upper = direction.upper()
+        
+        if direction_upper == 'LONG':
+            # For YES: exit if price drops to or below floor
+            return current_price_cents <= floor_price_cents
+        else:  # SHORT
+            # For NO: exit if price rises to or above floor
+            return current_price_cents >= floor_price_cents
 
 
 # Singleton instance for convenience

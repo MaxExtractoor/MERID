@@ -3227,12 +3227,38 @@ async def place_order(
                 if confidence is None:
                     confidence = 0.5
                 
-                # Compute dynamic TP
+                # Compute dynamic TP with ratchet parameters from profile
+                from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
+                
+                ratchet_enabled = True
+                ratchet_activation_threshold_cents = 85
+                ratchet_floor_offset_cents = 5
+                ratchet_force_exit_on_breach = True
+                ratchet_min_hold_after_activation_sec = 30
+                
+                # Load ratchet config from profile if available
+                if is_profile_active():
+                    try:
+                        profile_adapter = get_active_profile()
+                        profile = profile_adapter.profile
+                        ratchet_enabled = profile.ratchet_profit_floor_enabled
+                        ratchet_activation_threshold_cents = profile.ratchet_activation_threshold_cents
+                        ratchet_floor_offset_cents = profile.ratchet_floor_offset_cents
+                        ratchet_force_exit_on_breach = profile.ratchet_force_exit_on_floor_breach
+                        ratchet_min_hold_after_activation_sec = profile.ratchet_min_hold_after_activation_sec
+                    except Exception as profile_exc:
+                        logger.warning("[API-TP] Failed to load ratchet config from profile: %s", profile_exc)
+                
                 tp_plan = engine.compute_tp(
                     entry_price=price_cents / 100.0,  # Convert to decimal
                     stop_price=stop_loss_price_cents / 100.0,
                     direction="LONG" if side == "yes" else "SHORT",
                     confidence=confidence,
+                    ratchet_enabled=ratchet_enabled,
+                    ratchet_activation_threshold_cents=ratchet_activation_threshold_cents,
+                    ratchet_floor_offset_cents=ratchet_floor_offset_cents,
+                    ratchet_force_exit_on_breach=ratchet_force_exit_on_breach,
+                    ratchet_min_hold_after_activation_sec=ratchet_min_hold_after_activation_sec,
                 )
                 
                 # Convert TP price back to cents and set as R-multiple for routing

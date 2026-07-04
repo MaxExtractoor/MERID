@@ -194,6 +194,17 @@ trailing_stop:
   activation_delay_sec: 30  # Wait 30s before activating
   description: "Trailing stop: lock in profits as price moves favorably"
 
+# Ratchet Profit Floor Configuration
+# Research-backed mechanism to lock in profits when price reaches high threshold
+# Prevents giving back significant gains when 99¢ TP is not guaranteed
+ratchet_profit_floor:
+  enabled: true  # Enable ratchet profit floor mechanism
+  activation_threshold_cents: 85  # Activate ratchet when price hits this threshold
+  floor_offset_cents: 5  # Set floor X cents below activation (e.g., 85¢ activation → 80¢ floor)
+  force_exit_on_floor_breach: true  # Mandatory exit if price drops to floor
+  min_hold_after_activation_sec: 30  # Prevent immediate exit on noise (seconds)
+  description: "Ratchet profit floor: lock in profits at high price thresholds to prevent giving back gains"
+
 # Staged Time-Based Exit Configuration
 # Partial exits at time intervals for volatile markets
 staged_time_exit:

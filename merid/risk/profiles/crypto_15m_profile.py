@@ -317,6 +317,15 @@ class Crypto15mProfile:
     trailing_stop_min_profit_cents: int = 12  # Updated from 3 to 12 (align with 2026 research: 10-15¢ threshold to avoid noise-triggered exits)
     trailing_stop_activation_delay_sec: int = 30
     
+    # Position Management: Ratchet Profit Floor Configuration
+    # Research-backed mechanism to lock in profits when price reaches high threshold
+    # Prevents giving back significant gains when 99¢ TP is not guaranteed
+    ratchet_profit_floor_enabled: bool = True  # Enable ratchet profit floor mechanism
+    ratchet_activation_threshold_cents: int = 85  # Activate ratchet when price hits this threshold
+    ratchet_floor_offset_cents: int = 5  # Set floor X cents below activation (e.g., 85¢ activation → 80¢ floor)
+    ratchet_force_exit_on_floor_breach: bool = True  # Mandatory exit if price drops to floor
+    ratchet_min_hold_after_activation_sec: int = 30  # Prevent immediate exit on noise (seconds)
+    
     # Position Management: Dynamic Sizing Configuration
     dynamic_sizing_enabled: bool = False
     dynamic_sizing_base_contracts: int = 1
@@ -933,6 +942,12 @@ class Crypto15mProfileAdapter:
                 trailing_stop_trailing_distance_cents=raw.get('trailing_stop', {}).get('trailing_distance_cents', 5),
                 trailing_stop_min_profit_cents=raw.get('trailing_stop', {}).get('min_profit_cents', 3),
                 trailing_stop_activation_delay_sec=raw.get('trailing_stop', {}).get('activation_delay_sec', 30),
+                # Position Management: Ratchet Profit Floor Configuration
+                ratchet_profit_floor_enabled=raw.get('ratchet_profit_floor', {}).get('enabled', True),
+                ratchet_activation_threshold_cents=raw.get('ratchet_profit_floor', {}).get('activation_threshold_cents', 85),
+                ratchet_floor_offset_cents=raw.get('ratchet_profit_floor', {}).get('floor_offset_cents', 5),
+                ratchet_force_exit_on_floor_breach=raw.get('ratchet_profit_floor', {}).get('force_exit_on_floor_breach', True),
+                ratchet_min_hold_after_activation_sec=raw.get('ratchet_profit_floor', {}).get('min_hold_after_activation_sec', 30),
                 # Position Management: Dynamic Sizing Configuration
                 dynamic_sizing_enabled=raw.get('dynamic_sizing', {}).get('enabled', False),
                 dynamic_sizing_base_contracts=raw.get('dynamic_sizing', {}).get('base_contracts', 1),
