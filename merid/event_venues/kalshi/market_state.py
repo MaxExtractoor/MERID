@@ -4113,6 +4113,11 @@ class KalshiMarketStateStore:
             + (best_ask[1] if best_ask else 0)
         )
 
+        # Initialize depth variables
+        yes_depth = 0
+        no_depth = 0
+        depth_10c = 0
+
         if mid is not None:
             lo = int(mid) - _DEPTH_WINDOW_CENTS
             hi = int(mid) + _DEPTH_WINDOW_CENTS
@@ -4125,11 +4130,11 @@ class KalshiMarketStateStore:
             no_hi = 100 - lo
             no_depth = sum(sz for p, sz in ob.no_levels.items() if no_lo <= p <= no_hi)
             depth_10c = yes_depth + no_depth
-        else:
-            depth_10c = 0
 
         state.top_of_book_size = top_of_book_size
         state.depth_10c = depth_10c
+        state.depth_10c_yes = yes_depth
+        state.depth_10c_no = no_depth
         
         # AUDIT: Populate new liquidity audit fields
         state.last_update_ts = time.monotonic()
