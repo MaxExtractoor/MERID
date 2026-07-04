@@ -53,13 +53,17 @@ logger = get_logger("merid.risk.unified_risk_manager")
 
 @dataclass
 class RiskLimits:
-    """Risk limits loaded from config/risk_limits.yaml."""
+    """Risk limits loaded from config/risk_limits.yaml.
     
-    # Bankroll-based limits
-    max_cycle_risk_pct: float = 0.25
-    max_total_risk_pct: float = 0.30
-    daily_loss_pct: float = 0.03
-    cluster_stop_pct: float = 0.015
+    CRITICAL FIX: Defaults aligned with kalshi_crypto_15m_v2 profile YAML
+    to ensure single source of truth across all risk components.
+    """
+    
+    # Bankroll-based limits (aligned with profile YAML)
+    max_cycle_risk_pct: float = 0.005  # 0.5% (was 0.25 - aligned with profile)
+    max_total_risk_pct: float = 0.15  # 15% (was 0.30 - aligned with profile)
+    daily_loss_pct: float = 0.05  # 5% (was 0.03 - aligned with profile)
+    cluster_stop_pct: float = 0.025
     
     # Category caps
     category_crypto_max_notional_pct: float = 0.30
@@ -73,13 +77,13 @@ class RiskLimits:
     per_asset_enabled: bool = False
     per_asset_min_cap_usd: float = 5.0
     
-    # Per-trade limits
-    per_trade_max_notional_pct: float = 0.05
-    per_trade_max_contracts: int = 10
+    # Per-trade limits (aligned with profile YAML)
+    per_trade_max_notional_pct: float = 0.02  # 2% (was 0.05 - aligned with profile)
+    per_trade_max_contracts: int = 2  # CRITICAL FIX: Aligned with profile per-asset max_contracts (was 10)
     
-    # Drawdown limits
-    drawdown_halt_pct: float = 0.10
-    drawdown_unwind_pct: float = 0.15
+    # Drawdown limits (aligned with profile YAML)
+    drawdown_halt_pct: float = 0.20  # 20% (was 0.10 - aligned with profile)
+    drawdown_unwind_pct: float = 0.25  # 25% (was 0.15 - aligned with profile)
     
     # Rate limiting
     rate_limit_max_trades_per_hour: int = 20
@@ -179,10 +183,10 @@ class UnifiedRiskManager:
             
             # Bankroll limits
             if 'bankroll' in config:
-                limits.max_cycle_risk_pct = config['bankroll'].get('max_cycle_risk_pct', 0.25)
-                limits.max_total_risk_pct = config['bankroll'].get('max_total_risk_pct', 0.30)
-                limits.daily_loss_pct = config['bankroll'].get('daily_loss_pct', 0.03)
-                limits.cluster_stop_pct = config['bankroll'].get('cluster_stop_pct', 0.015)
+                limits.max_cycle_risk_pct = config['bankroll'].get('max_cycle_risk_pct', 0.005)  # CRITICAL FIX: 0.5% - aligned with profile (was 0.25)
+                limits.max_total_risk_pct = config['bankroll'].get('max_total_risk_pct', 0.15)  # CRITICAL FIX: 15% - aligned with profile (was 0.30)
+                limits.daily_loss_pct = config['bankroll'].get('daily_loss_pct', 0.05)  # CRITICAL FIX: 5% - aligned with profile (was 0.03)
+                limits.cluster_stop_pct = config['bankroll'].get('cluster_stop_pct', 0.025)  # CRITICAL FIX: 2.5% - aligned with profile (was 0.015)
             
             # Category caps
             if 'categories' in config and 'crypto' in config['categories']:
@@ -201,13 +205,13 @@ class UnifiedRiskManager:
             
             # Per-trade limits
             if 'per_trade' in config:
-                limits.per_trade_max_notional_pct = config['per_trade'].get('max_notional_pct', 0.05)
+                limits.per_trade_max_notional_pct = config['per_trade'].get('max_notional_pct', 0.02)  # CRITICAL FIX: 2% - aligned with profile (was 0.05)
                 limits.per_trade_max_contracts = config['per_trade'].get('max_contracts', 10)
             
             # Drawdown limits
             if 'drawdown' in config:
-                limits.drawdown_halt_pct = config['drawdown'].get('halt_pct', 0.10)
-                limits.drawdown_unwind_pct = config['drawdown'].get('unwind_pct', 0.15)
+                limits.drawdown_halt_pct = config['drawdown'].get('halt_pct', 0.20)  # CRITICAL FIX: 20% - aligned with profile (was 0.10)
+                limits.drawdown_unwind_pct = config['drawdown'].get('unwind_pct', 0.25)  # CRITICAL FIX: 25% - aligned with profile (was 0.15)
             
             # Rate limiting
             if 'rate_limit' in config:

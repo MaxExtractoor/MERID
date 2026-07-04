@@ -61,14 +61,14 @@ def enable_high_performance_mode(
     os.environ["MERID_HP_WIN_RATE_TARGET"] = str(int(win_rate_target * 100))
     
     if aggressive_sizing:
-        os.environ["MERID_KELLY_FRACTION"] = "0.30"
+        os.environ["MERID_KELLY_FRACTION"] = "0.02"  # CRITICAL FIX: 2% - aligned with kalshi_crypto_15m_v2.yaml (2026-07-04)
     
     if strict_round_trip_limits:
         os.environ["MERID_STRICT_ROUND_TRIPS"] = "1"
     
     logger.info(
         f"🚀 HIGH-PERFORMANCE MODE ENABLED: Target win rate {win_rate_target:.0%}, "
-        f"Kelly {0.30 if aggressive_sizing else 0.25}, "
+        f"Kelly {0.02 if aggressive_sizing else 0.25}, "
         f"Strict round-trip limits: {strict_round_trip_limits}"
     )
 

@@ -4,12 +4,15 @@ DEPRECATED: This module is deprecated in favor of UnifiedRiskManager.
 Use merid.risk.unified_risk_manager instead.
 
 All risk management has been consolidated into a single source of truth:
-- Configuration: config/risk_limits.yaml
+- Configuration: config/profiles/kalshi_crypto_15m_v2.yaml (for 15m Kalshi)
 - Implementation: merid.risk.unified_risk_manager.UnifiedRiskManager
 - Single entry point: check_order() method
 
 This module is kept for backward compatibility but will be removed in a future release.
 New code should use UnifiedRiskManager for all risk checks.
+
+CRITICAL: For kalshi_crypto_15m_v2 profile, risk parameters are loaded from profile YAML.
+This module's defaults (6% cycle risk, 6% total risk) are NOT used by the 15m production stack.
 
 ---
 
@@ -48,6 +51,14 @@ import warnings
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Callable, Optional, Tuple
+
+# Emit deprecation warning when module is imported
+warnings.warn(
+    "GlobalRiskGuard is DEPRECATED. Use UnifiedRiskManager instead. "
+    "For kalshi_crypto_15m_v2 profile, risk parameters are loaded from profile YAML.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 from utils.logger import get_logger
 from merid.utils.logging_helpers import log_guardrail_check, log_risk_check, log_trading_operation
@@ -97,8 +108,8 @@ class GlobalRiskGuard:
 
     def __init__(
         self,
-        max_cycle_risk_pct: float = 0.06,  # 2026 best practice: 6% per cycle (increased to allow multi-asset trading)
-        max_total_risk_pct: float = 0.06,  # 2026 best practice: 6% total
+        max_cycle_risk_pct: float = 0.005,  # CRITICAL FIX: 0.5% per cycle - aligned with kalshi_crypto_15m_v2.yaml (2026-07-04)
+        max_total_risk_pct: float = 0.15,  # CRITICAL FIX: 15% total - aligned with kalshi_crypto_15m_v2.yaml (2026-07-04)
         scalper_single_batch_mode: bool = False,
         max_trades_per_batch: int = 3,
     ) -> None:
@@ -627,8 +638,9 @@ def _load_canonical_pcts() -> Tuple[float, float]:
     try:
         # CRITICAL FIX: Read from environment variable first (set by start_15m.ps1)
         # This ensures GlobalRiskGuard uses the same cap as KalshiRiskConfig
-        cycle = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.05"))  # 5% default (matches profile)
-        total = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.08"))  # 8% default
+        # Aligned with kalshi_crypto_15m_v2.yaml (2026-07-04)
+        cycle = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.005"))  # 0.5% default - aligned with profile
+        total = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.15"))  # 15% default - aligned with profile
         logger.info(
             "[GLOBAL-RISK-GUARD] Loaded pcts from env: cycle=%.4f (%.2f%%) total=%.4f (%.2f%%)",
             cycle, cycle * 100, total, total * 100

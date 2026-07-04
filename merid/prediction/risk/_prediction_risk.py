@@ -1143,9 +1143,9 @@ class CycleCapConfig:
     Bankroll MUST come from live Kalshi API via bankroll_service_v2.
     NO hardcoded fallbacks permitted - fail closed if bankroll unavailable.
     
-    UNIFIED 3%/6% RISK REGIME (2026-06-28): Aligned with MAX_CYCLE_RISK_PCT/MAX_TOTAL_RISK_PCT from core.settings
+    UNIFIED 0.5%/15% RISK REGIME (2026-07-04): Aligned with kalshi_crypto_15m_v2.yaml profile
     """
-    max_cycle_risk_pct: float = 0.03  # 3% of bankroll per cycle (2026 best practice)
+    max_cycle_risk_pct: float = 0.005  # 0.5% of bankroll per cycle - aligned with profile (was 0.03)
     bankroll_source: str = "live"  # "live" = from bankroll service ONLY
 
 

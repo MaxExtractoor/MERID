@@ -54,20 +54,22 @@ USE_TOPN_ALLOCATOR: bool = str(os.getenv("USE_TOPN_ALLOCATOR", "true")).lower() 
 #   - Risk management as platform-level infrastructure
 #
 # Configuration:
-#   - MAX_CYCLE_RISK_PCT: 3% of bankroll per cycle (allows 2-3 agents to trade simultaneously)
-#   - MAX_TOTAL_RISK_PCT: 6% of bankroll total (allows 2 concurrent cycles of exposure)
+#   - MAX_CYCLE_RISK_PCT: 0.5% of bankroll per cycle (aligned with kalshi_crypto_15m_v2.yaml)
+#   - MAX_TOTAL_RISK_PCT: 15% of bankroll total (aligned with kalshi_crypto_15m_v2.yaml)
 #   - DAILY_LOSS_CAP_PCT: 5% of bankroll (2026 best practice - halt trading)
 #   - CLUSTER_STOP_PCT: 3% of bankroll (half of daily cap)
 #
 # With $40 equity:
-#   - Cycle cap: $1.20 (3%) → 2-3 contract winners at 50c/contract
-#   - Total cap: $2.40 (6%) → allows multi-cycle concurrent exposure
+#   - Cycle cap: $0.20 (0.5%) → conservative for 5-second cycles
+#   - Total cap: $6.00 (15%) → production safety cap
 #   - Daily loss: $2.00 (5%) → automatic halt trigger
 # ═══════════════════════════════════════════════════════════════════════════
-_DEFAULT_CYCLE_RISK_PCT = "0.03"  # 3% per cycle - 2026 best practice
-# Read from env var to allow profile-driven configuration (but default to 2026 best practice)
+# CRITICAL FIX: Aligned with kalshi_crypto_15m_v2.yaml profile (2026-07-04)
+# Profile specifies: max_cycle_risk_pct: 0.005 (0.5%), max_total_risk_pct: 0.15 (15%)
+_DEFAULT_CYCLE_RISK_PCT = "0.005"  # 0.5% per cycle - aligned with profile
+# Read from env var to allow profile-driven configuration (but default to profile value)
 MAX_CYCLE_RISK_PCT: float = float(os.getenv("MAX_CYCLE_RISK_PCT", _DEFAULT_CYCLE_RISK_PCT))
-MAX_TOTAL_RISK_PCT: float = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.06"))  # 6% total max (2026 best practice)
+MAX_TOTAL_RISK_PCT: float = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.15"))  # 15% total max - aligned with profile
 
 # Daily and cluster risk caps (auto-scale with bankroll)
 # DAILY_LOSS_CAP_PCT = 5% of bankroll (2026 best practice - halt trading)
