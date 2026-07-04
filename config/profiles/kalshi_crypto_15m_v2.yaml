@@ -1322,7 +1322,7 @@ fee_aware_edge:
 # 50c threshold blocks extreme data quality issues (82-91c spreads with YES ask=99c) while allowing normal trading
 market_microstructure:
   enabled: true  # Enable market microstructure filters
-  max_spread_cents: 15  # 2026-07-04: Unified to 15c based on 2026 industry research (liquid: 1-3c, medium: 3-8c, thin: 10-30c) - eliminates spread gating conflicts
+  max_spread_cents: 50  # 2026-07-04: Increased to 50c based on 2026 research (altcoin spreads 5-30% per Kalena)
   min_depth_usd: 50  # Require >$50 within 3 cents of mid price (reduced from $200 for single-contract trading)
   min_yes_depth: 1  # Minimum YES depth threshold
   min_no_depth: 1  # Minimum NO depth threshold
