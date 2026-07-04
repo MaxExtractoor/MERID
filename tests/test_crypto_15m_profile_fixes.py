@@ -343,9 +343,9 @@ class TestPriceFloorGuardrail:
             assert "'SOL': 50" in source and "'XRP': 50" in source and "'DOGE': 50" in source, \
                 "agent_grid_15m.py should use 50c minimum entry price for all assets"
             
-            # Verify that the comment mentions 15c minimum
-            assert "15-70c" in source or "15c" in source, \
-                "agent_grid_15m.py should document the 15c minimum in comments"
+            # Verify that the comment mentions 50c minimum (updated for scaling optimization)
+            assert "50-70c" in source or "50c" in source, \
+                "agent_grid_15m.py should document the 50c minimum in comments"
         except Exception as e:
             pytest.skip(f"Agent grid price clamping check skipped: {e}")
 
