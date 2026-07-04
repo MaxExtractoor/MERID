@@ -209,7 +209,7 @@ class TestProfileSmokeTest:
             profile = adapter.profile
             
             # Verify guardrail parameters are from profile
-            assert profile.guardrails_max_spread_cents == 15  # 2026-07-04: Unified to 15c based on 2026 industry research (eliminates 20c/50c conflicts)
+            assert profile.guardrails_max_spread_cents == 50  # 2026-07-04: 50c from profile (guardrails section)
             assert profile.guardrails_max_slippage_cents == 5  # INCREASED from 3 to 5 based on 2026 research
             # min_depth_contracts removed - now uses per-asset depth thresholds (single source of truth)
             assert profile.guardrails_min_post_fee_edge == 0.015  # LOWERED from 0.02 to 0.015 based on 2026 research

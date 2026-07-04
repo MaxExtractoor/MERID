@@ -72,7 +72,7 @@ class TestCrypto15mProfileDataclass:
             'correlation_tracking_threshold_moderate',
             'correlation_tracking_threshold_alert',
             'correlation_tracking_max_correlated_assets',
-            'volatility_regime_edge_adjustment_enabled',
+            'volatility_regime_edge_adjustment_enabled',  # 2026-07-04: Now disabled (was enabled)
             'volatility_regime_edge_adjustment_lookback_days',
             'volatility_regime_edge_adjustment_low_volatility_threshold',
             'volatility_regime_edge_adjustment_high_volatility_threshold',
