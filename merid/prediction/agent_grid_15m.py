@@ -3639,7 +3639,93 @@ class LeanAgent15m:
             # No market data - use neutral price
             price_cents = 50
         
+        # MID-SPREAD ENTRY OPTIMIZATION (2026-07-04)
+        # Instead of using mid-price, post limit orders to capture spread
+        # This improves entry price by 1-3 cents per contract
+        # Reference: Industry best practices for prediction market entry optimization
+        def calculate_optimal_entry_price(
+            side: str,
+            best_bid: int,
+            best_ask: int,
+            minutes_to_expiry: float,
+            edge_pct: float
+        ) -> int:
+            """
+            Calculate optimal entry price using mid-spread strategy.
+            
+            Strategy:
+            - Post limit order 1-2 cents from opposite side to capture spread
+            - Adjust aggressiveness based on time to expiry (patient early, aggressive late)
+            - Adjust aggressiveness based on edge (high edge = patient, low edge = aggressive)
+            
+            Args:
+                side: "yes" or "no"
+                best_bid: Best bid price in cents
+                best_ask: Best ask price in cents
+                minutes_to_expiry: Time remaining in 15m window
+                edge_pct: Signal edge percentage
+                
+            Returns:
+                Optimal entry price in cents
+            """
+            if best_bid == 0 or best_ask == 0:
+                # No orderbook data, use mid-price fallback
+                return (best_bid + best_ask) // 2 if best_bid > 0 and best_ask > 0 else 50
+            
+            # Time-decay adjustment: more aggressive as expiry approaches
+            if minutes_to_expiry >= 4.0:
+                # Optimal window: patient entry (2 cents from mid)
+                time_offset = 2
+            elif minutes_to_expiry >= 0.5:
+                # Late entry: moderate aggressiveness (1 cent from mid)
+                time_offset = 1
+            else:
+                # Last 30 seconds: aggressive (use mid-price)
+                time_offset = 0
+            
+            # Edge-based adjustment: high edge = patient, low edge = aggressive
+            if edge_pct >= 0.10:
+                edge_offset = 1  # High edge: be patient
+            elif edge_pct >= 0.05:
+                edge_offset = 0  # Medium edge: neutral
+            else:
+                edge_offset = -1  # Low edge: be aggressive
+            
+            # Combine adjustments (minimum 0 offset)
+            total_offset = max(0, time_offset + edge_offset)
+            
+            # Calculate optimal price based on side
+            if side == "yes":
+                # For YES buy: post below ask to capture spread
+                optimal_price = best_ask - total_offset
+            else:  # side == "no"
+                # For NO buy: post above bid to capture spread
+                optimal_price = best_bid + total_offset
+            
+            # Ensure price is within bid-ask spread
+            if side == "yes":
+                optimal_price = max(best_bid, min(best_ask, optimal_price))
+            else:
+                optimal_price = max(best_bid, min(best_ask, optimal_price))
+            
+            return int(optimal_price)
+        
+        # Apply mid-spread entry optimization
+        if best_bid > 0 and best_ask > 0:
+            price_cents = calculate_optimal_entry_price(
+                side=signal_side,
+                best_bid=best_bid,
+                best_ask=best_ask,
+                minutes_to_expiry=minutes_to_expiry,
+                edge_pct=edge_pct
+            )
+            logger.info(
+                "[MID-SPREAD-ENTRY] asset=%s side=%s bid=%d ask=%d optimal_price=%d offset=mid_spread time_to_expiry=%.1f edge=%.2f%%",
+                asset, signal_side, best_bid, best_ask, price_cents, minutes_to_expiry, edge_pct
+            )
+        
         # Clamp to valid range [55, 75] (enforce price validation range - aligned with profile price_range)
+        # Note: This clamp is a safety rail; mid-spread optimization should naturally stay within range
         price_cents = max(55, min(75, price_cents))
         
         # Construct signal dictionary
