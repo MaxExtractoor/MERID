@@ -2385,7 +2385,7 @@ class LeanAgent15m:
         try:
             from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
             envelope = get_kalshi_crypto_15m_risk_envelope()
-            depth_thresholds = envelope.get_depth_thresholds(asset)
+            depth_thresholds = envelope.get_depth_thresholds(self.config.name)
             min_depth_yes_threshold = depth_thresholds.get('min_depth_yes', 1)
             min_depth_no_threshold = depth_thresholds.get('min_depth_no', 1)
             
