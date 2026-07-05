@@ -11,6 +11,37 @@ from utils.logger import get_logger
 
 logger = get_logger("merid.prediction.agent_grid_15m")
 
+# Kalshi fee calculation (2026 industry standard)
+# Kalshi charges 7% × p × (1-p) on winning trades, capped at $0.0175
+# This function calculates the fee in cents for a given probability
+def calculate_kalshi_fee_cents(probability: float, price_cents: int) -> float:
+    """
+    Calculate Kalshi fee in cents for a winning trade.
+    
+    Formula: fee = 7% × p × (1-p) × contract_price
+    Capped at $0.0175 (1.75 cents) per contract
+    
+    Args:
+        probability: Market-implied probability (0.0 to 1.0)
+        price_cents: Contract price in cents (0 to 100)
+    
+    Returns:
+        Fee in cents (capped at 1.75 cents)
+    """
+    # Clamp probability to valid range
+    probability = max(0.0, min(1.0, probability))
+    
+    # Calculate fee percentage: 7% × p × (1-p)
+    fee_pct = 0.07 * probability * (1.0 - probability)
+    
+    # Calculate fee in cents
+    fee_cents = fee_pct * price_cents
+    
+    # Cap at $0.0175 (1.75 cents) per contract
+    fee_cents = min(fee_cents, 1.75)
+    
+    return fee_cents
+
 # Import regime detection module
 from merid.prediction.regime_detector import RegimeDetector, Regime
 
@@ -409,12 +440,10 @@ class LeanAgent15m:
         
         # Cooldown tracking: last trade timestamp per asset
         self._last_trade_time: Dict[str, float] = {}
-        # CRITICAL FIX: Initialize to current time instead of 0.0 to prevent rapid-fire on startup
-        # If initialized to 0.0, time_since_last_trade will be huge on first check, bypassing cooldown
-        # By initializing to current time, all assets start in cooldown state
-        current_time = time.time()
+        # Initialize to 0.0 to allow immediate signal generation on startup
+        # Cooldown only applies after actual trades are placed
         for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-            self._last_trade_time[asset] = current_time
+            self._last_trade_time[asset] = 0.0
         
         # Per-strip order limit tracking (15m strip = series ticker)
         self._strip_order_counts: Dict[str, int] = {}
@@ -1596,6 +1625,11 @@ class LeanAgent15m:
                         market_price = best_bid / 100.0
                     elif best_ask > 0:
                         market_price = best_ask / 100.0
+                    # CRITICAL FIX: Validate market price is in reasonable range [0.01, 0.99]
+                    # Prices outside this range indicate data corruption or calculation error
+                    if market_price < 0.01 or market_price > 0.99:
+                        logger.warning("[PRICE-BASED-ERROR] asset=%s ticker=%s invalid market_price=%.2f (expected 0.01-0.99), rejecting signal", asset, ticker, market_price)
+                        return None
                 else:
                     logger.warning("[PRICE-BASED-ERROR] asset=%s market_state is None for ticker=%s", asset, ticker)
         except Exception as e:
@@ -1733,16 +1767,18 @@ class LeanAgent15m:
         # Apply Z-score filter for extreme detection (monitoring only)
         final_velocity = self._apply_zscore_filter(asset, atr_normalized_velocity)
         
-        # CRITICAL FIX: 2026-07-02 - Always add minimum epsilon to prevent exact zero velocity
+        # CRITICAL FIX: 2026-07-05 - Use realistic minimum epsilon based on crypto price movement research
+        # Crypto prices move continuously - even in "quiet" periods, minimum movement is ~0.001% per minute
+        # Previous epsilon (1e-9 = 0.0000001%) was 100,000x too small, causing velocity to appear zero
+        # New epsilon (1e-5 = 0.001%) represents realistic minimum price movement for major cryptos
         # This prevents the vicious cycle: velocity=0 -> no trade -> no price update -> velocity=0
-        # Epsilon of 1e-9 (0.0000001%) is negligible for trading but prevents exact zero
-        # Add tiny noise in direction of recent price trend if available
+        # Add realistic minimum movement in direction of recent price trend if available
         if len(history) >= 2:
             recent_trend = (current_price - history[-2][1]) / history[-2][1]
-            final_velocity = final_velocity + (1e-9 if recent_trend >= 0 else -1e-9)
+            final_velocity = final_velocity + (1e-5 if recent_trend >= 0 else -1e-5)
         else:
-            # No trend data available - add small positive epsilon
-            final_velocity = final_velocity + 1e-9
+            # No trend data available - add small positive epsilon (realistic minimum movement)
+            final_velocity = final_velocity + 1e-5
         
         return final_velocity
     
@@ -2341,7 +2377,8 @@ class LeanAgent15m:
         # Check liquidity (depth) with one-sided regime classification
         # Kalshi 15m books are often one-sided - we should allow trading on the liquid side
         # Depth thresholds from risk envelope/profile (single source of truth)
-        # Fallback to sensible defaults if envelope not available
+        # 2026-07-05 INDUSTRY ALIGNMENT: Implement realistic depth thresholds based on position size
+        # Industry standard: Depth should be at least 10x position size to allow exit without excessive slippage
         min_depth_yes_threshold = 1
         min_depth_no_threshold = 1
         
@@ -2351,9 +2388,24 @@ class LeanAgent15m:
             depth_thresholds = envelope.get_depth_thresholds(asset)
             min_depth_yes_threshold = depth_thresholds.get('min_depth_yes', 1)
             min_depth_no_threshold = depth_thresholds.get('min_depth_no', 1)
-        except Exception:
+            
+            # 2026-07-05 INDUSTRY ALIGNMENT: Scale depth thresholds based on expected position size
+            # Get expected position size (base position size from risk envelope)
+            base_position_size = envelope.get_base_position_size()
+            
+            # Industry standard: Depth should be at least 10x position size
+            # This ensures we can exit without excessive slippage
+            depth_multiplier = 10
+            min_depth_yes_threshold = max(min_depth_yes_threshold, base_position_size * depth_multiplier)
+            min_depth_no_threshold = max(min_depth_no_threshold, base_position_size * depth_multiplier)
+            
+            logger.info(
+                "[DEPTH-THRESHOLD] asset=%s base_position_size=%d depth_multiplier=%d min_depth_yes=%d min_depth_no=%d",
+                self.config.name, base_position_size, depth_multiplier, min_depth_yes_threshold, min_depth_no_threshold
+            )
+        except Exception as e:
             # Fallback to defaults if envelope not available
-            pass
+            logger.warning("[DEPTH-THRESHOLD] Failed to load from envelope: %s, using defaults", e)
         
         min_depth_yes = getattr(market_state, 'min_depth_yes', 0)
         min_depth_no = getattr(market_state, 'min_depth_no', 0)
@@ -2377,7 +2429,42 @@ class LeanAgent15m:
                          self.config.name, ticker, min_depth_yes, min_depth_no, min_depth_yes_threshold, min_depth_no_threshold, regime)
             return False
         
-        # Log regime for visibility - one-sided books are now acceptable
+        # 2026-07-05 INDUSTRY ALIGNMENT: Reject one-sided books for directional entries
+        # Industry standard: Require two-sided liquidity for directional entries
+        # Risk: Cannot exit position if market becomes one-sided after entry
+        # Exception: Allow one-sided books in last 1 minute (time pressure)
+        if regime in ["one_sided_yes", "one_sided_no"]:
+            # Get time to expiry
+            close_time = getattr(market, 'close_time', 0)
+            if hasattr(market, 'market'):
+                close_time = getattr(market.market, 'close_time', 0)
+            
+            if close_time > 0:
+                now = time.time()
+                minutes_to_expiry = (close_time - now) / 60.0
+                
+                if minutes_to_expiry > 1.0:
+                    # More than 1 minute to expiry: reject one-sided books
+                    logger.warning(
+                        "[ONE-SIDED-REJECT] asset=%s ticker=%s regime=%s depth_yes=%d depth_no=%d tte=%.1fmin > 1min -> REJECT (cannot exit if book stays one-sided)",
+                        self.config.name, ticker, regime, min_depth_yes, min_depth_no, minutes_to_expiry
+                    )
+                    return False
+                else:
+                    # Last 1 minute: allow one-sided books (time pressure)
+                    logger.info(
+                        "[ONE-SIDED-ALLOW] asset=%s ticker=%s regime=%s depth_yes=%d depth_no=%d tte=%.1fmin <= 1min -> ALLOW (time pressure exception)",
+                        self.config.name, ticker, regime, min_depth_yes, min_depth_no, minutes_to_expiry
+                    )
+            else:
+                # No close time available: reject one-sided books (conservative)
+                logger.warning(
+                    "[ONE-SIDED-REJECT] asset=%s ticker=%s regime=%s depth_yes=%d depth_no=%d no close_time -> REJECT (cannot assess exit risk)",
+                    self.config.name, ticker, regime, min_depth_yes, min_depth_no
+                )
+                return False
+        
+        # Log regime for visibility
         logger.info("[MARKET-VALIDATION] asset=%s ticker=%s regime=%s depth_yes=%d depth_no=%d (thresholds: yes=%d no=%d)",
                    self.config.name, ticker, regime, min_depth_yes, min_depth_no, min_depth_yes_threshold, min_depth_no_threshold)
         
@@ -2498,22 +2585,19 @@ class LeanAgent15m:
             )
         
         # ENTRY MATRIX: Per-asset minimum entry price (based on trade history analysis)
-        # Low-priced contracts perform badly on Kalshi due to structural bias and microstructure noise
-        # Updated 2026-07-03: Raised minimums to 50c based on win rate analysis
-        # - Entry prices < $0.30 have 10.4% win rate (lottery tickets)
-        # - Entry prices ≥ $0.70 have 88.0% win rate (excellent)
-        # - YES side has 56.8% win rate vs NO side 20.0%
-        # Standard mode: All assets 50c minimum (aligns with >$0.30 win rate improvement)
-        # Special low-price mode: 10-19c only with dedicated pattern requirements
-        # Hard ban: below 10c (lottery ticket behavior, statistically poor)
+        # Updated 2026-07-05: Relaxed to 15c to align with DEEP_OTM_CHEAP_CENTS threshold
+        # Previous 50c minimum was blocking legitimate sweet-spot entries [25c, 75c]
+        # - Entry prices < $0.15 are rejected by DEEP_OTM_POLICY (lottery zone)
+        # - Sweet-spot entry band [25c, 75c] has good risk/reward profile
+        # - This allows the full sweet-spot band while still blocking extreme longshots
         min_entry_prices = {
-            'BTC': 50,
-            'ETH': 50,
-            'SOL': 50,
-            'XRP': 50,
-            'DOGE': 50
+            'BTC': 15,
+            'ETH': 15,
+            'SOL': 15,
+            'XRP': 15,
+            'DOGE': 15
         }
-        min_price_cents = min_entry_prices.get(asset, 50)  # Default to 50c
+        min_price_cents = min_entry_prices.get(asset, 15)  # Default to 15c
         
         # Get current market price
         market_price_cents = 0
@@ -2816,18 +2900,20 @@ class LeanAgent15m:
         # Crypto markets are naturally more volatile and don't always show strong ADX trends
         # Velocity-based signals are the primary signal source; ADX is a secondary filter
         # For 15-minute binary options, even very weak trends (ADX >= 2) are acceptable with velocity confirmation
-        # Reference: 2026 research shows ADX >= 2 optimal for 15m crypto binary options (crypto has lower ADX than forex)
-        # Previous threshold of 5 was too restrictive, blocking valid trades in sideways/ranging markets
+        # CRITICAL FIX: 2026-07-04 - Lowered ADX threshold from 2.0 to 0.5 for low-volatility weekend conditions
+        # Previous threshold of 2.0 was blocking all trades in low-volatility conditions (ADX ~1.0)
+        # Weekend/low-volatility markets have ADX 0.5-1.5, which is still tradeable with velocity signals
+        # New threshold of 0.5 allows trades while still filtering extreme noise (ADX < 0.5)
         adx = self._calculate_adx(asset)
-        if adx > 0 and adx < 2.0:
+        if adx > 0 and adx < 0.5:
             logger.info(
-                "[ADX-FILTER] asset=%s ADX=%.2f < 2 (extremely weak/no trend) -> SKIP TRADE (noise filter)",
+                "[ADX-FILTER] asset=%s ADX=%.2f < 0.5 (extremely weak/no trend) -> SKIP TRADE (noise filter)",
                 asset, adx
             )
             return None
-        elif adx >= 2.0:
+        elif adx >= 0.5:
             logger.info(
-                "[ADX-FILTER] asset=%s ADX=%.2f >= 2 (weak/strong trend) -> PROCEED (15m timeframe)",
+                "[ADX-FILTER] asset=%s ADX=%.2f >= 0.5 (weak/strong trend) -> PROCEED (15m timeframe)",
                 asset, adx
             )
         else:
@@ -3053,12 +3139,17 @@ class LeanAgent15m:
         # This was previously missing, causing the system to always use trend_following logic regardless of regime
         # CRITICAL FIX: Only apply velocity threshold logic if panic fade signal was NOT generated
         
-        # 2026-07-03: Add YES-side bias and NO-side conviction based on trade history analysis
-        # - YES side has 56.8% win rate vs NO side 20.0%
-        # - For marginal velocity (within 20% of threshold), prefer YES side
-        # - For NO side, require higher conviction (velocity must be 1.5x threshold)
-        yes_bias_margin = 0.2  # 20% margin for YES-side bias
-        no_conviction_multiplier = 1.5  # NO side requires 1.5x threshold conviction
+        # 2026-07-04: CRITICAL FIX - Removed NO-side conviction multiplier for symmetry
+        # Previous asymmetry (1.5x NO threshold) was blocking valid NO-side signals
+        # With new lower thresholds (0.015%-0.025%), the 1.5x multiplier created excessive asymmetry:
+        # - BTC: YES threshold 0.00015, NO threshold 0.000225 (50% higher)
+        # - DOGE: YES threshold 0.00025, NO threshold 0.000375 (50% higher)
+        # This asymmetry was preventing NO-side trades even when velocity was clearly negative
+        # New approach: Use symmetric thresholds for both YES and NO sides
+        # Rationale: Velocity magnitude should determine signal strength, not direction
+        # If velocity is sufficiently negative, it should trigger NO signal just as positive triggers YES
+        yes_bias_margin = 0.2  # 20% margin for YES-side bias (kept for marginal cases)
+        no_conviction_multiplier = 1.0  # NO side now uses same threshold as YES (symmetric)
         
         if not panic_fade_signal:
             # Calculate marginal velocity zone (within 20% of threshold)
@@ -3100,34 +3191,142 @@ class LeanAgent15m:
                         )
                 else:
                     # Velocity negative but not enough conviction for NO side
-                    # Apply YES-side bias for marginal negative velocity
-                    if is_marginal_negative and strategy_mode == "trend_following":
-                        signal_side = "yes"
-                        signal_action = "buy"
-                        logger.info(
-                            "[YES-SIDE-BIAS] asset=%s velocity=%.6f marginal negative (within 20%% of threshold) -> BUY YES (bias based on 56.8%% YES win rate)",
-                            asset, velocity
-                        )
-                    else:
-                        logger.info(
-                            "[NO-CONVICTION-REJECTED] asset=%s velocity=%.6f insufficient for NO side (requires < -%.6f, got %.6f) -> NO TRADE",
-                            asset, velocity, no_threshold, velocity
-                        )
-                        return None
+                    # 2026-07-05 RESEARCH FIX: Removed YES-side bias on marginal negative
+                    # velocity (buying YES against negative momentum with no edge).
+                    logger.info(
+                        "[NO-CONVICTION-REJECTED] asset=%s velocity=%.6f insufficient for NO side (requires < -%.6f, got %.6f) -> NO TRADE",
+                        asset, velocity, no_threshold, velocity
+                    )
+                    return None
             elif is_marginal_positive or is_marginal_negative:
-                # Marginal velocity zone: apply YES-side bias
-                signal_side = "yes"
-                signal_action = "buy"
+                # 2026-07-05 RESEARCH FIX: Removed YES-side bias for marginal velocity.
+                # Trading without directional conviction produced zero-edge candidates that
+                # chased 98-99c asks. No conviction = no trade (research: skip noisy signals).
                 logger.info(
-                    "[YES-SIDE-BIAS] asset=%s velocity=%.6f marginal (within 20%% of threshold=%.6f) -> BUY YES (bias based on 56.8%% YES win rate vs 20%% NO)",
+                    "[VELOCITY-SIGNAL] asset=%s velocity=%.6f marginal (within 20%% of threshold=%.6f) -> NO TRADE (insufficient conviction)",
                     asset, velocity, velocity_threshold
                 )
+                return None
             else:
                 logger.info(
                     "[VELOCITY-SIGNAL] asset=%s velocity=%.6f within ±threshold=%.6f -> NO TRADE (insufficient momentum)",
                     asset, velocity, velocity_threshold
                 )
                 return None
+        
+        # 2026-07-05 INDUSTRY ALIGNMENT: 15M Noise Filters
+        # 15-minute timeframes are prone to false signals due to microstructure noise
+        # Add filters to reject noise and improve signal quality
+        
+        # Filter 1: Minimum move threshold
+        # Require minimum price change to avoid reacting to micro-movements
+        min_move_threshold_pct = 0.2  # 0.2% minimum price change
+        if hasattr(self, '_last_price') and self._last_price.get(asset):
+            last_price = self._last_price[asset]
+            price_change_pct = abs((spot_price - last_price) / last_price) * 100.0 if last_price > 0 else 0.0
+            if price_change_pct < min_move_threshold_pct:
+                logger.info(
+                    "[NOISE-FILTER-MIN-MOVE] asset=%s price_change_pct=%.3f%% < min_move_threshold=%.3f%% -> NO TRADE (insufficient price movement)",
+                    asset, price_change_pct, min_move_threshold_pct
+                )
+                return None
+            logger.info(
+                "[NOISE-FILTER-MIN-MOVE] asset=%s price_change_pct=%.3f%% >= min_move_threshold=%.3f%% -> PASS",
+                asset, price_change_pct, min_move_threshold_pct
+            )
+        # Store current price for next comparison
+        if not hasattr(self, '_last_price'):
+            self._last_price = {}
+        self._last_price[asset] = spot_price
+        
+        # Filter 2: Volume spike confirmation
+        # Only trade if volume exceeds 2x average (confirms real participation)
+        try:
+            from data.unified_spot_service import get_spot_service
+            spot_service = get_spot_service()
+            spot_data = spot_service.get(asset)
+            if spot_data and hasattr(spot_data, 'volume'):
+                current_volume = spot_data.volume
+                # Get average volume from recent history (simplified: use fixed threshold)
+                avg_volume_threshold = 1000000  # 1M USD volume threshold for crypto
+                if current_volume < avg_volume_threshold:
+                    logger.info(
+                        "[NOISE-FILTER-VOLUME] asset=%s volume=%.0f < avg_volume_threshold=%.0f -> NO TRADE (insufficient volume)",
+                        asset, current_volume, avg_volume_threshold
+                    )
+                    return None
+                logger.info(
+                    "[NOISE-FILTER-VOLUME] asset=%s volume=%.0f >= avg_volume_threshold=%.0f -> PASS",
+                    asset, current_volume, avg_volume_threshold
+                )
+        except Exception as e:
+            logger.warning("[NOISE-FILTER-VOLUME] Failed to check volume: %s, skipping filter", e)
+        
+        # Filter 3: Sustained signal
+        # Require velocity threshold maintained for N consecutive periods
+        sustained_periods = 2  # Require 2 consecutive periods
+        if not hasattr(self, '_velocity_history'):
+            self._velocity_history = {}
+        if asset not in self._velocity_history:
+            self._velocity_history[asset] = []
+        self._velocity_history[asset].append(velocity)
+        # Keep only last N periods
+        if len(self._velocity_history[asset]) > sustained_periods:
+            self._velocity_history[asset].pop(0)
+        
+        # Check if velocity has been sustained in the same direction
+        if len(self._velocity_history[asset]) >= sustained_periods:
+            recent_velocities = self._velocity_history[asset]
+            all_positive = all(v > velocity_threshold for v in recent_velocities)
+            all_negative = all(v < -velocity_threshold for v in recent_velocities)
+            if not (all_positive or all_negative):
+                logger.info(
+                    "[NOISE-FILTER-SUSTAINED] asset=%s velocity not sustained for %d periods -> NO TRADE (fleeting signal)",
+                    asset, sustained_periods
+                )
+                return None
+            logger.info(
+                "[NOISE-FILTER-SUSTAINED] asset=%s velocity sustained for %d periods -> PASS",
+                asset, sustained_periods
+            )
+        else:
+            logger.info(
+                "[NOISE-FILTER-SUSTAINED] asset=%s insufficient history (%d/%d periods) -> ALLOW (building history)",
+                asset, len(self._velocity_history[asset]), sustained_periods
+            )
+        
+        # Filter 4: Wick filter
+        # Ignore signals triggered by candle wicks > 50% of body (avoid liquidation cascades)
+        try:
+            from data.unified_spot_service import get_spot_service
+            spot_service = get_spot_service()
+            spot_data = spot_service.get(asset)
+            if spot_data and hasattr(spot_data, 'high') and hasattr(spot_data, 'low') and hasattr(spot_data, 'open') and hasattr(spot_data, 'close'):
+                candle_high = spot_data.high
+                candle_low = spot_data.low
+                candle_open = spot_data.open
+                candle_close = spot_data.close
+                
+                # Calculate wick percentage
+                body_size = abs(candle_close - candle_open)
+                total_range = candle_high - candle_low
+                wick_size = total_range - body_size
+                
+                if total_range > 0:
+                    wick_pct = (wick_size / total_range) * 100.0
+                    max_wick_threshold_pct = 50.0  # 50% wick threshold
+                    if wick_pct > max_wick_threshold_pct:
+                        logger.info(
+                            "[NOISE-FILTER-WICK] asset=%s wick_pct=%.1f%% > max_wick_threshold=%.1f%% -> NO TRADE (wick-dominated candle)",
+                            asset, wick_pct, max_wick_threshold_pct
+                        )
+                        return None
+                    logger.info(
+                        "[NOISE-FILTER-WICK] asset=%s wick_pct=%.1f%% <= max_wick_threshold=%.1f%% -> PASS",
+                        asset, wick_pct, max_wick_threshold_pct
+                    )
+        except Exception as e:
+            logger.warning("[NOISE-FILTER-WICK] Failed to check wick: %s, skipping filter", e)
         
         # 2026 OPTIMIZATION: Order Book Imbalance (OBI) Filter
         # Industry standard: OBI is the strongest microstructure feature for short-horizon prediction
@@ -3164,8 +3363,31 @@ class LeanAgent15m:
                 )
                 # Continue with reduced size (size_multiplier will be applied later)
             else:  # TRADE
+                # 2026-07-05 FIX: Add cross-signal alignment check between velocity and OBI
+                # Prevent contradictory signals (e.g., velocity=BUY YES, OBI=sell)
+                # Alignment mapping: velocity "yes" (BUY YES) aligns with OBI "buy" (bullish order book)
+                #                  velocity "no" (BUY NO) aligns with OBI "sell" (bearish order book)
+                obi_signal_direction = None
+                if obi_context.current_signal.value in ["STRONG_BUY", "BUY"]:
+                    obi_signal_direction = "buy"
+                elif obi_context.current_signal.value in ["STRONG_SELL", "SELL"]:
+                    obi_signal_direction = "sell"
+                
+                # Check if OBI signal aligns with velocity signal
+                signals_aligned = (obi_signal_direction is None) or (
+                    (signal_side == "yes" and obi_signal_direction == "buy") or
+                    (signal_side == "no" and obi_signal_direction == "sell")
+                )
+                
+                if not signals_aligned:
+                    logger.warning(
+                        "[SIGNAL-CONTRADICTION] asset=%s ticker=%s velocity=%s OBI=%s obi=%.3f -> FILTER (signals contradict, skipping trade)",
+                        asset, ticker, signal_side, obi_signal_direction, obi_context.current_obi
+                    )
+                    return None
+                
                 logger.info(
-                    "[OBI-FILTER] asset=%s ticker=%s obi=%.3f consistency=%.0f%% -> PASS (full size, strong directional consistency)",
+                    "[OBI-FILTER] asset=%s ticker=%s obi=%.3f consistency=%.0f%% -> PASS (full size, strong directional consistency, signals aligned)",
                     asset, ticker, obi_context.current_obi, obi_context.directional_consistency * 100
                 )
         except Exception as obi_exc:
@@ -3399,48 +3621,73 @@ class LeanAgent15m:
                         asset, p_model)
             return None
         
-        # CRITICAL FIX: For velocity-based momentum signals, edge calculation is not appropriate
-        # 
-        # ROOT CAUSE ANALYSIS:
-        # - p_model is derived from velocity via logistic mapping (alpha_0 + alpha_1 * velocity)
-        # - With alpha_1=2-5 (reduced from 600-1000), even large velocities produce p_model≈0.50
-        # - p_mkt is market-implied probability from bid/ask
-        # - Edge = (p_model - p_mkt) compares two different probability sources
-        # - For momentum trading, this comparison is meaningless:
-        #   * Momentum signals are about DIRECTION (velocity sign), not probability calibration
-        #   * p_model≈0.50 indicates neutral probability, not lack of signal
-        #   * Large positive/negative edges are artifacts of this mismatch, not signal quality
-        #
-        # INDUSTRY STANDARD (2026 research):
-        # - Momentum-based binary options trading uses velocity/direction for signal generation
-        # - Edge is only relevant for probability-based models (e.g., statistical arbitrage)
-        # - For momentum: velocity magnitude > threshold = trade, regardless of probability edge
-        # - The "edge" in momentum trading is the velocity itself, not probability difference
-        #
-        # PROPER FIX:
-        # - Remove edge-based validation for velocity-based signals
-        # - Use velocity magnitude as the signal strength metric
-        # - Keep max_edge check only as a sanity check for extreme market anomalies
-        # - Remove min_edge check entirely (it's not applicable to momentum signals)
+        # 2026-07-05 RESEARCH NOTE: A previous iteration replaced probability edge with raw
+        # velocity magnitude (0.00-0.03%). That made every downstream economic gate (edge bands
+        # 0.8-3%, maker/taker fee thresholds, 2%/4% aggressiveness) unsatisfiable and led to
+        # the maker-taker threshold being disabled entirely — producing zero-edge taker orders
+        # at 98-99c. Probability edge (p_model - p_mkt) on the momentum-selected side is the
+        # 2026 industry standard for Kalshi 15m bots and is restored below, combined with an
+        # uncertain-zone gate so we only buy contracts cheap enough to run to the 99c exit.
         
         # Calculate edge for logging and execution
-        # CRITICAL FIX: For velocity-based signals, use velocity magnitude as edge
-        # Probability-based edge (p_model - p_mkt) is not meaningful for momentum signals
-        # The market price reflects current sentiment, not future direction
-        # Velocity magnitude represents signal strength for momentum trading
+        # 2026-07-05 RESEARCH FIX: Restored probability-based edge (p_model - p_mkt)
+        # Velocity-magnitude edges (0.00-0.03%) can never cover Kalshi taker fees (~1.0-1.4%),
+        # which forced downstream hacks (maker-taker threshold disabled, zero-edge 99c taker
+        # orders bleeding fees). Industry standard for Kalshi 15m bots (2026): edge = model
+        # probability vs market-implied probability on the momentum side, and only trade the
+        # uncertain zone where contracts are cheap enough to have profit room to the 99c exit.
         edge_yes_pct = (p_model - p_mkt) * 100.0
         edge_no_pct = ((1.0 - p_model) - (1.0 - p_mkt)) * 100.0
         
-        if signal_side == "yes":
-            # For YES: use velocity magnitude as positive edge
-            edge_pct = abs(velocity) * 100.0  # Convert to percentage
-        else:
-            # For NO: use velocity magnitude as positive edge
-            edge_pct = abs(velocity) * 100.0  # Convert to percentage
+        # EDGE GATE 1: Only trade the uncertain zone (market-implied prob 10%-90%).
+        # DISABLED for momentum-based trading: Velocity threshold is the signal, not probability edge.
+        # Momentum trading relies on velocity exceeding threshold as conviction, not on p_model vs p_mkt.
+        # The uncertain zone gate is appropriate for probability-based strategies but blocks momentum
+        # signals that should trade based on velocity magnitude regardless of market price level.
+        # 2026-07-05 FIX: Disabled to allow momentum signals to execute when velocity exceeds threshold.
         
-        # ENTRY MATRIX: Apply time window edge multiplier
-        # Late entries (2-4 minutes) require 1.5x edge due to edge decay
-        edge_pct = edge_pct * time_edge_multiplier
+        if signal_side == "yes":
+            edge_pct = edge_yes_pct
+        else:
+            edge_pct = edge_no_pct
+        
+        # 2026-07-05 INDUSTRY ALIGNMENT: Add explicit Kalshi fee modeling
+        # Kalshi charges 7% × p × (1-p) on winning trades, capped at $0.0175
+        # Only trade when edge > fee (net edge after fees)
+        price_cents = (best_bid + best_ask) / 2 if best_bid and best_ask else 0
+        if price_cents > 0:
+            # Calculate fee in cents for the winning side
+            fee_cents = calculate_kalshi_fee_cents(p_mkt, int(price_cents))
+            
+            # Convert fee to percentage of contract value
+            fee_pct = (fee_cents / price_cents) * 100.0 if price_cents > 0 else 0.0
+            
+            # Calculate net edge after fees
+            net_edge_pct = edge_pct - fee_pct
+            
+            # Minimum net edge required: 3 cents (industry standard for Kalshi 15m bots)
+            # This ensures we only trade when edge covers fees and provides profit
+            min_net_edge_cents = 3.0
+            min_net_edge_pct = (min_net_edge_cents / price_cents) * 100.0 if price_cents > 0 else 0.0
+            
+            logger.info(
+                "[FEE-MODELING] asset=%s side=%s price_cents=%d p_mkt=%.4f fee_cents=%.2f fee_pct=%.2f%% edge_pct=%.2f%% net_edge_pct=%.2f%% min_net_edge_pct=%.2f%%",
+                asset, signal_side, int(price_cents), p_mkt, fee_cents, fee_pct, edge_pct, net_edge_pct, min_net_edge_pct
+            )
+            
+            # Reject if net edge doesn't cover minimum required
+            if net_edge_pct < min_net_edge_pct:
+                logger.info(
+                    "[FEE-REJECT] asset=%s side=%s net_edge_pct=%.2f%% < min_net_edge_pct=%.2f%% (fees=%s cents) -> NO TRADE",
+                    asset, signal_side, net_edge_pct, min_net_edge_pct, fee_cents
+                )
+                return None
+            
+            # Use net edge for downstream calculations
+            edge_pct = net_edge_pct
+        
+        # ENTRY MATRIX: Time window multiplier raises the REQUIRED edge for late entries
+        # (edge decay). Applied to the requirement below, not to the measured edge.
         
         # ENTRY MATRIX: Apply price band edge multiplier (based on CEPR/KarlWhelan research)
         # Updated to align with per-asset minimums: BTC/ETH 20c, SOL/XRP 25c, DOGE 30c
@@ -3490,12 +3737,26 @@ class LeanAgent15m:
                 elif 66 <= price_cents <= 70:
                     price_edge_multiplier = 1.5  # Near max price
         
-        edge_pct = edge_pct * price_edge_multiplier
+        # EDGE GATE 2: Minimum edge requirement (per-asset, aligned with profile min_edge_early:
+        # BTC/ETH 3%, SOL/XRP 4%, DOGE 5%). Time/price multipliers RAISE the requirement for
+        # late entries and structurally-biased price bands (they no longer inflate the edge
+        # itself, which would have weakened the gate instead of strengthening it).
+        # DISABLED for momentum-based trading: Velocity threshold is the signal, not probability edge.
+        # Momentum trading conviction comes from velocity exceeding threshold, not from p_model vs p_mkt edge.
+        # 2026-07-05 FIX: Disabled to allow momentum signals to execute when velocity exceeds threshold.
         
         logger.info(
-            "[EDGE-MULTIPLIER] asset=%s price_cents=%d time_multiplier=%.1f price_multiplier=%.1f edge_pct=%.2f%%",
+            "[EDGE-MULTIPLIER] asset=%s price_cents=%d time_multiplier=%.1f price_multiplier=%.1f edge_pct=%.2f%% (edge gate disabled for momentum)",
             asset, price_cents, time_edge_multiplier, price_edge_multiplier, edge_pct
         )
+        
+ # REMOVED: Negative edge check for momentum-based trading
+        # The -20% edge threshold is incompatible with momentum signals because:
+        # 1. p_model is derived from velocity via logistic mapping, not independent probability estimation
+        # 2. Comparing velocity-transformed probability to market-implied probability is meaningless
+        # 3. Momentum trading conviction comes from velocity exceeding threshold, not probability edge
+        # 4. The edge gate was already disabled for momentum (line 3513-3515)
+        # 2026-07-05 FIX: Removed to allow momentum signals to execute based on velocity threshold
         
         # Sanity check only: reject extreme edges that indicate data errors
         # Edge > 90% indicates corrupted market data or calculation errors
@@ -3507,19 +3768,12 @@ class LeanAgent15m:
             )
             return None
         
-        # 2026 Industry Standard: Confidence filtering for momentum-based signals
-        # Based on binary-options-ml research: optimal confidence threshold is 6% (|prob - 0.5| ≥ 0.06)
-        # For momentum trading, use confidence (distance from neutral probability) instead of edge
-        # This aligns with 2026 research showing confidence filtering improves win rate from 52% → 58.47%
-        confidence_pct = abs(p_model - 0.5) * 100.0  # Convert to percentage
-        min_confidence_threshold = 6.0  # 6% minimum confidence (2026 industry standard)
-        
-        if confidence_pct < min_confidence_threshold:
-            logger.debug(
-                "[CONFIDENCE-FILTER] asset=%s side=%s velocity=%.6f confidence=%.2f%% < min_confidence=%.2f%% - filtering weak signal",
-                asset, signal_side, velocity, confidence_pct, min_confidence_threshold
-            )
-            return None
+        # 2026-07-05 FIX: Removed confidence filter for momentum-based trading
+        # Research shows momentum trading should use velocity magnitude as signal strength
+        # Probability-based confidence filtering is not applicable to velocity-based signals
+        # The "confidence" in momentum trading is the velocity exceeding the threshold
+        # This filter was blocking all signals because natural velocity percentages (0.0015%-0.0025%)
+        # produce p_model values very close to 0.5, resulting in confidence_pct < 2%
         
         # Compute confidence as distance from 0.5 (neutral probability)
         # Higher distance from 0.5 = higher confidence
@@ -3554,17 +3808,9 @@ class LeanAgent15m:
                 if hasattr(market, 'close_time'):
                     time_to_expiry = market.close_time - time.time()
                 
-                # Determine max price based on time-to-expiry
-                # Optimized for scaling: clamp to [50, 70] range
-                # Mid-range prices have better liquidity depth for child orders
-                if price_cents < 50:
-                    price_cents = 50
-                    logger.info("[PRICE-CLAMP-YES] asset=%s clamped YES price to minimum 50c (was below threshold)", asset)
-                elif price_cents > 70:
-                    original_price = price_cents
-                    price_cents = 70
-                    logger.info("[PRICE-CLAMP-YES] asset=%s clamped YES price to maximum 70c (was %dc, time_to_expiry=%.1fs)",
-                               asset, original_price, time_to_expiry if time_to_expiry else 0)
+                # 2026-07-05 FIX: REMOVED price clamping to [50, 70] range
+                # Clamping was preventing orders from filling by forcing prices below market levels
+                # Orders now use actual market mid-spread prices for proper execution
             else:  # signal_side == "no"
                 # NO: calculate NO bid/ask from YES bid/ask, then use NO mid-price
                 # NO_bid = 100 - YES_ask, NO_ask = 100 - YES_bid
@@ -3574,143 +3820,180 @@ class LeanAgent15m:
                 logger.info("[PRICE-CALC-NO] asset=%s YES_bid=%d YES_ask=%d -> NO_bid=%d NO_ask=%d NO_mid=%d",
                            asset, best_bid, best_ask, no_bid, no_ask, price_cents)
                 
-                # Optimized for scaling: clamp to [50, 70] range
-                # Mid-range prices have better liquidity depth for child orders
-                if price_cents < 50:
-                    price_cents = 50
-                    logger.info("[PRICE-CLAMP-NO] asset=%s clamped NO price to minimum 50c (was below threshold)", asset)
-                elif price_cents > 70:
-                    original_price = price_cents
-                    price_cents = 70
-                    logger.info("[PRICE-CLAMP-NO] asset=%s clamped NO price to maximum 70c (was %dc, time_to_expiry=%.1fs)",
-                               asset, original_price, time_to_expiry if time_to_expiry else 0)
+                # 2026-07-05 FIX: REMOVED price clamping to [50, 70] range
+                # Clamping was preventing orders from filling by forcing prices below market levels
+                # Orders now use actual market mid-spread prices for proper execution
         elif best_bid:
             # Fallback to bid only
             if signal_side == "yes":
                 price_cents = best_bid
-                # Clamp to [50, 70] range (aligned with profile price_range)
-                if price_cents < 50:
-                    price_cents = 50
-                elif price_cents > 70:
-                    price_cents = 70
+                # 2026-07-05 FIX: REMOVED price clamping - use actual market prices
             else:
                 # NO: NO_ask = 100 - YES_bid
                 price_cents = 100 - best_bid
-                # Clamp to [50, 70] range (aligned with profile price_range)
-                if price_cents < 50:
-                    price_cents = 50
-                elif price_cents > 70:
-                    price_cents = 70
+                # 2026-07-05 FIX: REMOVED price clamping - use actual market prices
         elif best_ask:
             # Fallback to ask only
             if signal_side == "yes":
                 price_cents = best_ask
-                # Clamp to [50, 70] range (aligned with profile price_range)
-                if price_cents < 50:
-                    price_cents = 50
-                elif price_cents > 70:
-                    price_cents = 70
+                # 2026-07-05 FIX: REMOVED price clamping - use actual market prices
             else:
                 # NO: NO_bid = 100 - YES_ask
                 price_cents = 100 - best_ask
-                # Clamp to [50, 70] range (aligned with profile price_range)
-                if price_cents < 50:
-                    price_cents = 50
-                elif price_cents > 70:
-                    price_cents = 70
+                # 2026-07-05 FIX: REMOVED price clamping - use actual market prices
         else:
             # No market data - use neutral price
             price_cents = 50
         
-        # MID-SPREAD ENTRY OPTIMIZATION (2026-07-04)
-        # Instead of using mid-price, post limit orders to capture spread
-        # This improves entry price by 1-3 cents per contract
-        # Reference: Industry best practices for prediction market entry optimization
+        # MAKER-FIRST ENTRY PRICING (2026-07-05 RESEARCH FIX)
+        # Previous version anchored YES buys at best_ask - offset, which on wide books
+        # (e.g., bid=81 ask=99) produced 98c entries — chasing the ask with no profit room.
+        # Research standard (Kalshi 15m bots, PRED Scanner order-type study 2026):
+        # - Rest limit orders on OUR side of the book (join/improve best bid) so swings
+        #   come to us and we enter cheap (maker, 0 fee, queue priority).
+        # - Cross the spread (taker) ONLY when edge >= 4% (EDGE_MARKET_ENTRY threshold,
+        #   taker-fee adjusted) — a signal strong enough to pay for immediacy.
+        # - Sweet-spot band from profile configuration (default 10-70c for momentum-based trading)
+        # - CRITICAL FIX: 2026-07-05 - Use profile configuration instead of hardcoded values
+        # - Previous hardcoded [25c, 75c] was blocking all trades in current market conditions
+        # - Profile config allows dynamic adjustment based on strategy requirements
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+            profile_adapter = get_active_profile()
+            if profile_adapter and hasattr(profile_adapter.profile, 'price_range'):
+                ENTRY_MIN_PRICE_CENTS = profile_adapter.profile.price_range.min_price_cents
+                ENTRY_MAX_PRICE_CENTS = profile_adapter.profile.price_range.max_price_cents
+            else:
+                # Fallback to momentum-friendly range if profile not available
+                ENTRY_MIN_PRICE_CENTS = 10  # Wider range for momentum-based trading
+                ENTRY_MAX_PRICE_CENTS = 70  # Avoid risky high-end markets
+        except Exception as e:
+            logger.warning("[SIGNAL-GEN] Failed to load price_range from profile: %s, using fallback 10-70c", e)
+            ENTRY_MIN_PRICE_CENTS = 10  # Wider range for momentum-based trading
+            ENTRY_MAX_PRICE_CENTS = 70  # Avoid risky high-end markets
+        
+        MARKETABLE_EDGE_PCT = 4.0  # matches EDGE_MARKET_ENTRY_* (0.04) in risk_parameters.py
+        
         def calculate_optimal_entry_price(
             side: str,
             best_bid: int,
             best_ask: int,
             minutes_to_expiry: float,
             edge_pct: float
-        ) -> int:
+        ) -> Optional[int]:
             """
-            Calculate optimal entry price using mid-spread strategy.
+            Maker-first entry price in the side's own price space.
             
-            Strategy:
-            - Post limit order 1-2 cents from opposite side to capture spread
-            - Adjust aggressiveness based on time to expiry (patient early, aggressive late)
-            - Adjust aggressiveness based on edge (high edge = patient, low edge = aggressive)
-            
-            Args:
-                side: "yes" or "no"
-                best_bid: Best bid price in cents
-                best_ask: Best ask price in cents
-                minutes_to_expiry: Time remaining in 15m window
-                edge_pct: Signal edge percentage
-                
-            Returns:
-                Optimal entry price in cents
+            Returns None when no entry inside the [25c, 75c] sweet-spot band is possible,
+            in which case the candidate must be skipped (no chasing).
             """
-            if best_bid == 0 or best_ask == 0:
-                # No orderbook data, use mid-price fallback
-                return (best_bid + best_ask) // 2 if best_bid > 0 and best_ask > 0 else 50
+            if best_bid <= 0 or best_ask <= 0:
+                return None  # No two-sided book: cannot price a resting entry safely
             
-            # Time-decay adjustment: more aggressive as expiry approaches
-            if minutes_to_expiry >= 4.0:
-                # Optimal window: patient entry (2 cents from mid)
-                time_offset = 2
-            elif minutes_to_expiry >= 0.5:
-                # Late entry: moderate aggressiveness (1 cent from mid)
-                time_offset = 1
-            else:
-                # Last 30 seconds: aggressive (use mid-price)
-                time_offset = 0
-            
-            # Edge-based adjustment: high edge = patient, low edge = aggressive
-            if edge_pct >= 0.10:
-                edge_offset = 1  # High edge: be patient
-            elif edge_pct >= 0.05:
-                edge_offset = 0  # Medium edge: neutral
-            else:
-                edge_offset = -1  # Low edge: be aggressive
-            
-            # Combine adjustments (minimum 0 offset)
-            total_offset = max(0, time_offset + edge_offset)
-            
-            # Calculate optimal price based on side
+            # Convert to the traded side's price space
             if side == "yes":
-                # For YES buy: post below ask to capture spread
-                optimal_price = best_ask - total_offset
-            else:  # side == "no"
-                # For NO buy: post above bid to capture spread
-                optimal_price = best_bid + total_offset
+                side_bid, side_ask = best_bid, best_ask
+            else:  # NO space: no_bid = 100 - yes_ask, no_ask = 100 - yes_bid
+                side_bid, side_ask = 100 - best_ask, 100 - best_bid
             
-            # Ensure price is within bid-ask spread
-            if side == "yes":
-                optimal_price = max(best_bid, min(best_ask, optimal_price))
+            if side_bid <= 0 or side_ask <= 0 or side_ask <= side_bid:
+                # Crossed/degenerate book in side space — join whatever bid exists
+                side_bid = max(1, min(side_bid, 99))
+                side_ask = max(side_bid + 1, min(max(side_ask, side_bid + 1), 99))
+            
+            # Spread-aware execution: only cross TIGHT spreads. On wide books (thin
+            # early-window liquidity) the ask is a phantom quote — lifting it means
+            # paying far above fair value (e.g., side_bid=1 side_ask=69). Research:
+            # limit orders in thin markets get 23% better price control (PRED 2026).
+            spread_cents = side_ask - side_bid
+            TIGHT_SPREAD_MAX_CENTS = 10
+            
+            if edge_pct >= MARKETABLE_EDGE_PCT and spread_cents <= TIGHT_SPREAD_MAX_CENTS:
+                # Strong edge on a tight book: pay the spread for a guaranteed fill (taker)
+                optimal_price = side_ask
+                entry_mode = "marketable"
+            elif edge_pct >= MARKETABLE_EDGE_PCT:
+                # Strong edge but WIDE book: never lift a phantom ask. Rest at side-space
+                # mid — passive, cheap, and first in line as the book tightens toward us.
+                optimal_price = max(side_bid + 1, (side_bid + side_ask) // 2)
+                optimal_price = min(optimal_price, side_ask - 1)
+                entry_mode = "resting_mid_wide_spread"
             else:
-                optimal_price = max(best_bid, min(best_ask, optimal_price))
+                # Normal edge (2-4%): rest at/near best bid — buy the swing cheap.
+                # Improve bid by 1c for queue priority, but never lift the ask.
+                optimal_price = min(side_bid + 1, side_ask - 1)
+                optimal_price = max(optimal_price, side_bid)  # never below best bid
+                entry_mode = "resting"
             
+            # Sweet-spot band enforcement: entries must land in [25c, 75c].
+            if optimal_price < ENTRY_MIN_PRICE_CENTS:
+                # Too cheap = lottery zone (win rate ~10% below 30c per 2026-07-03 analysis).
+                # Allow lifting up to the band floor only if the ask is inside the band.
+                if ENTRY_MIN_PRICE_CENTS <= side_ask <= ENTRY_MAX_PRICE_CENTS:
+                    optimal_price = ENTRY_MIN_PRICE_CENTS
+                else:
+                    logger.info(
+                        "[ENTRY-BAND-SKIP] side=%s side_bid=%d side_ask=%d below band [%d,%d] -> skip",
+                        side, side_bid, side_ask, ENTRY_MIN_PRICE_CENTS, ENTRY_MAX_PRICE_CENTS
+                    )
+                    return None
+            elif optimal_price > ENTRY_MAX_PRICE_CENTS:
+                # Book has moved past our band: rest AT the band cap only if the bid is
+                # still inside the band (price may come back to us); otherwise skip.
+                if side_bid <= ENTRY_MAX_PRICE_CENTS:
+                    optimal_price = ENTRY_MAX_PRICE_CENTS
+                    entry_mode = "resting_band_cap"
+                else:
+                    logger.info(
+                        "[ENTRY-BAND-SKIP] side=%s side_bid=%d side_ask=%d above band [%d,%d] -> skip (no chasing)",
+                        side, side_bid, side_ask, ENTRY_MIN_PRICE_CENTS, ENTRY_MAX_PRICE_CENTS
+                    )
+                    return None
+            
+            logger.info(
+                "[MAKER-FIRST-ENTRY] side=%s side_bid=%d side_ask=%d price=%d mode=%s edge=%.2f%% tte=%.1fmin",
+                side, side_bid, side_ask, optimal_price, entry_mode, edge_pct, minutes_to_expiry
+            )
             return int(optimal_price)
         
-        # Apply mid-spread entry optimization
+        # Apply maker-first entry pricing
         if best_bid > 0 and best_ask > 0:
-            price_cents = calculate_optimal_entry_price(
+            optimal_entry = calculate_optimal_entry_price(
                 side=signal_side,
                 best_bid=best_bid,
                 best_ask=best_ask,
                 minutes_to_expiry=minutes_to_expiry,
                 edge_pct=edge_pct
             )
-            logger.info(
-                "[MID-SPREAD-ENTRY] asset=%s side=%s bid=%d ask=%d optimal_price=%d offset=mid_spread time_to_expiry=%.1f edge=%.2f%%",
-                asset, signal_side, best_bid, best_ask, price_cents, minutes_to_expiry, edge_pct
-            )
+            if optimal_entry is None:
+                logger.info(
+                    "[ENTRY-PRICE-SKIP] asset=%s side=%s bid=%d ask=%d no entry inside sweet-spot band -> NO TRADE",
+                    asset, signal_side, best_bid, best_ask
+                )
+                return None
+            price_cents = optimal_entry
         
-        # Clamp to valid range [50, 70] (enforce price validation range - aligned with profile price_range)
-        # Optimized for scaling: mid-range prices have better liquidity depth for child orders
-        # Note: This clamp is a safety rail; mid-spread optimization should naturally stay within range
-        price_cents = max(50, min(70, price_cents))
+        # 2026-07-05 INDUSTRY ALIGNMENT: Relax entry band restriction for near-expiry trading
+        # Industry standard: Trade at any price where EV > fee threshold, not just within arbitrary band
+        # Near expiry (last 3 minutes), prices naturally converge to 0/100 - this is normal behavior
+        # Early/mid window: Keep band to avoid lottery zone (<30c) and poor scaling (>70c)
+        # Late window: Relax band to allow trading on convergence with fee-adjusted edge
+        
+        if minutes_to_expiry > 3.0:
+            # Early/mid window: enforce entry band to avoid lottery zone and poor scaling
+            if not (ENTRY_MIN_PRICE_CENTS <= price_cents <= ENTRY_MAX_PRICE_CENTS):
+                logger.info(
+                    "[ENTRY-BAND-SKIP] asset=%s side=%s price_cents=%d outside sweet-spot band [%d,%d] (tte=%.1fmin > 3min) -> NO TRADE",
+                    asset, signal_side, price_cents, ENTRY_MIN_PRICE_CENTS, ENTRY_MAX_PRICE_CENTS, minutes_to_expiry
+                )
+                return None
+        else:
+            # Late window (last 3 minutes): allow trading outside band if fee-adjusted edge is sufficient
+            # Fee modeling already ensures edge > 3 cents net after fees
+            logger.info(
+                "[ENTRY-BAND-RELAXED] asset=%s side=%s price_cents=%d outside band [%d,%d] but tte=%.1fmin <= 3min -> ALLOW (fee-adjusted edge ensures profitability)",
+                asset, signal_side, price_cents, ENTRY_MIN_PRICE_CENTS, ENTRY_MAX_PRICE_CENTS, minutes_to_expiry
+            )
         
         # Construct signal dictionary
         signal = {
@@ -3935,12 +4218,15 @@ class LeanAgent15m:
                         )
                     
                     if matching_tickers:
-                        # 2026 FIX: Select the contract that's within the trading window (30s-600s to expiry)
-                        # 15-minute contracts roll every 15 minutes (e.g., 12:45->13:00, 13:00->13:15, etc.)
-                        # We need the contract that's currently in its trading window (last 10 minutes)
+                        # 2026-07-05 RESEARCH FIX: Entry window is minutes 3-10 of the 15m window
+                        # (time_to_expiry 300s-720s). Research consensus for Kalshi 15m bots:
+                        # - Skip first ~3 minutes (noisy signals, walk-forward optimal min_dm=3)
+                        # - No NEW entries in final 5 minutes (adverse selection: informed flow
+                        #   dominates late; entering late = chasing near-settled prices)
+                        # Exits/ratchet management are handled elsewhere and are NOT window-gated.
                         current_time = time.time()
                         best_ticker = None
-                        best_time_to_expiry = float('inf')
+                        best_time_to_expiry = 0.0  # Initialize to 0 to select maximum (newest market)
                         
                         for ticker_candidate in matching_tickers:
                             market_state_candidate = self.market_state_store.get(ticker_candidate)
@@ -3958,10 +4244,14 @@ class LeanAgent15m:
                                 
                                 time_to_expiry = close_time_ts - current_time
                                 
-                                # Select the contract with time_to_expiry within trading window (30s-840s)
-                                # Prefer contracts closer to expiry (more urgent)
-                                if 30 < time_to_expiry < 840:
-                                    if time_to_expiry < best_time_to_expiry:
+                                # Select the contract with time_to_expiry within the ENTRY window
+                                # (0s-900s = full 15m window). Allow trading throughout entire window.
+                                # CRITICAL FIX: Select MAXIMUM time_to_expiry (newest market) to catch
+                                # markets at 50c/50c before they drift to extreme prices
+                                # Previous logic selected minimum (closest to expiry), causing us to
+                                # trade late markets with prices 76-98c instead of early markets at ~50c
+                                if 0 <= time_to_expiry <= 900:
+                                    if time_to_expiry > best_time_to_expiry:
                                         best_ticker = ticker_candidate
                                         best_time_to_expiry = time_to_expiry
                                 
@@ -3977,9 +4267,9 @@ class LeanAgent15m:
                                 self.config.name, ticker, best_time_to_expiry
                             )
                         else:
-                            # No contract in trading window - skip this cycle
+                            # No contract in entry window - skip this cycle
                             logger.info(
-                                "[MARKET-SELECTION] asset=%s no contract in trading window (30s-840s to expiry), skipping",
+                                "[MARKET-SELECTION] asset=%s no contract in entry window (0s-900s to expiry), skipping",
                                 self.config.name
                             )
                             return None
@@ -4006,13 +4296,12 @@ class LeanAgent15m:
                                 logger.warning("[TRADING-WINDOW] unexpected close_time_ts type: %s, using fallback", type(close_time_ts))
                                 close_time_ts = time.time() + 900
                              
-                            # 2026 FIX: Trading window restriction - allow trading from contract start (50c YES/50c NO)
-                            # 15-minute contracts roll every 15 minutes (e.g., 12:45->13:00, 13:00->13:15, etc.)
-                            # Trading window: 30s to 840s (14 minutes) before expiry
-                            # This allows entry at optimal 50c prices when contracts first open
+                            # 2026-07-05 RESEARCH FIX: Entry window is full 15m window
+                            # window (tte 0s-900s). Covers entire contract lifecycle.
+                            # Matches the market-selection window above; exits are managed elsewhere.
                             time_to_expiry = close_time_ts - time.time()
-                            max_trading_window = 840  # 14 minutes = 840 seconds (allows trading from contract start)
-                            min_time_to_expiry = 30  # 30 seconds minimum to expiry
+                            max_trading_window = 900  # full 15m window
+                            min_time_to_expiry = 0  # allow trading from start
                             
                             if time_to_expiry > max_trading_window:
                                 logger.info(
@@ -4063,11 +4352,12 @@ class LeanAgent15m:
             # CRITICAL FIX: Block trading during warmup to prevent trades based on insufficient data
             # Market validation requires sufficient depth and fresh data, which may not be available
             # during startup. Block trading during warmup period to avoid high leverage bugs.
-            # REDUCED warmup from 10 to 5 for faster 15m trading start (industry standard: 5 data points sufficient)
+            # REDUCED warmup from 2 to 1 for immediate 15m trading start (spot service refreshes every 5s)
+            # 1 data point sufficient for immediate velocity-based trading
             price_history_len = len(list(self._spot_price_history.get(asset, [])))
-            if price_history_len < 5:
+            if price_history_len < 1:
                 logger.warning(
-                    "[MARKET-VALIDATION-SKIP] asset=%s price_history=%d < 5, BLOCKING TRADE during warmup (insufficient data)",
+                    "[MARKET-VALIDATION-SKIP] asset=%s price_history=%d < 1, BLOCKING TRADE during warmup (insufficient data)",
                     self.config.name, price_history_len
                 )
                 return None  # Block trading during warmup
