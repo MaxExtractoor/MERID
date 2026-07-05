@@ -4320,7 +4320,7 @@ class LeanAgent15m:
                                 # parent.parent.parent = MERID root
                                 profile_path = Path(__file__).parent.parent.parent / "config" / "profiles" / profile_filename
                                 
-                                with open(profile_path, 'r') as f:
+                                with open(profile_path, 'r', encoding='utf-8') as f:
                                     profile_yaml = yaml.safe_load(f)
                                 
                                 min_decision_minute_config = profile_yaml.get("min_decision_minute", {})
