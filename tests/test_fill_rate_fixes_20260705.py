@@ -54,28 +54,21 @@ class TestMinDecisionMinuteImplementation:
     """Test that min_decision_minute is implemented and used in trading window logic."""
     
     def test_min_decision_minute_loaded_from_profile(self):
-        """Test that min_decision_minute is loaded from profile configuration."""
-        with patch('merid.risk.profiles.crypto_15m_profile.get_active_profile') as mock_profile:
-            mock_profile.return_value = {
-                'min_decision_minute': {
-                    'BTC': 2,
-                    'ETH': 2,
-                    'SOL': 3,
-                    'XRP': 3,
-                    'DOGE': 5
-                }
-            }
-            
-            from merid.risk.profiles.crypto_15m_profile import get_active_profile
-            profile = get_active_profile()
-            
-            min_decision_config = profile.get('min_decision_minute', {})
-            
-            assert min_decision_config['BTC'] == 2, "BTC should wait 2 minutes"
-            assert min_decision_config['ETH'] == 2, "ETH should wait 2 minutes"
-            assert min_decision_config['SOL'] == 3, "SOL should wait 3 minutes"
-            assert min_decision_config['XRP'] == 3, "XRP should wait 3 minutes"
-            assert min_decision_config['DOGE'] == 5, "DOGE should wait 5 minutes (thinnest book)"
+        """Test that min_decision_minute is loaded from profile YAML configuration."""
+        # The actual implementation loads from raw YAML file, not get_active_profile
+        # Test that the YAML loading logic is present and correct
+        
+        with open('c:/Dev/MERID/merid/prediction/agent_grid_15m.py', 'r') as f:
+            content = f.read()
+        
+        # Verify YAML loading is present
+        assert 'yaml.safe_load' in content, "YAML loading should be present"
+        assert 'encoding=\'utf-8\'' in content, "UTF-8 encoding should be specified"
+        assert 'profile_path = Path(__file__).parent.parent.parent' in content, "Path construction should be correct"
+        assert 'min_decision_minute_config = profile_yaml.get("min_decision_minute"' in content, "min_decision_minute extraction should be present"
+        
+        # Verify the fix comment is present
+        assert 'CRITICAL FIX: Implement min_decision_minute from profile' in content, "Fix comment should be present"
     
     def test_min_decision_minute_in_trading_window(self):
         """Test that min_decision_minute is used in trading window validation."""
@@ -85,8 +78,8 @@ class TestMinDecisionMinuteImplementation:
         
         # Verify min_decision_minute implementation is present
         assert 'min_decision_minute' in content, "min_decision_minute should be implemented"
-        assert 'get_active_profile' in content, "Profile loading should be present"
         assert 'min_time_to_expiry = min_decision_minute * 60' in content, "Conversion to seconds should be present"
+        assert 'time_to_expiry < min_time_to_expiry' in content, "Early signal skip logic should be present"
         
         # Verify the fix comment is present
         assert 'CRITICAL FIX: Implement min_decision_minute from profile' in content, "Fix comment should be present"
