@@ -2385,7 +2385,9 @@ class LeanAgent15m:
         try:
             from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
             envelope = get_kalshi_crypto_15m_risk_envelope()
-            depth_thresholds = envelope.get_depth_thresholds(self.config.name)
+            # Extract asset symbol from agent name (e.g., "DOGE_15M" -> "DOGE")
+            asset_symbol = self.config.name.split('_')[0] if '_' in self.config.name else self.config.name
+            depth_thresholds = envelope.get_depth_thresholds(asset_symbol)
             min_depth_yes_threshold = depth_thresholds.get('min_depth_yes', 1)
             min_depth_no_threshold = depth_thresholds.get('min_depth_no', 1)
             
