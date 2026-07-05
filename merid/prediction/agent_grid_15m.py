@@ -4310,18 +4310,27 @@ class LeanAgent15m:
                             # Get min_decision_minute from profile (per-asset configuration)
                             min_decision_minute = 0  # default to 0 if not configured
                             try:
-                                from merid.risk.profiles.crypto_15m_profile import get_active_profile
-                                profile = get_active_profile()
-                                min_decision_minute_config = profile.get("min_decision_minute", {})
+                                # Load raw YAML to access min_decision_minute section
+                                import yaml
+                                from pathlib import Path
+                                import os
+                                profile_name = os.getenv("MERID_PROFILE", "kalshi_crypto_15m_v2")
+                                profile_filename = f"{profile_name}.yaml"
+                                profile_path = Path(__file__).parent.parent.parent.parent / "config" / "profiles" / profile_filename
+                                
+                                with open(profile_path, 'r') as f:
+                                    profile_yaml = yaml.safe_load(f)
+                                
+                                min_decision_minute_config = profile_yaml.get("min_decision_minute", {})
                                 # Extract asset symbol from agent name (e.g., "DOGE_15M" -> "DOGE")
                                 asset_symbol = self.config.name.split('_')[0] if '_' in self.config.name else self.config.name
                                 min_decision_minute = min_decision_minute_config.get(asset_symbol, 0)
                                 logger.info(
-                                    "[MIN-DECISION-MINUTE] asset=%s min_decision_minute=%d (from profile)",
+                                    "[MIN-DECISION-MINUTE] asset=%s min_decision_minute=%d (from profile YAML)",
                                     self.config.name, min_decision_minute
                                 )
                             except Exception as e:
-                                logger.warning("[MIN-DECISION-MINUTE] Failed to load from profile: %s, using default 0", e)
+                                logger.warning("[MIN-DECISION-MINUTE] Failed to load from profile YAML: %s, using default 0", e)
                             
                             min_time_to_expiry = min_decision_minute * 60  # convert to seconds
                             
