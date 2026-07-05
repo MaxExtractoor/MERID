@@ -2378,8 +2378,10 @@ class LeanAgent15m:
         # Check liquidity (depth) with one-sided regime classification
         # Kalshi 15m books are often one-sided - we should allow trading on the liquid side
         # Depth thresholds from risk envelope/profile (single source of truth)
-        # 2026-07-05 INDUSTRY ALIGNMENT: Implement realistic depth thresholds based on position size
-        # Industry standard: Depth should be at least 10x position size to allow exit without excessive slippage
+        # CRITICAL FIX: Removed 10x multiplier that was ignoring profile config
+        # The profile YAML already sets appropriate depth thresholds (1-2 contracts for 15m crypto)
+        # Applying a 10x multiplier was requiring 60-70 contracts when profile only required 1
+        # This was causing massive trade rejections and low fill rates
         min_depth_yes_threshold = 1
         min_depth_no_threshold = 1
         
@@ -2392,19 +2394,9 @@ class LeanAgent15m:
             min_depth_yes_threshold = depth_thresholds.get('min_depth_yes', 1)
             min_depth_no_threshold = depth_thresholds.get('min_depth_no', 1)
             
-            # 2026-07-05 INDUSTRY ALIGNMENT: Scale depth thresholds based on expected position size
-            # Get expected position size (base position size from risk envelope)
-            base_position_size = envelope.get_base_position_size()
-            
-            # Industry standard: Depth should be at least 10x position size
-            # This ensures we can exit without excessive slippage
-            depth_multiplier = 10
-            min_depth_yes_threshold = max(min_depth_yes_threshold, base_position_size * depth_multiplier)
-            min_depth_no_threshold = max(min_depth_no_threshold, base_position_size * depth_multiplier)
-            
             logger.info(
-                "[DEPTH-THRESHOLD] asset=%s base_position_size=%d depth_multiplier=%d min_depth_yes=%d min_depth_no=%d",
-                self.config.name, base_position_size, depth_multiplier, min_depth_yes_threshold, min_depth_no_threshold
+                "[DEPTH-THRESHOLD] asset=%s min_depth_yes=%d min_depth_no=%d (from profile)",
+                self.config.name, min_depth_yes_threshold, min_depth_no_threshold
             )
         except Exception as e:
             # Fallback to defaults if envelope not available
@@ -2432,10 +2424,12 @@ class LeanAgent15m:
                          self.config.name, ticker, min_depth_yes, min_depth_no, min_depth_yes_threshold, min_depth_no_threshold, regime)
             return False
         
-        # 2026-07-05 INDUSTRY ALIGNMENT: Reject one-sided books for directional entries
-        # Industry standard: Require two-sided liquidity for directional entries
-        # Risk: Cannot exit position if market becomes one-sided after entry
-        # Exception: Allow one-sided books in last 1 minute (time pressure)
+        # CRITICAL FIX: Relaxed one-sided rejection for 15-minute markets
+        # Previous logic: Reject one-sided books when TTE > 1 minute (too aggressive)
+        # New logic: Allow one-sided books with sufficient depth on the trading side
+        # Rationale: 15-minute crypto markets are frequently one-sided, especially for smaller assets
+        # Risk mitigation: We only trade on the liquid side (YES for one_sided_yes, NO for one_sided_no)
+        # This allows trading while avoiding the risk of being stuck in an illiquid position
         if regime in ["one_sided_yes", "one_sided_no"]:
             # Get time to expiry
             close_time = getattr(market, 'close_time', 0)
@@ -2446,26 +2440,27 @@ class LeanAgent15m:
                 now = time.time()
                 minutes_to_expiry = (close_time - now) / 60.0
                 
-                if minutes_to_expiry > 1.0:
-                    # More than 1 minute to expiry: reject one-sided books
+                # Only reject one-sided books in last 30 seconds (terminal phase)
+                # Before that, allow trading on the liquid side
+                if minutes_to_expiry > 0.5:
+                    # More than 30 seconds to expiry: allow one-sided books
+                    logger.info(
+                        "[ONE-SIDED-ALLOW] asset=%s ticker=%s regime=%s depth_yes=%d depth_no=%d tte=%.1fmin > 0.5min -> ALLOW (trading on liquid side)",
+                        self.config.name, ticker, regime, min_depth_yes, min_depth_no, minutes_to_expiry
+                    )
+                else:
+                    # Last 30 seconds: reject one-sided books (terminal phase risk)
                     logger.warning(
-                        "[ONE-SIDED-REJECT] asset=%s ticker=%s regime=%s depth_yes=%d depth_no=%d tte=%.1fmin > 1min -> REJECT (cannot exit if book stays one-sided)",
+                        "[ONE-SIDED-REJECT] asset=%s ticker=%s regime=%s depth_yes=%d depth_no=%d tte=%.1fmin <= 0.5min -> REJECT (terminal phase, exit risk)",
                         self.config.name, ticker, regime, min_depth_yes, min_depth_no, minutes_to_expiry
                     )
                     return False
-                else:
-                    # Last 1 minute: allow one-sided books (time pressure)
-                    logger.info(
-                        "[ONE-SIDED-ALLOW] asset=%s ticker=%s regime=%s depth_yes=%d depth_no=%d tte=%.1fmin <= 1min -> ALLOW (time pressure exception)",
-                        self.config.name, ticker, regime, min_depth_yes, min_depth_no, minutes_to_expiry
-                    )
             else:
-                # No close time available: reject one-sided books (conservative)
-                logger.warning(
-                    "[ONE-SIDED-REJECT] asset=%s ticker=%s regime=%s depth_yes=%d depth_no=%d no close_time -> REJECT (cannot assess exit risk)",
+                # No close time available: allow one-sided books (less conservative)
+                logger.info(
+                    "[ONE-SIDED-ALLOW] asset=%s ticker=%s regime=%s depth_yes=%d depth_no=%d no close_time -> ALLOW (trading on liquid side)",
                     self.config.name, ticker, regime, min_depth_yes, min_depth_no
                 )
-                return False
         
         # Log regime for visibility
         logger.info("[MARKET-VALIDATION] asset=%s ticker=%s regime=%s depth_yes=%d depth_no=%d (thresholds: yes=%d no=%d)",
@@ -4305,12 +4300,30 @@ class LeanAgent15m:
                                 logger.warning("[TRADING-WINDOW] unexpected close_time_ts type: %s, using fallback", type(close_time_ts))
                                 close_time_ts = time.time() + 900
                              
-                            # 2026-07-05 RESEARCH FIX: Entry window is full 15m window
-                            # window (tte 0s-900s). Covers entire contract lifecycle.
-                            # Matches the market-selection window above; exits are managed elsewhere.
+                            # CRITICAL FIX: Implement min_decision_minute from profile
+                            # Profile configures per-asset minimum decision minute to skip noisy early signals
+                            # This prevents low-quality signals from early price action
+                            # Industry standard: Skip first N minutes of 15m window to avoid noise
                             time_to_expiry = close_time_ts - time.time()
                             max_trading_window = 900  # full 15m window
-                            min_time_to_expiry = 0  # allow trading from start
+                            
+                            # Get min_decision_minute from profile (per-asset configuration)
+                            min_decision_minute = 0  # default to 0 if not configured
+                            try:
+                                from merid.risk.profiles.crypto_15m_profile import get_active_profile
+                                profile = get_active_profile()
+                                min_decision_minute_config = profile.get("min_decision_minute", {})
+                                # Extract asset symbol from agent name (e.g., "DOGE_15M" -> "DOGE")
+                                asset_symbol = self.config.name.split('_')[0] if '_' in self.config.name else self.config.name
+                                min_decision_minute = min_decision_minute_config.get(asset_symbol, 0)
+                                logger.info(
+                                    "[MIN-DECISION-MINUTE] asset=%s min_decision_minute=%d (from profile)",
+                                    self.config.name, min_decision_minute
+                                )
+                            except Exception as e:
+                                logger.warning("[MIN-DECISION-MINUTE] Failed to load from profile: %s, using default 0", e)
+                            
+                            min_time_to_expiry = min_decision_minute * 60  # convert to seconds
                             
                             if time_to_expiry > max_trading_window:
                                 logger.info(
@@ -4320,8 +4333,8 @@ class LeanAgent15m:
                                 return None
                             elif time_to_expiry < min_time_to_expiry:
                                 logger.info(
-                                    "[TRADING-WINDOW] asset=%s time_to_expiry=%.1fs < min_time_to_expiry=%ds -> SKIP (too close to expiry)",
-                                    self.config.name, time_to_expiry, min_time_to_expiry
+                                    "[TRADING-WINDOW] asset=%s time_to_expiry=%.1fs < min_time_to_expiry=%ds (%d min) -> SKIP (too early in window, waiting for signal clarity)",
+                                    self.config.name, time_to_expiry, min_time_to_expiry, min_decision_minute
                                 )
                                 return None
                             else:
