@@ -172,15 +172,16 @@ class LeanAgentConfig:
     max_orders_per_15m_window: int = 5  # 2026 research: Max 5 trades per 15m session window
     consecutive_loss_pause: int = 3  # 2026 research: Pause after N consecutive losses
     max_session_risk_pct: float = 0.10  # 2026 research: Max session risk as % of capital
-    velocity_threshold: float = 0.0002  # Velocity threshold for signal generation (0.02% - aligned with actual market velocities)
+    velocity_threshold: float = 0.006  # Velocity threshold for signal generation (0.6% - aligned with 2026 industry standards)
     # Asset-specific velocity thresholds (deeper markets = lower threshold, more volatile = higher threshold)
-    # CRITICAL FIX: Lowered from 0.13%-0.20% to 0.02%-0.04% to match actual market velocities
-    # Previous thresholds were 5-10x too high, blocking all trades
-    velocity_threshold_btc: float = 0.0002  # BTC: 0.02% (deeper market, lower threshold)
-    velocity_threshold_eth: float = 0.0002  # ETH: 0.02% (deeper market, lower threshold)
-    velocity_threshold_sol: float = 0.0003  # SOL: 0.03% (more volatile, higher threshold)
-    velocity_threshold_xrp: float = 0.0003  # XRP: 0.03% (more volatile, higher threshold)
-    velocity_threshold_doge: float = 0.0004  # DOGE: 0.04% (most volatile, highest threshold)
+    # CRITICAL FIX: 2026-07-05 - Aligned with MagicTradeBot 15m standard (0.6% threshold)
+    # Previous thresholds (0.02%-0.04%) were 10-20x too low, causing "marginal" rejections
+    # New thresholds align with 2026 production systems for 15m crypto momentum:
+    velocity_threshold_btc: float = 0.006  # BTC: 0.6% (aligned with MagicTradeBot 15m standard)
+    velocity_threshold_eth: float = 0.006  # ETH: 0.6% (aligned with MagicTradeBot 15m standard)
+    velocity_threshold_sol: float = 0.008  # SOL: 0.8% (higher for high-beta assets)
+    velocity_threshold_xrp: float = 0.008  # XRP: 0.8% (higher for high-beta assets)
+    velocity_threshold_doge: float = 0.010  # DOGE: 1.0% (highest for highest volatility asset)
     # INDUSTRY ALIGNMENT: Fee-aware trading parameters based on profitable scalping research
     prefer_maker_orders: bool = True  # Prefer maker orders to earn rebates (-0.05% round trip) vs taker fees (0.15% round trip)
     min_profit_basis_points: int = 20  # Minimum 20bp profit target to overcome structural disadvantages (industry standard for retail)
@@ -1451,15 +1452,15 @@ class LeanAgent15m:
         adx = self._calculate_adx(asset)
         
         # Define volatility regimes for threshold adjustment (2026 industry standards for 15m crypto)
-        # CRITICAL FIX: 2026-07-01 - Adjusted ATR thresholds to match actual base velocity thresholds
-        # Previous thresholds (0.05%-0.15%) were 10x-100x higher than base thresholds, causing systematic reduction
-        # New thresholds (0.005%-0.03%) align with base velocity threshold range
-        # Low volatility: ATR < 0.005% -> reduce threshold to catch smaller moves (common in crypto)
-        # Normal volatility: 0.005% <= ATR < 0.03% -> use base threshold
-        # High volatility: ATR >= 0.03% -> increase threshold to avoid false signals
+        # CRITICAL FIX: 2026-07-05 - Aligned ATR thresholds with new velocity thresholds (0.6%-1.0%)
+        # Previous thresholds (0.005%-0.03%) were 20-200x lower than velocity thresholds, causing misalignment
+        # New thresholds align with velocity thresholds for consistent conviction:
+        # Low volatility: ATR < 0.4% -> reduce threshold to catch smaller moves (common in crypto)
+        # Normal volatility: 0.4% <= ATR < 1.2% -> use base threshold
+        # High volatility: ATR >= 1.2% -> increase threshold to avoid false signals
         
-        low_volatility_threshold = 0.00005  # 0.005% - aligned with base velocity thresholds
-        high_volatility_threshold = 0.00030  # 0.03% - aligned with base velocity thresholds
+        low_volatility_threshold = 0.004  # 0.4% - aligned with velocity thresholds (BTC/ETH: 0.6%)
+        high_volatility_threshold = 0.012  # 1.2% - aligned with velocity thresholds (DOGE: 1.0%)
         
         # Base adjustment factor from ATR (volatility)
         # CRITICAL FIX: 2026-07-02 - Disabled ATR adjustment to prevent threshold inflation blocking trades
@@ -3150,13 +3151,16 @@ class LeanAgent15m:
         # New approach: Use symmetric thresholds for both YES and NO sides
         # Rationale: Velocity magnitude should determine signal strength, not direction
         # If velocity is sufficiently negative, it should trigger NO signal just as positive triggers YES
-        yes_bias_margin = 0.2  # 20% margin for YES-side bias (kept for marginal cases)
+        # CRITICAL FIX: 2026-07-05 - Removed marginal zone rejection based on industry research
+        # Industry systems (MagicTradeBot, Manic Trade, VoiceOfChain) do not use marginal zones
+        # Signals fire when threshold is crossed - no 20% margin blocking valid trades
+        yes_bias_margin = 0.0  # REMOVED: No marginal zone - signals fire at threshold
         no_conviction_multiplier = 1.0  # NO side now uses same threshold as YES (symmetric)
         
         if not panic_fade_signal:
-            # Calculate marginal velocity zone (within 20% of threshold)
-            is_marginal_positive = (velocity > 0) and (velocity < velocity_threshold * (1 + yes_bias_margin))
-            is_marginal_negative = (velocity < 0) and (velocity > -velocity_threshold * (1 + yes_bias_margin))
+            # Calculate marginal velocity zone (DISABLED - no marginal zone)
+            is_marginal_positive = False  # DISABLED: No marginal zone
+            is_marginal_negative = False  # DISABLED: No marginal zone
             
             if velocity > velocity_threshold:
                 if strategy_mode == "trend_following":
@@ -3222,7 +3226,10 @@ class LeanAgent15m:
         
         # Filter 1: Minimum move threshold
         # Require minimum price change to avoid reacting to micro-movements
-        min_move_threshold_pct = 0.2  # 0.2% minimum price change
+        # CRITICAL FIX: 2026-07-05 - Aligned with velocity thresholds (0.6%-1.0%)
+        # Previous threshold (0.2%) was 3-5x lower than velocity thresholds, causing filter bypass
+        # New threshold aligns with velocity thresholds for consistent conviction:
+        min_move_threshold_pct = 0.6  # 0.6% minimum price change (aligned with BTC/ETH velocity threshold)
         if hasattr(self, '_last_price') and self._last_price.get(asset):
             last_price = self._last_price[asset]
             price_change_pct = abs((spot_price - last_price) / last_price) * 100.0 if last_price > 0 else 0.0
