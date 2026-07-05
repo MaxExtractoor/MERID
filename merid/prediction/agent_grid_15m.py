@@ -4316,7 +4316,9 @@ class LeanAgent15m:
                                 import os
                                 profile_name = os.getenv("MERID_PROFILE", "kalshi_crypto_15m_v2")
                                 profile_filename = f"{profile_name}.yaml"
-                                profile_path = Path(__file__).parent.parent.parent.parent / "config" / "profiles" / profile_filename
+                                # __file__ is merid/prediction/agent_grid_15m.py
+                                # parent.parent.parent = MERID root
+                                profile_path = Path(__file__).parent.parent.parent / "config" / "profiles" / profile_filename
                                 
                                 with open(profile_path, 'r') as f:
                                     profile_yaml = yaml.safe_load(f)
