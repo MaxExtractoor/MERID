@@ -261,14 +261,14 @@ class GlobalExecutionGuard:
                     logger.error("[GLOBAL_GUARD_ERROR] Bankroll unavailable from bankroll_service_v2")
                     return False, "BANKROLL_UNAVAILABLE: bankroll_service_v2 returned None or 0"
                 
-                # Read MAX_CYCLE_RISK_PCT from environment variable first (set by start_15m.ps1)
+                # Read MAX_CYCLE_RISK_PCT from core.settings (single source of truth)
                 # This ensures GlobalExecutionGuard uses the same cap as KalshiRiskConfig
-                env_value = os.getenv("MAX_CYCLE_RISK_PCT", "NOT_SET")
+                from core.settings import MAX_CYCLE_RISK_PCT
+                max_cycle_risk_pct = MAX_CYCLE_RISK_PCT
                 logger.info(
-                    "[GLOBAL_GUARD] MAX_CYCLE_RISK_PCT env var = '%s'",
-                    env_value
+                    "[GLOBAL_GUARD] MAX_CYCLE_RISK_PCT from core.settings = %.4f (%.1f%%)",
+                    max_cycle_risk_pct, max_cycle_risk_pct * 100
                 )
-                max_cycle_risk_pct = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.005"))  # CRITICAL FIX: 0.5% - aligned with profile (was 0.03)
                 bankroll_cap_usd = bankroll_usd * max_cycle_risk_pct
                 logger.info(
                     "[GLOBAL_GUARD] bankroll=$%.2f max_cycle_risk_pct=%.4f (%.1f%%) bankroll_cap_usd=$%.2f",
@@ -481,8 +481,9 @@ class GlobalExecutionGuard:
                     bankroll_cap_usd = 0.0
                     max_cycle_risk_pct = 0.005  # CRITICAL FIX: 0.5% - aligned with profile (was 0.03)
                 else:
-                    # Read MAX_CYCLE_RISK_PCT from environment variable first (set by start_15m.ps1)
-                    max_cycle_risk_pct = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.005"))  # CRITICAL FIX: 0.5% - aligned with profile (was 0.03)
+                    # Read MAX_CYCLE_RISK_PCT from core.settings (single source of truth)
+                    from core.settings import MAX_CYCLE_RISK_PCT
+                    max_cycle_risk_pct = MAX_CYCLE_RISK_PCT
                     bankroll_cap_usd = bankroll_usd * max_cycle_risk_pct
             except Exception:
                 bankroll_usd = 0.0

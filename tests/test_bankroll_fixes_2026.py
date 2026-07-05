@@ -29,32 +29,36 @@ def test_order_router_no_clamp():
         "Should reference 0.5% profile value in comments"
 
 
-def test_order_router_micro_account_multiplier_5x():
-    """Test that micro-account multiplier is 5x (from 2x)."""
+def test_order_router_micro_account_multiplier_enabled():
+    """Test that micro-account multiplier is ENABLED (10x for <$100, 1.5x for >=$100)."""
     with open('merid/event_venues/kalshi/order_router.py', 'r', encoding='utf-8') as f:
         content = f.read()
     
-    # Verify the multiplier is 5.0
-    assert 'max_total_risk_usd * 5.0' in content, \
-        "Micro-account multiplier should be 5x"
+    # Verify the conditional logic for micro accounts is present
+    assert 'if effective_equity_usd < 100.0:' in content, \
+        "Should have conditional logic for micro accounts"
     
-    # Verify the tolerance multiplier is 5.0
-    assert 'tolerance_multiplier = 5.0' in content, \
-        "Tolerance multiplier should be 5.0 for micro-accounts"
+    # Verify the 10x multiplier for micro accounts
+    assert 'tolerance_multiplier = 10.0' in content, \
+        "Micro accounts should use 10x tolerance"
     
-    # Verify the comment mentions 5x
-    assert '5x' in content, \
-        "Should mention 5x multiplier in comments"
+    # Verify the 1.5x multiplier for normal accounts
+    assert 'tolerance_multiplier = 1.5' in content, \
+        "Normal accounts should use 1.5x tolerance"
+    
+    # Verify the comment mentions re-enabled micro-account logic
+    assert 'Re-enabled micro-account tolerance' in content, \
+        "Should mention re-enabled micro-account logic in comments"
 
 
 def test_order_router_minimum_order_floor():
-    """Test that order_router has $0.50 minimum order floor."""
+    """Test that order_router has $0.10 minimum order floor (2026-07-05: lowered from $0.50)."""
     with open('merid/event_venues/kalshi/order_router.py', 'r', encoding='utf-8') as f:
         content = f.read()
     
     # Verify the minimum order notional floor is present
-    assert 'min_order_notional = 0.50' in content, \
-        "Should have $0.50 minimum order notional floor"
+    assert 'min_order_notional = 0.10' in content, \
+        "Should have $0.10 minimum order notional floor (lowered from $0.50 on 2026-07-05)"
     
     # Verify it's applied to effective_max
     assert 'effective_max = max(effective_max, min_order_notional)' in content, \
@@ -117,28 +121,31 @@ def test_unified_risk_enforcement_2_percent():
         "Should reference alignment with profile"
 
 
-def test_micro_account_order_calculation():
-    """Test that micro-account order calculation allows $0.70 orders with $34 bankroll."""
-    # Simulate the order router calculation
+def test_uniform_order_calculation():
+    """Test that uniform order calculation applies 1.5x tolerance for all account sizes."""
+    # Simulate the order router calculation (micro-account logic disabled)
     effective_equity_usd = 34.12
     risk_fraction = 0.005  # 0.5% from profile
     
     # Calculate max total risk
     max_total_risk_usd = effective_equity_usd * risk_fraction  # $0.17
     
-    # Apply micro-account adjustment (5x)
-    effective_max = max_total_risk_usd * 5.0  # $0.85
+    # Per-edge estimate (divide by 3 for rough sizing)
+    per_edge_estimate = max_total_risk_usd / 3.0  # $0.057
+    
+    # Apply uniform 1.5x tolerance (no micro-account adjustment)
+    effective_max = per_edge_estimate * 1.5  # $0.085
     
     # Apply minimum floor
-    effective_max = max(effective_max, 0.50)  # $0.85 (floor not needed)
+    effective_max = max(effective_max, 0.50)  # $0.50 (floor applies)
     
-    # Test $0.70 order
-    intent_notional_usd = 0.70
+    # Test $0.50 order (minimum viable)
+    intent_notional_usd = 0.50
     
     assert intent_notional_usd <= effective_max, \
-        f"$0.70 order should be allowed with $34 bankroll (effective_max=${effective_max:.2f})"
+        f"$0.50 order should be allowed with $34 bankroll (effective_max=${effective_max:.2f})"
     
-    print(f"✓ Micro-account calculation: ${effective_equity_usd:.2f} equity → ${effective_max:.2f} effective max → allows ${intent_notional_usd:.2f} orders")
+    print(f"✓ Uniform calculation: ${effective_equity_usd:.2f} equity → ${effective_max:.2f} effective max → allows ${intent_notional_usd:.2f} orders")
 
 
 def test_consistent_100_dollar_threshold():

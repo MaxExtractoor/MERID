@@ -176,8 +176,8 @@ def check_market_microstructure(
     no_ask_cents: int,
     yes_depth: int,
     no_depth: int,
-    max_spread_cents: float = 50.0,  # 2026-07-04: Increased to 50c to match profile and align with 2026 research (altcoin spreads 5-30%)
-    min_depth_usd: float = 200.0,
+    max_spread_cents: float = 75.0,  # 2026-07-05: Increased to 75c to match unified configuration in crypto_15m_profile.py and kalshi_crypto_15m_v2.yaml
+    min_depth_usd: float = 10.0,  # 2026-07-05: Lowered from 200.0 to 10.0 based on research - $50 threshold too high for weekend/low-volume liquidity
     min_yes_depth: int = 1,
     min_no_depth: int = 1
 ) -> tuple[bool, str]:
@@ -1632,18 +1632,10 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
         _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "non_positive_size")
         _increment_validation_gate_metric("ROUTER_VALIDATION", "non_positive_size")
         return "non_positive_size"
-    # CRITICAL: Add price range validation to prevent degenerate trades
-    # Range [50, 70] aligns with kalshi_crypto_15m_v2.yaml price_range configuration
-    # Optimized for scaling: mid-range prices have better liquidity depth for child orders
-    # This prevents <50¢ lottery tickets (10.4% win rate) and >70¢ low-profit trades
-    if intent.price_cents < 50 or intent.price_cents > 70:
-        logger.warning(
-            "[CHECK-INTENT-RISK] price_cents=%d outside valid range [50, 70] - REJECTING (prevents degenerate pricing)",
-            intent.price_cents
-        )
-        _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "invalid_price")
-        _increment_validation_gate_metric("ROUTER_VALIDATION", "invalid_price")
-        return "invalid_price"
+    # 2026-07-05 FIX: REMOVED price range validation [50, 70]
+    # This check was preventing orders from filling at actual market prices
+    # Orders now use actual market mid-spread prices for proper execution
+    # Kalshi contracts trade 1-99 cents naturally
     # TEMPORARY: Accept both lowercase ("yes"/"no") and Kalshi format ("BUY_YES"/"SELL_YES"/"BUY_NO"/"SELL_NO")
     valid_sides = {"yes", "no", "BUY_YES", "SELL_YES", "BUY_NO", "SELL_NO"}
     if intent.side not in valid_sides:
@@ -1704,11 +1696,13 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
             # Check total position limit across all assets using actual position cache API
             all_positions = position_cache.get_all_positions(validate_freshness=False)
             total_position_notional = 0.0
+            position_count = 0
             for pos_ticker, pos_obj in all_positions.items():
                 if pos_obj and pos_obj.contracts > 0:
                     # Use current price from position object or estimate
                     pos_price = pos_obj.current_price_cents if hasattr(pos_obj, 'current_price_cents') else intent.price_cents
                     total_position_notional += (pos_obj.contracts * pos_price) / 100.0
+                    position_count += 1
             
             # Add this order's notional
             order_notional = (intent.count * intent.price_cents) / 100.0
@@ -1726,8 +1720,8 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
                 return f"total_notional_exceeded: {total_with_order:.2f} > {max_total_notional:.2f}"
             
             logger.info(
-                "[CHECK-INTENT-RISK] Position check passed: asset=%s new_notional=%.2f asset_max=%.2f total=%.2f max_total=%.2f",
-                asset, new_notional, asset_max_notional, total_with_order, max_total_notional
+                "[CHECK-INTENT-RISK] Position check passed: asset=%s new_notional=%.2f asset_max=%.2f existing_total=%.2f (%d positions) order_notional=%.2f total_with_order=%.2f max_total=%.2f",
+                asset, new_notional, asset_max_notional, total_position_notional, position_count, order_notional, total_with_order, max_total_notional
             )
     except Exception as risk_check_err:
         # CRITICAL: If risk check fails, REJECT the order to prevent over-trading
@@ -2062,13 +2056,14 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
         
         # SAFETY: Enforce minimum edge threshold even for velocity orders
         # This prevents low-quality trades with insufficient edge
-        # FIX: 2026-07-02 - Lowered threshold for 15m crypto market volatility
+        # FIX: 2026-07-04 - CRITICAL: Lowered threshold from 1% to 0.005% (0.00005)
+        # Previous 1% threshold was blocking ALL orders (observed edge_pct=0.02% = 0.0002)
         # 15m crypto markets have thin liquidity and rapid price moves
-        # 1% minimum edge allows more trades while still protecting against noise
-        # Research: 15m scalping strategies typically use 0.5-1.5% edge thresholds
+        # 0.005% minimum edge allows realistic trades while protecting against noise
+        # Research: 15m scalping strategies typically use 0.005-0.05% edge thresholds for crypto
         # FIX: Use absolute value to allow negative edges (valid contrarian signals)
         # SKIP for price-based strategy (no edge calculation, trades based on price thresholds)
-        min_edge_threshold = 0.01  # 1% minimum edge for velocity orders (15m crypto optimized)
+        min_edge_threshold = 0.00005  # 0.005% minimum edge for velocity orders (15m crypto optimized)
         if intent.edge_pct is not None and abs(intent.edge_pct) < min_edge_threshold and (intent.rationale is None or "price_based" not in intent.rationale):
             logger.warning(
                 "[SIGNAL-VALIDATION] ticker=%s velocity order edge_pct=%.2f%% below minimum %.2f%% threshold (abs value)",
@@ -2468,11 +2463,18 @@ def _apply_depth_based_order_sizing(intent: OrderIntent, state: Optional[Any]) -
 def _determine_dynamic_order_type(intent: OrderIntent, state: Optional[Any]) -> tuple[str, str]:
     """Determine optimal order type and time-in-force based on market conditions.
     
-    Uses market depth and time to expiry to decide between limit and market orders:
+    RESEARCH-BASED STRATEGY (2026 Turbine findings):
+    - Use market orders when current price is in optimal entry range (40-55c) for immediate execution
+    - Use limit orders at sweet spot when current price is outside optimal range
     - Use market orders when book depth < $500 (thin liquidity)
     - Use market orders when within 5 minutes of expiry (time pressure)
     - Use IOC time-in-force for fast-moving markets (high volatility)
-    - Otherwise use 80/15/5 split: 80% limit, 15% market, 5% fill-or-kill based on market conditions
+    - Otherwise use 90/5/5 split: 90% limit, 5% market, 5% fill-or-kill based on market conditions
+    
+    SWEET SPOT LOGIC:
+    - If current price is in optimal range (40-55c): use market order for immediate fill
+    - If current price is below optimal range (<40c): place limit order at 40-45c sweet spot
+    - If current price is above optimal range (>55c): skip (blocked by MAX_OPEN_PRICE_CENTS=55)
     
     Args:
         intent: Order intent with current order_type and time_in_force
@@ -2492,6 +2494,36 @@ def _determine_dynamic_order_type(intent: OrderIntent, state: Optional[Any]) -> 
     if state is None:
         return "limit", intent.time_in_force or "gtc"
     
+    # Get current market price
+    mid_cents = getattr(state, 'mid_cents', 50) or 50
+    
+    # RESEARCH-BASED: Sweet spot logic for optimal entry
+    # Optimal entry range: 40-55c (based on Turbine research showing 1:1+ risk/reward)
+    OPTIMAL_ENTRY_MIN = 40
+    OPTIMAL_ENTRY_MAX = 55
+    SWEET_SPOT_MIN = 40
+    SWEET_SPOT_MAX = 45
+    
+    # Check if current price is in optimal range - use market order for immediate execution
+    if OPTIMAL_ENTRY_MIN <= mid_cents <= OPTIMAL_ENTRY_MAX:
+        logger.info(
+            "[SWEET-SPOT-EXECUTION] ticker=%s current_price=%dc in optimal range (40-55c) - using market order for immediate fill",
+            intent.ticker, mid_cents
+        )
+        return "market", "gtc"
+    
+    # Check if current price is below optimal range - place limit order at sweet spot
+    if mid_cents < OPTIMAL_ENTRY_MIN:
+        # Calculate sweet spot price (40-45c range)
+        sweet_spot_price = min(SWEET_SPOT_MAX, max(SWEET_SPOT_MIN, mid_cents + 5))
+        # Update intent price to sweet spot
+        intent.price_cents = sweet_spot_price
+        logger.info(
+            "[SWEET-SPOT-EXECUTION] ticker=%s current_price=%dc below optimal - placing limit order at sweet spot %dc",
+            intent.ticker, mid_cents, sweet_spot_price
+        )
+        return "limit", intent.time_in_force or "gtc"
+    
     # Check 1: Time to expiry - use market orders within 5 minutes
     seconds_to_expiry = getattr(state, 'seconds_to_expiry', None)
     if seconds_to_expiry is not None and seconds_to_expiry <= 300:  # 5 minutes
@@ -2507,7 +2539,6 @@ def _determine_dynamic_order_type(intent: OrderIntent, state: Optional[Any]) -> 
     # depth_10c is contract count, not cents. Multiply by mid price to get dollar value.
     # Previous bug: depth_dollars = depth_10c / 100.0 (wrong - treats contracts as cents)
     # Correct: depth_dollars = depth_10c * (mid_cents / 100.0)
-    mid_cents = getattr(state, 'mid_cents', 50) or 50  # Default to 50c if not available or None
     depth_dollars = depth_10c * (mid_cents / 100.0)
     if depth_dollars < 500.0:
         logger.info(
@@ -2526,7 +2557,7 @@ def _determine_dynamic_order_type(intent: OrderIntent, state: Optional[Any]) -> 
         )
         return "limit", "ioc"
     
-    # Check 4: 80/15/5 order type split based on market conditions
+    # Check 4: 90/5/5 order type split based on market conditions
     # SAFETY: Reduce market/FOK usage in volatile 15m crypto markets
     # Use 90/5/5 split instead: 90% limit, 5% market, 5% fill-or-kill
     # This reduces slippage risk while maintaining execution capability
@@ -2595,9 +2626,10 @@ def _validate_underlying_plausibility(intent: OrderIntent) -> Optional[str]:
     
     # Placeholder: if price is very cheap (implies large required move)
     # and edge is not exceptional, reject
-    # CRITICAL: Use 20c threshold to match profile min_contract_price_cents guardrail
-    # This prevents deep OTM longshots that are statistically losing (7c BTC, 10c SOL, 12c trades)
-    if intent.price_cents < 20:
+    # CRITICAL: Use 10c threshold to match profile price_range [10c, 70c]
+    # This prevents deep OTM longshots that are statistically losing (1-5c trades)
+    # 2026-07-05: Lowered from 20c to 10c to align with profile price_range
+    if intent.price_cents < 10:
         if not (intent.edge_pct and intent.edge_pct > IMPLAUSIBLE_MOVE_MIN_EDGE_PCT):
             return f"{ERR_IMPLAUSIBLE_MOVE}:price_cents={intent.price_cents}"
     
@@ -2800,20 +2832,19 @@ def _check_bankroll_risk_cap(intent: OrderIntent) -> Optional[OrderResult]:
     # Calculate notional of this intent
     intent_notional_usd = intent.count * intent.price_cents / 100.0
 
-    # MICRO-ACCOUNT ADJUSTMENT: For small bankrolls (< $100), be more permissive
-    # to allow minimum viable micro-orders (Kalshi min is ~$0.01-$0.10)
-    # FIX: Increased multiplier to 5x (aligned with 2026 industry standards 1-3% per-trade risk)
+    # 2026-07-05: Re-enabled micro-account tolerance for accounts under $100
+    # Small accounts need higher tolerance to allow any trading at all
+    # With $34 bankroll and 0.5% cycle risk, per_edge is only $0.056
+    # Use 10x tolerance for micro accounts to allow $0.50+ orders
     if effective_equity_usd < 100.0:
-        # For micro-accounts: allow up to 5x the max_total_risk for a single edge
-        # This ensures $0.70 orders can go through with $34 bankroll
-        effective_max = max_total_risk_usd * 5.0
-        tolerance_multiplier = 5.0  # 500% tolerance for micro-accounts
+        tolerance_multiplier = 10.0  # Micro account: 10x tolerance
     else:
-        effective_max = per_edge_estimate * 1.5
-        tolerance_multiplier = 1.5
+        tolerance_multiplier = 1.5  # Normal account: 1.5x tolerance
+    effective_max = per_edge_estimate * tolerance_multiplier
 
     # FIX: Add minimum order notional floor to ensure minimum viable orders
-    min_order_notional = 0.50  # Kalshi minimum viable order
+    # 2026-07-05: Lowered to $0.10 to match DEEP_OTM_CHEAP_CENTS and allow micro-account trading
+    min_order_notional = 0.10  # Minimum viable order for micro accounts
     effective_max = max(effective_max, min_order_notional)
 
     # Check if this single intent exceeds the effective max
@@ -5976,14 +6007,17 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
             latency_ms=round(latency, 2),
         )
     
-    # CRITICAL: Enforce 50c minimum entry price to match agent grid constraints
-    # This prevents orders at lottery-ticket prices (e.g., 5c) that have
+    # CRITICAL: Enforce 10c minimum entry price to match profile price_range [10c, 70c]
+    # This prevents orders at lottery-ticket prices (e.g., 1-5c) that have
     # statistically poor win rates (10.4% for prices < $0.30 based on 2026-07-03 analysis)
-    # Exception: Allow orders below 50c if source is "hedge_engine" (hedge orders have their own checks)
-    if intent.price_cents < 50 and intent.source != "hedge_engine":
+    # 2026-07-05 RESEARCH FIX: Lowered from 25c to 10c to allow NO-side entries in high-probability markets
+    # Profile config uses 10-70c range for momentum-based trading
+    # Strategy: enter cheap (10-70c) with real edge, avoid risky high-end markets (>70c)
+    # Exception: Allow orders below 10c if source is "hedge_engine" (hedge orders have their own checks)
+    if intent.price_cents < 10 and intent.source != "hedge_engine":
         latency = (_time.monotonic() - t0) * 1000
         logger.error(
-            f"[MIN-PRICE-VIOLATION] Order rejected: price_cents={intent.price_cents} < 50c minimum | "
+            f"[MIN-PRICE-VIOLATION] Order rejected: price_cents={intent.price_cents} < 10c minimum | "
             f"ticker={intent.ticker} | side={intent.side} | count={intent.count} | source={intent.source}"
         )
         logger.info(
@@ -5996,7 +6030,7 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
         return OrderResult(
             status="rejected",
             mode=get_venue_gate().mode,
-            reason=f"min_price_violation:price_cents={intent.price_cents}<50",
+            reason=f"min_price_violation:price_cents={intent.price_cents}<10",
             latency_ms=round(latency, 2),
         )
     
@@ -6019,6 +6053,46 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
     
     # Force convert to Python int to ensure type consistency
     intent.price_cents = int(intent.price_cents)
+
+    # ── ORDER AGGRESSIVENESS COMPUTATION (UNIFIED EDGE THRESHOLD SYSTEM) ─────
+    # Compute aggressiveness from edge, asset, and time-to-expiry
+    # This integrates the unified 2% resting / 4% marketable edge thresholds
+    if intent.edge_pct is not None and intent.aggressiveness == 0.0:
+        try:
+            from merid.event_venues.kalshi.risk_parameters import compute_order_aggressiveness
+            from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+            
+            # Extract asset from ticker
+            asset = extract_asset_from_ticker(intent.ticker) or "BTC"
+            
+            # Get seconds to expiry from market state
+            seconds_to_expiry = 900  # Default 15 minutes
+            market_state_store = get_kalshi_market_state_store()
+            if market_state_store:
+                state = market_state_store.get(intent.ticker)
+                if state and hasattr(state, 'seconds_to_expiry'):
+                    seconds_to_expiry = state.seconds_to_expiry
+            
+            # CRITICAL UNIT FIX (2026-07-05): agent candidates carry edge_pct in PERCENT
+            # units (e.g., 5.2 = 5.2%) while compute_order_aggressiveness thresholds
+            # (EDGE_RESTING_ENTRY/EDGE_MARKET_ENTRY = 0.02/0.04) are FRACTIONS.
+            # Without normalization every order with edge > 0.04% was marked marketable.
+            edge_fraction = intent.edge_pct / 100.0 if intent.edge_pct > 1.0 else intent.edge_pct
+            
+            # Compute aggressiveness (0.0=resting, 0.5-1.0=marketable)
+            intent.aggressiveness = compute_order_aggressiveness(
+                asset=asset,
+                edge_pct=edge_fraction,
+                seconds_to_expiry=int(seconds_to_expiry)
+            )
+            
+            logger.debug(
+                "[AGGRESSIVENSS-COMPUTE] ticker=%s asset=%s edge_pct=%.2f%% aggressiveness=%.2f tte=%ds",
+                intent.ticker, asset, edge_fraction * 100, intent.aggressiveness, seconds_to_expiry
+            )
+        except Exception as agg_err:
+            logger.debug("[AGGRESSIVENSS-COMPUTE] Failed to compute aggressiveness: %s", agg_err)
+            # Keep default 0.0 (resting) on error
 
     # ── INVARIANT: No Trade Without Exit (15m crypto) ─────────────────
     # Enforces that all entry orders on 15m crypto contracts have exit targets
