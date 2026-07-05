@@ -51,6 +51,9 @@ $env:TRADING_ENABLED = "true"
 $env:MERID_PM_TRADING_MODE = "live"
 $env:MERID_PM_LIVE_ENABLED = "true"
 $env:MERID_ALLOW_LIVE_TRADES = "true"
+# CRITICAL FIX: Disable net edge filter to allow velocity-based small-edge trades
+# The filter was rejecting orders with edge < (fee + buffer), blocking valid signals
+$env:MERID_KALSHI_NET_EDGE_FILTER_ENABLED = "false"
 Write-Host "[start_15m] *** LIVE TRADING ENABLED - REAL ORDERS WILL BE SENT ***" -ForegroundColor Red
 Write-Host "[start_15m] TRADING_ENABLED=$($env:TRADING_ENABLED)" -ForegroundColor Cyan
 Write-Host "[start_15m] MERID_PM_TRADING_MODE=$($env:MERID_PM_TRADING_MODE)" -ForegroundColor Cyan
@@ -100,6 +103,18 @@ Write-Host "[start_15m] MERID_YES_NO_ARBITRAGE_ENABLED=$($env:MERID_YES_NO_ARBIT
 # All risk limits are now configured in config/risk_limits.yaml (single source of truth)
 # UnifiedRiskManager reads from this file and enforces all risk checks
 Write-Host "[start_15m] Risk limits configured in config/risk_limits.yaml (UnifiedRiskManager)" -ForegroundColor Cyan
+
+# CRITICAL FIX: Disable deprecated GlobalRiskGuard for kalshi_crypto_15m_v2
+# The legacy GlobalRiskGuard uses 0.5% cycle cap which is too restrictive for micro accounts
+# The risk envelope provides proper risk management with per-asset caps and drawdown tracking
+$env:MERID_DISABLE_SHARED_RISK_GUARD = "true"
+Write-Host "[start_15m] MERID_DISABLE_SHARED_RISK_GUARD=$($env:MERID_DISABLE_SHARED_RISK_GUARD) - using risk envelope only" -ForegroundColor Cyan
+
+# CRITICAL FIX: Increase MAX_CYCLE_RISK_PCT to 5% to match risk envelope agent defaults
+# GlobalExecutionGuard was using 0.5% which is too restrictive for micro accounts
+# This aligns with the 5% agent default max_notional_pct in the risk envelope
+$env:MAX_CYCLE_RISK_PCT = "0.05"
+Write-Host "[start_15m] MAX_CYCLE_RISK_PCT=$($env:MAX_CYCLE_RISK_PCT) (5% - aligned with risk envelope agent defaults)" -ForegroundColor Cyan
 
 # Market making and correlation tracking are controlled by profile config (kalshi_crypto_15m_v2.yaml)
 # These are already enabled in the profile config

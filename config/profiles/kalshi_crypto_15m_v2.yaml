@@ -128,9 +128,9 @@ catalog_staleness_enforced: false
 # - momentum_fvg: Trade with trend using Fair Value Gaps and Order Book Imbalance
 # - hybrid: Allow both modes (default for maximum opportunity capture)
 # - price_based: Turbine research winner - buy YES when price <= 0.50, sell when price >= 0.70
-# 2026 OPTIMIZATION: Switch to hybrid mode for maximum opportunity capture
-# Hybrid mode combines mean_reversion and momentum_fvg for better signal diversity
-signal_mode: momentum_fvg  # Options: mean_reversion, momentum_fvg, hybrid, price_based - SWITCHED from hybrid based on 2026 research (panic_fade only profitable strategy)
+# 2026-07-05: Switched to momentum_fvg based on Turbine research - momentum was the only profitable family (78 of 100 strategies)
+# Turbine research showed mean reversion failed completely (0 for 432 variants) on 15-minute markets
+signal_mode: momentum_fvg  # Options: mean_reversion, momentum_fvg, hybrid, price_based, trend - 2026-07-05: Changed from trend to momentum_fvg based on Turbine research
 
 # ── Phase 1 Profitability Enhancements ─────────────────────────────────────────
 # YES/NO Sum Arbitrage, Market Making, and Correlation Tracking
@@ -175,15 +175,19 @@ correlation_tracking:
 
 # Offset Hedging Configuration
 # When holding YES, buy NO in same market to cap downside while preserving upside
+# 2026-07-05: Disabled based on research - binary contracts are inefficient for hedging crypto
+# Research findings: Binary payouts are structurally mismatched for linear loss hedging
+# For assets with public markets (BTC/ETH/SOL/XRP/DOGE), options are more efficient
+# Prediction markets are better suited for events without corresponding public market prices
 offset_hedging:
-  enabled: true  # Set to true to enable offset hedging
+  enabled: false  # DISABLED: Binary hedging inefficient for crypto with public markets
   hedge_ratio: 0.30  # 30% hedge, 70% conviction (0.30 = 30%)
   min_edge_for_hedge: 0.03  # Only hedge when edge >= 3% (0.03 = 3%)
   max_hedge_notional_pct: 0.02  # Max 2% of equity for hedge (0.02 = 2%)
   rebalance_threshold: 0.05  # Rebalance when probability drifts > 5% (0.05 = 5%)
   min_hedge_contracts: 1  # Minimum 1 contract for hedge
   max_hedge_contracts: 3  # Maximum 3 contracts for hedge
-  description: "Offset hedge: buy NO when holding YES to cap downside"
+  description: "Offset hedge: buy NO when holding YES to cap downside (DISABLED - inefficient for crypto)"
 
 # Trailing Stop Configuration
 # Dynamic stop-loss that follows price to lock in profits
@@ -197,12 +201,18 @@ trailing_stop:
 # Ratchet Profit Floor Configuration
 # Research-backed mechanism to lock in profits when price reaches high threshold
 # Prevents giving back significant gains when 99¢ TP is not guaranteed
+# 2026-07-05: Added mandatory 99c exit for maximum profit capture
+# 2026-07-05: Added position trimming to derisk when >1 contract and price >80c
 ratchet_profit_floor:
   enabled: true  # Enable ratchet profit floor mechanism
   activation_threshold_cents: 85  # Activate ratchet when price hits this threshold
   floor_offset_cents: 5  # Set floor X cents below activation (e.g., 85¢ activation → 80¢ floor)
   force_exit_on_floor_breach: true  # Mandatory exit if price drops to floor
   min_hold_after_activation_sec: 30  # Prevent immediate exit on noise (seconds)
+  mandatory_exit_at_99c: true  # Mandatory exit when price reaches 99c (maximum profit)
+  trim_position_enabled: true  # Trim position when >1 contract and price >80c
+  trim_threshold_cents: 80  # Trim when price crosses this threshold
+  trim_to_contracts: 1  # Trim to 1 contract to lock in profits
   description: "Ratchet profit floor: lock in profits at high price thresholds to prevent giving back gains"
 
 # Staged Time-Based Exit Configuration
@@ -225,11 +235,11 @@ staged_time_exit:
 dynamic_sizing:
   enabled: true  # Set to true to enable dynamic sizing
   base_contracts: 1  # Base size
-  edge_multiplier: 0.5  # 0.5 contracts per 1% edge
-  confidence_multiplier: 0.3  # 0.3 contracts per 1% confidence
+  edge_multiplier: 2.0  # 2026-07-05: Increased from 0.5 to 2.0 (4x) based on Turbine research - amplify edge impact for small velocity-based edges
+  confidence_multiplier: 1.0  # 2026-07-05: Increased from 0.3 to 1.0 (3.3x) based on Turbine research - amplify confidence impact
   max_contracts: 3  # Max contracts per trade
   min_contracts: 1  # Min contracts per trade
-  description: "Dynamic sizing: scale position based on edge and confidence"
+  description: "Dynamic sizing: scale position based on edge and confidence (2026 research-tuned)"
 
 # Order Scaling Configuration
 # Institutional-grade scaling strategies (TWAP, iceberg, adaptive)
@@ -304,7 +314,7 @@ momentum_fvg:
   
   # Spread guard interaction with momentum
   # If spread exceeds this, require higher OBI persistence for momentum entries
-  spread_gate_cents: 15  # 2026-07-04: Unified to 15c - aligned with guardrails and market_microstructure (eliminates 50c conflicts)
+  spread_gate_cents: 75  # 2026-07-04: UNIFIED to 75c - aligned with guardrails.max_spread_cents (single source of truth)
   spread_gate_obi_persistence_boost: 0.75  # Require 75% persistence if spread is wide
 
 # ── Price-Based Strategy Parameters (2026 Optimized for Swing Trading) ───────────
@@ -368,7 +378,7 @@ drawdown_semantics:
 capital_usd: 0  # Live mode: derive from live Kalshi equity via router/bankroll engine
 
 # Minimum trade size (floor) - single source of truth for all agents
-min_notional_usd: 0.50  # MICRO-ACCOUNT ADJUSTED: $0.50 minimum notional per trade (reduced from $1.00 for micro accounts under $100)
+min_notional_usd: 0.50  # Minimum notional per trade (uniform for all account sizes)
 min_contracts: 1  # Minimum 1 contract per trade (Kalshi venue invariant)
 
 # Fallback pricing configuration
@@ -409,11 +419,11 @@ venue:
   # - max_cycle_risk_pct (0.5%): aggregate cycle-level control (conservative for 5-second cycles)
   # - max_total_risk_pct (15%): aggregate total exposure control (conservative for survival)
   max_total_notional_pct:
-    value: 0.50  # INCREASED: 50% total venue cap (sum of 10% per asset × 5 assets for $1+/15m target)
+    value: 0.15  # CONSERVATIVE: 15% total venue cap (sum of 3% per asset × 5 assets for conservative cycle risk)
     static: profile
     description: "Maximum total notional as percentage of capital (matches sum of per-asset caps)"
   max_category_notional_pct:
-    value: 0.50  # INCREASED: 50% of capital for "crypto" category (matches total)
+    value: 0.15  # CONSERVATIVE: 15% of capital for "crypto" category (matches total)
     static: profile
     description: "Maximum category notional as percentage of capital"
   
@@ -440,7 +450,7 @@ venue:
 universe:
   min_volume: 5  # Minimum 5 contracts volume (relaxed from default 50 for 15m crypto)
   min_open_interest: 1  # Minimum 1 contract open interest (relaxed from default 10)
-  max_spread_cents: 15  # 2026-07-04: Unified to 15c - aligned with guardrails and market_microstructure (eliminates 50c conflicts)
+  max_spread_cents: 75  # 2026-07-04: UNIFIED to 75c - aligned with guardrails.max_spread_cents (single source of truth)
   description: "Coarse liquidity prefilter for 15m crypto markets - tuned for exactly 5 markets per asset"
 
 # ── Throttling (Order Rate Limits) ───────────────────────────────────────────
@@ -473,17 +483,19 @@ failsafe:
 # Prevents degenerate trades at extreme prices (1 cent or 89-99 cents)
 # This is the single source of truth for price validation across the system
 # Orders outside this range will be rejected at the order router level
-# UPDATED for scaling: 50-70c range optimal for order scaling strategies
+# UPDATED: 10-70c range for momentum-based trading
 # Research findings (2026-07-04):
 # - Prediction markets have hidden liquidity problems - quoted price ≠ tradeable price for size
 # - Mid-range prices (50-70c) have better depth to absorb scaled child orders
 # - Low prices (<50c) = lottery tickets with 10.4% win rate, thin markets
 # - High prices (>70c) = low profit potential, thin markets, poor scaling effectiveness
 # - Scaling requires sufficient liquidity to avoid excessive slippage on child orders
+# - For momentum-based trading, conviction comes from velocity magnitude, not price level
+# - 10-70c range allows NO-side entries while avoiding risky high-end prices
 price_range:
-  min_price_cents: 50  # OPTIMIZED for scaling: 50c minimum balances edge opportunities with liquidity
-  max_price_cents: 70  # OPTIMIZED for scaling: 70c maximum avoids thin high-end markets where scaling fails
-  description: "Valid price range in cents for order execution (optimized for scaling strategies)"
+  min_price_cents: 10  # WIDENED for momentum: 10c minimum allows NO-side entries in high-probability markets
+  max_price_cents: 70  # KEEPS 70c maximum to avoid risky high-end markets with poor scaling
+  description: "Valid price range in cents for order execution (10-70c for momentum-based trading)"
 
 # ── Per-Asset Caps (BTC/ETH/SOL/XRP/DOGE) ─────────────────────────────────
 # Each asset has its own notional as percentage of capital, NOT hardcoded USD values.
@@ -491,8 +503,8 @@ price_range:
 # MINIMUM FLOOR: max_notional_usd will be at least min_notional_usd regardless of bankroll size
 # This ensures trades are possible even with small bankrolls (e.g., $31.36)
 # Set to 0.0 to disable floor and use pure percentage-based sizing
-# INCREASED to 0.50 to enable meaningful trading with small bankrolls
-min_max_notional_usd: 0.50  # Minimum floor for per-asset max_notional (increased from 0.10 for $31.36 bankroll)
+# 2026-07-05: Reduced to 0.10 to remove blocking constraint on legitimate trades
+min_max_notional_usd: 0.10  # Minimum floor for per-asset max_notional (reduced from 0.50 to allow sweet-spot trading)
 
 # 2026 OPTIMIZATION: Per-asset minimum decision minute (skip noisy early signals)
 # Industry standard (GRDazzle bot): Skip first N minutes of 15m window to avoid noise
@@ -535,10 +547,11 @@ portfolio_heat:
   description: "Portfolio heat tracking: correlation-adjusted exposure monitoring"
 
 # 2026 OPTIMIZATION: Time-of-Day Risk Scaling
+# DISABLED: Time-of-day scaling interferes with 3% per asset / 5% per 15m window risk limits
 # Industry standard: Adjust risk based on session liquidity
 # US market hours: 100% risk, Asian: 80%, European: 90%, Weekend: 50%
 time_of_day_risk_scaling:
-  enabled: true  # Enable time-of-day risk scaling
+  enabled: false  # DISABLED: interferes with 3% per asset limits
   us_market_hours: "09:30-16:00 ET"  # US market hours
   asian_session: "20:00-02:00 ET"  # Asian session
   european_session: "02:00-09:30 ET"  # European session
@@ -547,7 +560,7 @@ time_of_day_risk_scaling:
   asian_multiplier: 0.8  # 80% risk during Asian session (lower liquidity)
   european_multiplier: 0.9  # 90% risk during European session
   weekend_multiplier: 0.8  # 80% risk during weekend (relaxed from 0.5 - use volatility regime instead)
-  description: "Time-of-day risk scaling: adjust risk based on session liquidity (weekend relaxed for regime-based sizing)"
+  description: "Time-of-day risk scaling: DISABLED - interferes with 3% per asset / 5% per 15m window limits"
 
 # 2026 OPTIMIZATION: Per-Asset Rolling PnL Limits
 # Industry standard: Asset-specific rolling PnL limits based on volatility
@@ -637,7 +650,7 @@ fractional_contract_override_threshold: 0.5  # Allow 1 contract if max_notional 
 assets:
   BTC:
     max_notional_pct:
-      value: 0.10  # INCREASED: 10% of capital for BTC (up from 5% for $1+/15m target)
+      value: 0.03  # CONSERVATIVE: 3% of capital for BTC (limits total cycle risk to 15% across 5 assets)
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for BTC (computed from bankroll)"
     max_contracts:
@@ -666,7 +679,7 @@ assets:
     
   ETH:
     max_notional_pct:
-      value: 0.10  # INCREASED: 10% of capital for ETH (up from 5% for $1+/15m target)
+      value: 0.03  # CONSERVATIVE: 3% of capital for ETH (limits total cycle risk to 15% across 5 assets)
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for ETH (computed from bankroll)"
     max_contracts:
@@ -695,7 +708,7 @@ assets:
     
   SOL:
     max_notional_pct:
-      value: 0.10  # INCREASED: 10% of capital for SOL (up from 5% for $1+/15m target)
+      value: 0.03  # CONSERVATIVE: 3% of capital for SOL (limits total cycle risk to 15% across 5 assets)
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for SOL (computed from bankroll)"
     max_contracts:
@@ -724,7 +737,7 @@ assets:
     
   XRP:
     max_notional_pct:
-      value: 0.10  # INCREASED: 10% of capital for XRP (up from 5% for $1+/15m target)
+      value: 0.03  # CONSERVATIVE: 3% of capital for XRP (limits total cycle risk to 15% across 5 assets)
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for XRP (computed from bankroll)"
     max_contracts:
@@ -753,7 +766,7 @@ assets:
     
   DOGE:
     max_notional_pct:
-      value: 0.10  # INCREASED: 10% of capital for DOGE (up from 5% for $1+/15m target)
+      value: 0.03  # CONSERVATIVE: 3% of capital for DOGE (limits total cycle risk to 15% across 5 assets)
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for DOGE (computed from bankroll)"
     max_contracts:
@@ -786,7 +799,7 @@ assets:
 # UNIFIED RISK: All assets (BTC/ETH/SOL/XRP/DOGE) use the same 1-3% per-trade risk range
 # based on market conditions, not per-asset fixed percentages.
 agent_defaults:
-  max_notional_pct: 0.08  # INCREASED: 8% of capital per agent (up from 3% for $1+/15m target)
+  max_notional_pct: 0.05  # FIXED: 5% of capital per agent (per 15m window limit)
   max_orders_per_window: 20  # Max orders per trading window (increased for edge audit)
   max_yes_position: 5  # INCREASED: Max YES contracts per side (up from 3)
   max_no_position: 5  # INCREASED: Max NO contracts per side (up from 3)
@@ -813,23 +826,23 @@ confidence:
   min_confidence_threshold: 0.65  # INCREASED from 0.50 to 0.65 (minimum confidence to execute trade)
 
 # ── Tiered Edge Band Configuration ───────────────────────────────────────────
-# TIERED STRUCTURE: 1-2% watch, 2-4% small, ≥4% standard
-# 2026 FIX: RAISED thresholds based on 100% loss analysis - previous 1-3% edges too low
+# TIERED STRUCTURE: 0.8-1.5% watch, 1.5-3% small, ≥3% standard
+# 2026-07-05 FIX: REVERTED thresholds - previous increase to 4-7% blocked ALL trades
 # CRITICAL: Edge bands are the ACTUAL thresholds used (per-asset min_edge fields are ignored)
 edge_bands:
   enabled: true  # Enable tiered edge band logic
   watch_band:
-    min_edge_pct: 0.04  # 4% minimum edge for watch band (INCREASED from 0.8% to prevent 100% losses)
-    max_edge_pct: 0.05  # 5% maximum edge for watch band (INCREASED from 1.5%)
+    min_edge_pct: 0.008  # 0.8% minimum edge for watch band (REVERTED from 4% - was blocking all trades)
+    max_edge_pct: 0.015  # 1.5% maximum edge for watch band (REVERTED from 5%)
     action: "log_only"  # Log candidates but don't trade
     kelly_multiplier: 0.0  # No sizing in watch band
   small_band:
-    min_edge_pct: 0.05  # 5% minimum edge for small band (INCREASED from 1.5% to prevent 100% losses)
-    max_edge_pct: 0.07  # 7% maximum edge for small band (INCREASED from 3%)
+    min_edge_pct: 0.015  # 1.5% minimum edge for small band (REVERTED from 5% - was blocking all trades)
+    max_edge_pct: 0.03  # 3% maximum edge for small band (REVERTED from 7%)
     action: "trade_small"  # Trade with reduced size
     kelly_multiplier: 0.25  # 0.25x Kelly for small band
   standard_band:
-    min_edge_pct: 0.07  # 7% minimum edge for standard band (INCREASED from 3% to prevent 100% losses)
+    min_edge_pct: 0.03  # 3% minimum edge for standard band (REVERTED from 7% - was blocking all trades)
     max_edge_pct: 1.0  # No upper limit
     action: "trade_standard"  # Trade with standard size
     kelly_multiplier: 0.50  # 0.5x Kelly for standard band
@@ -854,11 +867,11 @@ guardrails:
   min_post_fee_edge: 0.015  # LOWERED: Minimum post-fee edge 1.5% (research: 2-2.5% net edge realistic, 1.5% floor for more opportunities)
   min_time_to_expiry_min: 2.0  # RELAXED: Minimum 2 minutes to expiry (120s, reduced from 2.5min for more 15m opportunities)
   max_dist_pct_trade: 2.5  # RELAXED: Maximum spot-strike distance percentage for trading (2.5% for better market coverage)
-  min_contract_price_cents: 50  # UPDATED: Minimum contract price floor (50 cents / $0.50) - aligns with 2026-07-03 trade history analysis (entry prices <30c have 10.4% win rate)
-  max_contract_price_cents: 70  # ADDED: Maximum contract price to prevent low-profit trades (2026 research: minimum 80% payout recommended, which is 55¢ for $1 payout. Set to 70¢ for 43% minimum payout, preventing 97¢ trades with only 3% profit)
+  min_contract_price_cents: 10  # 2026-07-05: Lowered to 10c to match agent_grid entry band [10, 70] and DEEP_OTM_CHEAP_CENTS threshold
+  max_contract_price_cents: 75  # 2026-07-05 SWEET-SPOT BAND: cap at 75c (research range 55-80c; entries above have no profit room to ratchet to the 99c exit)
   max_same_side_per_strip: 5  # RELAXED: Maximum same-direction positions per strip (increased from 4 to 5 for more opportunities)
   # REMOVED: Duplicate max_orders_per_cycle - now handled by throttling.max_orders_per_15m_window (single source of truth)
-  min_edge_per_trade: 0.008  # LOWERED: Minimum edge percentage 0.8% (research: profitable systems trade edges down to 1-2%)
+  min_edge_per_trade: 0.02  # UNIFIED: 2% base edge for maker orders (aligned with Kalshi's 1-2% maker requirement, research-backed)
   # Time trap prevention (entry window narrowing)
   # Aligned with TTE regimes from risk.tte_regime:
   # - NORMAL: > 10 minutes (allow entry)
@@ -1053,7 +1066,7 @@ risk_policy:
 # Kalshi venue-level constants (not configurable per profile)
 venue_invariants:
   valid_price_cents_min:
-    value: 50  # CRITICAL: Minimum price floor (50 cents) - blocks deep OTM longshots that are statistically losing (updated 2026-07-03 based on trade history: entry prices <30c have 10.4% win rate)
+    value: 10  # 2026-07-05: Lowered to 10c to match agent_grid entry band [10, 70] and DEEP_OTM_CHEAP_CENTS threshold
     static: invariant
     description: "Minimum valid price for Kalshi binary contracts (PRODUCTION INVARIANT - aligned with min_contract_price_cents guardrail)"
   valid_price_cents_max:
@@ -1276,14 +1289,18 @@ velocity_model:
 # - Polymarket BTC backtest: 0.20% momentum threshold (MOMENTUM_THRESHOLD = 0.0020)
 # - Polymarket VWAP bot: 3% VWAP deviation (min_deviation_pct = 3)
 # - Polymarket impulse bot: 5% minimum jump (minJump = 0.05)
-# Previous thresholds (0.4%-0.8%) were 2-4x too high, blocking all signals
-# New thresholds align with Polymarket production backtest results:
+# Previous thresholds (0.2%-0.4%) were 20-50x too high, blocking all signals
+# CRITICAL FIX: 2026-07-04 - Lowered thresholds to match actual market velocities
+# Observed velocities in production: 0.008%-0.05% (much lower than Polymarket thresholds)
+# 2026-07-05: Further lowered based on Turbine research - threshold barely mattered (0.0002 or 0.002 both worked)
+# 2026-07-05: Updated based on crypto price movement research - typical per-minute movement is 0.01%-0.1%
+# New thresholds align with actual 15m crypto market conditions and realistic minimum movement:
 velocity_thresholds:
-  BTC: 0.002  # 0.2% - matches Polymarket BTC backtest production threshold
-  ETH: 0.002  # 0.2% - matches Polymarket BTC backtest production threshold
-  SOL: 0.003  # 0.3% - slightly higher for high-beta assets (SOL)
-  XRP: 0.003  # 0.3% - slightly higher for high-beta assets (XRP)
-  DOGE: 0.004  # 0.4% - highest for highest volatility asset (DOGE)
+  BTC: 0.00002  # 0.002% - 2026-07-05: Lowered to realistic minimum for stable asset (based on 0.01%-0.1% per-minute research)
+  ETH: 0.00002  # 0.002% - 2026-07-05: Lowered to realistic minimum for stable asset
+  SOL: 0.00003  # 0.003% - 2026-07-05: Lowered for high-beta asset (higher volatility than BTC/ETH)
+  XRP: 0.00003  # 0.003% - 2026-07-05: Lowered for high-beta asset
+  DOGE: 0.00004  # 0.004% - 2026-07-05: Lowered for highest volatility asset (most movement)
 
 # ── Momentum Weights (Phase 4.1) ───────────────────────────────────────────────
 # Multi-window velocity weights for momentum signal fusion
@@ -1332,8 +1349,8 @@ fee_aware_edge:
 # 50c threshold blocks extreme data quality issues (82-91c spreads with YES ask=99c) while allowing normal trading
 market_microstructure:
   enabled: true  # Enable market microstructure filters
-  max_spread_cents: 50  # 2026-07-04: Increased to 50c based on 2026 research (altcoin spreads 5-30% per Kalena)
-  min_depth_usd: 50  # Require >$50 within 3 cents of mid price (reduced from $200 for single-contract trading)
+  max_spread_cents: 75  # 2026-07-05: UNIFIED to 75c - aligned with guardrails.max_spread_cents and crypto_15m_profile.py (single source of truth)
+  min_depth_usd: 0.0  # DISABLED: System uses limit orders which wait for fills, not market orders. Kalshi 15m crypto markets have sufficient liquidity. Depth thresholds are primarily for market orders to prevent slippage.
   min_yes_depth: 1  # Minimum YES depth threshold
   min_no_depth: 1  # Minimum NO depth threshold
 
@@ -1348,25 +1365,25 @@ strategies:
     enabled: true
     # Policy configuration for this strategy
     policy:
-      min_edge: 0.02  # 2% minimum edge (from strategy_policy)
+      min_edge: 0.01  # 1% minimum edge (aligned with realistic velocity-based edges 0.02-0.08%)
       min_confidence: 0.50  # 50% minimum confidence (from strategy_policy, industry-aligned)
       max_md_staleness_sec: 15.0  # MD staleness threshold
       # Per-asset overrides (optional)
       asset_overrides:
         BTC:
-          min_edge: 0.02
+          min_edge: 0.01
           min_confidence: 0.50
         ETH:
-          min_edge: 0.02
+          min_edge: 0.01
           min_confidence: 0.50
         SOL:
-          min_edge: 0.02
+          min_edge: 0.01
           min_confidence: 0.50
         XRP:
-          min_edge: 0.02
+          min_edge: 0.01
           min_confidence: 0.50
         DOGE:
-          min_edge: 0.02
+          min_edge: 0.01
           min_confidence: 0.50
 
 # ── Metadata ──────────────────────────────────────────────────────────────

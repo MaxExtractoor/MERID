@@ -1443,7 +1443,10 @@ class Kalshi15mLoop:
                             if not has_position:
                                 # No position: execute if edge meets minimum threshold OR beats current best
                                 # OR if swing mode enabled and this is opposite-side reversal
-                                if edge > min_edge_threshold or edge > current_best_edge or is_swing_reversal:
+                                # CRITICAL FIX: Use abs(edge) for comparison since edge = p_model - p_market can be negative
+                                # Negative edges are valid contrarian signals (model disagrees with market)
+                                # Industry standard: edge magnitude matters, not direction, for momentum/contrarian trading
+                                if abs(edge) > min_edge_threshold or abs(edge) > abs(current_best_edge) or is_swing_reversal:
                                     should_execute = True
                                     if is_swing_reversal:
                                         logger.info(
@@ -1452,8 +1455,8 @@ class Kalshi15mLoop:
                                         )
                                     else:
                                         logger.info(
-                                            "[15m-LOOP] Best-edge selection: asset=%s edge=%.2f%% > min_threshold=%.2f%% or current_best=%.2f%% - will execute",
-                                            asset, edge, min_edge_threshold, current_best_edge
+                                            "[15m-LOOP] Best-edge selection: asset=%s edge=%.2f%% (abs=%.2f%%) > min_threshold=%.2f%% or current_best=%.2f%% - will execute",
+                                            asset, edge, abs(edge), min_edge_threshold, current_best_edge
                                         )
                                     # Update best edge tracking
                                     self._best_edge_per_asset[asset] = {
@@ -1468,22 +1471,24 @@ class Kalshi15mLoop:
                                         logger.info("[SWING-MODE] Disabled for asset=%s after reversal entry", asset)
                                 else:
                                     logger.debug(
-                                        "[15m-LOOP] Best-edge selection: asset=%s edge=%.2f%% <= min_threshold=%.2f%% and <= current_best=%.2f%% - skipping",
-                                        asset, edge, min_edge_threshold, current_best_edge
+                                        "[15m-LOOP] Best-edge selection: asset=%s edge=%.2f%% (abs=%.2f%%) <= min_threshold=%.2f%% and <= current_best=%.2f%% - skipping",
+                                        asset, edge, abs(edge), min_edge_threshold, current_best_edge
                                     )
                             else:
                                 # Has position: only execute if edge improves significantly
                                 # CRITICAL FIX: Use relative improvement (percentage) instead of absolute for velocity-based signals
                                 # Velocity-based signals have tiny edges (0.01-0.07%), so absolute 5% threshold is impossible
                                 # Use 20% relative improvement instead: edge must be 20% better than current best
-                                if current_best_edge > 0:
-                                    edge_improvement_ratio = (edge - current_best_edge) / current_best_edge
+                                # CRITICAL FIX: Use abs(edge) for comparison since edge = p_model - p_market can be negative
+                                # Negative edges are valid contrarian signals (model disagrees with market)
+                                if abs(current_best_edge) > 0:
+                                    edge_improvement_ratio = (abs(edge) - abs(current_best_edge)) / abs(current_best_edge)
                                     edge_improvement_threshold = 0.20  # 20% relative improvement required
                                     if edge_improvement_ratio > edge_improvement_threshold:
                                         should_execute = True
                                         logger.info(
-                                            "[15m-LOOP] Edge improvement: asset=%s edge=%.6f (ratio=%.2f%%) > current_best=%.6f + threshold=%.2f%% - will execute",
-                                            asset, edge, edge_improvement_ratio * 100, current_best_edge, edge_improvement_threshold * 100
+                                            "[15m-LOOP] Edge improvement: asset=%s edge=%.6f (abs=%.6f, ratio=%.2f%%) > current_best=%.6f + threshold=%.2f%% - will execute",
+                                            asset, edge, abs(edge), edge_improvement_ratio * 100, current_best_edge, edge_improvement_threshold * 100
                                         )
                                         # Update best edge tracking
                                         self._best_edge_per_asset[asset] = {
@@ -1494,16 +1499,17 @@ class Kalshi15mLoop:
                                         }
                                     else:
                                         logger.debug(
-                                            "[15m-LOOP] Edge improvement: asset=%s edge=%.6f (ratio=%.2f%%) <= current_best=%.6f + threshold=%.2f%% - skipping (position exists)",
-                                            asset, edge, edge_improvement_ratio * 100, current_best_edge, edge_improvement_threshold * 100
+                                            "[15m-LOOP] Edge improvement: asset=%s edge=%.6f (abs=%.6f, ratio=%.2f%%) <= current_best=%.6f + threshold=%.2f%% - skipping (position exists)",
+                                            asset, edge, abs(edge), edge_improvement_ratio * 100, current_best_edge, edge_improvement_threshold * 100
                                         )
                                 else:
                                     # No current best edge (first signal with position), execute if edge meets minimum threshold
-                                    if edge > min_edge_threshold:
+                                    # CRITICAL FIX: Use abs(edge) for comparison since edge = p_model - p_market can be negative
+                                    if abs(edge) > min_edge_threshold:
                                         should_execute = True
                                         logger.info(
-                                            "[15m-LOOP] First signal with position: asset=%s edge=%.6f > min_threshold=%.6f - will execute",
-                                            asset, edge, min_edge_threshold
+                                            "[15m-LOOP] First signal with position: asset=%s edge=%.6f (abs=%.6f) > min_threshold=%.6f - will execute",
+                                            asset, edge, abs(edge), min_edge_threshold
                                         )
                                         # Update best edge tracking
                                         self._best_edge_per_asset[asset] = {
@@ -1514,8 +1520,8 @@ class Kalshi15mLoop:
                                         }
                                     else:
                                         logger.debug(
-                                            "[15m-LOOP] First signal with position: asset=%s edge=%.6f <= min_threshold=%.6f - skipping",
-                                            asset, edge, min_edge_threshold
+                                            "[15m-LOOP] First signal with position: asset=%s edge=%.6f (abs=%.6f) <= min_threshold=%.6f - skipping",
+                                            asset, edge, abs(edge), min_edge_threshold
                                         )
                             
                             if not should_execute:
@@ -1580,17 +1586,11 @@ class Kalshi15mLoop:
                             candidate_key = self._get_candidate_key(candidate)
                             self._executed_candidates_this_window.add(candidate_key)
                             
-                            # CRITICAL: Reset cycle guards after successful execution
-                            # This prevents BANKROLL_CAP_EXCEEDED from accumulating across trades
-                            # Best practice: execution-based reset ensures fresh risk tracking per trade
-                            from merid.guards.global_risk_guard import get_global_risk_guard
-                            from merid.guards.global_execution_guard import get_global_execution_guard
-                            risk_guard = get_global_risk_guard()
-                            exec_guard = get_global_execution_guard()
-                            
-                            logger.info("[15m-LOOP] Resetting cycle guards after successful execution: %s", ticker)
-                            risk_guard.reset_cycle()
-                            exec_guard.reset_cycle()
+                            # FIX: Do NOT reset cycle guards after each execution
+                            # The GlobalExecutionGuard should track total notional across the 15-minute window
+                            # to enforce the 5% total allocation limit. Resetting after each trade defeats this.
+                            # Cycle reset only happens at the start of a new 15-minute window (line 1364)
+                            # NOTE: GlobalExecutionGuard is deprecated - risk envelope should handle this
                             
                             # Clear deduplication cache to allow new orders if conditions change
                             self._executed_candidates_this_window.clear()

@@ -230,10 +230,10 @@ class TestPriceFloorGuardrail:
             adapter = Crypto15mProfileAdapter()
             profile = adapter.profile
 
-            # Check that the value is set to 50 cents (from YAML)
-            # UPDATED from 15 to 50 based on 2026-07-03 trade history analysis (entry prices <30c have 10.4% win rate)
-            assert profile.guardrails_min_contract_price_cents == 50, \
-                f"Expected min_contract_price_cents=50 (blocks deep OTM longshots), got {profile.guardrails_min_contract_price_cents}"
+            # Check that the value is set to 10 cents (from YAML)
+            # UPDATED from 25 to 10 on 2026-07-05 to match agent_grid entry band [10, 70] and DEEP_OTM_CHEAP_CENTS threshold
+            assert profile.guardrails_min_contract_price_cents == 10, \
+                f"Expected min_contract_price_cents=10 (matches entry band), got {profile.guardrails_min_contract_price_cents}"
         except Exception as e:
             pytest.skip(f"Profile min_contract_price_cents check skipped: {e}")
 

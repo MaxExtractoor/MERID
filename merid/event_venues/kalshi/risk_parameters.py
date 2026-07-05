@@ -24,8 +24,8 @@ from typing import Final
 MIN_KALSHI_PRICE_CENTS: Final[int] = 1
 MAX_KALSHI_PRICE_CENTS: Final[int] = 99
 DEFAULT_KALSHI_PRICE_CENTS: Final[int] = 50  # Midpoint fallback when market price unavailable
-DEEP_OTM_CHEAP_CENTS: Final[int] = 50  # Updated 2026-07-03 to align with profile guardrails (50¢ minimum based on trade history)
-DEEP_OTM_EXPENSIVE_CENTS: Final[int] = 95
+DEEP_OTM_CHEAP_CENTS: Final[int] = 10  # 2026-07-05: Lowered to 10c to match agent_grid entry band [10, 70]. Reject only below 10c (lottery zone).
+DEEP_OTM_EXPENSIVE_CENTS: Final[int] = 75  # 2026-07-05: Aligned with sweet-spot entry band [25c, 75c]. Reject above 75c (no profit room to ratchet to 99c exit).
 MAX_PRICE_DIFFERENCE_CENTS: Final[int] = 50  # Max realistic price jump (data error threshold)  
 
 # Mid-band - reasonable pricing
@@ -34,7 +34,10 @@ MID_BAND_HIGH_CENTS: Final[int] = 80
 
 # Minimum price for opening orders (anti-dust)
 MIN_OPEN_PRICE_CENTS: Final[int] = 2
-MAX_OPEN_PRICE_CENTS: Final[int] = 98
+MAX_OPEN_PRICE_CENTS: Final[int] = 55  # RESEARCH-BASED: Max entry at 55c for profitable risk/reward
+# Rationale: Above 55c, reward:risk drops below 1:1 (risk more than profit potential)
+# Turbine research: Tight-band strategies above 50c lost 75-78% due to fees/slippage
+# Only winning strategy (panic_fade/volatility reversion) works best at 40-55c range
 
 # ============================================================================
 # PROBABILITY THRESHOLDS (0.0 - 1.0)
@@ -53,20 +56,19 @@ CONFIDENCE_CONFIDENT: Final[float] = 0.75
 # ============================================================================
 
 # Edge thresholds for order aggressiveness (per asset)
-# Higher edge = more aggressive (cross spread), lower edge = resting (join spread)
-# ALIGNED TO 2026 INDUSTRY STANDARDS: 2-4% net edge is the reasonable floor for Kalshi value betting
-# Based on research: Claw Arbs and Turbine recommend 2-4% net edge after fees
-EDGE_MARKET_ENTRY_BTC: Final[float] = 0.04  # BTC: cross spread if edge >= 4% (industry standard upper bound)
-EDGE_MARKET_ENTRY_ETH: Final[float] = 0.04  # ETH: cross spread if edge >= 4% (industry standard upper bound)
-EDGE_MARKET_ENTRY_SOL: Final[float] = 0.04  # SOL: cross spread if edge >= 4% (industry standard upper bound)
-EDGE_MARKET_ENTRY_XRP: Final[float] = 0.04  # XRP: cross spread if edge >= 4% (industry standard upper bound)
-EDGE_MARKET_ENTRY_DOGE: Final[float] = 0.04  # DOGE: cross spread if edge >= 4% (industry standard upper bound)
+# UNIFIED: 2% resting (maker), 4% marketable (taker) - aligned with Kalshi fee structure
+# Research: Maker needs 1-2% edge, Taker needs 2-4% edge after fees (Kalshi 2026)
+EDGE_MARKET_ENTRY_BTC: Final[float] = 0.04  # BTC: cross spread if edge >= 4% (taker fee-adjusted)
+EDGE_MARKET_ENTRY_ETH: Final[float] = 0.04  # ETH: cross spread if edge >= 4% (taker fee-adjusted)
+EDGE_MARKET_ENTRY_SOL: Final[float] = 0.04  # SOL: cross spread if edge >= 4% (taker fee-adjusted)
+EDGE_MARKET_ENTRY_XRP: Final[float] = 0.04  # XRP: cross spread if edge >= 4% (taker fee-adjusted)
+EDGE_MARKET_ENTRY_DOGE: Final[float] = 0.04  # DOGE: cross spread if edge >= 4% (taker fee-adjusted)
 
-EDGE_RESTING_ENTRY_BTC: Final[float] = 0.02  # BTC: join spread if edge >= 2% (industry standard floor)
-EDGE_RESTING_ENTRY_ETH: Final[float] = 0.02  # ETH: join spread if edge >= 2% (industry standard floor)
-EDGE_RESTING_ENTRY_SOL: Final[float] = 0.02  # SOL: join spread if edge >= 2% (industry standard floor)
-EDGE_RESTING_ENTRY_XRP: Final[float] = 0.02  # XRP: join spread if edge >= 2% (industry standard floor)
-EDGE_RESTING_ENTRY_DOGE: Final[float] = 0.02  # DOGE: join spread if edge >= 2% (industry standard floor)
+EDGE_RESTING_ENTRY_BTC: Final[float] = 0.02  # BTC: join spread if edge >= 2% (maker fee-adjusted)
+EDGE_RESTING_ENTRY_ETH: Final[float] = 0.02  # ETH: join spread if edge >= 2% (maker fee-adjusted)
+EDGE_RESTING_ENTRY_SOL: Final[float] = 0.02  # SOL: join spread if edge >= 2% (maker fee-adjusted)
+EDGE_RESTING_ENTRY_XRP: Final[float] = 0.02  # XRP: join spread if edge >= 2% (maker fee-adjusted)
+EDGE_RESTING_ENTRY_DOGE: Final[float] = 0.02  # DOGE: join spread if edge >= 2% (maker fee-adjusted)
 
 # Edge threshold for canceling resting orders (edge decay below this triggers cancel)
 EDGE_CANCEL_THRESHOLD_BTC: Final[float] = 0.50
