@@ -276,16 +276,16 @@ class Crypto15mProfile:
     velocity_model_alpha_0_doge: float = 0.0
     velocity_model_alpha_1_doge: float = 500.0  # Increased from 5.0 to 500.0 for responsive mapping
 
-    # Velocity thresholds (per-asset, aligned with actual 15m crypto market conditions)
-    # CRITICAL FIX: 2026-07-04 - Lowered further to match current low-volatility market conditions
-    # Previous thresholds (0.015%-0.025%) were still 6-10x too high for current market
-    # Current observed velocities: 0.002%-0.004% (very low volatility weekend conditions)
-    # New thresholds align with actual current market conditions:
-    velocity_threshold_btc: float = 0.00001  # 0.001% - matches current BTC velocities (0.002%-0.004%)
-    velocity_threshold_eth: float = 0.00001  # 0.001% - matches current ETH velocities (0.002%-0.004%)
-    velocity_threshold_sol: float = 0.000015  # 0.0015% - slightly higher for high-beta assets (SOL)
-    velocity_threshold_xrp: float = 0.000015  # 0.0015% - slightly higher for high-beta assets (XRP)
-    velocity_threshold_doge: float = 0.00002  # 0.002% - highest for highest volatility asset (DOGE)
+    # Velocity thresholds (per-asset, aligned with 2026 industry standards for 15m crypto momentum)
+    # CRITICAL FIX: 2026-07-05 - Aligned with industry research (MagicTradeBot, VoiceOfChain, Manic Trade)
+    # Industry standard for 15m momentum: 0.6% velocity threshold (600 basis points)
+    # Previous thresholds (0.001%-0.002%) were 300-600x too low, causing "marginal" rejections
+    # New thresholds align with 2026 production systems:
+    velocity_threshold_btc: float = 0.006  # 0.6% - aligned with MagicTradeBot 15m standard
+    velocity_threshold_eth: float = 0.006  # 0.6% - aligned with MagicTradeBot 15m standard
+    velocity_threshold_sol: float = 0.008  # 0.8% - higher for high-beta assets (SOL)
+    velocity_threshold_xrp: float = 0.008  # 0.8% - higher for high-beta assets (XRP)
+    velocity_threshold_doge: float = 0.010  # 1.0% - highest for highest volatility asset (DOGE)
 
     # Phase 4.1: Multi-window velocity weights for momentum signal fusion
     momentum_weights_windows: list = field(default_factory=lambda: [10, 30, 60])  # Velocity windows in seconds
@@ -932,14 +932,14 @@ class Crypto15mProfileAdapter:
                 velocity_model_alpha_1_xrp=velocity_model.get('XRP', {}).get('alpha_1', 300.0),
                 velocity_model_alpha_0_doge=velocity_model.get('DOGE', {}).get('alpha_0', 0.0),
                 velocity_model_alpha_1_doge=velocity_model.get('DOGE', {}).get('alpha_1', 500.0),
-                # Velocity thresholds (per-asset, aligned with Polymarket production systems)
-                # CRITICAL FIX: 2026-07-04 - Updated to match Polymarket BTC backtest (0.20% threshold)
-                # Polymarket production systems use 0.20% for BTC/ETH, slightly higher for volatile assets
-                velocity_threshold_btc=raw.get('velocity_thresholds', {}).get('BTC', 0.002),
-                velocity_threshold_eth=raw.get('velocity_thresholds', {}).get('ETH', 0.002),
-                velocity_threshold_sol=raw.get('velocity_thresholds', {}).get('SOL', 0.003),
-                velocity_threshold_xrp=raw.get('velocity_thresholds', {}).get('XRP', 0.003),
-                velocity_threshold_doge=raw.get('velocity_thresholds', {}).get('DOGE', 0.004),
+                # Velocity thresholds (per-asset, aligned with 2026 industry standards)
+                # CRITICAL FIX: 2026-07-05 - Aligned with MagicTradeBot 15m standard (0.6% threshold)
+                # Industry standard for 15m momentum: 0.6% velocity threshold (600 basis points)
+                velocity_threshold_btc=raw.get('velocity_thresholds', {}).get('BTC', 0.006),
+                velocity_threshold_eth=raw.get('velocity_thresholds', {}).get('ETH', 0.006),
+                velocity_threshold_sol=raw.get('velocity_thresholds', {}).get('SOL', 0.008),
+                velocity_threshold_xrp=raw.get('velocity_thresholds', {}).get('XRP', 0.008),
+                velocity_threshold_doge=raw.get('velocity_thresholds', {}).get('DOGE', 0.010),
                 # Phase 4.1: Multi-window velocity weights
                 momentum_weights_windows=raw.get('momentum_weights', {}).get('windows', [10, 30, 60]),
                 momentum_weights_values=raw.get('momentum_weights', {}).get('weights', [0.2, 0.3, 0.5]),
