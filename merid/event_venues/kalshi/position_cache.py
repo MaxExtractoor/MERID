@@ -287,6 +287,10 @@ class KalshiPositionCache:
         # This ensures extreme profit exits (99c YES / 1c NO) actually place orders
         self._register_exit_intent_callback()
         
+        # CRITICAL FIX: Reset stale window exposure if position cache is empty
+        # This prevents phantom exposure from blocking all trading after restart
+        self._reset_stale_window_exposure()
+        
         logger.info("KalshiPositionCache initialized")
 
     def _ensure_mutex(self) -> asyncio.Lock:
@@ -450,6 +454,38 @@ class KalshiPositionCache:
             
         except Exception as init_err:
             logger.error("[POSITION-CACHE] Failed to register exit intent callback: %s", init_err, exc_info=True)
+
+    def _reset_stale_window_exposure(self) -> None:
+        """Reset stale window exposure if position cache is empty.
+        
+        CRITICAL FIX: This prevents phantom exposure from blocking all trading
+        after restart. If the position cache shows 0 open positions but window
+        exposure is non-zero, it means exposure tracking is stale (positions
+        were closed outside the system or before shutdown).
+        
+        This should be called during position cache initialization.
+        """
+        try:
+            from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import (
+                _WINDOW_TRACKING_STATE,
+                _WINDOW_TRACKING_LOCK,
+            )
+            import time
+            
+            with _WINDOW_TRACKING_LOCK:
+                total_exposure = _WINDOW_TRACKING_STATE["total_exposure_usd"]
+                agent_exposure = _WINDOW_TRACKING_STATE["agent_exposure_usd"]
+            
+            # Only reset if exposure is non-zero but position cache is empty
+            if total_exposure > 0.0 and len(self._positions) == 0:
+                logger.warning(
+                    f"[POSITION-CACHE] Stale window exposure detected: total=${total_exposure:.2f} "
+                    f"agents={len(agent_exposure)} but position cache is empty. Resetting exposure."
+                )
+                from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import force_reset_window_exposure
+                force_reset_window_exposure()
+        except Exception as e:
+            logger.warning("[POSITION-CACHE] Failed to reset stale window exposure: %s", e)
 
     def register_tp_targets(
         self,
