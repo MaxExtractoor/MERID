@@ -1,6 +1,7 @@
 """Unit tests for optimized spread and edge thresholds and 2026 research-based risk management."""
 
 import pytest
+import dataclasses
 from unittest.mock import MagicMock, patch
 
 
@@ -328,6 +329,124 @@ class TestThresholdOptimization:
                 # DOGE: Most volatile, tightest limits
                 assert profile.asset_specific_rolling_pnl_DOGE_rolling_1h_halt_pct == 0.08
                 assert profile.asset_specific_rolling_pnl_DOGE_rolling_4h_halt_pct == 0.12
+
+    def test_per_trade_risk_aligned_with_3_percent_agent_limit(self):
+        """Test that per-trade risk is aligned with 3% per agent / 5% per 15m window limits."""
+        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import KalshiCrypto15mRiskEnvelope
+        
+        # Test small bankroll (< $100): 3% per trade (aligned with 3% per agent limit)
+        envelope_small = KalshiCrypto15mRiskEnvelope(
+            live_bankroll_usd=50.0,
+            profile_capital_usd=100.0,
+            max_single_order_notional_usd=1.5,
+            max_total_notional_usd=7.5,
+            max_concurrent_trades=5,
+            asset_max_notional_usd={'BTC': 1.5, 'ETH': 1.5, 'SOL': 1.5, 'XRP': 1.5, 'DOGE': 1.5},
+            asset_depth_thresholds={'BTC': 1.0, 'ETH': 1.0, 'SOL': 1.0, 'XRP': 1.0, 'DOGE': 1.0},
+            agent_max_notional_usd=2.5,
+            agent_max_orders_per_window=12,
+            agent_max_yes_position=5,
+            agent_max_no_position=5,
+            max_cycle_risk_pct=0.05,
+            daily_loss_enabled=True,
+            max_daily_loss_usd=20.0,
+            drawdown_halt_pct=0.20,
+            drawdown_unwind_pct=0.25,
+            peak_equity_usd=50.0,
+            current_equity_usd=50.0,
+            current_drawdown_pct=0.0,
+            kelly_fraction=0.02,
+            adaptive_risk_bands=[],
+            per_trade_risk_multiplier=1.0,
+            is_halted=False,
+            current_risk_band=None,
+            resume_if_drawdown_improves=False,
+            correlation_tracking_enabled=False,
+            correlation_threshold=0.5,
+            correlation_multiplier=1.0,
+        )
+        assert envelope_small.get_per_trade_risk_pct() == 0.03  # 3% for small bankroll
+        
+        # Test medium bankroll ($100-$1k): 2% per trade (fraction of 3% per agent limit)
+        envelope_medium = KalshiCrypto15mRiskEnvelope(
+            live_bankroll_usd=500.0,
+            profile_capital_usd=1000.0,
+            max_single_order_notional_usd=10.0,
+            max_total_notional_usd=50.0,
+            max_concurrent_trades=5,
+            asset_max_notional_usd={'BTC': 15.0, 'ETH': 15.0, 'SOL': 15.0, 'XRP': 15.0, 'DOGE': 15.0},
+            asset_depth_thresholds={'BTC': 1.0, 'ETH': 1.0, 'SOL': 1.0, 'XRP': 1.0, 'DOGE': 1.0},
+            agent_max_notional_usd=25.0,
+            agent_max_orders_per_window=12,
+            agent_max_yes_position=5,
+            agent_max_no_position=5,
+            max_cycle_risk_pct=0.05,
+            daily_loss_enabled=True,
+            max_daily_loss_usd=200.0,
+            drawdown_halt_pct=0.20,
+            drawdown_unwind_pct=0.25,
+            peak_equity_usd=500.0,
+            current_equity_usd=500.0,
+            current_drawdown_pct=0.0,
+            kelly_fraction=0.02,
+            adaptive_risk_bands=[],
+            per_trade_risk_multiplier=1.0,
+            is_halted=False,
+            current_risk_band=None,
+            resume_if_drawdown_improves=False,
+            correlation_tracking_enabled=False,
+            correlation_threshold=0.5,
+            correlation_multiplier=1.0,
+        )
+        assert envelope_medium.get_per_trade_risk_pct() == 0.02  # 2% for medium bankroll
+        
+        # Test large bankroll (> $1k): 1.5% per trade (conservative fraction of 3% per agent limit)
+        envelope_large = KalshiCrypto15mRiskEnvelope(
+            live_bankroll_usd=5000.0,
+            profile_capital_usd=10000.0,
+            max_single_order_notional_usd=75.0,
+            max_total_notional_usd=375.0,
+            max_concurrent_trades=5,
+            asset_max_notional_usd={'BTC': 150.0, 'ETH': 150.0, 'SOL': 150.0, 'XRP': 150.0, 'DOGE': 150.0},
+            asset_depth_thresholds={'BTC': 1.0, 'ETH': 1.0, 'SOL': 1.0, 'XRP': 1.0, 'DOGE': 1.0},
+            agent_max_notional_usd=250.0,
+            agent_max_orders_per_window=12,
+            agent_max_yes_position=5,
+            agent_max_no_position=5,
+            max_cycle_risk_pct=0.05,
+            daily_loss_enabled=True,
+            max_daily_loss_usd=1000.0,
+            drawdown_halt_pct=0.20,
+            drawdown_unwind_pct=0.25,
+            peak_equity_usd=5000.0,
+            current_equity_usd=5000.0,
+            current_drawdown_pct=0.0,
+            kelly_fraction=0.02,
+            adaptive_risk_bands=[],
+            per_trade_risk_multiplier=1.0,
+            is_halted=False,
+            current_risk_band=None,
+            resume_if_drawdown_improves=False,
+            correlation_tracking_enabled=False,
+            correlation_threshold=0.5,
+            correlation_multiplier=1.0,
+        )
+        assert envelope_large.get_per_trade_risk_pct() == 0.015  # 1.5% for large bankroll
+
+    def test_volatility_regime_edge_adjustment_defaults_aligned_with_yaml(self):
+        """Test that volatility-regime edge adjustment defaults are aligned with profile YAML."""
+        from merid.risk.profiles.crypto_15m_profile import Crypto15mProfile
+        from dataclasses import fields, MISSING
+        
+        # Get the default values from the dataclass field definitions
+        field_defaults = {}
+        for f in fields(Crypto15mProfile):
+            if f.default != MISSING:
+                field_defaults[f.name] = f.default
+        
+        # Verify defaults match profile YAML values
+        assert field_defaults.get('volatility_regime_edge_adjustment_low_volatility_adjustment') == -0.0025, "Default low vol adjustment should be -0.25% (aligned with YAML)"
+        assert field_defaults.get('volatility_regime_edge_adjustment_high_volatility_adjustment') == 0.005, "Default high vol adjustment should be +0.5% (aligned with YAML)"
 
     def test_doge_min_decision_minute_increased(self):
         """Test that DOGE min decision minute is increased to 5 for signal clarity."""

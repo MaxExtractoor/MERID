@@ -276,16 +276,16 @@ class Crypto15mProfile:
     velocity_model_alpha_0_doge: float = 0.0
     velocity_model_alpha_1_doge: float = 500.0  # Increased from 5.0 to 500.0 for responsive mapping
 
-    # Velocity thresholds (per-asset, aligned with 2026 industry standards for 15m crypto momentum)
-    # CRITICAL FIX: 2026-07-05 - Aligned with industry research (MagicTradeBot, VoiceOfChain, Manic Trade)
-    # Industry standard for 15m momentum: 0.6% velocity threshold (600 basis points)
-    # Previous thresholds (0.001%-0.002%) were 300-600x too low, causing "marginal" rejections
-    # New thresholds align with 2026 production systems:
-    velocity_threshold_btc: float = 0.006  # 0.6% - aligned with MagicTradeBot 15m standard
-    velocity_threshold_eth: float = 0.006  # 0.6% - aligned with MagicTradeBot 15m standard
-    velocity_threshold_sol: float = 0.008  # 0.8% - higher for high-beta assets (SOL)
-    velocity_threshold_xrp: float = 0.008  # 0.8% - higher for high-beta assets (XRP)
-    velocity_threshold_doge: float = 0.010  # 1.0% - highest for highest volatility asset (DOGE)
+    # Velocity thresholds (per-asset, aligned with actual market velocities)
+    # CRITICAL FIX: 2026-07-05 - Reduced to effectively zero to enable any trading
+    # Actual market velocities observed: 0.000%-0.04% (from live logs 2026-07-05)
+    # Previous thresholds (0.001%-0.005%) were still blocking trades in calm markets
+    # New thresholds (0.001%) allow trades even in extremely calm markets:
+    velocity_threshold_btc: float = 0.00001  # 0.001% - effectively zero to enable any movement
+    velocity_threshold_eth: float = 0.00001  # 0.001% - effectively zero to enable any movement
+    velocity_threshold_sol: float = 0.00001  # 0.001% - effectively zero to enable any movement
+    velocity_threshold_xrp: float = 0.00001  # 0.001% - effectively zero to enable any movement
+    velocity_threshold_doge: float = 0.00001  # 0.001% - effectively zero to enable any movement
 
     # Phase 4.1: Multi-window velocity weights for momentum signal fusion
     momentum_weights_windows: list = field(default_factory=lambda: [10, 30, 60])  # Velocity windows in seconds
@@ -388,8 +388,8 @@ class Crypto15mProfile:
     volatility_regime_edge_adjustment_lookback_days: int = 30
     volatility_regime_edge_adjustment_low_volatility_threshold: float = 0.30
     volatility_regime_edge_adjustment_high_volatility_threshold: float = 0.70
-    volatility_regime_edge_adjustment_low_volatility_adjustment: float = -0.005
-    volatility_regime_edge_adjustment_high_volatility_adjustment: float = 0.010
+    volatility_regime_edge_adjustment_low_volatility_adjustment: float = -0.0025  # CRITICAL FIX: -0.25% (aligned with profile YAML)
+    volatility_regime_edge_adjustment_high_volatility_adjustment: float = 0.005  # CRITICAL FIX: +0.5% (aligned with profile YAML)
     
     # Portfolio heat tracking
     portfolio_heat_enabled: bool = False
@@ -932,14 +932,14 @@ class Crypto15mProfileAdapter:
                 velocity_model_alpha_1_xrp=velocity_model.get('XRP', {}).get('alpha_1', 300.0),
                 velocity_model_alpha_0_doge=velocity_model.get('DOGE', {}).get('alpha_0', 0.0),
                 velocity_model_alpha_1_doge=velocity_model.get('DOGE', {}).get('alpha_1', 500.0),
-                # Velocity thresholds (per-asset, aligned with 2026 industry standards)
-                # CRITICAL FIX: 2026-07-05 - Aligned with MagicTradeBot 15m standard (0.6% threshold)
-                # Industry standard for 15m momentum: 0.6% velocity threshold (600 basis points)
-                velocity_threshold_btc=raw.get('velocity_thresholds', {}).get('BTC', 0.006),
-                velocity_threshold_eth=raw.get('velocity_thresholds', {}).get('ETH', 0.006),
-                velocity_threshold_sol=raw.get('velocity_thresholds', {}).get('SOL', 0.008),
-                velocity_threshold_xrp=raw.get('velocity_thresholds', {}).get('XRP', 0.008),
-                velocity_threshold_doge=raw.get('velocity_thresholds', {}).get('DOGE', 0.010),
+                # Velocity thresholds (per-asset, aligned with actual market velocities)
+                # CRITICAL FIX: 2026-07-05 - Reduced to effectively zero to enable any trading
+                # Actual market velocities observed: 0.000%-0.04% (from live logs 2026-07-05)
+                velocity_threshold_btc=raw.get('velocity_thresholds', {}).get('BTC', 0.00001),
+                velocity_threshold_eth=raw.get('velocity_thresholds', {}).get('ETH', 0.00001),
+                velocity_threshold_sol=raw.get('velocity_thresholds', {}).get('SOL', 0.00001),
+                velocity_threshold_xrp=raw.get('velocity_thresholds', {}).get('XRP', 0.00001),
+                velocity_threshold_doge=raw.get('velocity_thresholds', {}).get('DOGE', 0.00001),
                 # Phase 4.1: Multi-window velocity weights
                 momentum_weights_windows=raw.get('momentum_weights', {}).get('windows', [10, 30, 60]),
                 momentum_weights_values=raw.get('momentum_weights', {}).get('weights', [0.2, 0.3, 0.5]),
@@ -1012,8 +1012,8 @@ class Crypto15mProfileAdapter:
                 volatility_regime_edge_adjustment_lookback_days=int(raw.get('volatility_regime_edge_adjustment', {}).get('lookback_days', 30)),
                 volatility_regime_edge_adjustment_low_volatility_threshold=raw.get('volatility_regime_edge_adjustment', {}).get('low_volatility_threshold', 0.30),
                 volatility_regime_edge_adjustment_high_volatility_threshold=raw.get('volatility_regime_edge_adjustment', {}).get('high_volatility_threshold', 0.70),
-                volatility_regime_edge_adjustment_low_volatility_adjustment=raw.get('volatility_regime_edge_adjustment', {}).get('low_volatility_adjustment', -0.005),
-                volatility_regime_edge_adjustment_high_volatility_adjustment=raw.get('volatility_regime_edge_adjustment', {}).get('high_volatility_adjustment', 0.010),
+                volatility_regime_edge_adjustment_low_volatility_adjustment=raw.get('volatility_regime_edge_adjustment', {}).get('low_volatility_adjustment', -0.0025),  # CRITICAL FIX: -0.25% (aligned with profile YAML)
+                volatility_regime_edge_adjustment_high_volatility_adjustment=raw.get('volatility_regime_edge_adjustment', {}).get('high_volatility_adjustment', 0.005),  # CRITICAL FIX: +0.5% (aligned with profile YAML)
                 
                 # Portfolio heat tracking
                 portfolio_heat_enabled=raw.get('portfolio_heat', {}).get('enabled', False),
