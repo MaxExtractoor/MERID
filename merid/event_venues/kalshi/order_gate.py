@@ -841,6 +841,9 @@ class PreTradeGate:
         # Enforces 3% per agent per 15-minute window and 5% total venue per 15-minute window
         # This prevents over-trading and forces agents to get better entry prices
         # No more entries until exposure is closed out via trailing stop, ratchet, or 99c exit
+        # CRITICAL FIX: If envelope fails to initialize, REJECT the order for safety
+        # Previously, envelope failures were caught and logged but orders were allowed through
+        # This caused agents to exceed risk limits when bankroll service was unavailable
         try:
             from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
             envelope = get_kalshi_crypto_15m_risk_envelope()
@@ -873,9 +876,32 @@ class PreTradeGate:
                         reason=f"window_limit:{window_reason}",
                     )
             else:
-                logger.warning("[GATE-WINDOW-CHECK] Envelope is None - window limit check skipped")
+                self._store._metrics.blocked_window_limit += 1
+                logger.error(
+                    "[GATE-ALERT] envelope_is_none - window limit check failed, rejecting order for safety. "
+                    "contract=%s side=%s agent=%s notional=$%.2f (metric: blocked_window_limit=%d)",
+                    contract_id, side, agent_id, (target_count * price_cents) / 100.0,
+                    self._store._metrics.blocked_window_limit,
+                )
+                return GateVerdict(
+                    allowed=False,
+                    client_order_id=coid,
+                    reason="window_limit:envelope_is_none",
+                )
         except Exception as e:
-            logger.error("[GATE] Failed to check window limit: %s", e, exc_info=True)
+            self._store._metrics.blocked_window_limit += 1
+            logger.error(
+                "[GATE-ALERT] window_limit_check_failed - rejecting order for safety. "
+                "contract=%s side=%s agent=%s notional=$%.2f error=%s (metric: blocked_window_limit=%d)",
+                contract_id, side, agent_id, (target_count * price_cents) / 100.0, str(e),
+                self._store._metrics.blocked_window_limit,
+                exc_info=True
+            )
+            return GateVerdict(
+                allowed=False,
+                client_order_id=coid,
+                reason=f"window_limit:check_failed:{str(e)[:50]}",
+            )
 
         # 3.5. Price guard: prevent deep OTM longshots and high-price low-profit trades (critical guardrail)
         # Load min_contract_price_cents from profile with fallback to 15 cents
