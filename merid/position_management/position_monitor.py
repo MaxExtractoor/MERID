@@ -740,6 +740,31 @@ class PositionMonitor:
                     exc_info=True
                 )
     
+    def _get_side_aware_price(self, state, position_side: PositionSide) -> Optional[int]:
+        """
+        Get side-aware current price from market state.
+        
+        CRITICAL FIX: mid_cents is YES-centric. For NO positions, we need to convert
+        to NO price (100 - YES mid) to correctly evaluate exit conditions.
+        
+        Args:
+            state: UnifiedMarketState for the market
+            position_side: PositionSide.YES or PositionSide.NO
+            
+        Returns:
+            Current price in cents for the position's side
+        """
+        if not state or not state.mid_cents:
+            return None
+        
+        if position_side == PositionSide.YES:
+            # YES: use mid_cents directly
+            return int(state.mid_cents)
+        else:
+            # NO: convert YES mid to NO price (100 - YES mid)
+            # Example: YES mid = 42c → NO price = 58c
+            return int(100 - state.mid_cents)
+    
     async def _poll_loop(self) -> None:
         """
         Main polling loop.
@@ -768,8 +793,15 @@ class PositionMonitor:
                     for position_id, position in positions_snapshot:
                         state = store.get(position.market_id)
                         if state and state.mid_cents:
-                            current_price = state.mid_cents
-                            await self._check_position(position, current_price)
+                            # CRITICAL FIX: Use side-aware price for NO positions
+                            current_price = self._get_side_aware_price(state, position.side)
+                            if current_price is not None:
+                                await self._check_position(position, current_price)
+                            else:
+                                logger.debug(
+                                    "[POSITION-MONITOR] Could not get side-aware price for %s",
+                                    position.market_id
+                                )
                         else:
                             logger.debug(
                                 "[POSITION-MONITOR] No market state for %s",
