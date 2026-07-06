@@ -69,3 +69,13 @@ class TestAgentGridConfigAlignment:
         ]
         
         assert all(t == 0.00001 for t in thresholds), "All assets should have velocity_threshold = 0.00001"
+    
+    def test_default_velocity_threshold_aligned_with_profile_yaml(self):
+        """Test that default velocity threshold is aligned with profile YAML (0.00001)."""
+        config = LeanAgentConfig(
+            name="BTC_15M",
+            series_tickers=["KXBTC15M"],
+        )
+        
+        # Verify default threshold matches profile YAML (0.00001, not 0.0015)
+        assert config.velocity_threshold == 0.00001, "Default velocity_threshold should be 0.00001 (aligned with profile YAML)"

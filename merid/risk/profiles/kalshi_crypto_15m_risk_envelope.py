@@ -488,11 +488,11 @@ def compute_kalshi_crypto_15m_risk_envelope(
         )
     
     # ── Compute Per-Agent Defaults ────────────────────────────────────────────
-    agent_max_notional_pct = agent_defaults.get('max_notional_pct', 0.05)  # FIXED: Default 0.05 to match YAML (5% per 15m window)
+    agent_max_notional_pct = agent_defaults.get('max_notional_pct', 0.03)  # FIXED: Default 0.03 to match YAML (3% per agent)
     agent_max_notional_usd = effective_capital * agent_max_notional_pct
     agent_max_orders_per_window = agent_defaults.get('max_orders_per_window', 20)  # FIXED: Default 20 to match YAML (was 3)
-    agent_max_yes_position = agent_defaults.get('max_yes_position', 3)
-    agent_max_no_position = agent_defaults.get('max_no_position', 3)
+    agent_max_yes_position = agent_defaults.get('max_yes_position', 5)  # FIXED: Default 5 to match YAML
+    agent_max_no_position = agent_defaults.get('max_no_position', 5)  # FIXED: Default 5 to match YAML
     
     logger.info(
         f"[RISK-ENVELOPE] Agent defaults: "

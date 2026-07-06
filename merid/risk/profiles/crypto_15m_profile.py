@@ -149,6 +149,7 @@ class Crypto15mProfile:
     guardrails_max_slippage_cents: int
     guardrails_min_depth_contracts: int
     guardrails_min_post_fee_edge: float
+    guardrails_per_trade_risk_pct: float  # Per-trade risk percentage (sizing control)
     guardrails_min_time_to_expiry_min: int  # Minimum time to expiry for entry in minutes
     guardrails_drawdown_halt_pct: float
     guardrails_drawdown_unwind_pct: float
@@ -615,9 +616,9 @@ class Crypto15mProfileAdapter:
             if isinstance(venue_max_single_order_pct, dict):
                 venue_max_single_order_pct = venue_max_single_order_pct.get('value', 0.05)
             
-            venue_max_total_notional_pct = venue.get('max_total_notional_pct', 0.25)  # FIXED: Default 0.25 to match YAML (was 0.15)
+            venue_max_total_notional_pct = venue.get('max_total_notional_pct', 0.15)  # FIXED: Default 0.15 to match YAML (15% total venue cap)
             if isinstance(venue_max_total_notional_pct, dict):
-                venue_max_total_notional_pct = venue_max_total_notional_pct.get('value', 0.25)  # FIXED: Default 0.25 to match YAML (was 0.15)
+                venue_max_total_notional_pct = venue_max_total_notional_pct.get('value', 0.15)  # FIXED: Default 0.15 to match YAML (15% total venue cap)
             
             venue_max_category_notional_pct = venue.get('max_category_notional_pct', 0.10)
             if isinstance(venue_max_category_notional_pct, dict):
@@ -627,9 +628,9 @@ class Crypto15mProfileAdapter:
             if isinstance(venue_bankroll_cap_pct, dict):
                 venue_bankroll_cap_pct = venue_bankroll_cap_pct.get('value', 0.02)
             
-            agent_max_notional_pct = agent_defaults.get('max_notional_pct', 0.05)  # FIXED: Default 0.05 to match YAML (5% per 15m window)
+            agent_max_notional_pct = agent_defaults.get('max_notional_pct', 0.03)  # FIXED: Default 0.03 to match YAML (3% per agent)
             if isinstance(agent_max_notional_pct, dict):
-                agent_max_notional_pct = agent_max_notional_pct.get('value', 0.05)  # FIXED: Default 0.05 to match YAML (5% per 15m window)
+                agent_max_notional_pct = agent_max_notional_pct.get('value', 0.03)  # FIXED: Default 0.03 to match YAML (3% per agent)
             
             # Compute USD values from capital
             # Ensure all computed values are floats to prevent type errors
@@ -670,7 +671,7 @@ class Crypto15mProfileAdapter:
             # Extract drawdown thresholds from nested dict format
             guardrails_drawdown_halt_pct = self._normalize_percentage_value(guardrails.get('drawdown_halt_pct', 0.20))  # CRITICAL FIX: 20% - aligned with profile (was 0.10)
             guardrails_drawdown_unwind_pct = self._normalize_percentage_value(guardrails.get('drawdown_unwind_pct', 0.25))  # CRITICAL FIX: 25% - aligned with profile (was 0.15)
-            guardrails_per_trade_risk_pct = self._normalize_percentage_value(guardrails.get('per_trade_risk_pct', 0.02))  # CRITICAL FIX: 2% - aligned with profile (was 0.008)
+            guardrails_per_trade_risk_pct = self._normalize_percentage_value(guardrails.get('per_trade_risk_pct', 0.03))  # CRITICAL FIX: 3% - aligned with profile (was 0.008)
             
             # Parse Kelly
             kelly = raw.get('kelly', {})
@@ -786,7 +787,7 @@ class Crypto15mProfileAdapter:
                 
                 # Venue-level caps (percentage-based, normalize dict format)
                 venue_max_single_order_pct=self._normalize_percentage_value(venue.get('max_single_order_pct', 0.05)),
-                venue_max_total_notional_pct=self._normalize_percentage_value(venue.get('max_total_notional_pct', 0.25)),  # FIXED: Increased from 0.05 to 0.25 to match YAML (25% for 5 assets at 3-5% each)
+                venue_max_total_notional_pct=self._normalize_percentage_value(venue.get('max_total_notional_pct', 0.15)),  # FIXED: Default 0.15 to match YAML (15% total venue cap)
                 venue_max_category_notional_pct=self._normalize_percentage_value(venue.get('max_category_notional_pct', 0.10)),  # FIXED: Increased from 0.05 to 0.10 to match YAML
                 venue_bankroll_cap_pct=self._normalize_percentage_value(venue.get('bankroll_cap_pct', 0.02)),  # Default 2% if not specified
                 venue_max_orders_per_minute=venue.get('max_orders_per_minute', 30),
@@ -801,7 +802,7 @@ class Crypto15mProfileAdapter:
                 asset_configs=asset_configs,
                 
                 # Per-agent defaults (percentage-based, normalize dict format)
-                agent_max_notional_pct=self._normalize_percentage_value(agent_defaults.get('max_notional_pct', 0.05)),  # FIXED: Default 0.05 to match YAML (5% per 15m window)
+                agent_max_notional_pct=self._normalize_percentage_value(agent_defaults.get('max_notional_pct', 0.03)),  # FIXED: Default 0.03 to match YAML (3% per agent)
                 agent_max_orders_per_window=agent_defaults.get('max_orders_per_window', 20),  # FIXED: Default 20 to match YAML (was 3)
                 agent_max_yes_position=agent_defaults.get('max_yes_position', 3),
                 agent_max_no_position=agent_defaults.get('max_no_position', 3),
@@ -825,6 +826,7 @@ class Crypto15mProfileAdapter:
                 guardrails_max_slippage_cents=guardrails.get('max_slippage_cents', 3),
                 guardrails_min_depth_contracts=guardrails.get('min_depth_contracts', 5),
                 guardrails_min_post_fee_edge=self._normalize_percentage_value(guardrails.get('min_post_fee_edge', 0.02)),  # FIXED: Default 0.02 to match YAML (was 0.01)
+                guardrails_per_trade_risk_pct=guardrails_per_trade_risk_pct,  # Per-trade risk percentage (sizing control)
                 guardrails_min_time_to_expiry_min=guardrails.get('min_time_to_expiry_min', 2.5),  # FIXED: Default 2.5 to match YAML (was 3)
                 guardrails_drawdown_halt_pct=guardrails_drawdown_halt_pct,
                 guardrails_drawdown_unwind_pct=guardrails_drawdown_unwind_pct,
@@ -854,13 +856,13 @@ class Crypto15mProfileAdapter:
                 guardrails_experimental_max_tte_min=guardrails.get('experimental_max_tte_min', 7.0),  # Default 7min
                 
                 # Kelly sizing (normalize dict format for percentage fields)
-                # P1-FIX1: fallback default reduced from 0.30 to 0.05
-                kelly_hard_cap=self._normalize_percentage_value(kelly.get('kelly_hard_cap', 0.05)),
+                # P1-FIX1: fallback default 0.02 to match profile (2% Kelly hard cap)
+                kelly_hard_cap=self._normalize_percentage_value(kelly.get('kelly_hard_cap', 0.02)),
                 kelly_min_edge_pct=self._normalize_percentage_value(kelly.get('kelly_min_edge_pct', 1.0)),
                 kelly_max_edge_pct=self._normalize_percentage_value(kelly.get('kelly_max_edge_pct', 25.0)),
                 kelly_min_win_prob=kelly.get('kelly_min_win_prob', 0.01),
                 kelly_max_win_prob=kelly.get('kelly_max_win_prob', 0.99),
-                kelly_global_notional_cap_pct=self._normalize_percentage_value(kelly.get('kelly_global_notional_cap_pct', 0.05)),  # P2-FIX6: tightened from 2.0 to 0.05 (was 200%, now 5%)
+                kelly_global_notional_cap_pct=self._normalize_percentage_value(kelly.get('kelly_global_notional_cap_pct', 0.02)),  # P2-FIX6: fallback default 0.02 to match profile (2% global Kelly cap)
                 
                 # Contract caps
                 contract_caps_max_contracts_total=contract_caps.get('max_contracts_total', 5000),
