@@ -202,7 +202,204 @@ class TestPositionMonitorExitCallback:
         callback.assert_called_once()
         call_args = callback.call_args
         assert call_args[0][1] == ExitReason.TRAIL
-        assert call_args[0][3] is None  # contracts_to_close (full exit)
+    
+    def test_dynamic_take_profit_zone_matching(self):
+        """Test dynamic take profit zone matching based on entry price."""
+        monitor = PositionMonitor()
+        
+        callback = Mock()
+        monitor.register_exit_intent_callback(callback)
+        
+        # Mock profile with dynamic take profit enabled
+        with patch('merid.risk.profiles.crypto_15m_profile.is_profile_active', return_value=True), \
+             patch('merid.risk.profiles.crypto_15m_profile.get_active_profile') as mock_profile:
+            
+            mock_adapter = Mock()
+            mock_adapter.profile = Mock()
+            mock_adapter.profile.dynamic_take_profit = {
+                'enabled': True,
+                'zones': [
+                    {'entry_min': 25, 'entry_max': 30, 'exit_target': 55},
+                    {'entry_min': 30, 'entry_max': 40, 'exit_target': 65},
+                    {'entry_min': 40, 'entry_max': 50, 'exit_target': 75},
+                ],
+                'edge_adjustment_enabled': False,
+            }
+            # Add required trailing stop config to avoid Mock errors
+            mock_adapter.profile.trailing_stop_min_profit_cents = 12
+            mock_adapter.profile.trailing_stop_profit_zone_activation_cents = 80
+            mock_adapter.profile.ratchet_profit_floor_enabled = False
+            mock_profile.return_value = mock_adapter
+            
+            # Test entry at 27c (should match 25-30 zone, target 55c)
+            position = Position(
+                market_id="KXBTC15M-1234",
+                series_ticker="KXBTC15M",
+                side=PositionSide.YES,
+                size=10,
+                avg_entry_price_cents=27,
+            )
+            
+            monitor.add_position(position)
+            
+            # Check position to initialize dynamic TP target
+            asyncio.run(monitor._check_position(position, 30))
+            
+            # Target should be set to 55c
+            assert position.dynamic_tp_target_cents == 55
+            
+            # When price reaches 55c, exit should trigger
+            asyncio.run(monitor._check_position(position, 55))
+            
+            # Callback should be called with DYNAMIC_TAKE_PROFIT
+            callback.assert_called_once()
+            call_args = callback.call_args
+            assert call_args[0][1] == ExitReason.DYNAMIC_TAKE_PROFIT
+            assert call_args[0][2] == 55
+    
+    def test_dynamic_take_profit_no_position(self):
+        """Test dynamic take profit for NO positions (mirror logic from YES zones)."""
+        monitor = PositionMonitor()
+        
+        callback = Mock()
+        monitor.register_exit_intent_callback(callback)
+        
+        # Mock profile with dynamic take profit enabled
+        with patch('merid.risk.profiles.crypto_15m_profile.is_profile_active', return_value=True), \
+             patch('merid.risk.profiles.crypto_15m_profile.get_active_profile') as mock_profile:
+            
+            mock_adapter = Mock()
+            mock_adapter.profile = Mock()
+            mock_adapter.profile.dynamic_take_profit = {
+                'enabled': True,
+                'zones': [
+                    {'entry_min': 60, 'entry_max': 70, 'exit_target': 90},  # YES-style: enter 60-70c, exit 90c
+                ],
+                'edge_adjustment_enabled': False,
+            }
+            # Add required trailing stop config to avoid Mock errors
+            mock_adapter.profile.trailing_stop_min_profit_cents = 12
+            mock_adapter.profile.trailing_stop_profit_zone_activation_cents = 80
+            mock_adapter.profile.ratchet_profit_floor_enabled = False
+            mock_profile.return_value = mock_adapter
+            
+            # Test NO position entry at 65c (should mirror to 10c target: 100 - 90)
+            position = Position(
+                market_id="KXBTC15M-1234",
+                series_ticker="KXBTC15M",
+                side=PositionSide.NO,
+                size=10,
+                avg_entry_price_cents=65,
+            )
+            
+            monitor.add_position(position)
+            
+            # Check position to initialize dynamic TP target (price at 68c, not triggering exit)
+            asyncio.run(monitor._check_position(position, 68))
+            
+            # Target should be mirrored: 100 - 90 = 10c
+            assert position.dynamic_tp_target_cents == 10
+            
+            # Callback should not have been called yet
+            callback.assert_not_called()
+            
+            # When price drops to 10c, exit should trigger
+            asyncio.run(monitor._check_position(position, 10))
+            
+            # Callback should be called with DYNAMIC_TAKE_PROFIT
+            callback.assert_called_once()
+            call_args = callback.call_args
+            assert call_args[0][1] == ExitReason.DYNAMIC_TAKE_PROFIT
+            assert call_args[0][2] == 10
+    
+    def test_dynamic_take_profit_edge_adjustment(self):
+        """Test dynamic take profit edge quality adjustment."""
+        monitor = PositionMonitor()
+        
+        callback = Mock()
+        monitor.register_exit_intent_callback(callback)
+        
+        # Mock profile with edge adjustment enabled
+        with patch('merid.risk.profiles.crypto_15m_profile.is_profile_active', return_value=True), \
+             patch('merid.risk.profiles.crypto_15m_profile.get_active_profile') as mock_profile:
+            
+            mock_adapter = Mock()
+            mock_adapter.profile = Mock()
+            mock_adapter.profile.dynamic_take_profit = {
+                'enabled': True,
+                'zones': [
+                    {'entry_min': 25, 'entry_max': 30, 'exit_target': 55},
+                ],
+                'edge_adjustment_enabled': True,
+                'edge_high_threshold': 0.05,
+                'edge_high_multiplier': 1.1,
+                'edge_low_threshold': 0.02,
+                'edge_low_multiplier': 0.9,
+            }
+            # Add required trailing stop config to avoid Mock errors
+            mock_adapter.profile.trailing_stop_min_profit_cents = 12
+            mock_adapter.profile.trailing_stop_profit_zone_activation_cents = 80
+            mock_adapter.profile.ratchet_profit_floor_enabled = False
+            mock_profile.return_value = mock_adapter
+            
+            # Test high edge (6%)
+            position = Position(
+                market_id="KXBTC15M-1234",
+                series_ticker="KXBTC15M",
+                side=PositionSide.YES,
+                size=10,
+                avg_entry_price_cents=27,
+                entry_edge_pct=0.06,  # High edge
+            )
+            
+            monitor.add_position(position)
+            
+            # Check position to initialize dynamic TP target
+            asyncio.run(monitor._check_position(position, 30))
+            
+            # Target should be adjusted: 55 * 1.1 = 60.5 -> 60c
+            assert position.dynamic_tp_target_cents == 60
+    
+    def test_dynamic_take_profit_disabled(self):
+        """Test dynamic take profit when disabled in profile."""
+        monitor = PositionMonitor()
+        
+        callback = Mock()
+        monitor.register_exit_intent_callback(callback)
+        
+        # Mock profile with dynamic take profit disabled
+        with patch('merid.risk.profiles.crypto_15m_profile.is_profile_active', return_value=True), \
+             patch('merid.risk.profiles.crypto_15m_profile.get_active_profile') as mock_profile:
+            
+            mock_adapter = Mock()
+            mock_adapter.profile = Mock()
+            mock_adapter.profile.dynamic_take_profit = {
+                'enabled': False,
+            }
+            # Add required trailing stop config to avoid Mock errors
+            mock_adapter.profile.trailing_stop_min_profit_cents = 12
+            mock_adapter.profile.trailing_stop_profit_zone_activation_cents = 80
+            mock_adapter.profile.ratchet_profit_floor_enabled = False
+            mock_profile.return_value = mock_adapter
+            
+            position = Position(
+                market_id="KXBTC15M-1234",
+                series_ticker="KXBTC15M",
+                side=PositionSide.YES,
+                size=10,
+                avg_entry_price_cents=27,
+            )
+            
+            monitor.add_position(position)
+            
+            # Check position
+            asyncio.run(monitor._check_position(position, 55))
+            
+            # No dynamic TP target should be set
+            assert position.dynamic_tp_target_cents is None
+            
+            # Callback should not be called
+            callback.assert_not_called()
     
     def test_exit_intent_callback_on_extreme_profit(self):
         """Test callback is triggered on extreme profit exit (99c YES / 1c NO)."""

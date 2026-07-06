@@ -86,6 +86,11 @@ class Position:
     ratchet_hold_until: float = 0.0  # Timestamp until which to hold after activation
     ratchet_trimmed: bool = False  # Track if position has been trimmed
     
+    # Dynamic take profit tracking (2026-07-06)
+    dynamic_tp_target_cents: Optional[int] = None  # Dynamic take profit target based on entry price
+    dynamic_tp_triggered: bool = False  # Track if dynamic TP has been triggered
+    entry_edge_pct: float = 0.03  # Edge percentage at entry (default 3% for dynamic TP adjustment)
+    
     # Initial risk for R-multiple calculation
     initial_risk_cents: int = 0  # |entry_price - stop_loss_price| if stop_loss set
     

@@ -189,6 +189,85 @@ class PositionMonitor:
             self._emit_exit_intent(position, ExitReason.EXTREME_PROFIT, current_price_cents)
             return
         
+        # DYNAMIC TAKE PROFIT: Laddered exits based on entry price for consistent profits
+        # 2026-07-06: Implements user's strategy for frequent small wins
+        # Entry 25-30c → Exit 50-60c, Entry 30-40c → Exit 60-70c, etc.
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
+            if is_profile_active():
+                adapter = get_active_profile()
+                profile = adapter.profile
+                
+                # Check if dynamic take profit is enabled
+                dynamic_tp_config = getattr(profile, 'dynamic_take_profit', {})
+                if dynamic_tp_config and dynamic_tp_config.get('enabled', False):
+                    # Initialize dynamic TP target if not set
+                    if position.dynamic_tp_target_cents is None:
+                        entry_price = position.avg_entry_price_cents
+                        zones = dynamic_tp_config.get('zones', [])
+                        
+                        # Find matching zone based on entry price
+                        for zone in zones:
+                            entry_min = zone.get('entry_min', 0)
+                            entry_max = zone.get('entry_max', 100)
+                            if entry_min <= entry_price <= entry_max:
+                                base_target = zone.get('exit_target', 0)
+                                
+                                # Apply edge quality adjustment if enabled
+                                if dynamic_tp_config.get('edge_adjustment_enabled', False):
+                                    # Get edge from position (if available)
+                                    edge_pct = getattr(position, 'entry_edge_pct', 0.03)  # Default 3%
+                                    edge_high_threshold = dynamic_tp_config.get('edge_high_threshold', 0.05)
+                                    edge_low_threshold = dynamic_tp_config.get('edge_low_threshold', 0.02)
+                                    edge_high_multiplier = dynamic_tp_config.get('edge_high_multiplier', 1.1)
+                                    edge_low_multiplier = dynamic_tp_config.get('edge_low_multiplier', 0.9)
+                                    
+                                    if edge_pct >= edge_high_threshold:
+                                        base_target = int(base_target * edge_high_multiplier)
+                                    elif edge_pct <= edge_low_threshold:
+                                        base_target = int(base_target * edge_low_multiplier)
+                                
+                                # Adjust for NO positions (mirror logic)
+                                if position.side == PositionSide.NO:
+                                    position.dynamic_tp_target_cents = 100 - base_target
+                                else:
+                                    position.dynamic_tp_target_cents = base_target
+                                
+                                logger.info(
+                                    "[POSITION-MONITOR] DYNAMIC-TP target set: position=%s entry=%dc target=%dc (zone: %d-%dc)",
+                                    position.position_id[:8],
+                                    entry_price,
+                                    position.dynamic_tp_target_cents,
+                                    entry_min,
+                                    entry_max,
+                                )
+                                break
+                    
+                    # Check if dynamic TP target is reached
+                    if position.dynamic_tp_target_cents is not None and not position.dynamic_tp_triggered:
+                        if position.side == PositionSide.YES and current_price_cents >= position.dynamic_tp_target_cents:
+                            position.dynamic_tp_triggered = True
+                            logger.info(
+                                "[POSITION-MONITOR] DYNAMIC-TP triggered: position=%s price=%dc target=%dc (YES target reached)",
+                                position.position_id[:8],
+                                current_price_cents,
+                                position.dynamic_tp_target_cents,
+                            )
+                            self._emit_exit_intent(position, ExitReason.DYNAMIC_TAKE_PROFIT, current_price_cents)
+                            return
+                        elif position.side == PositionSide.NO and current_price_cents <= position.dynamic_tp_target_cents:
+                            position.dynamic_tp_triggered = True
+                            logger.info(
+                                "[POSITION-MONITOR] DYNAMIC-TP triggered: position=%s price=%dc target=%dc (NO target reached)",
+                                position.position_id[:8],
+                                current_price_cents,
+                                position.dynamic_tp_target_cents,
+                            )
+                            self._emit_exit_intent(position, ExitReason.DYNAMIC_TAKE_PROFIT, current_price_cents)
+                            return
+        except Exception as e:
+            logger.debug("[POSITION-MONITOR] Dynamic take profit check failed: %s", e)
+        
         # RATCHET PROFIT FLOOR: Lock in profits at 80-85c range
         # Research-backed mechanism to prevent giving back gains when 99c TP is not guaranteed
         # 2026-07-05: Added position trimming and 99c hard exit
