@@ -662,6 +662,158 @@ class TestDynamicCooldown:
         assert dynamic_cooldown <= 180.0
 
 
+class TestVelocityBiasFix:
+    """Test 2026-07-06 bias fix: history[-1][1] instead of history[-2][1]."""
+    
+    def test_velocity_epsilon_uses_correct_history_index(self):
+        """Test velocity epsilon adjustment uses history[-1][1] (most recent price).
+        
+        CRITICAL FIX: 2026-07-06 - Fix bias bug where history[-2][1] was used instead of history[-1][1].
+        history[-1][1] is the most recent price in history, history[-2][1] is the price before that.
+        This caused systematic bias in epsilon direction, leading to only BUY_NO signals.
+        """
+        config = LeanAgentConfig(
+            name="BTC_15M",
+            series_tickers=["KXBTC15M"],
+        )
+        
+        agent = LeanAgent15m(
+            config=config,
+            catalog=Mock(),
+            market_state_store=Mock(),
+            spot_provider=Mock(),
+            order_router=Mock(),
+            risk_config=Mock(),
+        )
+        
+        # Simulate price history with 2 data points
+        asset = "BTC"
+        current_time = time.time()
+        
+        # Add history: 65000 -> 65150 (price increased)
+        agent._spot_price_history[asset].append((current_time - 10.0, 65000.0))
+        agent._spot_price_history[asset].append((current_time - 5.0, 65150.0))
+        
+        # Current price is higher than most recent history price
+        current_price = 65200.0
+        
+        # Calculate velocity
+        velocity = agent._calculate_velocity(asset, current_price)
+        
+        # Velocity should be positive (price increased)
+        # Epsilon should be positive because recent_trend = (65200 - 65150) / 65150 > 0
+        assert velocity > 0, f"Velocity should be positive when price increased, got {velocity}"
+    
+    def test_velocity_epsilon_negative_trend(self):
+        """Test velocity epsilon adjustment handles negative trend correctly."""
+        config = LeanAgentConfig(
+            name="BTC_15M",
+            series_tickers=["KXBTC15M"],
+        )
+        
+        agent = LeanAgent15m(
+            config=config,
+            catalog=Mock(),
+            market_state_store=Mock(),
+            spot_provider=Mock(),
+            order_router=Mock(),
+            risk_config=Mock(),
+        )
+        
+        # Simulate price history with 2 data points
+        asset = "BTC"
+        current_time = time.time()
+        
+        # Add history: 65000 -> 64850 (price decreased)
+        agent._spot_price_history[asset].append((current_time - 10.0, 65000.0))
+        agent._spot_price_history[asset].append((current_time - 5.0, 64850.0))
+        
+        # Current price is lower than most recent history price
+        current_price = 64800.0
+        
+        # Calculate velocity
+        velocity = agent._calculate_velocity(asset, current_price)
+        
+        # Velocity should be negative (price decreased)
+        # Epsilon should be negative because recent_trend = (64800 - 64850) / 64850 < 0
+        assert velocity < 0, f"Velocity should be negative when price decreased, got {velocity}"
+    
+    def test_multi_window_velocity_uses_correct_history_index(self):
+        """Test multi-window velocity epsilon adjustment uses history[-1][1]."""
+        config = LeanAgentConfig(
+            name="BTC_15M",
+            series_tickers=["KXBTC15M"],
+        )
+        
+        agent = LeanAgent15m(
+            config=config,
+            catalog=Mock(),
+            market_state_store=Mock(),
+            spot_provider=Mock(),
+            order_router=Mock(),
+            risk_config=Mock(),
+        )
+        
+        # Simulate price history with multiple data points
+        asset = "BTC"
+        current_time = time.time()
+        
+        # Add history: prices increasing
+        for i in range(10):
+            price = 65000.0 + i * 10.0
+            agent._spot_price_history[asset].append((current_time - (10 - i) * 5.0, price))
+        
+        # Current price is higher than most recent history price
+        current_price = 65150.0
+        
+        # Calculate multi-window velocity
+        velocity = agent._calculate_multi_window_velocity(asset, current_price)
+        
+        # Velocity should be positive (price increased)
+        assert velocity > 0, f"Multi-window velocity should be positive when price increased, got {velocity}"
+    
+    def test_velocity_no_bias_in_signal_generation(self):
+        """Test that velocity calculation does not systematically bias toward negative values."""
+        config = LeanAgentConfig(
+            name="BTC_15M",
+            series_tickers=["KXBTC15M"],
+        )
+        
+        agent = LeanAgent15m(
+            config=config,
+            catalog=Mock(),
+            market_state_store=Mock(),
+            spot_provider=Mock(),
+            order_router=Mock(),
+            risk_config=Mock(),
+        )
+        
+        asset = "BTC"
+        current_time = time.time()
+        
+        # Test both positive and negative price movements
+        test_cases = [
+            (65000.0, 65100.0, 65150.0, True),   # Price increasing -> positive velocity
+            (65000.0, 64900.0, 64850.0, False),  # Price decreasing -> negative velocity
+            (65000.0, 65050.0, 65100.0, True),   # Price increasing -> positive velocity
+            (65000.0, 64950.0, 64900.0, False),  # Price decreasing -> negative velocity
+        ]
+        
+        for prev_price, mid_price, current_price, should_be_positive in test_cases:
+            agent._spot_price_history[asset].clear()
+            agent._spot_price_history[asset].append((current_time - 10.0, prev_price))
+            agent._spot_price_history[asset].append((current_time - 5.0, mid_price))
+            
+            velocity = agent._calculate_velocity(asset, current_price)
+            
+            if should_be_positive:
+                assert velocity > 0, \
+                    f"Velocity should be positive for price {prev_price}->{mid_price}->{current_price}, got {velocity}"
+            else:
+                assert velocity < 0, \
+                    f"Velocity should be negative for price {prev_price}->{mid_price}->{current_price}, got {velocity}"
+
+
 class TestPriceBasedStrategy:
     """Test Phase 5.3 price-based strategy (Turbine research winner)."""
     
