@@ -374,6 +374,19 @@ class KalshiPositionCache:
                             exit_reason.value, position.position_id[:8], position.side.value, exit_size, exit_price_cents
                         )
                     
+                    # Derive agent_id from asset for proper window tracking
+                    # CRITICAL FIX: Use actual agent_id (e.g., BTC_15M) instead of "position_monitor"
+                    # This ensures window exposure is correctly tracked and reduced when position closes
+                    try:
+                        from config.kalshi_crypto_config import kalshi_ticker_to_asset
+                        asset = kalshi_ticker_to_asset(position.market_id)
+                        if asset and asset.upper() in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                            exit_agent_id = f"{asset.upper()}_15M"
+                        else:
+                            exit_agent_id = "position_monitor"  # Fallback for non-crypto assets
+                    except Exception:
+                        exit_agent_id = "position_monitor"  # Fallback if asset lookup fails
+                    
                     # Create exit intent
                     exit_intent = OrderIntent(
                         ticker=position.market_id,
@@ -384,7 +397,7 @@ class KalshiPositionCache:
                         order_type=order_type,
                         time_in_force=time_in_force,
                         source="position_monitor",
-                        agent_id="position_monitor",
+                        agent_id=exit_agent_id,
                         rationale=f"Exit triggered: {exit_reason.value}",
                     )
                     

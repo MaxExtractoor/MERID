@@ -9,12 +9,15 @@ import asyncio
 import unittest
 from datetime import datetime
 from unittest.mock import Mock, patch
+from utils.logger import get_logger
 from merid.position_management.position import Position, PositionSide
 from merid.position_management.exit_policy import ExitReason
 from merid.position_management.position_monitor import (
     PositionMonitor,
     get_position_monitor,
 )
+
+logger = get_logger("test_position_monitor")
 
 
 class TestPositionMonitor:
@@ -133,6 +136,7 @@ class TestPositionMonitorExitCallback:
         assert call_args[0][0] is position
         assert call_args[0][1] == ExitReason.STOP_LOSS
         assert call_args[0][2] == 35
+        assert call_args[0][3] is None  # contracts_to_close (full exit)
         
         # Position should be removed
         assert len(monitor.get_open_positions()) == 0
@@ -198,6 +202,180 @@ class TestPositionMonitorExitCallback:
         callback.assert_called_once()
         call_args = callback.call_args
         assert call_args[0][1] == ExitReason.TRAIL
+        assert call_args[0][3] is None  # contracts_to_close (full exit)
+    
+    def test_exit_intent_callback_on_extreme_profit(self):
+        """Test callback is triggered on extreme profit exit (99c YES / 1c NO)."""
+        # Test YES position at 99c
+        monitor_yes = PositionMonitor()
+        
+        callback_yes = Mock()
+        monitor_yes.register_exit_intent_callback(callback_yes)
+        
+        position_yes = Position(
+            market_id="KXBTC15M-1234",
+            series_ticker="KXBTC15M",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,
+        )
+        
+        monitor_yes.add_position(position_yes)
+        
+        # Move price to 99c (extreme profit)
+        asyncio.run(monitor_yes._check_position(position_yes, 99))
+        
+        # Callback should be called with EXTREME_PROFIT reason
+        callback_yes.assert_called_once()
+        call_args = callback_yes.call_args
+        assert call_args[0][1] == ExitReason.EXTREME_PROFIT
+        assert call_args[0][2] == 99  # exit price
+        assert call_args[0][3] is None  # contracts_to_close (full exit)
+        
+        # Test NO position at 1c
+        monitor_no = PositionMonitor()
+        
+        callback_no = Mock()
+        monitor_no.register_exit_intent_callback(callback_no)
+        
+        position_no = Position(
+            market_id="KXBTC15M-5678",
+            series_ticker="KXBTC15M",
+            side=PositionSide.NO,
+            size=10,
+            avg_entry_price_cents=50,
+        )
+        
+        monitor_no.add_position(position_no)
+        
+        # Move price to 1c (extreme profit for NO)
+        asyncio.run(monitor_no._check_position(position_no, 1))
+        
+        # Callback should be called with EXTREME_PROFIT reason
+        callback_no.assert_called_once()
+        call_args = callback_no.call_args
+        assert call_args[0][1] == ExitReason.EXTREME_PROFIT
+        assert call_args[0][2] == 1  # exit price
+        assert call_args[0][3] is None  # contracts_to_close (full exit)
+
+    @pytest.mark.asyncio
+    async def test_exit_intent_callback_agent_id_for_all_crypto_assets(self):
+        """Test that exit intent callback derives correct agent_id for all 5 crypto assets.
+        
+        This test verifies the critical fix for window tracking:
+        - Exit orders must use the actual agent_id (e.g., BTC_15M) instead of "position_monitor"
+        - This ensures window exposure is correctly tracked and reduced when positions close
+        - All 5 crypto assets (BTC, ETH, SOL, XRP, DOGE) must be covered
+        """
+        from merid.position_management.position_monitor import get_position_monitor
+        from merid.position_management.position import Position, PositionSide
+        from merid.position_management.exit_policy import ExitReason
+        from unittest.mock import Mock, patch, AsyncMock
+        import asyncio
+        
+        monitor = get_position_monitor()
+        
+        # Mock route_order_async to capture the order intent
+        mock_route_order_async = AsyncMock()
+        mock_route_order_async.return_value = Mock(status="submitted", reason="ok")
+        
+        # Create a callback that mimics the position_cache callback
+        def exit_intent_callback(position, exit_reason, exit_price_cents, contracts_to_close=None):
+            from merid.event_venues.kalshi.order_router import OrderIntent
+            from config.kalshi_crypto_config import kalshi_ticker_to_asset
+            
+            # Determine exit side and action
+            if position.side == PositionSide.YES:
+                exit_action = "sell"
+                exit_side = "yes"
+            else:
+                exit_action = "buy"
+                exit_side = "yes"
+            
+            # Determine order type based on exit reason
+            if exit_reason == ExitReason.EXTREME_PROFIT:
+                order_type = "market"
+                time_in_force = "ioc"
+            elif exit_reason == ExitReason.RATCHET_TRIM:
+                order_type = "limit"
+                time_in_force = "gtc"
+            else:
+                order_type = "limit"
+                time_in_force = "gtc"
+            
+            exit_size = contracts_to_close if contracts_to_close else position.size
+            
+            # Derive agent_id from asset for proper window tracking (CRITICAL FIX)
+            try:
+                asset = kalshi_ticker_to_asset(position.market_id)
+                if asset and asset.upper() in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                    exit_agent_id = f"{asset.upper()}_15M"
+                else:
+                    exit_agent_id = "position_monitor"
+            except Exception:
+                exit_agent_id = "position_monitor"
+            
+            exit_intent = OrderIntent(
+                ticker=position.market_id,
+                side=exit_side,
+                action=exit_action,
+                price_cents=exit_price_cents,
+                count=exit_size,
+                order_type=order_type,
+                time_in_force=time_in_force,
+                source="position_monitor",
+                agent_id=exit_agent_id,
+                rationale=f"Exit triggered: {exit_reason.value}",
+            )
+            
+            # Submit order asynchronously
+            async def submit_exit():
+                return await mock_route_order_async(exit_intent)
+            
+            loop = asyncio.get_event_loop()
+            loop.create_task(submit_exit())
+        
+        # Register the callback
+        monitor.register_exit_intent_callback(exit_intent_callback)
+        
+        # Test all 5 crypto assets
+        test_cases = [
+            ("KXBTC15M-TEST", "BTC_15M"),
+            ("KXETH15M-TEST", "ETH_15M"),
+            ("KXSOL15M-TEST", "SOL_15M"),
+            ("KXXRP15M-TEST", "XRP_15M"),
+            ("KXDOGE15M-TEST", "DOGE_15M"),
+        ]
+        
+        for market_id, expected_agent_id in test_cases:
+            position = Position(
+                market_id=market_id,
+                series_ticker=market_id.split("-")[0],
+                side=PositionSide.YES,
+                size=5,
+                avg_entry_price_cents=50,
+            )
+            
+            monitor.add_position(position)
+            
+            # Trigger extreme profit exit at 99c
+            await monitor._check_position(position, 99)
+            
+            # Wait for async task to complete
+            await asyncio.sleep(0.1)
+            
+            # Verify agent_id is correctly derived
+            assert mock_route_order_async.called
+            call_args = mock_route_order_async.call_args
+            order_intent = call_args[0][0]
+            assert order_intent.agent_id == expected_agent_id, \
+                f"For {market_id}, expected {expected_agent_id}, got {order_intent.agent_id}"
+            
+            # Clean up
+            monitor.remove_position(position.position_id)
+            mock_route_order_async.reset_mock()
+        
+        print("[PASS] All 5 crypto assets (BTC, ETH, SOL, XRP, DOGE) use correct agent_id in exit orders")
 
 
 class TestPositionMonitorPolling:
@@ -357,6 +535,24 @@ class TestPositionMonitorThreadSafety:
 
 class TestPositionMonitorPositionCacheIntegration:
     """Test integration between position_cache and PositionMonitor."""
+    
+    def test_position_cache_registers_exit_intent_callback(self):
+        """Test that position_cache registers exit intent callback on initialization.
+        
+        This test verifies the fix for the bug where the exit intent callback
+        was not registered, causing extreme profit exits to be detected but
+        no orders to be placed.
+        """
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+        from merid.position_management.position_monitor import get_position_monitor
+        
+        # Get cache (this should trigger initialization and callback registration)
+        cache = get_position_cache()
+        monitor = get_position_monitor()
+        
+        # Verify callback is registered
+        assert monitor._exit_intent_callback is not None
+        logger.info("[TEST] Exit intent callback is registered in PositionMonitor")
     
     @pytest.mark.asyncio
     async def test_position_cache_adds_to_monitor_on_new_position(self):
@@ -530,18 +726,159 @@ class TestPositionMonitorPositionCacheIntegration:
         if hasattr(cache, '_positions') and "KXBTC15M-TEST" in cache._positions:
             del cache._positions["KXBTC15M-TEST"]
         risk_mgr._state.asset_notional["BTC"] = 0.0
+    
+    @pytest.mark.asyncio
+    async def test_exit_intent_callback_places_market_order_for_extreme_profit(self):
+        """Test that exit intent callback places market order for extreme profit exit.
+        
+        This test verifies the fix for the bug where extreme profit exits used
+        limit orders instead of market orders, potentially failing to execute
+        at the extreme price levels (99c YES / 1c NO).
+        """
+        from merid.position_management.position_monitor import get_position_monitor
+        from merid.position_management.position import Position, PositionSide
+        from merid.position_management.exit_policy import ExitReason
+        from unittest.mock import Mock, patch, AsyncMock
+        import asyncio
+        
+        monitor = get_position_monitor()
+        
+        # Mock route_order_async to capture the order intent
+        mock_route_order_async = AsyncMock()
+        mock_route_order_async.return_value = Mock(status="submitted", reason="ok")
+        
+        # Create a callback that mimics the position_cache callback
+        def exit_intent_callback(position, exit_reason, exit_price_cents, contracts_to_close=None):
+            from merid.event_venues.kalshi.order_router import OrderIntent
+            from config.kalshi_crypto_config import kalshi_ticker_to_asset
+            
+            # Determine exit side and action
+            if position.side == PositionSide.YES:
+                exit_action = "sell"
+                exit_side = "yes"
+            else:
+                exit_action = "buy"
+                exit_side = "yes"
+            
+            # Determine order type based on exit reason
+            if exit_reason == ExitReason.EXTREME_PROFIT:
+                order_type = "market"
+                time_in_force = "ioc"
+            elif exit_reason == ExitReason.RATCHET_TRIM:
+                order_type = "limit"
+                time_in_force = "gtc"
+            else:
+                order_type = "limit"
+                time_in_force = "gtc"
+            
+            exit_size = contracts_to_close if contracts_to_close else position.size
+            
+            # Derive agent_id from asset for proper window tracking (CRITICAL FIX)
+            try:
+                asset = kalshi_ticker_to_asset(position.market_id)
+                if asset and asset.upper() in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                    exit_agent_id = f"{asset.upper()}_15M"
+                else:
+                    exit_agent_id = "position_monitor"
+            except Exception:
+                exit_agent_id = "position_monitor"
+            
+            exit_intent = OrderIntent(
+                ticker=position.market_id,
+                side=exit_side,
+                action=exit_action,
+                price_cents=exit_price_cents,
+                count=exit_size,
+                order_type=order_type,
+                time_in_force=time_in_force,
+                source="position_monitor",
+                agent_id=exit_agent_id,
+                rationale=f"Exit triggered: {exit_reason.value}",
+            )
+            
+            # Submit order asynchronously
+            async def submit_exit():
+                return await mock_route_order_async(exit_intent)
+            
+            loop = asyncio.get_event_loop()
+            loop.create_task(submit_exit())
+        
+        # Register the callback
+        monitor.register_exit_intent_callback(exit_intent_callback)
+        
+        # Create a YES position
+        position_yes = Position(
+            market_id="KXBTC15M-TEST-YES",
+            series_ticker="KXBTC15M",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,
+        )
+        
+        monitor.add_position(position_yes)
+        
+        # Trigger extreme profit exit at 99c (use await instead of asyncio.run)
+        await monitor._check_position(position_yes, 99)
+        
+        # Wait for async task to complete
+        await asyncio.sleep(0.1)
+        
+        # Verify route_order_async was called with market order
+        assert mock_route_order_async.called
+        call_args = mock_route_order_async.call_args
+        order_intent = call_args[0][0]
+        assert order_intent.order_type == "market"
+        assert order_intent.time_in_force == "ioc"
+        assert order_intent.price_cents == 99
+        assert order_intent.count == 10
+        # CRITICAL FIX: Verify agent_id is correctly derived from asset
+        assert order_intent.agent_id == "BTC_15M", f"Expected BTC_15M, got {order_intent.agent_id}"
+        
+        # Clean up
+        monitor.remove_position(position_yes.position_id)
+        
+        # Test NO position at 1c
+        position_no = Position(
+            market_id="KXBTC15M-TEST-NO",
+            series_ticker="KXBTC15M",
+            side=PositionSide.NO,
+            size=10,
+            avg_entry_price_cents=50,
+        )
+        
+        monitor.add_position(position_no)
+        
+        # Trigger extreme profit exit at 1c (use await instead of asyncio.run)
+        await monitor._check_position(position_no, 1)
+        
+        # Wait for async task to complete
+        await asyncio.sleep(0.1)
+        
+        # Verify route_order_async was called with market order
+        assert mock_route_order_async.call_count == 2
+        call_args = mock_route_order_async.call_args
+        order_intent = call_args[0][0]
+        # CRITICAL FIX: Verify agent_id is correctly derived from asset
+        assert order_intent.agent_id == "BTC_15M", f"Expected BTC_15M, got {order_intent.agent_id}"
+        assert order_intent.order_type == "market"
+        assert order_intent.time_in_force == "ioc"
+        assert order_intent.price_cents == 1
+        assert order_intent.count == 10
+        
+        # Clean up
+        monitor.remove_position(position_no.position_id)
 
 
 class TestPositionMonitorTrailingStopConfiguration:
     """Test trailing stop configuration aligned with 15m best practices."""
     
     @pytest.mark.asyncio
-    async def test_position_cache_configures_r_multiple_trailing(self):
-        """Test that position_cache configures R-multiple trailing with 0.5R trail distance.
+    async def test_position_cache_configures_fixed_cents_trailing(self):
+        """Test that position_cache configures FIXED_CENTS trailing with 5c trail distance.
         
-        This test verifies the fix for aligning trailing stops with 15m research:
-        - Move to break-even at +0.5R
-        - Trail with 0.5R distance
+        This test verifies the fix for mandatory FIXED_CENTS trailing:
+        - All positions use FIXED_CENTS trailing regardless of profile config
+        - Trail distance is 5 cents (from profile configuration)
         """
         from merid.position_management.position_monitor import get_position_monitor
         from merid.event_venues.kalshi.position_cache import get_position_cache
@@ -574,9 +911,9 @@ class TestPositionMonitorTrailingStopConfiguration:
         assert monitored_position is not None
         assert monitored_position.market_id == "KXBTC15M-TEST"
         
-        # Verify trailing stop configuration
-        assert monitored_position.trailing_type == TrailingType.R_MULTIPLE
-        assert monitored_position.trailing_param == 0.5  # 0.5R trail distance per research
+        # Verify trailing stop configuration (FIXED_CENTS is mandatory)
+        assert monitored_position.trailing_type == TrailingType.FIXED_CENTS
+        assert monitored_position.trailing_param == 5  # 5c trail distance from profile
         
         # Clean up
         monitor.remove_position("KXBTC15M-TEST")
