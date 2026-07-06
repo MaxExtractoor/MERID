@@ -130,6 +130,28 @@ class TestFVGConsolidation:
         # Verify momentum_fvg signal mode exists
         assert "momentum_fvg" in content, \
             "Agent grid should have momentum_fvg signal mode"
+    
+    def test_agent_grid_passes_required_fvg_arguments(self):
+        """Verify that agent_grid_15m.py passes required arguments to FVG forecaster."""
+        agent_grid_path = Path(__file__).parent.parent.parent / "merid" / "prediction" / "agent_grid_15m.py"
+        
+        assert agent_grid_path.exists(), f"Agent grid file not found: {agent_grid_path}"
+        
+        with open(agent_grid_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Verify the FVG forecaster call includes required arguments
+        # The predict method requires: market_id, implied_yes, implied_no, volume, open_interest, minutes_to_expiry
+        assert "open_interest=" in content, \
+            "Agent grid should pass open_interest to FVG forecaster"
+        assert "minutes_to_expiry=" in content, \
+            "Agent grid should pass minutes_to_expiry to FVG forecaster"
+        assert "implied_yes=" in content, \
+            "Agent grid should pass implied_yes to FVG forecaster"
+        assert "implied_no=" in content, \
+            "Agent grid should pass implied_no to FVG forecaster"
+        assert "volume=" in content, \
+            "Agent grid should pass volume to FVG forecaster"
 
 
 if __name__ == "__main__":
