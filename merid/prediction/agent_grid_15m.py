@@ -1671,12 +1671,41 @@ class LeanAgent15m:
         try:
             from merid.prediction.forecasters.fvg import get_fvg_forecaster
             fvg_forecaster = get_fvg_forecaster()
-            # Get FVG prediction for current price
-            fvg_prediction = fvg_forecaster.predict(asset, "15m", spot_price, time.time())
-            if fvg_prediction:
-                fvg_confidence = fvg_prediction.get('confidence', 0.0)
-                fvg_direction = fvg_prediction.get('direction', 'neutral')
-                fvg_signal = fvg_prediction
+            # Get market data for FVG forecaster
+            ticker = market.market.market_id if hasattr(market, 'market') else market.market_id
+            market_state = self.market_state_store.get(ticker) if self.market_state_store else None
+            
+            # Extract market parameters
+            implied_yes = getattr(market_state, 'yes_price', 0.5) if market_state else 0.5
+            implied_no = 1.0 - implied_yes
+            volume = getattr(market_state, 'volume_24h', 0.0) if market_state else 0.0
+            open_interest = getattr(market_state, 'open_interest', 0.0) if market_state else 0.0
+            bid = getattr(market_state, 'bid', None) if market_state else None
+            ask = getattr(market_state, 'ask', None) if market_state else None
+            
+            # Get FVG prediction with correct arguments
+            fvg_result = fvg_forecaster.predict(
+                market_id=ticker,
+                implied_yes=implied_yes,
+                implied_no=implied_no,
+                volume=volume,
+                open_interest=open_interest,
+                minutes_to_expiry=minutes_to_expiry,
+                asset=asset,
+                timeframe="15m",
+                bid=bid,
+                ask=ask,
+            )
+            if fvg_result:
+                fvg_confidence = fvg_result.confidence
+                fvg_direction = fvg_result.components.get('fvg_nearest_direction', 0.0)
+                if fvg_direction > 0:
+                    fvg_direction = "bullish"
+                elif fvg_direction < 0:
+                    fvg_direction = "bearish"
+                else:
+                    fvg_direction = "neutral"
+                fvg_signal = fvg_result
         except Exception as e:
             logger.warning("[MOMENTUM-FVG] Failed to get FVG signal: %s", e)
         
