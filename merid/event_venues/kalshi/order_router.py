@@ -102,6 +102,13 @@ class RestingOrder:
 _resting_orders: Dict[str, RestingOrder] = {}
 _resting_orders_lock = threading.Lock()
 
+# Duplicate order prevention tracker (in-memory, resets on restart)
+# Key: (ticker, side, action, price_cents) -> timestamp of last order
+_duplicate_order_tracker: Dict[tuple, float] = {}
+_duplicate_order_lock = threading.Lock()
+# Time window in seconds to consider an order a duplicate (default: 60 seconds)
+_DUPLICATE_ORDER_WINDOW_SECONDS = 60
+
 
 # =============================================================================
 # Fee-Aware Edge Calculation (Phase 1)
@@ -271,6 +278,76 @@ def get_resting_orders() -> List[RestingOrder]:
     """Get all currently tracked resting orders."""
     with _resting_orders_lock:
         return list(_resting_orders.values())
+
+
+def _check_duplicate_order(intent: OrderIntent) -> Optional[str]:
+    """Check if this order is a duplicate of a recently placed order.
+    
+    Prevents placing multiple identical orders for the same ticker, side, action, and price
+    within a short time window. This addresses the issue where agents place multiple
+    identical resting limit orders for the same contract price.
+    
+    Args:
+        intent: OrderIntent to check
+        
+    Returns:
+        Rejection reason string if duplicate, None if OK
+    """
+    # Extract price in cents (OrderIntent uses price_cents, not price)
+    price_cents = intent.price_cents if hasattr(intent, 'price_cents') else 0
+    
+    # Create key for duplicate detection
+    # Normalize side/action to uppercase for consistent key generation
+    side_normalized = intent.side.upper() if intent.side else ""
+    action_normalized = intent.action.upper() if intent.action else ""
+    ticker_normalized = intent.ticker.upper() if intent.ticker else ""
+    
+    duplicate_key = (ticker_normalized, side_normalized, action_normalized, price_cents)
+    
+    current_ts = _time.time()
+    
+    with _duplicate_order_lock:
+        last_order_ts = _duplicate_order_tracker.get(duplicate_key)
+        
+        if last_order_ts is not None:
+            time_since_last = current_ts - last_order_ts
+            if time_since_last < _DUPLICATE_ORDER_WINDOW_SECONDS:
+                logger.warning(
+                    "[DUPLICATE-ORDER-REJECTED] ticker=%s side=%s action=%s price=%d¢ "
+                    "time_since_last=%.1fs < window=%ds - rejecting duplicate order",
+                    ticker_normalized, side_normalized, action_normalized, price_cents,
+                    time_since_last, _DUPLICATE_ORDER_WINDOW_SECONDS
+                )
+                return f"duplicate_order:{time_since_last:.1f}s < {_DUPLICATE_ORDER_WINDOW_SECONDS}s"
+    
+    return None
+
+
+def _record_order_placed(intent: OrderIntent) -> None:
+    """Record that an order was placed for duplicate detection.
+    
+    Args:
+        intent: OrderIntent that was placed
+    """
+    # Extract price in cents (OrderIntent uses price_cents, not price)
+    price_cents = intent.price_cents if hasattr(intent, 'price_cents') else 0
+    
+    # Create key for duplicate detection
+    side_normalized = intent.side.upper() if intent.side else ""
+    action_normalized = intent.action.upper() if intent.action else ""
+    ticker_normalized = intent.ticker.upper() if intent.ticker else ""
+    
+    duplicate_key = (ticker_normalized, side_normalized, action_normalized, price_cents)
+    
+    current_ts = _time.time()
+    
+    with _duplicate_order_lock:
+        _duplicate_order_tracker[duplicate_key] = current_ts
+    
+    logger.debug(
+        "[DUPLICATE-ORDER-TRACK] ticker=%s side=%s action=%s price=%d¢ recorded at ts=%.0f",
+        ticker_normalized, side_normalized, action_normalized, price_cents, current_ts
+    )
 
 
 def check_and_cancel_stale_orders() -> List[str]:
@@ -1632,6 +1709,23 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
         _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "non_positive_size")
         _increment_validation_gate_metric("ROUTER_VALIDATION", "non_positive_size")
         return "non_positive_size"
+    
+    # CRITICAL: Enforce 1 contract per order hard cap
+    # This prevents doubling up on the same price and aligns with risk management strategy
+    # Profile config sets max_single_order_contracts to 1 for all assets
+    if intent.count > 1:
+        _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "max_single_order_contracts_exceeded")
+        _increment_validation_gate_metric("ROUTER_VALIDATION", "max_single_order_contracts_exceeded")
+        return "max_single_order_contracts_exceeded"
+    
+    # CRITICAL: Check for duplicate orders (same ticker, side, action, price within time window)
+    # This prevents agents from placing multiple identical resting limit orders
+    duplicate_rejection = _check_duplicate_order(intent)
+    if duplicate_rejection:
+        _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "duplicate_order")
+        _increment_validation_gate_metric("ROUTER_VALIDATION", "duplicate_order")
+        return duplicate_rejection
+    
     # 2026-07-05 FIX: REMOVED price range validation [50, 70]
     # This check was preventing orders from filling at actual market prices
     # Orders now use actual market mid-spread prices for proper execution
@@ -4966,6 +5060,9 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
 
         # Order successfully submitted to exchange - record in rate limiter
         _record_successful_order()
+        
+        # Record order placement for duplicate detection
+        _record_order_placed(intent)
 
         placed = placed_res.data
         requested_count = int(placed.size)

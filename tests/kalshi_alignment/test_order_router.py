@@ -578,6 +578,168 @@ class TestOrderRouterSingleContractLimit:
             assert "non_positive_size" in result.reason
 
 
+class TestOrderRouterDuplicateOrderPrevention:
+    """Test duplicate order prevention for (ticker, side, action, price) combinations."""
+
+    @pytest.fixture
+    def valid_order_intent(self):
+        """Create a valid order intent for testing."""
+        return OrderIntent(
+            intent_id="test-123",
+            ticker="KXBTC15M-26JUN022230-30",
+            side="yes",
+            action="buy",
+            price_cents=55,
+            count=1,
+            source="BTC_15M",
+            confidence=0.70,
+            edge_pct=0.05,
+            model_prob=0.70,
+            window_resolution_id="BTC_15M",
+            risk_tier="A",
+            max_hold_seconds=600
+        )
+
+    @pytest.mark.asyncio
+    async def test_first_order_allowed(self, valid_order_intent):
+        """Test that the first order for a (ticker, side, action, price) combination is allowed."""
+        valid_order_intent.price_cents = 55  # 55 cents
+
+        with patch('merid.event_venues.kalshi.order_router.get_rate_limiter') as mock_get_limiter, \
+             patch('merid.event_venues.kalshi.order_router._resolve_mode') as mock_resolve_mode, \
+             patch('merid.event_venues.kalshi.order_router._check_exit_target_invariant') as mock_invariant, \
+             patch('merid.event_venues.kalshi.order_router._validate_risk_contract_linkage') as mock_risk, \
+             patch('merid.event_venues.kalshi.order_router._check_global_rate_limit') as mock_global_rate, \
+             patch('merid.risk.profiles.kalshi_crypto_15m_risk_envelope.get_kalshi_crypto_15m_risk_envelope') as mock_envelope:
+
+            mock_limiter = AsyncMock()
+            mock_limiter.acquire.return_value = True
+            mock_get_limiter.return_value = mock_limiter
+            mock_resolve_mode.return_value = "paper"
+            mock_invariant.return_value = None
+            mock_risk.return_value = (True, None)
+            mock_global_rate.return_value = None
+            
+            # Mock risk envelope to avoid bankroll check failure
+            mock_envelope_obj = MagicMock()
+            mock_envelope_obj.current_equity_usd = 100.0
+            mock_envelope_obj.max_single_order_contracts = 1
+            mock_envelope.return_value = mock_envelope_obj
+
+            result = await route_order_async(valid_order_intent)
+
+            # First order should be allowed (will fail at exchange placement in paper mode, but pass duplicate check)
+            assert result.status != "rejected" or "duplicate_order" not in (result.reason or "")
+
+    def test_duplicate_order_within_window_rejected(self, valid_order_intent):
+        """Test that a duplicate order within the time window is rejected."""
+        valid_order_intent.price_cents = 55  # 55 cents
+
+        # Manually record the first order in the duplicate tracker
+        from merid.event_venues.kalshi.order_router import _check_duplicate_order, _record_order_placed
+        _record_order_placed(valid_order_intent)
+
+        # Now check if the same order is rejected as duplicate
+        result = _check_duplicate_order(valid_order_intent)
+
+        assert result is not None
+        assert "duplicate_order" in result
+
+    @pytest.mark.asyncio
+    async def test_different_price_allowed(self, valid_order_intent):
+        """Test that orders with different prices are not considered duplicates."""
+        valid_order_intent.price_cents = 56  # 56 cents (different from 55 cents)
+
+        with patch('merid.event_venues.kalshi.order_router.get_rate_limiter') as mock_get_limiter, \
+             patch('merid.event_venues.kalshi.order_router._resolve_mode') as mock_resolve_mode, \
+             patch('merid.event_venues.kalshi.order_router._check_exit_target_invariant') as mock_invariant, \
+             patch('merid.event_venues.kalshi.order_router._validate_risk_contract_linkage') as mock_risk, \
+             patch('merid.event_venues.kalshi.order_router._check_global_rate_limit') as mock_global_rate, \
+             patch('merid.event_venues.kalshi.order_router._record_order_placed') as mock_record, \
+             patch('merid.risk.profiles.kalshi_crypto_15m_risk_envelope.get_kalshi_crypto_15m_risk_envelope') as mock_envelope:
+
+            mock_limiter = AsyncMock()
+            mock_limiter.acquire.return_value = True
+            mock_get_limiter.return_value = mock_limiter
+            mock_resolve_mode.return_value = "paper"
+            mock_invariant.return_value = None
+            mock_risk.return_value = (True, None)
+            mock_global_rate.return_value = None
+            mock_record.return_value = None
+            
+            # Mock risk envelope to avoid bankroll check failure
+            mock_envelope_obj = MagicMock()
+            mock_envelope_obj.current_equity_usd = 100.0
+            mock_envelope_obj.max_single_order_contracts = 1
+            mock_envelope.return_value = mock_envelope_obj
+
+            # Record an order at 55 cents
+            from merid.event_venues.kalshi.order_router import _record_order_placed
+            test_intent = OrderIntent(
+                intent_id="test-456",
+                ticker="KXBTC15M-26JUN022230-30",
+                side="yes",
+                action="buy",
+                price_cents=55,
+                count=1,
+                source="BTC_15M"
+            )
+            _record_order_placed(test_intent)
+
+            # Try to place an order at 56 cents - should NOT be rejected as duplicate
+            result = await route_order_async(valid_order_intent)
+
+            assert result.status != "rejected" or "duplicate_order" not in (result.reason or "")
+
+    @pytest.mark.asyncio
+    async def test_different_side_allowed(self, valid_order_intent):
+        """Test that orders with different sides are not considered duplicates."""
+        valid_order_intent.side = "no"  # Different side
+        valid_order_intent.action = "buy"
+        valid_order_intent.price_cents = 55
+
+        with patch('merid.event_venues.kalshi.order_router.get_rate_limiter') as mock_get_limiter, \
+             patch('merid.event_venues.kalshi.order_router._resolve_mode') as mock_resolve_mode, \
+             patch('merid.event_venues.kalshi.order_router._check_exit_target_invariant') as mock_invariant, \
+             patch('merid.event_venues.kalshi.order_router._validate_risk_contract_linkage') as mock_risk, \
+             patch('merid.event_venues.kalshi.order_router._check_global_rate_limit') as mock_global_rate, \
+             patch('merid.event_venues.kalshi.order_router._record_order_placed') as mock_record, \
+             patch('merid.risk.profiles.kalshi_crypto_15m_risk_envelope.get_kalshi_crypto_15m_risk_envelope') as mock_envelope:
+
+            mock_limiter = AsyncMock()
+            mock_limiter.acquire.return_value = True
+            mock_get_limiter.return_value = mock_limiter
+            mock_resolve_mode.return_value = "paper"
+            mock_invariant.return_value = None
+            mock_risk.return_value = (True, None)
+            mock_global_rate.return_value = None
+            mock_record.return_value = None
+            
+            # Mock risk envelope to avoid bankroll check failure
+            mock_envelope_obj = MagicMock()
+            mock_envelope_obj.current_equity_usd = 100.0
+            mock_envelope_obj.max_single_order_contracts = 1
+            mock_envelope.return_value = mock_envelope_obj
+
+            # Record a YES buy order at 55 cents
+            from merid.event_venues.kalshi.order_router import _record_order_placed
+            test_intent = OrderIntent(
+                intent_id="test-456",
+                ticker="KXBTC15M-26JUN022230-30",
+                side="yes",
+                action="buy",
+                price_cents=55,
+                count=1,
+                source="BTC_15M"
+            )
+            _record_order_placed(test_intent)
+
+            # Try to place a NO buy order at 55 cents - should NOT be rejected as duplicate
+            result = await route_order_async(valid_order_intent)
+
+            assert result.status != "rejected" or "duplicate_order" not in (result.reason or "")
+
+
 class TestOrderRouterConfidenceValidation:
     """Test confidence threshold validation in order router."""
 
