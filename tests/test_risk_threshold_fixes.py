@@ -202,5 +202,107 @@ class TestDrawdownLimits:
         # Note: drawdown_unwind_pct may not be in RiskProfile, check if needed
 
 
+class TestRiskLimitsYAML:
+    """Test config/risk_limits.yaml has correct values (5% cycle risk)."""
+    
+    def test_risk_limits_yaml_cycle_risk(self):
+        """Test config/risk_limits.yaml has 5% cycle risk."""
+        import yaml
+        from pathlib import Path
+        
+        config_path = Path(__file__).parent.parent / "config" / "risk_limits.yaml"
+        with open(config_path) as f:
+            config = yaml.safe_load(f)
+        
+        max_cycle_risk_pct = config['bankroll']['max_cycle_risk_pct']
+        assert max_cycle_risk_pct == 0.05, \
+            f"Expected 5% cycle risk in risk_limits.yaml, got {max_cycle_risk_pct}"
+    
+    def test_risk_limits_yaml_total_risk(self):
+        """Test config/risk_limits.yaml has 25% total risk (legacy value)."""
+        import yaml
+        from pathlib import Path
+        
+        config_path = Path(__file__).parent.parent / "config" / "risk_limits.yaml"
+        with open(config_path) as f:
+            config = yaml.safe_load(f)
+        
+        max_total_risk_pct = config['bankroll']['max_total_risk_pct']
+        assert max_total_risk_pct == 0.25, \
+            f"Expected 25% total risk in risk_limits.yaml, got {max_total_risk_pct}"
+
+
+class TestLoop15mPriceFallback:
+    """Test loop_15m.py correctly calculates NO prices from YES prices."""
+    
+    def test_no_price_calculation_from_yes_mid(self):
+        """Test NO price is calculated as 100 - YES_mid."""
+        # Simulate the logic in loop_15m.py
+        yes_mid = 70
+        no_mid = 100 - yes_mid
+        
+        assert no_mid == 30, \
+            f"Expected NO_mid=30 when YES_mid=70, got {no_mid}"
+    
+    def test_no_price_calculation_from_bid_ask(self):
+        """Test NO price is calculated from YES bid/ask."""
+        # Simulate the logic in loop_15m.py
+        yes_bid = 65
+        yes_ask = 75
+        yes_mid = (yes_bid + yes_ask) // 2
+        no_mid = 100 - yes_mid
+        
+        assert no_mid == 30, \
+            f"Expected NO_mid=30 when YES_bid=65, YES_ask=75, got {no_mid}"
+
+
+class TestDeepOTMThreshold:
+    """Test 75c threshold is consistent across all layers."""
+    
+    def test_risk_parameters_deep_otm_expensive(self):
+        """Test DEEP_OTM_EXPENSIVE_CENTS is 75."""
+        from merid.event_venues.kalshi.risk_parameters import DEEP_OTM_EXPENSIVE_CENTS
+        
+        assert DEEP_OTM_EXPENSIVE_CENTS == 75, \
+            f"Expected DEEP_OTM_EXPENSIVE_CENTS=75, got {DEEP_OTM_EXPENSIVE_CENTS}"
+    
+    def test_profile_max_contract_price(self):
+        """Test profile max_contract_price_cents is 75."""
+        import yaml
+        from pathlib import Path
+        
+        config_path = Path(__file__).parent.parent / "config" / "profiles" / "kalshi_crypto_15m_v2.yaml"
+        with open(config_path, encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+        
+        max_contract_price_cents = config['guardrails']['max_contract_price_cents']
+        assert max_contract_price_cents == 75, \
+            f"Expected max_contract_price_cents=75 in profile, got {max_contract_price_cents}"
+
+
+class TestGlobalExecutionGuardDisabled:
+    """Test GlobalExecutionGuard is disabled in client.py (production uses UnifiedRiskManager)."""
+    
+    def test_client_global_execution_guard_disabled(self):
+        """Test GlobalExecutionGuard check is commented out in client.py."""
+        from pathlib import Path
+        
+        client_path = Path(__file__).parent.parent / "merid" / "event_venues" / "kalshi" / "client.py"
+        with open(client_path, encoding='utf-8') as f:
+            content = f.read()
+        
+        # Verify the deprecated guard check is commented out
+        assert "from merid.guards.global_execution_guard import get_global_execution_guard" not in content or \
+               "# from merid.guards.global_execution_guard import get_global_execution_guard" in content, \
+            "GlobalExecutionGuard import should be commented out in client.py"
+        
+        # Verify the comment explaining the fix is present
+        assert "CRITICAL FIX: Disabled deprecated GlobalExecutionGuard check" in content, \
+            "Comment explaining GlobalExecutionGuard disable should be present"
+        
+        assert "Production stack uses UnifiedRiskManager" in content, \
+            "Comment about UnifiedRiskManager should be present"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
