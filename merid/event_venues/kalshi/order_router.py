@@ -3367,35 +3367,9 @@ def _record_price_execution(intent: OrderIntent) -> None:
     except Exception as e:
         logger.debug("[order-router] Failed to record price execution: %s", e)
     
-    # CRITICAL: Record window-based risk exposure (2026-07-06)
-    try:
-        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
-        envelope = get_kalshi_crypto_15m_risk_envelope()
-        if envelope:
-            import time
-            order_notional_usd = (intent.count * intent.price_cents) / 100.0
-            # Extract agent_id from intent or derive from ticker
-            agent_id = getattr(intent, 'agent_id', None)
-            if not agent_id:
-                # Derive agent_id from ticker (e.g., "BTC-USD" -> "BTC_15M")
-                ticker_map = {
-                    'BTC-USD': 'BTC_15M',
-                    'ETH-USD': 'ETH_15M',
-                    'SOL-USD': 'SOL_15M',
-                    'XRP-USD': 'XRP_15M',
-                    'DOGE-USD': 'DOGE_15M',
-                }
-                agent_id = ticker_map.get(intent.ticker, f"{intent.ticker.split('-')[0]}_15M")
-            envelope.record_order_execution(
-                agent_id=agent_id,
-                order_notional_usd=order_notional_usd
-            )
-            logger.debug(
-                "[order-router] Recorded window exposure: agent=%s notional=$%.2f",
-                agent_id, order_notional_usd
-            )
-    except Exception as e:
-        logger.debug("[order-router] Failed to record window exposure: %s", e)
+    # CRITICAL FIX (2026-07-06): Window exposure is now recorded in order_gate at gate pass time
+    # This ensures exposure is tracked even if orders get rejected later by the exchange.
+    # The duplicate recording here has been removed to avoid double-counting exposure.
 
 
 async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> OrderResult:
