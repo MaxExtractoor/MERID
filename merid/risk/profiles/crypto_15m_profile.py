@@ -155,6 +155,10 @@ class Crypto15mProfile:
     guardrails_min_post_fee_edge: float
     guardrails_per_trade_risk_pct: float  # Per-trade risk percentage (sizing control)
     guardrails_min_time_to_expiry_min: int  # Minimum time to expiry for entry in minutes
+    
+    # Window-based risk limits (2026-07-06: HARD STOP)
+    guardrails_per_window_risk_pct: float  # 3% per agent per 15m window (HARD STOP)
+    guardrails_total_venue_risk_pct: float  # 5% total across all agents per 15m window (HARD STOP)
     guardrails_drawdown_halt_pct: float
     guardrails_drawdown_unwind_pct: float
     guardrails_max_daily_loss_usd: float
@@ -729,6 +733,14 @@ class Crypto15mProfileAdapter:
             guardrails_drawdown_unwind_pct = self._normalize_percentage_value(guardrails.get('drawdown_unwind_pct', 0.25))  # CRITICAL FIX: 25% - aligned with profile (was 0.15)
             guardrails_per_trade_risk_pct = self._normalize_percentage_value(guardrails.get('per_trade_risk_pct', 0.03))  # CRITICAL FIX: 3% - aligned with profile (was 0.008)
             
+            # Parse window-based risk limits (2026-07-06: HARD STOP)
+            guardrails_per_window_risk_pct = self._normalize_percentage_value(
+                raw.get('guardrails_per_window_risk_pct', 0.03)
+            )  # 3% per agent per 15m window (HARD STOP)
+            guardrails_total_venue_risk_pct = self._normalize_percentage_value(
+                raw.get('guardrails_total_venue_risk_pct', 0.05)
+            )  # 5% total across all agents per 15m window (HARD STOP)
+            
             # Parse Kelly
             kelly = raw.get('kelly', {})
             
@@ -889,6 +901,8 @@ class Crypto15mProfileAdapter:
                 guardrails_min_post_fee_edge=self._normalize_percentage_value(guardrails.get('min_post_fee_edge', 0.02)),  # FIXED: Default 0.02 to match YAML (was 0.01)
                 guardrails_per_trade_risk_pct=guardrails_per_trade_risk_pct,  # Per-trade risk percentage (sizing control)
                 guardrails_min_time_to_expiry_min=guardrails.get('min_time_to_expiry_min', 2.5),  # FIXED: Default 2.5 to match YAML (was 3)
+                guardrails_per_window_risk_pct=guardrails_per_window_risk_pct,  # 3% per agent per 15m window (HARD STOP)
+                guardrails_total_venue_risk_pct=guardrails_total_venue_risk_pct,  # 5% total across all agents per 15m window (HARD STOP)
                 guardrails_drawdown_halt_pct=guardrails_drawdown_halt_pct,
                 guardrails_drawdown_unwind_pct=guardrails_drawdown_unwind_pct,
                 guardrails_max_daily_loss_usd=guardrails.get('max_daily_loss_usd', 200.0),

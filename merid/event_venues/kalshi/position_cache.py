@@ -346,15 +346,24 @@ class KalshiPositionCache:
                     exit_size = contracts_to_close if contracts_to_close else position.size
                     
                     # Determine order type based on exit reason
-                    # Extreme profit exits use market orders for immediate execution
+                    # Extreme profit exits and 99c exits use market orders for immediate execution
+                    # Ratchet trims use limit orders for better fill prices
                     # Other exits use limit orders for better fill prices
-                    if exit_reason == ExitReason.EXTREME_PROFIT:
+                    if exit_reason == ExitReason.EXTREME_PROFIT or exit_reason == ExitReason.RATCHET_99C:
                         order_type = "market"
                         time_in_force = "ioc"  # Immediate or cancel
                         logger.info(
-                            "[EXIT-CALLBACK] EXTREME-PROFIT exit: market order for immediate execution "
+                            "[EXIT-CALLBACK] %s exit: market order for immediate execution "
                             "position=%s side=%s size=%d price=%dc",
-                            position.position_id[:8], position.side.value, exit_size, exit_price_cents
+                            exit_reason.value, position.position_id[:8], position.side.value, exit_size, exit_price_cents
+                        )
+                    elif exit_reason == ExitReason.RATCHET_TRIM:
+                        order_type = "limit"
+                        time_in_force = "gtc"  # Good till cancelled
+                        logger.info(
+                            "[EXIT-CALLBACK] RATCHET-TRIM partial exit: limit order for better fill "
+                            "position=%s side=%s size=%d -> %d price=%dc",
+                            position.position_id[:8], position.side.value, position.size, exit_size, exit_price_cents
                         )
                     else:
                         order_type = "limit"
@@ -824,6 +833,29 @@ class KalshiPositionCache:
                             )
                     except Exception as risk_err:
                         logger.warning("[POSITION-CACHE] Failed to record position close in risk manager: %s", risk_err)
+                    
+                    # CRITICAL: Record position close in risk envelope for window-based risk tracking (2026-07-06)
+                    # This allows agents to re-enter after closing positions via trailing stop, ratchet, or 99c exit
+                    try:
+                        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+                        envelope = get_kalshi_crypto_15m_risk_envelope()
+                        if envelope:
+                            from config.kalshi_crypto_config import kalshi_ticker_to_asset
+                            asset = kalshi_ticker_to_asset(market_id)
+                            if asset and asset.upper() in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                                # Derive agent_id from asset
+                                agent_id = f"{asset.upper()}_15M"
+                                position_notional_usd = (pre_contracts * price_cents) / 100.0
+                                envelope.record_position_closure(
+                                    agent_id=agent_id,
+                                    position_notional_usd=position_notional_usd
+                                )
+                                logger.info(
+                                    "[POSITION-CACHE] Recorded window exposure reduction: agent=%s notional=$%.2f",
+                                    agent_id, position_notional_usd
+                                )
+                    except Exception as window_err:
+                        logger.warning("[POSITION-CACHE] Failed to record window exposure reduction: %s", window_err)
 
                     # SELL-SIDE FIX: Release contract lease when position is fully closed
                     # This ensures the lease is freed for future orders and prevents
@@ -1940,137 +1972,14 @@ class KalshiPositionCache:
                         pnl_cents = entry_price_cents - current_price_cents
                     current_r = pnl_cents / risk_cents if risk_cents > 0 else 0.0
 
-                    # RATCHET PROFIT FLOOR: Research-backed profit locking mechanism
-                    # Activates when price reaches high threshold (e.g., 85¢) and sets a hard floor
-                    # Prevents giving back significant gains when 99¢ TP is not guaranteed
-                    # NOTE: Ratchet operates independently of trailing stop and takes precedence at high prices
-                    # - Trailing stop: activates at 12¢ profit, trails 5¢ behind (low-mid range)
-                    # - Ratchet: activates at 85¢ price, sets floor 5¢ below (high range)
-                    # - When ratchet activates, it cancels existing TP/SL brackets to prevent conflicts
-                    try:
-                        from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
-                        from merid.prediction.dynamic_takeprofit import get_dtp_engine
-                        
-                        if is_profile_active():
-                            profile_adapter = get_active_profile()
-                            profile = profile_adapter.profile
-                            
-                            if profile.ratchet_profit_floor_enabled:
-                                dtp_engine = get_dtp_engine()
-                                
-                                # Check if ratchet should activate
-                                if not position.ratchet_activated:
-                                    # Create a temporary TakeProfitPlan with ratchet parameters
-                                    from merid.prediction.dynamic_takeprofit import TakeProfitPlan
-                                    ratchet_plan = TakeProfitPlan(
-                                        tp_price=position.take_profit_price_cents or 99,
-                                        tp_r_multiple=position.take_profit_r_multiple or 2.0,
-                                        tp_level=type('obj', (object,), {'value': 'base'})(),
-                                        ratchet_enabled=True,
-                                        ratchet_activation_threshold_cents=profile.ratchet_activation_threshold_cents,
-                                        ratchet_floor_offset_cents=profile.ratchet_floor_offset_cents,
-                                        ratchet_force_exit_on_breach=profile.ratchet_force_exit_on_floor_breach,
-                                        ratchet_min_hold_after_activation_sec=profile.ratchet_min_hold_after_activation_sec,
-                                    )
-                                    
-                                    should_activate = dtp_engine.should_activate_ratchet(
-                                        current_price_cents=current_price_cents,
-                                        direction="LONG" if position.side == "yes" else "SHORT",
-                                        plan=ratchet_plan
-                                    )
-                                    
-                                    if should_activate:
-                                        # Activate ratchet and set floor
-                                        floor_price = dtp_engine.compute_ratchet_floor(
-                                            activation_price_cents=current_price_cents,
-                                            plan=ratchet_plan,
-                                            direction="LONG" if position.side == "yes" else "SHORT"
-                                        )
-                                        
-                                        position.ratchet_activated = True
-                                        position.ratchet_floor_price_cents = floor_price
-                                        position.ratchet_activation_timestamp = datetime.now(timezone.utc)
-                                        
-                                        logger.info(
-                                            "[RATCHET-ACTIVATED] market=%s side=%s activation_price=%dc floor_price=%dc",
-                                            position.market_id, position.side, current_price_cents, floor_price
-                                        )
-                                
-                                # Check if ratchet floor is breached (mandatory exit)
-                                elif position.ratchet_activated and position.ratchet_floor_price_cents is not None:
-                                    activation_ts = position.ratchet_activation_timestamp.timestamp() if position.ratchet_activation_timestamp else None
-                                    
-                                    should_exit = dtp_engine.should_exit_on_ratchet_floor(
-                                        current_price_cents=current_price_cents,
-                                        floor_price_cents=position.ratchet_floor_price_cents,
-                                        direction="LONG" if position.side == "yes" else "SHORT",
-                                        activation_timestamp=activation_ts,
-                                        min_hold_seconds=profile.ratchet_min_hold_after_activation_sec,
-                                    )
-                                    
-                                    if should_exit and profile.ratchet_force_exit_on_floor_breach:
-                                        logger.warning(
-                                            "[RATCHET-FLOOR-BREACH] market=%s side=%s current=%dc floor=%dc - forcing exit",
-                                            position.market_id, position.side, current_price_cents, position.ratchet_floor_price_cents
-                                        )
-                                        
-                                        # Cancel existing TP/SL brackets before submitting ratchet exit
-                                        # This prevents duplicate orders and ensures clean exit
-                                        if position.tp_bracket_client_tag or position.sl_bracket_client_tag:
-                                            try:
-                                                await self._cancel_brackets(position)
-                                                logger.info(
-                                                    "[RATCHET-EXIT] market=%s canceled existing TP/SL brackets before ratchet exit",
-                                                    position.market_id
-                                                )
-                                            except Exception as cancel_exc:
-                                                logger.warning(
-                                                    "[RATCHET-EXIT] market=%s failed to cancel brackets (non-fatal): %s",
-                                                    position.market_id, cancel_exc
-                                                )
-                                        
-                                        # Submit emergency exit order
-                                        try:
-                                            from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
-                                            
-                                            # Determine exit side
-                                            if position.side == "yes":
-                                                exit_action = "sell"
-                                                exit_side = "yes"
-                                            else:  # "no"
-                                                exit_action = "buy"
-                                                exit_side = "yes"
-                                            
-                                            # Use aggressive market order for floor breach (fast exit)
-                                            ratchet_exit_intent = OrderIntent(
-                                                ticker=position.market_id,
-                                                side=exit_side,
-                                                action=exit_action,
-                                                price_cents=current_price_cents - 1 if position.side == "yes" else current_price_cents + 1,  # Aggressive pricing
-                                                count=position.contracts,
-                                                order_type="market",
-                                                source="ratchet_floor_breach",
-                                                agent_id="position_cache",
-                                                rationale=f"Ratchet floor breach: current={current_price_cents}c floor={position.ratchet_floor_price_cents}c",
-                                            )
-                                            
-                                            result = await route_order_async(ratchet_exit_intent)
-                                            logger.info(
-                                                "[RATCHET-EXIT] market=%s submitted exit order: status=%s reason=%s",
-                                                position.market_id, result.status, result.reason
-                                            )
-                                            
-                                        except Exception as ratchet_exc:
-                                            logger.error(
-                                                "[RATCHET-EXIT] market=%s failed to submit exit order: %s",
-                                                position.market_id, ratchet_exc, exc_info=True
-                                            )
-                    
-                    except Exception as ratchet_exc:
-                        logger.error(
-                            "[RATCHET-ERROR] market=%s ratchet logic failed: %s",
-                            position.market_id, ratchet_exc, exc_info=True
-                        )
+                    # NOTE: Ratchet profit floor logic is handled by PositionMonitor (authoritative source)
+                    # This prevents duplicate logic and conflicts between position_cache and position_monitor
+                    # PositionMonitor has full implementation including:
+                    # - Activation at 85c threshold
+                    # - Floor breach detection at 80c
+                    # - Position trimming at 80c (reduce to 1 contract)
+                    # - Mandatory 99c exit
+                    # - Profile parameter integration
 
                     # P3-FIX8: Get trailing activation threshold from profile (min_profit_cents for 15m binary options)
                     # NOTE: PositionMonitor handles trailing activation using min_profit_cents (12¢ per 2026 research)
