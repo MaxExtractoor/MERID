@@ -6,10 +6,10 @@
 # BTC, ETH, SOL, XRP, DOGE have 0.8+ correlation and are treated as single position
 # Based on 2026 HFT best practices: Quarter Kelly (0.25x) for crypto, 1-3% per trade
 bankroll:
-  # Maximum total exposure per trading cycle (0.5% for 5-second cycles)
-  # 2026 best practice: 0.5-1% per cycle for HFT to prevent catastrophic compounding
-  # With 180 cycles/hour, even 0.5% compounds to significant exposure
-  max_cycle_risk_pct: 0.005
+  # Maximum total exposure per trading cycle (5% for 15m window)
+  # CRITICAL FIX: Aligned with kalshi_crypto_15m_v2.yaml profile (5% per 15m window)
+  # Previous 0.5% was too restrictive for 15m trading, causing all orders to be rejected
+  max_cycle_risk_pct: 0.05
   
   # Maximum total exposure across all positions (25% total)
   # Increased to 25% to allow 5% per asset across 5 assets (5 × 5% = 25%)

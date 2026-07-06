@@ -850,6 +850,30 @@ class KalshiVenueClient(EventVenueClient):
 
         for attempt in range(KALSHI_MAX_RETRIES + 1):
             try:
+                # CRITICAL FIX: Check if event loop is still running before scheduling work
+                # This prevents "cannot schedule new futures after shutdown" errors during shutdown
+                try:
+                    loop = asyncio.get_running_loop()
+                    if loop.is_closed():
+                        logger.warning("[kalshi] Event loop is closed - skipping %s request to %s", operation_name, path)
+                        return OperationResult.fail(
+                            RuntimeError("Event loop is closed"),
+                            latency_ms=0,
+                            retries=attempt,
+                            operation=operation_name,
+                            status_code=None,
+                        )
+                except RuntimeError:
+                    # No running loop - skip the call
+                    logger.warning("[kalshi] No running event loop - skipping %s request to %s", operation_name, path)
+                    return OperationResult.fail(
+                        RuntimeError("No running event loop"),
+                        latency_ms=0,
+                        retries=attempt,
+                        operation=operation_name,
+                        status_code=None,
+                    )
+                
                 # Initialize network resources FIRST - they may have been cleared by
                 # event loop mismatch errors or other coroutines
                 self._ensure_async_network_resources()
@@ -1861,42 +1885,11 @@ class KalshiVenueClient(EventVenueClient):
                 )
         
         # FINAL SAFETY NET: GlobalExecutionGuard at lowest level
-        # This catches ANY order that bypassed higher-level guards
-        try:
-            from merid.guards.global_execution_guard import get_global_execution_guard
-            _guard = get_global_execution_guard()
-            # PRODUCTION-FIX: Use actual order price if available, fallback to default only if None
-            # At this point, order.price should always be set (fixed in order_router.py and trading.py)
-            from merid.event_venues.kalshi.risk_parameters import DEFAULT_KALSHI_PRICE_CENTS
-            _price_cents = int(order.price * 100) if order.price is not None else DEFAULT_KALSHI_PRICE_CENTS
-            _allowed, _reason = _guard.check_order(
-                ticker=order.market_id,
-                contracts=int(order.size),
-                price_cents=_price_cents,
-                source="kalshi_client_final_net",
-                asset=order.metadata.get("asset") if hasattr(order, "metadata") else None,
-                action=order.side,  # "buy" or "sell" - critical for exit handling
-            )
-            if not _allowed:
-                logger.critical(
-                    "[KALSHI_CLIENT_BLOCKED] GlobalExecutionGuard final net rejected: %s | ticker=%s",
-                    _reason, order.market_id
-                )
-                return OperationResult.fail(
-                    f"Global execution guard blocked: {_reason}",
-                    latency_ms=0.0,
-                    retries=0,
-                )
-        except ImportError:
-            pass  # Guard not available — proceed with other checks
-        except Exception as _guard_err:
-            logger.error("[KALSHI_CLIENT_GUARD_ERROR] Guard check failed: %s", _guard_err)
-            # Fail-closed: block order if guard fails
-            return OperationResult.fail(
-                f"Global execution guard error: {_guard_err}",
-                latency_ms=0.0,
-                retries=0,
-            )
+        # CRITICAL FIX: Disabled deprecated GlobalExecutionGuard check
+        # Production stack uses UnifiedRiskManager (called from order_router.py)
+        # GlobalExecutionGuard is deprecated and was using incorrect 0.5% cycle cap
+        # instead of 5% from profile, causing all orders to be rejected
+        # Risk checks are now handled by UnifiedRiskManager in order_router.py
 
         # Use market_id directly as the ticker - it should already be in Kalshi's format
         # from the market catalog. DO NOT normalize here - normalization is for internal

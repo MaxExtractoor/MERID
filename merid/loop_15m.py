@@ -564,6 +564,9 @@ class Kalshi15mLoop:
         from merid.event_venues.kalshi.market_catalog import get_market_catalog
         self._catalog = get_market_catalog()
         self._ws_bridge = ws_bridge  # Store shared WS bridge reference
+        # CRITICAL FIX: Initialize market_state_store for dynamic sizing
+        from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+        self.market_state_store = get_kalshi_market_state_store()
         # Watchdog: fixed wall-clock budget per cycle (2x cadence as safety margin)
         self._watchdog_budget = self.cadence_seconds * 2.0
         self._last_cycle_wall_time = time.time()
@@ -3666,19 +3669,42 @@ class Kalshi15mLoop:
                     from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
                     market_state_store = get_kalshi_market_state_store()
                     market_state = market_state_store.get(ticker) if market_state_store else None
-                    if market_state and market_state.mid_cents:
-                        # BUG #39 FIX: Convert mid_cents to integer
-                        # mid_cents is a float from unified_market_state.py but order router requires integer
-                        price_cents = int(market_state.mid_cents)
-                        logger.info("[15M-LOOP] ticker=%s price_cents from mid_cents=%d (raw=%.2f)", ticker, price_cents, market_state.mid_cents)
-                    elif market_state and market_state.best_bid_cents and market_state.best_ask_cents:
-                        # Use mid of bid/ask if mid not available
-                        price_cents = (market_state.best_bid_cents + market_state.best_ask_cents) // 2
-                        logger.info("[15M-LOOP] ticker=%s price_cents from bid/ask mid=%d (bid=%d, ask=%d)", ticker, price_cents, market_state.best_bid_cents, market_state.best_ask_cents)
+                    if market_state:
+                        # CRITICAL FIX: For NO orders, calculate NO mid-price from YES bid/ask
+                        # Kalshi duality: NO_mid = 100 - YES_mid
+                        candidate_side = candidate.get("side", "yes").lower()
+                        if candidate_side == "no" or candidate_side == "buy_no":
+                            # NO order: calculate NO mid-price
+                            if market_state.best_bid_cents and market_state.best_ask_cents:
+                                yes_mid = (market_state.best_bid_cents + market_state.best_ask_cents) // 2
+                                price_cents = 100 - yes_mid
+                                logger.info("[15M-LOOP] ticker=%s NO order: YES_mid=%d -> NO_mid=%d", ticker, yes_mid, price_cents)
+                            elif market_state.mid_cents:
+                                price_cents = 100 - int(market_state.mid_cents)
+                                logger.info("[15M-LOOP] ticker=%s NO order: YES_mid_cents=%.2f -> NO_mid=%d", ticker, market_state.mid_cents, price_cents)
+                            else:
+                                logger.warning("[15M-LOOP] NO order but no market state data for %s, using default 50c", ticker)
+                                price_cents = 50
+                        else:
+                            # YES order: use YES mid-price
+                            if market_state.mid_cents:
+                                # BUG #39 FIX: Convert mid_cents to integer
+                                # mid_cents is a float from unified_market_state.py but order router requires integer
+                                price_cents = int(market_state.mid_cents)
+                                logger.info("[15M-LOOP] ticker=%s YES order: price_cents from mid_cents=%d (raw=%.2f)", ticker, price_cents, market_state.mid_cents)
+                            elif market_state.best_bid_cents and market_state.best_ask_cents:
+                                # Use mid of bid/ask if mid not available
+                                price_cents = (market_state.best_bid_cents + market_state.best_ask_cents) // 2
+                                logger.info("[15M-LOOP] ticker=%s YES order: price_cents from bid/ask mid=%d (bid=%d, ask=%d)", ticker, price_cents, market_state.best_bid_cents, market_state.best_ask_cents)
+                            else:
+                                logger.warning("[15M-LOOP] YES order but no market state data for %s, using default 50c", ticker)
+                                price_cents = 50
                     else:
-                        logger.warning("[15M-LOOP] No market state price available for %s, using default 50c", ticker)
+                        logger.warning("[15M-LOOP] No market state available for %s, using default 50c", ticker)
+                        price_cents = 50
                 except Exception as e:
                     logger.warning("[15M-LOOP] Failed to get price from market state for %s: %s", ticker, e)
+                    price_cents = 50
             else:
                 logger.info("[15M-LOOP] ticker=%s price_cents from candidate=%d (side=%s)", ticker, price_cents, candidate.get("side"))
             
