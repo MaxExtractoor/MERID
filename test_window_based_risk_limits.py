@@ -332,6 +332,89 @@ def test_upstream_reservation_window_check():
     return True
 
 
+def test_force_reset_window_exposure():
+    """Test that force_reset_window_exposure() clears stale exposure."""
+    print("\n=== Test 10: Force Reset Window Exposure ===")
+    
+    try:
+        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import (
+            compute_kalshi_crypto_15m_risk_envelope,
+            _reset_shared_window_state_for_testing,
+            force_reset_window_exposure,
+            _WINDOW_TRACKING_STATE,
+        )
+        
+        # Reset shared state for clean test
+        _reset_shared_window_state_for_testing()
+        
+        envelope = compute_kalshi_crypto_15m_risk_envelope(live_bankroll_usd=100.0)
+        
+        # Record some exposure
+        envelope.record_order_execution("BTC_15M", 1.97)
+        assert envelope.total_window_exposure_usd == 1.97
+        assert envelope.agent_window_exposure_usd["BTC_15M"] == 1.97
+        
+        # Force reset exposure (pass envelope to sync instance fields)
+        force_reset_window_exposure(envelope)
+        
+        # Verify exposure was cleared
+        assert envelope.total_window_exposure_usd == 0.0, "Total exposure should be cleared after force reset"
+        assert envelope.agent_window_exposure_usd == {}, "Agent exposure should be cleared after force reset"
+        assert _WINDOW_TRACKING_STATE["total_exposure_usd"] == 0.0, "Shared state total exposure should be cleared"
+        assert _WINDOW_TRACKING_STATE["agent_exposure_usd"] == {}, "Shared state agent exposure should be cleared"
+        
+        print("[PASS] force_reset_window_exposure() clears stale exposure")
+        
+    except Exception as e:
+        print(f"[FAIL] {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    
+    return True
+
+
+def test_reset_stale_window_exposure():
+    """Test that _reset_stale_window_exposure() detects and clears stale exposure."""
+    print("\n=== Test 11: Reset Stale Window Exposure ===")
+    
+    try:
+        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import (
+            compute_kalshi_crypto_15m_risk_envelope,
+            _reset_shared_window_state_for_testing,
+            _WINDOW_TRACKING_STATE,
+        )
+        from merid.event_venues.kalshi.position_cache import KalshiPositionCache
+        
+        # Reset shared state for clean test
+        _reset_shared_window_state_for_testing()
+        
+        # Create envelope and record exposure
+        envelope = compute_kalshi_crypto_15m_risk_envelope(live_bankroll_usd=100.0)
+        envelope.record_order_execution("BTC_15M", 1.97)
+        
+        # Verify exposure is recorded
+        assert envelope.total_window_exposure_usd == 1.97
+        
+        # Create position cache (should detect stale exposure and reset)
+        # Note: This tests the _reset_stale_window_exposure() method which is called in __init__
+        cache = KalshiPositionCache()
+        
+        # Verify exposure was reset because position cache is empty
+        assert _WINDOW_TRACKING_STATE["total_exposure_usd"] == 0.0, "Stale exposure should be reset when position cache is empty"
+        assert _WINDOW_TRACKING_STATE["agent_exposure_usd"] == {}, "Stale agent exposure should be reset when position cache is empty"
+        
+        print("[PASS] _reset_stale_window_exposure() detects and clears stale exposure")
+        
+    except Exception as e:
+        print(f"[FAIL] {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    
+    return True
+
+
 def main():
     """Run all window-based risk limit tests."""
     print("=" * 60)
@@ -348,6 +431,8 @@ def main():
         test_function_name_correctness,
         test_dynamic_sizing_disabled,
         test_upstream_reservation_window_check,
+        test_force_reset_window_exposure,
+        test_reset_stale_window_exposure,
     ]
     
     results = []

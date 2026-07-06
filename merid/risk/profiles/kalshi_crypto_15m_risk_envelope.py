@@ -46,7 +46,7 @@ def _reset_shared_window_state_for_testing() -> None:
         _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
 
 
-def force_reset_window_exposure() -> None:
+def force_reset_window_exposure(envelope=None) -> None:
     """
     Force reset window exposure tracking state.
     
@@ -56,6 +56,10 @@ def force_reset_window_exposure() -> None:
     
     This should be called during startup if exposure is non-zero but position
     cache shows zero open positions (stale exposure condition).
+    
+    Args:
+        envelope: Optional envelope instance to sync instance fields after reset.
+                  If provided, instance fields will be updated to match shared state.
     """
     import time
     current_ts = time.time()
@@ -63,6 +67,14 @@ def force_reset_window_exposure() -> None:
         _WINDOW_TRACKING_STATE["window_start_ts"] = _window_bucket_start(current_ts)
         _WINDOW_TRACKING_STATE["agent_exposure_usd"] = {}
         _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
+        venue_total = _WINDOW_TRACKING_STATE["total_exposure_usd"]
+    
+    # Sync instance fields if envelope provided
+    if envelope:
+        envelope.window_start_ts = _WINDOW_TRACKING_STATE["window_start_ts"]
+        envelope.agent_window_exposure_usd = {}
+        envelope.total_window_exposure_usd = venue_total
+    
     logger.warning(
         f"[WINDOW-TRACKING] FORCE RESET at ts={current_ts:.0f} - stale exposure cleared"
     )
