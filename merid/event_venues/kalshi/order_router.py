@@ -5767,9 +5767,30 @@ def _run_pre_trade_gate(
                                 latency_ms=round((_time.monotonic() - t0) * 1000, 2),
                             )
                     else:
-                        logger.warning("[order-router-WINDOW-CHECK] Envelope is None - window limit check skipped (upstream path)")
+                        logger.error(
+                            "[order-router-WINDOW-BLOCK] envelope_is_none - window limit check failed, rejecting order for safety. "
+                            "coid=%s ticker=%s agent=%s notional=$%.2f",
+                            _upstream_coid[:16], intent.ticker, _agent, order_notional_usd,
+                        )
+                        return OrderResult(
+                            status="rejected",
+                            mode=mode,
+                            reason="window_limit:envelope_is_none",
+                            latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                        )
                 except Exception as e:
-                    logger.error("[order-router] Failed to check window limit (upstream path): %s", e, exc_info=True)
+                    logger.error(
+                        "[order-router-WINDOW-BLOCK] window_limit_check_failed - rejecting order for safety. "
+                        "coid=%s ticker=%s agent=%s notional=$%.2f error=%s",
+                        _upstream_coid[:16], intent.ticker, _agent, order_notional_usd, str(e),
+                        exc_info=True
+                    )
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason=f"window_limit:check_failed:{str(e)[:50]}",
+                        latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                    )
                 
                 logger.debug(
                     "[order-router] pre_trade_gate using upstream reservation coid=%s ticker=%s",

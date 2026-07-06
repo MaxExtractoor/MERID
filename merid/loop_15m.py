@@ -1547,13 +1547,35 @@ class Kalshi15mLoop:
                                     bankroll_usd = 100.0
                                 
                                 # Get price from candidate or market state
-                                price_cents = candidate.get("price_cents", 50)
-                                if price_cents == 0:
-                                    # Fallback to market state
+                                # CRITICAL FIX (2026-07-06): The old default of 50c made sizing
+                                # blind to the real price: floor($cap/$0.50)=2 contracts, while
+                                # the order was later built at the real mid (60-89c), producing
+                                # multi-contract orders (doubling up) and asset_notional_exceeded
+                                # rejections. Resolve the SAME side-aware price here that
+                                # _execute_candidate uses to build the order.
+                                price_cents = int(candidate.get("price_cents", 0) or 0)
+                                if price_cents <= 0:
+                                    # Fallback to market state (side-aware, Kalshi duality: NO = 100 - YES_mid)
                                     if self.market_state_store:
                                         market_state = self.market_state_store.get(ticker)
                                         if market_state:
-                                            price_cents = getattr(market_state, 'last_price_cents', 50)
+                                            candidate_side = str(candidate.get("side", "yes")).lower()
+                                            yes_mid = 0
+                                            if getattr(market_state, 'mid_cents', None):
+                                                yes_mid = int(market_state.mid_cents)
+                                            elif getattr(market_state, 'best_bid_cents', None) and getattr(market_state, 'best_ask_cents', None):
+                                                yes_mid = (market_state.best_bid_cents + market_state.best_ask_cents) // 2
+                                            if yes_mid > 0:
+                                                if candidate_side in ("no", "buy_no"):
+                                                    price_cents = 100 - yes_mid
+                                                else:
+                                                    price_cents = yes_mid
+                                if price_cents <= 0:
+                                    logger.warning(
+                                        "[15m-LOOP] No real price available for sizing ticker=%s - using conservative 50c placeholder",
+                                        ticker
+                                    )
+                                    price_cents = 50
                             
                                 # Get edge and confidence from candidate
                                 edge_pct = Decimal(str(candidate.get("edge_pct", 0.0)))
@@ -1626,8 +1648,11 @@ class Kalshi15mLoop:
                             # Cycle reset only happens at the start of a new 15-minute window (line 1364)
                             # NOTE: GlobalExecutionGuard is deprecated - risk envelope should handle this
                             
-                            # Clear deduplication cache to allow new orders if conditions change
-                            self._executed_candidates_this_window.clear()
+                            # CRITICAL FIX: Do NOT clear deduplication cache after each execution
+                            # The cache should only be cleared at the start of a new 15-minute window (line 1346)
+                            # Clearing it here allows the same order to be placed every 5 seconds, causing agents
+                            # to exceed risk limits. The order gate and window-based risk checks should handle
+                            # allowing new orders when conditions change (different price, side, etc.)
                         except Exception as e:
                             logger.error("[15m-LOOP] Failed to execute candidate: %s", e, exc_info=True)
                     
