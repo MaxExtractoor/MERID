@@ -31,6 +31,7 @@ class ExitReason(str, Enum):
     EXTREME_PROFIT = "extreme_profit"  # 2026 FIX: Exit at 99c YES / 1c NO (guaranteed win)
     RATCHET_FLOOR = "ratchet_floor"  # 2026 FIX: Exit when price drops below ratchet floor (80-85c profit protection)
     RATCHET_TRIM = "ratchet_trim"  # 2026-07-05: Partial close to trim position when >1 contract and price >80c
+    DYNAMIC_TAKE_PROFIT = "dynamic_take_profit"  # 2026-07-06: Laddered exit based on entry price for consistent profits
 
 
 @dataclass

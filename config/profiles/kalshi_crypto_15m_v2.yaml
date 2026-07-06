@@ -223,7 +223,7 @@ ratchet_profit_floor:
 # Staged Time-Based Exit Configuration
 # Partial exits at time intervals for volatile markets
 staged_time_exit:
-  enabled: true  # Enable staged time-based exits
+  enabled: false  # DISABLED: Bypasses PositionMonitor - TODO: Re-implement in PositionMonitor
   # Staged exits: [minutes, percent_to_close]
   # Example: At 5 min close 40%, at 10 min close 30%, at 13 min close remaining 30%
   stages:
@@ -233,7 +233,43 @@ staged_time_exit:
       percent: 30
     - minutes: 13
       percent: 30
-  description: "Staged time exits: partial liquidation at time intervals"
+  description: "Staged time exits: partial liquidation at time intervals (DISABLED - bypasses PositionMonitor)"
+
+# Dynamic Take Profit Zones Configuration
+# Laddered exit targets based on entry price for consistent profit taking
+# This strategy ensures frequent small wins and reduces all-or-nothing risk
+dynamic_take_profit:
+  enabled: true  # Enable dynamic take profit zones
+  # Zones: [entry_min, entry_max, exit_target, exit_type]
+  # exit_type: "limit" (resting order) or "market" (immediate execution)
+  zones:
+    - entry_min: 25
+      entry_max: 30
+      exit_target: 55  # 25-30c profit
+      exit_type: "limit"
+    - entry_min: 30
+      entry_max: 40
+      exit_target: 65  # 25-35c profit
+      exit_type: "limit"
+    - entry_min: 40
+      entry_max: 50
+      exit_target: 75  # 25-35c profit
+      exit_type: "limit"
+    - entry_min: 50
+      entry_max: 60
+      exit_target: 85  # 25-35c profit
+      exit_type: "limit"
+    - entry_min: 60
+      entry_max: 70
+      exit_target: 95  # 25-35c profit
+      exit_type: "limit"
+  # Edge quality adjustment: Higher edge = higher exit target
+  edge_adjustment_enabled: true
+  edge_high_threshold: 0.05  # 5% edge = high quality
+  edge_high_multiplier: 1.1  # Increase target by 10% for high edge
+  edge_low_threshold: 0.02  # 2% edge = low quality
+  edge_low_multiplier: 0.9  # Decrease target by 10% for low edge
+  description: "Dynamic take profit: laddered exits based on entry price for consistent profits"
 
 # Dynamic Position Sizing Configuration
 # Scale position size based on edge and confidence
@@ -242,7 +278,7 @@ dynamic_sizing:
   base_contracts: 1  # Base size
   edge_multiplier: 2.0  # 2026-07-05: Increased from 0.5 to 2.0 (4x) based on Turbine research - amplify edge impact for small velocity-based edges
   confidence_multiplier: 1.0  # 2026-07-05: Increased from 0.3 to 1.0 (3.3x) based on Turbine research - amplify confidence impact
-  max_contracts: 3  # Global cap for dynamic sizing (per-asset limits take precedence)
+  max_contracts: 1  # HARD RULE (2026-07-06): 1 contract per order (per-asset limits take precedence)
   min_contracts: 1  # Min contracts per trade
   description: "Dynamic sizing: scale position based on edge and confidence (2026 research-tuned) - DISABLED to prevent interference with window-based risk limits"
 
@@ -682,9 +718,9 @@ assets:
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for BTC (computed from bankroll)"
     max_contracts:
-      value: 3  # PRIMARY limit for BTC (overrides dynamic_sizing.max_contracts)
+      value: 1  # HARD RULE (2026-07-06): 1 contract per order - agents scale in via DCA at lower prices only
       static: profile
-      description: "Maximum contracts for BTC (static for this profile)"
+      description: "Maximum contracts per order for BTC (1 contract at a time - prevents doubling up on same price)"
     # Edge thresholds based on 2026 volatility research (BTC: 45-55% vol, 1.5-3% intraday range)
     # Tier 1 (core assets): 3-4% min edge (REDUCED from 6-7% for achievable trade frequency in 15m markets)
     min_edge_early: 0.03  # REDUCED from 6% to 3% early edge (achievable in 15m markets)
@@ -711,9 +747,9 @@ assets:
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for ETH (computed from bankroll)"
     max_contracts:
-      value: 3  # PRIMARY limit for ETH (overrides dynamic_sizing.max_contracts)
+      value: 1  # HARD RULE (2026-07-06): 1 contract per order - agents scale in via DCA at lower prices only
       static: profile
-      description: "Maximum contracts for ETH (static for this profile)"
+      description: "Maximum contracts per order for ETH (1 contract at a time - prevents doubling up on same price)"
     # Edge thresholds based on 2026 volatility research (ETH: 45.2% vol in April 2026, declining - L2 scaling maturation)
     # Tier 1 (core assets): 3-4% min edge (REDUCED from 6-7% for achievable trade frequency in 15m markets)
     min_edge_early: 0.03  # REDUCED from 6% to 3% early edge (achievable in 15m markets)
@@ -740,9 +776,9 @@ assets:
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for SOL (computed from bankroll)"
     max_contracts:
-      value: 3  # PRIMARY limit for SOL (overrides dynamic_sizing.max_contracts)
+      value: 1  # HARD RULE (2026-07-06): 1 contract per order - agents scale in via DCA at lower prices only
       static: profile
-      description: "Maximum contracts for SOL (static for this profile)"
+      description: "Maximum contracts per order for SOL (1 contract at a time - prevents doubling up on same price)"
     # Edge thresholds based on 2026 volatility research (SOL: 89.6% vol in April 2026, increasing - speculative capital rotation)
     # Tier 2 (alt assets): 4-5% min edge (REDUCED from 8-9% for achievable trade frequency in 15m markets)
     min_edge_early: 0.04  # REDUCED from 8% to 4% early edge (achievable in 15m markets)
@@ -769,9 +805,9 @@ assets:
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for XRP (computed from bankroll)"
     max_contracts:
-      value: 3  # PRIMARY limit for XRP (overrides dynamic_sizing.max_contracts)
+      value: 1  # HARD RULE (2026-07-06): 1 contract per order - agents scale in via DCA at lower prices only
       static: profile
-      description: "Maximum contracts for XRP (static for this profile)"
+      description: "Maximum contracts per order for XRP (1 contract at a time - prevents doubling up on same price)"
     # Edge thresholds based on 2026 volatility research (XRP: ~55% vol, event-driven, beta 1.35)
     # Tier 2 (alt assets): 4-5% min edge (REDUCED from 7-8% for achievable trade frequency in 15m markets)
     min_edge_early: 0.04  # REDUCED from 7% to 4% early edge (achievable in 15m markets)
@@ -798,9 +834,9 @@ assets:
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for DOGE (computed from bankroll)"
     max_contracts:
-      value: 2  # PRIMARY limit for DOGE (overrides dynamic_sizing.max_contracts)
+      value: 1  # HARD RULE (2026-07-06): 1 contract per order - agents scale in via DCA at lower prices only
       static: profile
-      description: "Maximum contracts for DOGE (static for this profile)"
+      description: "Maximum contracts per order for DOGE (1 contract at a time - prevents doubling up on same price)"
     # Edge thresholds based on 2026 volatility research (DOGE: ~100% vol, sentiment-driven, highest beta 2.70)
     # Tier 2 (alt assets): 5-6% min edge (REDUCED from 8.5-9.5% for achievable trade frequency in 15m markets)
     min_edge_early: 0.05  # REDUCED from 8.5% to 5% early edge (achievable in 15m markets)
@@ -1053,7 +1089,7 @@ contract_caps:
   max_contracts_total: 5000  # Max total contracts across all assets
   max_contracts_per_asset: 1750  # Max contracts per asset (BTC, ETH, etc.)
   max_contracts_per_cluster: 750  # Max contracts per asset/timeframe/overlap-window
-  max_single_order_contracts: 2  # CRITICAL FIX: Aligned with per-asset max_contracts (was 10 - inconsistent)
+  max_single_order_contracts: 1  # HARD RULE (2026-07-06): 1 contract per order (enforced in order router _check_intent_risk)
 
 # ── Risk Policy ───────────────────────────────────────────────────────────
 # Risk limits that affect order acceptance and sizing

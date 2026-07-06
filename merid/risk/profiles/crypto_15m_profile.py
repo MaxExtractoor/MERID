@@ -343,6 +343,10 @@ class Crypto15mProfile:
     ratchet_trim_threshold_cents: int = 80  # 2026-07-05: Trim when price crosses this threshold
     ratchet_trim_to_contracts: int = 1  # 2026-07-05: Trim to 1 contract to lock in profits
     
+    # Position Management: Dynamic Take Profit Zones Configuration
+    # 2026-07-06: Laddered exit targets based on entry price for consistent profit taking
+    dynamic_take_profit: dict = field(default_factory=dict)  # Full dynamic take profit config dict
+    
     # Position Management: Dynamic Sizing Configuration
     dynamic_sizing_enabled: bool = False
     dynamic_sizing_base_contracts: int = 1
@@ -1071,6 +1075,8 @@ class Crypto15mProfileAdapter:
                 ratchet_trim_position_enabled=raw.get('ratchet_profit_floor', {}).get('trim_position_enabled', True),
                 ratchet_trim_threshold_cents=raw.get('ratchet_profit_floor', {}).get('trim_threshold_cents', 80),
                 ratchet_trim_to_contracts=raw.get('ratchet_profit_floor', {}).get('trim_to_contracts', 1),
+                # Position Management: Dynamic Take Profit Zones Configuration
+                dynamic_take_profit=raw.get('dynamic_take_profit', {}),
                 # Position Management: Dynamic Sizing Configuration
                 dynamic_sizing_enabled=raw.get('dynamic_sizing', {}).get('enabled', False),
                 dynamic_sizing_base_contracts=raw.get('dynamic_sizing', {}).get('base_contracts', 1),
