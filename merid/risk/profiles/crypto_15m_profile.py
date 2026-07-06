@@ -437,6 +437,56 @@ class Crypto15mProfile:
         description='Valid price range in cents for order execution'
     ))
 
+    @property
+    def momentum_fvg(self) -> Dict[str, Any]:
+        """
+        Return momentum_fvg configuration as a dictionary.
+        
+        This property provides backward compatibility for code that expects
+        profile.momentum_fvg to be a nested object/dict.
+        """
+        return {
+            'momentum_rsi_long_min': self.momentum_fvg_rsi_long_min,
+            'momentum_rsi_short_max': self.momentum_fvg_rsi_short_max,
+            'momentum_min_macd_hist_long': self.momentum_fvg_min_macd_hist_long,
+            'momentum_min_macd_hist_short': self.momentum_fvg_min_macd_hist_short,
+            'obi_min': self.momentum_fvg_obi_min,
+            'obi_persistence_min': self.momentum_fvg_obi_persistence_min,
+            'obi_persistence_window_sec': self.momentum_fvg_obi_persistence_window_sec,
+            'obi_ewma_alpha': self.momentum_fvg_obi_ewma_alpha,
+            'obi_strong_btc': self.momentum_fvg_obi_strong_btc,
+            'obi_strong_eth': self.momentum_fvg_obi_strong_eth,
+            'obi_strong_sol': self.momentum_fvg_obi_strong_sol,
+            'obi_strong_xrp': self.momentum_fvg_obi_strong_xrp,
+            'obi_strong_doge': self.momentum_fvg_obi_strong_doge,
+            'obi_ewma_alpha_btc': self.momentum_fvg_obi_ewma_alpha_btc,
+            'obi_ewma_alpha_eth': self.momentum_fvg_obi_ewma_alpha_eth,
+            'obi_ewma_alpha_sol': self.momentum_fvg_obi_ewma_alpha_sol,
+            'obi_ewma_alpha_xrp': self.momentum_fvg_obi_ewma_alpha_xrp,
+            'obi_ewma_alpha_doge': self.momentum_fvg_obi_ewma_alpha_doge,
+            'fvg_window_size': self.momentum_fvg_fvg_window_size,
+            'fvg_min_gap_cents': self.momentum_fvg_fvg_min_gap_cents,
+            'fvg_fill_threshold_cents': self.momentum_fvg_fvg_fill_threshold_cents,
+            'fvg_atr_period': self.momentum_fvg_fvg_atr_period,
+            'fvg_max_age_bars': self.momentum_fvg_fvg_max_age_bars,
+            'fvg_min_size_ticks': self.momentum_fvg_fvg_min_size_ticks,
+            'fvg_min_time_to_expiry_min': self.momentum_fvg_fvg_min_time_to_expiry_min,
+            'require_ema_stack': self.momentum_fvg_require_ema_stack,
+            'require_price_vs_ema50': self.momentum_fvg_require_price_vs_ema50,
+            'liquidity_high_threshold': self.momentum_fvg_liquidity_high_threshold,
+            'liquidity_high_size_factor': self.momentum_fvg_liquidity_high_size_factor,
+            'liquidity_medium_threshold': self.momentum_fvg_liquidity_medium_threshold,
+            'liquidity_medium_size_factor': self.momentum_fvg_liquidity_medium_size_factor,
+            'liquidity_low_threshold': self.momentum_fvg_liquidity_low_threshold,
+            'liquidity_low_size_factor': self.momentum_fvg_liquidity_low_size_factor,
+            'liquidity_ultra_low_threshold': self.momentum_fvg_liquidity_ultra_low_threshold,
+            'liquidity_ultra_low_size_factor': self.momentum_fvg_liquidity_ultra_low_size_factor,
+            'liquidity_min_threshold': self.momentum_fvg_liquidity_min_threshold,
+            'liquidity_min_size_factor': self.momentum_fvg_liquidity_min_size_factor,
+            'spread_gate_cents': self.momentum_fvg_spread_gate_cents,
+            'spread_gate_obi_persistence_boost': self.momentum_fvg_spread_gate_obi_persistence_boost,
+        }
+
 
 @dataclass
 class PriceRange:
@@ -1418,6 +1468,22 @@ class Crypto15mProfileAdapter:
 
 # Singleton instance for the active profile
 _active_adapter: Optional[Crypto15mProfileAdapter] = None
+
+
+def get_crypto_15m_profile() -> Optional[Crypto15mProfile]:
+    """
+    Get the active Crypto15mProfile object if one is configured.
+    
+    This function is used by agent_grid_15m.py, fvg_integration.py, and forecasters/fvg.py
+    to access momentum_fvg configuration parameters.
+    
+    Returns:
+        Crypto15mProfile if MERID_PROFILE=kalshi_crypto_15m_v2, else None.
+    """
+    adapter = get_active_profile()
+    if adapter is None:
+        return None
+    return adapter._profile
 
 
 def get_active_profile() -> Optional[Crypto15mProfileAdapter]:
