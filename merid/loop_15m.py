@@ -3535,7 +3535,7 @@ class Kalshi15mLoop:
         # Velocity-based signals use velocity magnitude as signal strength, not probability edge
         # The "edge" in momentum trading is the velocity itself, not probability difference
         rationale = candidate.get("rationale", "")
-        if "velocity_based" in rationale:
+        if rationale and "velocity_based" in rationale:
             # Velocity-based signals: skip edge validation (validated by velocity threshold in agent_grid)
             logger.info(
                 "[EDGE-VALIDATION] Skipping edge check for velocity-based signal: ticker=%s rationale=%s",
