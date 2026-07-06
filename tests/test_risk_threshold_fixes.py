@@ -86,14 +86,17 @@ class TestCycleRiskFixes:
     
     def test_global_risk_guard_defaults(self):
         """Test global_risk_guard.py default values."""
-        from merid.guards.global_risk_guard import GlobalRiskGuard
-        
-        guard = GlobalRiskGuard()
-        
-        assert guard.max_cycle_risk_pct == 0.05, \
-            f"Expected 5% cycle risk, got {guard.max_cycle_risk_pct}"
-        assert guard.max_total_risk_pct == 0.15, \
-            f"Expected 15% total risk, got {guard.max_total_risk_pct}"
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            from merid.guards.global_risk_guard import GlobalRiskGuard
+
+            guard = GlobalRiskGuard()
+
+            assert guard.max_cycle_risk_pct == 0.05, \
+                f"Expected 5% cycle risk, got {guard.max_cycle_risk_pct}"
+            assert guard.max_total_risk_pct == 0.15, \
+                f"Expected 15% total risk, got {guard.max_total_risk_pct}"
     
     def test_global_risk_guard_env_fallbacks(self):
         """Test global_risk_guard.py env var fallbacks."""
