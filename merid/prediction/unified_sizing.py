@@ -77,8 +77,13 @@ def _get_regime_position_size_multiplier() -> float:
         Multiplier between 0.0 and 1.0. Returns 1.0 if regime detection unavailable.
     """
     # CRITICAL: Regime sizing is DISABLED to prevent interference with risk limits
-    # If you re-enable regime sizing, you MUST update the risk envelope to account for it
-    # and ensure 3% per asset / 5% per 15m window limits are still respected
+    # DISABLED REASON: Regime-based multipliers could cause oversizing beyond 3% per asset / 5% per 15m window limits
+    # RE-ENABLE RISKS: If re-enabled without updating risk envelope, positions could exceed hard risk limits
+    # RE-ENABLE REQUIREMENTS:
+    #   1. Update kalshi_crypto_15m_risk_envelope.py to apply regime_multiplier to risk limits
+    #   2. Ensure 3% per asset / 5% per 15m window limits are still respected after multiplier
+    #   3. Add validation to prevent regime_multiplier > 1.0 from causing oversizing
+    #   4. Test with various regime multipliers to verify limits are respected
     return 1.0
     
     # The code below is preserved for future reference if regime sizing is re-enabled
@@ -139,7 +144,14 @@ def _get_tte_position_size_multiplier(tte_seconds: Optional[float] = None) -> fl
     Returns:
         Multiplier between 0.0 and 1.0. Returns 1.0 if TTE regime unavailable or tte_seconds is None.
     """
-    # DISABLED: Always return 1.0 to prevent TTE sizing from interfering with risk limits
+    # CRITICAL: TTE sizing is DISABLED to prevent interference with risk limits
+    # DISABLED REASON: Time-to-expiry multipliers could cause oversizing beyond 3% per asset / 5% per 15m window limits
+    # RE-ENABLE RISKS: If re-enabled without updating risk envelope, positions could exceed hard risk limits
+    # RE-ENABLE REQUIREMENTS:
+    #   1. Update kalshi_crypto_15m_risk_envelope.py to apply tte_multiplier to risk limits
+    #   2. Ensure 3% per asset / 5% per 15m window limits are still respected after multiplier
+    #   3. Add validation to prevent tte_multiplier > 1.0 from causing oversizing
+    #   4. Test with various TTE values to verify limits are respected
     return 1.0
 
 
