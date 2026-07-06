@@ -46,6 +46,28 @@ def _reset_shared_window_state_for_testing() -> None:
         _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
 
 
+def force_reset_window_exposure() -> None:
+    """
+    Force reset window exposure tracking state.
+    
+    CRITICAL: This is for recovery when window exposure gets stuck due to
+    missing position closure events (e.g., positions closed outside the system,
+    or shutdown before closure events were processed).
+    
+    This should be called during startup if exposure is non-zero but position
+    cache shows zero open positions (stale exposure condition).
+    """
+    import time
+    current_ts = time.time()
+    with _WINDOW_TRACKING_LOCK:
+        _WINDOW_TRACKING_STATE["window_start_ts"] = _window_bucket_start(current_ts)
+        _WINDOW_TRACKING_STATE["agent_exposure_usd"] = {}
+        _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
+    logger.warning(
+        f"[WINDOW-TRACKING] FORCE RESET at ts={current_ts:.0f} - stale exposure cleared"
+    )
+
+
 def _window_bucket_start(current_ts: float) -> float:
     """Return the epoch-aligned start of the 15-minute window containing current_ts."""
     return current_ts - (current_ts % 900.0)
