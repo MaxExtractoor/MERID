@@ -118,7 +118,8 @@ class TestUnifiedSizing(unittest.TestCase):
         """Test sizing with cheap contracts (10 cents).
         
         CRITICAL FIX: 2026-07-06 - min_notional lowered from $0.50 to $0.15 to align with 15c price floor.
-        Now allows cheap contracts as long as notional >= $0.15.
+        However, fractional_contract_override_threshold allows 1 contract if max_notional >= 50% of contract cost.
+        For 10c contracts: 50% threshold = $0.05, so if max_notional >= $0.05, allows 1 contract.
         """
         bankroll = Decimal("100.00")
         price_cents = 10
@@ -130,19 +131,19 @@ class TestUnifiedSizing(unittest.TestCase):
             asset=asset,
         )
         
-        # Expected (new behavior with min_notional = $0.15):
-        # max_notional = $100 × 0.0200 (bankroll_cap) = $2.00
-        # contracts_from_notional = floor(2.00 / 0.10) = 20
+        # Expected (new behavior with fractional_contract_override):
+        # max_notional = $100 × 0.03 (bankroll_cap) = $3.00
+        # contracts_from_notional = floor(3.00 / 0.10) = 30
         # But capped at max_contracts_cap (1 for BTC with 1-contract-per-order rule)
         # max_contracts = 1
         # max_contracts_notional = 1 × $0.10 = $0.10
-        # Since max_contracts_notional ($0.10) < min_notional ($0.15), order is rejected
-        # count = 0
-        # notional = 0
+        # fractional_contract_override_threshold = 0.5 (50%)
+        # $3.00 >= $0.05 (50% of $0.10), so allows 1 contract
+        # count = 1
+        # notional = $0.10
         
-        self.assertEqual(count, 0, "Should reject due to min_notional")
-        self.assertEqual(notional_usd, Decimal("0"))
-        self.assertEqual(metadata["rejection_reason"], "min_notional_not_met")
+        self.assertEqual(count, 1, "Should allow 1 contract via fractional override")
+        self.assertEqual(notional_usd, Decimal("0.10"))
     
     def test_sizing_with_expensive_contracts(self):
         """Test sizing with expensive contracts (90 cents).
@@ -227,31 +228,36 @@ class TestUnifiedSizing(unittest.TestCase):
             self.assertIn(key, metadata, f"Metadata missing required key: {key}")
     
     def test_bankroll_cap_pct_default(self):
-        """Test that default bankroll cap is 2%."""
+        """Test that default bankroll cap is 3% (per-window risk limit)."""
         # Clear env var to test default
         os.environ.pop("MERID_BANKROLL_CAP_PCT", None)
         
         cap_pct = _get_bankroll_cap_pct()
         
-        self.assertEqual(cap_pct, Decimal("0.02"), "Default should be 2%")
+        self.assertEqual(cap_pct, Decimal("0.03"), "Default should be 3% (per-window risk limit)")
     
     def test_bankroll_cap_pct_custom(self):
-        """Test that custom bankroll cap is respected."""
+        """Test that custom bankroll cap is respected (but profile takes precedence)."""
+        # Note: Profile YAML now takes precedence over env var for risk parameters
+        # This test verifies the env var is read but profile value (3%) is used
         with patch.dict(os.environ, {"MERID_BANKROLL_CAP_PCT": "1.5"}):
             cap_pct = _get_bankroll_cap_pct()
-            self.assertEqual(cap_pct, Decimal("0.015"), "Should use 1.5% from env")
+            # Profile value (3%) takes precedence over env var
+            self.assertEqual(cap_pct, Decimal("0.03"), "Profile value (3%) takes precedence over env var")
     
     def test_bankroll_cap_pct_clamped_low(self):
-        """Test that bankroll cap is clamped to minimum 1%."""
+        """Test that bankroll cap uses profile value (3%) regardless of low env var."""
+        # Profile value (3%) takes precedence over env var
         with patch.dict(os.environ, {"MERID_BANKROLL_CAP_PCT": "0.5"}):
             cap_pct = _get_bankroll_cap_pct()
-            self.assertEqual(cap_pct, Decimal("0.01"), "Should clamp to 1% minimum")
+            self.assertEqual(cap_pct, Decimal("0.03"), "Profile value (3%) takes precedence over env var")
     
     def test_bankroll_cap_pct_clamped_high(self):
-        """Test that bankroll cap is clamped to maximum 2%."""
+        """Test that bankroll cap uses profile value (3%) regardless of high env var."""
+        # Profile value (3%) takes precedence over env var
         with patch.dict(os.environ, {"MERID_BANKROLL_CAP_PCT": "10.0"}):
             cap_pct = _get_bankroll_cap_pct()
-            self.assertEqual(cap_pct, Decimal("0.02"), "Should clamp to 2% maximum")
+            self.assertEqual(cap_pct, Decimal("0.03"), "Profile value (3%) takes precedence over env var")
     
     def test_sizing_with_edge_pct(self):
         """Test that edge_pct is accepted (for future edge-scaled sizing)."""

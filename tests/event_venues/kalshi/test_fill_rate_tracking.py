@@ -25,7 +25,7 @@ class TestFillRateTracking:
         # Add intents for BTC
         intent1 = OrderIntent(
             intent_id="intent1",
-            market_ticker="KXBTC-15M-ABOVE-75000",
+            ticker="KXBTC-15M-ABOVE-75000",
             side="yes",
             action="buy",
             count=10,
@@ -36,7 +36,7 @@ class TestFillRateTracking:
         
         intent2 = OrderIntent(
             intent_id="intent2",
-            market_ticker="KXBTC-15M-ABOVE-75000",
+            ticker="KXBTC-15M-ABOVE-75000",
             side="yes",
             action="buy",
             count=10,
@@ -73,7 +73,7 @@ class TestFillRateTracking:
         """Test fill rate tracking for BTC."""
         btc_intent = OrderIntent(
             intent_id="btc_intent",
-            market_ticker="KXBTC-15M-ABOVE-75000",
+            ticker="KXBTC-15M-ABOVE-75000",
             side="yes",
             action="buy",
             count=10,
@@ -105,7 +105,7 @@ class TestFillRateTracking:
         """Test fill rate tracking for ETH."""
         eth_intent = OrderIntent(
             intent_id="eth_intent",
-            market_ticker="KXETH-15M-ABOVE-3500",
+            ticker="KXETH-15M-ABOVE-3500",
             side="yes",
             action="buy",
             count=10,
@@ -138,7 +138,7 @@ class TestFillRateTracking:
         # Add intent for 10 contracts
         intent1 = OrderIntent(
             intent_id="intent1",
-            market_ticker="KXBTC-15M-ABOVE-75000",
+            ticker="KXBTC-15M-ABOVE-75000",
             side="yes",
             action="buy",
             count=10,
@@ -176,7 +176,7 @@ class TestFillRateTracking:
         # Add old intent and fill
         old_intent = OrderIntent(
             intent_id="old_intent",
-            market_ticker="KXBTC-15M-ABOVE-75000",
+            ticker="KXBTC-15M-ABOVE-75000",
             side="yes",
             action="buy",
             count=10,
@@ -204,7 +204,7 @@ class TestFillRateTracking:
         # Add new intent and fill
         new_intent = OrderIntent(
             intent_id="new_intent",
-            market_ticker="KXBTC-15M-ABOVE-75000",
+            ticker="KXBTC-15M-ABOVE-75000",
             side="yes",
             action="buy",
             count=10,
@@ -243,7 +243,7 @@ class TestFillRateTracking:
         # Add BTC data
         btc_intent = OrderIntent(
             intent_id="btc_intent",
-            market_ticker="KXBTC-15M-ABOVE-75000",
+            ticker="KXBTC-15M-ABOVE-75000",
             side="yes",
             action="buy",
             count=10,

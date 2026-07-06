@@ -447,19 +447,8 @@ class KalshiFillsLedger:
         status = await ledger.reconcile_with_kalshi_positions()
     """
     
-    _instance: Optional[KalshiFillsLedger] = None
-    _lock = threading.Lock()
-    
-    def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-                    cls._instance._initialized = False
-        return cls._instance
-    
     def __init__(self):
-        if self._initialized:
+        if hasattr(self, '_initialized') and self._initialized:
             return
             
         self._initialized = True
@@ -1623,7 +1612,7 @@ class KalshiFillsLedger:
         intents_by_asset: Dict[str, int] = {}
         for intent in intents:
             asset = None
-            ticker = intent.market_ticker.upper() if intent.market_ticker else ""
+            ticker = intent.ticker.upper() if intent.ticker else ""
             if "KXBTC" in ticker:
                 asset = "BTC"
             elif "KXETH" in ticker:
@@ -4223,23 +4212,36 @@ class KalshiFillsLedger:
             return 0
 
 
-# Singleton accessor
-_ledger: Optional[KalshiFillsLedger] = None
+# Profile-aware singleton accessor to prevent legacy/production contamination
+_ledgers: Dict[str, Optional[KalshiFillsLedger]] = {}
 _ledger_lock = threading.Lock()
 
 
-def get_fills_ledger() -> KalshiFillsLedger:
-    """Get the singleton KalshiFillsLedger instance."""
-    global _ledger
-    if _ledger is None:
+def get_fills_ledger(profile: Optional[str] = None) -> KalshiFillsLedger:
+    """Get the profile-aware singleton KalshiFillsLedger instance.
+    
+    Args:
+        profile: Optional profile name. If None, uses current MERID_PROFILE env var.
+                This ensures legacy and production stacks get separate instances.
+    
+    Returns:
+        KalshiFillsLedger instance for the specified profile.
+    """
+    import os
+    if profile is None:
+        profile = os.getenv("MERID_PROFILE", "default")
+    
+    global _ledgers
+    if profile not in _ledgers or _ledgers[profile] is None:
         with _ledger_lock:
-            if _ledger is None:
-                _ledger = KalshiFillsLedger()
+            # Double-checked: verify ledger is still None inside lock
+            if profile not in _ledgers or _ledgers[profile] is None:
+                _ledgers[profile] = KalshiFillsLedger()
                 # Session-based PnL tracking: load session metadata on first access
-                _ledger._load_session_metadata()
+                _ledgers[profile]._load_session_metadata()
                 # Check if we need to start a new session
-                _ledger.start_new_session()
-    return _ledger
+                _ledgers[profile].start_new_session()
+    return _ledgers[profile]
 
 
 # Convenience exports
