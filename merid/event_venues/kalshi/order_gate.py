@@ -875,6 +875,21 @@ class PreTradeGate:
                         client_order_id=coid,
                         reason=f"window_limit:{window_reason}",
                     )
+                else:
+                    # CRITICAL FIX (2026-07-06): Record window exposure immediately when window check passes
+                    # This ensures exposure is tracked even if orders get rejected later by the exchange
+                    # (duplicate order, post_only errors, etc.). Previously, exposure was only recorded
+                    # on fills, which allowed agents to bypass window limits by submitting orders that
+                    # never fill (always rejected by exchange). Recording at gate pass time ensures
+                    # the 3% per-agent / 5% total venue limits are enforced for ALL order attempts.
+                    envelope.record_order_execution(
+                        agent_id=agent_id,
+                        order_notional_usd=order_notional_usd
+                    )
+                    logger.info(
+                        "[GATE-WINDOW-RECORD] Recorded window exposure: agent=%s notional=$%.2f",
+                        agent_id, order_notional_usd
+                    )
             else:
                 self._store._metrics.blocked_window_limit += 1
                 logger.error(
