@@ -350,12 +350,8 @@ class UnifiedRiskManager:
             
             # Per-trade notional limit
             per_trade_cap = self._bankroll_usd * self._limits.per_trade_max_notional_pct
-            # CRITICAL FIX: Add minimum floor for small bankrolls (<$100)
-            # Research shows small accounts should use minimum stake pricing
-            # This prevents rejections when contract price exceeds percentage-based limit
-            if self._bankroll_usd < 100.0:
-                per_trade_cap = max(per_trade_cap, 1.00)  # Minimum $1.00 for small accounts
-                logger.debug(f"[UNIFIED_RISK] Small bankroll ($%.2f) - using minimum floor $1.00 for per-trade cap", self._bankroll_usd)
+            # 2026-07-06: DISABLED micro-account minimum floor - use uniform percentage-based cap
+            # Risk envelope and unified_sizing handle all sizing logic; no micro-account adjustments
             if notional_usd > per_trade_cap:
                 reason = f"PER_TRADE_NOTIONAL: ${notional_usd:.2f} > ${per_trade_cap:.2f}"
                 self._rejections += 1

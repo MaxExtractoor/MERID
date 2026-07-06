@@ -215,14 +215,10 @@ class KalshiCrypto15mRiskEnvelope:
         Rationale: Per-trade risk should be a fraction of the 3% per agent limit, not exceed it.
         The 5% per 15m window limit allows multiple trades within the window.
         """
-        # Extract tier thresholds from profile config (if available in envelope)
-        # For now, implement tiered logic directly based on live bankroll
-        if self.live_bankroll_usd < 100.0:
-            return 0.03  # 3% for small bankroll (CRITICAL FIX: aligned with 3% per agent limit)
-        elif self.live_bankroll_usd < 1000.0:
-            return 0.02  # 2% for medium bankroll (CRITICAL FIX: fraction of 3% per agent limit)
-        else:
-            return 0.015  # 1.5% for large bankroll (CRITICAL FIX: conservative fraction of 3% per agent limit)
+        # 2026-07-06: DISABLED tiered micro-account logic - use uniform per-trade risk
+        # Risk envelope and unified_sizing handle all sizing logic; no micro-account adjustments
+        # Use uniform 3% per-trade risk for all bankroll sizes (aligned with YAML per_trade_risk_pct)
+        return 0.03  # Uniform 3% per-trade risk for all accounts (matches YAML config)
     
     def get_drawdown_halt_pct(self) -> float:
         """Get drawdown halt percentage."""
