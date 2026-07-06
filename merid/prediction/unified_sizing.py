@@ -195,34 +195,27 @@ def compute_min_notional_for_venue(
 # =============================================================================
 
 def _get_bankroll_cap_pct() -> Decimal:
-    """Get global bankroll cap percentage from environment.
+    """Get bankroll cap percentage from profile config.
     
-    SAFETY CEILING: This is a GLOBAL SAFETY CEILING, not a primary policy mechanism.
-    Production profiles must set risk percentages (per_trade_risk_pct, max_single_order_pct)
-    that are ≤ this ceiling. Changing this env var in production is a risk-governance action,
-    not a tuning knob.
+    This reads from kalshi_crypto_15m.yaml venue.bankroll_cap_pct.
     
-    Reads MERID_BANKROLL_CAP_PCT env var, clamped to safe range [1%, 2%].
-    Default is 2% (max) if not configured.
-    
-    Returns:
-        Cap percentage as Decimal (e.g., Decimal("0.02") for 2%)
+    PRODUCTION: If profile is unavailable, this fails (no silent fallback).
     """
-    try:
-        raw_pct = float(os.getenv("MERID_BANKROLL_CAP_PCT", "2.0"))
-        # CRITICAL FIX: Validate bankroll cap percentage is reasonable
-        if raw_pct < 0 or raw_pct > 100:
-            logger.warning(
-                "[UNIFIED-SIZING] Invalid MERID_BANKROLL_CAP_PCT=%s - using default 2.0",
-                raw_pct
-            )
-            raw_pct = 2.0
-    except (ValueError, TypeError):
-        raw_pct = 2.0
+    if not _PROFILE_AVAILABLE:
+        logger.error("[UNIFIED-SIZING] Profile adapter not available - cannot size orders in production")
+        raise RuntimeError("Profile adapter required for production sizing")
     
-    # Clamp to safe range: 1% minimum, 2% maximum
-    clamped_pct = max(1.0, min(2.0, raw_pct))
-    return Decimal(str(clamped_pct / 100.0))  # Convert to fraction
+    try:
+        if is_profile_active():
+            adapter = get_active_profile()
+            profile = adapter.profile
+            return Decimal(str(profile.venue_bankroll_cap_pct))
+        else:
+            logger.error("[UNIFIED-SIZING] Profile not active - cannot size orders in production")
+            raise RuntimeError("Active profile required for production sizing")
+    except Exception as e:
+        logger.error("[UNIFIED-SIZING] Failed to read bankroll_cap_pct from profile: %s", e)
+        raise RuntimeError(f"Profile read failed: {e}") from e
 
 
 def _get_per_asset_risk_pct(asset: str) -> Optional[Decimal]:
@@ -363,13 +356,11 @@ def _get_max_contracts_per_asset(asset: str) -> int:
         raise RuntimeError(f"Profile read failed: {e}") from e
 
 
-def _get_min_edge_risk_pct() -> Decimal:
-    """Get min-edge-based risk percentage from profile config.
+def _get_per_trade_risk_pct() -> Decimal:
+    """Get per-trade risk percentage from profile config.
     
-    NOTE: This reads from kalshi_crypto_15m.yaml guardrails.min_post_fee_edge.
-    The field is conceptually a minimum edge threshold, but we repurpose it as a
-    per-trade risk cap for sizing. This is a temporary measure; a dedicated
-    per_trade_risk_pct field should be added to the profile for clarity.
+    This reads from kalshi_crypto_15m.yaml guardrails.per_trade_risk_pct.
+    This is the dedicated per-trade risk control for sizing (not to be confused with edge thresholds).
     
     PRODUCTION: If profile is unavailable, this fails (no silent fallback).
     """
@@ -381,12 +372,12 @@ def _get_min_edge_risk_pct() -> Decimal:
         if is_profile_active():
             adapter = get_active_profile()
             profile = adapter.profile
-            return Decimal(str(profile.guardrails_min_post_fee_edge))
+            return Decimal(str(profile.guardrails_per_trade_risk_pct))
         else:
             logger.error("[UNIFIED-SIZING] Profile not active - cannot size orders in production")
             raise RuntimeError("Active profile required for production sizing")
     except Exception as e:
-        logger.error("[UNIFIED-SIZING] Failed to read min_edge from profile: %s", e)
+        logger.error("[UNIFIED-SIZING] Failed to read per_trade_risk_pct from profile: %s", e)
         raise RuntimeError(f"Profile read failed: {e}") from e
 
 
@@ -623,13 +614,13 @@ def compute_order_size(
         )
     else:
         # Compute effective risk_pct
-        # Interlock rule: risk_pct_for_sizing = min(min_edge_risk_pct, max_single_order_pct, MERID_BANKROLL_CAP_PCT)
-        min_edge_risk_pct = _get_min_edge_risk_pct()  # from profile guardrails.min_post_fee_edge (repurposed)
+        # Interlock rule: risk_pct_for_sizing = min(per_trade_risk_pct, max_single_order_pct, bankroll_cap_pct)
+        per_trade_risk_pct = _get_per_trade_risk_pct()  # from profile guardrails.per_trade_risk_pct (dedicated sizing control)
         max_single_order_pct = _get_max_single_order_pct()  # from profile venue.max_single_order_pct
-        bankroll_cap_pct = _get_bankroll_cap_pct()  # global safety ceiling from MERID_BANKROLL_CAP_PCT env
+        bankroll_cap_pct = _get_bankroll_cap_pct()  # from profile venue.bankroll_cap_pct
         per_asset_risk_pct = _get_per_asset_risk_pct(asset)  # per-asset from profile (optional)
         
-        risk_pct_candidates = [min_edge_risk_pct, max_single_order_pct, bankroll_cap_pct]
+        risk_pct_candidates = [per_trade_risk_pct, max_single_order_pct, bankroll_cap_pct]
         if per_asset_risk_pct is not None:
             risk_pct_candidates.append(per_asset_risk_pct)
         
@@ -640,9 +631,9 @@ def compute_order_size(
         
         logger.info(
             "[SIZE-COMPUTE] Computed max_notional from risk_pct: bankroll=%.2f risk_pct=%.4f max_notional=%.2f asset=%s "
-            "(candidates: min_edge=%.4f, max_single=%.4f, bankroll_cap=%.4f, per_asset=%s)",
+            "(candidates: per_trade=%.4f, max_single=%.4f, bankroll_cap=%.4f, per_asset=%s)",
             float(bankroll_usd), float(risk_pct_effective), float(max_notional_usd), asset,
-            float(min_edge_risk_pct), float(max_single_order_pct), float(bankroll_cap_pct),
+            float(per_trade_risk_pct), float(max_single_order_pct), float(bankroll_cap_pct),
             f"{float(per_asset_risk_pct):.4f}" if per_asset_risk_pct else "None"
         )
     

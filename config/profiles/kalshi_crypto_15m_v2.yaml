@@ -418,9 +418,9 @@ venue:
   name: kalshi
   # Conservative venue caps based on 2026 HFT best practices (Quarter Kelly)
   # Primary risk controls are now (2026 best practices):
-  # - per_trade_risk_pct (0.8%): primary sizing control
+  # - per_trade_risk_pct (3%): primary sizing control
   # - per-asset max_notional_pct (3%): secondary per-asset limits (conservative)
-  # - max_cycle_risk_pct (0.5%): aggregate cycle-level control (conservative for 5-second cycles)
+  # - max_cycle_risk_pct (5%): aggregate cycle-level control (conservative for 5-second cycles)
   # - max_total_risk_pct (15%): aggregate total exposure control (conservative for survival)
   max_total_notional_pct:
     value: 0.15  # CONSERVATIVE: 15% total venue cap (sum of 3% per asset × 5 assets for conservative cycle risk)
@@ -837,6 +837,11 @@ confidence:
 # TIERED STRUCTURE: 0.8-1.5% watch, 1.5-3% small, ≥3% standard
 # 2026-07-05 FIX: REVERTED thresholds - previous increase to 4-7% blocked ALL trades
 # CRITICAL: Edge bands are the ACTUAL thresholds used (per-asset min_edge fields are ignored)
+# MIN_EDGE HIERARCHY (from highest to lowest priority):
+# 1. edge_bands.*.min_edge_pct - PRIMARY: Used for trade execution (watch/small/standard bands)
+# 2. strategy_policy.min_edge - LEGACY: Not actively used, kept for compatibility
+# 3. strategies.*.policy.min_edge - Strategy-specific: Used by individual strategies
+# 4. Per-asset min_edge_early/mid/late/terminal - IGNORED: Legacy fields, not used
 edge_bands:
   enabled: true  # Enable tiered edge band logic
   watch_band:
@@ -1132,7 +1137,7 @@ edge_lag_filter:
 # Reference: https://www.indiehackers.com/post/building-a-stable-15-minute-trading-bot-for-polymarket-crypto-up-down-markets-563a14e882
 strategy_policy:
   min_edge: 0.015  # LOWERED: 1.5% global minimum edge (research: profitable systems trade edges down to 1-2%)
-  min_confidence: 0.50  # ALIGNED TO 2026 INDUSTRY STANDARD: 50% (was 55%)
+  min_confidence: 0.50  # LEGACY VALUE: Not actively used - primary confidence threshold is in confidence.min_confidence_threshold (0.65)
   max_md_staleness_sec: 20.0  # RELAXED: Strategy-specific MD staleness threshold (increased from 15s to 20s for more opportunities)
   
   # NEW: Confidence and agreement requirements

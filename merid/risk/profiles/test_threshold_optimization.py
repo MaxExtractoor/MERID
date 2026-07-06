@@ -334,7 +334,7 @@ class TestThresholdOptimization:
         """Test that per-trade risk is aligned with 3% per agent / 5% per 15m window limits."""
         from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import KalshiCrypto15mRiskEnvelope
         
-        # Test small bankroll (< $100): 3% per trade (aligned with 3% per agent limit)
+        # Test uniform 3% per-trade risk for all bankroll sizes (bankroll tiering removed)
         envelope_small = KalshiCrypto15mRiskEnvelope(
             live_bankroll_usd=50.0,
             profile_capital_usd=100.0,
@@ -365,9 +365,9 @@ class TestThresholdOptimization:
             correlation_threshold=0.5,
             correlation_multiplier=1.0,
         )
-        assert envelope_small.get_per_trade_risk_pct() == 0.03  # 3% for small bankroll
+        assert envelope_small.get_per_trade_risk_pct() == 0.03  # 3% for all bankroll sizes (tiering removed)
         
-        # Test medium bankroll ($100-$1k): 2% per trade (fraction of 3% per agent limit)
+        # Test medium bankroll: 3% per trade (uniform, no tiering)
         envelope_medium = KalshiCrypto15mRiskEnvelope(
             live_bankroll_usd=500.0,
             profile_capital_usd=1000.0,
@@ -398,9 +398,9 @@ class TestThresholdOptimization:
             correlation_threshold=0.5,
             correlation_multiplier=1.0,
         )
-        assert envelope_medium.get_per_trade_risk_pct() == 0.02  # 2% for medium bankroll
+        assert envelope_medium.get_per_trade_risk_pct() == 0.03  # 3% for all bankroll sizes (tiering removed)
         
-        # Test large bankroll (> $1k): 1.5% per trade (conservative fraction of 3% per agent limit)
+        # Test large bankroll: 3% per trade (uniform, no tiering)
         envelope_large = KalshiCrypto15mRiskEnvelope(
             live_bankroll_usd=5000.0,
             profile_capital_usd=10000.0,
@@ -431,7 +431,7 @@ class TestThresholdOptimization:
             correlation_threshold=0.5,
             correlation_multiplier=1.0,
         )
-        assert envelope_large.get_per_trade_risk_pct() == 0.015  # 1.5% for large bankroll
+        assert envelope_large.get_per_trade_risk_pct() == 0.03  # 3% for all bankroll sizes (tiering removed)
 
     def test_volatility_regime_edge_adjustment_defaults_aligned_with_yaml(self):
         """Test that volatility-regime edge adjustment defaults are aligned with profile YAML."""

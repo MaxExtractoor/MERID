@@ -172,7 +172,7 @@ class LeanAgentConfig:
     max_orders_per_15m_window: int = 12  # CRITICAL FIX: 12 (aligned with profile YAML throttling.max_orders_per_15m_window)
     consecutive_loss_pause: int = 3  # 2026 research: Pause after N consecutive losses
     max_session_risk_pct: float = 0.10  # 2026 research: Max session risk as % of capital
-    velocity_threshold: float = 0.0015  # Velocity threshold for signal generation (0.15% - aligned with actual market conditions)
+    velocity_threshold: float = 0.00001  # 0.001% - aligned with profile YAML (default, overridden by per-asset values)
     # Asset-specific velocity thresholds (deeper markets = lower threshold, more volatile = higher threshold)
     # CRITICAL FIX: 2026-07-05 - Aligned with profile YAML velocity_thresholds section
     # Profile YAML values: 0.00001 (0.001%) for all assets - effectively zero to enable any movement
@@ -4827,6 +4827,17 @@ async def build_15m_agent_grid(
         logger.warning("[AGENT-GRID-15M] Failed to load velocity coefficients from profile: %s", e)
     
     logger.info("[AGENT-GRID-15M] Final per_asset_cooldown_s=%s", per_asset_cooldown_s)
+    
+    # CRITICAL FIX: Provide default values in case profile loading fails
+    if 'max_orders_per_15m_window' not in locals():
+        max_orders_per_15m_window = 12  # Default: 12 orders per 15m window
+        logger.warning("[AGENT-GRID-15M] Profile loading failed, using default max_orders_per_15m_window=12")
+    if 'consecutive_loss_pause' not in locals():
+        consecutive_loss_pause = 3  # Default: pause after 3 consecutive losses
+        logger.warning("[AGENT-GRID-15M] Profile loading failed, using default consecutive_loss_pause=3")
+    if 'max_session_risk_pct' not in locals():
+        max_session_risk_pct = 0.10  # Default: 10% session risk cap
+        logger.warning("[AGENT-GRID-15M] Profile loading failed, using default max_session_risk_pct=0.10")
     
     # Create 5 agents for BTC, ETH, SOL, XRP, DOGE
     agents = []
