@@ -143,6 +143,9 @@ class Crypto15mProfile:
     # Confidence
     confidence_use_crypto_threshold_matrix: bool
     confidence_profile_name: str
+    confidence_min_confidence_threshold: float  # 2026-07-06: Primary confidence threshold (0.65 from YAML)
+    # Kelly multipliers: DEPRECATED - Not actively used in sizing logic (2026-07-06 audit)
+    # These are kept for backward compatibility but should be removed in future cleanup
     confidence_kelly_multiplier_no_trade: float
     confidence_kelly_multiplier_cautious: float
     confidence_kelly_multiplier_quick_win: float
@@ -889,6 +892,7 @@ class Crypto15mProfileAdapter:
                 # Confidence
                 confidence_use_crypto_threshold_matrix=confidence.get('use_crypto_threshold_matrix', True),
                 confidence_profile_name=confidence.get('profile_name', 'modern_tradeable_kalshi_v1'),
+                confidence_min_confidence_threshold=confidence.get('min_confidence_threshold', 0.65),  # 2026-07-06: Primary threshold from YAML
                 confidence_kelly_multiplier_no_trade=confidence.get('kelly_multiplier_no_trade', 0.0),
                 confidence_kelly_multiplier_cautious=confidence.get('kelly_multiplier_cautious', 0.5),
                 confidence_kelly_multiplier_quick_win=confidence.get('kelly_multiplier_quick_win', 0.6),

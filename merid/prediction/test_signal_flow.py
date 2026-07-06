@@ -217,18 +217,18 @@ def test_edge_pct_validation():
 
 
 def test_confidence_validation():
-    """Test that confidence is validated in the flow (ALIGNED TO 2026 INDUSTRY STANDARD: 50% threshold)."""
-    # Valid confidence (above 50% threshold)
+    """Test that confidence is validated in the flow (2026-07-06: STANDARDIZED to 65% threshold)."""
+    # Valid confidence (above 65% threshold)
     candidate = {"confidence": 0.7}
-    assert candidate["confidence"] >= 0.50, "Confidence should meet minimum threshold"
+    assert candidate["confidence"] >= 0.65, "Confidence should meet minimum threshold"
     
-    # Valid confidence (at 50% threshold)
-    candidate = {"confidence": 0.50}
-    assert candidate["confidence"] >= 0.50, "Confidence at threshold should be accepted"
+    # Valid confidence (at 65% threshold)
+    candidate = {"confidence": 0.65}
+    assert candidate["confidence"] >= 0.65, "Confidence at threshold should be accepted"
     
-    # Invalid confidence (below 50% threshold)
-    candidate = {"confidence": 0.49}
-    assert candidate["confidence"] < 0.50, "Confidence below threshold should be rejected"
+    # Invalid confidence (below 65% threshold)
+    candidate = {"confidence": 0.64}
+    assert candidate["confidence"] < 0.65, "Confidence below threshold should be rejected"
     
     # Test industry range (30-75%)
     candidate = {"confidence": 0.30}

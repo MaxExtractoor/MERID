@@ -1401,7 +1401,25 @@ class UnifiedEdgeComputer:
         """
         Compute confidence score based on edge magnitude and time to expiry.
         
-        Higher edge and more time to expiry = higher confidence.
+        CONFIDENCE FORMULA (2026-07-06 STANDARDIZED):
+        confidence = 0.6 × edge_score + 0.4 × time_score
+        
+        Where:
+        - edge_score = min(1.0, abs(edge) / 0.2)  # Normalize edge to [0, 1], max reasonable edge = 20%
+        - time_score = min(1.0, time_to_expiry / 900.0)  # Normalize TTE to [0, 1], max = 15 minutes (900s)
+        
+        RATIONALE:
+        - Edge contributes 60% to confidence (primary signal strength indicator)
+        - Time to expiry contributes 40% (more time = more opportunity for edge to materialize)
+        - Higher edge and more time to expiry = higher confidence
+        - Output range: [0.0, 1.0]
+        
+        ALTERNATIVE FORMULAS (strategy-specific):
+        - Momentum_FVG: confidence = 0.5 + (score × 0.1) + (fvg_conf × 0.1)  # Range: 0.5-0.95
+        - Price-Based: confidence = 0.5 + 2.0 × distance_from_threshold  # Range: 0.5-0.99
+        - Regime Detection: HMM probability  # Range: 0.0-1.0
+        
+        NOTE: Different strategies use different confidence formulas. This is the unified edge formula.
         """
         # Normalize edge to [0, 1] (assuming max reasonable edge is 0.2)
         edge_score = min(1.0, abs(edge) / 0.2)

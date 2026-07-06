@@ -69,7 +69,9 @@ class RiskLimits:
     
     # Per-trade limits - MUST be set from live bankroll
     max_single_trade_usd: float = 0.0  # No default - configure from bankroll
-    min_confidence_for_trade: float = 0.5
+    # 2026-07-06: Standardized to 0.65 to align with profile YAML (confidence.min_confidence_threshold)
+    # Previous value 0.50 was causing inconsistency with other components
+    min_confidence_for_trade: float = 0.65
     
     # Timing limits
     min_time_between_trades_seconds: float = 60.0

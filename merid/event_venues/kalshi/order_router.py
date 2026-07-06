@@ -1979,9 +1979,11 @@ def _get_strategy_policy(intent: OrderIntent) -> Dict[str, Any]:
             return policy
         
         # Fallback to global strategy_policy
+        # 2026-07-06: Use confidence_min_confidence_threshold (0.65) instead of strategy_policy_min_confidence (0.50)
+        # This aligns with the primary confidence threshold from the profile YAML
         return {
             "min_edge": profile.strategy_policy_min_edge,
-            "min_confidence": profile.strategy_policy_min_confidence,
+            "min_confidence": profile.confidence_min_confidence_threshold,  # 0.65 (primary threshold)
             "max_md_staleness_sec": profile.strategy_policy_max_md_staleness_sec,
         }
     except Exception as e:
@@ -2166,15 +2168,16 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
             return f"edge_pct_too_low:{intent.edge_pct:.4f}"
         
         # Relax confidence validation for velocity orders (may have lower confidence)
-        # ALIGNED TO 2026 INDUSTRY STANDARDS: 50% threshold (aligned with YAML strategy_policy)
-        # Research: Predict & Profit uses 30% minimum, voltage-kalshi uses 55%, GRDazzle uses 75%
-        # 50% balances signal quality with trade volume for 15m crypto markets
+        # 2026-07-06: Velocity-based signals use velocity magnitude as signal strength, not probability-based confidence
+        # Research shows momentum trading should not be gated by probability confidence
         # SKIP for price-based strategy (no confidence calculation, trades based on price thresholds)
-        if intent.rationale and "price_based" not in intent.rationale:
-            min_confidence_threshold = 0.50  # 50% minimum confidence for velocity orders (aligned with YAML)
+        # SKIP for velocity-based strategy (velocity threshold is the signal strength indicator)
+        if intent.rationale and "price_based" not in intent.rationale and "velocity" not in intent.rationale.lower():
+            # Only apply confidence filter to non-velocity, non-price-based signals
+            min_confidence_threshold = 0.50  # 50% minimum confidence for other signal types
             if intent.confidence is not None and intent.confidence < min_confidence_threshold:
                 logger.warning(
-                    "[SIGNAL-VALIDATION] ticker=%s velocity order confidence=%.2f below minimum %.2f threshold",
+                    "[SIGNAL-VALIDATION] ticker=%s order confidence=%.2f below minimum %.2f threshold",
                     intent.ticker, intent.confidence, min_confidence_threshold
                 )
                 return f"confidence_too_low:{intent.confidence:.2f}"
