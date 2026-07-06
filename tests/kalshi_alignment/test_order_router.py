@@ -27,7 +27,7 @@ class TestOrderRouterPricingValidation:
             side="yes",
             action="buy",
             price_cents=55,  # Valid: 1-99 cents
-            count=10,
+            count=1,  # Valid: 1 contract per order rule
             source="BTC_15M"  # Valid agent in whitelist
         )
     
@@ -205,7 +205,7 @@ class TestOrderRouterRateLimits:
             side="yes",
             action="buy",
             price_cents=55,
-            count=10,
+            count=1,  # Valid: 1 contract per order rule
             source="test"
         )
     
@@ -299,7 +299,7 @@ class TestOrderRouterIntegration:
             side="yes",
             action="buy",
             price_cents=55,
-            count=10,
+            count=1,  # Valid: 1 contract per order rule
             source="test"
         )
     
@@ -372,14 +372,14 @@ class TestOrderRouterIntegration:
             btc_order = OrderIntent(
                 intent_id="btc-123",
                 ticker="KXBTC15M-26JUN022230-30",
-                side="yes", action="buy", price_cents=55, count=10, source="test"
+                side="yes", action="buy", price_cents=55, count=1, source="test"
             )
             
             # ETH order
             eth_order = OrderIntent(
                 intent_id="eth-123", 
                 ticker="KXETH15M-26JUN022230-30",
-                side="yes", action="buy", price_cents=55, count=10, source="test"
+                side="yes", action="buy", price_cents=55, count=1, source="test"
             )
             
             # First order (BTC) should succeed
@@ -417,7 +417,7 @@ class TestOrderRouterExitOrderBypass:
             side="yes",
             action="buy",  # Entry order
             price_cents=55,
-            count=100,  # Large position size
+            count=1,  # Valid: 1 contract per order rule
             source="BTC_15M",
             window_resolution_id="test_window",
             exit_policy_id="test_policy",
@@ -468,3 +468,201 @@ class TestOrderRouterExitOrderBypass:
         # Verify that _is_exit_order returns False for entry orders
         from merid.event_venues.kalshi.order_router import _is_exit_order
         assert _is_exit_order(entry_order_intent) == False
+
+
+class TestOrderRouterSingleContractLimit:
+    """Test 1-contract-per-order hard cap enforcement."""
+
+    @pytest.fixture
+    def valid_order_intent(self):
+        """Create a valid order intent for testing."""
+        return OrderIntent(
+            intent_id="test-123",
+            ticker="KXBTC15M-26JUN022230-30",
+            side="yes",
+            action="buy",
+            price_cents=55,
+            count=1,  # Valid: 1 contract
+            source="BTC_15M",
+            window_resolution_id="test_window",
+            risk_tier="A",
+            max_hold_seconds=900
+        )
+
+    @pytest.mark.asyncio
+    async def test_single_contract_allowed(self, valid_order_intent):
+        """Test that orders with 1 contract are allowed."""
+        valid_order_intent.count = 1
+
+        with patch('merid.event_venues.kalshi.order_router.get_rate_limiter') as mock_get_limiter, \
+             patch('merid.event_venues.kalshi.order_router._resolve_mode') as mock_resolve_mode, \
+             patch('merid.event_venues.kalshi.order_router._check_exit_target_invariant') as mock_invariant, \
+             patch('merid.event_venues.kalshi.order_router._validate_risk_contract_linkage') as mock_risk:
+
+            mock_limiter = AsyncMock()
+            mock_limiter.acquire.return_value = True
+            mock_get_limiter.return_value = mock_limiter
+            mock_resolve_mode.return_value = "paper"
+            mock_invariant.return_value = None
+            mock_risk.return_value = (True, None)
+
+            result = await route_order_async(valid_order_intent)
+
+            # Should not be rejected due to contract count
+            assert result.status != "rejected" or "max_single_order_contracts_exceeded" not in result.reason
+
+    @pytest.mark.asyncio
+    async def test_multiple_contracts_rejected(self, valid_order_intent):
+        """Test that orders with >1 contract are rejected."""
+        valid_order_intent.count = 2  # Invalid: >1 contract
+        valid_order_intent.exit_policy_id = "test_policy"  # Bypass invariant check
+
+        with patch('merid.event_venues.kalshi.order_router.get_rate_limiter') as mock_get_limiter, \
+             patch('merid.event_venues.kalshi.order_router._check_exit_target_invariant') as mock_invariant, \
+             patch('merid.event_venues.kalshi.order_router._validate_risk_contract_linkage') as mock_risk, \
+             patch('merid.event_venues.kalshi.order_router._check_global_rate_limit') as mock_global_rate:
+            mock_limiter = AsyncMock()
+            mock_limiter.acquire.return_value = True
+            mock_get_limiter.return_value = mock_limiter
+            mock_invariant.return_value = None  # Bypass invariant check
+            mock_risk.return_value = (True, None)  # Bypass risk contract check
+            mock_global_rate.return_value = None  # Bypass startup grace period
+
+            result = await route_order_async(valid_order_intent)
+
+            assert result.status == "rejected"
+            assert "max_single_order_contracts_exceeded" in result.reason
+
+    @pytest.mark.asyncio
+    async def test_large_contract_count_rejected(self, valid_order_intent):
+        """Test that orders with large contract counts are rejected."""
+        valid_order_intent.count = 100  # Invalid: large count
+        valid_order_intent.exit_policy_id = "test_policy"  # Bypass invariant check
+
+        with patch('merid.event_venues.kalshi.order_router.get_rate_limiter') as mock_get_limiter, \
+             patch('merid.event_venues.kalshi.order_router._check_exit_target_invariant') as mock_invariant, \
+             patch('merid.event_venues.kalshi.order_router._validate_risk_contract_linkage') as mock_risk, \
+             patch('merid.event_venues.kalshi.order_router._check_global_rate_limit') as mock_global_rate:
+            mock_limiter = AsyncMock()
+            mock_limiter.acquire.return_value = True
+            mock_get_limiter.return_value = mock_limiter
+            mock_invariant.return_value = None  # Bypass invariant check
+            mock_risk.return_value = (True, None)  # Bypass risk contract check
+            mock_global_rate.return_value = None  # Bypass startup grace period
+
+            result = await route_order_async(valid_order_intent)
+
+            assert result.status == "rejected"
+            assert "max_single_order_contracts_exceeded" in result.reason
+
+    @pytest.mark.asyncio
+    async def test_zero_contract_count_rejected(self, valid_order_intent):
+        """Test that orders with 0 contracts are rejected (non_positive_size check)."""
+        valid_order_intent.count = 0  # Invalid: zero
+        valid_order_intent.exit_policy_id = "test_policy"  # Bypass invariant check
+
+        with patch('merid.event_venues.kalshi.order_router.get_rate_limiter') as mock_get_limiter, \
+             patch('merid.event_venues.kalshi.order_router._check_exit_target_invariant') as mock_invariant, \
+             patch('merid.event_venues.kalshi.order_router._validate_risk_contract_linkage') as mock_risk, \
+             patch('merid.event_venues.kalshi.order_router._check_global_rate_limit') as mock_global_rate:
+            mock_limiter = AsyncMock()
+            mock_limiter.acquire.return_value = True
+            mock_get_limiter.return_value = mock_limiter
+            mock_invariant.return_value = None  # Bypass invariant check
+            mock_risk.return_value = (True, None)  # Bypass risk contract check
+            mock_global_rate.return_value = None  # Bypass startup grace period
+
+            result = await route_order_async(valid_order_intent)
+
+            assert result.status == "rejected"
+            assert "non_positive_size" in result.reason
+
+
+class TestOrderRouterConfidenceValidation:
+    """Test confidence threshold validation in order router."""
+
+    @pytest.fixture
+    def valid_order_intent(self):
+        """Create a valid order intent for testing."""
+        return OrderIntent(
+            intent_id="test-123",
+            ticker="KXBTC15M-26JUN022230-30",
+            side="yes",
+            action="buy",
+            price_cents=55,
+            count=1,  # Updated to 1 contract per new rule
+            source="BTC_15M",
+            confidence=0.70,  # Above production threshold
+            edge_pct=0.05,
+            model_prob=0.70
+        )
+
+    @pytest.mark.asyncio
+    async def test_confidence_above_threshold_passes(self, valid_order_intent):
+        """Test that confidence above 0.65 threshold passes validation."""
+        valid_order_intent.confidence = 0.70  # Above 0.65 threshold
+        valid_order_intent.rationale = "momentum_signal"
+
+        with patch('merid.event_venues.kalshi.order_router.get_rate_limiter') as mock_get_limiter, \
+             patch('merid.event_venues.kalshi.order_router._resolve_mode') as mock_resolve_mode, \
+             patch('merid.event_venues.kalshi.order_router._check_exit_target_invariant') as mock_invariant, \
+             patch('merid.event_venues.kalshi.order_router._validate_risk_contract_linkage') as mock_risk:
+
+            mock_limiter = AsyncMock()
+            mock_limiter.acquire.return_value = True
+            mock_get_limiter.return_value = mock_limiter
+            mock_resolve_mode.return_value = "paper"
+            mock_invariant.return_value = None
+            mock_risk.return_value = (True, None)
+
+            result = await route_order_async(valid_order_intent)
+
+            # Should not be rejected due to confidence
+            assert result.status != "rejected" or "confidence_too_low" not in result.reason
+
+
+    @pytest.mark.asyncio
+    async def test_confidence_at_threshold_boundary(self, valid_order_intent):
+        """Test confidence exactly at 0.65 threshold boundary."""
+        valid_order_intent.confidence = 0.65  # Exactly at threshold
+        valid_order_intent.rationale = "momentum_signal"
+
+        with patch('merid.event_venues.kalshi.order_router.get_rate_limiter') as mock_get_limiter, \
+             patch('merid.event_venues.kalshi.order_router._resolve_mode') as mock_resolve_mode, \
+             patch('merid.event_venues.kalshi.order_router._check_exit_target_invariant') as mock_invariant, \
+             patch('merid.event_venues.kalshi.order_router._validate_risk_contract_linkage') as mock_risk:
+
+            mock_limiter = AsyncMock()
+            mock_limiter.acquire.return_value = True
+            mock_get_limiter.return_value = mock_limiter
+            mock_resolve_mode.return_value = "paper"
+            mock_invariant.return_value = None
+            mock_risk.return_value = (True, None)
+
+            result = await route_order_async(valid_order_intent)
+
+            # Should pass (threshold is inclusive)
+            assert result.status != "rejected" or "confidence_too_low" not in result.reason
+
+    @pytest.mark.asyncio
+    async def test_price_based_strategy_bypasses_confidence(self, valid_order_intent):
+        """Test that price-based strategies bypass confidence validation."""
+        valid_order_intent.confidence = 0.40  # Below threshold
+        valid_order_intent.rationale = "price_based"  # Bypasses confidence check
+
+        with patch('merid.event_venues.kalshi.order_router.get_rate_limiter') as mock_get_limiter, \
+             patch('merid.event_venues.kalshi.order_router._resolve_mode') as mock_resolve_mode, \
+             patch('merid.event_venues.kalshi.order_router._check_exit_target_invariant') as mock_invariant, \
+             patch('merid.event_venues.kalshi.order_router._validate_risk_contract_linkage') as mock_risk:
+
+            mock_limiter = AsyncMock()
+            mock_limiter.acquire.return_value = True
+            mock_get_limiter.return_value = mock_limiter
+            mock_resolve_mode.return_value = "paper"
+            mock_invariant.return_value = None
+            mock_risk.return_value = (True, None)
+
+            result = await route_order_async(valid_order_intent)
+
+            # Should not be rejected due to confidence (bypassed)
+            assert result.status != "rejected" or "confidence_too_low" not in result.reason
