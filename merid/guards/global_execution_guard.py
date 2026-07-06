@@ -479,7 +479,7 @@ class GlobalExecutionGuard:
                 if bankroll_usd is None or bankroll_usd <= 0:
                     bankroll_usd = 0.0
                     bankroll_cap_usd = 0.0
-                    max_cycle_risk_pct = 0.005  # CRITICAL FIX: 0.5% - aligned with profile (was 0.03)
+                    max_cycle_risk_pct = 0.05  # CRITICAL FIX: 5% - aligned with profile
                 else:
                     # Read MAX_CYCLE_RISK_PCT from core.settings (single source of truth)
                     from core.settings import MAX_CYCLE_RISK_PCT
@@ -488,7 +488,7 @@ class GlobalExecutionGuard:
             except Exception:
                 bankroll_usd = 0.0
                 bankroll_cap_usd = 0.0
-                max_cycle_risk_pct = 0.005  # CRITICAL FIX: 0.5% - aligned with profile (was 0.03)
+                max_cycle_risk_pct = 0.05  # CRITICAL FIX: 5% - aligned with profile
             
             return {
                 "total_notional_usd": round(self._total_notional_usd, 2),

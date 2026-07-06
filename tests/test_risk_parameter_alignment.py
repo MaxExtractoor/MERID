@@ -25,10 +25,10 @@ class TestUnifiedRiskManagerDefaults:
     """Test that UnifiedRiskManager defaults align with profile YAML."""
 
     def test_max_cycle_risk_pct_aligned(self):
-        """Test that max_cycle_risk_pct matches profile YAML (0.5%)."""
+        """Test that max_cycle_risk_pct matches profile YAML (5%)."""
         limits = RiskLimits()
-        assert limits.max_cycle_risk_pct == 0.005, (
-            f"Expected 0.005 (0.5%), got {limits.max_cycle_risk_pct}"
+        assert limits.max_cycle_risk_pct == 0.05, (
+            f"Expected 0.05 (5%), got {limits.max_cycle_risk_pct}"
         )
 
     def test_max_total_risk_pct_aligned(self):
@@ -60,10 +60,10 @@ class TestUnifiedRiskManagerDefaults:
         )
 
     def test_per_trade_max_notional_pct_aligned(self):
-        """Test that per_trade_max_notional_pct matches profile YAML (2%)."""
+        """Test that per_trade_max_notional_pct matches profile YAML (3%)."""
         limits = RiskLimits()
-        assert limits.per_trade_max_notional_pct == 0.02, (
-            f"Expected 0.02 (2%), got {limits.per_trade_max_notional_pct}"
+        assert limits.per_trade_max_notional_pct == 0.03, (
+            f"Expected 0.03 (3%), got {limits.per_trade_max_notional_pct}"
         )
 
 
@@ -71,21 +71,21 @@ class TestUnifiedRiskEnforcementCaps:
     """Test that unified_risk_enforcement absolute caps align with profile YAML."""
 
     def test_absolute_max_cycle_risk_pct_aligned(self):
-        """Test that ABSOLUTE_MAX_CYCLE_RISK_PCT matches profile YAML (0.5%)."""
-        assert ABSOLUTE_MAX_CYCLE_RISK_PCT == 0.005, (
-            f"Expected 0.005 (0.5%), got {ABSOLUTE_MAX_CYCLE_RISK_PCT}"
+        """Test that ABSOLUTE_MAX_CYCLE_RISK_PCT matches profile YAML (5%)."""
+        assert ABSOLUTE_MAX_CYCLE_RISK_PCT == 0.05, (
+            f"Expected 0.05 (5%), got {ABSOLUTE_MAX_CYCLE_RISK_PCT}"
         )
 
     def test_absolute_max_edges_per_cycle(self):
-        """Test that ABSOLUTE_MAX_EDGES_PER_CYCLE is 3."""
-        assert ABSOLUTE_MAX_EDGES_PER_CYCLE == 3, (
-            f"Expected 3, got {ABSOLUTE_MAX_EDGES_PER_CYCLE}"
+        """Test that ABSOLUTE_MAX_EDGES_PER_CYCLE is 5."""
+        assert ABSOLUTE_MAX_EDGES_PER_CYCLE == 5, (
+            f"Expected 5, got {ABSOLUTE_MAX_EDGES_PER_CYCLE}"
         )
 
     def test_absolute_max_risk_per_trade_pct_aligned(self):
-        """Test that ABSOLUTE_MAX_RISK_PER_TRADE_PCT matches profile YAML (2%)."""
-        assert ABSOLUTE_MAX_RISK_PER_TRADE_PCT == 0.02, (
-            f"Expected 0.02 (2%), got {ABSOLUTE_MAX_RISK_PER_TRADE_PCT}"
+        """Test that ABSOLUTE_MAX_RISK_PER_TRADE_PCT matches profile YAML (3%)."""
+        assert ABSOLUTE_MAX_RISK_PER_TRADE_PCT == 0.03, (
+            f"Expected 0.03 (3%), got {ABSOLUTE_MAX_RISK_PER_TRADE_PCT}"
         )
 
 
@@ -99,11 +99,11 @@ class TestProfileYAMLConsistency:
         assert profile is not None
 
     def test_profile_max_cycle_risk_pct(self):
-        """Test that profile max_cycle_risk_pct is 0.5%."""
+        """Test that profile max_cycle_risk_pct is 5%."""
         adapter = Crypto15mProfileAdapter()
         profile = adapter.profile
-        assert profile.max_cycle_risk_pct == 0.005, (
-            f"Expected 0.005 (0.5%), got {profile.max_cycle_risk_pct}"
+        assert profile.max_cycle_risk_pct == 0.05, (
+            f"Expected 0.05 (5%), got {profile.max_cycle_risk_pct}"
         )
 
     def test_profile_drawdown_halt_pct(self):
@@ -181,10 +181,10 @@ class TestRiskParameterCrossValidation:
         # unified_risk_enforcement cap
         enforcement_cap = ABSOLUTE_MAX_CYCLE_RISK_PCT
         
-        # All should be 0.5%
-        assert profile_value == 0.005
-        assert urm_default == 0.005
-        assert enforcement_cap == 0.005
+        # All should be 5%
+        assert profile_value == 0.05
+        assert urm_default == 0.05
+        assert enforcement_cap == 0.05
 
     def test_drawdown_consistency(self):
         """Test that drawdown_halt_pct is consistent across components."""
@@ -208,9 +208,9 @@ class TestRiskParameterCrossValidation:
         # unified_risk_enforcement cap
         enforcement_cap = ABSOLUTE_MAX_RISK_PER_TRADE_PCT
         
-        # Both should be 2%
-        assert urm_default == 0.02
-        assert enforcement_cap == 0.02
+        # Both should be 3%
+        assert urm_default == 0.03
+        assert enforcement_cap == 0.03
 
 
 class TestUnifiedRiskManagerBehavior:

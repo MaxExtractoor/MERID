@@ -2791,13 +2791,12 @@ def _derive_live_bankroll_usd() -> Optional[float]:
 
 
 def _check_bankroll_risk_cap(intent: OrderIntent) -> Optional[OrderResult]:
-    """Enforce 1-2% total bankroll risk cap across TOP 3 edges.
+    """Enforce per-asset risk caps from risk envelope (single source of truth).
     
-    CRITICAL: Uses ONLY actual Kalshi balance. No fallbacks, no hardcodes.
-    With live bankroll, 2% = total cap across all 3 edges combined.
-    Each edge gets proportional allocation based on relative edge strength.
+    CRITICAL: Uses risk envelope service for per-asset caps instead of calculating independently.
+    This ensures consistency between risk envelope and order router enforcement.
     
-    FAIL-CLOSED: If live bankroll cannot be determined, order is REJECTED.
+    FAIL-CLOSED: If bankroll cannot be determined, order is REJECTED.
 
     Returns OrderResult if cap exceeded or bankroll unavailable, None if OK.
     """
@@ -2816,39 +2815,55 @@ def _check_bankroll_risk_cap(intent: OrderIntent) -> Optional[OrderResult]:
             latency_ms=0.0,
         )
 
-    # Get configured risk fraction from core.settings (2026 best practice: 0.5%)
-    # 2026 BEST PRACTICE: Read from core.settings as single source of truth
-    # FIX: Removed clamp to use profile value directly (0.5% = 0.005)
-    from core.settings import MAX_CYCLE_RISK_PCT
-    risk_fraction = MAX_CYCLE_RISK_PCT
-
-    # Calculate max total risk across ALL 3 EDGES COMBINED
-    max_total_risk_usd = effective_equity_usd * risk_fraction
-    
-    # Per-edge allocation: divide by 3 for rough sizing check
-    # (actual allocation is proportional by edge in Top3Allocator)
-    per_edge_estimate = max_total_risk_usd / 3.0
+    # CRITICAL FIX: Use risk envelope service for per-asset caps (single source of truth)
+    # This replaces the previous calculation that was inconsistent with risk envelope
+    try:
+        from merid.risk.profiles.risk_envelope_service import get_risk_envelope_service
+        from merid.event_venues.kalshi.market_filter import extract_asset_from_ticker
+        envelope_service = get_risk_envelope_service()
+        envelope_config = envelope_service.get_config()
+        
+        # Extract asset from ticker (e.g., KXBTC15M-26JUL060115-15 -> BTC)
+        asset = extract_asset_from_ticker(intent.ticker)
+        
+        # Get per-asset cap from risk envelope
+        if asset and asset in envelope_config.asset_max_notional_usd:
+            effective_max = envelope_config.asset_max_notional_usd[asset]
+            logger.debug(
+                "[BANKROLL-CAP] Using risk envelope per-asset cap: asset=%s cap=$%.2f",
+                asset, effective_max
+            )
+        else:
+            # Fallback to max_single_order_notional_usd if asset-specific cap not found
+            effective_max = envelope_config.max_single_order_notional_usd
+            logger.warning(
+                "[BANKROLL-CAP] Asset %s not found in envelope caps, using max_single_order=$%.2f",
+                asset, effective_max
+            )
+    except Exception as e:
+        logger.error("[BANKROLL-CAP] Failed to get risk envelope config: %s", e)
+        # Fallback to previous calculation if envelope service fails
+        from core.settings import MAX_CYCLE_RISK_PCT
+        risk_fraction = MAX_CYCLE_RISK_PCT
+        max_total_risk_usd = effective_equity_usd * risk_fraction
+        per_edge_estimate = max_total_risk_usd / 3.0
+        effective_max = per_edge_estimate * 1.5
+        logger.warning(
+            "[BANKROLL-CAP] Using fallback calculation: effective_max=$%.2f (risk_fraction=%.4f)",
+            effective_max, risk_fraction
+        )
 
     # Calculate notional of this intent
     intent_notional_usd = intent.count * intent.price_cents / 100.0
-
-    # 2026-07-06: DISABLED micro-account tolerance - use uniform tolerance for all accounts
-    # Risk envelope and unified_sizing handle all sizing logic; order router should not apply additional caps
-    # Use uniform 1.5x tolerance for all accounts (no micro-account adjustment)
-    tolerance_multiplier = 1.5  # Uniform tolerance for all accounts
-    effective_max = per_edge_estimate * tolerance_multiplier
 
     # Check if this single intent exceeds the effective max
     if intent_notional_usd > effective_max:
         logger.warning(
             "[BANKROLL-CAP-REJECT] %s — intent=$%.2f > effective-max=$%.2f "
-            "(per-edge=$%.2f, total-cap=$%.2f, tolerance=%.1fx, equity=$%.2f).",
+            "(equity=$%.2f, source=risk_envelope).",
             intent.ticker,
             intent_notional_usd,
             effective_max,
-            per_edge_estimate,
-            max_total_risk_usd,
-            tolerance_multiplier,
             effective_equity_usd,
         )
         _log_structured_block(
@@ -2856,9 +2871,8 @@ def _check_bankroll_risk_cap(intent: OrderIntent) -> Optional[OrderResult]:
             details={
                 "intent_notional_usd": intent_notional_usd,
                 "effective_max": effective_max,
-                "per_edge_estimate": per_edge_estimate,
-                "max_total_risk_usd": max_total_risk_usd,
                 "effective_equity_usd": effective_equity_usd,
+                "source": "risk_envelope",
             }
         )
         return OrderResult(

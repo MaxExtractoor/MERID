@@ -30,9 +30,9 @@ logger = logging.getLogger("merid.config.unified_risk_enforcement")
 # ═══════════════════════════════════════════════════════════════════════════════
 # CRITICAL FIX: Aligned with kalshi_crypto_15m_v2 profile YAML values
 # These absolute caps now match the profile's single source of truth
-ABSOLUTE_MAX_CYCLE_RISK_PCT = 0.005  # 0.5% of equity maximum total basket risk (aligned with profile)
-ABSOLUTE_MAX_EDGES_PER_CYCLE = 3    # Maximum 3 concurrent edges
-ABSOLUTE_MAX_RISK_PER_TRADE_PCT = 0.02  # FIX: 2% max per individual trade (aligned with profile)
+ABSOLUTE_MAX_CYCLE_RISK_PCT = 0.05  # 5% of equity maximum total basket risk (aligned with profile)
+ABSOLUTE_MAX_EDGES_PER_CYCLE = 5    # Maximum 5 concurrent edges (aligned with 5-asset crypto stack)
+ABSOLUTE_MAX_RISK_PER_TRADE_PCT = 0.03  # FIX: 3% max per individual trade (aligned with profile per_trade_risk_pct)
 
 # Sim-only overrides (for backtesting historical scenarios)
 ALLOWED_SIM_ONLY_OVERRIDES = [

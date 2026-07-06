@@ -2,9 +2,9 @@
 Pass 8 Tests: Unified Risk Enforcement
 
 Verifies that:
-- Global risk > 2% is clamped or rejected
+- Global risk > 5% is clamped or rejected
 - Fixed USD caps are rejected in LIVE/PAPER
-- Max concurrent edges limited to 3
+- Max concurrent edges limited to 5
 - Per-trade caps are sub-caps that aggregate correctly
 """
 
@@ -23,16 +23,16 @@ from merid.config.unified_risk_enforcement import (
 
 
 class TestGlobalRiskCapInvariant:
-    """Test 2% global risk cap cannot be exceeded."""
-    
-    def test_global_risk_clamped_to_2pct_in_sim(self):
-        """6% config should be clamped to 2% in SIM mode."""
+    """Test 5% global risk cap cannot be exceeded."""
+
+    def test_global_risk_clamped_to_5pct_in_sim(self):
+        """6% config should be clamped to 5% in SIM mode."""
         with patch("merid.config.unified_risk_enforcement._get_current_trade_mode", return_value="sim"):
             configs = [{"max_risk_pct_global": 0.06}]  # 6% - dangerous
-            
+
             result = enforce_unified_risk_model(configs)
-            
-            assert result.final_config["max_risk_pct_global"] == 0.02
+
+            assert result.final_config["max_risk_pct_global"] == 0.05
             assert len(result.violations) > 0
             assert any("clamped" in v.lower() for v in result.violations)
     
@@ -47,22 +47,22 @@ class TestGlobalRiskCapInvariant:
             assert "0.06" in str(exc_info.value)
             assert "exceeds" in str(exc_info.value).lower()
     
-    def test_global_risk_accepted_if_under_2pct(self):
-        """1.5% config should be accepted."""
+    def test_global_risk_accepted_if_under_5pct(self):
+        """3% config should be accepted."""
         with patch("merid.config.unified_risk_enforcement._get_current_trade_mode", return_value="live"):
-            configs = [{"max_risk_pct_global": 0.015}]  # 1.5%
-            
+            configs = [{"max_risk_pct_global": 0.03}]  # 3%
+
             result = enforce_unified_risk_model(configs)
-            
-            assert result.final_config["max_risk_pct_global"] == 0.015
+
+            assert result.final_config["max_risk_pct_global"] == 0.03
             assert len([v for v in result.violations if "VIOLATION" in v]) == 0
     
     @pytest.mark.parametrize("mode", ["live", "paper", "LIVE", "PAPER"])
     def test_all_live_variants_reject_high_risk(self, mode):
-        """All live/paper mode variants reject >2% global risk."""
+        """All live/paper mode variants reject >5% global risk."""
         with patch("merid.config.unified_risk_enforcement._get_current_trade_mode", return_value=mode):
-            configs = [{"max_risk_pct_global": 0.05}]
-            
+            configs = [{"max_risk_pct_global": 0.06}]
+
             with pytest.raises(RiskConfigViolationError):
                 enforce_unified_risk_model(configs)
 
@@ -103,58 +103,58 @@ class TestFixedUsdCapInvariant:
 
 
 class TestMaxEdgesInvariant:
-    """Test max 3 concurrent edges invariant."""
+    """Test max 5 concurrent edges invariant."""
     
-    def test_max_edges_clamped_to_3_in_live(self):
-        """Config with 5 edges should be clamped to 3 in LIVE."""
+    def test_max_edges_clamped_to_5_in_live(self):
+        """Config with 8 edges should be clamped to 5 in LIVE."""
         with patch("merid.config.unified_risk_enforcement._get_current_trade_mode", return_value="live"):
-            configs = [{"max_concurrent_assets": 5}]
+            configs = [{"max_concurrent_assets": 8}]
             
             result = enforce_unified_risk_model(configs)
             
-            assert result.final_config["max_concurrent_assets"] == 3
-            assert any("clamped" in v.lower() and "3" in v for v in result.violations)
+            assert result.final_config["max_concurrent_assets"] == 5
+            assert any("clamped" in v.lower() and "5" in v for v in result.violations)
     
-    def test_max_edges_accepted_if_under_3(self):
-        """Config with 2 edges should be accepted."""
-        with patch("merid.config.unified_risk_enforcement._get_current_trade_mode", return_value="live"):
-            configs = [{"max_concurrent_assets": 2}]
-            
-            result = enforce_unified_risk_model(configs)
-            
-            assert result.final_config["max_concurrent_assets"] == 2
-    
-    def test_max_edges_exactly_3_accepted(self):
-        """Config with exactly 3 edges should be accepted."""
+    def test_max_edges_accepted_if_under_5(self):
+        """Config with 3 edges should be accepted."""
         with patch("merid.config.unified_risk_enforcement._get_current_trade_mode", return_value="live"):
             configs = [{"max_concurrent_assets": 3}]
             
             result = enforce_unified_risk_model(configs)
             
             assert result.final_config["max_concurrent_assets"] == 3
+    
+    def test_max_edges_exactly_5_accepted(self):
+        """Config with exactly 5 edges should be accepted."""
+        with patch("merid.config.unified_risk_enforcement._get_current_trade_mode", return_value="live"):
+            configs = [{"max_concurrent_assets": 5}]
+            
+            result = enforce_unified_risk_model(configs)
+            
+            assert result.final_config["max_concurrent_assets"] == 5
 
 
 class TestPerTradeCapInvariant:
     """Test per-trade sub-caps aggregate correctly."""
-    
-    def test_per_trade_clamped_when_over_1pct(self):
-        """2% per-trade should be clamped to 1% (sub-cap)."""
+
+    def test_per_trade_clamped_when_over_3pct(self):
+        """5% per-trade should be clamped to 3% (sub-cap)."""
         with patch("merid.config.unified_risk_enforcement._get_current_trade_mode", return_value="live"):
-            configs = [{"max_risk_pct_per_trade": 0.02}]  # 2% per trade
+            configs = [{"max_risk_pct_per_trade": 0.05}]  # 5% per trade
             
             result = enforce_unified_risk_model(configs)
-            
-            # Should be clamped to 1%
-            assert result.final_config["max_risk_pct_per_trade"] <= 0.01
-    
-    def test_per_trade_accepted_when_under_1pct(self):
-        """0.5% per-trade should be accepted."""
+
+            # Should be clamped to 3%
+            assert result.final_config["max_risk_pct_per_trade"] == 0.03
+
+    def test_per_trade_accepted_when_under_3pct(self):
+        """2% per-trade should be accepted."""
         with patch("merid.config.unified_risk_enforcement._get_current_trade_mode", return_value="live"):
-            configs = [{"max_risk_pct_per_trade": 0.005}]
-            
+            configs = [{"max_risk_pct_per_trade": 0.02}]
+
             result = enforce_unified_risk_model(configs)
-            
-            assert result.final_config["max_risk_pct_per_trade"] == 0.005
+
+            assert result.final_config["max_risk_pct_per_trade"] == 0.02
 
 
 class TestMultiSourceConfigMerge:
@@ -175,7 +175,7 @@ class TestMultiSourceConfigMerge:
     def test_env_var_takes_precedence(self):
         """Environment variables should be checked."""
         with patch("merid.config.unified_risk_enforcement._get_current_trade_mode", return_value="live"):
-            with patch.dict(os.environ, {"MAX_RISK_PCT_GLOBAL": "0.05"}):
+            with patch.dict(os.environ, {"MAX_RISK_PCT_GLOBAL": "0.06"}):
                 with pytest.raises(RiskConfigViolationError):
                     enforce_unified_risk_model()  # Uses env
 

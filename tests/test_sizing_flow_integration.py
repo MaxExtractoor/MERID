@@ -98,7 +98,7 @@ class TestSizingFlowIntegration:
             mock_state.depth_no = 50
             mock_state.spread_cents = 10
             mock_state.mid_cents = 50
-            mock_store.get_state.return_value = mock_state
+            mock_store.get.return_value = mock_state
             mock_get_store.return_value = mock_store
             
             adjusted_size = sizer.get_liquidity_aware_size(
@@ -126,7 +126,7 @@ class TestSizingFlowIntegration:
             mock_state.depth_no = 10000
             mock_state.spread_cents = 5
             mock_state.mid_cents = 50
-            mock_store.get_state.return_value = mock_state
+            mock_store.get.return_value = mock_state
             mock_get_store.return_value = mock_store
             
             adjusted_size = sizer.get_liquidity_aware_size(
@@ -156,7 +156,7 @@ class TestSizingFlowIntegration:
         # Mock missing market state
         with patch('merid.event_venues.kalshi.market_state.get_kalshi_market_state_store') as mock_get_store:
             mock_store = Mock()
-            mock_store.get_state.return_value = None
+            mock_store.get.return_value = None
             mock_get_store.return_value = mock_store
             
             adjusted_size = sizer.get_liquidity_aware_size(
