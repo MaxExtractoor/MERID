@@ -1593,12 +1593,15 @@ class LeanAgent15m:
         # Normalize by total weight
         velocity = weighted_velocity / total_weight
         
-        # CRITICAL FIX: 2026-07-02 - Always add minimum epsilon to prevent exact zero velocity
+        # CRITICAL FIX: 2026-07-06 - Fix bias bug: use history[-1][1] instead of history[-2][1]
+        # Previous code used history[-2][1] (second-to-last price) which created incorrect trend comparison
+        # history[-1][1] is the most recent price in history, history[-2][1] is the price before that
+        # This caused systematic bias in epsilon direction, leading to only BUY_NO signals
         # This prevents the vicious cycle: velocity=0 -> no trade -> no price update -> velocity=0
         # Epsilon of 1e-9 (0.0000001%) is negligible for trading but prevents exact zero
         # Add tiny noise in direction of recent price trend if available
-        if len(history) >= 2:
-            recent_trend = (current_price - history[-2][1]) / history[-2][1]
+        if len(history) >= 1:
+            recent_trend = (current_price - history[-1][1]) / history[-1][1]
             velocity = velocity + (1e-9 if recent_trend >= 0 else -1e-9)
         else:
             # No trend data available - add small positive epsilon
@@ -2032,14 +2035,17 @@ class LeanAgent15m:
         # Apply Z-score filter for extreme detection (monitoring only)
         final_velocity = self._apply_zscore_filter(asset, atr_normalized_velocity)
         
-        # CRITICAL FIX: 2026-07-05 - Use realistic minimum epsilon based on crypto price movement research
+        # CRITICAL FIX: 2026-07-06 - Fix bias bug: use history[-1][1] instead of history[-2][1]
+        # Previous code used history[-2][1] (second-to-last price) which created incorrect trend comparison
+        # history[-1][1] is the most recent price in history, history[-2][1] is the price before that
+        # This caused systematic bias in epsilon direction, leading to only BUY_NO signals
         # Crypto prices move continuously - even in "quiet" periods, minimum movement is ~0.001% per minute
         # Previous epsilon (1e-9 = 0.0000001%) was 100,000x too small, causing velocity to appear zero
         # New epsilon (1e-5 = 0.001%) represents realistic minimum price movement for major cryptos
         # This prevents the vicious cycle: velocity=0 -> no trade -> no price update -> velocity=0
         # Add realistic minimum movement in direction of recent price trend if available
-        if len(history) >= 2:
-            recent_trend = (current_price - history[-2][1]) / history[-2][1]
+        if len(history) >= 1:
+            recent_trend = (current_price - history[-1][1]) / history[-1][1]
             final_velocity = final_velocity + (1e-5 if recent_trend >= 0 else -1e-5)
         else:
             # No trend data available - add small positive epsilon (realistic minimum movement)
