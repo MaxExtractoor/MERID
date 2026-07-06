@@ -209,7 +209,7 @@ class LiquidityAwareSizer:
         try:
             from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
             store = get_kalshi_market_state_store()
-            state = store.get_state(ticker)
+            state = store.get(ticker)
             
             if not state:
                 logger.warning(f"No market state available for {ticker}")

@@ -60,7 +60,7 @@ class RiskLimits:
     """
     
     # Bankroll-based limits (aligned with profile YAML)
-    max_cycle_risk_pct: float = 0.005  # 0.5% (was 0.25 - aligned with profile)
+    max_cycle_risk_pct: float = 0.05  # 5% (was 0.25 - aligned with profile)
     max_total_risk_pct: float = 0.15  # 15% (was 0.30 - aligned with profile)
     daily_loss_pct: float = 0.20  # 20% (aligned with drawdown halt, was 0.05)
     cluster_stop_pct: float = 0.025
@@ -184,7 +184,7 @@ class UnifiedRiskManager:
             
             # Bankroll limits
             if 'bankroll' in config:
-                limits.max_cycle_risk_pct = config['bankroll'].get('max_cycle_risk_pct', 0.005)  # CRITICAL FIX: 0.5% - aligned with profile (was 0.25)
+                limits.max_cycle_risk_pct = config['bankroll'].get('max_cycle_risk_pct', 0.05)  # CRITICAL FIX: 5% - aligned with profile
                 limits.max_total_risk_pct = config['bankroll'].get('max_total_risk_pct', 0.15)  # CRITICAL FIX: 15% - aligned with profile (was 0.30)
                 limits.daily_loss_pct = config['bankroll'].get('daily_loss_pct', 0.20)  # CRITICAL FIX: 20% - aligned with drawdown halt (was 0.05)
                 limits.cluster_stop_pct = config['bankroll'].get('cluster_stop_pct', 0.025)  # CRITICAL FIX: 2.5% - aligned with profile (was 0.015)

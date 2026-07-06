@@ -256,11 +256,11 @@ class Top3SelectionSpec:
     # Configuration - ENV-DRIVEN (no hardcoded defaults)
     # These read from environment at runtime, defaulting only if env not set
     # CRITICAL FIX: Aligned with kalshi_crypto_15m_v2.yaml profile (2026-07-04)
-    # Profile specifies: max_cycle_risk_pct: 0.005 (0.5%)
-    DEFAULT_CYCLE_RISK_CAP_PCT_MIN: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MIN", "0.005"))  # CRITICAL FIX: 0.5% (was 0.03)
-    DEFAULT_CYCLE_RISK_CAP_PCT_MAX: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MAX", "0.005"))  # CRITICAL FIX: 0.5% (was 0.03)
+    # Profile specifies: max_cycle_risk_pct: 0.05 (5%)
+    DEFAULT_CYCLE_RISK_CAP_PCT_MIN: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MIN", "0.05"))  # CRITICAL FIX: 5% (was 0.03)
+    DEFAULT_CYCLE_RISK_CAP_PCT_MAX: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MAX", "0.05"))  # CRITICAL FIX: 5% (was 0.03)
     DEFAULT_EPS: float = float(os.getenv("MERID_TOP3_EDGE_EPS", "1e-6"))
-    MAX_ASSETS: int = int(os.getenv("MERID_TOP3_MAX_ASSETS", "3"))
+    MAX_ASSETS: int = int(os.getenv("MERID_TOP3_MAX_ASSETS", "5"))  # CRITICAL FIX: 5 (was 3) - aligned with 5-asset crypto stack
     MIN_ALLOCATION_CENTS: int = int(os.getenv("MERID_TOP3_MIN_ALLOCATION_CENTS", "50"))  # $0.50 minimum
     
     VALID_ASSETS: Tuple[str, ...] = ("BTC", "ETH", "SOL", "XRP", "DOGE")

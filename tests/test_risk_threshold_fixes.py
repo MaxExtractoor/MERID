@@ -76,11 +76,11 @@ class TestCycleRiskFixes:
             import core.settings
             importlib.reload(core.settings)
             
-            MAX_CYCLE_RISK_PCT = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.005"))
+            MAX_CYCLE_RISK_PCT = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.05"))
             MAX_TOTAL_RISK_PCT = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.15"))
             
-            assert MAX_CYCLE_RISK_PCT == 0.005, \
-                f"Expected 0.5% cycle risk, got {MAX_CYCLE_RISK_PCT}"
+            assert MAX_CYCLE_RISK_PCT == 0.05, \
+                f"Expected 5% cycle risk, got {MAX_CYCLE_RISK_PCT}"
             assert MAX_TOTAL_RISK_PCT == 0.15, \
                 f"Expected 15% total risk, got {MAX_TOTAL_RISK_PCT}"
     
@@ -90,8 +90,8 @@ class TestCycleRiskFixes:
         
         guard = GlobalRiskGuard()
         
-        assert guard.max_cycle_risk_pct == 0.005, \
-            f"Expected 0.5% cycle risk, got {guard.max_cycle_risk_pct}"
+        assert guard.max_cycle_risk_pct == 0.05, \
+            f"Expected 5% cycle risk, got {guard.max_cycle_risk_pct}"
         assert guard.max_total_risk_pct == 0.15, \
             f"Expected 15% total risk, got {guard.max_total_risk_pct}"
     
@@ -99,11 +99,11 @@ class TestCycleRiskFixes:
         """Test global_risk_guard.py env var fallbacks."""
         # Test the _load_risk_pcts_from_env function
         with patch.dict(os.environ, {}, clear=True):
-            cycle = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.005"))
+            cycle = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.05"))
             total = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.15"))
             
-            assert cycle == 0.005, \
-                f"Expected 0.5% cycle risk fallback, got {cycle}"
+            assert cycle == 0.05, \
+                f"Expected 5% cycle risk fallback, got {cycle}"
             assert total == 0.15, \
                 f"Expected 15% total risk fallback, got {total}"
 

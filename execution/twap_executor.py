@@ -298,7 +298,7 @@ class TWAPExecutor:
         try:
             from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
             store = get_kalshi_market_state_store()
-            state = store.get_state(ticker)
+            state = store.get(ticker)
             
             if state and state.mid_cents:
                 return state.mid_cents

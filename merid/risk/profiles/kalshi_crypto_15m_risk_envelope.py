@@ -430,7 +430,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
     
     # ── Compute Per-Asset Caps ────────────────────────────────────────────────
     # Apply minimum floor to ensure trades are possible with small bankrolls
-    min_max_notional_usd = profile_config.get('min_max_notional_usd', 0.50)  # FIXED: Default 0.50 to match YAML (was 0.0)
+    min_max_notional_usd = profile_config.get('min_max_notional_usd', 0.10)  # FIXED: Default 0.10 to match YAML (was 0.50)
     
     asset_max_notional_usd = {}
     asset_depth_thresholds = {}

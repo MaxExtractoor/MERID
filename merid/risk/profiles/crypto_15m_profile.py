@@ -781,7 +781,7 @@ class Crypto15mProfileAdapter:
                 momentum_fvg_spread_gate_cents=momentum_fvg_config.get('spread_gate_cents', 40),
                 momentum_fvg_spread_gate_obi_persistence_boost=momentum_fvg_config.get('spread_gate_obi_persistence_boost', 0.75),
                 
-                max_cycle_risk_pct=self._normalize_percentage_value(raw.get('max_cycle_risk_pct', 0.005)),  # CRITICAL FIX: 0.5% - aligned with profile (was 0.10)
+                max_cycle_risk_pct=self._normalize_percentage_value(raw.get('max_cycle_risk_pct', 0.05)),  # CRITICAL FIX: 5% - aligned with profile
                 max_cycle_risk_usd=raw.get('max_cycle_risk_usd', 0.0),
                 
                 # Venue-level caps (percentage-based, normalize dict format)
