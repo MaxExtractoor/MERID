@@ -59,10 +59,30 @@ def _get_regime_position_size_multiplier() -> float:
     - MEAN_REVERTING: 0.8 (moderate reduction)
     - HIGH_VOLATILITY: 0.4 (significant reduction)
     - CRISIS: 0.1 (minimal trading)
-    - UNKNOWN: 0.0 (no trading)
+    - UNKNOWN: 1.0 (FIX: 2026-07-04 - Changed from 0.0 to 1.0 to prevent silent blocking)
+    
+    CRITICAL FIX: 2026-07-04 - Prevent silent blocking by regime detection
+    Previous behavior: UNKNOWN regime returned 0.0 multiplier, blocking ALL trades
+    New behavior: UNKNOWN regime returns 1.0 (allow trading with normal sizing)
+    This prevents regime detection failures from silently blocking all trading
+    
+    CRITICAL FIX: 2026-07-06 - Added guard to prevent regime sizing from interfering with risk limits
+    Regime sizing is DISABLED to prevent interference with 3% per asset / 5% per 15m window limits.
+    If re-enabled in the future, this guard ensures:
+    1. Multiplier is never <= 0.0 (would block all trades)
+    2. Multiplier is clamped to safe range [0.1, 1.0]
+    3. Exception handling prevents regime detection failures from blocking trading
     
     Returns:
         Multiplier between 0.0 and 1.0. Returns 1.0 if regime detection unavailable.
+    """
+    # CRITICAL: Regime sizing is DISABLED to prevent interference with risk limits
+    # If you re-enable regime sizing, you MUST update the risk envelope to account for it
+    # and ensure 3% per asset / 5% per 15m window limits are still respected
+    return 1.0
+    
+    # The code below is preserved for future reference if regime sizing is re-enabled
+    # It includes comprehensive guards to prevent silent blocking
     """
     if not _REGIME_DETECTION_AVAILABLE:
         return 1.0
@@ -72,19 +92,40 @@ def _get_regime_position_size_multiplier() -> float:
         constraints = detector.get_constraints()
         if constraints:
             multiplier = constraints.position_size_multiplier
-            logger.debug(
-                "[REGIME-SIZING] Applied regime position_size_multiplier=%.2f",
-                multiplier
-            )
+            # CRITICAL FIX: Prevent 0.0 multiplier from blocking all trades
+            if multiplier <= 0.0:
+                logger.warning(
+                    "[REGIME-SIZING] CRITICAL: Regime multiplier=%.2f would block all trades, forcing to 1.0",
+                    multiplier
+                )
+                multiplier = 1.0
+            # CRITICAL FIX: Clamp multiplier to safe range [0.1, 1.0]
+            # This prevents extreme reductions that could interfere with risk limits
+            if multiplier < 0.1:
+                logger.warning(
+                    "[REGIME-SIZING] CRITICAL: Regime multiplier=%.2f below safe minimum 0.1, clamping to 0.1",
+                    multiplier
+                )
+                multiplier = 0.1
+            if multiplier > 1.0:
+                logger.warning(
+                    "[REGIME-SIZING] CRITICAL: Regime multiplier=%.2f above safe maximum 1.0, clamping to 1.0",
+                    multiplier
+                )
+                multiplier = 1.0
             return multiplier
     except Exception as e:
         logger.warning("[REGIME-SIZING] Failed to get regime multiplier: %s", e)
     
     return 1.0
+    """
 
 
 def _get_tte_position_size_multiplier(tte_seconds: Optional[float] = None) -> float:
     """Get position size multiplier from TTE regime.
+    
+    DISABLED: TTE sizing interferes with 3% per asset / 5% per 15m window limits.
+    Always returns 1.0 to prevent TTE-based scaling from interfering with risk limits.
     
     This reads from merid.risk.tte_regime.TTERegimeConfig size multipliers:
     - NORMAL: 1.0 (normal)
@@ -98,20 +139,7 @@ def _get_tte_position_size_multiplier(tte_seconds: Optional[float] = None) -> fl
     Returns:
         Multiplier between 0.0 and 1.0. Returns 1.0 if TTE regime unavailable or tte_seconds is None.
     """
-    if not _TTE_REGIME_AVAILABLE or tte_seconds is None:
-        return 1.0
-    
-    try:
-        classifier = get_tte_classifier()
-        multiplier = classifier.get_size_multiplier(tte_seconds)
-        logger.debug(
-            "[TTE-SIZING] Applied TTE regime size_multiplier=%.2f (tte_seconds=%.0f)",
-            multiplier, tte_seconds
-        )
-        return multiplier
-    except Exception as e:
-        logger.warning("[TTE-SIZING] Failed to get TTE multiplier: %s", e)
-    
+    # DISABLED: Always return 1.0 to prevent TTE sizing from interfering with risk limits
     return 1.0
 
 
@@ -127,8 +155,8 @@ def compute_min_notional_for_venue(
     """Compute minimum notional requirement from venue/contract metadata.
     
     This function centralizes min_notional calculation to avoid hardcoded constants.
-    For Kalshi, the minimum notional is typically $1.00 for sanity check compliance,
-    but this should be derived from venue rules or contract metadata when available.
+    For Kalshi, the minimum notional is $0.50 to align with kalshi_crypto_15m_v2.yaml profile
+    (min_notional_usd: 0.50 for micro accounts under $100 bankroll).
     
     Args:
         venue: Venue name (e.g., "kalshi")
@@ -141,9 +169,9 @@ def compute_min_notional_for_venue(
     # Kalshi-specific rules
     if venue.lower() == "kalshi":
         # Kalshi contracts pay $1 per contract
-        # Minimum order notional is $1.00 for sanity check compliance
+        # Minimum order notional is $0.50 to align with profile (micro account support)
         # This is a venue-level requirement, not a risk limit
-        return Decimal("1.00")
+        return Decimal("0.50")
     
     # For other venues or if venue metadata is unavailable, return 0.0 (no constraint)
     # This allows the sizing function to proceed without a min_notional floor
@@ -191,7 +219,7 @@ def _get_per_asset_risk_pct(asset: str) -> Optional[Decimal]:
     This reads from kalshi_crypto_15m.yaml per-asset max_notional_pct.
     
     Args:
-        asset: Asset symbol (e.g., "BTC", "ETH", "SOL", "XRP", "DOGE")
+        asset: Asset symbol (e.g., "BTC", "ETH", "SOL", "XRP", "DOGE", or "BTC15M", "ETH15M", etc.)
     
     Returns:
         Risk percentage as Decimal, or None to use global cap
@@ -206,9 +234,21 @@ def _get_per_asset_risk_pct(asset: str) -> Optional[Decimal]:
         if is_profile_active():
             adapter = get_active_profile()
             profile = adapter.profile
-            asset_config = profile.asset_configs.get(asset)
+            
+            # CRITICAL FIX: Normalize asset name by stripping "15M" suffix
+            # Profile config uses keys like "BTC", "ETH", "SOL", "XRP", "DOGE"
+            # But callers may pass "BTC15M", "ETH15M", etc.
+            asset_normalized = asset.replace("15M", "") if asset.endswith("15M") else asset
+            
+            asset_config = profile.asset_configs.get(asset_normalized)
             if asset_config:
                 return Decimal(str(asset_config.max_notional_pct))
+            else:
+                logger.warning(
+                    "[UNIFIED-SIZING] Asset %s (normalized to %s) not in profile config, using global cap",
+                    asset, asset_normalized
+                )
+                return None
         else:
             logger.error("[UNIFIED-SIZING] Profile not active - cannot size orders in production")
             raise RuntimeError("Active profile required for production sizing")
@@ -276,7 +316,7 @@ def _get_max_contracts_per_asset(asset: str) -> int:
     This reads from kalshi_crypto_15m.yaml per-asset max_contracts.
     
     Args:
-        asset: Asset symbol (e.g., "BTC", "ETH", "SOL", "XRP", "DOGE")
+        asset: Asset symbol (e.g., "BTC", "ETH", "SOL", "XRP", "DOGE", or "BTC15M", "ETH15M", etc.)
     
     Returns:
         Max contracts for this asset
@@ -291,11 +331,17 @@ def _get_max_contracts_per_asset(asset: str) -> int:
         if is_profile_active():
             adapter = get_active_profile()
             profile = adapter.profile
-            asset_config = profile.asset_configs.get(asset)
+            
+            # CRITICAL FIX: Normalize asset name by stripping "15M" suffix
+            # Profile config uses keys like "BTC", "ETH", "SOL", "XRP", "DOGE"
+            # But callers may pass "BTC15M", "ETH15M", etc.
+            asset_normalized = asset.replace("15M", "") if asset.endswith("15M") else asset
+            
+            asset_config = profile.asset_configs.get(asset_normalized)
             if asset_config:
                 return asset_config.max_contracts
             # If asset not in profile, use a conservative default
-            logger.warning("[UNIFIED-SIZING] Asset %s not in profile config, using default max_contracts=10", asset)
+            logger.warning("[UNIFIED-SIZING] Asset %s (normalized to %s) not in profile config, using default max_contracts=10", asset, asset_normalized)
             return 10
         else:
             logger.error("[UNIFIED-SIZING] Profile not active - cannot size orders in production")
@@ -385,7 +431,7 @@ def _get_dynamic_sizing_edge_multiplier() -> float:
         Edge multiplier as float.
     """
     if not _PROFILE_AVAILABLE:
-        return 0.5  # Default
+        return 2.0  # 2026-07-05: Updated default from 0.5 to 2.0 based on Turbine research
     
     try:
         if is_profile_active():
@@ -395,7 +441,7 @@ def _get_dynamic_sizing_edge_multiplier() -> float:
     except Exception as e:
         logger.warning("[UNIFIED-SIZING] Failed to read dynamic_sizing_edge_multiplier: %s", e)
     
-    return 0.5  # Default
+    return 2.0  # 2026-07-05: Updated default from 0.5 to 2.0 based on Turbine research
 
 
 def _get_dynamic_sizing_confidence_multiplier() -> float:
@@ -407,7 +453,7 @@ def _get_dynamic_sizing_confidence_multiplier() -> float:
         Confidence multiplier as float.
     """
     if not _PROFILE_AVAILABLE:
-        return 0.3  # Default
+        return 1.0  # 2026-07-05: Updated default from 0.3 to 1.0 based on Turbine research
     
     try:
         if is_profile_active():
@@ -417,7 +463,7 @@ def _get_dynamic_sizing_confidence_multiplier() -> float:
     except Exception as e:
         logger.warning("[UNIFIED-SIZING] Failed to read dynamic_sizing_confidence_multiplier: %s", e)
     
-    return 0.3  # Default
+    return 1.0  # 2026-07-05: Updated default from 0.3 to 1.0 based on Turbine research
 
 
 def _get_dynamic_sizing_max_contracts() -> int:

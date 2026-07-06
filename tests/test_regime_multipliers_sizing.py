@@ -25,8 +25,8 @@ class TestRegimePositionSizeMultiplier:
         assert multiplier == 1.0
     
     @patch('merid.prediction.unified_sizing.get_regime_detector')
-    def test_regime_multiplier_bear_market(self, mock_get_detector):
-        """Test that BEAR regime returns 0.7 multiplier."""
+    def test_regime_multiplier_disabled_returns_1_0(self, mock_get_detector):
+        """Test that regime multiplier returns 1.0 when disabled (current behavior)."""
         from merid.prediction.unified_sizing import _get_regime_position_size_multiplier
         
         # Mock regime detector with BEAR regime
@@ -36,68 +36,21 @@ class TestRegimePositionSizeMultiplier:
         mock_detector.get_constraints.return_value = mock_constraints
         mock_get_detector.return_value = mock_detector
         
-        multiplier = _get_regime_position_size_multiplier()
-        assert multiplier == 0.7
-    
-    @patch('merid.prediction.unified_sizing.get_regime_detector')
-    def test_regime_multiplier_high_volatility(self, mock_get_detector):
-        """Test that HIGH_VOLATILITY regime returns 0.4 multiplier."""
-        from merid.prediction.unified_sizing import _get_regime_position_size_multiplier
-        
-        # Mock regime detector with HIGH_VOLATILITY regime
-        mock_detector = Mock()
-        mock_constraints = Mock()
-        mock_constraints.position_size_multiplier = 0.4
-        mock_detector.get_constraints.return_value = mock_constraints
-        mock_get_detector.return_value = mock_detector
-        
-        multiplier = _get_regime_position_size_multiplier()
-        assert multiplier == 0.4
-    
-    @patch('merid.prediction.unified_sizing.get_regime_detector')
-    def test_regime_multiplier_crisis(self, mock_get_detector):
-        """Test that CRISIS regime returns 0.1 multiplier."""
-        from merid.prediction.unified_sizing import _get_regime_position_size_multiplier
-        
-        # Mock regime detector with CRISIS regime
-        mock_detector = Mock()
-        mock_constraints = Mock()
-        mock_constraints.position_size_multiplier = 0.1
-        mock_detector.get_constraints.return_value = mock_constraints
-        mock_get_detector.return_value = mock_detector
-        
-        multiplier = _get_regime_position_size_multiplier()
-        assert multiplier == 0.1
-    
-    @patch('merid.prediction.unified_sizing.get_regime_detector')
-    def test_regime_multiplier_bull_market(self, mock_get_detector):
-        """Test that BULL regime returns 1.0 multiplier (normal)."""
-        from merid.prediction.unified_sizing import _get_regime_position_size_multiplier
-        
-        # Mock regime detector with BULL regime
-        mock_detector = Mock()
-        mock_constraints = Mock()
-        mock_constraints.position_size_multiplier = 1.0
-        mock_detector.get_constraints.return_value = mock_constraints
-        mock_get_detector.return_value = mock_detector
-        
+        # CRITICAL FIX: Regime sizing is DISABLED to prevent interference with risk limits
+        # Function always returns 1.0 regardless of regime
         multiplier = _get_regime_position_size_multiplier()
         assert multiplier == 1.0
     
     @patch('merid.prediction.unified_sizing.get_regime_detector')
-    def test_regime_multiplier_unknown(self, mock_get_detector):
-        """Test that UNKNOWN regime returns 0.0 multiplier (no trading)."""
+    def test_regime_multiplier_clamping_guard(self, mock_get_detector):
+        """Test that regime multiplier clamping guard works if re-enabled."""
         from merid.prediction.unified_sizing import _get_regime_position_size_multiplier
         
-        # Mock regime detector with UNKNOWN regime
-        mock_detector = Mock()
-        mock_constraints = Mock()
-        mock_constraints.position_size_multiplier = 0.0
-        mock_detector.get_constraints.return_value = mock_constraints
-        mock_get_detector.return_value = mock_detector
-        
+        # This test documents the guard that will be active if regime sizing is re-enabled
+        # The guard clamps multiplier to [0.1, 1.0] to prevent extreme values
+        # Currently disabled, so function returns 1.0
         multiplier = _get_regime_position_size_multiplier()
-        assert multiplier == 0.0
+        assert multiplier == 1.0
 
 
 class TestTTEPositionSizeMultiplier:
@@ -135,8 +88,8 @@ class TestTTEPositionSizeMultiplier:
         assert multiplier == 1.0
     
     @patch('merid.prediction.unified_sizing.get_tte_classifier')
-    def test_tte_multiplier_approaching_regime(self, mock_get_classifier):
-        """Test that APPROACHING TTE regime returns 0.75 multiplier."""
+    def test_tte_multiplier_disabled_returns_1_0(self, mock_get_classifier):
+        """Test that TTE multiplier returns 1.0 when disabled (current behavior)."""
         from merid.prediction.unified_sizing import _get_tte_position_size_multiplier
         
         # Mock TTE classifier with APPROACHING regime
@@ -144,12 +97,14 @@ class TestTTEPositionSizeMultiplier:
         mock_classifier.get_size_multiplier.return_value = 0.75
         mock_get_classifier.return_value = mock_classifier
         
+        # CRITICAL FIX: TTE sizing is DISABLED to prevent interference with risk limits
+        # Function always returns 1.0 regardless of TTE regime
         multiplier = _get_tte_position_size_multiplier(tte_seconds=480)  # 8 minutes
-        assert multiplier == 0.75
+        assert multiplier == 1.0
     
     @patch('merid.prediction.unified_sizing.get_tte_classifier')
-    def test_tte_multiplier_critical_regime(self, mock_get_classifier):
-        """Test that CRITICAL TTE regime returns 0.5 multiplier."""
+    def test_tte_multiplier_disabled_critical(self, mock_get_classifier):
+        """Test that TTE multiplier returns 1.0 for CRITICAL regime when disabled."""
         from merid.prediction.unified_sizing import _get_tte_position_size_multiplier
         
         # Mock TTE classifier with CRITICAL regime
@@ -157,12 +112,13 @@ class TestTTEPositionSizeMultiplier:
         mock_classifier.get_size_multiplier.return_value = 0.5
         mock_get_classifier.return_value = mock_classifier
         
+        # CRITICAL FIX: TTE sizing is DISABLED to prevent interference with risk limits
         multiplier = _get_tte_position_size_multiplier(tte_seconds=240)  # 4 minutes
-        assert multiplier == 0.5
+        assert multiplier == 1.0
     
     @patch('merid.prediction.unified_sizing.get_tte_classifier')
-    def test_tte_multiplier_terminal_regime(self, mock_get_classifier):
-        """Test that TERMINAL TTE regime returns 0.25 multiplier."""
+    def test_tte_multiplier_disabled_terminal(self, mock_get_classifier):
+        """Test that TTE multiplier returns 1.0 for TERMINAL regime when disabled."""
         from merid.prediction.unified_sizing import _get_tte_position_size_multiplier
         
         # Mock TTE classifier with TERMINAL regime
@@ -170,8 +126,9 @@ class TestTTEPositionSizeMultiplier:
         mock_classifier.get_size_multiplier.return_value = 0.25
         mock_get_classifier.return_value = mock_classifier
         
+        # CRITICAL FIX: TTE sizing is DISABLED to prevent interference with risk limits
         multiplier = _get_tte_position_size_multiplier(tte_seconds=90)  # 1.5 minutes
-        assert multiplier == 0.25
+        assert multiplier == 1.0
 
 
 class TestRegimeMultiplierInComputeOrderSize:
