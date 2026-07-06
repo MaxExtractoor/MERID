@@ -1576,6 +1576,37 @@ class Kalshi15mLoop:
                                     "[15m-LOOP] Dynamic sizing: ticker=%s edge=%.4f confidence=%.4f count=%d notional=%.2f",
                                     ticker, float(edge_pct), float(confidence), count, float(notional)
                                 )
+                                
+                                # CRITICAL FIX: Integrate LiquidityAwareSizer to reduce size based on market depth
+                                # This prevents slippage and market impact by respecting available liquidity
+                                try:
+                                    from execution.liquidity_aware_sizing import get_liquidity_sizer
+                                    sizer = get_liquidity_sizer()
+                                    
+                                    # Determine side from candidate
+                                    side = candidate.get("side", "yes").lower()
+                                    
+                                    # Get liquidity-aware size
+                                    liquidity_adjusted_count = sizer.get_liquidity_aware_size(
+                                        ticker=ticker,
+                                        side=side,
+                                        desired_contracts=count,
+                                        max_participation_rate=0.1  # 10% participation rate
+                                    )
+                                    
+                                    if liquidity_adjusted_count < count:
+                                        logger.info(
+                                            "[15m-LOOP] Liquidity-aware sizing reduced count: ticker=%s from %d to %d (depth-based adjustment)",
+                                            ticker, count, liquidity_adjusted_count
+                                        )
+                                        candidate["count"] = liquidity_adjusted_count
+                                    else:
+                                        logger.debug(
+                                            "[15m-LOOP] Liquidity-aware sizing: ticker=%s count unchanged (sufficient liquidity)",
+                                            ticker
+                                        )
+                                except Exception as liquidity_err:
+                                    logger.warning("[15m-LOOP] Liquidity-aware sizing failed, using risk-based count: %s", liquidity_err)
                             except Exception as sizing_err:
                                 logger.warning("[15m-LOOP] Dynamic sizing failed, using default count=1: %s", sizing_err)
                                 candidate["count"] = 1
@@ -3651,101 +3682,23 @@ class Kalshi15mLoop:
             else:
                 logger.info("[15M-LOOP] ticker=%s price_cents from candidate=%d (side=%s)", ticker, price_cents, candidate.get("side"))
             
-            # Calculate position size from risk envelope
-            count = 1  # Default
-            if self._risk_envelope:
-                try:
-                    # RiskEnvelopeConfig may not have per_trade_risk_multiplier, use default
-                    risk_multiplier = getattr(self._risk_envelope, 'per_trade_risk_multiplier', 1.0)
-                    # Compute base_size from max_single_order_notional_usd (conservative 50c contract price)
-                    max_single_notional = getattr(self._risk_envelope, 'max_single_order_notional_usd', 0.50)
-                    assumed_contract_price_usd = 0.50  # Conservative assumption for 15m crypto futures
-                    base_size = max_single_notional / assumed_contract_price_usd
-                    base_size = max(1.0, base_size)  # Ensure minimum of 1 contract
-                    count = int(base_size * risk_multiplier)
-                    
-                    # CRITICAL FIX: Hard cap count=1 for small bankrolls (<$100)
-                    # This prevents PER_TRADE_NOTIONAL rejections when position sizing allows multiple contracts
-                    # but risk limits reject them. Research shows minimum stake for small accounts is optimal.
-                    effective_equity_usd = getattr(self._risk_envelope, 'live_bankroll_usd', 0.0)
-                    if effective_equity_usd < 100.0:
-                        count = 1
-                        logger.info("[15M-LOOP] Small bankroll ($%.2f < $100) - forcing count=1 to prevent PER_TRADE_NOTIONAL rejections", effective_equity_usd)
-                    if count < 1:
-                        count = 1
-                    
-                    # Validate position size notional against profile limits
-                    # Calculate notional: count * price_cents / 100
-                    position_notional_usd = (count * price_cents) / 100.0
-                    logger.info("[15M-LOOP] ticker=%s count=%d price_cents=%d calculated_notional=%.2f", ticker, count, price_cents, position_notional_usd)
-                    
-                    # Check against per-asset notional cap
-                    asset_max_notional = getattr(self._risk_envelope, 'asset_max_notional_usd', {})
-                    if asset in asset_max_notional:
-                        current_exposure = self._asset_positions.get(asset, 0.0)
-                        new_exposure = current_exposure + position_notional_usd
-                        max_asset_notional = asset_max_notional[asset]
-                        
-                        if new_exposure > max_asset_notional:
-                            logger.warning(
-                                "[15M-LOOP] Asset %s exposure %.2f + %.2f > max %.2f, reducing count",
-                                asset, current_exposure, position_notional_usd, max_asset_notional
-                            )
-                            # Reduce count to fit within limit
-                            available_notional = max_asset_notional - current_exposure
-                            if available_notional > 0:
-                                count = int((available_notional * 100.0) / price_cents)
-                                if count < 1:
-                                    count = 1
-                                position_notional_usd = (count * price_cents) / 100.0
-                            else:
-                                logger.warning("[15M-LOOP] Asset %s at max exposure, skipping trade", asset)
-                                return
-                    
-                    # Check against concurrent trade limit
-                    max_concurrent = getattr(self._risk_envelope, 'max_concurrent_trades', 5)
-                    current_active = sum(self._active_trades.values())
-                    if current_active >= max_concurrent:
-                        logger.warning(
-                            "[15M-LOOP] Concurrent trades %d >= max %d, skipping trade",
-                            current_active, max_concurrent
-                        )
-                        return
-                    
-                    # Check against max_single_order_notional_usd
-                    max_notional = getattr(self._risk_envelope, 'max_single_order_notional_usd', float('inf'))
-                    if position_notional_usd > max_notional:
-                        logger.warning(
-                            "[15M-LOOP] Position notional %.2f > max %.2f, reducing count",
-                            position_notional_usd, max_notional
-                        )
-                        count = int((max_notional * 100.0) / price_cents)
-                        if count < 1:
-                            count = 1
-                        # CRITICAL: Recalculate position_notional_usd after reducing count
-                        position_notional_usd = (count * price_cents) / 100.0
-                    
-                    # Check against min_notional_usd (if available)
-                    min_notional = getattr(self._risk_envelope, 'min_notional_usd', 0.0)
-                    if min_notional > 0 and position_notional_usd < min_notional:
-                        logger.warning(
-                            "[15M-LOOP] Position notional %.2f < min %.2f, increasing count",
-                            position_notional_usd, min_notional
-                        )
-                        count = int((min_notional * 100.0) / price_cents)
-                        if count < 1:
-                            count = 1
-                    
-                    logger.info(
-                        "[15M-LOOP] Position sizing: count=%d notional=%.2f multiplier=%.2f",
-                        count, (count * price_cents) / 100.0, risk_multiplier
-                    )
-                except Exception as e:
-                    logger.warning("[15M-LOOP] Failed to calculate position size: %s", e)
-
-            # CRITICAL: position_notional_usd is already calculated in risk envelope block above
-            # including recalculation after count reduction (line 3074)
-            # Do NOT recalculate here as it would overwrite the corrected value
+            # CRITICAL FIX: Consolidated sizing path - use count from unified_sizing
+            # The count is already computed by compute_order_size in the main loop (line 1565)
+            # This removes the dual sizing path inconsistency where _execute_candidate
+            # would recalculate count from risk envelope, overwriting the unified_sizing result
+            count = candidate.get("count", 1)
+            
+            # Validate count is reasonable
+            if count < 1:
+                logger.warning("[15M-LOOP] Invalid count=%d from candidate, defaulting to 1", count)
+                count = 1
+            
+            # Calculate notional for logging
+            position_notional_usd = (count * price_cents) / 100.0
+            logger.info(
+                "[15M-LOOP] Using unified_sizing count=%d notional=%.2f ticker=%s",
+                count, position_notional_usd, ticker
+            )
 
             # BUG #34 FIX: Extract edge_pct, confidence, model_prob from candidate
             # These are now computed in signal generation (BUG #36) and carried through candidate

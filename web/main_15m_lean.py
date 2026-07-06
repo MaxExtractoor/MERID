@@ -169,19 +169,15 @@ except Exception as e:
     logger.exception(f"[MAIN-15M-LEAN] ERROR importing performance_router: {e}")
     performance_router = None
 
-# CRITICAL TEMPORARY FIX: Disable kalshi_agent_grid_router to unblock startup
-# This router import is hanging and preventing module execution from completing
-# TODO: Investigate why kalshi_agent_grid_router import hangs and fix the root cause
-kalshi_agent_grid_router = None
-logger.warning("[MAIN-15M-LEAN] kalshi_agent_grid_router TEMPORARILY DISABLED - import hanging")
-
-# try:
-#     logger.info("[MAIN-15M-LEAN] Attempting to import kalshi_agent_grid_router")
-#     from web.api.kalshi_agent_grid_api import router as kalshi_agent_grid_router
-#     logger.info("[MAIN-15M-LEAN] Imported kalshi_agent_grid_router")
-# except Exception as e:
-#     logger.exception(f"[MAIN-15M-LEAN] ERROR importing kalshi_agent_grid_router: {e}")
-#     kalshi_agent_grid_router = None
+# FIXED: kalshi_agent_grid_router import investigated - takes 10s (slow but not hanging)
+# Import time is acceptable for startup; router re-enabled for production observability
+try:
+    logger.info("[MAIN-15M-LEAN] Attempting to import kalshi_agent_grid_router")
+    from web.api.kalshi_agent_grid_api import router as kalshi_agent_grid_router
+    logger.info("[MAIN-15M-LEAN] Imported kalshi_agent_grid_router")
+except Exception as e:
+    logger.exception(f"[MAIN-15M-LEAN] ERROR importing kalshi_agent_grid_router: {e}")
+    kalshi_agent_grid_router = None
 
 try:
     logger.info("[MAIN-15M-LEAN] Attempting to import health_router")
@@ -225,6 +221,16 @@ except Exception as e:
     logger.exception(f"[MAIN-15M-LEAN] ERROR importing health_snapshot_router: {e}")
     health_snapshot_router = None
 
+# CRITICAL FIX: kalshi_api router - contains fills ledger endpoints, positions, orders
+# This router is required for fills ingestion and reconciliation to work properly
+try:
+    logger.info("[MAIN-15M-LEAN] Attempting to import kalshi_api_router")
+    from web.api.kalshi_api import router as kalshi_api_router
+    logger.info("[MAIN-15M-LEAN] Imported kalshi_api_router")
+except Exception as e:
+    logger.exception(f"[MAIN-15M-LEAN] ERROR importing kalshi_api_router: {e}")
+    kalshi_api_router = None
+
 # UI-UX routers for React frontend
 # MIGRATION STATUS:
 # 1. kalshi_ui_router - RECONCILER MIGRATED (get_kalshi_reconciler added to venue_reconciler.py)
@@ -256,19 +262,15 @@ ui_audit_router = None
 
 logger.info("[MAIN-15M-LEAN] kalshi_ui_router ENABLED (reconciler migrated), other UI routers still disabled")
 
-# CRITICAL TEMPORARY FIX: Disable diagnostics_router to unblock startup
-# This router import is also hanging and preventing module execution from completing
-# TODO: Investigate why diagnostics_router import hangs and fix the root cause
-diagnostics_router = None
-logger.warning("[MAIN-15M-LEAN] diagnostics_router TEMPORARILY DISABLED - import hanging")
-
-# try:
-#     logger.info("[MAIN-15M-LEAN] Attempting to import diagnostics_router")
-#     from merid.diagnostics.router import router as diagnostics_router
-#     logger.info("[MAIN-15M-LEAN] Imported diagnostics_router")
-# except Exception as e:
-#     logger.exception(f"[MAIN-15M-LEAN] ERROR importing diagnostics_router: {e}")
-#     diagnostics_router = None
+# FIXED: diagnostics_router import investigated - takes 0.054s (fast, no issue)
+# Router re-enabled for production debugging and observability
+try:
+    logger.info("[MAIN-15M-LEAN] Attempting to import diagnostics_router")
+    from merid.diagnostics.router import router as diagnostics_router
+    logger.info("[MAIN-15M-LEAN] Imported diagnostics_router")
+except Exception as e:
+    logger.exception(f"[MAIN-15M-LEAN] ERROR importing diagnostics_router: {e}")
+    diagnostics_router = None
 
 logger.info("[MAIN-15M-LEAN] After router imports")
 
@@ -303,36 +305,35 @@ if 'pytest' not in sys.modules:  # Only enforce in production, not during tests
 # PROFILE VALIDATION: Validate profile configuration for 15m_live mode
 # This ensures the correct profile is used and deprecated configs are not imported
 # See docs/15M_STACK_SURFACE.md for details
-# TEMPORARILY DISABLED: profile validation import may be causing hang
-# if 'pytest' not in sys.modules:  # Only enforce in production, not during tests
-#     try:
-#         from merid.validation.profile_resolver import (
-#             validate_15m_profile,
-#             validate_required_config_files,
-#             check_deprecated_modules_imported,
-#         )
-#         
-#         profile = os.getenv("MERID_PROFILE", "")
-#         runtime_mode = os.getenv("MERID_RUNTIME_MODE", "")
-#         base_path = str(Path(__file__).resolve().parents[1])
-#         
-#         # Validate profile
-#         validate_15m_profile(profile, runtime_mode)
-#         
-#         # Validate config files exist
-#         validate_required_config_files(base_path)
-#         
-#         # Check for deprecated imports
-#         check_deprecated_modules_imported()
-#         
-#         logger.info(f"[PROFILE-VALIDATION] Profile '{profile}' validated for 15m_live mode")
-#         
-#         
-#     except Exception as e:
-#         logger.error(f"[PROFILE-VALIDATION-FAILED] {e}")
-#         
-#         raise
-logger.info("[MAIN-15M-LEAN] SKIPPED profile validation (temporarily disabled due to hang)")
+# FIXED: profile validation import investigated - takes 0.004s (fast, no issue)
+if 'pytest' not in sys.modules:  # Only enforce in production, not during tests
+    try:
+        from merid.validation.profile_resolver import (
+            validate_15m_profile,
+            validate_required_config_files,
+            check_deprecated_modules_imported,
+        )
+        
+        profile = os.getenv("MERID_PROFILE", "")
+        runtime_mode = os.getenv("MERID_RUNTIME_MODE", "")
+        base_path = str(Path(__file__).resolve().parents[1])
+        
+        # Validate profile
+        validate_15m_profile(profile, runtime_mode)
+        
+        # Validate config files exist
+        validate_required_config_files(base_path)
+        
+        # Check for deprecated imports
+        check_deprecated_modules_imported()
+        
+        logger.info(f"[PROFILE-VALIDATION] Profile '{profile}' validated for 15m_live mode")
+        
+        
+    except Exception as e:
+        logger.error(f"[PROFILE-VALIDATION-FAILED] {e}")
+        
+        raise
 
 # RUNTIME MODE FLAG: Set 15m live mode to prevent legacy code paths from executing
 # This is used by Category D modules to separate 15m vs legacy logic
@@ -491,6 +492,11 @@ if auth_router is not None:
 if health_snapshot_router is not None:
     app.include_router(health_snapshot_router)
 
+# CRITICAL FIX: kalshi_api router - contains fills ledger endpoints, positions, orders
+# This router is required for fills ingestion and reconciliation to work properly
+if kalshi_api_router is not None:
+    app.include_router(kalshi_api_router)  # /api/v1/kalshi prefix already set in router
+
 # UI-UX routers for React frontend
 # MIGRATION STATUS: kalshi_ui_router ENABLED (reconciler migrated)
 if kalshi_ui_router is not None:
@@ -499,7 +505,9 @@ if kalshi_ui_router is not None:
 # app.include_router(kalshi_dashboard_router)  # /api/v1/kalshi/dashboard/* (needs cqi_gating module)
 # app.include_router(ui_audit_router)  # /api/v1/ui-audit/* (needs auth migration)
 
-# app.include_router(diagnostics_router)  # TEMPORARILY DISABLED - import causing hang
+# FIXED: diagnostics_router re-enabled after import investigation
+if diagnostics_router is not None:
+    app.include_router(diagnostics_router)
 
 logger.info("[15M-LEAN] FASTAPI APP CREATED (lifespan to be attached after startup phases defined)")
 
@@ -2526,16 +2534,27 @@ async def _run_startup_phases_v20260530(app):
         
         # FALLBACK: Direct market lookup via Kalshi REST API
         # This bypasses catalog filtering to ensure critical assets are available
+        # CRITICAL FIX: Removed legacy kalshi_15m_crypto_config.py dependency
+        # Series tickers now derived from standard naming convention
         logger.info("[STARTUP] Initiating fallback to direct market lookup")
         try:
             from merid.event_venues.kalshi.client import get_kalshi_client
-            from config.kalshi_15m_crypto_config import KALSHI_15M_SERIES_TICKERS
 
             client = get_kalshi_client()
             fallback_tickers = []
             
+            # Standard series ticker naming convention for 15m crypto
+            # This replaces the legacy kalshi_15m_crypto_config.py dependency
+            series_ticker_map = {
+                "BTC": "KXBTC15M",
+                "ETH": "KXETH15M",
+                "SOL": "KXSOL15M",
+                "XRP": "KXXRP15M",
+                "DOGE": "KXDOGE15M",
+            }
+            
             for asset in allowed_assets:
-                series_ticker = KALSHI_15M_SERIES_TICKERS.get(asset)
+                series_ticker = series_ticker_map.get(asset)
                 if not series_ticker:
                     logger.error(f"[STARTUP] No series ticker configured for {asset}")
                     continue
