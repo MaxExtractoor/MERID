@@ -2832,27 +2832,17 @@ def _check_bankroll_risk_cap(intent: OrderIntent) -> Optional[OrderResult]:
     # Calculate notional of this intent
     intent_notional_usd = intent.count * intent.price_cents / 100.0
 
-    # 2026-07-05: Re-enabled micro-account tolerance for accounts under $100
-    # Small accounts need higher tolerance to allow any trading at all
-    # With $34 bankroll and 0.5% cycle risk, per_edge is only $0.056
-    # Use 10x tolerance for micro accounts to allow $0.50+ orders
-    if effective_equity_usd < 100.0:
-        tolerance_multiplier = 10.0  # Micro account: 10x tolerance
-    else:
-        tolerance_multiplier = 1.5  # Normal account: 1.5x tolerance
+    # 2026-07-06: DISABLED micro-account tolerance - use uniform tolerance for all accounts
+    # Risk envelope and unified_sizing handle all sizing logic; order router should not apply additional caps
+    # Use uniform 1.5x tolerance for all accounts (no micro-account adjustment)
+    tolerance_multiplier = 1.5  # Uniform tolerance for all accounts
     effective_max = per_edge_estimate * tolerance_multiplier
-
-    # FIX: Add minimum order notional floor to ensure minimum viable orders
-    # 2026-07-05: Lowered to $0.10 to match DEEP_OTM_CHEAP_CENTS and allow micro-account trading
-    min_order_notional = 0.10  # Minimum viable order for micro accounts
-    effective_max = max(effective_max, min_order_notional)
 
     # Check if this single intent exceeds the effective max
     if intent_notional_usd > effective_max:
         logger.warning(
             "[BANKROLL-CAP-REJECT] %s — intent=$%.2f > effective-max=$%.2f "
-            "(per-edge=$%.2f, total-cap=$%.2f, tolerance=%.1fx, equity=$%.2f). "
-            "Micro-account adjustment applied for equity < $100.",
+            "(per-edge=$%.2f, total-cap=$%.2f, tolerance=%.1fx, equity=$%.2f).",
             intent.ticker,
             intent_notional_usd,
             effective_max,
@@ -2876,8 +2866,7 @@ def _check_bankroll_risk_cap(intent: OrderIntent) -> Optional[OrderResult]:
             mode=TradingMode.LIVE,
             reason=(
                 f"bankroll_risk_cap_exceeded: Order notional (${intent_notional_usd:.2f}) "
-                f"exceeds effective limit (${effective_max:.2f}) based on live Kalshi balance. "
-                f"Micro-account adjustment applied for equity < $100."
+                f"exceeds effective limit (${effective_max:.2f}) based on live Kalshi balance."
             ),
             latency_ms=0.0,
         )
