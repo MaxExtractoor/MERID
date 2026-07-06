@@ -47,9 +47,12 @@ MAX_OPEN_PRICE_CENTS: Final[int] = 55  # RESEARCH-BASED: Max entry at 55c for pr
 MIN_MODEL_PROB: Final[float] = 0.60
 
 # Confidence bands
-CONFIDENCE_NO_TRADE: Final[float] = 0.60
-CONFIDENCE_CAUTIOUS: Final[float] = 0.75
-CONFIDENCE_CONFIDENT: Final[float] = 0.75
+# 2026-07-06: DEPRECATED - These hardcoded values should be read from profile YAML instead
+# Use profile.confidence_min_confidence_threshold (0.65) as the single source of truth
+# These values are kept for backward compatibility but should not be used in new code
+CONFIDENCE_NO_TRADE: Final[float] = 0.60  # DEPRECATED: Use profile.confidence_min_confidence_threshold
+CONFIDENCE_CAUTIOUS: Final[float] = 0.75  # DEPRECATED: Use profile.confidence_min_confidence_threshold
+CONFIDENCE_CONFIDENT: Final[float] = 0.75  # DEPRECATED: Use profile.confidence_min_confidence_threshold
 
 # ============================================================================
 # MARKETABLE LIMIT ORDER PARAMETERS
@@ -493,7 +496,9 @@ KELLY_BASE_FRACTION: Final[float] = 0.20  # Fifth-Kelly
 KELLY_MAX_ALLOCATION_PCT: Final[float] = 0.05  # 5% of capital per trade
 
 # Kelly confidence floor (minimum confidence to use Kelly)
-KELLY_CONFIDENCE_FLOOR: Final[float] = 0.65
+# 2026-07-06: DEPRECATED - This should be read from profile YAML instead
+# Use profile.confidence_min_confidence_threshold (0.65) as the single source of truth
+KELLY_CONFIDENCE_FLOOR: Final[float] = 0.65  # DEPRECATED: Use profile.confidence_min_confidence_threshold
 
 # ============================================================================
 # TIMEFRAME-SPECIFIC EDGE THRESHOLDS
@@ -531,7 +536,9 @@ SENTIMENT_HISTORY_WINDOW: Final[int] = 30
 SENTIMENT_DIVERGENCE_THRESHOLD: Final[float] = 0.30  # 30%
 
 # Minimum sentiment confidence to use in sizing
-MIN_SENTIMENT_CONFIDENCE: Final[float] = 0.70
+# 2026-07-06: DEPRECATED - This should be read from profile YAML instead
+# Use profile.confidence_min_confidence_threshold (0.65) as the single source of truth
+MIN_SENTIMENT_CONFIDENCE: Final[float] = 0.70  # DEPRECATED: Use profile.confidence_min_confidence_threshold
 
 # ============================================================================
 # VALIDATION ERROR CODES

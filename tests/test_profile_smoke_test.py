@@ -164,8 +164,12 @@ class TestProfileSmokeTest:
             assert cycle_cap['capital_usd'] == profile.capital_usd
             assert cycle_cap['max_cycle_risk_pct'] == profile.max_cycle_risk_pct
             
-            # Verify cycle risk is 2% of profile capital
-            expected_cycle_risk = profile.capital_usd * profile.max_cycle_risk_pct
+            # Verify cycle risk uses absolute cap if set, otherwise percentage
+            # Profile has max_cycle_risk_usd: 7.00 (hardcoded cap to allow 10 contracts at max entry price)
+            if profile.max_cycle_risk_usd > 0:
+                expected_cycle_risk = profile.max_cycle_risk_usd
+            else:
+                expected_cycle_risk = profile.capital_usd * profile.max_cycle_risk_pct
             assert cycle_cap['max_total_notional_usd'] == expected_cycle_risk
             
             # Verify this is independent of any simulated bankroll
@@ -209,7 +213,7 @@ class TestProfileSmokeTest:
             profile = adapter.profile
             
             # Verify guardrail parameters are from profile
-            assert profile.guardrails_max_spread_cents == 50  # 2026-07-04: 50c from profile (guardrails section)
+            assert profile.guardrails_max_spread_cents == 75  # 2026-07-04: 75c from profile (guardrails section) - aligned with universe and market_microstructure
             assert profile.guardrails_max_slippage_cents == 5  # INCREASED from 3 to 5 based on 2026 research
             # min_depth_contracts removed - now uses per-asset depth thresholds (single source of truth)
             assert profile.guardrails_min_post_fee_edge == 0.015  # LOWERED from 0.02 to 0.015 based on 2026 research
@@ -263,7 +267,10 @@ class TestProfileSmokeTest:
             assert profile.confidence_use_crypto_threshold_matrix is False  # Updated to match actual profile
             assert profile.confidence_profile_name is None  # Updated to match actual profile
             
-            # Verify Kelly multipliers can override matrix
+            # 2026-07-06: Verify primary confidence threshold from YAML
+            assert profile.confidence_min_confidence_threshold == 0.65, "Primary confidence threshold should be 0.65"
+            
+            # Verify Kelly multipliers can override matrix (DEPRECATED - kept for backward compatibility)
             assert profile.confidence_kelly_multiplier_no_trade == 0.0
             assert profile.confidence_kelly_multiplier_cautious == 0.5
             assert profile.confidence_kelly_multiplier_quick_win == 0.6

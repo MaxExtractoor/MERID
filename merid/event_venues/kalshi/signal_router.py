@@ -206,7 +206,9 @@ class SignalRouter:
     _MIN_QUALITY_SCORE: float = 0.30
     
     # Minimum confidence for signal to be considered
-    _MIN_CONFIDENCE: float = 0.55
+    # 2026-07-06: Standardized to 0.65 to align with profile YAML (confidence.min_confidence_threshold)
+    # Previous value 0.55 was causing double-gating with order router (0.65)
+    _MIN_CONFIDENCE: float = 0.65
     
     def __init__(self) -> None:
         self._subscribers: List[Callable[[AgentSignal], None]] = []
