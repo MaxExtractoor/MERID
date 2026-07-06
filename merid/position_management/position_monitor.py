@@ -159,7 +159,172 @@ class PositionMonitor:
         # Update runtime state
         position.update_runtime_state(current_price_cents)
         
-        # Check TP/SL first (highest priority)
+        # Log position state for debugging
+        logger.debug(
+            "[POSITION-MONITOR] Checking position=%s market=%s side=%s entry=%dc current=%dc pnl=%dc R=%.2f "
+            "tp=%dc sl=%dc trailing=%s",
+            position.position_id[:8],
+            position.market_id,
+            position.side.value,
+            position.avg_entry_price_cents,
+            current_price_cents,
+            position.unrealized_pnl_cents,
+            position.r_multiple,
+            position.take_profit_price_cents or 0,
+            position.stop_loss_price_cents or 0,
+            position.trailing_activated,
+        )
+        
+        # CRITICAL: Check extreme profit exit first (highest priority)
+        # Exit at 99c YES / 1c NO to lock in guaranteed wins
+        # CRITICAL FIX: 2026-07-06 - Consolidated 99c exit to single mechanism (removed duplicate ratchet 99c check)
+        # The position-level extreme profit check handles 99c YES / 1c NO for all assets
+        # Profile ratchet_mandatory_exit_at_99c is redundant and removed from this path
+        if position.should_trigger_extreme_profit(current_price_cents):
+            logger.info(
+                "[POSITION-MONITOR] EXTREME-PROFIT triggered: position=%s price=%dc (99c YES / 1c NO) - locking guaranteed win",
+                position.position_id[:8],
+                current_price_cents,
+            )
+            self._emit_exit_intent(position, ExitReason.EXTREME_PROFIT, current_price_cents)
+            return
+        
+        # RATCHET PROFIT FLOOR: Lock in profits at 80-85c range
+        # Research-backed mechanism to prevent giving back gains when 99c TP is not guaranteed
+        # 2026-07-05: Added position trimming and 99c hard exit
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
+            if is_profile_active():
+                adapter = get_active_profile()
+                profile = adapter.profile
+                if profile.ratchet_profit_floor_enabled:
+                    activation_threshold = profile.ratchet_activation_threshold_cents  # 85c
+                    floor_offset = profile.ratchet_floor_offset_cents  # 5c (floor at 80c)
+                    force_exit = profile.ratchet_force_exit_on_floor_breach
+                    # CRITICAL FIX: 2026-07-06 - Removed mandatory_exit_at_99c (redundant, handled by position-level extreme profit)
+                    trim_enabled = profile.ratchet_trim_position_enabled  # 2026-07-05
+                    trim_threshold = profile.ratchet_trim_threshold_cents  # 2026-07-05: 80c
+                    trim_to_contracts = profile.ratchet_trim_to_contracts  # 2026-07-05: 1 contract
+                    
+                    # Calculate floor price
+                    floor_price = activation_threshold - floor_offset
+                    
+                    # Check if position hit activation threshold
+                    if not hasattr(position, 'ratchet_activated'):
+                        position.ratchet_activated = False
+                    if not hasattr(position, 'ratchet_hold_until'):
+                        position.ratchet_hold_until = 0
+                    if not hasattr(position, 'ratchet_trimmed'):
+                        position.ratchet_trimmed = False  # 2026-07-05: Track if position was trimmed
+                    
+                    # 2026-07-05: POSITION TRIMMING when >1 contract and price >80c
+                    if trim_enabled and not position.ratchet_trimmed:
+                        if position.size > trim_to_contracts:
+                            if position.side == PositionSide.YES and current_price_cents >= trim_threshold:
+                                position.ratchet_trimmed = True
+                                # Emit trim intent (partial close)
+                                contracts_to_close = position.size - trim_to_contracts
+                                logger.info(
+                                    "[POSITION-MONITOR] RATCHET-TRIM triggered: position=%s price=%dc size=%d -> trim to %d contracts (close %d)",
+                                    position.position_id[:8],
+                                    current_price_cents,
+                                    position.size,
+                                    trim_to_contracts,
+                                    contracts_to_close,
+                                )
+                                self._emit_exit_intent(position, ExitReason.RATCHET_TRIM, current_price_cents, contracts_to_close)
+                                # Update position size after trim (don't remove from monitoring)
+                                position.size = trim_to_contracts
+                                return  # Exit early after trim
+                            elif position.side == PositionSide.NO and current_price_cents <= (100 - trim_threshold):
+                                position.ratchet_trimmed = True
+                                contracts_to_close = position.size - trim_to_contracts
+                                logger.info(
+                                    "[POSITION-MONITOR] RATCHET-TRIM triggered: position=%s price=%dc size=%d -> trim to %d contracts (close %d)",
+                                    position.position_id[:8],
+                                    current_price_cents,
+                                    position.size,
+                                    trim_to_contracts,
+                                    contracts_to_close,
+                                )
+                                self._emit_exit_intent(position, ExitReason.RATCHET_TRIM, current_price_cents, contracts_to_close)
+                                # Update position size after trim (don't remove from monitoring)
+                                position.size = trim_to_contracts
+                                return  # Exit early after trim
+                    
+                    # Activate ratchet when price hits threshold
+                    if not position.ratchet_activated:
+                        if position.side == PositionSide.YES and current_price_cents >= activation_threshold:
+                            position.ratchet_activated = True
+                            position.ratchet_hold_until = datetime.utcnow().timestamp() + profile.ratchet_min_hold_after_activation_sec
+                            logger.info(
+                                "[POSITION-MONITOR] RATCHET activated: position=%s price=%dc threshold=%dc floor=%dc",
+                                position.position_id[:8],
+                                current_price_cents,
+                                activation_threshold,
+                                floor_price,
+                            )
+                        elif position.side == PositionSide.NO and current_price_cents <= (100 - activation_threshold):
+                            position.ratchet_activated = True
+                            position.ratchet_hold_until = datetime.utcnow().timestamp() + profile.ratchet_min_hold_after_activation_sec
+                            logger.info(
+                                "[POSITION-MONITOR] RATCHET activated: position=%s price=%dc threshold=%dc floor=%dc",
+                                position.position_id[:8],
+                                current_price_cents,
+                                100 - activation_threshold,
+                                100 - floor_price,
+                            )
+                    
+                    # Check floor breach after activation and hold period
+                    # CRITICAL FIX: 2026-07-06 - Bypass hold period when in profit zone (80-85c) for faster exit
+                    if position.ratchet_activated:
+                        # Check if in profit zone (already activated ratchet means we hit 85c)
+                        # If in profit zone, bypass hold period for immediate exit on floor breach
+                        in_profit_zone = position.ratchet_activated  # Ratchet activated means we hit 85c
+                        hold_expired = datetime.utcnow().timestamp() >= position.ratchet_hold_until
+                        can_exit = hold_expired or in_profit_zone  # Exit if hold expired OR in profit zone
+                        
+                        if can_exit:
+                            if position.side == PositionSide.YES and current_price_cents <= floor_price:
+                                if force_exit:
+                                    logger.info(
+                                        "[POSITION-MONITOR] RATCHET-FLOOR-BREACH triggered: position=%s price=%dc floor=%dc - mandatory exit (hold_period=%s)",
+                                        position.position_id[:8],
+                                        current_price_cents,
+                                        floor_price,
+                                        "bypassed" if in_profit_zone else "expired",
+                                    )
+                                    self._emit_exit_intent(position, ExitReason.RATCHET_FLOOR, current_price_cents)
+                                    return
+                                else:
+                                    logger.warning(
+                                        "[POSITION-MONITOR] RATCHET-FLOOR-BREACH: position=%s price=%dc floor=%dc (exit not forced)",
+                                        position.position_id[:8],
+                                        current_price_cents,
+                                        floor_price,
+                                    )
+                            elif position.side == PositionSide.NO and current_price_cents >= (100 - floor_price):
+                                if force_exit:
+                                    logger.info(
+                                        "[POSITION-MONITOR] RATCHET-FLOOR-BREACH triggered: position=%s price=%dc floor=%dc - mandatory exit (hold_period=%s)",
+                                        position.position_id[:8],
+                                        current_price_cents,
+                                        100 - floor_price,
+                                        "bypassed" if in_profit_zone else "expired",
+                                    )
+                                    self._emit_exit_intent(position, ExitReason.RATCHET_FLOOR, current_price_cents)
+                                    return
+                                else:
+                                    logger.warning(
+                                        "[POSITION-MONITOR] RATCHET-FLOOR-BREACH: position=%s price=%dc floor=%dc (exit not forced)",
+                                        position.position_id[:8],
+                                        current_price_cents,
+                                        100 - floor_price,
+                                    )
+        except Exception as e:
+            logger.debug("[POSITION-MONITOR] Ratchet profit floor check failed: %s", e)
+        
+        # Check TP/SL next
         if position.should_trigger_stop_loss(current_price_cents):
             logger.info(
                 "[POSITION-MONITOR] STOP-LOSS triggered: position=%s price=%dc sl=%dc R=%.2f",
@@ -212,17 +377,20 @@ class PositionMonitor:
         # For 15-minute binary options, waiting for 1R break-even is too conservative
         # Many trades never reach 1R before reversing, causing avoidable losses
         # Activate trailing after min_profit_cents from profile (default 12 cents, align with 2026 research)
+        # CRITICAL FIX: 2026-07-06 - Activate aggressive trailing (2c distance) when price crosses 80c profit zone
         if not position.trailing_activated:
             # Check if position has minimum profit to activate trailing
             min_profit_cents = 12  # Default from profile (align with 2026 research)
+            profit_zone_activation_cents = 80  # CRITICAL FIX: 2026-07-06 - Activate aggressive trailing at 80c
             try:
                 from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
                 if is_profile_active():
                     adapter = get_active_profile()
                     profile = adapter.profile
                     min_profit_cents = profile.trailing_stop_min_profit_cents
+                    profit_zone_activation_cents = profile.trailing_stop_profit_zone_activation_cents
             except Exception as e:
-                logger.debug("[POSITION-MONITOR] Could not read min_profit_cents from profile: %s", e)
+                logger.debug("[POSITION-MONITOR] Could not read trailing config from profile: %s", e)
             
             # Calculate current profit in cents
             if position.side == PositionSide.YES:
@@ -233,14 +401,60 @@ class PositionMonitor:
             # Activate trailing if minimum profit threshold reached
             if profit_cents >= min_profit_cents:
                 position.trailing_activated = True
-                logger.info(
-                    "[POSITION-MONITOR] TRAILING activated: position=%s price=%dc profit=%dc R=%.2f threshold=%dc",
-                    position.position_id[:8],
-                    current_price_cents,
-                    profit_cents,
-                    position.r_multiple,
-                    min_profit_cents,
-                )
+                # CRITICAL FIX: 2026-07-06 - Check if in profit zone (80c for YES, 20c for NO)
+                in_profit_zone = False
+                if position.side == PositionSide.YES and current_price_cents >= profit_zone_activation_cents:
+                    in_profit_zone = True
+                    position.trailing_profit_zone_activated = True
+                elif position.side == PositionSide.NO and current_price_cents <= (100 - profit_zone_activation_cents):
+                    in_profit_zone = True
+                    position.trailing_profit_zone_activated = True
+                
+                if in_profit_zone:
+                    logger.info(
+                        "[POSITION-MONITOR] TRAILING activated (AGGRESSIVE 2c mode): position=%s price=%dc profit=%dc R=%.2f - in 80-85c profit zone",
+                        position.position_id[:8],
+                        current_price_cents,
+                        profit_cents,
+                        position.r_multiple,
+                    )
+                else:
+                    logger.info(
+                        "[POSITION-MONITOR] TRAILING activated (normal 5c mode): position=%s price=%dc profit=%dc R=%.2f threshold=%dc",
+                        position.position_id[:8],
+                        current_price_cents,
+                        profit_cents,
+                        position.r_multiple,
+                        min_profit_cents,
+                    )
+        else:
+            # CRITICAL FIX: 2026-07-06 - Check if position entered profit zone after trailing was already activated
+            # Switch to aggressive trailing if price crosses 80c
+            if not position.trailing_profit_zone_activated:
+                profit_zone_activation_cents = 80
+                try:
+                    from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
+                    if is_profile_active():
+                        adapter = get_active_profile()
+                        profile = adapter.profile
+                        profit_zone_activation_cents = profile.trailing_stop_profit_zone_activation_cents
+                except Exception as e:
+                    logger.debug("[POSITION-MONITOR] Could not read profit zone config from profile: %s", e)
+                
+                if position.side == PositionSide.YES and current_price_cents >= profit_zone_activation_cents:
+                    position.trailing_profit_zone_activated = True
+                    logger.info(
+                        "[POSITION-MONITOR] TRAILING switched to AGGRESSIVE 2c mode: position=%s price=%dc - entered 80-85c profit zone",
+                        position.position_id[:8],
+                        current_price_cents,
+                    )
+                elif position.side == PositionSide.NO and current_price_cents <= (100 - profit_zone_activation_cents):
+                    position.trailing_profit_zone_activated = True
+                    logger.info(
+                        "[POSITION-MONITOR] TRAILING switched to AGGRESSIVE 2c mode: position=%s price=%dc - entered 80-85c profit zone",
+                        position.position_id[:8],
+                        current_price_cents,
+                    )
         
         # Check trailing stop (only if activated)
         if position.trailing_activated and position.should_trigger_trail(current_price_cents):
@@ -332,7 +546,8 @@ class PositionMonitor:
         self,
         position: Position,
         exit_reason: ExitReason,
-        exit_price_cents: int
+        exit_price_cents: int,
+        contracts_to_close: Optional[int] = None
     ) -> None:
         """
         Emit exit intent via callback.
@@ -341,23 +556,76 @@ class PositionMonitor:
             position: Position to exit
             exit_reason: Exit reason
             exit_price_cents: Exit price in cents
+            contracts_to_close: Number of contracts to close (None = full position)
         """
-        # Mark position as exited
-        position.mark_exited(exit_reason.value, exit_price_cents)
+        # Log exit intent emission
+        if contracts_to_close is None:
+            # Full position exit
+            logger.info(
+                "[POSITION-MONITOR] EMITTING EXIT INTENT: position=%s market=%s side=%s reason=%s exit_price=%dc "
+                "entry_price=%dc pnl=%dc R=%.2f size=%d (FULL EXIT)",
+                position.position_id[:8],
+                position.market_id,
+                position.side.value,
+                exit_reason.value,
+                exit_price_cents,
+                position.avg_entry_price_cents,
+                position.unrealized_pnl_cents,
+                position.r_multiple,
+                position.size,
+            )
+        else:
+            # Partial position exit (trim)
+            logger.info(
+                "[POSITION-MONITOR] EMITTING EXIT INTENT: position=%s market=%s side=%s reason=%s exit_price=%dc "
+                "entry_price=%dc pnl=%dc R=%.2f size=%d -> close %d (PARTIAL TRIM)",
+                position.position_id[:8],
+                position.market_id,
+                position.side.value,
+                exit_reason.value,
+                exit_price_cents,
+                position.avg_entry_price_cents,
+                position.unrealized_pnl_cents,
+                position.r_multiple,
+                position.size,
+                contracts_to_close,
+            )
         
-        # Remove from monitoring
-        self.remove_position(position.position_id)
+        # For partial trims, don't mark as exited or remove from monitoring
+        # Only full exits should remove the position
+        if contracts_to_close is None:
+            # Mark position as exited
+            position.mark_exited(exit_reason.value, exit_price_cents)
+            
+            # Remove from monitoring
+            self.remove_position(position.position_id)
         
         # Call callback if registered
         if self._exit_intent_callback:
             try:
-                self._exit_intent_callback(position, exit_reason, exit_price_cents)
+                logger.info(
+                    "[POSITION-MONITOR] Calling exit intent callback for position=%s reason=%s contracts=%s",
+                    position.position_id[:8],
+                    exit_reason.value,
+                    contracts_to_close or "ALL",
+                )
+                # Pass contracts_to_close to callback for partial close handling
+                self._exit_intent_callback(position, exit_reason, exit_price_cents, contracts_to_close)
+                logger.info(
+                    "[POSITION-MONITOR] Exit intent callback completed for position=%s",
+                    position.position_id[:8],
+                )
             except Exception as e:
                 logger.error(
                     "[POSITION-MONITOR] Exit intent callback failed: %s",
                     e,
                     exc_info=True
                 )
+        else:
+            logger.warning(
+                "[POSITION-MONITOR] No exit intent callback registered - exit order will NOT be placed for position=%s",
+                position.position_id[:8],
+            )
     
     def _emit_scale_out_intent(
         self,

@@ -197,23 +197,24 @@ offset_hedging:
 # Dynamic stop-loss that follows price to lock in profits
 trailing_stop:
   enabled: true  # Set to true to enable trailing stop
-  trailing_distance_cents: 5  # 5 cents trailing distance
+  trailing_distance_cents: 5  # 5 cents trailing distance (normal)
+  trailing_distance_cents_profit_zone: 2  # 2 cents trailing distance in 80-85c profit zone (aggressive)
   min_profit_cents: 12  # Only activate after 12c profit (align with 2026 research: 10-15¢ threshold to avoid noise-triggered exits)
   activation_delay_sec: 30  # Wait 30s before activating
-  description: "Trailing stop: lock in profits as price moves favorably"
+  profit_zone_activation_cents: 80  # Activate aggressive trailing when price crosses 80c
+  description: "Trailing stop: lock in profits as price moves favorably (tightens to 2c in 80-85c zone)"
 
 # Ratchet Profit Floor Configuration
 # Research-backed mechanism to lock in profits when price reaches high threshold
 # Prevents giving back significant gains when 99¢ TP is not guaranteed
-# 2026-07-05: Added mandatory 99c exit for maximum profit capture
 # 2026-07-05: Added position trimming to derisk when >1 contract and price >80c
+# CRITICAL FIX: 2026-07-06 - Removed mandatory_exit_at_99c (redundant, handled by position-level extreme profit)
 ratchet_profit_floor:
   enabled: true  # Enable ratchet profit floor mechanism
   activation_threshold_cents: 85  # Activate ratchet when price hits this threshold
   floor_offset_cents: 5  # Set floor X cents below activation (e.g., 85¢ activation → 80¢ floor)
   force_exit_on_floor_breach: true  # Mandatory exit if price drops to floor
   min_hold_after_activation_sec: 30  # Prevent immediate exit on noise (seconds)
-  mandatory_exit_at_99c: true  # Mandatory exit when price reaches 99c (maximum profit)
   trim_position_enabled: true  # Trim position when >1 contract and price >80c
   trim_threshold_cents: 80  # Trim when price crosses this threshold
   trim_to_contracts: 1  # Trim to 1 contract to lock in profits
@@ -294,6 +295,12 @@ momentum_fvg:
   obi_ewma_alpha_doge: 0.20  # DOGE: less depth, quicker reaction
   
   # Fair Value Gap (FVG) parameters - Kalshi 15m constraints
+  # CRITICAL: These are the single source of truth for FVG configuration
+  # Previously used environment variables (MERID_FVG_*), now consolidated to profile YAML
+  fvg_window_size: 20  # Rolling window size for FVG detection (number of candles)
+  fvg_min_gap_cents: 2.0  # Minimum gap size in cents to consider valid FVG
+  fvg_fill_threshold_cents: 5.0  # Distance threshold to consider FVG as filling
+  fvg_atr_period: 14  # ATR period for FVG strength calculation
   fvg_max_age_bars: 4  # Maximum age of FVG in bars (15m bars, 4 bars = 60min)
   fvg_min_size_ticks: 3  # Minimum FVG size in ticks to consider valid
   fvg_min_time_to_expiry_min: 30  # Minimum time to expiry to use FVG for new entries (30min)

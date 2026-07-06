@@ -98,6 +98,10 @@ class Crypto15mProfile:
     momentum_fvg_obi_ewma_alpha_sol: float  # SOL EWMA alpha
     momentum_fvg_obi_ewma_alpha_xrp: float  # XRP EWMA alpha
     momentum_fvg_obi_ewma_alpha_doge: float  # DOGE EWMA alpha
+    momentum_fvg_fvg_window_size: int  # FVG rolling window size (number of candles)
+    momentum_fvg_fvg_min_gap_cents: float  # Minimum FVG gap size in cents
+    momentum_fvg_fvg_fill_threshold_cents: float  # FVG fill distance threshold in cents
+    momentum_fvg_fvg_atr_period: int  # ATR period for FVG strength calculation
     momentum_fvg_fvg_max_age_bars: int  # Maximum FVG age in bars
     momentum_fvg_fvg_min_size_ticks: int  # Minimum FVG size in ticks
     momentum_fvg_fvg_min_time_to_expiry_min: float  # Minimum time to expiry for FVG entries
@@ -314,8 +318,10 @@ class Crypto15mProfile:
     # Position Management: Trailing Stop Configuration
     trailing_stop_enabled: bool = True  # CRITICAL FIX: Default to True to match YAML config (was False - trailing stops were disabled)
     trailing_stop_trailing_distance_cents: int = 5
+    trailing_stop_trailing_distance_cents_profit_zone: int = 2  # CRITICAL FIX: 2026-07-06 - Aggressive trailing in 80-85c profit zone
     trailing_stop_min_profit_cents: int = 12  # Updated from 3 to 12 (align with 2026 research: 10-15¢ threshold to avoid noise-triggered exits)
     trailing_stop_activation_delay_sec: int = 30
+    trailing_stop_profit_zone_activation_cents: int = 80  # CRITICAL FIX: 2026-07-06 - Activate aggressive trailing at 80c
     
     # Position Management: Ratchet Profit Floor Configuration
     # Research-backed mechanism to lock in profits when price reaches high threshold
@@ -325,7 +331,7 @@ class Crypto15mProfile:
     ratchet_floor_offset_cents: int = 5  # Set floor X cents below activation (e.g., 85¢ activation → 80¢ floor)
     ratchet_force_exit_on_floor_breach: bool = True  # Mandatory exit if price drops to floor
     ratchet_min_hold_after_activation_sec: int = 30  # Prevent immediate exit on noise (seconds)
-    ratchet_mandatory_exit_at_99c: bool = True  # 2026-07-05: Mandatory exit when price reaches 99c (maximum profit)
+    # CRITICAL FIX: 2026-07-06 - Removed ratchet_mandatory_exit_at_99c (redundant, handled by position-level extreme profit)
     ratchet_trim_position_enabled: bool = True  # 2026-07-05: Trim position when >1 contract and price >80c
     ratchet_trim_threshold_cents: int = 80  # 2026-07-05: Trim when price crosses this threshold
     ratchet_trim_to_contracts: int = 1  # 2026-07-05: Trim to 1 contract to lock in profits
@@ -760,6 +766,11 @@ class Crypto15mProfileAdapter:
                 momentum_fvg_obi_ewma_alpha_sol=momentum_fvg_config.get('obi_ewma_alpha_sol', 0.20),
                 momentum_fvg_obi_ewma_alpha_xrp=momentum_fvg_config.get('obi_ewma_alpha_xrp', 0.20),
                 momentum_fvg_obi_ewma_alpha_doge=momentum_fvg_config.get('obi_ewma_alpha_doge', 0.20),
+                # CRITICAL FIX: 2026-07-06 - Added FVG config from profile YAML (single source of truth)
+                momentum_fvg_fvg_window_size=momentum_fvg_config.get('fvg_window_size', 20),
+                momentum_fvg_fvg_min_gap_cents=momentum_fvg_config.get('fvg_min_gap_cents', 2.0),
+                momentum_fvg_fvg_fill_threshold_cents=momentum_fvg_config.get('fvg_fill_threshold_cents', 5.0),
+                momentum_fvg_fvg_atr_period=momentum_fvg_config.get('fvg_atr_period', 14),
                 momentum_fvg_fvg_max_age_bars=momentum_fvg_config.get('fvg_max_age_bars', 4),
                 momentum_fvg_fvg_min_size_ticks=momentum_fvg_config.get('fvg_min_size_ticks', 3),
                 momentum_fvg_fvg_min_time_to_expiry_min=momentum_fvg_config.get('fvg_min_time_to_expiry_min', 30.0),
@@ -978,15 +989,17 @@ class Crypto15mProfileAdapter:
                 # Position Management: Trailing Stop Configuration
                 trailing_stop_enabled=raw.get('trailing_stop', {}).get('enabled', False),
                 trailing_stop_trailing_distance_cents=raw.get('trailing_stop', {}).get('trailing_distance_cents', 5),
-                trailing_stop_min_profit_cents=raw.get('trailing_stop', {}).get('min_profit_cents', 3),
+                trailing_stop_trailing_distance_cents_profit_zone=raw.get('trailing_stop', {}).get('trailing_distance_cents_profit_zone', 2),  # CRITICAL FIX: 2026-07-06
+                trailing_stop_min_profit_cents=raw.get('trailing_stop', {}).get('min_profit_cents', 12),
                 trailing_stop_activation_delay_sec=raw.get('trailing_stop', {}).get('activation_delay_sec', 30),
+                trailing_stop_profit_zone_activation_cents=raw.get('trailing_stop', {}).get('profit_zone_activation_cents', 80),  # CRITICAL FIX: 2026-07-06
                 # Position Management: Ratchet Profit Floor Configuration
                 ratchet_profit_floor_enabled=raw.get('ratchet_profit_floor', {}).get('enabled', True),
                 ratchet_activation_threshold_cents=raw.get('ratchet_profit_floor', {}).get('activation_threshold_cents', 85),
                 ratchet_floor_offset_cents=raw.get('ratchet_profit_floor', {}).get('floor_offset_cents', 5),
                 ratchet_force_exit_on_floor_breach=raw.get('ratchet_profit_floor', {}).get('force_exit_on_floor_breach', True),
                 ratchet_min_hold_after_activation_sec=raw.get('ratchet_profit_floor', {}).get('min_hold_after_activation_sec', 30),
-                ratchet_mandatory_exit_at_99c=raw.get('ratchet_profit_floor', {}).get('mandatory_exit_at_99c', True),
+                # CRITICAL FIX: 2026-07-06 - Removed ratchet_mandatory_exit_at_99c (redundant, handled by position-level extreme profit)
                 ratchet_trim_position_enabled=raw.get('ratchet_profit_floor', {}).get('trim_position_enabled', True),
                 ratchet_trim_threshold_cents=raw.get('ratchet_profit_floor', {}).get('trim_threshold_cents', 80),
                 ratchet_trim_to_contracts=raw.get('ratchet_profit_floor', {}).get('trim_to_contracts', 1),

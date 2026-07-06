@@ -570,179 +570,49 @@ class Crypto15mIndicatorStack:
         self._asset_symbol = symbol.upper()
 
     # ── FVG Detection ───────────────────────────────────────────────
+    # CRITICAL FIX: 2026-07-06 - FVG detection consolidated to merid/prediction/forecasters/fvg.py
+    # This indicator stack no longer performs FVG detection to avoid duplicate implementations
+    # Use get_fvg_forecaster() from merid.prediction.forecasters.fvg for authoritative FVG data
+    # The previous approximation-based FVG detection has been removed to ensure consistency
 
     def _detect_fvg(self, window: List[Dict[str, float]], atr: float) -> Optional[FVGZone]:
-        """Detect Fair Value Gap from 3-candle window.
+        """DEPRECATED: FVG detection moved to merid/prediction/forecasters/fvg.py
         
-        Uses close prices as proxy for OHLC (limited by 1m feed).
-        
-        Bullish FVG: Candle 2 low > Candle 1 high (gap up between them)
-        Bearish FVG: Candle 2 high < Candle 1 low (gap down between them)
-        
-        We approximate:
-        - "high" = max(close, prev_close)  
-        - "low" = min(close, prev_close)
+        This method is kept for backward compatibility but returns None.
+        Use get_fvg_forecaster() from merid.prediction.forecasters.fvg for authoritative FVG data.
         """
-        if len(window) < 3 or atr <= 0:
-            return None
-        
-        if not self.cfg.fvg_enabled:
-            return None
-
-        # Extract candles (0=oldest, 1=middle, 2=newest)
-        c0, c1, c2 = window[0], window[1], window[2]
-        
-        # Approximate OHLC from close prices
-        h0 = max(c0["price"], c1["price"])  # Prev candle high approx
-        l0 = min(c0["price"], c1["price"])  # Prev candle low approx
-        h1 = max(c1["price"], c2["price"])  # Current candle high approx
-        l1 = min(c1["price"], c2["price"])  # Current candle low approx
-        
-        # Bullish FVG: gap between c1 low and c2 high
-        # Actually: gap between c0 high and c1 low (displacement up)
-        if l1 > h0:
-            gap_size = l1 - h0
-            gap_size_atr = gap_size / atr
-            gap_pct = gap_size / c1["price"] if c1["price"] > 0 else 0
-            
-            # Check minimum thresholds
-            if gap_size_atr >= self.cfg.fvg_min_gap_size_atr or gap_pct >= self.cfg.fvg_min_gap_size_pct:
-                # Check immediate fill (next candle fills the gap)
-                if self.cfg.fvg_ignore_immediate_fill:
-                    if c2["price"] <= h0:  # Filled
-                        return None
-                
-                zone = FVGZone(
-                    top=l1,
-                    bottom=h0,
-                    direction="bullish",
-                    created_at=datetime.now(timezone.utc),
-                    timeframe="15m",
-                    strength=gap_size_atr,
-                )
-                return zone
-        
-        # Bearish FVG: gap between c0 low and c1 high (displacement down)
-        if h1 < l0:
-            gap_size = l0 - h1
-            gap_size_atr = gap_size / atr
-            gap_pct = gap_size / c1["price"] if c1["price"] > 0 else 0
-            
-            if gap_size_atr >= self.cfg.fvg_min_gap_size_atr or gap_pct >= self.cfg.fvg_min_gap_size_pct:
-                if self.cfg.fvg_ignore_immediate_fill:
-                    if c2["price"] >= l0:  # Filled
-                        return None
-                
-                zone = FVGZone(
-                    top=l0,
-                    bottom=h1,
-                    direction="bearish",
-                    created_at=datetime.now(timezone.utc),
-                    timeframe="15m",
-                    strength=gap_size_atr,
-                )
-                return zone
-        
+        # CRITICAL FIX: 2026-07-06 - Removed approximation-based FVG detection
+        # Use merid.prediction.forecasters.fvg.FVGForecaster for actual OHLC-based FVG detection
         return None
 
     def _check_fvg_fills(self, price: float) -> None:
-        """Check if current price fills any active FVG zones."""
-        for zone in self._fvg_zones:
-            if not zone.is_filled and zone.contains_price(price):
-                zone.filled_at = datetime.now(timezone.utc)
-                zone.fill_price = price
-                logger.debug("FVG filled: %s at %.2f", zone.direction, price)
+        """DEPRECATED: FVG fill checking moved to merid/prediction/forecasters/fvg.py
+        
+        This method is kept for backward compatibility but does nothing.
+        Use get_fvg_forecaster() from merid.prediction.forecasters.fvg for authoritative FVG data.
+        """
+        # CRITICAL FIX: 2026-07-06 - Removed duplicate FVG fill checking
+        # Use merid.prediction.forecasters.fvg.FVGStore for fill detection
+        pass
 
     def _compute_fvg_context(self, price: float, atr: float) -> FVGContext:
-        """Compute complete FVG context for current price."""
-        ctx = FVGContext()
+        """DEPRECATED: FVG context computation moved to merid/prediction/forecasters/fvg.py
         
-        if not self.cfg.fvg_enabled or atr <= 0:
-            return ctx
-        
-        # Filter to active (unfilled) zones within relevance distance
-        active_zones = []
-        for zone in self._fvg_zones:
-            if zone.is_filled:
-                continue
-            # Check age
-            age_bars = zone._approx_age_bars()
-            if age_bars > self.cfg.fvg_max_age_bars:
-                continue
-            # Check distance
-            dist_atr = abs(zone.distance_to_price(price)) / atr
-            if dist_atr > self.cfg.fvg_relevance_distance_atr:
-                continue
-            active_zones.append(zone)
-        
-        ctx.zones = active_zones
-        ctx.unfilled_count = len(active_zones)
-        
-        if not active_zones:
-            return ctx
-        
-        # Find nearest zone
-        nearest = min(active_zones, key=lambda z: abs(z.distance_to_price(price)))
-        ctx.nearest_distance_atr = nearest.distance_to_price(price) / atr
-        
-        # Compute pressure: weighted by zone strength and proximity
-        total_pressure = 0.0
-        total_weight = 0.0
-        bull_count = 0
-        bear_count = 0
-        
-        for zone in active_zones:
-            dist = abs(zone.distance_to_price(price))
-            proximity_weight = 1.0 / (1.0 + dist / atr)  # Closer = higher weight
-            direction_sign = 1.0 if zone.direction == "bullish" else -1.0
-            
-            total_pressure += direction_sign * zone.strength * proximity_weight
-            total_weight += zone.strength * proximity_weight
-            
-            if zone.direction == "bullish":
-                bull_count += 1
-            else:
-                bear_count += 1
-        
-        if total_weight > 0:
-            ctx.fvg_pressure = max(-1.0, min(1.0, total_pressure / total_weight))
-        
-        # Dominant direction
-        if bull_count > bear_count:
-            ctx.dominant_direction = "bullish"
-        elif bear_count > bull_count:
-            ctx.dominant_direction = "bearish"
-        else:
-            ctx.dominant_direction = "neutral"
-        
-        return ctx
+        This method is kept for backward compatibility but returns empty context.
+        Use get_fvg_forecaster() from merid.prediction.forecasters.fvg for authoritative FVG data.
+        """
+        # CRITICAL FIX: 2026-07-06 - Removed duplicate FVG context computation
+        # Use merid.prediction.forecasters.fvg.FVGForecaster for FVG context
+        return FVGContext()
 
     def _check_fvg_confluence(self, snap: IndicatorSnapshot, ctx: FVGContext) -> bool:
-        """Check if FVG aligns with trend/Fib for enhanced signals."""
-        if not ctx.zones:
-            return False
+        """DEPRECATED: FVG confluence checking moved to merid/prediction/forecasters/fvg.py
         
-        # Trend confluence: bullish FVG in bullish trend or bearish FVG in bearish trend
-        for zone in ctx.zones:
-            if zone.is_filled:
-                continue
-            
-            # Bullish FVG + bullish trend alignment
-            if zone.direction == "bullish" and snap.price_above_trend_ema:
-                return True
-            
-            # Bearish FVG + bearish trend alignment
-            if zone.direction == "bearish" and not snap.price_above_trend_ema:
-                return True
-            
-            # RSI confluence: bullish FVG at oversold levels
-            if zone.direction == "bullish" and snap.rsi_zone == "oversold":
-                return True
-            
-            # RSI confluence: bearish FVG at overbought levels
-            if zone.direction == "bearish" and snap.rsi_zone == "overbought":
-                return True
-        
+        This method is kept for backward compatibility but returns False.
+        Use get_fvg_forecaster() from merid.prediction.forecasters.fvg for authoritative FVG data.
+        """
+        # CRITICAL FIX: 2026-07-06 - Removed duplicate FVG confluence checking
+        # Use merid.prediction.forecasters.fvg.FVGStore for confluence scoring
         return False
 
     def _compute_simple_atr(self, prices: List[float], period: int = 14) -> float:
