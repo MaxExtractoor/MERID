@@ -25,7 +25,7 @@ MIN_KALSHI_PRICE_CENTS: Final[int] = 1
 MAX_KALSHI_PRICE_CENTS: Final[int] = 99
 DEFAULT_KALSHI_PRICE_CENTS: Final[int] = 50  # Midpoint fallback when market price unavailable
 DEEP_OTM_CHEAP_CENTS: Final[int] = 10  # 2026-07-05: Lowered to 10c to match agent_grid entry band [10, 70]. Reject only below 10c (lottery zone).
-DEEP_OTM_EXPENSIVE_CENTS: Final[int] = 95  # 2026-07-06: Raised to 95c to allow ratchet/trailing stop to work. Entries at 55c need room to ratchet to 99c exit. Only block extreme 96-99c entries (no profit room).
+DEEP_OTM_EXPENSIVE_CENTS: Final[int] = 75  # 2026-07-05: Aligned with sweet-spot entry band [25c, 75c]. Reject above 75c (no profit room to ratchet to 99c exit).
 MAX_PRICE_DIFFERENCE_CENTS: Final[int] = 50  # Max realistic price jump (data error threshold)  
 
 # Mid-band - reasonable pricing
