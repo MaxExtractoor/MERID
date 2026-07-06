@@ -156,12 +156,16 @@ market_making:
 
 # Correlation Tracking Configuration
 # Reduce exposure when assets are highly correlated
+# CRITICAL FIX: DISABLED for 15m crypto prediction markets
+# These are prediction markets on crypto price movements, not spot crypto assets
+# Correlation between prediction market outcomes differs from spot crypto correlation
+# This was blocking multiple assets from trading in the same 15m window
 correlation_tracking:
-  enabled: true  # Set to true to enable correlation tracking
+  enabled: false  # DISABLED: Was blocking multi-asset trading in 15m window
   threshold: 0.5  # Correlation threshold for exposure reduction
   max_reduction: 0.4  # Reduce to 40% of combined cap at perfect correlation
   window_days: 30  # Rolling window for correlation calculation
-  description: "Correlation tracking: reduce exposure when assets are highly correlated"
+  description: "Correlation tracking: DISABLED for 15m crypto prediction markets"
   # 2026 RESEARCH-BASED: Correlation-aware risk management
   real_time_monitoring: true  # Real-time correlation monitoring (not static intervals)
   threshold_high: 0.80  # Treat as ONE position when >0.80 correlation
@@ -237,7 +241,7 @@ dynamic_sizing:
   base_contracts: 1  # Base size
   edge_multiplier: 2.0  # 2026-07-05: Increased from 0.5 to 2.0 (4x) based on Turbine research - amplify edge impact for small velocity-based edges
   confidence_multiplier: 1.0  # 2026-07-05: Increased from 0.3 to 1.0 (3.3x) based on Turbine research - amplify confidence impact
-  max_contracts: 3  # Max contracts per trade
+  max_contracts: 3  # Global cap for dynamic sizing (per-asset limits take precedence)
   min_contracts: 1  # Min contracts per trade
   description: "Dynamic sizing: scale position based on edge and confidence (2026 research-tuned)"
 
@@ -390,8 +394,8 @@ max_fallback_notional_usd: 0.35  # If fallback allowed, cap at min_notional (unu
 max_fallback_cycles: 0  # DISABLED: No fallback cycles allowed
 
 # Maximum risk per cycle as percentage of capital
-# 2026 BEST PRACTICE: 0.5% per cycle for 5-second HFT (aligned with Quarter Kelly research)
-# With 180 cycles/hour, even 0.5% compounds to significant exposure
+# 2026 BEST PRACTICE: 5% per 15m window (aligned with per-asset max_notional_pct)
+# This limits total cycle risk to 5% of capital per 15m window
 # This is the SINGLE SOURCE OF TRUTH - core.settings.py must match this value
 max_cycle_risk_pct:
   value: 0.05  # 5% of capital per cycle (aligned with 5% per 15m window limit)
@@ -429,15 +433,15 @@ venue:
   
   # Maximum single order as percentage of bankroll (validation constraint)
   max_single_order_pct:
-    value: 0.10  # INCREASED: 10% of bankroll per single order (up from 5% for $1+/15m target)
+    value: 0.03  # CRITICAL FIX: 3% of bankroll per single order (aligned with per-asset max notional)
     static: profile
-    description: "Maximum single order notional as percentage of bankroll (increased for $1+/15m target)"
+    description: "Maximum single order notional as percentage of bankroll (aligned with per-asset cap)"
   
-  # Bankroll cap percentage for order sizing (2026 best practice: 10% for $1+/15m target)
+  # Bankroll cap percentage for order sizing (2026 best practice: 3% aligned with per-asset cap)
   bankroll_cap_pct:
-    value: 0.10  # INCREASED: 10% of bankroll per order (up from 1% for $1+/15m target)
+    value: 0.03  # CRITICAL FIX: 3% of bankroll per order (aligned with per-asset max notional)
     static: profile
-    description: "Maximum order notional as percentage of bankroll (increased for $1+/15m target)"
+    description: "Maximum order notional as percentage of bankroll (aligned with per-asset cap)"
   
   # REMOVED: Conflicting rate limits - now handled by throttling section (single source of truth)
   # - max_orders_per_minute: replaced by throttling.global_orders_limit (5/min)
@@ -551,7 +555,11 @@ portfolio_heat:
 # Industry standard: Adjust risk based on session liquidity
 # US market hours: 100% risk, Asian: 80%, European: 90%, Weekend: 50%
 time_of_day_risk_scaling:
-  enabled: false  # DISABLED: interferes with 3% per asset limits
+  enabled: false  # DISABLED: interferes with 3% per asset / 5% per 15m window limits
+  # RE-ENABLE RISKS: If re-enabled, must update risk envelope to account for time-based scaling
+  # and ensure 3% per asset / 5% per 15m window limits are still respected after multiplier
+  # RE-ENABLE REQUIREMENTS: Update kalshi_crypto_15m_risk_envelope.py to apply time_of_day_multiplier
+  # to risk limits, not just order sizes
   us_market_hours: "09:30-16:00 ET"  # US market hours
   asian_session: "20:00-02:00 ET"  # Asian session
   european_session: "02:00-09:30 ET"  # European session
@@ -654,7 +662,7 @@ assets:
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for BTC (computed from bankroll)"
     max_contracts:
-      value: 3  # INCREASED: Max 3 contracts for BTC 15m (was 2 - for larger positions)
+      value: 3  # PRIMARY limit for BTC (overrides dynamic_sizing.max_contracts)
       static: profile
       description: "Maximum contracts for BTC (static for this profile)"
     # Edge thresholds based on 2026 volatility research (BTC: 45-55% vol, 1.5-3% intraday range)
@@ -683,7 +691,7 @@ assets:
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for ETH (computed from bankroll)"
     max_contracts:
-      value: 3  # INCREASED: Max 3 contracts for ETH 15m (was 2 - for larger positions)
+      value: 3  # PRIMARY limit for ETH (overrides dynamic_sizing.max_contracts)
       static: profile
       description: "Maximum contracts for ETH (static for this profile)"
     # Edge thresholds based on 2026 volatility research (ETH: 45.2% vol in April 2026, declining - L2 scaling maturation)
@@ -712,7 +720,7 @@ assets:
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for SOL (computed from bankroll)"
     max_contracts:
-      value: 3  # INCREASED: Max 3 contracts for SOL 15m (was 2 - for larger positions)
+      value: 3  # PRIMARY limit for SOL (overrides dynamic_sizing.max_contracts)
       static: profile
       description: "Maximum contracts for SOL (static for this profile)"
     # Edge thresholds based on 2026 volatility research (SOL: 89.6% vol in April 2026, increasing - speculative capital rotation)
@@ -741,7 +749,7 @@ assets:
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for XRP (computed from bankroll)"
     max_contracts:
-      value: 3  # INCREASED: Max 3 contracts for XRP 15m (was 2 - for larger positions)
+      value: 3  # PRIMARY limit for XRP (overrides dynamic_sizing.max_contracts)
       static: profile
       description: "Maximum contracts for XRP (static for this profile)"
     # Edge thresholds based on 2026 volatility research (XRP: ~55% vol, event-driven, beta 1.35)
@@ -770,7 +778,7 @@ assets:
       dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
       description: "Maximum notional as percentage of capital for DOGE (computed from bankroll)"
     max_contracts:
-      value: 2  # INCREASED: Max 2 contracts for DOGE 15m (was 1 - for larger positions, still conservative due to volatility)
+      value: 2  # PRIMARY limit for DOGE (overrides dynamic_sizing.max_contracts)
       static: profile
       description: "Maximum contracts for DOGE (static for this profile)"
     # Edge thresholds based on 2026 volatility research (DOGE: ~100% vol, sentiment-driven, highest beta 2.70)
@@ -799,7 +807,7 @@ assets:
 # UNIFIED RISK: All assets (BTC/ETH/SOL/XRP/DOGE) use the same 1-3% per-trade risk range
 # based on market conditions, not per-asset fixed percentages.
 agent_defaults:
-  max_notional_pct: 0.05  # FIXED: 5% of capital per agent (per 15m window limit)
+  max_notional_pct: 0.03  # CRITICAL FIX: 3% of capital per agent (aligned with per-asset max and single order cap)
   max_orders_per_window: 20  # Max orders per trading window (increased for edge audit)
   max_yes_position: 5  # INCREASED: Max YES contracts per side (up from 3)
   max_no_position: 5  # INCREASED: Max NO contracts per side (up from 3)
@@ -898,12 +906,8 @@ guardrails:
   experimental_price_band_enabled: false  # DISABLED: Fair treatment for all assets (was true for BTC/ETH only)
   experimental_tte_band_enabled: false  # DISABLED: Fair treatment for all assets (was true for BTC/ETH only)
   
-  # NEW: Per-asset depth thresholds by tier
-  # RELAXED: Tier 2 depth reduced from 5 to 2-3 contracts for thinner books
-  min_depth_yes_tier1: 2  # Tier 1 (BTC/ETH): min 2 yes contracts (relaxed from 5 for single-contract trading)
-  min_depth_no_tier1: 2   # Tier 1 (BTC/ETH): min 2 no contracts (relaxed from 5 for single-contract trading)
-  min_depth_yes_tier2: 1   # Tier 2 (SOL/XRP/DOGE): min 1 yes contract (relaxed from 2 for thinner books)
-  min_depth_no_tier2: 1    # Tier 2 (SOL/XRP/DOGE): min 1 no contract (relaxed from 2 for thinner books)
+  # Depth thresholds: per-asset values are single source of truth (min_depth_yes/min_depth_no per asset)
+  # Removed tier-based thresholds to avoid confusion
   
   # NEW: Spread guard with edge override
   spread_guard_enabled: true  # Enable spread guard
@@ -928,22 +932,13 @@ guardrails:
   # Set to 0 to disable (rely on per-asset and cycle limits instead)
   max_position_value_usd: 100000.0  # $100k total position limit (relaxed for 15m crypto)
   
-  # Per-trade risk derived from drawdown (survive 15-20 consecutive full-risk losses)
-  # CRITICAL FIX: Aligned to unified risk limit (2.75% per-trade for micro accounts) to ensure tradable sizes
-  # BANKROLL-TIERED: Higher risk for small bankrolls to ensure tradable sizes
-  # - bankroll < $100: 2.75% per trade (aggressive to overcome minimum lot granularity - $0.94 on $34.12)
-  # - bankroll $100-$1k: 2% per trade (moderate scaling)
-  # - bankroll > $1k: 2% per trade (aligned with unified risk limit)
+  # Per-trade risk as percentage of capital
+  # NOTE: Bankroll tiering removed - not implemented in risk envelope code
+  # Using single 3% value for all bankroll sizes (aligned with per-asset max_notional_pct)
   per_trade_risk_pct:
-    value: 0.02  # CRITICAL FIX: Default 2% (aligned with unified risk limit, was 0.008)
-    dynamic: bankroll_tiered  # Computed from live bankroll via RiskEnvelopeService with tiered logic
-    description: "Per-trade risk as percentage of capital (bankroll-tiered: 2.75% for <$100, 2% for $100-$1k, 2% for >$1k)"
-    # Bankroll tier thresholds (applied in RiskEnvelopeService)
-    bankroll_tier_small_usd: 100.0  # Threshold for small bankroll regime
-    bankroll_tier_medium_usd: 1000.0  # Threshold for medium bankroll regime
-    per_trade_risk_small_pct: 0.0275  # 2.75% per trade for bankroll < $100 (was 0.03, increased for tradable sizes)
-    per_trade_risk_medium_pct: 0.02  # 2% per trade for bankroll $100-$1k (was 0.015)
-    per_trade_risk_large_pct: 0.02  # CRITICAL FIX: 2% per trade for bankroll > $1k (was 0.008)
+    value: 0.03  # 3% per trade (aligned with per-asset max_notional_pct for trading buffer)
+    dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
+    description: "Per-trade risk as percentage of capital (3% for all bankroll sizes)"
   
   # Daily loss cap (2026 BEST PRACTICE: 20% - aligned with drawdown halt)
   # 2026 best practice: Halt trading when daily loss exceeds 20% of bankroll
@@ -1328,6 +1323,8 @@ calibration_config:
 # Based on research: small-edge trades lose money after Kalshi fees
 fee_aware_edge:
   enabled: false  # DISABLED for price-based strategy (no edge calculation, trades based on price thresholds)
+  # RE-ENABLE RISKS: If re-enabled with momentum_fvg mode, may conflict with velocity-based edge
+  # RE-ENABLE REQUIREMENTS: Verify edge calculation is compatible with momentum_fvg signal mode
   min_edge_cents: 2  # $0.02 minimum edge after fees
   fee_per_contract: 0.07  # Kalshi taker fee per contract (7 cents)
   # Fee formula: 0.07 × P × (1−P) where P is contract price
@@ -1346,6 +1343,43 @@ market_microstructure:
   min_depth_usd: 0.0  # DISABLED: System uses limit orders which wait for fills, not market orders. Kalshi 15m crypto markets have sufficient liquidity. Depth thresholds are primarily for market orders to prevent slippage.
   min_yes_depth: 1  # Minimum YES depth threshold
   min_no_depth: 1  # Minimum NO depth threshold
+
+# ── Volume Filter Configuration (2026 Best Practices) ───────────────────────────────
+# 2026-07-05: Fixed broken volume filter implementation
+# Previous bug: Compared 60-second candle volume (hundreds/thousands USD) to 1M threshold
+# This ALWAYS failed and blocked all trades
+# 
+# 2026 industry best practices (AnomIQ, JustScreener, TokenToolHub research):
+# - Use relative volume Z-scores (rolling 5m/15m/60m baselines) instead of absolute thresholds
+# - Add liquidity floor (min_volume_24h_usd) as coarse prefilter
+# - Use volume anomaly detection (Buy/Sell Volume Z-Score > 2.5) for signal confirmation
+# - Cross-timeframe confirmation (5m detection, 15m confirmation, 60m regime context)
+# - Volume concentration metrics to distinguish wash trading from real participation
+#
+# Current implementation: DISABLED in agent_grid_15m.py (broken filter removed)
+# Future implementation should use:
+# - Rolling median + MAD (median absolute deviation) for robust Z-score calculation
+# - Per-asset baselines (BTC vs DOGE have different volume characteristics)
+# - Multi-timeframe windows (5m for detection, 15m for confirmation, 60m for regime)
+# - Directional volume (Buy Volume Z-Score vs Sell Volume Z-Score) for side detection
+#
+# Coarse liquidity filtering is already handled by:
+# - universe.min_volume (5 contracts minimum for Kalshi markets)
+# - per-asset min_volume_24h_usd (BTC: 5000, ETH: 4000, SOL: 3000, XRP: 2500, DOGE: 1500)
+volume_filter:
+  enabled: false  # DISABLED: Previous implementation was broken (wrong metric + wrong threshold)
+  # Future implementation parameters (when re-enabled with proper Z-score logic):
+  # use_relative_z_score: true  # Use rolling Z-score instead of absolute threshold
+  # z_score_threshold: 2.5  # Volume Z-score > 2.5 = unusual (AnomIQ research)
+  # liquidity_floor_usd: 1500.0  # Minimum 24h volume (use DOGE's threshold as floor)
+  # detection_window_sec: 300  # 5m window for anomaly detection
+  # confirmation_window_sec: 900  # 15m window for confirmation
+  # regime_window_sec: 3600  # 60m window for regime context
+  # require_15m_confirmation: true  # Require 15m Z-score > 1.5 for confirmation
+  # use_directional_volume: true  # Check Buy/Sell Volume Z-Score separately
+  # buy_z_score_threshold: 2.5  # Buy Volume Z-Score > 2.5 for long signals
+  # sell_z_score_threshold: 2.5  # Sell Volume Z-Score > 2.5 for short signals
+  description: "Volume filter using 2026 best practices (relative Z-scores, multi-timeframe confirmation)"
 
 # ── Strategies ───────────────────────────────────────────────────────────────
 # Phase 2: Strategy definitions for multi-strategy support

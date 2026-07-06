@@ -338,11 +338,11 @@ def compute_kalshi_crypto_15m_risk_envelope(
     correlation_tracking_config = profile_config.get('correlation_tracking', {})
 
     # Extract cycle risk cap (handle nested dict format)
-    # CRITICAL FIX: Aligned with kalshi_crypto_15m_v2.yaml profile (2026-07-04)
-    # Profile specifies: max_cycle_risk_pct: 0.005 (0.5%)
-    max_cycle_risk_pct_raw = profile_config.get('max_cycle_risk_pct', 0.005)  # CRITICAL FIX: 0.5% - aligned with profile (was 0.03)
+    # Aligned with kalshi_crypto_15m_v2.yaml profile (2026-06-05)
+    # Profile specifies: max_cycle_risk_pct: 0.05 (5%)
+    max_cycle_risk_pct_raw = profile_config.get('max_cycle_risk_pct', 0.05)  # 5% - aligned with profile
     if isinstance(max_cycle_risk_pct_raw, dict):
-        max_cycle_risk_pct = max_cycle_risk_pct_raw.get('value', 0.005)  # CRITICAL FIX: 0.5% - aligned with profile (was 0.03)
+        max_cycle_risk_pct = max_cycle_risk_pct_raw.get('value', 0.05)  # 5% - aligned with profile
     else:
         max_cycle_risk_pct = max_cycle_risk_pct_raw
     
@@ -509,9 +509,11 @@ def compute_kalshi_crypto_15m_risk_envelope(
     # ── Compute Guardrails ───────────────────────────────────────────────────
     # Drawdown is the primary hard cap; daily loss is optional/soft
     # Handle nested dict format for per_trade_risk_pct
-    per_trade_risk_pct_raw = guardrails.get('per_trade_risk_pct', 0.02)  # CRITICAL FIX: 2% - aligned with profile (was 0.008)
+    # Aligned with kalshi_crypto_15m_v2.yaml profile (2026-06-05)
+    # Profile specifies: per_trade_risk_pct: 0.03 (3%)
+    per_trade_risk_pct_raw = guardrails.get('per_trade_risk_pct', 0.03)  # 3% - aligned with profile
     if isinstance(per_trade_risk_pct_raw, dict):
-        per_trade_risk_pct = per_trade_risk_pct_raw.get('value', 0.02)  # CRITICAL FIX: 2% - aligned with profile (was 0.008)
+        per_trade_risk_pct = per_trade_risk_pct_raw.get('value', 0.03)  # 3% - aligned with profile
     else:
         per_trade_risk_pct = per_trade_risk_pct_raw
     

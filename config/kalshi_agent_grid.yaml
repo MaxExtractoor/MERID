@@ -26,11 +26,9 @@ agents:
     category: crypto
     frequency: fifteen_min
   strategy_overrides:
-    min_edge_early: 0.02
-    min_edge_mid: 0.02
-    min_edge_late: 0.02
-    min_edge_terminal: 0.025
-    signal_mode: mean_reversion
+    # Edge thresholds handled by profile edge_bands (kalshi_crypto_15m_v2.yaml)
+    # Removed min_edge fields to use single source of truth
+    signal_mode: momentum_fvg
   take_profit:
     enabled: true
     # TUNED (2026-05-25): Time-based dynamic TP for 15m contracts - aligned with edge
@@ -47,7 +45,8 @@ agents:
     min_price_move_for_reentry: 5
     min_edge_after_fees_cents: 2.0
   strike_selection:
-    max_spot_to_strike_pct: 0.15   # 15% max distance for 15m BTC (calibrated v2)
+    # Distance filtering handled by profile (max_distance_pct in kalshi_crypto_15m_v2.yaml)
+    # Removed max_spot_to_strike_pct to use single source of truth
     target_spot_band_pct: 0.06     # prefer contracts within 6% of spot
     deep_otm_allowed: false
 - name: ETH_15M
@@ -63,11 +62,9 @@ agents:
     category: crypto
     frequency: fifteen_min
   strategy_overrides:
-    min_edge_early: 0.02
-    min_edge_mid: 0.02
-    min_edge_late: 0.02
-    min_edge_terminal: 0.025
-    signal_mode: mean_reversion
+    # Edge thresholds handled by profile edge_bands (kalshi_crypto_15m_v2.yaml)
+    # Removed min_edge fields to use single source of truth
+    signal_mode: momentum_fvg
   take_profit:
     enabled: true
     # TUNED (2026-05-25): Time-based dynamic TP for 15m contracts - aligned with edge
@@ -84,7 +81,8 @@ agents:
     min_price_move_for_reentry: 5
     min_edge_after_fees_cents: 2.0
   strike_selection:
-    max_spot_to_strike_pct: 0.15   # 15% max distance for 15m ETH (calibrated v2)
+    # Distance filtering handled by profile (max_distance_pct in kalshi_crypto_15m_v2.yaml)
+    # Removed max_spot_to_strike_pct to use single source of truth
     target_spot_band_pct: 0.06     # prefer contracts within 6% of spot
     deep_otm_allowed: false
 - name: SOL_15M
@@ -100,11 +98,9 @@ agents:
     category: crypto
     frequency: fifteen_min
   strategy_overrides:
-    min_edge_early: 0.02
-    min_edge_mid: 0.02
-    min_edge_late: 0.02
-    min_edge_terminal: 0.025
-    signal_mode: mean_reversion
+    # Edge thresholds handled by profile edge_bands (kalshi_crypto_15m_v2.yaml)
+    # Removed min_edge fields to use single source of truth
+    signal_mode: momentum_fvg
   take_profit:
     enabled: true
     # TUNED (2026-05-25): Time-based dynamic TP for 15m contracts - aligned with edge
@@ -132,14 +128,13 @@ agents:
   market_filter:
     category: crypto
   strategy_overrides:
-    min_edge_early: 0.02
-    min_edge_mid: 0.02
-    min_edge_late: 0.02
-    min_edge_terminal: 0.025
-    signal_mode: mean_reversion
+    # Edge thresholds handled by profile edge_bands (kalshi_crypto_15m_v2.yaml)
+    # Removed min_edge fields to use single source of truth
+    signal_mode: momentum_fvg
     frequency: fifteen_min
   strike_selection:
-    max_spot_to_strike_pct: 0.20   # 20% max distance for 15m XRP (calibrated v2)
+    # Distance filtering handled by profile (max_distance_pct in kalshi_crypto_15m_v2.yaml)
+    # Removed max_spot_to_strike_pct to use single source of truth
     target_spot_band_pct: 0.08     # prefer contracts within 8% of spot
     deep_otm_allowed: false
   take_profit:
@@ -170,13 +165,12 @@ agents:
     category: crypto
     frequency: fifteen_min
   strategy_overrides:
-    min_edge_early: 0.02
-    min_edge_mid: 0.02
-    min_edge_late: 0.02
-    min_edge_terminal: 0.025
-    signal_mode: mean_reversion
+    # Edge thresholds handled by profile edge_bands (kalshi_crypto_15m_v2.yaml)
+    # Removed min_edge fields to use single source of truth
+    signal_mode: momentum_fvg
   strike_selection:
-    max_spot_to_strike_pct: 0.20   # 20% max distance for 15m DOGE (calibrated v2)
+    # Distance filtering handled by profile (max_distance_pct in kalshi_crypto_15m_v2.yaml)
+    # Removed max_spot_to_strike_pct to use single source of truth
     target_spot_band_pct: 0.08     # prefer contracts within 8% of spot
     deep_otm_allowed: false
   take_profit:

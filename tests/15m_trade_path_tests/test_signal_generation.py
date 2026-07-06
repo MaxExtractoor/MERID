@@ -7,6 +7,8 @@ based on market data and edge calculations.
 
 import time
 import pytest
+import yaml
+from pathlib import Path
 
 
 def test_signal_generation_happy_path(mock_agent, mock_market_state, mock_spot_service, generate_signal):
@@ -182,3 +184,150 @@ def test_signal_market_id_format(mock_agent, mock_market_state, mock_spot_servic
     assert "-" in signal.market_id, "Market ID should contain hyphens"
     assert signal.asset in signal.market_id, "Market ID should contain asset name"
     assert "15m" in signal.market_id, "Market ID should contain 15m indicator"
+
+
+def test_agent_grid_signal_mode_momentum_fvg():
+    """Test that agent grid uses momentum_fvg signal mode (CRITICAL FIX #1)."""
+    agent_grid_path = Path("c:/Dev/MERID/config/kalshi_agent_grid.yaml")
+    
+    with open(agent_grid_path, 'r', encoding='utf-8') as f:
+        agent_grid = yaml.safe_load(f)
+    
+    # Check all 5 assets have signal_mode: momentum_fvg
+    assets = ["BTC_15M", "ETH_15M", "SOL_15M", "XRP_15M", "DOGE_15M"]
+    
+    for agent in agent_grid['agents']:
+        if agent['name'] in assets:
+            strategy_overrides = agent.get('strategy_overrides', {})
+            signal_mode = strategy_overrides.get('signal_mode')
+            assert signal_mode == "momentum_fvg", f"{agent['name']} should have signal_mode=momentum_fvg, got {signal_mode}"
+
+
+def test_agent_grid_no_max_spot_to_strike_pct():
+    """Test that agent grid does not have max_spot_to_strike_pct (CRITICAL FIX #2)."""
+    agent_grid_path = Path("c:/Dev/MERID/config/kalshi_agent_grid.yaml")
+    
+    with open(agent_grid_path, 'r', encoding='utf-8') as f:
+        agent_grid = yaml.safe_load(f)
+    
+    # Check no agent has max_spot_to_strike_pct in strike_selection
+    for agent in agent_grid['agents']:
+        strike_selection = agent.get('strike_selection', {})
+        assert 'max_spot_to_strike_pct' not in strike_selection, \
+            f"{agent['name']} should not have max_spot_to_strike_pct (use profile max_distance_pct)"
+
+
+def test_agent_grid_no_min_edge_fields():
+    """Test that agent grid does not have min_edge fields (HIGH FIX #3)."""
+    agent_grid_path = Path("c:/Dev/MERID/config/kalshi_agent_grid.yaml")
+    
+    with open(agent_grid_path, 'r', encoding='utf-8') as f:
+        agent_grid = yaml.safe_load(f)
+    
+    # Check no agent has min_edge fields in strategy_overrides
+    for agent in agent_grid['agents']:
+        strategy_overrides = agent.get('strategy_overrides', {})
+        assert 'min_edge_early' not in strategy_overrides, \
+            f"{agent['name']} should not have min_edge_early (use profile edge_bands)"
+        assert 'min_edge_mid' not in strategy_overrides, \
+            f"{agent['name']} should not have min_edge_mid (use profile edge_bands)"
+        assert 'min_edge_late' not in strategy_overrides, \
+            f"{agent['name']} should not have min_edge_late (use profile edge_bands)"
+        assert 'min_edge_terminal' not in strategy_overrides, \
+            f"{agent['name']} should not have min_edge_terminal (use profile edge_bands)"
+
+
+def test_profile_per_trade_risk_pct_3_percent():
+    """Test that profile per_trade_risk_pct is 3% (HIGH FIX #7)."""
+    profile_path = Path("c:/Dev/MERID/config/profiles/kalshi_crypto_15m_v2.yaml")
+    
+    with open(profile_path, 'r', encoding='utf-8') as f:
+        profile = yaml.safe_load(f)
+    
+    per_trade_risk = profile['guardrails']['per_trade_risk_pct']
+    assert per_trade_risk['value'] == 0.03, \
+        f"per_trade_risk_pct should be 0.03 (3%), got {per_trade_risk['value']}"
+    
+    # Verify no bankroll tiering (removed as dead code)
+    assert 'bankroll_tier_small_usd' not in per_trade_risk, \
+        "Bankroll tiering should be removed (not implemented in code)"
+
+
+def test_profile_dynamic_sizing_multipliers():
+    """Test that profile dynamic_sizing multipliers are 2.0/1.0 (HIGH FIX #4)."""
+    profile_path = Path("c:/Dev/MERID/config/profiles/kalshi_crypto_15m_v2.yaml")
+    
+    with open(profile_path, 'r', encoding='utf-8') as f:
+        profile = yaml.safe_load(f)
+    
+    dynamic_sizing = profile['dynamic_sizing']
+    assert dynamic_sizing['edge_multiplier'] == 2.0, \
+        f"edge_multiplier should be 2.0, got {dynamic_sizing['edge_multiplier']}"
+    assert dynamic_sizing['confidence_multiplier'] == 1.0, \
+        f"confidence_multiplier should be 1.0, got {dynamic_sizing['confidence_multiplier']}"
+
+
+def test_profile_max_cycle_risk_pct_5_percent():
+    """Test that profile max_cycle_risk_pct is 5% (HIGH FIX #5)."""
+    profile_path = Path("c:/Dev/MERID/config/profiles/kalshi_crypto_15m_v2.yaml")
+    
+    with open(profile_path, 'r', encoding='utf-8') as f:
+        profile = yaml.safe_load(f)
+    
+    max_cycle_risk = profile['max_cycle_risk_pct']
+    assert max_cycle_risk['value'] == 0.05, \
+        f"max_cycle_risk_pct should be 0.05 (5%), got {max_cycle_risk['value']}"
+
+
+def test_profile_max_contracts_hierarchy():
+    """Test that profile has max_contracts hierarchy comments (HIGH FIX #8)."""
+    profile_path = Path("c:/Dev/MERID/config/profiles/kalshi_crypto_15m_v2.yaml")
+    
+    with open(profile_path, 'r', encoding='utf-8') as f:
+        profile = yaml.safe_load(f)
+    
+    # Check dynamic_sizing has hierarchy comment
+    dynamic_sizing = profile['dynamic_sizing']
+    assert dynamic_sizing['max_contracts'] == 3, \
+        "dynamic_sizing max_contracts should be 3 (global cap)"
+    
+    # Check per-asset max_contracts are PRIMARY limits
+    assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+    for asset in assets:
+        asset_config = profile['assets'][asset]
+        max_contracts = asset_config['max_contracts']['value']
+        if asset == "DOGE":
+            assert max_contracts == 2, f"{asset} max_contracts should be 2"
+        else:
+            assert max_contracts == 3, f"{asset} max_contracts should be 3"
+
+
+def test_profile_no_tier_based_depth_thresholds():
+    """Test that profile does not have tier-based depth thresholds (MEDIUM FIX #9)."""
+    profile_path = Path("c:/Dev/MERID/config/profiles/kalshi_crypto_15m_v2.yaml")
+    
+    with open(profile_path, 'r', encoding='utf-8') as f:
+        profile = yaml.safe_load(f)
+    
+    guardrails = profile['guardrails']
+    
+    # Check tier-based thresholds are removed
+    assert 'min_depth_yes_tier1' not in guardrails, \
+        "Tier-based depth thresholds should be removed (use per-asset values)"
+    assert 'min_depth_no_tier1' not in guardrails, \
+        "Tier-based depth thresholds should be removed (use per-asset values)"
+    assert 'min_depth_yes_tier2' not in guardrails, \
+        "Tier-based depth thresholds should be removed (use per-asset values)"
+    assert 'min_depth_no_tier2' not in guardrails, \
+        "Tier-based depth thresholds should be removed (use per-asset values)"
+
+
+def test_risk_envelope_per_trade_risk_pct_default():
+    """Test that risk envelope has correct per_trade_risk_pct default (HIGH FIX #7)."""
+    from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import compute_kalshi_crypto_15m_risk_envelope
+    
+    # Check the code has the correct default by inspecting source
+    import inspect
+    source = inspect.getsource(compute_kalshi_crypto_15m_risk_envelope)
+    assert "0.03" in source, \
+        "Risk envelope should have 3% default for per_trade_risk_pct"

@@ -332,8 +332,8 @@ class Crypto15mProfile:
     # Position Management: Dynamic Sizing Configuration
     dynamic_sizing_enabled: bool = False
     dynamic_sizing_base_contracts: int = 1
-    dynamic_sizing_edge_multiplier: float = 0.5
-    dynamic_sizing_confidence_multiplier: float = 0.3
+    dynamic_sizing_edge_multiplier: float = 2.0
+    dynamic_sizing_confidence_multiplier: float = 1.0
     dynamic_sizing_max_contracts: int = 3
     dynamic_sizing_min_contracts: int = 1
     # Crypto markets are near well-calibrated (slope ~1.08) but still benefit from dynamic adjustment
@@ -384,7 +384,7 @@ class Crypto15mProfile:
     correlation_tracking_max_correlated_assets: int = 3
     
     # Volatility-regime edge adjustment
-    volatility_regime_edge_adjustment_enabled: bool = False
+    volatility_regime_edge_adjustment_enabled: bool = True
     volatility_regime_edge_adjustment_lookback_days: int = 30
     volatility_regime_edge_adjustment_low_volatility_threshold: float = 0.30
     volatility_regime_edge_adjustment_high_volatility_threshold: float = 0.70
@@ -991,8 +991,8 @@ class Crypto15mProfileAdapter:
                 # Position Management: Dynamic Sizing Configuration
                 dynamic_sizing_enabled=raw.get('dynamic_sizing', {}).get('enabled', False),
                 dynamic_sizing_base_contracts=raw.get('dynamic_sizing', {}).get('base_contracts', 1),
-                dynamic_sizing_edge_multiplier=raw.get('dynamic_sizing', {}).get('edge_multiplier', 0.5),
-                dynamic_sizing_confidence_multiplier=raw.get('dynamic_sizing', {}).get('confidence_multiplier', 0.3),
+                dynamic_sizing_edge_multiplier=raw.get('dynamic_sizing', {}).get('edge_multiplier', 2.0),
+                dynamic_sizing_confidence_multiplier=raw.get('dynamic_sizing', {}).get('confidence_multiplier', 1.0),
                 dynamic_sizing_max_contracts=raw.get('dynamic_sizing', {}).get('max_contracts', 3),
                 dynamic_sizing_min_contracts=raw.get('dynamic_sizing', {}).get('min_contracts', 1),
                 # Phase 2: Strategy definitions
@@ -1008,7 +1008,7 @@ class Crypto15mProfileAdapter:
                 correlation_tracking_max_correlated_assets=int(raw.get('correlation_tracking', {}).get('max_correlated_assets', 3)),
                 
                 # Volatility-regime edge adjustment
-                volatility_regime_edge_adjustment_enabled=raw.get('volatility_regime_edge_adjustment', {}).get('enabled', False),
+                volatility_regime_edge_adjustment_enabled=raw.get('volatility_regime_edge_adjustment', {}).get('enabled', True),
                 volatility_regime_edge_adjustment_lookback_days=int(raw.get('volatility_regime_edge_adjustment', {}).get('lookback_days', 30)),
                 volatility_regime_edge_adjustment_low_volatility_threshold=raw.get('volatility_regime_edge_adjustment', {}).get('low_volatility_threshold', 0.30),
                 volatility_regime_edge_adjustment_high_volatility_threshold=raw.get('volatility_regime_edge_adjustment', {}).get('high_volatility_threshold', 0.70),
