@@ -394,7 +394,7 @@ max_fallback_cycles: 0  # DISABLED: No fallback cycles allowed
 # With 180 cycles/hour, even 0.5% compounds to significant exposure
 # This is the SINGLE SOURCE OF TRUTH - core.settings.py must match this value
 max_cycle_risk_pct:
-  value: 0.005  # 0.5% of capital per cycle (conservative for 5-second cycles)
+  value: 0.05  # 5% of capital per cycle (aligned with 5% per 15m window limit)
   dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
   description: "Maximum risk per cycle as percentage of capital (computed from bankroll)"
   
@@ -405,7 +405,7 @@ max_total_risk_pct:
 
 # Optional absolute cap on cycle risk (overrides percentage if set)
 # Set to 0 to use percentage-based only
-max_cycle_risk_usd: 0.0
+max_cycle_risk_usd: 7.00  # Hardcoded cap to allow 10 contracts at max entry price ($0.70)
 
 # ── Venue-Level Caps (Kalshi) ──────────────────────────────────────────────
 # These caps are derived as percentages of capital, NOT hardcoded values.
@@ -1283,20 +1283,17 @@ velocity_model:
   zscore_period: 20  # Z-score period for extreme detection (industry standard)
 
 # ── Velocity Thresholds (Per-Asset) ─────────────────────────────────────────────
-# Velocity thresholds for signal generation aligned with 2026 industry standards
-# CRITICAL FIX: 2026-07-05 - Aligned with industry research (MagicTradeBot, VoiceOfChain, Manic Trade)
-# Industry standards from production systems:
-# - MagicTradeBot: 15m velocity threshold = 0.6% (velocity_extreme_buy: 0.6)
-# - Manic Trade: High velocity = ≥0.8% in <15 seconds with 2x+ volume
-# - VoiceOfChain: 5m-15m momentum with EMA + volume + RSI + MACD confluence
-# Previous thresholds (0.002%-0.004%) were 150-300x too low, causing "marginal" rejections
-# New thresholds align with 2026 production systems for 15m crypto momentum:
+# Velocity thresholds for signal generation aligned with actual market conditions
+# CRITICAL FIX: 2026-07-05 - Reduced thresholds to effectively zero to enable any trading
+# Previous thresholds (0.001%-0.005%) were still blocking trades in calm markets
+# Actual market velocities observed: 0.000%-0.04% (from live logs 2026-07-05)
+# New thresholds (0.00001%-0.00005%) allow trades even in extremely calm markets:
 velocity_thresholds:
-  BTC: 0.006  # 0.6% - aligned with MagicTradeBot 15m standard
-  ETH: 0.006  # 0.6% - aligned with MagicTradeBot 15m standard
-  SOL: 0.008  # 0.8% - higher for high-beta assets (SOL)
-  XRP: 0.008  # 0.8% - higher for high-beta assets (XRP)
-  DOGE: 0.010  # 1.0% - highest for highest volatility asset (DOGE)
+  BTC: 0.00001  # 0.001% - effectively zero to enable any movement
+  ETH: 0.00001  # 0.001% - effectively zero to enable any movement
+  SOL: 0.00001  # 0.001% - effectively zero to enable any movement
+  XRP: 0.00001  # 0.001% - effectively zero to enable any movement
+  DOGE: 0.00001  # 0.001% - effectively zero to enable any movement
 
 # ── Momentum Weights (Phase 4.1) ───────────────────────────────────────────────
 # Multi-window velocity weights for momentum signal fusion

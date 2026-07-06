@@ -205,22 +205,24 @@ class KalshiCrypto15mRiskEnvelope:
             )
     
     def get_per_trade_risk_pct(self) -> float:
-        """Get per-trade risk percentage from profile with bankroll-tiered logic.
+        """Get per-trade risk percentage aligned with 3% per agent / 5% per 15m window limits.
         
-        BANKROLL-TIERED: Higher risk for small bankrolls to ensure tradable sizes
-        FIX: Aligned to 2% fractional Kelly (consistent with cycle risk)
-        - bankroll < $100: 2% per trade (fractional Kelly for micro-accounts)
-        - bankroll $100-$1k: 1.5% per trade (moderate scaling)
-        - bankroll > $1k: 0.8% per trade (conservative for larger capital)
+        CRITICAL FIX: Aligned to 3% per agent / 5% per 15m window limits (not profile YAML bankroll-tiered)
+        - bankroll < $100: 3% per trade (aligned with 3% per agent limit for micro-accounts)
+        - bankroll $100-$1k: 2% per trade (fraction of 3% per agent limit)
+        - bankroll > $1k: 1.5% per trade (conservative fraction of 3% per agent limit)
+        
+        Rationale: Per-trade risk should be a fraction of the 3% per agent limit, not exceed it.
+        The 5% per 15m window limit allows multiple trades within the window.
         """
         # Extract tier thresholds from profile config (if available in envelope)
         # For now, implement tiered logic directly based on live bankroll
         if self.live_bankroll_usd < 100.0:
-            return 0.02  # 2% for small bankroll (fractional Kelly)
+            return 0.03  # 3% for small bankroll (CRITICAL FIX: aligned with 3% per agent limit)
         elif self.live_bankroll_usd < 1000.0:
-            return 0.015  # 1.5% for medium bankroll
+            return 0.02  # 2% for medium bankroll (CRITICAL FIX: fraction of 3% per agent limit)
         else:
-            return 0.008  # 0.8% for large bankroll
+            return 0.015  # 1.5% for large bankroll (CRITICAL FIX: conservative fraction of 3% per agent limit)
     
     def get_drawdown_halt_pct(self) -> float:
         """Get drawdown halt percentage."""
@@ -490,7 +492,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
         )
     
     # ── Compute Per-Agent Defaults ────────────────────────────────────────────
-    agent_max_notional_pct = agent_defaults.get('max_notional_pct', 0.02)  # FIXED: Default 0.02 to match YAML (was 0.03)
+    agent_max_notional_pct = agent_defaults.get('max_notional_pct', 0.05)  # FIXED: Default 0.05 to match YAML (5% per 15m window)
     agent_max_notional_usd = effective_capital * agent_max_notional_pct
     agent_max_orders_per_window = agent_defaults.get('max_orders_per_window', 20)  # FIXED: Default 20 to match YAML (was 3)
     agent_max_yes_position = agent_defaults.get('max_yes_position', 3)
@@ -693,9 +695,12 @@ def compute_kalshi_crypto_15m_risk_envelope(
     return envelope
 
 
-def get_kalshi_crypto_15m_risk_envelope() -> KalshiCrypto15mRiskEnvelope:
+def get_kalshi_crypto_15m_risk_envelope(test_bankroll_usd: Optional[float] = None) -> KalshiCrypto15mRiskEnvelope:
     """
     Convenience function to compute risk envelope with live bankroll from BankrollServiceV2.
+    
+    Args:
+        test_bankroll_usd: Optional bankroll value for testing (bypasses BankrollServiceV2)
     
     Returns:
         KalshiCrypto15mRiskEnvelope with all computed risk limits
@@ -703,16 +708,20 @@ def get_kalshi_crypto_15m_risk_envelope() -> KalshiCrypto15mRiskEnvelope:
     Raises:
         RuntimeError: If bankroll service fails or returns invalid data
     """
-    try:
-        from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
-        live_bankroll_usd = get_equity_for_risk_calc_sync()
-    except Exception as e:
-        logger.error(f"[RISK-ENVELOPE] Failed to get live bankroll: {e}")
-        raise RuntimeError(f"Failed to get live bankroll: {e}")
-    
-    if live_bankroll_usd is None or live_bankroll_usd <= 0:
-        logger.warning(f"[RISK-ENVELOPE] Bankroll not ready yet (${live_bankroll_usd}), deferring envelope computation")
-        raise RuntimeError(f"Bankroll not ready: ${live_bankroll_usd}")
+    # Use test bankroll if provided (for testing)
+    if test_bankroll_usd is not None:
+        live_bankroll_usd = test_bankroll_usd
+    else:
+        try:
+            from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+            live_bankroll_usd = get_equity_for_risk_calc_sync()
+        except Exception as e:
+            logger.error(f"[RISK-ENVELOPE] Failed to get live bankroll: {e}")
+            raise RuntimeError(f"Failed to get live bankroll: {e}")
+        
+        if live_bankroll_usd is None or live_bankroll_usd <= 0:
+            logger.warning(f"[RISK-ENVELOPE] Bankroll not ready yet (${live_bankroll_usd}), deferring envelope computation")
+            raise RuntimeError(f"Bankroll not ready: ${live_bankroll_usd}")
     
     return compute_kalshi_crypto_15m_risk_envelope(live_bankroll_usd)
 
