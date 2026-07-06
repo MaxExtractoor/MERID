@@ -283,13 +283,14 @@ class KalshiPositionCache:
         self._monitoring_interval_seconds: float = 5.0  # Check every 5 seconds
         self._initialized = True
         
-        # CRITICAL FIX: Register exit intent callback for PositionMonitor
-        # This ensures extreme profit exits (99c YES / 1c NO) actually place orders
-        self._register_exit_intent_callback()
-        
         # CRITICAL FIX: Reset stale window exposure if position cache is empty
         # This prevents phantom exposure from blocking all trading after restart
         self._reset_stale_window_exposure()
+        
+        # CRITICAL FIX: DO NOT register exit intent callback here
+        # The production callback is registered in loop_15m.py with proper swing mode logic
+        # Registering here would overwrite the production callback and break exit handling
+        # PositionMonitor callback registration is done in loop_15m._start_position_monitor()
         
         logger.info("KalshiPositionCache initialized")
 
@@ -305,155 +306,6 @@ class KalshiPositionCache:
             from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
             self._fills_ledger = get_fills_ledger()
         return self._fills_ledger
-
-    def _register_exit_intent_callback(self) -> None:
-        """Register exit intent callback with PositionMonitor.
-        
-        CRITICAL FIX: This callback is triggered when PositionMonitor detects
-        extreme profit exits (99c YES / 1c NO) or other exit conditions.
-        It creates an OrderIntent and routes it through the order router to
-        actually place the exit order.
-        
-        Without this callback, the PositionMonitor would detect the exit condition
-        but no order would be placed, leaving the position open.
-        """
-        try:
-            from merid.position_management.position_monitor import get_position_monitor
-            from merid.position_management.exit_policy import ExitReason
-            
-            monitor = get_position_monitor()
-            
-            def exit_intent_callback(position, exit_reason, exit_price_cents, contracts_to_close=None):
-                """Callback to place exit order when PositionMonitor triggers exit.
-                
-                Args:
-                    position: Position object from PositionMonitor
-                    exit_reason: ExitReason enum (EXTREME_PROFIT, STOP_LOSS, TAKE_PROFIT, etc.)
-                    exit_price_cents: Exit price in cents
-                    contracts_to_close: Optional number of contracts for partial exits (scale-out)
-                """
-                try:
-                    from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
-                    from merid.position_management.position import PositionSide
-                    
-                    # Determine exit side and action
-                    # For YES positions: exit by selling YES
-                    # For NO positions: exit by buying YES (to close the NO)
-                    if position.side == PositionSide.YES:
-                        exit_action = "sell"
-                        exit_side = "yes"
-                    else:  # NO position
-                        exit_action = "buy"
-                        exit_side = "yes"
-                    
-                    # Determine order size (full position or partial scale-out)
-                    exit_size = contracts_to_close if contracts_to_close else position.size
-                    
-                    # Determine order type based on exit reason
-                    # Extreme profit exits and 99c exits use market orders for immediate execution
-                    # Ratchet trims use limit orders for better fill prices
-                    # Other exits use limit orders for better fill prices
-                    if exit_reason == ExitReason.EXTREME_PROFIT or exit_reason == ExitReason.RATCHET_99C:
-                        order_type = "market"
-                        time_in_force = "ioc"  # Immediate or cancel
-                        logger.info(
-                            "[EXIT-CALLBACK] %s exit: market order for immediate execution "
-                            "position=%s side=%s size=%d price=%dc",
-                            exit_reason.value, position.position_id[:8], position.side.value, exit_size, exit_price_cents
-                        )
-                    elif exit_reason == ExitReason.RATCHET_TRIM:
-                        order_type = "limit"
-                        time_in_force = "gtc"  # Good till cancelled
-                        logger.info(
-                            "[EXIT-CALLBACK] RATCHET-TRIM partial exit: limit order for better fill "
-                            "position=%s side=%s size=%d -> %d price=%dc",
-                            position.position_id[:8], position.side.value, position.size, exit_size, exit_price_cents
-                        )
-                    else:
-                        order_type = "limit"
-                        time_in_force = "gtc"  # Good till cancelled
-                        logger.info(
-                            "[EXIT-CALLBACK] %s exit: limit order for better fill "
-                            "position=%s side=%s size=%d price=%dc",
-                            exit_reason.value, position.position_id[:8], position.side.value, exit_size, exit_price_cents
-                        )
-                    
-                    # Derive agent_id from asset for proper window tracking
-                    # CRITICAL FIX: Use actual agent_id (e.g., BTC_15M) instead of "position_monitor"
-                    # This ensures window exposure is correctly tracked and reduced when position closes
-                    try:
-                        from config.kalshi_crypto_config import kalshi_ticker_to_asset
-                        asset = kalshi_ticker_to_asset(position.market_id)
-                        if asset and asset.upper() in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
-                            exit_agent_id = f"{asset.upper()}_15M"
-                        else:
-                            exit_agent_id = "position_monitor"  # Fallback for non-crypto assets
-                    except Exception:
-                        exit_agent_id = "position_monitor"  # Fallback if asset lookup fails
-                    
-                    # Create exit intent
-                    exit_intent = OrderIntent(
-                        ticker=position.market_id,
-                        side=exit_side,
-                        action=exit_action,
-                        price_cents=exit_price_cents,
-                        count=exit_size,
-                        order_type=order_type,
-                        time_in_force=time_in_force,
-                        source="position_monitor",
-                        agent_id=exit_agent_id,
-                        rationale=f"Exit triggered: {exit_reason.value}",
-                    )
-                    
-                    # Submit order asynchronously
-                    async def submit_exit():
-                        try:
-                            result = await route_order_async(exit_intent)
-                            logger.info(
-                                "[EXIT-CALLBACK] Exit order submitted: position=%s status=%s reason=%s",
-                                position.position_id[:8], result.status, result.reason
-                            )
-                            
-                            # Record exit in RoundTripMonitor if entry intent ID is available
-                            if hasattr(position, 'exit_policy_id') and position.exit_policy_id:
-                                try:
-                                    from merid.event_venues.kalshi.round_trip_monitor import get_round_trip_monitor
-                                    rt_monitor = get_round_trip_monitor()
-                                    rt_monitor.record_exit(
-                                        exit_intent_id=exit_intent.intent_id,
-                                        entry_intent_id=position.exit_policy_id,
-                                        exit_price_cents=exit_price_cents,
-                                        exit_reason=exit_reason.value,
-                                    )
-                                    logger.info(
-                                        "[EXIT-CALLBACK] Recorded exit in RoundTripMonitor: position=%s",
-                                        position.position_id[:8]
-                                    )
-                                except Exception as rt_err:
-                                    logger.debug("[EXIT-CALLBACK] Failed to record exit in RoundTripMonitor: %s", rt_err)
-                        except Exception as submit_err:
-                            logger.error(
-                                "[EXIT-CALLBACK] Failed to submit exit order: position=%s error=%s",
-                                position.position_id[:8], submit_err, exc_info=True
-                            )
-                    
-                    # Schedule async submission
-                    import asyncio
-                    loop = asyncio.get_event_loop()
-                    loop.create_task(submit_exit())
-                    
-                except Exception as callback_err:
-                    logger.error(
-                        "[EXIT-CALLBACK] Exit intent callback failed: position=%s error=%s",
-                        position.position_id[:8], callback_err, exc_info=True
-                    )
-            
-            # Register the callback
-            monitor.register_exit_intent_callback(exit_intent_callback)
-            logger.info("[POSITION-CACHE] Registered exit intent callback with PositionMonitor")
-            
-        except Exception as init_err:
-            logger.error("[POSITION-CACHE] Failed to register exit intent callback: %s", init_err, exc_info=True)
 
     def _reset_stale_window_exposure(self) -> None:
         """Reset stale window exposure if position cache is empty.
@@ -1180,16 +1032,23 @@ class KalshiPositionCache:
                     if not market_id:
                         continue
                     
+                    # DEBUG: Log all positions from API before filtering
+                    logger.info(
+                        f"[POSITION-CACHE-DEBUG] API returned position: market_id={market_id} "
+                        f"contracts={pos.get('contracts', 0)} side={pos.get('side', 'yes')} "
+                        f"avg_price_cents={pos.get('avg_price_cents', 'N/A')}"
+                    )
+                    
                     # PRODUCTION FIX (2026-05-10): Filter out test positions
                     if _is_test_ticker(market_id):
-                        logger.debug(f"Skipping test ticker in position cache sync: {market_id}")
+                        logger.warning(f"Skipping test ticker in position cache sync: {market_id}")
                         positions_filtered += 1
                         continue
 
                     # PRODUCTION FIX (2026-07-03): Filter out expired positions
                     # Expired markets should not be in the cache as they can't be traded
                     if _is_expired_ticker(market_id):
-                        logger.debug(f"Skipping expired ticker in position cache sync: {market_id}")
+                        logger.warning(f"Skipping expired ticker in position cache sync: {market_id}")
                         positions_filtered += 1
                         continue
 
@@ -1198,7 +1057,7 @@ class KalshiPositionCache:
                     # PRODUCTION FIX (2026-05-11): Only cache open positions (contracts > 0)
                     # Closed positions (contracts=0) should not be in the cache
                     if contracts == 0:
-                        logger.debug(f"Skipping closed position in position cache sync: {market_id} (contracts=0)")
+                        logger.warning(f"Skipping closed position in position cache sync: {market_id} (contracts=0)")
                         positions_filtered += 1
                         continue
 
@@ -1708,22 +1567,15 @@ class KalshiPositionCache:
                     entry_price_cents = position.avg_price_cents
                     sl_price_cents = position.stop_loss_price_cents
 
-                    # P0 FIX: Staged time-based exits for volatile markets
-                    # Load staged exit configuration from profile
-                    staged_exit_enabled = False
-                    staged_exit_stages = []
-                    try:
-                        from pathlib import Path
-                        import yaml
-                        profile_yaml_path = Path(__file__).parent.parent.parent.parent / "config" / "profiles" / "kalshi_crypto_15m_v2.yaml"
-                        if profile_yaml_path.exists():
-                            with open(profile_yaml_path, 'r', encoding='utf-8') as f:
-                                profile_config = yaml.safe_load(f)
-                            staged_exit_config = profile_config.get("staged_time_exit", {})
-                            staged_exit_enabled = staged_exit_config.get("enabled", False)
-                            staged_exit_stages = staged_exit_config.get("stages", [])
-                    except Exception as exc:
-                        logger.warning("[STAGED-EXIT] Failed to load staged exit config: %s", exc)
+                    # CRITICAL FIX: Staged time-based exits DISABLED
+                    # This logic was bypassing PositionMonitor and the exit intent callback system
+                    # Staged exits were calling route_order_async directly, missing:
+                    # - Proper agent_id (was using "position_cache" instead of actual agent)
+                    # - Swing mode logic (enables opposite-side entries after trailing exits)
+                    # - Exit intent callback error handling and logging
+                    # - Integration with PositionMonitor's state management
+                    # TODO: Re-implement staged exits in PositionMonitor with proper callback routing
+                    staged_exit_enabled = False  # Force disabled until properly integrated
                     
                     if state.seconds_to_expiry is not None:
                         time_to_expiry_minutes = state.seconds_to_expiry / 60.0
@@ -1808,206 +1660,20 @@ class KalshiPositionCache:
                                                     position.market_id, exc, exc_info=True
                                                 )
                         
-                        # Fallback: single cutoff at 2 min (original logic)
-                        if time_to_expiry_minutes <= cutoff_minutes:
-                            logger.info(
-                                "[TIME-EXIT] market=%s side=%s time_to_expiry=%.1fmin <= cutoff=%dmin forcing exit",
-                                position.market_id, position.side, time_to_expiry_minutes, cutoff_minutes
-                            )
-                            # Submit market exit order via order router
-                            try:
-                                from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
-
-                                # Determine exit side: closing YES long = sell YES, closing NO long = buy YES
-                                # For YES positions: action="sell", side="yes"
-                                # For NO positions: action="buy", side="yes" (to close the NO)
-                                if position.side == "yes":
-                                    exit_action = "sell"
-                                    exit_side = "yes"
-                                else:  # "no"
-                                    exit_action = "buy"
-                                    exit_side = "yes"
-
-                                # Create exit intent
-                                exit_intent = OrderIntent(
-                                    ticker=position.market_id,
-                                    side=exit_side,
-                                    action=exit_action,
-                                    price_cents=current_price_cents,  # Market price
-                                    count=position.contracts,
-                                    order_type="market",  # Market order for quick exit
-                                    time_in_force="ioc",  # Immediate or cancel
-                                    source="time_exit_monitor",
-                                    agent_id="position_cache",
-                                    rationale=f"Time-based forced exit at {time_to_expiry_minutes:.1f}min to expiry",
-                                )
-
-                                # Submit order asynchronously
-                                result = await route_order_async(exit_intent)
-                                logger.info(
-                                    "[TIME-EXIT] market=%s submitted exit order: status=%s reason=%s",
-                                    position.market_id, result.status, result.reason
-                                )
-
-                                # Mark exit reason in RoundTripMonitor
-                                from merid.event_venues.kalshi.round_trip_monitor import get_round_trip_monitor
-                                rt_monitor = get_round_trip_monitor()
-                                if position.entry_intent_id:
-                                    rt_monitor.record_exit(
-                                        exit_intent_id=exit_intent.intent_id,
-                                        entry_intent_id=position.entry_intent_id,
-                                        exit_price_cents=current_price_cents,
-                                        exit_reason="time_exit",
-                                    )
-                                    logger.info(
-                                        "[TIME-EXIT] market=%s recorded exit in RoundTripMonitor with reason=time_exit",
-                                        position.market_id
-                                    )
-                                else:
-                                    logger.warning(
-                                        "[TIME-EXIT] market=%s exit submitted but RoundTripMonitor tracking incomplete (missing entry_intent_id)",
-                                        position.market_id
-                                    )
-
-                            except Exception as exc:
-                                logger.error(
-                                    "[TIME-EXIT] market=%s failed to submit exit order: %s",
-                                    position.market_id, exc, exc_info=True
-                                )
+                        # CRITICAL FIX: Time-based exit fallback DISABLED
+                        # This logic was bypassing PositionMonitor and the exit intent callback system
+                        # Time exits should be handled by PositionMonitor's exit policy resolver
+                        # which ensures proper agent_id, swing mode logic, and callback routing
+                        # TODO: Implement time-based exit in PositionMonitor.exit_policy.evaluate()
+                        # with proper callback routing
                             continue
 
-                    # P1 FIX: Partial profit taking (scale-out) at trigger threshold
-                    # Load scale-out parameters from profile config
-                    try:
-                        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
-                        risk_envelope = get_kalshi_crypto_15m_risk_envelope()
-                        scale_out_config = risk_envelope.profile.get('scale_out', {})
-                        scale_out_trigger_r = scale_out_config.get('scale_out_trigger_r', 0.7)
-                        scale_out_fraction = scale_out_config.get('scale_out_fraction', 0.5)
-                    except Exception as config_err:
-                        logger.warning("[SCALE-OUT] Failed to load scale-out config, using defaults: %s", config_err)
-                        scale_out_trigger_r = 0.7
-                        scale_out_fraction = 0.5
-                    if not position.scale_out_complete and current_r >= scale_out_trigger_r:
-                        size_to_sell = int(position.contracts * scale_out_fraction)
-                        if size_to_sell >= 1:
-                            logger.info(
-                                "[SCALE-OUT] market=%s side=%s fraction=%.2f size=%d at %.2fR",
-                                position.market_id, position.side, scale_out_fraction, size_to_sell, current_r
-                            )
-                            # Submit partial exit order via order router
-                            try:
-                                from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
-
-                                # Determine exit side
-                                if position.side == "yes":
-                                    exit_action = "sell"
-                                    exit_side = "yes"
-                                else:  # "no"
-                                    exit_action = "buy"
-                                    exit_side = "yes"
-
-                                # Create scale-out intent (limit order near current price)
-                                scale_out_intent = OrderIntent(
-                                    ticker=position.market_id,
-                                    side=exit_side,
-                                    action=exit_action,
-                                    price_cents=current_price_cents,  # Limit at current price
-                                    count=size_to_sell,
-                                    order_type="limit",
-                                    time_in_force="gtc",
-                                    source="scale_out_monitor",
-                                    agent_id="position_cache",
-                                    rationale=f"Scale-out at {current_r:.2f}R (sell {scale_out_fraction:.0%} of position)",
-                                )
-
-                                # Submit order asynchronously
-                                result = await route_order_async(scale_out_intent)
-                                logger.info(
-                                    "[SCALE-OUT] market=%s submitted scale-out order: status=%s reason=%s",
-                                    position.market_id, result.status, result.reason
-                                )
-
-                                # Move stop loss to breakeven for remaining position
-                                # Breakeven = entry price (no loss if stopped out)
-                                new_sl_cents = entry_price_cents
-                                logger.info(
-                                    "[SCALE-OUT] market=%s moving SL to breakeven: old_sl=%dc new_sl=%dc",
-                                    position.market_id, sl_price_cents, new_sl_cents
-                                )
-                                # Cancel existing SL bracket and submit new one at breakeven
-                                if position.sl_bracket_client_tag:
-                                    try:
-                                        # Cancel only the SL bracket (preserve TP bracket)
-                                        from merid.event_venues.kalshi.client_v2 import get_kalshi_client
-                                        client = get_kalshi_client()
-                                        sl_tag = position.sl_bracket_client_tag
-                                        
-                                        # Cancel the SL order
-                                        try:
-                                            await client.cancel_order_by_client_order_id(sl_tag)
-                                            logger.info(
-                                                "[SCALE-OUT] market=%s canceled old SL bracket: tag=%s",
-                                                position.market_id, sl_tag
-                                            )
-                                        except Exception as cancel_exc:
-                                            logger.warning(
-                                                "[SCALE-OUT] market=%s failed to cancel SL bracket (non-fatal): %s",
-                                                position.market_id, cancel_exc
-                                            )
-                                        
-                                        # Submit new SL bracket at breakeven
-                                        new_sl_tag = self._bracket_client_tag(position.market_id, "sl", new_sl_cents)
-                                        from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
-
-                                        # Remaining contracts after scale-out
-                                        # position.contracts already reflects the updated count after the partial fill
-                                        remaining_contracts = position.contracts
-                                        
-                                        sl_intent = OrderIntent(
-                                            ticker=position.market_id,
-                                            side=position.side,
-                                            action="sell",
-                                            price_cents=int(new_sl_cents),
-                                            count=int(remaining_contracts),
-                                            source="scale_out_breakeven_sl",
-                                            agent_id="position_cache_bracket",
-                                            client_tag=new_sl_tag,
-                                            group_id="bracket",
-                                            rationale=f"breakeven_sl_after_scaleout:{position.market_id}:{new_sl_cents}c",
-                                        )
-                                        
-                                        res = await route_order_async(sl_intent)
-                                        ok = bool(getattr(res, "success", False))
-                                        self._record_bracket_metric("sl", ok)
-                                        
-                                        # Update position with new SL tag and price
-                                        position.sl_bracket_client_tag = new_sl_tag
-                                        position.stop_loss_price_cents = new_sl_cents
-                                        
-                                        logger.info(
-                                            "[SCALE-OUT] market=%s submitted new SL at breakeven: price=%dc contracts=%d tag=%s ok=%s",
-                                            position.market_id, new_sl_cents, remaining_contracts, new_sl_tag, ok
-                                        )
-                                        
-                                    except Exception as sl_exc:
-                                        logger.error(
-                                            "[SCALE-OUT] market=%s failed to update SL to breakeven: %s",
-                                            position.market_id, sl_exc, exc_info=True
-                                        )
-
-                                # Mark scale-out as complete
-                                position.scale_out_complete = True
-                                logger.info(
-                                    "[SCALE-OUT] market=%s scale-out complete, remaining contracts=%d",
-                                    position.market_id, position.contracts - size_to_sell
-                                )
-
-                            except Exception as exc:
-                                logger.error(
-                                    "[SCALE-OUT] market=%s failed to submit scale-out order: %s",
-                                    position.market_id, exc, exc_info=True
-                                )
+                    # CRITICAL FIX: Scale-out DISABLED
+                    # This logic was bypassing PositionMonitor and the exit intent callback system
+                    # Scale-outs should be handled by PositionMonitor's scale-out logic
+                    # which ensures proper agent_id, swing mode logic, and callback routing
+                    # TODO: Implement scale-out in PositionMonitor._check_position()
+                    # with proper callback routing
 
                     # Compute risk per contract (R)
                     risk_cents = abs(entry_price_cents - sl_price_cents)

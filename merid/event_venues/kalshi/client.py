@@ -4354,20 +4354,65 @@ class KalshiVenueClient(EventVenueClient):
             return None
     
     def _parse_position(self, data: Dict[str, Any]) -> Optional[KalshiPosition]:
-        """Parse position from API."""
+        """Parse position from API.
+        
+        API format (2026): market_positions uses position_fp (fixed-point) for count
+        Legacy format: uses count field
+        """
         try:
+            # Handle both new API format (position_fp) and legacy format (count)
+            count = 0
+            if "position_fp" in data:
+                # New format: position_fp is a fixed-point string (e.g., "10.00")
+                count = int(float(data.get("position_fp", "0")))
+            elif "count" in data:
+                # Legacy format: count is an integer
+                count = int(data.get("count", 0))
+            
+            # Handle both new format (realized_pnl_dollars) and legacy format (realized_pnl)
+            realized_pnl = None
+            if "realized_pnl_dollars" in data:
+                realized_pnl = Decimal(str(data.get("realized_pnl_dollars", 0)))
+            elif "realized_pnl" in data:
+                realized_pnl = Decimal(str(data.get("realized_pnl", 0)))
+            
+            # Handle both new format (market_exposure_dollars) and legacy format (unrealized_pnl)
+            unrealized_pnl = None
+            if "market_exposure_dollars" in data:
+                # New format: market_exposure_dollars is exposure, not unrealized PnL
+                # For now, treat as unrealized PnL for compatibility
+                unrealized_pnl = Decimal(str(data.get("market_exposure_dollars", 0)))
+            elif "unrealized_pnl" in data:
+                unrealized_pnl = Decimal(str(data.get("unrealized_pnl", 0)))
+            
+            # Handle avg_price - new format may not include it, calculate from exposure/position
+            avg_price = Decimal("0")
+            if "avg_price" in data:
+                avg_price = Decimal(str(data.get("avg_price", 0)))
+            elif "market_exposure_dollars" in data and count > 0:
+                # Calculate avg_price from exposure and position count
+                exposure = Decimal(str(data.get("market_exposure_dollars", 0)))
+                avg_price = exposure / Decimal(count) if count > 0 else Decimal("0")
+            
+            # Handle total_cost - new format uses total_cost_dollars
+            total_cost = Decimal("0")
+            if "total_cost" in data:
+                total_cost = Decimal(str(data.get("total_cost", 0)))
+            elif "total_cost_dollars" in data:
+                total_cost = Decimal(str(data.get("total_cost_dollars", 0)))
+            
             return KalshiPosition(
                 ticker=data.get("ticker", ""),
                 side=data.get("side", ""),
-                count=int(data.get("count", 0)),
-                avg_price=Decimal(str(data.get("avg_price", 0))),
-                total_cost=Decimal(str(data.get("total_cost", 0))),
-                unrealized_pnl=Decimal(str(data.get("unrealized_pnl", 0))) if "unrealized_pnl" in data else None,
-                realized_pnl=Decimal(str(data.get("realized_pnl", 0))) if "realized_pnl" in data else None,
+                count=count,
+                avg_price=avg_price,
+                total_cost=total_cost,
+                unrealized_pnl=unrealized_pnl,
+                realized_pnl=realized_pnl,
                 created_at=self._parse_datetime(data.get("created_at"))
             )
         except (ValueError, TypeError, KeyError) as e:
-            logger.warning(f"Failed to parse Kalshi position: {e}")
+            logger.warning(f"Failed to parse Kalshi position: {e} data={data}")
             return None
     
     def _to_venue_position(self, pos: KalshiPosition) -> VenuePosition:
