@@ -1200,6 +1200,8 @@ class Kalshi15mLoop:
             # Create exit OrderIntent
             # CRITICAL: Use limit order with GTC to create resting order for better fill rate
             # This allows the exit order to sit on the book and get filled at the desired price
+            # CRITICAL FIX: Add exit_policy_id to satisfy order router validation for exit orders
+            # Exit orders require exit_policy_id for tracking per _validate_risk_contract_linkage
             intent = OrderIntent(
                 ticker=position.market_id,
                 side=kalshi_side,  # CRITICAL FIX: Use Kalshi-formatted side (SELL_YES, SELL_NO)
@@ -1211,6 +1213,7 @@ class Kalshi15mLoop:
                 source="position_monitor_exit",
                 agent_id="merid.position_management.position_monitor",
                 exit_reason=exit_reason,
+                exit_policy_id=position.exit_policy_id,  # CRITICAL FIX: Required for exit order validation
             )
 
             logger.info(
@@ -1597,6 +1600,16 @@ class Kalshi15mLoop:
                                 )
                                 
                                 candidate["count"] = count
+                                
+                                # CRITICAL FIX: Skip execution if sizing returned count=0
+                                # This prevents invalid orders from being submitted
+                                if count == 0:
+                                    logger.warning(
+                                        "[15m-LOOP] Sizing returned count=0 for ticker=%s (notional=%.2f, rejection_reason=%s) - skipping execution",
+                                        ticker, float(notional), metadata.get("rejection_reason", "unknown")
+                                    )
+                                    continue
+                                
                                 logger.info(
                                     "[15m-LOOP] Dynamic sizing: ticker=%s edge=%.4f confidence=%.4f count=%d notional=%.2f",
                                     ticker, float(edge_pct), float(confidence), count, float(notional)
