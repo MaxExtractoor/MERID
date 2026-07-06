@@ -63,6 +63,7 @@ class Position:
     trailing_param: float = 0.0  # e.g., 1.0 R or 1% trail
     max_favorable_price_cents: int = 0  # Updated as price moves favorably
     trailing_activated: bool = False  # Research: activate trailing after min_profit_cents (12¢ per 2026 research)
+    trailing_profit_zone_activated: bool = False  # CRITICAL FIX: 2026-07-06 - Aggressive trailing in 80-85c zone
     
     # Policy references
     window_resolution_id: str = ""
@@ -79,6 +80,11 @@ class Position:
     exit_reason: Optional[str] = None
     exit_price_cents: Optional[int] = None
     exited_at: Optional[datetime] = None
+    
+    # Ratchet profit floor tracking (2026-07-05)
+    ratchet_activated: bool = False
+    ratchet_hold_until: float = 0.0  # Timestamp until which to hold after activation
+    ratchet_trimmed: bool = False  # Track if position has been trimmed
     
     # Initial risk for R-multiple calculation
     initial_risk_cents: int = 0  # |entry_price - stop_loss_price| if stop_loss set
@@ -222,7 +228,21 @@ class Position:
         elif self.trailing_type == TrailingType.FIXED_CENTS:
             # Fixed cent trail: trail_level = max_favorable - fixed_distance
             # trailing_param is the fixed distance in cents (e.g., 5 cents)
-            fixed_distance = int(trailing_param)
+            # CRITICAL FIX: 2026-07-06 - Use aggressive distance (2c) in 80-85c profit zone
+            try:
+                from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
+                if is_profile_active():
+                    adapter = get_active_profile()
+                    profile = adapter.profile
+                    if self.trailing_profit_zone_activated:
+                        fixed_distance = profile.trailing_stop_trailing_distance_cents_profit_zone  # 2c in profit zone
+                    else:
+                        fixed_distance = profile.trailing_stop_trailing_distance_cents  # 5c normal
+                else:
+                    fixed_distance = int(trailing_param)  # Fallback to param
+            except Exception as e:
+                fixed_distance = int(trailing_param)  # Fallback to param
+            
             if self.side == PositionSide.YES:
                 # YES: trail below max favorable
                 trail_level = self.max_favorable_price_cents - fixed_distance
@@ -350,6 +370,27 @@ class Position:
         else:
             # Long NO: trigger if price falls to or below take-profit
             return current_price_cents <= self.take_profit_price_cents
+    
+    def should_trigger_extreme_profit(self, current_price_cents: int) -> bool:
+        """
+        Check if extreme profit exit should trigger (99c YES / 1c NO).
+        
+        2026 FIX: Exit at 99c for YES or 1c for NO to lock in guaranteed wins.
+        At these extreme prices, the probability is near 100% and holding further
+        provides minimal upside with significant risk of reversal.
+        
+        Args:
+            current_price_cents: Current market price in cents
+            
+        Returns:
+            True if price is at extreme profit level (99c YES / 1c NO)
+        """
+        if self.side == PositionSide.YES:
+            # YES: exit at 99c or higher (guaranteed win)
+            return current_price_cents >= 99
+        else:
+            # NO: exit at 1c or lower (guaranteed win)
+            return current_price_cents <= 1
     
     def should_trigger_break_even(self, current_price_cents: int) -> bool:
         """

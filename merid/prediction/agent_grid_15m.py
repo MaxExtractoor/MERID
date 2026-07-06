@@ -1606,6 +1606,239 @@ class LeanAgent15m:
         
         return velocity
     
+    def _generate_momentum_fvg_signal(self, asset: str, spot_price: float, market: Any, minutes_to_expiry: float) -> Optional[Dict[str, Any]]:
+        """MOMENTUM_FVG STRATEGY: Combines velocity, MACD, RSI, OBI, and FVG for enhanced signals.
+        
+        CRITICAL FIX: 2026-07-06 - Wires MACD/RSI into momentum_fvg signal generation
+        This strategy uses multiple indicators to generate high-confidence signals:
+        - Velocity: Multi-window velocity with EMA smoothing and ATR normalization
+        - MACD: Momentum confirmation (histogram sign and slope)
+        - RSI: Overbought/oversold conditions for fade entries
+        - OBI: Order book imbalance for confirmation
+        - FVG: Fair Value Gap for confluence and timing
+        """
+        # Load profile configuration for momentum_fvg parameters
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_crypto_15m_profile
+            profile = get_crypto_15m_profile()
+            momentum_fvg_config = profile.momentum_fvg
+        except Exception as e:
+            logger.warning("[MOMENTUM-FVG] Failed to load profile config: %s", e)
+            return None
+        
+        # Calculate velocity (multi-window with EMA smoothing)
+        velocity = self._calculate_multi_window_velocity(asset, spot_price)
+        velocity_threshold = self._calculate_dynamic_velocity_threshold(asset)
+        
+        # Get MACD and RSI from indicator stack
+        macd_histogram = 0.0
+        macd_slope = 0.0
+        rsi = 50.0
+        rsi_zone = "neutral"
+        
+        try:
+            if hasattr(self, '_indicator_stack') and self._indicator_stack:
+                # Get MACD histogram and slope
+                if hasattr(self._indicator_stack, '_macd_ema_fast') and hasattr(self._indicator_stack, '_macd_ema_slow'):
+                    macd_line = self._indicator_stack._macd_ema_fast - self._indicator_stack._macd_ema_slow
+                    if hasattr(self._indicator_stack, '_macd_signal_ema'):
+                        macd_histogram = macd_line - self._indicator_stack._macd_signal_ema
+                        # Calculate MACD slope (change in histogram)
+                        if hasattr(self._indicator_stack, '_prev_macd_histogram'):
+                            macd_slope = macd_histogram - self._indicator_stack._prev_macd_histogram
+                        self._indicator_stack._prev_macd_histogram = macd_histogram
+                
+                # Get RSI
+                if hasattr(self._indicator_stack, '_calculate_rsi'):
+                    rsi = self._indicator_stack._calculate_rsi(asset, period=9)
+                    # Determine RSI zone
+                    rsi_oversold = getattr(momentum_fvg_config, 'rsi_oversold', 30.0)
+                    rsi_overbought = getattr(momentum_fvg_config, 'rsi_overbought', 70.0)
+                    if rsi <= rsi_oversold:
+                        rsi_zone = "oversold"
+                    elif rsi >= rsi_overbought:
+                        rsi_zone = "overbought"
+                    else:
+                        rsi_zone = "neutral"
+        except Exception as e:
+            logger.warning("[MOMENTUM-FVG] Failed to get MACD/RSI indicators: %s", e)
+        
+        # Get FVG signal from FVG forecaster
+        fvg_signal = None
+        fvg_confidence = 0.0
+        fvg_direction = "neutral"
+        
+        try:
+            from merid.prediction.forecasters.fvg import get_fvg_forecaster
+            fvg_forecaster = get_fvg_forecaster()
+            # Get FVG prediction for current price
+            fvg_prediction = fvg_forecaster.predict(asset, "15m", spot_price, time.time())
+            if fvg_prediction:
+                fvg_confidence = fvg_prediction.get('confidence', 0.0)
+                fvg_direction = fvg_prediction.get('direction', 'neutral')
+                fvg_signal = fvg_prediction
+        except Exception as e:
+            logger.warning("[MOMENTUM-FVG] Failed to get FVG signal: %s", e)
+        
+        # Get OBI (Order Book Imbalance) from market state
+        obi = 0.0
+        obi_strong = False
+        try:
+            ticker = market.market.market_id if hasattr(market, 'market') else market.market_id
+            market_state = self.market_state_store.get(ticker) if self.market_state_store else None
+            if market_state:
+                depth_yes = getattr(market_state, 'depth_yes_10c', 0) or 0
+                depth_no = getattr(market_state, 'depth_no_10c', 0) or 0
+                if depth_yes + depth_no > 0:
+                    obi = (depth_yes - depth_no) / (depth_yes + depth_no)
+                    # Check per-asset strong thresholds
+                    asset_obi_strong = getattr(momentum_fvg_config, f'obi_strong_{asset.lower()}', 0.5)
+                    obi_strong = abs(obi) >= asset_obi_strong
+        except Exception as e:
+            logger.warning("[MOMENTUM-FVG] Failed to get OBI: %s", e)
+        
+        # Combine signals for momentum_fvg decision
+        # Long signal conditions:
+        # 1. Velocity > threshold (positive momentum)
+        # 2. MACD histogram >= 0 (bullish momentum)
+        # 3. RSI not overbought (not extended)
+        # 4. OBI positive (buying pressure) OR FVG bullish confluence
+        
+        min_macd_hist_long = getattr(momentum_fvg_config, 'min_macd_hist_long', 0)
+        min_macd_hist_short = getattr(momentum_fvg_config, 'min_macd_hist_short', 0)
+        
+        long_conditions = [
+            velocity > velocity_threshold,
+            macd_histogram >= min_macd_hist_long,
+            rsi_zone != "overbought",
+            (obi > 0 and obi_strong) or (fvg_direction == "bullish" and fvg_confidence > 0.5)
+        ]
+        
+        short_conditions = [
+            velocity < -velocity_threshold,
+            macd_histogram <= min_macd_hist_short,
+            rsi_zone != "oversold",
+            (obi < 0 and obi_strong) or (fvg_direction == "bearish" and fvg_confidence > 0.5)
+        ]
+        
+        # Count conditions met
+        long_score = sum(long_conditions)
+        short_score = sum(short_conditions)
+        
+        # Require at least 3 of 4 conditions for signal
+        if long_score >= 3:
+            signal_side = "yes"
+            signal_action = "buy"
+            confidence = 0.5 + (long_score * 0.1) + (fvg_confidence * 0.1)
+            confidence = min(0.95, confidence)
+            logger.info(
+                "[MOMENTUM-FVG-LONG] asset=%s velocity=%.6f (threshold=%.6f) macd_hist=%.4f rsi=%.1f (%s) obi=%.2f fvg_dir=%s fvg_conf=%.2f -> BUY YES",
+                asset, velocity, velocity_threshold, macd_histogram, rsi, rsi_zone, obi, fvg_direction, fvg_confidence
+            )
+        elif short_score >= 3:
+            signal_side = "no"
+            signal_action = "buy"
+            confidence = 0.5 + (short_score * 0.1) + (fvg_confidence * 0.1)
+            confidence = min(0.95, confidence)
+            logger.info(
+                "[MOMENTUM-FVG-SHORT] asset=%s velocity=%.6f (threshold=%.6f) macd_hist=%.4f rsi=%.1f (%s) obi=%.2f fvg_dir=%s fvg_conf=%.2f -> BUY NO",
+                asset, velocity, velocity_threshold, macd_histogram, rsi, rsi_zone, obi, fvg_direction, fvg_confidence
+            )
+        else:
+            logger.info(
+                "[MOMENTUM-FVG-NO-SIGNAL] asset=%s long_score=%d short_score=%d -> NO TRADE",
+                asset, long_score, short_score
+            )
+            return None
+        
+        # Calculate edge based on velocity and indicator strength
+        edge_pct = abs(velocity / velocity_threshold) * 2.0  # Base edge from velocity
+        edge_pct = max(edge_pct, 2.0)  # Minimum 2% edge
+        
+        # Add MACD strength to edge
+        edge_pct += abs(macd_histogram) * 10.0
+        
+        # Add RSI strength (fade at extremes)
+        if rsi_zone == "oversold" and signal_side == "yes":
+            edge_pct += 1.0  # Bonus for oversold bounce
+        elif rsi_zone == "overbought" and signal_side == "no":
+            edge_pct += 1.0  # Bonus for overbought fade
+        
+        # Add FVG confluence bonus
+        if fvg_confidence > 0.5:
+            edge_pct += fvg_confidence * 2.0
+        
+        # Cap edge at reasonable maximum
+        edge_pct = min(edge_pct, 15.0)
+        
+        # Calculate model probability
+        if signal_side == "yes":
+            model_prob = min(0.95, 0.5 + (edge_pct / 100.0))
+        else:
+            model_prob = max(0.05, 0.5 - (edge_pct / 100.0))
+        
+        # Return signal
+        return {
+            "side": signal_side,
+            "action": signal_action,
+            "confidence": confidence,
+            "edge_pct": edge_pct,
+            "model_prob": model_prob,
+            "signal_mode": "momentum_fvg",
+            "velocity": velocity,
+            "velocity_threshold": velocity_threshold,
+            "macd_histogram": macd_histogram,
+            "macd_slope": macd_slope,
+            "rsi": rsi,
+            "rsi_zone": rsi_zone,
+            "obi": obi,
+            "fvg_direction": fvg_direction,
+            "fvg_confidence": fvg_confidence,
+            "long_score": long_score,
+            "short_score": short_score,
+        }
+
+    def _check_trend_alignment(self, asset: str, spot_price: float) -> bool:
+        """Check if 5m and 1h trends are aligned for signal confirmation.
+        
+        CRITICAL FIX: 2026-07-06 - Integrated trend alignment as confirmation filter
+        Based on Turbine research: trend alignment was consistently profitable
+        - YES alignment: 5 of 5 profitable, mean P&L +$5,939
+        - NO alignment: 5 of 5 profitable, mean P&L +$3,773
+        
+        Returns:
+            True if trends are aligned (both up or both down), False otherwise
+        """
+        try:
+            from merid.prediction.strategies.trend_alignment import get_trend_alignment_strategy
+            trend_strategy = get_trend_alignment_strategy()
+            
+            # Update price history
+            current_time = time.time()
+            trend_strategy.update_price(asset, spot_price, current_time)
+            
+            # Calculate short (5m) and medium (1h) trends
+            short_trend = trend_strategy._calculate_trend(asset, 300, current_time)  # 5 minutes
+            medium_trend = trend_strategy._calculate_trend(asset, 3600, current_time)  # 1 hour
+            
+            # Check if trends agree and are not neutral
+            if short_trend == medium_trend and short_trend.value != "neutral":
+                logger.info(
+                    "[TREND-ALIGNMENT] asset=%s short_trend=%s medium_trend=%s -> ALIGNED",
+                    asset, short_trend.value, medium_trend.value
+                )
+                return True
+            else:
+                logger.info(
+                    "[TREND-ALIGNMENT] asset=%s short_trend=%s medium_trend=%s -> NOT ALIGNED",
+                    asset, short_trend.value, medium_trend.value
+                )
+                return False
+        except Exception as e:
+            logger.warning("[TREND-ALIGNMENT] Failed to check trend alignment for %s: %s", asset, e)
+            # If trend alignment check fails, proceed (fail-safe)
+            return True
+
     def _generate_price_based_signal(self, asset: str, spot_price: float, market: Any, minutes_to_expiry: float) -> Optional[Dict[str, Any]]:
         # PRICE-BASED STRATEGY (Turbine research winner: +56.6% ROI)
         # Buy YES when market price <= 0.50, sell when price >= 0.70
@@ -2695,6 +2928,27 @@ class LeanAgent15m:
         # Buy YES when price <= 0.50, sell when price >= 0.70
         if self.config.signal_mode == "price_based":
             return self._generate_price_based_signal(asset, spot_price, market, minutes_to_expiry)
+        
+        # CRITICAL FIX: 2026-07-06 - Wire MACD/RSI into momentum_fvg signal generation
+        # MOMENTUM_FVG STRATEGY: Combines velocity, MACD, RSI, OBI, and FVG for enhanced signals
+        if self.config.signal_mode == "momentum_fvg":
+            return self._generate_momentum_fvg_signal(asset, spot_price, market, minutes_to_expiry)
+        
+        # CRITICAL FIX: 2026-07-06 - Integrate trend alignment as confirmation filter
+        # TREND_ALIGNMENT STRATEGY: Requires 5m and 1h trend agreement for signal confirmation
+        # Based on Turbine research: trend alignment was consistently profitable
+        trend_aligned = self._check_trend_alignment(asset, spot_price)
+        if not trend_aligned:
+            logger.info(
+                "[TREND-ALIGNMENT-FILTER] asset=%s 5m and 1h trends not aligned -> SKIP TRADE (trend disagreement)",
+                asset
+            )
+            return None
+        else:
+            logger.info(
+                "[TREND-ALIGNMENT-CONFIRMED] asset=%s 5m and 1h trends aligned -> PROCEED",
+                asset
+            )
         
         # CRITICAL FIX: Use multi-window velocity for both threshold comparison AND logit calculation
         # Previous bug: Used simple _calculate_velocity for threshold but _calculate_multi_window_velocity for logit

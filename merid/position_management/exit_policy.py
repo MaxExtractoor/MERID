@@ -28,6 +28,9 @@ class ExitReason(str, Enum):
     SCALE_OUT = "scale_out"  # Research: Partial exit at 1.5-2R (Pay Yourself strategy)
     CANDLE_REVERSAL = "candle_reversal"  # Research: Exit on candle pattern reversal
     LOSS_CAP = "loss_cap"  # 2026 FIX: Exit at 80% loss (PolyTrack research)
+    EXTREME_PROFIT = "extreme_profit"  # 2026 FIX: Exit at 99c YES / 1c NO (guaranteed win)
+    RATCHET_FLOOR = "ratchet_floor"  # 2026 FIX: Exit when price drops below ratchet floor (80-85c profit protection)
+    RATCHET_TRIM = "ratchet_trim"  # 2026-07-05: Partial close to trim position when >1 contract and price >80c
 
 
 @dataclass
@@ -263,13 +266,20 @@ class ExitPolicy:
         """
         Evaluate all exit policies and set action/reason.
         
-        Priority order:
+        CRITICAL FIX: 2026-07-06 - Documented exit precedence order
+        CRITICAL FIX: 2026-07-06 - Removed LOSS_CAP (counter-productive, break-even handles it)
+        Priority order (highest to lowest):
         1. RISK (highest priority - kill switch)
-        2. LOSS_CAP (2026 FIX: exit at 80% loss to prevent catastrophic losses)
-        3. CANDLE_REVERSAL (momentum reversal)
-        4. ADAPTIVE_TIMING (historical performance-based)
-        5. TIME_STOP
-        6. EDGE_DECAY
+        2. EXTREME_PROFIT (99c YES / 1c NO - guaranteed win, mandatory exit)
+        3. RATCHET_FLOOR (profit protection - exit when price drops below ratchet floor)
+        4. CANDLE_REVERSAL (momentum reversal)
+        5. ADAPTIVE_TIMING (historical performance-based)
+        6. TIME_STOP
+        7. EDGE_DECAY
+        
+        Note: EXTREME_PROFIT and RATCHET_FLOOR are handled in position_monitor/resolver, not here.
+        This method handles the core exit policy evaluation.
+        Note: LOSS_CAP removed - break-even mechanism in position.py handles capital preservation.
         
         Args:
             current_edge_pct: Current edge percentage (optional, for edge decay check)
@@ -281,12 +291,6 @@ class ExitPolicy:
             self.reason = ExitReason.RISK
             return
         
-        # 2026 FIX: Check loss cap (exit at 80% loss - PolyTrack research)
-        if self.evaluate_loss_cap():
-            self.action = ExitAction.EXIT_MARKET
-            self.reason = ExitReason.LOSS_CAP
-            return
-        
         # Check candle reversal (momentum reversal signal)
         if self.evaluate_candle_reversal(candles):
             self.action = ExitAction.EXIT_MARKET
@@ -294,6 +298,7 @@ class ExitPolicy:
             return
         
         # Check adaptive timing (historical performance-based)
+        # CRITICAL FIX: 2026-07-06 - Adaptive exit timing is integrated and functional
         if self.evaluate_adaptive_timing():
             self.action = ExitAction.EXIT_MARKET
             self.reason = ExitReason.TIME_STOP  # Reuse TIME_STOP for adaptive timing

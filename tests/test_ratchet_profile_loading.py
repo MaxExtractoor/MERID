@@ -30,7 +30,8 @@ class TestRatchetProfileLoading:
         assert "floor_offset_cents" in ratchet_config
         assert "force_exit_on_floor_breach" in ratchet_config
         assert "min_hold_after_activation_sec" in ratchet_config
-        assert "mandatory_exit_at_99c" in ratchet_config  # 2026-07-05: Added mandatory 99c exit
+        # CRITICAL FIX: 2026-07-06 - Removed mandatory_exit_at_99c (redundant, handled by position-level extreme profit)
+        assert "mandatory_exit_at_99c" not in ratchet_config  # Should NOT be present (removed)
         assert "trim_position_enabled" in ratchet_config  # 2026-07-05: Added position trimming
         assert "trim_threshold_cents" in ratchet_config  # 2026-07-05: Trim threshold
         assert "trim_to_contracts" in ratchet_config  # 2026-07-05: Trim to contracts
@@ -52,7 +53,8 @@ class TestRatchetProfileLoading:
             assert hasattr(profile, "ratchet_floor_offset_cents")
             assert hasattr(profile, "ratchet_force_exit_on_floor_breach")
             assert hasattr(profile, "ratchet_min_hold_after_activation_sec")
-            assert hasattr(profile, "ratchet_mandatory_exit_at_99c")
+            # CRITICAL FIX: 2026-07-06 - Removed ratchet_mandatory_exit_at_99c (redundant, handled by position-level extreme profit)
+            assert not hasattr(profile, "ratchet_mandatory_exit_at_99c")  # Should NOT have this field
             assert hasattr(profile, "ratchet_trim_position_enabled")
             assert hasattr(profile, "ratchet_trim_threshold_cents")
             assert hasattr(profile, "ratchet_trim_to_contracts")
@@ -63,7 +65,6 @@ class TestRatchetProfileLoading:
             assert profile.ratchet_floor_offset_cents == 5
             assert profile.ratchet_force_exit_on_floor_breach is True
             assert profile.ratchet_min_hold_after_activation_sec == 30
-            assert profile.ratchet_mandatory_exit_at_99c is True  # 2026-07-05: Added mandatory 99c exit
             assert profile.ratchet_trim_position_enabled is True  # 2026-07-05: Added position trimming
             assert profile.ratchet_trim_threshold_cents == 80  # 2026-07-05: Trim at 80c
             assert profile.ratchet_trim_to_contracts == 1  # 2026-07-05: Trim to 1 contract
@@ -82,7 +83,8 @@ class TestRatchetProfileLoading:
         assert Crypto15mProfile.ratchet_floor_offset_cents == 5
         assert Crypto15mProfile.ratchet_force_exit_on_floor_breach == True
         assert Crypto15mProfile.ratchet_min_hold_after_activation_sec == 30
-        assert Crypto15mProfile.ratchet_mandatory_exit_at_99c == True
+        # CRITICAL FIX: 2026-07-06 - Removed ratchet_mandatory_exit_at_99c (redundant, handled by position-level extreme profit)
+        assert not hasattr(Crypto15mProfile, "ratchet_mandatory_exit_at_99c")  # Should NOT have this field
         assert Crypto15mProfile.ratchet_trim_position_enabled == True
         assert Crypto15mProfile.ratchet_trim_threshold_cents == 80
         assert Crypto15mProfile.ratchet_trim_to_contracts == 1
