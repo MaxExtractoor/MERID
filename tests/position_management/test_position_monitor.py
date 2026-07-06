@@ -648,6 +648,70 @@ class TestPositionMonitorPolling:
         assert position.current_price_cents == 0
 
 
+class TestPositionMonitorSideAwarePrice:
+    """Test side-aware price conversion for NO positions."""
+    
+    def test_get_side_aware_price_yes_position(self):
+        """Test that YES positions use mid_cents directly."""
+        monitor = PositionMonitor()
+        
+        # Mock market state with YES-centric mid_cents
+        mock_state = Mock()
+        mock_state.mid_cents = 42
+        
+        # YES position should return mid_cents directly
+        price = monitor._get_side_aware_price(mock_state, PositionSide.YES)
+        assert price == 42
+    
+    def test_get_side_aware_price_no_position(self):
+        """Test that NO positions convert mid_cents to NO price (100 - YES mid)."""
+        monitor = PositionMonitor()
+        
+        # Mock market state with YES-centric mid_cents
+        mock_state = Mock()
+        mock_state.mid_cents = 42
+        
+        # NO position should return 100 - mid_cents = 58
+        price = monitor._get_side_aware_price(mock_state, PositionSide.NO)
+        assert price == 58
+    
+    def test_get_side_aware_price_no_state(self):
+        """Test that None is returned when market state is None."""
+        monitor = PositionMonitor()
+        
+        price = monitor._get_side_aware_price(None, PositionSide.YES)
+        assert price is None
+    
+    def test_get_side_aware_price_no_mid_cents(self):
+        """Test that None is returned when mid_cents is None."""
+        monitor = PositionMonitor()
+        
+        mock_state = Mock()
+        mock_state.mid_cents = None
+        
+        price = monitor._get_side_aware_price(mock_state, PositionSide.YES)
+        assert price is None
+    
+    def test_get_side_aware_price_no_position_edge_cases(self):
+        """Test NO position price conversion at edge cases."""
+        monitor = PositionMonitor()
+        
+        # Test various YES mid prices
+        test_cases = [
+            (1, 99),   # YES mid 1c -> NO price 99c
+            (10, 90),  # YES mid 10c -> NO price 90c
+            (50, 50),  # YES mid 50c -> NO price 50c
+            (90, 10),  # YES mid 90c -> NO price 10c
+            (99, 1),   # YES mid 99c -> NO price 1c
+        ]
+        
+        for yes_mid, expected_no_price in test_cases:
+            mock_state = Mock()
+            mock_state.mid_cents = yes_mid
+            price = monitor._get_side_aware_price(mock_state, PositionSide.NO)
+            assert price == expected_no_price, f"YES mid {yes_mid} should convert to NO price {expected_no_price}, got {price}"
+
+
 class TestPositionMonitorThreadSafety:
     """Test thread safety of PositionMonitor operations."""
     
