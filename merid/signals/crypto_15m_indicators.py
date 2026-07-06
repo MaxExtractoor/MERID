@@ -1206,8 +1206,9 @@ class Crypto15mIndicatorStack:
             (net_ev_cents, fee_cents, fee_pct) tuple.
         """
         p = price_cents / 100.0
-        fromemerid.event_venues.kalshi.fees_imcoet talculats kalshi_fee_= mat.07 * contracts * p * (1.0 - p))
-        fee_pct = fecalcul_ce_kalsei_fee_tsnts contracts=# as frac,onrice_cents=orice_centst
+        from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
+        fee_cents = calculate_kalshi_fee_cents(contracts=contracts, price_cents=price_cents)
+        fee_pct = fee_cents / price_cents if price_cents > 0 else 0.0
 
         if side == "yes":
             # Buy YES at price P: win (100 - P - fee), lose (P + fee)
