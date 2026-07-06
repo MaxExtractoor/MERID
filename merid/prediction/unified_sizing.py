@@ -167,8 +167,14 @@ def compute_min_notional_for_venue(
     """Compute minimum notional requirement from venue/contract metadata.
     
     This function centralizes min_notional calculation to avoid hardcoded constants.
-    For Kalshi, the minimum notional is $0.50 to align with kalshi_crypto_15m_v2.yaml profile
-    (min_notional_usd: 0.50 for micro accounts under $100 bankroll).
+    For Kalshi, the minimum notional is $0.15 - aligned with the 15c minimum contract
+    price floor (guardrails min_contract_price_cents).
+    
+    HARD RULE (2026-07-06): Agents place 1 contract per order. The previous $0.50
+    minimum forced the min-notional bump-up path to raise count to 2+ contracts for
+    sub-50c prices (doubling up on the same price) or reject the trade entirely.
+    With the 1-contract-per-order rule, min_notional must equal the price floor so
+    a single contract at 15-99c always satisfies it.
     
     Args:
         venue: Venue name (e.g., "kalshi")
@@ -181,9 +187,9 @@ def compute_min_notional_for_venue(
     # Kalshi-specific rules
     if venue.lower() == "kalshi":
         # Kalshi contracts pay $1 per contract
-        # Minimum order notional is $0.50 to align with profile (micro account support)
+        # Minimum order notional is $0.15 = 1 contract at the 15c price floor
         # This is a venue-level requirement, not a risk limit
-        return Decimal("0.50")
+        return Decimal("0.15")
     
     # For other venues or if venue metadata is unavailable, return 0.0 (no constraint)
     # This allows the sizing function to proceed without a min_notional floor
@@ -719,67 +725,78 @@ def compute_order_size(
         )
     
     # Step 5: Check existing positions for position-aware sizing
-    # Reduce max_notional if we already have exposure to this asset
-    existing_position_notional = Decimal("0")
-    try:
-        from merid.event_venues.kalshi.position_cache import get_position_cache
-        cache = get_position_cache()
-        positions = cache.get_all_positions()
-        
-        # Sum existing positions for this asset (across all timeframes)
-        for ticker, pos in positions.items():
-            # Extract asset from ticker (e.g., KXBTC15M-... -> BTC)
-            ticker_asset = None
-            if "BTC" in ticker.upper():
-                ticker_asset = "BTC"
-            elif "ETH" in ticker.upper():
-                ticker_asset = "ETH"
-            elif "SOL" in ticker.upper():
-                ticker_asset = "SOL"
-            elif "XRP" in ticker.upper():
-                ticker_asset = "XRP"
-            elif "DOGE" in ticker.upper():
-                ticker_asset = "DOGE"
-            
-            if ticker_asset == asset and hasattr(pos, 'contracts'):
-                # Calculate notional from position using actual entry price
-                # Use avg_price_cents from position if available, otherwise fallback to current price
-                entry_price_cents = getattr(pos, 'avg_price_cents', None)
-                if entry_price_cents and entry_price_cents > 0:
-                    position_notional_usd = (Decimal(entry_price_cents) / Decimal("100")) * pos.contracts
-                else:
-                    # Fallback to current price if entry price unavailable
-                    position_notional_usd = contract_notional_usd * pos.contracts
-                existing_position_notional += position_notional_usd
-        
-        if existing_position_notional > 0:
-            # Reduce max_notional by existing exposure
-            available_notional = max_notional_usd - existing_position_notional
-            if available_notional <= 0:
-                logger.info(
-                    "[SIZE-COMPUTE] Position-aware sizing: already at max exposure for %s (existing=%.2f, max=%.2f). Rejecting.",
-                    asset, float(existing_position_notional), float(max_notional_usd)
-                )
-                return 0, Decimal("0"), {
-                    "bankroll_usd": float(bankroll_usd),
-                    "risk_pct_effective": float(risk_pct_effective),
-                    "max_notional_usd": float(max_notional_usd),
-                    "price_cents": price_cents,
-                    "asset": asset,
-                    "contracts_from_notional": 0,
-                    "max_contracts_cap": max_contracts_cap,
-                    "per_asset_risk_pct": per_asset_risk_pct,
-                    "final_count": 0,
-                    "final_notional_usd": 0.0,
-                    "rejection_reason": "position_limit_exceeded"
-                }
-            max_notional_usd = available_notional
-            logger.info(
-                "[SIZE-COMPUTE] Position-aware sizing: reduced max_notional for %s from %.2f to %.2f (existing exposure: %.2f)",
-                asset, float(max_notional_usd + existing_position_notional), float(max_notional_usd), float(existing_position_notional)
-            )
-    except Exception as e:
-        logger.warning("[SIZE-COMPUTE] Failed to check existing positions for position-aware sizing: %s", e)
+    # CRITICAL FIX: DISABLED to prevent interference with window-based risk limits
+    # Position-aware sizing reduces max_notional based on existing positions, which conflicts
+    # with the 3% per-agent / 5% total venue per 15-minute window limits. The window-based
+    # limits are the single source of truth for risk enforcement, and position-aware sizing
+    # could allow agents to bypass window limits by reducing max_notional after positions are closed.
+    # RE-ENABLE REQUIREMENTS:
+    #   1. Update kalshi_crypto_15m_risk_envelope.py to account for position-aware sizing
+    #   2. Ensure 3% per agent / 5% per 15m window limits are still respected after reduction
+    #   3. Add validation to prevent position-aware sizing from allowing window limit bypass
+    #   4. Test with various position states to verify limits are respected
+    #
+    # DISABLED CODE (preserved for future reference):
+    # existing_position_notional = Decimal("0")
+    # try:
+    #     from merid.event_venues.kalshi.position_cache import get_position_cache
+    #     cache = get_position_cache()
+    #     positions = cache.get_all_positions()
+    #     
+    #     # Sum existing positions for this asset (across all timeframes)
+    #     for ticker, pos in positions.items():
+    #         # Extract asset from ticker (e.g., KXBTC15M-... -> BTC)
+    #         ticker_asset = None
+    #         if "BTC" in ticker.upper():
+    #             ticker_asset = "BTC"
+    #         elif "ETH" in ticker.upper():
+    #             ticker_asset = "ETH"
+    #         elif "SOL" in ticker.upper():
+    #             ticker_asset = "SOL"
+    #         elif "XRP" in ticker.upper():
+    #             ticker_asset = "XRP"
+    #         elif "DOGE" in ticker.upper():
+    #             ticker_asset = "DOGE"
+    #         
+    #         if ticker_asset == asset and hasattr(pos, 'contracts'):
+    #             # Calculate notional from position using actual entry price
+    #             # Use avg_price_cents from position if available, otherwise fallback to current price
+    #             entry_price_cents = getattr(pos, 'avg_price_cents', None)
+    #             if entry_price_cents and entry_price_cents > 0:
+    #                 position_notional_usd = (Decimal(entry_price_cents) / Decimal("100")) * pos.contracts
+    #             else:
+    #                 # Fallback to current price if entry price unavailable
+    #                 position_notional_usd = contract_notional_usd * pos.contracts
+    #             existing_position_notional += position_notional_usd
+    #     
+    #     if existing_position_notional > 0:
+    #         # Reduce max_notional by existing exposure
+    #         available_notional = max_notional_usd - existing_position_notional
+    #         if available_notional <= 0:
+    #             logger.info(
+    #                 "[SIZE-COMPUTE] Position-aware sizing: already at max exposure for %s (existing=%.2f, max=%.2f). Rejecting.",
+    #                 asset, float(existing_position_notional), float(max_notional_usd)
+    #             )
+    #             return 0, Decimal("0"), {
+    #                 "bankroll_usd": float(bankroll_usd),
+    #                 "risk_pct_effective": float(risk_pct_effective),
+    #                 "max_notional_usd": float(max_notional_usd),
+    #                 "price_cents": price_cents,
+    #                 "asset": asset,
+    #                 "contracts_from_notional": 0,
+    #                 "max_contracts_cap": max_contracts_cap,
+    #                 "per_asset_risk_pct": per_asset_risk_pct,
+    #                 "final_count": 0,
+    #                 "final_notional_usd": 0.0,
+    #                 "rejection_reason": "position_limit_exceeded"
+    #             }
+    #         max_notional_usd = available_notional
+    #         logger.info(
+    #             "[SIZE-COMPUTE] Position-aware sizing: reduced max_notional for %s from %.2f to %.2f (existing exposure: %.2f)",
+    #             asset, float(max_notional_usd + existing_position_notional), float(max_notional_usd), float(existing_position_notional)
+    #         )
+    # except Exception as e:
+    #     logger.warning("[SIZE-COMPUTE] Failed to check existing positions for position-aware sizing: %s", e)
     
     # Step 5: Convert max_notional to contract count
     contract_notional_usd = Decimal(price_cents) / Decimal("100")
