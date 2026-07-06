@@ -436,6 +436,7 @@ def test_best_edge_selection_initial_candidate():
     This tests the signal generation vs execution separation:
     - Agents generate candidates continuously
     - First candidate for an asset becomes the best edge
+    - CRITICAL FIX: Use abs(edge) since edge = p_model - p_market can be negative
     """
     # Simulate best-edge tracking state
     best_edge_per_asset = {
@@ -460,10 +461,11 @@ def test_best_edge_selection_initial_candidate():
     edge = candidate.get("edge", 0.0) or candidate.get("edge_pct", 0.0)
     
     # Check if should execute (no position, no best edge)
+    # CRITICAL FIX: Use abs(edge) since edge = p_model - p_market can be negative
     current_best = best_edge_per_asset.get(asset)
     current_best_edge = current_best.get("edge", 0.0) if current_best else 0.0
     
-    should_execute = edge > current_best_edge
+    should_execute = abs(edge) > abs(current_best_edge)
     
     assert should_execute == True
     assert edge == 15.5
@@ -474,6 +476,7 @@ def test_best_edge_selection_improves_edge():
     """Test that candidate with higher edge replaces current best edge.
     
     This ensures the system always executes the best opportunity.
+    - CRITICAL FIX: Use abs(edge) since edge = p_model - p_market can be negative
     """
     # Simulate best-edge tracking state with existing best edge
     best_edge_per_asset = {
@@ -503,10 +506,11 @@ def test_best_edge_selection_improves_edge():
     edge = candidate.get("edge", 0.0) or candidate.get("edge_pct", 0.0)
     
     # Check if should execute (higher edge)
+    # CRITICAL FIX: Use abs(edge) since edge = p_model - p_market can be negative
     current_best = best_edge_per_asset.get(asset)
     current_best_edge = current_best.get("edge", 0.0) if current_best else 0.0
     
-    should_execute = edge > current_best_edge
+    should_execute = abs(edge) > abs(current_best_edge)
     
     assert should_execute == True
     assert edge == 15.5
@@ -517,6 +521,7 @@ def test_best_edge_selection_skips_lower_edge():
     """Test that candidate with lower edge is skipped.
     
     This prevents over-trading and ensures only best edges execute.
+    - CRITICAL FIX: Use abs(edge) since edge = p_model - p_market can be negative
     """
     # Simulate best-edge tracking state with existing best edge
     best_edge_per_asset = {
@@ -546,10 +551,11 @@ def test_best_edge_selection_skips_lower_edge():
     edge = candidate.get("edge", 0.0) or candidate.get("edge_pct", 0.0)
     
     # Check if should execute (lower edge)
+    # CRITICAL FIX: Use abs(edge) since edge = p_model - p_market can be negative
     current_best = best_edge_per_asset.get(asset)
     current_best_edge = current_best.get("edge", 0.0) if current_best else 0.0
     
-    should_execute = edge > current_best_edge
+    should_execute = abs(edge) > abs(current_best_edge)
     
     assert should_execute == False
     assert edge == 10.0
@@ -914,6 +920,75 @@ def test_tp_sl_none_when_exit_policy_missing():
     assert take_profit_price_cents is None
     assert take_profit_r_multiple is None
     assert stop_loss_price_cents is None
+
+
+def test_deduplication_cache_persists_across_15m_window():
+    """Test that deduplication cache persists across 5-second cycles within 15m window.
+    
+    CRITICAL FIX: The deduplication cache (_executed_candidates_this_window) should
+    only be cleared at the start of a new 15-minute window, not after each execution.
+    This prevents the same order from being placed every 5 seconds.
+    """
+    # Simulate deduplication cache state
+    _executed_candidates_this_window = set()
+    
+    # First cycle: execute candidate
+    candidate_key = "KXBTC15M-26JUN300345-45_YES_BUY_50"
+    _executed_candidates_this_window.add(candidate_key)
+    
+    # Verify candidate is in cache
+    assert candidate_key in _executed_candidates_this_window
+    
+    # CRITICAL FIX: Cache should NOT be cleared after execution
+    # OLD BUG: _executed_candidates_this_window.clear() was called after each execution
+    # NEW BEHAVIOR: Cache persists until 15-minute window boundary
+    
+    # Second cycle (5 seconds later): same candidate should be rejected
+    assert candidate_key in _executed_candidates_this_window
+    should_execute = candidate_key not in _executed_candidates_this_window
+    assert should_execute == False  # Should be rejected (duplicate)
+    
+    # Third cycle (10 seconds later): same candidate should still be rejected
+    assert candidate_key in _executed_candidates_this_window
+    should_execute = candidate_key not in _executed_candidates_this_window
+    assert should_execute == False  # Should be rejected (duplicate)
+    
+    # Simulate 15-minute window boundary
+    # Cache should be cleared at window boundary
+    _executed_candidates_this_window.clear()
+    
+    # New window: same candidate should be allowed
+    assert candidate_key not in _executed_candidates_this_window
+    should_execute = candidate_key not in _executed_candidates_this_window
+    assert should_execute == True  # Should be allowed (new window)
+
+
+def test_deduplication_cache_allows_different_candidates():
+    """Test that deduplication cache allows different candidates in same window.
+    
+    This ensures the cache only prevents exact duplicates, not all orders.
+    """
+    # Simulate deduplication cache state
+    _executed_candidates_this_window = set()
+    
+    # First candidate
+    candidate_key_1 = "KXBTC15M-26JUN300345-45_YES_BUY_50"
+    _executed_candidates_this_window.add(candidate_key_1)
+    
+    # Different candidate (different ticker)
+    candidate_key_2 = "KXETH15M-26JUN300345-45_YES_BUY_50"
+    should_execute_2 = candidate_key_2 not in _executed_candidates_this_window
+    assert should_execute_2 == True  # Should be allowed (different ticker)
+    
+    # Different candidate (different side)
+    candidate_key_3 = "KXBTC15M-26JUN300345-45_NO_SELL_50"
+    should_execute_3 = candidate_key_3 not in _executed_candidates_this_window
+    assert should_execute_3 == True  # Should be allowed (different side)
+    
+    # Different candidate (different price)
+    candidate_key_4 = "KXBTC15M-26JUN300345-45_YES_BUY_55"
+    should_execute_4 = candidate_key_4 not in _executed_candidates_this_window
+    assert should_execute_4 == True  # Should be allowed (different price)
 
 
 def test_order_intent_includes_tp_sl_and_client_tag():

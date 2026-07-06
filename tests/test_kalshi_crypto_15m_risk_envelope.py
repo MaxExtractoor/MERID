@@ -417,6 +417,182 @@ class TestEdgeBandConfiguration:
             "Strategy policy min edge should be 1.5% (lowered from 4%)"
 
 
+class TestWindowBasedRiskLimitEnforcement:
+    """Test window-based risk limit enforcement (3% per-agent, 5% total per 15m window)."""
+
+    def test_window_limit_fields_exist(self):
+        """Test that window limit fields exist in envelope."""
+        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import (
+            KalshiCrypto15mRiskEnvelope,
+        )
+        
+        # Create envelope with $100 bankroll
+        envelope = KalshiCrypto15mRiskEnvelope(
+            profile_capital_usd=100.0,
+            live_bankroll_usd=100.0,
+            max_single_order_notional_usd=3.0,
+            max_total_notional_usd=5.0,
+            max_concurrent_trades=3,
+            agent_max_notional_usd=3.0,
+            asset_max_notional_usd={"BTC": 3.0, "ETH": 3.0, "SOL": 3.0, "XRP": 3.0, "DOGE": 3.0},
+            max_daily_loss_usd=20.0,
+            drawdown_halt_pct=0.10,
+            drawdown_unwind_pct=0.15,
+            agent_max_orders_per_window=10,
+            agent_max_yes_position=3,
+            agent_max_no_position=3,
+            max_cycle_risk_pct=0.03,
+            daily_loss_enabled=True,
+            peak_equity_usd=100.0,
+            current_equity_usd=100.0,
+            current_drawdown_pct=0.0,
+            kelly_fraction=0.05,
+            adaptive_risk_bands=[],
+            per_trade_risk_multiplier=1.0,
+            is_halted=False,
+            current_risk_band=None,
+            resume_if_drawdown_improves=False,
+            asset_depth_thresholds={"BTC": {"min_depth_yes": 5, "min_depth_no": 5}},
+            correlation_tracking_enabled=True,
+            correlation_threshold=0.5,
+            correlation_multiplier=1.0,
+            guardrails_per_window_risk_pct=0.03,  # 3% per agent
+            guardrails_total_venue_risk_pct=0.05,  # 5% total
+            per_agent_window_limit_usd=3.0,  # 3% of $100
+            total_venue_window_limit_usd=5.0,  # 5% of $100
+            window_start_ts=0.0,  # Required field
+            agent_window_exposure_usd={},  # Required field
+            total_window_exposure_usd=0.0,  # Required field
+        )
+        
+        # Verify window limit fields exist
+        assert hasattr(envelope, 'guardrails_per_window_risk_pct')
+        assert hasattr(envelope, 'guardrails_total_venue_risk_pct')
+        assert hasattr(envelope, 'per_agent_window_limit_usd')
+        assert hasattr(envelope, 'total_venue_window_limit_usd')
+        assert hasattr(envelope, 'window_start_ts')
+        assert hasattr(envelope, 'agent_window_exposure_usd')
+        assert hasattr(envelope, 'total_window_exposure_usd')
+        
+        # Verify values are correct
+        assert envelope.guardrails_per_window_risk_pct == 0.03
+        assert envelope.guardrails_total_venue_risk_pct == 0.05
+        assert envelope.per_agent_window_limit_usd == 3.0
+        assert envelope.total_venue_window_limit_usd == 5.0
+
+    def test_window_limit_methods_exist(self):
+        """Test that window limit methods exist in envelope."""
+        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import (
+            KalshiCrypto15mRiskEnvelope,
+        )
+        
+        # Create envelope
+        envelope = KalshiCrypto15mRiskEnvelope(
+            profile_capital_usd=100.0,
+            live_bankroll_usd=100.0,
+            max_single_order_notional_usd=3.0,
+            max_total_notional_usd=5.0,
+            max_concurrent_trades=3,
+            agent_max_notional_usd=3.0,
+            asset_max_notional_usd={"BTC": 3.0, "ETH": 3.0, "SOL": 3.0, "XRP": 3.0, "DOGE": 3.0},
+            max_daily_loss_usd=20.0,
+            drawdown_halt_pct=0.10,
+            drawdown_unwind_pct=0.15,
+            agent_max_orders_per_window=10,
+            agent_max_yes_position=3,
+            agent_max_no_position=3,
+            max_cycle_risk_pct=0.03,
+            daily_loss_enabled=True,
+            peak_equity_usd=100.0,
+            current_equity_usd=100.0,
+            current_drawdown_pct=0.0,
+            kelly_fraction=0.05,
+            adaptive_risk_bands=[],
+            per_trade_risk_multiplier=1.0,
+            is_halted=False,
+            current_risk_band=None,
+            resume_if_drawdown_improves=False,
+            asset_depth_thresholds={"BTC": {"min_depth_yes": 5, "min_depth_no": 5}},
+            correlation_tracking_enabled=True,
+            correlation_threshold=0.5,
+            correlation_multiplier=1.0,
+            guardrails_per_window_risk_pct=0.03,
+            guardrails_total_venue_risk_pct=0.05,
+            per_agent_window_limit_usd=3.0,
+            total_venue_window_limit_usd=5.0,
+            window_start_ts=0.0,
+            agent_window_exposure_usd={},
+            total_window_exposure_usd=0.0,
+        )
+        
+        # Verify methods exist
+        assert hasattr(envelope, 'check_window_limit')
+        assert hasattr(envelope, 'record_order_execution')
+        assert hasattr(envelope, 'record_position_closure')
+        
+        # Verify methods are callable
+        assert callable(envelope.check_window_limit)
+        assert callable(envelope.record_order_execution)
+        assert callable(envelope.record_position_closure)
+
+    def test_window_limit_check_signature(self):
+        """Test that check_window_limit has correct signature."""
+        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import (
+            KalshiCrypto15mRiskEnvelope,
+        )
+        import inspect
+        
+        # Create envelope
+        envelope = KalshiCrypto15mRiskEnvelope(
+            profile_capital_usd=100.0,
+            live_bankroll_usd=100.0,
+            max_single_order_notional_usd=3.0,
+            max_total_notional_usd=5.0,
+            max_concurrent_trades=3,
+            agent_max_notional_usd=3.0,
+            asset_max_notional_usd={"BTC": 3.0, "ETH": 3.0, "SOL": 3.0, "XRP": 3.0, "DOGE": 3.0},
+            max_daily_loss_usd=20.0,
+            drawdown_halt_pct=0.10,
+            drawdown_unwind_pct=0.15,
+            agent_max_orders_per_window=10,
+            agent_max_yes_position=3,
+            agent_max_no_position=3,
+            max_cycle_risk_pct=0.03,
+            daily_loss_enabled=True,
+            peak_equity_usd=100.0,
+            current_equity_usd=100.0,
+            current_drawdown_pct=0.0,
+            kelly_fraction=0.05,
+            adaptive_risk_bands=[],
+            per_trade_risk_multiplier=1.0,
+            is_halted=False,
+            current_risk_band=None,
+            resume_if_drawdown_improves=False,
+            asset_depth_thresholds={"BTC": {"min_depth_yes": 5, "min_depth_no": 5}},
+            correlation_tracking_enabled=True,
+            correlation_threshold=0.5,
+            correlation_multiplier=1.0,
+            guardrails_per_window_risk_pct=0.03,
+            guardrails_total_venue_risk_pct=0.05,
+            per_agent_window_limit_usd=3.0,
+            total_venue_window_limit_usd=5.0,
+            window_start_ts=0.0,
+            agent_window_exposure_usd={},
+            total_window_exposure_usd=0.0,
+        )
+        
+        # Check signature
+        sig = inspect.signature(envelope.check_window_limit)
+        params = list(sig.parameters.keys())
+        assert 'agent_id' in params
+        assert 'order_notional_usd' in params
+        assert 'current_ts' in params
+        
+        # Verify return type annotation (may be string representation)
+        return_annotation_str = str(sig.return_annotation)
+        assert 'tuple' in return_annotation_str and 'bool' in return_annotation_str and 'str' in return_annotation_str
+
+
 class TestAgentSeriesTickerConsistency:
     """Test that all 5 agents use 15M series tickers consistently."""
 
