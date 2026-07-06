@@ -118,6 +118,26 @@ class TestCircuitBreaker:
         status = client.get_circuit_status()
         assert "state" in status
 
+    @pytest.mark.asyncio
+    async def test_event_loop_closure_protection(self, client):
+        """Request should fail gracefully when event loop is closed."""
+        # Simulate event loop closure by mocking get_running_loop to return a closed loop
+        import asyncio
+        from unittest.mock import patch
+        
+        closed_loop = asyncio.new_event_loop()
+        closed_loop.close()  # Close the loop
+        
+        with patch('asyncio.get_running_loop', return_value=closed_loop):
+            result = await client._request_with_resilience(
+                "GET", "/markets", operation_name="test_closed_loop"
+            )
+        
+        # Should fail with event loop closed error, not attempt HTTP request
+        assert result.success is False
+        assert "Event loop is closed" in str(result.error)
+        assert result.metadata.get("status_code") is None
+
 
 class TestPagination:
     """Tests for cursor-based pagination."""
@@ -127,18 +147,23 @@ class TestPagination:
         """Test that list_open_markets_for_series follows cursors correctly."""
         client, fake_http = fake_public_client
         
+        # Use future timestamps to pass freshness filter (default 2 hours ago)
+        import time
+        now = int(time.time())
+        future_base = now + 3600  # 1 hour in the future
+        
         # Configure fake HTTP with paginated responses
         fake_http.pages = [
             {
                 "markets": [
-                    {"ticker": f"KXBTC15M-{i}", "series_ticker": "KXBTC15M", "close_ts": 1700000000 + i * 60}
+                    {"ticker": f"KXBTC15M-{i}", "series_ticker": "KXBTC15M", "close_ts": future_base + i * 60}
                     for i in range(5)
                 ],
                 "cursor": "cursor_1"
             },
             {
                 "markets": [
-                    {"ticker": f"KXBTC15M-{i+5}", "series_ticker": "KXBTC15M", "close_ts": 1700000000 + (i+5) * 60}
+                    {"ticker": f"KXBTC15M-{i+5}", "series_ticker": "KXBTC15M", "close_ts": future_base + (i+5) * 60}
                     for i in range(5)
                 ],
                 "cursor": None  # End of pagination
@@ -157,7 +182,8 @@ class TestPagination:
         url, params, _ = fake_http.calls[0]
         assert "/markets" in url
         assert params.get("series_ticker") == "KXBTC15M"
-        assert params.get("status") == "open"
+        # client_public.py uses min_close_ts instead of status for filtering
+        assert "min_close_ts" in params
 
     @pytest.mark.asyncio
     async def test_get_positions_pagination(self, client):
@@ -205,6 +231,11 @@ class TestFilters:
         """Test series_ticker filter is passed correctly to public API."""
         client, fake_http = fake_public_client
         
+        # Use future timestamp to pass freshness filter (default 2 hours ago)
+        import time
+        now = int(time.time())
+        future_ts = now + 3600  # 1 hour in the future
+        
         # Configure fake HTTP with filtered response
         fake_http.pages = [
             {
@@ -212,7 +243,7 @@ class TestFilters:
                     {
                         "ticker": "KXBTC15M-001",
                         "series_ticker": "KXBTC15M",
-                        "close_ts": 1700000000
+                        "close_ts": future_ts
                     }
                 ],
                 "cursor": None
@@ -228,7 +259,8 @@ class TestFilters:
         url, params, _ = fake_http.calls[0]
         assert "/markets" in url
         assert params.get("series_ticker") == "KXBTC15M"
-        assert params.get("status") == "open"
+        # client_public.py uses min_close_ts instead of status for filtering
+        assert "min_close_ts" in params
 
     @pytest.mark.asyncio
     async def test_get_positions_with_filters(self, client):
@@ -404,7 +436,8 @@ class TestOrderOperations:
             
             call_args = client._http_client.request.call_args
             json_data = call_args.kwargs["json"]
-            assert json_data["yes_price"] == 65  # Converted to cents
+            # Kalshi V2 API uses "price" field as string in fixed-point dollars (e.g., "0.6500")
+            assert json_data["price"] == "0.6500"  # Converted to dollars with 4 decimal places
 
 
 class TestSubaccountOperations:
