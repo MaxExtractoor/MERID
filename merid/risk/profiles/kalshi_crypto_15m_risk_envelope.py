@@ -7,6 +7,7 @@ Single source of truth for all risk parameters for kalshi_crypto_15m_v2 profile.
 from __future__ import annotations
 
 import os
+import threading
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 from decimal import Decimal
@@ -15,6 +16,51 @@ from enum import Enum
 from utils.logger import get_logger
 
 logger = get_logger("merid.risk.profiles.kalshi_crypto_15m_risk_envelope")
+
+# ── Module-Level Window Tracking State (2026-07-06 CRITICAL FIX) ────────────
+# get_kalshi_crypto_15m_risk_envelope() computes a FRESH envelope on every call,
+# so window exposure stored on envelope instances was discarded immediately:
+# check_window_limit() always saw $0 exposure and the 3%/5% HARD STOPs never
+# engaged. Window tracking state MUST live at module level so every envelope
+# instance reads/writes the same cumulative exposure for the current 15m window.
+# Windows are aligned to epoch 900s boundaries to match the Kalshi 15m market
+# windows (e.g., 06:00:00-06:15:00).
+_WINDOW_TRACKING_LOCK = threading.Lock()
+_WINDOW_TRACKING_STATE: Dict[str, Any] = {
+    "window_start_ts": 0.0,
+    "agent_exposure_usd": {},   # agent_id -> cumulative executed notional this window
+    "total_exposure_usd": 0.0,  # cumulative executed notional across all agents this window
+}
+
+
+def _reset_shared_window_state_for_testing() -> None:
+    """
+    Reset module-level shared window tracking state for testing.
+    
+    CRITICAL: This is a testing-only function that clears the shared state
+    to ensure clean test isolation. Do not call this in production code.
+    """
+    with _WINDOW_TRACKING_LOCK:
+        _WINDOW_TRACKING_STATE["window_start_ts"] = 0.0
+        _WINDOW_TRACKING_STATE["agent_exposure_usd"] = {}
+        _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
+
+
+def _window_bucket_start(current_ts: float) -> float:
+    """Return the epoch-aligned start of the 15-minute window containing current_ts."""
+    return current_ts - (current_ts % 900.0)
+
+
+def _roll_window_if_needed_locked(current_ts: float) -> None:
+    """Reset shared window state when a new 15m window begins. Caller holds lock."""
+    bucket_start = _window_bucket_start(current_ts)
+    if bucket_start != _WINDOW_TRACKING_STATE["window_start_ts"]:
+        _WINDOW_TRACKING_STATE["window_start_ts"] = bucket_start
+        _WINDOW_TRACKING_STATE["agent_exposure_usd"] = {}
+        _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
+        logger.info(
+            f"[WINDOW-TRACKING] New 15m window started at ts={bucket_start:.0f} - exposure reset"
+        )
 
 # VERSION TAG: This log identifies the deployed revision of kalshi_crypto_15m_risk_envelope.py
 # Changes in v20260529a:
@@ -302,10 +348,17 @@ class KalshiCrypto15mRiskEnvelope:
     def reset_window_tracking(self, current_ts: float) -> None:
         """Reset window tracking at start of new 15-minute window.
         
+        CRITICAL (2026-07-06): Operates on module-level shared state so the reset
+        is visible to ALL envelope instances (envelopes are recomputed per call).
+        
         Args:
             current_ts: Current timestamp
         """
-        self.window_start_ts = current_ts
+        with _WINDOW_TRACKING_LOCK:
+            _WINDOW_TRACKING_STATE["window_start_ts"] = _window_bucket_start(current_ts)
+            _WINDOW_TRACKING_STATE["agent_exposure_usd"] = {}
+            _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
+            self.window_start_ts = _WINDOW_TRACKING_STATE["window_start_ts"]
         self.agent_window_exposure_usd = {}
         self.total_window_exposure_usd = 0.0
         logger.info(
@@ -330,15 +383,16 @@ class KalshiCrypto15mRiskEnvelope:
             - allowed: True if order is within window limits, False if blocked
             - reason: Reason string if blocked, empty string if allowed
         """
-        import time
-        
-        # Check if window needs reset (15 minutes = 900 seconds)
-        if current_ts - self.window_start_ts > 900:
-            self.reset_window_tracking(current_ts)
+        # CRITICAL (2026-07-06): Read cumulative exposure from module-level shared
+        # state. Envelope instances are recomputed on every call, so instance
+        # fields always start at zero - only the shared state carries the truth.
+        with _WINDOW_TRACKING_LOCK:
+            _roll_window_if_needed_locked(current_ts)
+            current_agent_exposure = _WINDOW_TRACKING_STATE["agent_exposure_usd"].get(agent_id, 0.0)
+            current_total_exposure = _WINDOW_TRACKING_STATE["total_exposure_usd"]
         
         # Calculate per-agent window limit
         per_agent_limit_usd = self.live_bankroll_usd * self.guardrails_per_window_risk_pct
-        current_agent_exposure = self.agent_window_exposure_usd.get(agent_id, 0.0)
         new_agent_exposure = current_agent_exposure + order_notional_usd
         
         # Check per-agent window limit (HARD STOP)
@@ -354,19 +408,24 @@ class KalshiCrypto15mRiskEnvelope:
         
         # Calculate total venue window limit
         total_venue_limit_usd = self.live_bankroll_usd * self.guardrails_total_venue_risk_pct
-        new_total_exposure = self.total_window_exposure_usd + order_notional_usd
+        new_total_exposure = current_total_exposure + order_notional_usd
         
         # Check total venue window limit (HARD STOP)
         if new_total_exposure > total_venue_limit_usd:
             reason = (
                 f"total_venue_window_limit: "
-                f"current=${self.total_window_exposure_usd:.2f} + order=${order_notional_usd:.2f} "
+                f"current=${current_total_exposure:.2f} + order=${order_notional_usd:.2f} "
                 f"= ${new_total_exposure:.2f} > limit=${total_venue_limit_usd:.2f} "
                 f"({self.guardrails_total_venue_risk_pct*100:.1f}%) - HARD STOP"
             )
             logger.warning(f"[WINDOW-TRACKING] {reason}")
             return False, reason
         
+        logger.info(
+            f"[WINDOW-TRACKING] Window check OK: agent={agent_id} "
+            f"agent_exposure=${current_agent_exposure:.2f}+${order_notional_usd:.2f} <= ${per_agent_limit_usd:.2f}, "
+            f"venue_exposure=${current_total_exposure:.2f}+${order_notional_usd:.2f} <= ${total_venue_limit_usd:.2f}"
+        )
         return True, ""
     
     def record_order_execution(
@@ -380,19 +439,28 @@ class KalshiCrypto15mRiskEnvelope:
             agent_id: Agent identifier
             order_notional_usd: Notional value of executed order in USD
         """
-        # Update per-agent exposure
-        self.agent_window_exposure_usd[agent_id] = (
-            self.agent_window_exposure_usd.get(agent_id, 0.0) + order_notional_usd
-        )
+        # CRITICAL (2026-07-06): Write to module-level shared state so the
+        # recorded exposure survives envelope recomputation and is visible to
+        # subsequent check_window_limit() calls (3%/5% allowance decrement).
+        import time as _time_mod
+        with _WINDOW_TRACKING_LOCK:
+            _roll_window_if_needed_locked(_time_mod.time())
+            _WINDOW_TRACKING_STATE["agent_exposure_usd"][agent_id] = (
+                _WINDOW_TRACKING_STATE["agent_exposure_usd"].get(agent_id, 0.0) + order_notional_usd
+            )
+            _WINDOW_TRACKING_STATE["total_exposure_usd"] += order_notional_usd
+            agent_total = _WINDOW_TRACKING_STATE["agent_exposure_usd"][agent_id]
+            venue_total = _WINDOW_TRACKING_STATE["total_exposure_usd"]
         
-        # Update total exposure
-        self.total_window_exposure_usd += order_notional_usd
+        # Sync instance fields for observability/snapshots
+        self.agent_window_exposure_usd[agent_id] = agent_total
+        self.total_window_exposure_usd = venue_total
         
-        logger.debug(
+        logger.info(
             f"[WINDOW-TRACKING] Recorded execution: agent={agent_id} "
             f"notional=${order_notional_usd:.2f} "
-            f"agent_total=${self.agent_window_exposure_usd[agent_id]:.2f} "
-            f"venue_total=${self.total_window_exposure_usd:.2f}"
+            f"agent_total=${agent_total:.2f} "
+            f"venue_total=${venue_total:.2f}"
         )
     
     def record_position_closure(
@@ -409,19 +477,26 @@ class KalshiCrypto15mRiskEnvelope:
             agent_id: Agent identifier
             position_notional_usd: Notional value of closed position in USD
         """
-        # Reduce per-agent exposure (but not below zero)
-        current_agent_exposure = self.agent_window_exposure_usd.get(agent_id, 0.0)
-        new_agent_exposure = max(0.0, current_agent_exposure - position_notional_usd)
-        self.agent_window_exposure_usd[agent_id] = new_agent_exposure
+        # CRITICAL (2026-07-06): Operate on module-level shared state (see
+        # record_order_execution for rationale).
+        with _WINDOW_TRACKING_LOCK:
+            current_agent_exposure = _WINDOW_TRACKING_STATE["agent_exposure_usd"].get(agent_id, 0.0)
+            new_agent_exposure = max(0.0, current_agent_exposure - position_notional_usd)
+            _WINDOW_TRACKING_STATE["agent_exposure_usd"][agent_id] = new_agent_exposure
+            _WINDOW_TRACKING_STATE["total_exposure_usd"] = max(
+                0.0, _WINDOW_TRACKING_STATE["total_exposure_usd"] - position_notional_usd
+            )
+            venue_total = _WINDOW_TRACKING_STATE["total_exposure_usd"]
         
-        # Reduce total exposure (but not below zero)
-        self.total_window_exposure_usd = max(0.0, self.total_window_exposure_usd - position_notional_usd)
+        # Sync instance fields for observability/snapshots
+        self.agent_window_exposure_usd[agent_id] = new_agent_exposure
+        self.total_window_exposure_usd = venue_total
         
         logger.info(
             f"[WINDOW-TRACKING] Recorded closure: agent={agent_id} "
             f"notional=${position_notional_usd:.2f} "
             f"agent_total=${current_agent_exposure:.2f}→${new_agent_exposure:.2f} "
-            f"venue_total=${self.total_window_exposure_usd:.2f}"
+            f"venue_total=${venue_total:.2f}"
         )
 
 
@@ -740,10 +815,16 @@ def compute_kalshi_crypto_15m_risk_envelope(
     current_drawdown_pct = 0.0
     
     # ── Initialize Window-Based Risk Tracking (2026-07-06) ─────────────────
+    # CRITICAL FIX: Seed from module-level shared state so fresh envelope
+    # instances reflect the cumulative exposure already recorded this window.
+    # (Envelopes are recomputed per call - instance-local init of {} / 0.0
+    # made the 3%/5% window HARD STOPs a no-op.)
     import time
-    window_start_ts = time.time()
-    agent_window_exposure_usd = {}
-    total_window_exposure_usd = 0.0
+    with _WINDOW_TRACKING_LOCK:
+        _roll_window_if_needed_locked(time.time())
+        window_start_ts = _WINDOW_TRACKING_STATE["window_start_ts"]
+        agent_window_exposure_usd = dict(_WINDOW_TRACKING_STATE["agent_exposure_usd"])
+        total_window_exposure_usd = _WINDOW_TRACKING_STATE["total_exposure_usd"]
     
     # ── Initialize Adaptive Risk ───────────────────────────────────────────────
     per_trade_risk_multiplier = 1.0
