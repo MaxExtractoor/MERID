@@ -122,6 +122,9 @@ class GateMetrics:
     blocked_risk: int = 0
     blocked_stale_data: int = 0
     blocked_invalid_transition: int = 0  # PHASE1-DUP-5: Invalid state transitions
+    blocked_price_guard: int = 0  # Price guard rejections (deep OTM or high price)
+    blocked_price_repeat: int = 0  # CRITICAL: Block repeat price execution (same ticker+side+price)
+    blocked_window_limit: int = 0  # CRITICAL: Block window-based risk limit violations (3% per agent, 5% total per 15m)
     submitted: int = 0
     filled: int = 0
     canceled: int = 0
@@ -219,6 +222,11 @@ class IdempotentOrderStore:
         self._async_lock: Optional[asyncio.Lock] = None  # PHASE1-DUP-4: Async lock for concurrent async submissions
         self._orders: Dict[str, OrderRecord] = {}
         self._metrics = GateMetrics()
+        # CRITICAL: Track price execution history to prevent repeat price execution
+        # Key: (contract_id, side, price_cents), Value: timestamp of last execution
+        self._price_execution_history: Dict[Tuple[str, str, int], float] = {}
+        # Time window for price repeat check (15 minutes = 900 seconds)
+        self._price_repeat_window_s: float = 900.0
 
     def _ensure_async_lock(self) -> asyncio.Lock:
         """Lazy-initialize the async lock in the current event loop."""
@@ -411,6 +419,10 @@ class IdempotentOrderStore:
         This prevents duplicate resting orders even when they have different
         client_order_ids due to different 5-second time buckets.
         
+        CRITICAL FIX: Exclude stale PENDING orders from duplicate check to prevent
+        blocking new orders when old orders failed to transition properly.
+        PENDING orders older than 30 seconds are considered stale and ignored.
+        
         Args:
             contract_id: Market ticker
             side: "yes" or "no"
@@ -422,6 +434,7 @@ class IdempotentOrderStore:
             OrderRecord if duplicate found, None otherwise
         """
         with self._lock:
+            now = _time.time()
             for rec in self._orders.values():
                 # Skip if this is the current order we're checking
                 if exclude_coid and rec.client_order_id == exclude_coid:
@@ -434,6 +447,16 @@ class IdempotentOrderStore:
                     and rec.price_cents == price_cents
                     and rec.status in (OrderStatus.PENDING, OrderStatus.SUBMITTED, OrderStatus.LIVE)
                 ):
+                    # CRITICAL FIX: Skip stale PENDING orders (older than 30 seconds)
+                    # These are likely failed orders that never transitioned properly
+                    if rec.status == OrderStatus.PENDING:
+                        age_seconds = now - rec.updated_at
+                        if age_seconds > 30:
+                            logger.debug(
+                                "[find_resting_duplicate] Skipping stale PENDING order coid=%s age=%.1fs (threshold=30s)",
+                                rec.client_order_id, age_seconds
+                            )
+                            continue
                     return rec
             return None
 
@@ -449,6 +472,92 @@ class IdempotentOrderStore:
                 ):
                     return True
             return False
+
+    def check_price_repeat(
+        self,
+        contract_id: str,
+        side: str,
+        price_cents: int,
+        allow_lower_price: bool = True,
+    ) -> tuple[bool, Optional[str], Optional[int]]:
+        """Check if this (contract, side, price) was executed recently.
+        
+        CRITICAL FIX: Prevent agents from executing the same price multiple times.
+        Forces scaling in at lower prices - if same price was executed before,
+        reject unless new price is strictly lower (cheaper entry).
+        
+        Args:
+            contract_id: Market ticker
+            side: "yes" or "no"
+            price_cents: Limit price in cents
+            allow_lower_price: If True, allow execution at lower price (scaling in)
+            
+        Returns:
+            Tuple of (allowed, reason, last_price_cents)
+            - allowed: True if price is allowed, False if blocked
+            - reason: Reason string if blocked, None otherwise
+            - last_price_cents: Last executed price for this (contract, side), None if none
+        """
+        with self._lock:
+            now = _time.time()
+            price_key = (contract_id, side, price_cents)
+            
+            # Check if this exact price was executed recently
+            if price_key in self._price_execution_history:
+                last_execution_ts = self._price_execution_history[price_key]
+                age_seconds = now - last_execution_ts
+                
+                # If within the 15-minute window, block repeat execution
+                if age_seconds < self._price_repeat_window_s:
+                    self._metrics.blocked_price_repeat += 1
+                    logger.warning(
+                        "[PRICE-REPEAT-BLOCK] contract=%s side=%s price=%dc executed %.1fs ago (window=%.1fs) - BLOCKED",
+                        contract_id, side, price_cents, age_seconds, self._price_repeat_window_s
+                    )
+                    return False, f"price_repeat:executed_{age_seconds:.0f}s_ago", price_cents
+            
+            # Check if any price for this (contract, side) was executed recently
+            # to enforce scaling in at lower prices (cheaper entry)
+            if allow_lower_price:
+                for (hist_contract, hist_side, hist_price), hist_ts in self._price_execution_history.items():
+                    if hist_contract == contract_id and hist_side == side:
+                        age_seconds = now - hist_ts
+                        if age_seconds < self._price_repeat_window_s:
+                            # Only allow strictly lower prices (scale in at cheaper price)
+                            # This forces agents to get better entry prices
+                            if price_cents >= hist_price:
+                                self._metrics.blocked_price_repeat += 1
+                                logger.warning(
+                                    "[PRICE-SCALE-IN-BLOCK] contract=%s side=%s price=%dc >= last_price=%dc (window=%.1fs) - BLOCKED (must scale in at lower price)",
+                                    contract_id, side, price_cents, hist_price, self._price_repeat_window_s
+                                )
+                                return False, f"price_scale_in:price_{price_cents}c >= last_{hist_price}c", hist_price
+            
+            return True, None, None
+
+    def record_price_execution(
+        self,
+        contract_id: str,
+        side: str,
+        price_cents: int,
+    ) -> None:
+        """Record that this (contract, side, price) was executed.
+        
+        This is called after successful order execution to update the
+        price execution history for future repeat checks.
+        
+        Args:
+            contract_id: Market ticker
+            side: "yes" or "no"
+            price_cents: Executed price in cents
+        """
+        with self._lock:
+            price_key = (contract_id, side, price_cents)
+            self._price_execution_history[price_key] = _time.time()
+            logger.debug(
+                "[PRICE-EXECUTION-RECORDED] contract=%s side=%s price=%dc",
+                contract_id, side, price_cents
+            )
 
     # ── Duplicate Race Detection ─────────────────────────────────────────
     # NOTE: This method is UNUSED LEGACY CODE. It has zero call sites in the codebase.
@@ -705,16 +814,82 @@ class PreTradeGate:
                 existing_status=resting_duplicate.status.value,
             )
 
-        # 3.5. Price guard: prevent deep OTM longshots (critical guardrail)
+        # 3c. CRITICAL: Price repeat check - prevent executing same price multiple times
+        # Forces scaling in at lower prices - if same price was executed before, reject
+        # unless new price is lower (for buy) or higher (for sell)
+        price_allowed, price_reason, last_price = self._store.check_price_repeat(
+            contract_id=contract_id,
+            side=side,
+            price_cents=price_cents,
+            allow_lower_price=True,  # Allow scaling in at lower prices
+        )
+        if not price_allowed:
+            self._store._metrics.blocked_price_repeat += 1
+            logger.warning(
+                "[GATE-ALERT] price_repeat_blocked contract=%s side=%s price=%dc reason=%s last_price=%s agent=%s "
+                "(metric: blocked_price_repeat=%d)",
+                contract_id, side, price_cents, price_reason, last_price, agent_id,
+                self._store._metrics.blocked_price_repeat,
+            )
+            return GateVerdict(
+                allowed=False,
+                client_order_id=coid,
+                reason=f"price_repeat:{price_reason}",
+            )
+
+        # 3d. CRITICAL: Window-based risk limit check (HARD STOP) - 2026-07-06
+        # Enforces 3% per agent per 15-minute window and 5% total venue per 15-minute window
+        # This prevents over-trading and forces agents to get better entry prices
+        # No more entries until exposure is closed out via trailing stop, ratchet, or 99c exit
+        try:
+            from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+            envelope = get_kalshi_crypto_15m_risk_envelope()
+            if envelope:
+                import time
+                order_notional_usd = (target_count * price_cents) / 100.0
+                logger.info(
+                    "[GATE-WINDOW-CHECK] Checking window limit: agent=%s notional=$%.2f count=%d price=%dc",
+                    agent_id, order_notional_usd, target_count, price_cents
+                )
+                window_allowed, window_reason = envelope.check_window_limit(
+                    agent_id=agent_id,
+                    order_notional_usd=order_notional_usd,
+                    current_ts=time.time()
+                )
+                logger.info(
+                    "[GATE-WINDOW-CHECK] Window limit result: allowed=%s reason=%s",
+                    window_allowed, window_reason
+                )
+                if not window_allowed:
+                    self._store._metrics.blocked_window_limit += 1
+                    logger.warning(
+                        "[GATE-ALERT] window_limit_blocked contract=%s side=%s agent=%s notional=$%.2f reason=%s (metric: blocked_window_limit=%d)",
+                        contract_id, side, agent_id, order_notional_usd, window_reason,
+                        self._store._metrics.blocked_window_limit,
+                    )
+                    return GateVerdict(
+                        allowed=False,
+                        client_order_id=coid,
+                        reason=f"window_limit:{window_reason}",
+                    )
+            else:
+                logger.warning("[GATE-WINDOW-CHECK] Envelope is None - window limit check skipped")
+        except Exception as e:
+            logger.error("[GATE] Failed to check window limit: %s", e, exc_info=True)
+
+        # 3.5. Price guard: prevent deep OTM longshots and high-price low-profit trades (critical guardrail)
         # Load min_contract_price_cents from profile with fallback to 15 cents
         min_price_cents = 15  # Default fallback (15 cents / $0.15)
+        max_price_cents = 55  # Default fallback (55 cents / $0.55) - RESEARCH-BASED
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
             profile_adapter = get_active_profile()
             if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_min_contract_price_cents'):
                 min_price_cents = profile_adapter.profile.guardrails_min_contract_price_cents
+            if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_max_contract_price_cents'):
+                max_price_cents = profile_adapter.profile.guardrails_max_contract_price_cents
         except Exception as e:
-            logger.debug("[GATE] Failed to load min_contract_price_cents from profile: %s, using default 15c", e)
+            logger.debug("[GATE] Failed to load contract price limits from profile: %s, using defaults", e)
         
         # For both YES and NO contracts, check the price directly
         # - Low YES price (e.g., 5¢) = deep OTM longshot (betting on low-probability event)
@@ -729,6 +904,20 @@ class PreTradeGate:
                 allowed=False,
                 client_order_id=coid,
                 reason=f"deep_otm_longshot:price={price_cents}c < {min_price_cents}c threshold",
+            )
+        
+        # - High YES price (e.g., 85¢) = low-profit trade (risk more than profit potential)
+        # - High NO price (e.g., 85¢) = low-profit trade (risk more than profit potential)
+        if price_cents > max_price_cents:
+            self._store._metrics.blocked_price_guard += 1
+            logger.warning(
+                "[GATE-ALERT] high_price_low_profit_blocked coid=%s contract=%s side=%s price=%dc > %dc threshold (poor risk/reward rejected)",
+                coid, contract_id, side, price_cents, max_price_cents,
+            )
+            return GateVerdict(
+                allowed=False,
+                client_order_id=coid,
+                reason=f"high_price_low_profit:price={price_cents}c > {max_price_cents}c threshold",
             )
 
         # 4. Fill-awareness: is the target already satisfied?
@@ -989,16 +1178,42 @@ class PreTradeGate:
                 existing_status=resting_duplicate.status.value,
             )
 
-        # 3.5. Price guard: prevent deep OTM longshots (critical guardrail)
+        # 3c. CRITICAL: Price repeat check - prevent executing same price multiple times
+        # Forces scaling in at lower prices - if same price was executed before, reject
+        # unless new price is lower (for buy) or higher (for sell)
+        price_allowed, price_reason, last_price = self._store.check_price_repeat(
+            contract_id=contract_id,
+            side=side,
+            price_cents=price_cents,
+            allow_lower_price=True,  # Allow scaling in at lower prices
+        )
+        if not price_allowed:
+            self._store._metrics.blocked_price_repeat += 1
+            logger.warning(
+                "[GATE-ALERT] price_repeat_blocked contract=%s side=%s price=%dc reason=%s last_price=%s agent=%s "
+                "(metric: blocked_price_repeat=%d)",
+                contract_id, side, price_cents, price_reason, last_price, agent_id,
+                self._store._metrics.blocked_price_repeat,
+            )
+            return GateVerdict(
+                allowed=False,
+                client_order_id=coid,
+                reason=f"price_repeat:{price_reason}",
+            )
+
+        # 3.5. Price guard: prevent deep OTM longshots and high-price low-profit trades (critical guardrail)
         # Load min_contract_price_cents from profile with fallback to 15 cents
         min_price_cents = 15  # Default fallback (15 cents / $0.15)
+        max_price_cents = 55  # Default fallback (55 cents / $0.55) - RESEARCH-BASED
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
             profile_adapter = get_active_profile()
             if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_min_contract_price_cents'):
                 min_price_cents = profile_adapter.profile.guardrails_min_contract_price_cents
+            if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_max_contract_price_cents'):
+                max_price_cents = profile_adapter.profile.guardrails_max_contract_price_cents
         except Exception as e:
-            logger.debug("[GATE] Failed to load min_contract_price_cents from profile: %s, using default 15c", e)
+            logger.debug("[GATE] Failed to load contract price limits from profile: %s, using defaults", e)
         
         # For both YES and NO contracts, check the price directly
         # - Low YES price (e.g., 5¢) = deep OTM longshot (betting on low-probability event)
@@ -1013,6 +1228,20 @@ class PreTradeGate:
                 allowed=False,
                 client_order_id=coid,
                 reason=f"deep_otm_longshot:price={price_cents}c < {min_price_cents}c threshold",
+            )
+        
+        # - High YES price (e.g., 85¢) = low-profit trade (risk more than profit potential)
+        # - High NO price (e.g., 85¢) = low-profit trade (risk more than profit potential)
+        if price_cents > max_price_cents:
+            self._store._metrics.blocked_price_guard += 1
+            logger.warning(
+                "[GATE-ALERT] high_price_low_profit_blocked coid=%s contract=%s side=%s price=%dc > %dc threshold (poor risk/reward rejected)",
+                coid, contract_id, side, price_cents, max_price_cents,
+            )
+            return GateVerdict(
+                allowed=False,
+                client_order_id=coid,
+                reason=f"high_price_low_profit:price={price_cents}c > {max_price_cents}c threshold",
             )
 
         # 4. Fill-awareness: is the target already satisfied?

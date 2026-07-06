@@ -238,13 +238,13 @@ staged_time_exit:
 # Dynamic Position Sizing Configuration
 # Scale position size based on edge and confidence
 dynamic_sizing:
-  enabled: true  # Set to true to enable dynamic sizing
+  enabled: false  # DISABLED: Dynamic sizing multipliers interfere with window-based risk limits (3% per agent, 5% total per 15m window)
   base_contracts: 1  # Base size
   edge_multiplier: 2.0  # 2026-07-05: Increased from 0.5 to 2.0 (4x) based on Turbine research - amplify edge impact for small velocity-based edges
   confidence_multiplier: 1.0  # 2026-07-05: Increased from 0.3 to 1.0 (3.3x) based on Turbine research - amplify confidence impact
   max_contracts: 3  # Global cap for dynamic sizing (per-asset limits take precedence)
   min_contracts: 1  # Min contracts per trade
-  description: "Dynamic sizing: scale position based on edge and confidence (2026 research-tuned)"
+  description: "Dynamic sizing: scale position based on edge and confidence (2026 research-tuned) - DISABLED to prevent interference with window-based risk limits"
 
 # Order Scaling Configuration
 # Institutional-grade scaling strategies (TWAP, iceberg, adaptive)
@@ -408,6 +408,19 @@ max_cycle_risk_pct:
   value: 0.05  # 5% of capital per cycle (aligned with 5% per 15m window limit)
   dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
   description: "Maximum risk per cycle as percentage of capital (computed from bankroll)"
+
+# CRITICAL FIX: 2026-07-06 - Window-based risk limits (HARD STOP)
+# Per-agent per-window limit: 3% per agent per 15-minute window
+# Total venue per-window limit: 5% across all agents per 15-minute window
+# These are HARD STOPS - no exceptions, no more entries until exposure is closed out
+# Exposure is reduced via trailing stop, ratchet, or mandatory 99c exit
+guardrails_per_window_risk_pct:
+  value: 0.03  # 3% per agent per 15-minute window (HARD STOP)
+  description: "Maximum risk per agent per 15-minute window (HARD STOP - no entries until closed)"
+
+guardrails_total_venue_risk_pct:
+  value: 0.05  # 5% total across all agents per 15-minute window (HARD STOP)
+  description: "Maximum total risk across all agents per 15-minute window (HARD STOP - no entries until closed)"
   
 # CRITICAL FIX: Added maximum total risk cap for production safety
 max_total_risk_pct:

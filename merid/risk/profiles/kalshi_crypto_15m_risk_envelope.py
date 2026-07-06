@@ -95,6 +95,21 @@ class KalshiCrypto15mRiskEnvelope:
     # ── Cycle Risk Cap ───────────────────────────────────────────────────────
     max_cycle_risk_pct: float  # Maximum risk per cycle as percentage of capital
     
+    # ── Window-Based Risk Tracking (2026-07-06: HARD STOP) ─────────────────
+    # Per-agent per-window limit: 3% per agent per 15-minute window
+    # Total venue per-window limit: 5% across all agents per 15-minute window
+    guardrails_per_window_risk_pct: float  # 3% per agent per 15m window (HARD STOP)
+    guardrails_total_venue_risk_pct: float  # 5% total across all agents per 15m window (HARD STOP)
+    
+    # Computed window limits in USD (for easy access)
+    per_agent_window_limit_usd: float  # 3% of capital in USD
+    total_venue_window_limit_usd: float  # 5% of capital in USD
+    
+    # Window tracking state
+    window_start_ts: float  # Timestamp when current 15m window started
+    agent_window_exposure_usd: Dict[str, float]  # Cumulative exposure per agent this window
+    total_window_exposure_usd: float  # Cumulative exposure across all agents this window
+    
     # ── Guardrails ───────────────────────────────────────────────────────────
     daily_loss_enabled: bool
     max_daily_loss_usd: float
@@ -283,6 +298,131 @@ class KalshiCrypto15mRiskEnvelope:
         
         # Return as integer
         return int(base_size)
+    
+    def reset_window_tracking(self, current_ts: float) -> None:
+        """Reset window tracking at start of new 15-minute window.
+        
+        Args:
+            current_ts: Current timestamp
+        """
+        self.window_start_ts = current_ts
+        self.agent_window_exposure_usd = {}
+        self.total_window_exposure_usd = 0.0
+        logger.info(
+            f"[WINDOW-TRACKING] Reset 15m window tracking at ts={current_ts:.0f}"
+        )
+    
+    def check_window_limit(
+        self,
+        agent_id: str,
+        order_notional_usd: float,
+        current_ts: float
+    ) -> tuple[bool, str]:
+        """Check if order would exceed window-based risk limits (HARD STOP).
+        
+        Args:
+            agent_id: Agent identifier (e.g., "BTC_15M", "ETH_15M")
+            order_notional_usd: Notional value of order in USD
+            current_ts: Current timestamp
+            
+        Returns:
+            Tuple of (allowed, reason)
+            - allowed: True if order is within window limits, False if blocked
+            - reason: Reason string if blocked, empty string if allowed
+        """
+        import time
+        
+        # Check if window needs reset (15 minutes = 900 seconds)
+        if current_ts - self.window_start_ts > 900:
+            self.reset_window_tracking(current_ts)
+        
+        # Calculate per-agent window limit
+        per_agent_limit_usd = self.live_bankroll_usd * self.guardrails_per_window_risk_pct
+        current_agent_exposure = self.agent_window_exposure_usd.get(agent_id, 0.0)
+        new_agent_exposure = current_agent_exposure + order_notional_usd
+        
+        # Check per-agent window limit (HARD STOP)
+        if new_agent_exposure > per_agent_limit_usd:
+            reason = (
+                f"per_agent_window_limit: agent={agent_id} "
+                f"current=${current_agent_exposure:.2f} + order=${order_notional_usd:.2f} "
+                f"= ${new_agent_exposure:.2f} > limit=${per_agent_limit_usd:.2f} "
+                f"({self.guardrails_per_window_risk_pct*100:.1f}%) - HARD STOP"
+            )
+            logger.warning(f"[WINDOW-TRACKING] {reason}")
+            return False, reason
+        
+        # Calculate total venue window limit
+        total_venue_limit_usd = self.live_bankroll_usd * self.guardrails_total_venue_risk_pct
+        new_total_exposure = self.total_window_exposure_usd + order_notional_usd
+        
+        # Check total venue window limit (HARD STOP)
+        if new_total_exposure > total_venue_limit_usd:
+            reason = (
+                f"total_venue_window_limit: "
+                f"current=${self.total_window_exposure_usd:.2f} + order=${order_notional_usd:.2f} "
+                f"= ${new_total_exposure:.2f} > limit=${total_venue_limit_usd:.2f} "
+                f"({self.guardrails_total_venue_risk_pct*100:.1f}%) - HARD STOP"
+            )
+            logger.warning(f"[WINDOW-TRACKING] {reason}")
+            return False, reason
+        
+        return True, ""
+    
+    def record_order_execution(
+        self,
+        agent_id: str,
+        order_notional_usd: float
+    ) -> None:
+        """Record order execution in window tracking.
+        
+        Args:
+            agent_id: Agent identifier
+            order_notional_usd: Notional value of executed order in USD
+        """
+        # Update per-agent exposure
+        self.agent_window_exposure_usd[agent_id] = (
+            self.agent_window_exposure_usd.get(agent_id, 0.0) + order_notional_usd
+        )
+        
+        # Update total exposure
+        self.total_window_exposure_usd += order_notional_usd
+        
+        logger.debug(
+            f"[WINDOW-TRACKING] Recorded execution: agent={agent_id} "
+            f"notional=${order_notional_usd:.2f} "
+            f"agent_total=${self.agent_window_exposure_usd[agent_id]:.2f} "
+            f"venue_total=${self.total_window_exposure_usd:.2f}"
+        )
+    
+    def record_position_closure(
+        self,
+        agent_id: str,
+        position_notional_usd: float
+    ) -> None:
+        """Record position closure (reduces window exposure).
+        
+        CRITICAL: This allows agents to re-enter after closing positions
+        via trailing stop, ratchet, or mandatory 99c exit.
+        
+        Args:
+            agent_id: Agent identifier
+            position_notional_usd: Notional value of closed position in USD
+        """
+        # Reduce per-agent exposure (but not below zero)
+        current_agent_exposure = self.agent_window_exposure_usd.get(agent_id, 0.0)
+        new_agent_exposure = max(0.0, current_agent_exposure - position_notional_usd)
+        self.agent_window_exposure_usd[agent_id] = new_agent_exposure
+        
+        # Reduce total exposure (but not below zero)
+        self.total_window_exposure_usd = max(0.0, self.total_window_exposure_usd - position_notional_usd)
+        
+        logger.info(
+            f"[WINDOW-TRACKING] Recorded closure: agent={agent_id} "
+            f"notional=${position_notional_usd:.2f} "
+            f"agent_total=${current_agent_exposure:.2f}→${new_agent_exposure:.2f} "
+            f"venue_total=${self.total_window_exposure_usd:.2f}"
+        )
 
 
 
@@ -332,6 +472,25 @@ def compute_kalshi_crypto_15m_risk_envelope(
     
     # Extract Phase 1 profitability enhancements
     correlation_tracking_config = profile_config.get('correlation_tracking', {})
+    
+    # Extract window-based risk limits (2026-07-06: HARD STOP)
+    guardrails_per_window_risk_pct_raw = profile_config.get('guardrails_per_window_risk_pct', 0.03)
+    if isinstance(guardrails_per_window_risk_pct_raw, dict):
+        guardrails_per_window_risk_pct = guardrails_per_window_risk_pct_raw.get('value', 0.03)
+    else:
+        guardrails_per_window_risk_pct = guardrails_per_window_risk_pct_raw
+    
+    guardrails_total_venue_risk_pct_raw = profile_config.get('guardrails_total_venue_risk_pct', 0.05)
+    if isinstance(guardrails_total_venue_risk_pct_raw, dict):
+        guardrails_total_venue_risk_pct = guardrails_total_venue_risk_pct_raw.get('value', 0.05)
+    else:
+        guardrails_total_venue_risk_pct = guardrails_total_venue_risk_pct_raw
+    
+    logger.info(
+        f"[RISK-ENVELOPE] Window-based limits: "
+        f"per_agent={guardrails_per_window_risk_pct*100:.1f}%, "
+        f"total_venue={guardrails_total_venue_risk_pct*100:.1f}% (HARD STOP)"
+    )
 
     # Extract cycle risk cap (handle nested dict format)
     # Aligned with kalshi_crypto_15m_v2.yaml profile (2026-06-05)
@@ -580,6 +739,12 @@ def compute_kalshi_crypto_15m_risk_envelope(
     current_equity_usd = live_bankroll_usd
     current_drawdown_pct = 0.0
     
+    # ── Initialize Window-Based Risk Tracking (2026-07-06) ─────────────────
+    import time
+    window_start_ts = time.time()
+    agent_window_exposure_usd = {}
+    total_window_exposure_usd = 0.0
+    
     # ── Initialize Adaptive Risk ───────────────────────────────────────────────
     per_trade_risk_multiplier = 1.0
     is_halted = False
@@ -632,6 +797,10 @@ def compute_kalshi_crypto_15m_risk_envelope(
         )
     
     # ── Return Envelope ────────────────────────────────────────────────────────
+    # Compute window limits in USD
+    per_agent_window_limit_usd = effective_capital * guardrails_per_window_risk_pct
+    total_venue_window_limit_usd = effective_capital * guardrails_total_venue_risk_pct
+    
     envelope = KalshiCrypto15mRiskEnvelope(
         live_bankroll_usd=live_bankroll_usd,
         profile_capital_usd=profile_capital,
@@ -645,6 +814,13 @@ def compute_kalshi_crypto_15m_risk_envelope(
         agent_max_yes_position=agent_max_yes_position,
         agent_max_no_position=agent_max_no_position,
         max_cycle_risk_pct=max_cycle_risk_pct,
+        guardrails_per_window_risk_pct=guardrails_per_window_risk_pct,
+        guardrails_total_venue_risk_pct=guardrails_total_venue_risk_pct,
+        per_agent_window_limit_usd=per_agent_window_limit_usd,
+        total_venue_window_limit_usd=total_venue_window_limit_usd,
+        window_start_ts=window_start_ts,
+        agent_window_exposure_usd=agent_window_exposure_usd,
+        total_window_exposure_usd=total_window_exposure_usd,
         daily_loss_enabled=daily_loss_enabled,
         max_daily_loss_usd=max_daily_loss_usd,
         drawdown_halt_pct=drawdown_halt_pct,
@@ -706,22 +882,28 @@ def get_kalshi_crypto_15m_risk_envelope(test_bankroll_usd: Optional[float] = Non
     Raises:
         RuntimeError: If bankroll service fails or returns invalid data
     """
+    logger.info("[RISK-ENVELOPE] get_kalshi_crypto_15m_risk_envelope() called")
+    
     # Use test bankroll if provided (for testing)
     if test_bankroll_usd is not None:
         live_bankroll_usd = test_bankroll_usd
+        logger.info(f"[RISK-ENVELOPE] Using test bankroll: ${live_bankroll_usd}")
     else:
         try:
             from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
             live_bankroll_usd = get_equity_for_risk_calc_sync()
+            logger.info(f"[RISK-ENVELOPE] Retrieved live bankroll: ${live_bankroll_usd}")
         except Exception as e:
-            logger.error(f"[RISK-ENVELOPE] Failed to get live bankroll: {e}")
+            logger.error(f"[RISK-ENVELOPE] Failed to get live bankroll: {e}", exc_info=True)
             raise RuntimeError(f"Failed to get live bankroll: {e}")
         
         if live_bankroll_usd is None or live_bankroll_usd <= 0:
             logger.warning(f"[RISK-ENVELOPE] Bankroll not ready yet (${live_bankroll_usd}), deferring envelope computation")
             raise RuntimeError(f"Bankroll not ready: ${live_bankroll_usd}")
     
-    return compute_kalshi_crypto_15m_risk_envelope(live_bankroll_usd)
+    envelope = compute_kalshi_crypto_15m_risk_envelope(live_bankroll_usd)
+    logger.info(f"[RISK-ENVELOPE] Computed envelope successfully: per_agent_limit={envelope.per_agent_window_limit_usd:.2f} total_venue_limit={envelope.total_venue_window_limit_usd:.2f}")
+    return envelope
 
 
 def safe_update_envelope_equity(envelope: KalshiCrypto15mRiskEnvelope) -> bool:

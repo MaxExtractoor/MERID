@@ -2460,6 +2460,83 @@ def _apply_depth_based_order_sizing(intent: OrderIntent, state: Optional[Any]) -
     return requested_count
 
 
+def _apply_risk_based_order_sizing(intent: OrderIntent, bankroll_usd: Optional[Decimal] = None) -> int:
+    """Enforce 3% per-trade risk limit using unified_sizing.
+    
+    CRITICAL FIX: This prevents orders exceeding the hard 3% per-trade cap.
+    The order router previously only capped based on liquidity, allowing
+    orders to exceed the 3% bankroll limit (e.g., $1.95 on $33.72 bankroll = 5.8%).
+    
+    Args:
+        intent: Order intent with requested count, price_cents, and ticker
+        bankroll_usd: Optional bankroll value (if None, will fetch from service)
+        
+    Returns:
+        Adjusted count capped at 3% of bankroll (or 0 if exceeds limit)
+    """
+    try:
+        from merid.prediction.unified_sizing import compute_order_size
+        from merid.event_venues.kalshi import get_summary_sync
+        from decimal import Decimal
+        from typing import Optional
+        
+        # Extract asset from ticker (e.g., KXSOL15M-26JUL051900-00 -> SOL)
+        ticker = intent.ticker
+        asset = None
+        if "BTC" in ticker.upper():
+            asset = "BTC"
+        elif "ETH" in ticker.upper():
+            asset = "ETH"
+        elif "SOL" in ticker.upper():
+            asset = "SOL"
+        elif "XRP" in ticker.upper():
+            asset = "XRP"
+        elif "DOGE" in ticker.upper():
+            asset = "DOGE"
+        
+        if not asset:
+            logger.warning("[RISK-BASED-SIZING] Could not extract asset from ticker=%s, returning original count", ticker)
+            return intent.count
+        
+        # Get bankroll - use provided value or fetch from service
+        if bankroll_usd is None:
+            bankroll_summary = get_summary_sync()
+            if not bankroll_summary:
+                logger.warning("[RISK-BASED-SIZING] Bankroll summary unavailable, returning original count")
+                return intent.count
+            bankroll_usd = Decimal(str(bankroll_summary.equity))
+        
+        price_cents = intent.price_cents
+        
+        # Compute order size using unified_sizing (enforces 3% per-trade limit)
+        count, notional_usd, metadata = compute_order_size(
+            bankroll_usd=bankroll_usd,
+            price_cents=price_cents,
+            asset=asset,
+        )
+        
+        # If unified_sizing returns 0, reject the order (exceeds 3% limit)
+        if count == 0:
+            logger.warning(
+                "[RISK-BASED-SIZING] ticker=%s asset=%s bankroll=%.2f price=%dc -> REJECTED (exceeds 3%% per-trade limit, requested_count=%d)",
+                ticker, asset, float(bankroll_usd), price_cents, intent.count
+            )
+            return 0
+        
+        # If unified_sizing returns a smaller count, log the reduction
+        if count < intent.count:
+            logger.info(
+                "[RISK-BASED-SIZING] ticker=%s asset=%s bankroll=%.2f price=%dc -> CAPPED from %d to %d contracts (3%% per-trade limit, notional=%.2f)",
+                ticker, asset, float(bankroll_usd), price_cents, intent.count, count, float(notional_usd)
+            )
+        
+        return count
+        
+    except Exception as e:
+        logger.error("[RISK-BASED-SIZING] Failed to apply risk-based sizing: %s - returning original count for safety", e, exc_info=True)
+        return intent.count
+
+
 def _determine_dynamic_order_type(intent: OrderIntent, state: Optional[Any]) -> tuple[str, str]:
     """Determine optimal order type and time-in-force based on market conditions.
     
@@ -3061,6 +3138,8 @@ def _update_gate_on_fill(intent: OrderIntent, fill_count: int) -> None:
         _ptg = get_pre_trade_gate()
         _ptg.mark_submitted(intent.client_tag)
         _ptg.mark_filled(intent.client_tag, fill_count)
+        # CRITICAL: Record price execution to prevent repeat price execution
+        _record_price_execution(intent)
     except Exception as e:
         logger.debug(f"Failed to update gate on fill: {e}")
 
@@ -3084,6 +3163,25 @@ def _route_sync_non_live(intent: OrderIntent, mode: TradingMode, t0: float) -> O
         intent.edge_pct or "none",
         _mode_value(mode),
     )
+    
+    # CRITICAL FIX: Enforce 3% per-trade risk limit using unified_sizing
+    # This applies to MOCK/PAPER modes as well for consistency
+    original_count = intent.count
+    intent.count = _apply_risk_based_order_sizing(intent)
+    
+    # Reject order if risk-based sizing returned 0 (exceeds 3% limit)
+    if intent.count == 0:
+        latency = (_time.monotonic() - t0) * 1000
+        logger.warning(
+            "[order-router] Order rejected — exceeds 3%% per-trade risk limit: ticker=%s requested_count=%d price=%dc mode=%s",
+            intent.ticker, original_count, intent.price_cents, _mode_value(mode)
+        )
+        return OrderResult(
+            status="rejected",
+            mode=mode,
+            reason=f"risk_limit_exceeded:order_exceeds_3_percent_cap:requested={original_count},price={intent.price_cents}c",
+            latency_ms=round(latency, 2),
+        )
     
     if _is_mock_mode(mode):
         fill = simulate_paper_fill(intent)
@@ -3148,6 +3246,59 @@ def _release_gate_record(intent: OrderIntent, reason: str = "") -> None:
         logger.debug("[order-router] Released gate record for %s: %s", tag[:32], reason[:50])
     except Exception as e:
         logger.debug(f"[CRASH-013] Failed to release gate record for {tag[:32]}: {e}")
+
+
+def _record_price_execution(intent: OrderIntent) -> None:
+    """Record successful price execution for repeat prevention and window-based risk tracking.
+    
+    CRITICAL: This must be called after successful order execution to update:
+    1. Price execution history in the order gate (prevents repeat price execution)
+    2. Window-based risk exposure in the risk envelope (tracks 3% per agent, 5% total per 15m)
+    """
+    try:
+        from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
+        _ptg = get_pre_trade_gate()
+        _ptg.store.record_price_execution(
+            contract_id=intent.ticker,
+            side=intent.side,
+            price_cents=intent.price_cents,
+        )
+        logger.debug(
+            "[order-router] Recorded price execution: ticker=%s side=%s price=%dc",
+            intent.ticker, intent.side, intent.price_cents
+        )
+    except Exception as e:
+        logger.debug("[order-router] Failed to record price execution: %s", e)
+    
+    # CRITICAL: Record window-based risk exposure (2026-07-06)
+    try:
+        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+        envelope = get_kalshi_crypto_15m_risk_envelope()
+        if envelope:
+            import time
+            order_notional_usd = (intent.count * intent.price_cents) / 100.0
+            # Extract agent_id from intent or derive from ticker
+            agent_id = getattr(intent, 'agent_id', None)
+            if not agent_id:
+                # Derive agent_id from ticker (e.g., "BTC-USD" -> "BTC_15M")
+                ticker_map = {
+                    'BTC-USD': 'BTC_15M',
+                    'ETH-USD': 'ETH_15M',
+                    'SOL-USD': 'SOL_15M',
+                    'XRP-USD': 'XRP_15M',
+                    'DOGE-USD': 'DOGE_15M',
+                }
+                agent_id = ticker_map.get(intent.ticker, f"{intent.ticker.split('-')[0]}_15M")
+            envelope.record_order_execution(
+                agent_id=agent_id,
+                order_notional_usd=order_notional_usd
+            )
+            logger.debug(
+                "[order-router] Recorded window exposure: agent=%s notional=$%.2f",
+                agent_id, order_notional_usd
+            )
+    except Exception as e:
+        logger.debug("[order-router] Failed to record window exposure: %s", e)
 
 
 async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> OrderResult:
@@ -3366,6 +3517,26 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         intent.order_type, intent.time_in_force = _determine_dynamic_order_type(intent, state)
         intent.count = _apply_depth_based_order_sizing(intent, state)
         intent.price_cents = _adjust_order_price_for_fill_rate(intent, state)
+        
+        # CRITICAL FIX: Enforce 3% per-trade risk limit using unified_sizing
+        # This prevents orders exceeding the hard 3% per-trade cap regardless of liquidity
+        intent.count = _apply_risk_based_order_sizing(intent)
+        
+        # Reject order if risk-based sizing returned 0 (exceeds 3% limit)
+        if intent.count == 0:
+            latency = (_time.monotonic() - t0) * 1000
+            logger.warning(
+                "[order-router] Live order rejected — exceeds 3%% per-trade risk limit: ticker=%s requested_count=%d price=%dc",
+                intent.ticker, original_count, original_price
+            )
+            _release_gate_record(intent, f"risk_limit_exceeded:{intent.ticker}")
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason=f"risk_limit_exceeded:order_exceeds_3_percent_cap:requested={original_count},price={original_price}c",
+                latency_ms=round(latency, 2),
+            )
+        
         if intent.order_type != original_order_type or intent.time_in_force != original_tif or intent.count != original_count or intent.price_cents != original_price:
             logger.info(
                 "[DYNAMIC-ORDER-TYPE] ticker=%s order_type changed from %s to %s, tif from %s to %s, count from %d to %d, price from %dc to %dc based on market conditions",
@@ -4686,6 +4857,8 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                         _filled = getattr(order_data, "filled_size", 0) or getattr(order_data, "filled_count", 0)
                         if _filled:
                             _ptg.mark_filled(intent.client_tag, int(_filled))
+                            # CRITICAL: Record price execution to prevent repeat price execution
+                            _record_price_execution(intent)
                     except Exception as _dup_gate_err:
                         logger.debug("[order-router] duplicate gate update failed: %s", _dup_gate_err)
                     
@@ -4904,6 +5077,8 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             _ptg.mark_submitted(intent.client_tag or "", _venue_oid)
             if filled_count > 0:
                 _ptg.mark_filled(intent.client_tag or "", filled_count)
+                # CRITICAL: Record price execution to prevent repeat price execution
+                _record_price_execution(intent)
         except Exception as e:
             logger.debug(f"Gate mark submitted/filled failed: {e}")
 
@@ -5461,6 +5636,43 @@ def _run_pre_trade_gate(
                         reason=f"deep_otm_longshot:price={intent.price_cents}c < {min_price_cents}c threshold",
                         latency_ms=round((_time.monotonic() - t0) * 1000, 2),
                     )
+                
+                # CRITICAL: Run window-based risk limit check even with upstream reservation
+                # This prevents oversized trades from bypassing the 3% per agent / 5% total window limits
+                try:
+                    from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+                    envelope = get_kalshi_crypto_15m_risk_envelope()
+                    if envelope:
+                        import time
+                        order_notional_usd = (intent.count * intent.price_cents) / 100.0
+                        logger.info(
+                            "[order-router-WINDOW-CHECK] Checking window limit (upstream path): agent=%s notional=$%.2f count=%d price=%dc",
+                            _agent, order_notional_usd, intent.count, intent.price_cents
+                        )
+                        window_allowed, window_reason = envelope.check_window_limit(
+                            agent_id=_agent,
+                            order_notional_usd=order_notional_usd,
+                            current_ts=time.time()
+                        )
+                        logger.info(
+                            "[order-router-WINDOW-CHECK] Window limit result (upstream path): allowed=%s reason=%s",
+                            window_allowed, window_reason
+                        )
+                        if not window_allowed:
+                            logger.warning(
+                                "[order-router-WINDOW-BLOCK] window_limit_blocked (upstream path) coid=%s ticker=%s agent=%s notional=$%.2f reason=%s",
+                                _upstream_coid[:16], intent.ticker, _agent, order_notional_usd, window_reason,
+                            )
+                            return OrderResult(
+                                status="rejected",
+                                mode=mode,
+                                reason=f"window_limit:{window_reason}",
+                                latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                            )
+                    else:
+                        logger.warning("[order-router-WINDOW-CHECK] Envelope is None - window limit check skipped (upstream path)")
+                except Exception as e:
+                    logger.error("[order-router] Failed to check window limit (upstream path): %s", e, exc_info=True)
                 
                 logger.debug(
                     "[order-router] pre_trade_gate using upstream reservation coid=%s ticker=%s",
