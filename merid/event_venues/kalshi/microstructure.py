@@ -12,11 +12,14 @@ Kalshi YES/NO Duality:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Literal, Optional, Tuple
 from decimal import Decimal
 
 from merid.event_venues.kalshi.unified_market_state import OrderbookSnapshot, OrderbookLevel
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -105,6 +108,23 @@ def compute_side_microstructure(
     # Compute spread (absolute value)
     if view.best_yes_bid is not None and view.best_yes_ask is not None:
         view.spread_cents = abs(view.best_yes_bid - view.best_yes_ask)
+        
+        # CRITICAL FIX: Detect crossed market (zero or negative spread)
+        # Spread <= 0 indicates crossed market - should flag as invalid
+        if view.spread_cents <= 0:
+            logger.warning(
+                f"[MICROSTRUCTURE] Crossed market detected for {ob.ticker}: "
+                f"yes_bid={view.best_yes_bid}, yes_ask={view.best_yes_ask}, spread={view.spread_cents}"
+            )
+        
+        # CRITICAL FIX: Flag wide spreads as illiquid (>15c threshold)
+        WIDE_SPREAD_THRESHOLD = 15
+        if view.spread_cents > WIDE_SPREAD_THRESHOLD:
+            logger.warning(
+                f"[MICROSTRUCTURE] Wide spread detected for {ob.ticker}: "
+                f"spread={view.spread_cents}c (threshold={WIDE_SPREAD_THRESHOLD}c) - market may be illiquid"
+            )
+        
         mid = (view.best_yes_bid + view.best_yes_ask) / 2.0
         if mid > 0:
             view.spread_pct = view.spread_cents / mid  # Spread as fraction of mid (not percentage)
@@ -230,6 +250,60 @@ def compute_depth_at_price(
         if best_bid is not None and price_cents > best_bid:
             return levels[0].size if levels else 0  # Only best bid
         return sum(lv.size for lv in levels if lv.price_cents >= price_cents)
+
+
+def compute_optimal_side(
+    ob: OrderbookSnapshot,
+    direction: Literal["long", "short"],
+) -> Optional[Literal["yes", "no"]]:
+    """Determine optimal side (YES or NO) for a given directional view.
+    
+    Compares YES bid vs NO ask (100 - NO bid) to find the better entry price.
+    For long exposure: compare YES bid vs NO ask (100 - NO bid)
+    For short exposure: compare YES ask vs NO bid (100 - YES bid)
+    
+    Args:
+        ob: OrderbookSnapshot with current market state
+        direction: "long" (bet YES will be true) or "short" (bet YES will be false)
+    
+    Returns:
+        "yes" if YES side is better, "no" if NO side is better, None if can't determine
+    """
+    yes_bid = ob.best_yes_bid
+    no_bid = ob.no_bids[0].price_cents if ob.no_bids else None
+    
+    if yes_bid is None or no_bid is None:
+        return None
+    
+    if direction == "long":
+        # For long: compare YES bid vs NO ask (100 - NO bid)
+        # Lower price is better for entry
+        yes_entry_price = yes_bid
+        no_entry_price = 100 - no_bid  # NO ask in YES-equivalent terms
+        
+        if yes_entry_price < no_entry_price:
+            return "yes"
+        elif no_entry_price < yes_entry_price:
+            return "no"
+        else:
+            # Equal prices - prefer YES for simplicity
+            return "yes"
+    else:  # short
+        # For short: compare YES ask vs NO bid
+        # Higher price is better for entry (selling YES at higher price)
+        yes_ask = 100 - no_bid if no_bid is not None else None
+        no_ask = no_bid
+        
+        if yes_ask is None or no_ask is None:
+            return None
+        
+        if yes_ask > no_ask:
+            return "yes"
+        elif no_ask > yes_ask:
+            return "no"
+        else:
+            # Equal prices - prefer NO for simplicity
+            return "no"
 
 
 def cents_to_dollars(cents: Optional[int]) -> Optional[float]:
