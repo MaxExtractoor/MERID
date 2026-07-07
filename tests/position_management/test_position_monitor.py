@@ -794,6 +794,64 @@ class TestPositionMonitorThreadSafety:
             assert pos.market_id.startswith("KXBTC15M-")
 
 
+class TestPositionMonitorStartupSequence:
+    """Test PositionMonitor startup sequence to ensure proper initialization."""
+    
+    @pytest.mark.asyncio
+    async def test_startup_sets_running_flag_before_callback(self):
+        """Test that PositionMonitor.start() sets _running flag before callback can be used.
+        
+        This test verifies the fix for the fire-and-forget startup bug where
+        _running flag was not set before callback registration, causing race conditions.
+        """
+        monitor = PositionMonitor()
+        
+        # Initially not running
+        assert monitor._running is False
+        
+        # Start the monitor (await to ensure proper sequencing)
+        await monitor.start()
+        
+        # _running flag should now be True
+        assert monitor._running is True
+        
+        # Callback can be registered after startup
+        callback = Mock()
+        monitor.register_exit_intent_callback(callback)
+        assert monitor._exit_intent_callback is callback
+        
+        # Stop the monitor
+        await monitor.stop()
+        
+        # _running flag should be False after stop
+        assert monitor._running is False
+    
+    @pytest.mark.asyncio
+    async def test_startup_already_running(self):
+        """Test that calling start() when already running is idempotent."""
+        monitor = PositionMonitor()
+        
+        # Start the monitor
+        await monitor.start()
+        assert monitor._running is True
+        
+        # Call start() again (should be idempotent)
+        await monitor.start()
+        assert monitor._running is True
+        
+        # Stop the monitor
+        await monitor.stop()
+    
+    @pytest.mark.asyncio
+    async def test_stop_when_not_running(self):
+        """Test that calling stop() when not running is safe."""
+        monitor = PositionMonitor()
+        
+        # Stop without starting (should be safe)
+        await monitor.stop()
+        assert monitor._running is False
+
+
 class TestPositionMonitorPositionCacheIntegration:
     """Test integration between position_cache and PositionMonitor."""
     

@@ -850,6 +850,8 @@ _ALLOWED_CALLER_PREFIXES = (
     "merid.prediction.agent_grid_15m",
     # Lean 15m loop - main trading loop for 15m crypto scalping
     "merid.loop_15m",
+    # Position monitor - executes exit orders for TP/SL/trailing stops
+    "merid.position_management.position_monitor",
     # Web 15m main entry point for 15m crypto trading
     "web.main_15m",
     # Tests are allowed for testing the router itself
