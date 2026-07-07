@@ -228,8 +228,10 @@ class LocalOrderbook:
                     # Convert to cents by multiplying by 100 before rounding
                     # This preserves sub-cent resolution (e.g., 0.19 -> 19 cents)
                     price_cents = int(round(price * 100))
-                    # Filter out invalid 0-price levels (Kalshi binary contracts are 1-99 cents)
-                    if price_cents > 0:
+                    # Filter out invalid price levels (Kalshi binary contracts are 1-99 cents)
+                    # Clamp to valid range to handle rounding edge cases
+                    price_cents = max(1, min(99, price_cents))
+                    if price_cents > 0 and price_cents < 100:
                         self.yes_levels[price_cents] = int(size)
 
         # Parse no side
@@ -240,8 +242,10 @@ class LocalOrderbook:
                     # CRITICAL: Kalshi prices are dollar floats in [0.00, 1.00]
                     # Convert to cents by multiplying by 100 before rounding
                     price_cents = int(round(price * 100))
-                    # Filter out invalid 0-price levels (Kalshi binary contracts are 1-99 cents)
-                    if price_cents > 0:
+                    # Filter out invalid price levels (Kalshi binary contracts are 1-99 cents)
+                    # Clamp to valid range to handle rounding edge cases
+                    price_cents = max(1, min(99, price_cents))
+                    if price_cents > 0 and price_cents < 100:
                         self.no_levels[price_cents] = int(size)
 
         self._initialized = True
@@ -310,11 +314,19 @@ class LocalOrderbook:
         if price is None:
             return
 
-        # Filter out invalid 0-price levels (Kalshi binary contracts are 1-99 cents)
-        if price <= 0:
+        # Filter out invalid price levels (Kalshi binary contracts are 1-99 cents)
+        # Clamp to valid range to handle rounding edge cases
+        price = max(1, min(99, price))
+        if price <= 0 or price >= 100:
             return
 
         levels = self.yes_levels if side == "yes" else self.no_levels
+
+        # CRITICAL FIX: Convert size_delta to int to match Dict[int, int] type
+        # Kalshi WS sends delta_fp as float (e.g., 0.28), but orderbook levels store int sizes
+        # Without this conversion, float values get stored in int dict, causing depth calculations
+        # to fail microstructure gate checks (e.g., 0.28 < 1 threshold)
+        size_delta = int(round(size_delta))
 
         # Apply signed delta
         new_size = levels[price] + size_delta

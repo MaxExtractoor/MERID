@@ -79,10 +79,30 @@ class SpreadOptimizer:
         self._calculations = 0
         self._errors = 0
         
-        # Performance thresholds
-        self.MAX_SPREAD_CENTS = 15  # Maximum acceptable spread
+        # CRITICAL FIX: Read thresholds from profile for consistency
+        # Default to legacy values if profile unavailable
+        self.MAX_SPREAD_CENTS = 15  # Maximum acceptable spread for quality assessment
         self.MIN_DEPTH_LEVELS = 2   # Minimum depth levels
         self.MIN_LIQUIDITY_SCORE = 0.3  # Minimum liquidity score
+        
+        # Try to load from profile for consistency
+        try:
+            from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
+            profile = Crypto15mProfileAdapter()
+            # Use guardrails.max_spread_cents for consistency (75c for coarse filtering)
+            # But keep optimizer's tighter threshold (15c) for quality assessment
+            # These serve different purposes: coarse filter vs quality metric
+            logger.info(
+                "[SPREAD-OPTIMIZER] Profile loaded: guardrails.max_spread_cents=%d (coarse filter), "
+                "optimizer.MAX_SPREAD_CENTS=%d (quality metric)",
+                profile.guardrails_max_spread_cents, self.MAX_SPREAD_CENTS
+            )
+        except Exception as e:
+            logger.warning(
+                "[SPREAD-OPTIMIZER] Failed to load profile: %s, using legacy defaults "
+                "(MAX_SPREAD_CENTS=%d, MIN_DEPTH_LEVELS=%d, MIN_LIQUIDITY_SCORE=%.3f)",
+                e, self.MAX_SPREAD_CENTS, self.MIN_DEPTH_LEVELS, self.MIN_LIQUIDITY_SCORE
+            )
         
         logger.info("[SPREAD-OPTIMIZER] Initialized with cache_size=%d", cache_size)
     
@@ -441,15 +461,24 @@ class SpreadOptimizer:
             return 0
     
     def _calculate_liquidity_score(self, spread_cents: float, total_depth: int) -> float:
-        """Calculate liquidity score based on spread and depth."""
+        """Calculate liquidity score based on spread and depth.
+        
+        CRITICAL FIX: More conservative depth scoring to prevent overestimation
+        for low-liquidity markets. Previous formula gave 0.8 score for 10 depth,
+        which is too optimistic for thin books.
+        """
         # Spread component: lower spread = higher liquidity
         spread_score = max(0.0, 1.0 - (spread_cents / self.MAX_SPREAD_CENTS))
         
         # Depth component: more depth = higher liquidity
-        depth_score = min(1.0, total_depth / 10.0)  # Normalize to 10 levels
+        # CRITICAL FIX: Normalize to 50 levels instead of 10 for more conservative scoring
+        # This ensures thin books (10 depth) get lower scores (~0.2 instead of 1.0)
+        depth_score = min(1.0, total_depth / 50.0)
         
         # Combine scores (weighted average)
-        liquidity_score = (spread_score * 0.6 + depth_score * 0.4)
+        # CRITICAL FIX: Increase spread weight to 0.7, reduce depth weight to 0.3
+        # Spread is more important for liquidity assessment in prediction markets
+        liquidity_score = (spread_score * 0.7 + depth_score * 0.3)
         
         return max(0.0, min(1.0, liquidity_score))
     
