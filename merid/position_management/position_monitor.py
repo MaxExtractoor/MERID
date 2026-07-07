@@ -626,6 +626,78 @@ class PositionMonitor:
             self._emit_exit_intent(position, ExitReason.TRAIL, current_price_cents)
             return
         
+        # CRITICAL FIX: 2026-07-07 - Staged time-based exits
+        # Re-implemented from position_cache with proper callback routing
+        # This ensures proper agent_id, swing mode logic, and exit intent callback error handling
+        # Staged exits close partial positions at predefined time intervals
+        staged_exit_stages = [
+            {"minutes": 5, "percent": 25},   # Close 25% at 5 minutes
+            {"minutes": 10, "percent": 25},  # Close another 25% at 10 minutes
+            {"minutes": 13, "percent": 50},  # Close remaining 50% at 13 minutes
+        ]
+        
+        # Get time to expiry from market state
+        time_to_expiry_seconds = 900.0  # Default 15 minutes
+        try:
+            from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+            store = get_kalshi_market_state_store()
+            state = store.get(position.market_id)
+            if state and state.seconds_to_expiry:
+                time_to_expiry_seconds = state.seconds_to_expiry
+        except Exception as e:
+            logger.debug("[POSITION-MONITOR] Could not get time to expiry for staged exit: %s", e)
+        
+        # Calculate time since entry (approximate for 15m window)
+        time_since_entry_seconds = 900.0 - time_to_expiry_seconds
+        if time_since_entry_seconds < 0:
+            time_since_entry_seconds = 0
+        
+        time_since_entry_minutes = time_since_entry_seconds / 60.0
+        
+        # Check staged exits
+        for stage_idx, stage in enumerate(staged_exit_stages):
+            stage_minutes = stage.get("minutes", 0)
+            stage_percent = stage.get("percent", 0)
+            
+            # Check if we've reached this stage time
+            if time_since_entry_minutes >= stage_minutes:
+                stage_key = f"stage_{stage_idx}"
+                stage_executed_attr = f"staged_exit_{stage_key}_executed"
+                
+                # Check if this stage has already been executed
+                if not getattr(position, stage_executed_attr, False):
+                    # Calculate contracts to close for this stage
+                    contracts_to_close = int(position.size * (stage_percent / 100.0))
+                    
+                    if contracts_to_close > 0 and contracts_to_close < position.size:
+                        logger.info(
+                            "[POSITION-MONITOR] STAGED-EXIT triggered: position=%s stage=%d minutes=%d percent=%d contracts=%d/%d time_since_entry=%.1fmin",
+                            position.position_id[:8],
+                            stage_idx,
+                            stage_minutes,
+                            stage_percent,
+                            contracts_to_close,
+                            position.size,
+                            time_since_entry_minutes,
+                        )
+                        
+                        # Mark stage as executed
+                        setattr(position, stage_executed_attr, True)
+                        setattr(position, f"staged_exit_{stage_key}_timestamp", datetime.utcnow())
+                        
+                        # Emit partial exit intent
+                        self._emit_exit_intent(position, ExitReason.TIME_STOP, current_price_cents, contracts_to_close)
+                        
+                        # Update position size after trim (don't remove from monitoring)
+                        position.size -= contracts_to_close
+                        logger.info(
+                            "[POSITION-MONITOR] STAGED-EXIT trimmed position: position=%s new_size=%d closed=%d",
+                            position.position_id[:8],
+                            position.size,
+                            contracts_to_close,
+                        )
+                        # Continue to check other exit conditions (don't return early)
+        
         # Check exit policy (time stop, edge decay, risk, candle reversal)
         resolver = get_exit_policy_resolver()
         

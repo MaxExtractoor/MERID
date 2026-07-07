@@ -91,6 +91,14 @@ class Position:
     dynamic_tp_triggered: bool = False  # Track if dynamic TP has been triggered
     entry_edge_pct: float = 0.03  # Edge percentage at entry (default 3% for dynamic TP adjustment)
     
+    # Staged time-based exit tracking (2026-07-07)
+    staged_exit_stage_0_executed: bool = False  # Track if stage 0 has been executed
+    staged_exit_stage_1_executed: bool = False  # Track if stage 1 has been executed
+    staged_exit_stage_2_executed: bool = False  # Track if stage 2 has been executed
+    staged_exit_stage_0_timestamp: Optional[datetime] = None  # When stage 0 was executed
+    staged_exit_stage_1_timestamp: Optional[datetime] = None  # When stage 1 was executed
+    staged_exit_stage_2_timestamp: Optional[datetime] = None  # When stage 2 was executed
+    
     # Initial risk for R-multiple calculation
     initial_risk_cents: int = 0  # |entry_price - stop_loss_price| if stop_loss set
     
