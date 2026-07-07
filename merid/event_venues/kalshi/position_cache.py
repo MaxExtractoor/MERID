@@ -431,6 +431,36 @@ class KalshiPositionCache:
             # Task 2: Look up fill_source from fills_ledger if fill_id provided
             fill_source = await self._lookup_fill_source(fill_id, client_order_id)
 
+            # CRITICAL FIX (2026-07-07): Record window exposure on fill confirmation
+            # Window exposure is now counted only when fills are confirmed, not at order submission.
+            # This prevents phantom exposure accumulation from unfilled orders.
+            try:
+                from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+                # Extract agent_id from fills_ledger if available
+                agent_id = None
+                if fill_id and self._fills_ledger:
+                    try:
+                        fill_record = self._fills_ledger.get_fill(fill_id)
+                        if fill_record:
+                            agent_id = getattr(fill_record, 'agent_id', None)
+                    except Exception as ledger_err:
+                        logger.debug("[POSITION-CACHE] Could not get fill record for exposure: %s", ledger_err)
+                
+                # Record exposure if we have agent_id and this is an entry order (buy)
+                if agent_id and action == "buy":
+                    envelope = get_kalshi_crypto_15m_risk_envelope()
+                    order_notional_usd = (contracts * price_cents) / 100.0
+                    envelope.record_order_execution(
+                        agent_id=agent_id,
+                        order_notional_usd=order_notional_usd
+                    )
+                    logger.info(
+                        "[POSITION-CACHE] Recorded window exposure on fill: agent=%s notional=$%.2f market=%s fill_id=%s",
+                        agent_id, order_notional_usd, market_id, fill_id or "N/A"
+                    )
+            except Exception as exposure_err:
+                logger.warning("[POSITION-CACHE] Failed to record window exposure on fill: %s", exposure_err)
+
             # PRODUCTION FIX: Recover client_order_id from order_id if not provided
             # HTTP fills from Kalshi API don't include client_order_id, only order_id
             # We use the order_id -> client_tag mapping registered at order submission time
