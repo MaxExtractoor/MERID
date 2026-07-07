@@ -441,6 +441,13 @@ class LeanAgent15m:
             self._price_1m_history[asset] = collections.deque(maxlen=self._1m_window_size)
             self._price_5m_history[asset] = collections.deque(maxlen=self._5m_window_size)
         
+        # CRITICAL FIX: 2026-07-06 - Initialize MACD history for momentum_fvg signal generation
+        # MACD(12,26,9) requires 9 periods of MACD line history for signal line calculation
+        self._macd_history: Dict[str, collections.deque] = {}
+        self._macd_window_size = 9  # 9-period EMA for signal line
+        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+            self._macd_history[asset] = collections.deque(maxlen=self._macd_window_size)
+        
         # Cooldown tracking: last trade timestamp per asset
         self._last_trade_time: Dict[str, float] = {}
         # Initialize to 0.0 to allow immediate signal generation on startup
@@ -1633,38 +1640,109 @@ class LeanAgent15m:
         velocity = self._calculate_multi_window_velocity(asset, spot_price)
         velocity_threshold = self._calculate_dynamic_velocity_threshold(asset)
         
-        # Get MACD and RSI from indicator stack
+        # CRITICAL FIX: 2026-07-06 - Check for sufficient warmup data before calculating indicators
+        # Industry best practice: MACD(12,26,9) needs 35+ periods, RSI(9) needs 10+ periods
+        # If insufficient data, skip signal generation to avoid zero/default indicator values
+        price_history = list(self._spot_price_history.get(asset, []))
+        min_history_for_macd = 35  # 26 for MACD + 9 for signal line
+        min_history_for_rsi = 10   # 9 for RSI + 1 for calculation
+        
+        if len(price_history) < min_history_for_macd:
+            logger.warning(
+                "[MOMENTUM-FVG] asset=%s insufficient price history for MACD (%d < %d), skipping signal generation. "
+                "Agents need warmup time to accumulate historical data for accurate indicator calculations.",
+                asset, len(price_history), min_history_for_macd
+            )
+            return None
+        
+        if len(price_history) < min_history_for_rsi:
+            logger.warning(
+                "[MOMENTUM-FVG] asset=%s insufficient price history for RSI (%d < %d), skipping signal generation. "
+                "Agents need warmup time to accumulate historical data for accurate indicator calculations.",
+                asset, len(price_history), min_history_for_rsi
+            )
+            return None
+        
+        # Get MACD and RSI using agent's own calculations
+        # CRITICAL FIX: Indicator stack is not initialized, so we use agent's own methods
         macd_histogram = 0.0
         macd_slope = 0.0
         rsi = 50.0
         rsi_zone = "neutral"
         
         try:
-            if hasattr(self, '_indicator_stack') and self._indicator_stack:
-                # Get MACD histogram and slope
-                if hasattr(self._indicator_stack, '_macd_ema_fast') and hasattr(self._indicator_stack, '_macd_ema_slow'):
-                    macd_line = self._indicator_stack._macd_ema_fast - self._indicator_stack._macd_ema_slow
-                    if hasattr(self._indicator_stack, '_macd_signal_ema'):
-                        macd_histogram = macd_line - self._indicator_stack._macd_signal_ema
-                        # Calculate MACD slope (change in histogram)
-                        if hasattr(self._indicator_stack, '_prev_macd_histogram'):
-                            macd_slope = macd_histogram - self._indicator_stack._prev_macd_histogram
-                        self._indicator_stack._prev_macd_histogram = macd_histogram
+            # Calculate RSI using agent's own method
+            rsi = self._calculate_rsi(asset, period=9)
+            
+            # CRITICAL FIX: If RSI returns 0.0, it means insufficient data - skip signal
+            if rsi == 0.0:
+                logger.warning(
+                    "[MOMENTUM-FVG] asset=%s RSI returned 0.0 (insufficient data), skipping signal generation",
+                    asset
+                )
+                return None
+            
+            # Determine RSI zone
+            rsi_oversold = getattr(momentum_fvg_config, 'rsi_oversold', 30.0)
+            rsi_overbought = getattr(momentum_fvg_config, 'rsi_overbought', 70.0)
+            if rsi <= rsi_oversold:
+                rsi_zone = "oversold"
+            elif rsi >= rsi_overbought:
+                rsi_zone = "overbought"
+            else:
+                rsi_zone = "neutral"
+            
+            # Calculate simple MACD histogram using price history
+            # MACD(12,26,9) - industry standard for 15-minute trading
+            if len(price_history) >= 26:
+                # Extract close prices (index 1 in price history tuples)
+                closes = [p[1] for p in price_history[-26:]]
                 
-                # Get RSI
-                if hasattr(self._indicator_stack, '_calculate_rsi'):
-                    rsi = self._indicator_stack._calculate_rsi(asset, period=9)
-                    # Determine RSI zone
-                    rsi_oversold = getattr(momentum_fvg_config, 'rsi_oversold', 30.0)
-                    rsi_overbought = getattr(momentum_fvg_config, 'rsi_overbought', 70.0)
-                    if rsi <= rsi_oversold:
-                        rsi_zone = "oversold"
-                    elif rsi >= rsi_overbought:
-                        rsi_zone = "overbought"
-                    else:
-                        rsi_zone = "neutral"
+                # Calculate EMAs
+                def ema(data, period):
+                    k = 2.0 / (period + 1)
+                    ema_val = data[0]
+                    for price in data[1:]:
+                        ema_val = (price * k) + (ema_val * (1 - k))
+                    return ema_val
+                
+                ema_fast = ema(closes, 12)
+                ema_slow = ema(closes, 26)
+                macd_line = ema_fast - ema_slow
+                
+                # Signal line (9-period EMA of MACD line)
+                # Use recent MACD values if available, otherwise use current
+                if not hasattr(self, '_macd_history'):
+                    self._macd_history = {}
+                if asset not in self._macd_history:
+                    self._macd_history[asset] = collections.deque(maxlen=9)
+                
+                self._macd_history[asset].append(macd_line)
+                if len(self._macd_history[asset]) >= 9:
+                    signal_line = ema(list(self._macd_history[asset]), 9)
+                    macd_histogram = macd_line - signal_line
+                    
+                    # Calculate slope
+                    if len(self._macd_history[asset]) >= 2:
+                        prev_histogram = list(self._macd_history[asset])[-2] - ema(list(self._macd_history[asset])[:-1], 9)
+                        macd_slope = macd_histogram - prev_histogram
+                else:
+                    logger.warning(
+                        "[MOMENTUM-FVG] asset=%s insufficient MACD history for signal line (%d < 9), "
+                        "MACD histogram will be 0.0 until warmup completes",
+                        asset, len(self._macd_history[asset])
+                    )
+                    return None
+            else:
+                logger.warning(
+                    "[MOMENTUM-FVG] asset=%s insufficient price history for MACD (%d < 26), "
+                    "MACD histogram will be 0.0 until warmup completes",
+                    asset, len(price_history)
+                )
+                return None
         except Exception as e:
-            logger.warning("[MOMENTUM-FVG] Failed to get MACD/RSI indicators: %s", e)
+            logger.warning("[MOMENTUM-FVG] Failed to calculate MACD/RSI: %s", e)
+            return None
         
         # Get FVG signal from FVG forecaster
         fvg_signal = None
@@ -1719,13 +1797,35 @@ class LeanAgent15m:
             ticker = market.market.market_id if hasattr(market, 'market') else market.market_id
             market_state = self.market_state_store.get(ticker) if self.market_state_store else None
             if market_state:
-                depth_yes = getattr(market_state, 'depth_yes_10c', 0) or 0
-                depth_no = getattr(market_state, 'depth_no_10c', 0) or 0
-                if depth_yes + depth_no > 0:
+                # CRITICAL FIX: Use correct field names from KalshiMarketState model
+                # The model uses depth_10c_yes and depth_10c_no, not depth_yes_10c and depth_no_10c
+                depth_yes = getattr(market_state, 'depth_10c_yes', 0) or 0
+                depth_no = getattr(market_state, 'depth_10c_no', 0) or 0
+                
+                # CRITICAL FIX: Check for valid depth data before calculating OBI
+                # If both depths are 0, the market state may not have been populated yet
+                if depth_yes == 0 and depth_no == 0:
+                    logger.warning(
+                        "[MOMENTUM-FVG] asset=%s ticker=%s depth data not available (depth_yes=0, depth_no=0), "
+                        "market state may not be populated yet. Skipping OBI calculation.",
+                        asset, ticker
+                    )
+                    # Don't use OBI in signal conditions if data is unavailable
+                    obi = 0.0
+                    obi_strong = False
+                elif depth_yes + depth_no > 0:
                     obi = (depth_yes - depth_no) / (depth_yes + depth_no)
                     # Check per-asset strong thresholds
                     asset_obi_strong = getattr(momentum_fvg_config, f'obi_strong_{asset.lower()}', 0.5)
                     obi_strong = abs(obi) >= asset_obi_strong
+                    
+                    # CRITICAL FIX: Log extreme OBI values for debugging
+                    if abs(obi) >= 0.9:
+                        logger.warning(
+                            "[MOMENTUM-FVG] asset=%s ticker=%s extreme OBI=%.2f (depth_yes=%d depth_no=%d). "
+                            "This may indicate one-sided liquidity or stale market data.",
+                            asset, ticker, obi, depth_yes, depth_no
+                        )
         except Exception as e:
             logger.warning("[MOMENTUM-FVG] Failed to get OBI: %s", e)
         
@@ -3214,39 +3314,16 @@ class LeanAgent15m:
                 asset, adx
             )
         
-        # Volume confirmation filter - integrated with unified_spot_service
+        # Volume confirmation filter - use proper EMA20 comparison
         # Industry standard: volume > 1.2x EMA20(volume) confirms signal validity
         # Reference: https://github.com/PapaDaCodr/kryptic-gopha/blob/main/research/hft_analysis.md
-        try:
-            from data.unified_spot_service import get_unified_spot_service
-            spot_service = get_unified_spot_service()
-            spot_result = spot_service.get(asset)
-            
-            if isinstance(spot_result, SpotError):
-                logger.info(
-                    "[VOLUME-FILTER] asset=%s spot data unavailable/error - PROCEED (volume filter bypass)",
-                    asset
-                )
-            elif spot_result and spot_result.volume and spot_result.volume > 0:
-                # Calculate EMA20 of volume using price history as proxy
-                # In production, would maintain separate volume history
-                volume = spot_result.volume
-                # For now, use simple threshold: volume > 0 confirms liquidity
-                # Future enhancement: implement EMA20(volume) comparison
-                logger.info(
-                    "[VOLUME-FILTER] asset=%s volume=%.2f - PROCEED (liquidity confirmed)",
-                    asset, volume
-                )
-            else:
-                logger.info(
-                    "[VOLUME-FILTER] asset=%s volume data missing/zero - PROCEED (filter bypass)",
-                    asset
-                )
-        except Exception as e:
-            logger.warning(
-                "[VOLUME-FILTER] asset=%s volume check failed: %s - PROCEED (filter bypass)",
-                asset, e
+        volume_confirmed = self._check_volume_confirmation(asset)
+        if not volume_confirmed:
+            logger.info(
+                "[VOLUME-FILTER] asset=%s volume confirmation failed -> SKIP TRADE (insufficient volume)",
+                asset
             )
+            return None
         
         # Phase 7: Check panic fade (volatility reversion) conditions
         # Panic fade is the Turbine research winner: 93 of 96 variants profitable
@@ -3467,41 +3544,21 @@ class LeanAgent15m:
                         asset, velocity, velocity_threshold
                     )
             elif velocity < -velocity_threshold:
-                # NO-side conviction check: require 1.5x threshold for NO signals
-                no_threshold = velocity_threshold * no_conviction_multiplier
-                if velocity < -no_threshold:
-                    if strategy_mode == "trend_following":
-                        signal_side = "no"
-                        signal_action = "buy"
-                        logger.info(
-                            "[VELOCITY-SIGNAL] asset=%s velocity=%.6f < -no_threshold=%.6f (1.5x) mode=trend_following -> BUY NO (negative momentum with conviction)",
-                            asset, velocity, no_threshold
-                        )
-                    else:  # mean_reversion
-                        signal_side = "yes"
-                        signal_action = "buy"
-                        logger.info(
-                            "[VELOCITY-SIGNAL] asset=%s velocity=%.6f < -no_threshold=%.6f (1.5x) mode=mean_reversion -> BUY YES (expect reversion up)",
-                            asset, velocity, no_threshold
-                        )
-                else:
-                    # Velocity negative but not enough conviction for NO side
-                    # 2026-07-05 RESEARCH FIX: Removed YES-side bias on marginal negative
-                    # velocity (buying YES against negative momentum with no edge).
+                # Symmetric threshold: NO side uses same threshold as YES (no_conviction_multiplier = 1.0)
+                if strategy_mode == "trend_following":
+                    signal_side = "no"
+                    signal_action = "buy"
                     logger.info(
-                        "[NO-CONVICTION-REJECTED] asset=%s velocity=%.6f insufficient for NO side (requires < -%.6f, got %.6f) -> NO TRADE",
-                        asset, velocity, no_threshold, velocity
+                        "[VELOCITY-SIGNAL] asset=%s velocity=%.6f < -threshold=%.6f mode=trend_following -> BUY NO (negative momentum)",
+                        asset, velocity, velocity_threshold
                     )
-                    return None
-            elif is_marginal_positive or is_marginal_negative:
-                # 2026-07-05 RESEARCH FIX: Removed YES-side bias for marginal velocity.
-                # Trading without directional conviction produced zero-edge candidates that
-                # chased 98-99c asks. No conviction = no trade (research: skip noisy signals).
-                logger.info(
-                    "[VELOCITY-SIGNAL] asset=%s velocity=%.6f marginal (within 20%% of threshold=%.6f) -> NO TRADE (insufficient conviction)",
-                    asset, velocity, velocity_threshold
-                )
-                return None
+                else:  # mean_reversion
+                    signal_side = "yes"
+                    signal_action = "buy"
+                    logger.info(
+                        "[VELOCITY-SIGNAL] asset=%s velocity=%.6f < -threshold=%.6f mode=mean_reversion -> BUY YES (expect reversion up)",
+                        asset, velocity, velocity_threshold
+                    )
             else:
                 logger.info(
                     "[VELOCITY-SIGNAL] asset=%s velocity=%.6f within ±threshold=%.6f -> NO TRADE (insufficient momentum)",
@@ -4159,11 +4216,11 @@ class LeanAgent15m:
             else:
                 # Fallback to momentum-friendly range if profile not available
                 ENTRY_MIN_PRICE_CENTS = 10  # Wider range for momentum-based trading
-                ENTRY_MAX_PRICE_CENTS = 70  # Avoid risky high-end markets
+                ENTRY_MAX_PRICE_CENTS = 75  # CRITICAL FIX: 75 to match profile (was 70)
         except Exception as e:
-            logger.warning("[SIGNAL-GEN] Failed to load price_range from profile: %s, using fallback 10-70c", e)
+            logger.warning("[SIGNAL-GEN] Failed to load price_range from profile: %s, using fallback 10-75c", e)
             ENTRY_MIN_PRICE_CENTS = 10  # Wider range for momentum-based trading
-            ENTRY_MAX_PRICE_CENTS = 70  # Avoid risky high-end markets
+            ENTRY_MAX_PRICE_CENTS = 75  # CRITICAL FIX: 75 to match profile (was 70)
         
         MARKETABLE_EDGE_PCT = 4.0  # matches EDGE_MARKET_ENTRY_* (0.04) in risk_parameters.py
         

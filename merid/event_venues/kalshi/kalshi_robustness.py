@@ -369,7 +369,7 @@ class RobustKalshiClient:
         # CRITICAL: Price guard before robustness wrapper
         if order and hasattr(order, 'price') and order.price is not None:
             _price_cents = int(order.price * 100)
-            min_price_cents = 15  # 15 cents / $0.15 minimum
+            min_price_cents = 10  # CRITICAL FIX: 10 cents / $0.10 minimum to match profile (was 15c)
             try:
                 from merid.risk.profiles.crypto_15m_profile import get_active_profile
                 profile_adapter = get_active_profile()
@@ -378,7 +378,7 @@ class RobustKalshiClient:
             except Exception as e:
                 from utils.logger import get_logger
                 logger = get_logger("merid.event_venues.kalshi.kalshi_robustness")
-                logger.debug("[ROBUST_CLIENT] Failed to load min_contract_price_cents from profile: %s, using default 15c", e)
+                logger.debug("[ROBUST_CLIENT] Failed to load min_contract_price_cents from profile: %s, using default 10c", e)
             
             if _price_cents < min_price_cents:
                 from utils.logger import get_logger

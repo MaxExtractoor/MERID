@@ -810,9 +810,10 @@ class Crypto15mProfileAdapter:
                 price_based_sell_threshold=raw.get('price_based', {}).get('sell_threshold', 0.90),
                 
                 # Price range configuration for entry band restrictions
+                # CRITICAL FIX: max_price_cents default 75 to match guardrails_max_contract_price_cents (75c sweet spot threshold)
                 price_range=PriceRange(
                     min_price_cents=raw.get('price_range', {}).get('min_price_cents', 10),
-                    max_price_cents=raw.get('price_range', {}).get('max_price_cents', 70),
+                    max_price_cents=raw.get('price_range', {}).get('max_price_cents', 75),  # CRITICAL FIX: Default 75c to match guardrails (was 70)
                     description=raw.get('price_range', {}).get('description', 'Valid price range in cents for order execution')
                 ),
                 
@@ -916,12 +917,12 @@ class Crypto15mProfileAdapter:
                 guardrails_max_daily_loss_usd=guardrails.get('max_daily_loss_usd', 200.0),
                 guardrails_max_position_value_usd=guardrails.get('max_position_value_usd', 100000.0),  # Default $100k
                 # OTM filtering for 15-minute crypto
-                guardrails_max_dist_pct_trade=guardrails.get('max_dist_pct_trade', 2.0),  # Default 2%
-                guardrails_min_contract_price_cents=guardrails.get('min_contract_price_cents', 20),  # Default 20 cents
-                guardrails_max_contract_price_cents=guardrails.get('max_contract_price_cents', 70),  # Default 70 cents (2026 research: 80% payout recommended)
-                guardrails_max_same_side_per_strip=guardrails.get('max_same_side_per_strip', 2),  # Default 2 per strip
+                guardrails_max_dist_pct_trade=guardrails.get('max_dist_pct_trade', 2.5),  # CRITICAL FIX: Default 2.5 to match YAML (was 2.0)
+                guardrails_min_contract_price_cents=guardrails.get('min_contract_price_cents', 10),  # CRITICAL FIX: Default 10c to match YAML (10c minimum for momentum-based trading)
+                guardrails_max_contract_price_cents=guardrails.get('max_contract_price_cents', 75),  # CRITICAL FIX: Default 75c to match YAML (75c sweet spot threshold - intentional)
+                guardrails_max_same_side_per_strip=guardrails.get('max_same_side_per_strip', 5),  # CRITICAL FIX: Default 5 to match YAML (was 2)
                 # Time trap prevention (entry window narrowing)
-                guardrails_max_entry_mins=guardrails.get('max_entry_mins', 12.0),  # Default 12 minutes
+                guardrails_max_entry_mins=guardrails.get('max_entry_mins', 15.0),  # CRITICAL FIX: Default 15 to match YAML (was 12)
                 guardrails_min_entry_mins=guardrails.get('min_entry_mins', 2.0),  # Default 2 minutes
                 # Microstructure trap prevention
                 guardrails_depth_size_multiplier=guardrails.get('depth_size_multiplier', 3.0),  # Default 3x

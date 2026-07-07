@@ -554,8 +554,8 @@ failsafe:
 # - 10-70c range allows NO-side entries while avoiding risky high-end prices
 price_range:
   min_price_cents: 10  # WIDENED for momentum: 10c minimum allows NO-side entries in high-probability markets
-  max_price_cents: 70  # KEEPS 70c maximum to avoid risky high-end markets with poor scaling
-  description: "Valid price range in cents for order execution (10-70c for momentum-based trading)"
+  max_price_cents: 75  # CRITICAL FIX: 75c to match guardrails_max_contract_price_cents (sweet spot threshold)
+  description: "Valid price range in cents for order execution (10-75c for momentum-based trading)"
 
 # ── Per-Asset Caps (BTC/ETH/SOL/XRP/DOGE) ─────────────────────────────────
 # Each asset has its own notional as percentage of capital, NOT hardcoded USD values.
@@ -1345,11 +1345,11 @@ velocity_model:
 # Actual market velocities observed: 0.000%-0.04% (from live logs 2026-07-05)
 # New thresholds (0.00001%-0.00005%) allow trades even in extremely calm markets:
 velocity_thresholds:
-  BTC: 0.00001  # 0.001% - effectively zero to enable any movement
-  ETH: 0.00001  # 0.001% - effectively zero to enable any movement
-  SOL: 0.00001  # 0.001% - effectively zero to enable any movement
-  XRP: 0.00001  # 0.001% - effectively zero to enable any movement
-  DOGE: 0.00001  # 0.001% - effectively zero to enable any movement
+  BTC: 0.00015  # 0.015% - aligned with Coinbase velocity_signal.py (single source of truth)
+  ETH: 0.00015  # 0.015% - aligned with Coinbase velocity_signal.py (single source of truth)
+  SOL: 0.000225  # 0.0225% - aligned with Coinbase velocity_signal.py (single source of truth)
+  XRP: 0.000225  # 0.0225% - aligned with Coinbase velocity_signal.py (single source of truth)
+  DOGE: 0.0003  # 0.03% - aligned with Coinbase velocity_signal.py (single source of truth)
 
 # ── Momentum Weights (Phase 4.1) ───────────────────────────────────────────────
 # Multi-window velocity weights for momentum signal fusion

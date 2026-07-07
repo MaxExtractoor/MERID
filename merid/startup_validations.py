@@ -279,11 +279,12 @@ def validate_kalshi_15m_guardrail_fields() -> None:
                 f"[GUARDRAIL-VALIDATION] max_entry_mins ({guardrails.max_entry_mins}) < 10.0 NORMAL threshold - may restrict entry in normal regime"
             )
         
-        # Contract price floor: should be ≥ 20c (blocks ultra-low priced contracts)
-        # CRITICAL: 10c floor allowed losing deep OTM trades (7c BTC, 10c SOL) - restored to 20c
-        if guardrails.min_contract_price_cents < 20:
+        # Contract price floor: should be ≥ 10c (blocks ultra-low priced contracts)
+        # 2026-07-05: Lowered to 10c for momentum-based trading (allows NO-side entries in high-probability markets)
+        # 10c minimum aligns with agent_grid entry band [10, 70] and DEEP_OTM_CHEAP_CENTS threshold
+        if guardrails.min_contract_price_cents < 10:
             raise StartupValidationError(
-                f"Profile invalid: min_contract_price_cents ({guardrails.min_contract_price_cents}) must be ≥ 20c"
+                f"Profile invalid: min_contract_price_cents ({guardrails.min_contract_price_cents}) must be ≥ 10c"
             )
         
         # Distance percentage: should be ≤ few % (focus on near-ATM)
