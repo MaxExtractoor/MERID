@@ -276,8 +276,8 @@ def test_logit_fusion_normal_case():
     logit_fusion_mean_reversion_weight = 0.3
     near_expiry_guard_sec = 300
     
-    # Apply logit fusion
-    if minutes_to_expiry * 60 < near_expiry_guard_sec:
+    # Apply logit fusion (CRITICAL FIX: 2026-07-07 - use <= instead of <)
+    if minutes_to_expiry * 60 <= near_expiry_guard_sec:
         fused_logit = velocity_logit
     else:
         fused_logit = (logit_fusion_velocity_weight * velocity_logit + 
@@ -298,8 +298,8 @@ def test_logit_fusion_near_expiry():
     logit_fusion_mean_reversion_weight = 0.3
     near_expiry_guard_sec = 300
     
-    # Apply logit fusion
-    if minutes_to_expiry * 60 < near_expiry_guard_sec:
+    # Apply logit fusion (CRITICAL FIX: 2026-07-07 - use <= instead of <)
+    if minutes_to_expiry * 60 <= near_expiry_guard_sec:
         fused_logit = velocity_logit
     else:
         fused_logit = (logit_fusion_velocity_weight * velocity_logit + 
@@ -311,7 +311,7 @@ def test_logit_fusion_near_expiry():
 
 
 def test_logit_fusion_at_guard_boundary():
-    """Test logit fusion exactly at guard boundary."""
+    """Test logit fusion exactly at guard boundary (CRITICAL FIX: 2026-07-07)."""
     velocity_logit = 0.5
     mean_reversion_logit = -0.2
     minutes_to_expiry = 5.0  # Exactly at 5 minute guard
@@ -320,16 +320,16 @@ def test_logit_fusion_at_guard_boundary():
     logit_fusion_mean_reversion_weight = 0.3
     near_expiry_guard_sec = 300
     
-    # Apply logit fusion
-    if minutes_to_expiry * 60 < near_expiry_guard_sec:
+    # Apply logit fusion (CRITICAL FIX: 2026-07-07 - use <= instead of <)
+    # At exactly 5 minutes, should use velocity-only mode
+    if minutes_to_expiry * 60 <= near_expiry_guard_sec:
         fused_logit = velocity_logit
     else:
         fused_logit = (logit_fusion_velocity_weight * velocity_logit + 
                       logit_fusion_mean_reversion_weight * mean_reversion_logit)
     
-    # Should use fusion (not strictly less than guard)
-    expected_fused = 0.7 * 0.5 + 0.3 * (-0.2)
-    assert abs(fused_logit - expected_fused) < 0.001, f"Expected {expected_fused}, got {fused_logit}"
+    # Should use velocity logit only (not fusion) at exact boundary
+    assert fused_logit == velocity_logit, f"Expected {velocity_logit} (velocity-only at boundary), got {fused_logit}"
     print(f"Logit fusion (at boundary): {fused_logit}")
 
 

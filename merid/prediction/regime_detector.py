@@ -315,8 +315,9 @@ class RegimeDetector:
         
         # Mean-reversion in choppy regimes (only with high confidence)
         elif detection.regime == Regime.CHOPPY:
-            logger.info(
-                f"[REGIME-DETECTOR] High-confidence CHOPPY regime detected, using mean_reversion"
+            logger.warning(
+                f"[REGIME-DETECTOR] High-confidence CHOPPY regime detected (confidence={detection.confidence:.2f}), "
+                f"using mean_reversion mode - SIGNAL INVERSION RISK: positive velocity will trigger NO signals"
             )
             return 'mean_reversion'
         

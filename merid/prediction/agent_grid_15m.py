@@ -2576,7 +2576,9 @@ class LeanAgent15m:
                            minutes_to_expiry: float) -> float:
         # Phase 4.4: Apply logit fusion to combine velocity and mean reversion signals.
         # Phase 4.5: Skip logit fusion near expiry (use velocity only).
-        if minutes_to_expiry * 60 < self._near_expiry_guard_sec:
+        # CRITICAL FIX: 2026-07-07 - Use <= instead of < to handle exact boundary condition
+        # At exactly 5 minutes (300 seconds), should use velocity-only mode
+        if minutes_to_expiry * 60 <= self._near_expiry_guard_sec:
             # Near expiry, use velocity logit only
             logger.debug("[LOGIT-FUSION] Near expiry (%.1f min), using velocity logit only", minutes_to_expiry)
             return velocity_logit
