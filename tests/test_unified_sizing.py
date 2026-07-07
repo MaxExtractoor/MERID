@@ -9,7 +9,7 @@ import unittest
 from decimal import Decimal
 from unittest.mock import patch
 
-from merid.prediction.unified_sizing import compute_order_size, _get_bankroll_cap_pct
+from merid.prediction.unified_sizing import compute_order_size, _get_bankroll_cap_pct, _get_time_of_day_multiplier
 
 
 class TestUnifiedSizing(unittest.TestCase):
@@ -333,6 +333,56 @@ class TestIntegrationETH15MScenario(unittest.TestCase):
             self.assertGreaterEqual(notional_usd, Decimal("0"), "Should be non-negative notional")
             # Dynamic sizing may increase notional, so just verify it's reasonable
             self.assertLessEqual(notional_usd, Decimal("5.00"), f"Notional ${notional_usd} should be reasonable")
+
+
+class TestTimeOfDayScaling(unittest.TestCase):
+    """Test time-of-day risk scaling multiplier function."""
+
+    def test_time_of_day_multiplier_disabled_returns_1(self):
+        """Test that when time_of_day_risk_scaling_enabled is false, returns 1.0."""
+        # Mock the profile to have time_of_day_risk_scaling_enabled = False
+        with patch('merid.prediction.unified_sizing.get_active_profile') as mock_get_profile:
+            mock_profile_adapter = type('obj', (object,), {
+                '_profile': type('obj', (object,), {
+                    'time_of_day_risk_scaling_enabled': False
+                })()
+            })()
+            mock_get_profile.return_value = mock_profile_adapter
+            
+            multiplier = _get_time_of_day_multiplier("BTC")
+            self.assertEqual(multiplier, 1.0, "Should return 1.0 when disabled")
+
+    def test_time_of_day_multiplier_no_profile_returns_1(self):
+        """Test that when profile is unavailable, returns 1.0."""
+        with patch('merid.prediction.unified_sizing.get_active_profile') as mock_get_profile:
+            mock_get_profile.return_value = None
+            
+            multiplier = _get_time_of_day_multiplier("ETH")
+            self.assertEqual(multiplier, 1.0, "Should return 1.0 when profile unavailable")
+
+    def test_time_of_day_multiplier_error_handling(self):
+        """Test that errors are handled gracefully and return 1.0."""
+        with patch('merid.prediction.unified_sizing.get_active_profile') as mock_get_profile:
+            # Simulate an error during profile access
+            mock_get_profile.side_effect = Exception("Test error")
+            
+            multiplier = _get_time_of_day_multiplier("DOGE")
+            self.assertEqual(multiplier, 1.0, "Should return 1.0 on error")
+
+    def test_time_of_day_multiplier_all_5_assets(self):
+        """Test that time-of-day multiplier works for all 5 crypto assets."""
+        with patch('merid.prediction.unified_sizing.get_active_profile') as mock_get_profile:
+            mock_profile_adapter = type('obj', (object,), {
+                '_profile': type('obj', (object,), {
+                    'time_of_day_risk_scaling_enabled': False
+                })()
+            })()
+            mock_get_profile.return_value = mock_profile_adapter
+            
+            # Test all 5 assets
+            for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+                multiplier = _get_time_of_day_multiplier(asset)
+                self.assertEqual(multiplier, 1.0, f"Should return 1.0 for {asset} when disabled")
 
 
 if __name__ == "__main__":

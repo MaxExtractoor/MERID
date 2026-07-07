@@ -1013,6 +1013,12 @@ class LeanAgent15m:
         2026 Research-Based Risk Management: Adjust position sizing based on
         trading session (US market, Asian, European, weekend).
         
+        CURRENT STATUS: DISABLED via profile YAML (time_of_day_risk_scaling.enabled: false)
+        This function returns 1.0 (no scaling) when disabled.
+        
+        FUTURE RE-ENABLEMENT: When re-enabling, must also update unified_sizing.py to
+        apply the same multiplier, and ensure risk envelope respects the scaled limits.
+        
         Returns:
             float: Risk multiplier (e.g., 1.0 for normal, 0.8 for reduced risk)
         """
@@ -1024,6 +1030,7 @@ class LeanAgent15m:
             
             profile = profile_adapter._profile
             if not profile.time_of_day_risk_scaling_enabled:
+                # DISABLED: Return 1.0 (no scaling) when feature is disabled in YAML
                 return 1.0
             
             from datetime import datetime, timezone
