@@ -8,7 +8,6 @@ This adapter ensures config-only behavior for 15m crypto trading on Kalshi,
 with no balance-derived computations when the profile is active.
 """
 
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional, Any
@@ -16,7 +15,9 @@ from decimal import Decimal
 
 import yaml
 
-logger = logging.getLogger(__name__)
+from utils.logger import get_logger
+
+logger = get_logger("merid.risk.profiles.crypto_15m_profile")
 
 
 def is_live_profile(profile_name: str) -> bool:
@@ -1183,7 +1184,10 @@ class Crypto15mProfileAdapter:
             logger.info(f"[Crypto15mProfileAdapter] Loaded profile {self._profile.profile_name} v{self._profile.profile_version}")
             
         except Exception as e:
-            logger.error(f"[Crypto15mProfileAdapter] Failed to load profile from {self.profile_path}: {e}")
+            logger.error(
+                f"[Crypto15mProfileAdapter] Failed to load profile from {self.profile_path}: {e} - "
+                f"profile loading failed, adapter cannot initialize"
+            )
             raise
     
     @property
@@ -1468,7 +1472,11 @@ class Crypto15mProfileAdapter:
                         agent_name, max_notional_usd
                     )
             except Exception as e:
-                logger.error("[PROFILE-ADAPTER] Failed to compute max_notional_usd from live bankroll for %s: %s", agent_name, e)
+                logger.error(
+                    "[PROFILE-ADAPTER] Failed to compute max_notional_usd from live bankroll for %s: %s - "
+                    "falling back to min_notional_usd",
+                    agent_name, e
+                )
                 max_notional_usd = p.min_notional_usd
         
         overrides = {
@@ -1497,7 +1505,11 @@ class Crypto15mProfileAdapter:
                         # Apply minimum floor from profile
                         asset_max_notional_usd = max(computed_asset_notional, p.min_notional_usd)
                 except Exception as e:
-                    logger.error("[PROFILE-ADAPTER] Failed to compute asset max_notional_usd from live bankroll for %s: %s", agent_name, e)
+                    logger.error(
+                        "[PROFILE-ADAPTER] Failed to compute asset max_notional_usd from live bankroll for %s: %s - "
+                        "falling back to min_notional_usd",
+                        agent_name, e
+                    )
                     asset_max_notional_usd = p.min_notional_usd
             
             overrides.update({
@@ -1614,7 +1626,10 @@ def runtime_profile_self_check() -> bool:
     
     adapter = get_active_profile()
     if adapter is None:
-        logger.error("[PROFILE_SELF_CHECK] Profile should be active but adapter is None")
+        logger.error(
+            "[PROFILE_SELF_CHECK] Profile should be active but adapter is None - "
+            "profile initialization failed, self-check cannot complete"
+        )
         return False
     
     profile = adapter.profile
@@ -1681,30 +1696,48 @@ def runtime_profile_self_check() -> bool:
     
     # Critical checks - fail if these are not set correctly
     if not profile.legacy_disable_balance_calibration:
-        logger.error("[PROFILE_SELF_CHECK] FAIL: legacy_disable_balance_calibration must be True")
+        logger.error(
+            "[PROFILE_SELF_CHECK] FAIL: legacy_disable_balance_calibration must be True - "
+            "legacy balance calibration path not disabled, profile configuration invalid"
+        )
         return False
     
     if not profile.legacy_disable_dynamic_contract_caps:
-        logger.error("[PROFILE_SELF_CHECK] FAIL: legacy_disable_dynamic_contract_caps must be True")
+        logger.error(
+            "[PROFILE_SELF_CHECK] FAIL: legacy_disable_dynamic_contract_caps must be True - "
+            "legacy dynamic contract caps path not disabled, profile configuration invalid"
+        )
         return False
     
     if not profile.legacy_disable_bankroll_category_limits:
-        logger.error("[PROFILE_SELF_CHECK] FAIL: legacy_disable_bankroll_category_limits must be True")
+        logger.error(
+            "[PROFILE_SELF_CHECK] FAIL: legacy_disable_bankroll_category_limits must be True - "
+            "legacy bankroll category limits path not disabled, profile configuration invalid"
+        )
         return False
     
     if not profile.legacy_disable_bankroll_prediction_risk:
-        logger.error("[PROFILE_SELF_CHECK] FAIL: legacy_disable_bankroll_prediction_risk must be True")
+        logger.error(
+            "[PROFILE_SELF_CHECK] FAIL: legacy_disable_bankroll_prediction_risk must be True - "
+            "legacy bankroll prediction risk path not disabled, profile configuration invalid"
+        )
         return False
     
     if not profile.legacy_disable_bankroll_guardrails:
-        logger.error("[PROFILE_SELF_CHECK] FAIL: legacy_disable_bankroll_guardrails must be True")
+        logger.error(
+            "[PROFILE_SELF_CHECK] FAIL: legacy_disable_bankroll_guardrails must be True - "
+            "legacy bankroll guardrails path not disabled, profile configuration invalid"
+        )
         return False
     
     # Verify all expected assets are present
     expected_assets = {'BTC', 'ETH', 'SOL', 'XRP', 'DOGE'}
     missing_assets = expected_assets - set(profile.asset_configs.keys())
     if missing_assets:
-        logger.error(f"[PROFILE_SELF_CHECK] FAIL: Missing assets in profile: {missing_assets}")
+        logger.error(
+            f"[PROFILE_SELF_CHECK] FAIL: Missing assets in profile: {missing_assets} - "
+            "profile configuration incomplete, self-check failed"
+        )
         return False
     
     logger.info("[PROFILE_SELF_CHECK] SUCCESS: All profile configuration checks passed")

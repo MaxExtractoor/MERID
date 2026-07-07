@@ -315,7 +315,10 @@ def _get_bankroll_cap_pct() -> Decimal:
     PRODUCTION: If profile is unavailable, this fails (no silent fallback).
     """
     if not _PROFILE_AVAILABLE:
-        logger.error("[UNIFIED-SIZING] Profile adapter not available - cannot size orders in production")
+        logger.error(
+            "[UNIFIED-SIZING] Profile adapter not available - cannot size orders in production - "
+            "profile initialization failed, order sizing unavailable"
+        )
         raise RuntimeError("Profile adapter required for production sizing")
     
     try:
@@ -324,10 +327,17 @@ def _get_bankroll_cap_pct() -> Decimal:
             profile = adapter.profile
             return Decimal(str(profile.venue_bankroll_cap_pct))
         else:
-            logger.error("[UNIFIED-SIZING] Profile not active - cannot size orders in production")
+            logger.error(
+                "[UNIFIED-SIZING] Profile not active - cannot size orders in production - "
+                "profile not activated, order sizing unavailable"
+            )
             raise RuntimeError("Active profile required for production sizing")
     except Exception as e:
-        logger.error("[UNIFIED-SIZING] Failed to read bankroll_cap_pct from profile: %s", e)
+        logger.error(
+            "[UNIFIED-SIZING] Failed to read bankroll_cap_pct from profile: %s - "
+            "profile read failed, order sizing unavailable",
+            e
+        )
         raise RuntimeError(f"Profile read failed: {e}") from e
 
 
@@ -345,7 +355,10 @@ def _get_per_asset_risk_pct(asset: str) -> Optional[Decimal]:
     PRODUCTION: If profile is unavailable, this fails (no silent fallback).
     """
     if not _PROFILE_AVAILABLE:
-        logger.error("[UNIFIED-SIZING] Profile adapter not available - cannot size orders in production")
+        logger.error(
+            "[UNIFIED-SIZING] Profile adapter not available - cannot size orders in production - "
+            "profile initialization failed, per-asset risk pct unavailable"
+        )
         raise RuntimeError("Profile adapter required for production sizing")
     
     try:
@@ -368,10 +381,17 @@ def _get_per_asset_risk_pct(asset: str) -> Optional[Decimal]:
                 )
                 return None
         else:
-            logger.error("[UNIFIED-SIZING] Profile not active - cannot size orders in production")
+            logger.error(
+                "[UNIFIED-SIZING] Profile not active - cannot size orders in production - "
+                "profile not activated, per-asset risk pct unavailable"
+            )
             raise RuntimeError("Active profile required for production sizing")
     except Exception as e:
-        logger.error("[UNIFIED-SIZING] Failed to read per-asset risk pct from profile: %s", e)
+        logger.error(
+            "[UNIFIED-SIZING] Failed to read per-asset risk pct from profile: %s - "
+            "profile read failed, per-asset risk pct unavailable",
+            e
+        )
         raise RuntimeError(f"Profile read failed: {e}") from e
     
     return None
@@ -412,7 +432,10 @@ def _get_max_single_order_pct() -> Decimal:
     PRODUCTION: If profile is unavailable, this fails (no silent fallback).
     """
     if not _PROFILE_AVAILABLE:
-        logger.error("[UNIFIED-SIZING] Profile adapter not available - cannot size orders in production")
+        logger.error(
+            "[UNIFIED-SIZING] Profile adapter not available - cannot size orders in production - "
+            "profile initialization failed, max single order pct unavailable"
+        )
         raise RuntimeError("Profile adapter required for production sizing")
     
     try:
@@ -421,10 +444,17 @@ def _get_max_single_order_pct() -> Decimal:
             profile = adapter.profile
             return Decimal(str(profile.venue_max_single_order_pct))
         else:
-            logger.error("[UNIFIED-SIZING] Profile not active - cannot size orders in production")
+            logger.error(
+                "[UNIFIED-SIZING] Profile not active - cannot size orders in production - "
+                "profile not activated, max single order pct unavailable"
+            )
             raise RuntimeError("Active profile required for production sizing")
     except Exception as e:
-        logger.error("[UNIFIED-SIZING] Failed to read max_single_order_pct from profile: %s", e)
+        logger.error(
+            "[UNIFIED-SIZING] Failed to read max_single_order_pct from profile: %s - "
+            "profile read failed, max single order pct unavailable",
+            e
+        )
         raise RuntimeError(f"Profile read failed: {e}") from e
 
 
@@ -442,7 +472,10 @@ def _get_max_contracts_per_asset(asset: str) -> int:
     PRODUCTION: If profile is unavailable, this fails (no silent fallback).
     """
     if not _PROFILE_AVAILABLE:
-        logger.error("[UNIFIED-SIZING] Profile adapter not available - cannot size orders in production")
+        logger.error(
+            "[UNIFIED-SIZING] Profile adapter not available - cannot size orders in production - "
+            "profile initialization failed, max contracts unavailable"
+        )
         raise RuntimeError("Profile adapter required for production sizing")
     
     try:
@@ -462,10 +495,17 @@ def _get_max_contracts_per_asset(asset: str) -> int:
             logger.warning("[UNIFIED-SIZING] Asset %s (normalized to %s) not in profile config, using default max_contracts=10", asset, asset_normalized)
             return 10
         else:
-            logger.error("[UNIFIED-SIZING] Profile not active - cannot size orders in production")
+            logger.error(
+                "[UNIFIED-SIZING] Profile not active - cannot size orders in production - "
+                "profile not activated, max contracts unavailable"
+            )
             raise RuntimeError("Active profile required for production sizing")
     except Exception as e:
-        logger.error("[UNIFIED-SIZING] Failed to read max_contracts from profile: %s", e)
+        logger.error(
+            "[UNIFIED-SIZING] Failed to read max_contracts from profile: %s - "
+            "profile read failed, max contracts unavailable",
+            e
+        )
         raise RuntimeError(f"Profile read failed: {e}") from e
 
 
@@ -478,7 +518,10 @@ def _get_per_trade_risk_pct() -> Decimal:
     PRODUCTION: If profile is unavailable, this fails (no silent fallback).
     """
     if not _PROFILE_AVAILABLE:
-        logger.error("[UNIFIED-SIZING] Profile adapter not available - cannot size orders in production")
+        logger.error(
+            "[UNIFIED-SIZING] Profile adapter not available - cannot size orders in production - "
+            "profile initialization failed, per-trade risk pct unavailable"
+        )
         raise RuntimeError("Profile adapter required for production sizing")
     
     try:
@@ -487,10 +530,17 @@ def _get_per_trade_risk_pct() -> Decimal:
             profile = adapter.profile
             return Decimal(str(profile.guardrails_per_trade_risk_pct))
         else:
-            logger.error("[UNIFIED-SIZING] Profile not active - cannot size orders in production")
+            logger.error(
+                "[UNIFIED-SIZING] Profile not active - cannot size orders in production - "
+                "profile not activated, per-trade risk pct unavailable"
+            )
             raise RuntimeError("Active profile required for production sizing")
     except Exception as e:
-        logger.error("[UNIFIED-SIZING] Failed to read per_trade_risk_pct from profile: %s", e)
+        logger.error(
+            "[UNIFIED-SIZING] Failed to read per_trade_risk_pct from profile: %s - "
+            "profile read failed, per-trade risk pct unavailable",
+            e
+        )
         raise RuntimeError(f"Profile read failed: {e}") from e
 
 
@@ -692,7 +742,8 @@ def compute_order_size(
     # CRITICAL: Guard against invalid price (price=0 causes notional=0)
     if price_cents <= 0:
         logger.error(
-            "[UNIFIED-SIZING] INVALID_PRICE: price_cents=%d for asset=%s - cannot size order with zero/negative price",
+            "[UNIFIED-SIZING] INVALID_PRICE: price_cents=%d for asset=%s - "
+            "cannot size order with zero/negative price, order sizing failed",
             price_cents, asset
         )
         raise ValueError(f"Invalid price_cents={price_cents} for asset={asset} - must be > 0")

@@ -1,14 +1,6 @@
 from __future__ import annotations
 import sys
 from pathlib import Path
-
-# CRITICAL DIAGNOSTIC: Write to file to verify execution
-try:
-    import time
-    Path("c:\\Dev\\MERID\\main_15m_execution_marker.txt").write_text(f"EXECUTED: {time.time()}")
-except:
-    pass
-
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -18,16 +10,11 @@ import logging
 import asyncio
 from pathlib import Path
 
-# CRITICAL FIX: Use get_logger instead of logging.getLogger for consistent logging
-# This ensures all logs go through the same configured logger
+# Use get_logger for consistent logging across the production stack
 from utils.logger import get_logger
 logger = get_logger("web.main_15m_lean")
 
-# CRITICAL DIAGNOSTIC: Immediate log to verify this code runs
-logger.info("[MAIN-15M-LEAN] FIRST LINE OF FILE - EXECUTING")
-
-# CRITICAL DIAGNOSTIC: Log file execution
-logger.info("[MAIN-15M-LEAN] FILE START - Beginning execution")
+logger.debug("[MAIN-15M-LEAN] Module loaded and initialized")
 
 MERID_HTTP_PORT = 8011
 
@@ -38,57 +25,39 @@ def get_health_log_path() -> Path:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d")
     return Path(__file__).parent / f"health_diagnostic_{timestamp}.txt"
 
-# P0-12 DIAGNOSTIC: Log module import after function is defined
-print("[MODULE-IMPORT] main_15m_lean.py imported", file=sys.stderr, flush=True)
 logger.debug("[MODULE-IMPORT] main_15m_lean.py imported")
 
-# CRITICAL FIX: Reset singletons to ensure clean startup state
+# Reset singletons to ensure clean startup state
 # This prevents stale state from previous server instances from persisting
-print("[SINGLETON-RESET] Resetting singletons for clean startup", file=sys.stderr, flush=True)
 logger.info("[SINGLETON-RESET] Resetting singletons for clean startup")
 
 try:
     from data.unified_spot_service import reset_unified_spot_service
     reset_unified_spot_service()
-    print("[SINGLETON-RESET] unified_spot_service reset", file=sys.stderr, flush=True)
     logger.info("[SINGLETON-RESET] unified_spot_service reset")
 except Exception as e:
-    print(f"[SINGLETON-RESET] Failed to reset unified_spot_service: {e}", file=sys.stderr, flush=True)
     logger.warning(f"[SINGLETON-RESET] Failed to reset unified_spot_service: {e}")
 
 try:
     from merid.event_venues.kalshi.ws_bridge import reset_bridge
     reset_bridge()
-    print("[SINGLETON-RESET] ws_bridge reset", file=sys.stderr, flush=True)
     logger.info("[SINGLETON-RESET] ws_bridge reset")
 except Exception as e:
-    print(f"[SINGLETON-RESET] Failed to reset ws_bridge: {e}", file=sys.stderr, flush=True)
     logger.warning(f"[SINGLETON-RESET] Failed to reset ws_bridge: {e}")
 
-# CRITICAL FIX: Reset window exposure tracking to prevent stale exposure from blocking orders
+# Reset window exposure tracking to prevent stale exposure from blocking orders
 # This handles the case where window exposure is non-zero but position cache shows zero open positions
 try:
     from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import force_reset_window_exposure
     force_reset_window_exposure()
-    print("[SINGLETON-RESET] window exposure tracking reset", file=sys.stderr, flush=True)
     logger.info("[SINGLETON-RESET] window exposure tracking reset")
 except Exception as e:
-    print(f"[SINGLETON-RESET] Failed to reset window exposure: {e}", file=sys.stderr, flush=True)
     logger.warning(f"[SINGLETON-RESET] Failed to reset window exposure: {e}")
 
-# CRITICAL FIX: Do NOT reset market_catalog singleton during startup
+# Do NOT reset market_catalog singleton during startup
 # The reset causes the singleton to be None when components try to use it
 # The catalog will be properly initialized and set as singleton in the startup function
-# try:
-#     from merid.event_venues.kalshi.market_catalog import reset_market_catalog
-#     reset_market_catalog()
-#     print("[SINGLETON-RESET] market_catalog reset", file=sys.stderr, flush=True)
-#     logger.info("[SINGLETON-RESET] market_catalog reset")
-# except Exception as e:
-#     print(f"[SINGLETON-RESET] Failed to reset market_catalog: {e}", file=sys.stderr, flush=True)
-#     logger.warning(f"[SINGLETON-RESET] Failed to reset market_catalog: {e}")
 
-print("[SINGLETON-RESET] All singletons reset complete", file=sys.stderr, flush=True)
 logger.info("[SINGLETON-RESET] All singletons reset complete")
 
 def get_port() -> int:
@@ -177,7 +146,10 @@ try:
     from web.api.performance_api import performance_router
     logger.info("[MAIN-15M-LEAN] Imported performance_router")
 except Exception as e:
-    logger.exception(f"[MAIN-15M-LEAN] ERROR importing performance_router: {e}")
+    logger.exception(
+        f"[MAIN-15M-LEAN] ERROR importing performance_router: {e} - "
+        f"router will be unavailable, performance monitoring disabled"
+    )
     performance_router = None
 
 # FIXED: kalshi_agent_grid_router import investigated - takes 10s (slow but not hanging)
@@ -187,7 +159,10 @@ try:
     from web.api.kalshi_agent_grid_api import router as kalshi_agent_grid_router
     logger.info("[MAIN-15M-LEAN] Imported kalshi_agent_grid_router")
 except Exception as e:
-    logger.exception(f"[MAIN-15M-LEAN] ERROR importing kalshi_agent_grid_router: {e}")
+    logger.exception(
+        f"[MAIN-15M-LEAN] ERROR importing kalshi_agent_grid_router: {e} - "
+        f"router will be unavailable, agent grid API disabled"
+    )
     kalshi_agent_grid_router = None
 
 try:
@@ -195,7 +170,10 @@ try:
     from web.api.health_api import router as health_router
     logger.info("[MAIN-15M-LEAN] Imported health_router")
 except Exception as e:
-    logger.exception(f"[MAIN-15M-LEAN] ERROR importing health_router: {e}")
+    logger.exception(
+        f"[MAIN-15M-LEAN] ERROR importing health_router: {e} - "
+        f"router will be unavailable, health check endpoints disabled"
+    )
     health_router = None
 
 try:
@@ -203,7 +181,10 @@ try:
     from web.api.loop_api import loop_api_router as loop_router
     logger.info("[MAIN-15M-LEAN] Imported loop_router")
 except Exception as e:
-    logger.exception(f"[MAIN-15M-LEAN] ERROR importing loop_router: {e}")
+    logger.exception(
+        f"[MAIN-15M-LEAN] ERROR importing loop_router: {e} - "
+        f"router will be unavailable, loop control API disabled"
+    )
     loop_router = None
 
 try:
@@ -211,7 +192,10 @@ try:
     from web.api.spot_debug_api import router as spot_router
     logger.info("[MAIN-15M-LEAN] Imported spot_router")
 except Exception as e:
-    logger.exception(f"[MAIN-15M-LEAN] ERROR importing spot_router: {e}")
+    logger.exception(
+        f"[MAIN-15M-LEAN] ERROR importing spot_router: {e} - "
+        f"router will be unavailable, spot price API disabled"
+    )
     spot_router = None
 
 # auth_router - optional, not critical for trading
@@ -280,7 +264,10 @@ try:
     from merid.diagnostics.router import router as diagnostics_router
     logger.info("[MAIN-15M-LEAN] Imported diagnostics_router")
 except Exception as e:
-    logger.exception(f"[MAIN-15M-LEAN] ERROR importing diagnostics_router: {e}")
+    logger.exception(
+        f"[MAIN-15M-LEAN] ERROR importing diagnostics_router: {e} - "
+        f"router will be unavailable, diagnostic endpoints disabled"
+    )
     diagnostics_router = None
 
 logger.info("[MAIN-15M-LEAN] After router imports")
@@ -291,9 +278,7 @@ logger.info("[MAIN-15M-LEAN] After logger.info MODULE IMPORTED")
 
 # Log environment at startup for explicit mode separation
 # DISABLED: log_environment_startup function does not exist
-# print("[MAIN-15M-LEAN] Before log_environment_startup", file=sys.stderr, flush=True)
 # log_environment_startup()
-# print("[MAIN-15M-LEAN] After log_environment_startup", file=sys.stderr, flush=True)
 
 # IMPORT KILL-SWITCH: Prevent legacy modules from being loaded in 15m stack
 # This is a hard guardrail to ensure no legacy code can accidentally affect 15m operations
@@ -342,8 +327,10 @@ if 'pytest' not in sys.modules:  # Only enforce in production, not during tests
         
         
     except Exception as e:
-        logger.error(f"[PROFILE-VALIDATION-FAILED] {e}")
-        
+        logger.error(
+            f"[PROFILE-VALIDATION-FAILED] {e} - "
+            f"profile validation failed, server cannot start safely"
+        )
         raise
 
 # RUNTIME MODE FLAG: Set 15m live mode to prevent legacy code paths from executing
@@ -352,13 +339,11 @@ if 'pytest' not in sys.modules:  # Only enforce in production, not during tests
 os.environ['MERID_RUNTIME_MODE'] = '15m_live'
 
 # Define lifespan BEFORE app creation - FastAPI needs it to exist when app is created
-# CRITICAL DIAGNOSTIC: Log before decorator to verify this code is executed
-logger.info("[LIFESPAN-DEF] About to define lifespan function")
+logger.debug("[LIFESPAN-DEF] About to define lifespan function")
 
 @asynccontextmanager
 async def lifespan(app):
     """Lifespan context manager for startup/shutdown events."""
-    # CRITICAL DIAGNOSTIC: Log at function entry to verify lifespan is called
     logger.info("=" * 80)
     logger.info("[LIFESPAN-ENTRY] lifespan function called - ENTRY POINT")
     logger.info("=" * 80)
@@ -378,7 +363,11 @@ async def lifespan(app):
         await _run_startup_phases_v20260530(app)
         logger.info("[STARTUP-EVENT] P1.x startup completed successfully")
     except Exception as e:
-        logger.exception("[STARTUP-EVENT] P1.x startup failed: %r", e)
+        logger.exception(
+            "[STARTUP-EVENT] P1.x startup failed: %r - "
+            "critical infrastructure initialization failed, server cannot start",
+            e
+        )
         raise
     logger.info("[LIFESPAN] Completed _run_startup_phases_v20260530")
     
@@ -390,7 +379,11 @@ async def lifespan(app):
         logger.info("[STARTUP-EVENT] P2.x startup completed successfully")
         
     except Exception as e:
-        logger.exception("[STARTUP-EVENT] P2.x startup failed: %r", e)
+        logger.exception(
+            "[STARTUP-EVENT] P2.x startup failed: %r - "
+            "trading stack initialization failed, server cannot start",
+            e
+        )
         raise
     logger.info("[LIFESPAN] After _run_full_startup_in_lifespan")
     
@@ -740,7 +733,11 @@ async def infra_status():
             "timestamp": snapshot.timestamp,
         }
     except Exception as e:
-        logger.exception("[INFRA] Failed to get infrastructure status: %s", e)
+        logger.exception(
+            "[INFRA] Failed to get infrastructure status: %s - "
+            "health check endpoint will return error status",
+            e
+        )
         return {
             "error": str(e),
             "overall_status": "error",
@@ -827,10 +824,17 @@ async def agents_status():
     try:
         return await asyncio.wait_for(_agents_status_impl(), timeout=2.0)
     except asyncio.TimeoutError:
-        logger.error("[AGENTS] timeout in agents_status")
+        logger.error(
+            "[AGENTS] timeout in agents_status - "
+            "agent grid status check took longer than 2s, returning 500 error"
+        )
         raise HTTPException(status_code=500, detail="agents_status_timeout")
     except Exception as e:
-        logger.exception("[AGENTS] error in agents_status: %r", e)
+        logger.exception(
+            "[AGENTS] error in agents_status: %r - "
+            "agent grid status check failed, returning 500 error",
+            e
+        )
         raise HTTPException(status_code=500, detail=f"agents_status_error: {e!r}")
 
 
@@ -998,10 +1002,16 @@ async def risk_snapshot():
     try:
         return await asyncio.wait_for(_risk_snapshot_impl(), timeout=2.0)
     except asyncio.TimeoutError:
-        logger.error("[RISK] risk_snapshot: timeout after 2s")
+        logger.error(
+            "[RISK] risk_snapshot: timeout after 2s - "
+            "risk state check took longer than 2s, returning 500 error"
+        )
         raise HTTPException(status_code=500, detail="risk_snapshot_timeout")
     except Exception as e:
-        logger.exception("[RISK] risk_snapshot: failed")
+        logger.exception(
+            "[RISK] risk_snapshot: failed - "
+            "risk state check failed, returning 500 error"
+        )
         raise HTTPException(status_code=500, detail=f"risk_snapshot_error: {e!r}")
 
 
@@ -1120,7 +1130,11 @@ async def meta_cognition():
         
         return response
     except Exception as e:
-        logger.exception("[META] meta_cognition failed: %r", e)
+        logger.exception(
+            "[META] meta_cognition failed: %r - "
+            "meta-cognitive health check failed, returning 500 error",
+            e
+        )
         from fastapi import HTTPException
         raise HTTPException(status_code=500, detail=f"meta_cognition_error: {e!r}")
 
@@ -1174,7 +1188,11 @@ async def internal_catalog_snapshot():
             "catalog_version": getattr(catalog, 'version', 'unknown')
         }
     except Exception as e:
-        logger.exception("[INTERNAL-CATALOG] catalog_snapshot failed: %r", e)
+        logger.exception(
+            "[INTERNAL-CATALOG] catalog_snapshot failed: %r - "
+            "catalog snapshot check failed, returning 500 error",
+            e
+        )
         raise HTTPException(status_code=500, detail=f"catalog_snapshot_error: {e!r}")
 
 
@@ -1244,7 +1262,11 @@ async def internal_spot_prices(assets: str = None):
             "cache_fresh": True
         }
     except Exception as e:
-        logger.exception("[INTERNAL-SPOT] spot_prices failed: %r", e)
+        logger.exception(
+            "[INTERNAL-SPOT] spot_prices failed: %r - "
+            "spot price check failed, returning 500 error",
+            e
+        )
         raise HTTPException(status_code=500, detail=f"spot_prices_error: {e!r}")
 
 
@@ -1324,7 +1346,11 @@ async def internal_place_order(order_data: dict):
         return response
         
     except Exception as e:
-        logger.exception("[INTERNAL-ORDER] place_order failed: %r", e)
+        logger.exception(
+            "[INTERNAL-ORDER] place_order failed: %r - "
+            "order placement failed, returning 500 error",
+            e
+        )
         import traceback
         tb_str = traceback.format_exc()
         logger.error("[INTERNAL-ORDER] Full traceback:\n%s", tb_str)
@@ -1383,7 +1409,11 @@ async def internal_health_infra():
         }
         
     except Exception as e:
-        logger.exception("[INTERNAL-HEALTH] infra_health failed: %r", e)
+        logger.exception(
+            "[INTERNAL-HEALTH] infra_health failed: %r - "
+            "infra health check failed, returning 500 error",
+            e
+        )
         raise HTTPException(status_code=500, detail=f"infra_health_error: {e!r}")
 
 
@@ -1437,7 +1467,11 @@ async def internal_market_state(ticker: str):
         }
         
     except Exception as e:
-        logger.exception("[INTERNAL-MSTATE] market_state failed: %r", e)
+        logger.exception(
+            "[INTERNAL-MSTATE] market_state failed: %r - "
+            "market state check failed, returning 500 error",
+            e
+        )
         raise HTTPException(status_code=500, detail=f"market_state_error: {e!r}")
 
 
@@ -1501,7 +1535,11 @@ async def internal_resolve_policies(request: dict):
                 "edge_pct": edge_result.get("edge_pct", 0.0)
             }
         except Exception as resolver_exc:
-            logger.error("[INTERNAL-POLICIES] Failed to resolve policies using resolvers: %s", resolver_exc)
+            logger.error(
+                "[INTERNAL-POLICIES] Failed to resolve policies using resolvers: %s - "
+                "falling back to simple edge-based logic",
+                resolver_exc
+            )
             # Fallback to simple logic if resolvers fail
             edge_pct = edge_result.get("edge_pct", 0.0)
             if edge_pct >= 3.0:
@@ -1528,7 +1566,11 @@ async def internal_resolve_policies(request: dict):
             }
         
     except Exception as e:
-        logger.exception("[INTERNAL-POLICIES] resolve_policies failed: %r", e)
+        logger.exception(
+            "[INTERNAL-POLICIES] resolve_policies failed: %r - "
+            "policy resolution failed, returning 500 error",
+            e
+        )
         raise HTTPException(status_code=500, detail=f"resolve_policies_error: {e!r}")
 
 
@@ -1567,7 +1609,10 @@ async def refresh_ws_subscriptions_once(catalog, ws_bridge, iteration: int, stop
         all_markets = catalog.get_all_markets()
         logger.debug(f"[WS-REFRESH-ONCE] Catalog has {len(all_markets)} markets total")
     except Exception as e:
-        logger.error(f"[WS-REFRESH-ONCE] ERROR getting catalog markets: {e}")
+        logger.error(
+            f"[WS-REFRESH-ONCE] ERROR getting catalog markets: {e} - "
+            f"catalog snapshot failed, skipping this refresh iteration"
+        )
         logger.error(f"[WS-REFRESH] Error getting catalog markets: {e}", exc_info=True)
         return
     
@@ -1590,7 +1635,11 @@ async def refresh_ws_subscriptions_once(catalog, ws_bridge, iteration: int, stop
             else:
                 logger.warning(f"[WS-REFRESH] No active 15m market found for {asset}")
     except Exception as e:
-        logger.error(f"[WS-REFRESH] Error getting active markets: {e}", exc_info=True)
+        logger.error(
+            f"[WS-REFRESH] Error getting active markets: {e} - "
+            f"active market lookup failed, using existing subscriptions",
+            exc_info=True
+        )
     
     logger.info(f"[WS-REFRESH] Iteration {iteration}: {len(active_tickers)} current 15m markets to subscribe")
     
@@ -1619,7 +1668,11 @@ async def refresh_ws_subscriptions_once(catalog, ws_bridge, iteration: int, stop
                         asyncio.create_task(ws_bridge.sync_to_catalog())
                         logger.info("[WS-REFRESH] Scheduled sync_to_catalog task")
             except Exception as sync_error:
-                logger.error(f"[WS-REFRESH] Failed to trigger WS re-sync: {sync_error}", exc_info=True)
+                logger.error(
+                    f"[WS-REFRESH] Failed to trigger WS re-sync: {sync_error} - "
+                    f"WS re-sync failed, will retry in next iteration",
+                    exc_info=True
+                )
     
     # MD FRESHNESS (decoupled from _rest_fallback_mode): Re-poll orderbooks via REST
     # so market data never goes stale, even when WS "connects" but delivers no deltas
@@ -1719,7 +1772,11 @@ async def refresh_ws_subscriptions_once(catalog, ws_bridge, iteration: int, stop
                     store.apply_orderbook_message(msg)
                 except Exception as e:
                     import traceback
-                    logger.error(f"[WS-REFRESH] REST refresh failed for {ticker}: {e}\n{traceback.format_exc()}")
+                    logger.error(
+                        f"[WS-REFRESH] REST refresh failed for {ticker}: {e} - "
+                        f"REST orderbook refresh failed, will retry in next iteration"
+                    )
+                    logger.error(f"[WS-REFRESH] Full traceback:\n{traceback.format_exc()}")
                     continue
                 refreshed += 1
                 # prev_age is already computed as time delta (seconds since last update)
@@ -1729,7 +1786,10 @@ async def refresh_ws_subscriptions_once(catalog, ws_bridge, iteration: int, stop
                     f"(prev_age={prev_age_str})"
                 )
         except Exception as e:
-            logger.error(f"[WS-REFRESH] REST refresh failed for {ticker}: {e}")
+            logger.error(
+                f"[WS-REFRESH] REST refresh failed for {ticker}: {e} - "
+                f"REST orderbook refresh failed, skipping this ticker"
+            )
     if active_tickers:
         logger.info(
             f"[WS-REFRESH] MD freshness: refreshed={refreshed} skipped_fresh={skipped_fresh} "
@@ -1753,7 +1813,11 @@ async def refresh_ws_subscriptions_periodically(catalog, ws_bridge, interval_s: 
             try:
                 await refresh_ws_subscriptions_once(catalog, ws_bridge, iteration, stop_event)
             except Exception as e:
-                logger.error(f"[WS-REFRESH] Error in iteration {iteration}: {e}", exc_info=True)
+                logger.error(
+                    f"[WS-REFRESH] Error in iteration {iteration}: {e} - "
+                    f"refresh iteration failed, will retry in next cycle",
+                    exc_info=True
+                )
             
             # Sleep for interval, but check stop_event periodically
             # Use shorter sleep chunks to respond quickly to stop_event
@@ -1767,7 +1831,11 @@ async def refresh_ws_subscriptions_periodically(catalog, ws_bridge, interval_s: 
         logger.info("[WS-REFRESH] Task cancelled")
         raise
     except Exception as e:
-        logger.exception("[WS-REFRESH] Unexpected error: %s", e)
+        logger.exception(
+            "[WS-REFRESH] Unexpected error: %s - "
+            "WS refresh task crashed unexpectedly, task will exit",
+            e
+        )
     finally:
         logger.info("[WS-REFRESH] Task exiting")
 
@@ -1866,7 +1934,6 @@ async def _run_full_startup_in_lifespan(app):
         trading_enabled = settings.TRADING_ENABLED
         # PRODUCTION: Use actual trading_enabled setting - no debug overrides
         logger.info(f"[STARTUP-STACK] TRADING_ENABLED={trading_enabled} (from settings)")
-        print(f"[STARTUP-STACK] TRADING_ENABLED={trading_enabled} (from settings)", file=sys.stderr, flush=True)
         
         if trading_enabled:
             # CRITICAL FIX: Agent grid is now built and started in P1.10 (before WS bridge)
@@ -2849,7 +2916,7 @@ async def _run_startup_phases_v20260530(app):
     
     logger.info("[STARTUP] P1.7.7: Calibrating UnifiedRiskManager from bankroll")
     risk_mgr = get_unified_risk_manager()
-    risk_mgr.calibrate_from_balance(balance_cents=equity_provider_cents)
+    risk_mgr.calibrate_from_balance(balance_cents=equity_provider_cents())
     logger.info("[STARTUP] P1.7.8: UnifiedRiskManager calibrated")
     logger.info("[STARTUP] Bankroll service initialized and registered")
     
@@ -3075,6 +3142,5 @@ app.add_middleware(
 # NOTE: __main__ block removed - use run_15m_lean.py to start the server
 # This prevents double-initialization when using string-form uvicorn.run()
 
-# CRITICAL DIAGNOSTIC: Log end of file execution
-logger.info("[MAIN-15M-LEAN] END OF FILE - File execution complete")
+logger.debug("[MAIN-15M-LEAN] END OF FILE - File execution complete")
 
