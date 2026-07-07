@@ -342,6 +342,12 @@ class Crypto15mProfile:
     trailing_stop_activation_delay_sec: int = 30
     trailing_stop_profit_zone_activation_cents: int = 80  # CRITICAL FIX: 2026-07-06 - Activate aggressive trailing at 80c
     
+    # Position Management: Dynamic Risk Configuration
+    # Volatility-regime based stop-loss cents for dynamic risk engine
+    dynamic_risk_sl_cents_low_vol: int = 6  # Tight SL in low volatility (6 cents)
+    dynamic_risk_sl_cents_normal_vol: int = 8  # Standard SL in normal volatility (8 cents)
+    dynamic_risk_sl_cents_high_vol: int = 10  # Wide SL in high volatility (10 cents)
+    
     # Position Management: Ratchet Profit Floor Configuration
     # Research-backed mechanism to lock in profits when price reaches high threshold
     # Prevents giving back significant gains when 99¢ TP is not guaranteed

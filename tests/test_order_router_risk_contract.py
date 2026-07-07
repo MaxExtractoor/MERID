@@ -1,4 +1,9 @@
-"""Tests for order router risk contract validation."""
+"""Tests for order router risk contract validation.
+
+INVARIANT MARKER: This test validates the "No Trade Without Exit" invariant by ensuring
+crypto 15m markets require full risk contract linkage (exit_policy_id, window_resolution_id,
+risk_tier, max_hold_seconds) before order submission.
+"""
 
 import pytest
 from merid.event_venues.kalshi.order_router import OrderIntent, _is_crypto_15m_market, _validate_risk_contract_linkage

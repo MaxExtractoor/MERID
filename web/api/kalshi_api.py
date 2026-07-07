@@ -3213,15 +3213,25 @@ async def place_order(
     # This ensures the "no trade without exit" invariant is satisfied
     # NOTE: Kalshi API uses base series tickers (KXBTC, KXETH, etc.) without timeframe suffix
     if action == "buy" and ticker.startswith(("KXBTC", "KXETH", "KXXRP", "KXDOGE")):
+        # CRITICAL FIX: Reject orders without stop_loss_price_cents (2026-07-06)
+        # Previously used hardcoded fallback of price_cents - 5
+        # Now requires explicit SL to enforce "no trade without exit" invariant
+        if stop_loss_price_cents is None:
+            logger.error(
+                "[KALSHI-API] Missing stop_loss_price_cents for order %s - "
+                "cannot proceed without exit policy (invariant violation)",
+                client_order_id
+            )
+            raise HTTPException(
+                status_code=400,
+                detail="Missing stop_loss_price_cents - exit policy resolution failed. All 15m crypto entry orders must provide explicit stop_loss_price_cents."
+            )
+        
         # Check if we need to compute default TP
         if take_profit_price_cents is None and take_profit_r_multiple is None:
             try:
                 from merid.prediction.dynamic_takeprofit import DynamicTakeProfitEngine
                 engine = DynamicTakeProfitEngine()
-                
-                # Default SL: 5 cents below entry (conservative)
-                if stop_loss_price_cents is None:
-                    stop_loss_price_cents = max(1, price_cents - 5)
                 
                 # Default confidence: 0.5 (medium) if not provided
                 if confidence is None:

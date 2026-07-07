@@ -598,6 +598,20 @@ def resolve_exit_policy(
         # Tier 2 assets: slightly wider TP thresholds
         tp_min_cents = max(tp_min_cents, 4)
     
+    # CRITICAL FIX: Load sl_cents from profile config (2026-07-06)
+    # Previously hardcoded to 5 - now uses upstream/midstream/downstream consistency
+    # sl_cents is the SL offset in cents (not absolute SL price)
+    sl_cents_offset = 5  # Default fallback
+    try:
+        from merid.risk.profiles.crypto_15m_profile import get_active_profile
+        profile = get_active_profile().profile
+        # Use normal volatility SL as default offset for policy resolution
+        sl_cents_offset = profile.dynamic_risk_sl_cents_normal_vol
+    except Exception as e:
+        logger.warning("[ORDER-ROUTER] Failed to load SL config from profile: %s", e)
+        # Fallback to hardcoded value
+        sl_cents_offset = 5
+    
     return ExitPolicyResolution(
         policy_id=policy_id,
         asset=asset,
@@ -607,7 +621,7 @@ def resolve_exit_policy(
         tp_min_cents=tp_min_cents,
         tp_time_based_r=tp_time_based_r,
         sl_mode=StopLossMode.FIXED_CENTS,  # CRITICAL FIX: Use fixed cent SL for binary options
-        sl_cents=5,  # 5 cent fixed stop loss (conservative for 15m crypto)
+        sl_cents=sl_cents_offset,  # CRITICAL FIX: Load from profile config instead of hardcoded 5
         sl_r_multiple=0.5,  # Fallback R-multiple for legacy compatibility
         trailing_enabled=True,
         trailing_activation_r=0.8,
@@ -5010,6 +5024,24 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                     )
                 except Exception as _ogr:
                     logger.warning("[order-router] og debit rollback failed: %s", _ogr)
+            # CRITICAL FIX (2026-07-07): Refund window exposure on exchange rejection
+            # Window exposure was recorded optimistically at gate pass time. If the exchange
+            # rejects the order, we must refund this exposure to prevent accumulation that
+            # blocks all future orders until the 15m window expires.
+            try:
+                from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+                envelope = get_kalshi_crypto_15m_risk_envelope(live_bankroll_usd=30.54)  # TODO: get actual bankroll
+                order_notional_usd = (intent.count * intent.price_cents) / 100.0
+                envelope.refund_order_execution(
+                    agent_id=intent.agent_id,
+                    order_notional_usd=order_notional_usd
+                )
+                logger.info(
+                    "[order-router] Refunded window exposure on exchange rejection: agent=%s notional=$%.2f",
+                    intent.agent_id, order_notional_usd
+                )
+            except Exception as _refund_err:
+                logger.warning("[order-router] Failed to refund window exposure on rejection: %s", _refund_err)
             logger.info(
                 "[ORDER-REJECT] trace_id=%s market_id=%s error_code=%s message=%s latency_ms=%.2f",
                 trace_id,

@@ -260,6 +260,8 @@ class KalshiPositionCache:
 
         self._positions: Dict[str, CachedPosition] = {}
         self._last_sync: Optional[datetime] = None
+        # CRITICAL FIX: Track unhealthy positions (missing exit metadata)
+        self._unhealthy_positions: set = set()
 
         # Log bracket order mode on startup
         brackets_enabled = os.getenv("MERID_RESTING_BRACKETS_ENABLED", "false").lower() in ("true", "1", "yes")
@@ -583,8 +585,22 @@ class KalshiPositionCache:
                         logger.debug("[POSITION-CACHE] Could not read trailing stop config: %s", ts_err)
                     
                     tp_r = tp_targets.get("tp_r", 1.0)
-                    sl_price = tp_targets.get("sl_price", price_cents - 5)
-                    risk_cents = abs(price_cents - sl_price) if sl_price else 5
+                    sl_price = tp_targets.get("sl_price")
+                    
+                    # CRITICAL FIX: Reject positions without SL (2026-07-06)
+                    # Previously used hardcoded fallback of price_cents - 5
+                    # Now requires explicit SL to enforce "no trade without exit" invariant
+                    if sl_price is None:
+                        logger.error(
+                            "[POSITION-CACHE] Missing SL price for order %s - "
+                            "cannot monitor position for exits (invariant violation)",
+                            client_order_id
+                        )
+                        # Flag position as unhealthy and skip monitoring
+                        self._unhealthy_positions.add(market_id)
+                        return
+                    
+                    risk_cents = abs(price_cents - sl_price)
                     
                     # CRITICAL: Clamp trailing stops to mandatory FIXED_CENTS mode
                     # This ensures all positions have trailing stop protection regardless of profile config
@@ -1060,6 +1076,17 @@ class KalshiPositionCache:
                         logger.warning(f"Skipping closed position in position cache sync: {market_id} (contracts=0)")
                         positions_filtered += 1
                         continue
+                    
+                    # CRITICAL FIX (2026-07-06): Filter out negative contracts
+                    # Negative contracts indicate a side inversion or data error from Kalshi API
+                    # Example: contracts=-1 side=yes could actually be a NO position
+                    if contracts < 0:
+                        logger.warning(
+                            f"Skipping invalid position in position cache sync: {market_id} "
+                            f"(contracts={contracts} side={pos.get('side', 'yes')}) - negative contracts indicate side inversion or API error"
+                        )
+                        positions_filtered += 1
+                        continue
 
                     self._positions[market_id] = CachedPosition(
                         market_id=market_id,
@@ -1159,6 +1186,33 @@ class KalshiPositionCache:
             return False
         
         return True
+
+    def is_position_healthy(self, market_id: str) -> bool:
+        """Check if position has proper exit metadata.
+        
+        Args:
+            market_id: The market ID to check
+            
+        Returns:
+            True if position is healthy (has exit metadata), False otherwise
+        """
+        return market_id not in self._unhealthy_positions
+    
+    def get_unhealthy_positions(self) -> List[str]:
+        """Get list of unhealthy positions for alerting.
+        
+        Returns:
+            List of market IDs that are unhealthy (missing exit metadata)
+        """
+        return list(self._unhealthy_positions)
+    
+    def log_unhealthy_positions(self) -> None:
+        """Log unhealthy positions for audit."""
+        if self._unhealthy_positions:
+            logger.warning(
+                "[POSITION-CACHE] Unhealthy positions (missing exit metadata): %s",
+                self._unhealthy_positions
+            )
 
     async def clear(self) -> None:
         """Clear all cached positions.
@@ -1517,9 +1571,12 @@ class KalshiPositionCache:
         3. Compute current PnL in R-multiples
         4. Check if trailing should activate (based on trailing_activation_r_multiple from config)
         5. If activated, compute new trailing stop and submit order to update SL
+        
+        CRITICAL FIX: Added health monitoring and trading halt on persistent failures (2026-07-06)
         """
         from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
         from merid.prediction.dynamic_takeprofit import get_dtp_engine
+        import time
 
         dtp_engine = get_dtp_engine()
         market_state_store = get_kalshi_market_state_store()
@@ -1540,8 +1597,28 @@ class KalshiPositionCache:
 
         logger.info("[TRAIL-MONITOR] Loop started, interval=%s, cutoff_minutes=%d", self._monitoring_interval_seconds, cutoff_minutes)
 
+        # CRITICAL FIX: Health monitoring variables
+        last_tick_time = time.time()
+        consecutive_errors = 0
+        max_consecutive_errors = 5  # Halt after 5 consecutive errors
+        max_tick_interval = self._monitoring_interval_seconds * 2  # Alert if tick takes >2x interval
+
         while self._monitoring_enabled:
             try:
+                # Check loop health
+                current_time = time.time()
+                tick_interval = current_time - last_tick_time
+                last_tick_time = current_time
+                
+                if tick_interval > max_tick_interval:
+                    logger.error(
+                        "[TRAIL-MONITOR] Loop health degraded: tick interval=%.1fs (expected=%.1fs)",
+                        tick_interval,
+                        self._monitoring_interval_seconds
+                    )
+                    # Emit health alert
+                    self._emit_health_alert("monitoring_loop_slow", tick_interval)
+                
                 async with self._ensure_mutex():
                     positions_snapshot = list(self._positions.values())
 
@@ -1701,13 +1778,68 @@ class KalshiPositionCache:
                     # This loop only handles time-based forced exit, not trailing activation
                     # Trailing activation is delegated to PositionMonitor to avoid duplicate logic
 
+                # CRITICAL FIX: Reset consecutive errors on successful tick
+                consecutive_errors = 0
+
             except Exception as exc:
-                logger.error("[TRAIL-MONITOR] Error in monitoring loop: %s", exc, exc_info=True)
+                consecutive_errors += 1
+                logger.error(
+                    "[TRAIL-MONITOR] Loop error (%d/%d): %s",
+                    consecutive_errors, max_consecutive_errors, exc, exc_info=True
+                )
+                
+                # Emit health alert
+                self._emit_health_alert("monitoring_loop_error", str(exc))
+                
+                # Halt trading if too many consecutive errors
+                if consecutive_errors >= max_consecutive_errors:
+                    logger.critical(
+                        "[TRAIL-MONITOR] Too many consecutive errors (%d) - halting monitoring",
+                        consecutive_errors
+                    )
+                    self._monitoring_enabled = False
+                    # Trigger trading halt
+                    self._trigger_trading_halt("monitoring_loop_failure")
+                    return
 
             # Wait for next check interval
             await asyncio.sleep(self._monitoring_interval_seconds)
 
         logger.info("[TRAIL-MONITOR] Monitoring loop exited")
+
+    def _emit_health_alert(self, alert_type: str, details: str) -> None:
+        """Emit health alert for monitoring.
+        
+        Args:
+            alert_type: Type of alert (e.g., "monitoring_loop_slow", "monitoring_loop_error")
+            details: Additional details about the alert
+        """
+        try:
+            from monitoring.metrics import get_metrics_registry
+            reg = get_metrics_registry()
+            counter = reg.counter(
+                "merid_position_monitor_health_alerts_total",
+                help_text="Position monitor health alerts",
+                label_names=["alert_type"]
+            )
+            counter.labels(alert_type=alert_type).inc()
+        except Exception as e:
+            logger.debug("[TRAIL-MONITOR] Failed to emit health alert: %s", e)
+
+    def _trigger_trading_halt(self, reason: str) -> None:
+        """Trigger trading halt due to monitoring failure.
+        
+        Args:
+            reason: Reason for the trading halt
+        """
+        try:
+            from merid.governance.adaptive_risk_limits import get_adaptive_risk_limits
+            risk_limits = get_adaptive_risk_limits()
+            risk_limits.emergency_halt = True
+            risk_limits.emergency_halt_reason = f"Position monitoring failure: {reason}"
+            logger.critical("[TRAIL-MONITOR] Trading halt triggered: %s", reason)
+        except Exception as e:
+            logger.critical("[TRAIL-MONITOR] Failed to trigger trading halt: %s", e)
 
 
 # Singleton accessor
