@@ -3090,19 +3090,19 @@ class LeanAgent15m:
             )
         
         # ENTRY MATRIX: Per-asset minimum entry price (based on trade history analysis)
-        # Updated 2026-07-05: Relaxed to 15c to align with DEEP_OTM_CHEAP_CENTS threshold
-        # Previous 50c minimum was blocking legitimate sweet-spot entries [25c, 75c]
-        # - Entry prices < $0.15 are rejected by DEEP_OTM_POLICY (lottery zone)
-        # - Sweet-spot entry band [25c, 75c] has good risk/reward profile
-        # - This allows the full sweet-spot band while still blocking extreme longshots
+        # Updated 2026-07-07: Aligned to 10c to match profile guardrails_min_contract_price_cents
+        # Previous 15c minimum was blocking valid 10-19c entries that profile allows
+        # - Entry prices < $0.10 are rejected by DEEP_OTM_POLICY (lottery zone)
+        # - Sweet-spot entry band [10c, 75c] has good risk/reward profile
+        # - This aligns agent grid with profile, order_gate, and order_router (all 10c minimum)
         min_entry_prices = {
-            'BTC': 15,
-            'ETH': 15,
-            'SOL': 15,
-            'XRP': 15,
-            'DOGE': 15
+            'BTC': 10,
+            'ETH': 10,
+            'SOL': 10,
+            'XRP': 10,
+            'DOGE': 10
         }
-        min_price_cents = min_entry_prices.get(asset, 15)  # Default to 15c
+        min_price_cents = min_entry_prices.get(asset, 10)  # Default to 10c
         
         # Get current market price
         market_price_cents = 0
@@ -3122,6 +3122,7 @@ class LeanAgent15m:
             logger.warning("[PRICE-FILTER-ERROR] asset=%s failed to get market price: %s", asset, e)
         
         # Hard ban below 10c (lottery ticket behavior)
+        # This aligns with profile guardrails_min_contract_price_cents = 10
         if market_price_cents > 0 and market_price_cents < 10:
             logger.info(
                 "[PRICE-FILTER-HARD-BAN] asset=%s price_cents=%d -> SKIP (below 10c hard ban - lottery ticket behavior)",
@@ -3129,16 +3130,7 @@ class LeanAgent15m:
             )
             return None
         
-        # Special low-price mode (10-19c): only with dedicated pattern requirements
-        # For now, skip this range unless future backtest shows positive EV
-        if market_price_cents > 0 and 10 <= market_price_cents <= 19:
-            logger.info(
-                "[PRICE-FILTER-LOW-PRICE] asset=%s price_cents=%d -> SKIP (10-19c special mode - requires dedicated pattern)",
-                asset, market_price_cents
-            )
-            return None
-        
-        # Standard mode: enforce per-asset minimum
+        # Standard mode: enforce per-asset minimum (10c for all crypto assets)
         if market_price_cents > 0 and market_price_cents < min_price_cents:
             logger.info(
                 "[PRICE-FILTER-MINIMUM] asset=%s price_cents=%d -> SKIP (below minimum %dc - poor EV per CEPR research)",
