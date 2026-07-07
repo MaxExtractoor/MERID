@@ -381,27 +381,8 @@ class IdempotentOrderStore:
                     self._metrics.canceled += 1
 
     def mark_rejected(self, client_order_id: str, reason: str = "") -> None:
-        # CRITICAL FIX (2026-07-07): Refund window exposure on gate rejection
-        # Window exposure was recorded optimistically at gate pass time. If the gate
-        # rejects the order (e.g., deep OTM, high price, already satisfied), we must
-        # refund this exposure to prevent accumulation that blocks all future orders.
-        if hasattr(self._store, '_pending_window_exposure') and self._store._pending_window_exposure:
-            try:
-                from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
-                envelope = get_kalshi_crypto_15m_risk_envelope(live_bankroll_usd=30.54)  # TODO: get actual bankroll
-                envelope.refund_order_execution(
-                    agent_id=self._store._pending_window_exposure["agent_id"],
-                    order_notional_usd=self._store._pending_window_exposure["notional_usd"]
-                )
-                logger.info(
-                    "[GATE-WINDOW-REFUND] Refunded window exposure on gate rejection: agent=%s notional=$%.2f reason=%s",
-                    self._store._pending_window_exposure["agent_id"],
-                    self._store._pending_window_exposure["notional_usd"],
-                    reason[:50]
-                )
-                self._store._pending_window_exposure = None
-            except Exception as _refund_err:
-                logger.warning("[GATE-WINDOW-REFUND] Failed to refund window exposure: %s", _refund_err)
+        # CRITICAL FIX (2026-07-07): Window exposure no longer recorded optimistically
+        # No refund needed since exposure is only recorded on fills
         with self._lock:
             rec = self._orders.get(client_order_id)
             if rec:
@@ -907,28 +888,13 @@ class PreTradeGate:
                         reason=f"window_limit:{window_reason}",
                     )
                 else:
-                    # CRITICAL FIX (2026-07-06): Record window exposure immediately when window check passes
-                    # This ensures exposure is tracked even if orders get rejected later by the exchange
-                    # (duplicate order, post_only errors, etc.). Previously, exposure was only recorded
-                    # on fills, which allowed agents to bypass window limits by submitting orders that
-                    # never fill (always rejected by exchange). Recording at gate pass time ensures
-                    # the 3% per-agent / 5% total venue limits are enforced for ALL order attempts.
-                    # CRITICAL FIX (2026-07-07): Store recorded exposure for potential refund if gate rejects later
-                    # If the gate itself rejects the order after window check passes (e.g., deep OTM, high price),
-                    # we must refund the exposure to prevent accumulation.
-                    envelope.record_order_execution(
-                        agent_id=agent_id,
-                        order_notional_usd=order_notional_usd
-                    )
+                    # CRITICAL FIX (2026-07-07): Window exposure is now recorded on fills, not at gate pass
+                    # This prevents phantom exposure accumulation from unfilled orders.
+                    # Exposure tracking moved to position_cache.on_fill() for accuracy.
                     logger.info(
-                        "[GATE-WINDOW-RECORD] Recorded window exposure: agent=%s notional=$%.2f",
+                        "[GATE-WINDOW-CHECK] Window limit passed: agent=%s notional=$%.2f (exposure recorded on fill)",
                         agent_id, order_notional_usd
                     )
-                    # Store exposure info for potential refund if gate rejects later
-                    self._store._pending_window_exposure = {
-                        "agent_id": agent_id,
-                        "notional_usd": order_notional_usd
-                    }
             else:
                 self._store._metrics.blocked_window_limit += 1
                 logger.error(

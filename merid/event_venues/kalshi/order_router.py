@@ -5024,24 +5024,8 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                     )
                 except Exception as _ogr:
                     logger.warning("[order-router] og debit rollback failed: %s", _ogr)
-            # CRITICAL FIX (2026-07-07): Refund window exposure on exchange rejection
-            # Window exposure was recorded optimistically at gate pass time. If the exchange
-            # rejects the order, we must refund this exposure to prevent accumulation that
-            # blocks all future orders until the 15m window expires.
-            try:
-                from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
-                envelope = get_kalshi_crypto_15m_risk_envelope(live_bankroll_usd=30.54)  # TODO: get actual bankroll
-                order_notional_usd = (intent.count * intent.price_cents) / 100.0
-                envelope.refund_order_execution(
-                    agent_id=intent.agent_id,
-                    order_notional_usd=order_notional_usd
-                )
-                logger.info(
-                    "[order-router] Refunded window exposure on exchange rejection: agent=%s notional=$%.2f",
-                    intent.agent_id, order_notional_usd
-                )
-            except Exception as _refund_err:
-                logger.warning("[order-router] Failed to refund window exposure on rejection: %s", _refund_err)
+            # CRITICAL FIX (2026-07-07): Window exposure no longer recorded optimistically
+            # No refund needed since exposure is only recorded on fills
             logger.info(
                 "[ORDER-REJECT] trace_id=%s market_id=%s error_code=%s message=%s latency_ms=%.2f",
                 trace_id,
