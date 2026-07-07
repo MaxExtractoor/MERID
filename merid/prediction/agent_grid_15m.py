@@ -178,11 +178,11 @@ class LeanAgentConfig:
     # Profile YAML values: 0.00001 (0.001%) for all assets - effectively zero to enable any movement
     # Previous hardcoded values (0.15%-0.20%) were 150-200x higher than profile YAML
     # New thresholds align with profile YAML single source of truth:
-    velocity_threshold_btc: float = 0.00001  # BTC: 0.001% (CRITICAL FIX: aligned with profile YAML)
-    velocity_threshold_eth: float = 0.00001  # ETH: 0.001% (CRITICAL FIX: aligned with profile YAML)
-    velocity_threshold_sol: float = 0.00001  # SOL: 0.001% (CRITICAL FIX: aligned with profile YAML)
-    velocity_threshold_xrp: float = 0.00001  # XRP: 0.001% (CRITICAL FIX: aligned with profile YAML)
-    velocity_threshold_doge: float = 0.00001  # DOGE: 0.001% (CRITICAL FIX: aligned with profile YAML)
+    velocity_threshold_btc: float = 0.00015  # BTC: 0.015% (CRITICAL FIX: aligned with profile YAML)
+    velocity_threshold_eth: float = 0.00015  # ETH: 0.015% (CRITICAL FIX: aligned with profile YAML)
+    velocity_threshold_sol: float = 0.000225  # SOL: 0.0225% (CRITICAL FIX: aligned with profile YAML)
+    velocity_threshold_xrp: float = 0.000225  # XRP: 0.0225% (CRITICAL FIX: aligned with profile YAML)
+    velocity_threshold_doge: float = 0.0003  # DOGE: 0.03% (CRITICAL FIX: aligned with profile YAML)
     # INDUSTRY ALIGNMENT: Fee-aware trading parameters based on profitable scalping research
     prefer_maker_orders: bool = True  # Prefer maker orders to earn rebates (-0.05% round trip) vs taker fees (0.15% round trip)
     min_profit_basis_points: int = 20  # Minimum 20bp profit target to overcome structural disadvantages (industry standard for retail)
@@ -1963,6 +1963,17 @@ class LeanAgent15m:
         min_macd_hist_long = getattr(momentum_fvg_config, 'min_macd_hist_long', 0)
         min_macd_hist_short = getattr(momentum_fvg_config, 'min_macd_hist_short', 0)
         
+        # CRITICAL FIX: Add MACD histogram dead zone to prevent noise triggering
+        # Based on 2026 research: flat/hugging zero line indicates low momentum, should be avoided
+        # Dead zone: skip signals when histogram is within ±0.0001 of zero
+        macd_dead_zone = 0.0001
+        if abs(macd_histogram) < macd_dead_zone:
+            logger.info(
+                "[MOMENTUM-FVG-DEAD-ZONE] asset=%s macd_histogram=%.6f within dead zone (±%.6f), skipping signal to avoid noise",
+                asset, macd_histogram, macd_dead_zone
+            )
+            return None
+        
         long_conditions = [
             velocity > velocity_threshold,
             macd_histogram >= min_macd_hist_long,
@@ -1972,7 +1983,7 @@ class LeanAgent15m:
         
         short_conditions = [
             velocity < -velocity_threshold,
-            macd_histogram <= min_macd_hist_short,
+            macd_histogram < min_macd_hist_short,  # CRITICAL FIX: Use strict inequality to prevent symmetry at hist=0
             rsi_zone != "oversold",
             (obi < 0 and obi_strong) or (fvg_direction == "bearish" and fvg_confidence > 0.5)
         ]
