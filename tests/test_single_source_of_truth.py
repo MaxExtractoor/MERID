@@ -65,9 +65,9 @@ class TestSingleSourceOfTruth:
         assert "max_orders_per_hour:\n    value: 300" not in content, "Conflicting max_orders_per_hour should be removed"
         assert "max_orders_per_cycle: 5" not in content, "Duplicate max_orders_per_cycle should be removed"
         
-        # The primary limit should exist
-        assert "max_orders_per_15m_window: 5" in content, "Primary 15m window limit must exist"
-        assert "global_orders_limit: 5" in content, "Primary global rate limit must exist"
+        # The primary limit should exist (updated to 12 per profile YAML 2026-07-07)
+        assert "max_orders_per_15m_window: 12" in content, "Primary 15m window limit must exist (updated to 12)"
+        assert "global_orders_limit: 30" in content, "Primary global rate limit must exist (updated to 30)"
 
     def test_production_code_path_uses_profile(self):
         """Verify production code path uses profile adapter."""
@@ -88,8 +88,8 @@ class TestSingleSourceOfTruth:
         assert "token bucket" in content, "Profile must document token bucket algorithm"
         assert "2%" in content or "0.02" in content, "Profile must document per-trade risk percentage"
         
-        # Check conservative limits (per-asset max_contracts is set to 2)
-        assert "max_contracts:\n      value: 2" in content, "Max contracts should be 2 (conservative)"
+        # Check conservative limits (per-asset max_contracts is set to 10 per 2026-07-07 fix)
+        assert "max_contracts:\n      value: 10" in content, "Max contracts should be 10 (updated for multi-contract exits)"
         assert "drawdown_halt_pct" in content, "Drawdown halt should be defined"
 
 
