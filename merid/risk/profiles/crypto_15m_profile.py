@@ -305,11 +305,11 @@ class Crypto15mProfile:
     # Actual market velocities observed: 0.000%-0.04% (from live logs 2026-07-05)
     # Previous thresholds (0.001%-0.005%) were still blocking trades in calm markets
     # New thresholds (0.001%) allow trades even in extremely calm markets:
-    velocity_threshold_btc: float = 0.00001  # 0.001% - effectively zero to enable any movement
-    velocity_threshold_eth: float = 0.00001  # 0.001% - effectively zero to enable any movement
-    velocity_threshold_sol: float = 0.00001  # 0.001% - effectively zero to enable any movement
-    velocity_threshold_xrp: float = 0.00001  # 0.001% - effectively zero to enable any movement
-    velocity_threshold_doge: float = 0.00001  # 0.001% - effectively zero to enable any movement
+    velocity_threshold_btc: float = 0.00015  # 0.015% - aligned with profile YAML
+    velocity_threshold_eth: float = 0.00015  # 0.015% - aligned with profile YAML
+    velocity_threshold_sol: float = 0.000225  # 0.0225% - aligned with profile YAML
+    velocity_threshold_xrp: float = 0.000225  # 0.0225% - aligned with profile YAML
+    velocity_threshold_doge: float = 0.0003  # 0.03% - aligned with profile YAML
 
     # Phase 4.1: Multi-window velocity weights for momentum signal fusion
     momentum_weights_windows: list = field(default_factory=lambda: [10, 30, 60])  # Velocity windows in seconds
@@ -1063,11 +1063,11 @@ class Crypto15mProfileAdapter:
                 # Velocity thresholds (per-asset, aligned with actual market velocities)
                 # CRITICAL FIX: 2026-07-05 - Reduced to effectively zero to enable any trading
                 # Actual market velocities observed: 0.000%-0.04% (from live logs 2026-07-05)
-                velocity_threshold_btc=raw.get('velocity_thresholds', {}).get('BTC', 0.00001),
-                velocity_threshold_eth=raw.get('velocity_thresholds', {}).get('ETH', 0.00001),
-                velocity_threshold_sol=raw.get('velocity_thresholds', {}).get('SOL', 0.00001),
-                velocity_threshold_xrp=raw.get('velocity_thresholds', {}).get('XRP', 0.00001),
-                velocity_threshold_doge=raw.get('velocity_thresholds', {}).get('DOGE', 0.00001),
+                velocity_threshold_btc=raw.get('velocity_thresholds', {}).get('BTC', 0.00015),
+                velocity_threshold_eth=raw.get('velocity_thresholds', {}).get('ETH', 0.00015),
+                velocity_threshold_sol=raw.get('velocity_thresholds', {}).get('SOL', 0.000225),
+                velocity_threshold_xrp=raw.get('velocity_thresholds', {}).get('XRP', 0.000225),
+                velocity_threshold_doge=raw.get('velocity_thresholds', {}).get('DOGE', 0.0003),
                 # Phase 4.1: Multi-window velocity weights
                 momentum_weights_windows=raw.get('momentum_weights', {}).get('windows', [10, 30, 60]),
                 momentum_weights_values=raw.get('momentum_weights', {}).get('weights', [0.2, 0.3, 0.5]),
