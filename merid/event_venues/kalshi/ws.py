@@ -696,7 +696,7 @@ class KalshiWebSocket(EventVenueStream):
             raise RuntimeError("WebSocket not connected")
 
         params: Dict[str, Any] = {
-            "channels": ["orderbook_delta", "orderbook_snapshot"],
+            "channels": ["orderbook_delta"],
             "market_tickers": [market_id],
         }
         if event_ticker:
@@ -744,7 +744,7 @@ class KalshiWebSocket(EventVenueStream):
                 "id": self._next_sub_id(),
                 "cmd": "subscribe",
                 "params": {
-                    "channels": ["orderbook_delta", "orderbook_snapshot"],
+                    "channels": ["orderbook_delta"],
                     "market_tickers": chunk,
                 },
             }
@@ -2244,7 +2244,10 @@ class KalshiWebSocket(EventVenueStream):
 
             elif channel == "fill":
                 # Private user fill — forward dict for ws_bridge (ledger + bus), not VenueTrade
-                return {"type": "fill", "data": body, "seq": data.get("seq")}
+                # CRITICAL FIX: Kalshi WS fill messages have action nested in "msg" field
+                # Format: {"type": "fill", "sid": 13, "msg": {"action": "buy", ...}}
+                # Must forward full "data" dict (which contains "msg") not just "body"
+                return {"type": "fill", "data": data, "seq": data.get("seq")}
 
             elif channel == "orderbook_snapshot":
                 market_id = body.get("ticker") or body.get("market_ticker", "") or data.get("ticker", "")
