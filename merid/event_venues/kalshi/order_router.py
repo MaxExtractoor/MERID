@@ -5690,14 +5690,14 @@ def _run_pre_trade_gate(
             if _existing is not None:
                 # CRITICAL: Still run price guard even with upstream reservation
                 # to prevent deep OTM longshots from bypassing the check
-                min_price_cents = 15  # Default fallback (15 cents / $0.15)
+                min_price_cents = 10  # CRITICAL FIX: Default fallback 10c to match profile (was 15c)
                 try:
                     from merid.risk.profiles.crypto_15m_profile import get_active_profile
                     profile_adapter = get_active_profile()
                     if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_min_contract_price_cents'):
                         min_price_cents = profile_adapter.profile.guardrails_min_contract_price_cents
                 except Exception as e:
-                    logger.debug("[order-router] Failed to load min_contract_price_cents from profile: %s, using default 15c", e)
+                    logger.debug("[order-router] Failed to load min_contract_price_cents from profile: %s, using default 10c", e)
                 
                 if intent.price_cents < min_price_cents:
                     logger.warning(

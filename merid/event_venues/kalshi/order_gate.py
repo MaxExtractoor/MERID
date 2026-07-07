@@ -919,9 +919,9 @@ class PreTradeGate:
             )
 
         # 3.5. Price guard: prevent deep OTM longshots and high-price low-profit trades (critical guardrail)
-        # Load min_contract_price_cents from profile with fallback to 15 cents
-        min_price_cents = 15  # Default fallback (15 cents / $0.15)
-        max_price_cents = 55  # Default fallback (55 cents / $0.55) - RESEARCH-BASED
+        # Load min_contract_price_cents from profile with fallback to 10 cents
+        min_price_cents = 10  # CRITICAL FIX: Default fallback 10c to match profile (was 15c)
+        max_price_cents = 75  # CRITICAL FIX: Default fallback 75c to match profile (was 55c)
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
             profile_adapter = get_active_profile()
@@ -1243,9 +1243,9 @@ class PreTradeGate:
             )
 
         # 3.5. Price guard: prevent deep OTM longshots and high-price low-profit trades (critical guardrail)
-        # Load min_contract_price_cents from profile with fallback to 15 cents
-        min_price_cents = 15  # Default fallback (15 cents / $0.15)
-        max_price_cents = 55  # Default fallback (55 cents / $0.55) - RESEARCH-BASED
+        # Load min_contract_price_cents from profile with fallback to 10 cents
+        min_price_cents = 10  # CRITICAL FIX: Default fallback 10c to match profile (was 15c)
+        max_price_cents = 75  # CRITICAL FIX: Default fallback 75c to match profile (was 55c)
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
             profile_adapter = get_active_profile()

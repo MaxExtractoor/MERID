@@ -1954,16 +1954,16 @@ class KalshiVenueClient(EventVenueClient):
                     retries=0,
                 )
             
-            # CRITICAL: Price guard - prevent deep OTM longshots (15¢ minimum)
+            # CRITICAL: Price guard - prevent deep OTM longshots (10¢ minimum)
             # This is the FINAL safety net before API call
-            min_price_cents = 15  # 15 cents / $0.15 minimum
+            min_price_cents = 10  # CRITICAL FIX: 10 cents / $0.10 minimum to match profile (was 15c)
             try:
                 from merid.risk.profiles.crypto_15m_profile import get_active_profile
                 profile_adapter = get_active_profile()
                 if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_min_contract_price_cents'):
                     min_price_cents = profile_adapter.profile.guardrails_min_contract_price_cents
             except Exception as e:
-                logger.debug("[KALSHI_CLIENT] Failed to load min_contract_price_cents from profile: %s, using default 15c", e)
+                logger.debug("[KALSHI_CLIENT] Failed to load min_contract_price_cents from profile: %s, using default 10c", e)
             
             if _price_cents < min_price_cents:
                 logger.critical(
