@@ -1800,3 +1800,103 @@ class TestIndicatorStackIntegration:
         except Exception as e:
             pytest.skip(f"Profile loading failed: {e}")
 
+
+class TestDataQualityTracking:
+    """Test data quality tracking and OHLC validation."""
+    
+    def test_data_quality_issues_initialization(self):
+        """Test that data quality issues are initialized for all 5 assets."""
+        config = LeanAgentConfig(
+            name="BTC_15M",
+            series_tickers=["KXBTC15M"],
+        )
+        
+        agent = LeanAgent15m(
+            config=config,
+            catalog=Mock(),
+            market_state_store=Mock(),
+            spot_provider=Mock(),
+            order_router=Mock(),
+            risk_config=Mock(),
+        )
+        
+        # Verify all 5 assets have data quality tracking initialized
+        expected_assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+        for asset in expected_assets:
+            assert asset in agent._data_quality_issues
+            assert "ohlcv_corruption" in agent._data_quality_issues[asset]
+            assert "ohlcv_stale" in agent._data_quality_issues[asset]
+            assert "volume_anomaly" in agent._data_quality_issues[asset]
+            assert "price_anomaly" in agent._data_quality_issues[asset]
+            # All counters should start at 0
+            assert agent._data_quality_issues[asset]["ohlcv_corruption"] == 0
+            assert agent._data_quality_issues[asset]["ohlcv_stale"] == 0
+            assert agent._data_quality_issues[asset]["volume_anomaly"] == 0
+            assert agent._data_quality_issues[asset]["price_anomaly"] == 0
+    
+    def test_track_data_quality_issue(self):
+        """Test that data quality issues are tracked correctly."""
+        config = LeanAgentConfig(
+            name="BTC_15M",
+            series_tickers=["KXBTC15M"],
+        )
+        
+        agent = LeanAgent15m(
+            config=config,
+            catalog=Mock(),
+            market_state_store=Mock(),
+            spot_provider=Mock(),
+            order_router=Mock(),
+            risk_config=Mock(),
+        )
+        
+        # Track a corruption issue
+        agent._track_data_quality_issue("BTC", "ohlcv_corruption", "high_less_than_low")
+        assert agent._data_quality_issues["BTC"]["ohlcv_corruption"] == 1
+        
+        # Track another corruption issue
+        agent._track_data_quality_issue("BTC", "ohlcv_corruption", "high_less_than_low")
+        assert agent._data_quality_issues["BTC"]["ohlcv_corruption"] == 2
+        
+        # Track a stale issue
+        agent._track_data_quality_issue("BTC", "ohlcv_stale", "high_equals_low")
+        assert agent._data_quality_issues["BTC"]["ohlcv_stale"] == 1
+        
+        # Verify other counters remain at 0
+        assert agent._data_quality_issues["BTC"]["volume_anomaly"] == 0
+        assert agent._data_quality_issues["BTC"]["price_anomaly"] == 0
+    
+    def test_get_data_quality_metrics(self):
+        """Test that data quality metrics can be retrieved."""
+        config = LeanAgentConfig(
+            name="BTC_15M",
+            series_tickers=["KXBTC15M"],
+        )
+        
+        agent = LeanAgent15m(
+            config=config,
+            catalog=Mock(),
+            market_state_store=Mock(),
+            spot_provider=Mock(),
+            order_router=Mock(),
+            risk_config=Mock(),
+        )
+        
+        # Track some issues
+        agent._track_data_quality_issue("BTC", "ohlcv_corruption", "high_less_than_low")
+        agent._track_data_quality_issue("ETH", "ohlcv_stale", "high_equals_low")
+        
+        # Get metrics
+        metrics = agent.get_data_quality_metrics()
+        
+        # Verify structure
+        assert isinstance(metrics, dict)
+        assert "BTC" in metrics
+        assert "ETH" in metrics
+        assert metrics["BTC"]["ohlcv_corruption"] == 1
+        assert metrics["ETH"]["ohlcv_stale"] == 1
+        
+        # Verify it's a copy (modifying returned dict shouldn't affect internal state)
+        metrics["BTC"]["ohlcv_corruption"] = 999
+        assert agent._data_quality_issues["BTC"]["ohlcv_corruption"] == 1
+
