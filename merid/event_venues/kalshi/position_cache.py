@@ -1477,6 +1477,85 @@ class KalshiPositionCache:
         except Exception:
             pass
 
+    def _calculate_dynamic_max_hold_seconds(self, market_id: str) -> int:
+        """Calculate dynamic max hold time based on remaining time-to-expiry.
+        
+        CRITICAL FIX: Prevents holding past contract expiry when entering late in the 15m window.
+        Research-based approach from Tradewink: Use 80% of remaining TTE to allow execution buffer.
+        Source: https://www.tradewink.com/glossary/time-decay-exit
+        
+        Logic:
+        - Parse market ID to extract expiry timestamp (format: KXBTC15M-26JUL191645-45)
+        - Calculate remaining seconds to expiry
+        - Return 80% of remaining TTE (allows 20% buffer for order execution)
+        - Fallback to 300s (5 min) if TTE cannot be determined (conservative)
+        
+        Example:
+        - Enter at 8 min into 15m window → 7 min (420s) remaining
+        - Dynamic max_hold = 420 * 0.8 = 336s (5.6 min)
+        - This ensures exit before expiry with execution buffer
+        """
+        try:
+            import re
+            from datetime import datetime, timezone
+            
+            # Kalshi market ID format: KX{COIN}15M-{DD}{MON}{HHMM}-{STRIKE}
+            # Example: KXBTC15M-26JUL191645-45
+            match = re.search(r'KX\w+15M-(\d{2})([A-Z]{3})(\d{4})', market_id)
+            if not match:
+                logger.warning("[DYNAMIC-HOLD] Could not parse market ID for TTE: %s", market_id)
+                return 300  # Conservative 5-minute fallback
+            
+            day_str, month_str, time_str = match.groups()
+            
+            # Parse month abbreviation
+            month_map = {
+                'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
+                'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12
+            }
+            month = month_map.get(month_str.upper())
+            if not month:
+                logger.warning("[DYNAMIC-HOLD] Invalid month in market ID: %s", month_str)
+                return 300
+            
+            # Parse time (HHMM format)
+            hour = int(time_str[:2])
+            minute = int(time_str[2:])
+            
+            # Calculate expiry timestamp (assume current year, UTC)
+            now = datetime.now(timezone.utc)
+            year = now.year
+            expiry_dt = datetime(year, month, int(day_str), hour, minute, 0, tzinfo=timezone.utc)
+            
+            # If expiry is in the past, it's next year (unlikely but defensive)
+            if expiry_dt < now:
+                expiry_dt = expiry_dt.replace(year=year + 1)
+            
+            # Calculate remaining seconds
+            remaining_seconds = (expiry_dt - now).total_seconds()
+            
+            # Use 80% of remaining TTE (20% buffer for execution)
+            dynamic_max_hold = int(remaining_seconds * 0.8)
+            
+            # Sanity checks
+            if dynamic_max_hold < 60:  # Minimum 1 minute
+                logger.warning("[DYNAMIC-HOLD] Calculated max_hold too low (%ds), using 60s", dynamic_max_hold)
+                dynamic_max_hold = 60
+            elif dynamic_max_hold > 600:  # Maximum 10 minutes (safety cap)
+                logger.info("[DYNAMIC-HOLD] Capping max_hold at 600s (calculated: %ds)", dynamic_max_hold)
+                dynamic_max_hold = 600
+            
+            logger.info(
+                "[DYNAMIC-HOLD] market=%s remaining_tte=%ds dynamic_max_hold=%ds",
+                market_id, int(remaining_seconds), dynamic_max_hold
+            )
+            
+            return dynamic_max_hold
+            
+        except Exception as e:
+            logger.warning("[DYNAMIC-HOLD] Failed to calculate dynamic max_hold: %s, using fallback 300s", e)
+            return 300  # Conservative 5-minute fallback
+
     async def _submit_resting_bracket(self, position: CachedPosition) -> None:
         """Submit a GTC limit sell at the take-profit price (and optional SL).
 
@@ -1497,6 +1576,12 @@ class KalshiPositionCache:
         if not tp_price or position.contracts <= 0:
             return
 
+        # CRITICAL FIX: Calculate dynamic max_hold_seconds based on remaining time-to-expiry
+        # This prevents holding past contract expiry when entering late in the 15m window
+        # Research-based approach: Use 80% of remaining TTE to allow execution buffer
+        # Source: https://www.tradewink.com/glossary/time-decay-exit
+        max_hold_seconds = self._calculate_dynamic_max_hold_seconds(position.market_id)
+
         # TP leg: GTC sell at TP price
         tp_tag = self._bracket_client_tag(position.market_id, "tp", tp_price)
         tp_intent = OrderIntent(
@@ -1510,6 +1595,12 @@ class KalshiPositionCache:
             client_tag=tp_tag,
             group_id="bracket",
             rationale=f"resting_tp:{position.market_id}:{tp_price}c",
+            # CRITICAL FIX: Add exit policy metadata to satisfy validation for exit orders
+            # Exit orders require exit_policy_id for tracking per _validate_risk_contract_linkage
+            exit_policy_id=position.exit_policy_id or "bracket_exit",
+            window_resolution_id=position.window_resolution_id or "bracket_window",
+            risk_tier="A",  # Default to tier A for bracket exits
+            max_hold_seconds=max_hold_seconds,  # Dynamic based on remaining TTE
         )
 
         position.tp_bracket_client_tag = tp_tag
@@ -1543,6 +1634,12 @@ class KalshiPositionCache:
                 client_tag=sl_tag,
                 group_id="bracket",
                 rationale=f"resting_sl:{position.market_id}:{sl_price}c",
+                # CRITICAL FIX: Add exit policy metadata to satisfy validation for exit orders
+                # Exit orders require exit_policy_id for tracking per _validate_risk_contract_linkage
+                exit_policy_id=position.exit_policy_id or "bracket_exit",
+                window_resolution_id=position.window_resolution_id or "bracket_window",
+                risk_tier="A",  # Default to tier A for bracket exits
+                max_hold_seconds=max_hold_seconds,  # Dynamic based on remaining TTE
             )
             position.sl_bracket_client_tag = sl_tag
             try:
@@ -1566,276 +1663,57 @@ class KalshiPositionCache:
     def start_monitoring(self) -> None:
         """Start the trailing stop monitoring loop.
 
-        This should be called during application startup if trailing is enabled.
-        The loop runs every 5 seconds and checks positions for trailing activation.
+        CRITICAL FIX: 2026-07-07 - DISABLED
+        Position monitoring is now handled exclusively by PositionMonitor (merid/position_management/position_monitor.py)
+        This prevents duplicate monitoring loops and ensures proper callback routing for all exit conditions.
+        
+        PositionMonitor now handles:
+        - Extreme profit exits (99c YES / 1c NO)
+        - Dynamic take profit (laddered exits)
+        - Ratchet profit floor and trimming
+        - Trailing stop activation
+        - Stop loss / take profit triggers
+        - Staged time-based exits (re-implemented from this class)
+        - Exit policy resolution (time stop, edge decay, risk, candle reversal)
+        
+        This class (KalshiPositionCache) now only handles:
+        - Position state management (fills, PnL, metadata)
+        - Position cache and exposure tracking
+        - Integration with PositionMonitor for position addition
         """
-        logger.info("[TRAIL-MONITOR] start_monitoring called, enabled=%s, interval=%s", self._monitoring_enabled, self._monitoring_interval_seconds)
-        if self._monitoring_enabled:
-            logger.warning("[TRAIL-MONITOR] Already running, ignoring start request")
-            return
-
-        self._monitoring_enabled = True
-        self._monitoring_task = asyncio.create_task(self._monitor_positions_loop())
-        logger.info("[TRAIL-MONITOR] Started trailing stop monitoring loop (interval=%.1fs)", self._monitoring_interval_seconds)
+        logger.info("[TRAIL-MONITOR] start_monitoring called - DISABLED (delegated to PositionMonitor)")
+        logger.info("[TRAIL-MONITOR] PositionMonitor is now the authoritative exit system")
+        # No-op - PositionMonitor handles all exit monitoring
 
     def stop_monitoring(self) -> None:
         """Stop the trailing stop monitoring loop.
 
-        This should be called during application shutdown.
+        CRITICAL FIX: 2026-07-07 - DISABLED
+        Position monitoring is now handled exclusively by PositionMonitor.
+        This is a no-op for backward compatibility.
         """
-        if not self._monitoring_enabled:
-            return
-
-        self._monitoring_enabled = False
-        if self._monitoring_task:
-            self._monitoring_task.cancel()
-            self._monitoring_task = None
-        logger.info("[TRAIL-MONITOR] Stopped trailing stop monitoring loop")
+        logger.info("[TRAIL-MONITOR] stop_monitoring called - DISABLED (delegated to PositionMonitor)")
+        # No-op - PositionMonitor handles all exit monitoring
 
     async def _monitor_positions_loop(self) -> None:
         """Background loop that monitors positions for trailing stop activation and time-based forced exit.
 
-        For each open position with TP/SL targets:
-        1. Fetch current market price from market state
-        2. Check time to expiry and force exit at cutoff (P0 FIX)
-        3. Compute current PnL in R-multiples
-        4. Check if trailing should activate (based on trailing_activation_r_multiple from config)
-        5. If activated, compute new trailing stop and submit order to update SL
+        CRITICAL FIX: 2026-07-07 - DISABLED
+        Position monitoring is now handled exclusively by PositionMonitor (merid/position_management/position_monitor.py)
+        This method is a no-op for backward compatibility.
         
-        CRITICAL FIX: Added health monitoring and trading halt on persistent failures (2026-07-06)
+        All exit monitoring is now handled by PositionMonitor:
+        - Extreme profit exits (99c YES / 1c NO)
+        - Dynamic take profit (laddered exits)
+        - Ratchet profit floor and trimming
+        - Trailing stop activation
+        - Stop loss / take profit triggers
+        - Staged time-based exits
+        - Exit policy resolution
         """
-        from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
-        from merid.prediction.dynamic_takeprofit import get_dtp_engine
-        import time
-
-        dtp_engine = get_dtp_engine()
-        market_state_store = get_kalshi_market_state_store()
-
-        # P3-FIX9: Get cutoff from profile (default 2 minutes)
-        cutoff_minutes = 2  # Default fallback
-        try:
-            from pathlib import Path
-            import yaml
-            profile_yaml_path = Path(__file__).parent.parent.parent.parent / "config" / "profiles" / "kalshi_crypto_15m_v2.yaml"
-            if profile_yaml_path.exists():
-                with open(profile_yaml_path, 'r', encoding='utf-8') as f:
-                    profile_config = yaml.safe_load(f)
-                cutoff_minutes = profile_config.get("exit_policy", {}).get("time_exit", {}).get("cutoff_minutes_before_expiry", 2)
-                logger.info("[TRAIL-CONFIG] Loaded cutoff_minutes=%d from profile", cutoff_minutes)
-        except Exception as exc:
-            logger.warning("[TRAIL-CONFIG] Failed to load cutoff from profile, using default 2: %s", exc)
-
-        logger.info("[TRAIL-MONITOR] Loop started, interval=%s, cutoff_minutes=%d", self._monitoring_interval_seconds, cutoff_minutes)
-
-        # CRITICAL FIX: Health monitoring variables
-        last_tick_time = time.time()
-        consecutive_errors = 0
-        max_consecutive_errors = 5  # Halt after 5 consecutive errors
-        max_tick_interval = self._monitoring_interval_seconds * 2  # Alert if tick takes >2x interval
-
-        while self._monitoring_enabled:
-            try:
-                # Check loop health
-                current_time = time.time()
-                tick_interval = current_time - last_tick_time
-                last_tick_time = current_time
-                
-                if tick_interval > max_tick_interval:
-                    logger.error(
-                        "[TRAIL-MONITOR] Loop health degraded: tick interval=%.1fs (expected=%.1fs)",
-                        tick_interval,
-                        self._monitoring_interval_seconds
-                    )
-                    # Emit health alert
-                    self._emit_health_alert("monitoring_loop_slow", tick_interval)
-                
-                async with self._ensure_mutex():
-                    positions_snapshot = list(self._positions.values())
-
-                logger.info("[TRAIL-MONITOR] Loop tick, positions=%d", len(positions_snapshot))
-
-                for position in positions_snapshot:
-                    # Skip positions without TP/SL targets or zero contracts
-                    if position.contracts <= 0:
-                        continue
-                    if position.take_profit_price_cents is None or position.stop_loss_price_cents is None:
-                        logger.error(
-                            "[TRAIL-ERROR] market=%s side=%s has missing TP/SL metadata (tp=%s sl=%s) - position cannot be monitored for trailing",
-                            position.market_id, position.side, position.take_profit_price_cents, position.stop_loss_price_cents
-                        )
-                        continue
-
-                    # Get current market price
-                    state = market_state_store.get_unified(position.market_id)
-                    if not state or state.mid_cents <= 0:
-                        continue
-
-                    current_price_cents = state.mid_cents
-                    entry_price_cents = position.avg_price_cents
-                    sl_price_cents = position.stop_loss_price_cents
-
-                    # CRITICAL FIX: Staged time-based exits DISABLED
-                    # This logic was bypassing PositionMonitor and the exit intent callback system
-                    # Staged exits were calling route_order_async directly, missing:
-                    # - Proper agent_id (was using "position_cache" instead of actual agent)
-                    # - Swing mode logic (enables opposite-side entries after trailing exits)
-                    # - Exit intent callback error handling and logging
-                    # - Integration with PositionMonitor's state management
-                    # TODO: Re-implement staged exits in PositionMonitor with proper callback routing
-                    staged_exit_enabled = False  # Force disabled until properly integrated
-                    
-                    if state.seconds_to_expiry is not None:
-                        time_to_expiry_minutes = state.seconds_to_expiry / 60.0
-                        time_since_entry_minutes = (state.seconds_to_expiry / 60.0) - 15.0  # Approximate time since entry (15m window)
-                        if time_since_entry_minutes < 0:
-                            time_since_entry_minutes = 0
-                        
-                        # Check staged exits if enabled
-                        if staged_exit_enabled and staged_exit_stages:
-                            for stage_idx, stage in enumerate(staged_exit_stages):
-                                stage_minutes = stage.get("minutes", 0)
-                                stage_percent = stage.get("percent", 0)
-                                
-                                # Check if we've reached this stage time
-                                if time_since_entry_minutes >= stage_minutes:
-                                    # Check if this stage has already been executed
-                                    stage_key = f"stage_{stage_idx}"
-                                    if not getattr(position, stage_key + "_executed", False):
-                                        # Calculate contracts to close for this stage
-                                        contracts_to_close = int(position.contracts * (stage_percent / 100.0))
-                                        
-                                        if contracts_to_close >= 1:
-                                            logger.info(
-                                                "[STAGED-EXIT] market=%s side=%s stage=%d minutes=%d percent=%d%% time_since=%.1fmin closing %d contracts",
-                                                position.market_id, position.side, stage_idx, stage_minutes, stage_percent, time_since_entry_minutes, contracts_to_close
-                                            )
-                                            
-                                            # Submit partial exit order
-                                            try:
-                                                from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
-                                                
-                                                # Determine exit side
-                                                if position.side == "yes":
-                                                    exit_action = "sell"
-                                                    exit_side = "yes"
-                                                else:  # "no"
-                                                    exit_action = "buy"
-                                                    exit_side = "yes"
-                                                
-                                                # Create staged exit intent (limit order for better fill)
-                                                staged_exit_intent = OrderIntent(
-                                                    ticker=position.market_id,
-                                                    side=exit_side,
-                                                    action=exit_action,
-                                                    price_cents=current_price_cents,
-                                                    count=contracts_to_close,
-                                                    order_type="limit",
-                                                    time_in_force="gtc",
-                                                    source="staged_time_exit",
-                                                    agent_id="position_cache",
-                                                    rationale=f"Staged exit stage {stage_idx}: {stage_percent}% at {stage_minutes}min",
-                                                )
-                                                
-                                                # Submit order asynchronously
-                                                result = await route_order_async(staged_exit_intent)
-                                                logger.info(
-                                                    "[STAGED-EXIT] market=%s submitted staged exit order: status=%s reason=%s",
-                                                    position.market_id, result.status, result.reason
-                                                )
-                                                
-                                                # Mark stage as executed
-                                                setattr(position, stage_key + "_executed", True)
-                                                setattr(position, stage_key + "_timestamp", datetime.utcnow())
-                                                
-                                                # Update position contracts count
-                                                position.contracts -= contracts_to_close
-                                                
-                                                # Mark exit reason in RoundTripMonitor for partial exit
-                                                from merid.event_venues.kalshi.round_trip_monitor import get_round_trip_monitor
-                                                rt_monitor = get_round_trip_monitor()
-                                                if position.entry_intent_id:
-                                                    rt_monitor.record_exit(
-                                                        exit_intent_id=staged_exit_intent.intent_id,
-                                                        entry_intent_id=position.entry_intent_id,
-                                                        exit_price_cents=current_price_cents,
-                                                        exit_reason=f"staged_exit_stage_{stage_idx}",
-                                                    )
-                                                
-                                            except Exception as exc:
-                                                logger.error(
-                                                    "[STAGED-EXIT] market=%s failed to submit staged exit order: %s",
-                                                    position.market_id, exc, exc_info=True
-                                                )
-                        
-                        # CRITICAL FIX: Time-based exit fallback DISABLED
-                        # This logic was bypassing PositionMonitor and the exit intent callback system
-                        # Time exits should be handled by PositionMonitor's exit policy resolver
-                        # which ensures proper agent_id, swing mode logic, and callback routing
-                        # TODO: Implement time-based exit in PositionMonitor.exit_policy.evaluate()
-                        # with proper callback routing
-                            continue
-
-                    # CRITICAL FIX: Scale-out DISABLED
-                    # This logic was bypassing PositionMonitor and the exit intent callback system
-                    # Scale-outs should be handled by PositionMonitor's scale-out logic
-                    # which ensures proper agent_id, swing mode logic, and callback routing
-                    # TODO: Implement scale-out in PositionMonitor._check_position()
-                    # with proper callback routing
-
-                    # Compute risk per contract (R)
-                    risk_cents = abs(entry_price_cents - sl_price_cents)
-                    if risk_cents == 0:
-                        continue
-
-                    # Compute current PnL in R-multiples
-                    if position.side == "yes":
-                        pnl_cents = current_price_cents - entry_price_cents
-                    else:  # "no"
-                        pnl_cents = entry_price_cents - current_price_cents
-                    current_r = pnl_cents / risk_cents if risk_cents > 0 else 0.0
-
-                    # NOTE: Ratchet profit floor logic is handled by PositionMonitor (authoritative source)
-                    # This prevents duplicate logic and conflicts between position_cache and position_monitor
-                    # PositionMonitor has full implementation including:
-                    # - Activation at 85c threshold
-                    # - Floor breach detection at 80c
-                    # - Position trimming at 80c (reduce to 1 contract)
-                    # - Mandatory 99c exit
-                    # - Profile parameter integration
-
-                    # P3-FIX8: Get trailing activation threshold from profile (min_profit_cents for 15m binary options)
-                    # NOTE: PositionMonitor handles trailing activation using min_profit_cents (12¢ per 2026 research)
-                    # This loop only handles time-based forced exit, not trailing activation
-                    # Trailing activation is delegated to PositionMonitor to avoid duplicate logic
-
-                # CRITICAL FIX: Reset consecutive errors on successful tick
-                consecutive_errors = 0
-
-            except Exception as exc:
-                consecutive_errors += 1
-                logger.error(
-                    "[TRAIL-MONITOR] Loop error (%d/%d): %s",
-                    consecutive_errors, max_consecutive_errors, exc, exc_info=True
-                )
-                
-                # Emit health alert
-                self._emit_health_alert("monitoring_loop_error", str(exc))
-                
-                # Halt trading if too many consecutive errors
-                if consecutive_errors >= max_consecutive_errors:
-                    logger.critical(
-                        "[TRAIL-MONITOR] Too many consecutive errors (%d) - halting monitoring",
-                        consecutive_errors
-                    )
-                    self._monitoring_enabled = False
-                    # Trigger trading halt
-                    self._trigger_trading_halt("monitoring_loop_failure")
-                    return
-
-            # Wait for next check interval
-            await asyncio.sleep(self._monitoring_interval_seconds)
-
-        logger.info("[TRAIL-MONITOR] Monitoring loop exited")
+        logger.warning("[TRAIL-MONITOR] _monitor_positions_loop called - DISABLED (delegated to PositionMonitor)")
+        # No-op - PositionMonitor handles all exit monitoring
+        return
 
     def _emit_health_alert(self, alert_type: str, details: str) -> None:
         """Emit health alert for monitoring.
