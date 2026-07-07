@@ -98,6 +98,46 @@ def test_window_reset():
     return True
 
 
+def test_window_state_reset_function():
+    """Test that _reset_shared_window_state_for_testing properly clears shared state."""
+    print("\n=== Test 2.5: Window State Reset Function ===")
+    
+    try:
+        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import (
+            compute_kalshi_crypto_15m_risk_envelope,
+            _reset_shared_window_state_for_testing,
+            _WINDOW_TRACKING_STATE
+        )
+        
+        # Create envelope and record exposure
+        envelope = compute_kalshi_crypto_15m_risk_envelope(live_bankroll_usd=100.0)
+        envelope.record_order_execution("BTC_15M", 2.0)
+        envelope.record_order_execution("ETH_15M", 1.5)
+        
+        # Verify exposure is recorded
+        assert _WINDOW_TRACKING_STATE["agent_exposure_usd"]["BTC_15M"] == 2.0
+        assert _WINDOW_TRACKING_STATE["agent_exposure_usd"]["ETH_15M"] == 1.5
+        assert _WINDOW_TRACKING_STATE["total_exposure_usd"] == 3.5
+        
+        # Call reset function
+        _reset_shared_window_state_for_testing()
+        
+        # Verify state is cleared
+        assert _WINDOW_TRACKING_STATE["window_start_ts"] == 0.0
+        assert _WINDOW_TRACKING_STATE["agent_exposure_usd"] == {}
+        assert _WINDOW_TRACKING_STATE["total_exposure_usd"] == 0.0
+        
+        print(f"[PASS] Window state reset function clears shared state")
+        
+    except Exception as e:
+        print(f"[FAIL] {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    
+    return True
+
+
 def test_per_agent_window_limit():
     """Test that per-agent window limit (3%) is enforced as hard stop."""
     print("\n=== Test 3: Per-Agent Window Limit (3%) ===")
@@ -626,6 +666,7 @@ def main():
     tests = [
         test_risk_envelope_window_limits,
         test_window_reset,
+        test_window_state_reset_function,
         test_per_agent_window_limit,
         test_total_venue_window_limit,
         test_position_closure_reduces_exposure,
