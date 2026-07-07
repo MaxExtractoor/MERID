@@ -98,6 +98,36 @@ class TestThresholdOptimization:
                 # Verify spread_gate_cents is set to 50c (aligned with guardrails_max_spread_cents)
                 assert profile.momentum_fvg_spread_gate_cents == 50
 
+    def test_kelly_hard_cap_aligned_with_risk_limit(self):
+        """Test that Kelly hard cap is set to 2% aligned with unified risk limit."""
+        with patch('merid.risk.profiles.crypto_15m_profile.is_profile_active', return_value=True), \
+             patch('merid.risk.profiles.crypto_15m_profile.get_active_profile', return_value=MagicMock(profile=MagicMock(
+                 kelly_hard_cap=0.02
+             ))):
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
+            
+            if is_profile_active():
+                adapter = get_active_profile()
+                profile = adapter.profile
+                
+                # Verify Kelly hard cap is 2% (aligned with unified risk limit)
+                assert profile.kelly_hard_cap == 0.02
+
+    def test_kelly_global_notional_cap_aligned_with_risk_limit(self):
+        """Test that Kelly global notional cap is set to 2% aligned with per-trade limit."""
+        with patch('merid.risk.profiles.crypto_15m_profile.is_profile_active', return_value=True), \
+             patch('merid.risk.profiles.crypto_15m_profile.get_active_profile', return_value=MagicMock(profile=MagicMock(
+                 kelly_global_notional_cap_pct=0.02
+             ))):
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
+            
+            if is_profile_active():
+                adapter = get_active_profile()
+                profile = adapter.profile
+                
+                # Verify Kelly global notional cap is 2% (aligned with per-trade limit)
+                assert profile.kelly_global_notional_cap_pct == 0.02
+
     # 2026 Research-Based Risk Management Tests
     def test_session_limit_reduced_to_5_trades(self):
         """Test that session limit is reduced to 5 trades based on 2026 research."""
