@@ -108,6 +108,37 @@ class PositionMonitor:
             position.exit_reason,
             position.exit_price_cents,
         )
+        
+        # CRITICAL: Release window capacity in risk envelope when position closes
+        # This allows re-entry after position exit (trailing stop, ratchet, 99c exit)
+        try:
+            # Calculate notional to release
+            notional_usd = (position.size * position.avg_entry_price_cents) / 100.0
+            
+            # Release exposure using risk envelope (which has window tracking)
+            from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+            envelope = get_kalshi_crypto_15m_risk_envelope()
+            envelope.record_position_closure(position.market_id, notional_usd)
+            
+            logger.info(
+                "[POSITION-MONITOR] Released window capacity: market=%s notional=$%.2f exit_reason=%s",
+                position.market_id,
+                notional_usd,
+                position.exit_reason,
+            )
+        except RuntimeError as e:
+            # Risk envelope not ready (bankroll not available) - log warning but don't fail
+            # This can happen during startup or in test environments
+            logger.warning(
+                "[POSITION-MONITOR] Risk envelope not ready, skipping window capacity release: %s",
+                e
+            )
+        except Exception as e:
+            logger.error(
+                "[POSITION-MONITOR] Failed to release window capacity: %s",
+                e,
+                exc_info=True
+            )
     
     def get_position(self, position_id: str) -> Optional[Position]:
         """

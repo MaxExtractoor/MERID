@@ -1359,17 +1359,11 @@ class Kalshi15mLoop:
                             self._swing_mode[asset] = {"enabled": False, "exited_side": None, "exit_time": None}
                         logger.info("[15m-LOOP] Reset swing mode for new window")
                         
-                        # Reset GlobalRiskGuard cycle tracking
-                        from merid.guards.global_risk_guard import get_global_risk_guard
-                        risk_guard = get_global_risk_guard()
-                        risk_guard.reset_cycle()
-                        
-                        # Reset GlobalExecutionGuard total notional accumulator
-                        from merid.guards.global_execution_guard import get_global_execution_guard
-                        exec_guard = get_global_execution_guard()
-                        logger.info("[15m-LOOP] About to call exec_guard.reset_cycle() for window=%s", current_window.suffix)
-                        exec_guard.reset_cycle()
-                        logger.info("[15m-LOOP] Called exec_guard.reset_cycle() for window=%s", current_window.suffix)
+                        # Reset UnifiedRiskManager cycle tracking
+                        from merid.risk.unified_risk_manager import get_unified_risk_manager
+                        risk_mgr = get_unified_risk_manager()
+                        risk_mgr.reset_cycle()
+                        logger.info("[15m-LOOP] Reset UnifiedRiskManager cycle for window=%s", current_window.suffix)
                     else:
                         logger.debug("[15m-LOOP] Window unchanged: %s - skipping cycle reset", current_window.suffix)
                     
@@ -1657,10 +1651,9 @@ class Kalshi15mLoop:
                             self._executed_candidates_this_window.add(candidate_key)
                             
                             # FIX: Do NOT reset cycle guards after each execution
-                            # The GlobalExecutionGuard should track total notional across the 15-minute window
+                            # The UnifiedRiskManager should track total notional across the 15-minute window
                             # to enforce the 5% total allocation limit. Resetting after each trade defeats this.
-                            # Cycle reset only happens at the start of a new 15-minute window (line 1364)
-                            # NOTE: GlobalExecutionGuard is deprecated - risk envelope should handle this
+                            # Cycle reset only happens at the start of a new 15-minute window (line 1366)
                             
                             # CRITICAL FIX: Do NOT clear deduplication cache after each execution
                             # The cache should only be cleared at the start of a new 15-minute window (line 1346)
@@ -1723,7 +1716,7 @@ class Kalshi15mLoop:
         Run a single trading cycle.
         
         Steps:
-        1) Reset GlobalRiskGuard cycle tracking (critical for cycle cap enforcement)
+        1) Reset UnifiedRiskManager cycle tracking (critical for cycle cap enforcement)
         2) Update envelope equity once per cycle (not per order)
         3) Check if halted due to drawdown
         4) Skip cycle if halted
@@ -3166,7 +3159,7 @@ class Kalshi15mLoop:
             
             # COMPONENT TIMING: Bankroll + risk envelope check
             t_bankroll = time.time()
-            # BYPASS: Legacy GlobalRiskGuard for kalshi_crypto_15m_v2 - use risk envelope only
+            # BYPASS: Legacy GlobalRiskGuard for kalshi_crypto_15m_v2 - use UnifiedRiskManager only
             # This ties the cycle to the 15-min market epoch, not agent loop ticks
             try:
                 from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
@@ -3430,17 +3423,11 @@ class Kalshi15mLoop:
                     self._current_window_suffix = current_window.suffix
                     self._executed_candidates_this_window.clear()
                     
-                    # Reset GlobalRiskGuard cycle tracking
-                    from merid.guards.global_risk_guard import get_global_risk_guard
-                    risk_guard = get_global_risk_guard()
-                    risk_guard.reset_cycle()
-                    
-                    # Reset GlobalExecutionGuard total notional accumulator
-                    from merid.guards.global_execution_guard import get_global_execution_guard
-                    exec_guard = get_global_execution_guard()
-                    logger.info("[15m-LOOP] About to call exec_guard.reset_cycle() for window=%s", current_window.suffix)
-                    exec_guard.reset_cycle()
-                    logger.info("[15m-LOOP] Called exec_guard.reset_cycle() for window=%s", current_window.suffix)
+                    # Reset UnifiedRiskManager cycle tracking
+                    from merid.risk.unified_risk_manager import get_unified_risk_manager
+                    risk_mgr = get_unified_risk_manager()
+                    risk_mgr.reset_cycle()
+                    logger.info("[15m-LOOP] Reset UnifiedRiskManager cycle for window=%s", current_window.suffix)
                 else:
                     logger.debug("[15m-LOOP] Window unchanged: %s - skipping cycle reset", current_window.suffix)
                 

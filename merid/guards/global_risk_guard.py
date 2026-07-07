@@ -14,15 +14,31 @@ New code should use UnifiedRiskManager for all risk checks.
 CRITICAL: For kalshi_crypto_15m_v2 profile, risk parameters are loaded from profile YAML.
 This module's defaults (6% cycle risk, 6% total risk) are NOT used by the 15m production stack.
 
+IMPORT BLOCKED: This module is deprecated and should not be imported in production code.
+Use merid.risk.unified_risk_manager instead.
+"""
+
+# Import-time error to prevent accidental usage in production
+import sys
+import os
+
+# Allow import for tests or legacy code paths that explicitly opt-in
+if os.getenv("ALLOW_DEPRECATED_RISK_GUARDS", "").lower() not in ("1", "true", "yes"):
+    raise ImportError(
+        "merid.guards.global_risk_guard is DEPRECATED. "
+        "Use merid.risk.unified_risk_manager instead. "
+        "Set ALLOW_DEPRECATED_RISK_GUARDS=1 to bypass this check (for tests only)."
+    )
+
 ---
 
 Legacy documentation (deprecated):
 
 Canonical risk gate for all Kalshi PM order submissions. Extracted from
-``merid.trading.kalshi_continuous_trader`` so that every caller — the
+``merid.trading.kalshi_continuous_trader`` so that every caller - the
 ``KalshiContinuousTrader`` loop, ``KalshiTradingAgent`` (agent grid, 35 agents),
 crypto lanes (``btc15m_lane``, ``crypto15m_lane``), web manual trades, and any
-future order source — shares the **same** per-cycle / total risk envelope
+future order source - shares the **same** per-cycle / total risk envelope
 on a **unified** ``equity_cents`` source.
 
 See ``docs/TRADING_OWNERSHIP_DECISION.md`` for the policy context and
@@ -30,8 +46,8 @@ See ``docs/TRADING_OWNERSHIP_DECISION.md`` for the policy context and
 
 Invariants enforced (per ``check_order`` call):
     1. Sum of ``max_loss_cents`` for all approved orders in the current cycle
-       ≤ ``max_cycle_risk_pct * equity_cents``.
-    2. ``existing_risk_cents + cycle_new_risk_cents`` ≤
+       <= ``max_cycle_risk_pct * equity_cents``.
+    2. ``existing_risk_cents + cycle_new_risk_cents`` <=
        ``max_total_risk_pct * equity_cents``.
     3. If any invariant would be violated, the guard logs CRITICAL and
        returns ``(False, reason)``.
@@ -74,15 +90,15 @@ warnings.warn(
 )
 
 
-# ────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────────────
 # Data
-# ────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class PendingOrderRisk:
     """Risk metadata for a pending order.
 
-    ``max_loss_cents`` is the canonical field — callers MUST compute it
+    ``max_loss_cents`` is the canonical field - callers MUST compute it
     correctly (typically ``contracts * entry_price_cents`` for a long YES,
     or ``contracts * (100 - entry_price_cents)`` for a long NO).
     """
@@ -108,7 +124,7 @@ class GlobalRiskGuard:
 
     def __init__(
         self,
-        max_cycle_risk_pct: float = 0.005,  # CRITICAL FIX: 0.5% per cycle - aligned with kalshi_crypto_15m_v2.yaml (2026-07-04)
+        max_cycle_risk_pct: float = 0.05,  # CRITICAL FIX: 5% per cycle - total across all assets in 15m window (2026-07-05)
         max_total_risk_pct: float = 0.15,  # CRITICAL FIX: 15% total - aligned with kalshi_crypto_15m_v2.yaml (2026-07-04)
         scalper_single_batch_mode: bool = False,
         max_trades_per_batch: int = 3,
@@ -272,7 +288,7 @@ class GlobalRiskGuard:
         If ``equity_cents`` is non-positive, fail-closed with a clear reason.
         """
         with self._lock:
-            # ── Scalper single-batch mode (hard veto) ──────────────────
+            # -- Scalper single-batch mode (hard veto) ------------------------------
             if self.scalper_single_batch_mode:
                 if max(0, int(existing_risk_cents)) > 0:
                     reason = (
@@ -309,7 +325,7 @@ class GlobalRiskGuard:
             if equity_cents <= 0:
                 reason = (
                     f"GLOBAL RISK GUARD BLOCK: non-positive equity "
-                    f"equity_cents={equity_cents} — fail-closed"
+                    f"equity_cents={equity_cents} - fail-closed"
                 )
                 log_risk_check(
                     "non_positive_equity",
@@ -449,7 +465,7 @@ class GlobalRiskGuard:
                                     return False, reason
                             
                             scaled_contracts = min(pending_order.contracts, max_contracts_for_capacity)
-                            # CRITICAL FIX: Don't force minimum 1 contract if price is too low (prevents 1¢ orders)
+                            # CRITICAL FIX: Don't force minimum 1 contract if price is too low (prevents 1c orders)
                             # Only force minimum if contract notional is reasonable (>= $0.05)
                             contract_notional_usd = pending_order.entry_price_cents / 100.0
                             if contract_notional_usd >= 0.05:
@@ -459,12 +475,12 @@ class GlobalRiskGuard:
                                 # If max_contracts_for_capacity is 0, the order should be rejected
                                 if max_contracts_for_capacity < 1:
                                     logger.warning(
-                                        "[GLOBAL_GUARD] Rejecting low-price order: price=%dc (<5¢) would require %d contracts but capacity allows %d",
+                                        "[GLOBAL_GUARD] Rejecting low-price order: price=%dc (<5c) would require %d contracts but capacity allows %d",
                                         pending_order.entry_price_cents, pending_order.contracts, max_contracts_for_capacity
                                     )
                                     reason = (
                                         f"GLOBAL RISK GUARD BLOCK: Low-price order rejected | "
-                                        f"price={pending_order.entry_price_cents}c (<5¢ threshold) | "
+                                        f"price={pending_order.entry_price_cents}c (<5c threshold) | "
                                         f"contracts={pending_order.contracts} | "
                                         f"capacity_contracts={max_contracts_for_capacity}"
                                     )
@@ -596,7 +612,7 @@ class GlobalRiskGuard:
             remaining = cycle_risk_cents - self._cycle_new_risk_cents
             return max(0, remaining)
 
-    # ── telemetry ───────────────────────────────────────────────────────
+    # -- telemetry -------------------------------------------------------
     def metrics(self) -> dict:
         with self._lock:
             return {
@@ -634,12 +650,15 @@ def _load_canonical_pcts() -> Tuple[float, float]:
     
     OPTIMIZED RISK REGIME (2026-05-07): 5% cycle / 8% total for better throughput while maintaining safety.
     With $40 equity: 5% = $2.02 cycle cap for multi-asset trading.
+    
+    CRITICAL FIX (2026-07-05): Updated default to 5% to match profile YAML bankroll_cap_pct
+    Previous 0.5% was too restrictive for micro accounts.
     """
     try:
         # CRITICAL FIX: Read from environment variable first (set by start_15m.ps1)
         # This ensures GlobalRiskGuard uses the same cap as KalshiRiskConfig
-        # Aligned with kalshi_crypto_15m_v2.yaml (2026-07-04)
-        cycle = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.005"))  # 0.5% default - aligned with profile
+        # Aligned with kalshi_crypto_15m_v2.yaml (2026-07-05)
+        cycle = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.05"))  # 5% default - aligned with profile bankroll_cap_pct
         total = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.15"))  # 15% default - aligned with profile
         logger.info(
             "[GLOBAL-RISK-GUARD] Loaded pcts from env: cycle=%.4f (%.2f%%) total=%.4f (%.2f%%)",
@@ -716,7 +735,7 @@ def reset_global_risk_guard_for_tests() -> None:
         _existing_risk_provider = None
 
 
-# ── providers ───────────────────────────────────────────────────────────
+# -- providers ----------------------------------------------------------
 
 def set_equity_provider(fn: Optional[Callable[[], int]]) -> None:
     """Register a zero-arg callable returning the canonical ``equity_cents``.
@@ -772,7 +791,7 @@ def resolve_equity_cents() -> int:
                 logger.warning("[GLOBAL-RISK-GUARD] equity_provider returned unusually high value %d - using but flagging", equity)
             return int(equity)
         except Exception as e:
-            logger.error("[GLOBAL-RISK-GUARD] equity_provider raised exception: %s — using default", e, exc_info=True)
+            logger.error("[GLOBAL-RISK-GUARD] equity_provider raised exception: %s - using default", e, exc_info=True)
     return default_equity_cents()
 
 
@@ -782,13 +801,13 @@ def resolve_existing_risk_cents() -> int:
         try:
             return max(0, int(_existing_risk_provider() or 0))
         except Exception as e:
-            logger.warning("[GLOBAL-RISK-GUARD] existing_risk_provider raised: %s — using 0", e)
+            logger.warning("[GLOBAL-RISK-GUARD] existing_risk_provider raised: %s - using 0", e)
     return 0
 
 
-# ────────────────────────────────────────────────────────────────────────────
+# -------------------------------------------------------------------------
 # Convenience helpers for routers
-# ────────────────────────────────────────────────────────────────────────────
+# -------------------------------------------------------------------------
 
 def compute_intent_max_loss_cents(
     side: str,
@@ -798,9 +817,9 @@ def compute_intent_max_loss_cents(
 ) -> int:
     """Compute max-loss for an ``OrderIntent`` in cents.
 
-    Binary Kalshi contracts settle at 100¢ or 0¢.
+    Binary Kalshi contracts settle at 100c or 0c.
         long YES bought at P:  max_loss = P * count
-        long NO  bought at P:  max_loss = P * count  (same — pay P, lose P if wrong)
+        long NO  bought at P:  max_loss = P * count  (same - pay P, lose P if wrong)
     Only meaningful for ``action == "buy"``; sells reduce exposure and should
     not be passed through the guard.
     """
@@ -821,7 +840,7 @@ def check_intent(
     """Convenience: build ``PendingOrderRisk`` and run ``check_order``.
 
     Returns ``(True, "")`` automatically for ``action != "buy"`` (exits are
-    exempt — they reduce exposure).
+    exempt - they reduce exposure).
     """
     if (action or "").lower() != "buy":
         return True, "exit_exempt"
