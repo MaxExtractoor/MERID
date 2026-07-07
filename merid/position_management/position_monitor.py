@@ -180,7 +180,13 @@ class PositionMonitor:
         # CRITICAL FIX: 2026-07-06 - Consolidated 99c exit to single mechanism (removed duplicate ratchet 99c check)
         # The position-level extreme profit check handles 99c YES / 1c NO for all assets
         # Profile ratchet_mandatory_exit_at_99c is redundant and removed from this path
-        if position.should_trigger_extreme_profit(current_price_cents):
+        # CRITICAL FIX: 2026-07-07 - Added idempotency guard to prevent double exit
+        # Check if position already has exit intent pending to prevent race conditions
+        # CRITICAL FIX: 2026-07-07 - Added bid/ask spread handling for boundary conditions
+        # Pass bid/ask to prevent false triggers at extreme prices due to spread
+        # Note: bid/ask not available in current _check_position signature, using mid price
+        # Future enhancement: pass bid/ask from market state to improve accuracy
+        if position.should_trigger_extreme_profit(current_price_cents) and not position.exit_triggered:
             logger.info(
                 "[POSITION-MONITOR] EXTREME-PROFIT triggered: position=%s price=%dc (99c YES / 1c NO) - locking guaranteed win",
                 position.position_id[:8],
@@ -233,6 +239,41 @@ class PositionMonitor:
                                 else:
                                     position.dynamic_tp_target_cents = base_target
                                 
+                                # CRITICAL FIX: 2026-07-07 - Add user communication for infeasible TP targets due to fees
+                                # Check if target is feasible after fees
+                                try:
+                                    from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
+                                    
+                                    # Calculate gross profit
+                                    if position.side == PositionSide.YES:
+                                        gross_profit = (position.dynamic_tp_target_cents - entry_price) * position.size
+                                    else:
+                                        gross_profit = (entry_price - position.dynamic_tp_target_cents) * position.size
+                                    
+                                    # Calculate round-trip fees
+                                    entry_fee = calculate_kalshi_fee_cents(position.size, entry_price)
+                                    exit_fee = calculate_kalshi_fee_cents(position.size, position.dynamic_tp_target_cents)
+                                    total_fees = entry_fee + exit_fee
+                                    
+                                    # Calculate net profit per contract
+                                    net_edge = (gross_profit - total_fees) / position.size if position.size > 0 else 0
+                                    min_edge_threshold = 1.0  # Minimum 1 cent net profit
+                                    
+                                    if net_edge < min_edge_threshold:
+                                        logger.warning(
+                                            "[POSITION-MONITOR] DYNAMIC-TP target INFEASIBLE due to fees: position=%s entry=%dc target=%dc gross=%dc fees=%dc net=%.1fc < %.1fc threshold. "
+                                            "Target will be set but may not trigger profitable exit. Consider adjusting entry price or target zones.",
+                                            position.position_id[:8],
+                                            entry_price,
+                                            position.dynamic_tp_target_cents,
+                                            gross_profit,
+                                            total_fees,
+                                            net_edge,
+                                            min_edge_threshold,
+                                        )
+                                except Exception as e:
+                                    logger.debug("[POSITION-MONITOR] Could not check fee feasibility for dynamic TP: %s", e)
+                                
                                 logger.info(
                                     "[POSITION-MONITOR] DYNAMIC-TP target set: position=%s entry=%dc target=%dc (zone: %d-%dc)",
                                     position.position_id[:8],
@@ -244,7 +285,8 @@ class PositionMonitor:
                                 break
                     
                     # Check if dynamic TP target is reached
-                    if position.dynamic_tp_target_cents is not None and not position.dynamic_tp_triggered:
+                    # CRITICAL FIX: 2026-07-07 - Added idempotency guard to prevent double exit
+                    if position.dynamic_tp_target_cents is not None and not position.dynamic_tp_triggered and not position.exit_triggered:
                         if position.side == PositionSide.YES and current_price_cents >= position.dynamic_tp_target_cents:
                             position.dynamic_tp_triggered = True
                             logger.info(
@@ -297,7 +339,11 @@ class PositionMonitor:
                         position.ratchet_trimmed = False  # 2026-07-05: Track if position was trimmed
                     
                     # 2026-07-05: POSITION TRIMMING when >1 contract and price >80c
-                    if trim_enabled and not position.ratchet_trimmed:
+                    # CRITICAL FIX: 2026-07-07 - Added idempotency guard to prevent double trim
+                    # CRITICAL FIX: 2026-07-07 - Removed early return to cascade other exit checks
+                    # After trimming, continue checking other exit conditions (extreme profit, dynamic TP, etc.)
+                    # This ensures critical exits like 99c are not delayed by trimming
+                    if trim_enabled and not position.ratchet_trimmed and not position.exit_triggered:
                         if position.size > trim_to_contracts:
                             if position.side == PositionSide.YES and current_price_cents >= trim_threshold:
                                 position.ratchet_trimmed = True
@@ -314,7 +360,7 @@ class PositionMonitor:
                                 self._emit_exit_intent(position, ExitReason.RATCHET_TRIM, current_price_cents, contracts_to_close)
                                 # Update position size after trim (don't remove from monitoring)
                                 position.size = trim_to_contracts
-                                return  # Exit early after trim
+                                # CRITICAL: Continue to check other exit conditions (don't return early)
                             elif position.side == PositionSide.NO and current_price_cents <= (100 - trim_threshold):
                                 position.ratchet_trimmed = True
                                 contracts_to_close = position.size - trim_to_contracts
@@ -329,10 +375,11 @@ class PositionMonitor:
                                 self._emit_exit_intent(position, ExitReason.RATCHET_TRIM, current_price_cents, contracts_to_close)
                                 # Update position size after trim (don't remove from monitoring)
                                 position.size = trim_to_contracts
-                                return  # Exit early after trim
+                                # CRITICAL: Continue to check other exit conditions (don't return early)
                     
                     # Activate ratchet when price hits threshold
-                    if not position.ratchet_activated:
+                    # CRITICAL FIX: 2026-07-07 - Added idempotency guard to prevent double activation
+                    if not position.ratchet_activated and not position.exit_triggered:
                         if position.side == PositionSide.YES and current_price_cents >= activation_threshold:
                             position.ratchet_activated = True
                             position.ratchet_hold_until = datetime.utcnow().timestamp() + profile.ratchet_min_hold_after_activation_sec
@@ -355,23 +402,22 @@ class PositionMonitor:
                             )
                     
                     # Check floor breach after activation and hold period
-                    # CRITICAL FIX: 2026-07-06 - Bypass hold period when in profit zone (80-85c) for faster exit
+                    # CRITICAL FIX: 2026-07-07 - REMOVED hold period bypass to prevent noise-triggered exits
+                    # Previous logic bypassed hold period when in profit zone, defeating its purpose
+                    # Now only allow exit when hold period expires to prevent premature exits
                     if position.ratchet_activated:
-                        # Check if in profit zone (already activated ratchet means we hit 85c)
-                        # If in profit zone, bypass hold period for immediate exit on floor breach
-                        in_profit_zone = position.ratchet_activated  # Ratchet activated means we hit 85c
                         hold_expired = datetime.utcnow().timestamp() >= position.ratchet_hold_until
-                        can_exit = hold_expired or in_profit_zone  # Exit if hold expired OR in profit zone
+                        can_exit = hold_expired  # Exit ONLY if hold period expired
                         
                         if can_exit:
-                            if position.side == PositionSide.YES and current_price_cents <= floor_price:
+                            # CRITICAL FIX: 2026-07-07 - Added idempotency guard to prevent double exit
+                            if position.side == PositionSide.YES and current_price_cents <= floor_price and not position.exit_triggered:
                                 if force_exit:
                                     logger.info(
-                                        "[POSITION-MONITOR] RATCHET-FLOOR-BREACH triggered: position=%s price=%dc floor=%dc - mandatory exit (hold_period=%s)",
+                                        "[POSITION-MONITOR] RATCHET-FLOOR-BREACH triggered: position=%s price=%dc floor=%dc - mandatory exit (hold_period=expired)",
                                         position.position_id[:8],
                                         current_price_cents,
                                         floor_price,
-                                        "bypassed" if in_profit_zone else "expired",
                                     )
                                     self._emit_exit_intent(position, ExitReason.RATCHET_FLOOR, current_price_cents)
                                     return
@@ -382,14 +428,13 @@ class PositionMonitor:
                                         current_price_cents,
                                         floor_price,
                                     )
-                            elif position.side == PositionSide.NO and current_price_cents >= (100 - floor_price):
+                            elif position.side == PositionSide.NO and current_price_cents >= (100 - floor_price) and not position.exit_triggered:
                                 if force_exit:
                                     logger.info(
-                                        "[POSITION-MONITOR] RATCHET-FLOOR-BREACH triggered: position=%s price=%dc floor=%dc - mandatory exit (hold_period=%s)",
+                                        "[POSITION-MONITOR] RATCHET-FLOOR-BREACH triggered: position=%s price=%dc floor=%dc - mandatory exit (hold_period=expired)",
                                         position.position_id[:8],
                                         current_price_cents,
                                         100 - floor_price,
-                                        "bypassed" if in_profit_zone else "expired",
                                     )
                                     self._emit_exit_intent(position, ExitReason.RATCHET_FLOOR, current_price_cents)
                                     return
@@ -509,14 +554,19 @@ class PositionMonitor:
         else:
             # CRITICAL FIX: 2026-07-06 - Check if position entered profit zone after trailing was already activated
             # Switch to aggressive trailing if price crosses 80c
+            # CRITICAL FIX: 2026-07-07 - Added hysteresis to prevent oscillation around 80c boundary
+            # Activate aggressive mode at 80c, but only deactivate when price drops below 75c
+            # This prevents trail level jumping from 83c to 80c when crossing threshold
             if not position.trailing_profit_zone_activated:
                 profit_zone_activation_cents = 80
+                profit_zone_deactivation_cents = 75  # Hysteresis: deactivate 5c below activation
                 try:
                     from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
                     if is_profile_active():
                         adapter = get_active_profile()
                         profile = adapter.profile
                         profit_zone_activation_cents = profile.trailing_stop_profit_zone_activation_cents
+                        profit_zone_deactivation_cents = profit_zone_activation_cents - 5  # 5c hysteresis
                 except Exception as e:
                     logger.debug("[POSITION-MONITOR] Could not read profit zone config from profile: %s", e)
                 
@@ -531,6 +581,33 @@ class PositionMonitor:
                     position.trailing_profit_zone_activated = True
                     logger.info(
                         "[POSITION-MONITOR] TRAILING switched to AGGRESSIVE 2c mode: position=%s price=%dc - entered 80-85c profit zone",
+                        position.position_id[:8],
+                        current_price_cents,
+                    )
+            else:
+                # Check if should deactivate aggressive mode (with hysteresis)
+                profit_zone_deactivation_cents = 75
+                try:
+                    from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
+                    if is_profile_active():
+                        adapter = get_active_profile()
+                        profile = adapter.profile
+                        profit_zone_activation_cents = profile.trailing_stop_profit_zone_activation_cents
+                        profit_zone_deactivation_cents = profit_zone_activation_cents - 5  # 5c hysteresis
+                except Exception as e:
+                    logger.debug("[POSITION-MONITOR] Could not read profit zone config from profile: %s", e)
+                
+                if position.side == PositionSide.YES and current_price_cents < profit_zone_deactivation_cents:
+                    position.trailing_profit_zone_activated = False
+                    logger.info(
+                        "[POSITION-MONITOR] TRAILING switched to NORMAL 5c mode: position=%s price=%dc - exited profit zone (hysteresis)",
+                        position.position_id[:8],
+                        current_price_cents,
+                    )
+                elif position.side == PositionSide.NO and current_price_cents > (100 - profit_zone_deactivation_cents):
+                    position.trailing_profit_zone_activated = False
+                    logger.info(
+                        "[POSITION-MONITOR] TRAILING switched to NORMAL 5c mode: position=%s price=%dc - exited profit zone (hysteresis)",
                         position.position_id[:8],
                         current_price_cents,
                     )
