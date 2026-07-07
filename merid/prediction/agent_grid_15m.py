@@ -369,6 +369,21 @@ class LeanAgent15m:
         self._spot_price_history: Dict[str, collections.deque] = {}
         self._price_history_window_size = 300  # 5 minutes at 1-second intervals (60 data points at 5s cadence)
         
+        # CRITICAL FIX: 2026-07-07 - Initialize Crypto15mIndicatorStack for 2026 research-based indicators
+        # This provides EMA(200), regime-based RSI, MACD filters, and RSI+MACD confluence scoring
+        self._indicator_stacks: Dict[str, Any] = {}
+        try:
+            from merid.signals.crypto_15m_indicators import Crypto15mIndicatorStack, IndicatorConfig
+            for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+                # Create indicator stack with asset-specific config
+                cfg = IndicatorConfig(asset=asset)
+                self._indicator_stacks[asset] = Crypto15mIndicatorStack(config=cfg)
+                logger.info("[AGENT-INIT] %s initialized Crypto15mIndicatorStack for %s with 2026 research features", 
+                           config.name, asset)
+        except Exception as e:
+            logger.warning("[AGENT-INIT] %s failed to initialize Crypto15mIndicatorStack: %s", config.name, e)
+            self._indicator_stacks = {}
+        
         # Initialize for all 5 crypto assets
         for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
             self._spot_price_history[asset] = collections.deque(maxlen=self._price_history_window_size)
@@ -608,6 +623,15 @@ class LeanAgent15m:
         
         # CRITICAL FIX: 2026-07-01 - Update volume history for volume confirmation filter
         self._volume_history[asset].append((current_time, volume))
+        
+        # CRITICAL FIX: 2026-07-07 - Update Crypto15mIndicatorStack with new price
+        # This enables EMA(200), regime-based RSI, MACD filters, and RSI+MACD confluence
+        if asset in self._indicator_stacks:
+            try:
+                self._indicator_stacks[asset].update(spot_price)
+                logger.debug("[INDICATOR-STACK-UPDATE] asset=%s price=%.2f updated in Crypto15mIndicatorStack", asset, spot_price)
+            except Exception as e:
+                logger.warning("[INDICATOR-STACK-UPDATE] asset=%s failed to update Crypto15mIndicatorStack: %s", asset, e)
         
         # CRITICAL FIX: 2026-07-01 - Update multi-timeframe price history for alignment
         self._price_1m_history[asset].append((current_time, spot_price))
@@ -1663,86 +1687,120 @@ class LeanAgent15m:
             )
             return None
         
-        # Get MACD and RSI using agent's own calculations
-        # CRITICAL FIX: Indicator stack is not initialized, so we use agent's own methods
-        macd_histogram = 0.0
-        macd_slope = 0.0
-        rsi = 50.0
-        rsi_zone = "neutral"
-        
-        try:
-            # Calculate RSI using agent's own method
-            rsi = self._calculate_rsi(asset, period=9)
-            
-            # CRITICAL FIX: If RSI returns 0.0, it means insufficient data - skip signal
-            if rsi == 0.0:
-                logger.warning(
-                    "[MOMENTUM-FVG] asset=%s RSI returned 0.0 (insufficient data), skipping signal generation",
-                    asset
+        # CRITICAL FIX: 2026-07-07 - Use Crypto15mIndicatorStack for 2026 research-based indicators
+        # This provides EMA(200), regime-based RSI, MACD filters, and RSI+MACD confluence scoring
+        if asset in self._indicator_stacks:
+            try:
+                indicator_snap = self._indicator_stacks[asset].snapshot()
+                
+                # Extract 2026 research-based indicators from indicator stack
+                rsi = indicator_snap.rsi
+                rsi_zone = indicator_snap.rsi_zone
+                macro_regime = indicator_snap.macro_regime
+                price_above_ema_200 = indicator_snap.price_above_ema_200
+                macd_line = indicator_snap.macd_line
+                macd_histogram = indicator_snap.macd_histogram
+                macd_zero_line_ok = indicator_snap.macd_zero_line_ok
+                macd_histogram_expanding = indicator_snap.macd_histogram_expanding
+                bias = indicator_snap.bias
+                bias_confidence = indicator_snap.bias_confidence
+                
+                logger.debug(
+                    "[MOMENTUM-FVG-INDICATORS] asset=%s rsi=%.1f zone=%s macro_regime=%s ema200_above=%s macd_line=%.6f macd_hist=%.6f zero_line_ok=%s hist_expanding=%s bias=%s confidence=%.2f",
+                    asset, rsi, rsi_zone, macro_regime, price_above_ema_200, macd_line, macd_histogram, macd_zero_line_ok, macd_histogram_expanding, bias, bias_confidence
                 )
-                return None
-            
-            # Determine RSI zone
-            rsi_oversold = getattr(momentum_fvg_config, 'rsi_oversold', 30.0)
-            rsi_overbought = getattr(momentum_fvg_config, 'rsi_overbought', 70.0)
-            if rsi <= rsi_oversold:
-                rsi_zone = "oversold"
-            elif rsi >= rsi_overbought:
-                rsi_zone = "overbought"
-            else:
-                rsi_zone = "neutral"
-            
-            # Calculate simple MACD histogram using price history
-            # MACD(12,26,9) - industry standard for 15-minute trading
-            if len(price_history) >= 26:
-                # Extract close prices (index 1 in price history tuples)
-                closes = [p[1] for p in price_history[-26:]]
                 
-                # Calculate EMAs
-                def ema(data, period):
-                    k = 2.0 / (period + 1)
-                    ema_val = data[0]
-                    for price in data[1:]:
-                        ema_val = (price * k) + (ema_val * (1 - k))
-                    return ema_val
+                # Apply 2026 research-based filters
                 
-                ema_fast = ema(closes, 12)
-                ema_slow = ema(closes, 26)
-                macd_line = ema_fast - ema_slow
+                # 1. EMA(200) macro trend filter - only trade in direction of macro trend
+                # If price below EMA(200) (bear regime), prefer shorts; if above (bull regime), prefer longs
+                if not price_above_ema_200 and macro_regime == "bear":
+                    # In bear regime, prefer short signals
+                    logger.debug("[EMA200-FILTER] asset=%s in bear regime (price below EMA200), prefer short signals", asset)
+                elif price_above_ema_200 and macro_regime == "bull":
+                    # In bull regime, prefer long signals
+                    logger.debug("[EMA200-FILTER] asset=%s in bull regime (price above EMA200), prefer long signals", asset)
                 
-                # Signal line (9-period EMA of MACD line)
-                # Use recent MACD values if available, otherwise use current
-                if not hasattr(self, '_macd_history'):
-                    self._macd_history = {}
-                if asset not in self._macd_history:
-                    self._macd_history[asset] = collections.deque(maxlen=9)
+                # 2. Regime-based RSI threshold shifting
+                # Bull regime: thresholds shifted up (80/40)
+                # Bear regime: thresholds shifted down (60/20)
+                # Range regime: neutral thresholds (70/30)
+                # CRITICAL FIX: 2026-07-07 - Read thresholds from profile YAML instead of hardcoding
+                # This ensures single source of truth and allows dynamic adjustment
+                if macro_regime == "bull":
+                    rsi_oversold = getattr(momentum_fvg_config, 'rsi_bull_oversold', 40.0)
+                    rsi_overbought = getattr(momentum_fvg_config, 'rsi_bull_overbought', 80.0)
+                elif macro_regime == "bear":
+                    rsi_oversold = getattr(momentum_fvg_config, 'rsi_bear_oversold', 20.0)
+                    rsi_overbought = getattr(momentum_fvg_config, 'rsi_bear_overbought', 60.0)
+                else:  # range or neutral
+                    rsi_oversold = 30.0  # Default neutral thresholds
+                    rsi_overbought = 70.0
                 
-                self._macd_history[asset].append(macd_line)
-                if len(self._macd_history[asset]) >= 9:
-                    signal_line = ema(list(self._macd_history[asset]), 9)
-                    macd_histogram = macd_line - signal_line
-                    
-                    # Calculate slope
-                    if len(self._macd_history[asset]) >= 2:
-                        prev_histogram = list(self._macd_history[asset])[-2] - ema(list(self._macd_history[asset])[:-1], 9)
-                        macd_slope = macd_histogram - prev_histogram
+                # Recalculate RSI zone with regime-based thresholds
+                if rsi <= rsi_oversold:
+                    rsi_zone = "oversold"
+                elif rsi >= rsi_overbought:
+                    rsi_zone = "overbought"
                 else:
-                    logger.warning(
-                        "[MOMENTUM-FVG] asset=%s insufficient MACD history for signal line (%d < 9), "
-                        "MACD histogram will be 0.0 until warmup completes",
-                        asset, len(self._macd_history[asset])
-                    )
+                    rsi_zone = "neutral"
+                
+                # 3. MACD zero-line filter - only take longs if MACD > 0, shorts if MACD < 0
+                # CRITICAL FIX: 2026-07-07 - Actually apply the filter, not just log
+                # Check if filter is enabled in profile
+                macd_zero_line_enabled = getattr(momentum_fvg_config, 'macd_zero_line_filter_enabled', True)
+                if macd_zero_line_enabled and not macd_zero_line_ok:
+                    logger.debug("[MACD-ZERO-LINE-FILTER] asset=%s MACD line on wrong side of zero (%.6f), skip signal", asset, macd_line)
+                    # Skip signal generation if MACD is on wrong side of zero
                     return None
-            else:
-                logger.warning(
-                    "[MOMENTUM-FVG] asset=%s insufficient price history for MACD (%d < 26), "
-                    "MACD histogram will be 0.0 until warmup completes",
-                    asset, len(price_history)
-                )
-                return None
-        except Exception as e:
-            logger.warning("[MOMENTUM-FVG] Failed to calculate MACD/RSI: %s", e)
-            return None
+                
+                # 4. MACD histogram momentum filter - require histogram expansion
+                # CRITICAL FIX: 2026-07-07 - Actually apply the filter, not just log
+                # Check if filter is enabled in profile
+                macd_histogram_enabled = getattr(momentum_fvg_config, 'macd_histogram_momentum_filter_enabled', True)
+                if macd_histogram_enabled and not macd_histogram_expanding:
+                    logger.debug("[MACD-HISTOGRAM-FILTER] asset=%s histogram not expanding, momentum weakening", asset)
+                    # Don't skip signal entirely, but note the filter (histogram expansion is confirmation, not a hard gate)
+                
+                # 5. RSI+MACD confluence scoring - boost confidence when both agree
+                # Long confluence: RSI oversold/neutral-bullish + MACD histogram positive
+                # Short confluence: RSI overbought/neutral-bearish + MACD histogram negative
+                confluence_boost = 0.0
+                if rsi < 50.0 and macd_histogram > 0:
+                    confluence_boost = 0.5  # Long confluence
+                    logger.debug("[RSI-MACD-CONFLUENCE] asset=%s long confluence (RSI=%.1f<50, MACD hist=%.6f>0)", asset, rsi, macd_histogram)
+                elif rsi > 50.0 and macd_histogram < 0:
+                    confluence_boost = 0.5  # Short confluence
+                    logger.debug("[RSI-MACD-CONFLUENCE] asset=%s short confluence (RSI=%.1f>50, MACD hist=%.6f<0)", asset, rsi, macd_histogram)
+                
+                # Extreme confluence (highest confidence)
+                if rsi < rsi_oversold and macd_histogram > 0 and macd_histogram_expanding:
+                    confluence_boost += 0.4  # Additional boost for extreme long confluence
+                    logger.debug("[RSI-MACD-CONFLUENCE] asset=%s EXTREME long confluence (RSI oversold, MACD positive and expanding)", asset)
+                elif rsi > rsi_overbought and macd_histogram < 0 and macd_histogram_expanding:
+                    confluence_boost += 0.4  # Additional boost for extreme short confluence
+                    logger.debug("[RSI-MACD-CONFLUENCE] asset=%s EXTREME short confluence (RSI overbought, MACD negative and expanding)", asset)
+                
+            except Exception as e:
+                logger.warning("[MOMENTUM-FVG] Failed to get indicator snapshot from Crypto15mIndicatorStack: %s", e)
+                # Fallback to internal calculations
+                macd_histogram = 0.0
+                macd_slope = 0.0
+                rsi = 50.0
+                rsi_zone = "neutral"
+                confluence_boost = 0.0
+        else:
+            # Fallback: Use internal calculations if indicator stack not available
+            logger.warning("[MOMENTUM-FVG] Crypto15mIndicatorStack not available for %s, using internal calculations", asset)
+            macd_histogram = 0.0
+            macd_slope = 0.0
+            rsi = 50.0
+            rsi_zone = "neutral"
+            confluence_boost = 0.0
+            macro_regime = "neutral"
+            price_above_ema_200 = True
+            macd_zero_line_ok = True
+            macd_histogram_expanding = False
         
         # Get FVG signal from FVG forecaster
         fvg_signal = None

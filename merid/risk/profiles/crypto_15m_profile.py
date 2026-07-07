@@ -107,6 +107,18 @@ class Crypto15mProfile:
     momentum_fvg_fvg_min_time_to_expiry_min: float  # Minimum time to expiry for FVG entries
     momentum_fvg_require_ema_stack: bool  # Require EMA stack alignment
     momentum_fvg_require_price_vs_ema50: bool  # Require price vs EMA50
+    momentum_fvg_require_price_vs_ema200: bool  # Require price vs EMA200 for macro regime (2026 research)
+    # 2026 research-based indicator enhancements
+    momentum_fvg_ema_200_period: int  # EMA(200) period for macro regime classification
+    momentum_fvg_regime_based_rsi_enabled: bool  # Enable regime-based RSI threshold shifting
+    momentum_fvg_rsi_bull_oversold: float  # Bull regime oversold threshold
+    momentum_fvg_rsi_bull_overbought: float  # Bull regime overbought threshold
+    momentum_fvg_rsi_bear_oversold: float  # Bear regime oversold threshold
+    momentum_fvg_rsi_bear_overbought: float  # Bear regime overbought threshold
+    momentum_fvg_macd_zero_line_filter_enabled: bool  # Enable MACD zero-line filter
+    momentum_fvg_macd_histogram_momentum_filter_enabled: bool  # Enable MACD histogram momentum filter
+    momentum_fvg_macd_histogram_expansion_bars: int  # Required bars of histogram expansion
+    momentum_fvg_rsi_macd_confluence_enabled: bool  # Enable RSI+MACD confluence scoring
     momentum_fvg_liquidity_high_threshold: int  # High liquidity threshold
     momentum_fvg_liquidity_high_size_factor: float  # High liquidity size factor
     momentum_fvg_liquidity_medium_threshold: int  # Medium liquidity threshold
@@ -484,6 +496,18 @@ class Crypto15mProfile:
             'fvg_min_time_to_expiry_min': self.momentum_fvg_fvg_min_time_to_expiry_min,
             'require_ema_stack': self.momentum_fvg_require_ema_stack,
             'require_price_vs_ema50': self.momentum_fvg_require_price_vs_ema50,
+            'require_price_vs_ema200': self.momentum_fvg_require_price_vs_ema200,
+            # 2026 research-based indicator enhancements
+            'ema_200_period': self.momentum_fvg_ema_200_period,
+            'regime_based_rsi_enabled': self.momentum_fvg_regime_based_rsi_enabled,
+            'rsi_bull_oversold': self.momentum_fvg_rsi_bull_oversold,
+            'rsi_bull_overbought': self.momentum_fvg_rsi_bull_overbought,
+            'rsi_bear_oversold': self.momentum_fvg_rsi_bear_oversold,
+            'rsi_bear_overbought': self.momentum_fvg_rsi_bear_overbought,
+            'macd_zero_line_filter_enabled': self.momentum_fvg_macd_zero_line_filter_enabled,
+            'macd_histogram_momentum_filter_enabled': self.momentum_fvg_macd_histogram_momentum_filter_enabled,
+            'macd_histogram_expansion_bars': self.momentum_fvg_macd_histogram_expansion_bars,
+            'rsi_macd_confluence_enabled': self.momentum_fvg_rsi_macd_confluence_enabled,
             'liquidity_high_threshold': self.momentum_fvg_liquidity_high_threshold,
             'liquidity_high_size_factor': self.momentum_fvg_liquidity_high_size_factor,
             'liquidity_medium_threshold': self.momentum_fvg_liquidity_medium_threshold,
@@ -846,6 +870,18 @@ class Crypto15mProfileAdapter:
                 momentum_fvg_fvg_min_time_to_expiry_min=momentum_fvg_config.get('fvg_min_time_to_expiry_min', 30.0),
                 momentum_fvg_require_ema_stack=momentum_fvg_config.get('require_ema_stack', True),
                 momentum_fvg_require_price_vs_ema50=momentum_fvg_config.get('require_price_vs_ema50', True),
+                momentum_fvg_require_price_vs_ema200=momentum_fvg_config.get('require_price_vs_ema200', True),
+                # 2026 research-based indicator enhancements
+                momentum_fvg_ema_200_period=momentum_fvg_config.get('ema_200_period', 200),
+                momentum_fvg_regime_based_rsi_enabled=momentum_fvg_config.get('regime_based_rsi_enabled', True),
+                momentum_fvg_rsi_bull_oversold=momentum_fvg_config.get('rsi_bull_oversold', 40.0),
+                momentum_fvg_rsi_bull_overbought=momentum_fvg_config.get('rsi_bull_overbought', 80.0),
+                momentum_fvg_rsi_bear_oversold=momentum_fvg_config.get('rsi_bear_oversold', 20.0),
+                momentum_fvg_rsi_bear_overbought=momentum_fvg_config.get('rsi_bear_overbought', 60.0),
+                momentum_fvg_macd_zero_line_filter_enabled=momentum_fvg_config.get('macd_zero_line_filter_enabled', True),
+                momentum_fvg_macd_histogram_momentum_filter_enabled=momentum_fvg_config.get('macd_histogram_momentum_filter_enabled', True),
+                momentum_fvg_macd_histogram_expansion_bars=momentum_fvg_config.get('macd_histogram_expansion_bars', 2),
+                momentum_fvg_rsi_macd_confluence_enabled=momentum_fvg_config.get('rsi_macd_confluence_enabled', True),
                 
                 # Liquidity tiers
                 momentum_fvg_liquidity_high_threshold=liquidity_tiers.get('high_threshold', 200),
