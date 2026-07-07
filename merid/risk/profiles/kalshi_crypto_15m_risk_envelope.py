@@ -46,7 +46,7 @@ def _reset_shared_window_state_for_testing() -> None:
         _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
 
 
-def force_reset_window_exposure(envelope=None) -> None:
+def force_reset_window_exposure(envelope=None, reason="startup") -> None:
     """
     Force reset window exposure tracking state.
     
@@ -60,10 +60,17 @@ def force_reset_window_exposure(envelope=None) -> None:
     Args:
         envelope: Optional envelope instance to sync instance fields after reset.
                   If provided, instance fields will be updated to match shared state.
+        reason: Reason for the reset (e.g., "startup", "stale_exposure", "manual")
     """
     import time
     current_ts = time.time()
+    
+    # Capture stale exposure before reset for logging
     with _WINDOW_TRACKING_LOCK:
+        stale_agent_exposure = dict(_WINDOW_TRACKING_STATE["agent_exposure_usd"])
+        stale_total_exposure = _WINDOW_TRACKING_STATE["total_exposure_usd"]
+        stale_window_start = _WINDOW_TRACKING_STATE["window_start_ts"]
+        
         _WINDOW_TRACKING_STATE["window_start_ts"] = _window_bucket_start(current_ts)
         _WINDOW_TRACKING_STATE["agent_exposure_usd"] = {}
         _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
@@ -76,7 +83,12 @@ def force_reset_window_exposure(envelope=None) -> None:
         envelope.total_window_exposure_usd = venue_total
     
     logger.warning(
-        f"[WINDOW-TRACKING] FORCE RESET at ts={current_ts:.0f} - stale exposure cleared"
+        f"[WINDOW-TRACKING] FORCE RESET at ts={current_ts:.0f} - "
+        f"reason={reason} "
+        f"stale_total_exposure=${stale_total_exposure:.2f} "
+        f"stale_agent_count={len(stale_agent_exposure)} "
+        f"stale_window_start={stale_window_start:.0f} "
+        f"new_window_start={_WINDOW_TRACKING_STATE['window_start_ts']:.0f}"
     )
 
 
@@ -89,11 +101,20 @@ def _roll_window_if_needed_locked(current_ts: float) -> None:
     """Reset shared window state when a new 15m window begins. Caller holds lock."""
     bucket_start = _window_bucket_start(current_ts)
     if bucket_start != _WINDOW_TRACKING_STATE["window_start_ts"]:
+        old_window_start = _WINDOW_TRACKING_STATE["window_start_ts"]
+        old_total_exposure = _WINDOW_TRACKING_STATE["total_exposure_usd"]
+        old_agent_count = len(_WINDOW_TRACKING_STATE["agent_exposure_usd"])
+        
         _WINDOW_TRACKING_STATE["window_start_ts"] = bucket_start
         _WINDOW_TRACKING_STATE["agent_exposure_usd"] = {}
         _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
+        
         logger.info(
-            f"[WINDOW-TRACKING] New 15m window started at ts={bucket_start:.0f} - exposure reset"
+            f"[WINDOW-TRACKING] New 15m window started at ts={bucket_start:.0f} - "
+            f"old_window_start={old_window_start:.0f} "
+            f"old_total_exposure=${old_total_exposure:.2f} "
+            f"old_agent_count={old_agent_count} "
+            f"exposure_reset"
         )
 
 # VERSION TAG: This log identifies the deployed revision of kalshi_crypto_15m_risk_envelope.py
@@ -105,7 +126,6 @@ def _roll_window_if_needed_locked(current_ts: float) -> None:
 
 def log_risk_envelope_version() -> None:
     """Log risk envelope version at startup (not import time)."""
-    print("[RISK-ENVELOPE VERSION v20260529a-cache-fix] Loaded - operation_mode support for daily loss limit")
     logger.info("[RISK-ENVELOPE VERSION v20260529a-cache-fix] Loaded - operation_mode support for daily loss limit")
 
 
@@ -532,6 +552,44 @@ class KalshiCrypto15mRiskEnvelope:
             f"agent_total=${current_agent_exposure:.2f}→${new_agent_exposure:.2f} "
             f"venue_total=${venue_total:.2f}"
         )
+    
+    def refund_order_execution(
+        self,
+        agent_id: str,
+        order_notional_usd: float
+    ) -> None:
+        """Refund window exposure for rejected/unfilled orders.
+        
+        CRITICAL: This reverses the optimistic exposure recording done at gate pass time
+        when orders are rejected by the exchange or fail to fill. Without this, window
+        exposure accumulates even though no actual positions are taken, blocking all
+        future orders until the 15m window expires.
+        
+        Args:
+            agent_id: Agent identifier
+            order_notional_usd: Notional value to refund in USD
+        """
+        # CRITICAL (2026-07-07): Operate on module-level shared state (see
+        # record_order_execution for rationale).
+        with _WINDOW_TRACKING_LOCK:
+            current_agent_exposure = _WINDOW_TRACKING_STATE["agent_exposure_usd"].get(agent_id, 0.0)
+            new_agent_exposure = max(0.0, current_agent_exposure - order_notional_usd)
+            _WINDOW_TRACKING_STATE["agent_exposure_usd"][agent_id] = new_agent_exposure
+            _WINDOW_TRACKING_STATE["total_exposure_usd"] = max(
+                0.0, _WINDOW_TRACKING_STATE["total_exposure_usd"] - order_notional_usd
+            )
+            venue_total = _WINDOW_TRACKING_STATE["total_exposure_usd"]
+        
+        # Sync instance fields for observability/snapshots
+        self.agent_window_exposure_usd[agent_id] = new_agent_exposure
+        self.total_window_exposure_usd = venue_total
+        
+        logger.info(
+            f"[WINDOW-TRACKING] Refunded execution: agent={agent_id} "
+            f"notional=${order_notional_usd:.2f} "
+            f"agent_total=${current_agent_exposure:.2f}→${new_agent_exposure:.2f} "
+            f"venue_total=${venue_total:.2f}"
+        )
 
 
 
@@ -569,7 +627,10 @@ def compute_kalshi_crypto_15m_risk_envelope(
         with open(profile_path, 'r', encoding='utf-8') as f:
             profile_config = yaml.safe_load(f)
     except Exception as e:
-        logger.error(f"[RISK-ENVELOPE] Failed to load profile from {profile_path}: {e}")
+        logger.error(
+            f"[RISK-ENVELOPE] Failed to load profile from {profile_path}: {e} - "
+            f"profile loading failed, risk envelope cannot be computed"
+        )
         raise RuntimeError(f"Failed to load {profile_path.name}: {e}")
     
     # Extract venue caps
@@ -1009,7 +1070,11 @@ def get_kalshi_crypto_15m_risk_envelope(test_bankroll_usd: Optional[float] = Non
             live_bankroll_usd = get_equity_for_risk_calc_sync()
             logger.info(f"[RISK-ENVELOPE] Retrieved live bankroll: ${live_bankroll_usd}")
         except Exception as e:
-            logger.error(f"[RISK-ENVELOPE] Failed to get live bankroll: {e}", exc_info=True)
+            logger.error(
+                f"[RISK-ENVELOPE] Failed to get live bankroll: {e} - "
+                f"bankroll service unavailable, risk envelope cannot be computed",
+                exc_info=True
+            )
             raise RuntimeError(f"Failed to get live bankroll: {e}")
         
         if live_bankroll_usd is None or live_bankroll_usd <= 0:
@@ -1040,7 +1105,10 @@ def safe_update_envelope_equity(envelope: KalshiCrypto15mRiskEnvelope) -> bool:
         
         # Handle None equity - fail-closed with clear logging
         if current_equity is None:
-            logger.error("[RISK-ENVELOPE] Failed to update equity: get_equity_for_risk_calc_sync returned None - bankroll service may not be initialized or failed to fetch")
+            logger.error(
+                "[RISK-ENVELOPE] Failed to update equity: get_equity_for_risk_calc_sync returned None - "
+                "bankroll service may not be initialized or failed to fetch, equity update failed"
+            )
             return False
         
         envelope.update_drawdown(current_equity)
@@ -1068,7 +1136,10 @@ def safe_update_envelope_equity(envelope: KalshiCrypto15mRiskEnvelope) -> bool:
         
         return True
     except Exception as e:
-        logger.error(f"[RISK-ENVELOPE] Failed to update equity: {e}")
+        logger.error(
+            f"[RISK-ENVELOPE] Failed to update equity: {e} - "
+            f"equity update failed, risk envelope not updated"
+        )
         return False
 
 
