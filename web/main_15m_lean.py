@@ -2001,51 +2001,11 @@ async def _run_full_startup_in_lifespan(app):
             except Exception as e:
                 logger.warning("[STARTUP-STACK] P2.7: Settlement poller start failed (non-fatal): %s", e)
 
-            # CRITICAL FIX: Start PositionMonitor for take profit and stop loss enforcement
-            # This was completely missing from production startup, meaning TP/SL were never enforced
-            try:
-                from merid.position_management.position_monitor import get_position_monitor
-                position_monitor = get_position_monitor()
-                
-                # Register exit intent callback to execute exit orders
-                async def exit_intent_callback(position, exit_reason, exit_price_cents):
-                    """Execute exit order when position monitor triggers exit."""
-                    try:
-                        from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
-                        from trading.trade_mode import get_trade_mode
-                        
-                        # Determine opposite side for exit
-                        exit_side = "no" if position.side == "yes" else "yes"
-                        exit_action = "sell" if position.side == "yes" else "buy"
-                        
-                        intent = OrderIntent(
-                            ticker=position.market_id,
-                            side=exit_side,
-                            action=exit_action,
-                            price_cents=exit_price_cents,
-                            count=position.size,
-                            exit_policy_id=position.exit_policy_id,
-                        )
-                        
-                        mode = get_trade_mode()
-                        result = await route_order_async(intent, mode=mode)
-                        
-                        logger.info(
-                            "[POSITION-MONITOR-EXIT] Executed exit order: position=%s reason=%s price=%dc result=%s",
-                            position.position_id[:8],
-                            exit_reason.value,
-                            exit_price_cents,
-                            result.status.value,
-                        )
-                    except Exception as e:
-                        logger.error("[POSITION-MONITOR-EXIT] Failed to execute exit order: %s", e, exc_info=True)
-                
-                position_monitor.register_exit_intent_callback(exit_intent_callback)
-                await position_monitor.start()
-                app.state.position_monitor = position_monitor
-                logger.info("[STARTUP-STACK] P2.7: PositionMonitor started (take profit/stop loss enforcement)")
-            except Exception as e:
-                logger.warning("[STARTUP-STACK] P2.7: PositionMonitor start failed (non-fatal): %s", e)
+            # CRITICAL FIX: PositionMonitor startup moved to Kalshi15mLoop.start()
+            # This prevents duplicate startup and callback overwriting
+            # The loop_15m.py has the correct Kalshi side mapping (SELL_YES, SELL_NO)
+            # main_15m_lean.py had wrong side logic that was overwriting the correct callback
+            logger.info("[STARTUP-STACK] P2.7: PositionMonitor will be started by Kalshi15mLoop.start() (correct side mapping)")
 
             # CRITICAL FIX: Start CryptoHedgeEngine auto-exit loop for hedge position TP/SL
             # This ensures hedge positions are automatically exited when TP/SL levels are hit
