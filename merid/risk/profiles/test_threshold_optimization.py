@@ -348,6 +348,14 @@ class TestThresholdOptimization:
             agent_max_yes_position=5,
             agent_max_no_position=5,
             max_cycle_risk_pct=0.05,
+            # Window-based risk tracking (2026-07-06: HARD STOP)
+            guardrails_per_window_risk_pct=0.03,  # 3% per agent per 15m window
+            guardrails_total_venue_risk_pct=0.05,  # 5% total across all agents per 15m window
+            per_agent_window_limit_usd=1.5,  # 3% of $50 = $1.5
+            total_venue_window_limit_usd=2.5,  # 5% of $50 = $2.5
+            window_start_ts=0.0,
+            agent_window_exposure_usd={},
+            total_window_exposure_usd=0.0,
             daily_loss_enabled=True,
             max_daily_loss_usd=20.0,
             drawdown_halt_pct=0.20,
@@ -381,6 +389,14 @@ class TestThresholdOptimization:
             agent_max_yes_position=5,
             agent_max_no_position=5,
             max_cycle_risk_pct=0.05,
+            # Window-based risk tracking (2026-07-06: HARD STOP)
+            guardrails_per_window_risk_pct=0.03,  # 3% per agent per 15m window
+            guardrails_total_venue_risk_pct=0.05,  # 5% total across all agents per 15m window
+            per_agent_window_limit_usd=15.0,  # 3% of $500 = $15
+            total_venue_window_limit_usd=25.0,  # 5% of $500 = $25
+            window_start_ts=0.0,
+            agent_window_exposure_usd={},
+            total_window_exposure_usd=0.0,
             daily_loss_enabled=True,
             max_daily_loss_usd=200.0,
             drawdown_halt_pct=0.20,
@@ -414,6 +430,14 @@ class TestThresholdOptimization:
             agent_max_yes_position=5,
             agent_max_no_position=5,
             max_cycle_risk_pct=0.05,
+            # Window-based risk tracking (2026-07-06: HARD STOP)
+            guardrails_per_window_risk_pct=0.03,  # 3% per agent per 15m window
+            guardrails_total_venue_risk_pct=0.05,  # 5% total across all agents per 15m window
+            per_agent_window_limit_usd=150.0,  # 3% of $5000 = $150
+            total_venue_window_limit_usd=250.0,  # 5% of $5000 = $250
+            window_start_ts=0.0,
+            agent_window_exposure_usd={},
+            total_window_exposure_usd=0.0,
             daily_loss_enabled=True,
             max_daily_loss_usd=1000.0,
             drawdown_halt_pct=0.20,

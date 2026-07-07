@@ -47,7 +47,7 @@ def log_bankroll_service_version() -> None:
 # CRITICAL FIX: Increased timeout to prevent startup failures on slower connections
 # EVIDENCE-BASED FIX: Increased to 45s based on production logs showing occasional API delays
 _BANKROLL_EQUITY_TIMEOUT_S = float(os.getenv("MERID_BANKROLL_EQUITY_TIMEOUT_S", "45.0"))  # increased from 30 to 45 for production stability
-_BANKROLL_SUMMARY_TIMEOUT_S = float(os.getenv("MERID_BANKROLL_SUMMARY_TIMEOUT_S", "10.0"))  # increased from 5 to 10 to prevent order blocking
+_BANKROLL_SUMMARY_TIMEOUT_S = float(os.getenv("MERID_BANKROLL_SUMMARY_TIMEOUT_S", "30.0"))  # increased from 10 to 30 to prevent order blocking on slow fetches
 from merid.event_venues.kalshi.types import (
     BalanceResult, BalanceSuccess, BalanceTemporaryError, BalancePermanentError,
     InternalBankroll, BalanceState,
@@ -997,11 +997,18 @@ def get_equity_for_risk_calc_sync(force_refresh: bool = False) -> Optional[float
         # This is the correct pattern when calling async code from sync context with a running loop
         future = asyncio.run_coroutine_threadsafe(_get_equity_async(), loop)
         logger.info("[EQUITY-FETCH] Future submitted to loop, waiting for result (timeout=%.1fs)...", _BANKROLL_EQUITY_TIMEOUT_S)
-        equity = future.result(timeout=_BANKROLL_EQUITY_TIMEOUT_S)
-        logger.info("[EQUITY-FETCH] run_coroutine_threadsafe completed with result: %s", equity)
-        if equity is not None:
-            logger.info("[EQUITY-FETCH] equity_cents=%d source=bankroll_service_v2", int(equity * 100))
-        return equity
+        
+        try:
+            equity = future.result(timeout=_BANKROLL_EQUITY_TIMEOUT_S)
+            logger.info("[EQUITY-FETCH] run_coroutine_threadsafe completed with result: %s", equity)
+            if equity is not None:
+                logger.info("[EQUITY-FETCH] equity_cents=%d source=bankroll_service_v2", int(equity * 100))
+            return equity
+        except asyncio.TimeoutError:
+            logger.warning("[EQUITY-FETCH] Timeout waiting for equity (%.1fs) - cancelling future", _BANKROLL_EQUITY_TIMEOUT_S)
+            # Cancel the future to prevent it from continuing in the background
+            future.cancel()
+            return None
     except RuntimeError:
         # No running loop - this should not happen in FastAPI/uvicorn context
         # but handle it for standalone script usage
@@ -1065,11 +1072,18 @@ async def _get_equity_async() -> Optional[float]:
 def get_summary_sync(caller_module: str = "unknown") -> Optional[BankrollSummary]:
     """Synchronous wrapper to get bankroll summary.
     
+    CRITICAL FIX: This function is called from sync contexts (order_router) and must not block.
+    The previous implementation used run_coroutine_threadsafe which could hang if the async loop
+    is busy or the bankroll service is slow to respond.
+    
     Args:
         caller_module: Name of calling module for logging attribution
     
     Returns None on any error. Use this for logging/display where
     you don't want async complexity.
+    
+    NOTE: For order submission, consider passing bankroll as a parameter instead of
+    fetching it synchronously to avoid blocking the order path.
     """
     try:
         loop = asyncio.get_running_loop()
@@ -1077,9 +1091,16 @@ def get_summary_sync(caller_module: str = "unknown") -> Optional[BankrollSummary
         # CRITICAL FIX: Use run_coroutine_threadsafe to schedule on existing loop
         future = asyncio.run_coroutine_threadsafe(_get_summary_async(caller_module), loop)
         logger.info("[SUMMARY-FETCH] Future submitted to loop, waiting for result (timeout=%.1fs)...", _BANKROLL_SUMMARY_TIMEOUT_S)
-        summary = future.result(timeout=_BANKROLL_SUMMARY_TIMEOUT_S)
-        logger.info("[SUMMARY-FETCH] run_coroutine_threadsafe completed")
-        return summary
+        
+        try:
+            summary = future.result(timeout=_BANKROLL_SUMMARY_TIMEOUT_S)
+            logger.info("[SUMMARY-FETCH] run_coroutine_threadsafe completed")
+            return summary
+        except asyncio.TimeoutError:
+            logger.warning("[SUMMARY-FETCH] Timeout waiting for summary (%.1fs) - cancelling future", _BANKROLL_SUMMARY_TIMEOUT_S)
+            # Cancel the future to prevent it from continuing in the background
+            future.cancel()
+            return None
     except RuntimeError:
         # No running loop - this should not happen in FastAPI/uvicorn context
         logger.warning("[SUMMARY-FETCH] No running loop detected - this is unexpected in FastAPI context")
@@ -1087,8 +1108,8 @@ def get_summary_sync(caller_module: str = "unknown") -> Optional[BankrollSummary
             return asyncio.run(_get_summary_async(caller_module))
         except Exception:
             return None
-    except asyncio.TimeoutError:
-        logger.warning("[SUMMARY-FETCH] Timeout waiting for summary (%.1fs)", _BANKROLL_SUMMARY_TIMEOUT_S)
+    except Exception as e:
+        logger.error("[SUMMARY-FETCH] Unexpected error: %s", e)
         return None
 
 

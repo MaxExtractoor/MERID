@@ -3477,11 +3477,15 @@ class Kalshi15mLoop:
                 # to offset net directional exposure per (asset, timeframe) cell
                 try:
                     from merid.event_venues.kalshi.order_router import compute_hedge_intents, route_order_async
-                    from merid.services.bankroll_service import get_bankroll_service
+                    from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service as get_bankroll_service_v2
                     
-                    # Get current bankroll for hedge sizing
-                    bankroll_service = get_bankroll_service()
-                    bankroll_cents = int(bankroll_service.get_equity() * 100) if bankroll_service else 100000
+                    # Get current bankroll for hedge sizing - use v2 directly
+                    bankroll_service = await get_bankroll_service_v2()
+                    if bankroll_service:
+                        summary = await bankroll_service.get_summary()
+                        bankroll_cents = int(summary.equity_usd * 100) if summary and summary.equity_usd else 100000
+                    else:
+                        bankroll_cents = 100000
                     
                     # Compute hedge intents based on current exposure
                     hedge_intents = compute_hedge_intents(bankroll_cents=bankroll_cents)
