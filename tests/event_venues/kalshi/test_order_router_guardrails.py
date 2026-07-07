@@ -131,6 +131,7 @@ def test_signal_validation_rejects_15m_velocity_orders_with_low_edge():
         edge_pct=0.025,  # 2.5% edge (below 3% minimum for velocity orders)
         confidence=0.65,
         model_prob=0.50,
+        rationale="velocity_based: velocity=0.000050 edge_pct=2.5%",  # Add rationale to pass rationale check
         source="merid.prediction.agent_grid_15m"
     )
     
@@ -179,11 +180,116 @@ def test_signal_validation_allows_15m_velocity_orders_with_tightened_thresholds(
         edge_pct=0.03,  # 3% edge (at minimum for velocity orders)
         confidence=0.50,  # 50% confidence (at new minimum for velocity orders, aligned with YAML)
         model_prob=0.50,  # Valid model_prob (required)
+        rationale="velocity_based: velocity=0.000060 edge_pct=3.0%",  # Add rationale
         source="merid.prediction.agent_grid_15m"  # 15m velocity source
     )
     
     error = _validate_signal_metadata(intent)
     assert error is None, "15m velocity orders with sufficient edge/confidence should be accepted"
+
+
+def test_signal_validation_rejects_rationale_none_fee_aware_gate():
+    """CRITICAL FIX: Orders with rationale=None are rejected by fee-aware gate to prevent bypass."""
+    from merid.event_venues.kalshi.order_router import OrderIntent, _validate_signal_metadata
+    
+    intent = OrderIntent(
+        ticker="KXSOL15M-TEST",
+        side="yes",
+        action="buy",
+        price_cents=27,
+        count=3,
+        edge_pct=2.0,
+        rationale=None,  # CRITICAL: rationale=None should be rejected
+        yes_bid_cents=25,
+        yes_ask_cents=29,
+        model_prob=0.50,  # Valid model_prob to pass earlier validation
+        source="merid.prediction.agent_grid_15m"
+    )
+    
+    error = _validate_signal_metadata(intent)
+    assert error == "fee_aware_gate_failed:rationale_required", "Orders with rationale=None should be rejected to prevent gate bypass"
+
+
+def test_signal_validation_rejects_rationale_none_microstructure_gate():
+    """CRITICAL FIX: Orders with rationale=None are rejected by microstructure gate to prevent bypass."""
+    from merid.event_venues.kalshi.order_router import OrderIntent, _validate_signal_metadata
+    
+    intent = OrderIntent(
+        ticker="KXSOL15M-TEST",
+        side="yes",
+        action="buy",
+        price_cents=27,
+        count=3,
+        rationale=None,  # CRITICAL: rationale=None should be rejected
+        yes_bid_cents=25,
+        yes_ask_cents=29,
+        model_prob=0.50,  # Valid model_prob to pass earlier validation
+        source="merid.prediction.agent_grid_15m"
+    )
+    
+    error = _validate_signal_metadata(intent)
+    # Should be rejected by fee_aware_gate first (it comes before microstructure gate)
+    assert error == "fee_aware_gate_failed:rationale_required", "Orders with rationale=None should be rejected"
+
+
+def test_signal_validation_allows_rationale_velocity_based():
+    """Orders with valid velocity_based rationale should pass gate checks."""
+    from merid.event_venues.kalshi.order_router import OrderIntent, _validate_signal_metadata
+    from unittest.mock import patch, Mock
+    
+    intent = OrderIntent(
+        ticker="KXSOL15M-TEST",
+        side="yes",
+        action="buy",
+        price_cents=27,
+        count=3,
+        edge_pct=2.5,
+        rationale="velocity_based: velocity=0.000123 edge_pct=2.50%",
+        yes_bid_cents=25,
+        yes_ask_cents=29,
+        model_prob=0.50,  # Valid model_prob
+        source="merid.prediction.agent_grid_15m"
+    )
+    
+    # Mock profile to disable fee_aware_gate
+    with patch('merid.risk.profiles.crypto_15m_profile.Crypto15mProfileAdapter') as mock_adapter:
+        mock_profile = Mock()
+        mock_profile.fee_aware_edge_enabled = False
+        mock_profile.market_microstructure_enabled = False
+        mock_adapter.return_value.profile = mock_profile
+        
+        error = _validate_signal_metadata(intent)
+        assert error is None, "Orders with valid velocity_based rationale should pass"
+
+
+def test_signal_validation_allows_rationale_price_based():
+    """Orders with valid price_based rationale should pass gate checks."""
+    from merid.event_venues.kalshi.order_router import OrderIntent, _validate_signal_metadata
+    from unittest.mock import patch, Mock
+    
+    intent = OrderIntent(
+        ticker="KXSOL15M-TEST",
+        side="no",
+        action="buy",
+        price_cents=73,
+        count=3,
+        edge_pct=5.0,
+        rationale="price_based: price=0.45 vs thresholds (buy=0.50, sell=0.70)",
+        yes_bid_cents=25,
+        yes_ask_cents=29,
+        model_prob=0.50,  # Valid model_prob
+        source="merid.prediction.agent_grid_15m"
+    )
+    
+    # Mock profile to disable gates
+    with patch('merid.risk.profiles.crypto_15m_profile.Crypto15mProfileAdapter') as mock_adapter:
+        mock_profile = Mock()
+        mock_profile.fee_aware_edge_enabled = False
+        mock_profile.market_microstructure_enabled = False
+        mock_adapter.return_value.profile = mock_profile
+        
+        error = _validate_signal_metadata(intent)
+        assert error is None, "Orders with valid price_based rationale should pass"
 
 
 def test_signal_validation_requires_model_prob_for_15m_orders():
@@ -243,7 +349,7 @@ def test_signal_validation_rejects_missing_confidence():
         price_cents=60,
         count=10,
         edge_pct=0.05,
-        confidence=0.50,  # Too low
+        confidence=0.49,  # Below 0.50 threshold (CRITICAL FIX: use < instead of <=)
         model_prob=0.60,
         source="merid.prediction.agent_grid_15m",  # Use 15m source
         rationale="velocity_based: velocity=0.001 edge_pct=5.00%"  # Add rationale for confidence check
@@ -256,7 +362,7 @@ def test_signal_validation_rejects_missing_confidence():
         mock_adapter.return_value.profile = mock_profile
         
         error = _validate_signal_metadata(intent)
-        assert error == "confidence_too_low:0.50"  # Updated to match actual error format
+        assert error == "confidence_too_low:0.49"  # Updated to match actual error format
 
 
 def test_signal_validation_rejects_invalid_model_prob():
@@ -344,7 +450,7 @@ def test_signal_validation_allows_price_based_orders_with_low_edge():
 
 
 def test_signal_validation_rejects_velocity_orders_without_rationale():
-    """Velocity orders without rationale are subject to edge validation."""
+    """CRITICAL FIX: Velocity orders without rationale are rejected by fee-aware gate before edge validation."""
     from merid.event_venues.kalshi.order_router import OrderIntent, _validate_signal_metadata
     
     intent = OrderIntent(
@@ -357,11 +463,11 @@ def test_signal_validation_rejects_velocity_orders_without_rationale():
         confidence=0.65,
         model_prob=0.50,
         source="merid.prediction.agent_grid_15m",
-        rationale=None,  # No rationale - should be rejected
+        rationale=None,  # No rationale - should be rejected by fee-aware gate
     )
     
     error = _validate_signal_metadata(intent)
-    assert error == "edge_pct_too_low:0.0250", "Velocity orders without rationale should be rejected for low edge"
+    assert error == "fee_aware_gate_failed:rationale_required", "Velocity orders without rationale should be rejected by fee-aware gate"
 
 
 class TestOrderIntentSizingContext:

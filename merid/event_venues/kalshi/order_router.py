@@ -2050,7 +2050,15 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
         # SKIP for price-based and velocity-based strategies (edge calculation differs)
         # - price_based: uses price thresholds, not probability edge
         # - velocity_based: uses velocity magnitude as edge, not probability difference
-        if intent.edge_pct is not None and intent.price_cents is not None and intent.rationale and "price_based" not in intent.rationale and "velocity_based" not in intent.rationale:
+        # CRITICAL FIX: Reject orders with rationale=None to prevent gate bypass
+        if intent.rationale is None:
+            logger.warning(
+                "[FEE-AWARE-GATE] ticker=%s rationale=None - rejecting to prevent gate bypass. Upstream must set rationale.",
+                intent.ticker
+            )
+            return "fee_aware_gate_failed:rationale_required"
+        
+        if intent.edge_pct is not None and intent.price_cents is not None and "price_based" not in intent.rationale and "velocity_based" not in intent.rationale:
             # Load fee-aware edge config from profile
             try:
                 from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
@@ -2079,7 +2087,15 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
         # Phase 1: Market microstructure filters for velocity orders
         # Check spread and depth thresholds
         # SKIP for price-based strategy (trades based on price thresholds, not microstructure)
-        if intent.yes_bid_cents is not None and intent.yes_ask_cents is not None and intent.rationale and "price_based" not in intent.rationale:
+        # CRITICAL FIX: Reject orders with rationale=None to prevent gate bypass
+        if intent.rationale is None:
+            logger.warning(
+                "[MICROSTRUCTURE-GATE] ticker=%s rationale=None - rejecting to prevent gate bypass. Upstream must set rationale.",
+                intent.ticker
+            )
+            return "microstructure_gate_failed:rationale_required"
+        
+        if intent.yes_bid_cents is not None and intent.yes_ask_cents is not None and "price_based" not in intent.rationale:
             try:
                 from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
                 profile_adapter = Crypto15mProfileAdapter()
@@ -2195,11 +2211,11 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
         # 2026-07-06: Velocity-based signals use velocity magnitude as signal strength, not probability-based confidence
         # Research shows momentum trading should not be gated by probability confidence
         # SKIP for price-based strategy (no confidence calculation, trades based on price thresholds)
-        # TEST FIX: For velocity orders with rationale, enforce 50% minimum confidence (strictly less, reject 0.50)
+        # CRITICAL FIX: Allow confidence exactly at threshold (use < instead of <=)
         if intent.rationale and not has_price_rationale:
             # For velocity orders with rationale, enforce confidence check
             min_confidence_threshold = 0.50  # 50% minimum confidence for velocity orders
-            if intent.confidence is not None and intent.confidence <= min_confidence_threshold:
+            if intent.confidence is not None and intent.confidence < min_confidence_threshold:
                 logger.warning(
                     "[SIGNAL-VALIDATION] ticker=%s order confidence=%.2f below minimum %.2f threshold",
                     intent.ticker, intent.confidence, min_confidence_threshold

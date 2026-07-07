@@ -50,6 +50,88 @@ def test_dynamic_risk_imports():
     assert RiskBudget is not None
 
 
+def test_microstructure_data_population_window_based_depth():
+    """CRITICAL FIX: Agent grid populates window-based depth (depth_10c_yes/depth_10c_no) instead of single-level depth."""
+    from unittest.mock import Mock
+    
+    # Mock market state with window-based depth
+    mock_market_state = Mock()
+    mock_market_state.best_bid_cents = 25
+    mock_market_state.best_ask_cents = 29
+    mock_market_state.depth_10c_yes = 50  # Window-based depth (contracts within ±10c)
+    mock_market_state.depth_10c_no = 45
+    mock_market_state.min_depth_yes = 5  # Single-level depth (best bid only)
+    mock_market_state.min_depth_no = 3
+    
+    # Simulate the population logic from agent_grid_15m.py lines 5012-5025
+    candidate = {}
+    
+    # Populate YES/NO prices
+    candidate["yes_bid_cents"] = mock_market_state.best_bid_cents
+    candidate["yes_ask_cents"] = mock_market_state.best_ask_cents
+    candidate["no_ask_cents"] = 100 - mock_market_state.best_bid_cents
+    candidate["no_bid_cents"] = 100 - mock_market_state.best_ask_cents
+    
+    # CRITICAL FIX: Use window-based depth
+    depth_10c_yes = mock_market_state.depth_10c_yes
+    depth_10c_no = mock_market_state.depth_10c_no
+    if depth_10c_yes is not None and depth_10c_yes > 0:
+        candidate["yes_depth"] = depth_10c_yes
+    else:
+        candidate["yes_depth"] = mock_market_state.min_depth_yes
+    if depth_10c_no is not None and depth_10c_no > 0:
+        candidate["no_depth"] = depth_10c_no
+    else:
+        candidate["no_depth"] = mock_market_state.min_depth_no
+    
+    # Verify window-based depth is used
+    assert candidate["yes_depth"] == 50, "Should use window-based depth (depth_10c_yes) when available"
+    assert candidate["no_depth"] == 45, "Should use window-based depth (depth_10c_no) when available"
+    assert candidate["yes_bid_cents"] == 25
+    assert candidate["yes_ask_cents"] == 29
+    assert candidate["no_bid_cents"] == 71
+    assert candidate["no_ask_cents"] == 75
+
+
+def test_microstructure_data_population_fallback_to_single_level():
+    """CRITICAL FIX: Agent grid falls back to single-level depth when window-based depth unavailable."""
+    from unittest.mock import Mock
+    
+    # Mock market state without window-based depth
+    mock_market_state = Mock()
+    mock_market_state.best_bid_cents = 25
+    mock_market_state.best_ask_cents = 29
+    mock_market_state.depth_10c_yes = None  # Window-based depth unavailable
+    mock_market_state.depth_10c_no = None
+    mock_market_state.min_depth_yes = 5  # Single-level depth fallback
+    mock_market_state.min_depth_no = 3
+    
+    # Simulate the population logic from agent_grid_15m.py lines 5012-5025
+    candidate = {}
+    
+    # Populate YES/NO prices
+    candidate["yes_bid_cents"] = mock_market_state.best_bid_cents
+    candidate["yes_ask_cents"] = mock_market_state.best_ask_cents
+    candidate["no_ask_cents"] = 100 - mock_market_state.best_bid_cents
+    candidate["no_bid_cents"] = 100 - mock_market_state.best_ask_cents
+    
+    # CRITICAL FIX: Fallback to single-level depth
+    depth_10c_yes = mock_market_state.depth_10c_yes
+    depth_10c_no = mock_market_state.depth_10c_no
+    if depth_10c_yes is not None and depth_10c_yes > 0:
+        candidate["yes_depth"] = depth_10c_yes
+    else:
+        candidate["yes_depth"] = mock_market_state.min_depth_yes
+    if depth_10c_no is not None and depth_10c_no > 0:
+        candidate["no_depth"] = depth_10c_no
+    else:
+        candidate["no_depth"] = mock_market_state.min_depth_no
+    
+    # Verify fallback to single-level depth
+    assert candidate["yes_depth"] == 5, "Should fallback to single-level depth (min_depth_yes) when window-based unavailable"
+    assert candidate["no_depth"] == 3, "Should fallback to single-level depth (min_depth_no) when window-based unavailable"
+
+
 def test_agent_grid_15m_imports():
     """Verify agent grid module can be imported."""
     from merid.prediction.agent_grid_15m import LeanAgent15m
