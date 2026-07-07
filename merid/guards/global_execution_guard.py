@@ -14,6 +14,22 @@ New code should use UnifiedRiskManager for all risk checks.
 CRITICAL: For kalshi_crypto_15m_v2 profile, risk parameters are loaded from profile YAML.
 This module's defaults (3% bankroll cap) are NOT used by the 15m production stack.
 
+IMPORT BLOCKED: This module is deprecated and should not be imported in production code.
+Use merid.risk.unified_risk_manager instead.
+"""
+
+# Import-time error to prevent accidental usage in production
+import sys
+import os
+
+# Allow import for tests or legacy code paths that explicitly opt-in
+if os.getenv("ALLOW_DEPRECATED_RISK_GUARDS", "").lower() not in ("1", "true", "yes"):
+    raise ImportError(
+        "merid.guards.global_execution_guard is DEPRECATED. "
+        "Use merid.risk.unified_risk_manager instead. "
+        "Set ALLOW_DEPRECATED_RISK_GUARDS=1 to bypass this check (for tests only)."
+    )
+
 ---
 
 Legacy documentation (deprecated):

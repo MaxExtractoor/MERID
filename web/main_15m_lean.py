@@ -2793,8 +2793,8 @@ async def _run_startup_phases_v20260530(app):
     logger.info("[STARTUP] P1.7: BEFORE bankroll")
     logger.info("[STARTUP] P1.7.1: Importing bankroll_service_v2")
     from merid.event_venues.kalshi.bankroll_service_v2 import BankrollServiceV2, set_bankroll_service
-    logger.info("[STARTUP] P1.7.2: Importing global_risk_guard")
-    from merid.guards.global_risk_guard import set_equity_provider
+    logger.info("[STARTUP] P1.7.2: Importing unified_risk_manager")
+    from merid.risk.unified_risk_manager import get_unified_risk_manager
     logger.info("[STARTUP] P1.7.3: Creating BankrollServiceV2 instance directly")
     
     
@@ -2847,9 +2847,10 @@ async def _run_startup_phases_v20260530(app):
             logger.error(f"[STARTUP] equity_provider_cents failed: {e}")
             return 0
     
-    logger.info("[STARTUP] P1.7.7: Calling set_equity_provider")
-    set_equity_provider(equity_provider_cents)
-    logger.info("[STARTUP] P1.7.8: set_equity_provider completed")
+    logger.info("[STARTUP] P1.7.7: Calibrating UnifiedRiskManager from bankroll")
+    risk_mgr = get_unified_risk_manager()
+    risk_mgr.calibrate_from_balance(balance_cents=equity_provider_cents)
+    logger.info("[STARTUP] P1.7.8: UnifiedRiskManager calibrated")
     logger.info("[STARTUP] Bankroll service initialized and registered")
     
     logger.info("[STARTUP] P1.7: AFTER bankroll")

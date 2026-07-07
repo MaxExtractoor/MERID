@@ -866,6 +866,8 @@ _ALLOWED_CALLER_PREFIXES = (
     "merid.loop_15m",
     # Position monitor - executes exit orders for TP/SL/trailing stops
     "merid.position_management.position_monitor",
+    # Position cache - executes resting bracket orders (TP/SL) for exit policy enforcement
+    "merid.event_venues.kalshi.position_cache",
     # Web 15m main entry point for 15m crypto trading
     "web.main_15m",
     # Tests are allowed for testing the router itself
@@ -894,7 +896,7 @@ _ALLOWED_CALLER_PREFIXES = (
     # NOTE: SIGNAL-ONLY agents - these must route through trading_agent
     # "merid.prediction.kalshi_tools",  # SIGNAL ONLY - use trading_agent
     # "merid.trading.ct_execution_adapter",  # SIGNAL ONLY - CT must route through trading_agent
-    # "merid.trading.kalshi_continuous_trader",  # SIGNAL ONLY - CT must route through trading_agent
+    # "merid.trading.kalshi_continuous_trader",  # SIGNAL ONLY - CT must route through trading_agent (DEPRECATED - use UnifiedRiskManager)
     # "merid.lanes.btc15m_lane",      # SIGNAL ONLY - no execution
     # "merid.lanes.crypto15m_lane",   # SIGNAL ONLY - no execution
     # "merid.prediction.universal_agent",  # SIGNAL ONLY - no execution
@@ -6048,39 +6050,18 @@ def _run_shared_risk_guard_and_dedup(
     # Cross-caller deduplication is too aggressive for high-frequency signal generation
     # and blocks valid orders from the same caller (loop_15m) in the same bucket
 
-    # ── Step 2: shared GlobalRiskGuard ─────────────────────────────────
+    # ── Step 2: UnifiedRiskManager check ─────────────────────────────────
     try:
-        from merid.guards.global_risk_guard import (
-            get_global_risk_guard,
-            resolve_equity_cents,
-            resolve_existing_risk_cents,
-            compute_intent_max_loss_cents,
-            PendingOrderRisk,
-        )
+        from merid.risk.unified_risk_manager import get_unified_risk_manager
 
-        max_loss = compute_intent_max_loss_cents(
-            side=intent.side,
-            action=action,
-            price_cents=int(intent.price_cents),
-            count=int(intent.count),
-        )
         asset = _infer_asset_from_ticker(intent.ticker)
-        pending = PendingOrderRisk(
-            ticker=intent.ticker,
-            asset=asset,
-            contracts=int(intent.count),
-            entry_price_cents=int(intent.price_cents),
-            direction="long" if (intent.side or "").lower() == "yes" else "short",
-            max_loss_cents=max_loss,
-            edge=float(intent.edge_pct or 0.0),
-        )
-        guard = get_global_risk_guard()
-        equity = resolve_equity_cents()
-        existing = resolve_existing_risk_cents()
+        guard = get_unified_risk_manager()
         allowed, reason = guard.check_order(
-            equity_cents=equity,
-            existing_risk_cents=existing,
-            pending_order=pending,
+            ticker=intent.ticker,
+            contracts=int(intent.count),
+            price_cents=int(intent.price_cents),
+            category="crypto",
+            underlying=asset,
         )
         if not allowed:
             latency = (_time.monotonic() - t0) * 1000
@@ -6093,7 +6074,7 @@ def _run_shared_risk_guard_and_dedup(
             return OrderResult(
                 status="rejected",
                 mode=mode,
-                reason=f"global_risk_guard:{reason[:200]}",
+                reason=f"unified_risk_manager:{reason[:200]}",
                 latency_ms=round(latency, 2),
             )
 
@@ -6103,12 +6084,12 @@ def _run_shared_risk_guard_and_dedup(
         # reject rather than silently let the order through.
         latency = (_time.monotonic() - t0) * 1000
         logger.error(
-            "[GLOBAL-RISK-GUARD] infrastructure failure — fail-closed: %s", _guard_exc,
+            "[UNIFIED-RISK-MANAGER] infrastructure failure — fail-closed: %s", _guard_exc,
         )
         return OrderResult(
             status="rejected",
             mode=mode,
-            reason=f"global_risk_guard:infra_error:{type(_guard_exc).__name__}",
+            reason=f"unified_risk_manager:infra_error:{type(_guard_exc).__name__}",
             latency_ms=round(latency, 2),
         )
 
