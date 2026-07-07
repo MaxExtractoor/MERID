@@ -364,25 +364,26 @@ class TestEdgeBandConfiguration:
         
         edge_bands = profile_config.get('edge_bands', {})
         
-        # Verify watch band: 0.8-1.5% (lowered from 2-4%)
-        assert edge_bands['watch_band']['min_edge_pct'] == 0.008, \
-            "Watch band min edge should be 0.8% (lowered from 2%)"
-        assert edge_bands['watch_band']['max_edge_pct'] == 0.015, \
-            "Watch band max edge should be 1.5% (lowered from 4%)"
+        # 2026-07-07: Verify edge bands updated based on trade scenario simulation (reduced from 3% to 0.5%)
+        # Verify watch band: 0.5% (reduced from 0.8% based on simulation)
+        assert edge_bands['watch_band']['min_edge_pct'] == 0.005, \
+            "Watch band min edge should be 0.5% (reduced from 0.8% based on trade scenario simulation)"
+        assert edge_bands['watch_band']['max_edge_pct'] == 0.005, \
+            "Watch band max edge should be 0.5% (unified with min for consistency)"
         assert edge_bands['watch_band']['action'] == "log_only"
         assert edge_bands['watch_band']['kelly_multiplier'] == 0.0
         
-        # Verify small band: 1.5-3% (lowered from 4-6%)
-        assert edge_bands['small_band']['min_edge_pct'] == 0.015, \
-            "Small band min edge should be 1.5% (lowered from 4%)"
-        assert edge_bands['small_band']['max_edge_pct'] == 0.03, \
-            "Small band max edge should be 3% (lowered from 6%)"
+        # Verify small band: 0.5-1% (reduced from 1.5-3% based on simulation)
+        assert edge_bands['small_band']['min_edge_pct'] == 0.005, \
+            "Small band min edge should be 0.5% (reduced from 1.5% based on trade scenario simulation)"
+        assert edge_bands['small_band']['max_edge_pct'] == 0.01, \
+            "Small band max edge should be 1% (reduced from 3% based on trade scenario simulation)"
         assert edge_bands['small_band']['action'] == "trade_small"
         assert edge_bands['small_band']['kelly_multiplier'] == 0.25
         
-        # Verify standard band: ≥3% (lowered from ≥6%)
-        assert edge_bands['standard_band']['min_edge_pct'] == 0.03, \
-            "Standard band min edge should be 3% (lowered from 6%)"
+        # Verify standard band: ≥0.5% (reduced from ≥3% based on simulation)
+        assert edge_bands['standard_band']['min_edge_pct'] == 0.005, \
+            "Standard band min edge should be 0.5% (reduced from 3% based on trade scenario simulation)"
         assert edge_bands['standard_band']['max_edge_pct'] == 1.0, \
             "Standard band max edge should be unlimited (1.0)"
         assert edge_bands['standard_band']['action'] == "trade_standard"

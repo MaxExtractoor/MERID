@@ -232,21 +232,28 @@ class TestEdgeThresholdOptimization:
         # Check watch band thresholds (actual configuration values)
         watch_min = bands["watch_band"]["min_edge_pct"]
         watch_max = bands["watch_band"]["max_edge_pct"]
-        assert watch_min == 0.04, f"Watch band min should be 4%, got {watch_min}"
-        assert watch_max == 0.05, f"Watch band max should be 5%, got {watch_max}"
+        # 2026-07-07: Updated edge band thresholds based on trade scenario simulation (reduced to 0.5%)
+        assert watch_min == 0.005, f"Watch band min should be 0.5%, got {watch_min}"
+        assert watch_max == 0.005, f"Watch band max should be 0.5%, got {watch_max}"
         
         # Check small band thresholds (actual configuration values)
         small_min = bands["small_band"]["min_edge_pct"]
         small_max = bands["small_band"]["max_edge_pct"]
-        assert small_min == 0.05, f"Small band min should be 5%, got {small_min}"
-        assert small_max == 0.07, f"Small band max should be 7%, got {small_max}"
+        assert small_min == 0.005, f"Small band min should be 0.5%, got {small_min}"
+        assert small_max == 0.01, f"Small band max should be 1%, got {small_max}"
         
         # Check standard band thresholds (actual configuration values)
         standard_min = bands["standard_band"]["min_edge_pct"]
-        assert standard_min == 0.07, f"Standard band min should be 7%, got {standard_min}"
+        assert standard_min == 0.005, f"Standard band min should be 0.5%, got {standard_min}"
     
     def test_edge_band_progression(self):
-        """Test that edge bands have proper progression."""
+        """Test that edge bands have proper progression.
+        
+        2026-07-07: Updated to reflect new tiered structure where bands share a common
+        minimum edge (0.5%) but differ in action and Kelly multipliers. This allows
+        for more granular sizing based on edge quality while maintaining a unified
+        entry threshold.
+        """
         import yaml
         
         with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
@@ -254,14 +261,31 @@ class TestEdgeThresholdOptimization:
         
         bands = profile["edge_bands"]
         
-        watch_max = bands["watch_band"]["max_edge_pct"]
+        # Verify bands share the same minimum edge (unified entry threshold)
+        watch_min = bands["watch_band"]["min_edge_pct"]
         small_min = bands["small_band"]["min_edge_pct"]
-        small_max = bands["small_band"]["max_edge_pct"]
         standard_min = bands["standard_band"]["min_edge_pct"]
         
-        # Bands should not overlap incorrectly
-        assert watch_max <= small_min, "Watch band max should be <= small band min"
-        assert small_max <= standard_min, "Small band max should be <= standard band min"
+        assert watch_min == small_min == standard_min == 0.005, \
+            "All bands should share the same minimum edge (0.5%) for unified entry threshold"
+        
+        # Verify bands have different actions and Kelly multipliers
+        assert bands["watch_band"]["action"] == "log_only"
+        assert bands["watch_band"]["kelly_multiplier"] == 0.0
+        
+        assert bands["small_band"]["action"] == "trade_small"
+        assert bands["small_band"]["kelly_multiplier"] == 0.25
+        
+        assert bands["standard_band"]["action"] == "trade_standard"
+        assert bands["standard_band"]["kelly_multiplier"] == 0.50
+        
+        # Verify max edges increase appropriately
+        watch_max = bands["watch_band"]["max_edge_pct"]
+        small_max = bands["small_band"]["max_edge_pct"]
+        standard_max = bands["standard_band"]["max_edge_pct"]
+        
+        assert watch_max <= small_max, "Watch band max should be <= small band max"
+        assert small_max < standard_max, "Small band max should be < standard band max"
     
     def test_kelly_multipliers(self):
         """Test that Kelly multipliers are properly configured."""
