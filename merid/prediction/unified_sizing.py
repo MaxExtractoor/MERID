@@ -155,6 +155,107 @@ def _get_tte_position_size_multiplier(tte_seconds: Optional[float] = None) -> fl
     return 1.0
 
 
+def _get_time_of_day_multiplier(asset: str) -> float:
+    """
+    Get time-of-day risk scaling multiplier.
+    
+    CURRENT STATUS: DISABLED via profile YAML (time_of_day_risk_scaling.enabled: false)
+    This function returns 1.0 (no scaling) when disabled.
+    
+    FUTURE RE-ENABLEMENT: When re-enabling, must:
+      1. Update kalshi_crypto_15m_risk_envelope.py to apply time_of_day_multiplier to risk limits
+      2. Ensure 3% per asset / 5% per 15m window limits are still respected after multiplier
+      3. Add validation to prevent time_of_day_multiplier > 1.0 from causing oversizing
+      4. Test with various time-of-day multipliers to verify limits are respected
+    
+    Industry Research (LiquidView 2026):
+    - Asian session (00:00-08:00 UTC): 15-30% wider spreads, 20-40% lower depth
+    - European session (08:00-14:00 UTC): Competitive liquidity, near-daily tight spreads
+    - US session (14:00-22:00 UTC): Peak liquidity, deepest books, lowest execution cost
+    - Late Asian/early Pacific (22:00-00:00 UTC): Liquidity trough, highest execution costs
+    
+    Profile YAML multipliers (when enabled):
+    - US market: 1.0 (100% risk during peak liquidity)
+    - European: 0.9 (90% risk during good liquidity)
+    - Asian: 0.8 (80% risk during lower liquidity)
+    - Weekend: 0.8 (80% risk during reduced liquidity)
+    
+    Args:
+        asset: Asset symbol (e.g., "BTC", "ETH", "SOL", "XRP", "DOGE")
+    
+    Returns:
+        Multiplier between 0.5 and 1.0. Returns 1.0 if disabled or on error.
+    """
+    try:
+        from merid.risk.profiles.crypto_15m_profile import get_active_profile
+        profile_adapter = get_active_profile()
+        if not profile_adapter or not profile_adapter._profile:
+            return 1.0
+        
+        profile = profile_adapter._profile
+        if not profile.time_of_day_risk_scaling_enabled:
+            # DISABLED: Return 1.0 (no scaling) when feature is disabled in YAML
+            return 1.0
+        
+        # If enabled, read from profile and apply session-based logic
+        from datetime import datetime, timezone
+        current_utc_hour = datetime.now(timezone.utc).hour
+        current_utc_minute = datetime.now(timezone.utc).minute
+        current_time_utc = current_utc_hour + current_utc_minute / 60.0
+        
+        # Parse session windows from profile (format: "HH:MM-HH:MM ET")
+        # Convert ET to UTC (ET = UTC-4 or UTC-5 depending on DST)
+        # For simplicity, assume ET = UTC-4 (daylight time)
+        et_offset = 4
+        
+        def parse_time_range(time_str: str) -> tuple[float, float]:
+            """Parse 'HH:MM-HH:MM ET' to UTC hours."""
+            # Strip ' ET' suffix if present
+            time_str = time_str.replace(' ET', '')
+            start_str, end_str = time_str.split('-')
+            start_h, start_m = map(int, start_str.split(':'))
+            end_h, end_m = map(int, end_str.split(':'))
+            start_utc = (start_h + et_offset) % 24
+            end_utc = (end_h + et_offset) % 24
+            return start_utc + start_m / 60.0, end_utc + end_m / 60.0
+        
+        us_market_start, us_market_end = parse_time_range(profile.time_of_day_risk_scaling_us_market_hours)
+        asian_start, asian_end = parse_time_range(profile.time_of_day_risk_scaling_asian_session)
+        european_start, european_end = parse_time_range(profile.time_of_day_risk_scaling_european_session)
+        
+        # Determine current session
+        in_us_market = us_market_start <= current_time_utc < us_market_end
+        in_asian = asian_start <= current_time_utc < asian_end
+        in_european = european_start <= current_time_utc < european_end
+        
+        # Check if weekend (Saturday/Sunday in UTC)
+        is_weekend = datetime.now(timezone.utc).weekday() >= 5
+        
+        # Apply multiplier based on session
+        if is_weekend:
+            multiplier = profile.time_of_day_risk_scaling_weekend_multiplier
+        elif in_us_market:
+            multiplier = profile.time_of_day_risk_scaling_us_market_multiplier
+        elif in_asian:
+            multiplier = profile.time_of_day_risk_scaling_asian_multiplier
+        elif in_european:
+            multiplier = profile.time_of_day_risk_scaling_european_multiplier
+        else:
+            multiplier = 1.0
+        
+        # Validate multiplier is within safe bounds (0.5 to 1.0)
+        multiplier = max(0.5, min(1.0, multiplier))
+        
+        logger.info(
+            "[TIME-OF-DAY-SCALING] asset=%s time_utc=%.2f multiplier=%.2f",
+            asset, current_time_utc, multiplier
+        )
+        return multiplier
+    except Exception as e:
+        logger.warning("[TIME-OF-DAY-SCALING] asset=%s failed to get multiplier: %s", asset, e)
+        return 1.0
+
+
 # =============================================================================
 # Venue-Aware Minimum Notional
 # =============================================================================
@@ -167,14 +268,15 @@ def compute_min_notional_for_venue(
     """Compute minimum notional requirement from venue/contract metadata.
     
     This function centralizes min_notional calculation to avoid hardcoded constants.
-    For Kalshi, the minimum notional is $0.15 - aligned with the 15c minimum contract
-    price floor (guardrails min_contract_price_cents).
+    For Kalshi, the minimum notional is DYNAMIC based on contract price - aligned with
+    the 1-contract-per-order rule and the 10c minimum contract price floor.
     
-    HARD RULE (2026-07-06): Agents place 1 contract per order. The previous $0.50
-    minimum forced the min-notional bump-up path to raise count to 2+ contracts for
-    sub-50c prices (doubling up on the same price) or reject the trade entirely.
-    With the 1-contract-per-order rule, min_notional must equal the price floor so
-    a single contract at 15-99c always satisfies it.
+    HARD RULE (2026-07-06): Agents place 1 contract per order. The min_notional
+    must be equal to the contract notional itself (price_cents / 100) to ensure
+    a single contract always satisfies the minimum notional requirement.
+    
+    This prevents rejection of low-priced contracts (1c-9c) when they are valid
+    entries in the 10-75c sweet spot range.
     
     Args:
         venue: Venue name (e.g., "kalshi")
@@ -186,10 +288,15 @@ def compute_min_notional_for_venue(
     """
     # Kalshi-specific rules
     if venue.lower() == "kalshi":
-        # Kalshi contracts pay $1 per contract
-        # Minimum order notional is $0.15 = 1 contract at the 15c price floor
-        # This is a venue-level requirement, not a risk limit
-        return Decimal("0.15")
+        # CRITICAL FIX: Dynamic min_notional based on actual contract price
+        # With 1-contract-per-order rule, min_notional = contract_notional
+        # This ensures single contract orders always pass min_notional validation
+        if price_cents is not None and price_cents > 0:
+            # Min notional = cost of 1 contract at this price
+            return Decimal(str(price_cents)) / Decimal("100")
+        else:
+            # Fallback: use 10c minimum price floor = $0.10
+            return Decimal("0.10")
     
     # For other venues or if venue metadata is unavailable, return 0.0 (no constraint)
     # This allows the sizing function to proceed without a min_notional floor
@@ -694,12 +801,14 @@ def compute_order_size(
         max_notional_usd = max_notional_usd * Decimal(str(dynamic_sizing_multiplier))
     
     # Step 4.5: Apply time-of-day risk scaling multiplier
-    # 2026 Research-Based Risk Management: Scale position size based on trading session
-    if time_of_day_multiplier != 1.0:
-        max_notional_usd = max_notional_usd * Decimal(str(time_of_day_multiplier))
+    # CRITICAL: Use _get_time_of_day_multiplier to ensure consistency with profile YAML
+    # This replaces the direct time_of_day_multiplier parameter with profile-driven logic
+    actual_time_of_day_multiplier = _get_time_of_day_multiplier(asset)
+    if actual_time_of_day_multiplier != 1.0:
+        max_notional_usd = max_notional_usd * Decimal(str(actual_time_of_day_multiplier))
         logger.info(
             "[TIME-OF-DAY-SCALING] Applied multiplier=%.2f to max_notional for asset=%s (new max_notional=%.2f)",
-            time_of_day_multiplier, asset, float(max_notional_usd)
+            actual_time_of_day_multiplier, asset, float(max_notional_usd)
         )
     
     # Step 4.6: Apply regime-based position size multiplier
