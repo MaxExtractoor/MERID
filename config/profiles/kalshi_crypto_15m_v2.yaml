@@ -608,12 +608,14 @@ min_max_notional_usd: 0.10  # Minimum floor for per-asset max_notional (reduced 
 # 2026 OPTIMIZATION: Per-asset minimum decision minute (skip noisy early signals)
 # Industry standard (GRDazzle bot): Skip first N minutes of 15m window to avoid noise
 # This prevents low-quality signals from early price action
+# 2026-07-07: Reduced to 1 minute for all assets to capture signals at window rollover
+# while still filtering extreme noise in the first 60 seconds
 min_decision_minute:
-  BTC: 2  # Skip first 2 minutes for BTC (deeper market, needs more time to settle)
-  ETH: 2  # Skip first 2 minutes for ETH (similar to BTC)
-  SOL: 3  # Skip first 3 minutes for SOL (thinner book, more noise)
-  XRP: 3  # Skip first 3 minutes for XRP (thinner book, more noise)
-  DOGE: 5  # INCREASED from 4 to 5 for DOGE (thinnest book, most noise, needs longer wait for signal clarity)
+  BTC: 1  # Reduced from 2 - capture early signals while filtering noise
+  ETH: 1  # Reduced from 2 - capture early signals while filtering noise
+  SOL: 1  # Reduced from 3 - capture early signals while filtering noise
+  XRP: 1  # Reduced from 3 - capture early signals while filtering noise
+  DOGE: 1  # Reduced from 5 - capture early signals while filtering noise
 
 # 2026 OPTIMIZATION: Volatility-Regime Edge Adjustment
 # Industry standard: Adjust edge thresholds based on volatility regime

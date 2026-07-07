@@ -449,10 +449,10 @@ class TestThresholdOptimization:
         assert field_defaults.get('volatility_regime_edge_adjustment_high_volatility_adjustment') == 0.005, "Default high vol adjustment should be +0.5% (aligned with YAML)"
 
     def test_doge_min_decision_minute_increased(self):
-        """Test that DOGE min decision minute is increased to 5 for signal clarity."""
+        """Test that DOGE min decision minute is set to 1 for all assets (2026-07-07)."""
         with patch('merid.risk.profiles.crypto_15m_profile.is_profile_active', return_value=True), \
              patch('merid.risk.profiles.crypto_15m_profile.get_active_profile', return_value=MagicMock(profile=MagicMock(
-                 min_decision_minute_DOGE=5
+                 min_decision_minute_DOGE=1
              ))):
             from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
             
@@ -460,8 +460,8 @@ class TestThresholdOptimization:
                 adapter = get_active_profile()
                 profile = adapter.profile
                 
-                # Verify DOGE min decision minute is 5 (increased from 4)
-                assert profile.min_decision_minute_DOGE == 5
+                # Verify DOGE min decision minute is 1 (reduced from 5 for all assets)
+                assert profile.min_decision_minute_DOGE == 1
 
     def test_time_of_day_multiplier_in_candidate(self):
         """Test that time_of_day_multiplier is included in candidate dictionary."""
