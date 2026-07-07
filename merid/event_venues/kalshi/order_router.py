@@ -1728,13 +1728,10 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
         _increment_validation_gate_metric("ROUTER_VALIDATION", "non_positive_size")
         return "non_positive_size"
     
-    # CRITICAL: Enforce 1 contract per order hard cap
-    # This prevents doubling up on the same price and aligns with risk management strategy
-    # Profile config sets max_single_order_contracts to 1 for all assets
-    if intent.count > 1:
-        _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "max_single_order_contracts_exceeded")
-        _increment_validation_gate_metric("ROUTER_VALIDATION", "max_single_order_contracts_exceeded")
-        return "max_single_order_contracts_exceeded"
+    # CRITICAL FIX (2026-07-07): Removed hardcoded 1 contract per order limit
+    # This was blocking multi-contract exits (ratchet trim, 99c exit, scale-out)
+    # Max contracts per order is now enforced by profile config (contract_caps.max_single_order_contracts)
+    # and validated in KalshiRiskManager.check_order()
     
     # CRITICAL: Check for duplicate orders (same ticker, side, action, price within time window)
     # This prevents agents from placing multiple identical resting limit orders

@@ -140,10 +140,10 @@ class TestThresholdOptimization:
                 assert profile.correlation_tracking_max_correlated_assets == 3
 
     def test_doge_specific_adjustments(self):
-        """Test that DOGE has reduced max contracts and increased min edge."""
+        """Test that DOGE has increased max contracts (2026-07-07 fix) and increased min edge."""
         with patch('merid.risk.profiles.crypto_15m_profile.is_profile_active', return_value=True), \
              patch('merid.risk.profiles.crypto_15m_profile.get_active_profile', return_value=MagicMock(profile=MagicMock(
-                 assets_DOGE_max_contracts=1,
+                 assets_DOGE_max_contracts=10,  # CRITICAL FIX (2026-07-07): Increased from 1 to 10 for multi-contract exits
                  assets_DOGE_min_edge_early=0.065,
                  assets_DOGE_min_edge_mid=0.065,
                  assets_DOGE_min_edge_late=0.065,
@@ -157,7 +157,7 @@ class TestThresholdOptimization:
                 profile = adapter.profile
                 
                 # Verify DOGE-specific adjustments
-                assert profile.assets_DOGE_max_contracts == 1  # Reduced from 2
+                assert profile.assets_DOGE_max_contracts == 10  # CRITICAL FIX (2026-07-07): Increased from 1 to 10
                 assert profile.assets_DOGE_min_edge_early == 0.065  # Increased from 0.06
                 assert profile.assets_DOGE_min_edge_mid == 0.065  # Increased from 0.06
                 assert profile.assets_DOGE_min_edge_late == 0.065  # Increased from 0.06
