@@ -784,8 +784,9 @@ class KalshiRiskConfig:
     max_stop_loss_usd_per_cluster: float = 0.0  # 0 = derive from profile (was 500.0 hardcoded)
     # 2026 STANDARD: Per-asset cluster stop-loss limits
     per_asset_cluster_stop_loss: Dict[str, float] = field(default_factory=dict)
-    # 15m scalper: max 5 contracts per order (increased from 1 for better position sizing)
-    max_single_order_contracts: int = int(os.getenv("KALSHI_MAX_ORDER_CONTRACTS", "5"))  # 5 for production (was 1 - too restrictive)
+    # CRITICAL FIX (2026-07-07): Increased default from 5 to 10 to allow multi-contract exits
+    # Profile config (contract_caps.max_single_order_contracts) takes precedence over this default
+    max_single_order_contracts: int = int(os.getenv("KALSHI_MAX_ORDER_CONTRACTS", "10"))  # 10 for production (was 5 - too restrictive for multi-contract exits)
     max_single_order_notional_usd: float = 0.0  # 0 = derive from profile (was 2500.0 hardcoded)
     max_position_per_contract: int = 500  # Kalshi typical retail limit
     # Per-asset max notional caps (from risk envelope with floor applied)
