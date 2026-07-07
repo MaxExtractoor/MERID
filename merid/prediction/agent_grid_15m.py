@@ -413,6 +413,17 @@ class LeanAgent15m:
         for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
             self._velocity_zscore_history[asset] = collections.deque(maxlen=self._zscore_window_size)
         
+        # DATA QUALITY: Initialize data quality issue tracking
+        # Tracks OHLCV corruption, staleness, and other data quality issues per asset
+        self._data_quality_issues: Dict[str, Dict[str, int]] = {}
+        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+            self._data_quality_issues[asset] = {
+                "ohlcv_corruption": 0,  # high < low violations
+                "ohlcv_stale": 0,       # high == low (no movement)
+                "volume_anomaly": 0,    # volume spikes or zeros
+                "price_anomaly": 0,     # price spikes or gaps
+            }
+        
         # Phase 6: Initialize ADX history for trend filtering (14-period ADX)
         self._adx_history: Dict[str, collections.deque] = {}
         self._adx_window_size = 14  # ADX period (industry standard)
@@ -600,13 +611,33 @@ class LeanAgent15m:
         else:
             # Fallback: Calculate OHLC proxy volume from price movement
             # This captures trading activity as a proxy for volume
-            if high_price > low_price:
+            # DATA QUALITY FIX: Validate OHLC invariants before using data
+            # Industry best practice: high >= low is a fundamental invariant
+            if high_price < low_price:
+                # CORRUPTED DATA: high < low is mathematically impossible
+                # This indicates data provider error or transmission corruption
+                logger.error(
+                    f"[DATA-QUALITY] asset={asset} CORRUPTED OHLC data: high={high_price:.2f} < low={low_price:.2f}. "
+                    f"This violates the fundamental OHLC invariant (high >= low). "
+                    f"Using default volume=1.0 and flagging for data quality audit."
+                )
+                # Track data quality issue for metrics
+                self._track_data_quality_issue(asset, "ohlcv_corruption", "high_less_than_low")
+                volume = 1.0
+            elif high_price == low_price:
+                # STALE DATA: high == low indicates no price movement
+                # This is valid but indicates illiquid market or stale data
+                logger.debug(
+                    f"[DATA-QUALITY] asset={asset} STALE OHLC data: high={high_price:.2f} == low={low_price:.2f}. "
+                    f"No price movement detected in this period. Using default volume=1.0."
+                )
+                volume = 1.0
+            elif high_price > low_price:
+                # VALID DATA: Calculate volume proxy from price movement
                 volume_proxy = (high_price - low_price) * spot_price
                 # Normalize to reasonable range (1-100) to avoid extreme values
                 volume = max(1.0, min(100.0, volume_proxy * 100))
                 logger.info(f"[VOLUME-EXTRACTION] asset={asset} volume not available, using OHLC proxy={volume:.2f} (high={high_price:.2f} low={low_price:.2f} spot={spot_price:.2f})")
-            else:
-                logger.warning(f"[VOLUME-EXTRACTION] asset={asset} volume not available and OHLC data invalid (high={high_price:.2f} <= low={low_price:.2f}), using default=1.0")
         
         # Phase 4.1: Update volatility history for ATR calculation BEFORE appending current price
         # This ensures we compare current price with previous price, not with itself
@@ -636,6 +667,30 @@ class LeanAgent15m:
         # CRITICAL FIX: 2026-07-01 - Update multi-timeframe price history for alignment
         self._price_1m_history[asset].append((current_time, spot_price))
         self._price_5m_history[asset].append((current_time, spot_price))
+    
+    def _track_data_quality_issue(self, asset: str, issue_type: str, detail: str) -> None:
+        """Track data quality issues for metrics and auditing.
+        
+        Args:
+            asset: Asset symbol (BTC, ETH, SOL, XRP, DOGE)
+            issue_type: Type of issue (ohlcv_corruption, ohlcv_stale, volume_anomaly, price_anomaly)
+            detail: Detailed description of the issue
+        """
+        if asset in self._data_quality_issues and issue_type in self._data_quality_issues[asset]:
+            self._data_quality_issues[asset][issue_type] += 1
+            logger.debug(
+                f"[DATA-QUALITY] asset={asset} issue_type={issue_type} detail={detail} "
+                f"total_count={self._data_quality_issues[asset][issue_type]}"
+            )
+    
+    def get_data_quality_metrics(self) -> Dict[str, Dict[str, int]]:
+        """Get data quality metrics for all assets.
+        
+        Returns:
+            Dictionary mapping asset symbols to their data quality issue counts
+        """
+        import copy
+        return copy.deepcopy(self._data_quality_issues)
     
     def _update_volatility_history(self, asset: str, spot_price: float) -> None:
         # Update volatility history for ATR calculation.
@@ -1687,6 +1742,9 @@ class LeanAgent15m:
             )
             return None
         
+        # Initialize indicator variables with defaults
+        macd_slope = 0.0
+        
         # CRITICAL FIX: 2026-07-07 - Use Crypto15mIndicatorStack for 2026 research-based indicators
         # This provides EMA(200), regime-based RSI, MACD filters, and RSI+MACD confluence scoring
         if asset in self._indicator_stacks:
@@ -1704,6 +1762,7 @@ class LeanAgent15m:
                 macd_histogram_expanding = indicator_snap.macd_histogram_expanding
                 bias = indicator_snap.bias
                 bias_confidence = indicator_snap.bias_confidence
+                macd_slope = getattr(indicator_snap, 'macd_slope', 0.0)
                 
                 logger.debug(
                     "[MOMENTUM-FVG-INDICATORS] asset=%s rsi=%.1f zone=%s macro_regime=%s ema200_above=%s macd_line=%.6f macd_hist=%.6f zero_line_ok=%s hist_expanding=%s bias=%s confidence=%.2f",
