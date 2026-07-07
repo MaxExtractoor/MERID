@@ -86,20 +86,21 @@ class TestMinDecisionMinuteImplementation:
     
     def test_min_decision_minute_skips_early_signals(self):
         """Test that early signals are skipped based on min_decision_minute."""
-        # Simulate DOGE with min_decision_minute=5
-        # At 3 minutes into 15m window, should skip (waiting for signal clarity)
-        # At 6 minutes into 15m window, should allow (signal clarity achieved)
+        # 2026-07-07: Updated to reflect new min_decision_minute=1 for all assets
+        # Simulate DOGE with min_decision_minute=1
+        # At 0.5 minutes into 15m window, should skip (waiting for signal clarity)
+        # At 1.5 minutes into 15m window, should allow (signal clarity achieved)
         
-        min_decision_minute = 5  # DOGE from profile
-        time_to_expiry = 3 * 60  # 3 minutes remaining (12 minutes into window)
-        min_time_to_expiry = min_decision_minute * 60  # 5 minutes = 300 seconds
+        min_decision_minute = 1  # DOGE from profile (updated 2026-07-07)
+        time_to_expiry = 0.5 * 60  # 0.5 minutes remaining (14.5 minutes into window)
+        min_time_to_expiry = min_decision_minute * 60  # 1 minute = 60 seconds
         
-        # Should skip because 3 minutes < 5 minutes threshold
+        # Should skip because 0.5 minutes < 1 minute threshold
         should_skip = time_to_expiry < min_time_to_expiry
         assert should_skip, "Should skip early signals before min_decision_minute"
         
-        # At 6 minutes remaining (9 minutes into window), should allow
-        time_to_expiry = 6 * 60  # 6 minutes remaining
+        # At 1.5 minutes remaining (13.5 minutes into window), should allow
+        time_to_expiry = 1.5 * 60  # 1.5 minutes remaining
         should_skip = time_to_expiry < min_time_to_expiry
         assert not should_skip, "Should allow signals after min_decision_minute"
 
@@ -180,24 +181,30 @@ class TestFillRateImprovementIntegration:
     
     def test_early_signals_skipped_for_signal_clarity(self):
         """Test that early signals are skipped to improve signal quality."""
+        # 2026-07-07: Updated to reflect new min_decision_minute=1 for all assets
         # With min_decision_minute implemented, early noisy signals are skipped
         # This should improve win rate even if it slightly reduces trade count
         
-        # Simulate DOGE at 3 minutes into 15m window
-        min_decision_minute = 5  # DOGE from profile
-        time_into_window = 3  # 3 minutes
+        # Simulate DOGE at 0.5 minutes into 15m window
+        min_decision_minute = 1  # DOGE from profile (updated 2026-07-07)
+        time_into_window = 0.5  # 0.5 minutes
         
-        # Should skip because 3 minutes < 5 minutes threshold
+        # Should skip because 0.5 minutes < 1 minute threshold
         should_skip = time_into_window < min_decision_minute
         assert should_skip, "Should skip early signals for DOGE"
         
-        # Simulate BTC at 3 minutes into 15m window
-        min_decision_minute = 2  # BTC from profile
-        time_into_window = 3  # 3 minutes
+        # Simulate BTC at 0.5 minutes into 15m window
+        min_decision_minute = 1  # BTC from profile (updated 2026-07-07)
+        time_into_window = 0.5  # 0.5 minutes
         
-        # Should allow because 3 minutes >= 2 minutes threshold
+        # Should skip because 0.5 minutes < 1 minute threshold
         should_skip = time_into_window < min_decision_minute
-        assert not should_skip, "Should allow signals for BTC after 2 minutes"
+        assert should_skip, "Should skip early signals for BTC"
+        
+        # At 1.5 minutes into window, should allow for all assets
+        time_into_window = 1.5  # 1.5 minutes
+        should_skip = time_into_window < min_decision_minute
+        assert not should_skip, "Should allow signals for all assets after 1 minute"
 
 
 if __name__ == '__main__':

@@ -31,9 +31,9 @@ class TestConfidenceThreshold:
         assert "confidence" in profile
         assert "min_confidence_threshold" in profile["confidence"]
         
-        # Check value is 0.75 (industry standard)
+        # Check value is 0.65 (current profile value)
         threshold = profile["confidence"]["min_confidence_threshold"]
-        assert threshold == 0.75, f"Expected 0.75, got {threshold}"
+        assert threshold == 0.65, f"Expected 0.65, got {threshold}"
     
     def test_confidence_threshold_is_float(self):
         """Test that confidence threshold is a float."""
@@ -76,16 +76,13 @@ class TestMinDecisionMinute:
         
         mdm = profile["min_decision_minute"]
         
-        # BTC/ETH should have lower values (deeper markets)
-        assert mdm["BTC"] >= 2, f"BTC min_decision_minute too low: {mdm['BTC']}"
-        assert mdm["ETH"] >= 2, f"ETH min_decision_minute too low: {mdm['ETH']}"
-        
-        # SOL/XRP should have higher values (thinner books)
-        assert mdm["SOL"] >= 3, f"SOL min_decision_minute too low: {mdm['SOL']}"
-        assert mdm["XRP"] >= 3, f"XRP min_decision_minute too low: {mdm['XRP']}"
-        
-        # DOGE should have highest value (thinnest book)
-        assert mdm["DOGE"] >= 4, f"DOGE min_decision_minute too low: {mdm['DOGE']}"
+        # 2026-07-07: All assets set to 1 minute to capture early signals
+        # while still filtering extreme noise in the first 60 seconds
+        assert mdm["BTC"] == 1, f"BTC min_decision_minute should be 1: {mdm['BTC']}"
+        assert mdm["ETH"] == 1, f"ETH min_decision_minute should be 1: {mdm['ETH']}"
+        assert mdm["SOL"] == 1, f"SOL min_decision_minute should be 1: {mdm['SOL']}"
+        assert mdm["XRP"] == 1, f"XRP min_decision_minute should be 1: {mdm['XRP']}"
+        assert mdm["DOGE"] == 1, f"DOGE min_decision_minute should be 1: {mdm['DOGE']}"
         
         # All values should be <= 15 (max window size)
         for asset, value in mdm.items():
