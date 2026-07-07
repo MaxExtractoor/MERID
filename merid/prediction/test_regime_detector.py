@@ -167,6 +167,32 @@ class TestRegimeDetector:
         mode = detector.get_strategy_mode(detection)
         assert mode == "trend_following"  # Should default to trend_following due to low confidence
     
+    def test_get_strategy_mode_choppy_high_confidence_warning(self, detector, caplog):
+        """Test that high-confidence CHOPPY regime logs warning about signal inversion risk."""
+        import logging
+        
+        # Set log level to capture warnings
+        caplog.set_level(logging.WARNING)
+        
+        detection = RegimeDetection(
+            regime=Regime.CHOPPY,
+            probabilities={Regime.BULL: 0.1, Regime.CHOPPY: 0.8, Regime.BEAR: 0.1},
+            confidence=0.8,  # High confidence (>0.7) should trigger mean_reversion with warning
+            features=np.array([0.0, 0.05, 0.0]),
+            timestamp=0
+        )
+        
+        mode = detector.get_strategy_mode(detection)
+        assert mode == "mean_reversion"
+        
+        # Verify warning was logged about signal inversion risk
+        assert len(caplog.records) > 0
+        warning_messages = [record.message for record in caplog.records if record.levelno == logging.WARNING]
+        assert any("SIGNAL INVERSION RISK" in msg for msg in warning_messages), \
+            "Expected warning about signal inversion risk when using mean_reversion mode"
+        assert any("positive velocity will trigger NO signals" in msg for msg in warning_messages), \
+            "Expected warning about velocity signal inversion in mean_reversion mode"
+    
     def test_get_strategy_mode_bear(self, detector):
         """Test strategy mode for bear regime."""
         detection = RegimeDetection(
