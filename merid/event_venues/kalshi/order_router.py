@@ -1793,6 +1793,7 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
             
             # Check per-asset limit
             asset_max_notional = risk_envelope.asset_max_notional_usd.get(asset, 0.0)
+            
             if new_notional > asset_max_notional:
                 logger.warning(
                     "[CHECK-INTENT-RISK] asset=%s new_notional=%.2f > asset_max=%.2f - REJECTING",
@@ -5296,6 +5297,41 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 )
             except Exception as _rr:
                 logger.debug("UnifiedRiskManager record_fill failed (non-fatal): %s", _rr)
+            
+            # CRITICAL FIX: Record order execution in window-based risk envelope
+            # This tracks cumulative exposure per 15-minute window for 3% per-agent / 5% total venue limits
+            try:
+                from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+                envelope = get_kalshi_crypto_15m_risk_envelope()
+                
+                # Calculate order notional for window tracking
+                order_notional_usd = filled_count * fill_price_cents / 100.0
+                
+                # Extract asset from ticker for agent ID
+                asset = extract_asset_from_ticker(intent.ticker) or "UNK"
+                agent_id = f"{asset}_15M"  # Agent ID format for window tracking
+                
+                # Record execution in window tracking
+                envelope.record_order_execution(agent_id, order_notional_usd)
+                
+                logger.info(
+                    "[ORDER-ROUTER] WINDOW_TRACKING: recorded execution agent=%s asset=%s notional=$%.2f filled=%d price=%dc",
+                    agent_id, asset, order_notional_usd, filled_count, fill_price_cents
+                )
+            except RuntimeError as e:
+                # Risk envelope not ready (bankroll not available) - log warning but proceed
+                logger.warning(
+                    "[ORDER-ROUTER] Risk envelope not ready for window tracking: %s - "
+                    "window exposure not recorded (may exceed limits)",
+                    e
+                )
+            except Exception as e:
+                logger.error(
+                    "[ORDER-ROUTER] Window tracking recording failed: %s - "
+                    "window exposure not recorded (may exceed limits)",
+                    e,
+                    exc_info=True
+                )
 
         # BUG-B fix: sell fills reduce open exposure — release the notional from the
         # tracker so category caps reflect the true remaining open position.
