@@ -319,6 +319,10 @@ class Position:
         """
         Check if trailing stop should trigger.
         
+        CRITICAL FIX: 2026-07-07 - Verified NO position logic is correct:
+        - YES: trigger if price falls to or below trail level (protect upside)
+        - NO: trigger if price rises to or above trail level (protect downside)
+        
         Args:
             current_price_cents: Current market price in cents
             
@@ -330,10 +334,11 @@ class Position:
             return False
         
         if self.side == PositionSide.YES:
-            # Long YES: trigger if price falls to or below trail level
+            # Long YES: trigger if price falls to or below trail level (protect upside)
             return current_price_cents <= trail_level
         else:
-            # Long NO: trigger if price rises to or above trail level
+            # Long NO: trigger if price rises to or above trail level (protect downside)
+            # CRITICAL: NO positions profit when YES price falls, so exit when YES price rises
             return current_price_cents >= trail_level
     
     def should_trigger_stop_loss(self, current_price_cents: int) -> bool:
@@ -376,7 +381,7 @@ class Position:
             # Long NO: trigger if price falls to or below take-profit
             return current_price_cents <= self.take_profit_price_cents
     
-    def should_trigger_extreme_profit(self, current_price_cents: int) -> bool:
+    def should_trigger_extreme_profit(self, current_price_cents: int, bid_cents: Optional[int] = None, ask_cents: Optional[int] = None) -> bool:
         """
         Check if extreme profit exit should trigger (99c YES / 1c NO).
         
@@ -384,18 +389,34 @@ class Position:
         At these extreme prices, the probability is near 100% and holding further
         provides minimal upside with significant risk of reversal.
         
+        CRITICAL FIX: 2026-07-07 - Added bid/ask spread handling for boundary conditions
+        At extreme prices, bid/ask spread can cause false triggers. Use conservative pricing:
+        - YES: use bid price (what we can actually sell at)
+        - NO: use ask price (what we can actually buy back at)
+        
         Args:
-            current_price_cents: Current market price in cents
+            current_price_cents: Current market price in cents (mid price)
+            bid_cents: Current bid price in cents (optional)
+            ask_cents: Current ask price in cents (optional)
             
         Returns:
             True if price is at extreme profit level (99c YES / 1c NO)
         """
+        # Use side-aware price if bid/ask available
+        check_price = current_price_cents
+        if self.side == PositionSide.YES and bid_cents is not None:
+            # YES: we sell to buyer's bid - use bid for conservative check
+            check_price = bid_cents
+        elif self.side == PositionSide.NO and ask_cents is not None:
+            # NO: we buy back at seller's ask - use ask for conservative check
+            check_price = ask_cents
+        
         if self.side == PositionSide.YES:
             # YES: exit at 99c or higher (guaranteed win)
-            return current_price_cents >= 99
+            return check_price >= 99
         else:
             # NO: exit at 1c or lower (guaranteed win)
-            return current_price_cents <= 1
+            return check_price <= 1
     
     def should_trigger_break_even(self, current_price_cents: int) -> bool:
         """
@@ -496,6 +517,103 @@ class Position:
     def is_open(self) -> bool:
         """Check if position is still open."""
         return not self.exit_triggered
+    
+    def to_dict(self) -> dict:
+        """
+        Convert position to dictionary for persistence.
+        
+        CRITICAL FIX: 2026-07-07 - Added dynamic_tp_target_cents to persistence
+        to prevent loss of dynamic TP targets on system restart.
+        """
+        return {
+            "position_id": self.position_id,
+            "market_id": self.market_id,
+            "series_ticker": self.series_ticker,
+            "side": self.side.value if isinstance(self.side, PositionSide) else self.side,
+            "size": self.size,
+            "avg_entry_price_cents": self.avg_entry_price_cents,
+            "opened_at": self.opened_at.isoformat() if self.opened_at else None,
+            "take_profit_price_cents": self.take_profit_price_cents,
+            "take_profit_r_multiple": self.take_profit_r_multiple,
+            "stop_loss_price_cents": self.stop_loss_price_cents,
+            "break_even_triggered": self.break_even_triggered,
+            "break_even_price_cents": self.break_even_price_cents,
+            "scale_out_price_cents": self.scale_out_price_cents,
+            "scale_out_triggered": self.scale_out_triggered,
+            "scale_out_remaining_size": self.scale_out_remaining_size,
+            "trailing_type": self.trailing_type.value if isinstance(self.trailing_type, TrailingType) else self.trailing_type,
+            "trailing_param": self.trailing_param,
+            "max_favorable_price_cents": self.max_favorable_price_cents,
+            "trailing_activated": self.trailing_activated,
+            "trailing_profit_zone_activated": self.trailing_profit_zone_activated,
+            "window_resolution_id": self.window_resolution_id,
+            "exit_policy_id": self.exit_policy_id,
+            "current_price_cents": self.current_price_cents,
+            "unrealized_pnl_cents": self.unrealized_pnl_cents,
+            "r_multiple": self.r_multiple,
+            "time_since_entry_seconds": self.time_since_entry_seconds,
+            "exit_triggered": self.exit_triggered,
+            "exit_reason": self.exit_reason,
+            "exit_price_cents": self.exit_price_cents,
+            "exited_at": self.exited_at.isoformat() if self.exited_at else None,
+            "ratchet_activated": self.ratchet_activated,
+            "ratchet_hold_until": self.ratchet_hold_until,
+            "ratchet_trimmed": self.ratchet_trimmed,
+            "dynamic_tp_target_cents": self.dynamic_tp_target_cents,  # CRITICAL: Persist dynamic TP target
+            "dynamic_tp_triggered": self.dynamic_tp_triggered,
+            "entry_edge_pct": self.entry_edge_pct,
+            "initial_risk_cents": self.initial_risk_cents,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "Position":
+        """
+        Create position from dictionary (for persistence retrieval).
+        
+        CRITICAL FIX: 2026-07-07 - Added dynamic_tp_target_cents from persistence
+        to restore dynamic TP targets after system restart.
+        """
+        from datetime import datetime
+        
+        return cls(
+            position_id=data.get("position_id"),
+            market_id=data.get("market_id", ""),
+            series_ticker=data.get("series_ticker", ""),
+            side=PositionSide(data.get("side", "yes")),
+            size=data.get("size", 0),
+            avg_entry_price_cents=data.get("avg_entry_price_cents", 0),
+            opened_at=datetime.fromisoformat(data["opened_at"]) if data.get("opened_at") else datetime.utcnow(),
+            take_profit_price_cents=data.get("take_profit_price_cents"),
+            take_profit_r_multiple=data.get("take_profit_r_multiple"),
+            stop_loss_price_cents=data.get("stop_loss_price_cents"),
+            break_even_triggered=data.get("break_even_triggered", False),
+            break_even_price_cents=data.get("break_even_price_cents"),
+            scale_out_price_cents=data.get("scale_out_price_cents"),
+            scale_out_triggered=data.get("scale_out_triggered", False),
+            scale_out_remaining_size=data.get("scale_out_remaining_size", 0),
+            trailing_type=TrailingType(data.get("trailing_type", "none")),
+            trailing_param=data.get("trailing_param", 0.0),
+            max_favorable_price_cents=data.get("max_favorable_price_cents", 0),
+            trailing_activated=data.get("trailing_activated", False),
+            trailing_profit_zone_activated=data.get("trailing_profit_zone_activated", False),
+            window_resolution_id=data.get("window_resolution_id", ""),
+            exit_policy_id=data.get("exit_policy_id", ""),
+            current_price_cents=data.get("current_price_cents", 0),
+            unrealized_pnl_cents=data.get("unrealized_pnl_cents", 0),
+            r_multiple=data.get("r_multiple", 0.0),
+            time_since_entry_seconds=data.get("time_since_entry_seconds", 0.0),
+            exit_triggered=data.get("exit_triggered", False),
+            exit_reason=data.get("exit_reason"),
+            exit_price_cents=data.get("exit_price_cents"),
+            exited_at=datetime.fromisoformat(data["exited_at"]) if data.get("exited_at") else None,
+            ratchet_activated=data.get("ratchet_activated", False),
+            ratchet_hold_until=data.get("ratchet_hold_until", 0.0),
+            ratchet_trimmed=data.get("ratchet_trimmed", False),
+            dynamic_tp_target_cents=data.get("dynamic_tp_target_cents"),  # CRITICAL: Restore dynamic TP target
+            dynamic_tp_triggered=data.get("dynamic_tp_triggered", False),
+            entry_edge_pct=data.get("entry_edge_pct", 0.03),
+            initial_risk_cents=data.get("initial_risk_cents", 0),
+        )
     
     def __repr__(self) -> str:
         """String representation for debugging."""

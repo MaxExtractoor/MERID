@@ -17,7 +17,30 @@ class ExitAction(str, Enum):
 
 
 class ExitReason(str, Enum):
-    """Exit reason types."""
+    """
+    Exit reason types.
+    
+    CRITICAL FIX: 2026-07-07 - Documented exit precedence order to prevent confusion.
+    
+    EXIT PRECEDENCE ORDER (highest to lowest priority):
+    1. EXTREME_PROFIT - Exit at 99c YES / 1c NO (guaranteed win, highest priority)
+    2. DYNAMIC_TAKE_PROFIT - Laddered exit based on entry price zones (user strategy)
+    3. RATCHET_FLOOR - Exit when price drops below ratchet floor (80-85c profit protection)
+    4. RATCHET_TRIM - Partial close to trim position when >1 contract and price >80c
+    5. RISK - Global risk layer kill switch
+    6. CANDLE_REVERSAL - Exit on candle pattern reversal
+    7. ADAPTIVE_TIMING - Time-based exit with volatility adjustment
+    8. TIME_STOP - Time-based exit (time since entry)
+    9. EDGE_DECAY - Exit when edge decays below threshold
+    10. STOP_LOSS - Stop loss trigger
+    11. TRAIL - Trailing stop trigger
+    12. TAKE_PROFIT - Take profit trigger
+    13. SCALE_OUT - Partial exit at 1.5-2R (Pay Yourself strategy)
+    14. MANUAL - Manual exit
+    15. LOSS_CAP - Exit at 80% loss (PolyTrack research) - DEPRECATED, replaced by RISK
+    
+    NOTE: This precedence order must match the check order in position_monitor._check_position()
+    """
     TAKE_PROFIT = "take_profit"
     STOP_LOSS = "stop_loss"
     TRAIL = "trail"
@@ -27,7 +50,7 @@ class ExitReason(str, Enum):
     MANUAL = "manual"
     SCALE_OUT = "scale_out"  # Research: Partial exit at 1.5-2R (Pay Yourself strategy)
     CANDLE_REVERSAL = "candle_reversal"  # Research: Exit on candle pattern reversal
-    LOSS_CAP = "loss_cap"  # 2026 FIX: Exit at 80% loss (PolyTrack research)
+    LOSS_CAP = "loss_cap"  # 2026 FIX: Exit at 80% loss (PolyTrack research) - DEPRECATED
     EXTREME_PROFIT = "extreme_profit"  # 2026 FIX: Exit at 99c YES / 1c NO (guaranteed win)
     RATCHET_FLOOR = "ratchet_floor"  # 2026 FIX: Exit when price drops below ratchet floor (80-85c profit protection)
     RATCHET_TRIM = "ratchet_trim"  # 2026-07-05: Partial close to trim position when >1 contract and price >80c
