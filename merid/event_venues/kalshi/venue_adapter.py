@@ -551,6 +551,27 @@ class KalshiVenueAdapter:
             # NOTE: Do NOT close client here - singleton adapter keeps connection alive
             return placed
         except Exception as exc:
+            # CRITICAL: Refund window exposure for Kalshi business rejects
+            # This prevents permanent window capacity consumption when venue rejects orders
+            from merid.event_venues.kalshi import KalshiBusinessError
+            if isinstance(exc, KalshiBusinessError):
+                try:
+                    from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+                    envelope = get_kalshi_crypto_15m_risk_envelope()
+                    # Calculate notional to refund
+                    notional_usd = float(order.size * (order.price or 0))
+                    if notional_usd > 0:
+                        envelope.refund_order_execution(
+                            agent_id=order.client_order_id or "venue_adapter",
+                            order_notional_usd=notional_usd
+                        )
+                        logger.warning(
+                            f"[venue-adapter] Refunded window exposure for Kalshi business reject: "
+                            f"notional=${notional_usd:.2f} reason={exc}"
+                        )
+                except Exception as refund_exc:
+                    logger.error(f"[venue-adapter] Failed to refund window exposure: {refund_exc}")
+            
             logger.error(f"Failed to place Kalshi order: {exc}")
             raise RuntimeError(f"Order submission failed: {exc}") from exc
 
