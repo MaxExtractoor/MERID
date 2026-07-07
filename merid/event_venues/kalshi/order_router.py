@@ -5803,6 +5803,11 @@ def _run_pre_trade_gate(
             price_cents=intent.price_cents,
             decision_ts=intent.snapshot_ts,
             intent_id=intent.intent_id,
+            # CRITICAL FIX: Pass exit policy metadata to gate for validation (2026-07-07)
+            exit_policy_id=intent.exit_policy_id,
+            window_resolution_id=intent.window_resolution_id,
+            risk_tier=intent.risk_tier,
+            max_hold_seconds=intent.max_hold_seconds,
         )
         if not verdict.allowed:
             latency = (_time.monotonic() - t0) * 1000

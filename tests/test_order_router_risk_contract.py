@@ -281,3 +281,32 @@ class TestOrderIntentRiskContractFields:
         assert intent.risk_tier is None
         assert intent.trailing_enabled is None
         assert intent.max_hold_seconds is None
+    
+    def test_order_intent_post_only_default_false(self):
+        """Test that OrderIntent post_only defaults to False to prevent Kalshi API rejection.
+        
+        CRITICAL FIX 2026-07-07: Kalshi API rejects orders with post_only=True when they can't rest.
+        The default is False, but loop_15m.py explicitly sets post_only=False to ensure
+        orders are accepted regardless of execution type.
+        """
+        intent = OrderIntent(
+            ticker="KXBTC15M-12345",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=10,
+        )
+        # Default should be False
+        assert intent.post_only is False
+    
+    def test_order_intent_post_only_explicit_false(self):
+        """Test that OrderIntent can explicitly set post_only=False."""
+        intent = OrderIntent(
+            ticker="KXBTC15M-12345",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=10,
+            post_only=False,
+        )
+        assert intent.post_only is False
