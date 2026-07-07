@@ -748,6 +748,46 @@ def compute_order_size(
         )
         raise ValueError(f"Invalid price_cents={price_cents} for asset={asset} - must be > 0")
     
+    # CRITICAL FIX: Window-based risk limit check (HARD STOP)
+    # Enforce 3% per-agent / 5% total venue window limits before sizing
+    # This prevents orders from exceeding window-based risk limits
+    try:
+        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+        import time
+        envelope = get_kalshi_crypto_15m_risk_envelope()
+        
+        # Estimate order notional for window check (use worst case: max contracts from profile)
+        # We'll use a conservative estimate based on bankroll and risk limits
+        estimated_notional = float(bankroll_usd) * 0.03  # Conservative 3% estimate
+        agent_id = f"{asset}_15M"  # Agent ID format for window tracking
+        current_ts = time.time()
+        
+        # Check window limits
+        allowed, reason = envelope.check_window_limit(agent_id, estimated_notional, current_ts)
+        if not allowed:
+            logger.warning(
+                "[UNIFIED-SIZING] WINDOW_LIMIT_REJECTED: agent=%s asset=%s reason=%s - "
+                "order sizing blocked by window-based risk limits (HARD STOP)",
+                agent_id, asset, reason
+            )
+            # Return 0 contracts to indicate order should be rejected
+            return 0, Decimal("0.0"), {"window_limit_rejected": True, "reason": reason}
+    except RuntimeError as e:
+        # Risk envelope not ready (bankroll not available) - log warning but proceed
+        # This can happen during startup or in test environments
+        logger.warning(
+            "[UNIFIED-SIZING] Risk envelope not ready for window limit check: %s - "
+            "proceeding without window limit enforcement (may exceed limits)",
+            e
+        )
+    except Exception as e:
+        logger.error(
+            "[UNIFIED-SIZING] Window limit check failed: %s - "
+            "proceeding without window limit enforcement (may exceed limits)",
+            e,
+            exc_info=True
+        )
+    
     # INTENTIONAL WRAPPER: This function is NOT a pure delegation to invariants.py.
     # It owns specific policy concerns while delegating pure sizing math:
     #
