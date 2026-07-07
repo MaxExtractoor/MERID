@@ -5009,8 +5009,20 @@ class LeanAgent15m:
                             candidate["no_ask_cents"] = 100 - candidate["yes_bid_cents"]
                         if candidate["yes_ask_cents"] is not None:
                             candidate["no_bid_cents"] = 100 - candidate["yes_ask_cents"]
-                        candidate["yes_depth"] = getattr(market_state, 'min_depth_yes', None)
-                        candidate["no_depth"] = getattr(market_state, 'min_depth_no', None)
+                        # CRITICAL FIX: Use window-based depth (depth_10c_yes/depth_10c_no) instead of single-level depth
+                        # depth_10c_yes/depth_10c_no represent contracts within ±10c of mid price (industry standard)
+                        # min_depth_yes/min_depth_no only capture best bid/ask size (1 price level)
+                        # This fixes false rejections when liquidity exists across multiple levels
+                        depth_10c_yes = getattr(market_state, 'depth_10c_yes', None)
+                        depth_10c_no = getattr(market_state, 'depth_10c_no', None)
+                        if depth_10c_yes is not None and depth_10c_yes > 0:
+                            candidate["yes_depth"] = depth_10c_yes
+                        else:
+                            candidate["yes_depth"] = getattr(market_state, 'min_depth_yes', None)
+                        if depth_10c_no is not None and depth_10c_no > 0:
+                            candidate["no_depth"] = depth_10c_no
+                        else:
+                            candidate["no_depth"] = getattr(market_state, 'min_depth_no', None)
             except Exception as e:
                 logger.warning("[CANDIDATE-MICROSTRUCTURE] Failed to populate microstructure data: %s", e)
             
