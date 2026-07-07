@@ -43,12 +43,21 @@
 # ═══════════════════════════════════════════════════════════════════════
 
 profile_name: kalshi_crypto_15m_v2
-profile_version: "2.3.0"
+profile_version: "2.4.0"
 description: "Config-only risk model for 15m crypto prediction markets on Kalshi with 2026 research-based correlation and volatility management"
 
 # ── Change Log ──────────────────────────────────────────────────────────────────
 # Tracks implementation progress and version history for the 5-phase probability modeling roadmap
 change_log:
+  - version: "2.4.0"
+    date: "2026-07-07"
+    description: "2026 research-based indicator enhancements: 200 MA trend filter, regime-based RSI, MACD zero-line/histogram filters, RSI+MACD confluence"
+    changes:
+      - "Added EMA(200) macro trend filter for regime classification (bull/bear market)"
+      - "Added regime-based RSI threshold shifting (bull: 80/40, bear: 60/20, range: 70/30)"
+      - "Added MACD zero-line filter (long: MACD > 0, short: MACD < 0)"
+      - "Added MACD histogram momentum filter (require histogram expansion)"
+      - "Added RSI+MACD confluence scoring (boost when RSI and MACD agree)"
   - version: "2.3.0"
     date: "2026-07-03"
     description: "2026 research-based correlation and volatility risk management"
@@ -344,6 +353,28 @@ momentum_fvg:
   # Trend confirmation
   require_ema_stack: true  # Require EMA stack alignment (fast > slow for longs)
   require_price_vs_ema50: true  # Require price above/below EMA50 for direction
+  require_price_vs_ema200: true  # Require price above/below EMA200 for macro regime (2026 research)
+  
+  # 2026 research-based indicator enhancements
+  # EMA(200) macro trend filter
+  ema_200_period: 200  # EMA(200) period for macro regime classification
+  
+  # Regime-based RSI threshold shifting
+  regime_based_rsi_enabled: true  # Enable regime-based RSI threshold shifting
+  rsi_bull_oversold: 40.0  # Bull regime oversold threshold (shifted up to stay in trades longer)
+  rsi_bull_overbought: 80.0  # Bull regime overbought threshold (shifted up)
+  rsi_bear_oversold: 20.0  # Bear regime oversold threshold (shifted down to exit faster)
+  rsi_bear_overbought: 60.0  # Bear regime overbought threshold (shifted down)
+  
+  # MACD zero-line filter
+  macd_zero_line_filter_enabled: true  # Enable MACD zero-line filter (long: MACD > 0, short: MACD < 0)
+  
+  # MACD histogram momentum filter
+  macd_histogram_momentum_filter_enabled: true  # Enable MACD histogram momentum filter
+  macd_histogram_expansion_bars: 2  # Require N bars of histogram expansion for confirmation
+  
+  # RSI+MACD confluence scoring
+  rsi_macd_confluence_enabled: true  # Enable RSI+MACD confluence scoring (boost when both agree)
   
   # Liquidity-aware size scaling (Kalshi-specific tiers)
   # Based on depth_yes_10c and depth_no_10c from orderbook
