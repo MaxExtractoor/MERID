@@ -87,6 +87,9 @@ MAX_LIVE_SECONDS_RESTING_SOL: Final[int] = 90   # 1.5 minutes
 MAX_LIVE_SECONDS_RESTING_XRP: Final[int] = 90   # 1.5 minutes
 MAX_LIVE_SECONDS_RESTING_DOGE: Final[int] = 60  # 1 minute
 
+# Max hold time for 15-minute markets (auto-cancel unfilled limit orders after this)
+MAX_HOLD_SECONDS_15M: Final[int] = 180  # 3 minutes for fast 15m crypto markets
+
 # Time-to-expiry threshold: use only marketable orders in last N seconds
 MARKET_ONLY_LAST_SECONDS: Final[int] = 150  # 2.5 minutes before expiry
 
