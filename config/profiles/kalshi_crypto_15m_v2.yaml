@@ -924,12 +924,12 @@ confidence:
   # PROFILE-GUARD: crypto_threshold_matrix.yaml is disabled for kalshi_crypto_15m_v2
   use_crypto_threshold_matrix: false
   profile_name: null  # Not used when use_crypto_threshold_matrix=false
-  # 2026-07-07 OPTIMIZATION: Confidence threshold gate for high-probability trades
-  # INCREASED from 0.65 to 0.80 based on trade scenario simulation results
-  # Simulation showed 80% threshold achieved 57.8 profitability score vs 52.2 at 65%
-  # Higher confidence reduces noise and improves win rate (57.9% at 80% vs 55.3% at 65%)
+  # 2026-07-07 REVERT: Confidence threshold gate for high-probability trades
+  # REVERTED from 0.80 to 0.65 - 80% threshold was blocking all trades
+  # Trade scenario simulation suggested 80% for optimal profitability, but actual signal generation
+  # does not achieve this confidence level in practice. 65% allows trades to execute.
   # Industry standard (voltage-kalshi): 0.55, Predict & Profit: 0.30
-  min_confidence_threshold: 0.80  # INCREASED from 0.65 to 0.80 (minimum confidence to execute trade)
+  min_confidence_threshold: 0.65  # REVERTED from 0.80 to 0.65 (minimum confidence to execute trade)
 
 # ── Tiered Edge Band Configuration ───────────────────────────────────────────
 # TIERED STRUCTURE: 0.5% watch, 0.5% small, ≥0.5% standard
@@ -991,7 +991,7 @@ guardrails:
   # - APPROACHING: 5-10 minutes (allow entry with tighter constraints)
   # - CRITICAL: 2-5 minutes (allow entry with very tight constraints)
   # - TERMINAL: < 2 minutes (block entry)
-  max_entry_mins: 15.0  # NORMAL: Maximum time to expiry for entry (15min - increased for better market coverage)
+  max_entry_mins: 15.0  # NORMAL: Maximum time to expiry for entry (15min - aligned with 15m market duration)
   min_entry_mins: 2.0   # TERMINAL: Minimum time to expiry for entry (2min - aligned with TTE TERMINAL < 2min)
   # Microstructure trap prevention
   # SIMPLIFIED: Single spread rule instead of complex edge-dependent mapping

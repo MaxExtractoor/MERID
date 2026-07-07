@@ -267,8 +267,8 @@ class TestProfileSmokeTest:
             assert profile.confidence_use_crypto_threshold_matrix is False  # Updated to match actual profile
             assert profile.confidence_profile_name is None  # Updated to match actual profile
             
-            # 2026-07-07: Verify primary confidence threshold from YAML (updated from 0.65 to 0.80 based on trade scenario simulation)
-            assert profile.confidence_min_confidence_threshold == 0.80, "Primary confidence threshold should be 0.80"
+            # 2026-07-07: Verify primary confidence threshold from YAML (reverted from 0.80 to 0.65 - 80% was blocking trades)
+            assert profile.confidence_min_confidence_threshold == 0.65, "Primary confidence threshold should be 0.65"
             
             # Verify Kelly multipliers can override matrix (DEPRECATED - kept for backward compatibility)
             assert profile.confidence_kelly_multiplier_no_trade == 0.0
