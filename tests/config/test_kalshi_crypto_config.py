@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
+
 from config.kalshi_crypto_config import (
     ACTIVE_CRYPTO_ASSETS,
     ACTIVE_CRYPTO_FREQS,
     ACTIVE_CRYPTO_WS_TIMEFRAMES,
-    active_crypto_asset_mood_timeframe_grid,
     check_ws_ticker_asset_coverage,
     kalshi_ticker_to_asset,
 )
@@ -19,12 +20,15 @@ def test_active_crypto_assets_five_coin_grid() -> None:
 
 
 def test_active_crypto_freqs_match_catalog_timeframe_derivation() -> None:
-    assert ACTIVE_CRYPTO_FREQS == ["15M", "1H", "D1", "W1", "M1"]
-    assert ACTIVE_CRYPTO_WS_TIMEFRAMES == ["15m", "1h", "daily", "weekly", "monthly"]
-    assert ACTIVE_CRYPTO_WS_TIMEFRAMES == UNIVERSE_WS_TF == ALL_TIMEFRAMES
+    assert ACTIVE_CRYPTO_FREQS == ["15M"]
+    assert ACTIVE_CRYPTO_WS_TIMEFRAMES == ["15m"]
+    # Note: UNIVERSE_WS_TF and ALL_TIMEFRAMES may have more timeframes for broader crypto lane
+    # For 15m stack, we only use 15m timeframe
 
 
+@pytest.mark.skip(reason="active_crypto_asset_mood_timeframe_grid removed - mood surfaces not used in 15m stack")
 def test_active_crypto_mood_grid_matches_assets_times_ws_tfs() -> None:
+    from config.kalshi_crypto_config import active_crypto_asset_mood_timeframe_grid
     g = active_crypto_asset_mood_timeframe_grid()
     assert len(g) == len(ACTIVE_CRYPTO_ASSETS) * len(ACTIVE_CRYPTO_WS_TIMEFRAMES)
 
