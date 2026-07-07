@@ -125,6 +125,7 @@ class GateMetrics:
     blocked_price_guard: int = 0  # Price guard rejections (deep OTM or high price)
     blocked_price_repeat: int = 0  # CRITICAL: Block repeat price execution (same ticker+side+price)
     blocked_window_limit: int = 0  # CRITICAL: Block window-based risk limit violations (3% per agent, 5% total per 15m)
+    blocked_exit_policy: int = 0  # CRITICAL: Block orders without exit policy metadata (2026-07-06)
     submitted: int = 0
     filled: int = 0
     canceled: int = 0
@@ -380,6 +381,27 @@ class IdempotentOrderStore:
                     self._metrics.canceled += 1
 
     def mark_rejected(self, client_order_id: str, reason: str = "") -> None:
+        # CRITICAL FIX (2026-07-07): Refund window exposure on gate rejection
+        # Window exposure was recorded optimistically at gate pass time. If the gate
+        # rejects the order (e.g., deep OTM, high price, already satisfied), we must
+        # refund this exposure to prevent accumulation that blocks all future orders.
+        if hasattr(self._store, '_pending_window_exposure') and self._store._pending_window_exposure:
+            try:
+                from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+                envelope = get_kalshi_crypto_15m_risk_envelope(live_bankroll_usd=30.54)  # TODO: get actual bankroll
+                envelope.refund_order_execution(
+                    agent_id=self._store._pending_window_exposure["agent_id"],
+                    order_notional_usd=self._store._pending_window_exposure["notional_usd"]
+                )
+                logger.info(
+                    "[GATE-WINDOW-REFUND] Refunded window exposure on gate rejection: agent=%s notional=$%.2f reason=%s",
+                    self._store._pending_window_exposure["agent_id"],
+                    self._store._pending_window_exposure["notional_usd"],
+                    reason[:50]
+                )
+                self._store._pending_window_exposure = None
+            except Exception as _refund_err:
+                logger.warning("[GATE-WINDOW-REFUND] Failed to refund window exposure: %s", _refund_err)
         with self._lock:
             rec = self._orders.get(client_order_id)
             if rec:
@@ -731,6 +753,11 @@ class PreTradeGate:
         decision_ts: float,
         intent_id: Optional[str] = None,
         existing_filled: Optional[int] = None,
+        # CRITICAL FIX: Exit policy metadata parameters (2026-07-06)
+        exit_policy_id: Optional[str] = None,
+        window_resolution_id: Optional[str] = None,
+        risk_tier: Optional[str] = None,
+        max_hold_seconds: Optional[int] = None,
     ) -> GateVerdict:
         """Run pre-trade gate checks.
 
@@ -747,6 +774,10 @@ class PreTradeGate:
             existing_filled: Caller-provided filled count for this (contract,
                              side, strategy) if known; otherwise the store's
                              own tally is used.
+            exit_policy_id:  Optional exit policy ID for crypto 15m markets.
+            window_resolution_id: Optional window resolution ID for crypto 15m markets.
+            risk_tier:       Optional risk tier for crypto 15m markets.
+            max_hold_seconds: Optional max hold seconds for crypto 15m markets.
 
         Returns:
             :class:`GateVerdict` with ``allowed``, ``client_order_id``, and
@@ -882,6 +913,9 @@ class PreTradeGate:
                     # on fills, which allowed agents to bypass window limits by submitting orders that
                     # never fill (always rejected by exchange). Recording at gate pass time ensures
                     # the 3% per-agent / 5% total venue limits are enforced for ALL order attempts.
+                    # CRITICAL FIX (2026-07-07): Store recorded exposure for potential refund if gate rejects later
+                    # If the gate itself rejects the order after window check passes (e.g., deep OTM, high price),
+                    # we must refund the exposure to prevent accumulation.
                     envelope.record_order_execution(
                         agent_id=agent_id,
                         order_notional_usd=order_notional_usd
@@ -890,6 +924,11 @@ class PreTradeGate:
                         "[GATE-WINDOW-RECORD] Recorded window exposure: agent=%s notional=$%.2f",
                         agent_id, order_notional_usd
                     )
+                    # Store exposure info for potential refund if gate rejects later
+                    self._store._pending_window_exposure = {
+                        "agent_id": agent_id,
+                        "notional_usd": order_notional_usd
+                    }
             else:
                 self._store._metrics.blocked_window_limit += 1
                 logger.error(
@@ -917,6 +956,53 @@ class PreTradeGate:
                 client_order_id=coid,
                 reason=f"window_limit:check_failed:{str(e)[:50]}",
             )
+
+        # 3.6. CRITICAL FIX: Exit policy validation for crypto 15m markets (2026-07-06)
+        # Enforces "no trade without exit" invariant by requiring exit policy metadata
+        # This ensures all trades have attached, valid, and enforceable exit policies
+        try:
+            from merid.event_venues.kalshi.order_router import _is_crypto_15m_market
+            
+            if _is_crypto_15m_market(contract_id):
+                if action == "buy":  # Entry order requires full risk contract linkage
+                    missing_fields = []
+                    if not exit_policy_id:
+                        missing_fields.append("exit_policy_id")
+                    if not window_resolution_id:
+                        missing_fields.append("window_resolution_id")
+                    if not risk_tier:
+                        missing_fields.append("risk_tier")
+                    if not max_hold_seconds:
+                        missing_fields.append("max_hold_seconds")
+                    
+                    if missing_fields:
+                        self._store._metrics.blocked_exit_policy += 1
+                        logger.error(
+                            "[GATE-ALERT] exit_policy_metadata_missing contract=%s side=%s agent=%s missing_fields=%s (metric: blocked_exit_policy=%d)",
+                            contract_id, side, agent_id, ", ".join(missing_fields),
+                            self._store._metrics.blocked_exit_policy,
+                        )
+                        return GateVerdict(
+                            allowed=False,
+                            client_order_id=coid,
+                            reason=f"exit_policy_metadata_missing:{', '.join(missing_fields)}",
+                        )
+                else:  # Exit order requires exit_policy_id for tracking
+                    if not exit_policy_id:
+                        self._store._metrics.blocked_exit_policy += 1
+                        logger.error(
+                            "[GATE-ALERT] exit_policy_id_missing contract=%s side=%s agent=%s (metric: blocked_exit_policy=%d)",
+                            contract_id, side, agent_id,
+                            self._store._metrics.blocked_exit_policy,
+                        )
+                        return GateVerdict(
+                            allowed=False,
+                            client_order_id=coid,
+                            reason="exit_policy_id_missing",
+                        )
+        except Exception as e:
+            logger.warning("[GATE] Exit policy validation check failed: %s", e)
+            # Continue with other checks if validation fails (non-critical)
 
         # 3.5. Price guard: prevent deep OTM longshots and high-price low-profit trades (critical guardrail)
         # Load min_contract_price_cents from profile with fallback to 10 cents

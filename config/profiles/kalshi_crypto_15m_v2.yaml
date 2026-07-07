@@ -213,6 +213,14 @@ trailing_stop:
   profit_zone_activation_cents: 80  # Activate aggressive trailing when price crosses 80c
   description: "Trailing stop: lock in profits as price moves favorably (tightens to 2c in 80-85c zone)"
 
+# Dynamic Risk Configuration
+# Volatility-regime based stop-loss cents for dynamic risk engine
+dynamic_risk:
+  sl_cents_low_vol: 6  # Tight SL in low volatility (6 cents)
+  sl_cents_normal_vol: 8  # Standard SL in normal volatility (8 cents)
+  sl_cents_high_vol: 10  # Wide SL in high volatility (10 cents)
+  description: "Dynamic risk: volatility-regime based stop-loss cents"
+
 # Ratchet Profit Floor Configuration
 # Research-backed mechanism to lock in profits when price reaches high threshold
 # Prevents giving back significant gains when 99¢ TP is not guaranteed

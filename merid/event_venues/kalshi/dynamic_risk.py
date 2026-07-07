@@ -491,13 +491,34 @@ class DynamicRiskEngine:
         
         # Base SL: tighter in high vol, wider in low vol
         # SL is a function of volatility regime
-        # P1 FIX: Wider offsets to reduce noise stops on 15m crypto (2026-05-27)
-        sl_cents_map = {
-            VolatilityRegime.LOW: 6,      # Tight SL in low vol (was 4c)
-            VolatilityRegime.NORMAL: 8,   # Standard SL (was 6c)
-            VolatilityRegime.HIGH: 10,    # Wider SL in high vol (was 8c)
-            VolatilityRegime.EXTREME: 15, # Very wide SL in extreme vol (was 12c)
-        }
+        # CRITICAL FIX: Load SL cents from profile config (2026-07-06)
+        # Previously hardcoded - now uses upstream/midstream/downstream consistency
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+            profile = get_active_profile().profile
+            
+            sl_cents_map = {
+                VolatilityRegime.LOW: profile.dynamic_risk_sl_cents_low_vol,
+                VolatilityRegime.NORMAL: profile.dynamic_risk_sl_cents_normal_vol,
+                VolatilityRegime.HIGH: profile.dynamic_risk_sl_cents_high_vol,
+                VolatilityRegime.EXTREME: 15,  # Very wide SL in extreme vol (fallback)
+            }
+            logger.debug(
+                "[DYNAMIC-RISK] Loaded SL cents from profile: low=%d, normal=%d, high=%d",
+                profile.dynamic_risk_sl_cents_low_vol,
+                profile.dynamic_risk_sl_cents_normal_vol,
+                profile.dynamic_risk_sl_cents_high_vol
+            )
+        except Exception as e:
+            logger.warning("[DYNAMIC-RISK] Failed to load SL config from profile: %s", e)
+            # Fallback to hardcoded values (temporary)
+            sl_cents_map = {
+                VolatilityRegime.LOW: 6,      # Tight SL in low vol
+                VolatilityRegime.NORMAL: 8,   # Standard SL
+                VolatilityRegime.HIGH: 10,    # Wider SL in high vol
+                VolatilityRegime.EXTREME: 15, # Very wide SL in extreme vol
+            }
+        
         sl_offset_cents = sl_cents_map[vol_metrics.regime]
         
         # Adjust SL based on time to expiry (tighter near expiry)

@@ -65,6 +65,17 @@ except Exception as e:
     print(f"[SINGLETON-RESET] Failed to reset ws_bridge: {e}", file=sys.stderr, flush=True)
     logger.warning(f"[SINGLETON-RESET] Failed to reset ws_bridge: {e}")
 
+# CRITICAL FIX: Reset window exposure tracking to prevent stale exposure from blocking orders
+# This handles the case where window exposure is non-zero but position cache shows zero open positions
+try:
+    from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import force_reset_window_exposure
+    force_reset_window_exposure()
+    print("[SINGLETON-RESET] window exposure tracking reset", file=sys.stderr, flush=True)
+    logger.info("[SINGLETON-RESET] window exposure tracking reset")
+except Exception as e:
+    print(f"[SINGLETON-RESET] Failed to reset window exposure: {e}", file=sys.stderr, flush=True)
+    logger.warning(f"[SINGLETON-RESET] Failed to reset window exposure: {e}")
+
 # CRITICAL FIX: Do NOT reset market_catalog singleton during startup
 # The reset causes the singleton to be None when components try to use it
 # The catalog will be properly initialized and set as singleton in the startup function
@@ -1458,41 +1469,68 @@ async def internal_resolve_policies(request: dict):
         edge_result = request.get("edge_result", {})
         strip_context = request.get("strip_context", {})
         
-        # Simple policy resolution logic (mimics internal loop)
-        # In production, this would call the actual policy resolvers
+        # CRITICAL FIX: Use proper policy resolvers instead of hardcoded logic (2026-07-06)
+        # Previously hardcoded policy resolution bypassed the proper resolver functions
+        # Now uses resolve_window_policy and resolve_exit_policy for consistency
         
-        # Default values for 15m crypto trading
-        window_resolution_id = "15m"
-        
-        # Exit policy based on edge
-        edge_pct = edge_result.get("edge_pct", 0.0)
-        if edge_pct >= 3.0:
-            exit_policy_id = "aggressive"
-            risk_tier = "aggressive"
-            max_hold_seconds = 600  # 10 minutes
-        elif edge_pct >= 2.0:
-            exit_policy_id = "standard"
-            risk_tier = "moderate"
-            max_hold_seconds = 900  # 15 minutes
-        else:
-            exit_policy_id = "conservative"
-            risk_tier = "conservative"
-            max_hold_seconds = 900  # 15 minutes
-        
-        logger.info(
-            "[INTERNAL-POLICIES] Resolved: asset=%s regime=%s window=%s exit=%s tier=%s max_hold=%d",
-            asset, regime, window_resolution_id, exit_policy_id, risk_tier, max_hold_seconds
-        )
-        
-        return {
-            "asset": asset,
-            "regime": regime,
-            "window_resolution_id": window_resolution_id,
-            "exit_policy_id": exit_policy_id,
-            "risk_tier": risk_tier,
-            "max_hold_seconds": max_hold_seconds,
-            "edge_pct": edge_pct
-        }
+        try:
+            from merid.event_venues.kalshi.order_router import resolve_window_policy, resolve_exit_policy
+            
+            # Resolve window policy
+            window_resolution = resolve_window_policy(asset=asset, regime=regime)
+            window_resolution_id = window_resolution.window_resolution_id
+            
+            # Resolve exit policy
+            exit_policy_resolution = resolve_exit_policy(
+                edge_result=edge_result,
+                asset=asset,
+                regime=regime,
+                strip_context=strip_context
+            )
+            exit_policy_id = exit_policy_resolution.policy_id
+            risk_tier = exit_policy_resolution.regime  # Use regime as risk_tier
+            max_hold_seconds = exit_policy_resolution.max_hold_seconds
+            
+            logger.info(
+                "[INTERNAL-POLICIES] Resolved: asset=%s regime=%s window=%s exit=%s tier=%s max_hold=%d",
+                asset, regime, window_resolution_id, exit_policy_id, risk_tier, max_hold_seconds
+            )
+            
+            return {
+                "asset": asset,
+                "regime": regime,
+                "window_resolution_id": window_resolution_id,
+                "exit_policy_id": exit_policy_id,
+                "risk_tier": risk_tier,
+                "max_hold_seconds": max_hold_seconds,
+                "edge_pct": edge_result.get("edge_pct", 0.0)
+            }
+        except Exception as resolver_exc:
+            logger.error("[INTERNAL-POLICIES] Failed to resolve policies using resolvers: %s", resolver_exc)
+            # Fallback to simple logic if resolvers fail
+            edge_pct = edge_result.get("edge_pct", 0.0)
+            if edge_pct >= 3.0:
+                exit_policy_id = "aggressive"
+                risk_tier = "aggressive"
+                max_hold_seconds = 600
+            elif edge_pct >= 2.0:
+                exit_policy_id = "standard"
+                risk_tier = "moderate"
+                max_hold_seconds = 900
+            else:
+                exit_policy_id = "conservative"
+                risk_tier = "conservative"
+                max_hold_seconds = 900
+            
+            return {
+                "asset": asset,
+                "regime": regime,
+                "window_resolution_id": "15m",
+                "exit_policy_id": exit_policy_id,
+                "risk_tier": risk_tier,
+                "max_hold_seconds": max_hold_seconds,
+                "edge_pct": edge_pct
+            }
         
     except Exception as e:
         logger.exception("[INTERNAL-POLICIES] resolve_policies failed: %r", e)
