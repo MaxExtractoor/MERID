@@ -98,15 +98,17 @@ class TestEnvironmentGuarantees:
         """Test that prod URL is correct."""
         from merid.event_venues.kalshi.kalshi_config import _ENV_CONFIGS
         
-        assert _ENV_CONFIGS["prod"]["rest_base_url"] == "https://external-api.kalshi.com/trade-api/v2"
-        assert _ENV_CONFIGS["prod"]["ws_base_url"] == "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
+        # CRITICAL FIX: 2026-07-07 - Elections API endpoints for crypto markets
+        assert _ENV_CONFIGS["prod"]["rest_base_url"] == "https://api.elections.kalshi.com/trade-api/v2"
+        assert _ENV_CONFIGS["prod"]["ws_base_url"] == "wss://api.elections.kalshi.com/trade-api/ws/v2"
 
     def test_demo_url_correct(self):
         """Test that demo URL is correct."""
         from merid.event_venues.kalshi.kalshi_config import _ENV_CONFIGS
         
-        assert _ENV_CONFIGS["demo"]["rest_base_url"] == "https://external-api.demo.kalshi.co/trade-api/v2"
-        assert _ENV_CONFIGS["demo"]["ws_base_url"] == "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2"
+        # CRITICAL FIX: 2026-07-07 - Elections API endpoints for crypto markets
+        assert _ENV_CONFIGS["demo"]["rest_base_url"] == "https://demo-api.kalshi.co/trade-api/v2"
+        assert _ENV_CONFIGS["demo"]["ws_base_url"] == "wss://demo-api.kalshi.co/trade-api/ws/v2"
 
     def test_get_kalshi_env_defaults_to_prod(self):
         """Test that get_kalshi_env defaults to prod."""
