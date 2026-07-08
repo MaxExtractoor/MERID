@@ -128,6 +128,7 @@ class GateMetrics:
     blocked_window_limit_entry: int = 0  # Track entry order window limit blocks
     blocked_window_limit_exit: int = 0  # Track exit order window limit blocks
     blocked_exit_policy: int = 0  # CRITICAL: Block orders without exit policy metadata (2026-07-06)
+    blocked_exit_policy_invalid: int = 0  # CRITICAL: Block orders with invalid exit policy values (2026-07-08)
     submitted: int = 0
     filled: int = 0
     canceled: int = 0
@@ -1000,6 +1001,8 @@ class PreTradeGate:
             if _is_crypto_15m_market(contract_id):
                 if action == "buy":  # Entry order requires full risk contract linkage
                     missing_fields = []
+                    invalid_fields = []
+                    
                     if not exit_policy_id:
                         missing_fields.append("exit_policy_id")
                     if not window_resolution_id:
@@ -1008,6 +1011,40 @@ class PreTradeGate:
                         missing_fields.append("risk_tier")
                     if not max_hold_seconds:
                         missing_fields.append("max_hold_seconds")
+                    
+                    # CRITICAL FIX (2026-07-08): Validate exit policy metadata values
+                    # Extract TP/SL from metadata if available (stored in intent metadata)
+                    tp_price_cents = None
+                    sl_price_cents = None
+                    entry_price_cents = price_cents
+                    
+                    # Check if metadata dict is provided and contains TP/SL
+                    # Note: exit_policy_metadata is not currently passed to check(), but we can
+                    # add it as a parameter in the future. For now, we validate what we can.
+                    # If metadata is added later, uncomment the following:
+                    # if isinstance(exit_policy_metadata, dict):
+                    #     tp_price_cents = exit_policy_metadata.get("tp_price_cents")
+                    #     sl_price_cents = exit_policy_metadata.get("sl_price_cents")
+                    
+                    # Validate max_hold_seconds is reasonable
+                    if max_hold_seconds and max_hold_seconds < 60:
+                        invalid_fields.append(f"max_hold_seconds_invalid:{max_hold_seconds}s < 60s minimum")
+                    if max_hold_seconds and max_hold_seconds > 3600:
+                        invalid_fields.append(f"max_hold_seconds_invalid:{max_hold_seconds}s > 3600s maximum")
+                    
+                    # Validate TP price if provided (future enhancement when metadata is passed)
+                    if tp_price_cents is not None:
+                        if tp_price_cents <= entry_price_cents:
+                            invalid_fields.append(f"tp_price_cents_invalid:{tp_price_cents}c <= entry_{entry_price_cents}c")
+                        if tp_price_cents > 99:
+                            invalid_fields.append(f"tp_price_cents_invalid:{tp_price_cents}c > 99c")
+                    
+                    # Validate SL price if provided (future enhancement when metadata is passed)
+                    if sl_price_cents is not None:
+                        if sl_price_cents >= entry_price_cents:
+                            invalid_fields.append(f"sl_price_cents_invalid:{sl_price_cents}c >= entry_{entry_price_cents}c")
+                        if sl_price_cents < 1:
+                            invalid_fields.append(f"sl_price_cents_invalid:{sl_price_cents}c < 1c")
                     
                     if missing_fields:
                         self._store._metrics.blocked_exit_policy += 1
@@ -1020,6 +1057,19 @@ class PreTradeGate:
                             allowed=False,
                             client_order_id=coid,
                             reason=f"exit_policy_metadata_missing:{', '.join(missing_fields)}",
+                        )
+                    
+                    if invalid_fields:
+                        self._store._metrics.blocked_exit_policy_invalid += 1
+                        logger.error(
+                            "[GATE-ALERT] exit_policy_metadata_invalid contract=%s side=%s agent=%s invalid_fields=%s (metric: blocked_exit_policy_invalid=%d)",
+                            contract_id, side, agent_id, ", ".join(invalid_fields),
+                            self._store._metrics.blocked_exit_policy_invalid,
+                        )
+                        return GateVerdict(
+                            allowed=False,
+                            client_order_id=coid,
+                            reason=f"exit_policy_metadata_invalid:{', '.join(invalid_fields)}",
                         )
                 else:  # Exit order requires exit_policy_id for tracking
                     if not exit_policy_id:
