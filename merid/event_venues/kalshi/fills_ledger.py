@@ -2594,21 +2594,16 @@ class KalshiFillsLedger:
             cash_eod_cents = 0
             portfolio_value_eod_cents = 0
             try:
-                # CRITICAL FIX: Make bankroll service import lazy to prevent import-time bankroll service initialization
-                # This was triggering bankroll service initialization during KalshiVenueClient import via ws_bridge
+                # CRITICAL FIX: Use cached bankroll to avoid blocking during initialization
+                # get_summary_sync() uses run_coroutine_threadsafe with 30s timeout which blocks
                 try:
-                    from merid.event_venues.kalshi.bankroll_service_v2 import get_summary_sync, get_bankroll_service
-                    summary = get_summary_sync(caller_module="fills_ledger")
+                    from merid.event_venues.kalshi.bankroll_service_v2 import _BANKROLL_SERVICE_V2
+                    # Use cached value from bankroll service if available
+                    if _BANKROLL_SERVICE_V2 and _BANKROLL_SERVICE_V2._current and _BANKROLL_SERVICE_V2._current.equity_usd:
+                        cash_eod_cents = int(float(_BANKROLL_SERVICE_V2._current.equity_usd) * 100)
+                        portfolio_value_eod_cents = cash_eod_cents + unrealized_pnl_cents
                 except Exception as bankroll_exc:
                     logger.warning(f"[FILLS-LEDGER] Bankroll service unavailable during initialization: {bankroll_exc}")
-                    summary = None
-                if summary and summary.available_cash_usd is not None:
-                    cash_eod_cents = int(float(summary.available_cash_usd) * 100)
-                    # Use portfolio value from v2 summary if available, otherwise fall back to cash + unrealized PnL
-                    if summary.portfolio_value_usd is not None:
-                        portfolio_value_eod_cents = int(float(summary.portfolio_value_usd) * 100)
-                    else:
-                        portfolio_value_eod_cents = cash_eod_cents + unrealized_pnl_cents
             except Exception:
                 # Fallback: use unrealized PnL as proxy for portfolio value
                 portfolio_value_eod_cents = unrealized_pnl_cents
@@ -2815,6 +2810,16 @@ class KalshiFillsLedger:
                 elif fill.side == "no":
                     predicted_edge = float(fill.price_cents) / 100.0
                 
+                # Extract velocity from fill if available (from raw_payload or decision_trace)
+                velocity = None
+                try:
+                    if fill.raw_payload:
+                        import json
+                        payload = json.loads(fill.raw_payload) if isinstance(fill.raw_payload, str) else fill.raw_payload
+                        velocity = payload.get('velocity')
+                except Exception:
+                    pass
+                
                 tracker.record_fill(
                     agent_id=fill.agent_id,
                     market_id=fill.market_ticker,
@@ -2822,7 +2827,8 @@ class KalshiFillsLedger:
                     price_cents=fill.price_cents,
                     contracts=fill.count_fp,
                     predicted_edge=predicted_edge,
-                    confidence=confidence
+                    confidence=confidence,
+                    velocity=velocity
                 )
                 logger.debug(
                     "Recorded fill in agent_performance_tracker: agent=%s market=%s side=%s price=%dc contracts=%d",
@@ -3508,9 +3514,11 @@ class KalshiFillsLedger:
             fee_decimal = Decimal("0")
         
         # Resolve action: explicit "buy"/"sell" wins; taker_action is fallback.
-        # WS fills often arrive with action="" — leave empty (HTTP upsert will upgrade).
-        # HTTP fills with no action but positive count default to "buy".
-        _raw_act = raw.get("action") or raw.get("taker_action") or ""
+        # CRITICAL FIX: Kalshi WS fill messages have action nested in "msg" field
+        # Format: {"type": "fill", "msg": {"action": "buy", ...}}
+        # Extract from "msg" first, then top-level, then taker_action
+        _raw_act = (raw.get("msg", {}).get("action", "") if isinstance(raw.get("msg"), dict) else "") or \
+                   raw.get("action") or raw.get("taker_action") or ""
         _action = _raw_act if _raw_act in ("buy", "sell") else ""
         
         # FIX: Parse count with explicit None check (not 'or' which treats 0 as falsy)
@@ -3538,24 +3546,21 @@ class KalshiFillsLedger:
             if source != "websocket" and _count_fp > 0:
                 _action = "buy"
             elif source == "websocket" and _count_fp > 0:
-                # BUG-FIX: WebSocket fills often arrive without action field.
-                # Infer action from current position: if we have a position, this is likely a sell (close).
-                # If no position, this is likely a buy (open). This is critical for proper PnL tracking.
+                # CRITICAL FIX: WebSocket fills often arrive without action field.
+                # Previous bug: Inferred action from position (if position exists -> sell). This caused
+                # BUY fills to be misclassified as SELL when adding to existing positions.
+                # New fix: Use price heuristic from _infer_kalshi_trade_action to determine actual action.
+                # Price > 0.5 likely indicates BUY (paying more for YES), price < 0.5 likely indicates SELL.
                 ticker = (raw.get("market_ticker") or raw.get("ticker") or "").upper()
-                if ticker:
-                    current_pos = self.compute_position_from_fills(ticker)
-                    current_contracts = current_pos.get("contracts", 0) if current_pos else 0
-                    if current_contracts > 0:
-                        # We have a long position, this WS fill is likely a sell (closing)
-                        _action = "sell"
-                        logger.debug(f"WS fill {fill_id} for {ticker}: inferred action='sell' (closing position of {current_contracts})")
-                    else:
-                        # No position or short, this is likely a buy (opening)
-                        _action = "buy"
-                        logger.debug(f"WS fill {fill_id} for {ticker}: inferred action='buy' (opening position)")
+                price_dollars = yes_price_dollars if yes_price_dollars is not None else no_price_dollars
+                if price_dollars is not None:
+                    from merid.event_venues.kalshi.ws import _infer_kalshi_trade_action
+                    _action = _infer_kalshi_trade_action(raw, price_dollars)
+                    logger.debug(f"WS fill {fill_id} for {ticker}: inferred action='{_action}' from price={price_dollars:.2f}")
                 else:
-                    # No ticker available, default to buy (safer for accounting)
+                    # No price available, default to buy (safer for accounting)
                     _action = "buy"
+                    logger.debug(f"WS fill {fill_id} for {ticker}: inferred action='buy' (no price available, defaulting to buy)")
             else:
                 # P2 Task 10: Zero-count fills (settlements, cancels, info events)
                 # MUST still get a non-empty action so downstream PnL aggregation
@@ -3640,6 +3645,8 @@ class KalshiFillsLedger:
             decision_trace_id=raw.get("decision_trace_id"),
             is_live=is_live_trade,  # CRITICAL: Track if this was a real money trade
             asset=asset,  # Per-coin slippage tracking
+            agent_id=raw.get("agent_id"),  # CRITICAL: Extract agent_id from raw payload
+            intent_id=raw.get("intent_id"),  # CRITICAL: Extract intent_id from raw payload
         )
     
     def _index_fill(self, fill: KalshiFill) -> None:
