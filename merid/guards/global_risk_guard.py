@@ -28,11 +28,9 @@ if os.getenv("ALLOW_DEPRECATED_RISK_GUARDS", "").lower() not in ("1", "true", "y
         "merid.guards.global_risk_guard is DEPRECATED. "
         "Use merid.risk.unified_risk_manager instead. "
         "Set ALLOW_DEPRECATED_RISK_GUARDS=1 to bypass this check (for tests only)."
-    )
+   )
 
----
-
-Legacy documentation (deprecated):
+# Legacy documentation (deprecated):
 
 Canonical risk gate for all Kalshi PM order submissions. Extracted from
 ``merid.trading.kalshi_continuous_trader`` so that every caller - the
@@ -207,9 +205,9 @@ class GlobalRiskGuard:
                 )
 
     def _release_timed_out_capacity(self) -> None:
-        """Release capacity from approved orders that haven't filled within timeout.
+        """Release capacity from approved orders that have not filled within timeout.
         
-        2026 best practice: If an approved order doesn't fill within 60 seconds,
+        2026 best practice: If an approved order does not fill within 60 seconds,
         release its capacity back to the cycle cap to prevent false rejections.
         """
         now = time.time()
@@ -520,7 +518,7 @@ class GlobalRiskGuard:
 
             # 2. Bankroll cap check (sync with GlobalExecutionGuard)
             # CRITICAL FIX: Enforce bankroll cap to prevent GlobalExecutionGuard rejections
-            # This ensures GlobalRiskGuard doesn't approve orders that would be rejected downstream
+            # This ensures GlobalRiskGuard does not approve orders that would be rejected downstream
             bankroll_cap_cents = cycle_risk_cents  # Same as cycle cap for 15m crypto
             if new_cycle_total > bankroll_cap_cents:
                 reason = (
@@ -648,11 +646,11 @@ def _load_canonical_pcts() -> Tuple[float, float]:
     to ensure GlobalRiskGuard uses the same cap as KalshiRiskConfig.
     Only fall back to core.settings if env var is not set.
     
-    OPTIMIZED RISK REGIME (2026-05-07): 5% cycle / 8% total for better throughput while maintaining safety.
-    With $40 equity: 5% = $2.02 cycle cap for multi-asset trading.
-    
-    CRITICAL FIX (2026-07-05): Updated default to 5% to match profile YAML bankroll_cap_pct
-    Previous 0.5% was too restrictive for micro accounts.
+    # OPTIMIZED RISK REGIME (2026-05-07): 5% cycle / 8% total for better throughput while maintaining safety.
+    # With $40 equity: 5% = $2.02 cycle cap for multi-asset trading.
+    #
+    # CRITICAL FIX (2026-07-05): Updated default to 5% to match profile YAML bankroll_cap_pct
+    # Previous 0.5% was too restrictive for micro accounts.
     """
     try:
         # CRITICAL FIX: Read from environment variable first (set by start_15m.ps1)
@@ -741,7 +739,7 @@ def set_equity_provider(fn: Optional[Callable[[], int]]) -> None:
     """Register a zero-arg callable returning the canonical ``equity_cents``.
 
     Intended to be called once at startup by the component that owns the
-    canonical bankroll view (typically the AgentGrid's portfolio cache or
+    canonical bankroll view (typically the AgentGrid portfolio cache or
     the ``KalshiContinuousTrader`` bankroll manager when CT is active).
 
     Passing ``None`` clears the provider; callers that did not register a

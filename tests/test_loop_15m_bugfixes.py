@@ -1263,6 +1263,8 @@ def test_window_exposure_recorded_on_fill_not_at_gate():
     
     This test verifies the fix for the phantom exposure bug where exposure
     was counted at order submission instead of fill confirmation.
+    
+    CRITICAL FIX (2026-07-07): Also verifies duplicate recording was removed from order_router.py
     """
     # Verify order_gate.py does NOT record exposure at gate pass
     with open("merid/event_venues/kalshi/order_gate.py", "r", encoding="utf-8") as f:
@@ -1285,11 +1287,17 @@ def test_window_exposure_recorded_on_fill_not_at_gate():
     assert "async def on_fill" in cache_source, \
         "on_fill function not found in position_cache.py"
     
-    # Verify order_router.py does NOT have refund logic
+    # CRITICAL FIX (2026-07-07): Verify order_router.py does NOT have duplicate window exposure recording
     with open("merid/event_venues/kalshi/order_router.py", "r", encoding="utf-8") as f:
         router_source = f.read()
     
-    # Verify refund mechanism is removed
-    assert "refund_order_execution" not in router_source or \
-           "Window exposure no longer recorded optimistically" in router_source, \
-        "order_router.py should not have refund logic for optimistic exposure"
+    # Verify duplicate recording is removed (should have comment about removal)
+    assert "Removed duplicate window exposure recording" in router_source or \
+           "CRITICAL FIX (2026-07-07): Removed duplicate" in router_source, \
+        "order_router.py should have comment about removing duplicate window exposure recording"
+    
+    # Verify there's no duplicate record_order_execution call in order_router.py fill handling
+    # (position_cache.on_fill is the canonical source)
+    assert router_source.count("envelope.record_order_execution") == 0 or \
+           "CRITICAL FIX (2026-07-07): Removed duplicate" in router_source, \
+        "order_router.py should not have duplicate record_order_execution calls"

@@ -446,6 +446,22 @@ class KalshiPositionCache:
                     except Exception as ledger_err:
                         logger.debug("[POSITION-CACHE] Could not get fill record for exposure: %s", ledger_err)
                 
+                # CRITICAL FIX (2026-07-07): Derive agent_id from ticker if missing
+                # This ensures window exposure is tracked even when agent_id is not set in fill record
+                # (e.g., HTTP fills without agent_id context)
+                if not agent_id:
+                    try:
+                        from config.kalshi_crypto_config import kalshi_ticker_to_asset
+                        asset = kalshi_ticker_to_asset(market_id)
+                        if asset and asset.upper() in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                            agent_id = f"{asset.upper()}_15M"
+                            logger.debug(
+                                "[POSITION-CACHE] Derived agent_id=%s from ticker=%s for window exposure tracking",
+                                agent_id, market_id
+                            )
+                    except Exception as derive_err:
+                        logger.debug("[POSITION-CACHE] Could not derive agent_id from ticker: %s", derive_err)
+                
                 # Record exposure if we have agent_id and this is an entry order (buy)
                 if agent_id and action == "buy":
                     envelope = get_kalshi_crypto_15m_risk_envelope()
