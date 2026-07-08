@@ -3120,16 +3120,27 @@ class LeanAgent15m:
         
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
-            profile = get_active_profile()
-            min_entry_mins = profile.get("guardrails_min_entry_mins", 2.0)
-            max_entry_mins = profile.get("guardrails_max_entry_mins", 15.0)
-            cutoff_mins = profile.get("agent_cutoff_minutes_before_expiry", 2.0)
-            logger.debug(
-                "[TIME-WINDOW-CONFIG] asset=%s min_entry=%.1fmin max_entry=%.1fmin cutoff=%.1fmin (from profile)",
-                asset, min_entry_mins, max_entry_mins, cutoff_mins
-            )
+            adapter = get_active_profile()
+            if adapter and adapter._profile:
+                profile = adapter._profile
+                min_entry_mins = profile.guardrails_min_entry_mins
+                max_entry_mins = profile.guardrails_max_entry_mins
+                cutoff_mins = profile.agent_cutoff_minutes_before_expiry
+                logger.debug(
+                    "[TIME-WINDOW-CONFIG] asset=%s min_entry=%.1fmin max_entry=%.1fmin cutoff=%.1fmin (from profile)",
+                    asset, min_entry_mins, max_entry_mins, cutoff_mins
+                )
+            else:
+                # Use defaults if profile not available
+                min_entry_mins = 2.0
+                max_entry_mins = 15.0
+                cutoff_mins = 2.0
+                logger.debug("[TIME-WINDOW-CONFIG] asset=%s using defaults (profile not available)", asset)
         except Exception as e:
             logger.warning("[TIME-WINDOW-CONFIG] Failed to load from profile: %s, using defaults", e)
+            min_entry_mins = 2.0
+            max_entry_mins = 15.0
+            cutoff_mins = 2.0
         
         time_edge_multiplier = 1.0
         
@@ -4719,14 +4730,20 @@ class LeanAgent15m:
             logger.info("[COLLECT-SPOT-BEFORE] agent=%s asset=%s spot_provider=%s", 
                        self.config.name, asset, type(self.spot_provider).__name__)
             
-            # CRITICAL FIX: UnifiedSpotService.get() is synchronous and returns SpotPrice
+            # CRITICAL FIX: UnifiedSpotService.get() is synchronous and returns SpotPrice or SpotError
             # Use the synchronous get() method which returns SpotPrice with OHLC data
             if hasattr(self.spot_provider, 'get'):
                 result = self.spot_provider.get(asset)
                 logger.info("[COLLECT-SPOT-GET-RESULT] agent=%s asset=%s result=%s type=%s",
                            self.config.name, asset, result, type(result).__name__ if result else None)
                 if result is not None:
-                    if hasattr(result, 'price'):
+                    # Check if result is SpotError (indicates unavailable/degraded spot data)
+                    if hasattr(result, 'reason'):
+                        logger.warning("[COLLECT-SPOT-ERROR] agent=%s asset=%s spot unavailable: %s",
+                                     self.config.name, asset, result.reason)
+                        spot_price = None
+                        spot_data = None
+                    elif hasattr(result, 'price'):
                         spot_price = result.price
                         spot_data = result  # Store full SpotPrice object for OHLC data
                         logger.info("[COLLECT-SPOT-SUCCESS] agent=%s asset=%s spot_price=%.8f has_ohlc=%s",
