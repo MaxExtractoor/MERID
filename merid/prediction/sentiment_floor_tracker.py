@@ -47,39 +47,20 @@ class SentimentFloorTracker:
     """
     
     _instance: Optional["SentimentFloorTracker"] = None
-    # TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-    # TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-    # _lock: threading.Lock = threading.Lock()
-    _lock: Optional[threading.Lock] = None  # Disabled to prevent startup hang
+    _lock: threading.Lock = threading.Lock()
     
     def __new__(cls) -> "SentimentFloorTracker":
         if cls._instance is None:
-            if cls._lock is not None:
-                with cls._lock:
-                    if cls._instance is None:
-                        cls._instance = super().__new__(cls)
-                        cls._instance._initialized = False
-            else:
-                # Lock disabled - direct initialization (startup workaround)
-                cls._instance = super().__new__(cls)
-                cls._instance._initialized = False
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
         return cls._instance
     
     def __init__(self) -> None:
         if self._initialized:
             return
-        if self._lock is not None:
-            with self._lock:
-                if self._initialized:
-                    return
-                self._24h_seconds = 24 * 60 * 60  # 24 hours in seconds
-                self._attempts: deque[ContrarianAttempt] = deque()
-                self._initialized = True
-        else:
-            # Lock disabled - direct initialization (startup workaround)
-            self._24h_seconds = 24 * 60 * 60  # 24 hours in seconds
-            self._attempts: deque[ContrarianAttempt] = deque()
-            self._initialized = True
+        self._24h_seconds = 24 * 60 * 60  # 24 hours in seconds
+        self._attempts: deque[ContrarianAttempt] = deque()
+        self._initialized = True
     
     def record_attempt(
         self,

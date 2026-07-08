@@ -208,10 +208,7 @@ class StrikeCalibrator:
         self._calibration_path = calibration_path
         self._observations_path = observations_path
 
-        # TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-        # TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-        # self._lock = threading.Lock()
-        self._lock = None  # Disabled to prevent startup hang
+        self._lock = threading.Lock()
         self._calibrated: Dict[Tuple[str, str], float] = {}
         self._observation_count: Dict[Tuple[str, str], int] = {}
         self._calibrated_at: Optional[float] = None

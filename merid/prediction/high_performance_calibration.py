@@ -454,21 +454,13 @@ class HighPerformanceCalibration:
     def __init__(self, win_rate_target: WinRateTarget = WinRateTarget.AGGRESSIVE):
         self.win_rate_target = win_rate_target
         self._cache: Dict[Tuple[str, str], HighPerformanceConfig] = {}
-        # TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-        # TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-        # self._lock = threading.Lock()
-        self._lock = None  # Disabled to prevent startup hang
+        self._lock = threading.Lock()
         
     def get_config(self, asset: str, timeframe: str) -> HighPerformanceConfig:
         """Get optimized configuration for an asset/timeframe pair."""
         key = (asset.upper(), timeframe.lower())
         
-        if self._lock is not None:
-            with self._lock:
-                if key in self._cache:
-                    return self._cache[key]
-        else:
-            # Lock disabled - direct access (startup workaround)
+        with self._lock:
             if key in self._cache:
                 return self._cache[key]
         
