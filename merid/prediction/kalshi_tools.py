@@ -718,7 +718,7 @@ async def _kalshi_place_order(
                 
                 # Resolve window policy
                 window_resolution = resolve_window_policy(asset=asset if asset else "BTC", regime="neutral")
-                window_resolution_id = window_resolution.window_resolution_id
+                window_resolution_id = window_resolution.window_id  # Fixed: was window_resolution_id
                 
                 # Resolve exit policy with edge result
                 edge_result = {"edge_pct": 2.0}  # Default edge
