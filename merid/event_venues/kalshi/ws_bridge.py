@@ -432,6 +432,11 @@ class KalshiWebSocketBridge:
         # Sequence tracking for gap detection
         self._last_sequence: Optional[int] = None
         self._sequence_gaps: int = 0
+        self._sequence_gaps_list: List[Tuple[int, int]] = []  # Track (gap_start, gap_end) for logging
+        
+        # Message deduplication cache (per-ticker)
+        self._message_cache: Dict[str, Dict[str, Any]] = {}  # ticker -> last message hash
+        self._message_cache_size: int = 1000  # Max messages to cache
         
         # Connection lifecycle metrics
         self._reconnect_count: int = 0
@@ -2564,13 +2569,18 @@ class KalshiWebSocketBridge:
             )
             return
 
+        # CRITICAL FIX: Kalshi WS fill messages have action nested in "msg" field
+        # Format: {"type": "fill", "msg": {"action": "buy", ...}}
+        # Extract action from "msg" first, fallback to top-level
+        action = raw.get("msg", {}).get("action", "") if isinstance(raw.get("msg"), dict) else raw.get("action", "")
+        
         ws_fill: Dict[str, Any] = {
             "fill_id": str(fill_id),
             "trade_id": raw.get("trade_id"),
             "order_id": raw.get("order_id"),
             "market_ticker": raw.get("ticker") or raw.get("market_ticker") or "",
             "side": raw.get("side", ""),
-            "action": raw.get("action", ""),
+            "action": action,
             "count": count,
             "yes_price": raw.get("yes_price"),
             "no_price": raw.get("no_price"),
@@ -2757,11 +2767,56 @@ class KalshiWebSocketBridge:
                     if seq > expected:
                         gap = seq - expected
                         self._sequence_gaps += gap
+                        self._sequence_gaps_list.append((expected, seq - 1))
                         logger.warning(
                             f"WS fill sequence gap detected: expected {expected}, got {seq}, "
                             f"gap={gap}, total_gaps={self._sequence_gaps}"
                         )
                 self._last_sequence = seq
+        
+        # Check for sequence gaps in orderbook events
+        if isinstance(event, dict) and event.get("type") in ("orderbook_snapshot", "orderbook_delta"):
+            seq = event.get("sequence") or event.get("seq") or event.get("msg_id")
+            if seq is not None and isinstance(seq, numbers.Integral) and not isinstance(seq, bool):
+                if self._last_sequence is not None:
+                    expected = self._last_sequence + 1
+                    if seq > expected:
+                        gap = seq - expected
+                        self._sequence_gaps += gap
+                        self._sequence_gaps_list.append((expected, seq - 1))
+                        logger.warning(
+                            f"WS orderbook sequence gap detected: expected {expected}, got {seq}, "
+                            f"gap={gap}, total_gaps={self._sequence_gaps}"
+                        )
+                self._last_sequence = seq
+        
+        # Message deduplication check
+        if isinstance(event, dict):
+            ticker = event.get("ticker") or event.get("market_ticker") or event.get("msg", {}).get("market_ticker") if isinstance(event.get("msg"), dict) else None
+            event_type = event.get("type")
+            if ticker and event_type:
+                # Create a simple hash for deduplication
+                import hashlib
+                event_str = f"{ticker}:{event_type}:{str(event.get('seq', ''))}:{str(event.get('sequence', ''))}"
+                event_hash = hashlib.md5(event_str.encode()).hexdigest()
+                
+                if ticker in self._message_cache:
+                    if self._message_cache[ticker].get("hash") == event_hash:
+                        # Duplicate detected
+                        self._events_dropped += 1
+                        logger.debug(f"[WS-DEDUP] Duplicate event dropped: ticker={ticker}, type={event_type}")
+                        return
+                
+                # Update cache
+                if len(self._message_cache) >= self._message_cache_size:
+                    # Remove oldest entry
+                    oldest_ticker = next(iter(self._message_cache))
+                    del self._message_cache[oldest_ticker]
+                
+                self._message_cache[ticker] = {
+                    "hash": event_hash,
+                    "ts": _time.time()
+                }
         
         # EVENT-LOOP-FIX: Check queue depth and apply backpressure
         current_qsize = self._queue.qsize()
