@@ -4096,6 +4096,57 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 reason=f"Unified risk check: {reason}",
                 latency_ms=0.0
             )
+        
+        # CRITICAL FIX (2026-07-08): Enforce per-side position limits (max_yes_position/max_no_position)
+        # This prevents unlimited position accumulation despite max_contracts=1 per-order limit
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+            profile_adapter = get_active_profile()
+            if profile_adapter:
+                max_yes = profile_adapter.profile.agent_max_yes_position
+                max_no = profile_adapter.profile.agent_max_no_position
+                
+                # Get existing position from position cache
+                from merid.event_venues.kalshi.position_cache import get_position_cache
+                _cached = get_position_cache().get_position(intent.ticker)
+                existing_yes = 0
+                existing_no = 0
+                if _cached is not None:
+                    if _cached.contracts > 0:
+                        existing_yes = _cached.contracts
+                    elif _cached.contracts < 0:
+                        existing_no = abs(_cached.contracts)
+                
+                # Check per-side limit
+                if intent.side.lower() == "yes":
+                    new_yes_total = existing_yes + intent.count
+                    if new_yes_total > max_yes:
+                        logger.warning(
+                            f"[ORDER-ROUTER] Per-side YES limit exceeded: {new_yes_total} > {max_yes} (existing={existing_yes}, new={intent.count})"
+                        )
+                        return OrderResult(
+                            status="rejected",
+                            mode=intent.mode,
+                            fill=None,
+                            reason=f"Max YES position: {new_yes_total} > {max_yes}",
+                            latency_ms=0.0
+                        )
+                elif intent.side.lower() == "no":
+                    new_no_total = existing_no + intent.count
+                    if new_no_total > max_no:
+                        logger.warning(
+                            f"[ORDER-ROUTER] Per-side NO limit exceeded: {new_no_total} > {max_no} (existing={existing_no}, new={intent.count})"
+                        )
+                        return OrderResult(
+                            status="rejected",
+                            mode=intent.mode,
+                            fill=None,
+                            reason=f"Max NO position: {new_no_total} > {max_no}",
+                            latency_ms=0.0
+                        )
+        except Exception as _side_limit_err:
+            logger.error(f"[ORDER-ROUTER] Per-side position limit check failed: {_side_limit_err} — allowing order (fail-open)")
+            # Fail-open: allow order if limit check fails to avoid blocking all trading
     
     # Look up existing position so per-contract limit check is accurate
     # CRASH-004: Use sentinel value for cache failure, never poison calculation
