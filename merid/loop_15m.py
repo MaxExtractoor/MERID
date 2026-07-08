@@ -1135,6 +1135,18 @@ class Kalshi15mLoop:
                 # This prevents race condition where positions are added before callback is registered
                 self._position_monitor.register_exit_intent_callback(exit_intent_callback)
                 
+                # CRITICAL FIX (2026-07-08): Verify exit intent callback registration
+                if self._position_monitor._exit_intent_callback is None:
+                    logger.error(
+                        "[15M-LOOP] EXIT INTENT CALLBACK NOT REGISTERED - Exit policies will not execute!"
+                    )
+                    raise RuntimeError("Exit intent callback not registered - system unsafe for trading")
+                else:
+                    logger.info(
+                        "[15M-LOOP] Exit intent callback verified registered: %s",
+                        self._position_monitor._exit_intent_callback.__name__
+                    )
+                
                 # Start the monitor's polling loop (await to ensure _running flag is set)
                 await self._position_monitor.start()
                 logger.info("[15m-LOOP] Started PositionMonitor with exit callback")
@@ -3689,23 +3701,24 @@ class Kalshi15mLoop:
                 # CRITICAL DIAGNOSTIC: Log exit_policy resolution result
                 if exit_policy:
                     logger.info("[15M-LOOP] exit_policy resolved successfully: policy_id=%s asset=%s regime=%s", exit_policy.policy_id, asset, regime)
+                    # CRITICAL FIX: Add assertions to validate exit policy values
+                    assert exit_policy is not None, f"Exit policy resolution returned None for ticker={ticker}"
+                    assert exit_policy.policy_id is not None, f"Exit policy missing policy_id for ticker={ticker}"
+                    assert exit_policy.tp_r_multiple > 0, f"Exit policy TP R-multiple must be positive for ticker={ticker}, got {exit_policy.tp_r_multiple}"
+                    assert exit_policy.sl_cents >= 0, f"Exit policy SL cents must be non-negative for ticker={ticker}, got {exit_policy.sl_cents}"
+                    assert exit_policy.max_hold_seconds > 0, f"Exit policy max_hold_seconds must be positive for ticker={ticker}, got {exit_policy.max_hold_seconds}"
                 else:
                     logger.error("[15M-LOOP] exit_policy is None after resolution! asset=%s regime=%s", asset, regime)
+                    # CRITICAL FIX: Reject order when exit policy is None
+                    return
             except Exception as e:
-                logger.warning("[15M-LOOP] Failed to resolve policies for %s: %s, using fallback", ticker, e)
-                # CRITICAL FIX: Use fallback exit policy instead of returning to prevent exit_policy_id_missing rejection
-                import uuid
-                window_resolution_id = f"window_resolution_{uuid.uuid4().hex[:12]}"
-                # Create minimal fallback exit policy to satisfy gate validation
-                from merid.event_venues.kalshi.order_router import ExitPolicyResolution
-                exit_policy = ExitPolicyResolution(
-                    policy_id=f"fallback_{uuid.uuid4().hex[:8]}",
-                    tp_r_multiple=0.5,  # Conservative 50% take profit
-                    sl_cents=max(1, int(candidate.get("price_cents", 50) - 5)),  # 5 cent stop loss
-                    max_hold_seconds=600,  # 10 minute max hold
-                    edge_confidence=0.5,
-                    net_edge_cents_at_entry=0,
+                logger.error(
+                    "[15M-LOOP] Failed to resolve exit policy for %s: %s - REJECTING ORDER for safety",
+                    ticker, e, exc_info=True
                 )
+                # CRITICAL FIX: Reject order when exit policy resolution fails
+                # Fallback policies risk entering trades without effective exits
+                return  # Do not proceed with order submission
             
             # CRITICAL FIX: Use candidate's price_cents if available (already side-aware)
             # The signal generation now sets correct price based on side (YES uses YES price, NO uses NO price)
@@ -3918,9 +3931,10 @@ class Kalshi15mLoop:
                 take_profit_price_cents=take_profit_price_cents,
                 take_profit_r_multiple=take_profit_r_multiple,
                 stop_loss_price_cents=stop_loss_price_cents,
-                # CRITICAL FIX: Ensure exit_policy_id is never None to prevent gate rejection
-                # Fallback should have been created earlier, but add defensive check here
-                exit_policy_id=exit_policy.policy_id if exit_policy else f"fallback_{uuid.uuid4().hex[:8]}",
+                # CRITICAL FIX (2026-07-08): exit_policy must be non-None at this point
+                # If exit_policy is None, it should have been rejected earlier in _execute_candidate
+                # This defensive check ensures we fail loudly if there's a bug in the control flow
+                exit_policy_id=exit_policy.policy_id if exit_policy else None,
                 # CRITICAL FIX: Add risk contract linkage fields to satisfy _validate_risk_contract_linkage
                 # These are required for crypto 15m markets to pass the risk contract validation
                 window_resolution_id=window_resolution_id if window_resolution_id else f"window_resolution_{uuid.uuid4().hex[:12]}",

@@ -441,6 +441,13 @@ class KalshiCrypto15mRiskEnvelope:
             - allowed: True if order is within window limits, False if blocked
             - reason: Reason string if blocked, empty string if allowed
         """
+        # CRITICAL FIX (2026-07-08): Add assertions to validate inputs
+        assert self.live_bankroll_usd > 0, "Bankroll must be positive for window limit check"
+        assert self.guardrails_per_window_risk_pct > 0, "Per-agent window limit must be positive"
+        assert self.guardrails_total_venue_risk_pct > 0, "Total venue window limit must be positive"
+        assert order_notional_usd > 0, "Order notional must be positive"
+        assert agent_id, "Agent ID must be provided"
+        
         # CRITICAL (2026-07-06): Read cumulative exposure from module-level shared
         # state. Envelope instances are recomputed on every call, so instance
         # fields always start at zero - only the shared state carries the truth.
@@ -501,6 +508,11 @@ class KalshiCrypto15mRiskEnvelope:
             agent_id: Agent identifier
             order_notional_usd: Notional value of executed order in USD
         """
+        # CRITICAL FIX (2026-07-08): Add assertions to validate inputs
+        assert self.live_bankroll_usd > 0, "Bankroll must be positive for recording execution"
+        assert order_notional_usd > 0, "Order notional must be positive for recording"
+        assert agent_id, "Agent ID must be provided for recording"
+        
         # CRITICAL (2026-07-06): Write to module-level shared state so the
         # recorded exposure survives envelope recomputation and is visible to
         # subsequent check_window_limit() calls (3%/5% allowance decrement).
