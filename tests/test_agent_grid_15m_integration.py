@@ -812,27 +812,27 @@ def test_price_precision_logging_2026_standards():
     
     # Check VELOCITY-CALC logging format in agent_grid_15m.py
     velocity_calc_source = inspect.getsource(LeanAgent15m._generate_signal)
-    assert "%.8f" in velocity_calc_source, \
-        "VELOCITY-CALC log should use %.8f for full price precision"
-    assert "%.2f" not in velocity_calc_source or "current=%.2f" not in velocity_calc_source, \
-        "VELOCITY-CALC log should not use %.2f for current/prev prices (use %.8f)"
+    assert "format_price" in velocity_calc_source, \
+        "VELOCITY-CALC log should use format_price() for asset-aware precision"
+    assert "%.8f" not in velocity_calc_source or "current=%.8f" not in velocity_calc_source, \
+        "VELOCITY-CALC log should not use %.8f for current prices (use format_price)"
     
     # Check UNIFIED-SPOT logging format in unified_spot_service.py
     spot_service_source = inspect.getsource(UnifiedSpotService._fetch_asset)
-    assert ".8f" in spot_service_source, \
-        "UNIFIED-SPOT log should use .8f for full price precision"
+    assert "format_price" in spot_service_source, \
+        "UNIFIED-SPOT log should use format_price() for asset-aware precision"
     
     # Check crypto_spot_service.py logging format
     from merid.trading.crypto_spot_service import CryptoSpotService
     spot_service_source = inspect.getsource(CryptoSpotService._try_coinbase)
-    assert "%.8f" in spot_service_source, \
-        "Coinbase spot service log should use %.8f for full price precision"
+    assert "format_price" in spot_service_source, \
+        "Coinbase spot service log should use format_price() for asset-aware precision"
     
     # Check lag_tracker.py logging format
     from merid.market_data.lag_tracker import LagTracker
     lag_tracker_source = inspect.getsource(LagTracker.on_spot_update)
-    assert "%.8f" in lag_tracker_source, \
-        "LAG-TRACKER spot update log should use %.8f for full price precision"
+    assert "format_price" in lag_tracker_source, \
+        "LAG-TRACKER spot update log should use format_price() for asset-aware precision"
 
 
 def test_ohlc_data_structure_in_spot_price():

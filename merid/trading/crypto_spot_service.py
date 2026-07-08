@@ -43,7 +43,7 @@ import os
 import httpx
 import requests
 
-from utils.logger import get_logger
+from utils.logger import get_logger, format_price
 
 logger = get_logger("merid.trading.crypto_spot_service")
 
@@ -445,13 +445,13 @@ class CryptoSpotService:
                             self._failure_metrics["coinbase"]["stale"] += 1
                             # Reject stale data
                             return None
-                        logger.debug("Coinbase v2 success: %s = %.8f (age=%.1fs)", asset, price, age_seconds)
+                        logger.debug("Coinbase v2 success: %s = %s (age=%.1fs)", asset, format_price(asset, price), age_seconds)
                     except (ValueError, TypeError) as e:
                         logger.debug("Coinbase v2 timestamp parse failed for %s: %s", asset, e)
                         # If timestamp parsing fails, accept price but log warning
-                        logger.debug("Coinbase v2 success: %s = %.8f (timestamp unavailable)", asset, price)
+                        logger.debug("Coinbase v2 success: %s = %s (timestamp unavailable)", asset, format_price(asset, price))
                 else:
-                    logger.debug("Coinbase v2 success: %s = %.8f (no timestamp in response)", asset, price)
+                    logger.debug("Coinbase v2 success: %s = %s (no timestamp in response)", asset, format_price(asset, price))
                 self._clear_venue_error("coinbase")
                 return price
             else:
@@ -493,13 +493,13 @@ class CryptoSpotService:
                             self._failure_metrics["coinbase"]["stale"] += 1
                             # Reject stale data
                             return None
-                        logger.debug("Coinbase Exchange success: %s = %.8f (age=%.1fs)", asset, price, age_seconds)
+                        logger.debug("Coinbase Exchange success: %s = %s (age=%.1fs)", asset, format_price(asset, price), age_seconds)
                     except (ValueError, TypeError) as e:
                         logger.debug("Coinbase Exchange timestamp parse failed for %s: %s", asset, e)
                         # If timestamp parsing fails, accept price but log warning
-                        logger.debug("Coinbase Exchange success: %s = %.8f (timestamp unavailable)", asset, price)
+                        logger.debug("Coinbase Exchange success: %s = %s (timestamp unavailable)", asset, format_price(asset, price))
                 else:
-                    logger.debug("Coinbase Exchange success: %s = %.8f (no timestamp in response)", asset, price)
+                    logger.debug("Coinbase Exchange success: %s = %s (no timestamp in response)", asset, format_price(asset, price))
                 self._clear_venue_error("coinbase")
                 return price
         except Exception as e:

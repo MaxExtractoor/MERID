@@ -13,6 +13,38 @@ from typing import Any, Dict, Optional
 from merid_bootstrap import PROJECT_ROOT
 
 
+# ── Asset-Aware Price Formatting ───────────────────────────────────────
+# Different crypto assets have different price ranges and need appropriate
+# decimal precision for logging and display.
+
+def format_price(asset: str, price: float) -> str:
+    """Format price with appropriate decimal places based on asset.
+    
+    Args:
+        asset: Asset symbol (e.g., "BTC", "ETH", "SOL", "XRP", "DOGE")
+        price: Price value to format
+    
+    Returns:
+        Formatted price string with appropriate decimal places
+    """
+    # Define decimal places for each asset based on typical price range
+    # BTC: ~$60,000 -> 2 decimal places
+    # ETH: ~$1,700 -> 2 decimal places
+    # SOL: ~$77 -> 4 decimal places
+    # XRP: ~$1.08 -> 4 decimal places
+    # DOGE: ~$0.07 -> 7 decimal places
+    asset_precision = {
+        "BTC": 2,
+        "ETH": 2,
+        "SOL": 4,
+        "XRP": 4,
+        "DOGE": 7
+    }
+    
+    precision = asset_precision.get(asset.upper(), 4)  # Default to 4 decimals
+    return f"{price:.{precision}f}"
+
+
 # ── Correlation ID context ────────────────────────────────────────────
 # set per-request by the FastAPI correlation_id_middleware in web/main.py.
 # Any log line emitted during that request will include the correlation ID.
