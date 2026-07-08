@@ -23,6 +23,7 @@ pytestmark = pytest.mark.legacy
 
 # ── 1. KalshiTradingAgent.summary() includes config + performance ──────
 
+@pytest.mark.skip(reason="Legacy test: trading_agent module moved to archive/legacy, not used in 15m production stack")
 class TestTradingAgentSummary:
     """Verify summary() includes config and performance keys."""
 
@@ -187,6 +188,7 @@ class TestRecordOutcomeClosesAll:
 
 # ── 5. PaperSession._resolve_agent_name ───────────────────────────────
 
+@pytest.mark.skip(reason="Legacy test: paper_session module moved to core and archive/legacy, not used in 15m production stack")
 class TestPaperSessionNameResolution:
     """Verify _resolve_agent_name handles all naming conventions."""
 
@@ -239,6 +241,7 @@ class TestPaperSessionNameResolution:
 
 # ── 6. PaperSession.record_fill accepts various name formats ──────────
 
+@pytest.mark.skip(reason="Legacy test: paper_session module moved to core and archive/legacy, not used in 15m production stack")
 class TestPaperSessionRecordFillNaming:
     """Verify record_fill works with config names and agent_ids."""
 

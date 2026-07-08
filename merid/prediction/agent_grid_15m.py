@@ -5108,7 +5108,83 @@ class LeanAgent15m:
                 )
             
             logger.info("[CANDIDATE-GENERATED] asset=%s side=%s", self.config.name, signal["side"])
-            return candidate
+            
+            # CRITICAL FIX: 2026-07-08 - Direct execution invocation to complete the execution chain
+            # Industry best practices: strategy → OMS/EMS → mandatory risk gate → order gateway → venue
+            # The signal-to-order conversion layer was missing, causing guardrails to be bypassed
+            # This fix routes signals through _kalshi_place_order → route_order_async → PreTradeGate.check
+            # If order submission fails, the signal is rejected (fail-safe)
+            try:
+                from merid.prediction.kalshi_tools import _kalshi_place_order
+                
+                # Extract order parameters from signal
+                ticker = market.market.market_id if hasattr(market, 'market') else market.market_id
+                side = signal["side"]  # "yes" or "no"
+                action = "buy"  # Entry orders are always buys (YES or NO)
+                price_cents = int(signal.get("price_cents", 50))
+                count = int(signal.get("count", 1))
+                agent_name = self.config.name
+                
+                logger.info(
+                    "[DIRECT-EXECUTION] asset=%s ticker=%s side=%s action=%s price_cents=%d count=%d agent_name=%s",
+                    asset, ticker, side, action, price_cents, count, agent_name
+                )
+                
+                # Call _kalshi_place_order which routes through route_order_async and guardrails
+                order_result = await _kalshi_place_order(
+                    ticker=ticker,
+                    side=side,
+                    action=action,
+                    price_cents=price_cents,
+                    count=count,
+                    agent_name=agent_name
+                )
+                
+                # Check if order was successful
+                if order_result and order_result.get("success", False):
+                    logger.info(
+                        "[DIRECT-EXECUTION-SUCCESS] asset=%s ticker=%s order_id=%s",
+                        asset, ticker, order_result.get("order_id", "unknown")
+                    )
+                    # Update session order count on successful execution
+                    self._session_order_count += 1
+                    # Update last trade time on successful execution
+                    self._last_trade_time[asset] = time.time()
+                    # Update session risk on successful execution
+                    order_notional_usd = (price_cents / 100.0) * count
+                    self._session_risk_usd += order_notional_usd
+                    logger.info(
+                        "[SESSION-STATE-UPDATED] asset=%s session_orders=%d session_risk=%.2f",
+                        asset, self._session_order_count, self._session_risk_usd
+                    )
+                    # Return candidate with execution result
+                    candidate["execution_result"] = order_result
+                    return candidate
+                else:
+                    # Order submission failed - reject signal (fail-safe)
+                    logger.warning(
+                        "[DIRECT-EXECUTION-FAILED] asset=%s ticker=%s reason=%s - SIGNAL REJECTED (fail-safe)",
+                        asset, ticker, order_result.get("error", "unknown") if order_result else "no result"
+                    )
+                    # Increment consecutive loss counter on failed execution
+                    self._consecutive_losses[asset] = self._consecutive_losses.get(asset, 0) + 1
+                    # Check if consecutive loss pause should be triggered
+                    if self._consecutive_losses[asset] >= 3:
+                        pause_duration_sec = 300  # 5 minutes pause
+                        self._consecutive_loss_pause_until[asset] = time.time() + pause_duration_sec
+                        logger.warning(
+                            "[CONSECUTIVE-LOSS-PAUSE-TRIGGERED] asset=%s consecutive_losses=%d paused_until=%s",
+                            asset, self._consecutive_losses[asset], self._consecutive_loss_pause_until[asset]
+                        )
+                    return None
+                    
+            except Exception as e:
+                # Exception during order submission - reject signal (fail-safe)
+                logger.error(
+                    "[DIRECT-EXECUTION-ERROR] asset=%s ticker=%s error=%s - SIGNAL REJECTED (fail-safe)",
+                    asset, ticker if 'ticker' in locals() else "unknown", str(e), exc_info=True
+                )
+                return None
             
         except Exception as e:
             logger.error("[CANDIDATE-ERROR] asset=%s error=%s", self.config.name, str(e), exc_info=True)
