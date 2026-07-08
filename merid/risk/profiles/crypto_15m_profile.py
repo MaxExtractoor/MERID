@@ -371,7 +371,7 @@ class Crypto15mProfile:
     dynamic_sizing_base_contracts: int = 1
     dynamic_sizing_edge_multiplier: float = 2.0
     dynamic_sizing_confidence_multiplier: float = 1.0
-    dynamic_sizing_max_contracts: int = 3
+    dynamic_sizing_max_contracts: int = 1  # CRITICAL FIX (2026-07-08): Reduced from 3 to 1 to enforce 3% risk limit
     dynamic_sizing_min_contracts: int = 1
     # Crypto markets are near well-calibrated (slope ~1.08) but still benefit from dynamic adjustment
     calibration_enabled: bool = True  # Enable/disable probability calibration (ENABLED for dynamic adjustment)
@@ -997,7 +997,7 @@ class Crypto15mProfileAdapter:
                 contract_caps_max_contracts_per_cluster=contract_caps.get('max_contracts_per_cluster', 750),
                 # Handle nested dict format for max_single_order_contracts
                 contract_caps_max_single_order_contracts=self._normalize_contracts_value(
-                    contract_caps.get('max_single_order_contracts', 10)
+                    contract_caps.get('max_single_order_contracts', 1)  # CRITICAL FIX (2026-07-08): Default 1 to enforce 3% risk limit
                 ),
                 
                 # Risk policy (normalize dict format for percentage fields)
@@ -1126,7 +1126,7 @@ class Crypto15mProfileAdapter:
                 dynamic_sizing_base_contracts=raw.get('dynamic_sizing', {}).get('base_contracts', 1),
                 dynamic_sizing_edge_multiplier=raw.get('dynamic_sizing', {}).get('edge_multiplier', 2.0),
                 dynamic_sizing_confidence_multiplier=raw.get('dynamic_sizing', {}).get('confidence_multiplier', 1.0),
-                dynamic_sizing_max_contracts=raw.get('dynamic_sizing', {}).get('max_contracts', 3),
+                dynamic_sizing_max_contracts=raw.get('dynamic_sizing', {}).get('max_contracts', 1),  # CRITICAL FIX (2026-07-08): Default 1 to enforce 3% risk limit
                 dynamic_sizing_min_contracts=raw.get('dynamic_sizing', {}).get('min_contracts', 1),
                 # Phase 2: Strategy definitions
                 strategies=strategies,
