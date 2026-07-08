@@ -132,6 +132,163 @@ class TestOrphanSweepEnablesTerminalPrune:
         assert "coid-stale" not in store._orders
 
 
+class TestExitOrderPositionValidation:
+    """Tests for exit order position existence validation (2026-07-08 FIX)."""
+
+    def test_exit_order_without_position_is_rejected(self):
+        """Exit orders (SELL) are rejected when no position exists to close."""
+        from unittest.mock import MagicMock, patch
+        
+        gate = PreTradeGate()
+        
+        # Mock position cache to return no position
+        # Position check happens BEFORE window limit check, so no need to mock envelope
+        with patch('merid.event_venues.kalshi.position_cache.get_position_cache') as mock_get_cache:
+            mock_cache = MagicMock()
+            mock_cache.get_position.return_value = None
+            mock_get_cache.return_value = mock_cache
+            
+            verdict = gate.check(
+                agent_id="BTC_15M",
+                strategy_group="btc_15m",
+                contract_id="KXBTC15M-26JAN24-5000",
+                side="yes",
+                action="sell",  # Exit order
+                target_count=10,
+                price_cents=75,
+                decision_ts=__import__('time').time(),
+            )
+            
+            assert verdict.allowed is False
+            assert "exit_order_without_position" in verdict.reason
+
+    def test_exit_order_with_zero_contracts_is_rejected(self):
+        """Exit orders are rejected when position has zero contracts."""
+        from unittest.mock import MagicMock, patch
+        
+        gate = PreTradeGate()
+        
+        # Mock position cache to return position with zero contracts
+        with patch('merid.event_venues.kalshi.position_cache.get_position_cache') as mock_get_cache:
+            mock_cache = MagicMock()
+            mock_position = MagicMock()
+            mock_position.contracts = 0
+            mock_cache.get_position.return_value = mock_position
+            mock_get_cache.return_value = mock_cache
+            
+            verdict = gate.check(
+                agent_id="BTC_15M",
+                strategy_group="btc_15m",
+                contract_id="KXBTC15M-26JAN24-5000",
+                side="yes",
+                action="sell",
+                target_count=10,
+                price_cents=75,
+                decision_ts=__import__('time').time(),
+            )
+            
+            assert verdict.allowed is False
+            assert "exit_order_without_position" in verdict.reason
+
+    def test_exit_order_side_mismatch_is_rejected(self):
+        """Exit orders are rejected when order side doesn't match position side."""
+        from unittest.mock import MagicMock, patch
+        
+        gate = PreTradeGate()
+        
+        # Mock position cache to return YES position but order is for NO
+        with patch('merid.event_venues.kalshi.position_cache.get_position_cache') as mock_get_cache:
+            mock_cache = MagicMock()
+            mock_position = MagicMock()
+            mock_position.contracts = 10
+            mock_position.side = "yes"  # Position is YES
+            mock_cache.get_position.return_value = mock_position
+            mock_get_cache.return_value = mock_cache
+            
+            verdict = gate.check(
+                agent_id="BTC_15M",
+                strategy_group="btc_15m",
+                contract_id="KXBTC15M-26JAN24-5000",
+                side="no",  # Order is for NO (mismatch)
+                action="sell",
+                target_count=10,
+                price_cents=75,
+                decision_ts=__import__('time').time(),
+            )
+            
+            assert verdict.allowed is False
+            assert "exit_order_side_mismatch" in verdict.reason
+
+    def test_exit_order_with_valid_position_is_allowed(self):
+        """Exit orders are allowed when position exists and side matches."""
+        from unittest.mock import MagicMock, patch
+        
+        gate = PreTradeGate()
+        
+        # Mock position cache to return valid position
+        # Also need to mock risk envelope since it comes after position check
+        with patch('merid.event_venues.kalshi.position_cache.get_position_cache') as mock_get_cache, \
+             patch('merid.risk.profiles.kalshi_crypto_15m_risk_envelope.get_kalshi_crypto_15m_risk_envelope') as mock_get_envelope:
+            mock_cache = MagicMock()
+            mock_position = MagicMock()
+            mock_position.contracts = 10
+            mock_position.side = "yes"
+            mock_cache.get_position.return_value = mock_position
+            mock_get_cache.return_value = mock_cache
+            
+            mock_envelope = MagicMock()
+            mock_envelope.check_window_limit.return_value = (True, "")
+            mock_get_envelope.return_value = mock_envelope
+            
+            verdict = gate.check(
+                agent_id="BTC_15M",
+                strategy_group="btc_15m",
+                contract_id="KXBTC15M-26JAN24-5000",
+                side="yes",
+                action="sell",
+                target_count=10,
+                price_cents=75,
+                decision_ts=__import__('time').time(),
+                exit_policy_id="test_exit_policy",  # Required for crypto 15m markets
+            )
+            
+            assert verdict.allowed is True
+            assert verdict.reason == ""
+
+    def test_entry_order_bypasses_position_check(self):
+        """Entry orders (BUY) bypass position existence validation."""
+        from unittest.mock import MagicMock, patch
+        
+        gate = PreTradeGate()
+        
+        # Mock position cache to return no position (should not block entry)
+        # Entry orders skip position check, but still need to mock envelope
+        with patch('merid.event_venues.kalshi.position_cache.get_position_cache') as mock_get_cache, \
+             patch('merid.risk.profiles.kalshi_crypto_15m_risk_envelope.get_kalshi_crypto_15m_risk_envelope') as mock_get_envelope:
+            mock_cache = MagicMock()
+            mock_cache.get_position.return_value = None
+            mock_get_cache.return_value = mock_cache
+            
+            mock_envelope = MagicMock()
+            mock_envelope.check_window_limit.return_value = (True, "")
+            mock_get_envelope.return_value = mock_envelope
+            
+            verdict = gate.check(
+                agent_id="BTC_15M",
+                strategy_group="btc_15m",
+                contract_id="KXBTC15M-26JAN24-5000",
+                side="yes",
+                action="buy",  # Entry order
+                target_count=10,
+                price_cents=50,
+                decision_ts=__import__('time').time(),
+            )
+            
+            # Entry order should pass (other checks may block, but not position check)
+            # We just verify it doesn't get blocked by position check
+            assert "exit_order_without_position" not in verdict.reason
+
+
 class TestPreTradeGateCleanupStaleIntegration:
     """``PreTradeGate.cleanup_stale`` wires both passes together."""
 

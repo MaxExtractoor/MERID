@@ -849,6 +849,49 @@ class PreTradeGate:
                 reason=f"price_repeat:{price_reason}",
             )
 
+        # 3c.5. CRITICAL FIX: Position existence validation for exit orders (2026-07-08)
+        # Prevents exit orders from executing as new entry trades when no position exists
+        # This is the root cause of agents placing multiple orders at different prices
+        # Exit orders (SELL) must have an existing position to close
+        # MOVED BEFORE window limit check for logical ordering and testability
+        try:
+            is_exit_order = action == "sell"
+            if is_exit_order:
+                from merid.event_venues.kalshi.position_cache import get_position_cache
+                position_cache = get_position_cache()
+                position = position_cache.get_position(contract_id)
+                
+                # Check if position exists and has contracts
+                if not position or position.contracts <= 0:
+                    self._store._metrics.blocked_invalid_transition += 1
+                    logger.error(
+                        "[GATE-ALERT] exit_order_without_position contract=%s side=%s agent=%s action=%s - "
+                        "No position exists to close. This order would execute as a new entry trade. REJECTED.",
+                        contract_id, side, agent_id, action
+                    )
+                    return GateVerdict(
+                        allowed=False,
+                        client_order_id=coid,
+                        reason="exit_order_without_position:no_position_to_close",
+                    )
+                
+                # Check if position side matches order side (can't close YES position with SELL NO)
+                if position.side != side:
+                    self._store._metrics.blocked_invalid_transition += 1
+                    logger.error(
+                        "[GATE-ALERT] exit_order_side_mismatch contract=%s position_side=%s order_side=%s agent=%s - "
+                        "Cannot close position with different side. REJECTED.",
+                        contract_id, position.side, side, agent_id
+                    )
+                    return GateVerdict(
+                        allowed=False,
+                        client_order_id=coid,
+                        reason=f"exit_order_side_mismatch:position_{position.side}_order_{side}",
+                    )
+        except Exception as e:
+            logger.warning("[GATE] Position existence check failed for exit order: %s", e)
+            # Continue with other checks if validation fails (non-critical)
+
         # 3d. CRITICAL: Window-based risk limit check (HARD STOP) - 2026-07-06
         # Enforces 3% per agent per 15-minute window and 5% total venue per 15-minute window
         # This prevents over-trading and forces agents to get better entry prices
@@ -923,7 +966,7 @@ class PreTradeGate:
                 reason=f"window_limit:check_failed:{str(e)[:50]}",
             )
 
-        # 3.6. CRITICAL FIX: Exit policy validation for crypto 15m markets (2026-07-06)
+        # 3.7. CRITICAL FIX: Exit policy validation for crypto 15m markets (2026-07-06)
         # Enforces "no trade without exit" invariant by requiring exit policy metadata
         # This ensures all trades have attached, valid, and enforceable exit policies
         try:
