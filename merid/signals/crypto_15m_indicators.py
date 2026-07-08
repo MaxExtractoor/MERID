@@ -894,14 +894,6 @@ class Crypto15mIndicatorStack:
         snap.bars_available = n
         snap.session_tag = self._compute_session_tag(snap.timestamp)
 
-        # Cold start: use lower threshold during initialization
-        min_bars_threshold = self.cfg.min_bars_cold_start if n < self.cfg.min_bars_required else self.cfg.min_bars_required
-        
-        if n < min_bars_threshold:
-            snap.trade_allowed = False
-            snap.bias = "neutral"
-            return snap
-
         # Staleness check: reject if last price is older than threshold
         if self._last_price_timestamp is not None:
             age_seconds = time.time() - self._last_price_timestamp
