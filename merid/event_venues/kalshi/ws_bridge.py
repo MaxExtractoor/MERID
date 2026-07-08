@@ -429,10 +429,10 @@ class KalshiWebSocketBridge:
         from merid.diagnostics.ws_raw_vs_parsed import get_ws_tracker
         self._ws_tracker = get_ws_tracker()
         
-        # Sequence tracking for gap detection
-        self._last_sequence: Optional[int] = None
+        # Sequence tracking for gap detection (per-event-type to avoid false positives)
+        self._last_sequence: Dict[str, Optional[int]] = {}  # event_type -> last sequence
         self._sequence_gaps: int = 0
-        self._sequence_gaps_list: List[Tuple[int, int]] = []  # Track (gap_start, gap_end) for logging
+        self._sequence_gaps_list: List[Tuple[str, int, int]] = []  # Track (event_type, gap_start, gap_end) for logging
         
         # Message deduplication cache (per-ticker)
         self._message_cache: Dict[str, Dict[str, Any]] = {}  # ticker -> last message hash
@@ -2759,36 +2759,45 @@ class KalshiWebSocketBridge:
         if isinstance(event, dict) and event.get("type") == "fill":
             self._fills_received += 1
             
-            # Check for sequence gaps in fill events
+            # Check for sequence gaps in fill events (per-event-type tracking)
             seq = event.get("sequence") or event.get("seq") or event.get("msg_id")
             if seq is not None and isinstance(seq, numbers.Integral) and not isinstance(seq, bool):
-                if self._last_sequence is not None:
-                    expected = self._last_sequence + 1
+                event_type = "fill"
+                if event_type in self._last_sequence:
+                    expected = self._last_sequence[event_type] + 1
                     if seq > expected:
                         gap = seq - expected
                         self._sequence_gaps += gap
-                        self._sequence_gaps_list.append((expected, seq - 1))
+                        self._sequence_gaps_list.append((event_type, expected, seq - 1))
                         logger.warning(
                             f"WS fill sequence gap detected: expected {expected}, got {seq}, "
                             f"gap={gap}, total_gaps={self._sequence_gaps}"
                         )
-                self._last_sequence = seq
+                self._last_sequence[event_type] = seq
         
-        # Check for sequence gaps in orderbook events
+        # Check for sequence gaps in orderbook events (per-event-type tracking)
         if isinstance(event, dict) and event.get("type") in ("orderbook_snapshot", "orderbook_delta"):
             seq = event.get("sequence") or event.get("seq") or event.get("msg_id")
             if seq is not None and isinstance(seq, numbers.Integral) and not isinstance(seq, bool):
-                if self._last_sequence is not None:
-                    expected = self._last_sequence + 1
+                event_type = event.get("type")  # "orderbook_snapshot" or "orderbook_delta"
+                if event_type in self._last_sequence:
+                    expected = self._last_sequence[event_type] + 1
                     if seq > expected:
                         gap = seq - expected
                         self._sequence_gaps += gap
-                        self._sequence_gaps_list.append((expected, seq - 1))
-                        logger.warning(
-                            f"WS orderbook sequence gap detected: expected {expected}, got {seq}, "
-                            f"gap={gap}, total_gaps={self._sequence_gaps}"
-                        )
-                self._last_sequence = seq
+                        self._sequence_gaps_list.append((event_type, expected, seq - 1))
+                        # PERFORMANCE FIX: Reduce logging frequency - only warn on significant gap accumulation
+                        # Individual gaps logged at debug level to reduce blocking I/O
+                        if gap > 10 or self._sequence_gaps % 100 == 0:
+                            logger.warning(
+                                f"WS orderbook sequence gap detected: expected {expected}, got {seq}, "
+                                f"gap={gap}, total_gaps={self._sequence_gaps}"
+                            )
+                        else:
+                            logger.debug(
+                                f"WS orderbook sequence gap: expected {expected}, got {seq}, gap={gap}"
+                            )
+                self._last_sequence[event_type] = seq
         
         # Message deduplication check
         if isinstance(event, dict):
