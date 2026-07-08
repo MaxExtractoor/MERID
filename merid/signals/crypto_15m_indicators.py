@@ -1154,7 +1154,13 @@ class Crypto15mIndicatorStack:
             snap.realized_vol_annualized = 0.0
 
         # Classify vol band
-        if snap.realized_vol_annualized < self.cfg.vol_low_threshold:
+        # CRITICAL FIX: In kalshi_mode, always pass vol gate regardless of volatility
+        # Kalshi prediction markets are binary contracts, not continuous spot instruments
+        if self.cfg.kalshi_mode:
+            snap.vol_gate_ok = True
+            snap.vol_band = "kalshi_mode_disabled"
+            snap.vol_regime = "kalshi_mode_disabled"
+        elif snap.realized_vol_annualized < self.cfg.vol_low_threshold:
             snap.vol_band = "low"
             snap.vol_regime = "low"
             snap.vol_gate_ok = False  # dead market
@@ -1182,26 +1188,29 @@ class Crypto15mIndicatorStack:
 
         chop_reasons: List[str] = []
 
-        # 8a. Consecutive closes: need N aligned candles for trend confirmation
-        _max_streak = max(self._consecutive_above, self._consecutive_below)
-        if _max_streak < self.cfg.consecutive_closes_required:
-            chop_reasons.append(
-                f"consecutive_closes={_max_streak}<{self.cfg.consecutive_closes_required}"
-            )
-
-        # 8b. MACD persistence: histogram must stay same sign for M bars
-        if self._macd_hist_sign_bars < self.cfg.macd_persistence_bars:
-            chop_reasons.append(
-                f"macd_persistence={self._macd_hist_sign_bars}<{self.cfg.macd_persistence_bars}"
-            )
-
-        # 8c. MACD histogram magnitude: must exceed threshold
-        if price > 0:
-            hist_pct = abs(snap.macd_histogram) / price
-            if hist_pct < self.cfg.macd_histogram_min_pct:
+        # CRITICAL FIX: In kalshi_mode, disable chop gate entirely
+        # Kalshi prediction markets don't need consecutive closes or MACD persistence
+        if not self.cfg.kalshi_mode:
+            # 8a. Consecutive closes: need N aligned candles for trend confirmation
+            _max_streak = max(self._consecutive_above, self._consecutive_below)
+            if _max_streak < self.cfg.consecutive_closes_required:
                 chop_reasons.append(
-                    f"macd_hist_magnitude={hist_pct:.6f}<{self.cfg.macd_histogram_min_pct}"
+                    f"consecutive_closes={_max_streak}<{self.cfg.consecutive_closes_required}"
                 )
+
+            # 8b. MACD persistence: histogram must stay same sign for M bars
+            if self._macd_hist_sign_bars < self.cfg.macd_persistence_bars:
+                chop_reasons.append(
+                    f"macd_persistence={self._macd_hist_sign_bars}<{self.cfg.macd_persistence_bars}"
+                )
+
+            # 8c. MACD histogram magnitude: must exceed threshold
+            if price > 0:
+                hist_pct = abs(snap.macd_histogram) / price
+                if hist_pct < self.cfg.macd_histogram_min_pct:
+                    chop_reasons.append(
+                        f"macd_hist_magnitude={hist_pct:.6f}<{self.cfg.macd_histogram_min_pct}"
+                    )
 
         snap.chop_detected = len(chop_reasons) >= 2  # 2+ signals = chop
         snap.chop_reason = "; ".join(chop_reasons) if chop_reasons else ""
