@@ -2862,11 +2862,29 @@ async def _run_startup_phases_v20260530(app):
     from merid.event_venues.kalshi.bankroll_service_v2 import BankrollServiceV2, set_bankroll_service
     logger.info("[STARTUP] P1.7.2: Importing unified_risk_manager")
     from merid.risk.unified_risk_manager import get_unified_risk_manager
-    logger.info("[STARTUP] P1.7.3: Creating BankrollServiceV2 instance directly")
+    logger.info("[STARTUP] P1.7.3: Loading profile bankroll_cap_pct for bankroll service")
     
+    # CRITICAL FIX: Load bankroll_cap_pct from profile to pass to BankrollServiceV2
+    # This ensures max_position_usd uses the profile's 3% instead of default 2%
+    from decimal import Decimal
+    max_riskable_frac = None
+    try:
+        from merid.risk.profiles.crypto_15m_profile import is_profile_active, get_active_profile
+        if is_profile_active():
+            adapter = get_active_profile()
+            if adapter:
+                profile = adapter.profile
+                max_riskable_frac = Decimal(str(profile.venue_bankroll_cap_pct))
+                logger.info(f"[STARTUP] P1.7.3: Loaded bankroll_cap_pct from profile: {max_riskable_frac}")
+            else:
+                logger.warning("[STARTUP] P1.7.3: Profile adapter not available, using default 2%")
+        else:
+            logger.warning("[STARTUP] P1.7.3: Profile not active, using default 2%")
+    except Exception as e:
+        logger.warning(f"[STARTUP] P1.7.3: Failed to load bankroll_cap_pct from profile: {e}, using default 2%")
     
-    
-    bankroll = BankrollServiceV2()
+    logger.info("[STARTUP] P1.7.4: Creating BankrollServiceV2 instance with max_riskable_frac=%s", max_riskable_frac)
+    bankroll = BankrollServiceV2(max_riskable_frac=max_riskable_frac)
     
     # Phase 2: Trace bankroll service origin
     from merid.origin_tracer import log_object_origin

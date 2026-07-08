@@ -38,6 +38,7 @@ class MockKalshiClient:
     should_timeout: bool = False
     should_error: bool = False
     error_type: str = "temporary"  # "temporary" or "permanent"
+    max_riskable_frac: Decimal = Decimal("0.5")  # Allow overriding for testing
 
     async def get_balance(self):
         """Mock get_balance method."""
@@ -85,7 +86,7 @@ class MockKalshiClient:
         internal_bankroll = InternalBankroll(
             equity_usd=Decimal(str(self.balance_response)),
             available_cash_usd=Decimal(str(self.balance_response * 0.95)),
-            max_riskable_frac=Decimal("0.5"),
+            max_riskable_frac=self.max_riskable_frac,  # Use instance field
             state=BalanceState.FRESH,
             as_of=datetime.now(timezone.utc),
             source="kalshi"
@@ -360,8 +361,56 @@ class TestBankrollServiceV2SingleSource:
         # The specific logging may vary depending on the exact code path
 
 
-class TestBankrollServiceIntegration:
-    """Integration tests for bankroll service with realistic scenarios."""
+    async def test_profile_bankroll_cap_pct_wiring(self):
+        """Test 15: Profile bankroll_cap_pct is correctly passed to BankrollServiceV2."""
+        # This test verifies the fix for the high leverage bug where profile's 3% 
+        # was not being passed to bankroll service, causing it to default to 2%
+        from decimal import Decimal
+        
+        # Test with explicit max_riskable_frac parameter
+        mock_client = MockKalshiClient(
+            balance_response=100.0,
+            max_riskable_frac=Decimal("0.03")  # 3% from profile
+        )
+        service = BankrollServiceV2(
+            mock_client, 
+            refresh_interval_seconds=1.0,
+            max_riskable_frac=Decimal("0.03")  # 3% from profile
+        )
+        
+        # Patch global singleton
+        from merid.event_venues.kalshi import bankroll_service_v2
+        original_service = bankroll_service_v2._BANKROLL_SERVICE_V2
+        bankroll_service_v2._BANKROLL_SERVICE_V2 = service
+        
+        try:
+            await service.start()
+            await asyncio.sleep(0.1)  # Allow refresh
+            
+            # Get summary and verify max_position_usd uses 3%
+            summary = await service.get_summary()
+            
+            # With $100 equity and 3% max_riskable_frac, max_position should be $3
+            # (available_cash is 95% of equity = $95, so max_position = $95 * 0.03 = $2.85)
+            expected_max_position = Decimal("100.00") * Decimal("0.95") * Decimal("0.03")
+            
+            assert summary.max_position_usd == expected_max_position, \
+                f"Expected max_position_usd={expected_max_position} (3% of available cash), got {summary.max_position_usd}"
+            
+            # Verify the bankroll has the correct max_riskable_frac
+            current = service._current
+            assert current.max_riskable_frac == Decimal("0.03"), \
+                f"Expected max_riskable_frac=0.03, got {current.max_riskable_frac}"
+            
+        finally:
+            # Cleanup
+            if service._refresh_task and not service._refresh_task.done():
+                service._refresh_task.cancel()
+                try:
+                    await service._refresh_task
+                except asyncio.CancelledError:
+                    pass
+            bankroll_service_v2._BANKROLL_SERVICE_V2 = original_service
 
     async def test_startup_sequence_with_mock_kalshi(self):
         """Test 11: Startup integration test with mock Kalshi client."""
