@@ -155,7 +155,7 @@ class IndicatorConfig:
     # ── Price buffer ──────────────────────────────────────────────────
     max_bars: int = 250                # keep ~4 hours of 1m bars (increased from 120 to support EMA(200))
     min_bars_required: int = 52        # Need sufficient history for EMA/MACD calculations
-    min_bars_cold_start: int = 4       # Cold start: allow trading with fewer bars during initialization (reduced to match actual warmup data availability of 5 bars)
+    min_bars_cold_start: int = 1       # Cold start: allow trading with minimal bars during initialization (reduced to match actual warmup data availability of 2-3 bars)
     min_bars_for_macd: int = 30        # MACD needs more history
 
     # ── Fair Value Gap (FVG) detection ────────────────────────────────
