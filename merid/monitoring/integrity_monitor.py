@@ -241,7 +241,8 @@ class IntegrityMonitor:
             
             message = f"🚨 CRITICAL: {title}\n{details}\n⏰ {datetime.now(timezone.utc).isoformat()}"
             
-            tg_send(message)
+            # CRITICAL FIX (2026-07-08): Await the async tg_send function
+            await tg_send(message)
             logger.info("[INTEGRITY-MONITOR] Critical alert sent: %s", title)
             
         except Exception as e:
