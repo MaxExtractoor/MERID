@@ -1166,6 +1166,13 @@ class KalshiFillsLedger:
             # Task 7: Trigger auto-save if interval elapsed
             await self._maybe_trigger_auto_save()
             
+            # CRITICAL FIX: Auto-export to CSV after new fills are ingested
+            # This ensures trade_history_7days.csv is always up-to-date
+            try:
+                self.export_to_csv("trade_history_7days.csv", days=7)
+            except Exception as e:
+                logger.warning(f"Failed to auto-export CSV after HTTP ingest: {e}")
+            
         return new_count, new_fill_ids
     
     async def ingest_ws_fill(self, raw: Dict[str, Any], agent_id: Optional[str] = None) -> bool:
@@ -1323,6 +1330,13 @@ class KalshiFillsLedger:
         
         # Task 7: Trigger auto-save if interval elapsed
         await self._maybe_trigger_auto_save()
+        
+        # CRITICAL FIX: Auto-export to CSV after new fills are ingested
+        # This ensures trade_history_7days.csv is always up-to-date
+        try:
+            self.export_to_csv("trade_history_7days.csv", days=7)
+        except Exception as e:
+            logger.warning(f"Failed to auto-export CSV after WS ingest: {e}")
         
         # Task 5: Validate hedge fill consistency
         if fill.fill_source == "hedge":
@@ -2683,6 +2697,88 @@ class KalshiFillsLedger:
         logger.debug("Cumulative realized PnL updated: %s (trade_pnl=%s)", self._cumulative_realized_pnl, trade_pnl)
         # Persist immediately to avoid loss on crash
         self._persist_session_metadata(self._get_current_session_date())
+    
+    def export_to_csv(self, csv_path: str = "trade_history_7days.csv", days: int = 7) -> int:
+        """Export fills to CSV file for analysis and audit.
+        
+        This writes all fills from the last N days to the specified CSV file,
+        maintaining the format expected by analysis scripts.
+        
+        Args:
+            csv_path: Path to the CSV file to write
+            days: Number of days of history to include
+            
+        Returns:
+            Number of fills written to CSV
+        """
+        import csv
+        from pathlib import Path
+        
+        # Calculate cutoff date
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
+        
+        # Get fills within date range
+        recent_fills = self.get_fills(since=cutoff_date, limit=10000)
+        
+        # Filter out test fixtures
+        recent_fills = [f for f in recent_fills if not _is_test_fixture_fill(f.fill_id)]
+        
+        # Prepare CSV path
+        csv_file = Path(csv_path)
+        csv_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Write CSV
+        fieldnames = [
+            "fill_id", "order_id", "market_ticker", "side", "action",
+            "quantity", "price", "yes_price", "no_price", "total_cost",
+            "fee", "net_cost", "created_time", "asset", "is_taker"
+        ]
+        
+        written_count = 0
+        try:
+            with open(csv_file, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                
+                for fill in recent_fills:
+                    # Extract asset from ticker
+                    asset = fill.resolved_asset() or ""
+                    
+                    # Calculate total cost
+                    total_cost = fill.count_fp * (fill.yes_price_dollars or 0) if fill.side == "yes" else fill.count_fp * (fill.no_price_dollars or 0)
+                    
+                    # Net cost includes fees
+                    net_cost = total_cost + fill.fee_cost
+                    
+                    row = {
+                        "fill_id": fill.fill_id,
+                        "order_id": fill.order_id or "",
+                        "market_ticker": fill.market_ticker,
+                        "side": fill.side,
+                        "action": fill.action,
+                        "quantity": fill.count_fp,
+                        "price": float(fill.price_cents) / 100.0 if fill.price_cents else 0,
+                        "yes_price": float(fill.yes_price_dollars) if fill.yes_price_dollars else 0,
+                        "no_price": float(fill.no_price_dollars) if fill.no_price_dollars else 0,
+                        "total_cost": float(total_cost),
+                        "fee": float(fill.fee_cost),
+                        "net_cost": float(net_cost),
+                        "created_time": fill.created_time.isoformat() if fill.created_time else "",
+                        "asset": asset,
+                        "is_taker": "True" if fill.ingestion_source == "websocket" else "False"
+                    }
+                    writer.writerow(row)
+                    written_count += 1
+            
+            logger.info(
+                "Exported %d fills to CSV: %s (last %d days)",
+                written_count, csv_path, days
+            )
+            
+        except Exception as e:
+            logger.error("Failed to export fills to CSV: %s", e)
+        
+        return written_count
     
     def _get_instrument_key(self, fill: KalshiFill) -> str:
         """Get instrument key for position tracking.

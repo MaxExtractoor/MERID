@@ -300,6 +300,9 @@ async def _kalshi_place_order(
     agent_name: str = "",
     stop_loss_price_cents: Optional[int] = None,
     take_profit_r_multiple: Optional[float] = None,
+    model_prob: Optional[float] = None,
+    edge_pct: Optional[float] = None,
+    confidence: Optional[float] = None,
 ) -> ToolResult:
     """Place a YES/NO order on Kalshi."""
     t0 = time.time()
@@ -721,15 +724,16 @@ async def _kalshi_place_order(
                 window_resolution_id = window_resolution.window_id  # Fixed: was window_resolution_id
                 
                 # Resolve exit policy with edge result
+                # CRITICAL FIX: resolve_exit_policy signature is (edge_result, asset, regime, strip_context=None)
+                # Does NOT accept side, price_cents, or minutes_to_expiry parameters
                 edge_result = {"edge_pct": 2.0}  # Default edge
                 exit_policy_resolution = resolve_exit_policy(
                     edge_result=edge_result,
                     asset=asset if asset else "BTC",
-                    side=side_lower,
-                    price_cents=_pc,
-                    minutes_to_expiry=15.0
+                    regime="neutral"
                 )
-                exit_policy_id = exit_policy_resolution.exit_policy_id
+                # CRITICAL FIX: ExitPolicyResolution has 'policy_id' not 'exit_policy_id'
+                exit_policy_id = exit_policy_resolution.policy_id
                 risk_tier = exit_policy_resolution.regime
                 max_hold_seconds = exit_policy_resolution.max_hold_seconds
                 
@@ -754,6 +758,11 @@ async def _kalshi_place_order(
                 exit_policy_id=exit_policy_id,
                 risk_tier=risk_tier,
                 max_hold_seconds=max_hold_seconds,
+                # CRITICAL FIX: Pass model_prob, edge_pct, confidence from signal metadata
+                # These are required by order_router's _validate_signal_metadata function
+                model_prob=model_prob,
+                edge_pct=edge_pct,
+                confidence=confidence,
             )
 
             logger.info(

@@ -5258,9 +5258,15 @@ class LeanAgent15m:
                 count = int(signal.get("count", 1))
                 agent_name = self.config.name
                 
+                # CRITICAL FIX: Extract signal metadata for order validation
+                # These fields are required by order_router's _validate_signal_metadata function
+                model_prob = signal.get("model_prob")
+                edge_pct = signal.get("edge_pct")
+                confidence = signal.get("confidence")
+                
                 logger.info(
-                    "[DIRECT-EXECUTION] asset=%s ticker=%s side=%s action=%s price_cents=%d count=%d agent_name=%s",
-                    asset, ticker, side, action, price_cents, count, agent_name
+                    "[DIRECT-EXECUTION] asset=%s ticker=%s side=%s action=%s price_cents=%d count=%d agent_name=%s model_prob=%.2f edge_pct=%.2f%% confidence=%.2f",
+                    asset, ticker, side, action, price_cents, count, agent_name, model_prob or 0, edge_pct or 0, confidence or 0
                 )
                 
                 # Call _kalshi_place_order which routes through route_order_async and guardrails
@@ -5278,7 +5284,11 @@ class LeanAgent15m:
                     count=count,
                     agent_name=agent_name,
                     stop_loss_price_cents=stop_loss_price_cents,
-                    take_profit_r_multiple=take_profit_r_multiple
+                    take_profit_r_multiple=take_profit_r_multiple,
+                    # CRITICAL FIX: Pass signal metadata for order validation
+                    model_prob=model_prob,
+                    edge_pct=edge_pct,
+                    confidence=confidence
                 )
                 
                 # Check if order was successful
