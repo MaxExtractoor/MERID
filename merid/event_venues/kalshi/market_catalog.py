@@ -1267,7 +1267,7 @@ class KalshiMarketCatalog:
         self._by_ticker = ticker_idx
         
         # Enforce catalog invariants: exactly 5 assets (BTC, ETH, SOL, XRP, DOGE) with 15m tickers
-        from config.kalshi_15m_crypto_config import KALSHI_15M_SERIES_TICKERS
+        from config.kalshi_universe import KALSHI_15M_SERIES_TICKERS
         expected_assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
         assets_with_tickers = set()
         assets_missing_tickers = []
@@ -2841,11 +2841,12 @@ class KalshiMarketCatalog:
             logger.warning("[GET-CURRENT-15M] Failed to load min_entry_mins from profile: %s, using fallback 2.0", e)
             min_entry_mins = 2.0  # Fallback to profile default
         
-        max_entry_mins = 15.0  # Profile max_entry_mins
+        max_entry_mins = 15.0  # Profile max_entry_mins (hardcoded as markets are 15-minute duration)
         
-        logger.info("[GET-CURRENT-15M] Filtering %d markets for asset=%s with min_minutes_to_expiry=%.1f", len(asset_markets), asset, min_entry_mins)
+        logger.info("[GET-CURRENT-15M] Filtering %d markets for asset=%s with min_minutes_to_expiry=%.1f max_minutes_to_expiry=%.1f", len(asset_markets), asset, min_entry_mins, max_entry_mins)
         live_markets = select_live_markets_by_ts(
             asset_markets,
+            now_utc=None,  # Use current time
             min_minutes_to_expiry=min_entry_mins,
             max_minutes_to_expiry=max_entry_mins,
             require_exactly_one_per_asset=False
@@ -2889,7 +2890,7 @@ async def validate_catalog_against_kalshi_api(
     Returns:
         Dict with validation results per asset
     """
-    from config.kalshi_15m_crypto_config import KALSHI_15M_SERIES_TICKERS
+    from config.kalshi_universe import KALSHI_15M_SERIES_TICKERS
     
     results = {}
     

@@ -523,7 +523,7 @@ class TestKalshiSymbolEdgeCases:
         """
         try:
             from config.kalshi_universe import kalshi_agent_grid_catalog_series_tickers
-            from config.kalshi_15m_crypto_config import KALSHI_15M_SERIES_TICKERS
+            from config.kalshi_universe import KALSHI_15M_SERIES_TICKERS
             import yaml
             from pathlib import Path
             

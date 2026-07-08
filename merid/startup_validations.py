@@ -365,7 +365,7 @@ def validate_market_id_key_alignment() -> None:
     try:
         # Check 1: Verify catalog uses market_id as canonical key
         from merid.event_venues.kalshi.market_catalog import KalshiMarketCatalog
-        from config.kalshi_15m_crypto_config import KALSHI_15M_SERIES_TICKERS
+        from config.kalshi_universe import KALSHI_15M_SERIES_TICKERS
         
         # Sample check: catalog should return markets with market_id field
         # This is verified by checking the catalog enrichment logic
@@ -544,7 +544,7 @@ def validate_kalshi_series_consistency() -> None:
         StartupValidationError: If series ticker inconsistencies are found
     """
     try:
-        from config.kalshi_15m_crypto_config import KALSHI_15M_SERIES_TICKERS
+        from config.kalshi_universe import KALSHI_15M_SERIES_TICKERS
         from config.kalshi_universe import kalshi_agent_grid_catalog_series_tickers, kalshi_ct_default_series_tickers
     except ImportError as exc:
         logger.warning("KALSHI_SERIES_CONSISTENCY_CHECK: Failed to import series config: %s", exc)
@@ -1591,7 +1591,7 @@ def validate_catalog_series_health() -> bool:
 
     try:
         from merid.event_venues.kalshi.market_catalog import get_market_catalog
-        from config.kalshi_15m_crypto_config import KALSHI_15M_SERIES_TICKERS
+        from config.kalshi_universe import KALSHI_15M_SERIES_TICKERS
 
         catalog = get_market_catalog()
         required_series = set(KALSHI_15M_SERIES_TICKERS.values())

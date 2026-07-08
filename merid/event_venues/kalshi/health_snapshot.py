@@ -318,7 +318,7 @@ def check_catalog_ws_state_consistency(loop_tick: int) -> bool:
     try:
         from merid.event_venues.kalshi.market_catalog import get_market_catalog
         from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
-        from config.kalshi_15m_crypto_config import KALSHI_15M_SERIES_TICKERS
+        from config.kalshi_universe import KALSHI_15M_SERIES_TICKERS
         
         catalog = get_market_catalog()
         md_store = get_kalshi_market_state_store()

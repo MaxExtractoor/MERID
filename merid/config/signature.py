@@ -48,7 +48,7 @@ def load_kalshi_15m_series_universe() -> Dict[str, Any]:
         Dict containing the series universe config
     """
     try:
-        from config.kalshi_15m_crypto_config import (
+        from config.kalshi_universe import (
             KALSHI_15M_SERIES_TICKERS,
             KALSHI_15M_CRYPTO_ASSETS,
         )
