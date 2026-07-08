@@ -371,14 +371,24 @@ class LeanAgent15m:
         
         # CRITICAL FIX: 2026-07-07 - Initialize Crypto15mIndicatorStack for 2026 research-based indicators
         # This provides EMA(200), regime-based RSI, MACD filters, and RSI+MACD confluence scoring
+        # CRITICAL FIX: 2026-07-08 - Enable kalshi_mode to disable strict spot market thresholds
+        # Kalshi prediction markets are binary contracts, not continuous spot instruments
+        # Without kalshi_mode, strict vol/ATR/chop gates block all signals
+        # CRITICAL FIX: 2026-07-08 - Decouple indicator stack updates from 5s loop cadence
+        # Indicator stack expects 1-minute close prices, but loop runs at 5-second cadence
+        # We'll accumulate spot prices and only update indicator stack once per minute
         self._indicator_stacks: Dict[str, Any] = {}
+        self._indicator_stack_last_update: Dict[str, float] = {}  # Track last update time per asset
+        self._indicator_stack_price_buffer: Dict[str, List[float]] = {}  # Buffer spot prices for 1-minute aggregation
         try:
             from merid.signals.crypto_15m_indicators import Crypto15mIndicatorStack, IndicatorConfig
             for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-                # Create indicator stack with asset-specific config
-                cfg = IndicatorConfig(asset=asset)
+                # Create indicator stack with asset-specific config and kalshi_mode enabled
+                cfg = IndicatorConfig(asset=asset, kalshi_mode=True)
                 self._indicator_stacks[asset] = Crypto15mIndicatorStack(config=cfg)
-                logger.info("[AGENT-INIT] %s initialized Crypto15mIndicatorStack for %s with 2026 research features", 
+                self._indicator_stack_last_update[asset] = 0.0
+                self._indicator_stack_price_buffer[asset] = []
+                logger.info("[AGENT-INIT] %s initialized Crypto15mIndicatorStack for %s with kalshi_mode=True (lenient thresholds for prediction markets)", 
                            config.name, asset)
         except Exception as e:
             logger.warning("[AGENT-INIT] %s failed to initialize Crypto15mIndicatorStack: %s", config.name, e)
@@ -657,12 +667,32 @@ class LeanAgent15m:
         # CRITICAL FIX: 2026-07-01 - Update volume history for volume confirmation filter
         self._volume_history[asset].append((current_time, volume))
         
-        # CRITICAL FIX: 2026-07-07 - Update Crypto15mIndicatorStack with new price
-        # This enables EMA(200), regime-based RSI, MACD filters, and RSI+MACD confluence
+        # CRITICAL FIX: 2026-07-08 - Update Crypto15mIndicatorStack with 1-minute aggregated close price
+        # Indicator stack expects 1-minute close prices, but loop runs at 5-second cadence
+        # We accumulate spot prices and only update indicator stack once per minute
         if asset in self._indicator_stacks:
             try:
-                self._indicator_stacks[asset].update(spot_price)
-                logger.debug("[INDICATOR-STACK-UPDATE] asset=%s price=%.2f updated in Crypto15mIndicatorStack", asset, spot_price)
+                # Buffer spot price for 1-minute aggregation
+                self._indicator_stack_price_buffer[asset].append(spot_price)
+                
+                # Check if 1 minute has elapsed since last update
+                current_time = time.time()
+                last_update = self._indicator_stack_last_update[asset]
+                time_since_update = current_time - last_update
+                
+                # Update indicator stack once per minute (60 seconds)
+                if time_since_update >= 60.0:
+                    # Use the last price in the buffer as the 1-minute close
+                    if self._indicator_stack_price_buffer[asset]:
+                        minute_close = self._indicator_stack_price_buffer[asset][-1]
+                        self._indicator_stacks[asset].update(minute_close)
+                        self._indicator_stack_last_update[asset] = current_time
+                        self._indicator_stack_price_buffer[asset] = []  # Clear buffer
+                        logger.info("[INDICATOR-STACK-UPDATE] asset=%s minute_close=%.2f updated in Crypto15mIndicatorStack (1-minute aggregation)", 
+                                   asset, minute_close)
+                else:
+                    logger.debug("[INDICATOR-STACK-BUFFER] asset=%s buffered price=%.2f (%.1fs since last update, waiting for 60s)", 
+                               asset, spot_price, time_since_update)
             except Exception as e:
                 logger.warning("[INDICATOR-STACK-UPDATE] asset=%s failed to update Crypto15mIndicatorStack: %s", asset, e)
         
@@ -1756,28 +1786,36 @@ class LeanAgent15m:
         velocity = self._calculate_multi_window_velocity(asset, spot_price)
         velocity_threshold = self._calculate_dynamic_velocity_threshold(asset)
         
-        # CRITICAL FIX: 2026-07-06 - Check for sufficient warmup data before calculating indicators
-        # Industry best practice: MACD(12,26,9) needs 35+ periods, RSI(9) needs 10+ periods
+        # CRITICAL FIX: 2026-07-08 - Check for sufficient warmup data before calculating indicators
+        # Crypto15mIndicatorStack uses MACD(8,21,5) which needs 21 + 5 = 26 periods minimum
+        # RSI(8) needs 8 + 1 = 9 periods minimum
         # If insufficient data, skip signal generation to avoid zero/default indicator values
-        price_history = list(self._spot_price_history.get(asset, []))
-        min_history_for_macd = 35  # 26 for MACD + 9 for signal line
-        min_history_for_rsi = 10   # 9 for RSI + 1 for calculation
-        
-        if len(price_history) < min_history_for_macd:
-            logger.warning(
-                "[MOMENTUM-FVG] asset=%s insufficient price history for MACD (%d < %d), skipping signal generation. "
-                "Agents need warmup time to accumulate historical data for accurate indicator calculations.",
-                asset, len(price_history), min_history_for_macd
-            )
-            return None
-        
-        if len(price_history) < min_history_for_rsi:
-            logger.warning(
-                "[MOMENTUM-FVG] asset=%s insufficient price history for RSI (%d < %d), skipping signal generation. "
-                "Agents need warmup time to accumulate historical data for accurate indicator calculations.",
-                asset, len(price_history), min_history_for_rsi
-            )
-            return None
+        # CRITICAL FIX: Use indicator stack's min_bars_cold_start for faster warmup
+        # This allows trading with fewer bars during initialization (10 bars vs 30+)
+        if asset in self._indicator_stacks:
+            try:
+                indicator_snap = self._indicator_stacks[asset].snapshot()
+                if not indicator_snap.trade_allowed:
+                    logger.info(
+                        "[MOMENTUM-FVG] asset=%s indicator stack trade_allowed=False (bars_available=%d, min_bars_required=%d), skipping signal generation. "
+                        "Agents need warmup time to accumulate historical data for accurate indicator calculations.",
+                        asset, indicator_snap.bars_available, 30  # Default min_bars_required is 52, cold start is 10
+                    )
+                    return None
+            except Exception as e:
+                logger.warning("[MOMENTUM-FVG] asset=%s failed to check indicator stack trade_allowed: %s", asset, e)
+                # Fallback to original check if indicator stack fails
+                price_history = list(self._spot_price_history.get(asset, []))
+                min_history_for_macd = 26  # 21 for MACD slow + 5 for signal line (MACD(8,21,5))
+                min_history_for_rsi = 9   # 8 for RSI + 1 for calculation (RSI(8))
+                
+                if len(price_history) < min_history_for_macd:
+                    logger.warning(
+                        "[MOMENTUM-FVG] asset=%s insufficient price history for MACD (%d < %d), skipping signal generation. "
+                        "Agents need warmup time to accumulate historical data for accurate indicator calculations.",
+                        asset, len(price_history), min_history_for_macd
+                    )
+                    return None
         
         # Initialize indicator variables with defaults
         macd_slope = 0.0
@@ -2000,10 +2038,26 @@ class LeanAgent15m:
         momentum_rsi_short_max = getattr(momentum_fvg_config, 'momentum_rsi_short_max', 45.0)
         
         # CRITICAL FIX: 2026-07-08 - Read macd_dead_zone from profile YAML (single source of truth)
-        # Previous hardcoded 0.0005 (0.05%) was too strict and blocked all valid signals
-        # Research shows 15m crypto should use 0.0001 (0.01%) or smaller dead zone
-        # Profile YAML now contains the optimized value: macd_dead_zone: 0.0001
-        macd_dead_zone = getattr(momentum_fvg_config, 'macd_dead_zone', 0.0001)
+        # CRITICAL FIX: 2026-07-08 - During warmup (insufficient bars), disable dead zone to allow signals
+        # When indicator stack has sufficient data (52+ bars), histogram values will be meaningful
+        # During warmup, MACD histogram values are very small (near zero) due to insufficient data
+        # Setting dead zone to 0.0 during warmup allows signals to be generated
+        macd_dead_zone = getattr(momentum_fvg_config, 'macd_dead_zone', 0.0)
+        
+        # Check if indicator stack has sufficient data (warmup complete)
+        if asset in self._indicator_stacks:
+            try:
+                indicator_snap = self._indicator_stacks[asset].snapshot()
+                # If we have sufficient bars (>=52), use the configured dead zone
+                # If not, disable dead zone to allow signals during warmup
+                if indicator_snap.bars_available < 52:
+                    macd_dead_zone = 0.0  # Disable dead zone during warmup
+                    logger.debug("[MOMENTUM-FVG] asset=%s warmup mode (bars=%d < 52), disabled MACD dead zone", 
+                               asset, indicator_snap.bars_available)
+            except Exception as e:
+                logger.warning("[MOMENTUM-FVG] asset=%s failed to check indicator stack for warmup: %s", asset, e)
+                macd_dead_zone = 0.0  # Disable dead zone on error to allow signals
+        
         if abs(macd_histogram) < macd_dead_zone:
             logger.info(
                 "[MOMENTUM-FVG-DEAD-ZONE] asset=%s macd_histogram=%.6f within dead zone (±%.6f), skipping signal to avoid noise",

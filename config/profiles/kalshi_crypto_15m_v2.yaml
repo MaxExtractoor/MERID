@@ -326,6 +326,15 @@ momentum_fvg:
   momentum_min_macd_hist_long: 0  # For longs: MACD histogram >= 0
   momentum_min_macd_hist_short: 0  # For shorts: MACD histogram <= 0
   
+  # MACD histogram dead zone (2026 research-based optimization)
+  # Prevents noise trading when histogram is near zero (no clear momentum)
+  # CRITICAL FIX: 2026-07-08 - Set to 0.0 to disable dead zone during warmup
+  # During warmup, MACD histogram values are very small (near zero) due to insufficient data
+  # Setting dead zone to 0.0 allows signals to be generated even with small histogram values
+  # Once indicator stack has sufficient data (52+ bars), histogram values will be meaningful
+  # Previous 0.0001 (0.01%) was blocking all signals during warmup
+  macd_dead_zone: 0.0  # Disabled during warmup to allow signal generation
+  
   # Order Book Imbalance (OBI) parameters - Kalshi-specific per-asset thresholds
   # OBI = (BidContracts_10c - AskContracts_10c) / (BidContracts_10c + AskContracts_10c)
   obi_min: 0.25  # Minimum absolute OBI to qualify as directional (not noise)
