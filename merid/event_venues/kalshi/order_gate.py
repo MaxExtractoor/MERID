@@ -125,6 +125,8 @@ class GateMetrics:
     blocked_price_guard: int = 0  # Price guard rejections (deep OTM or high price)
     blocked_price_repeat: int = 0  # CRITICAL: Block repeat price execution (same ticker+side+price)
     blocked_window_limit: int = 0  # CRITICAL: Block window-based risk limit violations (3% per agent, 5% total per 15m)
+    blocked_window_limit_entry: int = 0  # Track entry order window limit blocks
+    blocked_window_limit_exit: int = 0  # Track exit order window limit blocks
     blocked_exit_policy: int = 0  # CRITICAL: Block orders without exit policy metadata (2026-07-06)
     submitted: int = 0
     filled: int = 0
@@ -893,7 +895,9 @@ class PreTradeGate:
             # Continue with other checks if validation fails (non-critical)
 
         # 3d. CRITICAL: Window-based risk limit check (HARD STOP) - 2026-07-06
-        # Enforces 3% per agent per 15-minute window and 5% total venue per 15-minute window
+        # Enforces 3% per agent per 15-minute window for entry orders
+        # Enforces 10% per agent per 15-minute window for exit orders (to prevent abuse)
+        # Enforces 5% total venue per 15-minute window for all orders
         # This prevents over-trading and forces agents to get better entry prices
         # No more entries until exposure is closed out via trailing stop, ratchet, or 99c exit
         # CRITICAL FIX: If envelope fails to initialize, REJECT the order for safety
@@ -905,25 +909,46 @@ class PreTradeGate:
             if envelope:
                 import time
                 order_notional_usd = (target_count * price_cents) / 100.0
+                is_exit_order = action == "sell"
+                exit_window_limit_pct = 0.10  # 10% for exits (higher than 3% for entries)
+                entry_window_limit_pct = 0.03  # 3% for entries
+                
                 logger.info(
-                    "[GATE-WINDOW-CHECK] Checking window limit: agent=%s notional=$%.2f count=%d price=%dc",
-                    agent_id, order_notional_usd, target_count, price_cents
+                    "[GATE-WINDOW-CHECK] Checking window limit: agent=%s notional=$%.2f count=%d price=%dc is_exit=%s",
+                    agent_id, order_notional_usd, target_count, price_cents, is_exit_order
                 )
-                window_allowed, window_reason = envelope.check_window_limit(
-                    agent_id=agent_id,
-                    order_notional_usd=order_notional_usd,
-                    current_ts=time.time()
-                )
+                
+                # Use different limits for entry vs exit orders
+                if is_exit_order:
+                    window_allowed, window_reason = envelope.check_window_limit(
+                        agent_id=agent_id,
+                        order_notional_usd=order_notional_usd,
+                        current_ts=time.time(),
+                        custom_per_agent_limit_pct=exit_window_limit_pct
+                    )
+                else:
+                    window_allowed, window_reason = envelope.check_window_limit(
+                        agent_id=agent_id,
+                        order_notional_usd=order_notional_usd,
+                        current_ts=time.time()
+                    )
+                
                 logger.info(
                     "[GATE-WINDOW-CHECK] Window limit result: allowed=%s reason=%s",
                     window_allowed, window_reason
                 )
                 if not window_allowed:
                     self._store._metrics.blocked_window_limit += 1
+                    if is_exit_order:
+                        self._store._metrics.blocked_window_limit_exit += 1
+                    else:
+                        self._store._metrics.blocked_window_limit_entry += 1
                     logger.warning(
-                        "[GATE-ALERT] window_limit_blocked contract=%s side=%s agent=%s notional=$%.2f reason=%s (metric: blocked_window_limit=%d)",
+                        "[GATE-ALERT] window_limit_blocked contract=%s side=%s agent=%s notional=$%.2f reason=%s (metric: blocked_window_limit=%d, entry=%d, exit=%d)",
                         contract_id, side, agent_id, order_notional_usd, window_reason,
                         self._store._metrics.blocked_window_limit,
+                        self._store._metrics.blocked_window_limit_entry,
+                        self._store._metrics.blocked_window_limit_exit,
                     )
                     return GateVerdict(
                         allowed=False,

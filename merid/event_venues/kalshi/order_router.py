@@ -4145,8 +4145,14 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                             latency_ms=0.0
                         )
         except Exception as _side_limit_err:
-            logger.error(f"[ORDER-ROUTER] Per-side position limit check failed: {_side_limit_err} — allowing order (fail-open)")
-            # Fail-open: allow order if limit check fails to avoid blocking all trading
+            logger.critical(f"[ORDER-ROUTER] Per-side position limit check failed: {_side_limit_err} — REJECTING order (fail-closed)")
+            # Fail-closed: reject order if limit check fails (max_contracts=1 provides adequate primary protection)
+            return OrderResult(
+                status="rejected",
+                mode=intent.mode,
+                reason=f"per_side_limit_check_failed:{str(_side_limit_err)[:100]}",
+                latency_ms=0.0
+            )
     
     # Look up existing position so per-contract limit check is accurate
     # CRASH-004: Use sentinel value for cache failure, never poison calculation
