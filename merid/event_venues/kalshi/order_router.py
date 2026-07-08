@@ -3703,12 +3703,19 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         original_count = intent.count
         original_price = intent.price_cents
         intent.order_type, intent.time_in_force = _determine_dynamic_order_type(intent, state)
-        intent.count = _apply_depth_based_order_sizing(intent, state)
-        intent.price_cents = _adjust_order_price_for_fill_rate(intent, state)
         
-        # CRITICAL FIX: Enforce 3% per-trade risk limit using unified_sizing
-        # This prevents orders exceeding the hard 3% per-trade cap regardless of liquidity
+        # CRITICAL FIX: Enforce 3% per-trade risk limit BEFORE depth-based sizing
+        # This prevents depth-based sizing from increasing count beyond the risk limit
         intent.count = _apply_risk_based_order_sizing(intent)
+        
+        # Only apply depth-based sizing if risk-based sizing didn't reject the order
+        if intent.count > 0:
+            intent.count = _apply_depth_based_order_sizing(intent, state)
+            # CRITICAL FIX: Re-apply risk-based sizing AFTER depth-based sizing
+            # This ensures depth-based sizing cannot increase count beyond 3% limit
+            intent.count = _apply_risk_based_order_sizing(intent)
+        
+        intent.price_cents = _adjust_order_price_for_fill_rate(intent, state)
         
         # Reject order if risk-based sizing returned 0 (exceeds 3% limit)
         if intent.count == 0:

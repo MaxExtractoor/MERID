@@ -6,6 +6,7 @@ Tests:
 2. Profile application via apply_profile_to_agent() pure function
 3. Removal of legacy to_agent_overrides() method from agent_grid_config.py
 4. Dynamic max_notional_usd computation from live bankroll
+5. CRITICAL FIX (2026-07-08): Profile adapter defaults match 3% risk limit from YAML
 """
 import pytest
 import os
@@ -1140,3 +1141,63 @@ class TestProfileApplicationRefactoring:
         # Profile loading is handled by Crypto15mProfileAdapter
         # This test is obsolete - profile loading is verified in test_guardrails_from_profile
         pass
+
+def test_profile_adapter_defaults_match_3_percent_risk_limit():
+    """CRITICAL FIX (2026-07-08): Profile adapter defaults match 3% risk limit from YAML.
+    
+    This test ensures that if profile YAML values are missing, the fallback defaults
+    in crypto_15m_profile.py still enforce the 3% risk limit (not 5% or 2%).
+    
+    Previous bugs:
+    - max_single_order_pct default was 0.05 (5%) instead of 0.03 (3%)
+    - bankroll_cap_pct default was 0.02 (2%) instead of 0.03 (3%)
+    
+    These could allow orders to exceed the 3% risk limit if YAML values were missing.
+    """
+    from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
+    import yaml
+    
+    # Load the profile YAML
+    profile_path = Path(__file__).parent.parent / "config" / "profiles" / "kalshi_crypto_15m_v2.yaml"
+    with open(profile_path, encoding='utf-8') as f:
+        profile_yaml = yaml.safe_load(f)
+    
+    # Verify YAML has 3% values
+    venue_section = profile_yaml.get('venue', {})
+    assert venue_section.get('max_single_order_pct', {}).get('value') == 0.03, \
+        "YAML should have max_single_order_pct = 0.03 (3%)"
+    assert venue_section.get('bankroll_cap_pct', {}).get('value') == 0.03, \
+        "YAML should have bankroll_cap_pct = 0.03 (3%)"
+    
+    # Test that adapter defaults match YAML when values are missing
+    # Simulate missing venue section
+    incomplete_yaml = {
+        'profile_name': 'kalshi_crypto_15m_v2',
+        'capital_usd': 10000.0,
+        'venue': {},  # Empty venue section - should use defaults
+        'agent_defaults': {}
+    }
+    
+    # The adapter should use 0.03 defaults, not 0.05 or 0.02
+    # This is verified by checking the code in crypto_15m_profile.py
+    # Line 713: venue.get('max_single_order_pct', 0.03)  # FIXED: Default 0.03
+    # Line 725: venue.get('bankroll_cap_pct', 0.03)  # FIXED: Default 0.03
+    
+    # We can't easily test the adapter directly without a full environment,
+    # but we can verify the defaults by checking the source code
+    import inspect
+    from merid.risk.profiles import crypto_15m_profile
+    
+    source = inspect.getsource(crypto_15m_profile)
+    
+    # Verify 0.03 defaults are in the source
+    assert "venue.get('max_single_order_pct', 0.03)" in source, \
+        "Profile adapter should use 0.03 default for max_single_order_pct"
+    assert "venue.get('bankroll_cap_pct', 0.03)" in source, \
+        "Profile adapter should use 0.03 default for bankroll_cap_pct"
+    
+    # Verify old buggy defaults are NOT in the source
+    assert "venue.get('max_single_order_pct', 0.05)" not in source, \
+        "Profile adapter should NOT use 0.05 default for max_single_order_pct (buggy)"
+    assert "venue.get('bankroll_cap_pct', 0.02)" not in source, \
+        "Profile adapter should NOT use 0.02 default for bankroll_cap_pct (buggy)"

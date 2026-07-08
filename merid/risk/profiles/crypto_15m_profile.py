@@ -710,7 +710,7 @@ class Crypto15mProfileAdapter:
             
             # Compute USD values from percentages
             # Handle nested dict format: {value: 0.05, dynamic: bankroll, description: "..."}
-            venue_max_single_order_pct = venue.get('max_single_order_pct', 0.05)
+            venue_max_single_order_pct = venue.get('max_single_order_pct', 0.03)  # FIXED: Default 0.03 to match YAML (3% per order)
             if isinstance(venue_max_single_order_pct, dict):
                 venue_max_single_order_pct = venue_max_single_order_pct.get('value', 0.05)
             
@@ -722,7 +722,7 @@ class Crypto15mProfileAdapter:
             if isinstance(venue_max_category_notional_pct, dict):
                 venue_max_category_notional_pct = venue_max_category_notional_pct.get('value', 0.10)
             
-            venue_bankroll_cap_pct = venue.get('bankroll_cap_pct', 0.02)  # Default 2% if not specified
+            venue_bankroll_cap_pct = venue.get('bankroll_cap_pct', 0.03)  # FIXED: Default 0.03 to match YAML (3% per order)
             if isinstance(venue_bankroll_cap_pct, dict):
                 venue_bankroll_cap_pct = venue_bankroll_cap_pct.get('value', 0.02)
             
@@ -910,10 +910,10 @@ class Crypto15mProfileAdapter:
                 max_cycle_risk_usd=raw.get('max_cycle_risk_usd', 0.0),
                 
                 # Venue-level caps (percentage-based, normalize dict format)
-                venue_max_single_order_pct=self._normalize_percentage_value(venue.get('max_single_order_pct', 0.05)),
+                venue_max_single_order_pct=self._normalize_percentage_value(venue.get('max_single_order_pct', 0.03)),  # FIXED: Default 0.03 to match YAML (3% per order)
                 venue_max_total_notional_pct=self._normalize_percentage_value(venue.get('max_total_notional_pct', 0.15)),  # FIXED: Default 0.15 to match YAML (15% total venue cap)
                 venue_max_category_notional_pct=self._normalize_percentage_value(venue.get('max_category_notional_pct', 0.10)),  # FIXED: Increased from 0.05 to 0.10 to match YAML
-                venue_bankroll_cap_pct=self._normalize_percentage_value(venue.get('bankroll_cap_pct', 0.02)),  # Default 2% if not specified
+                venue_bankroll_cap_pct=self._normalize_percentage_value(venue.get('bankroll_cap_pct', 0.03)),  # FIXED: Default 0.03 to match YAML (3% per order)
                 venue_max_orders_per_minute=venue.get('max_orders_per_minute', 30),
                 venue_max_orders_per_hour=venue.get('max_orders_per_hour', 300),
                 
