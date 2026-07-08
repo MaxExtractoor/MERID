@@ -136,17 +136,24 @@ class FinVizScraper:
         url: str,
         ticker: str
     ) -> List[ScrapedArticle]:
-        """Scrape using requests + BeautifulSoup."""
+        """Scrape using requests + BeautifulSoup (async-safe with executor)."""
         try:
             import requests
             from bs4 import BeautifulSoup
             
+            loop = asyncio.get_running_loop()
+            
+            def fetch_sync():
+                """Blocking HTTP fetch executed in thread pool."""
+                response = requests.get(url, headers=self.headers, timeout=10)
+                response.raise_for_status()
+                return response.text
+            
+            # Run blocking HTTP request in thread pool executor
+            html = await loop.run_in_executor(None, fetch_sync)
+            
             articles = []
-            
-            response = requests.get(url, headers=self.headers, timeout=10)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.text, 'html.parser')
+            soup = BeautifulSoup(html, 'html.parser')
             
             # Find news table
             news_table = soup.find("table", class_="fullview-news-outer")
