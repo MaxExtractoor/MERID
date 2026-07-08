@@ -706,6 +706,40 @@ async def _kalshi_place_order(
                 except Exception as e:
                     logger.debug("[kalshi_tools] Failed to load max_contracts from profile: %s, using default 2", e)
             
+            # Resolve risk contract fields for crypto 15m markets
+            window_resolution_id = "15m"  # Default window resolution for 15m markets
+            exit_policy_id = "tp_sl_15m"  # Default exit policy with TP/SL
+            risk_tier = "conservative"  # Default risk tier
+            max_hold_seconds = 900  # 15 minutes max hold time
+            
+            # Try to resolve policies using order_router functions if available
+            try:
+                from merid.event_venues.kalshi.order_router import resolve_window_policy, resolve_exit_policy
+                
+                # Resolve window policy
+                window_resolution = resolve_window_policy(asset=asset if asset else "BTC", regime="neutral")
+                window_resolution_id = window_resolution.window_resolution_id
+                
+                # Resolve exit policy with edge result
+                edge_result = {"edge_pct": 2.0}  # Default edge
+                exit_policy_resolution = resolve_exit_policy(
+                    edge_result=edge_result,
+                    asset=asset if asset else "BTC",
+                    side=side_lower,
+                    price_cents=_pc,
+                    minutes_to_expiry=15.0
+                )
+                exit_policy_id = exit_policy_resolution.exit_policy_id
+                risk_tier = exit_policy_resolution.regime
+                max_hold_seconds = exit_policy_resolution.max_hold_seconds
+                
+                logger.debug(
+                    "[kalshi_tools] Resolved policies: window=%s exit=%s tier=%s max_hold=%d",
+                    window_resolution_id, exit_policy_id, risk_tier, max_hold_seconds
+                )
+            except Exception as e:
+                logger.warning("[kalshi_tools] Failed to resolve policies, using defaults: %s", e)
+            
             intent = OrderIntent(
                 ticker=ticker,
                 side=kalshi_side,
@@ -716,6 +750,10 @@ async def _kalshi_place_order(
                 agent_id=_agent_name if _agent_name else "kalshi_tools",
                 stop_loss_price_cents=stop_loss_price_cents,
                 take_profit_r_multiple=take_profit_r_multiple,
+                window_resolution_id=window_resolution_id,
+                exit_policy_id=exit_policy_id,
+                risk_tier=risk_tier,
+                max_hold_seconds=max_hold_seconds,
             )
 
             logger.info(
