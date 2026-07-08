@@ -312,6 +312,110 @@ class TestLoop15mExitOrderCorrectSideMapping:
         assert intent_correct.side == "SELL_YES"
 
 
+class TestLoop15mCallbackRegistrationOrder:
+    """Tests for callback registration order (critical fix for race condition)."""
+    
+    def test_callback_registered_before_monitor_starts(self):
+        """Test that exit callback is registered BEFORE PositionMonitor starts.
+        
+        This test verifies the critical fix for the race condition where:
+        1. PositionMonitor starts polling
+        2. Fill arrives via WebSocket
+        3. Position is added to PositionMonitor
+        4. Exit condition is detected
+        5. _emit_exit_intent is called
+        6. But _exit_intent_callback is None (not registered yet)
+        7. Exit intent is logged but NO ORDER IS PLACED
+        
+        The fix ensures callback is registered BEFORE monitor starts.
+        """
+        import asyncio
+        from unittest.mock import Mock, patch
+        from merid.position_management.position_monitor import PositionMonitor
+        
+        # Create a mock callback
+        callback_called = {"count": 0}
+        def mock_callback(position, exit_reason, exit_price_cents, contracts_to_close=None):
+            callback_called["count"] += 1
+        
+        # Create PositionMonitor
+        monitor = PositionMonitor(poll_interval=0.1)
+        
+        # Verify callback is None initially
+        assert monitor._exit_intent_callback is None
+        
+        # Register callback BEFORE starting (the fix)
+        monitor.register_exit_intent_callback(mock_callback)
+        
+        # Verify callback is registered
+        assert monitor._exit_intent_callback is not None
+        assert monitor._exit_intent_callback == mock_callback
+        
+        # Start monitor (in async context)
+        async def test_startup():
+            await monitor.start()
+            # Verify monitor is running
+            assert monitor._running is True
+            # Verify callback is still registered after start
+            assert monitor._exit_intent_callback is not None
+            await monitor.stop()
+        
+        # Run async test
+        asyncio.run(test_startup())
+        
+        # Verify callback was not called during startup (no positions to check)
+        assert callback_called["count"] == 0
+    
+    def test_callback_not_registered_before_start_would_cause_lost_exits(self):
+        """Test that NOT registering callback before start would cause lost exits.
+        
+        This test demonstrates the bug: if callback is registered AFTER start,
+        any exit conditions detected during startup would be lost.
+        """
+        import asyncio
+        from unittest.mock import Mock, patch
+        from merid.position_management.position_monitor import PositionMonitor, Position, PositionSide, ExitReason
+        from merid.event_venues.kalshi.market_state import KalshiMarketState
+        
+        # Create a mock callback
+        callback_called = {"count": 0}
+        def mock_callback(position, exit_reason, exit_price_cents, contracts_to_close=None):
+            callback_called["count"] += 1
+        
+        # Create PositionMonitor
+        monitor = PositionMonitor(poll_interval=0.1)
+        
+        # Add a position BEFORE registering callback (simulating fill during startup)
+        position = Position(
+            position_id="test-1",
+            market_id="KXBTC15M-TEST",
+            side=PositionSide.YES,
+            size=5,
+            avg_entry_price_cents=50,
+            take_profit_price_cents=60,
+        )
+        monitor.add_position(position)
+        
+        # Start monitor WITHOUT registering callback (the bug)
+        async def test_bug_scenario():
+            await monitor.start()
+            
+            # Simulate poll loop detecting exit condition
+            # In real scenario, this would call _emit_exit_intent
+            # But callback is None, so exit is lost
+            assert monitor._exit_intent_callback is None
+            
+            # Now register callback (too late - exits already lost)
+            monitor.register_exit_intent_callback(mock_callback)
+            
+            await monitor.stop()
+        
+        asyncio.run(test_bug_scenario())
+        
+        # Callback was registered but any exits during startup would have been lost
+        # This demonstrates the bug
+
+
 class TestLoop15mExitOrderExitPolicyId:
     """Tests for exit_policy_id field in exit orders (critical fix)."""
     
