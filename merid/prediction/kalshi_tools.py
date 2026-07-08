@@ -298,6 +298,8 @@ async def _kalshi_place_order(
     price_cents: int = 0,
     count: int = 1,
     agent_name: str = "",
+    stop_loss_price_cents: Optional[int] = None,
+    take_profit_r_multiple: Optional[float] = None,
 ) -> ToolResult:
     """Place a YES/NO order on Kalshi."""
     t0 = time.time()
@@ -429,15 +431,15 @@ async def _kalshi_place_order(
         logger.warning("[FAT-FINGER-GUARD] Failed to validate order size: %s", _ff_exc)
 
     # MARKET UNIVERSE GUARD: Reject orders for non-allowed markets
+    # FIX: Use allowed_market_policy.is_market_allowed instead of universe.is_market_allowed
+    # universe.is_market_allowed only checks if ticker is in the static universe.tickers set
+    # which doesn't include new tickers until catalog refresh. The policy check uses
+    # asset/series prefix matching which works for all tickers including new ones.
     _orders_rejected_disallowed_market = 0
     try:
-        from merid.event_venues.kalshi.market_catalog import get_market_catalog
         from merid.event_venues.kalshi.allowed_market_policy import is_market_allowed
         
-        catalog = get_market_catalog()
-        universe = catalog.get_market_universe()
-        
-        if universe is not None and not universe.is_market_allowed(ticker):
+        if not is_market_allowed(ticker):
             _orders_rejected_disallowed_market = 1
             logger.warning(
                 "[MARKET-UNIVERSE-GUARD] Order rejected for disallowed market: ticker=%s agent=%s",
@@ -712,6 +714,8 @@ async def _kalshi_place_order(
                 count=max(1, min(max_contracts_limit, int(count))),
                 source="kalshi_tools",
                 agent_id=_agent_name if _agent_name else "kalshi_tools",
+                stop_loss_price_cents=stop_loss_price_cents,
+                take_profit_r_multiple=take_profit_r_multiple,
             )
 
             logger.info(
