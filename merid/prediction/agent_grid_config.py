@@ -102,7 +102,7 @@ def apply_profile_to_agent(
         )
     
     # 3. Compute per-trade risk percent (unified across assets)
-    risk_pct = getattr(profile, 'per_trade_risk_pct', 0.02)  # Default 2%
+    risk_pct = getattr(profile, 'per_trade_risk_pct', 0.03)  # CRITICAL FIX: Default 3% to match profile YAML (was 0.02)
     
     # 4. Compute max_notional
     max_notional_usd = effective_capital * risk_pct

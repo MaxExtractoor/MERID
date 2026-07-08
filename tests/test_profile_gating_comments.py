@@ -40,6 +40,9 @@ class TestProfileGatingComments:
         assert "PROFILE-GATED" in content, "PROFILE-GATED comment missing in top3_edge_allocator.py"
         assert "kalshi_crypto_15m_v2" in content, "Profile name missing in top3_edge_allocator.py"
         assert "4-7%" in content, "Profile edge bands not documented in top3_edge_allocator.py"
+        # CRITICAL FIX (2026-07-07): Verify cycle_risk_cap_pct comment is 5% (not 3%)
+        assert "cycle_risk_cap_pct = 0.05" in content or "5% - aligned" in content, \
+            "cycle_risk_cap_pct comment should reference 5% (aligned with profile), not 3%"
 
     def test_unified_risk_manager_has_doge_note(self):
         """Verify merid/risk/unified_risk_manager.py has NOTE about DOGE contract limit."""

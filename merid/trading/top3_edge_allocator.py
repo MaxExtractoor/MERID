@@ -226,7 +226,7 @@ class Top3SelectionSpec:
         
     Invariant 2 (Bankroll allocation cap per cycle):
         Let bankroll_notional(t) be live account equity (or configured bankroll).
-        Let cycle_risk_cap_pct = 0.03 (3% - 2026 best practice).
+        Let cycle_risk_cap_pct = 0.05 (5% - aligned with kalshi_crypto_15m_v2.yaml profile).
         
         Formal: sum(position_notional_for_new_entries(t)) <= cycle_risk_cap_pct * bankroll_notional(t)
         
@@ -260,7 +260,7 @@ class Top3SelectionSpec:
     DEFAULT_CYCLE_RISK_CAP_PCT_MIN: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MIN", "0.05"))  # CRITICAL FIX: 5% (was 0.03)
     DEFAULT_CYCLE_RISK_CAP_PCT_MAX: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MAX", "0.05"))  # CRITICAL FIX: 5% (was 0.03)
     DEFAULT_EPS: float = float(os.getenv("MERID_TOP3_EDGE_EPS", "1e-6"))
-    MAX_ASSETS: int = int(os.getenv("MERID_TOP3_MAX_ASSETS", "5"))  # CRITICAL FIX: 5 (was 3) - aligned with 5-asset crypto stack
+    MAX_ASSETS: int = int(os.getenv("MERID_TOP3_MAX_ASSETS", "3"))  # CRITICAL FIX: 3 (was 5) - enforce top-3 limit to prevent venue window bottleneck
     MIN_ALLOCATION_CENTS: int = int(os.getenv("MERID_TOP3_MIN_ALLOCATION_CENTS", "50"))  # $0.50 minimum
     
     VALID_ASSETS: Tuple[str, ...] = ("BTC", "ETH", "SOL", "XRP", "DOGE")
@@ -290,7 +290,7 @@ def select_top3_allocations(
 
     Args:
         bankroll_notional: Current bankroll in cents
-        cycle_risk_cap_pct: Risk cap as fraction (0.03 - 2026 best practice)
+        cycle_risk_cap_pct: Risk cap as fraction (0.05 - aligned with profile)
         candidates: List of edge candidates (all 5 assets potentially)
         eps: Epsilon for floating point comparisons (uses env if None)
         min_allocation_cents: Minimum allocation in cents (uses env if None)
