@@ -54,6 +54,13 @@ class TestKalshiCrypto15mRiskEnvelope:
             correlation_tracking_enabled=True,
             correlation_threshold=0.5,
             correlation_multiplier=1.0,
+            guardrails_per_window_risk_pct=0.03,
+            guardrails_total_venue_risk_pct=0.05,
+            per_agent_window_limit_usd=1.5,
+            total_venue_window_limit_usd=2.5,
+            window_start_ts=0.0,
+            agent_window_exposure_usd={},
+            total_window_exposure_usd=0.0,
         )
         assert envelope.profile_capital_usd == 50.0
         assert envelope.live_bankroll_usd == 50.0
@@ -100,6 +107,13 @@ class TestKalshiCrypto15mRiskEnvelope:
             correlation_tracking_enabled=True,
             correlation_threshold=0.5,
             correlation_multiplier=1.0,
+            guardrails_per_window_risk_pct=0.03,
+            guardrails_total_venue_risk_pct=0.05,
+            per_agent_window_limit_usd=1.5,
+            total_venue_window_limit_usd=2.5,
+            window_start_ts=0.0,
+            agent_window_exposure_usd={},
+            total_window_exposure_usd=0.0,
         )
 
     def test_risk_envelope_defaults_match_3_percent_risk_limit(self):
@@ -157,6 +171,13 @@ class TestKalshiCrypto15mRiskEnvelope:
             correlation_tracking_enabled=True,
             correlation_threshold=0.5,
             correlation_multiplier=1.0,
+            guardrails_per_window_risk_pct=0.03,
+            guardrails_total_venue_risk_pct=0.05,
+            per_agent_window_limit_usd=15.0,
+            total_venue_window_limit_usd=25.0,
+            window_start_ts=0.0,
+            agent_window_exposure_usd={},
+            total_window_exposure_usd=0.0,
         )
         # All bankrolls should use uniform 3% per-trade risk (tiered logic disabled 2026-07-06)
         assert envelope.get_per_trade_risk_pct() == 0.03
@@ -192,6 +213,13 @@ class TestKalshiCrypto15mRiskEnvelope:
             correlation_tracking_enabled=True,
             correlation_threshold=0.5,
             correlation_multiplier=1.0,
+            guardrails_per_window_risk_pct=0.03,
+            guardrails_total_venue_risk_pct=0.05,
+            per_agent_window_limit_usd=150.0,
+            total_venue_window_limit_usd=250.0,
+            window_start_ts=0.0,
+            agent_window_exposure_usd={},
+            total_window_exposure_usd=0.0,
         )
         # All bankrolls should use uniform 3% per-trade risk (tiered logic disabled 2026-07-06)
         assert envelope.get_per_trade_risk_pct() == 0.03
@@ -210,8 +238,8 @@ class TestKalshiCrypto15mRiskEnvelope:
         assert envelope.profile_capital_usd == 0.0
         # Verify live bankroll used ($50 from mock)
         assert envelope.live_bankroll_usd == 50.0
-        # Verify max_single_order derived from 10% of live bankroll
-        assert envelope.max_single_order_notional_usd == 5.0  # 10% of $50
+        # Verify max_single_order derived from 3% of live bankroll (not 10%)
+        assert envelope.max_single_order_notional_usd == 1.5  # 3% of $50
         # Verify max_total_notional derived from 15% of live bankroll (conservative cycle risk)
         assert envelope.max_total_notional_usd == 7.5  # 15% of $50
         # Verify max_concurrent_trades from profile
@@ -241,6 +269,73 @@ class TestKalshiCrypto15mRiskEnvelope:
         # Should return envelope with test bankroll fallback
         assert envelope is not None
         assert envelope.live_bankroll_usd == 50.0  # Test bankroll
+
+    def test_risk_envelope_uses_live_bankroll_in_production_mode(self):
+        """Test that risk envelope uses live bankroll when MERID_VALIDATION_MODE is false.
+        
+        This test ensures the risk envelope correctly prioritizes live bankroll over
+        profile capital in production mode (MERID_VALIDATION_MODE=false).
+        """
+        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import compute_kalshi_crypto_15m_risk_envelope
+        from unittest.mock import patch
+        
+        # Test with MERID_VALIDATION_MODE=false (production mode)
+        with patch.dict('os.environ', {'MERID_VALIDATION_MODE': 'false'}):
+            # Profile has capital_usd=0, so should use live bankroll
+            envelope = compute_kalshi_crypto_15m_risk_envelope(live_bankroll_usd=34.01)
+            
+            # Effective capital should be live bankroll, not profile capital
+            assert envelope.live_bankroll_usd == 34.01
+            assert envelope.profile_capital_usd == 0.0  # From YAML
+            
+            # Verify risk limits are computed from live bankroll
+            # 3% of $34.01 = ~$1.02 per agent window limit
+            expected_per_agent_limit = 34.01 * 0.03
+            assert abs(envelope.per_agent_window_limit_usd - expected_per_agent_limit) < 0.01
+            
+            # 5% of $34.01 = ~$1.70 total venue window limit
+            expected_total_venue_limit = 34.01 * 0.05
+            assert abs(envelope.total_venue_window_limit_usd - expected_total_venue_limit) < 0.01
+
+    def test_risk_envelope_uses_profile_capital_in_validation_mode(self):
+        """Test that risk envelope uses profile capital when MERID_VALIDATION_MODE is true.
+        
+        This test ensures the risk envelope correctly uses profile capital in
+        validation mode (MERID_VALIDATION_MODE=true) when profile_capital > 0.
+        """
+        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import compute_kalshi_crypto_15m_risk_envelope
+        from unittest.mock import patch
+        import yaml
+        from pathlib import Path
+        
+        # Load profile YAML and temporarily modify capital_usd
+        repo_root = Path(__file__).parent.parent
+        profile_path = repo_root / "config" / "profiles" / "kalshi_crypto_15m_v2.yaml"
+        
+        with open(profile_path, encoding='utf-8') as f:
+            profile_config = yaml.safe_load(f)
+        
+        original_capital = profile_config.get('capital_usd', 0)
+        
+        try:
+            # Temporarily set profile capital to 1000 for validation mode test
+            profile_config['capital_usd'] = 1000.0
+            
+            with patch.dict('os.environ', {'MERID_VALIDATION_MODE': 'true'}):
+                with patch('yaml.safe_load', return_value=profile_config):
+                    envelope = compute_kalshi_crypto_15m_risk_envelope(live_bankroll_usd=34.01)
+                    
+                    # In validation mode with profile_capital > 0, should use profile capital
+                    assert envelope.profile_capital_usd == 1000.0
+                    
+                    # Risk limits should be computed from profile capital (1000), not live bankroll (34.01)
+                    # 3% of $1000 = $30 per agent window limit
+                    expected_per_agent_limit = 1000.0 * 0.03
+                    assert abs(envelope.per_agent_window_limit_usd - expected_per_agent_limit) < 0.01
+                    
+        finally:
+            # Restore original capital_usd
+            profile_config['capital_usd'] = original_capital
 
 
 class TestCapabilitiesUsesCanonicalEnvelope:

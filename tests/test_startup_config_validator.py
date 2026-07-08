@@ -1,6 +1,9 @@
 """Test startup config validator catches contradictions."""
 
+import json
+import os
 import pytest
+from pathlib import Path
 from config.startup_config_validator import ConfigValidator
 
 
@@ -47,6 +50,40 @@ def test_validator_catches_risk_limit_exceeded():
     
     # Restore
     validator.kalshi_distance["sizing_constraints"]["max_risk_per_trade_pct"] = original_risk
+
+
+def test_supervisor_config_live_mode_environment():
+    """Test that supervisor config has correct live mode environment variables.
+    
+    This test ensures the supervisor config does not have conflicting environment
+    variables that force demo mode (which was causing $1000 demo bankroll instead
+    of live balance).
+    """
+    supervisor_config_path = Path(__file__).parent.parent / "supervisor" / "merid-service.json"
+    
+    if not supervisor_config_path.exists():
+        pytest.skip(f"Supervisor config not found at {supervisor_config_path}")
+    
+    with open(supervisor_config_path) as f:
+        config = json.load(f)
+    
+    env_vars = config.get("env", {})
+    
+    # Verify KALSHI_ENV is set to live (not demo)
+    kalshi_env = env_vars.get("KALSHI_ENV")
+    assert kalshi_env == "live", f"KALSHI_ENV must be 'live' for production, got '{kalshi_env}'"
+    
+    # Verify KALSHI_USE_DEMO is false
+    kalshi_use_demo = env_vars.get("KALSHI_USE_DEMO")
+    assert kalshi_use_demo == "false", f"KALSHI_USE_DEMO must be 'false' for production, got '{kalshi_use_demo}'"
+    
+    # Verify MERID_VALIDATION_MODE is false (to ensure risk envelope uses live bankroll)
+    validation_mode = env_vars.get("MERID_VALIDATION_MODE")
+    assert validation_mode == "0", f"MERID_VALIDATION_MODE must be '0' for production, got '{validation_mode}'"
+    
+    # Verify profile is kalshi_crypto_15m_v2
+    profile = env_vars.get("MERID_PROFILE")
+    assert profile == "kalshi_crypto_15m_v2", f"MERID_PROFILE must be 'kalshi_crypto_15m_v2', got '{profile}'"
 
 
 if __name__ == "__main__":
