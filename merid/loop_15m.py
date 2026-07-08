@@ -1131,11 +1131,12 @@ class Kalshi15mLoop:
                     except Exception as cb_err:
                         logger.error("[POSITION-MONITOR-CALLBACK] Failed to execute exit: %s", cb_err, exc_info=True)
 
+                # CRITICAL FIX: Register exit callback BEFORE starting monitor
+                # This prevents race condition where positions are added before callback is registered
+                self._position_monitor.register_exit_intent_callback(exit_intent_callback)
+                
                 # Start the monitor's polling loop (await to ensure _running flag is set)
                 await self._position_monitor.start()
-                
-                # Register exit callback after monitor is started
-                self._position_monitor.register_exit_intent_callback(exit_intent_callback)
                 logger.info("[15m-LOOP] Started PositionMonitor with exit callback")
             except Exception as e:
                 logger.warning("[15m-LOOP] Failed to start PositionMonitor: %s", e, exc_info=True)
