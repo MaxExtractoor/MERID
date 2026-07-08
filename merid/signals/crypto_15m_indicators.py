@@ -46,7 +46,7 @@ from datetime import datetime, timezone
 
 import logging
 
-logger = logging.getLogger("merid.signals.crypto_15m_indicators")
+logger = logging.getLogger("merid.prediction.agent_grid_15m")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -545,6 +545,7 @@ class Crypto15mIndicatorStack:
 
     def __init__(self, config: Optional[IndicatorConfig] = None):
         self.cfg = config or IndicatorConfig()
+        self._instance_id = id(self)  # Track instance for debugging
         self._prices: Deque[float] = deque(maxlen=self.cfg.max_bars)
         # EMA(50) trend state
         self._ema_trend: float = 0.0
@@ -674,10 +675,17 @@ class Crypto15mIndicatorStack:
         """
         import math
         if price is None or not math.isfinite(price) or price <= 0:
+            logger.warning("[INDICATOR-STACK-UPDATE] Invalid price: %s (price=%s, finite=%s, positive=%s)", 
+                          price, price is not None, math.isfinite(price) if price is not None else False, 
+                          (price > 0) if price is not None else False)
             return
         self._last_price_timestamp = timestamp
         prev = self._prices[-1] if self._prices else price
         self._prices.append(price)
+        
+        # CRITICAL FIX: 2026-07-08 - Log price history length for debugging bars_available=1 issue
+        logger.info("[INDICATOR-STACK-UPDATE] asset=%s instance_id=%d price=%.2f bars_before=%d bars_after=%d maxlen=%d", 
+                     self._asset_symbol, self._instance_id, price, len(self._prices) - 1, len(self._prices), self._prices.maxlen)
 
         n = len(self._prices)
 

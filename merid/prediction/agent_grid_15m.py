@@ -377,21 +377,25 @@ class LeanAgent15m:
         # CRITICAL FIX: 2026-07-08 - Decouple indicator stack updates from 5s loop cadence
         # Indicator stack expects 1-minute close prices, but loop runs at 5-second cadence
         # We'll accumulate spot prices and only update indicator stack once per minute
+        # CRITICAL FIX: 2026-07-08 - Each agent should only initialize indicator stack for its own asset
+        # Previous code initialized stacks for all 5 assets per agent, causing 25 total stacks
+        # This led to each stack only getting updates from one agent, resulting in bars_available=1
         self._indicator_stacks: Dict[str, Any] = {}
         self._indicator_stack_last_update: Dict[str, float] = {}  # Track last update time per asset
         self._indicator_stack_price_buffer: Dict[str, List[float]] = {}  # Buffer spot prices for 1-minute aggregation
         try:
             from merid.signals.crypto_15m_indicators import Crypto15mIndicatorStack, IndicatorConfig
-            for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-                # Create indicator stack with asset-specific config and kalshi_mode enabled
-                cfg = IndicatorConfig(asset=asset, kalshi_mode=True)
-                self._indicator_stacks[asset] = Crypto15mIndicatorStack(config=cfg)
-                self._indicator_stack_last_update[asset] = 0.0
-                self._indicator_stack_price_buffer[asset] = []
-                logger.info("[AGENT-INIT] %s initialized Crypto15mIndicatorStack for %s with kalshi_mode=True (lenient thresholds for prediction markets)", 
-                           config.name, asset)
+            # Only initialize indicator stack for this agent's specific asset
+            asset = config.name.split('_')[0]  # Extract asset from agent name (e.g., "BTC_15M" -> "BTC")
+            cfg = IndicatorConfig(asset=asset, kalshi_mode=True)
+            self._indicator_stacks[asset] = Crypto15mIndicatorStack(config=cfg)
+            self._indicator_stacks[asset].set_asset_symbol(asset)  # Set asset symbol for logging
+            self._indicator_stack_last_update[asset] = 0.0
+            self._indicator_stack_price_buffer[asset] = []
+            logger.info("[AGENT-INIT] %s initialized Crypto15mIndicatorStack for %s with kalshi_mode=True (lenient thresholds for prediction markets)", 
+                       config.name, asset)
         except Exception as e:
-            logger.warning("[AGENT-INIT] %s failed to initialize Crypto15mIndicatorStack: %s", config.name, e)
+            logger.error("[AGENT-INIT] %s failed to initialize Crypto15mIndicatorStack: %s", config.name, e, exc_info=True)
             self._indicator_stacks = {}
         
         # Initialize for all 5 crypto assets
@@ -685,6 +689,8 @@ class LeanAgent15m:
                     # Use the last price in the buffer as the 1-minute close
                     if self._indicator_stack_price_buffer[asset]:
                         minute_close = self._indicator_stack_price_buffer[asset][-1]
+                        logger.info("[INDICATOR-STACK-UPDATE-BEFORE] asset=%s minute_close=%.2f buffer_size=%d calling update()", 
+                                   asset, minute_close, len(self._indicator_stack_price_buffer[asset]))
                         self._indicator_stacks[asset].update(minute_close)
                         self._indicator_stack_last_update[asset] = current_time
                         self._indicator_stack_price_buffer[asset] = []  # Clear buffer
@@ -1815,11 +1821,15 @@ class LeanAgent15m:
         # Initialize indicator variables with defaults
         macd_slope = 0.0
         
-        # CRITICAL FIX: 2026-07-07 - Use Crypto15mIndicatorStack for 2026 research-based indicators
+        # CRITICAL FIX: 2026-07-08 - Use Crypto15mIndicatorStack for 2026 research-based indicators
         # This provides EMA(200), regime-based RSI, MACD filters, and RSI+MACD confluence scoring
         if asset in self._indicator_stacks:
             try:
                 indicator_snap = self._indicator_stacks[asset].snapshot()
+                
+                # CRITICAL FIX: 2026-07-08 - Log indicator stack state for debugging MACD=0.0000 issue
+                logger.info("[MOMENTUM-FVG-INDICATOR-STACK] asset=%s bars_available=%d macd_line=%.6f macd_histogram=%.6f rsi=%.1f", 
+                           asset, indicator_snap.bars_available, indicator_snap.macd_line, indicator_snap.macd_histogram, indicator_snap.rsi)
                 
                 # Extract 2026 research-based indicators from indicator stack
                 rsi = indicator_snap.rsi
@@ -2132,6 +2142,23 @@ class LeanAgent15m:
         else:
             model_prob = max(0.05, 0.5 - (edge_pct / 100.0))
         
+        # Calculate price_cents from market state (mid price)
+        price_cents = 50  # Default fallback
+        try:
+            ticker = market.market.market_id if hasattr(market, 'market') else market.market_id
+            market_state = self.market_state_store.get(ticker) if self.market_state_store else None
+            if market_state:
+                best_bid = getattr(market_state, 'best_bid_cents', 0) or 0
+                best_ask = getattr(market_state, 'best_ask_cents', 0) or 0
+                if best_bid > 0 and best_ask > 0:
+                    price_cents = int((best_bid + best_ask) / 2)
+                elif best_bid > 0:
+                    price_cents = int(best_bid)
+                elif best_ask > 0:
+                    price_cents = int(best_ask)
+        except Exception as e:
+            logger.warning("[MOMENTUM-FVG] Failed to get price_cents from market state: %s", e)
+        
         # Return signal
         return {
             "side": signal_side,
@@ -2151,6 +2178,8 @@ class LeanAgent15m:
             "fvg_confidence": fvg_confidence,
             "long_score": long_score,
             "short_score": short_score,
+            "price_cents": price_cents,  # CRITICAL: Include price_cents for order execution
+            "count": 1,  # CRITICAL: Include default count for order execution
             "rationale": f"momentum_fvg: velocity={velocity:.6f} (threshold={velocity_threshold:.6f}) macd_hist={macd_histogram:.4f} rsi={rsi:.1f} ({rsi_zone}) obi={obi:.2f} fvg_dir={fvg_direction} fvg_conf={fvg_confidence:.2f} edge={edge_pct:.2f}%",
         }
 
