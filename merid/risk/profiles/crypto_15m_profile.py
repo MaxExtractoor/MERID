@@ -85,6 +85,7 @@ class Crypto15mProfile:
     momentum_fvg_rsi_short_max: float  # Bearish momentum: RSI < threshold
     momentum_fvg_min_macd_hist_long: float  # For longs: MACD histogram >= threshold
     momentum_fvg_min_macd_hist_short: float  # For shorts: MACD histogram <= threshold
+    momentum_fvg_macd_dead_zone: float  # MACD histogram dead zone threshold (2026 research)
     momentum_fvg_obi_min: float  # Minimum absolute OBI value
     momentum_fvg_obi_persistence_min: float  # Minimum OBI persistence fraction
     momentum_fvg_obi_persistence_window_sec: float  # Time window for persistence check (seconds)
@@ -480,6 +481,7 @@ class Crypto15mProfile:
             'momentum_rsi_short_max': self.momentum_fvg_rsi_short_max,
             'momentum_min_macd_hist_long': self.momentum_fvg_min_macd_hist_long,
             'momentum_min_macd_hist_short': self.momentum_fvg_min_macd_hist_short,
+            'macd_dead_zone': self.momentum_fvg_macd_dead_zone,
             'obi_min': self.momentum_fvg_obi_min,
             'obi_persistence_min': self.momentum_fvg_obi_persistence_min,
             'obi_persistence_window_sec': self.momentum_fvg_obi_persistence_window_sec,
@@ -853,15 +855,16 @@ class Crypto15mProfileAdapter:
                 momentum_fvg_rsi_short_max=momentum_fvg_config.get('momentum_rsi_short_max', 45.0),
                 momentum_fvg_min_macd_hist_long=momentum_fvg_config.get('momentum_min_macd_hist_long', 0.0),
                 momentum_fvg_min_macd_hist_short=momentum_fvg_config.get('momentum_min_macd_hist_short', 0.0),
+                momentum_fvg_macd_dead_zone=momentum_fvg_config.get('macd_dead_zone', 0.0001),  # 2026-07-08: Optimized for 15m crypto
                 momentum_fvg_obi_min=momentum_fvg_config.get('obi_min', 0.25),
                 momentum_fvg_obi_persistence_min=momentum_fvg_config.get('obi_persistence_min', 0.6),
                 momentum_fvg_obi_persistence_window_sec=momentum_fvg_config.get('obi_persistence_window_sec', 10.0),
                 momentum_fvg_obi_ewma_alpha=momentum_fvg_config.get('obi_ewma_alpha', 0.15),
-                momentum_fvg_obi_strong_btc=momentum_fvg_config.get('obi_strong_btc', 0.85),  # 2026-07-03: Increased to 85% for crypto volatility
-                momentum_fvg_obi_strong_eth=momentum_fvg_config.get('obi_strong_eth', 0.85),  # 2026-07-03: Increased to 85% for crypto volatility
-                momentum_fvg_obi_strong_sol=momentum_fvg_config.get('obi_strong_sol', 0.80),  # 2026-07-03: Increased to 80% for crypto volatility
-                momentum_fvg_obi_strong_xrp=momentum_fvg_config.get('obi_strong_xrp', 0.80),  # 2026-07-03: Increased to 80% for crypto volatility
-                momentum_fvg_obi_strong_doge=momentum_fvg_config.get('obi_strong_doge', 0.80),  # 2026-07-03: Increased to 80% for crypto volatility
+                momentum_fvg_obi_strong_btc=momentum_fvg_config.get('obi_strong_btc', 0.55),  # CRITICAL FIX: 2026-07-08 - Aligned with profile YAML (was 0.85, 30pt mismatch)
+                momentum_fvg_obi_strong_eth=momentum_fvg_config.get('obi_strong_eth', 0.55),  # CRITICAL FIX: 2026-07-08 - Aligned with profile YAML (was 0.85, 30pt mismatch)
+                momentum_fvg_obi_strong_sol=momentum_fvg_config.get('obi_strong_sol', 0.45),  # CRITICAL FIX: 2026-07-08 - Aligned with profile YAML (was 0.80, 35pt mismatch)
+                momentum_fvg_obi_strong_xrp=momentum_fvg_config.get('obi_strong_xrp', 0.45),  # CRITICAL FIX: 2026-07-08 - Aligned with profile YAML (was 0.80, 35pt mismatch)
+                momentum_fvg_obi_strong_doge=momentum_fvg_config.get('obi_strong_doge', 0.45),  # CRITICAL FIX: 2026-07-08 - Aligned with profile YAML (was 0.80, 35pt mismatch)
                 momentum_fvg_obi_ewma_alpha_btc=momentum_fvg_config.get('obi_ewma_alpha_btc', 0.15),
                 momentum_fvg_obi_ewma_alpha_eth=momentum_fvg_config.get('obi_ewma_alpha_eth', 0.15),
                 momentum_fvg_obi_ewma_alpha_sol=momentum_fvg_config.get('obi_ewma_alpha_sol', 0.20),

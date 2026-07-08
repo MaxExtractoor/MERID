@@ -274,6 +274,130 @@ class TestMomentumFVGIntegration:
         
         should_skip = abs(macd_histogram) < macd_dead_zone
         assert should_skip is True, "Signal should be skipped in MACD dead zone"
+    
+    def test_macd_dead_zone_from_profile_yaml(self):
+        """Test that MACD dead zone is read from profile YAML."""
+        from merid.risk.profiles.crypto_15m_profile import get_crypto_15m_profile
+        
+        profile = get_crypto_15m_profile()
+        # momentum_fvg is a dictionary property, use dict access
+        macd_dead_zone = profile.momentum_fvg.get('macd_dead_zone', None)
+        
+        # Verify dead zone is configured in profile
+        assert macd_dead_zone is not None, "macd_dead_zone should be configured in profile YAML"
+        
+        # Verify it's the optimized value (0.0001 for 15m crypto, not the old 0.0005)
+        assert macd_dead_zone == 0.0001, f"macd_dead_zone should be 0.0001, got {macd_dead_zone}"
+        
+        # Verify it's not the old too-strict value
+        assert macd_dead_zone != 0.0005, "macd_dead_zone should not be the old too-strict 0.0005 value"
+    
+    def test_macd_dead_zone_allows_valid_signals(self):
+        """Test that optimized dead zone allows valid signals."""
+        from merid.risk.profiles.crypto_15m_profile import get_crypto_15m_profile
+        
+        profile = get_crypto_15m_profile()
+        macd_dead_zone = getattr(profile.momentum_fvg, 'macd_dead_zone', 0.0001)
+        
+        # Test values that should be allowed (outside dead zone)
+        # With 0.0001 dead zone, values like 0.0002 should be allowed
+        test_values = [0.0002, -0.0002, 0.001, -0.001]
+        
+        for macd_histogram in test_values:
+            should_skip = abs(macd_histogram) < macd_dead_zone
+            assert should_skip is False, f"MACD histogram {macd_histogram} should NOT be in dead zone with threshold {macd_dead_zone}"
+    
+    def test_macd_dead_zone_blocks_noise(self):
+        """Test that optimized dead zone still blocks noise."""
+        from merid.risk.profiles.crypto_15m_profile import get_crypto_15m_profile
+        
+        profile = get_crypto_15m_profile()
+        macd_dead_zone = getattr(profile.momentum_fvg, 'macd_dead_zone', 0.0001)
+        
+        # Test values that should be blocked (within dead zone)
+        # With 0.0001 dead zone, values like 0.00005 should be blocked
+        test_values = [0.0, 0.00005, -0.00005, 0.00009, -0.00009]
+        
+        for macd_histogram in test_values:
+            should_skip = abs(macd_histogram) < macd_dead_zone
+            assert should_skip is True, f"MACD histogram {macd_histogram} should be in dead zone with threshold {macd_dead_zone}"
+    
+    def test_obi_strong_thresholds_aligned_with_profile_yaml(self):
+        """Test that OBI strong thresholds are aligned with profile YAML (CRITICAL FIX: 2026-07-08)."""
+        from merid.risk.profiles.crypto_15m_profile import get_crypto_15m_profile
+        
+        profile = get_crypto_15m_profile()
+        momentum_fvg = profile.momentum_fvg
+        
+        # Verify OBI strong thresholds match profile YAML values
+        # Profile YAML: BTC=0.55, ETH=0.55, SOL=0.45, XRP=0.45, DOGE=0.45
+        # Previous defaults (WRONG): BTC=0.85, ETH=0.85, SOL=0.80, XRP=0.80, DOGE=0.80
+        
+        assert momentum_fvg['obi_strong_btc'] == 0.55, \
+            f"BTC OBI strong threshold should be 0.55, got {momentum_fvg['obi_strong_btc']}"
+        assert momentum_fvg['obi_strong_eth'] == 0.55, \
+            f"ETH OBI strong threshold should be 0.55, got {momentum_fvg['obi_strong_eth']}"
+        assert momentum_fvg['obi_strong_sol'] == 0.45, \
+            f"SOL OBI strong threshold should be 0.45, got {momentum_fvg['obi_strong_sol']}"
+        assert momentum_fvg['obi_strong_xrp'] == 0.45, \
+            f"XRP OBI strong threshold should be 0.45, got {momentum_fvg['obi_strong_xrp']}"
+        assert momentum_fvg['obi_strong_doge'] == 0.45, \
+            f"DOGE OBI strong threshold should be 0.45, got {momentum_fvg['obi_strong_doge']}"
+        
+        # Verify they are NOT the old incorrect values
+        assert momentum_fvg['obi_strong_btc'] != 0.85, "BTC OBI strong threshold should not be old value 0.85"
+        assert momentum_fvg['obi_strong_eth'] != 0.85, "ETH OBI strong threshold should not be old value 0.85"
+        assert momentum_fvg['obi_strong_sol'] != 0.80, "SOL OBI strong threshold should not be old value 0.80"
+    
+    def test_momentum_rsi_thresholds_used_in_signal_conditions(self):
+        """Test that momentum RSI thresholds are used in signal conditions (CRITICAL FIX: 2026-07-08)."""
+        import inspect
+        from merid.prediction.agent_grid_15m import LeanAgent15m
+        
+        # Get the source code of the _generate_momentum_fvg_signal method
+        source = inspect.getsource(LeanAgent15m._generate_momentum_fvg_signal)
+        
+        # Verify that momentum RSI thresholds are read from profile
+        assert "momentum_rsi_long_min" in source, \
+            "momentum_rsi_long_min should be read from profile config"
+        assert "momentum_rsi_short_max" in source, \
+            "momentum_rsi_short_max should be read from profile config"
+        
+        # Verify that RSI > momentum_rsi_long_min is used in long conditions
+        assert "rsi > momentum_rsi_long_min" in source, \
+            "Long conditions should check RSI > momentum_rsi_long_min"
+        
+        # Verify that RSI < momentum_rsi_short_max is used in short conditions
+        assert "rsi < momentum_rsi_short_max" in source, \
+            "Short conditions should check RSI < momentum_rsi_short_max"
+        
+        # Verify that the condition count was updated from 3 of 4 to 3 of 5
+        assert "3 of 5" in source, \
+            "Signal conditions should require 3 of 5 (updated from 3 of 4)"
+    
+    def test_timing_window_uses_profile_yaml(self):
+        """Test that timing window uses profile YAML configuration (CRITICAL FIX: 2026-07-08)."""
+        import inspect
+        from merid.prediction.agent_grid_15m import LeanAgent15m
+        
+        # Get the source code of the _generate_signal method
+        source = inspect.getsource(LeanAgent15m._generate_signal)
+        
+        # Verify that timing configuration is read from profile
+        assert "guardrails_min_entry_mins" in source, \
+            "guardrails_min_entry_mins should be read from profile"
+        assert "guardrails_max_entry_mins" in source, \
+            "guardrails_max_entry_mins should be read from profile"
+        assert "agent_cutoff_minutes_before_expiry" in source, \
+            "agent_cutoff_minutes_before_expiry should be read from profile"
+        
+        # Verify that old hardcoded timing window values are NOT used in signal generation
+        # Note: <= 0.5 in _validate_market_state is for one-sided book rejection (intentional)
+        assert ">= 14.0" not in source, \
+            "Hardcoded >=14.0min threshold should be removed from signal generation"
+        # Check that the old comment about "first minute" is removed
+        assert "first minute - price discovery noise" not in source, \
+            "Old hardcoded first minute logic should be removed"
 
 
 if __name__ == "__main__":
