@@ -11,10 +11,10 @@ bankroll:
   # Previous 0.5% was too restrictive for 15m trading, causing all orders to be rejected
   max_cycle_risk_pct: 0.05
   
-  # Maximum total exposure across all positions (25% total)
-  # Increased to 25% to allow 5% per asset across 5 assets (5 × 5% = 25%)
-  # Industry standard: 15-25% total exposure for binary options
-  max_total_risk_pct: 0.25
+  # Maximum total exposure across all positions (15% total)
+  # CRITICAL FIX: Aligned with kalshi_crypto_15m_v2.yaml profile (15% total venue)
+  # This allows 3% per asset across 5 assets (3% × 5 = 15%)
+  max_total_risk_pct: 0.15
   
   # Maximum daily loss limit (5% - triggers trading halt)
   # Standard institutional practice: 3-5% daily loss limit
@@ -58,15 +58,12 @@ per_asset:
 
 # Per-trade limits
 per_trade:
-  # Maximum notional for single trade (2% of bankroll)
-  # ALIGNED TO 2026 INDUSTRY STANDARDS: 1-2% per trade for binary options
-  # Research: Daytrading.com recommends 0.5-2% (prefer 0.5% for safety, 1-2% for growth)
-  # Trades-Trend recommends 1-2% as standard benchmark (5% is high risk)
-  # BinaryOptionsAE recommends 1-2% for small accounts to survive losing streaks
-  # CRITICAL FIX: This is the SINGLE SOURCE OF TRUTH for per-trade risk
+  # Maximum notional for single trade (3% of bankroll)
+  # CRITICAL FIX: Aligned with kalshi_crypto_15m_v2.yaml profile (3% per trade)
+  # This is the SINGLE SOURCE OF TRUTH for per-trade risk
   # All upstream sizing (Kelly fraction, profile per_trade_risk_pct) must align with this value
   # to prevent systematic rejections due to misalignment
-  max_notional_pct: 0.02
+  max_notional_pct: 0.03
   # Maximum contracts per trade
   max_contracts: 10
 

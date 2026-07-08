@@ -2681,7 +2681,6 @@ def _apply_risk_based_order_sizing(intent: OrderIntent, bankroll_usd: Optional[D
     """
     try:
         from merid.prediction.unified_sizing import compute_order_size
-        from merid.event_venues.kalshi import get_summary_sync
         from decimal import Decimal
         from typing import Optional
         
@@ -2704,12 +2703,17 @@ def _apply_risk_based_order_sizing(intent: OrderIntent, bankroll_usd: Optional[D
             return intent.count
         
         # Get bankroll - use provided value or fetch from service
+        # CRITICAL FIX: Use cached bankroll to avoid blocking order submission
+        # get_summary_sync() uses run_coroutine_threadsafe with 30s timeout which blocks orders
         if bankroll_usd is None:
-            bankroll_summary = get_summary_sync()
-            if not bankroll_summary:
-                logger.warning("[RISK-BASED-SIZING] Bankroll summary unavailable, returning original count")
+            from merid.event_venues.kalshi.bankroll_service_v2 import _BANKROLL_SERVICE_V2
+            # Use cached value from bankroll service if available
+            if _BANKROLL_SERVICE_V2 and _BANKROLL_SERVICE_V2._current and _BANKROLL_SERVICE_V2._current.equity_usd:
+                bankroll_usd = Decimal(str(_BANKROLL_SERVICE_V2._current.equity_usd))
+                logger.debug("[RISK-BASED-SIZING] Using cached bankroll: %s", bankroll_usd)
+            else:
+                logger.warning("[RISK-BASED-SIZING] Bankroll cache unavailable, returning original count")
                 return intent.count
-            bankroll_usd = Decimal(str(bankroll_summary.equity))
         
         price_cents = intent.price_cents
         
@@ -4041,12 +4045,18 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
     # UNIFIED RISK MANAGER: Single source of truth for all risk checks
     # Replaces GlobalRiskGuard, GlobalExecutionGuard, CategoryExposureTracker, KalshiRiskManager
     from merid.risk.unified_risk_manager import get_unified_risk_manager
-    from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
+    from merid.event_venues.kalshi.bankroll_service_v2 import _BANKROLL_SERVICE_V2
     
     unified_risk = get_unified_risk_manager()
     
     # Calibrate from current bankroll
-    current_bankroll = get_equity_for_risk_calc_sync()
+    # CRITICAL FIX: Use cached bankroll to avoid blocking order submission
+    # get_equity_for_risk_calc_sync() uses run_coroutine_threadsafe with 45s timeout which blocks orders
+    current_bankroll = None
+    if _BANKROLL_SERVICE_V2 and _BANKROLL_SERVICE_V2._current and _BANKROLL_SERVICE_V2._current.equity_usd:
+        current_bankroll = _BANKROLL_SERVICE_V2._current.equity_usd
+        logger.debug("[order-router] Using cached bankroll for unified risk calibration: %s", current_bankroll)
+    
     if current_bankroll is not None and current_bankroll > 0:
         balance_cents = int(current_bankroll * 100)
         unified_risk.calibrate_from_balance(balance_cents)
