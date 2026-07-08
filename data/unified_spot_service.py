@@ -228,14 +228,14 @@ class UnifiedSpotService:
         """Fetch single asset data from Coinbase Exchange API.
         
         Priority order:
-        1. Coinbase Exchange API (authenticated) - true OHLC data for ATR/ADX
+        1. Coinbase Public Ticker API - real-time price for velocity calculation (FASTEST)
         2. Coinbase Public Candles API - public OHLC data (no auth required)
-        3. Coinbase Public Ticker API - real-time price for velocity calculation
+        3. Coinbase Exchange API (authenticated) - true OHLC data for ATR/ADX
         4. Coinbase Public Spot API - fallback with OHLC proxy
         
-        CRITICAL FIX: Use public candles endpoint as fallback when auth fails to avoid flat candles.
-        Use ticker endpoint for real-time price updates (every 5s) for velocity calculation.
-        Use OHLC candles for ATR/ADX calculation.
+        CRITICAL FIX (2026-07-08): Prioritize ticker endpoint for real-time price updates.
+        Ticker is fastest and most reliable for spot price. OHLC is secondary for ATR/ADX.
+        This fixes XRP/DOGE NoneType issues by ensuring ticker fetch is attempted first.
         """
         pair_map = {
             "BTC": "BTC-USD",
@@ -250,29 +250,7 @@ class UnifiedSpotService:
             logger.error(f"[UNIFIED-SPOT] Unsupported asset: {asset}")
             return False
         
-        # Try authenticated Exchange API first (true OHLC data for ATR/ADX)
-        api_key, api_secret = _get_coinbase_credentials()
-        ohlc_data = None
-        if api_key and api_secret:
-            try:
-                ohlc_data = await self._fetch_ohlc_authenticated(pair, api_key, api_secret)
-                if ohlc_data:
-                    volume = ohlc_data.get('volume', 0)
-                    logger.info(f"[UNIFIED-SPOT] Fetched {asset} OHLC (auth): O={format_price(asset, ohlc_data['open'])} H={format_price(asset, ohlc_data['high'])} L={format_price(asset, ohlc_data['low'])} C={format_price(asset, ohlc_data['close'])} V={volume:.2f}")
-            except Exception as e:
-                logger.warning(f"[UNIFIED-SPOT] Authenticated OHLC fetch failed for {asset}, trying public candles: {e}")
-        
-        # Try public candles endpoint (no auth required) as fallback
-        if not ohlc_data:
-            try:
-                ohlc_data = await self._fetch_ohlc_public(pair)
-                if ohlc_data:
-                    volume = ohlc_data.get('volume', 0)
-                    logger.info(f"[UNIFIED-SPOT] Fetched {asset} OHLC (public): O={format_price(asset, ohlc_data['open'])} H={format_price(asset, ohlc_data['high'])} L={format_price(asset, ohlc_data['low'])} C={format_price(asset, ohlc_data['close'])} V={volume:.2f}")
-            except Exception as e:
-                logger.warning(f"[UNIFIED-SPOT] Public OHLC fetch failed for {asset}, falling back to ticker: {e}")
-        
-        # Always try ticker endpoint for real-time price (more frequent than candles)
+        # CRITICAL FIX: Try ticker FIRST for real-time price (most reliable, no auth needed)
         ticker_data = None
         try:
             ticker_data = await self._fetch_ticker_public(pair)
@@ -280,6 +258,28 @@ class UnifiedSpotService:
                 logger.info(f"[UNIFIED-SPOT] Fetched {asset} ticker: ${format_price(asset, ticker_data['price'])}")
         except Exception as e:
             logger.warning(f"[UNIFIED-SPOT] Ticker fetch failed for {asset}: {e}")
+        
+        # Try public candles endpoint (no auth required) for OHLC data
+        ohlc_data = None
+        try:
+            ohlc_data = await self._fetch_ohlc_public(pair)
+            if ohlc_data:
+                volume = ohlc_data.get('volume', 0)
+                logger.info(f"[UNIFIED-SPOT] Fetched {asset} OHLC (public): O={format_price(asset, ohlc_data['open'])} H={format_price(asset, ohlc_data['high'])} L={format_price(asset, ohlc_data['low'])} C={format_price(asset, ohlc_data['close'])} V={volume:.2f}")
+        except Exception as e:
+            logger.warning(f"[UNIFIED-SPOT] Public OHLC fetch failed for {asset}: {e}")
+        
+        # Try authenticated Exchange API as secondary OHLC source
+        if not ohlc_data:
+            api_key, api_secret = _get_coinbase_credentials()
+            if api_key and api_secret:
+                try:
+                    ohlc_data = await self._fetch_ohlc_authenticated(pair, api_key, api_secret)
+                    if ohlc_data:
+                        volume = ohlc_data.get('volume', 0)
+                        logger.info(f"[UNIFIED-SPOT] Fetched {asset} OHLC (auth): O={format_price(asset, ohlc_data['open'])} H={format_price(asset, ohlc_data['high'])} L={format_price(asset, ohlc_data['low'])} C={format_price(asset, ohlc_data['close'])} V={volume:.2f}")
+                except Exception as e:
+                    logger.warning(f"[UNIFIED-SPOT] Authenticated OHLC fetch failed for {asset}: {e}")
         
         # Combine data: use ticker price for velocity, OHLC for ATR/ADX
         if ticker_data:
