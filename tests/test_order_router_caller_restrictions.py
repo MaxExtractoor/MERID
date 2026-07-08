@@ -88,6 +88,10 @@ _SIGNAL_ONLY_MODULES = {
     "merid.prediction.universal_agent",
     "merid.trading.ct_execution_adapter",
     "merid.trading.kalshi_continuous_trader",
+    # Diagnostic and manual trade scripts (utility only, not production execution)
+    "diagnose_runtime",
+    "scripts.execute_manual_trade",
+    "scripts.force_agent_trade_execution",
 }
 
 
