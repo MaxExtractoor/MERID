@@ -17,20 +17,9 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config.kalshi_15m_crypto_config import (
+from config.kalshi_universe import (
     KALSHI_15M_CRYPTO_ASSETS,
     KALSHI_15M_SERIES_TICKERS,
-    KALSHI_15M_TIMEFRAME,
-    DEFAULT_ENTRY_POLICIES,
-    EXIT_POLICY_TABLE,
-    ASSET_CLASS_MAJOR,
-    ASSET_CLASS_ALT,
-    get_asset_class,
-    get_entry_policy,
-    get_exit_policy_params,
-    get_base_edge_threshold,
-    VolatilityTier,
-    dump_config_summary,
 )
 from merid.event_venues.kalshi.client import KalshiVenueClient
 from merid.event_venues.kalshi.market_catalog import KalshiMarketCatalog, get_market_catalog

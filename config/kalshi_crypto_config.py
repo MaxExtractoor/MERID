@@ -74,7 +74,7 @@ __all__ = [
 
 try:
 
-    from config.kalshi_15m_crypto_config import KALSHI_15M_CRYPTO_ASSETS, KALSHI_15M_TIMEFRAME
+    from config.kalshi_universe import KALSHI_15M_CRYPTO_ASSETS, KALSHI_15M_SERIES_TICKERS
 
     _USE_CANONICAL_15M = True
 

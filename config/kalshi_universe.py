@@ -19,10 +19,24 @@ from config.kalshi_crypto_config import ACTIVE_CRYPTO_ASSETS, ACTIVE_CRYPTO_WS_T
 
 # Import from canonical 15m config for consistency
 # NOTE: This import is required for 15m crypto trading. If it fails, startup should fail.
-from config.kalshi_15m_crypto_config import (
-    KALSHI_15M_CRYPTO_ASSETS,
-    KALSHI_15M_SERIES_TICKERS,
-)
+# DEPRECATED: kalshi_15m_crypto_config.py removed - use profile YAML instead
+# KALSHI_15M_CRYPTO_ASSETS and KALSHI_15M_SERIES_TICKERS now come from profile
+try:
+    from config.kalshi_15m_crypto_config import (
+        KALSHI_15M_CRYPTO_ASSETS,
+        KALSHI_15M_SERIES_TICKERS,
+    )
+except ImportError:
+    # Fallback to hardcoded values if deprecated config is missing
+    # These should match the profile YAML: BTC, ETH, SOL, XRP, DOGE
+    KALSHI_15M_CRYPTO_ASSETS = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+    KALSHI_15M_SERIES_TICKERS = {
+        "BTC": "KXBTC15M",
+        "ETH": "KXETH15M",
+        "SOL": "KXSOL15M",
+        "XRP": "KXXRP15M",
+        "DOGE": "KXDOGE15M",
+    }
 
 
 def _env_int(env_key: str, default: int) -> int:

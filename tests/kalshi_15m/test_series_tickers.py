@@ -1,7 +1,6 @@
 import pytest
 from merid.prediction.agent_grid_config import load_agent_grid_config
-from config.kalshi_universe import KALSHI_CRYPTO_PRODUCTS, kalshi_agent_grid_catalog_series_tickers, kalshi_ct_default_series_tickers
-from config.kalshi_15m_crypto_config import KALSHI_15M_SERIES_TICKERS
+from config.kalshi_universe import KALSHI_CRYPTO_PRODUCTS, kalshi_agent_grid_catalog_series_tickers, kalshi_ct_default_series_tickers, KALSHI_15M_SERIES_TICKERS
 
 
 @pytest.mark.kalshi_15m
@@ -76,8 +75,7 @@ class TestSeriesTickers:
     def test_series_ticker_consistency(self):
         """Verify that all series ticker sources are consistent."""
         # All sources should agree on the 15M series tickers
-        from config.kalshi_universe import kalshi_agent_grid_catalog_series_tickers
-        from config.kalshi_15m_crypto_config import KALSHI_15M_SERIES_TICKERS
+        from config.kalshi_universe import kalshi_agent_grid_catalog_series_tickers, KALSHI_15M_SERIES_TICKERS
         
         catalog_tickers = kalshi_agent_grid_catalog_series_tickers()
         config_tickers = list(KALSHI_15M_SERIES_TICKERS.values())

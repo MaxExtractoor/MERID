@@ -1824,7 +1824,7 @@ class Kalshi15mLoop:
                 
                 from merid.event_venues.kalshi.market_catalog import KalshiMarketCatalog
                 from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
-                from config.kalshi_15m_crypto_config import KALSHI_15M_SERIES_TICKERS
+                from config.kalshi_universe import KALSHI_15M_SERIES_TICKERS
                 
                 # Get market state store early for per-ticker health checks
                 store = get_kalshi_market_state_store()

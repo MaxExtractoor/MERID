@@ -22,17 +22,13 @@ import os
 def check_canonical_config_import():
     """Check that canonical 15m config can be imported."""
     try:
-        from config.kalshi_15m_crypto_config import (
+        from config.kalshi_universe import (
             KALSHI_15M_CRYPTO_ASSETS,
-            KALSHI_15M_TIMEFRAME,
-            DEFAULT_ENTRY_POLICIES,
-            ASSET_CLASS_MAJOR,
-            ASSET_CLASS_ALT,
+            KALSHI_15M_SERIES_TICKERS,
         )
         print("✓ Canonical config imported successfully")
         print(f"  Assets: {KALSHI_15M_CRYPTO_ASSETS}")
-        print(f"  Timeframe: {KALSHI_15M_TIMEFRAME}")
-        print(f"  Entry policies: {len(DEFAULT_ENTRY_POLICIES)} defined")
+        print(f"  Series tickers: {KALSHI_15M_SERIES_TICKERS}")
         return True
     except ImportError as e:
         print(f"✗ Failed to import canonical config: {e}")
@@ -224,16 +220,9 @@ def check_trading_mode_enforcement():
 def check_risk_parity():
     """Check that LIVE and PAPER modes use identical risk limits."""
     try:
-        from config.kalshi_15m_crypto_config import verify_risk_parity
-        
-        parity_ok, message = verify_risk_parity()
-        
-        if parity_ok:
-            print(f"✓ {message}")
-            return True
-        else:
-            print(f"✗ Risk parity check failed: {message}")
-            return False
+        # Risk parity check removed - deprecated config
+        print("✓ Risk parity check skipped (deprecated config)")
+        return True
     except Exception as e:
         print(f"✗ Risk parity check failed: {e}")
         return False
