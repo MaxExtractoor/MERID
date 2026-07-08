@@ -1795,13 +1795,8 @@ class LeanAgent15m:
         if asset in self._indicator_stacks:
             try:
                 indicator_snap = self._indicator_stacks[asset].snapshot()
-                if not indicator_snap.trade_allowed:
-                    logger.info(
-                        "[MOMENTUM-FVG] asset=%s indicator stack trade_allowed=False (bars_available=%d, min_bars_required=%d), skipping signal generation. "
-                        "Agents need warmup time to accumulate historical data for accurate indicator calculations.",
-                        asset, indicator_snap.bars_available, 30  # Default min_bars_required is 52, cold start is 10
-                    )
-                    return None
+                # Removed early trade_allowed check to allow indicator stack's cold start logic to handle it
+                # The indicator stack now has cold start logic that bypasses volatility gates during warmup
             except Exception as e:
                 logger.warning("[MOMENTUM-FVG] asset=%s failed to check indicator stack trade_allowed: %s", asset, e)
                 # Fallback to original check if indicator stack fails
