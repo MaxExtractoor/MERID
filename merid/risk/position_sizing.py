@@ -10,10 +10,15 @@ Features:
 - Fixed fractional position sizing
 - Risk parity position sizing
 - US-compliant risk management
+
+CRITICAL: Legacy position sizer should NOT be used in production 15m crypto stack.
+Production uses unified_sizing.py instead.
 """
 
 import asyncio
+import os
 import time
+import warnings
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Any, Tuple, Union
@@ -24,6 +29,31 @@ from collections import deque
 from utils.logger import get_logger
 
 logger = get_logger("risk.position_sizing")
+
+# CRITICAL: Legacy position sizer should NOT be used in production 15m crypto stack
+# Production uses unified_sizing.py instead
+_LEGACY_SIZER_WARNING_ISSUED = False
+
+def _check_legacy_sizer_usage():
+    """Warn if legacy position sizer is used in production."""
+    global _LEGACY_SIZER_WARNING_ISSUED
+    if _LEGACY_SIZER_WARNING_ISSUED:
+        return
+    
+    profile = os.getenv("MERID_PROFILE", "")
+    if "kalshi_crypto_15m" in profile:
+        _LEGACY_SIZER_WARNING_ISSUED = True
+        warnings.warn(
+            "CRITICAL: Legacy PositionSizer is being used in kalshi_crypto_15m profile. "
+            "This module is deprecated and should NOT be used in production. "
+            "Use merid.prediction.unified_sizing instead. "
+            "Legacy multipliers (sentiment_vol, cycle_drawdown) are NOT integrated with window-based risk limits.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+
+# Check on module import
+_check_legacy_sizer_usage()
 
 @dataclass
 class Position:

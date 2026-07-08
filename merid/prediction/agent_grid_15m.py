@@ -590,6 +590,8 @@ class LeanAgent15m:
         # UnifiedSpotService stores timestamps as int(time.time() * 1000) in milliseconds
         # Agent grid must use the same unit for velocity calculation to work correctly
         # CRITICAL FIX: Store OHLC data for proper ADX/ATR calculation
+        logger.info("[UPDATE-PRICE-HISTORY-ENTRY] asset=%s spot_price=%.8f spot_data=%s", 
+                    asset, spot_price, type(spot_data).__name__ if spot_data else None)
         current_time = int(time.time() * 1000)
         
         # Extract OHLC data if available
@@ -663,6 +665,34 @@ class LeanAgent15m:
                 logger.debug("[INDICATOR-STACK-UPDATE] asset=%s price=%.2f updated in Crypto15mIndicatorStack", asset, spot_price)
             except Exception as e:
                 logger.warning("[INDICATOR-STACK-UPDATE] asset=%s failed to update Crypto15mIndicatorStack: %s", asset, e)
+        
+        # CRITICAL FIX: 2026-07-07 - Update FVG forecaster with OHLC data
+        # FVG forecaster needs candle data to detect Fair Value Gaps
+        # Without this, fvg_confidence will always be 0.00 because no FVGs are detected
+        logger.info("[FVG-UPDATE-DEBUG] asset=%s spot_data=%s has_open=%s has_high=%s has_low=%s", 
+                    asset, type(spot_data).__name__, 
+                    hasattr(spot_data, 'open') if spot_data else False,
+                    hasattr(spot_data, 'high') if spot_data else False,
+                    hasattr(spot_data, 'low') if spot_data else False)
+        try:
+            from merid.prediction.forecasters.fvg import get_fvg_forecaster
+            fvg_forecaster = get_fvg_forecaster()
+            # Convert spot price to cents for Kalshi markets (0-100 range)
+            # FVG forecaster expects price in cents for Kalshi prediction markets
+            price_cents = spot_price * 100
+            fvg_forecaster.update_price(
+                asset=asset,
+                timeframe="15m",
+                open_p=open_price * 100,  # Convert to cents
+                high=high_price * 100,    # Convert to cents
+                low=low_price * 100,      # Convert to cents
+                close=price_cents,        # Already in cents
+                timestamp=current_time / 1000.0  # Convert ms to seconds
+            )
+            logger.info("[FVG-UPDATE] asset=%s OHLC data updated in FVG forecaster: O=%.1f H=%.1f L=%.1f C=%.1f", 
+                        asset, open_price * 100, high_price * 100, low_price * 100, price_cents)
+        except Exception as e:
+            logger.warning("[FVG-UPDATE] asset=%s failed to update FVG forecaster: %s", asset, e)
         
         # CRITICAL FIX: 2026-07-01 - Update multi-timeframe price history for alignment
         self._price_1m_history[asset].append((current_time, spot_price))
@@ -2063,6 +2093,7 @@ class LeanAgent15m:
             "fvg_confidence": fvg_confidence,
             "long_score": long_score,
             "short_score": short_score,
+            "rationale": f"momentum_fvg: velocity={velocity:.6f} (threshold={velocity_threshold:.6f}) macd_hist={macd_histogram:.4f} rsi={rsi:.1f} ({rsi_zone}) obi={obi:.2f} fvg_dir={fvg_direction} fvg_conf={fvg_confidence:.2f} edge={edge_pct:.2f}%",
         }
 
     def _check_trend_alignment(self, asset: str, spot_price: float) -> bool:
@@ -2905,6 +2936,12 @@ class LeanAgent15m:
                 "[DEPTH-THRESHOLD] asset=%s min_depth_yes=%d min_depth_no=%d (from profile)",
                 self.config.name, min_depth_yes_threshold, min_depth_no_threshold
             )
+        except RuntimeError as e:
+            # Bankroll not ready - use default thresholds
+            logger.warning(
+                "[DEPTH-THRESHOLD] Failed to get depth thresholds from envelope: %s (using defaults)",
+                e
+            )
         except Exception as e:
             # Fallback to defaults if envelope not available
             logger.warning("[DEPTH-THRESHOLD] Failed to load from envelope: %s, using defaults", e)
@@ -3176,8 +3213,16 @@ class LeanAgent15m:
         spot_data = None
         if hasattr(self.spot_provider, 'get'):
             result = self.spot_provider.get(asset)
-            if hasattr(result, 'price'):
+            logger.info("[GENERATE-SIGNAL-SPOT-GET] asset=%s result=%s type=%s",
+                       asset, result, type(result).__name__ if result else None)
+            if result is not None and hasattr(result, 'price'):
                 spot_data = result
+                logger.info("[GENERATE-SIGNAL-SPOT-SUCCESS] asset=%s spot_price=%.8f has_ohlc=%s",
+                           asset, result.price,
+                           hasattr(result, 'open') and hasattr(result, 'high') and hasattr(result, 'low'))
+            else:
+                logger.warning("[GENERATE-SIGNAL-SPOT-FAIL] asset=%s result=%s has_price=%s",
+                             asset, result, hasattr(result, 'price') if result else False)
         
         # Update price history (including ADX) in _generate_signal path
         # The system uses _generate_signal instead of collect_order_candidate for signal generation
@@ -4590,6 +4635,11 @@ class LeanAgent15m:
             # 2026 Research-Based Risk Management: Time-of-day risk scaling
             # Get multiplier (will be applied to position size later)
             time_of_day_multiplier = self._apply_time_of_day_risk_scaling(asset)
+            if time_of_day_multiplier != 1.0:
+                logger.info(
+                    "[TIME-OF-DAY-SCALING] agent=%s asset=%s multiplier=%.2f (session-based risk adjustment)",
+                    self.config.name, asset, time_of_day_multiplier
+                )
             if time_of_day_multiplier <= 0:
                 logger.info(
                     "[TIME-OF-DAY-SCALING] agent=%s asset=%s multiplier=%.2f -> SKIP (risk scaling zero)",
@@ -4630,21 +4680,36 @@ class LeanAgent15m:
             # Try different methods depending on spot provider interface
             logger.info("[COLLECT-SPOT-BEFORE] agent=%s asset=%s spot_provider=%s", 
                        self.config.name, asset, type(self.spot_provider).__name__)
-            if hasattr(self.spot_provider, 'get_spot_price'):
-                spot_price = await self.spot_provider.get_spot_price(asset)
-            elif hasattr(self.spot_provider, 'get'):
+            
+            # CRITICAL FIX: UnifiedSpotService.get() is synchronous and returns SpotPrice
+            # Use the synchronous get() method which returns SpotPrice with OHLC data
+            if hasattr(self.spot_provider, 'get'):
                 result = self.spot_provider.get(asset)
-                if hasattr(result, 'price'):
-                    spot_price = result.price
-                    spot_data = result  # Store full SpotPrice object for OHLC data
+                logger.info("[COLLECT-SPOT-GET-RESULT] agent=%s asset=%s result=%s type=%s",
+                           self.config.name, asset, result, type(result).__name__ if result else None)
+                if result is not None:
+                    if hasattr(result, 'price'):
+                        spot_price = result.price
+                        spot_data = result  # Store full SpotPrice object for OHLC data
+                        logger.info("[COLLECT-SPOT-SUCCESS] agent=%s asset=%s spot_price=%.8f has_ohlc=%s",
+                                   self.config.name, asset, spot_price,
+                                   hasattr(result, 'open') and hasattr(result, 'high') and hasattr(result, 'low'))
+                    else:
+                        logger.warning("[COLLECT-SPOT-NO-PRICE] agent=%s asset=%s result has no price attribute",
+                                     self.config.name, asset)
+                else:
+                    logger.warning("[COLLECT-SPOT-NONE] agent=%s asset=%s get() returned None",
+                                 self.config.name, asset)
+            elif hasattr(self.spot_provider, 'get_spot_price'):
+                spot_price = await self.spot_provider.get_spot_price(asset)
             elif hasattr(self.spot_provider, 'get_spot'):
                 result = await self.spot_provider.get_spot(asset)
                 if hasattr(result, 'price_usd'):
                     spot_price = result.price_usd
                     spot_data = result  # Store full SpotSnapshot object for OHLC data
             
-            logger.info("[COLLECT-SPOT-AFTER] agent=%s asset=%s spot_price=%s", 
-                       self.config.name, asset, spot_price)
+            logger.info("[COLLECT-SPOT-AFTER] agent=%s asset=%s spot_price=%s spot_data=%s", 
+                       self.config.name, asset, spot_price, type(spot_data).__name__ if spot_data else None)
             
             if not spot_price:
                 logger.warning("[SPOT-ERROR] asset=%s no spot price available", self.config.name)

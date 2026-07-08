@@ -423,7 +423,9 @@ class KalshiCrypto15mRiskEnvelope:
         self,
         agent_id: str,
         order_notional_usd: float,
-        current_ts: float
+        current_ts: float,
+        custom_per_agent_limit_pct: Optional[float] = None,
+        custom_total_venue_limit_pct: Optional[float] = None,
     ) -> tuple[bool, str]:
         """Check if order would exceed window-based risk limits (HARD STOP).
         
@@ -431,6 +433,8 @@ class KalshiCrypto15mRiskEnvelope:
             agent_id: Agent identifier (e.g., "BTC_15M", "ETH_15M")
             order_notional_usd: Notional value of order in USD
             current_ts: Current timestamp
+            custom_per_agent_limit_pct: Override per-agent limit (e.g., for exit orders)
+            custom_total_venue_limit_pct: Override total venue limit (e.g., for exit orders)
             
         Returns:
             Tuple of (allowed, reason)
@@ -445,8 +449,12 @@ class KalshiCrypto15mRiskEnvelope:
             current_agent_exposure = _WINDOW_TRACKING_STATE["agent_exposure_usd"].get(agent_id, 0.0)
             current_total_exposure = _WINDOW_TRACKING_STATE["total_exposure_usd"]
         
+        # Use custom limits if provided, otherwise use profile defaults
+        per_agent_limit_pct = custom_per_agent_limit_pct or self.guardrails_per_window_risk_pct
+        total_venue_limit_pct = custom_total_venue_limit_pct or self.guardrails_total_venue_risk_pct
+        
         # Calculate per-agent window limit
-        per_agent_limit_usd = self.live_bankroll_usd * self.guardrails_per_window_risk_pct
+        per_agent_limit_usd = self.live_bankroll_usd * per_agent_limit_pct
         new_agent_exposure = current_agent_exposure + order_notional_usd
         
         # Check per-agent window limit (HARD STOP)
@@ -455,13 +463,13 @@ class KalshiCrypto15mRiskEnvelope:
                 f"per_agent_window_limit: agent={agent_id} "
                 f"current=${current_agent_exposure:.2f} + order=${order_notional_usd:.2f} "
                 f"= ${new_agent_exposure:.2f} > limit=${per_agent_limit_usd:.2f} "
-                f"({self.guardrails_per_window_risk_pct*100:.1f}%) - HARD STOP"
+                f"({per_agent_limit_pct*100:.1f}%) - HARD STOP"
             )
             logger.warning(f"[WINDOW-TRACKING] {reason}")
             return False, reason
         
         # Calculate total venue window limit
-        total_venue_limit_usd = self.live_bankroll_usd * self.guardrails_total_venue_risk_pct
+        total_venue_limit_usd = self.live_bankroll_usd * total_venue_limit_pct
         new_total_exposure = current_total_exposure + order_notional_usd
         
         # Check total venue window limit (HARD STOP)
@@ -470,7 +478,7 @@ class KalshiCrypto15mRiskEnvelope:
                 f"total_venue_window_limit: "
                 f"current=${current_total_exposure:.2f} + order=${order_notional_usd:.2f} "
                 f"= ${new_total_exposure:.2f} > limit=${total_venue_limit_usd:.2f} "
-                f"({self.guardrails_total_venue_risk_pct*100:.1f}%) - HARD STOP"
+                f"({total_venue_limit_pct*100:.1f}%) - HARD STOP"
             )
             logger.warning(f"[WINDOW-TRACKING] {reason}")
             return False, reason

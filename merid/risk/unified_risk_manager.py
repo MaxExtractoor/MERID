@@ -369,8 +369,10 @@ class UnifiedRiskManager:
                 logger.warning(f"[UNIFIED_RISK] Order rejected: {reason}")
                 return False, reason
             
-            # Correlated stack check (if underlying provided)
-            if underlying:
+            # Correlated stack check (if underlying provided and correlation tracking enabled)
+            # CRITICAL FIX (2026-07-08): Only check correlated stack if per_asset_enabled is True
+            # This prevents rejecting orders based on a check that has no tracking data
+            if underlying and self._limits.per_asset_enabled:
                 correlated_cap = self._get_correlated_cap_usd()
                 current_correlated_exposure = self._correlated_exposure.get(underlying.upper(), 0.0)
                 if current_correlated_exposure + notional_usd > correlated_cap:
@@ -459,6 +461,11 @@ class UnifiedRiskManager:
             if underlying:
                 self._correlated_exposure[underlying.upper()] = (
                     self._correlated_exposure.get(underlying.upper(), 0.0) + notional_usd
+                )
+                # Log correlated exposure for observability
+                logger.info(
+                    f"[UNIFIED_RISK] Correlated exposure updated: {underlying.upper()}=${self._correlated_exposure[underlying.upper()]:.2f} "
+                    f"(cap=${self._get_correlated_cap_usd():.2f}, tracking_enabled={self._limits.per_asset_enabled})"
                 )
             
             # Update total exposure
