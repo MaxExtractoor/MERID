@@ -662,11 +662,20 @@ def resolve_window_policy(
     
     # Depth thresholds (from profile YAML - single source of truth for 15m stack)
     # Get depth thresholds from risk envelope - no regime multipliers, no fallbacks
-    from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
-    risk_envelope = get_kalshi_crypto_15m_risk_envelope()
-    depth_thresholds = risk_envelope.get_depth_thresholds(asset)
-    min_depth_yes = depth_thresholds['min_depth_yes']  # Direct access - no defaults
-    min_depth_no = depth_thresholds['min_depth_no']  # Direct access - no defaults
+    try:
+        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+        risk_envelope = get_kalshi_crypto_15m_risk_envelope()
+        depth_thresholds = risk_envelope.get_depth_thresholds(asset)
+        min_depth_yes = depth_thresholds['min_depth_yes']  # Direct access - no defaults
+        min_depth_no = depth_thresholds['min_depth_no']  # Direct access - no defaults
+    except RuntimeError as e:
+        # Bankroll not ready - use conservative defaults
+        logger.warning(
+            "[ORDER-ROUTER] Failed to get depth thresholds from envelope: %s (using defaults)",
+            e
+        )
+        min_depth_yes = 1
+        min_depth_no = 1
     
     # Strike selection (from kalshi_agent_grid.yaml)
     max_spot_to_strike_pct = 0.15
@@ -1849,10 +1858,36 @@ def _log_price_band_config() -> None:
     
     NOTE: edge_pct is expressed as a fraction (0.02 = 2%), not a percentage.
     All thresholds must be in fraction units to match.
+    
+    CRITICAL FIX: Read from profile YAML instead of environment variables (single source of truth)
     """
-    # Default lowered from 0.10 (10%) to 0.02 (2%) for 15m crypto compatibility
-    _price_band_min_edge = float(os.getenv("MERID_KALSHI_PRICE_BAND_MIN_EDGE", "0.02"))
-    _price_band_min_confidence = float(os.getenv("MERID_KALSHI_PRICE_BAND_MIN_CONFIDENCE", "0.50"))
+    # Read from profile YAML (single source of truth)
+    try:
+        from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
+        profile_adapter = Crypto15mProfileAdapter()
+        profile = profile_adapter.profile  # Use .profile property, not .get_profile()
+        
+        # Use guardrails_min_post_fee_edge from profile (1.5% minimum post-fee edge)
+        # Fallback to guardrails_per_trade_risk_pct (2% base edge for maker orders) if min_post_fee_edge not available
+        _price_band_min_edge = getattr(profile, 'guardrails_min_post_fee_edge', None)
+        if _price_band_min_edge is None:
+            _price_band_min_edge = getattr(profile, 'guardrails_per_trade_risk_pct', 0.02)
+        
+        # Use confidence_min_confidence_threshold from profile (65% - PRIMARY confidence threshold)
+        _price_band_min_confidence = getattr(profile, 'confidence_min_confidence_threshold', 0.65)
+        
+        logger.info(
+            "[order-router] Price band config loaded from profile: min_edge=%.4f (%.1f%%), min_confidence=%.2f (48-52c range)",
+            _price_band_min_edge, _price_band_min_edge * 100, _price_band_min_confidence
+        )
+    except Exception as e:
+        # Fallback to defaults if profile not available
+        logger.warning(
+            "[order-router] Failed to load price band config from profile: %s (using fallback defaults)",
+            e
+        )
+        _price_band_min_edge = 0.02  # 2% fallback
+        _price_band_min_confidence = 0.65  # 65% fallback (matches profile primary threshold)
     
     # Validate and clamp
     if not (0.0 <= _price_band_min_edge <= 1.0):
@@ -1904,14 +1939,28 @@ def _validate_price_band(intent: OrderIntent) -> Optional[str]:
     # Price band validation applies uniformly to all strategies
     
     # Get strategy policy (Phase 2: use strategy_type)
-    # TEST FIX: If intent has no source or source is "manual", use default thresholds for test compatibility
-    if not intent.source or intent.source == "manual":
-        _price_band_min_edge = 0.02
-        _price_band_min_confidence = 0.60
-    else:
-        policy = _get_strategy_policy(intent)
-        _price_band_min_edge = policy.get("min_edge", 0.02)
-        _price_band_min_confidence = policy.get("min_confidence", 0.55)
+    # CRITICAL FIX: Read from profile YAML instead of hardcoded values (single source of truth)
+    try:
+        from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
+        profile_adapter = Crypto15mProfileAdapter()
+        profile = profile_adapter.profile  # Use .profile property, not .get_profile()
+        
+        # Use guardrails_min_post_fee_edge from profile (1.5% minimum post-fee edge)
+        # Fallback to guardrails_per_trade_risk_pct (2% base edge for maker orders) if min_post_fee_edge not available
+        _price_band_min_edge = getattr(profile, 'guardrails_min_post_fee_edge', None)
+        if _price_band_min_edge is None:
+            _price_band_min_edge = getattr(profile, 'guardrails_per_trade_risk_pct', 0.02)
+        
+        # Use confidence_min_confidence_threshold from profile (65% - PRIMARY confidence threshold)
+        _price_band_min_confidence = getattr(profile, 'confidence_min_confidence_threshold', 0.65)
+    except Exception as e:
+        # Fallback to defaults if profile not available
+        logger.warning(
+            "[order-router] Failed to load price band config from profile: %s (using fallback defaults)",
+            e
+        )
+        _price_band_min_edge = 0.02  # 2% fallback
+        _price_band_min_confidence = 0.65  # 65% fallback (matches profile primary threshold)
     
     if 48 <= intent.price_cents <= 52:
         # Require exceptional edge and confidence for 50¢ band

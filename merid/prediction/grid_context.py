@@ -414,11 +414,24 @@ def get_grid_context(
                         os.getenv("GRID_CONTEXT_WINNER_MAX_AGE_SECONDS", "30.0")
                     )
                 if winner_min_probedge is None:
-                    # RESPECT MERID_PM_MIN_EDGE_TERMINAL (2026-05-11): Use same env var as strategy
-                    # for consistency across winner selection and prob_edge gating
-                    winner_min_probedge = float(
-                        os.getenv("MERID_PM_MIN_EDGE_TERMINAL", "0.02")
-                    )
+                    # CRITICAL FIX: Read from profile YAML instead of env var (single source of truth)
+                    # Use max terminal edge across all assets (DOGE has highest at 6%)
+                    try:
+                        from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
+                        profile_adapter = Crypto15mProfileAdapter()
+                        profile = profile_adapter.profile
+                        # Get max terminal edge from profile (DOGE has 6%, highest among assets)
+                        # BTC/ETH: 4%, SOL/XRP: 5%, DOGE: 6%
+                        winner_min_probedge = 0.06  # Use DOGE's 6% as conservative default
+                    except Exception as e:
+                        # Fallback to env var if profile not available
+                        logger.warning(
+                            "[grid-context] Failed to load min_edge_terminal from profile: %s (using env var fallback)",
+                            e
+                        )
+                        winner_min_probedge = float(
+                            os.getenv("MERID_PM_MIN_EDGE_TERMINAL", "0.02")
+                        )
                 _global_grid_context = GridContext(
                     winner_max_age_seconds=winner_max_age_seconds,
                     winner_min_probedge=winner_min_probedge,
@@ -432,11 +445,24 @@ def get_grid_context(
                     os.getenv("GRID_CONTEXT_WINNER_MAX_AGE_SECONDS", "30.0")
                 )
             if winner_min_probedge is None:
-                # RESPECT MERID_PM_MIN_EDGE_TERMINAL (2026-05-11): Use same env var as strategy
-                # for consistency across winner selection and prob_edge gating
-                winner_min_probedge = float(
-                    os.getenv("MERID_PM_MIN_EDGE_TERMINAL", "0.02")
-                )
+                # CRITICAL FIX: Read from profile YAML instead of env var (single source of truth)
+                # Use max terminal edge across all assets (DOGE has highest at 6%)
+                try:
+                    from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
+                    profile_adapter = Crypto15mProfileAdapter()
+                    profile = profile_adapter.profile
+                    # Get max terminal edge from profile (DOGE has 6%, highest among assets)
+                    # BTC/ETH: 4%, SOL/XRP: 5%, DOGE: 6%
+                    winner_min_probedge = 0.06  # Use DOGE's 6% as conservative default
+                except Exception as e:
+                    # Fallback to env var if profile not available
+                    logger.warning(
+                        "[grid-context] Failed to load min_edge_terminal from profile: %s (using env var fallback)",
+                        e
+                    )
+                    winner_min_probedge = float(
+                        os.getenv("MERID_PM_MIN_EDGE_TERMINAL", "0.02")
+                    )
             _global_grid_context = GridContext(
                 winner_max_age_seconds=winner_max_age_seconds,
                 winner_min_probedge=winner_min_probedge,

@@ -1290,8 +1290,21 @@ class KalshiStrategy:
                 _price_cents = 50  # Assume 50 cents for cross-venue arb (midpoint)
                 _fee_cents = calculate_kalshi_fee_cents(1, _price_cents)
                 fee_drag = Decimal(_fee_cents) / Decimal("100")
-                # Dynamic slippage from env var
-                _slippage_bps = float(os.getenv("MERID_SLIPPAGE_BPS", "1.0"))
+                # Dynamic slippage from profile (single source of truth)
+                try:
+                    from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
+                    profile_adapter = Crypto15mProfileAdapter()
+                    profile = profile_adapter.profile
+                    # Convert max_slippage_cents to bps (1 cent = 100 bps at 50c price)
+                    _slippage_cents = getattr(profile, 'guardrails_max_slippage_cents', 5)
+                    _slippage_bps = _slippage_cents * 100  # Convert cents to bps
+                except Exception as e:
+                    # Fallback to env var if profile not available
+                    logger.warning(
+                        "[strategy] Failed to load slippage from profile: %s (using env var fallback)",
+                        e
+                    )
+                    _slippage_bps = float(os.getenv("MERID_SLIPPAGE_BPS", "1.0"))
                 slippage_est = Decimal(str(_slippage_bps / 10000.0))
                 net_edge = edge_decimal - fee_drag - slippage_est
                 return EdgeEstimate(
@@ -1542,15 +1555,28 @@ class KalshiStrategy:
         _pre_fee_cents = calculate_kalshi_fee_cents(1, _pre_price_cents)
         _pre_fee_per_contract = _pre_fee_cents / 100.0
         _pre_ev_gross = float(p) - _pre_kalshi_price if p is not None else 0.0
-        # Dynamic slippage: configurable via env var (default 1 bps)
-        _pre_slippage_bps = float(os.getenv("MERID_SLIPPAGE_BPS", "1.0"))
+        # Dynamic slippage: read from profile (single source of truth)
+        try:
+            from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
+            profile_adapter = Crypto15mProfileAdapter()
+            profile = profile_adapter.profile
+            # Convert max_slippage_cents to bps (1 cent = 100 bps at 50c price)
+            _pre_slippage_cents = getattr(profile, 'guardrails_max_slippage_cents', 5)
+            _pre_slippage_bps = _pre_slippage_cents * 100  # Convert cents to bps
+        except Exception as e:
+            # Fallback to env var if profile not available
+            logger.warning(
+                "[EV-GATE] Failed to load slippage from profile: %s (using env var fallback)",
+                e
+            )
+            _pre_slippage_bps = float(os.getenv("MERID_SLIPPAGE_BPS", "1.0"))
         # CRITICAL FIX: Validate slippage bps is reasonable
         if _pre_slippage_bps < 0 or _pre_slippage_bps > 1000:
             logger.warning(
-                "[EV-GATE] Invalid MERID_SLIPPAGE_BPS=%s - using default 1.0",
+                "[EV-GATE] Invalid slippage_bps=%s - using default 500 (5c)",
                 _pre_slippage_bps
             )
-            _pre_slippage_bps = 1.0
+            _pre_slippage_bps = 500  # 5 cents = 500 bps
         _pre_slippage = _pre_slippage_bps / 10000.0  # Convert bps to decimal
         _pre_ev_net = _pre_ev_gross - _pre_fee_per_contract - _pre_slippage
         
@@ -1615,10 +1641,24 @@ class KalshiStrategy:
             """
             from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
             
-            # Dynamic slippage: use env var if not provided
+            # Dynamic slippage: read from profile (single source of truth)
             if slippage is None:
-                _slippage_bps = float(os.getenv("MERID_SLIPPAGE_BPS", "1.0"))
-                slippage = _slippage_bps / 10000.0  # Convert bps to decimal
+                try:
+                    from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
+                    profile_adapter = Crypto15mProfileAdapter()
+                    profile = profile_adapter.profile
+                    # Convert max_slippage_cents to bps (1 cent = 100 bps at 50c price)
+                    _slippage_cents = getattr(profile, 'guardrails_max_slippage_cents', 5)
+                    _slippage_bps = _slippage_cents * 100  # Convert cents to bps
+                    slippage = _slippage_bps / 10000.0  # Convert bps to decimal
+                except Exception as e:
+                    # Fallback to env var if profile not available
+                    logger.warning(
+                        "[strategy] Failed to load slippage from profile: %s (using env var fallback)",
+                        e
+                    )
+                    _slippage_bps = float(os.getenv("MERID_SLIPPAGE_BPS", "1.0"))
+                    slippage = _slippage_bps / 10000.0  # Convert bps to decimal
             
             price_cents = round(kalshi_price * 100)  # Use round() to preserve sub-cent precision (fixes int() truncation bug)
             fee_cents = calculate_kalshi_fee_cents(contracts, price_cents)

@@ -53,17 +53,34 @@ logger = get_logger("merid.event_venues.kalshi.universe")
 class UniverseConfig:
     """Liquidity and scope gates for the universe pools.
 
-    Defaults are set to non-zero values so illiquid and no-book markets are
-    rejected at the universe layer rather than silently propagating to the
-    strategy (BUG-07 fix).  Override via env vars:
-      MERID_UNIVERSE_MIN_VOLUME       (default from risk_parameters)
-      MERID_UNIVERSE_MIN_OI           (default from risk_parameters)
-      MERID_UNIVERSE_MAX_SPREAD_CENTS (default from risk_parameters)
+    CRITICAL FIX: Read from profile YAML instead of environment variables (single source of truth)
+    Profile values: min_volume=5, min_open_interest=1, max_spread_cents=75 (from kalshi_crypto_15m_v2.yaml)
+    Fallback to risk_parameters defaults if profile not available.
     """
-    min_volume: int = int(os.getenv("MERID_UNIVERSE_MIN_VOLUME", str(UNIVERSE_MIN_VOLUME_DEFAULT)))
-    min_open_interest: int = int(os.getenv("MERID_UNIVERSE_MIN_OI", str(UNIVERSE_MIN_OPEN_INTEREST_DEFAULT)))
-    max_spread_cents: int = int(os.getenv("MERID_UNIVERSE_MAX_SPREAD_CENTS", str(UNIVERSE_MAX_SPREAD_CENTS_DEFAULT)))
-    max_per_agent: int = int(os.getenv("MERID_UNIVERSE_MAX_PER_AGENT", str(UNIVERSE_MAX_PER_AGENT_DEFAULT)))
+    # Read from profile YAML (single source of truth)
+    try:
+        from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
+        profile_adapter = Crypto15mProfileAdapter()
+        profile = profile_adapter.profile
+        
+        min_volume = getattr(profile, 'universe_min_volume', UNIVERSE_MIN_VOLUME_DEFAULT)
+        min_open_interest = getattr(profile, 'universe_min_open_interest', UNIVERSE_MIN_OPEN_INTEREST_DEFAULT)
+        max_spread_cents = getattr(profile, 'universe_max_spread_cents', UNIVERSE_MAX_SPREAD_CENTS_DEFAULT)
+    except Exception as e:
+        # Fallback to risk_parameters defaults if profile not available
+        logger.warning(
+            "[universe] Failed to load universe config from profile: %s (using risk_parameters defaults)",
+            e
+        )
+        min_volume = int(os.getenv("MERID_UNIVERSE_MIN_VOLUME", str(UNIVERSE_MIN_VOLUME_DEFAULT)))
+        min_open_interest = int(os.getenv("MERID_UNIVERSE_MIN_OI", str(UNIVERSE_MIN_OPEN_INTEREST_DEFAULT)))
+        max_spread_cents = int(os.getenv("MERID_UNIVERSE_MAX_SPREAD_CENTS", str(UNIVERSE_MAX_SPREAD_CENTS_DEFAULT)))
+    
+    # Allow env var override for testing (but profile is primary source)
+    min_volume = int(os.getenv("MERID_UNIVERSE_MIN_VOLUME", str(min_volume)))
+    min_open_interest = int(os.getenv("MERID_UNIVERSE_MIN_OI", str(min_open_interest)))
+    max_spread_cents = int(os.getenv("MERID_UNIVERSE_MAX_SPREAD_CENTS", str(max_spread_cents)))
+    max_per_agent = int(os.getenv("MERID_UNIVERSE_MAX_PER_AGENT", str(UNIVERSE_MAX_PER_AGENT_DEFAULT)))
     allowed_categories: List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
