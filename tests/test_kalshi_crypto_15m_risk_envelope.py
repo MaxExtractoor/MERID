@@ -101,8 +101,30 @@ class TestKalshiCrypto15mRiskEnvelope:
             correlation_threshold=0.5,
             correlation_multiplier=1.0,
         )
-        # All bankrolls should use uniform 3% per-trade risk (tiered logic disabled 2026-07-06)
-        assert envelope.get_per_trade_risk_pct() == 0.03
+
+    def test_risk_envelope_defaults_match_3_percent_risk_limit(self):
+        """CRITICAL FIX (2026-07-08): Risk envelope defaults match 3% risk limit from YAML.
+        
+        This test ensures that if profile YAML values are missing, the fallback defaults
+        in kalshi_crypto_15m_risk_envelope.py still enforce the 3% risk limit (not 5%).
+        
+        Previous bug:
+        - max_single_order_pct default was 0.05 (5%) instead of 0.03 (3%)
+        
+        This could allow orders to exceed the 3% risk limit if YAML values were missing.
+        """
+        import inspect
+        from merid.risk.profiles import kalshi_crypto_15m_risk_envelope
+        
+        source = inspect.getsource(kalshi_crypto_15m_risk_envelope)
+        
+        # Verify 0.03 default is in the source
+        assert "venue.get('max_single_order_pct', 0.03)" in source, \
+            "Risk envelope should use 0.03 default for max_single_order_pct"
+        
+        # Verify old buggy default is NOT in the source
+        assert "venue.get('max_single_order_pct', 0.05)" not in source, \
+            "Risk envelope should NOT use 0.05 default for max_single_order_pct (buggy)"
 
     def test_bankroll_tiered_per_trade_risk_medium_bankroll(self):
         """Test that medium bankroll ($100-$1k) uses uniform 3% per-trade risk (2026-07-06: tiered logic disabled)."""

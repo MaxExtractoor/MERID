@@ -734,9 +734,9 @@ def compute_kalshi_crypto_15m_risk_envelope(
     
     # ── Compute Venue-Level Caps ────────────────────────────────────────────
     # Handle nested dict format: {value: 0.05, dynamic: bankroll, description: "..."}
-    max_single_order_pct_raw = venue.get('max_single_order_pct', 0.05)
+    max_single_order_pct_raw = venue.get('max_single_order_pct', 0.03)  # FIXED: Default 0.03 to match YAML (3% per order)
     if isinstance(max_single_order_pct_raw, dict):
-        max_single_order_pct = max_single_order_pct_raw.get('value', 0.05)
+        max_single_order_pct = max_single_order_pct_raw.get('value', 0.03)  # FIXED: Default 0.03 to match YAML (3% per order)
     else:
         max_single_order_pct = max_single_order_pct_raw
     max_single_order_notional_usd = effective_capital * max_single_order_pct
