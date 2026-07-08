@@ -1246,14 +1246,20 @@ class Crypto15mIndicatorStack:
 
         # ── 11. Composite gate ────────────────────────────────────────
         # NOTE: liquidity_ok removed - microstructure handled by unified edge
-        # Cold start: use lower threshold during initialization
+        # Cold start: use lower threshold during initialization and bypass volatility gates
+        # During cold start, volatility gates cannot be calculated properly due to insufficient data
         min_bars_threshold = self.cfg.min_bars_cold_start if snap.bars_available < self.cfg.min_bars_required else self.cfg.min_bars_required
-        snap.trade_allowed = (
-            snap.vol_gate_ok
-            and snap.atr_move_ok
-            and snap.chop_gate_ok
-            and snap.bars_available >= min_bars_threshold
-        )
+        if snap.bars_available < self.cfg.min_bars_required:
+            # Cold start: only check bar count, bypass volatility gates
+            snap.trade_allowed = snap.bars_available >= min_bars_threshold
+        else:
+            # Normal operation: check all gates
+            snap.trade_allowed = (
+                snap.vol_gate_ok
+                and snap.atr_move_ok
+                and snap.chop_gate_ok
+                and snap.bars_available >= min_bars_threshold
+            )
 
         # ── 12. Edge metrics (if set) ─────────────────────────────────
         snap.kalshi_implied_prob = self._kalshi_implied_prob
