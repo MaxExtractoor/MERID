@@ -231,10 +231,7 @@ class PredictionMarketRisk:
         self._orders_this_hour = 0
         self._last_minute_reset = datetime.now(timezone.utc)
         self._last_hour_reset = datetime.now(timezone.utc)
-        # TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-        # TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-        # self._rate_lock = threading.Lock()  # guards check-and-increment atomicity
-        self._rate_lock = None  # Disabled to prevent startup hang
+        self._rate_lock = threading.Lock()  # guards check-and-increment atomicity
 
         # Circuit breaker for risk check failures
         self._consecutive_failures = 0
@@ -835,25 +832,7 @@ class PredictionMarketRisk:
 
         # 9. Rate limit — lock to make check-and-increment atomic across
         # concurrent agent tasks that share this singleton.
-        if self._rate_lock is not None:
-            with self._rate_lock:
-                self._reset_rate_counters(now)
-                if self._orders_this_minute >= self.config.max_orders_per_minute:
-                    return PreTradeCheck(
-                        allowed=False,
-                        action=RiskAction.REJECT,
-                        reason=f"Rate limit: {self._orders_this_minute} orders this minute",
-                        market_id=market_id,
-                    )
-                if self._orders_this_hour >= self.config.max_orders_per_hour:
-                    return PreTradeCheck(
-                        allowed=False,
-                        action=RiskAction.REJECT,
-                        reason=f"Rate limit: {self._orders_this_hour} orders this hour",
-                        market_id=market_id,
-                    )
-        else:
-            # Lock disabled - direct check (startup workaround)
+        with self._rate_lock:
             self._reset_rate_counters(now)
             if self._orders_this_minute >= self.config.max_orders_per_minute:
                 return PreTradeCheck(
@@ -870,7 +849,7 @@ class PredictionMarketRisk:
                     market_id=market_id,
                 )
             # Pre-increment inside the lock so no other thread can see the
-            # same slot as available.  The increments at line 536 are removed.
+            # same slot as available.
             self._orders_this_minute += 1
             self._orders_this_hour += 1
 
@@ -1169,10 +1148,7 @@ class CycleCapTracker:
     
     def __init__(self, config: Optional[CycleCapConfig] = None) -> None:
         self._config = config or CycleCapConfig()
-        # TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-        # TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-        # self._lock = threading.Lock()
-        self._lock = None  # Disabled to prevent startup hang
+        self._lock = threading.Lock()
         self._deployed_this_cycle: float = 0.0
         self._cycle_start: datetime = datetime.now(timezone.utc)
         self._deployment_log: List[Dict] = []
@@ -1208,14 +1184,12 @@ class CycleCapTracker:
     @property
     def deployed(self) -> float:
         """Currently deployed capital this cycle."""
-        with self._lock:
-            return self._deployed_this_cycle
+        return self._deployed_this_cycle
     
     @property
     def available(self) -> float:
         """Remaining available capacity this cycle."""
-        with self._lock:
-            return max(0.0, self.max_cycle_cap - self._deployed_this_cycle)
+        return max(0.0, self.max_cycle_cap - self._deployed_this_cycle)
     
     def check_capacity(self, pending_order_notional: float) -> tuple[bool, float, str]:
         """Check if pending order fits within cycle cap.

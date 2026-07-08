@@ -97,25 +97,13 @@ class DynamicEdgeCalibrator:
     def __init__(self, config: Optional[DynamicEdgeConfig] = None):
         self.config = config or DynamicEdgeConfig()
         self._volatility_cache: Dict[str, AssetVolatilityState] = {}
-        # TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-        # TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-        # self._cache_lock = threading.Lock()
-        self._cache_lock = None  # Disabled to prevent startup hang
+        self._cache_lock = threading.Lock()
         self._last_update = 0.0
         self._cache_ttl_seconds = 300  # 5 minute TTL
         
     def _get_cached_volatility(self, asset: str) -> Optional[AssetVolatilityState]:
         """Get cached volatility data if fresh."""
-        if self._cache_lock is not None:
-            with self._cache_lock:
-                state = self._volatility_cache.get(asset)
-                if state is None:
-                    return None
-                if time.time() - state.last_update > self._cache_ttl_seconds:
-                    return None
-                return state
-        else:
-            # Lock disabled - direct access (startup workaround)
+        with self._cache_lock:
             state = self._volatility_cache.get(asset)
             if state is None:
                 return None

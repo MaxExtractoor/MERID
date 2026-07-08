@@ -239,22 +239,12 @@ class SentimentVolService:
     """
     
     _instance: Optional[SentimentVolService] = None
-    # TEMPORARILY DISABLED: threading.Lock causing deadlock during startup
-    # TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-    # _lock = threading.Lock()
-    _lock = None  # Disabled to prevent startup hang
+    _lock = threading.Lock()
     
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
-            if cls._lock is not None:
-                with cls._lock:
-                    if cls._instance is None:
-                        cls._instance = super().__new__(cls)
-                        cls._instance._initialized = False
-            else:
-                # Lock disabled - direct initialization (startup workaround)
-                cls._instance = super().__new__(cls)
-                cls._instance._initialized = False
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
         return cls._instance
     
     def __init__(
@@ -271,10 +261,7 @@ class SentimentVolService:
         
         # Asset state tracking
         self._assets: Dict[str, AssetState] = {}
-        # TEMPORARILY DISABLED: threading.RLock causing deadlock during startup
-        # TODO: Re-enable lock after startup is stable and investigate proper async synchronization
-        # self._asset_lock = threading.RLock()
-        self._asset_lock = None  # Disabled to prevent startup hang
+        self._asset_lock = threading.RLock()
         
         # Background update control
         self._running = False
