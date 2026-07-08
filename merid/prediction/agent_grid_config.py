@@ -499,7 +499,7 @@ def _parse_risk_limits(raw: Dict[str, Any]) -> AgentRiskLimits:
         max_no_position=raw.get("max_no_position", 0),   # 0 = derive from bankroll
         max_orders_per_window=raw.get("max_orders_per_window", 0),  # 0 = auto-compute
         max_notional_usd=Decimal(str(raw.get("max_notional_usd", 0))),  # 0 = derive from bankroll
-        max_contracts_per_order=raw.get("max_contracts_per_order", 50),
+        max_contracts_per_order=raw.get("max_contracts_per_order", 1),  # CRITICAL FIX (2026-07-08): Default 1 to enforce 3% risk limit
         price_bands=price_bands,
     )
 

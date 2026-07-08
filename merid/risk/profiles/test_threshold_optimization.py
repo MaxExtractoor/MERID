@@ -173,7 +173,7 @@ class TestThresholdOptimization:
         """Test that DOGE has increased max contracts (2026-07-07 fix) and increased min edge."""
         with patch('merid.risk.profiles.crypto_15m_profile.is_profile_active', return_value=True), \
              patch('merid.risk.profiles.crypto_15m_profile.get_active_profile', return_value=MagicMock(profile=MagicMock(
-                 assets_DOGE_max_contracts=10,  # CRITICAL FIX (2026-07-07): Increased from 1 to 10 for multi-contract exits
+                 assets_DOGE_max_contracts=1,  # CRITICAL FIX (2026-07-08): Reduced from 10 to 1 to enforce 3% risk limit
                  assets_DOGE_min_edge_early=0.065,
                  assets_DOGE_min_edge_mid=0.065,
                  assets_DOGE_min_edge_late=0.065,
@@ -187,12 +187,43 @@ class TestThresholdOptimization:
                 profile = adapter.profile
                 
                 # Verify DOGE-specific adjustments
-                assert profile.assets_DOGE_max_contracts == 10  # CRITICAL FIX (2026-07-07): Increased from 1 to 10
+                assert profile.assets_DOGE_max_contracts == 1  # CRITICAL FIX (2026-07-08): Reduced from 10 to 1 to enforce 3% risk limit
                 assert profile.assets_DOGE_min_edge_early == 0.065  # Increased from 0.06
                 assert profile.assets_DOGE_min_edge_mid == 0.065  # Increased from 0.06
                 assert profile.assets_DOGE_min_edge_late == 0.065  # Increased from 0.06
                 assert profile.assets_DOGE_min_edge_terminal == 0.075  # Increased from 0.07
                 assert profile.assets_DOGE_max_distance_pct == 0.025  # Tightened from 0.030
+
+    def test_max_contracts_enforcement_3_percent_risk_limit(self):
+        """Test that max_contracts=1 enforces 3% risk limit across all assets.
+        
+        CRITICAL FIX (2026-07-08): This test verifies that the max_contracts=1
+        change prevents orders from exceeding the 3% risk limit.
+        """
+        with patch('merid.risk.profiles.crypto_15m_profile.is_profile_active', return_value=True), \
+             patch('merid.risk.profiles.crypto_15m_profile.get_active_profile', return_value=MagicMock(profile=MagicMock(
+                 assets_BTC_max_contracts=1,
+                 assets_ETH_max_contracts=1,
+                 assets_SOL_max_contracts=1,
+                 assets_XRP_max_contracts=1,
+                 assets_DOGE_max_contracts=1,
+                 contract_caps_max_single_order_contracts=1
+             ))):
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
+            
+            if is_profile_active():
+                adapter = get_active_profile()
+                profile = adapter.profile
+                
+                # Verify all assets have max_contracts=1
+                assert profile.assets_BTC_max_contracts == 1
+                assert profile.assets_ETH_max_contracts == 1
+                assert profile.assets_SOL_max_contracts == 1
+                assert profile.assets_XRP_max_contracts == 1
+                assert profile.assets_DOGE_max_contracts == 1
+                
+                # Verify global max_single_order_contracts=1
+                assert profile.contract_caps_max_single_order_contracts == 1
 
     def test_consecutive_loss_pause_enabled(self):
         """Test that consecutive loss pause is enabled at 3 losses."""

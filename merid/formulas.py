@@ -613,7 +613,7 @@ def quarter_kelly_size(
 
 def apply_sizing_constraints(
     raw_contracts: int,
-    max_contracts_per_order: int = 50,
+    max_contracts_per_order: int = 1,  # CRITICAL FIX (2026-07-08): Reduced from 50 to 1 to enforce 3% risk limit
     max_contracts_per_market: int = 200,
     current_market_position: int = 0,
     drawdown_tier: str = "normal",  # normal, warning, tight, halt

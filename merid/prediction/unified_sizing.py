@@ -492,8 +492,8 @@ def _get_max_contracts_per_asset(asset: str) -> int:
             if asset_config:
                 return asset_config.max_contracts
             # If asset not in profile, use a conservative default
-            logger.warning("[UNIFIED-SIZING] Asset %s (normalized to %s) not in profile config, using default max_contracts=10", asset, asset_normalized)
-            return 10
+            logger.warning("[UNIFIED-SIZING] Asset %s (normalized to %s) not in profile config, using default max_contracts=1", asset, asset_normalized)
+            return 1  # CRITICAL FIX (2026-07-08): Reduced from 10 to 1 to enforce 3% risk limit
         else:
             logger.error(
                 "[UNIFIED-SIZING] Profile not active - cannot size orders in production - "
@@ -641,7 +641,7 @@ def _get_dynamic_sizing_max_contracts() -> int:
         Max contracts as int.
     """
     if not _PROFILE_AVAILABLE:
-        return 3  # Default
+        return 1  # CRITICAL FIX (2026-07-08): Reduced from 3 to 1 to enforce 3% risk limit
     
     try:
         if is_profile_active():
@@ -651,7 +651,7 @@ def _get_dynamic_sizing_max_contracts() -> int:
     except Exception as e:
         logger.warning("[UNIFIED-SIZING] Failed to read dynamic_sizing_max_contracts: %s", e)
     
-    return 3  # Default
+    return 1  # CRITICAL FIX (2026-07-08): Reduced from 3 to 1 to enforce 3% risk limit
 
 
 def _get_dynamic_sizing_min_contracts() -> int:
@@ -748,45 +748,11 @@ def compute_order_size(
         )
         raise ValueError(f"Invalid price_cents={price_cents} for asset={asset} - must be > 0")
     
-    # CRITICAL FIX: Window-based risk limit check (HARD STOP)
-    # Enforce 3% per-agent / 5% total venue window limits before sizing
-    # This prevents orders from exceeding window-based risk limits
-    try:
-        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
-        import time
-        envelope = get_kalshi_crypto_15m_risk_envelope()
-        
-        # Estimate order notional for window check (use worst case: max contracts from profile)
-        # We'll use a conservative estimate based on bankroll and risk limits
-        estimated_notional = float(bankroll_usd) * 0.03  # Conservative 3% estimate
-        agent_id = f"{asset}_15M"  # Agent ID format for window tracking
-        current_ts = time.time()
-        
-        # Check window limits
-        allowed, reason = envelope.check_window_limit(agent_id, estimated_notional, current_ts)
-        if not allowed:
-            logger.warning(
-                "[UNIFIED-SIZING] WINDOW_LIMIT_REJECTED: agent=%s asset=%s reason=%s - "
-                "order sizing blocked by window-based risk limits (HARD STOP)",
-                agent_id, asset, reason
-            )
-            # Return 0 contracts to indicate order should be rejected
-            return 0, Decimal("0.0"), {"window_limit_rejected": True, "reason": reason}
-    except RuntimeError as e:
-        # Risk envelope not ready (bankroll not available) - log warning but proceed
-        # This can happen during startup or in test environments
-        logger.warning(
-            "[UNIFIED-SIZING] Risk envelope not ready for window limit check: %s - "
-            "proceeding without window limit enforcement (may exceed limits)",
-            e
-        )
-    except Exception as e:
-        logger.error(
-            "[UNIFIED-SIZING] Window limit check failed: %s - "
-            "proceeding without window limit enforcement (may exceed limits)",
-            e,
-            exc_info=True
-        )
+    # CRITICAL FIX (2026-07-07): Removed redundant window limit check from unified_sizing.py
+    # Window limits are now enforced ONLY in order_gate.py with ACTUAL order notional
+    # Previous check here used a conservative 3% estimate that could block valid orders
+    # The proper enforcement point is order_gate.py which uses real contract count and price
+    # This eliminates the estimate vs actual notional conflict and prevents false rejections
     
     # INTENTIONAL WRAPPER: This function is NOT a pure delegation to invariants.py.
     # It owns specific policy concerns while delegating pure sizing math:
