@@ -7,7 +7,7 @@ import re
 from typing import Any, Optional, Dict
 from dataclasses import dataclass, field
 
-from utils.logger import get_logger
+from utils.logger import get_logger, format_price
 
 logger = get_logger("merid.prediction.agent_grid_15m")
 
@@ -600,8 +600,8 @@ class LeanAgent15m:
         # UnifiedSpotService stores timestamps as int(time.time() * 1000) in milliseconds
         # Agent grid must use the same unit for velocity calculation to work correctly
         # CRITICAL FIX: Store OHLC data for proper ADX/ATR calculation
-        logger.info("[UPDATE-PRICE-HISTORY-ENTRY] asset=%s spot_price=%.8f spot_data=%s", 
-                    asset, spot_price, type(spot_data).__name__ if spot_data else None)
+        logger.info("[UPDATE-PRICE-HISTORY-ENTRY] asset=%s spot_price=%s spot_data=%s", 
+                    asset, format_price(asset, spot_price), type(spot_data).__name__ if spot_data else None)
         current_time = int(time.time() * 1000)
         
         # Extract OHLC data if available
@@ -3320,8 +3320,8 @@ class LeanAgent15m:
                        asset, result, type(result).__name__ if result else None)
             if result is not None and hasattr(result, 'price'):
                 spot_data = result
-                logger.info("[GENERATE-SIGNAL-SPOT-SUCCESS] asset=%s spot_price=%.8f has_ohlc=%s",
-                           asset, result.price,
+                logger.info("[GENERATE-SIGNAL-SPOT-SUCCESS] asset=%s spot_price=%s has_ohlc=%s",
+                           asset, format_price(asset, result.price),
                            hasattr(result, 'open') and hasattr(result, 'high') and hasattr(result, 'low'))
             else:
                 logger.warning("[GENERATE-SIGNAL-SPOT-FAIL] asset=%s result=%s has_price=%s",
@@ -3369,8 +3369,8 @@ class LeanAgent15m:
         velocity = self._calculate_multi_window_velocity(asset, spot_price)
         
         logger.info(
-            "[VELOCITY-CALC] asset=%s current=%.8f velocity=%.9f (%.4f%%) multi-window with EMA smoothing",
-            asset, spot_price, velocity, velocity * 100
+            "[VELOCITY-CALC] asset=%s current=%s velocity=%.9f (%.4f%%) multi-window with EMA smoothing",
+            asset, format_price(asset, spot_price), velocity, velocity * 100
         )
         
         # VELOCITY-BASED SIGNAL DECISION (2026 #1 winner)
@@ -4800,8 +4800,8 @@ class LeanAgent15m:
                     elif hasattr(result, 'price'):
                         spot_price = result.price
                         spot_data = result  # Store full SpotPrice object for OHLC data
-                        logger.info("[COLLECT-SPOT-SUCCESS] agent=%s asset=%s spot_price=%.8f has_ohlc=%s",
-                                   self.config.name, asset, spot_price,
+                        logger.info("[COLLECT-SPOT-SUCCESS] agent=%s asset=%s spot_price=%s has_ohlc=%s",
+                                   self.config.name, asset, format_price(asset, spot_price),
                                    hasattr(result, 'open') and hasattr(result, 'high') and hasattr(result, 'low'))
                     else:
                         logger.warning("[COLLECT-SPOT-NO-PRICE] agent=%s asset=%s result has no price attribute",

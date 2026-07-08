@@ -36,6 +36,8 @@ import math
 import time
 import logging
 
+from utils.logger import format_price
+
 logger = logging.getLogger(__name__)
 
 
@@ -129,7 +131,7 @@ class LagTracker:
         st.last_spot_ts = ts
         st.last_spot_price = price
 
-        logger.debug("[LAG-TRACKER] Spot update: asset=%s ts=%.3f price=%.8f", asset, ts, price)
+        logger.debug("[LAG-TRACKER] Spot update: asset=%s ts=%.3f price=%s", asset, ts, format_price(asset, price))
 
     def on_book_update(self, asset: str, ts: float, best_bid: float, best_ask: float) -> None:
         """

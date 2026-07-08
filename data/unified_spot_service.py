@@ -41,7 +41,7 @@ import base64
 from typing import Optional, Dict, Any, Union
 from dataclasses import dataclass
 
-from utils.logger import get_logger
+from utils.logger import get_logger, format_price
 from data.spot_sla_config import get_spot_max_age
 
 logger = get_logger("data.unified_spot_service")
@@ -229,10 +229,12 @@ class UnifiedSpotService:
         
         Priority order:
         1. Coinbase Exchange API (authenticated) - true OHLC data for ATR/ADX
-        2. Coinbase Public Ticker API - real-time price for velocity calculation
-        3. Coinbase Public Spot API - fallback with OHLC proxy
+        2. Coinbase Public Candles API - public OHLC data (no auth required)
+        3. Coinbase Public Ticker API - real-time price for velocity calculation
+        4. Coinbase Public Spot API - fallback with OHLC proxy
         
-        CRITICAL FIX: Use ticker endpoint for real-time price updates (every 5s) for velocity calculation.
+        CRITICAL FIX: Use public candles endpoint as fallback when auth fails to avoid flat candles.
+        Use ticker endpoint for real-time price updates (every 5s) for velocity calculation.
         Use OHLC candles for ATR/ADX calculation.
         """
         pair_map = {
@@ -256,35 +258,74 @@ class UnifiedSpotService:
                 ohlc_data = await self._fetch_ohlc_authenticated(pair, api_key, api_secret)
                 if ohlc_data:
                     volume = ohlc_data.get('volume', 0)
-                    logger.info(f"[UNIFIED-SPOT] Fetched {asset} OHLC: O={ohlc_data['open']:.8f} H={ohlc_data['high']:.8f} L={ohlc_data['low']:.8f} C={ohlc_data['close']:.8f} V={volume:.2f}")
+                    logger.info(f"[UNIFIED-SPOT] Fetched {asset} OHLC (auth): O={format_price(asset, ohlc_data['open'])} H={format_price(asset, ohlc_data['high'])} L={format_price(asset, ohlc_data['low'])} C={format_price(asset, ohlc_data['close'])} V={volume:.2f}")
             except Exception as e:
-                logger.warning(f"[UNIFIED-SPOT] Authenticated OHLC fetch failed for {asset}, falling back to ticker: {e}")
+                logger.warning(f"[UNIFIED-SPOT] Authenticated OHLC fetch failed for {asset}, trying public candles: {e}")
+        
+        # Try public candles endpoint (no auth required) as fallback
+        if not ohlc_data:
+            try:
+                ohlc_data = await self._fetch_ohlc_public(pair)
+                if ohlc_data:
+                    volume = ohlc_data.get('volume', 0)
+                    logger.info(f"[UNIFIED-SPOT] Fetched {asset} OHLC (public): O={format_price(asset, ohlc_data['open'])} H={format_price(asset, ohlc_data['high'])} L={format_price(asset, ohlc_data['low'])} C={format_price(asset, ohlc_data['close'])} V={volume:.2f}")
+            except Exception as e:
+                logger.warning(f"[UNIFIED-SPOT] Public OHLC fetch failed for {asset}, falling back to ticker: {e}")
         
         # Always try ticker endpoint for real-time price (more frequent than candles)
         ticker_data = None
         try:
             ticker_data = await self._fetch_ticker_public(pair)
             if ticker_data:
-                logger.info(f"[UNIFIED-SPOT] Fetched {asset} ticker: ${ticker_data['price']:.8f}")
+                logger.info(f"[UNIFIED-SPOT] Fetched {asset} ticker: ${format_price(asset, ticker_data['price'])}")
         except Exception as e:
             logger.warning(f"[UNIFIED-SPOT] Ticker fetch failed for {asset}: {e}")
         
         # Combine data: use ticker price for velocity, OHLC for ATR/ADX
         if ticker_data:
             # Use ticker price as close, use OHLC for open/high/low if available
-            final_data = {
-                'open': ohlc_data['open'] if ohlc_data else ticker_data['price'],
-                'high': ohlc_data['high'] if ohlc_data else ticker_data['price'],
-                'low': ohlc_data['low'] if ohlc_data else ticker_data['price'],
-                'close': ticker_data['price']  # Use ticker price for velocity calculation
-            }
-            source = 'coinbase_ticker_hybrid' if ohlc_data else 'coinbase_ticker'
+            if ohlc_data:
+                final_data = {
+                    'open': ohlc_data['open'],
+                    'high': ohlc_data['high'],
+                    'low': ohlc_data['low'],
+                    'close': ticker_data['price'],  # Use ticker price for velocity calculation
+                    'volume': ohlc_data.get('volume')
+                }
+                source = 'coinbase_ticker_hybrid'
+            else:
+                # CRITICAL FIX: When OHLC is unavailable, construct valid OHLC from price history
+                # to avoid high=low invalid data that breaks volume extraction
+                ticker_price = ticker_data['price']
+                if asset in self._price_history and len(self._price_history[asset]) > 0:
+                    # Use recent price history to construct OHLC
+                    recent_prices = [p[1] for p in self._price_history[asset][-10:]]  # Last 10 prices
+                    recent_prices.append(ticker_price)
+                    final_data = {
+                        'open': recent_prices[0],  # Oldest price as open
+                        'high': max(recent_prices),  # Highest as high
+                        'low': min(recent_prices),   # Lowest as low
+                        'close': ticker_price,       # Current as close
+                        'volume': None
+                    }
+                    source = 'coinbase_ticker_ohlc_proxy'
+                else:
+                    # No price history available - add small spread to avoid high=low
+                    spread = ticker_price * 0.0001  # 0.01% spread
+                    final_data = {
+                        'open': ticker_price,
+                        'high': ticker_price + spread,
+                        'low': ticker_price - spread,
+                        'close': ticker_price,
+                        'volume': None
+                    }
+                    source = 'coinbase_ticker_spread_proxy'
             self._update_cache(asset, final_data, source=source)
             return True
         
         # Fallback to OHLC-only if ticker failed
         if ohlc_data:
-            self._update_cache(asset, ohlc_data, source='coinbase_exchange_authenticated')
+            self._update_cache(asset, ohlc_data, source='coinbase_ohlc')
             return True
         
         # Final fallback to public spot price endpoint (OHLC proxy)
@@ -292,7 +333,7 @@ class UnifiedSpotService:
             ohlc_data = await self._fetch_spot_price_fallback_async(pair)
             if ohlc_data:
                 self._update_cache(asset, ohlc_data, source='coinbase_public')
-                logger.info(f"[UNIFIED-SPOT] Fetched {asset}: ${ohlc_data['close']:.8f} (OHLC proxy: O=H=L=C)")
+                logger.info(f"[UNIFIED-SPOT] Fetched {asset}: ${format_price(asset, ohlc_data['close'])} (OHLC proxy: O=H=L=C)")
                 return True
         except Exception as e:
             logger.error(f"[UNIFIED-SPOT] Failed to fetch {asset}: {e}")
@@ -352,6 +393,46 @@ class UnifiedSpotService:
                 'low': float(candle[1]),
                 'close': float(candle[4]),
                 'volume': float(candle[5]) if len(candle) > 5 else None  # Volume for volume confirmation filter
+            }
+        
+        return await loop.run_in_executor(None, fetch_sync)
+    
+    async def _fetch_ohlc_public(self, pair: str) -> Optional[dict]:
+        """Fetch OHLC data from Coinbase public candles API (no auth required).
+        
+        Args:
+            pair: Trading pair (e.g., "BTC-USD")
+        
+        Returns:
+            Dict with 'open', 'high', 'low', 'close', 'volume' or None on failure
+        """
+        # Coinbase Exchange API public candles endpoint (no auth required)
+        url = f"https://api.exchange.coinbase.com/products/{pair}/candles"
+        
+        # Request parameters for 60-second candles
+        params = {
+            'granularity': '60',  # 60 seconds (1 minute)
+            'limit': 1  # Only need the most recent candle
+        }
+        
+        loop = asyncio.get_running_loop()
+        
+        def fetch_sync():
+            response = requests.get(url, params=params, timeout=5.0)
+            if response.status_code != 200:
+                raise Exception(f"HTTP {response.status_code}: {response.text}")
+            data = response.json()
+            if not data or not isinstance(data, list) or len(data) == 0:
+                raise Exception("No candles data returned")
+            
+            # Candle format: [timestamp, low, high, open, close, volume]
+            candle = data[0]
+            return {
+                'open': float(candle[3]),
+                'high': float(candle[2]),
+                'low': float(candle[1]),
+                'close': float(candle[4]),
+                'volume': float(candle[5]) if len(candle) > 5 else None
             }
         
         return await loop.run_in_executor(None, fetch_sync)
@@ -490,15 +571,23 @@ class UnifiedSpotService:
         
         # Create legacy-style spot snapshot object
         class SpotSnapshot:
-            def __init__(self, price_usd: float, staleness_ms: int, source: str):
+            def __init__(self, price_usd: float, staleness_ms: int, source: str, open: float = None, high: float = None, low: float = None, volume: float = None):
                 self.price_usd = price_usd
                 self.staleness_ms = staleness_ms
                 self.source = source
+                self.open = open
+                self.high = high
+                self.low = low
+                self.volume = volume
         
         return SpotSnapshot(
             price_usd=result.price,
             staleness_ms=staleness_ms,
-            source=result.source
+            source=result.source,
+            open=result.open,
+            high=result.high,
+            low=result.low,
+            volume=result.volume
         )
     
     def get_spot_history(self, asset: str, window_s: int = 300) -> list:
