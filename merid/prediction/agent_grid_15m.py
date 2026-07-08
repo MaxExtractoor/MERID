@@ -1993,14 +1993,17 @@ class LeanAgent15m:
         min_macd_hist_long = getattr(momentum_fvg_config, 'min_macd_hist_long', 0)
         min_macd_hist_short = getattr(momentum_fvg_config, 'min_macd_hist_short', 0)
         
-        # RESEARCH-BASED FIX: Updated MACD histogram dead zone from 0.00001 to 0.0005 for 15-minute crypto markets
-        # Web research (MagicTradeBot, StratBase.ai) shows:
-        # - Fast Timeframes (5m, 15m): MACD histogram thresholds of 0.2-0.4 for strong buy/sell signals
-        # - Cryptocurrency: Zero line threshold of 0.0005-0.001 for quick signals
-        # - Forex: Zero line threshold of 0.00001 (appropriate for low volatility)
-        # Current 0.00001 threshold is designed for forex (low volatility) but crypto has much higher volatility
-        # For 15-minute crypto markets, 0.0005-0.001 is the realistic dead zone threshold
-        macd_dead_zone = 0.0005
+        # CRITICAL FIX: 2026-07-08 - Read momentum RSI thresholds from profile YAML (single source of truth)
+        # These thresholds define directional momentum: RSI > 55 for longs, RSI < 45 for shorts
+        # Previous implementation did not use these thresholds, only checked RSI != overbought/oversold
+        momentum_rsi_long_min = getattr(momentum_fvg_config, 'momentum_rsi_long_min', 55.0)
+        momentum_rsi_short_max = getattr(momentum_fvg_config, 'momentum_rsi_short_max', 45.0)
+        
+        # CRITICAL FIX: 2026-07-08 - Read macd_dead_zone from profile YAML (single source of truth)
+        # Previous hardcoded 0.0005 (0.05%) was too strict and blocked all valid signals
+        # Research shows 15m crypto should use 0.0001 (0.01%) or smaller dead zone
+        # Profile YAML now contains the optimized value: macd_dead_zone: 0.0001
+        macd_dead_zone = getattr(momentum_fvg_config, 'macd_dead_zone', 0.0001)
         if abs(macd_histogram) < macd_dead_zone:
             logger.info(
                 "[MOMENTUM-FVG-DEAD-ZONE] asset=%s macd_histogram=%.6f within dead zone (±%.6f), skipping signal to avoid noise",
@@ -2012,6 +2015,7 @@ class LeanAgent15m:
             velocity > velocity_threshold,
             macd_histogram >= min_macd_hist_long,
             rsi_zone != "overbought",
+            rsi > momentum_rsi_long_min,  # CRITICAL FIX: 2026-07-08 - Add momentum RSI threshold for directional long signals
             (obi > 0 and obi_strong) or (fvg_direction == "bullish" and fvg_confidence > 0.5)
         ]
         
@@ -2019,6 +2023,7 @@ class LeanAgent15m:
             velocity < -velocity_threshold,
             macd_histogram < min_macd_hist_short,  # CRITICAL FIX: Use strict inequality to prevent symmetry at hist=0
             rsi_zone != "oversold",
+            rsi < momentum_rsi_short_max,  # CRITICAL FIX: 2026-07-08 - Add momentum RSI threshold for directional short signals
             (obi < 0 and obi_strong) or (fvg_direction == "bearish" and fvg_confidence > 0.5)
         ]
         
@@ -2026,7 +2031,7 @@ class LeanAgent15m:
         long_score = sum(long_conditions)
         short_score = sum(short_conditions)
         
-        # Require at least 3 of 4 conditions for signal
+        # Require at least 3 of 5 conditions for signal (increased from 3 of 4 due to added RSI momentum condition)
         if long_score >= 3:
             signal_side = "yes"
             signal_action = "buy"
@@ -3100,22 +3105,51 @@ class LeanAgent15m:
             logger.warning("[SIGNAL-ERROR] Could not determine asset from market")
             return None
         
-        # ENTRY MATRIX: Time window entry rules (based on TheLines/Perplexity research)
-        # Skip first minute: initial price discovery noisy unless spot/Kalshi tightly aligned
-        # Skip last 30 seconds: edge decay dominates, only mean-reversion or locked-in continuation
-        # 0.5-4 minutes: reduced edge multiplier (1.5x) for late entries
-        # 4-12 minutes: optimal window (baseline edge requirements)
+        # ENTRY MATRIX: Time window entry rules (CRITICAL FIX: 2026-07-08 - Use profile YAML as single source of truth)
+        # Previous hardcoded values (>=14.0min, <=0.5min) conflicted with profile YAML configuration
+        # Profile YAML defines:
+        # - min_decision_minute: per-asset minimum minute to start trading (default 1)
+        # - guardrails.min_entry_mins: minimum time to expiry for entry (2.0min)
+        # - guardrails.max_entry_mins: maximum time to expiry for entry (15.0min)
+        # - guardrails.cutoff_minutes_before_expiry: stop trading N minutes before expiry (2min)
+        
+        # Get timing configuration from profile YAML
+        min_entry_mins = 2.0  # Default from guardrails.min_entry_mins
+        max_entry_mins = 15.0  # Default from guardrails.max_entry_mins
+        cutoff_mins = 2.0  # Default from guardrails.cutoff_minutes_before_expiry
+        
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+            profile = get_active_profile()
+            min_entry_mins = profile.get("guardrails_min_entry_mins", 2.0)
+            max_entry_mins = profile.get("guardrails_max_entry_mins", 15.0)
+            cutoff_mins = profile.get("agent_cutoff_minutes_before_expiry", 2.0)
+            logger.debug(
+                "[TIME-WINDOW-CONFIG] asset=%s min_entry=%.1fmin max_entry=%.1fmin cutoff=%.1fmin (from profile)",
+                asset, min_entry_mins, max_entry_mins, cutoff_mins
+            )
+        except Exception as e:
+            logger.warning("[TIME-WINDOW-CONFIG] Failed to load from profile: %s, using defaults", e)
+        
         time_edge_multiplier = 1.0
-        if minutes_to_expiry >= 14.0:
+        
+        # Check if within trading window
+        if minutes_to_expiry > max_entry_mins:
             logger.info(
-                "[TIME-WINDOW-FILTER] asset=%s minutes_to_expiry=%.1f -> SKIP (first minute - price discovery noise)",
-                asset, minutes_to_expiry
+                "[TIME-WINDOW-FILTER] asset=%s minutes_to_expiry=%.1f -> SKIP (too early, >%.1fmin)",
+                asset, minutes_to_expiry, max_entry_mins
             )
             return None
-        elif minutes_to_expiry <= 0.5:
+        elif minutes_to_expiry < cutoff_mins:
             logger.info(
-                "[TIME-WINDOW-FILTER] asset=%s minutes_to_expiry=%.1f -> SKIP (last 30 seconds - edge decay)",
-                asset, minutes_to_expiry
+                "[TIME-WINDOW-FILTER] asset=%s minutes_to_expiry=%.1f -> SKIP (terminal phase, <%.1fmin to expiry)",
+                asset, minutes_to_expiry, cutoff_mins
+            )
+            return None
+        elif minutes_to_expiry < min_entry_mins:
+            logger.info(
+                "[TIME-WINDOW-FILTER] asset=%s minutes_to_expiry=%.1f -> SKIP (too early, <%.1fmin to expiry)",
+                asset, minutes_to_expiry, min_entry_mins
             )
             return None
         elif minutes_to_expiry <= 4.0:
