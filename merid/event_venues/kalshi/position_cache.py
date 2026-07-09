@@ -464,16 +464,52 @@ class KalshiPositionCache:
                 
                 # Record exposure if we have agent_id and this is an entry order (buy)
                 if agent_id and action == "buy":
-                    envelope = get_kalshi_crypto_15m_risk_envelope()
-                    order_notional_usd = (contracts * price_cents) / 100.0
-                    envelope.record_order_execution(
-                        agent_id=agent_id,
-                        order_notional_usd=order_notional_usd
-                    )
+                    try:
+                        envelope = get_kalshi_crypto_15m_risk_envelope()
+                        order_notional_usd = (contracts * price_cents) / 100.0
+                        envelope.record_order_execution(
+                            agent_id=agent_id,
+                            order_notional_usd=order_notional_usd
+                        )
+                    except RuntimeError as e:
+                        # Bankroll not ready - log warning but don't crash
+                        logger.warning(
+                            "[POSITION-CACHE] Failed to record window exposure: %s (bankroll service unavailable)",
+                            e
+                        )
                     logger.info(
                         "[POSITION-CACHE] Recorded window exposure on fill: agent=%s notional=$%.2f market=%s fill_id=%s",
                         agent_id, order_notional_usd, market_id, fill_id or "N/A"
                     )
+                
+                # SEV-0 FIX: Release window exposure for position-reducing fills (sell-side)
+                # This ensures window exposure is released on partial closes and all exit paths
+                # Previously, exposure was only released in remove_position(), missing partial closes
+                if agent_id and action == "sell":
+                    try:
+                        envelope = get_kalshi_crypto_15m_risk_envelope()
+                        # Calculate notional to release based on contracts closed
+                        position_notional_usd = (contracts * price_cents) / 100.0
+                        envelope.record_position_closure(
+                            agent_id=agent_id,
+                            position_notional_usd=position_notional_usd
+                        )
+                        logger.info(
+                            "[POSITION-CACHE] Released window exposure on sell fill: agent=%s notional=$%.2f market=%s fill_id=%s",
+                            agent_id, position_notional_usd, market_id, fill_id or "N/A"
+                        )
+                    except RuntimeError as e:
+                        # Bankroll not ready - log warning but don't crash
+                        logger.warning(
+                            "[POSITION-CACHE] Failed to release window exposure on sell fill: %s (bankroll service unavailable)",
+                            e
+                        )
+                    except Exception as e:
+                        logger.error(
+                            "[POSITION-CACHE] Failed to release window exposure on sell fill: %s",
+                            e,
+                            exc_info=True
+                        )
             except Exception as exposure_err:
                 logger.warning("[POSITION-CACHE] Failed to record window exposure on fill: %s", exposure_err)
 

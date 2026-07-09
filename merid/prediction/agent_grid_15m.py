@@ -42,6 +42,50 @@ def calculate_kalshi_fee_cents(probability: float, price_cents: int) -> float:
     
     return fee_cents
 
+# SEV-0 FIX: Standardized velocity edge calculation function
+# This ensures consistency across agent_grid, loop_15m, and order_router
+def calculate_velocity_edge(velocity: float, velocity_threshold: float) -> float:
+    """
+    Calculate edge percentage from velocity magnitude for velocity-based signals.
+    
+    Standard formula: edge = abs(velocity / threshold) * 2.0
+    This ensures edge is in 0-100% range for velocity-based signals.
+    
+    Args:
+        velocity: Velocity value (can be positive or negative)
+        velocity_threshold: Velocity threshold for signal generation
+    
+    Returns:
+        Edge percentage (0-100%)
+    """
+    if velocity_threshold == 0:
+        return 0.0
+    return abs(velocity / velocity_threshold) * 2.0
+
+# SEV-1 FIX: Time-based warmup guard
+# Warmup bypass only allowed in first 5 minutes after process start
+_process_start_time = time.time()
+
+def is_warmup(history_length: int) -> bool:
+    """
+    Check if system is in warmup state.
+    
+    Warmup is only allowed in first 5 minutes after process start.
+    After 5 minutes, require minimum history regardless of data gaps.
+    
+    Args:
+        history_length: Length of data history
+    
+    Returns:
+        True if in warmup state, False otherwise
+    """
+    # Time-based guard: only allow warmup bypass in first 5 minutes
+    if time.time() - _process_start_time > 300:
+        return False
+    
+    # History-based guard: require minimum history after 5 minutes
+    return history_length < 20
+
 # Import regime detection module
 from merid.prediction.regime_detector import RegimeDetector, Regime
 
@@ -1173,15 +1217,26 @@ class LeanAgent15m:
         """
         if not hasattr(self, '_volume_history') or asset not in self._volume_history:
             # No volume history available, bypass filter during warmup
-            logger.debug("[VOLUME-CONFIRMATION] asset=%s no volume history, bypassing filter", asset)
-            return True
+            # SEV-1 FIX: Use time-based warmup guard
+            if is_warmup(0):
+                logger.debug("[VOLUME-CONFIRMATION] asset=%s no volume history, bypassing filter (warmup)", asset)
+                return True
+            else:
+                logger.warning("[VOLUME-CONFIRMATION] asset=%s no volume history, rejecting (warmup expired)", asset)
+                return False
         
         volume_history = list(self._volume_history[asset])
         if len(volume_history) < 20:
             # Insufficient history for EMA20, bypass filter
-            logger.debug("[VOLUME-CONFIRMATION] asset=%s insufficient history (%d < 20), bypassing filter", 
-                        asset, len(volume_history))
-            return True
+            # SEV-1 FIX: Use time-based warmup guard
+            if is_warmup(len(volume_history)):
+                logger.debug("[VOLUME-CONFIRMATION] asset=%s insufficient history (%d < 20), bypassing filter (warmup)", 
+                            asset, len(volume_history))
+                return True
+            else:
+                logger.warning("[VOLUME-CONFIRMATION] asset=%s insufficient history (%d < 20), rejecting (warmup expired)", 
+                            asset, len(volume_history))
+                return False
         
         # Calculate EMA20 of volume
         # EMA formula: EMA = (current * k) + (previous_EMA * (1 - k))
@@ -1523,22 +1578,38 @@ class LeanAgent15m:
         """
         if not hasattr(self, '_price_1m_history') or asset not in self._price_1m_history:
             # No 1m history available, bypass filter during warmup
-            logger.debug("[MTF-ALIGNMENT] asset=%s no 1m history, bypassing filter", asset)
-            return True
+            # SEV-1 FIX: Use time-based warmup guard
+            if is_warmup(0):
+                logger.debug("[MTF-ALIGNMENT] asset=%s no 1m history, bypassing filter (warmup)", asset)
+                return True
+            else:
+                logger.warning("[MTF-ALIGNMENT] asset=%s no 1m history, rejecting (warmup expired)", asset)
+                return False
         
         if not hasattr(self, '_price_5m_history') or asset not in self._price_5m_history:
             # No 5m history available, bypass filter during warmup
-            logger.debug("[MTF-ALIGNMENT] asset=%s no 5m history, bypassing filter", asset)
-            return True
+            # SEV-1 FIX: Use time-based warmup guard
+            if is_warmup(0):
+                logger.debug("[MTF-ALIGNMENT] asset=%s no 5m history, bypassing filter (warmup)", asset)
+                return True
+            else:
+                logger.warning("[MTF-ALIGNMENT] asset=%s no 5m history, rejecting (warmup expired)", asset)
+                return False
         
         price_1m = list(self._price_1m_history[asset])
         price_5m = list(self._price_5m_history[asset])
         
         if len(price_1m) < 10 or len(price_5m) < 10:
             # Insufficient history for momentum calculation
-            logger.debug("[MTF-ALIGNMENT] asset=%s insufficient history (1m=%d, 5m=%d), bypassing filter",
-                        asset, len(price_1m), len(price_5m))
-            return True
+            # SEV-1 FIX: Use time-based warmup guard
+            if is_warmup(min(len(price_1m), len(price_5m))):
+                logger.debug("[MTF-ALIGNMENT] asset=%s insufficient history (1m=%d, 5m=%d), bypassing filter (warmup)",
+                            asset, len(price_1m), len(price_5m))
+                return True
+            else:
+                logger.warning("[MTF-ALIGNMENT] asset=%s insufficient history (1m=%d, 5m=%d), rejecting (warmup expired)",
+                            asset, len(price_1m), len(price_5m))
+                return False
         
         # Calculate 1m momentum (current vs 10 periods ago)
         recent_1m = [entry[1] for entry in price_1m[-10:]]
@@ -2116,8 +2187,9 @@ class LeanAgent15m:
             )
             return None
         
-        # Calculate edge based on velocity and indicator strength
-        edge_pct = abs(velocity / velocity_threshold) * 2.0  # Base edge from velocity
+        # SEV-0 FIX: Use standardized velocity edge calculation function
+        # This ensures consistency across agent_grid, loop_15m, and order_router
+        edge_pct = calculate_velocity_edge(velocity, velocity_threshold)
         edge_pct = max(edge_pct, 2.0)  # Minimum 2% edge
         
         # Add MACD strength to edge
