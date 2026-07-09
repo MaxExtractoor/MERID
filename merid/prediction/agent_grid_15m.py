@@ -769,8 +769,9 @@ class LeanAgent15m:
                 close=price_cents,        # Already in cents
                 timestamp=current_time / 1000.0  # Convert ms to seconds
             )
-            logger.info("[FVG-UPDATE] asset=%s OHLC data updated in FVG forecaster: O=%.1f H=%.1f L=%.1f C=%.1f", 
-                        asset, open_price * 100, high_price * 100, low_price * 100, price_cents)
+            logger.info("[FVG-UPDATE] asset=%s OHLC data updated in FVG forecaster: O=%s H=%s L=%s C=%s", 
+                        asset, format_price(asset, open_price * 100), format_price(asset, high_price * 100), 
+                        format_price(asset, low_price * 100), format_price(asset, price_cents))
         except Exception as e:
             logger.warning("[FVG-UPDATE] asset=%s failed to update FVG forecaster: %s", asset, e)
         

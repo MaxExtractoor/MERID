@@ -438,9 +438,10 @@ class CryptoSpotService:
                         api_ts = ts.timestamp()
                         age_seconds = time.time() - api_ts
                         if age_seconds > 30.0:
+                            from utils.logger import format_price
                             logger.warning(
-                                "Coinbase v2 stale price for %s: %.2f (age=%.1fs > 30s threshold)",
-                                asset, price, age_seconds
+                                "Coinbase v2 stale price for %s: %s (age=%.1fs > 30s threshold)",
+                                asset, format_price(asset, price), age_seconds
                             )
                             self._failure_metrics["coinbase"]["stale"] += 1
                             # Reject stale data
@@ -961,9 +962,10 @@ class CryptoSpotService:
                         )
                         by_source["stale_cache"].append(asset)
                         needed.remove(asset)
+                        from utils.logger import format_price
                         logger.warning(
-                            "Using stale cache for %s: age=%.1fs, price=%.2f",
-                            asset, age, entry.price
+                            "Using stale cache for %s: age=%.1fs, price=%s",
+                            asset, age, format_price(asset, entry.price)
                         )
         
         # Any still remaining are truly failed

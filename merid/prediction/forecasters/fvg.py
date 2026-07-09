@@ -31,34 +31,63 @@ from utils.logger import get_logger
 
 logger = get_logger("merid.prediction.forecasters.fvg")
 
-# Production configuration via environment variables
-_FVG_WINDOW_SIZE = int(os.getenv("MERID_FVG_WINDOW_SIZE", "20"))
-_FVG_MIN_GAP_CENTS = float(os.getenv("MERID_FVG_MIN_GAP_CENTS", "2.0"))  # Minimum 2c gap
-_FVG_FILL_THRESHOLD_CENTS = float(os.getenv("MERID_FVG_FILL_THRESHOLD", "5.0"))  # Within 5c = filling
-_FVG_ATR_PERIOD = int(os.getenv("MERID_FVG_ATR_PERIOD", "14"))
+# CRITICAL FIX: 2026-07-06 - Migrated from environment variables to profile YAML
+# Single source of truth: config/profiles/kalshi_crypto_15m_v2.yaml -> momentum_fvg.fvg_*
+# Environment variables (MERID_FVG_*) are DEPRECATED and no longer used
 
-# CRITICAL FIX: Validate FVG parameters are reasonable
+def _load_fvg_config_from_profile():
+    """Load FVG configuration from profile YAML (single source of truth)."""
+    try:
+        from merid.risk.profiles.crypto_15m_profile import get_crypto_15m_profile
+        profile = get_crypto_15m_profile()
+        
+        # Get momentum_fvg config section
+        momentum_fvg_config = profile.momentum_fvg
+        
+        return {
+            'window_size': getattr(momentum_fvg_config, 'fvg_window_size', 20),
+            'min_gap_cents': getattr(momentum_fvg_config, 'fvg_min_gap_cents', 2.0),
+            'fill_threshold_cents': getattr(momentum_fvg_config, 'fvg_fill_threshold_cents', 5.0),
+            'atr_period': getattr(momentum_fvg_config, 'fvg_atr_period', 14),
+        }
+    except Exception as e:
+        logger.warning("[FVG] Failed to load config from profile, using defaults: %s", e)
+        return {
+            'window_size': 20,
+            'min_gap_cents': 2.0,
+            'fill_threshold_cents': 5.0,
+            'atr_period': 14,
+        }
+
+# Load configuration from profile YAML
+_FVG_CONFIG = _load_fvg_config_from_profile()
+_FVG_WINDOW_SIZE = _FVG_CONFIG['window_size']
+_FVG_MIN_GAP_CENTS = _FVG_CONFIG['min_gap_cents']
+_FVG_FILL_THRESHOLD_CENTS = _FVG_CONFIG['fill_threshold_cents']
+_FVG_ATR_PERIOD = _FVG_CONFIG['atr_period']
+
+# Validate FVG parameters are reasonable
 if _FVG_WINDOW_SIZE < 1 or _FVG_WINDOW_SIZE > 1000:
     logger.warning(
-        "[FVG] Invalid MERID_FVG_WINDOW_SIZE=%s - using default 20",
+        "[FVG] Invalid fvg_window_size=%s - using default 20",
         _FVG_WINDOW_SIZE
     )
     _FVG_WINDOW_SIZE = 20
 if _FVG_MIN_GAP_CENTS < 0 or _FVG_MIN_GAP_CENTS > 100:
     logger.warning(
-        "[FVG] Invalid MERID_FVG_MIN_GAP_CENTS=%s - using default 2.0",
+        "[FVG] Invalid fvg_min_gap_cents=%s - using default 2.0",
         _FVG_MIN_GAP_CENTS
     )
     _FVG_MIN_GAP_CENTS = 2.0
 if _FVG_FILL_THRESHOLD_CENTS < 0 or _FVG_FILL_THRESHOLD_CENTS > 100:
     logger.warning(
-        "[FVG] Invalid MERID_FVG_FILL_THRESHOLD=%s - using default 5.0",
+        "[FVG] Invalid fvg_fill_threshold_cents=%s - using default 5.0",
         _FVG_FILL_THRESHOLD_CENTS
     )
     _FVG_FILL_THRESHOLD_CENTS = 5.0
 if _FVG_ATR_PERIOD < 1 or _FVG_ATR_PERIOD > 100:
     logger.warning(
-        "[FVG] Invalid MERID_FVG_ATR_PERIOD=%s - using default 14",
+        "[FVG] Invalid fvg_atr_period=%s - using default 14",
         _FVG_ATR_PERIOD
     )
     _FVG_ATR_PERIOD = 14
@@ -168,7 +197,8 @@ class FVGStore:
                         timeframe=timeframe,
                     )
                     self._fvgs[key].append(fvg)
-                    logger.debug(f"Detected bullish FVG for {asset}/{timeframe}: {c1[1]:.1f}-{c3[2]:.1f} ({gap_size:.1f}c)")
+                    from utils.logger import format_price
+                    logger.debug(f"Detected bullish FVG for {asset}/{timeframe}: {format_price(asset, c1[1])}-{format_price(asset, c3[2])} ({format_price(asset, gap_size)}c)")
             
             # Bearish FVG: c1.low > c3.high (gap between candles 1 and 3)
             if c1[2] > c3[1]:  # low1 > high3
@@ -184,7 +214,8 @@ class FVGStore:
                         timeframe=timeframe,
                     )
                     self._fvgs[key].append(fvg)
-                    logger.debug(f"Detected bearish FVG for {asset}/{timeframe}: {c3[1]:.1f}-{c1[2]:.1f} ({gap_size:.1f}c)")
+                    from utils.logger import format_price
+                    logger.debug(f"Detected bearish FVG for {asset}/{timeframe}: {format_price(asset, c3[1])}-{format_price(asset, c1[2])} ({format_price(asset, gap_size)}c)")
     
     def check_fills(self, asset: str, timeframe: str, current_price: float, timestamp: float) -> List[FVG]:
         """Check if any unfilled FVGs have been filled by current price."""
@@ -197,11 +228,13 @@ class FVGStore:
                     if fvg.direction == "bullish" and current_price >= fvg.top:
                         fvg.fill(timestamp)
                         filled.append(fvg)
-                        logger.debug(f"Bullish FVG filled at {current_price:.1f}")
+                        from utils.logger import format_price
+                        logger.debug(f"Bullish FVG filled at {format_price(asset, current_price)}")
                     elif fvg.direction == "bearish" and current_price <= fvg.bottom:
                         fvg.fill(timestamp)
                         filled.append(fvg)
-                        logger.debug(f"Bearish FVG filled at {current_price:.1f}")
+                        from utils.logger import format_price
+                        logger.debug(f"Bearish FVG filled at {format_price(asset, current_price)}")
         
         return filled
     
