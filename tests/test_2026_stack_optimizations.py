@@ -412,9 +412,9 @@ class TestMarketCatalogFilterFix:
         # Check min_entry_mins exists
         assert "min_entry_mins" in guardrails, "min_entry_mins should be in guardrails"
         
-        # Should be 2.0 (not hardcoded 12.0)
+        # Should be 0.5 (relaxed from 2.0 to allow full window trading)
         min_entry = guardrails["min_entry_mins"]
-        assert min_entry == 2.0, f"Expected min_entry_mins=2.0, got {min_entry}"
+        assert min_entry == 0.5, f"Expected min_entry_mins=0.5, got {min_entry}"
     
     def test_max_entry_mins_in_profile(self):
         """Test that max_entry_mins is configured in profile guardrails."""
