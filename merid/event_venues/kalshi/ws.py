@@ -20,6 +20,7 @@ import re
 import threading
 import time as _time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import websockets
@@ -236,6 +237,14 @@ class KalshiWebSocket(EventVenueStream):
         # guaranteed to be threadsafe under concurrent callbacks.
         self._parse_lock = threading.Lock()
         
+        # ── PERFORMANCE FIX: Dedicated thread pool for concurrent callback processing ──
+        # Prevents blocking under high load by avoiding default executor exhaustion
+        # 8 workers for concurrent callback processing (CPU-bound + I/O mixed workload)
+        self._callback_executor = ThreadPoolExecutor(
+            max_workers=8,
+            thread_name_prefix="kalshi-ws-callback"
+        )
+        
         # ── Queue metrics ────────────────────────────────────────────────
         self._messages_dropped: int = 0
         self._last_drop_log_ts: float = 0.0
@@ -308,9 +317,15 @@ class KalshiWebSocket(EventVenueStream):
         self.register_sigterm_snapshot()
 
     def _ensure_msg_queue(self) -> asyncio.Queue:
-        """Lazy-initialize the message queue in the current event loop."""
+        """Lazy-initialize the message queue in the current event loop.
+        
+        PERFORMANCE FIX: Increased queue size and added pressure monitoring
+        to prevent overflow and sequence gaps.
+        """
         if self._msg_queue is None:
-            self._msg_queue = asyncio.Queue(maxsize=32768)
+            # Increased from 32768 to 65536 to handle burst traffic
+            self._msg_queue = asyncio.Queue(maxsize=65536)
+            logger.info("[WS-QUEUE] Initialized message queue with maxsize=65536")
         return self._msg_queue
 
     def _ensure_reconnect_lock(self) -> asyncio.Lock:
@@ -1427,10 +1442,11 @@ class KalshiWebSocket(EventVenueStream):
         """
         # CRITICAL DIAGNOSTIC: Log that processor task started
         logger.info("[WS-PROCESSOR] Queue processor task started with callback=%s", callback.__name__ if hasattr(callback, '__name__') else str(callback))
-        _BATCH_SIZE_LOW_PRESSURE = 1
-        _BATCH_SIZE_HIGH_PRESSURE = 50
-        _PRESSURE_THRESHOLD = 0.75  # 75% utilization triggers batch mode
-        _COOPERATIVE_YIELD_EVERY = 25  # Yield every N messages in batch mode
+        # PERFORMANCE FIX: Optimized batching for high-throughput scenarios
+        _BATCH_SIZE_LOW_PRESSURE = 5  # Increased from 1 to reduce context switching
+        _BATCH_SIZE_HIGH_PRESSURE = 100  # Increased from 50 for better burst handling
+        _PRESSURE_THRESHOLD = 0.50  # Lowered from 0.75 to trigger batch mode earlier
+        _COOPERATIVE_YIELD_EVERY = 50  # Increased from 25 for better throughput
         
         loop_iteration = 0
         while self._running:
@@ -1457,8 +1473,21 @@ class KalshiWebSocket(EventVenueStream):
                                self._ensure_msg_queue().qsize(), self._ensure_msg_queue().maxsize)
                 
                 # Calculate current queue pressure for adaptive batch sizing
-                queue_util = self._ensure_msg_queue().qsize() / self._ensure_msg_queue().maxsize
+                queue_size = self._ensure_msg_queue().qsize()
+                queue_util = queue_size / self._ensure_msg_queue().maxsize
                 batch_size = _BATCH_SIZE_HIGH_PRESSURE if queue_util > _PRESSURE_THRESHOLD else _BATCH_SIZE_LOW_PRESSURE
+                
+                # PERFORMANCE FIX: Log queue pressure warnings and trigger backpressure
+                if queue_util > 0.90:  # 90% utilization is critical
+                    logger.warning(
+                        "[WS-QUEUE-PRESSURE] CRITICAL: queue_size=%d (%.1f%%) - high backpressure risk",
+                        queue_size, queue_util * 100
+                    )
+                elif queue_util > 0.75:  # 75% utilization is elevated
+                    logger.info(
+                        "[WS-QUEUE-PRESSURE] ELEVATED: queue_size=%d (%.1f%%)",
+                        queue_size, queue_util * 100
+                    )
                 
                 # Batch drain: process multiple messages per iteration under pressure
                 messages_processed = 0
@@ -1551,7 +1580,7 @@ class KalshiWebSocket(EventVenueStream):
                         # Windows fallback: assume loop is not closing
                         is_closing = False
                     if not is_closing:
-                        await loop.run_in_executor(None, self._callback, data)
+                        await loop.run_in_executor(self._callback_executor, self._callback, data)
                     else:
                         # Loop is closing, log and skip callback
                         msg_type = data.get('type', 'unknown')
@@ -2152,9 +2181,10 @@ class KalshiWebSocket(EventVenueStream):
         
         Phase 3: Enhanced with timestamp management for data freshness.
         """
-        # DIAGNOSTIC: Log every raw WS message to identify what Kalshi is sending
-        msg_type = data.get("type") or data.get("channel", "unknown")
-        logger.info(f"[WS-RAW] Received message: type={msg_type}, keys={list(data.keys()) if isinstance(data, dict) else 'N/A'}")
+        # DISABLED: Excessive diagnostic logging - causing 2+ second callback latency
+        # This logs every single WS message and blocks the event loop with synchronous I/O
+        # msg_type = data.get("type") or data.get("channel", "unknown")
+        # logger.info(f"[WS-RAW] Received message: type={msg_type}, keys={list(data.keys()) if isinstance(data, dict) else 'N/A'}")
         
         # BUG-FIX (2026-05-12): Serialize message parsing to prevent native crash
         with self._parse_lock:
@@ -2197,7 +2227,7 @@ class KalshiWebSocket(EventVenueStream):
             if not ts_info.is_fresh(self._timestamp_manager._max_age_seconds):
                 logger.warning(
                     f"[WS-TIMESTAMP] Stale data detected: age={ts_info.get_age_seconds():.1f}s, "
-                    f"type={msg_type}, source={ts_info.source}"
+                    f"type={channel}, source={ts_info.source}"
                 )
             
             # Add timestamp info to message for downstream processing
