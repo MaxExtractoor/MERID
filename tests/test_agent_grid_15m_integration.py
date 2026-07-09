@@ -1315,19 +1315,19 @@ def test_velocity_thresholds_2026_standards():
 
 def test_spread_thresholds_2026_standards():
     """Verify spread thresholds align with 2026 industry standards.
-    
-    2026-07-06 FIX: Updated to reflect actual profile YAML value (75c).
-    Previous test expected 15c, but profile uses 75c for DEEP_OTM_EXPENSIVE_CENTS.
-    This is intentional per 75c threshold strategy (sweet spot 10-75c range).
+
+    2026-07-08 FIX: Updated to reflect 10-50c sweet spot (binary options guidance).
+    Previous test expected 75c, but profile now uses 50c for DEEP_OTM_EXPENSIVE_CENTS.
+    This aligns with conservative binary options risk management (10-50c per clip).
     """
     import yaml
     import os
-    
+
     # Load directly from YAML to avoid singleton caching issues
     profile_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'profiles', 'kalshi_crypto_15m_v2.yaml')
     with open(profile_path, 'r', encoding='utf-8') as f:
         raw = yaml.safe_load(f)
-    
+
     # Verify market microstructure spread threshold is aligned with profile YAML
     guardrails = raw.get('guardrails', {})
     max_spread_cents = guardrails.get('max_spread_cents', 100)

@@ -24,10 +24,12 @@ from typing import Final
 MIN_KALSHI_PRICE_CENTS: Final[int] = 1
 MAX_KALSHI_PRICE_CENTS: Final[int] = 99
 DEFAULT_KALSHI_PRICE_CENTS: Final[int] = 50  # Midpoint fallback when market price unavailable
-DEEP_OTM_CHEAP_CENTS: Final[int] = 10  # 2026-07-05: Lowered to 10c to match agent_grid entry band [10, 70]. Reject only below 10c (lottery zone).
-DEEP_OTM_EXPENSIVE_CENTS: Final[int] = 50  # 2026-07-08 UPDATE: Lowered to 50c for fixed $1 exposure model
-# Rationale: With $1 total exposure cap, sweet spot is 10-50c (cheaper entries = easier loss recovery)
-# Above 50c, contracts are too expensive for $1 cap to allow multiple slots
+DEEP_OTM_CHEAP_CENTS: Final[int] = 10  # 2026-07-08: Lower bound of sweet spot (10-50c)
+DEEP_OTM_EXPENSIVE_CENTS: Final[int] = 50  # 2026-07-08: Upper bound of sweet spot (10-50c)
+# Rationale: 10-50c is the sweet spot for entry with favorable risk/reward
+# Above 50c: Too expensive for $1 fixed exposure cap, limited profit room
+# Below 10c: Lottery zone (deep OTM, also rejected)
+# Fixed $1 exposure model: cheaper entries enable easier loss recovery
 MAX_PRICE_DIFFERENCE_CENTS: Final[int] = 50  # Max realistic price jump (data error threshold)  
 
 # Mid-band - reasonable pricing
@@ -36,10 +38,9 @@ MID_BAND_HIGH_CENTS: Final[int] = 80
 
 # Minimum price for opening orders (anti-dust)
 MIN_OPEN_PRICE_CENTS: Final[int] = 2
-MAX_OPEN_PRICE_CENTS: Final[int] = 50  # 2026-07-08 UPDATE: Lowered to 50c for fixed $1 exposure model
-# Rationale: With $1 total exposure cap, cheaper contracts enable more slots (e.g., 2 contracts at 50c)
-# Easier loss recovery with cheaper entries, more room for profit
-# Aligns with sweet spot (10-50c) for optimal risk/reward in small bankroll trading
+MAX_OPEN_PRICE_CENTS: Final[int] = 50  # 2026-07-08: Upper bound of sweet spot (10-50c)
+# Rationale: Sweet spot for optimal sizing is 10c-50c (cheaper entries = easier loss recovery)
+# Fixed $1 exposure cap applies regardless of price
 
 # ============================================================================
 # PROBABILITY THRESHOLDS (0.0 - 1.0)
