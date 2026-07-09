@@ -108,9 +108,9 @@ class TestProfileAdapterAccess:
         
         # Create mock profile
         mock_profile = MagicMock(spec=Crypto15mProfile)
-        mock_profile.guardrails_min_entry_mins = 2.0
+        mock_profile.guardrails_min_entry_mins = 0.5  # Relaxed from 2.0 to allow full window trading
         mock_profile.guardrails_max_entry_mins = 15.0
-        mock_profile.agent_cutoff_minutes_before_expiry = 2.0
+        mock_profile.agent_cutoff_minutes_before_expiry = 0.5  # Relaxed from 2.0
         
         # Create mock adapter
         mock_adapter = MagicMock(spec=Crypto15mProfileAdapter)
@@ -127,9 +127,9 @@ class TestProfileAdapterAccess:
             max_entry_mins = profile.guardrails_max_entry_mins
             cutoff_mins = profile.agent_cutoff_minutes_before_expiry
             
-            assert min_entry_mins == 2.0, "Should access guardrails_min_entry_mins directly"
+            assert min_entry_mins == 0.5, "Should access guardrails_min_entry_mins directly"
             assert max_entry_mins == 15.0, "Should access guardrails_max_entry_mins directly"
-            assert cutoff_mins == 2.0, "Should access agent_cutoff_minutes_before_expiry directly"
+            assert cutoff_mins == 0.5, "Should access agent_cutoff_minutes_before_expiry directly"
     
     @patch('merid.risk.profiles.crypto_15m_profile.get_active_profile')
     def test_profile_adapter_none_handling(self, mock_get_profile):
@@ -145,9 +145,9 @@ class TestProfileAdapterAccess:
             profile = adapter._profile
             min_entry_mins = profile.guardrails_min_entry_mins
         else:
-            min_entry_mins = 2.0  # Default
+            min_entry_mins = 0.5  # Default (relaxed from 2.0)
         
-        assert min_entry_mins == 2.0, "Should use default when adapter is None"
+        assert min_entry_mins == 0.5, "Should use default when adapter is None"
 
 
 class TestFloorAppliedLogic:

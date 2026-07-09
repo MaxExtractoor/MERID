@@ -951,9 +951,10 @@ guardrails:
   # - NORMAL: > 10 minutes (allow entry)
   # - APPROACHING: 5-10 minutes (allow entry with tighter constraints)
   # - CRITICAL: 2-5 minutes (allow entry with very tight constraints)
-  # - TERMINAL: < 2 minutes (block entry)
+  # - TERMINAL: < 0.5 minutes (block entry - relaxed from 2min to allow full window trading)
+  # 2026-07-09: Relaxed min_entry_mins from 2.0 to 0.5 to allow trading throughout entire 15-minute window
   max_entry_mins: 15.0  # NORMAL: Maximum time to expiry for entry (15min - aligned with 15m market duration)
-  min_entry_mins: 2.0   # TERMINAL: Minimum time to expiry for entry (2min - aligned with TTE TERMINAL < 2min)
+  min_entry_mins: 0.5   # TERMINAL: Minimum time to expiry for entry (0.5min - relaxed to capture early window opportunities)
   # Microstructure trap prevention
   # SIMPLIFIED: Single spread rule instead of complex edge-dependent mapping
   # For edge < 2%: do not trade (avoid low edge & wide spread)

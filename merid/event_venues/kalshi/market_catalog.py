@@ -2836,10 +2836,10 @@ class KalshiMarketCatalog:
             if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_min_entry_mins'):
                 min_entry_mins = profile_adapter.profile.guardrails_min_entry_mins
             else:
-                min_entry_mins = 2.0  # Fallback to profile default
+                min_entry_mins = 0.5  # Fallback to profile default (relaxed from 2.0 to allow full window trading)
         except Exception as e:
-            logger.warning("[GET-CURRENT-15M] Failed to load min_entry_mins from profile: %s, using fallback 2.0", e)
-            min_entry_mins = 2.0  # Fallback to profile default
+            logger.warning("[GET-CURRENT-15M] Failed to load min_entry_mins from profile: %s, using fallback 0.5", e)
+            min_entry_mins = 0.5  # Fallback to profile default (relaxed from 2.0 to allow full window trading)
         
         max_entry_mins = 15.0  # Profile max_entry_mins (hardcoded as markets are 15-minute duration)
         
