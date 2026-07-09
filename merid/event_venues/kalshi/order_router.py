@@ -183,7 +183,7 @@ def check_market_microstructure(
     no_ask_cents: int,
     yes_depth: int,
     no_depth: int,
-    max_spread_cents: float = 40.0,  # 2026-07-09: Optimized to 40c aligned with 10c-50c entry range (down from 75c)
+    max_spread_cents: float = 10.0,  # 2026-07-09: Optimized to 10c based on industry research (moderate-liquidity range upper bound)
     min_depth_usd: float = 10.0,  # 2026-07-05: Lowered from 200.0 to 10.0 based on research - $50 threshold too high for weekend/low-volume liquidity
     min_yes_depth: int = 1,
     min_no_depth: int = 1

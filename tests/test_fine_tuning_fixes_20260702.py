@@ -77,18 +77,18 @@ def test_velocity_threshold_reduced():
     assert config.panic_fade_min_velocity == 0.000065, f"Expected 0.000065, got {config.panic_fade_min_velocity}"
 
 
-# Test 5: Microstructure threshold increase
-def test_microstructure_threshold_increased():
-    """Test that max_spread_cents was increased from 8c to 20c."""
+# Test 5: Microstructure threshold optimization
+def test_microstructure_threshold_optimized():
+    """Test that max_spread_cents was optimized to 10c based on 2026 research."""
     from merid.event_venues.kalshi.order_router import check_market_microstructure
     import inspect
     
     # Get the function signature
     sig = inspect.signature(check_market_microstructure)
     
-    # Verify max_spread_cents default is 20.0
+    # Verify max_spread_cents default is 10.0 (2026-07-09 optimized from 20c)
     max_spread_default = sig.parameters['max_spread_cents'].default
-    assert max_spread_default == 20.0, f"Expected 20.0, got {max_spread_default}"
+    assert max_spread_default == 10.0, f"Expected 10.0, got {max_spread_default}"
 
 
 # Test 6: Signal strength filter
@@ -141,36 +141,36 @@ def test_rate_limit_check_allows_3s_interval():
 
 
 # Test 9: Integration test - microstructure check
-def test_microstructure_check_allows_20c_spread():
-    """Test that microstructure check allows 20c spread."""
+def test_microstructure_check_allows_10c_spread():
+    """Test that microstructure check allows 10c spread (2026-07-09 optimized from 20c)."""
     from merid.event_venues.kalshi.order_router import check_market_microstructure
     
     # Test with 20c spread (should pass)
     # Need sufficient depth: 400 contracts at 50c mid = $200 depth USD
     passes, reason = check_market_microstructure(
-        yes_bid_cents=40,
-        yes_ask_cents=60,  # 20c spread
-        no_bid_cents=40,
-        no_ask_cents=60,
+        yes_bid_cents=45,
+        yes_ask_cents=55,  # 10c spread
+        no_bid_cents=45,
+        no_ask_cents=55,
         yes_depth=400,  # 400 contracts at 50c = $200 depth USD
         no_depth=400,
-        max_spread_cents=20.0
+        max_spread_cents=10.0
     )
     
-    assert passes, f"20c spread should pass: {reason}"
+    assert passes, f"10c spread should pass: {reason}"
     
-    # Test with 21c spread (should fail)
+    # Test with 11c spread (should fail)
     passes, reason = check_market_microstructure(
-        yes_bid_cents=40,
-        yes_ask_cents=61,  # 21c spread
-        no_bid_cents=40,
-        no_ask_cents=61,
+        yes_bid_cents=45,
+        yes_ask_cents=56,  # 11c spread
+        no_bid_cents=45,
+        no_ask_cents=56,
         yes_depth=400,
         no_depth=400,
-        max_spread_cents=20.0
+        max_spread_cents=10.0
     )
     
-    assert not passes, "21c spread should fail"
+    assert not passes, "11c spread should fail"
     assert "yes_spread_too_wide" in reason, f"Should fail with spread error: {reason}"
 
 

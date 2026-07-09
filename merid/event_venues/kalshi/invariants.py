@@ -379,7 +379,7 @@ def is_liquid_enough(
     bid_size: int,
     ask_size: int,
     min_size: int = 1,
-    max_spread_cents: int = 20,
+    max_spread_cents: int = 10,
 ) -> bool:
     """Check if market has sufficient liquidity for trading.
 
@@ -393,7 +393,7 @@ def is_liquid_enough(
         bid_size: Size at best bid (number of contracts)
         ask_size: Size at best ask (number of contracts)
         min_size: Minimum required size at best bid/ask (default: 1)
-        max_spread_cents: Maximum allowed spread in cents (default: 20)
+        max_spread_cents: Maximum allowed spread in cents (default: 10, 2026-07-09 optimized from 20c based on industry research)
 
     Returns:
         True if market meets liquidity criteria, False otherwise
