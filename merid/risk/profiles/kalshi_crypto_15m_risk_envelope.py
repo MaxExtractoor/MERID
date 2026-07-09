@@ -1116,6 +1116,10 @@ def compute_kalshi_crypto_15m_risk_envelope(
     # Per-asset caps are no longer rescaled to fit venue cap - this allows best edges to use available venue cap
     # Previous logic: Scale all caps down proportionally to fit exactly into venue cap
     # This was causing equal $0.20 caps per asset, defeating edge-based allocation
+    
+    # Calculate total_asset_cap for logging (even though we don't rescale)
+    total_asset_cap = sum(asset_max_notional_usd.values())
+    
     # total_asset_cap = sum(asset_max_notional_usd.values())
     # if total_asset_cap > max_total_notional_usd:
     #     scale_factor = max_total_notional_usd / total_asset_cap
