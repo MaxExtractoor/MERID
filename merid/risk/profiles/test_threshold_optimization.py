@@ -402,21 +402,23 @@ class TestThresholdOptimization:
             max_single_order_notional_usd=1.5,
             max_total_notional_usd=7.5,
             max_concurrent_trades=5,
-            asset_max_notional_usd={'BTC': 1.5, 'ETH': 1.5, 'SOL': 1.5, 'XRP': 1.5, 'DOGE': 1.5},
+            asset_max_notional_usd={'BTC': 1.0, 'ETH': 1.0, 'SOL': 1.0, 'XRP': 1.0, 'DOGE': 1.0},  # Fixed $1 per asset
             asset_depth_thresholds={'BTC': 1.0, 'ETH': 1.0, 'SOL': 1.0, 'XRP': 1.0, 'DOGE': 1.0},
-            agent_max_notional_usd=2.5,
+            agent_max_notional_usd=1.0,  # Fixed $1 exposure
             agent_max_orders_per_window=12,
             agent_max_yes_position=5,
             agent_max_no_position=5,
-            max_cycle_risk_pct=0.05,
-            # Window-based risk tracking (2026-07-06: HARD STOP)
-            guardrails_per_window_risk_pct=0.03,  # 3% per agent per 15m window
-            guardrails_total_venue_risk_pct=0.05,  # 5% total across all agents per 15m window
-            per_agent_window_limit_usd=1.5,  # 3% of $50 = $1.5
-            total_venue_window_limit_usd=2.5,  # 5% of $50 = $2.5
+            max_cycle_risk_pct=0.0,  # DISABLED - fixed $1 model
+            # Window-based risk tracking (2026-07-08: Fixed $1 exposure model)
+            guardrails_per_window_risk_pct=0.0,  # DISABLED - fixed $1 model
+            guardrails_total_venue_risk_pct=0.0,  # DISABLED - fixed $1 model
+            per_agent_window_limit_usd=1.0,  # Fixed $1 exposure
+            total_venue_window_limit_usd=1.0,  # Fixed $1 exposure
             window_start_ts=0.0,
             agent_window_exposure_usd={},
             total_window_exposure_usd=0.0,
+            agent_resting_exposure_usd={},  # Resting orders exposure
+            total_resting_exposure_usd=0.0,  # Total resting orders exposure
             daily_loss_enabled=True,
             max_daily_loss_usd=20.0,
             drawdown_halt_pct=0.20,
@@ -434,32 +436,36 @@ class TestThresholdOptimization:
             correlation_threshold=0.5,
             correlation_multiplier=1.0,
         )
-        assert envelope_small.get_per_trade_risk_pct() == 0.03  # 3% for all bankroll sizes (tiering removed)
+        # 2026-07-08: DISABLED percentage-based check - using fixed $1 exposure model
+        assert envelope_small.get_per_trade_risk_pct() == 0.0  # Disabled - fixed $1 model
         
-        # Test medium bankroll: 3% per trade (uniform, no tiering)
+        # Test medium bankroll: fixed $1 exposure (uniform, no tiering)
+        # 2026-07-08: Updated to use fixed $1 exposure model
         envelope_medium = KalshiCrypto15mRiskEnvelope(
             live_bankroll_usd=500.0,
             profile_capital_usd=1000.0,
-            max_single_order_notional_usd=10.0,
-            max_total_notional_usd=50.0,
+            max_single_order_notional_usd=1.0,  # Fixed $1 exposure
+            max_total_notional_usd=1.0,  # Fixed $1 exposure
             max_concurrent_trades=5,
-            asset_max_notional_usd={'BTC': 15.0, 'ETH': 15.0, 'SOL': 15.0, 'XRP': 15.0, 'DOGE': 15.0},
+            asset_max_notional_usd={'BTC': 1.0, 'ETH': 1.0, 'SOL': 1.0, 'XRP': 1.0, 'DOGE': 1.0},  # Fixed $1 per asset
             asset_depth_thresholds={'BTC': 1.0, 'ETH': 1.0, 'SOL': 1.0, 'XRP': 1.0, 'DOGE': 1.0},
-            agent_max_notional_usd=25.0,
+            agent_max_notional_usd=1.0,  # Fixed $1 exposure
             agent_max_orders_per_window=12,
             agent_max_yes_position=5,
             agent_max_no_position=5,
-            max_cycle_risk_pct=0.05,
-            # Window-based risk tracking (2026-07-06: HARD STOP)
-            guardrails_per_window_risk_pct=0.03,  # 3% per agent per 15m window
-            guardrails_total_venue_risk_pct=0.05,  # 5% total across all agents per 15m window
-            per_agent_window_limit_usd=15.0,  # 3% of $500 = $15
-            total_venue_window_limit_usd=25.0,  # 5% of $500 = $25
+            max_cycle_risk_pct=0.0,  # DISABLED - fixed $1 model
+            # Window-based risk tracking (2026-07-08: Fixed $1 exposure model)
+            guardrails_per_window_risk_pct=0.0,  # DISABLED - fixed $1 model
+            guardrails_total_venue_risk_pct=0.0,  # DISABLED - fixed $1 model
+            per_agent_window_limit_usd=1.0,  # Fixed $1 exposure
+            total_venue_window_limit_usd=1.0,  # Fixed $1 exposure
             window_start_ts=0.0,
             agent_window_exposure_usd={},
             total_window_exposure_usd=0.0,
+            agent_resting_exposure_usd={},  # Resting orders exposure
+            total_resting_exposure_usd=0.0,  # Total resting orders exposure
             daily_loss_enabled=True,
-            max_daily_loss_usd=200.0,
+            max_daily_loss_usd=20.0,
             drawdown_halt_pct=0.20,
             drawdown_unwind_pct=0.25,
             peak_equity_usd=500.0,
@@ -475,30 +481,34 @@ class TestThresholdOptimization:
             correlation_threshold=0.5,
             correlation_multiplier=1.0,
         )
-        assert envelope_medium.get_per_trade_risk_pct() == 0.03  # 3% for all bankroll sizes (tiering removed)
+        # 2026-07-08: DISABLED percentage-based check - using fixed $1 exposure model
+        assert envelope_medium.get_per_trade_risk_pct() == 0.0  # Disabled - fixed $1 model
         
-        # Test large bankroll: 3% per trade (uniform, no tiering)
+        # Test large bankroll: fixed $1 exposure (uniform, no tiering)
+        # 2026-07-08: Updated to use fixed $1 exposure model
         envelope_large = KalshiCrypto15mRiskEnvelope(
             live_bankroll_usd=5000.0,
             profile_capital_usd=10000.0,
-            max_single_order_notional_usd=75.0,
-            max_total_notional_usd=375.0,
+            max_single_order_notional_usd=1.0,  # Fixed $1 exposure
+            max_total_notional_usd=1.0,  # Fixed $1 exposure
             max_concurrent_trades=5,
-            asset_max_notional_usd={'BTC': 150.0, 'ETH': 150.0, 'SOL': 150.0, 'XRP': 150.0, 'DOGE': 150.0},
+            asset_max_notional_usd={'BTC': 1.0, 'ETH': 1.0, 'SOL': 1.0, 'XRP': 1.0, 'DOGE': 1.0},  # Fixed $1 per asset
             asset_depth_thresholds={'BTC': 1.0, 'ETH': 1.0, 'SOL': 1.0, 'XRP': 1.0, 'DOGE': 1.0},
-            agent_max_notional_usd=250.0,
+            agent_max_notional_usd=1.0,  # Fixed $1 exposure
             agent_max_orders_per_window=12,
             agent_max_yes_position=5,
             agent_max_no_position=5,
-            max_cycle_risk_pct=0.05,
-            # Window-based risk tracking (2026-07-06: HARD STOP)
-            guardrails_per_window_risk_pct=0.03,  # 3% per agent per 15m window
-            guardrails_total_venue_risk_pct=0.05,  # 5% total across all agents per 15m window
-            per_agent_window_limit_usd=150.0,  # 3% of $5000 = $150
-            total_venue_window_limit_usd=250.0,  # 5% of $5000 = $250
+            max_cycle_risk_pct=0.0,  # DISABLED - fixed $1 model
+            # Window-based risk tracking (2026-07-08: Fixed $1 exposure model)
+            guardrails_per_window_risk_pct=0.0,  # DISABLED - fixed $1 model
+            guardrails_total_venue_risk_pct=0.0,  # DISABLED - fixed $1 model
+            per_agent_window_limit_usd=1.0,  # Fixed $1 exposure
+            total_venue_window_limit_usd=1.0,  # Fixed $1 exposure
             window_start_ts=0.0,
             agent_window_exposure_usd={},
             total_window_exposure_usd=0.0,
+            agent_resting_exposure_usd={},  # Resting orders exposure
+            total_resting_exposure_usd=0.0,  # Total resting orders exposure
             daily_loss_enabled=True,
             max_daily_loss_usd=1000.0,
             drawdown_halt_pct=0.20,
@@ -516,7 +526,8 @@ class TestThresholdOptimization:
             correlation_threshold=0.5,
             correlation_multiplier=1.0,
         )
-        assert envelope_large.get_per_trade_risk_pct() == 0.03  # 3% for all bankroll sizes (tiering removed)
+        # 2026-07-08: DISABLED percentage-based check - using fixed $1 exposure model
+        assert envelope_large.get_per_trade_risk_pct() == 0.0  # Disabled - fixed $1 model
 
     def test_volatility_regime_edge_adjustment_defaults_aligned_with_yaml(self):
         """Test that volatility-regime edge adjustment defaults are aligned with profile YAML."""

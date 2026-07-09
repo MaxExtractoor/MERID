@@ -385,9 +385,20 @@ class KalshiCrypto15mRiskEnvelope:
         return self.per_trade_risk_multiplier
     
     def get_effective_per_trade_risk_usd(self) -> float:
-        """Get effective per-trade risk in USD (with adaptive scaling)."""
-        base_risk_usd = self.live_bankroll_usd * self.get_per_trade_risk_pct()
-        return base_risk_usd * self.per_trade_risk_multiplier
+        """Get effective per-trade risk in USD (with adaptive scaling).
+        
+        2026-07-08 UPDATE: DISABLED percentage-based calculation in favor of fixed $1 exposure model.
+        Per-trade risk is now enforced via slot-based position management:
+        - Total exposure across all positions must be ≤ $1
+        - Each contract consumes its price in USD from the $1 cap
+        - Sequential trading blocks new entries until positions exit
+        
+        Returns fixed $1 exposure cap (or override from environment variable).
+        """
+        # 2026-07-08: DISABLED percentage-based calculation - using fixed $1 exposure cap
+        import os
+        fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
+        return fixed_exposure_cap_usd
     
     def distance_to_halt_pct(self) -> float:
         """Distance from current drawdown to halt threshold."""
@@ -486,8 +497,9 @@ class KalshiCrypto15mRiskEnvelope:
         """
         # CRITICAL FIX (2026-07-08): Add assertions to validate inputs
         assert self.live_bankroll_usd > 0, "Bankroll must be positive for window limit check"
-        assert self.guardrails_per_window_risk_pct > 0, "Per-agent window limit must be positive"
-        assert self.guardrails_total_venue_risk_pct > 0, "Total venue window limit must be positive"
+        # 2026-07-08: DISABLED percentage-based assertions - using fixed $1 exposure model
+        # assert self.guardrails_per_window_risk_pct > 0, "Per-agent window limit must be positive"
+        # assert self.guardrails_total_venue_risk_pct > 0, "Total venue window limit must be positive"
         assert order_notional_usd > 0, "Order notional must be positive"
         assert agent_id, "Agent ID must be provided"
         
@@ -509,13 +521,12 @@ class KalshiCrypto15mRiskEnvelope:
             if asset:
                 current_asset_exposure = _WINDOW_TRACKING_STATE["asset_exposure_usd"].get(asset, 0.0)
         
-        # Use custom limits if provided, otherwise use profile defaults
-        per_agent_limit_pct = custom_per_agent_limit_pct or self.guardrails_per_window_risk_pct
-        total_venue_limit_pct = custom_total_venue_limit_pct or self.guardrails_total_venue_risk_pct
-        
-        # CRITICAL FIX 2026-07-08: Use peak bankroll for consistent limit calculation
-        # This prevents 5% limit from fluctuating if bankroll changes mid-window
-        per_agent_limit_usd = peak_bankroll_usd * per_agent_limit_pct
+        # 2026-07-08: DISABLED percentage-based window limits - using fixed $1 exposure model
+        # Use custom limits if provided, otherwise use fixed $1 exposure cap
+        import os
+        fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
+        per_agent_limit_usd = custom_per_agent_limit_pct if custom_per_agent_limit_pct else fixed_exposure_cap_usd
+        total_venue_limit_usd = custom_total_venue_limit_pct if custom_total_venue_limit_pct else fixed_exposure_cap_usd
         new_agent_exposure = current_agent_exposure + order_notional_usd
         new_agent_total = new_agent_exposure + current_agent_resting  # Executed + Resting
         
@@ -524,31 +535,29 @@ class KalshiCrypto15mRiskEnvelope:
             reason = (
                 f"per_agent_window_limit: agent={agent_id} "
                 f"executed=${current_agent_exposure:.2f} + resting=${current_agent_resting:.2f} + order=${order_notional_usd:.2f} "
-                f"= ${new_agent_total:.2f} > limit=${per_agent_limit_usd:.2f} "
-                f"({per_agent_limit_pct*100:.1f}%) peak_bankroll=${peak_bankroll_usd:.2f} - HARD STOP"
+                f"= ${new_agent_total:.2f} > limit=${per_agent_limit_usd:.2f} - HARD STOP"
             )
             logger.warning(f"[WINDOW-TRACKING] {reason}")
             return False, reason
         
-        # CRITICAL FIX 2026-07-08: Check 3% per-asset window limit (HARD STOP)
+        # 2026-07-08: DISABLED percentage-based per-asset window limit - using fixed $1 exposure model
         if asset:
-            per_asset_limit_pct = 0.03  # 3% per asset
-            per_asset_limit_usd = peak_bankroll_usd * per_asset_limit_pct
+            import os
+            fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
+            per_asset_limit_usd = fixed_exposure_cap_usd
             new_asset_exposure = current_asset_exposure + order_notional_usd
             
             if new_asset_exposure > per_asset_limit_usd:
                 reason = (
                     f"per_asset_window_limit: asset={asset} "
                     f"executed=${current_asset_exposure:.2f} + order=${order_notional_usd:.2f} "
-                    f"= ${new_asset_exposure:.2f} > limit=${per_asset_limit_usd:.2f} "
-                    f"({per_asset_limit_pct*100:.1f}%) peak_bankroll=${peak_bankroll_usd:.2f} - HARD STOP"
+                    f"= ${new_asset_exposure:.2f} > limit=${per_asset_limit_usd:.2f} - HARD STOP"
                 )
                 logger.warning(f"[WINDOW-TRACKING] {reason}")
                 return False, reason
         
         # Calculate total venue window limit (including resting orders)
-        # CRITICAL FIX 2026-07-08: Use peak bankroll for consistent limit calculation
-        total_venue_limit_usd = peak_bankroll_usd * total_venue_limit_pct
+        # 2026-07-08: DISABLED percentage-based total venue window limit - using fixed $1 exposure model
         new_total_exposure = current_total_exposure + order_notional_usd
         new_total_venue = new_total_exposure + current_total_resting  # Executed + Resting
         
@@ -557,8 +566,7 @@ class KalshiCrypto15mRiskEnvelope:
             reason = (
                 f"total_venue_window_limit: "
                 f"executed=${current_total_exposure:.2f} + resting=${current_total_resting:.2f} + order=${order_notional_usd:.2f} "
-                f"= ${new_total_venue:.2f} > limit=${total_venue_limit_usd:.2f} "
-                f"({total_venue_limit_pct*100:.1f}%) peak_bankroll=${peak_bankroll_usd:.2f} - HARD STOP"
+                f"= ${new_total_venue:.2f} > limit=${total_venue_limit_usd:.2f} - HARD STOP"
             )
             logger.warning(f"[WINDOW-TRACKING] {reason}")
             return False, reason
@@ -566,8 +574,7 @@ class KalshiCrypto15mRiskEnvelope:
         logger.info(
             f"[WINDOW-TRACKING] Window check OK: agent={agent_id} asset={asset or 'N/A'} "
             f"agent_exposure=${current_agent_exposure:.2f}+${order_notional_usd:.2f} <= ${per_agent_limit_usd:.2f}, "
-            f"venue_exposure=${current_total_exposure:.2f}+${order_notional_usd:.2f} <= ${total_venue_limit_usd:.2f} "
-            f"peak_bankroll=${peak_bankroll_usd:.2f}"
+            f"venue_exposure=${current_total_exposure:.2f}+${order_notional_usd:.2f} <= ${total_venue_limit_usd:.2f}"
         )
         return True, ""
     
@@ -851,10 +858,9 @@ def compute_kalshi_crypto_15m_risk_envelope(
     else:
         guardrails_total_venue_risk_pct = guardrails_total_venue_risk_pct_raw
     
+    # 2026-07-08: DISABLED percentage-based window limits - using fixed $1 exposure model
     logger.info(
-        f"[RISK-ENVELOPE] Window-based limits: "
-        f"per_agent={guardrails_per_window_risk_pct*100:.1f}%, "
-        f"total_venue={guardrails_total_venue_risk_pct*100:.1f}% (HARD STOP)"
+        "[RISK-ENVELOPE] Window-based limits: DISABLED (using fixed $1 exposure model)"
     )
 
     # Extract cycle risk cap (handle nested dict format)
@@ -928,76 +934,39 @@ def compute_kalshi_crypto_15m_risk_envelope(
             )
     
     # ── Compute Venue-Level Caps ────────────────────────────────────────────
-    # Handle nested dict format: {value: 0.05, dynamic: bankroll, description: "..."}
-    max_single_order_pct_raw = venue.get('max_single_order_pct', 0.03)  # FIXED: Default 0.03 to match YAML (3% per order)
-    if isinstance(max_single_order_pct_raw, dict):
-        max_single_order_pct = max_single_order_pct_raw.get('value', 0.03)  # FIXED: Default 0.03 to match YAML (3% per order)
-    else:
-        max_single_order_pct = max_single_order_pct_raw
-    max_single_order_notional_usd = effective_capital * max_single_order_pct
-    
-    max_total_notional_pct_raw = venue.get('max_total_notional_pct', 0.25)  # FIXED: Default 0.25 to match YAML (was 0.30)
-    if isinstance(max_total_notional_pct_raw, dict):
-        max_total_notional_pct = max_total_notional_pct_raw.get('value', 0.25)  # FIXED: Default 0.25 to match YAML (was 0.30)
-    else:
-        max_total_notional_pct = max_total_notional_pct_raw
-    max_total_notional_usd = effective_capital * max_total_notional_pct
+    # 2026-07-08: DISABLED percentage-based calculations - using fixed $1 exposure model
+    # Fixed exposure cap from environment variable or default $1.00
+    fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
+    max_single_order_notional_usd = fixed_exposure_cap_usd
+    max_total_notional_usd = fixed_exposure_cap_usd  # Total exposure cap = $1
     
     max_concurrent_trades = agent_defaults.get('max_concurrent_trades', 3)
     
+    # 2026-07-08: DISABLED percentage-based venue caps - using fixed $1 exposure model
     logger.info(
         f"[RISK-ENVELOPE] Venue caps: "
-        f"max_single_order=${max_single_order_notional_usd:.2f} ({max_single_order_pct*100:.1f}%), "
-        f"max_total=${max_total_notional_usd:.2f} ({max_total_notional_pct*100:.1f}%), "
+        f"max_single_order=${max_single_order_notional_usd:.2f}, "
+        f"max_total=${max_total_notional_usd:.2f}, "
         f"max_concurrent={max_concurrent_trades}"
     )
     
     # ── Compute Per-Asset Caps ────────────────────────────────────────────────
-    # Apply minimum floor to ensure trades are possible with small bankrolls
-    min_max_notional_usd = profile_config.get('min_max_notional_usd', 0.10)  # FIXED: Default 0.10 to match YAML (was 0.50)
+    # 2026-07-08: DISABLED percentage-based calculations - using fixed $1 exposure model
+    # All assets share the same fixed $1 exposure cap
+    fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
     
     asset_max_notional_usd = {}
     asset_depth_thresholds = {}
     for asset_symbol, asset_config in assets.items():
-        # Handle nested dict format for max_notional_pct
-        max_notional_pct_raw = asset_config.get('max_notional_pct', 0.03)
-        if isinstance(max_notional_pct_raw, dict):
-            max_notional_pct = max_notional_pct_raw.get('value', 0.03)
-        else:
-            max_notional_pct = max_notional_pct_raw
-        asset_max_notional_usd[asset_symbol] = effective_capital * max_notional_pct
+        # Fixed $1 exposure cap per asset
+        asset_max_notional_usd[asset_symbol] = fixed_exposure_cap_usd
         
-        # Apply minimum floor to enable small bankroll trading
-        if min_max_notional_usd > 0:
-            asset_max_notional_usd[asset_symbol] = max(
-                asset_max_notional_usd[asset_symbol],
-                min_max_notional_usd
-            )
+        # 2026-07-08: DISABLED percentage-based floor logic - using fixed $1 exposure model
         
-        # Log if floor was applied (risk distortion warning) - only log if significant distortion (>150% of target)
-        if min_max_notional_usd > 0 and asset_max_notional_usd[asset_symbol] > effective_capital * max_notional_pct:
-            distortion_pct = asset_max_notional_usd[asset_symbol] / (effective_capital * max_notional_pct) * 100
-            if distortion_pct > 150.0:
-                logger.warning(
-                    f"[RISK-ENVELOPE] Asset {asset_symbol}: min_floor applied - "
-                    f"target ${effective_capital * max_notional_pct:.2f} ({max_notional_pct*100:.1f}%) "
-                    f"-> actual ${asset_max_notional_usd[asset_symbol]:.2f} "
-                    f"({asset_max_notional_usd[asset_symbol]/effective_capital*100:.1f}%) "
-                    f"= {distortion_pct:.1f}% of target"
-                )
-            else:
-                logger.debug(
-                    f"[RISK-ENVELOPE] Asset {asset_symbol}: min_floor applied - "
-                    f"target ${effective_capital * max_notional_pct:.2f} ({max_notional_pct*100:.1f}%) "
-                    f"-> actual ${asset_max_notional_usd[asset_symbol]:.2f} "
-                    f"({asset_max_notional_usd[asset_symbol]/effective_capital*100:.1f}%) "
-                    f"= {distortion_pct:.1f}% of target"
-                )
-        
+        # 2026-07-08: DISABLED percentage-based asset caps - using fixed $1 exposure model
         logger.info(
             f"[RISK-ENVELOPE] Asset {asset_symbol}: "
-            f"max_notional=${asset_max_notional_usd[asset_symbol]:.2f} ({max_notional_pct*100:.1f}%)"
-            + (f" [min_floor=${min_max_notional_usd:.2f}]" if min_max_notional_usd > 0 else "")
+            f"max_notional=${asset_max_notional_usd[asset_symbol]:.2f}"
         )
         
         # Extract depth thresholds from profile YAML (single source of truth)
@@ -1012,15 +981,17 @@ def compute_kalshi_crypto_15m_risk_envelope(
         )
     
     # ── Compute Per-Agent Defaults ────────────────────────────────────────────
-    agent_max_notional_pct = agent_defaults.get('max_notional_pct', 0.03)  # FIXED: Default 0.03 to match YAML (3% per agent)
-    agent_max_notional_usd = effective_capital * agent_max_notional_pct
+    # 2026-07-08: DISABLED percentage-based calculations - using fixed $1 exposure model
+    fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
+    agent_max_notional_usd = fixed_exposure_cap_usd
     agent_max_orders_per_window = agent_defaults.get('max_orders_per_window', 20)  # FIXED: Default 20 to match YAML (was 3)
     agent_max_yes_position = agent_defaults.get('max_yes_position', 5)  # FIXED: Default 5 to match YAML
     agent_max_no_position = agent_defaults.get('max_no_position', 5)  # FIXED: Default 5 to match YAML
     
+    # 2026-07-08: DISABLED percentage-based agent defaults - using fixed $1 exposure model
     logger.info(
         f"[RISK-ENVELOPE] Agent defaults: "
-        f"max_notional=${agent_max_notional_usd:.2f} ({agent_max_notional_pct*100:.1f}%), "
+        f"max_notional=${agent_max_notional_usd:.2f}, "
         f"max_orders_per_window={agent_max_orders_per_window}, "
         f"max_yes_position={agent_max_yes_position}, "
         f"max_no_position={agent_max_no_position}"
@@ -1073,7 +1044,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
         # Log operation mode and limit
         logger.info(
             f"[RISK-ENVELOPE] Operation mode: {operation_mode}, "
-            f"Daily loss limit: {max_daily_loss_pct*100:.1f}% of capital (${effective_capital * max_daily_loss_pct:.2f})"
+            f"Daily loss limit: ${effective_capital * max_daily_loss_pct:.2f}"
         )
         
         max_daily_loss_usd = effective_capital * max_daily_loss_pct
@@ -1082,9 +1053,10 @@ def compute_kalshi_crypto_15m_risk_envelope(
         max_daily_loss_pct = None
         max_daily_loss_usd = float('inf')  # Effectively disabled
     
+    # 2026-07-08: DISABLED percentage-based guardrails - using fixed $1 exposure model
     logger.info(
         f"[RISK-ENVELOPE] Guardrails: "
-        f"per_trade_risk={per_trade_risk_pct*100:.2f}%, "
+        f"per_trade_risk=DISABLED, "
         f"drawdown_halt={drawdown_halt_pct*100:.1f}%, "
         f"drawdown_unwind={drawdown_unwind_pct*100:.1f}%, "
         f"daily_loss_enabled={daily_loss_enabled}, "
@@ -1092,7 +1064,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
     )
     if daily_loss_enabled:
         logger.info(
-            f"[RISK-ENVELOPE] Daily loss: ${max_daily_loss_usd:.2f} ({max_daily_loss_pct*100:.2f}%)"
+            f"[RISK-ENVELOPE] Daily loss: ${max_daily_loss_usd:.2f}"
         )
     else:
         logger.info(
@@ -1172,9 +1144,10 @@ def compute_kalshi_crypto_15m_risk_envelope(
         )
     
     # ── Return Envelope ────────────────────────────────────────────────────────
-    # Compute window limits in USD
-    per_agent_window_limit_usd = effective_capital * guardrails_per_window_risk_pct
-    total_venue_window_limit_usd = effective_capital * guardrails_total_venue_risk_pct
+    # 2026-07-08: DISABLED percentage-based window limits - using fixed $1 exposure model
+    fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
+    per_agent_window_limit_usd = fixed_exposure_cap_usd
+    total_venue_window_limit_usd = fixed_exposure_cap_usd
     
     envelope = KalshiCrypto15mRiskEnvelope(
         live_bankroll_usd=live_bankroll_usd,
@@ -1226,20 +1199,9 @@ def compute_kalshi_crypto_15m_risk_envelope(
         f"scaled={total_asset_cap > max_total_notional_usd}"
     )
     for asset_symbol, cap in asset_max_notional_usd.items():
-        # Re-compute target for logging
-        asset_config = assets.get(asset_symbol, {})
-        max_notional_pct_raw = asset_config.get('max_notional_pct', 0.03)
-        if isinstance(max_notional_pct_raw, dict):
-            max_notional_pct = max_notional_pct_raw.get('value', 0.03)
-        else:
-            max_notional_pct = max_notional_pct_raw
-        target_usd = effective_capital * max_notional_pct
-        floor_applied = min_max_notional_usd > 0 and cap > target_usd
+        # 2026-07-08: DISABLED percentage-based snapshot - using fixed $1 exposure model
         logger.info(
             f"[RISK-ENVELOPE-SNAPSHOT] {asset_symbol}: "
-            f"target_pct={max_notional_pct*100:.1f}% "
-            f"target_usd=${target_usd:.2f} "
-            f"floor_applied={floor_applied} "
             f"final_cap=${cap:.2f}"
         )
     
