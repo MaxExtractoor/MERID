@@ -507,9 +507,9 @@ def is_market_live(
 
 def select_live_markets_by_ts(
     markets: List[Any],
+    min_minutes_to_expiry: float = 0.5,
+    max_minutes_to_expiry: float = 15.0,
     now_utc: Optional[datetime] = None,
-    min_minutes_to_expiry: float = 2.0,
-    max_minutes_to_expiry: float = 12.0,
     require_exactly_one_per_asset: bool = False,
 ) -> List[Any]:
     """
@@ -521,13 +521,13 @@ def select_live_markets_by_ts(
     - Uses open_time and close_time from Kalshi API (authoritative)
     - Market is "live" if: open_time <= now_utc < close_time
     - Market is "tradeable" if: min_minutes_to_expiry <= mte <= max_minutes_to_expiry
-    - Defaults to 2-12 minute entry window (configurable)
+    - Defaults to 0.5-15 minute entry window (configurable, relaxed from 2.0 to allow full window trading)
     
     Args:
         markets: List of market objects (CatalogMarket or EventMarket)
+        min_minutes_to_expiry: Minimum minutes to expiry (default 0.5 for entry window, relaxed from 2.0)
+        max_minutes_to_expiry: Maximum minutes to expiry (default 15.0 for entry window)
         now_utc: Current time in UTC (defaults to now if None)
-        min_minutes_to_expiry: Minimum minutes to expiry (default 2.0 for entry window)
-        max_minutes_to_expiry: Maximum minutes to expiry (default 12.0 for entry window)
         require_exactly_one_per_asset: If True, raise error if >1 live market per asset
     
     Returns:
@@ -539,11 +539,11 @@ def select_live_markets_by_ts(
     # CRITICAL FIX: Validate min/max parameters are reasonable
     if min_minutes_to_expiry < 0 or max_minutes_to_expiry < 0:
         logger.warning(
-            "[SELECT-LIVE] Invalid min=%s max=%s - using defaults 2.0/12.0",
+            "[SELECT-LIVE] Invalid min=%s max=%s - using defaults 2.0/15.0",
             min_minutes_to_expiry, max_minutes_to_expiry
         )
         min_minutes_to_expiry = 2.0
-        max_minutes_to_expiry = 12.0
+        max_minutes_to_expiry = 15.0
     if min_minutes_to_expiry > max_minutes_to_expiry:
         logger.warning(
             "[SELECT-LIVE] min > max (%s > %s) - swapping values",

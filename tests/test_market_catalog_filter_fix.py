@@ -42,14 +42,14 @@ class TestMarketCatalogFilterFix:
         # Test with default parameters (0.5-15 minute window)
         live_markets = select_live_markets_by_ts(markets, now_utc=now_utc)
         
-        # Should include markets at 1, 3, 10, and 15 minutes
-        assert len(live_markets) == 4, f"Expected 4 live markets, got {len(live_markets)}"
+        # Should include markets at 0.5, 1, 3, 10, and 15 minutes
+        assert len(live_markets) == 5, f"Expected 5 live markets, got {len(live_markets)}"
         market_ids = [m.market_id for m in live_markets]
+        assert "market_0min" in market_ids  # 0.5 min is now included
         assert "market_1min" in market_ids
         assert "market_3min" in market_ids
         assert "market_10min" in market_ids
         assert "market_15min" in market_ids
-        assert "market_0min" not in market_ids  # Below min
         assert "market_16min" not in market_ids  # Above max
     
     def test_select_live_markets_custom_max_15_minutes(self):
@@ -84,13 +84,13 @@ class TestMarketCatalogFilterFix:
             now_utc=now_utc
         )
         
-        # Should include markets at 1, 10, and 15 minutes (0.5 min is below min, 20 min is above max)
-        assert len(live_markets) == 3, f"Expected 3 live markets, got {len(live_markets)}"
+        # Should include markets at 0.5, 1, 10, and 15 minutes (20 min is above max)
+        assert len(live_markets) == 4, f"Expected 4 live markets, got {len(live_markets)}"
         market_ids = [m.market_id for m in live_markets]
+        assert "market_0min" in market_ids  # 0.5 min is now included
         assert "market_1min" in market_ids
         assert "market_10min" in market_ids
         assert "market_15min" in market_ids
-        assert "market_0min" not in market_ids
         assert "market_20min" not in market_ids
     
     def test_select_live_markets_keyword_argument_order(self):
