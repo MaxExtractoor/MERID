@@ -3185,6 +3185,15 @@ class LeanAgent15m:
         if best_bid > 0 and best_ask > 0:
             # Both sides available - check spread
             spread_cents = best_ask - best_bid
+            
+            # 2026-07-09: Coarse filter check (40c) - first gate to reject pathological spreads
+            # This prevents wide spreads (40c-90c) from even being considered
+            coarse_filter_threshold = 40  # Aligned with guardrails.max_spread_cents
+            if spread_cents > coarse_filter_threshold:
+                logger.warning("[MARKET-VALIDATION] asset=%s ticker=%s spread exceeds coarse filter=%dc (spread=%dc)",
+                               self.config.name, ticker, coarse_filter_threshold, spread_cents)
+                return False
+            
             # INDUSTRY ALIGNMENT: Convert spread to basis points for regime-aware validation
             # Use mid price as reference for bp calculation
             mid_price_cents = (best_bid + best_ask) / 2
@@ -5315,93 +5324,17 @@ class LeanAgent15m:
             
             logger.info("[CANDIDATE-GENERATED] asset=%s side=%s", self.config.name, signal["side"])
             
-            # CRITICAL FIX: 2026-07-08 - Direct execution invocation to complete the execution chain
-            # Industry best practices: strategy → OMS/EMS → mandatory risk gate → order gateway → venue
-            # The signal-to-order conversion layer was missing, causing guardrails to be bypassed
-            # This fix routes signals through _kalshi_place_order → route_order_async → PreTradeGate.check
-            # If order submission fails, the signal is rejected (fail-safe)
-            try:
-                from merid.prediction.kalshi_tools import _kalshi_place_order
-                
-                # Extract order parameters from signal
-                ticker = market.market.market_id if hasattr(market, 'market') else market.market_id
-                side = signal["side"]  # "yes" or "no"
-                action = "buy"  # Entry orders are always buys (YES or NO)
-                price_cents = int(signal.get("price_cents", 50))
-                count = int(signal.get("count", 1))
-                agent_name = self.config.name
-                
-                # CRITICAL FIX: Extract signal metadata for order validation
-                # These fields are required by order_router's _validate_signal_metadata function
-                model_prob = signal.get("model_prob")
-                edge_pct = signal.get("edge_pct")
-                confidence = signal.get("confidence")
-                
-                logger.info(
-                    "[DIRECT-EXECUTION] asset=%s ticker=%s side=%s action=%s price_cents=%d count=%d agent_name=%s model_prob=%.2f edge_pct=%.2f%% confidence=%.2f",
-                    asset, ticker, side, action, price_cents, count, agent_name, model_prob or 0, edge_pct or 0, confidence or 0
-                )
-                
-                # Call _kalshi_place_order which routes through route_order_async and guardrails
-                # CRITICAL FIX: Pass explicit TP/SL to avoid invariant_violation:no_trade_without_exit
-                # Set default SL: 5 cents below entry (conservative)
-                stop_loss_price_cents = max(1, price_cents - 5)
-                # Set default TP: 1R multiple (fallback if dynamic TP computation fails)
-                take_profit_r_multiple = 1.0
-                
-                order_result = await _kalshi_place_order(
-                    ticker=ticker,
-                    side=side,
-                    action=action,
-                    price_cents=price_cents,
-                    count=count,
-                    agent_name=agent_name,
-                    stop_loss_price_cents=stop_loss_price_cents,
-                    take_profit_r_multiple=take_profit_r_multiple,
-                    # CRITICAL FIX: Pass signal metadata for order validation
-                    model_prob=model_prob,
-                    edge_pct=edge_pct,
-                    confidence=confidence
-                )
-                
-                # Check if order was successful
-                if order_result and order_result.success:
-                    logger.info(
-                        "[DIRECT-EXECUTION-SUCCESS] asset=%s ticker=%s order_id=%s",
-                        asset, ticker, order_result.payload.get("order_id", "unknown")
-                    )
-                    # Update session order count on successful execution
-                    self._session_order_count += 1
-                    # Update last trade time on successful execution
-                    self._last_trade_time[asset] = time.time()
-                    # Update session risk on successful execution
-                    order_notional_usd = (price_cents / 100.0) * count
-                    self._session_risk_usd += order_notional_usd
-                    logger.info(
-                        "[SESSION-STATE-UPDATED] asset=%s session_orders=%d session_risk=%.2f",
-                        asset, self._session_order_count, self._session_risk_usd
-                    )
-                    # Return candidate with execution result
-                    candidate["execution_result"] = order_result
-                    return candidate
-                else:
-                    # Order submission failed - reject signal (fail-safe)
-                    logger.warning(
-                        "[DIRECT-EXECUTION-FAILED] asset=%s ticker=%s reason=%s - SIGNAL REJECTED (fail-safe)",
-                        asset, ticker, order_result.error_message if order_result else "no result"
-                    )
-                    # CRITICAL FIX: Do NOT increment consecutive loss counter on failed submissions
-                    # Failed submissions are technical failures, not actual monetary losses
-                    # Consecutive loss tracking should only apply to executed trades with negative PnL
-                    return None
-                    
-            except Exception as e:
-                # Exception during order submission - reject signal (fail-safe)
-                logger.error(
-                    "[DIRECT-EXECUTION-ERROR] asset=%s ticker=%s error=%s - SIGNAL REJECTED (fail-safe)",
-                    asset, ticker if 'ticker' in locals() else "unknown", str(e), exc_info=True
-                )
-                return None
+            # 2026-07-09: DISABLED direct execution in individual agents
+            # Execution is now handled at grid level by global allocator
+            # This allows edge-based allocation under venue cap instead of per-asset caps
+            # The global allocator sorts candidates by edge and selects best ones under $1 cap
+            
+            # Set price_cents and count in candidate for allocator
+            candidate["price_cents"] = int(signal.get("price_cents", 50))
+            candidate["count"] = int(signal.get("count", 1))
+            
+            # Return candidate without execution (grid level will execute)
+            return candidate
             
         except Exception as e:
             logger.error("[CANDIDATE-ERROR] asset=%s error=%s", self.config.name, str(e), exc_info=True)
@@ -5516,6 +5449,7 @@ class LeanAgentGrid15m:
         # Sync from REST at the beginning of each cycle
         await self.sync_from_rest(tick)
         
+        # Phase 1: Collect all candidates from all agents (without execution)
         candidates = []
         
         for agent in self._agents:
@@ -5531,6 +5465,153 @@ class LeanAgentGrid15m:
                 logger.error("[CYCLE-ERROR] agent=%s error=%s", agent.config.name, str(e), exc_info=True)
         
         logger.info("[CYCLE-COMPLETE] tick=%d candidates=%d", tick, len(candidates))
+        
+        # Phase 2: Apply global allocator to select best edges under venue cap
+        if candidates and allow_new_entries:
+            try:
+                from merid.risk.profiles.global_allocator import GlobalAllocator, OrderCandidate, create_global_allocator_from_envelope
+                from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+                
+                # Get risk envelope for allocator configuration
+                envelope = get_kalshi_crypto_15m_risk_envelope()
+                allocator = create_global_allocator_from_envelope(envelope)
+                
+                # Convert candidates to OrderCandidate objects
+                order_candidates = []
+                for candidate in candidates:
+                    # Extract asset from agent_id (e.g., "BTC_15M" -> "BTC")
+                    asset = candidate.get('agent_id', '').replace('_15M', '').replace('_15m', '')
+                    if not asset:
+                        asset = candidate.get('asset', 'UNKNOWN')
+                    
+                    # Get current position notional for this asset
+                    current_position_notional = 0.0
+                    if self.position_cache:
+                        try:
+                            positions = self.position_cache.get_all_positions(validate_freshness=False)
+                            for pos_ticker, pos_obj in positions.items():
+                                if pos_obj and pos_obj.contracts > 0:
+                                    # Check if position belongs to this asset
+                                    if asset.lower() in pos_ticker.lower():
+                                        pos_price = pos_obj.current_price_cents if hasattr(pos_obj, 'current_price_cents') else candidate.get('price_cents', 50)
+                                        current_position_notional += (pos_obj.contracts * pos_price) / 100.0
+                        except Exception as e:
+                            logger.warning("[GLOBAL-ALLOCATOR] Failed to get current positions: %s", e)
+                    
+                    order_candidate = OrderCandidate(
+                        asset=asset,
+                        ticker=candidate.get('ticker', ''),
+                        side=candidate.get('side', 'yes'),
+                        action=candidate.get('action', 'buy'),
+                        price_cents=int(candidate.get('price_cents', 50)),
+                        count=int(candidate.get('count', 1)),
+                        edge_pct=float(candidate.get('edge_pct', 0.0)),
+                        confidence=float(candidate.get('confidence', 0.5)),
+                        model_prob=float(candidate.get('model_prob', 0.5)),
+                        agent_name=candidate.get('agent_id', asset)
+                    )
+                    order_candidates.append(order_candidate)
+                
+                # Get current positions for all assets
+                current_positions = {}
+                if self.position_cache:
+                    try:
+                        positions = self.position_cache.get_all_positions(validate_freshness=False)
+                        for pos_ticker, pos_obj in positions.items():
+                            if pos_obj and pos_obj.contracts > 0:
+                                pos_price = pos_obj.current_price_cents if hasattr(pos_obj, 'current_price_cents') else 50
+                                pos_notional = (pos_obj.contracts * pos_price) / 100.0
+                                # Determine asset from ticker
+                                for asset in ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE']:
+                                    if asset.lower() in pos_ticker.lower():
+                                        current_positions[asset] = current_positions.get(asset, 0.0) + pos_notional
+                                        break
+                    except Exception as e:
+                        logger.warning("[GLOBAL-ALLOCATOR] Failed to build current positions dict: %s", e)
+                
+                # Run global allocator
+                chosen_orders = allocator.allocate(order_candidates, current_positions)
+                
+                # Get allocation summary
+                summary = allocator.get_allocation_summary(chosen_orders)
+                logger.info(
+                    "[GLOBAL-ALLOCATOR-SUMMARY] chosen=%d, total_notional=$%.2f, utilization=%.1f%%, avg_edge=%.1f%%",
+                    summary['total_orders'], summary['total_notional'], summary['utilization_pct'], summary['avg_edge']
+                )
+                
+                # Phase 3: Execute only chosen orders
+                executed_count = 0
+                for order in chosen_orders:
+                    try:
+                        # Find the original candidate for this order
+                        original_candidate = None
+                        for candidate in candidates:
+                            if candidate.get('ticker') == order.ticker and candidate.get('side') == order.side:
+                                original_candidate = candidate
+                                break
+                        
+                        if original_candidate:
+                            # Execute via direct execution path
+                            from merid.prediction.kalshi_tools import _kalshi_place_order
+                            
+                            # Extract order parameters
+                            ticker = order.ticker
+                            side = order.side
+                            action = order.action
+                            price_cents = order.price_cents
+                            count = order.count
+                            agent_name = order.agent_name
+                            
+                            # Extract signal metadata
+                            model_prob = original_candidate.get('model_prob')
+                            edge_pct = original_candidate.get('edge_pct')
+                            confidence = original_candidate.get('confidence')
+                            
+                            logger.info(
+                                "[GLOBAL-ALLOCATOR-EXECUTE] asset=%s ticker=%s side=%s price=%dc count=%d edge=%.1f%%",
+                                order.asset, ticker, side, price_cents, count, order.edge_pct
+                            )
+                            
+                            # Set default TP/SL
+                            stop_loss_price_cents = max(1, price_cents - 5)
+                            take_profit_r_multiple = 1.0
+                            
+                            order_result = await _kalshi_place_order(
+                                ticker=ticker,
+                                side=side,
+                                action=action,
+                                price_cents=price_cents,
+                                count=count,
+                                agent_name=agent_name,
+                                stop_loss_price_cents=stop_loss_price_cents,
+                                take_profit_r_multiple=take_profit_r_multiple,
+                                model_prob=model_prob,
+                                edge_pct=edge_pct,
+                                confidence=confidence
+                            )
+                            
+                            if order_result and order_result.success:
+                                executed_count += 1
+                                logger.info("[GLOBAL-ALLOCATOR-EXECUTE-SUCCESS] asset=%s order_id=%s", order.asset, order_result.order_id)
+                            else:
+                                logger.warning("[GLOBAL-ALLOCATOR-EXECUTE-FAILED] asset=%s reason=%s", order.asset, order_result.message if order_result else "Unknown")
+                    
+                    except Exception as e:
+                        logger.error("[GLOBAL-ALLOCATOR-EXECUTE-ERROR] asset=%s error=%s", order.asset, str(e), exc_info=True)
+                
+                logger.info("[GLOBAL-ALLOCATOR-CYCLE] Executed %d/%d chosen orders", executed_count, len(chosen_orders))
+                
+                # Return only executed candidates
+                return [c for c in candidates if any(
+                    c.get('ticker') == order.ticker and c.get('side') == order.side
+                    for order in chosen_orders
+                )]
+            
+            except Exception as e:
+                logger.error("[GLOBAL-ALLOCATOR-ERROR] Failed to run global allocator: %s", str(e), exc_info=True)
+                # Fallback: return all candidates (original behavior)
+                return candidates
+        
         return candidates
     
     def get_agent(self, name: str) -> Optional[LeanAgent15m]:
