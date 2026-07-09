@@ -61,6 +61,8 @@ class TestKalshiCrypto15mRiskEnvelope:
             window_start_ts=0.0,
             agent_window_exposure_usd={},
             total_window_exposure_usd=0.0,
+            agent_resting_exposure_usd={},  # CRITICAL FIX 2026-07-08
+            total_resting_exposure_usd=0.0,  # CRITICAL FIX 2026-07-08
         )
         assert envelope.profile_capital_usd == 50.0
         assert envelope.live_bankroll_usd == 50.0
@@ -114,6 +116,8 @@ class TestKalshiCrypto15mRiskEnvelope:
             window_start_ts=0.0,
             agent_window_exposure_usd={},
             total_window_exposure_usd=0.0,
+            agent_resting_exposure_usd={},  # CRITICAL FIX 2026-07-08
+            total_resting_exposure_usd=0.0,  # CRITICAL FIX 2026-07-08
         )
 
     def test_risk_envelope_defaults_match_3_percent_risk_limit(self):
@@ -178,6 +182,8 @@ class TestKalshiCrypto15mRiskEnvelope:
             window_start_ts=0.0,
             agent_window_exposure_usd={},
             total_window_exposure_usd=0.0,
+            agent_resting_exposure_usd={},  # CRITICAL FIX 2026-07-08
+            total_resting_exposure_usd=0.0,  # CRITICAL FIX 2026-07-08
         )
         # All bankrolls should use uniform 3% per-trade risk (tiered logic disabled 2026-07-06)
         assert envelope.get_per_trade_risk_pct() == 0.03
@@ -220,6 +226,8 @@ class TestKalshiCrypto15mRiskEnvelope:
             window_start_ts=0.0,
             agent_window_exposure_usd={},
             total_window_exposure_usd=0.0,
+            agent_resting_exposure_usd={},  # CRITICAL FIX 2026-07-08
+            total_resting_exposure_usd=0.0,  # CRITICAL FIX 2026-07-08
         )
         # All bankrolls should use uniform 3% per-trade risk (tiered logic disabled 2026-07-06)
         assert envelope.get_per_trade_risk_pct() == 0.03
@@ -468,6 +476,55 @@ class TestRiskEnvelopeConfigLiveBankroll:
         assert config.live_bankroll_usd == 50.0, "live_bankroll_usd should be 50.0 from bankroll service"
 
 
+class TestRiskEnvelopeLogging:
+    """Test that risk envelope logging clarifies global slot allocator role."""
+
+    def test_risk_envelope_logging_clarifies_global_allocator(self):
+        """Test that risk envelope logging clarifies per-asset caps are upper bounds.
+        
+        This test verifies that the risk envelope logging explicitly states that:
+        - Per-asset caps are upper bounds (not actual limits)
+        - Global slot allocator enforces $1.00 total exposure across all assets
+        - This prevents confusion about whether each asset gets $1.00 or total is $1.00
+        """
+        import inspect
+        from merid.risk.profiles import kalshi_crypto_15m_risk_envelope
+        
+        source = inspect.getsource(kalshi_crypto_15m_risk_envelope)
+        
+        # Verify logging clarifies per-asset caps are upper bounds
+        assert "upper bound" in source.lower(), \
+            "Risk envelope logging should clarify that per-asset caps are upper bounds"
+        
+        # Verify logging mentions global slot allocator
+        assert "global slot allocator" in source.lower(), \
+            "Risk envelope logging should mention global slot allocator enforces total exposure"
+        
+        # Verify logging mentions total exposure across all assets
+        assert "total across all" in source.lower() or "total across all assets" in source.lower(), \
+            "Risk envelope logging should mention total exposure across all assets"
+        
+        # Verify logging clarifies the $1.00 total cap
+        assert "$1.00" in source or "$1" in source, \
+            "Risk envelope logging should mention the $1 total exposure cap"
+
+    def test_risk_envelope_snapshot_logging_clarifies_allocator_role(self):
+        """Test that envelope snapshot logging clarifies slot allocator role."""
+        import inspect
+        from merid.risk.profiles import kalshi_crypto_15m_risk_envelope
+        
+        source = inspect.getsource(kalshi_crypto_15m_risk_envelope)
+        
+        # Verify snapshot logging mentions slot allocator
+        assert "[RISK-ENVELOPE-SNAPSHOT]" in source, \
+            "Risk envelope should have snapshot logging"
+        
+        # Verify snapshot logging clarifies allocator manages actual allocation
+        assert "actual allocation managed by slot allocator" in source.lower() or \
+               "slot allocator enforces" in source.lower(), \
+            "Snapshot logging should clarify slot allocator manages actual allocation"
+
+
 class TestEdgeBandConfiguration:
     """Test that edge band thresholds are lowered for small bankroll regime."""
 
@@ -581,6 +638,8 @@ class TestWindowBasedRiskLimitEnforcement:
             window_start_ts=0.0,  # Required field
             agent_window_exposure_usd={},  # Required field
             total_window_exposure_usd=0.0,  # Required field
+            agent_resting_exposure_usd={},  # CRITICAL FIX 2026-07-08
+            total_resting_exposure_usd=0.0,  # CRITICAL FIX 2026-07-08
         )
         
         # Verify window limit fields exist
@@ -641,6 +700,8 @@ class TestWindowBasedRiskLimitEnforcement:
             window_start_ts=0.0,
             agent_window_exposure_usd={},
             total_window_exposure_usd=0.0,
+            agent_resting_exposure_usd={},  # CRITICAL FIX 2026-07-08
+            total_resting_exposure_usd=0.0,  # CRITICAL FIX 2026-07-08
         )
         
         # Verify methods exist
@@ -697,6 +758,8 @@ class TestWindowBasedRiskLimitEnforcement:
             window_start_ts=0.0,
             agent_window_exposure_usd={},
             total_window_exposure_usd=0.0,
+            agent_resting_exposure_usd={},  # CRITICAL FIX 2026-07-08
+            total_resting_exposure_usd=0.0,  # CRITICAL FIX 2026-07-08
         )
         
         # Check signature

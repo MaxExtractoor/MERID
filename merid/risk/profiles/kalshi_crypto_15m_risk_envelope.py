@@ -952,13 +952,19 @@ def compute_kalshi_crypto_15m_risk_envelope(
     
     # ── Compute Per-Asset Caps ────────────────────────────────────────────────
     # 2026-07-08: DISABLED percentage-based calculations - using fixed $1 exposure model
-    # All assets share the same fixed $1 exposure cap
+    # Global $1 exposure cap is shared across all assets (not per-asset)
+    # The global slot allocator enforces the $1 total cap across all assets
+    # Per-asset caps here are set to $1.00 as upper bounds, but actual allocation
+    # is managed by the slot allocator which enforces the $1.00 total exposure limit
     fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
     
     asset_max_notional_usd = {}
     asset_depth_thresholds = {}
+    
     for asset_symbol, asset_config in assets.items():
-        # Fixed $1 exposure cap per asset
+        # Per-asset cap equals global cap - slot allocator enforces $1.00 total across all assets
+        # This means while each asset theoretically has $1.00 upper bound, the slot allocator
+        # will only allow total exposure of $1.00 across BTC + ETH + SOL + XRP + DOGE
         asset_max_notional_usd[asset_symbol] = fixed_exposure_cap_usd
         
         # 2026-07-08: DISABLED percentage-based floor logic - using fixed $1 exposure model
@@ -966,7 +972,8 @@ def compute_kalshi_crypto_15m_risk_envelope(
         # 2026-07-08: DISABLED percentage-based asset caps - using fixed $1 exposure model
         logger.info(
             f"[RISK-ENVELOPE] Asset {asset_symbol}: "
-            f"max_notional=${asset_max_notional_usd[asset_symbol]:.2f}"
+            f"max_notional=${asset_max_notional_usd[asset_symbol]:.2f} "
+            f"(NOTE: This is an upper bound. Global slot allocator enforces ${fixed_exposure_cap_usd:.2f} TOTAL across all 5 assets)"
         )
         
         # Extract depth thresholds from profile YAML (single source of truth)
@@ -1208,6 +1215,10 @@ def compute_kalshi_crypto_15m_risk_envelope(
         f"venue_cap=${max_total_notional_usd:.2f} "
         f"sum_caps=${total_asset_cap:.2f} "
         f"scaled={total_asset_cap > max_total_notional_usd}"
+    )
+    logger.info(
+        f"[RISK-ENVELOPE-SNAPSHOT] Global slot allocator enforces ${fixed_exposure_cap_usd:.2f} total exposure across all assets "
+        f"(per-asset caps shown below are upper bounds, actual allocation managed by slot allocator)"
     )
     for asset_symbol, cap in asset_max_notional_usd.items():
         # 2026-07-08: DISABLED percentage-based snapshot - using fixed $1 exposure model
