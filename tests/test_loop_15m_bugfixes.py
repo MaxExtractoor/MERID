@@ -1370,53 +1370,79 @@ def test_exit_policy_id_fallback_in_loop_15m():
 
 
 def test_loop_15m_has_exit_policy_fallback_logic():
-    """Test that loop_15m.py contains the exit policy fallback logic."""
+    """Test that loop_15m.py contains the exit policy fallback logic.
+    
+    CRITICAL FIX: 2026-07-09 - Updated to check for global slot allocator exit order bypass
+    instead of ExitPolicyResolution, which is now handled by the slot allocator.
+    """
     with open("merid/loop_15m.py", "r", encoding="utf-8") as f:
         loop_source = f.read()
     
-    # Verify the fallback exit policy creation exists
-    assert "ExitPolicyResolution" in loop_source, \
-        "ExitPolicyResolution import not found in loop_15m.py"
+    # Verify the global slot allocator exit order bypass exists
+    assert "is_exit_order=True" in loop_source, \
+        "Exit order bypass flag not found in loop_15m.py"
     
-    # Verify the fallback pattern exists
-    assert "fallback_" in loop_source, \
-        "Fallback pattern not found in loop_15m.py"
+    # Verify the slot allocator integration exists
+    assert "get_global_slot_allocator" in loop_source, \
+        "Global slot allocator import not found in loop_15m.py"
     
-    # Verify the defensive check in OrderIntent creation
-    assert "exit_policy_id=exit_policy.policy_id if exit_policy else" in loop_source, \
-        "Defensive exit_policy_id check not found in OrderIntent creation"
-    
-    # Verify window_resolution_id fallback
-    assert "window_resolution_id=window_resolution_id if window_resolution_id else" in loop_source, \
-        "Defensive window_resolution_id check not found in OrderIntent creation"
+    # Verify the exit order bypass logic in _execute_exit_order
+    assert "EXIT_ORDER_BYPASS" in loop_source or "exit order bypass" in loop_source.lower(), \
+        "Exit order bypass logic not found in loop_15m.py"
 
 
 def test_window_exposure_recorded_on_fill_not_at_gate():
-    """Test that window exposure is recorded on fills, not at gate pass time.
+    """Test that exposure is recorded on fills, not at gate pass time.
     
     This test verifies the fix for the phantom exposure bug where exposure
     was counted at order submission instead of fill confirmation.
     
-    CRITICAL FIX (2026-07-07): Also verifies duplicate recording was removed from order_router.py
+    CRITICAL FIX: 2026-07-09 - Updated to check for global slot allocator integration
+    instead of window-based exposure tracking, which is now handled by the slot allocator.
     """
     # Verify order_gate.py does NOT record exposure at gate pass
     with open("merid/event_venues/kalshi/order_gate.py", "r", encoding="utf-8") as f:
         gate_source = f.read()
     
-    # Verify optimistic recording is removed
-    assert "record_order_execution" not in gate_source or \
-           "exposure recorded on fill" in gate_source, \
-        "order_gate.py should not record exposure at gate pass time"
+    # Verify optimistic recording is removed - check that record_order_execution is only in mark_filled
+    # and not in the check() method (gate pass time)
+    lines = gate_source.split('\n')
+    in_check_method = False
+    in_mark_filled_method = False
+    found_in_check = False
+    found_in_mark_filled = False
     
-    # Verify position_cache.py records exposure on fill
+    for i, line in enumerate(lines):
+        if 'def check(' in line:
+            in_check_method = True
+        elif in_check_method and line.strip().startswith('def '):
+            in_check_method = False
+        elif in_check_method and 'record_order_execution' in line:
+            found_in_check = True
+            
+        if 'def mark_filled(' in line:
+            in_mark_filled_method = True
+        elif in_mark_filled_method and line.strip().startswith('def '):
+            in_mark_filled_method = False
+        elif in_mark_filled_method and 'record_order_execution' in line:
+            found_in_mark_filled = True
+    
+    assert not found_in_check, \
+        "order_gate.py should not record exposure in check() method (gate pass time)"
+    assert found_in_mark_filled, \
+        "order_gate.py should record exposure in mark_filled() method (fill time)"
+    
+    # Verify position_cache.py releases slots on fill (new architecture)
     with open("merid/event_venues/kalshi/position_cache.py", "r", encoding="utf-8") as f:
         cache_source = f.read()
     
-    # Verify fill-based exposure recording exists
-    assert "Recorded window exposure on fill" in cache_source, \
-        "position_cache.py should record exposure on fill confirmation"
+    # Verify slot release on fill exists
+    assert "release_by_asset" in cache_source, \
+        "position_cache.py should release slots by asset on fill"
     
     # Verify it's in the on_fill function
+    assert "def on_fill" in cache_source, \
+        "position_cache.py should have on_fill function"
     assert "async def on_fill" in cache_source, \
         "on_fill function not found in position_cache.py"
     
