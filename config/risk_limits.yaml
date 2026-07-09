@@ -35,13 +35,14 @@ categories:
 
 # Correlated stack caps (same underlying across timeframes)
 correlated_stack:
-  # Maximum exposure to same underlying (15% for highly correlated assets)
+  # 2026-07-08: DISABLED percentage-based cap for fixed $1 exposure model
+  # Maximum exposure to same underlying is now fixed at $1 USD
   # BTC, ETH, SOL, XRP, DOGE treated as single position due to 0.8+ correlation
-  # Increased from 10% to 15% to allow 2-3 trades per asset per session
-  # Industry standard: 10-15% for correlated positions in binary options
-  max_notional_pct: 0.15
+  max_notional_pct: 0.0  # DISABLED - using fixed USD cap instead
+  # Fixed USD cap (primary source of truth)
+  max_usd: 1.0  # Max $1 total exposure (hard cap)
   # Minimum floor in USD
-  min_cap_usd: 10.0
+  min_cap_usd: 1.0
 
 # Per-asset caps (DISABLED for highly correlated crypto assets)
 # When assets have 0.8+ correlation, per-asset caps block legitimate trades

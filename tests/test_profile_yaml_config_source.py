@@ -69,18 +69,18 @@ class TestProfileYAMLConfigSource(unittest.TestCase):
             mock_profile = Mock()
             mock_profile.universe_min_volume = 5
             mock_profile.universe_min_open_interest = 1
-            mock_profile.universe_max_spread_cents = 75
+            mock_profile.universe_max_spread_cents = 75  # Liquidity threshold, not entry price
             mock_adapter.profile = mock_profile
             mock_adapter_class.return_value = mock_adapter
-            
+
             # Create universe config
             with patch('merid.event_venues.kalshi.universe.logger'):
                 config = UniverseConfig()
-                
+
                 # Verify profile values were used
                 self.assertEqual(config.min_volume, 5)
                 self.assertEqual(config.min_open_interest, 1)
-                self.assertEqual(config.max_spread_cents, 75)
+                self.assertEqual(config.max_spread_cents, 75)  # Liquidity threshold remains 75c
 
     def test_strategy_slippage_reads_from_profile(self):
         """Test that strategy slippage reads from profile YAML."""
@@ -108,7 +108,7 @@ class TestProfileYAMLConfigSource(unittest.TestCase):
         self.assertEqual(profile.guardrails_max_slippage_cents, 5)  # 5 cents
         self.assertEqual(profile.universe_min_volume, 5)
         self.assertEqual(profile.universe_min_open_interest, 1)
-        self.assertEqual(profile.universe_max_spread_cents, 75)
+        self.assertEqual(profile.universe_max_spread_cents, 75)  # Liquidity threshold, not entry price
 
 
 if __name__ == '__main__':

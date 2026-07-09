@@ -188,17 +188,23 @@ def test_spread_limit_unification():
         with open(config_path, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
         
-        # Check guardrails spread limit
+        # Check guardrails spread limit (liquidity threshold, not entry price)
+        # This remains at 75c for DOGE spreads that can exceed 50c
         guardrails = config.get('guardrails', {})
         assert guardrails.get('max_spread_cents') == 75, \
-            f"Guardrails max_spread_cents should be 75, got {guardrails.get('max_spread_cents')}"
+            f"Guardrails max_spread_cents should be 75 (liquidity), got {guardrails.get('max_spread_cents')}"
         assert guardrails.get('min_spread_gate_cents') == 75, \
             f"Guardrails min_spread_gate_cents should be 75, got {guardrails.get('min_spread_gate_cents')}"
-        
-        # Check universe spread limit
+
+        # Check universe spread limit (liquidity threshold, not entry price)
         universe = config.get('universe', {})
         assert universe.get('max_spread_cents') == 75, \
-            f"Universe max_spread_cents should be 75, got {universe.get('max_spread_cents')}"
+            f"Universe max_spread_cents should be 75 (liquidity), got {universe.get('max_spread_cents')}"
+
+        # Check guardrails max_contract_price_cents (entry price threshold)
+        # 2026-07-08: Updated to 50c for sweet spot (10-50c)
+        assert guardrails.get('max_contract_price_cents') == 50, \
+            f"Guardrails max_contract_price_cents should be 50 (entry price), got {guardrails.get('max_contract_price_cents')}"
         
         # Check momentum_fvg spread gate
         momentum_fvg = config.get('momentum_fvg', {})

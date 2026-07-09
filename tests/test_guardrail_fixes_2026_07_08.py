@@ -143,30 +143,31 @@ class TestCorrelatedStackCapDisabled(unittest.TestCase):
     def test_correlated_stack_check_executed_when_per_asset_enabled(self):
         """Test that correlated stack check executes when per_asset_enabled is True."""
         from merid.risk.unified_risk_manager import get_unified_risk_manager
-        
+
         # Get singleton risk manager
         manager = get_unified_risk_manager()
         manager.calibrate_from_balance(10000)  # $10,000 bankroll
-        
+
         # Set per_asset_enabled to True and set very low cap for testing
         manager._limits.per_asset_enabled = True
         manager._limits.correlated_stack_max_notional_pct = 0.01  # Very low cap ($100)
+        manager._limits.correlated_stack_max_usd = 1.0  # Fixed $1 cap (primary)
         manager._limits.per_trade_max_contracts = 1000  # Increase to avoid contract limit blocking
         manager._limits.per_trade_max_notional_pct = 0.50  # Increase to 50% to avoid notional limit blocking
-        
+
         # Add some correlated exposure
-        manager._correlated_exposure["BTC"] = 50.0  # $50 already exposed
-        
+        manager._correlated_exposure["BTC"] = 0.50  # $0.50 already exposed
+
         # Check order that would exceed correlated cap
-        # 10 contracts at $50 = $500, which exceeds $100 cap
+        # 1 contract at $0.60 = $0.60, which would exceed $1 cap ($0.50 + $0.60 = $1.10)
         allowed, reason = manager.check_order(
             ticker="KXBTC15M-26JUL020700-00",
-            contracts=10,  # Small enough to avoid contract limit
-            price_cents=50,
+            contracts=1,  # Small enough to avoid contract limit
+            price_cents=60,
             category="crypto",
             underlying="BTC",
         )
-        
+
         # Should reject due to correlated stack
         self.assertFalse(allowed)
         self.assertIn("CORRELATED_STACK", reason)

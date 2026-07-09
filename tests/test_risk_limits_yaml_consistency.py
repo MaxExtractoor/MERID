@@ -62,20 +62,20 @@ def test_risk_limits_yaml_total_limit_is_correct():
 
 
 def test_risk_limits_yaml_correlated_stack_limit():
-    """Test that risk_limits.yaml correlated_stack.max_notional_pct is set correctly."""
+    """Test that risk_limits.yaml correlated_stack is disabled for fixed $1 exposure model."""
     project_root = Path(__file__).parent.parent
-    
+
     # Load risk_limits.yaml
     risk_limits_path = project_root / "config" / "risk_limits.yaml"
     with open(risk_limits_path, 'r', encoding='utf-8') as f:
         risk_limits = yaml.safe_load(f)
-    
+
     # Get correlated stack limit
     correlated_stack_limit = risk_limits.get('correlated_stack', {}).get('max_notional_pct')
-    
-    # Should be 15% (same as total venue limit for highly correlated assets)
-    assert correlated_stack_limit == 0.15, \
-        f"Expected correlated_stack.max_notional_pct to be 0.15 (15%), got {correlated_stack_limit}"
+
+    # Should be 0.0 (disabled) - using fixed $1 USD cap instead
+    assert correlated_stack_limit == 0.0, \
+        f"Expected correlated_stack.max_notional_pct to be 0.0 (disabled), got {correlated_stack_limit}"
 
 
 def test_risk_limits_yaml_per_asset_disabled():
