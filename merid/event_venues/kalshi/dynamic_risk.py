@@ -743,28 +743,31 @@ class DynamicRiskEngine:
         global_cap = max(1, int(global_cap * vol_adjustment[vol_metrics.regime]))
         
         # Apply caps (min of all constraints)
+        # 2026-07-09: DISABLED per_asset_cap constraint - global allocator handles allocation at grid level
         remaining_per_market = max(0, per_market_cap - existing_exposure_contracts)
-        remaining_per_asset = max(0, per_asset_cap - asset_exposure_contracts)
+        # remaining_per_asset = max(0, per_asset_cap - asset_exposure_contracts)  # DISABLED
         remaining_global = max(0, global_cap - global_exposure_contracts)
         
-        contracts = min(contracts_from_risk, remaining_per_market, remaining_per_asset, remaining_global)
+        # contracts = min(contracts_from_risk, remaining_per_market, remaining_per_asset, remaining_global)  # DISABLED
+        contracts = min(contracts_from_risk, remaining_per_market, remaining_global)  # Without per_asset_cap
         
         # Determine limiting factor
+        # 2026-07-09: DISABLED per_asset_cap limiting factor - global allocator handles allocation
         if contracts == 0:
             if contracts_from_risk == 0:
                 limiting_factor = "risk_budget"
             elif remaining_per_market == 0:
                 limiting_factor = "per_market_cap"
-            elif remaining_per_asset == 0:
-                limiting_factor = "per_asset_cap"
+            # elif remaining_per_asset == 0:  # DISABLED
+            #     limiting_factor = "per_asset_cap"  # DISABLED
             else:
                 limiting_factor = "global_cap"
         elif contracts == contracts_from_risk:
             limiting_factor = "risk_budget"
         elif contracts == remaining_per_market:
             limiting_factor = "per_market_cap"
-        elif contracts == remaining_per_asset:
-            limiting_factor = "per_asset_cap"
+        # elif contracts == remaining_per_asset:  # DISABLED
+        #     limiting_factor = "per_asset_cap"  # DISABLED
         else:
             limiting_factor = "global_cap"
         
@@ -777,10 +780,10 @@ class DynamicRiskEngine:
         logger.info(
             "[DYNAMIC-SIZING] asset=%s entry=%dc sl=%dc bankroll=$%.2f "
             "risk_pct=%.2f%% contracts=%d (from_risk=%d) "
-            "caps=[mkt=%d asset=%d glb=%d] limit=%s vol=%s",
+            "caps=[mkt=%d glb=%d] limit=%s vol=%s",
             asset, entry_price_cents, sl_price_cents, bankroll_usd,
             actual_risk_pct * 100, contracts, contracts_from_risk,
-            per_market_cap, per_asset_cap, global_cap, limiting_factor,
+            per_market_cap, global_cap, limiting_factor,
             vol_metrics.regime.value
         )
         
@@ -790,7 +793,7 @@ class DynamicRiskEngine:
             risk_pct_of_bankroll=actual_risk_pct,
             bankroll_used=bankroll_usd,
             per_market_cap=per_market_cap,
-            per_asset_cap=per_asset_cap,
+            per_asset_cap=0,  # DISABLED - global allocator handles allocation
             global_cap=global_cap,
             limiting_factor=limiting_factor,
             computation_time_ms=computation_time_ms,
