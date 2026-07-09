@@ -506,7 +506,61 @@ def _get_max_contracts_per_asset(asset: str) -> int:
             "profile read failed, max contracts unavailable",
             e
         )
-        raise RuntimeError(f"Profile read failed: {e}") from e
+        raise RuntimeError(f"Profile read failed: {e}")
+
+
+def _get_kelly_multiplier(edge_pct: Optional[Decimal] = None) -> float:
+    """Get Kelly multiplier from profile config based on edge band.
+    
+    This reads from kalshi_crypto_15m.yaml edge_bands configuration.
+    Kelly multipliers are applied to reduce position size based on edge quality:
+    - watch band (0.5% edge): 0.0x Kelly (no trading)
+    - small band (0.5-1% edge): 0.25x Kelly (conservative)
+    - standard band (>1% edge): 0.5x Kelly (standard)
+    
+    Args:
+        edge_pct: Edge percentage (e.g., 0.02 for 2%). If None, returns 0.5x (standard).
+    
+    Returns:
+        Kelly multiplier as float (e.g., 0.25 for quarter-Kelly).
+    
+    PRODUCTION: If profile is unavailable, returns 0.5x (standard fractional Kelly).
+    """
+    if not _PROFILE_AVAILABLE:
+        logger.warning("[UNIFIED-SIZING] Profile adapter not available, using default Kelly multiplier 0.5x")
+        return 0.5  # Default to 0.5x Kelly if profile unavailable
+    
+    try:
+        if is_profile_active():
+            adapter = get_active_profile()
+            profile = adapter.profile
+            
+            # Check if edge_bands are enabled
+            if not hasattr(profile, 'edge_bands_enabled') or not profile.edge_bands_enabled:
+                return 0.5  # Default to 0.5x Kelly if edge bands disabled
+            
+            # If edge_pct is not provided, use standard band multiplier
+            if edge_pct is None:
+                return 0.5
+            
+            edge_pct_float = float(edge_pct)
+            
+            # Determine edge band based on edge_pct
+            # Watch band: 0.5% edge (0.005)
+            if edge_pct_float <= 0.005:
+                return 0.0  # No trading in watch band
+            # Small band: 0.5-1% edge (0.005-0.01)
+            elif edge_pct_float <= 0.01:
+                return 0.25  # 0.25x Kelly for small band
+            # Standard band: >1% edge (>0.01)
+            else:
+                return 0.5  # 0.5x Kelly for standard band
+        else:
+            logger.warning("[UNIFIED-SIZING] Profile not active, using default Kelly multiplier 0.5x")
+            return 0.5
+    except Exception as e:
+        logger.warning("[UNIFIED-SIZING] Failed to read Kelly multiplier from profile: %s, using default 0.5x", e)
+        return 0.5  # Default to 0.5x Kelly on error from e
 
 
 def _get_per_trade_risk_pct() -> Decimal:
@@ -807,7 +861,18 @@ def compute_order_size(
             f"{float(per_asset_risk_pct):.4f}" if per_asset_risk_pct else "None"
         )
     
-    # Step 2.5: Apply fee impact if requested
+    # Step 2.5: Apply Kelly multiplier based on edge band
+    # CRITICAL FIX (2026-07-08): Apply fractional Kelly (0.25x to 0.5x) based on edge quality
+    # This implements the user's requirement for conservative Kelly sizing
+    kelly_multiplier = _get_kelly_multiplier(edge_pct)
+    if kelly_multiplier != 1.0:
+        max_notional_usd = max_notional_usd * Decimal(str(kelly_multiplier))
+        logger.info(
+            "[KELLY-MULTIPLIER] Applied %.2fx Kelly multiplier to max_notional for asset=%s (new max_notional=%.2f)",
+            kelly_multiplier, asset, float(max_notional_usd)
+        )
+    
+    # Step 2.6: Apply fee impact if requested
     fee_adjusted = False
     if consider_fee_impact and estimated_fee_cents is not None:
         fee_usd = Decimal(estimated_fee_cents) / Decimal("100")
