@@ -26,6 +26,53 @@ from data.unified_spot_service import (
 )
 
 
+def format_price(asset: str, price: float) -> str:
+    """Format price with appropriate decimal places based on asset."""
+    asset_precision = {
+        "BTC": 2,
+        "ETH": 2,
+        "SOL": 4,
+        "XRP": 4,
+        "DOGE": 7
+    }
+    precision = asset_precision.get(asset.upper(), 4)
+    return f"{price:.{precision}f}"
+
+
+class TestFormatPrice:
+    """Test format_price function for asset-aware price formatting"""
+    
+    def test_format_price_btc(self):
+        """Test BTC price formatting (2 decimal places)"""
+        result = format_price("BTC", 67000.123456)
+        assert result == "67000.12"
+    
+    def test_format_price_eth(self):
+        """Test ETH price formatting (2 decimal places)"""
+        result = format_price("ETH", 1746.456789)
+        assert result == "1746.46"
+    
+    def test_format_price_sol(self):
+        """Test SOL price formatting (4 decimal places)"""
+        result = format_price("SOL", 78.12345678)
+        assert result == "78.1235"
+    
+    def test_format_price_xrp(self):
+        """Test XRP price formatting (4 decimal places)"""
+        result = format_price("XRP", 1.09723456)
+        assert result == "1.0972"
+    
+    def test_format_price_doge(self):
+        """Test DOGE price formatting (7 decimal places)"""
+        result = format_price("DOGE", 0.07263456789)
+        assert result == "0.0726346"
+    
+    def test_format_price_unknown_asset(self):
+        """Test unknown asset uses default 4 decimal places"""
+        result = format_price("UNKNOWN", 100.12345678)
+        assert result == "100.1235"
+
+
 class TestUnifiedSpotService:
     """Unit tests for UnifiedSpotService core functionality"""
     
