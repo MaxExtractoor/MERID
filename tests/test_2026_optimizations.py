@@ -68,7 +68,7 @@ class TestMinDecisionMinute:
         assert "DOGE" in mdm
     
     def test_min_decision_minute_values(self):
-        """Test that min_decision_minute values are reasonable."""
+        """Test that min_decision_minute values are reasonable with Phase 1A changes."""
         import yaml
         
         with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
@@ -76,13 +76,13 @@ class TestMinDecisionMinute:
         
         mdm = profile["min_decision_minute"]
         
-        # 2026-07-07: All assets set to 1 minute to capture early signals
-        # while still filtering extreme noise in the first 60 seconds
-        assert mdm["BTC"] == 1, f"BTC min_decision_minute should be 1: {mdm['BTC']}"
-        assert mdm["ETH"] == 1, f"ETH min_decision_minute should be 1: {mdm['ETH']}"
-        assert mdm["SOL"] == 1, f"SOL min_decision_minute should be 1: {mdm['SOL']}"
-        assert mdm["XRP"] == 1, f"XRP min_decision_minute should be 1: {mdm['XRP']}"
-        assert mdm["DOGE"] == 1, f"DOGE min_decision_minute should be 1: {mdm['DOGE']}"
+        # Phase 1A (2026-07-09): All assets reduced to 0.5 minutes to capture earlier signals
+        # while still filtering extreme noise in the first 30 seconds
+        assert mdm["BTC"] == 0.5, f"BTC min_decision_minute should be 0.5: {mdm['BTC']}"
+        assert mdm["ETH"] == 0.5, f"ETH min_decision_minute should be 0.5: {mdm['ETH']}"
+        assert mdm["SOL"] == 0.5, f"SOL min_decision_minute should be 0.5: {mdm['SOL']}"
+        assert mdm["XRP"] == 0.5, f"XRP min_decision_minute should be 0.5: {mdm['XRP']}"
+        assert mdm["DOGE"] == 0.5, f"DOGE min_decision_minute should be 0.5: {mdm['DOGE']}"
         
         # All values should be <= 15 (max window size)
         for asset, value in mdm.items():
