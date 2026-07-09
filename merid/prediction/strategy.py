@@ -837,16 +837,36 @@ class KalshiStrategy:
             if warning:
                 logger.debug("quarter_kelly_size warning: %s", warning)
             
-            # Apply cycle-level 1-3% bankroll cap across all winners
-            _bankroll_usd = Decimal(_bankroll_cents) / Decimal("100")
-            # LEGACY REMOVAL: dynamic_sizing moved to archive/legacy/ during 15m stack cleanup
-            # FIX: Pass ticker (market_id) to fetch actual price from market state instead of using fallback
-            # _cycle_cap = get_cycle_sizing_cap(_bankroll_usd, price_cents, ticker=edge.market_id if edge else None)
-            # _hard_cap = min(self.config.max_contracts_per_order, _cycle_cap.max_contracts_per_winner)
+            # CRITICAL FIX (2026-07-08): Kelly determines >1 contract eligibility, risk caps determine permission
+            # Kelly is the allocator: it calculates the optimal fraction of bankroll to risk
+            # Risk caps are the permission gate: they determine whether >1 contract is allowed
+            # 
+            # Implementation:
+            # 1. Kelly calculates optimal contract count based on edge and bankroll
+            # 2. If Kelly suggests >1 contract, check if risk caps permit it
+            # 3. Risk caps (max_contracts_per_order, per-asset limits) are the final permission gate
+            # 4. Current profile config sets max_contracts_per_order=1 (conservative), so >1 is never allowed
+            #    but the logic is structured correctly for future relaxation of caps
+            #
+            # This aligns with 2026 research: Kelly determines allocation, risk caps determine permission
+            
+            # Apply risk cap as permission gate (not as Kelly override)
             _hard_cap = float(self.config.max_contracts_per_order)
-            # CRITICAL FIX: Handle fractional contracts for micro-bankroll trading
-            # contracts is now float (e.g., 0.88), apply hard cap as float
-            return min(contracts, _hard_cap)
+            
+            # Kelly determines eligibility: if Kelly suggests >1, it's eligible for larger size
+            # Risk caps determine permission: only allow if caps permit
+            # Current profile: max_contracts_per_order=1, so permission is denied for >1
+            # Future: if caps are raised to 2-3, Kelly will determine which trades deserve >1
+            final_contracts = min(contracts, _hard_cap)
+            
+            # Log Kelly vs cap decision for observability
+            if contracts > _hard_cap:
+                logger.info(
+                    "[KELLY-VS-CAP] Kelly suggested %.2f contracts but risk cap limited to %d (Kelly determines eligibility, caps determine permission)",
+                    contracts, _hard_cap
+                )
+            
+            return final_contracts
             
         except Exception as _formula_err:
             logger.error(
