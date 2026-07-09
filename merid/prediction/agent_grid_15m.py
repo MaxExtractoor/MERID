@@ -5361,6 +5361,7 @@ class LeanAgentGrid15m:
         self._agents = agents
         self._running = False
         self._market_state_store = None
+        self.position_cache = None  # Position cache for global allocator
         # Initialize strip order tracking
         self._strip_order_counts: Dict[str, int] = {}
         self._current_market_ids: Dict[str, str] = {}
@@ -5374,6 +5375,12 @@ class LeanAgentGrid15m:
         for agent in self._agents:
             agent.market_state_store = market_state_store
         logger.info("[AGENT-GRID] Market state store set for %d agents", len(self._agents))
+    
+    def set_position_cache(self, position_cache: Any) -> None:
+        # Set the position cache after initialization.
+        # This is called after the position cache is available for global allocator.
+        self.position_cache = position_cache
+        logger.info("[AGENT-GRID] Position cache set for global allocator")
     
     async def start(self) -> None:
         # Start the agent grid.
