@@ -376,6 +376,27 @@ class IdempotentOrderStore:
                     rec.updated_at = _time.time()
                     self._metrics.filled += 1
 
+                    # CRITICAL FIX: 2026-07-08 - Record window exposure on fill
+                    # This ensures window exposure is tracked regardless of which path calls mark_filled
+                    # (order_router.py, reconciliation, or other paths)
+                    try:
+                        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+                        envelope = get_kalshi_crypto_15m_risk_envelope()
+                        if envelope:
+                            # Use actual filled notional for accurate exposure tracking
+                            filled_notional_usd = (filled_count * rec.price_cents) / 100.0
+                            envelope.record_order_execution(
+                                agent_id=rec.agent_id,
+                                order_notional_usd=filled_notional_usd,
+                                current_ts=_time.time()
+                            )
+                            logger.info(
+                                "[order-gate-WINDOW-RECORD] Recorded window exposure on fill: coid=%s agent=%s notional=$%.2f filled=%d price=%dc",
+                                client_order_id[:16], rec.agent_id, filled_notional_usd, filled_count, rec.price_cents
+                            )
+                    except Exception as e:
+                        logger.warning("[order-gate-WINDOW-RECORD] Failed to record window exposure: %s", e)
+
     def mark_canceled(self, client_order_id: str) -> None:
         with self._lock:
             rec = self._orders.get(client_order_id)
@@ -387,10 +408,32 @@ class IdempotentOrderStore:
                     rec.status = OrderStatus.CANCELED
                     rec.updated_at = _time.time()
                     self._metrics.canceled += 1
+                    
+                    # CRITICAL FIX (2026-07-08): Release resting order exposure on cancel
+                    # Resting exposure was recorded at placement time in check()
+                    # When order is canceled, we must release the resting exposure
+                    try:
+                        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+                        envelope = get_kalshi_crypto_15m_risk_envelope()
+                        if envelope:
+                            order_notional_usd = (rec.target_count * rec.price_cents) / 100.0
+                            envelope.release_resting_order_exposure(
+                                agent_id=rec.agent_id,
+                                order_notional_usd=order_notional_usd
+                            )
+                            logger.info(
+                                "[order-gate-WINDOW-RELEASE] Released resting exposure on cancel: coid=%s agent=%s notional=$%.2f",
+                                client_order_id[:16], rec.agent_id, order_notional_usd
+                            )
+                    except Exception as e:
+                        logger.warning("[order-gate-WINDOW-RELEASE] Failed to release resting exposure on cancel: %s", e)
 
     def mark_rejected(self, client_order_id: str, reason: str = "") -> None:
         # CRITICAL FIX (2026-07-07): Window exposure no longer recorded optimistically
         # No refund needed since exposure is only recorded on fills
+        # CRITICAL FIX (2026-07-08): Release resting order exposure on reject
+        # Resting exposure was recorded at placement time in check()
+        # When order is rejected, we must release the resting exposure
         with self._lock:
             rec = self._orders.get(client_order_id)
             if rec:
@@ -400,6 +443,23 @@ class IdempotentOrderStore:
                 if rec.status in (OrderStatus.PENDING, OrderStatus.SUBMITTED):
                     rec.status = OrderStatus.REJECTED
                     rec.updated_at = _time.time()
+                    
+                    # Release resting exposure on reject
+                    try:
+                        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+                        envelope = get_kalshi_crypto_15m_risk_envelope()
+                        if envelope:
+                            order_notional_usd = (rec.target_count * rec.price_cents) / 100.0
+                            envelope.release_resting_order_exposure(
+                                agent_id=rec.agent_id,
+                                order_notional_usd=order_notional_usd
+                            )
+                            logger.info(
+                                "[order-gate-WINDOW-RELEASE] Released resting exposure on reject: coid=%s agent=%s notional=$%.2f reason=%s",
+                                client_order_id[:16], rec.agent_id, order_notional_usd, reason
+                            )
+                    except Exception as e:
+                        logger.warning("[order-gate-WINDOW-RELEASE] Failed to release resting exposure on reject: %s", e)
 
     # ── Query helpers ────────────────────────────────────────────────────
 
@@ -922,13 +982,16 @@ class PreTradeGate:
                     agent_id, order_notional_usd, target_count, price_cents, is_exit_order
                 )
                 
-                # SEV-0 FIX: Use same 3% limit for both entry and exit orders
-                # Exit orders should be rare (trailing stop, ratchet, 99c exit) and sequential
-                # This prevents abuse where exit orders could accumulate exposure beyond 3%
+                # CRITICAL FIX: 2026-07-08 - Use custom window limits for exit orders
+                # Exit orders (trailing stop, ratchet, 99c exit) must be allowed to close positions
+                # even when agent is at 3% window limit. Use 100% limit for exit orders.
+                # Entry orders use 3% limit (HARD STOP).
+                custom_per_agent_limit_pct = 1.0 if is_exit_order else None  # 100% for exit, 3% for entry
                 window_allowed, window_reason = envelope.check_window_limit(
                     agent_id=agent_id,
                     order_notional_usd=order_notional_usd,
-                    current_ts=time.time()
+                    current_ts=time.time(),
+                    custom_per_agent_limit_pct=custom_per_agent_limit_pct
                 )
                 
                 logger.info(
@@ -954,13 +1017,28 @@ class PreTradeGate:
                         reason=f"window_limit:{window_reason}",
                     )
                 else:
-                    # CRITICAL FIX (2026-07-07): Window exposure is now recorded on fills, not at gate pass
-                    # This prevents phantom exposure accumulation from unfilled orders.
-                    # Exposure tracking moved to position_cache.on_fill() for accuracy.
-                    logger.info(
-                        "[GATE-WINDOW-CHECK] Window limit passed: agent=%s notional=$%.2f (exposure recorded on fill)",
-                        agent_id, order_notional_usd
-                    )
+                    # CRITICAL FIX (2026-07-08): Record resting order exposure at placement time
+                    # This prevents multiple resting orders from exceeding window limits.
+                    # Resting exposure is released when order fills, cancels, or expires.
+                    try:
+                        envelope.record_resting_order_placement(
+                            agent_id=agent_id,
+                            order_notional_usd=order_notional_usd
+                        )
+                        logger.info(
+                            "[GATE-WINDOW-CHECK] Window limit passed: agent=%s notional=$%.2f (resting exposure recorded)",
+                            agent_id, order_notional_usd
+                        )
+                    except Exception as e:
+                        logger.error(
+                            "[GATE-ALERT] Failed to record resting order exposure: %s - rejecting order for safety",
+                            str(e)
+                        )
+                        return GateVerdict(
+                            allowed=False,
+                            client_order_id=coid,
+                            reason=f"resting_exposure_record_failed:{str(e)[:50]}",
+                        )
             else:
                 self._store._metrics.blocked_window_limit += 1
                 # SEV-1 FIX: Track envelope failure count for alerting
@@ -996,7 +1074,6 @@ class PreTradeGate:
             self._store._metrics.blocked_window_limit += 1
             # SEV-1 FIX: Track envelope failure count for alerting
             with _envelope_failure_lock:
-                global _envelope_failure_count, _envelope_failure_window_start
                 now = _time.time()
                 if now - _envelope_failure_window_start > 60:
                     _envelope_failure_count = 1

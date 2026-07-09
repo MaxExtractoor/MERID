@@ -5347,6 +5347,36 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         except Exception as e:
             logger.debug(f"Gate mark submitted/filled failed: {e}")
 
+        # CRITICAL FIX: 2026-07-08 - Record window exposure after successful venue submission
+        # This is the ONLY place where window exposure is tracked for live orders
+        # Without this, the 3% per agent / 5% total per 15m window limits are NEVER enforced
+        try:
+            from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+            envelope = get_kalshi_crypto_15m_risk_envelope()
+            if envelope:
+                # Use actual filled notional (not requested) for accurate exposure tracking
+                filled_notional_usd = (filled_count * fill_price_cents) / 100.0
+                agent_id = intent.agent_id or "unknown"
+                
+                # CRITICAL FIX (2026-07-08): Resting exposure release moved to position_cache.on_fill()
+                # Resting exposure is now released ONLY in position_cache.on_fill() to prevent double-release
+                # Previous release here caused double-release when position_cache.on_fill() also released
+                # position_cache.on_fill() is the canonical source for resting exposure release on fills
+                # This prevents incorrect exposure tracking for partial fills and ensures consistency
+                
+                # Record execution exposure (actual filled notional)
+                envelope.record_order_execution(
+                    agent_id=agent_id,
+                    order_notional_usd=filled_notional_usd,
+                    current_ts=_time.time()
+                )
+                logger.info(
+                    "[order-router-WINDOW-RECORD] Recorded execution exposure: agent=%s notional=$%.2f filled=%d price=%dc ticker=%s",
+                    agent_id, filled_notional_usd, filled_count, fill_price_cents, intent.ticker
+                )
+        except Exception as e:
+            logger.warning("[order-router-WINDOW-RECORD] Failed to record window exposure: %s", e)
+
         # DRY-RUN-TRACE: Fill reconciliation
         _partial = filled_count < requested_count and filled_count > 0
         _fill_pct = (filled_count / requested_count * 100) if requested_count > 0 else 0.0

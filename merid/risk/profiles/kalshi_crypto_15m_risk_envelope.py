@@ -30,6 +30,8 @@ _WINDOW_TRACKING_STATE: Dict[str, Any] = {
     "window_start_ts": 0.0,
     "agent_exposure_usd": {},   # agent_id -> cumulative executed notional this window
     "total_exposure_usd": 0.0,  # cumulative executed notional across all agents this window
+    "agent_resting_exposure_usd": {},  # agent_id -> cumulative resting order notional this window (CRITICAL FIX 2026-07-08)
+    "total_resting_exposure_usd": 0.0,  # cumulative resting order notional across all agents this window (CRITICAL FIX 2026-07-08)
 }
 
 
@@ -44,6 +46,8 @@ def _reset_shared_window_state_for_testing() -> None:
         _WINDOW_TRACKING_STATE["window_start_ts"] = 0.0
         _WINDOW_TRACKING_STATE["agent_exposure_usd"] = {}
         _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
+        _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"] = {}
+        _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = 0.0
 
 
 def force_reset_window_exposure(envelope=None, reason="startup") -> None:
@@ -74,6 +78,8 @@ def force_reset_window_exposure(envelope=None, reason="startup") -> None:
         _WINDOW_TRACKING_STATE["window_start_ts"] = _window_bucket_start(current_ts)
         _WINDOW_TRACKING_STATE["agent_exposure_usd"] = {}
         _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
+        _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"] = {}
+        _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = 0.0
         venue_total = _WINDOW_TRACKING_STATE["total_exposure_usd"]
     
     # Sync instance fields if envelope provided
@@ -104,16 +110,20 @@ def _roll_window_if_needed_locked(current_ts: float) -> None:
         old_window_start = _WINDOW_TRACKING_STATE["window_start_ts"]
         old_total_exposure = _WINDOW_TRACKING_STATE["total_exposure_usd"]
         old_agent_count = len(_WINDOW_TRACKING_STATE["agent_exposure_usd"])
+        old_resting_exposure = _WINDOW_TRACKING_STATE["total_resting_exposure_usd"]
         
         _WINDOW_TRACKING_STATE["window_start_ts"] = bucket_start
         _WINDOW_TRACKING_STATE["agent_exposure_usd"] = {}
         _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
+        _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"] = {}
+        _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = 0.0
         
         logger.info(
             f"[WINDOW-TRACKING] New 15m window started at ts={bucket_start:.0f} - "
             f"old_window_start={old_window_start:.0f} "
             f"old_total_exposure=${old_total_exposure:.2f} "
             f"old_agent_count={old_agent_count} "
+            f"old_resting_exposure=${old_resting_exposure:.2f} "
             f"exposure_reset"
         )
 
@@ -209,6 +219,8 @@ class KalshiCrypto15mRiskEnvelope:
     window_start_ts: float  # Timestamp when current 15m window started
     agent_window_exposure_usd: Dict[str, float]  # Cumulative exposure per agent this window
     total_window_exposure_usd: float  # Cumulative exposure across all agents this window
+    agent_resting_exposure_usd: Dict[str, float]  # Cumulative resting order exposure per agent this window (CRITICAL FIX 2026-07-08)
+    total_resting_exposure_usd: float  # Cumulative resting order exposure across all agents this window (CRITICAL FIX 2026-07-08)
     
     # ── Guardrails ───────────────────────────────────────────────────────────
     daily_loss_enabled: bool
@@ -412,9 +424,13 @@ class KalshiCrypto15mRiskEnvelope:
             _WINDOW_TRACKING_STATE["window_start_ts"] = _window_bucket_start(current_ts)
             _WINDOW_TRACKING_STATE["agent_exposure_usd"] = {}
             _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
+            _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"] = {}
+            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = 0.0
             self.window_start_ts = _WINDOW_TRACKING_STATE["window_start_ts"]
         self.agent_window_exposure_usd = {}
         self.total_window_exposure_usd = 0.0
+        self.agent_resting_exposure_usd = {}
+        self.total_resting_exposure_usd = 0.0
         logger.info(
             f"[WINDOW-TRACKING] Reset 15m window tracking at ts={current_ts:.0f}"
         )
@@ -451,40 +467,46 @@ class KalshiCrypto15mRiskEnvelope:
         # CRITICAL (2026-07-06): Read cumulative exposure from module-level shared
         # state. Envelope instances are recomputed on every call, so instance
         # fields always start at zero - only the shared state carries the truth.
+        # CRITICAL FIX (2026-07-08): Include resting order exposure to prevent
+        # multiple resting orders from exceeding window limits when they execute.
         with _WINDOW_TRACKING_LOCK:
             _roll_window_if_needed_locked(current_ts)
             current_agent_exposure = _WINDOW_TRACKING_STATE["agent_exposure_usd"].get(agent_id, 0.0)
             current_total_exposure = _WINDOW_TRACKING_STATE["total_exposure_usd"]
+            current_agent_resting = _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"].get(agent_id, 0.0)
+            current_total_resting = _WINDOW_TRACKING_STATE["total_resting_exposure_usd"]
         
         # Use custom limits if provided, otherwise use profile defaults
         per_agent_limit_pct = custom_per_agent_limit_pct or self.guardrails_per_window_risk_pct
         total_venue_limit_pct = custom_total_venue_limit_pct or self.guardrails_total_venue_risk_pct
         
-        # Calculate per-agent window limit
+        # Calculate per-agent window limit (including resting orders)
         per_agent_limit_usd = self.live_bankroll_usd * per_agent_limit_pct
         new_agent_exposure = current_agent_exposure + order_notional_usd
+        new_agent_total = new_agent_exposure + current_agent_resting  # Executed + Resting
         
-        # Check per-agent window limit (HARD STOP)
-        if new_agent_exposure > per_agent_limit_usd:
+        # Check per-agent window limit (HARD STOP) - includes resting orders
+        if new_agent_total > per_agent_limit_usd:
             reason = (
                 f"per_agent_window_limit: agent={agent_id} "
-                f"current=${current_agent_exposure:.2f} + order=${order_notional_usd:.2f} "
-                f"= ${new_agent_exposure:.2f} > limit=${per_agent_limit_usd:.2f} "
+                f"executed=${current_agent_exposure:.2f} + resting=${current_agent_resting:.2f} + order=${order_notional_usd:.2f} "
+                f"= ${new_agent_total:.2f} > limit=${per_agent_limit_usd:.2f} "
                 f"({per_agent_limit_pct*100:.1f}%) - HARD STOP"
             )
             logger.warning(f"[WINDOW-TRACKING] {reason}")
             return False, reason
         
-        # Calculate total venue window limit
+        # Calculate total venue window limit (including resting orders)
         total_venue_limit_usd = self.live_bankroll_usd * total_venue_limit_pct
         new_total_exposure = current_total_exposure + order_notional_usd
+        new_total_venue = new_total_exposure + current_total_resting  # Executed + Resting
         
-        # Check total venue window limit (HARD STOP)
-        if new_total_exposure > total_venue_limit_usd:
+        # Check total venue window limit (HARD STOP) - includes resting orders
+        if new_total_venue > total_venue_limit_usd:
             reason = (
                 f"total_venue_window_limit: "
-                f"current=${current_total_exposure:.2f} + order=${order_notional_usd:.2f} "
-                f"= ${new_total_exposure:.2f} > limit=${total_venue_limit_usd:.2f} "
+                f"executed=${current_total_exposure:.2f} + resting=${current_total_resting:.2f} + order=${order_notional_usd:.2f} "
+                f"= ${new_total_venue:.2f} > limit=${total_venue_limit_usd:.2f} "
                 f"({total_venue_limit_pct*100:.1f}%) - HARD STOP"
             )
             logger.warning(f"[WINDOW-TRACKING] {reason}")
@@ -609,6 +631,77 @@ class KalshiCrypto15mRiskEnvelope:
             f"notional=${order_notional_usd:.2f} "
             f"agent_total=${current_agent_exposure:.2f}→${new_agent_exposure:.2f} "
             f"venue_total=${venue_total:.2f}"
+        )
+    
+    def record_resting_order_placement(
+        self,
+        agent_id: str,
+        order_notional_usd: float
+    ) -> None:
+        """Record resting order placement (adds to resting exposure).
+        
+        CRITICAL FIX (2026-07-08): This prevents multiple resting orders from
+        exceeding window limits. Resting orders are counted in window exposure
+        at placement time, then released when they fill, cancel, or expire.
+        
+        Args:
+            agent_id: Agent identifier
+            order_notional_usd: Notional value of resting order in USD
+        """
+        import time as _time_mod
+        with _WINDOW_TRACKING_LOCK:
+            _roll_window_if_needed_locked(_time_mod.time())
+            _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"][agent_id] = (
+                _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"].get(agent_id, 0.0) + order_notional_usd
+            )
+            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] += order_notional_usd
+            agent_total = _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"][agent_id]
+            venue_total = _WINDOW_TRACKING_STATE["total_resting_exposure_usd"]
+        
+        # Sync instance fields for observability/snapshots
+        self.agent_resting_exposure_usd[agent_id] = agent_total
+        self.total_resting_exposure_usd = venue_total
+        
+        logger.info(
+            f"[WINDOW-TRACKING] Recorded resting order: agent={agent_id} "
+            f"notional=${order_notional_usd:.2f} "
+            f"agent_resting_total=${agent_total:.2f} "
+            f"venue_resting_total=${venue_total:.2f}"
+        )
+    
+    def release_resting_order_exposure(
+        self,
+        agent_id: str,
+        order_notional_usd: float
+    ) -> None:
+        """Release resting order exposure (when order fills, cancels, or expires).
+        
+        CRITICAL FIX (2026-07-08): This reverses the resting exposure recording
+        done at placement time. Called when resting orders fill, are canceled,
+        or expire. Without this, resting exposure accumulates indefinitely.
+        
+        Args:
+            agent_id: Agent identifier
+            order_notional_usd: Notional value to release in USD
+        """
+        with _WINDOW_TRACKING_LOCK:
+            current_agent_resting = _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"].get(agent_id, 0.0)
+            new_agent_resting = max(0.0, current_agent_resting - order_notional_usd)
+            _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"][agent_id] = new_agent_resting
+            _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = max(
+                0.0, _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] - order_notional_usd
+            )
+            venue_total = _WINDOW_TRACKING_STATE["total_resting_exposure_usd"]
+        
+        # Sync instance fields for observability/snapshots
+        self.agent_resting_exposure_usd[agent_id] = new_agent_resting
+        self.total_resting_exposure_usd = venue_total
+        
+        logger.info(
+            f"[WINDOW-TRACKING] Released resting order: agent={agent_id} "
+            f"notional=${order_notional_usd:.2f} "
+            f"agent_resting_total=${current_agent_resting:.2f}→${new_agent_resting:.2f} "
+            f"venue_resting_total=${venue_total:.2f}"
         )
 
 
@@ -934,12 +1027,16 @@ def compute_kalshi_crypto_15m_risk_envelope(
     # instances reflect the cumulative exposure already recorded this window.
     # (Envelopes are recomputed per call - instance-local init of {} / 0.0
     # made the 3%/5% window HARD STOPs a no-op.)
+    # CRITICAL FIX (2026-07-08): Also seed resting order exposure to prevent
+    # multiple resting orders from exceeding window limits.
     import time
     with _WINDOW_TRACKING_LOCK:
         _roll_window_if_needed_locked(time.time())
         window_start_ts = _WINDOW_TRACKING_STATE["window_start_ts"]
         agent_window_exposure_usd = dict(_WINDOW_TRACKING_STATE["agent_exposure_usd"])
         total_window_exposure_usd = _WINDOW_TRACKING_STATE["total_exposure_usd"]
+        agent_resting_exposure_usd = dict(_WINDOW_TRACKING_STATE["agent_resting_exposure_usd"])
+        total_resting_exposure_usd = _WINDOW_TRACKING_STATE["total_resting_exposure_usd"]
     
     # ── Initialize Adaptive Risk ───────────────────────────────────────────────
     per_trade_risk_multiplier = 1.0
@@ -1017,6 +1114,8 @@ def compute_kalshi_crypto_15m_risk_envelope(
         window_start_ts=window_start_ts,
         agent_window_exposure_usd=agent_window_exposure_usd,
         total_window_exposure_usd=total_window_exposure_usd,
+        agent_resting_exposure_usd=agent_resting_exposure_usd,
+        total_resting_exposure_usd=total_resting_exposure_usd,
         daily_loss_enabled=daily_loss_enabled,
         max_daily_loss_usd=max_daily_loss_usd,
         drawdown_halt_pct=drawdown_halt_pct,
