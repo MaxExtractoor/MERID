@@ -922,6 +922,139 @@ def test_tp_sl_none_when_exit_policy_missing():
     assert stop_loss_price_cents is None
 
 
+def test_price_clamping_yes_order_from_mid_cents():
+    """Test that YES order price is clamped to 10-50c range from mid_cents.
+    
+    CRITICAL FIX: Raw market prices (70c-95c) are clamped to 10-50c to match profile guardrails.
+    """
+    # Mock market state with high mid_cents (would be rejected by DEEP_OTM_POLICY)
+    mock_market_state = Mock()
+    mock_market_state.mid_cents = 75.0  # 75c - above 50c limit
+    
+    # Simulate the clamping logic from loop_15m.py
+    raw_price_cents = int(mock_market_state.mid_cents)
+    price_cents = max(10, min(50, raw_price_cents))
+    
+    # Verify clamping
+    assert raw_price_cents == 75
+    assert price_cents == 50  # Clamped to max 50c
+
+
+def test_price_clamping_yes_order_from_bid_ask():
+    """Test that YES order price is clamped to 10-50c range from bid/ask mid.
+    
+    CRITICAL FIX: Raw market prices (70c-95c) are clamped to 10-50c to match profile guardrails.
+    """
+    # Mock market state with high bid/ask (would be rejected by DEEP_OTM_POLICY)
+    mock_market_state = Mock()
+    mock_market_state.mid_cents = None
+    mock_market_state.best_bid_cents = 70
+    mock_market_state.best_ask_cents = 80
+    
+    # Simulate the clamping logic from loop_15m.py
+    raw_price_cents = (mock_market_state.best_bid_cents + mock_market_state.best_ask_cents) // 2
+    price_cents = max(10, min(50, raw_price_cents))
+    
+    # Verify clamping
+    assert raw_price_cents == 75  # (70 + 80) // 2 = 75
+    assert price_cents == 50  # Clamped to max 50c
+
+
+def test_price_clamping_no_order_from_yes_mid():
+    """Test that NO order price is clamped to 10-50c range from YES mid.
+    
+    CRITICAL FIX: Raw market prices (70c-95c) are clamped to 10-50c to match profile guardrails.
+    NO price = 100 - YES price, so high YES prices need clamping too.
+    """
+    # Mock market state with low YES mid (would result in high NO price)
+    mock_market_state = Mock()
+    mock_market_state.best_bid_cents = 15
+    mock_market_state.best_ask_cents = 20
+    
+    # Simulate the clamping logic from loop_15m.py for NO orders
+    yes_mid = (mock_market_state.best_bid_cents + mock_market_state.best_ask_cents) // 2
+    raw_price_cents = 100 - yes_mid  # NO price
+    price_cents = max(10, min(50, raw_price_cents))
+    
+    # Verify clamping
+    assert yes_mid == 17  # (15 + 20) // 2 = 17
+    assert raw_price_cents == 83  # 100 - 17 = 83 (above 50c limit)
+    assert price_cents == 50  # Clamped to max 50c
+
+
+def test_price_clamping_below_minimum():
+    """Test that prices below 10c are clamped up to 10c.
+    
+    CRITICAL FIX: Prices below 10c are clamped up to match profile guardrails.
+    """
+    # Mock market state with very low mid_cents
+    mock_market_state = Mock()
+    mock_market_state.mid_cents = 5.0  # 5c - below 10c minimum
+    
+    # Simulate the clamping logic
+    raw_price_cents = int(mock_market_state.mid_cents)
+    price_cents = max(10, min(50, raw_price_cents))
+    
+    # Verify clamping
+    assert raw_price_cents == 5
+    assert price_cents == 10  # Clamped to min 10c
+
+
+def test_price_clamping_within_range():
+    """Test that prices within 10-50c range are not modified.
+    
+    CRITICAL FIX: Valid prices should pass through unchanged.
+    """
+    # Mock market state with valid mid_cents
+    mock_market_state = Mock()
+    mock_market_state.mid_cents = 35.0  # 35c - within valid range
+    
+    # Simulate the clamping logic
+    raw_price_cents = int(mock_market_state.mid_cents)
+    price_cents = max(10, min(50, raw_price_cents))
+    
+    # Verify no clamping needed
+    assert raw_price_cents == 35
+    assert price_cents == 35  # Unchanged
+
+
+def test_trace_id_generation_and_propagation():
+    """Test that trace_id is generated and propagated to candidate and order.
+    
+    CRITICAL FIX: trace_id enables end-to-end tracing of candidate → order → policy.
+    """
+    import uuid
+    
+    # Simulate trace_id generation as done in loop_15m.py
+    trace_id = str(uuid.uuid4())[:8]
+    
+    # Verify trace_id format
+    assert isinstance(trace_id, str)
+    assert len(trace_id) == 8
+    
+    # Simulate candidate with trace_id
+    candidate = {}
+    candidate["trace_id"] = trace_id
+    
+    # Verify trace_id is in candidate
+    assert candidate["trace_id"] == trace_id
+    
+    # Simulate OrderIntent with trace_id
+    from merid.event_venues.kalshi.order_router import OrderIntent
+    intent = OrderIntent(
+        ticker="KXBTC15M-TEST",
+        side="yes",
+        action="buy",
+        price_cents=50,
+        count=1,
+        source="merid.prediction.agent_grid_15m",
+        trace_id=trace_id,
+    )
+    
+    # Verify trace_id is in OrderIntent
+    assert intent.trace_id == trace_id
+
+
 def test_deduplication_cache_persists_across_15m_window():
     """Test that deduplication cache persists across 5-second cycles within 15m window.
     

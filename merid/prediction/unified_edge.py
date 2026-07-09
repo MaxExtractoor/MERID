@@ -411,15 +411,15 @@ class UnifiedEdgeComputer:
         
         # Check 2.76: Maximum contract price ceiling (low-profit trap prevention)
         # 2026 research: minimum 80% payout recommended (55¢ for $1 payout)
-        # Set to 70¢ for 43% minimum payout, preventing 97¢ trades with only 3% profit
-        max_price_cents = 70  # Default fallback (70 cents / $0.70)
+        # Set to 50¢ to match profile guardrails_max_contract_price_cents (10-50c sweet spot)
+        max_price_cents = 50  # Default fallback (50 cents / $0.50) - aligned with profile
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
             profile_adapter = get_active_profile()
             if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_max_contract_price_cents'):
                 max_price_cents = profile_adapter.profile.guardrails_max_contract_price_cents
         except Exception as e:
-            logger.debug("[EDGE-CHECK] Failed to load max_contract_price_cents from profile: %s, using default 70c", e)
+            logger.debug("[EDGE-CHECK] Failed to load max_contract_price_cents from profile: %s, using default 50c", e)
         
         # Get contract price from mid_price_cents (ContractState only has mid_price_cents)
         # For YES contracts, mid_price_cents is the YES price

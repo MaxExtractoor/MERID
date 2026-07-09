@@ -2392,6 +2392,25 @@ def _validate_deep_otm_policy(intent: OrderIntent) -> Optional[str]:
         ENFORCE_DEEP_OTM_POLICY,
     )
     
+    # DEEP_OTM_POLICY_CONFIG: Log runtime profile configuration
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        from merid.risk.profiles.crypto_15m_profile import get_active_profile
+        profile_adapter = get_active_profile()
+        if profile_adapter and hasattr(profile_adapter, 'profile'):
+            profile_name = getattr(profile_adapter.profile, 'profile_name', 'unknown')
+            profile_version = getattr(profile_adapter.profile, 'version', 'unknown')
+            guardrails_max = getattr(profile_adapter.profile, 'guardrails_max_contract_price_cents', 'N/A')
+            guardrails_min = getattr(profile_adapter.profile, 'guardrails_min_contract_price_cents', 'N/A')
+            logger.error(
+                "[DEEP_OTM_POLICY_CONFIG] profile_name=%s profile_version=%s "
+                "guardrails_min=%s guardrails_max=%s",
+                profile_name, profile_version, guardrails_min, guardrails_max
+            )
+    except Exception as e:
+        logger.error("[DEEP_OTM_POLICY_CONFIG] Failed to load profile: %s", e)
+    
     # Skip if policy not enforced
     if not ENFORCE_DEEP_OTM_POLICY:
         return None
@@ -2403,6 +2422,15 @@ def _validate_deep_otm_policy(intent: OrderIntent) -> Optional[str]:
     # Check if in deep OTM band
     is_deep_cheap = intent.price_cents <= DEEP_OTM_CHEAP_CENTS
     is_deep_expensive = intent.price_cents >= DEEP_OTM_EXPENSIVE_CENTS
+    
+    # DEEP_OTM_POLICY_STATE: Log detailed state for debugging price path
+    logger.error(
+        "[DEEP_OTM_POLICY_STATE] trace_id=%s requested_price_cents=%d deep_cheap_threshold=%d deep_expensive_threshold=%d "
+        "is_deep_cheap=%s is_deep_expensive=%s ticker=%s action=%s edge_pct=%s",
+        getattr(intent, 'trace_id', 'N/A'), intent.price_cents, DEEP_OTM_CHEAP_CENTS, DEEP_OTM_EXPENSIVE_CENTS,
+        is_deep_cheap, is_deep_expensive, intent.ticker, intent.action,
+        getattr(intent, 'edge_pct', 'N/A')
+    )
     
     if not (is_deep_cheap or is_deep_expensive):
         return None

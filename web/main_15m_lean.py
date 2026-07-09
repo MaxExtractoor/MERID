@@ -383,6 +383,29 @@ async def lifespan(app: FastAPI):
         logger.warning(f"[AUDIT-HARNESS] Failed to start production audit harness: {e}")
         # Non-fatal - continue without audit harness
     
+    # STARTUP CONTRACT: Log profile/guardrail agreement for debugging
+    logger.info("[STARTUP-CONTRACT] Logging profile and guardrail configuration")
+    try:
+        from merid.risk.profiles.crypto_15m_profile import get_active_profile
+        from merid.event_venues.kalshi.risk_parameters import (
+            DEEP_OTM_CHEAP_CENTS,
+            DEEP_OTM_EXPENSIVE_CENTS,
+        )
+        profile_adapter = get_active_profile()
+        if profile_adapter and hasattr(profile_adapter, 'profile'):
+            profile_name = getattr(profile_adapter.profile, 'profile_name', 'unknown')
+            profile_version = getattr(profile_adapter.profile, 'version', 'unknown')
+            guardrails_min = getattr(profile_adapter.profile, 'guardrails_min_contract_price_cents', 'N/A')
+            guardrails_max = getattr(profile_adapter.profile, 'guardrails_max_contract_price_cents', 'N/A')
+            logger.error(
+                "[STARTUP-CONTRACT] profile=%s version=%s guardrails=[min=%s,max=%s] "
+                "deep_otm=[cheap=%d,expensive=%d]",
+                profile_name, profile_version, guardrails_min, guardrails_max,
+                DEEP_OTM_CHEAP_CENTS, DEEP_OTM_EXPENSIVE_CENTS
+            )
+    except Exception as e:
+        logger.warning("[STARTUP-CONTRACT] Failed to log profile configuration: %s", e)
+    
     # Run P2.x (trading stack) in lifespan
     logger.info("[LIFESPAN] Before _run_full_startup_in_lifespan")
     

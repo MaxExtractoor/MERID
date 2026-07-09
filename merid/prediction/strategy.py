@@ -485,13 +485,33 @@ class KalshiStrategy:
                 # LEGACY REMOVAL: dynamic_sizing moved to archive/legacy/ during 15m stack cleanup
                 price_cents = None
                 if price_cents is None or price_cents <= 0:
-                    # CRITICAL FIX: Clamp to 55-75 cents to prevent extreme purchases
-                    # This aligns with kalshi_crypto_15m_v2.yaml price_range [55, 75]
-                    price_cents = max(55, min(75, int(round(market_prob * 100))))
+                    # CRITICAL FIX: Clamp to 10-50 cents to match profile price_range [10, 50]
+                    # 2026-07-09: Updated from 55-75c to 10-50c to match profile guardrails
+                    raw_price_cents = int(round(market_prob * 100))
+                    price_cents = max(10, min(50, raw_price_cents))
+                    # PRICE_PATH: Log raw vs clamped price for debugging
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error(
+                        "[PRICE_PATH] raw_price_cents=%d clamped_price_cents=%d asset=%s edge_pct=%s "
+                        "market_prob=%s source=strategy.py",
+                        raw_price_cents, price_cents, self._extract_asset_from_market_id(edge.market_id),
+                        edge_pct, market_prob
+                    )
             except Exception:
-                # CRITICAL FIX: Clamp to 55-75 cents to prevent extreme purchases
-                # This aligns with kalshi_crypto_15m_v2.yaml price_range [55, 75]
-                price_cents = max(55, min(75, int(round(market_prob * 100))))
+                # CRITICAL FIX: Clamp to 10-50 cents to match profile price_range [10, 50]
+                # 2026-07-09: Updated from 55-75c to 10-50c to match profile guardrails
+                raw_price_cents = int(round(market_prob * 100))
+                price_cents = max(10, min(50, raw_price_cents))
+                # PRICE_PATH: Log raw vs clamped price for debugging
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(
+                    "[PRICE_PATH] raw_price_cents=%d clamped_price_cents=%d asset=%s edge_pct=%s "
+                    "market_prob=%s source=strategy.py",
+                    raw_price_cents, price_cents, self._extract_asset_from_market_id(edge.market_id),
+                    edge_pct, market_prob
+                )
 
             # FIX: Validate actual price against max_price_cents from threshold matrix
             # This prevents momentum scalping from trading high-priced (low-edge) contracts

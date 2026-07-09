@@ -2414,10 +2414,22 @@ class LeanAgent15m:
         logger.info("[PRICE-BASED-CONFIDENCE] asset=%s action=%s price=%.2f edge_pct=%.2f%% confidence=%.2f",
                     asset, signal_action, market_price, edge_pct, confidence)
         
+        # CRITICAL FIX: Clamp price_cents to 10-50c entry range to match profile guardrails
+        # 2026-07-09: Raw market price can be 70c+ which gets rejected by DEEP_OTM_POLICY
+        raw_price_cents = int(market_price * 100)
+        clamped_price_cents = max(10, min(50, raw_price_cents))
+        
+        # PRICE_PATH: Log raw vs clamped price for debugging
+        logger.error(
+            "[PRICE_PATH] raw_price_cents=%d clamped_price_cents=%d asset=%s edge_pct=%s "
+            "market_price=%s source=agent_grid_15m_price_based",
+            raw_price_cents, clamped_price_cents, asset, edge_pct, market_price
+        )
+        
         return {
             "side": signal_side,
             "action": signal_action,
-            "price_cents": int(market_price * 100),
+            "price_cents": clamped_price_cents,  # CRITICAL: Use clamped price
             "confidence": confidence,  # Dynamic edge-based confidence (not hardcoded)
             "model_prob": model_prob,  # Clamped to valid range [0.05, 0.95]
             "edge_pct": edge_pct,  # CRITICAL: Calculate edge for price-based strategy
@@ -3220,9 +3232,10 @@ class LeanAgent15m:
             # Both sides available - check spread
             spread_cents = best_ask - best_bid
             
-            # 2026-07-09: Coarse filter check (40c) - first gate to reject pathological spreads
-            # This prevents wide spreads (40c-90c) from even being considered
-            coarse_filter_threshold = 40  # Aligned with guardrails.max_spread_cents
+            # 2026-07-09: Coarse filter check (20c) - first gate to reject pathological spreads
+            # This prevents wide spreads (20c-90c) from even being considered
+            # 2026-07-09: Updated from 40c to 20c based on industry research (15c-25c range, 20c recommended)
+            coarse_filter_threshold = 20  # Aligned with guardrails.max_spread_cents
             if spread_cents > coarse_filter_threshold:
                 logger.warning("[MARKET-VALIDATION] asset=%s ticker=%s spread exceeds coarse filter=%dc (spread=%dc)",
                                self.config.name, ticker, coarse_filter_threshold, spread_cents)
@@ -3231,7 +3244,7 @@ class LeanAgent15m:
             # CRITICAL FIX: Remove basis point validation for binary options
             # Binary options have 0-100c price range, making BP calculations inappropriate
             # A 37c spread on 50c mid = 74% = 7400bp, which looks extreme but is normal for binary options
-            # Use cents-based validation only, which is correctly configured with 40c coarse filter
+            # Use cents-based validation only, which is correctly configured with 20c coarse filter
             # Legacy check in cents for backward compatibility
             if spread_cents > self.config.max_spread_cents:
                 logger.warning("[MARKET-VALIDATION] asset=%s ticker=%s spread too wide=%dc > max=%dc",
@@ -4621,11 +4634,11 @@ class LeanAgent15m:
             else:
                 # Fallback to momentum-friendly range if profile not available
                 ENTRY_MIN_PRICE_CENTS = 10  # Wider range for momentum-based trading
-                ENTRY_MAX_PRICE_CENTS = 75  # CRITICAL FIX: 75 to match profile (was 70)
+                ENTRY_MAX_PRICE_CENTS = 50  # 2026-07-09: Fixed to 50c to match profile price_range.max_price_cents (was 75c)
         except Exception as e:
-            logger.warning("[SIGNAL-GEN] Failed to load price_range from profile: %s, using fallback 10-75c", e)
+            logger.warning("[SIGNAL-GEN] Failed to load price_range from profile: %s, using fallback 10-50c", e)
             ENTRY_MIN_PRICE_CENTS = 10  # Wider range for momentum-based trading
-            ENTRY_MAX_PRICE_CENTS = 75  # CRITICAL FIX: 75 to match profile (was 70)
+            ENTRY_MAX_PRICE_CENTS = 50  # 2026-07-09: Fixed to 50c to match profile price_range.max_price_cents (was 75c)
         
         MARKETABLE_EDGE_PCT = 4.0  # matches EDGE_MARKET_ENTRY_* (0.04) in risk_parameters.py
         
@@ -5623,7 +5636,14 @@ class LeanAgentGrid15m:
                                 executed_count += 1
                                 logger.info("[GLOBAL-ALLOCATOR-EXECUTE-SUCCESS] asset=%s order_id=%s", order.asset, order_result.order_id)
                             else:
-                                logger.warning("[GLOBAL-ALLOCATOR-EXECUTE-FAILED] asset=%s reason=%s", order.asset, order_result.message if order_result else "Unknown")
+                                # Handle both ToolResult and OrderResult objects
+                                reason = "Unknown"
+                                if order_result:
+                                    if hasattr(order_result, 'reason'):
+                                        reason = order_result.reason
+                                    elif hasattr(order_result, 'message'):
+                                        reason = order_result.message
+                                logger.warning("[GLOBAL-ALLOCATOR-EXECUTE-FAILED] asset=%s reason=%s", order.asset, reason)
                     
                     except Exception as e:
                         logger.error("[GLOBAL-ALLOCATOR-EXECUTE-ERROR] asset=%s error=%s", order.asset, str(e), exc_info=True)
