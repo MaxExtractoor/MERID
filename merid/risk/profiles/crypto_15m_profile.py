@@ -408,13 +408,13 @@ class Crypto15mProfile:
     # Previous 100c was too permissive, accepting illiquid markets with poor fill quality
     # Research shows BTC typically has 2c spreads in middle of window, other assets slightly wider
     # 95c spreads observed in logs are abnormal (data quality or extreme thinness)
-    # 2026-07-04: UNIFIED to 75c - aligned with guardrails.max_spread_cents (single source of truth)
+    # 2026-07-09: OPTIMIZED to 40c - aligned with 10c-50c entry range (down from 75c)
     # CRITICAL FIX: Previous 50c was blocking trades that should be allowed per YAML guardrails (75c)
     # Research: DOGE spreads can exceed 50c (observed 79c spread = 1.3% on 59c price)
     # Reference: Kalena 2026 research - altcoin spreads 5-30% in 15m markets
     # 75c threshold allows realistic trading while blocking extreme data quality issues
     market_microstructure_enabled: bool = True  # Enable market microstructure filters
-    market_microstructure_max_spread_cents: float = 75.0  # UNIFIED: 75c aligned with guardrails.max_spread_cents
+    market_microstructure_max_spread_cents: float = 40.0  # OPTIMIZED: 40c aligned with 10c-50c entry range (down from 75c)
     market_microstructure_min_depth_usd: float = 0.0  # DISABLED: System uses limit orders which wait for fills, not market orders. Kalshi 15m crypto markets have sufficient liquidity. Depth thresholds are primarily for market orders to prevent slippage.
     market_microstructure_min_yes_depth: int = 1  # Minimum YES depth threshold
     market_microstructure_min_no_depth: int = 1  # Minimum NO depth threshold

@@ -89,7 +89,7 @@ class SpreadOptimizer:
         try:
             from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
             profile = Crypto15mProfileAdapter()
-            # Use guardrails.max_spread_cents for consistency (75c for coarse filtering)
+            # Use guardrails.max_spread_cents for consistency (40c for coarse filtering)
             # But keep optimizer's tighter threshold (15c) for quality assessment
             # These serve different purposes: coarse filter vs quality metric
             logger.info(

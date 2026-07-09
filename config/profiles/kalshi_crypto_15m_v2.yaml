@@ -409,7 +409,7 @@ momentum_fvg:
   
   # Spread guard interaction with momentum
   # If spread exceeds this, require higher OBI persistence for momentum entries
-  spread_gate_cents: 75  # 2026-07-04: UNIFIED to 75c - aligned with guardrails.max_spread_cents (single source of truth)
+  spread_gate_cents: 40  # 2026-07-09: OPTIMIZED to 40c - aligned with 10c-50c entry range (down from 75c)
   spread_gate_obi_persistence_boost: 0.75  # Require 75% persistence if spread is wide
 
 # ── Price-Based Strategy Parameters (2026 Optimized for Swing Trading) ───────────
@@ -522,7 +522,7 @@ venue:
 universe:
   min_volume: 5  # Minimum 5 contracts volume (relaxed from default 50 for 15m crypto)
   min_open_interest: 1  # Minimum 1 contract open interest (relaxed from default 10)
-  max_spread_cents: 75  # 2026-07-04: UNIFIED to 75c - aligned with guardrails.max_spread_cents (single source of truth)
+  max_spread_cents: 40  # 2026-07-09: OPTIMIZED to 40c - aligned with 10c-50c entry range (down from 75c)
   description: "Coarse liquidity prefilter for 15m crypto markets - tuned for exactly 5 markets per asset"
 
 # ── Throttling (Order Rate Limits) ───────────────────────────────────────────
@@ -934,7 +934,7 @@ edge_bands:
 # Research findings: 15m markets have spreads 2-5c, profitable edge 1-2% post-fee
 # Reference: https://www.indiehackers.com/post/building-a-stable-15-minute-trading-bot-for-polymarket-crypto-up-down-markets-563a14e882
 guardrails:
-  max_spread_cents: 75  # INCREASED: 75c based on 2026 research (up from 50c - DOGE spreads can exceed 50c)
+  max_spread_cents: 40  # OPTIMIZED: 40c based on 10c-50c entry range (down from 75c - too loose for entry range)
   max_slippage_cents: 5  # INCREASED: Max 5 cents worse than best (research: 2-5c slippage acceptable for 15m markets)
   # CRITICAL FIX: Removed min_depth_contracts - use per-asset depth thresholds instead (single source of truth)
   # min_depth_contracts: 2  # REMOVED - inconsistent with per-asset min_depth_yes/min_depth_no values
@@ -980,7 +980,7 @@ guardrails:
   spread_guard_edge_multiplier: 1.1  # Require edge >= 1.1x spread to trade (relaxed from 1.5x)
   # 2026-07-04 FIX: Increased to 75c based on 2026 industry research (Kalena: altcoin spreads 5-30%)
   # DOGE observed at 79c spread (1.3% on 59c price) - 50c threshold was blocking all trades
-  min_spread_gate_cents: 75  # INCREASED: 75c (up from 50c - aligned with guardrails for realistic trading)
+  min_spread_gate_cents: 40  # OPTIMIZED: 40c (down from 75c - aligned with 10c-50c entry range)
   
   # Drawdown limits (percentage-based, not bankroll-scaled)
   # Drawdown is the primary hard cap; daily loss is optional/soft
