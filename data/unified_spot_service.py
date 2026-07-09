@@ -41,7 +41,7 @@ import base64
 from typing import Optional, Dict, Any, Union
 from dataclasses import dataclass
 
-from utils.logger import get_logger, format_price
+from utils.logger import get_logger
 from data.spot_sla_config import get_spot_max_age
 
 logger = get_logger("data.unified_spot_service")

@@ -7,7 +7,7 @@ import re
 from typing import Any, Optional, Dict
 from dataclasses import dataclass, field
 
-from utils.logger import get_logger, format_price
+from utils.logger import get_logger
 
 logger = get_logger("merid.prediction.agent_grid_15m")
 
@@ -270,9 +270,19 @@ class LeanAgentConfig:
     us_session_end_utc: int = 22  # 22:00 UTC
     european_morning_start_utc: int = 8  # 08:00 UTC
     european_morning_end_utc: int = 13  # 13:00 UTC
-    calm_spread_threshold_bp: int = 200  # 200bp max spread in calm regime (increased from 50bp)
-    elevated_spread_threshold_bp: int = 300  # 300bp max spread in elevated regime (increased from 100bp)
-    violent_spread_threshold_bp: int = 500  # 500bp max spread in violent regime (increased from 150bp)
+    # Phase 1A: Surgical spread relaxation based on log analysis (2026-07-09)
+    # Logs show spreads at 2000+ bp vs dynamic_max of 200 bp causing 0 candidates
+    # Asset-specific overrides: BTC/ETH (deeper books) 300bp, SOL/XRP/DOGE (thinner books) 350bp
+    calm_spread_threshold_bp: int = 200  # 200bp max spread in calm regime (base threshold)
+    elevated_spread_threshold_bp: int = 300  # 300bp max spread in elevated regime (base threshold)
+    violent_spread_threshold_bp: int = 500  # 500bp max spread in violent regime (base threshold)
+    # Per-asset overrides for regime-specific spread thresholds
+    calm_spread_threshold_bp_btc_eth: int = 300  # 300bp for BTC/ETH (deeper books)
+    calm_spread_threshold_bp_sol_xrp_doge: int = 350  # 350bp for SOL/XRP/DOGE (thinner books)
+    elevated_spread_threshold_bp_btc_eth: int = 400  # 400bp for BTC/ETH in elevated
+    elevated_spread_threshold_bp_sol_xrp_doge: int = 450  # 450bp for SOL/XRP/DOGE in elevated
+    violent_spread_threshold_bp_btc_eth: int = 600  # 600bp for BTC/ETH in violent
+    violent_spread_threshold_bp_sol_xrp_doge: int = 700  # 700bp for SOL/XRP/DOGE in violent
     spread_volatility_sensitivity: float = 1.5  # Lambda parameter for continuous interpolation
     # Phase 1: Velocity model coefficients for logistic mapping
     alpha_0: float = 0.0  # Intercept for logistic function
@@ -2936,7 +2946,11 @@ class LeanAgent15m:
     
     def _get_dynamic_spread_threshold(self, ticker: str) -> int:
         """
-        Calculate dynamic spread threshold based on volatility regime.
+        Calculate dynamic spread threshold based on volatility regime and asset class.
+        
+        Phase 1A (2026-07-09): Asset-specific overrides for Kalshi microstructure
+        - BTC/ETH: Deeper books, tighter thresholds (300bp calm, 400bp elevated, 600bp violent)
+        - SOL/XRP/DOGE: Thinner books, looser thresholds (350bp calm, 450bp elevated, 700bp violent)
         
         2026 best practice: "Blow your spreads out when the market's volatility does"
         Uses continuous interpolation between regime anchors for smooth transitions.
@@ -2948,13 +2962,26 @@ class LeanAgent15m:
         """
         regime, volatility = self._classify_volatility_regime(ticker)
         
-        # Get regime-specific thresholds
+        # Phase 1A: Determine asset class for per-asset thresholds
+        asset_symbol = ticker.split("_")[0] if "_" in ticker else ticker
+        is_major_asset = asset_symbol in ["BTC", "ETH"]
+        
+        # Get regime-specific thresholds with asset-specific overrides
         if regime == "calm":
-            threshold_bp = self.config.calm_spread_threshold_bp
+            if is_major_asset:
+                threshold_bp = self.config.calm_spread_threshold_bp_btc_eth
+            else:
+                threshold_bp = self.config.calm_spread_threshold_bp_sol_xrp_doge
         elif regime == "elevated":
-            threshold_bp = self.config.elevated_spread_threshold_bp
+            if is_major_asset:
+                threshold_bp = self.config.elevated_spread_threshold_bp_btc_eth
+            else:
+                threshold_bp = self.config.elevated_spread_threshold_bp_sol_xrp_doge
         else:  # violent
-            threshold_bp = self.config.violent_spread_threshold_bp
+            if is_major_asset:
+                threshold_bp = self.config.violent_spread_threshold_bp_btc_eth
+            else:
+                threshold_bp = self.config.violent_spread_threshold_bp_sol_xrp_doge
         
         # Apply continuous interpolation for smooth transitions
         # Use volatility ratio to interpolate between regimes
@@ -2964,19 +2991,26 @@ class LeanAgent15m:
         if regime == "calm":
             # In calm regime, use calm threshold directly (no interpolation)
             # This ensures we can trade even in low-volatility conditions
-            threshold_bp = self.config.calm_spread_threshold_bp
+            if is_major_asset:
+                threshold_bp = self.config.calm_spread_threshold_bp_btc_eth
+            else:
+                threshold_bp = self.config.calm_spread_threshold_bp_sol_xrp_doge
         elif regime == "elevated":
             # Interpolate between elevated and violent
             ratio = volatility / elevated_threshold
-            base = self.config.elevated_spread_threshold_bp
-            target = self.config.violent_spread_threshold_bp
+            if is_major_asset:
+                base = self.config.elevated_spread_threshold_bp_btc_eth
+                target = self.config.violent_spread_threshold_bp_btc_eth
+            else:
+                base = self.config.elevated_spread_threshold_bp_sol_xrp_doge
+                target = self.config.violent_spread_threshold_bp_sol_xrp_doge
             interpolated = base * (ratio ** self.config.spread_volatility_sensitivity)
             threshold_bp = int(interpolated)
             threshold_bp = min(threshold_bp, target)
         # violent regime uses maximum threshold
         
-        logger.debug("[DYNAMIC-SPREAD] asset=%s ticker=%s regime=%s threshold=%dbp volatility=%.4f",
-                    self.config.name, ticker, regime, threshold_bp, volatility)
+        logger.debug("[DYNAMIC-SPREAD] asset=%s ticker=%s regime=%s is_major=%s threshold=%dbp volatility=%.4f",
+                    self.config.name, ticker, regime, is_major_asset, threshold_bp, volatility)
         
         return threshold_bp
     
