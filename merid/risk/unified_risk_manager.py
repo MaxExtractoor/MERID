@@ -70,8 +70,11 @@ class RiskLimits:
     category_crypto_min_cap_usd: float = 100.0
     
     # Correlated stack caps
-    correlated_stack_max_notional_pct: float = 0.25
-    correlated_stack_min_cap_usd: float = 10.0
+    # 2026-07-08: Aligned with binary options guidance - limit to 1-2 active slots per correlated move
+    # With fixed $1 exposure cap, this allows $2-3 total for correlated assets (BTC, ETH, SOL often move together)
+    correlated_stack_max_notional_pct: float = 0.0  # DISABLED - using fixed USD cap instead
+    correlated_stack_max_usd: float = 3.0  # Max $3 for correlated stack (1-2 slots at $1 each + buffer)
+    correlated_stack_min_cap_usd: float = 3.0
     
     # Per-asset caps
     per_asset_enabled: bool = False
@@ -278,7 +281,15 @@ class UnifiedRiskManager:
         )
     
     def _get_correlated_cap_usd(self) -> float:
-        """Get correlated stack cap in USD."""
+        """Get correlated stack cap in USD.
+
+        2026-07-08: Updated to use fixed USD cap instead of percentage-based calculation.
+        Aligned with binary options guidance - limit to 1-2 active slots per correlated move.
+        """
+        # Use fixed USD cap for correlated stack (1-2 slots at $1 each + buffer)
+        if self._limits.correlated_stack_max_notional_pct == 0.0:
+            return self._limits.correlated_stack_max_usd
+        # Fallback to percentage-based calculation if not disabled
         return max(
             self._bankroll_usd * self._limits.correlated_stack_max_notional_pct,
             self._limits.correlated_stack_min_cap_usd
