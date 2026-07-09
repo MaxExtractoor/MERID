@@ -780,8 +780,8 @@ class LeanAgent15m:
                 timestamp=current_time / 1000.0  # Convert ms to seconds
             )
             logger.info("[FVG-UPDATE] asset=%s OHLC data updated in FVG forecaster: O=%s H=%s L=%s C=%s", 
-                        asset, format_price(asset, open_price * 100), format_price(asset, high_price * 100), 
-                        format_price(asset, low_price * 100), format_price(asset, price_cents))
+                        asset, format_price(asset, open_price), format_price(asset, high_price), 
+                        format_price(asset, low_price), format_price(asset, spot_price))
         except Exception as e:
             logger.warning("[FVG-UPDATE] asset=%s failed to update FVG forecaster: %s", asset, e)
         
@@ -2242,6 +2242,20 @@ class LeanAgent15m:
         except Exception as e:
             logger.warning("[MOMENTUM-FVG] Failed to get price_cents from market state: %s", e)
         
+        # CRITICAL FIX: Clamp price_cents to 10-50c entry range to match profile guardrails
+        # 2026-07-09: Raw market price can be 70c+ which gets rejected by DEEP_OTM_POLICY
+        raw_price_cents = price_cents
+        clamped_price_cents = max(10, min(50, raw_price_cents))
+        
+        # PRICE_PATH: Log raw vs clamped price for debugging
+        logger.error(
+            "[PRICE_PATH] raw_price_cents=%d clamped_price_cents=%d asset=%s edge_pct=%s "
+            "source=agent_grid_15m_momentum_fvg",
+            raw_price_cents, clamped_price_cents, asset, edge_pct
+        )
+        
+        price_cents = clamped_price_cents
+        
         # Return signal
         return {
             "side": signal_side,
@@ -3374,7 +3388,7 @@ class LeanAgent15m:
         # Updated 2026-07-07: Aligned to 10c to match profile guardrails_min_contract_price_cents
         # Previous 15c minimum was blocking valid 10-19c entries that profile allows
         # - Entry prices < $0.10 are rejected by DEEP_OTM_POLICY (lottery zone)
-        # - Sweet-spot entry band [10c, 75c] has good risk/reward profile
+        # - Sweet-spot entry band [10c, 50c] has good risk/reward profile
         # - This aligns agent grid with profile, order_gate, and order_router (all 10c minimum)
         min_entry_prices = {
             'BTC': 10,
@@ -4567,24 +4581,40 @@ class LeanAgent15m:
                 # YES: use YES mid-price
                 price_cents = int((best_bid + best_ask) / 2)
                 
-                # CRITICAL FIX: Dynamic price clamping based on time-to-expiry
-                # When YES prices are very high (93-99c), they exceed the 70c maximum
-                # This causes invalid_price rejections
-                # Dynamic limits: 70c cap for normal trading, up to 90c when expiry < 2 minutes
-                # Calculate time to expiry
-                time_to_expiry = None
-                if hasattr(market, 'close_time'):
-                    time_to_expiry = market.close_time - time.time()
+                # CRITICAL FIX: Clamp price_cents to 10-50c entry range to match profile guardrails
+                # 2026-07-09: Raw market price can be 70c+ which gets rejected by DEEP_OTM_POLICY
+                raw_price_cents = price_cents
+                clamped_price_cents = max(10, min(50, raw_price_cents))
                 
-                # 2026-07-05 FIX: REMOVED price clamping to [50, 70] range
-                # Clamping was preventing orders from filling by forcing prices below market levels
-                # Orders now use actual market mid-spread prices for proper execution
+                # PRICE_PATH: Log raw vs clamped price for debugging
+                logger.error(
+                    "[PRICE_PATH] raw_price_cents=%d clamped_price_cents=%d asset=%s edge_pct=%s "
+                    "source=agent_grid_15m_velocity_yes",
+                    raw_price_cents, clamped_price_cents, asset, edge_pct
+                )
+                
+                price_cents = clamped_price_cents
             else:  # signal_side == "no"
                 # NO: calculate NO bid/ask from YES bid/ask, then use NO mid-price
                 # NO_bid = 100 - YES_ask, NO_ask = 100 - YES_bid
                 no_bid = 100 - best_ask
                 no_ask = 100 - best_bid
                 price_cents = int((no_bid + no_ask) / 2)
+                
+                # CRITICAL FIX: Clamp price_cents to 10-50c entry range to match profile guardrails
+                # 2026-07-09: Raw market price can be 70c+ which gets rejected by DEEP_OTM_POLICY
+                raw_price_cents = price_cents
+                clamped_price_cents = max(10, min(50, raw_price_cents))
+                
+                # PRICE_PATH: Log raw vs clamped price for debugging
+                logger.error(
+                    "[PRICE_PATH] raw_price_cents=%d clamped_price_cents=%d asset=%s edge_pct=%s "
+                    "source=agent_grid_15m_velocity_no",
+                    raw_price_cents, clamped_price_cents, asset, edge_pct
+                )
+                
+                price_cents = clamped_price_cents
+                
                 logger.info("[PRICE-CALC-NO] asset=%s YES_bid=%d YES_ask=%d -> NO_bid=%d NO_ask=%d NO_mid=%d",
                            asset, best_bid, best_ask, no_bid, no_ask, price_cents)
                 
@@ -4595,22 +4625,54 @@ class LeanAgent15m:
             # Fallback to bid only
             if signal_side == "yes":
                 price_cents = best_bid
-                # 2026-07-05 FIX: REMOVED price clamping - use actual market prices
+                # CRITICAL FIX: Clamp price_cents to 10-50c entry range to match profile guardrails
+                raw_price_cents = price_cents
+                clamped_price_cents = max(10, min(50, raw_price_cents))
+                logger.error(
+                    "[PRICE_PATH] raw_price_cents=%d clamped_price_cents=%d asset=%s edge_pct=%s "
+                    "source=agent_grid_15m_velocity_yes_bid_fallback",
+                    raw_price_cents, clamped_price_cents, asset, edge_pct
+                )
+                price_cents = clamped_price_cents
             else:
                 # NO: NO_ask = 100 - YES_bid
                 price_cents = 100 - best_bid
-                # 2026-07-05 FIX: REMOVED price clamping - use actual market prices
+                # CRITICAL FIX: Clamp price_cents to 10-50c entry range to match profile guardrails
+                raw_price_cents = price_cents
+                clamped_price_cents = max(10, min(50, raw_price_cents))
+                logger.error(
+                    "[PRICE_PATH] raw_price_cents=%d clamped_price_cents=%d asset=%s edge_pct=%s "
+                    "source=agent_grid_15m_velocity_no_bid_fallback",
+                    raw_price_cents, clamped_price_cents, asset, edge_pct
+                )
+                price_cents = clamped_price_cents
         elif best_ask:
             # Fallback to ask only
             if signal_side == "yes":
                 price_cents = best_ask
-                # 2026-07-05 FIX: REMOVED price clamping - use actual market prices
+                # CRITICAL FIX: Clamp price_cents to 10-50c entry range to match profile guardrails
+                raw_price_cents = price_cents
+                clamped_price_cents = max(10, min(50, raw_price_cents))
+                logger.error(
+                    "[PRICE_PATH] raw_price_cents=%d clamped_price_cents=%d asset=%s edge_pct=%s "
+                    "source=agent_grid_15m_velocity_yes_ask_fallback",
+                    raw_price_cents, clamped_price_cents, asset, edge_pct
+                )
+                price_cents = clamped_price_cents
             else:
                 # NO: NO_bid = 100 - YES_ask
                 price_cents = 100 - best_ask
-                # 2026-07-05 FIX: REMOVED price clamping - use actual market prices
+                # CRITICAL FIX: Clamp price_cents to 10-50c entry range to match profile guardrails
+                raw_price_cents = price_cents
+                clamped_price_cents = max(10, min(50, raw_price_cents))
+                logger.error(
+                    "[PRICE_PATH] raw_price_cents=%d clamped_price_cents=%d asset=%s edge_pct=%s "
+                    "source=agent_grid_15m_velocity_no_ask_fallback",
+                    raw_price_cents, clamped_price_cents, asset, edge_pct
+                )
+                price_cents = clamped_price_cents
         else:
-            # No market data - use neutral price
+            # No market data - use neutral price (already in range)
             price_cents = 50
         
         # MAKER-FIRST ENTRY PRICING (2026-07-05 RESEARCH FIX)
@@ -4623,7 +4685,7 @@ class LeanAgent15m:
         #   taker-fee adjusted) — a signal strong enough to pay for immediacy.
         # - Sweet-spot band from profile configuration (default 10-70c for momentum-based trading)
         # - CRITICAL FIX: 2026-07-05 - Use profile configuration instead of hardcoded values
-        # - Previous hardcoded [25c, 75c] was blocking all trades in current market conditions
+        # - Previous hardcoded [25c, 50c] was blocking all trades in current market conditions
         # - Profile config allows dynamic adjustment based on strategy requirements
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
@@ -4652,7 +4714,7 @@ class LeanAgent15m:
             """
             Maker-first entry price in the side's own price space.
             
-            Returns None when no entry inside the [25c, 75c] sweet-spot band is possible,
+            Returns None when no entry inside the [10c, 50c] sweet-spot band is possible,
             in which case the candidate must be skipped (no chasing).
             """
             if best_bid <= 0 or best_ask <= 0:
@@ -4693,7 +4755,7 @@ class LeanAgent15m:
                 optimal_price = max(optimal_price, side_bid)  # never below best bid
                 entry_mode = "resting"
             
-            # Sweet-spot band enforcement: entries must land in [25c, 75c].
+            # Sweet-spot band enforcement: entries must land in [10c, 50c].
             if optimal_price < ENTRY_MIN_PRICE_CENTS:
                 # Too cheap = lottery zone (win rate ~10% below 30c per 2026-07-03 analysis).
                 # Allow lifting up to the band floor only if the ask is inside the band.

@@ -76,9 +76,6 @@ class FillsPoller:
         await poller.stop()
     """
     
-    _instance: Optional[FillsPoller] = None
-    _lock = threading.Lock()
-    
     # Default intervals (seconds) — configurable via env vars:
     # MERID_FILLS_POLL_INTERVAL_SEC, MERID_FILLS_RECONCILE_INTERVAL_SEC, MERID_FILLS_BACKFILL_INTERVAL_SEC
     # PRODUCTION AUDIT: Reduced from 20s to 10s to stay under 15s MD staleness threshold
@@ -87,16 +84,8 @@ class FillsPoller:
     DEFAULT_BACKFILL_INTERVAL: float = float(_os.getenv("MERID_FILLS_BACKFILL_INTERVAL_SEC", "300.0"))
     DEFAULT_CACHE_CLEANUP_INTERVAL: float = float(_os.getenv("MERID_CACHE_CLEANUP_INTERVAL_SEC", "900.0"))  # 15 minutes
     
-    def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-                    cls._instance._initialized = False
-        return cls._instance
-    
     def __init__(self):
-        if self._initialized:
+        if hasattr(self, '_initialized') and self._initialized:
             return
             
         self._initialized = True
@@ -156,16 +145,15 @@ class FillsPoller:
         self._shutdown = asyncio.Event()
         
         # Load any existing fills from DB
-        # TEMPORARILY DISABLED: DB load may be hanging - will debug separately
-        logger.info("FillsPoller: DB load skipped (debugging startup hang)")
-        # try:
-        #     from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
-        #     ledger = get_fills_ledger()
-        #     loaded = await ledger.load_from_db()
-        #     if loaded > 0:
-        #         logger.info(f"FillsPoller: Restored {loaded} fills from DB")
-        # except Exception as e:
-        #     logger.warning(f"DB restore failed: {e}")
+        # RE-ENABLED: Critical for fills persistence - was causing empty DB
+        try:
+            from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+            ledger = get_fills_ledger()
+            loaded = await ledger.load_from_db()
+            if loaded > 0:
+                logger.info(f"FillsPoller: Restored {loaded} fills from DB")
+        except Exception as e:
+            logger.warning(f"DB restore failed: {e}")
         
         def _task_done_cb(task: asyncio.Task) -> None:
             """Log unhandled exceptions from FillsPoller background tasks."""
@@ -412,15 +400,12 @@ class FillsPoller:
                         if computed_positions:
                             logger.warning(
                                 f"[POSITION-FALLBACK] REST API returned 0 positions but fills ledger shows {len(computed_positions)} positions. "
-                                f"This indicates fills ledger has stale data. Clearing fills ledger to sync with REST API ground truth."
+                                f"NOT clearing fills ledger - fills ledger is canonical source. REST API may be temporarily unavailable."
                             )
-                            # Clear fills ledger to sync with REST API ground truth
-                            # REST API is the single source of truth - if it says 0 positions, fills ledger should be 0
-                            await ledger.clear_all_fills()
-                            logger.info("[POSITION-FALLBACK] Cleared fills ledger to sync with REST API (single source of truth)")
-                            # Sync empty positions to cache
-                            await cache.sync_from_rest([])
-                            logger.info("[POSITION-FALLBACK] Synced 0 positions from REST API (fills ledger cleared)")
+                            # DO NOT clear fills ledger - fills ledger is the canonical source
+                            # REST API can temporarily return 0 positions due to API issues
+                            # Only clear fills ledger if there's evidence of actual data corruption
+                            # This prevents accidental data loss from transient API issues
 
                     # CRITICAL FIX: Resync category_contracts counter with actual positions
                     # This fixes the desync where category_contracts accumulates incorrectly
@@ -866,20 +851,32 @@ class FillsPoller:
             self._backfill_interval = backfill
 
 
-# Singleton accessor
-_poller: Optional[FillsPoller] = None
+# Profile-aware singleton accessor to prevent legacy/production contamination
+_pollers: Dict[str, Optional[FillsPoller]] = {}
 _poller_lock = threading.Lock()
 
 
-def get_fills_poller() -> FillsPoller:
-    """Get the singleton FillsPoller instance (double-checked locking pattern)."""
-    global _poller
-    if _poller is None:
+def get_fills_poller(profile: Optional[str] = None) -> FillsPoller:
+    """Get the profile-aware singleton FillsPoller instance.
+    
+    Args:
+        profile: Optional profile name. If None, uses current MERID_PROFILE env var.
+                This ensures legacy and production stacks get separate instances.
+    
+    Returns:
+        FillsPoller instance for the specified profile.
+    """
+    import os
+    if profile is None:
+        profile = os.getenv("MERID_PROFILE", "default")
+    
+    global _pollers
+    if profile not in _pollers or _pollers[profile] is None:
         with _poller_lock:
-            # Double-checked: verify _poller is still None inside lock
-            if _poller is None:
-                _poller = FillsPoller()
-    return _poller
+            # Double-checked: verify poller is still None inside lock
+            if profile not in _pollers or _pollers[profile] is None:
+                _pollers[profile] = FillsPoller()
+    return _pollers[profile]
 
 
 __all__ = ["FillsPoller", "get_fills_poller"]
