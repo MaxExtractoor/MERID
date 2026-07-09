@@ -200,10 +200,12 @@ SIZER_MIN_CONTRACTS: Final[int] = 1
 SIZER_MAX_CONTRACTS: Final[int] = 50
 
 # Bankroll fraction caps
-# STANDARDIZED: Max 5% of bankroll per trade for all 15m crypto agents
-# This prevents any single trade from risking excessive capital
-SIZER_MAX_BANKROLL_PCT: Final[float] = 0.03  # 3% max per trade (tightened from 5%)
-SIZER_MIN_BANKROLL_PCT: Final[float] = 0.01  # 1% min per trade
+# 2026-07-08 UPDATE: DISABLED in favor of fixed $1 exposure model
+# Percentage-based sizing replaced with slot-based position management
+# SIZER_MAX_BANKROLL_PCT: Final[float] = 0.03  # DISABLED - using fixed $1 exposure cap
+# SIZER_MIN_BANKROLL_PCT: Final[float] = 0.01  # DISABLED - using fixed $1 exposure cap
+SIZER_MAX_BANKROLL_PCT: Final[float] = 0.0  # DISABLED - using fixed $1 exposure cap
+SIZER_MIN_BANKROLL_PCT: Final[float] = 0.0  # DISABLED - using fixed $1 exposure cap
 
 # PF/expectancy gates for size scaling
 SIZER_PF_MIN_FOR_SCALING: Final[float] = 1.3

@@ -484,68 +484,32 @@ allow_fallback_trades: false  # DISABLED: Require live market data
 max_fallback_notional_usd: 0.35  # If fallback allowed, cap at min_notional (unused when disabled)
 max_fallback_cycles: 0  # DISABLED: No fallback cycles allowed
 
-# Maximum risk per cycle as percentage of capital
-# 2026 BEST PRACTICE: 5% per 15m window (aligned with per-asset max_notional_pct)
-# This limits total cycle risk to 5% of capital per 15m window
-# This is the SINGLE SOURCE OF TRUTH - core.settings.py must match this value
-max_cycle_risk_pct:
-  value: 0.05  # 5% of capital per cycle (aligned with 5% per 15m window limit)
-  dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
-  description: "Maximum risk per cycle as percentage of capital (computed from bankroll)"
+# 2026-07-08 UPDATE: Percentage-based cycle risk limits DISABLED in favor of fixed $1 exposure model
+# max_cycle_risk_pct DISABLED - using fixed $1 exposure cap instead
+# guardrails_per_window_risk_pct DISABLED - using fixed $1 exposure cap instead
+# guardrails_total_venue_risk_pct DISABLED - using fixed $1 exposure cap instead
+# max_total_risk_pct DISABLED - using fixed $1 exposure cap instead
+# max_cycle_risk_usd DISABLED - using fixed $1 exposure cap instead
+max_cycle_risk_pct: 0.0  # DISABLED - set to 0.0 to satisfy profile validation (not used in fixed $1 model)
 
-# CRITICAL FIX: 2026-07-06 - Window-based risk limits (HARD STOP)
-# Per-agent per-window limit: 3% per agent per 15-minute window
-# Total venue per-window limit: 5% across all agents per 15-minute window
-# These are HARD STOPS - no exceptions, no more entries until exposure is closed out
-# Exposure is reduced via trailing stop, ratchet, or mandatory 99c exit
-guardrails_per_window_risk_pct:
-  value: 0.03  # 3% per agent per 15-minute window (HARD STOP)
-  description: "Maximum risk per agent per 15-minute window (HARD STOP - no entries until closed)"
-
-guardrails_total_venue_risk_pct:
-  value: 0.05  # 5% total across all agents per 15-minute window (HARD STOP)
-  description: "Maximum total risk across all agents per 15-minute window (HARD STOP - no entries until closed)"
-  
-# CRITICAL FIX: Added maximum total risk cap for production safety
-max_total_risk_pct:
-  value: 0.15  # 15% total risk cap (conservative for production survival)
-  description: "Maximum total risk as percentage of capital (production safety)"
-
-# Optional absolute cap on cycle risk (overrides percentage if set)
-# Set to 0 to use percentage-based only
-max_cycle_risk_usd: 7.00  # Hardcoded cap to allow 10 contracts at max entry price ($0.70)
+# Fixed $1 exposure cap is enforced via:
+# - risk_policy.fixed_exposure_cap_usd: 1.00
+# - Sequential trading (blocks new entries until positions exit)
+# - Slot-based position management (sum of contract prices ≤ $1)
 
 # ── Venue-Level Caps (Kalshi) ──────────────────────────────────────────────
-# These caps are derived as percentages of capital, NOT hardcoded values.
-# This ensures risk scales with actual account balance.
+# 2026-07-08 UPDATE: Percentage-based venue caps DISABLED in favor of fixed $1 exposure model
+# max_total_notional_pct DISABLED - using fixed $1 exposure cap instead
+# max_category_notional_pct DISABLED - using fixed $1 exposure cap instead
+# max_single_order_pct DISABLED - using fixed $1 exposure cap instead
+# bankroll_cap_pct DISABLED - using fixed $1 exposure cap instead
 venue:
   name: kalshi
-  # Conservative venue caps based on 2026 HFT best practices (Quarter Kelly)
-  # Primary risk controls are now (2026 best practices):
-  # - per_trade_risk_pct (3%): primary sizing control
-  # - per-asset max_notional_pct (3%): secondary per-asset limits (conservative)
-  # - max_cycle_risk_pct (5%): aggregate cycle-level control (conservative for 5-second cycles)
-  # - max_total_risk_pct (15%): aggregate total exposure control (conservative for survival)
-  max_total_notional_pct:
-    value: 0.15  # CONSERVATIVE: 15% total venue cap (sum of 3% per asset × 5 assets for conservative cycle risk)
-    static: profile
-    description: "Maximum total notional as percentage of capital (matches sum of per-asset caps)"
-  max_category_notional_pct:
-    value: 0.15  # CONSERVATIVE: 15% of capital for "crypto" category (matches total)
-    static: profile
-    description: "Maximum category notional as percentage of capital"
-  
-  # Maximum single order as percentage of bankroll (validation constraint)
-  max_single_order_pct:
-    value: 0.03  # CRITICAL FIX: 3% of bankroll per single order (aligned with per-asset max notional)
-    static: profile
-    description: "Maximum single order notional as percentage of bankroll (aligned with per-asset cap)"
-  
-  # Bankroll cap percentage for order sizing (2026 best practice: 3% aligned with per-asset cap)
-  bankroll_cap_pct:
-    value: 0.03  # CRITICAL FIX: 3% of bankroll per order (aligned with per-asset max notional)
-    static: profile
-    description: "Maximum order notional as percentage of bankroll (aligned with per-asset cap)"
+  # All percentage-based venue caps replaced with fixed $1 exposure model
+  # Risk is now enforced via:
+  # - risk_policy.fixed_exposure_cap_usd: 1.00
+  # - Sequential trading (blocks new entries until positions exit)
+  # - Slot-based position management (sum of contract prices ≤ $1)
   
   # REMOVED: Conflicting rate limits - now handled by throttling section (single source of truth)
   # - max_orders_per_minute: replaced by throttling.global_orders_limit (5/min)
@@ -898,12 +862,10 @@ assets:
     min_depth_no: 1  # Minimum NO depth at best ask (contracts) - aligned with 1 contract per order
 
 # ── Per-Agent Caps ─────────────────────────────────────────────────────────
-# Default limits for agents using this profile (can be overridden per-agent).
-# Max notional is derived as percentage of capital, NOT hardcoded USD value.
-# UNIFIED RISK: All assets (BTC/ETH/SOL/XRP/DOGE) use the same 1-3% per-trade risk range
-# based on market conditions, not per-asset fixed percentages.
+# 2026-07-08 UPDATE: Percentage-based agent caps DISABLED in favor of fixed $1 exposure model
+# max_notional_pct DISABLED - using fixed $1 exposure cap instead
 agent_defaults:
-  max_notional_pct: 0.03  # CRITICAL FIX: 3% of capital per agent (aligned with per-asset max and single order cap)
+  # max_notional_pct DISABLED - using fixed $1 exposure cap instead
   max_orders_per_window: 20  # Max orders per trading window (increased for edge audit)
   max_yes_position: 5  # INCREASED: Max YES contracts per side (up from 3)
   max_no_position: 5  # INCREASED: Max NO contracts per side (up from 3)
@@ -1036,13 +998,12 @@ guardrails:
   # Set to 0 to disable (rely on per-asset and cycle limits instead)
   max_position_value_usd: 100000.0  # $100k total position limit (relaxed for 15m crypto)
   
-  # Per-trade risk as percentage of capital
-  # NOTE: Bankroll tiering removed - not implemented in risk envelope code
-  # Using single 3% value for all bankroll sizes (aligned with per-asset max_notional_pct)
-  per_trade_risk_pct:
-    value: 0.03  # 3% per trade (aligned with per-asset max_notional_pct for trading buffer)
-    dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
-    description: "Per-trade risk as percentage of capital (3% for all bankroll sizes)"
+  # 2026-07-08 UPDATE: Percentage-based per_trade_risk_pct DISABLED in favor of fixed $1 exposure model
+  # per_trade_risk_pct DISABLED - using fixed $1 exposure cap instead
+  # Sizing is now enforced via:
+  # - risk_policy.fixed_exposure_cap_usd: 1.00
+  # - Sequential trading (blocks new entries until positions exit)
+  # - Slot-based position management (sum of contract prices ≤ $1)
   
   # Daily loss cap (2026 BEST PRACTICE: 20% - aligned with drawdown halt)
   # 2026 best practice: Halt trading when daily loss exceeds 20% of bankroll

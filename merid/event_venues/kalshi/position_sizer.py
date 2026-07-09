@@ -98,12 +98,12 @@ class SizerConfig:
     min_contracts: int = SIZER_MIN_CONTRACTS
     max_contracts: int = SIZER_MAX_CONTRACTS
 
-    # Bankroll fraction caps - TIGHTENED for small bankroll protection
-    max_bankroll_pct: float = SIZER_MAX_BANKROLL_PCT
-    min_bankroll_pct: float = SIZER_MIN_BANKROLL_PCT
+    # Bankroll fraction caps - 2026-07-08 UPDATE: DISABLED in favor of fixed $1 exposure model
+    max_bankroll_pct: float = SIZER_MAX_BANKROLL_PCT  # DISABLED - using fixed $1 exposure cap
+    min_bankroll_pct: float = SIZER_MIN_BANKROLL_PCT  # DISABLED - using fixed $1 exposure cap
 
-    # P2-FIX5: Per-trade risk cap (0.8% of bankroll max per trade)
-    per_trade_risk_pct: float = 0.008  # 0.8%
+    # 2026-07-08 UPDATE: Per-trade risk cap DISABLED in favor of fixed $1 exposure model
+    per_trade_risk_pct: float = 0.0  # DISABLED - using fixed $1 exposure cap
 
     # PF/expectancy gates for size scaling
     pf_min_for_scaling: float = SIZER_PF_MIN_FOR_SCALING
