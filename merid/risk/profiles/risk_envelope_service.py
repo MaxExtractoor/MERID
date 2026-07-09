@@ -146,9 +146,10 @@ class RiskEnvelopeService:
         self._last_bankroll_usd = live_bankroll_usd
         self._last_update_ts = time.time()
         
+        # 2026-07-08: DISABLED percentage-based logging - using fixed $1 exposure model
         logger.info(
             f"[RISK-ENVELOPE-SERVICE] Envelope refreshed: bankroll=${live_bankroll_usd:.2f}, "
-            f"per_trade_risk={self._envelope.per_trade_risk_pct*100:.2f}%, "
+            f"per_trade_risk=DISABLED (fixed $1 exposure model), "
             f"max_total=${self._envelope.max_total_notional_usd:.2f}"
         )
     

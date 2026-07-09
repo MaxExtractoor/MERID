@@ -3208,9 +3208,10 @@ def log_config_signature() -> None:
             if adapter and adapter._profile:
                 p = adapter._profile
                 sig_parts.append(f"capital_usd={p.capital_usd:.2f}")
-                sig_parts.append(f"max_single_order_pct={p.venue_max_single_order_pct:.3f}")
-                sig_parts.append(f"max_total_notional_pct={p.venue_max_total_notional_pct:.3f}")
-                sig_parts.append(f"agent_max_notional_pct={p.agent_max_notional_pct:.3f}")
+                # 2026-07-08: DISABLED percentage-based logging - using fixed $1 exposure model
+                sig_parts.append(f"max_single_order_usd={p.venue_max_single_order_usd:.2f}")
+                sig_parts.append(f"max_total_notional_usd={p.venue_max_total_notional_usd:.2f}")
+                sig_parts.append(f"agent_max_notional_usd={p.agent_max_notional_usd:.2f}")
         except Exception as e:
             logger.warning("[CONFIG-SIGNATURE] Could not load profile for signature: %s", e)
     
@@ -3548,6 +3549,7 @@ def validate_kalshi_bankroll_source_consistency() -> None:
         
         risk_envelope_bankroll_usd = envelope.max_total_notional_usd / 0.15  # CRITICAL FIX: 15% - aligned with profile (was 0.30)
         
+        # 2026-07-08: DISABLED percentage-based logging - using fixed $1 exposure model
         logger.info(
             "[BANKROLL-MATRIX] "
             f"profile={active_profile} "
@@ -3555,8 +3557,8 @@ def validate_kalshi_bankroll_source_consistency() -> None:
             f"live_equity_usd={live_equity_usd:.2f if live_equity_usd else 0:.2f} "
             f"risk_envelope_bankroll_usd={risk_envelope_bankroll_usd:.2f} "
             f"kalshi_portfolio_bankroll_cents={kalshi_portfolio_bankroll_cents} "
-            f"max_cycle_risk_pct={envelope.max_cycle_risk_pct:.4f} "
-            f"per_trade_risk_pct={envelope.per_trade_risk_pct:.4f}"
+            f"max_cycle_risk_pct=DISABLED (fixed $1 exposure model) "
+            f"per_trade_risk_pct=DISABLED (fixed $1 exposure model)"
         )
         
         # Check for divergence between config and live equity
@@ -3902,11 +3904,11 @@ def validate_profile_dynamic_static_semantics() -> None:
             return
         
         # Key dynamic fields that must exist in envelope
+        # 2026-07-08: Removed percentage-based fields (max_cycle_risk_pct, per_trade_risk_pct)
+        # These are DISABLED in favor of fixed $1 exposure model
         required_dynamic_fields = [
             "max_single_order_notional_usd",
             "max_total_notional_usd",
-            "max_cycle_risk_pct",
-            "per_trade_risk_pct",
             "asset_max_notional_usd",
         ]
         

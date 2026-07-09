@@ -30,26 +30,29 @@ class TestWindowBasedRiskLimits:
         from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import KalshiCrypto15mRiskEnvelope
         
         # Create envelope with $1000 bankroll
+        # 2026-07-08: Updated to use fixed $1 exposure model
         envelope = KalshiCrypto15mRiskEnvelope(
             live_bankroll_usd=1000.0,
             profile_capital_usd=0.0,
-            max_single_order_notional_usd=30.0,
-            max_total_notional_usd=150.0,
+            max_single_order_notional_usd=1.0,  # Fixed $1 exposure
+            max_total_notional_usd=1.0,  # Fixed $1 exposure
             max_concurrent_trades=5,
-            asset_max_notional_usd={"BTC": 30.0, "ETH": 30.0, "SOL": 30.0, "XRP": 30.0, "DOGE": 30.0},
+            asset_max_notional_usd={"BTC": 1.0, "ETH": 1.0, "SOL": 1.0, "XRP": 1.0, "DOGE": 1.0},  # Fixed $1 per asset
             asset_depth_thresholds={},
-            agent_max_notional_usd=30.0,
+            agent_max_notional_usd=1.0,  # Fixed $1 exposure
             agent_max_orders_per_window=5,
             agent_max_yes_position=5,
             agent_max_no_position=5,
-            max_cycle_risk_pct=0.05,
-            guardrails_per_window_risk_pct=0.03,
-            guardrails_total_venue_risk_pct=0.05,
-            per_agent_window_limit_usd=30.0,
-            total_venue_window_limit_usd=50.0,
+            max_cycle_risk_pct=0.0,  # DISABLED - fixed $1 model
+            guardrails_per_window_risk_pct=0.0,  # DISABLED - fixed $1 model
+            guardrails_total_venue_risk_pct=0.0,  # DISABLED - fixed $1 model
+            per_agent_window_limit_usd=1.0,  # Fixed $1 exposure
+            total_venue_window_limit_usd=1.0,  # Fixed $1 exposure
             window_start_ts=0.0,
             agent_window_exposure_usd={},
             total_window_exposure_usd=0.0,
+            agent_resting_exposure_usd={},  # Resting orders exposure
+            total_resting_exposure_usd=0.0,  # Total resting orders exposure
             daily_loss_enabled=True,
             max_daily_loss_usd=50.0,
             drawdown_halt_pct=0.15,
@@ -68,19 +71,19 @@ class TestWindowBasedRiskLimits:
             correlation_multiplier=1.0,
         )
         
-        # Test with actual notional ($30 for 60 contracts at 50c)
+        # Test with actual notional ($0.35 for 1 contract at 35c)
         allowed, reason = envelope.check_window_limit(
             agent_id="BTC_15M",
-            order_notional_usd=30.0,
+            order_notional_usd=0.35,
             current_ts=time.time()
         )
         
-        # Should be allowed (within 3% per-agent limit)
+        # Should be allowed (within $1 per-agent limit)
         assert allowed is True
         assert reason == ""
     
     def test_window_limit_blocks_exceeding_per_agent_limit(self):
-        """Test that window limit blocks orders exceeding 3% per-agent limit."""
+        """Test that window limit blocks orders exceeding $1 per-agent limit."""
         from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import (
             KalshiCrypto15mRiskEnvelope,
             _reset_shared_window_state_for_testing
@@ -90,26 +93,29 @@ class TestWindowBasedRiskLimits:
         _reset_shared_window_state_for_testing()
         
         # Create envelope with $1000 bankroll
+        # 2026-07-08: Updated to use fixed $1 exposure model
         envelope = KalshiCrypto15mRiskEnvelope(
             live_bankroll_usd=1000.0,
             profile_capital_usd=0.0,
-            max_single_order_notional_usd=30.0,
-            max_total_notional_usd=150.0,
+            max_single_order_notional_usd=1.0,  # Fixed $1 exposure
+            max_total_notional_usd=1.0,  # Fixed $1 exposure
             max_concurrent_trades=5,
-            asset_max_notional_usd={"BTC": 30.0, "ETH": 30.0, "SOL": 30.0, "XRP": 30.0, "DOGE": 30.0},
+            asset_max_notional_usd={"BTC": 1.0, "ETH": 1.0, "SOL": 1.0, "XRP": 1.0, "DOGE": 1.0},
             asset_depth_thresholds={},
-            agent_max_notional_usd=30.0,
+            agent_max_notional_usd=1.0,  # Fixed $1 exposure
             agent_max_orders_per_window=5,
             agent_max_yes_position=5,
             agent_max_no_position=5,
-            max_cycle_risk_pct=0.05,
-            guardrails_per_window_risk_pct=0.03,
-            guardrails_total_venue_risk_pct=0.05,
-            per_agent_window_limit_usd=30.0,
-            total_venue_window_limit_usd=50.0,
+            max_cycle_risk_pct=0.0,  # DISABLED - fixed $1 model
+            guardrails_per_window_risk_pct=0.0,  # DISABLED - fixed $1 model
+            guardrails_total_venue_risk_pct=0.0,  # DISABLED - fixed $1 model
+            per_agent_window_limit_usd=1.0,  # Fixed $1 exposure
+            total_venue_window_limit_usd=1.0,  # Fixed $1 exposure
             window_start_ts=0.0,
-            agent_window_exposure_usd={"BTC_15M": 29.0},  # Already at $29 exposure
-            total_window_exposure_usd=29.0,
+            agent_window_exposure_usd={"BTC_15M": 0.65},  # Already at $0.65 exposure
+            total_window_exposure_usd=0.65,
+            agent_resting_exposure_usd={},  # Resting orders exposure
+            total_resting_exposure_usd=0.0,  # Total resting orders exposure
             daily_loss_enabled=True,
             max_daily_loss_usd=50.0,
             drawdown_halt_pct=0.15,
@@ -129,16 +135,16 @@ class TestWindowBasedRiskLimits:
         )
         
         # Record initial exposure in module-level state
-        envelope.record_order_execution(agent_id="BTC_15M", order_notional_usd=29.0)
+        envelope.record_order_execution(agent_id="BTC_15M", order_notional_usd=0.65)
         
-        # Try to add $2 more (would exceed $30 limit)
+        # Try to add $0.40 more (would exceed $1 limit)
         allowed, reason = envelope.check_window_limit(
             agent_id="BTC_15M",
-            order_notional_usd=2.0,
+            order_notional_usd=0.40,
             current_ts=time.time()
         )
         
-        # Should be blocked (exceeds 3% per-agent limit)
+        # Should be blocked (exceeds $1 per-agent limit)
         assert allowed is False
         assert "per_agent_window_limit" in reason
     

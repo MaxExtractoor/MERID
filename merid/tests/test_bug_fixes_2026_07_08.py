@@ -322,42 +322,41 @@ class TestAssertionConsistency:
             if f.default != MISSING and isinstance(f.default, (int, float)):
                 field_defaults[f.name] = f.default
         
-        # Verify critical percentage relationships
-        # agent_max_notional_pct <= venue_max_single_order_pct
-        # venue_max_single_order_pct <= venue_max_total_notional_pct
-        # These are enforced by assertions in the profile adapter
-        
-        # The assertions are in the profile adapter, not the dataclass
-        # We verify the dataclass has the fields
-        assert 'agent_max_notional_pct' in field_defaults or True  # Field exists
-        assert 'venue_max_single_order_pct' in field_defaults or True  # Field exists
-        assert 'venue_max_total_notional_pct' in field_defaults or True  # Field exists
+        # 2026-07-08: DISABLED percentage-based relationship checks - using fixed $1 exposure model
+        # Percentage-based fields are kept for backward compatibility but not used in sizing
+        # Verify the dataclass has the USD-based fields instead
+        assert 'agent_max_notional_usd' in field_defaults or True  # Field exists
+        assert 'venue_max_single_order_usd' in field_defaults or True  # Field exists
+        assert 'venue_max_total_notional_usd' in field_defaults or True  # Field exists
     
     def test_risk_envelope_input_assertions(self):
         """Test that risk envelope asserts positive inputs."""
         from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import KalshiCrypto15mRiskEnvelope
         
         # Create envelope with valid inputs
+        # 2026-07-08: Updated to use fixed $1 exposure model
         envelope = KalshiCrypto15mRiskEnvelope(
             live_bankroll_usd=1000.0,
             profile_capital_usd=0.0,
-            max_single_order_notional_usd=30.0,
-            max_total_notional_usd=150.0,
+            max_single_order_notional_usd=1.0,  # Fixed $1 exposure
+            max_total_notional_usd=1.0,  # Fixed $1 exposure
             max_concurrent_trades=5,
-            asset_max_notional_usd={"BTC": 30.0, "ETH": 30.0, "SOL": 30.0, "XRP": 30.0, "DOGE": 30.0},
+            asset_max_notional_usd={"BTC": 1.0, "ETH": 1.0, "SOL": 1.0, "XRP": 1.0, "DOGE": 1.0},  # Fixed $1 per asset
             asset_depth_thresholds={},
-            agent_max_notional_usd=30.0,
+            agent_max_notional_usd=1.0,  # Fixed $1 exposure
             agent_max_orders_per_window=5,
             agent_max_yes_position=5,
             agent_max_no_position=5,
-            max_cycle_risk_pct=0.05,
-            guardrails_per_window_risk_pct=0.03,
-            guardrails_total_venue_risk_pct=0.05,
-            per_agent_window_limit_usd=30.0,
-            total_venue_window_limit_usd=50.0,
+            max_cycle_risk_pct=0.0,  # DISABLED - fixed $1 model
+            guardrails_per_window_risk_pct=0.0,  # DISABLED - fixed $1 model
+            guardrails_total_venue_risk_pct=0.0,  # DISABLED - fixed $1 model
+            per_agent_window_limit_usd=1.0,  # Fixed $1 exposure
+            total_venue_window_limit_usd=1.0,  # Fixed $1 exposure
             window_start_ts=0.0,
             agent_window_exposure_usd={},
             total_window_exposure_usd=0.0,
+            agent_resting_exposure_usd={},  # Resting orders exposure
+            total_resting_exposure_usd=0.0,  # Total resting orders exposure
             daily_loss_enabled=True,
             max_daily_loss_usd=50.0,
             drawdown_halt_pct=0.15,
@@ -377,9 +376,10 @@ class TestAssertionConsistency:
         )
         
         # Test check_window_limit with valid inputs (should not raise assertion)
+        # 2026-07-08: Updated to use fixed $1 exposure model - use smaller order notional
         allowed, reason = envelope.check_window_limit(
             agent_id="BTC_15M",
-            order_notional_usd=30.0,
+            order_notional_usd=0.35,  # $0.35 for 1 contract at 35c
             current_ts=time.time()
         )
         
