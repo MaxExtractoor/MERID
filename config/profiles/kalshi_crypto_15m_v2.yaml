@@ -763,14 +763,12 @@ news_event_avoidance:
 fractional_contract_override_threshold: 0.5  # Allow 1 contract if max_notional >= 50% of contract cost
 assets:
   BTC:
-    max_notional_pct:
-      value: 0.03  # CONSERVATIVE: 3% of capital for BTC (limits total cycle risk to 15% across 5 assets)
-      dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
-      description: "Maximum notional as percentage of capital for BTC (computed from bankroll)"
+    # 2026-07-08 UPDATE: Removed percentage-based limits in favor of fixed $1 total exposure model
+    # max_notional_pct DISABLED - using fixed $1 exposure cap instead
     max_contracts:
-      value: 1  # CRITICAL FIX (2026-07-08): Reduced from 10 to 1 to enforce 3% risk limit (10 contracts can exceed 3% at low prices)
+      value: 1  # 1 contract per order (slot-based exposure management)
       static: profile
-      description: "Maximum contracts per order for BTC (1 contract to enforce 3% risk limit)"
+      description: "Maximum contracts per order for BTC (1 contract per slot)"
     # Edge thresholds based on 2026 volatility research (BTC: 45-55% vol, 1.5-3% intraday range)
     # Tier 1 (core assets): 3-4% min edge (REDUCED from 6-7% for achievable trade frequency in 15m markets)
     min_edge_early: 0.03  # REDUCED from 6% to 3% early edge (achievable in 15m markets)
@@ -792,14 +790,12 @@ assets:
     min_depth_no: 1  # Minimum NO depth at best ask (contracts) - aligned with 1 contract per order
     
   ETH:
-    max_notional_pct:
-      value: 0.03  # CONSERVATIVE: 3% of capital for ETH (limits total cycle risk to 15% across 5 assets)
-      dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
-      description: "Maximum notional as percentage of capital for ETH (computed from bankroll)"
+    # 2026-07-08 UPDATE: Removed percentage-based limits in favor of fixed $1 total exposure model
+    # max_notional_pct DISABLED - using fixed $1 exposure cap instead
     max_contracts:
-      value: 1  # CRITICAL FIX (2026-07-08): Reduced from 10 to 1 to enforce 3% risk limit (10 contracts can exceed 3% at low prices)
+      value: 1  # 1 contract per order (slot-based exposure management)
       static: profile
-      description: "Maximum contracts per order for ETH (1 contract to enforce 3% risk limit)"
+      description: "Maximum contracts per order for ETH (1 contract per slot)"
     # Edge thresholds based on 2026 volatility research (ETH: 45.2% vol in April 2026, declining - L2 scaling maturation)
     # Tier 1 (core assets): 3-4% min edge (REDUCED from 6-7% for achievable trade frequency in 15m markets)
     min_edge_early: 0.03  # REDUCED from 6% to 3% early edge (achievable in 15m markets)
@@ -821,14 +817,12 @@ assets:
     min_depth_no: 1  # Minimum NO depth at best ask (contracts) - aligned with 1 contract per order
     
   SOL:
-    max_notional_pct:
-      value: 0.03  # CONSERVATIVE: 3% of capital for SOL (limits total cycle risk to 15% across 5 assets)
-      dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
-      description: "Maximum notional as percentage of capital for SOL (computed from bankroll)"
+    # 2026-07-08 UPDATE: Removed percentage-based limits in favor of fixed $1 total exposure model
+    # max_notional_pct DISABLED - using fixed $1 exposure cap instead
     max_contracts:
-      value: 1  # CRITICAL FIX (2026-07-08): Reduced from 10 to 1 to enforce 3% risk limit (10 contracts can exceed 3% at low prices)
+      value: 1  # 1 contract per order (slot-based exposure management)
       static: profile
-      description: "Maximum contracts per order for SOL (1 contract to enforce 3% risk limit)"
+      description: "Maximum contracts per order for SOL (1 contract per slot)"
     # Edge thresholds based on 2026 volatility research (SOL: 89.6% vol in April 2026, increasing - speculative capital rotation)
     # Tier 2 (alt assets): 4-5% min edge (REDUCED from 8-9% for achievable trade frequency in 15m markets)
     min_edge_early: 0.04  # REDUCED from 8% to 4% early edge (achievable in 15m markets)
@@ -850,14 +844,12 @@ assets:
     min_depth_no: 1  # Minimum NO depth at best ask (contracts) - aligned with 1 contract per order
     
   XRP:
-    max_notional_pct:
-      value: 0.03  # CONSERVATIVE: 3% of capital for XRP (limits total cycle risk to 15% across 5 assets)
-      dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
-      description: "Maximum notional as percentage of capital for XRP (computed from bankroll)"
+    # 2026-07-08 UPDATE: Removed percentage-based limits in favor of fixed $1 total exposure model
+    # max_notional_pct DISABLED - using fixed $1 exposure cap instead
     max_contracts:
-      value: 1  # CRITICAL FIX (2026-07-08): Reduced from 10 to 1 to enforce 3% risk limit (10 contracts can exceed 3% at low prices)
+      value: 1  # 1 contract per order (slot-based exposure management)
       static: profile
-      description: "Maximum contracts per order for XRP (1 contract to enforce 3% risk limit)"
+      description: "Maximum contracts per order for XRP (1 contract per slot)"
     # Edge thresholds based on 2026 volatility research (XRP: ~55% vol, event-driven, beta 1.35)
     # Tier 2 (alt assets): 4-5% min edge (REDUCED from 7-8% for achievable trade frequency in 15m markets)
     min_edge_early: 0.04  # REDUCED from 7% to 4% early edge (achievable in 15m markets)
@@ -879,14 +871,12 @@ assets:
     min_depth_no: 1  # Minimum NO depth at best ask (contracts) - aligned with 1 contract per order
     
   DOGE:
-    max_notional_pct:
-      value: 0.03  # CONSERVATIVE: 3% of capital for DOGE (limits total cycle risk to 15% across 5 assets)
-      dynamic: bankroll  # Computed from live bankroll via RiskEnvelopeService
-      description: "Maximum notional as percentage of capital for DOGE (computed from bankroll)"
+    # 2026-07-08 UPDATE: Removed percentage-based limits in favor of fixed $1 total exposure model
+    # max_notional_pct DISABLED - using fixed $1 exposure cap instead
     max_contracts:
-      value: 1  # CRITICAL FIX (2026-07-08): Reduced from 10 to 1 to enforce 3% risk limit (10 contracts can exceed 3% at low prices)
+      value: 1  # 1 contract per order (slot-based exposure management)
       static: profile
-      description: "Maximum contracts per order for DOGE (1 contract to enforce 3% risk limit)"
+      description: "Maximum contracts per order for DOGE (1 contract per slot)"
     # Edge thresholds based on 2026 volatility research (DOGE: ~100% vol, sentiment-driven, highest beta 2.70)
     # Tier 2 (alt assets): 5-6% min edge (REDUCED from 8.5-9.5% for achievable trade frequency in 15m markets)
     min_edge_early: 0.05  # REDUCED from 8.5% to 5% early edge (achievable in 15m markets)
@@ -1171,6 +1161,9 @@ risk_policy:
   group_notional_cap_pct: 0.05  # 5% of bankroll per group (DISABLED - using fixed $1 instead)
   group_notional_cap_min_usd: 5.00  # Minimum $5 cap (DISABLED - using fixed $1 instead)
   group_notional_cap_max_usd: 2000.0  # Maximum $2000 cap (DISABLED - using fixed $1 instead)
+  # 2026-07-08 UPDATE: Max entry price lowered to 50c for fixed $1 exposure model
+  # Sweet spot is now 10-50c (cheaper entries = easier loss recovery, more slots available)
+  max_entry_price_cents: 50  # Max entry price for new orders
   max_fee_to_notional_pct: 15.0  # Max fee/notional ratio (circuit breaker)
   # 2026 STANDARD: Per-asset cluster stop-loss limits instead of aggregate
   # Each asset (BTC/ETH/SOL/XRP/DOGE) has calibrated limits based on volatility and liquidity

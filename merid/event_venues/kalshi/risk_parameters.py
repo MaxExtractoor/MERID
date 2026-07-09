@@ -25,7 +25,9 @@ MIN_KALSHI_PRICE_CENTS: Final[int] = 1
 MAX_KALSHI_PRICE_CENTS: Final[int] = 99
 DEFAULT_KALSHI_PRICE_CENTS: Final[int] = 50  # Midpoint fallback when market price unavailable
 DEEP_OTM_CHEAP_CENTS: Final[int] = 10  # 2026-07-05: Lowered to 10c to match agent_grid entry band [10, 70]. Reject only below 10c (lottery zone).
-DEEP_OTM_EXPENSIVE_CENTS: Final[int] = 75  # 2026-07-05: Aligned with sweet-spot entry band [25c, 75c]. Reject above 75c (no profit room to ratchet to 99c exit).
+DEEP_OTM_EXPENSIVE_CENTS: Final[int] = 50  # 2026-07-08 UPDATE: Lowered to 50c for fixed $1 exposure model
+# Rationale: With $1 total exposure cap, sweet spot is 10-50c (cheaper entries = easier loss recovery)
+# Above 50c, contracts are too expensive for $1 cap to allow multiple slots
 MAX_PRICE_DIFFERENCE_CENTS: Final[int] = 50  # Max realistic price jump (data error threshold)  
 
 # Mid-band - reasonable pricing
@@ -34,10 +36,10 @@ MID_BAND_HIGH_CENTS: Final[int] = 80
 
 # Minimum price for opening orders (anti-dust)
 MIN_OPEN_PRICE_CENTS: Final[int] = 2
-MAX_OPEN_PRICE_CENTS: Final[int] = 55  # RESEARCH-BASED: Max entry at 55c for profitable risk/reward
-# Rationale: Above 55c, reward:risk drops below 1:1 (risk more than profit potential)
-# Turbine research: Tight-band strategies above 50c lost 75-78% due to fees/slippage
-# Only winning strategy (panic_fade/volatility reversion) works best at 40-55c range
+MAX_OPEN_PRICE_CENTS: Final[int] = 50  # 2026-07-08 UPDATE: Lowered to 50c for fixed $1 exposure model
+# Rationale: With $1 total exposure cap, cheaper contracts enable more slots (e.g., 2 contracts at 50c)
+# Easier loss recovery with cheaper entries, more room for profit
+# Aligns with sweet spot (10-50c) for optimal risk/reward in small bankroll trading
 
 # ============================================================================
 # PROBABILITY THRESHOLDS (0.0 - 1.0)
