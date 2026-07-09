@@ -1111,29 +1111,36 @@ def compute_kalshi_crypto_15m_risk_envelope(
         logger.info("[RISK-ENVELOPE] Correlation tracking disabled")
     
     # ── Validation ────────────────────────────────────────────────────────────
-    # Ensure asset caps don't exceed total cap - enforce hard invariant
-    total_asset_cap = sum(asset_max_notional_usd.values())
-    if total_asset_cap > max_total_notional_usd:
-        # Scale all caps down proportionally to fit exactly into venue cap
-        scale_factor = max_total_notional_usd / total_asset_cap
-        old_total_asset_cap = total_asset_cap
-        
-        for asset_symbol in asset_max_notional_usd:
-            old_cap = asset_max_notional_usd[asset_symbol]
-            asset_max_notional_usd[asset_symbol] = old_cap * scale_factor
-        
-        total_asset_cap = sum(asset_max_notional_usd.values())
-        
-        logger.info(
-            f"[RISK-ENVELOPE] CAPS-RESCALED: Sum of asset caps exceeded venue cap - "
-            f"old sum=${old_total_asset_cap:.2f} -> new sum=${total_asset_cap:.2f} "
-            f"(scale_factor={scale_factor:.4f}, venue_cap=${max_total_notional_usd:.2f})"
-        )
-        for asset_symbol in asset_max_notional_usd:
-            logger.info(
-                f"[RISK-ENVELOPE] Asset {asset_symbol}: "
-                f"rescaled cap=${asset_max_notional_usd[asset_symbol]:.2f}"
-            )
+    # 2026-07-09: DISABLED per-asset cap rescaling - global allocator handles edge-based allocation
+    # The global allocator at agent grid level now manages allocation under venue cap
+    # Per-asset caps are no longer rescaled to fit venue cap - this allows best edges to use available venue cap
+    # Previous logic: Scale all caps down proportionally to fit exactly into venue cap
+    # This was causing equal $0.20 caps per asset, defeating edge-based allocation
+    # total_asset_cap = sum(asset_max_notional_usd.values())
+    # if total_asset_cap > max_total_notional_usd:
+    #     scale_factor = max_total_notional_usd / total_asset_cap
+    #     old_total_asset_cap = total_asset_cap
+    #     
+    #     for asset_symbol in asset_max_notional_usd:
+    #         old_cap = asset_max_notional_usd[asset_symbol]
+    #         asset_max_notional_usd[asset_symbol] = old_cap * scale_factor
+    #     
+    #     total_asset_cap = sum(asset_max_notional_usd.values())
+    #     
+    #     logger.info(
+    #         f"[RISK-ENVELOPE] CAPS-RESCALED: Sum of asset caps exceeded venue cap - "
+    #         f"old sum=${old_total_asset_cap:.2f} -> new sum=${total_asset_cap:.2f} "
+    #         f"(scale_factor={scale_factor:.4f}, venue_cap=${max_total_notional_usd:.2f})"
+    #     )
+    #     for asset_symbol in asset_max_notional_usd:
+    #         logger.info(
+    #             f"[RISK-ENVELOPE] Asset {asset_symbol}: "
+    #             f"rescaled cap=${asset_max_notional_usd[asset_symbol]:.2f}"
+    #         )
+    
+    logger.info(
+        "[RISK-ENVELOPE] Per-asset cap rescaling DISABLED - global allocator handles edge-based allocation under venue cap"
+    )
     
     # Ensure per-trade cap is reasonable relative to bankroll
     if max_single_order_notional_usd > live_bankroll_usd:
