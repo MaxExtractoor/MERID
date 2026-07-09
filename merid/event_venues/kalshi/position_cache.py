@@ -467,6 +467,15 @@ class KalshiPositionCache:
                     try:
                         envelope = get_kalshi_crypto_15m_risk_envelope()
                         order_notional_usd = (contracts * price_cents) / 100.0
+                        
+                        # CRITICAL FIX (2026-07-08): Release resting exposure and record execution exposure
+                        # Resting exposure was recorded at placement time (order_gate, top3 gate)
+                        # When order fills, we must release resting exposure and record execution exposure
+                        # This prevents double-counting and ensures accurate window tracking
+                        envelope.release_resting_order_exposure(
+                            agent_id=agent_id,
+                            order_notional_usd=order_notional_usd
+                        )
                         envelope.record_order_execution(
                             agent_id=agent_id,
                             order_notional_usd=order_notional_usd
@@ -476,9 +485,9 @@ class KalshiPositionCache:
                         logger.warning(
                             "[POSITION-CACHE] Failed to record window exposure: %s (bankroll service unavailable)",
                             e
-                        )
+                    )
                     logger.info(
-                        "[POSITION-CACHE] Recorded window exposure on fill: agent=%s notional=$%.2f market=%s fill_id=%s",
+                        "[POSITION-CACHE] Released resting exposure and recorded execution exposure on fill: agent=%s notional=$%.2f market=%s fill_id=%s",
                         agent_id, order_notional_usd, market_id, fill_id or "N/A"
                     )
                 

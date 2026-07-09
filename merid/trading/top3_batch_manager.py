@@ -416,6 +416,30 @@ class Top3BatchManager:
             self._current_batch.filled_assets.add(asset)
             self._save_state()
             
+            # CRITICAL FIX (2026-07-08): Release resting order exposure on fill
+            # Resting exposure was recorded at placement time in can_open_new_position()
+            # When order fills, we release resting exposure and record execution exposure
+            try:
+                from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+                envelope = get_kalshi_crypto_15m_risk_envelope()
+                if envelope:
+                    agent_id = f"{asset}_15M"
+                    order_notional_usd = filled_notional / 100.0
+                    envelope.release_resting_order_exposure(
+                        agent_id=agent_id,
+                        order_notional_usd=order_notional_usd
+                    )
+                    envelope.record_order_execution(
+                        agent_id=agent_id,
+                        order_notional_usd=order_notional_usd
+                    )
+                    logger.info(
+                        "[TOP3-BATCH] Released resting exposure on fill: asset=%s notional=$%.2f agent=%s",
+                        asset, order_notional_usd, agent_id
+                    )
+            except Exception as e:
+                logger.warning("[TOP3-BATCH] Failed to release resting exposure on fill: %s", e)
+            
             logger.info(
                 "[TOP3-BATCH] Marked %s as filled in batch %s (notional=%d¢)",
                 asset, batch_id, filled_notional
@@ -451,6 +475,28 @@ class Top3BatchManager:
                 )
             
             self._save_state()
+            
+            # CRITICAL FIX (2026-07-08): Release resting order exposure on close
+            # If position closes without being filled (e.g., cancelled order), release resting exposure
+            try:
+                from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+                envelope = get_kalshi_crypto_15m_risk_envelope()
+                if envelope:
+                    agent_id = f"{asset}_15M"
+                    # Get allocation notional for this asset
+                    allocation = self._current_batch.get_allocation_for_asset(asset)
+                    if allocation:
+                        order_notional_usd = allocation.target_notional / 100.0
+                        envelope.release_resting_order_exposure(
+                            agent_id=agent_id,
+                            order_notional_usd=order_notional_usd
+                        )
+                        logger.info(
+                            "[TOP3-BATCH] Released resting exposure on close: asset=%s notional=$%.2f agent=%s",
+                            asset, order_notional_usd, agent_id
+                        )
+            except Exception as e:
+                logger.warning("[TOP3-BATCH] Failed to release resting exposure on close: %s", e)
             
             logger.info("[TOP3-BATCH] Marked %s as closed in batch %s", asset, batch_id)
             return True
@@ -615,6 +661,10 @@ class Top3BatchManager:
         
         This is the main entry gate used by agents and routers.
         
+        CRITICAL FIX (2026-07-07): Added window-based risk limit check to unify
+        top 3 gate with window limits. This prevents the top 3 gate from allowing
+        orders that would exceed the 3% per-agent / 5% total venue window limits.
+        
         Args:
             asset: Asset to check (BTC, ETH, SOL, XRP, DOGE)
             requested_notional: Requested notional in cents
@@ -629,6 +679,7 @@ class Top3BatchManager:
         - NO_ACTIVE_TOP3_BATCH: No batch is currently active
         - ASSET_NOT_IN_TOP3: Asset not in current batch allocations
         - BATCH_NOTIONAL_LIMIT_REACHED: Notional limit would be exceeded
+        - WINDOW_LIMIT_EXCEEDED: Order would exceed window-based risk limits
         """
         with self._lock:
             batch = self.get_current_batch()
@@ -656,7 +707,53 @@ class Top3BatchManager:
                 )
                 return False, REJECT_ASSET_NOT_IN_TOP3, None
             
-            # Check 4: Notional limit (simplified - tracks filled vs target)
+            # Check 4: Window-based risk limit (HARD STOP) - 2026-07-07
+            # CRITICAL FIX (2026-07-08): Integrate with resting order exposure tracking
+            # Unify top 3 gate with window limits to prevent venue window bottleneck
+            try:
+                from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+                import time
+                envelope = get_kalshi_crypto_15m_risk_envelope()
+                if envelope:
+                    agent_id = f"{asset}_15M"  # Agent ID format for window tracking
+                    order_notional_usd = requested_notional / 100.0  # Convert cents to USD
+                    current_ts = time.time()
+                    
+                    window_allowed, window_reason = envelope.check_window_limit(
+                        agent_id=agent_id,
+                        order_notional_usd=order_notional_usd,
+                        current_ts=current_ts
+                    )
+                    
+                    if not window_allowed:
+                        self._rejections["WINDOW_LIMIT_EXCEEDED"] += 1
+                        logger.warning(
+                            "[TOP3-REJECT] WINDOW_LIMIT_EXCEEDED: asset=%s notional=$%.2f reason=%s - "
+                            "top 3 gate unified with window limits (HARD STOP)",
+                            asset, order_notional_usd, window_reason
+                        )
+                        return False, f"WINDOW_LIMIT_EXCEEDED:{window_reason}", None
+                    
+                    # CRITICAL FIX (2026-07-08): Record resting order exposure at placement time
+                    # This prevents multiple resting orders from exceeding window limits
+                    # Resting exposure is released when order fills or closes
+                    envelope.record_resting_order_placement(
+                        agent_id=agent_id,
+                        order_notional_usd=order_notional_usd
+                    )
+                    logger.info(
+                        "[TOP3-GATE] Recorded resting exposure: asset=%s notional=$%.2f agent=%s",
+                        asset, order_notional_usd, agent_id
+                    )
+            except Exception as e:
+                # If window check fails, fail-open for safety (don't block trading due to infrastructure issues)
+                logger.warning(
+                    "[TOP3-GATE] Window limit check failed for asset=%s: %s - "
+                    "proceeding without window check (fail-open)",
+                    asset, e
+                )
+            
+            # Check 5: Notional limit (simplified - tracks filled vs target)
             # In production, you'd track actual filled notional per asset
             if asset in batch.filled_assets:
                 # Already filled this asset in this batch
