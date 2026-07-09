@@ -1329,9 +1329,11 @@ def test_spread_thresholds_2026_standards():
         raw = yaml.safe_load(f)
 
     # Verify market microstructure spread threshold is aligned with profile YAML
+    # Note: max_spread_cents is about bid-ask spread (liquidity), not entry price
+    # This remains at 75c for DOGE spreads that can exceed 50c
     guardrails = raw.get('guardrails', {})
     max_spread_cents = guardrails.get('max_spread_cents', 100)
-    
+
     assert max_spread_cents == 75, \
         f"Market microstructure spread threshold should be 75c per profile YAML, got {max_spread_cents}"
     

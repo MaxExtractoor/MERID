@@ -249,16 +249,16 @@ class TestPriceFloorGuardrail:
             adapter = Crypto15mProfileAdapter()
             profile = adapter.profile
 
-            # Check that the value is set to 75 cents (from YAML)
-            # 2026 research: 75c sweet spot threshold - intentional to avoid moonshot territory
-            # Orders above 75c are rejected (no reward for the risk)
-            assert profile.guardrails_max_contract_price_cents == 75, \
-                f"Expected max_contract_price_cents=75 (sweet spot threshold), got {profile.guardrails_max_contract_price_cents}"
+            # Check that the value is set to 50 cents (from YAML)
+            # 2026-07-08: 50c sweet spot threshold - aligned with binary options guidance
+            # Orders above 50c are rejected (too expensive for $1 fixed exposure cap)
+            assert profile.guardrails_max_contract_price_cents == 50, \
+                f"Expected max_contract_price_cents=50 (sweet spot threshold), got {profile.guardrails_max_contract_price_cents}"
         except Exception as e:
             pytest.skip(f"Profile max_contract_price_cents check skipped: {e}")
 
     def test_price_range_max_price_cents_aligned_with_guardrails(self):
-        """Test that price_range max_price_cents is aligned with guardrails_max_contract_price_cents (75c)."""
+        """Test that price_range max_price_cents is aligned with guardrails_max_contract_price_cents (50c)."""
         try:
             import yaml
             from pathlib import Path
@@ -275,11 +275,11 @@ class TestPriceFloorGuardrail:
             guardrails = profile_yaml.get('guardrails', {})
 
             # Check that price_range max_price_cents matches guardrails max_contract_price_cents
-            # UPDATED: price_range max_price_cents is 75 (sweet spot threshold)
-            assert price_range.get('max_price_cents') == 75, \
-                f"Expected price_range max_price_cents=75, got {price_range.get('max_price_cents')}"
-            assert guardrails.get('max_contract_price_cents') == 75, \
-                f"Expected guardrails max_contract_price_cents=75, got {guardrails.get('max_contract_price_cents')}"
+            # 2026-07-08: Both should be 50c (sweet spot threshold)
+            assert price_range.get('max_price_cents') == 50, \
+                f"Expected price_range max_price_cents=50, got {price_range.get('max_price_cents')}"
+            assert guardrails.get('max_contract_price_cents') == 50, \
+                f"Expected guardrails max_contract_price_cents=50, got {guardrails.get('max_contract_price_cents')}"
         except Exception as e:
             pytest.skip(f"Price range alignment check skipped: {e}")
 

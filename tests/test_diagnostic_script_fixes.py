@@ -373,30 +373,31 @@ class TestAssetCoverage:
             assert attr in LeanAgentConfig.__dataclass_fields__
 
 
-class Test75cThreshold:
-    """Test that the 75c threshold is correctly implemented."""
-    
+class Test50cSweetSpotThreshold:
+    """Test that the 50c sweet spot threshold is correctly implemented (2026-07-08)."""
+
     def test_deep_otm_expensive_cents_value(self):
-        """Test that DEEP_OTM_EXPENSIVE_CENTS is 75."""
+        """Test that DEEP_OTM_EXPENSIVE_CENTS is 50 (2026-07-08 update)."""
         from merid.event_venues.kalshi.risk_parameters import DEEP_OTM_EXPENSIVE_CENTS
-        
-        assert DEEP_OTM_EXPENSIVE_CENTS == 75
-    
-    def test_75c_threshold_in_profile_yaml(self):
-        """Test that 75c threshold is reflected in profile YAML."""
+
+        assert DEEP_OTM_EXPENSIVE_CENTS == 50
+
+    def test_50c_threshold_in_profile_yaml(self):
+        """Test that 50c threshold is reflected in profile YAML."""
         profile_path = Path("c:/Dev/MERID/config/profiles/kalshi_crypto_15m_v2.yaml")
         with open(profile_path, 'r', encoding='utf-8') as f:
             profile = yaml.safe_load(f)
         
-        # Check guardrails.max_spread_cents
+        # Check guardrails.max_spread_cents (liquidity threshold, not entry price)
         assert 'guardrails' in profile
         guardrails = profile['guardrails']
-        assert guardrails['max_spread_cents'] == 75
-        
-        # Check universe.max_spread_cents
+        assert guardrails['max_spread_cents'] == 75  # Remains 75c for DOGE spreads
+
+        # Check universe.max_spread_cents (liquidity threshold, not entry price)
         assert 'universe' in profile
         universe = profile['universe']
-        assert universe['max_spread_cents'] == 75
-        
-        # Check guardrails max_contract_price_cents
-        assert guardrails['max_contract_price_cents'] == 75
+        assert universe['max_spread_cents'] == 75  # Remains 75c for DOGE spreads
+
+        # Check guardrails max_contract_price_cents (entry price threshold)
+        # 2026-07-08: Updated to 50c for sweet spot (10-50c)
+        assert guardrails['max_contract_price_cents'] == 50
