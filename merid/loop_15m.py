@@ -3738,11 +3738,15 @@ class Kalshi15mLoop:
                             # NO order: calculate NO mid-price
                             if market_state.best_bid_cents and market_state.best_ask_cents:
                                 yes_mid = (market_state.best_bid_cents + market_state.best_ask_cents) // 2
-                                price_cents = 100 - yes_mid
-                                logger.info("[15M-LOOP] ticker=%s NO order: YES_mid=%d -> NO_mid=%d", ticker, yes_mid, price_cents)
+                                raw_price_cents = 100 - yes_mid
+                                # CRITICAL FIX: Clamp to 10-50c entry range to match profile guardrails
+                                price_cents = max(10, min(50, raw_price_cents))
+                                logger.info("[15M-LOOP] ticker=%s NO order: YES_mid=%d -> NO_mid=%d (raw=%d, clamped=%d)", ticker, yes_mid, price_cents, raw_price_cents, price_cents)
                             elif market_state.mid_cents:
-                                price_cents = 100 - int(market_state.mid_cents)
-                                logger.info("[15M-LOOP] ticker=%s NO order: YES_mid_cents=%.2f -> NO_mid=%d", ticker, market_state.mid_cents, price_cents)
+                                raw_price_cents = 100 - int(market_state.mid_cents)
+                                # CRITICAL FIX: Clamp to 10-50c entry range to match profile guardrails
+                                price_cents = max(10, min(50, raw_price_cents))
+                                logger.info("[15M-LOOP] ticker=%s NO order: YES_mid_cents=%.2f -> NO_mid=%d (raw=%d, clamped=%d)", ticker, market_state.mid_cents, price_cents, raw_price_cents, price_cents)
                             else:
                                 logger.warning("[15M-LOOP] NO order but no market state data for %s, using default 50c", ticker)
                                 price_cents = 50
@@ -3751,12 +3755,16 @@ class Kalshi15mLoop:
                             if market_state.mid_cents:
                                 # BUG #39 FIX: Convert mid_cents to integer
                                 # mid_cents is a float from unified_market_state.py but order router requires integer
-                                price_cents = int(market_state.mid_cents)
-                                logger.info("[15M-LOOP] ticker=%s YES order: price_cents from mid_cents=%d (raw=%.2f)", ticker, price_cents, market_state.mid_cents)
+                                raw_price_cents = int(market_state.mid_cents)
+                                # CRITICAL FIX: Clamp to 10-50c entry range to match profile guardrails
+                                price_cents = max(10, min(50, raw_price_cents))
+                                logger.info("[15M-LOOP] ticker=%s YES order: price_cents from mid_cents=%d (raw=%.2f, clamped=%d)", ticker, price_cents, market_state.mid_cents, price_cents)
                             elif market_state.best_bid_cents and market_state.best_ask_cents:
                                 # Use mid of bid/ask if mid not available
-                                price_cents = (market_state.best_bid_cents + market_state.best_ask_cents) // 2
-                                logger.info("[15M-LOOP] ticker=%s YES order: price_cents from bid/ask mid=%d (bid=%d, ask=%d)", ticker, price_cents, market_state.best_bid_cents, market_state.best_ask_cents)
+                                raw_price_cents = (market_state.best_bid_cents + market_state.best_ask_cents) // 2
+                                # CRITICAL FIX: Clamp to 10-50c entry range to match profile guardrails
+                                price_cents = max(10, min(50, raw_price_cents))
+                                logger.info("[15M-LOOP] ticker=%s YES order: price_cents from bid/ask mid=%d (raw=%d, clamped=%d) (bid=%d, ask=%d)", ticker, price_cents, raw_price_cents, price_cents, market_state.best_bid_cents, market_state.best_ask_cents)
                             else:
                                 logger.warning("[15M-LOOP] YES order but no market state data for %s, using default 50c", ticker)
                                 price_cents = 50
@@ -3921,6 +3929,21 @@ class Kalshi15mLoop:
                 # Default to 5 cent SL if no policy
                 stop_loss_price_cents = max(1, price_cents - 5) if side_raw == "YES" else price_cents + 5
             
+            # Generate unique trace_id for candidate → order → policy tracking
+            import uuid
+            trace_id = str(uuid.uuid4())[:8]
+            candidate["trace_id"] = trace_id
+
+            # PRE-SEND ASSERT: Ensure order price is within 10-50c entry range
+            if not (10 <= price_cents <= 50):
+                logger.error(
+                    "[PRE-SEND-ASSERT-FAILED] trace_id=%s price_cents=%d outside entry range [10,50] ticker=%s side=%s edge_pct=%s "
+                    "candidate_price_cents=%s source=%s",
+                    trace_id, price_cents, ticker, kalshi_side, edge_pct,
+                    candidate.get("price_cents", "N/A"), "merid.prediction.agent_grid_15m"
+                )
+                raise AssertionError(f"Order price {price_cents}c outside entry range [10,50] for ticker={ticker}")
+
             intent = OrderIntent(
                 ticker=ticker,
                 side=kalshi_side,  # CRITICAL FIX: Use Kalshi-formatted side (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
@@ -3933,6 +3956,7 @@ class Kalshi15mLoop:
                 confidence=confidence,  # BUG #34 FIX: Add confidence from candidate
                 model_prob=model_prob,  # BUG #34 FIX: Add model_prob from candidate
                 rationale=candidate.get("rationale"),  # CRITICAL: Pass rationale to skip edge validation for price-based strategy
+                trace_id=trace_id,  # DEBUG: Add trace_id for candidate → order → policy tracking
                 # Phase 2: Strategy identification for multi-strategy support
                 strategy_id="heuristic_velocity",  # From profile strategies section
                 strategy_type="heuristic_velocity",  # From profile strategies section
