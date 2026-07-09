@@ -46,6 +46,11 @@ from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.order_gate")
 
+# SEV-1 FIX: Track envelope failure count for alerting
+_envelope_failure_count = 0
+_envelope_failure_window_start = _time.time()
+_envelope_failure_lock = threading.Lock()
+
 
 # ── Order status enum ────────────────────────────────────────────────────────
 
@@ -911,28 +916,20 @@ class PreTradeGate:
                 import time
                 order_notional_usd = (target_count * price_cents) / 100.0
                 is_exit_order = action == "sell"
-                exit_window_limit_pct = 0.10  # 10% for exits (higher than 3% for entries)
-                entry_window_limit_pct = 0.03  # 3% for entries
                 
                 logger.info(
                     "[GATE-WINDOW-CHECK] Checking window limit: agent=%s notional=$%.2f count=%d price=%dc is_exit=%s",
                     agent_id, order_notional_usd, target_count, price_cents, is_exit_order
                 )
                 
-                # Use different limits for entry vs exit orders
-                if is_exit_order:
-                    window_allowed, window_reason = envelope.check_window_limit(
-                        agent_id=agent_id,
-                        order_notional_usd=order_notional_usd,
-                        current_ts=time.time(),
-                        custom_per_agent_limit_pct=exit_window_limit_pct
-                    )
-                else:
-                    window_allowed, window_reason = envelope.check_window_limit(
-                        agent_id=agent_id,
-                        order_notional_usd=order_notional_usd,
-                        current_ts=time.time()
-                    )
+                # SEV-0 FIX: Use same 3% limit for both entry and exit orders
+                # Exit orders should be rare (trailing stop, ratchet, 99c exit) and sequential
+                # This prevents abuse where exit orders could accumulate exposure beyond 3%
+                window_allowed, window_reason = envelope.check_window_limit(
+                    agent_id=agent_id,
+                    order_notional_usd=order_notional_usd,
+                    current_ts=time.time()
+                )
                 
                 logger.info(
                     "[GATE-WINDOW-CHECK] Window limit result: allowed=%s reason=%s",
@@ -966,6 +963,24 @@ class PreTradeGate:
                     )
             else:
                 self._store._metrics.blocked_window_limit += 1
+                # SEV-1 FIX: Track envelope failure count for alerting
+                with _envelope_failure_lock:
+                    global _envelope_failure_count, _envelope_failure_window_start
+                    now = _time.time()
+                    if now - _envelope_failure_window_start > 60:
+                        _envelope_failure_count = 1
+                        _envelope_failure_window_start = now
+                    else:
+                        _envelope_failure_count += 1
+                    
+                    # Trigger SEV-0 alert if >3 failures in 60 seconds
+                    if _envelope_failure_count >= 3:
+                        logger.critical(
+                            "[SEV-0-ALERT] Risk envelope failed %d times in 60 seconds - SYSTEMIC ISSUE. "
+                            "All orders blocked until envelope is fixed. Check BankrollServiceV2 availability.",
+                            _envelope_failure_count
+                        )
+                
                 logger.error(
                     "[GATE-ALERT] envelope_is_none - window limit check failed, rejecting order for safety. "
                     "contract=%s side=%s agent=%s notional=$%.2f (metric: blocked_window_limit=%d)",
@@ -979,6 +994,24 @@ class PreTradeGate:
                 )
         except Exception as e:
             self._store._metrics.blocked_window_limit += 1
+            # SEV-1 FIX: Track envelope failure count for alerting
+            with _envelope_failure_lock:
+                global _envelope_failure_count, _envelope_failure_window_start
+                now = _time.time()
+                if now - _envelope_failure_window_start > 60:
+                    _envelope_failure_count = 1
+                    _envelope_failure_window_start = now
+                else:
+                    _envelope_failure_count += 1
+                
+                # Trigger SEV-0 alert if >3 failures in 60 seconds
+                if _envelope_failure_count >= 3:
+                    logger.critical(
+                        "[SEV-0-ALERT] Risk envelope failed %d times in 60 seconds - SYSTEMIC ISSUE. "
+                        "All orders blocked until envelope is fixed. Check BankrollServiceV2 availability.",
+                        _envelope_failure_count
+                    )
+            
             logger.error(
                 "[GATE-ALERT] window_limit_check_failed - rejecting order for safety. "
                 "contract=%s side=%s agent=%s notional=$%.2f error=%s (metric: blocked_window_limit=%d)",

@@ -3798,8 +3798,29 @@ class Kalshi15mLoop:
             # compute them from velocity and price for 15m velocity-based strategy
             if edge_pct == 0.0 and "velocity" in candidate:
                 velocity = candidate.get("velocity", 0.0)
-                # Compute edge from velocity (simple conversion for 15m strategy)
-                edge_pct = abs(velocity) * 100  # Convert velocity to edge percentage
+                # SEV-0 FIX: Use standardized velocity edge calculation function
+                # Get velocity threshold from profile for the asset
+                try:
+                    from merid.prediction.agent_grid_15m import calculate_velocity_edge
+                    from merid.config.profiles.kalshi_crypto_15m_v2 import get_profile
+                    profile = get_profile()
+                    # Extract asset from ticker (e.g., KXBTC15M-... -> BTC)
+                    asset = ticker.split("-")[0].replace("KX", "") if "-" in ticker else "UNKNOWN"
+                    # Get velocity threshold from profile
+                    velocity_threshold = 0.0002  # Default BTC threshold
+                    if asset == "ETH":
+                        velocity_threshold = 0.0003
+                    elif asset == "SOL":
+                        velocity_threshold = 0.0004
+                    elif asset == "XRP":
+                        velocity_threshold = 0.0005
+                    elif asset == "DOGE":
+                        velocity_threshold = 0.0006
+                    edge_pct = calculate_velocity_edge(velocity, velocity_threshold)
+                except Exception as e:
+                    logger.warning("[15M-LOOP] Failed to use standardized edge calculation: %s, using fallback", e)
+                    edge_pct = abs(velocity) * 100  # Fallback: simple conversion
+                
                 # Compute confidence from velocity magnitude (higher velocity = higher confidence)
                 velocity_magnitude = abs(velocity)
                 confidence = min(0.95, 0.50 + velocity_magnitude * 100)  # Base 50%, scale with velocity
