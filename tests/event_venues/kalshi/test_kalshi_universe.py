@@ -210,8 +210,25 @@ class TestUniverseConfig:
 class TestPassesLiquidity:
     def _passes(self, cm, **kwargs):
         from merid.event_venues.kalshi.universe import UniverseConfig, _passes_liquidity
-        cfg = UniverseConfig(**kwargs)
-        return _passes_liquidity(cm, cfg)
+        import os
+        
+        # Set environment variables for testing (UniverseConfig reads from env vars)
+        original_env = {}
+        for key, value in kwargs.items():
+            env_key = f"MERID_UNIVERSE_{key.upper()}"
+            original_env[env_key] = os.environ.get(env_key)
+            os.environ[env_key] = str(value)
+        
+        try:
+            cfg = UniverseConfig()
+            return _passes_liquidity(cm, cfg)
+        finally:
+            # Restore original environment
+            for key, value in original_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
     def test_passes_with_defaults(self):
         cm = _make_cm("TEST-1")
@@ -223,12 +240,12 @@ class TestPassesLiquidity:
 
     def test_fails_spread(self):
         cm = _make_cm("TEST-3", bid=10, ask=90)
-        assert self._passes(cm, max_spread_cents=20) is False
+        assert self._passes(cm, max_spread_cents=10) is False
 
     def test_passes_spread_within_limit(self):
-        cm = _make_cm("TEST-4", bid=40, ask=60)
-        # spread=20, limit=20 — should pass (not strictly greater)
-        assert self._passes(cm, max_spread_cents=20) is True
+        cm = _make_cm("TEST-4", bid=45, ask=55)
+        # spread=10, limit=10 — should pass (not strictly greater)
+        assert self._passes(cm, max_spread_cents=10) is True
 
     def test_no_book_skips_spread_check(self):
         cm = _make_cm("TEST-5", bid=0, ask=0)

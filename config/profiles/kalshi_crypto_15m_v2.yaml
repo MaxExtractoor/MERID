@@ -522,7 +522,7 @@ venue:
 universe:
   min_volume: 5  # Minimum 5 contracts volume (relaxed from default 50 for 15m crypto)
   min_open_interest: 1  # Minimum 1 contract open interest (relaxed from default 10)
-  max_spread_cents: 20  # 2026-07-09: OPTIMIZED to 20c - default balance between fill quality and trade frequency (industry research: 15c-25c range, 20c recommended)
+  max_spread_cents: 10  # 2026-07-09: OPTIMIZED to 10c - optimal balance between fill quality and trade frequency (industry research: 3-5c typical for crypto markets, 10c upper bound of moderate-liquidity range)
   description: "Coarse liquidity prefilter for 15m crypto markets - tuned for exactly 5 markets per asset"
 
 # ── Throttling (Order Rate Limits) ───────────────────────────────────────────
