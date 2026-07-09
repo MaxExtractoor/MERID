@@ -2421,7 +2421,7 @@ def _validate_deep_otm_policy(intent: OrderIntent) -> Optional[str]:
     
     # Check if in deep OTM band
     is_deep_cheap = intent.price_cents <= DEEP_OTM_CHEAP_CENTS
-    is_deep_expensive = intent.price_cents >= DEEP_OTM_EXPENSIVE_CENTS
+    is_deep_expensive = intent.price_cents > DEEP_OTM_EXPENSIVE_CENTS
     
     # DEEP_OTM_POLICY_STATE: Log detailed state for debugging price path
     logger.error(
