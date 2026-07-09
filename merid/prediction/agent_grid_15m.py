@@ -3196,9 +3196,11 @@ class LeanAgent15m:
             
             # INDUSTRY ALIGNMENT: Convert spread to basis points for regime-aware validation
             # Use mid price as reference for bp calculation
+            # CRITICAL FIX: Multiply by 10000 (not 100) for correct basis point conversion
+            # 1 basis point = 0.01%, so spread ratio * 10000 = basis points
             mid_price_cents = (best_bid + best_ask) / 2
             if mid_price_cents > 0:
-                spread_bp = (spread_cents / mid_price_cents) * 100
+                spread_bp = (spread_cents / mid_price_cents) * 10000
                 # 2026 BEST PRACTICE: Use dynamic spread threshold based on volatility regime
                 # "Blow your spreads out when the market's volatility does"
                 dynamic_threshold_bp = self._get_dynamic_spread_threshold(ticker)
