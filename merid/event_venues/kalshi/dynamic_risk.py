@@ -716,12 +716,16 @@ class DynamicRiskEngine:
         per_market_cap = int((bankroll_usd * 0.05) / worst_case_loss_dollars)
         
         # Per-asset cap: Use risk envelope's asset_max_notional_usd if provided, else 10% of bankroll
-        if asset_max_notional_usd is not None:
-            # Convert notional cap to contract cap: max_notional / entry_price
-            per_asset_cap = int(asset_max_notional_usd / worst_case_loss_dollars)
-        else:
-            # Fallback: 10% of bankroll (all 5 crypto assets treated as correlated)
-            per_asset_cap = int((bankroll_usd * 0.10) / worst_case_loss_dollars)
+        # 2026-07-09: DISABLED - global allocator handles allocation at grid level
+        # Per-asset caps are no longer enforced here to allow best edges to use available venue cap
+        # if asset_max_notional_usd is not None:
+        #     # Convert notional cap to contract cap: max_notional / entry_price
+        #     per_asset_cap = int(asset_max_notional_usd / worst_case_loss_dollars)
+        # else:
+        #     # Fallback: 10% of bankroll (all 5 crypto assets treated as correlated)
+        #     per_asset_cap = int((bankroll_usd * 0.10) / worst_case_loss_dollars)
+        # Use venue cap instead for dynamic risk calculation
+        per_asset_cap = int((bankroll_usd * 0.20) / worst_case_loss_dollars)  # 20% of bankroll as fallback
         
         # Global cap: 20% of bankroll across all positions
         global_cap = int((bankroll_usd * 0.20) / worst_case_loss_dollars)
