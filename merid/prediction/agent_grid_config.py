@@ -101,11 +101,10 @@ def apply_profile_to_agent(
             live_bankroll_usd or 0, min_capital
         )
     
-    # 3. Compute per-trade risk percent (unified across assets)
-    risk_pct = getattr(profile, 'per_trade_risk_pct', 0.03)  # CRITICAL FIX: Default 3% to match profile YAML (was 0.02)
-    
-    # 4. Compute max_notional
-    max_notional_usd = effective_capital * risk_pct
+    # 3. 2026-07-08 UPDATE: Use fixed $1 exposure cap instead of percentage-based sizing
+    # Percentage-based risk_pct DISABLED - using fixed $1 exposure cap
+    # max_notional is now enforced via slot-based position management in unified_sizing.py
+    max_notional_usd = Decimal("1.00")  # Fixed $1 exposure cap
     
     # 5. Apply overrides to risk limits
     updated_risk_limits = replace(

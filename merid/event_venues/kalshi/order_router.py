@@ -1870,10 +1870,11 @@ def _log_price_band_config() -> None:
         profile = profile_adapter.profile  # Use .profile property, not .get_profile()
         
         # Use guardrails_min_post_fee_edge from profile (1.5% minimum post-fee edge)
-        # Fallback to guardrails_per_trade_risk_pct (2% base edge for maker orders) if min_post_fee_edge not available
+        # 2026-07-08 UPDATE: Fallback to guardrails_per_trade_risk_pct DISABLED (percentage-based)
+        # If min_post_fee_edge not available, use fixed threshold instead
         _price_band_min_edge = getattr(profile, 'guardrails_min_post_fee_edge', None)
         if _price_band_min_edge is None:
-            _price_band_min_edge = getattr(profile, 'guardrails_per_trade_risk_pct', 0.02)
+            _price_band_min_edge = 0.015  # 1.5% fixed minimum edge (not percentage-based)
         
         # Use confidence_min_confidence_threshold from profile (65% - PRIMARY confidence threshold)
         _price_band_min_confidence = getattr(profile, 'confidence_min_confidence_threshold', 0.65)
@@ -1948,10 +1949,11 @@ def _validate_price_band(intent: OrderIntent) -> Optional[str]:
         profile = profile_adapter.profile  # Use .profile property, not .get_profile()
         
         # Use guardrails_min_post_fee_edge from profile (1.5% minimum post-fee edge)
-        # Fallback to guardrails_per_trade_risk_pct (2% base edge for maker orders) if min_post_fee_edge not available
+        # 2026-07-08 UPDATE: Fallback to guardrails_per_trade_risk_pct DISABLED (percentage-based)
+        # If min_post_fee_edge not available, use fixed threshold instead
         _price_band_min_edge = getattr(profile, 'guardrails_min_post_fee_edge', None)
         if _price_band_min_edge is None:
-            _price_band_min_edge = getattr(profile, 'guardrails_per_trade_risk_pct', 0.02)
+            _price_band_min_edge = 0.015  # 1.5% fixed minimum edge (not percentage-based)
         
         # Use confidence_min_confidence_threshold from profile (65% - PRIMARY confidence threshold)
         _price_band_min_confidence = getattr(profile, 'confidence_min_confidence_threshold', 0.65)
@@ -5365,10 +5367,12 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 # This prevents incorrect exposure tracking for partial fills and ensures consistency
                 
                 # Record execution exposure (actual filled notional)
+                # CRITICAL FIX 2026-07-08: Extract asset for per-asset exposure tracking
+                asset = extract_asset_from_ticker(intent.ticker) if intent.ticker else None
                 envelope.record_order_execution(
                     agent_id=agent_id,
                     order_notional_usd=filled_notional_usd,
-                    current_ts=_time.time()
+                    asset=asset
                 )
                 logger.info(
                     "[order-router-WINDOW-RECORD] Recorded execution exposure: agent=%s notional=$%.2f filled=%d price=%dc ticker=%s",
@@ -5946,14 +5950,17 @@ def _run_pre_trade_gate(
                     if envelope:
                         import time
                         order_notional_usd = (intent.count * intent.price_cents) / 100.0
+                        # CRITICAL FIX 2026-07-08: Extract asset for per-asset 3% limit check
+                        asset = extract_asset_from_ticker(intent.ticker) if intent.ticker else None
                         logger.info(
-                            "[order-router-WINDOW-CHECK] Checking window limit (upstream path): agent=%s notional=$%.2f count=%d price=%dc",
-                            _agent, order_notional_usd, intent.count, intent.price_cents
+                            "[order-router-WINDOW-CHECK] Checking window limit (upstream path): agent=%s asset=%s notional=$%.2f count=%d price=%dc",
+                            _agent, asset or "N/A", order_notional_usd, intent.count, intent.price_cents
                         )
                         window_allowed, window_reason = envelope.check_window_limit(
                             agent_id=_agent,
                             order_notional_usd=order_notional_usd,
-                            current_ts=time.time()
+                            current_ts=time.time(),
+                            asset=asset
                         )
                         logger.info(
                             "[order-router-WINDOW-CHECK] Window limit result (upstream path): allowed=%s reason=%s",

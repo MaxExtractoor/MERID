@@ -32,6 +32,8 @@ _WINDOW_TRACKING_STATE: Dict[str, Any] = {
     "total_exposure_usd": 0.0,  # cumulative executed notional across all agents this window
     "agent_resting_exposure_usd": {},  # agent_id -> cumulative resting order notional this window (CRITICAL FIX 2026-07-08)
     "total_resting_exposure_usd": 0.0,  # cumulative resting order notional across all agents this window (CRITICAL FIX 2026-07-08)
+    "peak_bankroll_usd": 0.0,  # CRITICAL FIX 2026-07-08: Peak bankroll at window start for consistent 5% calculation
+    "asset_exposure_usd": {},  # CRITICAL FIX 2026-07-08: asset -> cumulative executed notional this window (3% per-asset limit)
 }
 
 
@@ -48,6 +50,8 @@ def _reset_shared_window_state_for_testing() -> None:
         _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
         _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"] = {}
         _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = 0.0
+        _WINDOW_TRACKING_STATE["peak_bankroll_usd"] = 0.0
+        _WINDOW_TRACKING_STATE["asset_exposure_usd"] = {}
 
 
 def force_reset_window_exposure(envelope=None, reason="startup") -> None:
@@ -80,6 +84,8 @@ def force_reset_window_exposure(envelope=None, reason="startup") -> None:
         _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
         _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"] = {}
         _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = 0.0
+        _WINDOW_TRACKING_STATE["peak_bankroll_usd"] = 0.0
+        _WINDOW_TRACKING_STATE["asset_exposure_usd"] = {}
         venue_total = _WINDOW_TRACKING_STATE["total_exposure_usd"]
     
     # Sync instance fields if envelope provided
@@ -103,20 +109,37 @@ def _window_bucket_start(current_ts: float) -> float:
     return current_ts - (current_ts % 900.0)
 
 
-def _roll_window_if_needed_locked(current_ts: float) -> None:
-    """Reset shared window state when a new 15m window begins. Caller holds lock."""
+def _roll_window_if_needed_locked(current_ts: float, current_bankroll_usd: float = 0.0) -> None:
+    """Reset shared window state when a new 15m window begins. Caller holds lock.
+    
+    CRITICAL FIX 2026-07-08: Capture peak bankroll at window start for consistent 5% calculation.
+    This ensures the 5% limit doesn't fluctuate if bankroll changes mid-window.
+    """
     bucket_start = _window_bucket_start(current_ts)
     if bucket_start != _WINDOW_TRACKING_STATE["window_start_ts"]:
         old_window_start = _WINDOW_TRACKING_STATE["window_start_ts"]
         old_total_exposure = _WINDOW_TRACKING_STATE["total_exposure_usd"]
         old_agent_count = len(_WINDOW_TRACKING_STATE["agent_exposure_usd"])
         old_resting_exposure = _WINDOW_TRACKING_STATE["total_resting_exposure_usd"]
+        old_peak_bankroll = _WINDOW_TRACKING_STATE["peak_bankroll_usd"]
         
         _WINDOW_TRACKING_STATE["window_start_ts"] = bucket_start
         _WINDOW_TRACKING_STATE["agent_exposure_usd"] = {}
         _WINDOW_TRACKING_STATE["total_exposure_usd"] = 0.0
         _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"] = {}
         _WINDOW_TRACKING_STATE["total_resting_exposure_usd"] = 0.0
+        _WINDOW_TRACKING_STATE["asset_exposure_usd"] = {}
+        
+        # CRITICAL FIX 2026-07-08: Lock in peak bankroll at window start
+        # If current bankroll is provided and > 0, use it. Otherwise use previous peak.
+        # For first window start (old_peak_bankroll == 0), use current bankroll if provided.
+        if current_bankroll_usd > 0:
+            _WINDOW_TRACKING_STATE["peak_bankroll_usd"] = current_bankroll_usd
+        elif old_peak_bankroll > 0:
+            _WINDOW_TRACKING_STATE["peak_bankroll_usd"] = old_peak_bankroll
+        else:
+            # Fallback: use current bankroll even if 0 (shouldn't happen in production)
+            _WINDOW_TRACKING_STATE["peak_bankroll_usd"] = current_bankroll_usd
         
         logger.info(
             f"[WINDOW-TRACKING] New 15m window started at ts={bucket_start:.0f} - "
@@ -124,6 +147,7 @@ def _roll_window_if_needed_locked(current_ts: float) -> None:
             f"old_total_exposure=${old_total_exposure:.2f} "
             f"old_agent_count={old_agent_count} "
             f"old_resting_exposure=${old_resting_exposure:.2f} "
+            f"peak_bankroll=${_WINDOW_TRACKING_STATE['peak_bankroll_usd']:.2f} "
             f"exposure_reset"
         )
 
@@ -332,20 +356,17 @@ class KalshiCrypto15mRiskEnvelope:
             )
     
     def get_per_trade_risk_pct(self) -> float:
-        """Get per-trade risk percentage aligned with 3% per agent / 5% per 15m window limits.
+        """Get per-trade risk percentage.
         
-        CRITICAL FIX: Aligned to 3% per agent / 5% per 15m window limits (not profile YAML bankroll-tiered)
-        - bankroll < $100: 3% per trade (aligned with 3% per agent limit for micro-accounts)
-        - bankroll $100-$1k: 2% per trade (fraction of 3% per agent limit)
-        - bankroll > $1k: 1.5% per trade (conservative fraction of 3% per agent limit)
-        
-        Rationale: Per-trade risk should be a fraction of the 3% per agent limit, not exceed it.
-        The 5% per 15m window limit allows multiple trades within the window.
+        2026-07-08 UPDATE: DISABLED in favor of fixed $1 exposure model.
+        Per-trade risk is now enforced via slot-based position management:
+        - Total exposure across all positions must be ≤ $1
+        - Each contract consumes its price in USD from the $1 cap
+        - Sequential trading blocks new entries until positions exit
         """
-        # 2026-07-06: DISABLED tiered micro-account logic - use uniform per-trade risk
-        # Risk envelope and unified_sizing handle all sizing logic; no micro-account adjustments
-        # Use uniform 3% per-trade risk for all bankroll sizes (aligned with YAML per_trade_risk_pct)
-        return 0.03  # Uniform 3% per-trade risk for all accounts (matches YAML config)
+        # 2026-07-08: DISABLED - using fixed $1 exposure cap instead
+        # Return 0.0 to indicate percentage-based sizing is disabled
+        return 0.0
     
     def get_drawdown_halt_pct(self) -> float:
         """Get drawdown halt percentage."""
@@ -442,8 +463,13 @@ class KalshiCrypto15mRiskEnvelope:
         current_ts: float,
         custom_per_agent_limit_pct: Optional[float] = None,
         custom_total_venue_limit_pct: Optional[float] = None,
+        asset: Optional[str] = None,
     ) -> tuple[bool, str]:
         """Check if order would exceed window-based risk limits (HARD STOP).
+        
+        CRITICAL FIX 2026-07-08: 
+        - Uses peak bankroll at window start for consistent 5% calculation
+        - Adds 3% per-asset window limit enforcement
         
         Args:
             agent_id: Agent identifier (e.g., "BTC_15M", "ETH_15M")
@@ -451,6 +477,7 @@ class KalshiCrypto15mRiskEnvelope:
             current_ts: Current timestamp
             custom_per_agent_limit_pct: Override per-agent limit (e.g., for exit orders)
             custom_total_venue_limit_pct: Override total venue limit (e.g., for exit orders)
+            asset: Asset symbol (e.g., "BTC", "ETH") for per-asset limit check
             
         Returns:
             Tuple of (allowed, reason)
@@ -470,18 +497,25 @@ class KalshiCrypto15mRiskEnvelope:
         # CRITICAL FIX (2026-07-08): Include resting order exposure to prevent
         # multiple resting orders from exceeding window limits when they execute.
         with _WINDOW_TRACKING_LOCK:
-            _roll_window_if_needed_locked(current_ts)
+            _roll_window_if_needed_locked(current_ts, self.live_bankroll_usd)
             current_agent_exposure = _WINDOW_TRACKING_STATE["agent_exposure_usd"].get(agent_id, 0.0)
             current_total_exposure = _WINDOW_TRACKING_STATE["total_exposure_usd"]
             current_agent_resting = _WINDOW_TRACKING_STATE["agent_resting_exposure_usd"].get(agent_id, 0.0)
             current_total_resting = _WINDOW_TRACKING_STATE["total_resting_exposure_usd"]
+            # CRITICAL FIX 2026-07-08: Use peak bankroll at window start for consistent limits
+            peak_bankroll_usd = _WINDOW_TRACKING_STATE["peak_bankroll_usd"] or self.live_bankroll_usd
+            # CRITICAL FIX 2026-07-08: Get per-asset exposure for 3% limit check
+            current_asset_exposure = 0.0
+            if asset:
+                current_asset_exposure = _WINDOW_TRACKING_STATE["asset_exposure_usd"].get(asset, 0.0)
         
         # Use custom limits if provided, otherwise use profile defaults
         per_agent_limit_pct = custom_per_agent_limit_pct or self.guardrails_per_window_risk_pct
         total_venue_limit_pct = custom_total_venue_limit_pct or self.guardrails_total_venue_risk_pct
         
-        # Calculate per-agent window limit (including resting orders)
-        per_agent_limit_usd = self.live_bankroll_usd * per_agent_limit_pct
+        # CRITICAL FIX 2026-07-08: Use peak bankroll for consistent limit calculation
+        # This prevents 5% limit from fluctuating if bankroll changes mid-window
+        per_agent_limit_usd = peak_bankroll_usd * per_agent_limit_pct
         new_agent_exposure = current_agent_exposure + order_notional_usd
         new_agent_total = new_agent_exposure + current_agent_resting  # Executed + Resting
         
@@ -491,13 +525,30 @@ class KalshiCrypto15mRiskEnvelope:
                 f"per_agent_window_limit: agent={agent_id} "
                 f"executed=${current_agent_exposure:.2f} + resting=${current_agent_resting:.2f} + order=${order_notional_usd:.2f} "
                 f"= ${new_agent_total:.2f} > limit=${per_agent_limit_usd:.2f} "
-                f"({per_agent_limit_pct*100:.1f}%) - HARD STOP"
+                f"({per_agent_limit_pct*100:.1f}%) peak_bankroll=${peak_bankroll_usd:.2f} - HARD STOP"
             )
             logger.warning(f"[WINDOW-TRACKING] {reason}")
             return False, reason
         
+        # CRITICAL FIX 2026-07-08: Check 3% per-asset window limit (HARD STOP)
+        if asset:
+            per_asset_limit_pct = 0.03  # 3% per asset
+            per_asset_limit_usd = peak_bankroll_usd * per_asset_limit_pct
+            new_asset_exposure = current_asset_exposure + order_notional_usd
+            
+            if new_asset_exposure > per_asset_limit_usd:
+                reason = (
+                    f"per_asset_window_limit: asset={asset} "
+                    f"executed=${current_asset_exposure:.2f} + order=${order_notional_usd:.2f} "
+                    f"= ${new_asset_exposure:.2f} > limit=${per_asset_limit_usd:.2f} "
+                    f"({per_asset_limit_pct*100:.1f}%) peak_bankroll=${peak_bankroll_usd:.2f} - HARD STOP"
+                )
+                logger.warning(f"[WINDOW-TRACKING] {reason}")
+                return False, reason
+        
         # Calculate total venue window limit (including resting orders)
-        total_venue_limit_usd = self.live_bankroll_usd * total_venue_limit_pct
+        # CRITICAL FIX 2026-07-08: Use peak bankroll for consistent limit calculation
+        total_venue_limit_usd = peak_bankroll_usd * total_venue_limit_pct
         new_total_exposure = current_total_exposure + order_notional_usd
         new_total_venue = new_total_exposure + current_total_resting  # Executed + Resting
         
@@ -507,28 +558,33 @@ class KalshiCrypto15mRiskEnvelope:
                 f"total_venue_window_limit: "
                 f"executed=${current_total_exposure:.2f} + resting=${current_total_resting:.2f} + order=${order_notional_usd:.2f} "
                 f"= ${new_total_venue:.2f} > limit=${total_venue_limit_usd:.2f} "
-                f"({total_venue_limit_pct*100:.1f}%) - HARD STOP"
+                f"({total_venue_limit_pct*100:.1f}%) peak_bankroll=${peak_bankroll_usd:.2f} - HARD STOP"
             )
             logger.warning(f"[WINDOW-TRACKING] {reason}")
             return False, reason
         
         logger.info(
-            f"[WINDOW-TRACKING] Window check OK: agent={agent_id} "
+            f"[WINDOW-TRACKING] Window check OK: agent={agent_id} asset={asset or 'N/A'} "
             f"agent_exposure=${current_agent_exposure:.2f}+${order_notional_usd:.2f} <= ${per_agent_limit_usd:.2f}, "
-            f"venue_exposure=${current_total_exposure:.2f}+${order_notional_usd:.2f} <= ${total_venue_limit_usd:.2f}"
+            f"venue_exposure=${current_total_exposure:.2f}+${order_notional_usd:.2f} <= ${total_venue_limit_usd:.2f} "
+            f"peak_bankroll=${peak_bankroll_usd:.2f}"
         )
         return True, ""
     
     def record_order_execution(
         self,
         agent_id: str,
-        order_notional_usd: float
+        order_notional_usd: float,
+        asset: Optional[str] = None,
     ) -> None:
         """Record order execution in window tracking.
+        
+        CRITICAL FIX 2026-07-08: Added asset parameter for per-asset exposure tracking.
         
         Args:
             agent_id: Agent identifier
             order_notional_usd: Notional value of executed order in USD
+            asset: Asset symbol (e.g., "BTC", "ETH") for per-asset tracking
         """
         # CRITICAL FIX (2026-07-08): Add assertions to validate inputs
         assert self.live_bankroll_usd > 0, "Bankroll must be positive for recording execution"
@@ -540,31 +596,41 @@ class KalshiCrypto15mRiskEnvelope:
         # subsequent check_window_limit() calls (3%/5% allowance decrement).
         import time as _time_mod
         with _WINDOW_TRACKING_LOCK:
-            _roll_window_if_needed_locked(_time_mod.time())
+            _roll_window_if_needed_locked(_time_mod.time(), self.live_bankroll_usd)
             _WINDOW_TRACKING_STATE["agent_exposure_usd"][agent_id] = (
                 _WINDOW_TRACKING_STATE["agent_exposure_usd"].get(agent_id, 0.0) + order_notional_usd
             )
             _WINDOW_TRACKING_STATE["total_exposure_usd"] += order_notional_usd
+            # CRITICAL FIX 2026-07-08: Track per-asset exposure for 3% limit
+            if asset:
+                _WINDOW_TRACKING_STATE["asset_exposure_usd"][asset] = (
+                    _WINDOW_TRACKING_STATE["asset_exposure_usd"].get(asset, 0.0) + order_notional_usd
+                )
             agent_total = _WINDOW_TRACKING_STATE["agent_exposure_usd"][agent_id]
             venue_total = _WINDOW_TRACKING_STATE["total_exposure_usd"]
+            asset_total = _WINDOW_TRACKING_STATE["asset_exposure_usd"].get(asset, 0.0) if asset else 0.0
         
         # Sync instance fields for observability/snapshots
         self.agent_window_exposure_usd[agent_id] = agent_total
         self.total_window_exposure_usd = venue_total
         
         logger.info(
-            f"[WINDOW-TRACKING] Recorded execution: agent={agent_id} "
+            f"[WINDOW-TRACKING] Recorded execution: agent={agent_id} asset={asset or 'N/A'} "
             f"notional=${order_notional_usd:.2f} "
             f"agent_total=${agent_total:.2f} "
+            f"asset_total=${asset_total:.2f} "
             f"venue_total=${venue_total:.2f}"
         )
     
     def record_position_closure(
         self,
         agent_id: str,
-        position_notional_usd: float
+        position_notional_usd: float,
+        asset: Optional[str] = None,
     ) -> None:
         """Record position closure (reduces window exposure).
+        
+        CRITICAL FIX 2026-07-08: Added asset parameter for per-asset exposure release.
         
         CRITICAL: This allows agents to re-enter after closing positions
         via trailing stop, ratchet, or mandatory 99c exit.
@@ -572,26 +638,36 @@ class KalshiCrypto15mRiskEnvelope:
         Args:
             agent_id: Agent identifier
             position_notional_usd: Notional value of closed position in USD
+            asset: Asset symbol (e.g., "BTC", "ETH") for per-asset tracking
         """
         # CRITICAL (2026-07-06): Operate on module-level shared state (see
         # record_order_execution for rationale).
+        import time as _time_mod
         with _WINDOW_TRACKING_LOCK:
+            _roll_window_if_needed_locked(_time_mod.time(), self.live_bankroll_usd)
             current_agent_exposure = _WINDOW_TRACKING_STATE["agent_exposure_usd"].get(agent_id, 0.0)
             new_agent_exposure = max(0.0, current_agent_exposure - position_notional_usd)
             _WINDOW_TRACKING_STATE["agent_exposure_usd"][agent_id] = new_agent_exposure
             _WINDOW_TRACKING_STATE["total_exposure_usd"] = max(
                 0.0, _WINDOW_TRACKING_STATE["total_exposure_usd"] - position_notional_usd
             )
+            # CRITICAL FIX 2026-07-08: Release per-asset exposure
+            if asset:
+                current_asset_exposure = _WINDOW_TRACKING_STATE["asset_exposure_usd"].get(asset, 0.0)
+                new_asset_exposure = max(0.0, current_asset_exposure - position_notional_usd)
+                _WINDOW_TRACKING_STATE["asset_exposure_usd"][asset] = new_asset_exposure
             venue_total = _WINDOW_TRACKING_STATE["total_exposure_usd"]
+            asset_total = _WINDOW_TRACKING_STATE["asset_exposure_usd"].get(asset, 0.0) if asset else 0.0
         
         # Sync instance fields for observability/snapshots
         self.agent_window_exposure_usd[agent_id] = new_agent_exposure
         self.total_window_exposure_usd = venue_total
         
         logger.info(
-            f"[WINDOW-TRACKING] Recorded closure: agent={agent_id} "
+            f"[WINDOW-TRACKING] Recorded closure: agent={agent_id} asset={asset or 'N/A'} "
             f"notional=${position_notional_usd:.2f} "
             f"agent_total=${current_agent_exposure:.2f}→${new_agent_exposure:.2f} "
+            f"asset_total=${asset_total:.2f} "
             f"venue_total=${venue_total:.2f}"
         )
     
@@ -729,6 +805,12 @@ def compute_kalshi_crypto_15m_risk_envelope(
     import os
     import yaml
     from pathlib import Path
+    import time as _time_mod
+    
+    # CRITICAL FIX 2026-07-08: Initialize peak bankroll on envelope creation
+    # This ensures peak bankroll is set even before first check_window_limit call
+    with _WINDOW_TRACKING_LOCK:
+        _roll_window_if_needed_locked(_time_mod.time(), live_bankroll_usd)
     
     # Load profile YAML
     if profile_path is None:

@@ -3,13 +3,13 @@ Top-3 Edge Selector & Allocator — Production Implementation
 
 Implements the cross-agent "Top-3 Edge Selector & Allocator" that:
 1. Selects only the top 3 edge cases across 5 assets (BTC, ETH, SOL, XRP, DOGE)
-2. Allocates at most 3% of bankroll in total across all new positions per cycle (2026 best practice)
+2. 2026-07-08 UPDATE: Allocates at most $1 total exposure across all new positions per cycle (fixed $1 model)
 3. Dynamically sizes positions by relative edge (highest edge gets largest size)
 4. Enforces a position batch regime: no new trades until current top-3 are closed
 
 Invariants (see Top3SelectionSpec class docstring for formal contract):
 - len(selected_assets(t)) <= 3
-- sum(position_notional_for_new_entries(t)) <= cycle_risk_cap_pct * bankroll_notional(t)
+- sum(position_notional_for_new_entries(t)) <= $1.00 (fixed exposure cap)
 - At most one "open batch" can be ACTIVE at any time
 
 Uses existing infrastructure:
@@ -115,7 +115,7 @@ class Top3Batch:
         cycle_ts: When the batch was created
         allocations: List of asset allocations
         total_target_notional: Sum of all allocation targets
-        cycle_risk_cap_pct: The risk cap used for this batch
+        cycle_risk_cap_pct: The risk cap used for this batch (DEPRECATED - using fixed $1)
         bankroll_at_creation: Bankroll value when batch was created
     """
     batch_id: str
@@ -123,7 +123,7 @@ class Top3Batch:
     cycle_ts: datetime
     allocations: List[Top3Allocation]
     total_target_notional: int  # cents
-    cycle_risk_cap_pct: float
+    cycle_risk_cap_pct: float  # DEPRECATED - using fixed $1 exposure cap
     bankroll_at_creation: int  # cents
     
     # Track which assets have been filled/closed
@@ -256,9 +256,10 @@ class Top3SelectionSpec:
     # Configuration - ENV-DRIVEN (no hardcoded defaults)
     # These read from environment at runtime, defaulting only if env not set
     # CRITICAL FIX: Aligned with kalshi_crypto_15m_v2.yaml profile (2026-07-04)
-    # Profile specifies: max_cycle_risk_pct: 0.05 (5%)
-    DEFAULT_CYCLE_RISK_CAP_PCT_MIN: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MIN", "0.05"))  # CRITICAL FIX: 5% (was 0.03)
-    DEFAULT_CYCLE_RISK_CAP_PCT_MAX: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MAX", "0.05"))  # CRITICAL FIX: 5% (was 0.03)
+    # 2026-07-08 UPDATE: Percentage-based cycle risk cap DISABLED in favor of fixed $1 exposure model
+    # DEFAULT_CYCLE_RISK_CAP_PCT_MIN: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MIN", "0.05"))  # DISABLED
+    # DEFAULT_CYCLE_RISK_CAP_PCT_MAX: float = float(os.getenv("MERID_TOP3_RISK_CAP_PCT_MAX", "0.05"))  # DISABLED
+    DEFAULT_CYCLE_RISK_CAP_USD: float = 1.00  # Fixed $1 exposure cap (replaces percentage-based)
     DEFAULT_EPS: float = float(os.getenv("MERID_TOP3_EDGE_EPS", "1e-6"))
     MAX_ASSETS: int = int(os.getenv("MERID_TOP3_MAX_ASSETS", "3"))  # CRITICAL FIX: 3 (was 5) - enforce top-3 limit to prevent venue window bottleneck
     MIN_ALLOCATION_CENTS: int = int(os.getenv("MERID_TOP3_MIN_ALLOCATION_CENTS", "50"))  # $0.50 minimum
@@ -273,7 +274,7 @@ class Top3SelectionSpec:
 
 def select_top3_allocations(
     bankroll_notional: int,  # cents
-    cycle_risk_cap_pct: float,
+    cycle_risk_cap_usd: float,  # 2026-07-08 UPDATE: Fixed $1 exposure cap instead of percentage
     candidates: List[EdgeCandidate],
     eps: Optional[float] = None,  # Uses env MERID_TOP3_EDGE_EPS if None
     min_allocation_cents: Optional[int] = None,  # Uses env MERID_TOP3_MIN_ALLOCATION_CENTS if None
@@ -282,15 +283,15 @@ def select_top3_allocations(
 
     CRITICAL RULES (per user wagering specification):
     1. Edge #1 (highest edge) MUST be executed first - non-negotiable priority
-    2. Edge #1 gets minimum 1% of bankroll if valid (cycle_risk_cap_pct >= 0.01)
+    2. Edge #1 gets minimum 1 contract if valid (slot-based model)
     3. Edge #2 is ONLY considered after Edge #1 is fully allocated
     4. Edge #3 is ONLY considered after Edge #2 is fully allocated
     5. If any edge fails min constraints, it and ALL subsequent edges are skipped
     6. Never skip Edge #1 to take Edge #2 or #3
 
     Args:
-        bankroll_notional: Current bankroll in cents
-        cycle_risk_cap_pct: Risk cap as fraction (0.05 - aligned with profile)
+        bankroll_notional: Current bankroll in cents (unused in fixed $1 model)
+        cycle_risk_cap_usd: Fixed exposure cap in USD (default $1.00)
         candidates: List of edge candidates (all 5 assets potentially)
         eps: Epsilon for floating point comparisons (uses env if None)
         min_allocation_cents: Minimum allocation in cents (uses env if None)
@@ -318,16 +319,13 @@ def select_top3_allocations(
     sorted_candidates = sorted(valid_candidates, key=lambda c: c.edge, reverse=True)
 
     # Log the ranked edges
-    logger.info("[EDGE#1-PRIORITY] Bankroll=$%.2f | Risk cap=%.2f%%", bankroll_notional / 100, cycle_risk_cap_pct * 100)
+    logger.info("[EDGE#1-PRIORITY] Fixed exposure cap=$%.2f", cycle_risk_cap_usd)
     for i, c in enumerate(sorted_candidates[:3], 1):
         logger.info("  Edge#%d: %s | edge=%.4f | max_cap=%d¢", i, c.asset, c.edge, c.max_notional_cap)
 
-    # Step 3: Compute budgets
-    # Edge #1 gets minimum 1% (or full cap if cap < 1%)
-    # PROFILE-GATED: For kalshi_crypto_15m_v2, use profile edge bands (4-7%)
-    min_edge1_pct = 0.01  # 1% minimum for Edge #1 - PROFILE-GATED for kalshi_crypto_15m_v2
-    total_budget_cents = int(cycle_risk_cap_pct * bankroll_notional)
-    edge1_budget_cents = int(min(min_edge1_pct, cycle_risk_cap_pct) * bankroll_notional)
+    # Step 3: Compute budgets (fixed $1 model, not percentage-based)
+    total_budget_cents = int(cycle_risk_cap_usd * 100)  # Convert USD to cents
+    edge1_budget_cents = total_budget_cents  # Edge #1 gets full $1 budget
 
     # Step 4: SEQUENTIAL PRIORITY FILL - Edge #1 first, then #2, then #3
     allocations: List[Top3Allocation] = []
@@ -447,31 +445,27 @@ class Top3EdgeAllocator:
     
     def __init__(self):
         self.spec = Top3SelectionSpec()
-        self._cycle_risk_cap_pct = self._load_cycle_risk_cap_pct()
+        self._cycle_risk_cap_usd = self._load_cycle_risk_cap_usd()
     
-    def _load_cycle_risk_cap_pct(self) -> float:
+    def _load_cycle_risk_cap_usd(self) -> float:
         """Load cycle risk cap from environment/config.
         
-        Returns value defaulting to 0.03 (2026 best practice) if not set.
+        2026-07-08 UPDATE: Returns fixed $1 exposure cap instead of percentage-based.
         """
-        env_val = os.getenv("TOP3_CYCLE_RISK_CAP_PCT", "")
+        env_val = os.getenv("TOP3_CYCLE_RISK_CAP_USD", "")
         if env_val:
             try:
-                pct = float(env_val)
-                # Clamp to valid range
-                return max(
-                    self.spec.DEFAULT_CYCLE_RISK_CAP_PCT_MIN,
-                    min(pct, self.spec.DEFAULT_CYCLE_RISK_CAP_PCT_MAX)
-                )
+                usd = float(env_val)
+                # Clamp to valid range (min $0.50, max $5.00)
+                return max(0.50, min(usd, 5.00))
             except ValueError:
                 logger.warning(
-                    "[TOP3-ALLOCATOR] Invalid MERID_CYCLE_RISK_CAP_PCT env value '%s', using default %s",
+                    "[TOP3-ALLOCATOR] Invalid TOP3_CYCLE_RISK_CAP_USD env value '%s', using default $1.00",
                     env_val,
-                    self.spec.DEFAULT_CYCLE_RISK_CAP_PCT_MAX,
                 )
         
-        # Default to 2%
-        return self.spec.DEFAULT_CYCLE_RISK_CAP_PCT_MAX
+        # Default to $1.00
+        return self.spec.DEFAULT_CYCLE_RISK_CAP_USD
     
     def compute_allocations(
         self,
@@ -550,7 +544,7 @@ class Top3EdgeAllocator:
         
         allocations = select_top3_allocations(
             bankroll_notional=bankroll_notional,
-            cycle_risk_cap_pct=self._cycle_risk_cap_pct,
+            cycle_risk_cap_usd=self._cycle_risk_cap_usd,
             candidates=candidates,
             eps=self.spec.DEFAULT_EPS,
         )
@@ -558,19 +552,19 @@ class Top3EdgeAllocator:
         # Log the selection
         if allocations:
             total = sum(a.target_notional for a in allocations)
-            pct_of_bankroll = (total / bankroll_notional) * 100
+            total_usd = total / 100.0
             logger.info(
-                "[TOP3-ALLOCATOR] Selected %d assets, total=%d¢ (%.2f%% of bankroll, cap=%.2f%%)",
-                len(allocations), total, pct_of_bankroll, self._cycle_risk_cap_pct * 100
+                "[TOP3-ALLOCATOR] Selected %d assets, total=%d¢ ($%.2f, cap=$%.2f)",
+                len(allocations), total, total_usd, self._cycle_risk_cap_usd
             )
         else:
             logger.info("[TOP3-ALLOCATOR] No allocations selected")
         
         return allocations
     
-    def get_cycle_risk_cap_pct(self) -> float:
-        """Get current cycle risk cap percentage."""
-        return self._cycle_risk_cap_pct
+    def get_cycle_risk_cap_usd(self) -> float:
+        """Get current cycle risk cap in USD."""
+        return self._cycle_risk_cap_usd
     
     def validate_invariants(self, allocations: List[Top3Allocation], bankroll: int) -> bool:
         """Validate that allocations respect all invariants.
@@ -587,13 +581,13 @@ class Top3EdgeAllocator:
             )
             return False
         
-        # Invariant 2: Total notional within cap
+        # Invariant 2: Total notional within cap (fixed $1, not percentage-based)
         total = sum(a.target_notional for a in allocations)
-        max_allowed = int(self._cycle_risk_cap_pct * bankroll)
+        max_allowed = int(self._cycle_risk_cap_usd * 100)  # Convert USD to cents
         if total > max_allowed:
             logger.error(
-                "[TOP3-INVARIANT-VIOLATION] Notional exceeds cap: %d > %d (%.2f%% of bankroll)",
-                total, max_allowed, self._cycle_risk_cap_pct * 100
+                "[TOP3-INVARIANT-VIOLATION] Notional exceeds cap: %d¢ > %d¢ ($%.2f)",
+                total, max_allowed, self._cycle_risk_cap_usd
             )
             return False
         

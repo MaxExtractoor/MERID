@@ -358,7 +358,7 @@ class Top3BatchManager:
                 cycle_ts=__import__('datetime').datetime.now(__import__('datetime').timezone.utc),
                 allocations=allocations,
                 total_target_notional=total_notional,
-                cycle_risk_cap_pct=self._allocator.get_cycle_risk_cap_pct(),
+                cycle_risk_cap_pct=self._allocator.get_cycle_risk_cap_usd(),  # 2026-07-08: Now returns USD, not pct
                 bankroll_at_creation=bankroll_notional,
             )
             
