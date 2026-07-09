@@ -212,6 +212,73 @@ class TestDecimalPrecision:
         for asset, price, expected in test_cases:
             result = format_price(asset, price)
             assert result == expected, f"Asset {asset}: expected {expected}, got {result}"
+    
+    def test_fvg_logging_uses_format_price(self):
+        """Test that FVG forecaster logging uses format_price for asset-aware precision."""
+        import inspect
+        from merid.prediction.forecasters.fvg import FVGStore
+        
+        # Get the source code of the FVG store (where logging happens)
+        fvg_source = inspect.getsource(FVGStore)
+        
+        # Verify that format_price is used in logging (not hardcoded .1f)
+        assert "format_price" in fvg_source, \
+            "FVG store should use format_price() for asset-aware precision"
+        
+        # Verify that the old .1f format is not used for price logging
+        # (may still be used for non-price values like gap size, which is fine)
+        lines_with_price_logging = [line for line in fvg_source.split('\n') 
+                                   if 'FVG detected' in line or 'FVG filled' in line]
+        for line in lines_with_price_logging:
+            # These specific log lines should use format_price, not .1f
+            if 'FVG detected' in line or 'FVG filled' in line:
+                # Check that format_price is called in the line
+                assert 'format_price' in line, \
+                    f"FVG logging should use format_price: {line}"
+    
+    def test_agent_grid_fvg_logging_uses_format_price(self):
+        """Test that agent grid FVG logging uses format_price for asset-aware precision."""
+        import inspect
+        from merid.prediction.agent_grid_15m import LeanAgent15m
+        
+        # Get the source code of the agent grid
+        agent_source = inspect.getsource(LeanAgent15m)
+        
+        # Find the FVG-UPDATE log line and check the broader context (multi-line logger calls)
+        lines = agent_source.split('\n')
+        for i, line in enumerate(lines):
+            if 'FVG-UPDATE' in line and 'OHLC' in line:
+                # Check this line and the next few lines for format_price calls
+                context_lines = lines[i:i+3]  # Check current line + next 2 lines
+                context = '\n'.join(context_lines)
+                assert 'format_price' in context, \
+                    f"Agent grid FVG-UPDATE log should use format_price in context:\n{context}"
+                # Should not use %.1f format for prices
+                assert '%.1f' not in context or 'O=%.1f' not in context, \
+                    f"Agent grid FVG-UPDATE log should not use %.1f for prices in context:\n{context}"
+    
+    def test_indicator_stack_logging_uses_format_price(self):
+        """Test that indicator stack logging uses format_price for asset-aware precision."""
+        import inspect
+        from merid.signals.crypto_15m_indicators import Crypto15mIndicatorStack
+        
+        # Get the source code of the indicator stack
+        indicator_source = inspect.getsource(Crypto15mIndicatorStack)
+        
+        # Find the INDICATOR-STACK-UPDATE log line and check broader context (multi-line logger calls)
+        lines = indicator_source.split('\n')
+        for i, line in enumerate(lines):
+            if 'INDICATOR-STACK-UPDATE' in line and 'price=' in line and 'Invalid' not in line:
+                # Check this line and the next few lines for format_price calls
+                # Include the previous line to catch the import statement
+                start_idx = max(0, i - 1)
+                context_lines = lines[start_idx:i+3]  # Check previous line + current line + next 2 lines
+                context = '\n'.join(context_lines)
+                assert 'format_price' in context, \
+                    f"Indicator stack price log should use format_price in context:\n{context}"
+                # Should not use %.2f format for prices
+                assert '%.2f' not in context or 'price=%.2f' not in context, \
+                    f"Indicator stack price log should not use %.2f for prices in context:\n{context}"
 
 
 class TestAssertionConsistency:

@@ -684,8 +684,9 @@ class Crypto15mIndicatorStack:
         self._prices.append(price)
         
         # CRITICAL FIX: 2026-07-08 - Log price history length for debugging bars_available=1 issue
-        logger.info("[INDICATOR-STACK-UPDATE] asset=%s instance_id=%d price=%.2f bars_before=%d bars_after=%d maxlen=%d", 
-                     self._asset_symbol, self._instance_id, price, len(self._prices) - 1, len(self._prices), self._prices.maxlen)
+        from utils.logger import format_price
+        logger.info("[INDICATOR-STACK-UPDATE] asset=%s instance_id=%d price=%s bars_before=%d bars_after=%d maxlen=%d",
+                     self._asset_symbol, self._instance_id, format_price(self._asset_symbol, price), len(self._prices) - 1, len(self._prices), self._prices.maxlen)
 
         n = len(self._prices)
 
@@ -839,13 +840,14 @@ class Crypto15mIndicatorStack:
                         zone = self._detect_fvg(list(self._fvg_window), atr)
                         if zone:
                             self._fvg_zones.append(zone)
+                            from utils.logger import format_price
                             logger.debug(
-                                "FVG detected: %s %s zone at %.2f-%.2f (strength=%.2f)",
+                                "FVG detected: %s %s zone at %s-%s (strength=%s)",
                                 self._asset_symbol or "unknown",
                                 zone.direction,
-                                zone.bottom,
-                                zone.top,
-                                zone.strength,
+                                format_price(self._asset_symbol, zone.bottom),
+                                format_price(self._asset_symbol, zone.top),
+                                format_price(self._asset_symbol, zone.strength),
                             )
 
     def set_liquidity(self, spread_cents: Optional[int], depth: Optional[int]) -> None:
