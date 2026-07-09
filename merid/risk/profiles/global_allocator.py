@@ -62,7 +62,7 @@ class GlobalAllocator:
         self,
         venue_cap_usd: float = 1.00,
         min_edge_pct: float = 2.0,  # Minimum edge to be considered
-        max_single_asset_fraction: float = 0.70,  # Max 70% of cap per asset
+        max_single_asset_fraction: float = 1.00,  # Max 100% of cap per asset (allows single order to use full venue cap)
         enable_correlation_control: bool = False,
     ):
         self.venue_cap_usd = venue_cap_usd
