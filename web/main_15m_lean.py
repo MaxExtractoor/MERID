@@ -342,7 +342,7 @@ os.environ['MERID_RUNTIME_MODE'] = '15m_live'
 logger.debug("[LIFESPAN-DEF] About to define lifespan function")
 
 @asynccontextmanager
-async def lifespan(app):
+async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown events."""
     logger.info("=" * 80)
     logger.info("[LIFESPAN-ENTRY] lifespan function called - ENTRY POINT")
@@ -359,6 +359,7 @@ async def lifespan(app):
     # CRITICAL FIX: Run startup directly in lifespan event loop
     # This ensures proper event loop management and background task lifecycle
     logger.info("[LIFESPAN] About to call _run_startup_phases_v20260530")
+    logger.info("[LIFESPAN] Calling _run_startup_phases_v20260530 NOW")
     try:
         await _run_startup_phases_v20260530(app)
         logger.info("[STARTUP-EVENT] P1.x startup completed successfully")
@@ -370,6 +371,17 @@ async def lifespan(app):
         )
         raise
     logger.info("[LIFESPAN] Completed _run_startup_phases_v20260530")
+    
+    # Start production audit harness
+    logger.info("[AUDIT-HARNESS] Starting production audit harness")
+    try:
+        from merid.audit import start_production_audit_harness
+        audit_harness = start_production_audit_harness()
+        app.state.audit_harness = audit_harness
+        logger.info("[AUDIT-HARNESS] Production audit harness started successfully")
+    except Exception as e:
+        logger.warning(f"[AUDIT-HARNESS] Failed to start production audit harness: {e}")
+        # Non-fatal - continue without audit harness
     
     # Run P2.x (trading stack) in lifespan
     logger.info("[LIFESPAN] Before _run_full_startup_in_lifespan")
@@ -449,6 +461,14 @@ async def lifespan(app):
         logger.info("[SHUTDOWN] Stopping WS refresh supervisor")
         ws_refresh_stop.set()
         logger.info("[SHUTDOWN] WS refresh supervisor stopped")
+    
+    # Stop production audit harness
+    audit_harness = getattr(app.state, "audit_harness", None)
+    if audit_harness is not None:
+        logger.info("[AUDIT-HARNESS] Stopping production audit harness")
+        from merid.audit import stop_production_audit_harness
+        stop_production_audit_harness()
+        logger.info("[AUDIT-HARNESS] Production audit harness stopped")
     
     logger.info("[SHUTDOWN] Graceful shutdown complete")
 
@@ -2204,7 +2224,7 @@ async def _run_startup_phases_v20260530(app):
     global loop_task, kalshi_loop, ws_refresh_task, ws_refresh_stop
     
     # P0-12 DIAGNOSTIC: Log function entry
-    logger.debug("[P1-STARTUP-ENTRY] _run_startup_phases_v20260530 ENTERED")
+    logger.info("[P1-STARTUP-ENTRY] _run_startup_phases_v20260530 ENTERED")
     
     logger.info("[STARTUP] P0: ENTER _run_startup_phases_v20260530")
     
@@ -3049,6 +3069,13 @@ async def _run_startup_phases_v20260530(app):
     # This enables agents to subscribe to markets via the WS bridge
     agent_grid._ws_bridge = ws_bridge
     logger.info("[STARTUP] P1.10: WS bridge reference set on agent grid")
+    
+    # CRITICAL FIX: Set position cache on agent grid for global allocator
+    # The global allocator needs position cache to track current positions for allocation
+    from merid.event_venues.kalshi.position_cache import get_position_cache
+    position_cache = get_position_cache()
+    agent_grid.set_position_cache(position_cache)
+    logger.info("[STARTUP] P1.10: Position cache set on agent grid for global allocator")
     
     # Start agent grid to enable market subscriptions
     logger.info("[STARTUP] P1.10: Calling agent_grid.start()")
