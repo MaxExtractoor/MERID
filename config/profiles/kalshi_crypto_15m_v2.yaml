@@ -563,11 +563,11 @@ failsafe:
 # - High prices (>70c) = low profit potential, thin markets, poor scaling effectiveness
 # - Scaling requires sufficient liquidity to avoid excessive slippage on child orders
 # - For momentum-based trading, conviction comes from velocity magnitude, not price level
-# - 10-70c range allows NO-side entries while avoiding risky high-end prices
+# - 10-50c range is the sweet spot for optimal risk/reward with fixed $1 exposure cap
 price_range:
-  min_price_cents: 10  # WIDENED for momentum: 10c minimum allows NO-side entries in high-probability markets
-  max_price_cents: 75  # CRITICAL FIX: 75c to match guardrails_max_contract_price_cents (sweet spot threshold)
-  description: "Valid price range in cents for order execution (10-75c for momentum-based trading)"
+  min_price_cents: 10  # Lower bound of sweet spot (10-50c)
+  max_price_cents: 50  # 2026-07-08: Upper bound of sweet spot (10-50c) - aligned with binary options guidance
+  description: "Valid price range in cents for order execution (10-50c sweet spot for fixed $1 exposure model)"
 
 # ── Per-Asset Caps (BTC/ETH/SOL/XRP/DOGE) ─────────────────────────────────
 # Each asset has its own notional as percentage of capital, NOT hardcoded USD values.
@@ -941,8 +941,8 @@ guardrails:
   min_post_fee_edge: 0.015  # LOWERED: Minimum post-fee edge 1.5% (research: 2-2.5% net edge realistic, 1.5% floor for more opportunities)
   min_time_to_expiry_min: 2.0  # RELAXED: Minimum 2 minutes to expiry (120s, reduced from 2.5min for more 15m opportunities)
   max_dist_pct_trade: 2.5  # RELAXED: Maximum spot-strike distance percentage for trading (2.5% for better market coverage)
-  min_contract_price_cents: 10  # 2026-07-05: Lowered to 10c to match agent_grid entry band [10, 70] and DEEP_OTM_CHEAP_CENTS threshold
-  max_contract_price_cents: 75  # 2026-07-05 SWEET-SPOT BAND: cap at 75c (research range 55-80c; entries above have no profit room to ratchet to the 99c exit)
+  min_contract_price_cents: 10  # 2026-07-08: Lower bound of sweet spot (10-50c)
+  max_contract_price_cents: 50  # 2026-07-08: Upper bound of sweet spot (10-50c) - aligned with binary options guidance
   max_same_side_per_strip: 5  # RELAXED: Maximum same-direction positions per strip (increased from 4 to 5 for more opportunities)
   # REMOVED: Duplicate max_orders_per_cycle - now handled by throttling.max_orders_per_15m_window (single source of truth)
   min_edge_per_trade: 0.02  # UNIFIED: 2% base edge for maker orders (aligned with Kalshi's 1-2% maker requirement, research-backed)
