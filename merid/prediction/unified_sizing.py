@@ -748,42 +748,26 @@ def compute_order_size(
     time_of_day_multiplier: float = 1.0,  # 2026 Research-Based Risk Management: Time-of-day risk scaling
     tte_seconds: Optional[float] = None,  # Time to expiry in seconds for TTE regime multiplier
 ) -> Tuple[int, Decimal, dict]:
-    """Compute order size from bankroll, risk percentage, and market constraints.
+    """Compute order size using fixed $1 total exposure model (2026-07-08).
     
     This is the SINGLE SOURCE OF TRUTH for order sizing in 15m agents.
-    All other sizing logic should be removed or deprecated.
+    All percentage-based sizing has been removed in favor of fixed $1 total exposure.
     
     Formula:
-        1. If max_notional_usd is provided, use it directly (from profile per-asset cap)
-           Otherwise, compute effective risk_pct as min of:
-           - min_edge_risk_pct from profile (repurposed from guardrails.min_post_fee_edge)
-           - max_single_order_pct from profile (5%)
-           - MERID_BANKROLL_CAP_PCT from env (global safety ceiling, default 2%)
-           - per-asset risk_pct from profile (if available)
-           Then compute max_notional = bankroll_usd × risk_pct
-        
-        2. If consider_fee_impact=True, subtract estimated fee from max_notional
-        
-        3. Apply per-asset max contracts cap from profile
-        
-        4. Convert max_notional to integer contract count:
-           contract_notional = price_cents / 100.0
-           contracts_from_notional = floor(max_notional / contract_notional)
-        
-        5. Validate against min_notional_usd and min_contracts (from KalshiRiskConfig)
-           If computed count would result in notional below min_notional, reject the trade
-        
-        6. Return count and computed notional
+        1. Use fixed $1 exposure cap from profile (fixed_exposure_cap_usd)
+        2. Check existing total exposure from position_cache
+        3. Available exposure = $1 - existing_exposure
+        4. If available_exposure >= contract_cost, allow 1 contract
+        5. Otherwise, reject (no slots available)
     
-    Example with bankroll=$36.58, risk_pct=0.02, price_cents=50:
-        max_notional = $36.58 × 0.02 = $0.73
-        contract_notional = $0.50
-        contracts_from_notional = floor(0.73 / 0.50) = floor(1.46) = 1
-        count = 1
-        notional = 1 × $0.50 = $0.50 ✅ (within cap)
+    Example with existing_exposure=$0.65, price_cents=35:
+        available_exposure = $1.00 - $0.65 = $0.35
+        contract_cost = $0.35
+        available_exposure >= contract_cost → allow 1 contract
+        new_total_exposure = $0.65 + $0.35 = $1.00 ✅ (at cap)
     
     Args:
-        bankroll_usd: Current bankroll in USD (from Kalshi API)
+        bankroll_usd: Current bankroll in USD (from Kalshi API) - kept for compatibility
         price_cents: Price per contract in cents (0-99)
         asset: Asset symbol (e.g., "BTC", "ETH", "SOL", "XRP", "DOGE")
     
@@ -802,417 +786,110 @@ def compute_order_size(
         )
         raise ValueError(f"Invalid price_cents={price_cents} for asset={asset} - must be > 0")
     
-    # CRITICAL FIX (2026-07-07): Removed redundant window limit check from unified_sizing.py
-    # Window limits are now enforced ONLY in order_gate.py with ACTUAL order notional
-    # Previous check here used a conservative 3% estimate that could block valid orders
-    # The proper enforcement point is order_gate.py which uses real contract count and price
-    # This eliminates the estimate vs actual notional conflict and prevents false rejections
+    # 2026-07-08 UPDATE: Fixed $1 total exposure model - slot-based position management
+    # All percentage-based sizing has been removed
+    # New model: sum of all contract prices must be ≤ $1
     
-    # INTENTIONAL WRAPPER: This function is NOT a pure delegation to invariants.py.
-    # It owns specific policy concerns while delegating pure sizing math:
-    #
-    # OWNED BY THIS WRAPPER:
-    # - Risk pct interlock logic (min_edge_risk_pct, max_single_order_pct, bankroll_cap_pct)
-    # - Fee adjustment on max_notional (consider_fee_impact)
-    # - Position-aware sizing (queries position_cache, reduces max_notional based on existing exposure)
-    # - Per-asset max contracts cap enforcement
-    #
-    # DELEGATED TO invariants.py (pure math):
-    # - compute_max_notional: bankroll × risk_pct with floor
-    # - compute_contracts: notional → contract count with override threshold
-    # - is_trade_valid: notional vs max_risk_pct validation
-    #
-    # This separation is intentional: invariants.py owns pure Kalshi contract math,
-    # while unified_sizing.py owns MERID-specific risk policy and position management.
-    from merid.event_venues.kalshi.invariants import compute_max_notional, compute_contracts, is_trade_valid
-    
-    # Step 1: Use provided max_notional_usd if available, otherwise compute from risk_pct
-    if max_notional_usd is not None:
-        # Use explicit max_notional from profile (per-asset cap with floor applied)
-        max_notional_usd = Decimal(str(max_notional_usd))
-        risk_pct_effective = max_notional_usd / bankroll_usd if bankroll_usd > 0 else Decimal("0")
-        per_asset_risk_pct = None  # Not used when max_notional is explicit
-        logger.info(
-            "[SIZE-COMPUTE] Using explicit max_notional from profile: bankroll=%.2f max_notional=%.2f risk_pct=%.4f asset=%s",
-            float(bankroll_usd), float(max_notional_usd), float(risk_pct_effective), asset
-        )
-    else:
-        # Compute effective risk_pct
-        # Interlock rule: risk_pct_for_sizing = min(per_trade_risk_pct, max_single_order_pct, bankroll_cap_pct)
-        per_trade_risk_pct = _get_per_trade_risk_pct()  # from profile guardrails.per_trade_risk_pct (dedicated sizing control)
-        max_single_order_pct = _get_max_single_order_pct()  # from profile venue.max_single_order_pct
-        bankroll_cap_pct = _get_bankroll_cap_pct()  # from profile venue.bankroll_cap_pct
-        per_asset_risk_pct = _get_per_asset_risk_pct(asset)  # per-asset from profile (optional)
-        
-        risk_pct_candidates = [per_trade_risk_pct, max_single_order_pct, bankroll_cap_pct]
-        if per_asset_risk_pct is not None:
-            risk_pct_candidates.append(per_asset_risk_pct)
-        
-        risk_pct_effective = min(risk_pct_candidates)
-        
-        # Step 2: Compute max_notional from bankroll and effective risk_pct
-        max_notional_usd = bankroll_usd * risk_pct_effective
-        
-        logger.info(
-            "[SIZE-COMPUTE] Computed max_notional from risk_pct: bankroll=%.2f risk_pct=%.4f max_notional=%.2f asset=%s "
-            "(candidates: per_trade=%.4f, max_single=%.4f, bankroll_cap=%.4f, per_asset=%s)",
-            float(bankroll_usd), float(risk_pct_effective), float(max_notional_usd), asset,
-            float(per_trade_risk_pct), float(max_single_order_pct), float(bankroll_cap_pct),
-            f"{float(per_asset_risk_pct):.4f}" if per_asset_risk_pct else "None"
-        )
-    
-    # Step 2.5: Apply Kelly multiplier based on edge band
-    # CRITICAL FIX (2026-07-08): Apply fractional Kelly (0.25x to 0.5x) based on edge quality
-    # This implements the user's requirement for conservative Kelly sizing
-    kelly_multiplier = _get_kelly_multiplier(edge_pct)
-    if kelly_multiplier != 1.0:
-        max_notional_usd = max_notional_usd * Decimal(str(kelly_multiplier))
-        logger.info(
-            "[KELLY-MULTIPLIER] Applied %.2fx Kelly multiplier to max_notional for asset=%s (new max_notional=%.2f)",
-            kelly_multiplier, asset, float(max_notional_usd)
-        )
-    
-    # Step 2.6: Apply fixed $1 exposure cap (2026-07-08)
-    # CRITICAL: Replace percentage-based sizing with fixed $1 max exposure
-    # This ensures never more than $1 exposure at any time
-    # APPLIED AFTER Kelly multiplier to ensure cap is final
+    # Step 1: Get fixed $1 exposure cap from profile
+    fixed_exposure_cap_usd = Decimal("1.00")  # Default
     if _PROFILE_AVAILABLE and is_profile_active():
         adapter = get_active_profile()
         profile = adapter.profile
-        
-        # Check if fixed exposure cap is enabled
-        fixed_exposure_cap = profile.risk_policy_fixed_exposure_cap_usd
-        if fixed_exposure_cap > 0:
-            # Apply fixed $1 cap (final cap after all multipliers)
-            max_notional_usd = min(max_notional_usd, Decimal(str(fixed_exposure_cap)))
-            logger.info(
-                "[FIXED-EXPOSURE] Applied $%.2f fixed exposure cap to max_notional for asset=%s (new max_notional=%.2f)",
-                fixed_exposure_cap, asset, float(max_notional_usd)
-            )
+        fixed_exposure_cap_usd = Decimal(str(profile.risk_policy_fixed_exposure_cap_usd))
     
-    # Step 2.7: Apply fee impact if requested
-    fee_adjusted = False
-    if consider_fee_impact and estimated_fee_cents is not None:
-        fee_usd = Decimal(estimated_fee_cents) / Decimal("100")
-        if fee_usd > 0 and max_notional_usd > fee_usd:
-            max_notional_usd = max_notional_usd - fee_usd
-            fee_adjusted = True
-            logger.info(
-                f"[UNIFIED-SIZING] Fee-aware sizing: subtracted ${fee_usd:.2f} fee from max_notional, "
-                f"new max_notional=${max_notional_usd:.2f}"
-            )
+    # Step 2: Get existing total exposure from position_cache
+    existing_exposure_usd = Decimal("0")
+    try:
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+        position_cache = get_position_cache()
+        existing_exposure_usd = Decimal(str(position_cache.get_total_exposure_usd()))
+    except Exception as e:
+        logger.warning("[UNIFIED-SIZING] Failed to get existing exposure: %s", e)
     
-    # Step 3: Get per-asset max contracts cap
-    max_contracts_cap = _get_max_contracts_per_asset(asset)
+    # Step 3: Calculate available exposure
+    available_exposure_usd = fixed_exposure_cap_usd - existing_exposure_usd
     
-    # Step 4: Apply dynamic position sizing if enabled
-    # Scale position size based on edge and confidence
-    dynamic_sizing_multiplier = 1.0  # Default: no scaling
-    if _is_dynamic_sizing_enabled():
-        edge_pct = edge_pct if edge_pct is not None else 0.0
-        confidence = confidence if confidence is not None else 0.5
-        
-        # Get dynamic sizing parameters from profile
-        base_contracts = _get_dynamic_sizing_base_contracts()
-        edge_multiplier = _get_dynamic_sizing_edge_multiplier()
-        confidence_multiplier = _get_dynamic_sizing_confidence_multiplier()
-        max_contracts = _get_dynamic_sizing_max_contracts()
-        min_contracts = _get_dynamic_sizing_min_contracts()
-        
-        # Calculate dynamic size: base + (edge × edge_multiplier) + (confidence × confidence_multiplier)
-        # Convert Decimal to float for multiplication with float multipliers
-        edge_pct_float = float(edge_pct) if edge_pct is not None else 0.0
-        confidence_float = float(confidence) if confidence is not None else 0.5
-        dynamic_size = base_contracts + (edge_pct_float * 100 * edge_multiplier) + (confidence_float * 100 * confidence_multiplier)
-        dynamic_size = max(min_contracts, min(max_contracts, int(dynamic_size)))
-        
-        # Calculate multiplier to apply to notional
-        # If dynamic_size > 1, we want to increase notional proportionally
-        dynamic_sizing_multiplier = float(dynamic_size) / float(base_contracts)
-        
+    # Step 4: Calculate contract cost
+    contract_cost_usd = Decimal(price_cents) / Decimal("100")
+    
+    # Step 5: Check if we have enough exposure slot
+    if available_exposure_usd < contract_cost_usd:
         logger.info(
-            "[DYNAMIC-SIZING] edge=%.4f confidence=%.4f base=%d edge_mult=%.2f conf_mult=%.2f "
-            "dynamic_size=%d multiplier=%.2f asset=%s",
-            edge_pct, confidence, base_contracts, edge_multiplier, confidence_multiplier,
-            dynamic_size, dynamic_sizing_multiplier, asset
-        )
-        
-        # Apply multiplier to max_notional
-        max_notional_usd = max_notional_usd * Decimal(str(dynamic_sizing_multiplier))
-    
-    # Step 4.5: Apply time-of-day risk scaling multiplier
-    # CRITICAL: Use _get_time_of_day_multiplier to ensure consistency with profile YAML
-    # This replaces the direct time_of_day_multiplier parameter with profile-driven logic
-    actual_time_of_day_multiplier = _get_time_of_day_multiplier(asset)
-    if actual_time_of_day_multiplier != 1.0:
-        max_notional_usd = max_notional_usd * Decimal(str(actual_time_of_day_multiplier))
-        logger.info(
-            "[TIME-OF-DAY-SCALING] Applied multiplier=%.2f to max_notional for asset=%s (new max_notional=%.2f)",
-            actual_time_of_day_multiplier, asset, float(max_notional_usd)
-        )
-    
-    # Step 4.6: Apply regime-based position size multiplier
-    # CRITICAL FIX: Apply ops.regime_detection.RegimeConstraints.position_size_multiplier
-    # This reduces position sizes based on market regime risk (BEAR, HIGH_VOLATILITY, CRISIS)
-    regime_multiplier = _get_regime_position_size_multiplier()
-    if regime_multiplier != 1.0:
-        max_notional_usd = max_notional_usd * Decimal(str(regime_multiplier))
-        logger.info(
-            "[REGIME-SIZING] Applied regime multiplier=%.2f to max_notional for asset=%s (new max_notional=%.2f)",
-            regime_multiplier, asset, float(max_notional_usd)
-        )
-    
-    # Step 4.7: Apply TTE-based position size multiplier
-    # CRITICAL FIX: Apply merid.risk.tte_regime.TTERegimeConfig size multipliers
-    # This reduces position sizes as contracts approach expiry
-    tte_multiplier = _get_tte_position_size_multiplier(tte_seconds)
-    if tte_multiplier != 1.0:
-        max_notional_usd = max_notional_usd * Decimal(str(tte_multiplier))
-        logger.info(
-            "[TTE-SIZING] Applied TTE multiplier=%.2f to max_notional for asset=%s (new max_notional=%.2f)",
-            tte_multiplier, asset, float(max_notional_usd)
-        )
-    
-    # Step 4.8: CRITICAL - Re-apply fixed $1 exposure cap as FINAL cap (2026-07-08)
-    # This ensures that even if any scaling multipliers were enabled, the $1 cap is never exceeded
-    # Applied as the final check after all multipliers to guarantee $1 max exposure
-    if _PROFILE_AVAILABLE and is_profile_active():
-        adapter = get_active_profile()
-        profile = adapter.profile
-        
-        fixed_exposure_cap = profile.risk_policy_fixed_exposure_cap_usd
-        if fixed_exposure_cap > 0:
-            max_notional_usd = min(max_notional_usd, Decimal(str(fixed_exposure_cap)))
-            logger.info(
-                "[FIXED-EXPOSURE-FINAL] Re-applied $%.2f fixed exposure cap as FINAL check for asset=%s (final max_notional=%.2f)",
-                fixed_exposure_cap, asset, float(max_notional_usd)
-            )
-    
-    # Step 5: Check existing positions for position-aware sizing
-    # CRITICAL FIX: DISABLED to prevent interference with window-based risk limits
-    # Position-aware sizing reduces max_notional based on existing positions, which conflicts
-    # with the 3% per-agent / 5% total venue per 15-minute window limits. The window-based
-    # limits are the single source of truth for risk enforcement, and position-aware sizing
-    # could allow agents to bypass window limits by reducing max_notional after positions are closed.
-    # RE-ENABLE REQUIREMENTS:
-    #   1. Update kalshi_crypto_15m_risk_envelope.py to account for position-aware sizing
-    #   2. Ensure 3% per agent / 5% per 15m window limits are still respected after reduction
-    #   3. Add validation to prevent position-aware sizing from allowing window limit bypass
-    #   4. Test with various position states to verify limits are respected
-    #
-    # DISABLED CODE (preserved for future reference):
-    # existing_position_notional = Decimal("0")
-    # try:
-    #     from merid.event_venues.kalshi.position_cache import get_position_cache
-    #     cache = get_position_cache()
-    #     positions = cache.get_all_positions()
-    #     
-    #     # Sum existing positions for this asset (across all timeframes)
-    #     for ticker, pos in positions.items():
-    #         # Extract asset from ticker (e.g., KXBTC15M-... -> BTC)
-    #         ticker_asset = None
-    #         if "BTC" in ticker.upper():
-    #             ticker_asset = "BTC"
-    #         elif "ETH" in ticker.upper():
-    #             ticker_asset = "ETH"
-    #         elif "SOL" in ticker.upper():
-    #             ticker_asset = "SOL"
-    #         elif "XRP" in ticker.upper():
-    #             ticker_asset = "XRP"
-    #         elif "DOGE" in ticker.upper():
-    #             ticker_asset = "DOGE"
-    #         
-    #         if ticker_asset == asset and hasattr(pos, 'contracts'):
-    #             # Calculate notional from position using actual entry price
-    #             # Use avg_price_cents from position if available, otherwise fallback to current price
-    #             entry_price_cents = getattr(pos, 'avg_price_cents', None)
-    #             if entry_price_cents and entry_price_cents > 0:
-    #                 position_notional_usd = (Decimal(entry_price_cents) / Decimal("100")) * pos.contracts
-    #             else:
-    #                 # Fallback to current price if entry price unavailable
-    #                 position_notional_usd = contract_notional_usd * pos.contracts
-    #             existing_position_notional += position_notional_usd
-    #     
-    #     if existing_position_notional > 0:
-    #         # Reduce max_notional by existing exposure
-    #         available_notional = max_notional_usd - existing_position_notional
-    #         if available_notional <= 0:
-    #             logger.info(
-    #                 "[SIZE-COMPUTE] Position-aware sizing: already at max exposure for %s (existing=%.2f, max=%.2f). Rejecting.",
-    #                 asset, float(existing_position_notional), float(max_notional_usd)
-    #             )
-    #             return 0, Decimal("0"), {
-    #                 "bankroll_usd": float(bankroll_usd),
-    #                 "risk_pct_effective": float(risk_pct_effective),
-    #                 "max_notional_usd": float(max_notional_usd),
-    #                 "price_cents": price_cents,
-    #                 "asset": asset,
-    #                 "contracts_from_notional": 0,
-    #                 "max_contracts_cap": max_contracts_cap,
-    #                 "per_asset_risk_pct": per_asset_risk_pct,
-    #                 "final_count": 0,
-    #                 "final_notional_usd": 0.0,
-    #                 "rejection_reason": "position_limit_exceeded"
-    #             }
-    #         max_notional_usd = available_notional
-    #         logger.info(
-    #             "[SIZE-COMPUTE] Position-aware sizing: reduced max_notional for %s from %.2f to %.2f (existing exposure: %.2f)",
-    #             asset, float(max_notional_usd + existing_position_notional), float(max_notional_usd), float(existing_position_notional)
-    #         )
-    # except Exception as e:
-    #     logger.warning("[SIZE-COMPUTE] Failed to check existing positions for position-aware sizing: %s", e)
-    
-    # Step 5: Convert max_notional to contract count
-    contract_notional_usd = Decimal(price_cents) / Decimal("100")
-    if contract_notional_usd == 0:
-        # Avoid division by zero
-        contracts_from_notional = 0
-    else:
-        contracts_from_notional = int(max_notional_usd / contract_notional_usd)
-    
-    # Step 5.5: Small bankroll override - allow 1 contract if max_notional is close to contract cost
-    # This enables trading with small bankrolls where percentage-based caps are too restrictive
-    # Only apply if:
-    # - contracts_from_notional is 0 (can't afford 1 contract at percentage cap)
-    # - max_notional is at least threshold % of contract cost (from config)
-    # - max_contracts_cap allows at least 1 contract
-    # - CRITICAL: contract_notional_usd must be >= minimum notional (prevent 1¢ orders)
-    # Config: fractional_contract_override_threshold in kalshi_crypto_15m.yaml (default 0.5 = 50%)
-    if contracts_from_notional == 0 and max_contracts_cap >= 1:
-        # CRITICAL FIX: Reject override if contract cost is too low (prevents 1¢ orders)
-        # Minimum contract notional should be at least $0.05 to avoid extreme leverage
-        min_contract_notional_usd = Decimal("0.05")
-        if contract_notional_usd < min_contract_notional_usd:
-            logger.warning(
-                "[SIZE-COMPUTE] Small bankroll override rejected: contract_notional=%.2f < min=%.2f (prevents extreme leverage/1¢ orders)",
-                float(contract_notional_usd), float(min_contract_notional_usd)
-            )
-            # Don't override - keep contracts_from_notional = 0
-        else:
-            override_threshold = _get_fractional_contract_override_threshold()
-            if override_threshold > 0 and max_notional_usd >= contract_notional_usd * Decimal(str(override_threshold)):
-                contracts_from_notional = 1
-                logger.info(
-                    "[SIZE-COMPUTE] Small bankroll override: allowing 1 contract (max_notional=%.2f >= %.0f%% of contract_cost=%.2f)",
-                    float(max_notional_usd), override_threshold * 100, float(contract_notional_usd)
-                )
-    
-    # Step 6: Apply per-asset max contracts cap
-    count = min(contracts_from_notional, max_contracts_cap)
-    
-    # Step 6: Validate against min_contracts and min_notional
-    # For Kalshi, minimum notional is venue-specific (typically $1.00 for sanity check compliance)
-    # We enforce this separately from caps to avoid the "mkt=0" issue
-    if min_contracts is None:
-        min_contracts = 1  # Default to 1 contract minimum
-    
-    # Compute notional for current count
-    proposed_notional = count * contract_notional_usd
-    
-    # If count is 0, reject (return 0)
-    if count == 0:
-        logger.info(
-            "[SIZE-COMPUTE] Undersized trade: count=0 (max_notional too small for 1 contract). Rejecting."
+            "[UNIFIED-SIZING] Insufficient exposure slot: available=%.2f, needed=%.2f, existing=%.2f, cap=%.2f asset=%s",
+            float(available_exposure_usd), float(contract_cost_usd), float(existing_exposure_usd),
+            float(fixed_exposure_cap_usd), asset
         )
         return 0, Decimal("0"), {
             "bankroll_usd": float(bankroll_usd),
-            "risk_pct_effective": float(risk_pct_effective),
-            "max_notional_usd": float(max_notional_usd),
             "price_cents": price_cents,
             "asset": asset,
-            "contracts_from_notional": contracts_from_notional,
-            "max_contracts_cap": max_contracts_cap,
-            "per_asset_risk_pct": float(per_asset_risk_pct) if per_asset_risk_pct else None,
-            "final_count": 0,
-            "final_notional_usd": 0.0,
-            "rejection_reason": "undersized",
+            "reason": "insufficient_exposure_slot",
+            "available_exposure_usd": float(available_exposure_usd),
+            "contract_cost_usd": float(contract_cost_usd),
+            "existing_exposure_usd": float(existing_exposure_usd),
         }
     
-    # Apply min_notional check - use venue-aware function if not provided
-    # This is separate from caps - it's a venue requirement, not a risk limit
-    if min_notional_usd is None:
-        # Use venue-aware min_notional for Kalshi
-        min_notional_usd = compute_min_notional_for_venue(venue="kalshi", contract_ticker=asset, price_cents=price_cents)
-    else:
-        min_notional_usd = Decimal(str(min_notional_usd))
+    # Step 6: Allow 1 contract (slot-based)
+    contract_count = 1
+    order_notional_usd = contract_cost_usd
     
-    if min_notional_usd > 0 and proposed_notional > 0:
-        if proposed_notional < min_notional_usd:
-            # Try to bump up to minimum if within caps
-            min_count_for_notional = int((min_notional_usd / contract_notional_usd).to_integral_value(rounding="ROUND_CEILING"))
-            if min_count_for_notional <= max_contracts_cap and min_count_for_notional * contract_notional_usd <= max_notional_usd:
-                count = min_count_for_notional
-                proposed_notional = count * contract_notional_usd
-                logger.info(
-                    "[SIZE-COMPUTE] Bumped count to meet min_notional: %d -> %d (notional: %.2f -> %.2f)",
-                    contracts_from_notional, count, float(count * contract_notional_usd), float(proposed_notional)
-                )
-            else:
-                logger.info(
-                    "[SIZE-COMPUTE] Cannot meet min_notional=%.2f with caps (max_notional=%.2f, max_contracts=%d). Rejecting.",
-                    float(min_notional_usd), float(max_notional_usd), max_contracts_cap
-                )
-                return 0, Decimal("0"), {
-                    "bankroll_usd": float(bankroll_usd),
-                    "risk_pct_effective": float(risk_pct_effective),
-                    "max_notional_usd": float(max_notional_usd),
-                    "price_cents": price_cents,
-                    "asset": asset,
-                    "contracts_from_notional": contracts_from_notional,
-                    "max_contracts_cap": max_contracts_cap,
-                    "per_asset_risk_pct": float(per_asset_risk_pct) if per_asset_risk_pct else None,
-                    "final_count": 0,
-                    "final_notional_usd": 0.0,
-                    "rejection_reason": "min_notional_not_met",
-                }
+    # Step 7: Get per-asset max contracts cap (should be 1)
+    max_contracts_cap = _get_max_contracts_per_asset(asset)
+    contract_count = min(contract_count, max_contracts_cap)
     
-    # Step 7: Ensure minimum order notional for sanity check compliance
-    # Kalshi sanity check requires minimum notional of $1.00 per order
-    # DISABLED: Minimum notional enforcement disabled to respect per-trade risk limits
-    # The minimum notional check was causing count to increase beyond per-trade risk cap
-    # For production, minimum notional should be enforced at the order router level
-    # if needed, not in the sizing function which should respect risk limits
-    # min_order_notional_usd = Decimal("1.00")
-    # notional_usd = count * contract_notional_usd
-    # if notional_usd > 0 and notional_usd < min_order_notional_usd:
-    #     # Calculate minimum contracts needed to meet $1.00 notional
-    #     min_count_for_notional = int((min_order_notional_usd / contract_notional_usd).to_integral_value(rounding="ROUND_CEILING"))
-    #     # Only increase if within per-trade risk cap (max_notional_usd) and max contracts cap
-    #     if min_count_for_notional * contract_notional_usd <= max_notional_usd and min_count_for_notional <= max_contracts_cap:
-    #         count = min_count_for_notional
-    
-    # Compute final notional
-    notional_usd = count * contract_notional_usd
-    
-    # Build metadata for logging
-    metadata = {
-        "bankroll_usd": float(bankroll_usd),
-        "risk_pct_effective": float(risk_pct_effective),
-        "max_notional_usd": float(max_notional_usd),
-        "price_cents": price_cents,
-        "fee_adjusted": fee_adjusted,
-        "consider_fee_impact": consider_fee_impact,
-        "asset": asset,
-        "contracts_from_notional": contracts_from_notional,
-        "max_contracts_cap": max_contracts_cap,
-        "per_asset_risk_pct": float(per_asset_risk_pct) if per_asset_risk_pct else None,
-        "final_count": count,
-        "final_notional_usd": float(notional_usd),
-    }
-    
-    # Log SIZE-COMPUTE
     logger.info(
-        "[SIZE-COMPUTE] bankroll=%.2f risk_pct=%.4f max_notional=%.2f price=%dc asset=%s "
-        "contracts_from_notional=%d max_contracts_cap=%d final_count=%d final_notional=%.2f",
-        metadata["bankroll_usd"],
-        metadata["risk_pct_effective"],
-        metadata["max_notional_usd"],
-        metadata["price_cents"],
-        metadata["asset"],
-        metadata["contracts_from_notional"],
-        metadata["max_contracts_cap"],
-        count,
-        float(notional_usd),
+        "[UNIFIED-SIZING] Slot-based sizing: asset=%s price=%dc cost=$%.2f "
+        "existing_exposure=$%.2f available=$%.2f cap=$%.2f contracts=%d",
+        asset, price_cents, float(contract_cost_usd), float(existing_exposure_usd),
+        float(available_exposure_usd), float(fixed_exposure_cap_usd), contract_count
     )
     
-    return count, notional_usd, metadata
+    # Step 8: Validate min_notional and min_contracts if provided
+    if min_notional_usd is not None and order_notional_usd < min_notional_usd:
+        logger.info(
+            "[UNIFIED-SIZING] Undersized trade: notional=%.2f < min_notional=%.2f. Rejecting.",
+            float(order_notional_usd), float(min_notional_usd)
+        )
+        return 0, Decimal("0"), {
+            "bankroll_usd": float(bankroll_usd),
+            "price_cents": price_cents,
+            "asset": asset,
+            "reason": "below_min_notional",
+            "order_notional_usd": float(order_notional_usd),
+            "min_notional_usd": float(min_notional_usd),
+        }
+    
+    if min_contracts is not None and contract_count < min_contracts:
+        logger.info(
+            "[UNIFIED-SIZING] Undersized trade: count=%d < min_contracts=%d. Rejecting.",
+            contract_count, min_contracts
+        )
+        return 0, Decimal("0"), {
+            "bankroll_usd": float(bankroll_usd),
+            "price_cents": price_cents,
+            "asset": asset,
+            "reason": "below_min_contracts",
+            "contract_count": contract_count,
+            "min_contracts": min_contracts,
+        }
+    
+    # Return result
+    metadata = {
+        "bankroll_usd": float(bankroll_usd),
+        "price_cents": price_cents,
+        "asset": asset,
+        "contract_count": contract_count,
+        "order_notional_usd": float(order_notional_usd),
+        "existing_exposure_usd": float(existing_exposure_usd),
+        "available_exposure_usd": float(available_exposure_usd),
+        "fixed_exposure_cap_usd": float(fixed_exposure_cap_usd),
+    }
+    
+    logger.info(
+        "[UNIFIED-SIZING] Final sizing: asset=%s contracts=%d notional=$%.2f price=%dc "
+        "total_exposure_after=$%.2f",
+        asset, contract_count, float(order_notional_usd), price_cents,
+        float(existing_exposure_usd + order_notional_usd)
+    )
+    
+    return contract_count, order_notional_usd, metadata
