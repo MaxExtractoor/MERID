@@ -4859,6 +4859,59 @@ class LeanAgent15m:
             signal["rsi"] = panic_fade_signal.get("rsi")
             signal["zscore"] = panic_fade_signal.get("zscore")
         
+        # CRITICAL FIX: 2026-07-09 - Integrate global slot allocator for $1 hard limit
+        # Each contract consumes its entry price from the $1 cap across all 5 assets
+        # This prevents agents from exceeding $1 total exposure in the same window
+        try:
+            from merid.risk.global_slot_allocator import (
+                get_global_slot_allocator,
+                AllocationRequest
+            )
+            
+            slot_allocator = get_global_slot_allocator()
+            
+            # Calculate spread for allocation request
+            spread_cents = abs(best_ask - best_bid) if best_bid > 0 and best_ask > 0 else 0
+            
+            # Create allocation request
+            allocation_request = AllocationRequest(
+                agent_id=self.config.name,
+                asset=asset,
+                ticker=ticker if 'ticker' in locals() else market.market_id if hasattr(market, 'market') else "unknown",
+                entry_price_cents=int(price_cents),
+                edge_pct=edge_pct,
+                spread_cents=spread_cents,
+                is_exit_order=False  # Signal generation is for entry orders only
+            )
+            
+            # Request slot allocation
+            allocated, reason, slot_id = slot_allocator.request_allocation(allocation_request)
+            
+            if not allocated:
+                logger.info(
+                    "[SLOT-ALLOCATOR-REJECT] asset=%s side=%s price_cents=%d edge=%.2f%% - %s",
+                    asset, signal_side, int(price_cents), edge_pct, reason
+                )
+                return None  # Skip this signal - no slot available
+            
+            # Store slot_id in signal for later release on position closure
+            signal["slot_id"] = slot_id
+            
+            logger.info(
+                "[SLOT-ALLOCATOR-ALLOCATED] asset=%s side=%s price_cents=%d slot_id=%s total_exposure=$%.2f",
+                asset, signal_side, int(price_cents), slot_id, slot_allocator.get_total_exposure()
+            )
+            
+        except Exception as e:
+            logger.error("[SLOT-ALLOCATOR-ERROR] Failed to allocate slot: %s", e, exc_info=True)
+            # CRITICAL: Reject signal if slot allocator fails - this prevents exposure cap bypass
+            # If the allocator is unavailable, trading must halt to enforce the $1 hard cap
+            logger.warning(
+                "[SLOT-ALLOCATOR-REJECT] asset=%s side=%s price_cents=%d edge=%.2f%% - slot_allocator_error: %s",
+                asset, signal_side, int(price_cents), edge_pct, str(e)
+            )
+            return None  # Reject signal - slot allocator is required for $1 exposure cap
+        
         logger.info("[SIGNAL-GENERATED] asset=%s side=%s velocity=%.6f edge_pct=%.2f%% confidence=%.2f model_prob=%.2f", 
                    asset, signal_side, velocity, edge_pct, confidence, model_prob)
         return signal

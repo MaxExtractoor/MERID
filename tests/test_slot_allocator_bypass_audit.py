@@ -305,6 +305,32 @@ class TestSlotAllocatorBypassAudit:
         # All paths are either properly wired or correctly disabled
         assert True, "All order execution paths accounted for"
 
+    def test_agent_grid_rejects_on_slot_allocator_exception(self):
+        """Verify agent_grid_15m.py rejects signals when slot allocator fails."""
+        with open("merid/prediction/agent_grid_15m.py", "r", encoding="utf-8") as f:
+            grid_source = f.read()
+        
+        # Verify exception handler exists
+        assert "except Exception as e:" in grid_source, \
+            "agent_grid_15m.py should have exception handler for slot allocator"
+        
+        # Verify exception handler rejects signal (not allows it)
+        # Check that the exception handler has return None after SLOT-ALLOCATOR-ERROR
+        assert "SLOT-ALLOCATOR-ERROR" in grid_source, \
+            "agent_grid_15m.py should log SLOT-ALLOCATOR-ERROR on exception"
+        
+        # Check that the exception handler returns None (rejects signal)
+        assert "return None  # Reject signal - slot allocator is required for $1 exposure cap" in grid_source, \
+            "agent_grid_15m.py exception handler should reject signal with return None"
+        
+        # Verify the old allow logic is NOT present
+        assert "signal[\"slot_id\"] = None" not in grid_source, \
+            "agent_grid_15m.py should NOT allow signal without slot allocation (signal[\"slot_id\"] = None)"
+        
+        # Verify proper error logging
+        assert "SLOT-ALLOCATOR-REJECT" in grid_source, \
+            "agent_grid_15m.py should log SLOT-ALLOCATOR-REJECT on exception"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
