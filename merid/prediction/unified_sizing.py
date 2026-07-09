@@ -872,7 +872,25 @@ def compute_order_size(
             kelly_multiplier, asset, float(max_notional_usd)
         )
     
-    # Step 2.6: Apply fee impact if requested
+    # Step 2.6: Apply fixed $1 exposure cap (2026-07-08)
+    # CRITICAL: Replace percentage-based sizing with fixed $1 max exposure
+    # This ensures never more than $1 exposure at any time
+    # APPLIED AFTER Kelly multiplier to ensure cap is final
+    if _PROFILE_AVAILABLE and is_profile_active():
+        adapter = get_active_profile()
+        profile = adapter.profile
+        
+        # Check if fixed exposure cap is enabled
+        fixed_exposure_cap = profile.risk_policy_fixed_exposure_cap_usd
+        if fixed_exposure_cap > 0:
+            # Apply fixed $1 cap (final cap after all multipliers)
+            max_notional_usd = min(max_notional_usd, Decimal(str(fixed_exposure_cap)))
+            logger.info(
+                "[FIXED-EXPOSURE] Applied $%.2f fixed exposure cap to max_notional for asset=%s (new max_notional=%.2f)",
+                fixed_exposure_cap, asset, float(max_notional_usd)
+            )
+    
+    # Step 2.7: Apply fee impact if requested
     fee_adjusted = False
     if consider_fee_impact and estimated_fee_cents is not None:
         fee_usd = Decimal(estimated_fee_cents) / Decimal("100")
@@ -954,6 +972,21 @@ def compute_order_size(
             "[TTE-SIZING] Applied TTE multiplier=%.2f to max_notional for asset=%s (new max_notional=%.2f)",
             tte_multiplier, asset, float(max_notional_usd)
         )
+    
+    # Step 4.8: CRITICAL - Re-apply fixed $1 exposure cap as FINAL cap (2026-07-08)
+    # This ensures that even if any scaling multipliers were enabled, the $1 cap is never exceeded
+    # Applied as the final check after all multipliers to guarantee $1 max exposure
+    if _PROFILE_AVAILABLE and is_profile_active():
+        adapter = get_active_profile()
+        profile = adapter.profile
+        
+        fixed_exposure_cap = profile.risk_policy_fixed_exposure_cap_usd
+        if fixed_exposure_cap > 0:
+            max_notional_usd = min(max_notional_usd, Decimal(str(fixed_exposure_cap)))
+            logger.info(
+                "[FIXED-EXPOSURE-FINAL] Re-applied $%.2f fixed exposure cap as FINAL check for asset=%s (final max_notional=%.2f)",
+                fixed_exposure_cap, asset, float(max_notional_usd)
+            )
     
     # Step 5: Check existing positions for position-aware sizing
     # CRITICAL FIX: DISABLED to prevent interference with window-based risk limits

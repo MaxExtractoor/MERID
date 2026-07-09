@@ -528,26 +528,35 @@ class PortfolioRiskAgent:
             bankroll_usd = 0.0
 
         # Total notional
-        if snapshot.total_notional_usd > self._config.max_total_notional_usd:
-            notional_pct = (float(snapshot.total_notional_usd) / bankroll_usd * 100) if bankroll_usd > 0 else 0
-            from core.settings import MAX_TOTAL_RISK_PCT
-            limit_pct = MAX_TOTAL_RISK_PCT * 100
+        # 2026-07-08 UPDATE: Fixed $1 exposure model - disable percentage-based portfolio limits
+        # The $1 fixed exposure cap is enforced at the order sizing level (unified_sizing.py)
+        # Portfolio-level percentage limits are DISABLED to prevent conflicts with fixed $1 model
+        # Check fixed $1 exposure cap instead
+        from core.settings import FIXED_EXPOSURE_CAP_USD
+        if snapshot.total_notional_usd > Decimal(str(FIXED_EXPOSURE_CAP_USD)):
             breaches.append(
-                f"Total notional ${snapshot.total_notional_usd} ({notional_pct:.1f}% of bankroll) > "
-                f"limit ${self._config.max_total_notional_usd} ({limit_pct:.0f}% of bankroll)"
+                f"Total notional ${snapshot.total_notional_usd} > "
+                f"fixed exposure cap ${FIXED_EXPOSURE_CAP_USD}"
             )
 
         # Per-asset notional (with correlation-adjusted caps)
+        # 2026-07-08 UPDATE: Fixed $1 exposure model - disable percentage-based per-asset limits
+        # The $1 fixed exposure cap is enforced at the order sizing level (unified_sizing.py)
+        # Per-asset percentage limits are DISABLED to prevent conflicts with fixed $1 model
+        # Check fixed $1 exposure cap instead (applies to total across all assets)
         for asset, notional in snapshot.notional_per_asset.items():
-            if notional > self._config.max_notional_per_asset_usd:
-                from core.settings import MAX_CYCLE_RISK_PCT
-                per_asset_pct = MAX_CYCLE_RISK_PCT * 100
+            # Per-asset check is now redundant with total $1 cap, but kept for visibility
+            if notional > Decimal(str(FIXED_EXPOSURE_CAP_USD)):
                 breaches.append(
                     f"{asset} notional ${notional} > "
-                    f"limit ${self._config.max_notional_per_asset_usd} ({per_asset_pct:.0f}% of bankroll per asset)"
+                    f"fixed exposure cap ${FIXED_EXPOSURE_CAP_USD}"
                 )
 
         # Sprint D: Correlation-adjusted combined exposure check
+        # 2026-07-08 UPDATE: Fixed $1 exposure model - disable correlation-adjusted caps
+        # The $1 fixed exposure cap is enforced at the order sizing level (unified_sizing.py)
+        # Correlation-adjusted percentage limits are DISABLED to prevent conflicts with fixed $1 model
+        # Check fixed $1 exposure cap instead (applies to total across all assets)
         try:
             from merid.risk.correlation import get_correlation_tracker, ASSET_CLUSTERS
             corr_tracker = get_correlation_tracker()
@@ -558,17 +567,11 @@ class PortfolioRiskAgent:
                 )
                 if cluster_notional <= 0:
                     continue
-                # Get worst-case reduction factor for this cluster
-                worst_factor = Decimal("1.0")
-                for i, a in enumerate(members):
-                    for b in members[i + 1:]:
-                        f = corr_tracker.exposure_reduction_factor(a, b)
-                        worst_factor = min(worst_factor, Decimal(str(f)))
-                combined_cap = self._config.max_notional_per_asset_usd * Decimal(str(len(members))) * worst_factor
-                if cluster_notional > combined_cap:
+                # Check against fixed $1 exposure cap
+                if cluster_notional > Decimal(str(FIXED_EXPOSURE_CAP_USD)):
                     breaches.append(
                         f"Correlated cluster {cluster_name} notional ${cluster_notional} > "
-                        f"correlation-adjusted cap ${combined_cap:.0f} (factor={worst_factor:.2f})"
+                        f"fixed exposure cap ${FIXED_EXPOSURE_CAP_USD}"
                     )
         except Exception as exc:
             logger.debug(f"Correlation check skipped: {exc}")

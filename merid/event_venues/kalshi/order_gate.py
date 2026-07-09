@@ -134,6 +134,7 @@ class GateMetrics:
     blocked_window_limit_exit: int = 0  # Track exit order window limit blocks
     blocked_exit_policy: int = 0  # CRITICAL: Block orders without exit policy metadata (2026-07-06)
     blocked_exit_policy_invalid: int = 0  # CRITICAL: Block orders with invalid exit policy values (2026-07-08)
+    blocked_sequential_trading: int = 0  # CRITICAL: Block new entries when positions exist (2026-07-08)
     submitted: int = 0
     filled: int = 0
     canceled: int = 0
@@ -381,14 +382,17 @@ class IdempotentOrderStore:
                     # (order_router.py, reconciliation, or other paths)
                     try:
                         from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+                        from merid.event_venues.kalshi.market_filter import extract_asset_from_ticker
                         envelope = get_kalshi_crypto_15m_risk_envelope()
                         if envelope:
                             # Use actual filled notional for accurate exposure tracking
                             filled_notional_usd = (filled_count * rec.price_cents) / 100.0
+                            # CRITICAL FIX 2026-07-08: Extract asset for per-asset exposure tracking
+                            asset = extract_asset_from_ticker(rec.contract_id) if rec.contract_id else None
                             envelope.record_order_execution(
                                 agent_id=rec.agent_id,
                                 order_notional_usd=filled_notional_usd,
-                                current_ts=_time.time()
+                                asset=asset
                             )
                             logger.info(
                                 "[order-gate-WINDOW-RECORD] Recorded window exposure on fill: coid=%s agent=%s notional=$%.2f filled=%d price=%dc",
@@ -960,7 +964,40 @@ class PreTradeGate:
             logger.warning("[GATE] Position existence check failed for exit order: %s", e)
             # Continue with other checks if validation fails (non-critical)
 
-        # 3d. CRITICAL: Window-based risk limit check (HARD STOP) - 2026-07-06
+        # 3d. CRITICAL: Sequential trading check (2026-07-08)
+        # No new entries until all positions exit or expire
+        # This ensures $1 max exposure is never exceeded
+        # Only applies to entry orders (BUY), not exit orders (SELL)
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+            profile = get_active_profile()
+            if profile and profile.risk_policy_sequential_trading:
+                is_exit_order = action == "sell"
+                if not is_exit_order:
+                    # Check if there are any open positions across all assets
+                    from merid.event_venues.kalshi.position_cache import get_position_cache
+                    position_cache = get_position_cache()
+                    total_exposure = position_cache.get_total_exposure_usd()
+                    
+                    if total_exposure > 0:
+                        self._store._metrics.blocked_sequential_trading += 1
+                        logger.warning(
+                            "[GATE-ALERT] sequential_trading_blocked contract=%s agent=%s - "
+                            "Open positions exist (total_exposure=$%.2f). No new entries until all positions exit. "
+                            "(metric: blocked_sequential_trading=%d)",
+                            contract_id, agent_id, total_exposure,
+                            self._store._metrics.blocked_sequential_trading
+                        )
+                        return GateVerdict(
+                            allowed=False,
+                            client_order_id=coid,
+                            reason=f"sequential_trading:open_positions_exist_${total_exposure:.2f}",
+                        )
+        except Exception as e:
+            logger.warning("[GATE] Sequential trading check failed: %s", e)
+            # Continue with other checks if validation fails (non-critical)
+
+        # 3e. CRITICAL: Window-based risk limit check (HARD STOP) - 2026-07-06
         # Enforces 3% per agent per 15-minute window for entry orders
         # Enforces 10% per agent per 15-minute window for exit orders (to prevent abuse)
         # Enforces 5% total venue per 15-minute window for all orders
@@ -971,15 +1008,19 @@ class PreTradeGate:
         # This caused agents to exceed risk limits when bankroll service was unavailable
         try:
             from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+            from merid.event_venues.kalshi.market_filter import extract_asset_from_ticker
             envelope = get_kalshi_crypto_15m_risk_envelope()
             if envelope:
                 import time
                 order_notional_usd = (target_count * price_cents) / 100.0
                 is_exit_order = action == "sell"
                 
+                # CRITICAL FIX 2026-07-08: Extract asset for per-asset 3% limit check
+                asset = extract_asset_from_ticker(contract_id) if contract_id else None
+                
                 logger.info(
-                    "[GATE-WINDOW-CHECK] Checking window limit: agent=%s notional=$%.2f count=%d price=%dc is_exit=%s",
-                    agent_id, order_notional_usd, target_count, price_cents, is_exit_order
+                    "[GATE-WINDOW-CHECK] Checking window limit: agent=%s asset=%s notional=$%.2f count=%d price=%dc is_exit=%s",
+                    agent_id, asset or "N/A", order_notional_usd, target_count, price_cents, is_exit_order
                 )
                 
                 # CRITICAL FIX: 2026-07-08 - Use custom window limits for exit orders
@@ -991,7 +1032,8 @@ class PreTradeGate:
                     agent_id=agent_id,
                     order_notional_usd=order_notional_usd,
                     current_ts=time.time(),
-                    custom_per_agent_limit_pct=custom_per_agent_limit_pct
+                    custom_per_agent_limit_pct=custom_per_agent_limit_pct,
+                    asset=asset
                 )
                 
                 logger.info(
