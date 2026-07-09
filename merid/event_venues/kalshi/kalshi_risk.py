@@ -1468,39 +1468,41 @@ class KalshiRiskManager:
                 return False, reason, "max_position_per_contract"
 
             # 3b. Per-asset contract limit (from profile overrides)
-            # If per_asset_max_contracts is provided for this asset, use it instead of global max_contracts_per_asset
-            if asset and self._config.per_asset_max_contracts:
-                asset_key = asset.upper()
-                if asset_key in self._config.per_asset_max_contracts:
-                    per_asset_cap = self._config.per_asset_max_contracts[asset_key]
-                    # Defensive: normalize per_asset_cap to handle dict format
-                    if isinstance(per_asset_cap, dict):
-                        # Accept typical shapes: {"max_contracts": 500} or {"value": 500}
-                        if "max_contracts" in per_asset_cap:
-                            per_asset_cap = per_asset_cap["max_contracts"]
-                        elif "value" in per_asset_cap:
-                            per_asset_cap = per_asset_cap["value"]
-                        else:
-                            logger.error(
-                                "[RISK] Malformed per_asset_max_contracts[%s] dict: %s; skipping per-asset cap check",
-                                asset_key, per_asset_cap
-                            )
-                            per_asset_cap = None
-                    
-                    # If still not an int, skip the check for safety
-                    if not isinstance(per_asset_cap, int):
-                        logger.warning(
-                            "[RISK] per_asset_max_contracts[%s] is not an int after normalization (type=%s, value=%s). Skipping per-asset cap check.",
-                            asset_key, type(per_asset_cap), per_asset_cap
-                        )
-                    else:
-                        # Get current asset position from state
-                        asset_contracts = self._state.asset_contracts.get(asset_key, 0)
-                        new_asset_contracts = asset_contracts + contracts
-                        if new_asset_contracts > per_asset_cap:
-                            reason = f"Asset '{asset_key}' contracts {new_asset_contracts} exceeds profile cap {per_asset_cap}"
-                            self._log_breach("per_asset_contracts_cap", reason)
-                            return False, reason, "per_asset_contracts_cap"
+            # 2026-07-09: DISABLED - global allocator handles allocation at grid level
+            # The global allocator at agent grid level now manages edge-based allocation under venue cap
+            # Per-asset contract limits are no longer enforced here to allow best edges to use available venue cap
+            # if asset and self._config.per_asset_max_contracts:
+            #     asset_key = asset.upper()
+            #     if asset_key in self._config.per_asset_max_contracts:
+            #         per_asset_cap = self._config.per_asset_max_contracts[asset_key]
+            #         # Defensive: normalize per_asset_cap to handle dict format
+            #         if isinstance(per_asset_cap, dict):
+            #             # Accept typical shapes: {"max_contracts": 500} or {"value": 500}
+            #             if "max_contracts" in per_asset_cap:
+            #                 per_asset_cap = per_asset_cap["max_contracts"]
+            #             elif "value" in per_asset_cap:
+            #                 per_asset_cap = per_asset_cap["value"]
+            #             else:
+            #                 logger.error(
+            #                     "[RISK] Malformed per_asset_max_contracts[%s] dict: %s; skipping per-asset cap check",
+            #                     asset_key, per_asset_cap
+            #                 )
+            #                 per_asset_cap = None
+            #         
+            #         # If still not an int, skip the check for safety
+            #         if not isinstance(per_asset_cap, int):
+            #             logger.warning(
+            #                 "[RISK] per_asset_max_contracts[%s] is not an int after normalization (type=%s, value=%s). Skipping per-asset cap check.",
+            #                 asset_key, type(per_asset_cap), per_asset_cap
+            #             )
+            #         else:
+            #             # Get current asset position from state
+            #             asset_contracts = self._state.asset_contracts.get(asset_key, 0)
+            #             new_asset_contracts = asset_contracts + contracts
+            #             if new_asset_contracts > per_asset_cap:
+            #                 reason = f"Asset '{asset_key}' contracts {new_asset_contracts} exceeds profile cap {per_asset_cap}"
+            #                 self._log_breach("per_asset_contracts_cap", reason)
+            #                 return False, reason, "per_asset_contracts_cap"
 
             # 3c. Per-asset notional cap (from RiskEnvelope with floor applied)
             # 2026-07-09: DISABLED - global allocator handles allocation at grid level
