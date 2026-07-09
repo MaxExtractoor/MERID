@@ -219,8 +219,18 @@ class Crypto15mProfile:
     contract_caps_max_single_order_contracts: int
     
     # Risk policy
-    # 2026 BEST PRACTICE: Dynamic percentage-based group notional cap
-    # Scales with bankroll to follow industry best practices (2-5% per position)
+    # 2026-07-08 UPDATE: Fixed $1 exposure model for small bankroll optimization
+    # Replaces percentage-based sizing with fixed dollar cap to ensure $1+ profit per 15m window
+    risk_policy_fixed_exposure_cap_usd: float  # Fixed $1 max exposure (NEW)
+    risk_policy_sequential_trading: bool  # No new entries until all positions exit (NEW)
+    # Mandatory profit exit parameters (NEW)
+    mandatory_profit_exit_enabled: bool  # Enable automatic profit exits
+    mandatory_profit_exit_target_pct_low: float  # 30% for entries 10-30c
+    mandatory_profit_exit_target_pct_mid: float  # 25% for entries 30-50c
+    mandatory_profit_exit_target_pct_high: float  # 20% for entries 50-75c
+    mandatory_profit_exit_threshold_low_cents: int  # Threshold for low band (30c)
+    mandatory_profit_exit_threshold_high_cents: int  # Threshold for high band (50c)
+    # Legacy percentage-based cap parameters (DISABLED but kept for compatibility)
     risk_policy_group_notional_cap_pct: float  # Percentage of bankroll (e.g., 0.05 for 5%)
     risk_policy_group_notional_cap_min_usd: float  # Minimum floor for small bankrolls
     risk_policy_group_notional_cap_max_usd: float  # Maximum ceiling for large bankrolls
@@ -1004,7 +1014,27 @@ class Crypto15mProfileAdapter:
                 ),
                 
                 # Risk policy (normalize dict format for percentage fields)
-                # 2026 BEST PRACTICE: Load dynamic percentage-based group notional cap parameters
+                # 2026-07-08 UPDATE: Fixed $1 exposure model parameters
+                risk_policy_fixed_exposure_cap_usd=float(risk_policy.get('fixed_exposure_cap_usd', 1.00)),
+                risk_policy_sequential_trading=bool(risk_policy.get('sequential_trading', True)),
+                # Mandatory profit exit parameters
+                mandatory_profit_exit_enabled=bool(risk_policy.get('mandatory_profit_exit', {}).get('enabled', True)),
+                mandatory_profit_exit_target_pct_low=self._normalize_percentage_value(
+                    risk_policy.get('mandatory_profit_exit', {}).get('profit_target_pct_low', 0.30)
+                ),
+                mandatory_profit_exit_target_pct_mid=self._normalize_percentage_value(
+                    risk_policy.get('mandatory_profit_exit', {}).get('profit_target_pct_mid', 0.25)
+                ),
+                mandatory_profit_exit_target_pct_high=self._normalize_percentage_value(
+                    risk_policy.get('mandatory_profit_exit', {}).get('profit_target_pct_high', 0.20)
+                ),
+                mandatory_profit_exit_threshold_low_cents=int(
+                    risk_policy.get('mandatory_profit_exit', {}).get('price_threshold_low_cents', 30)
+                ),
+                mandatory_profit_exit_threshold_high_cents=int(
+                    risk_policy.get('mandatory_profit_exit', {}).get('price_threshold_high_cents', 50)
+                ),
+                # Legacy percentage-based cap parameters (DISABLED but kept for compatibility)
                 risk_policy_group_notional_cap_pct=self._normalize_percentage_value(risk_policy.get('group_notional_cap_pct', 0.05)),
                 risk_policy_group_notional_cap_min_usd=float(risk_policy.get('group_notional_cap_min_usd', 5.00)),
                 risk_policy_group_notional_cap_max_usd=float(risk_policy.get('group_notional_cap_max_usd', 2000.0)),

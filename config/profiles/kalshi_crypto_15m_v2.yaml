@@ -1146,12 +1146,31 @@ contract_caps:
 
 # ── Risk Policy ───────────────────────────────────────────────────────────
 # Risk limits that affect order acceptance and sizing
-# 2026 BEST PRACTICE: Dynamic percentage-based group notional cap
-# Scales with bankroll to follow industry best practices (2-5% per position)
+# 2026-07-08 UPDATE: Fixed $1 exposure model for small bankroll optimization
+# Replaces percentage-based sizing with fixed dollar cap to ensure $1+ profit per 15m window
 risk_policy:
-  group_notional_cap_pct: 0.05  # 5% of bankroll per group (within 2-5% best practice range)
-  group_notional_cap_min_usd: 5.00  # Minimum $5 cap for small bankrolls (ensures trading possible)
-  group_notional_cap_max_usd: 2000.0  # Maximum $2000 cap for large bankrolls (prevents excessive exposure)
+  # FIXED DOLLAR EXPOSURE MODEL (2026-07-08)
+  # Ensures never more than $1 exposure at any time
+  # Forces entries in sweet spot (10-75c) and enables mandatory profit exits
+  fixed_exposure_cap_usd: 1.00  # CRITICAL: $1 max total exposure across all assets
+  sequential_trading: true  # No new entries until all positions exit
+  # MANDATORY PROFIT EXIT (2026-07-08)
+  # Automatic profit-taking based on entry price to ensure quick wins
+  mandatory_profit_exit:
+    enabled: true  # Enable automatic profit exits
+    # Profit targets based on entry price (tiered for optimal risk/reward)
+    # Entry 10-30c: 30% profit target (quick flips)
+    # Entry 30-50c: 25% profit target
+    # Entry 50-75c: 20% profit target
+    profit_target_pct_low: 0.30  # 30% for entries 10-30c
+    profit_target_pct_mid: 0.25  # 25% for entries 30-50c
+    profit_target_pct_high: 0.20  # 20% for entries 50-75c
+    price_threshold_low_cents: 30  # Threshold for low band
+    price_threshold_high_cents: 50  # Threshold for high band
+  # Legacy percentage-based cap (DISABLED in favor of fixed $1 model)
+  group_notional_cap_pct: 0.05  # 5% of bankroll per group (DISABLED - using fixed $1 instead)
+  group_notional_cap_min_usd: 5.00  # Minimum $5 cap (DISABLED - using fixed $1 instead)
+  group_notional_cap_max_usd: 2000.0  # Maximum $2000 cap (DISABLED - using fixed $1 instead)
   max_fee_to_notional_pct: 15.0  # Max fee/notional ratio (circuit breaker)
   # 2026 STANDARD: Per-asset cluster stop-loss limits instead of aggregate
   # Each asset (BTC/ETH/SOL/XRP/DOGE) has calibrated limits based on volatility and liquidity

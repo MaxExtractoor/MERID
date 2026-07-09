@@ -472,13 +472,17 @@ class KalshiPositionCache:
                         # Resting exposure was recorded at placement time (order_gate, top3 gate)
                         # When order fills, we must release resting exposure and record execution exposure
                         # This prevents double-counting and ensures accurate window tracking
+                        # CRITICAL FIX 2026-07-08: Extract asset for per-asset exposure tracking
+                        from config.kalshi_crypto_config import kalshi_ticker_to_asset
+                        asset = kalshi_ticker_to_asset(market_id) if market_id else None
                         envelope.release_resting_order_exposure(
                             agent_id=agent_id,
                             order_notional_usd=order_notional_usd
                         )
                         envelope.record_order_execution(
                             agent_id=agent_id,
-                            order_notional_usd=order_notional_usd
+                            order_notional_usd=order_notional_usd,
+                            asset=asset
                         )
                     except RuntimeError as e:
                         # Bankroll not ready - log warning but don't crash
@@ -499,9 +503,13 @@ class KalshiPositionCache:
                         envelope = get_kalshi_crypto_15m_risk_envelope()
                         # Calculate notional to release based on contracts closed
                         position_notional_usd = (contracts * price_cents) / 100.0
+                        # CRITICAL FIX 2026-07-08: Extract asset for per-asset exposure release
+                        from config.kalshi_crypto_config import kalshi_ticker_to_asset
+                        asset = kalshi_ticker_to_asset(market_id) if market_id else None
                         envelope.record_position_closure(
                             agent_id=agent_id,
-                            position_notional_usd=position_notional_usd
+                            position_notional_usd=position_notional_usd,
+                            asset=asset
                         )
                         logger.info(
                             "[POSITION-CACHE] Released window exposure on sell fill: agent=%s notional=$%.2f market=%s fill_id=%s",
@@ -675,6 +683,41 @@ class KalshiPositionCache:
                     except Exception as ts_err:
                         logger.debug("[POSITION-CACHE] Could not read trailing stop config: %s", ts_err)
                     
+                    # CRITICAL: Mandatory profit exit (2026-07-08)
+                    # Calculate profit target based on entry price and profile configuration
+                    # This ensures quick wins and forces entries in sweet spot (10-75c)
+                    mandatory_profit_enabled = False
+                    profit_target_pct = 0.25  # Default 25%
+                    try:
+                        from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
+                        if is_profile_active():
+                            adapter = get_active_profile()
+                            profile = adapter.profile
+                            mandatory_profit_enabled = profile.mandatory_profit_exit_enabled
+                            
+                            # Determine profit target based on entry price band
+                            if price_cents < profile.mandatory_profit_exit_threshold_low_cents:
+                                # Entry 10-30c: 30% profit target (quick flips)
+                                profit_target_pct = profile.mandatory_profit_exit_target_pct_low
+                            elif price_cents < profile.mandatory_profit_exit_threshold_high_cents:
+                                # Entry 30-50c: 25% profit target
+                                profit_target_pct = profile.mandatory_profit_exit_target_pct_mid
+                            else:
+                                # Entry 50-75c: 20% profit target
+                                profit_target_pct = profile.mandatory_profit_exit_target_pct_high
+                    except Exception as mpe_err:
+                        logger.debug("[POSITION-CACHE] Could not read mandatory profit exit config: %s", mpe_err)
+                    
+                    # Calculate mandatory profit target price
+                    mandatory_tp_price = None
+                    if mandatory_profit_enabled:
+                        profit_cents = int(price_cents * profit_target_pct)
+                        mandatory_tp_price = price_cents + profit_cents
+                        logger.info(
+                            "[MANDATORY-PROFIT-EXIT] Set mandatory profit target: entry=%dc target=%dc profit_pct=%.0f%% profit_cents=%d",
+                            price_cents, mandatory_tp_price, profit_target_pct * 100, profit_cents
+                        )
+                    
                     tp_r = tp_targets.get("tp_r", 1.0)
                     sl_price = tp_targets.get("sl_price")
                     
@@ -707,13 +750,17 @@ class KalshiPositionCache:
                         # If TP is set, scale out at 75% of TP (between 1.5-2R)
                         scale_out_price = price_cents + int((tp_targets.get("tp_price") - price_cents) * 0.75)
                     
+                    # CRITICAL: Use mandatory profit target if enabled (2026-07-08)
+                    # This overrides the agent's TP to ensure quick wins
+                    final_tp_price = mandatory_tp_price if mandatory_profit_enabled and mandatory_tp_price else tp_targets.get("tp_price")
+                    
                     monitor_position = Position(
                         position_id=market_id,  # Use market_id as position_id
                         market_id=market_id,
                         side=side_enum,
                         size=contracts,
                         avg_entry_price_cents=price_cents,
-                        take_profit_price_cents=tp_targets.get("tp_price"),
+                        take_profit_price_cents=final_tp_price,  # Use mandatory TP if enabled
                         stop_loss_price_cents=tp_targets.get("sl_price"),
                         trailing_type=trailing_type,
                         trailing_param=trailing_param,
@@ -856,7 +903,8 @@ class KalshiPositionCache:
                                 position_notional_usd = (pre_contracts * price_cents) / 100.0
                                 envelope.record_position_closure(
                                     agent_id=agent_id,
-                                    position_notional_usd=position_notional_usd
+                                    position_notional_usd=position_notional_usd,
+                                    asset=asset.upper()
                                 )
                                 logger.info(
                                     "[POSITION-CACHE] Recorded window exposure reduction: agent=%s notional=$%.2f",
@@ -1026,6 +1074,22 @@ class KalshiPositionCache:
                     f"Consider calling sync_from_rest() before get_all_positions()."
                 )
         return dict(self._positions)
+    
+    def get_total_exposure_usd(self) -> float:
+        """Get total exposure in USD across all open positions.
+        
+        This is used for sequential trading checks to ensure $1 max exposure.
+        
+        Returns:
+            Total exposure in USD (sum of contracts * price for all open positions)
+        """
+        total_exposure = 0.0
+        for position in self._positions.values():
+            if position.contracts > 0:
+                # Exposure = contracts * price_cents / 100
+                position_exposure = (position.contracts * position.avg_price_cents) / 100.0
+                total_exposure += position_exposure
+        return total_exposure
     
     def get_cache_health(self) -> Dict[str, Any]:
         """Get position cache health status for monitoring.

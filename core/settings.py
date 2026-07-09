@@ -53,23 +53,28 @@ USE_TOPN_ALLOCATOR: bool = str(os.getenv("USE_TOPN_ALLOCATOR", "true")).lower() 
 #   - Max single trade loss: 1-2%
 #   - Risk management as platform-level infrastructure
 #
+# 2026-07-08 UPDATE: Fixed $1 exposure model for small bankroll optimization
+# Replaces percentage-based sizing with fixed dollar cap to ensure $1+ profit per 15m window
 # Configuration:
-#   - MAX_CYCLE_RISK_PCT: 0.5% of bankroll per cycle (aligned with kalshi_crypto_15m_v2.yaml)
-#   - MAX_TOTAL_RISK_PCT: 15% of bankroll total (aligned with kalshi_crypto_15m_v2.yaml)
+#   - MAX_CYCLE_RISK_PCT: 5% of bankroll per cycle (DISABLED - using fixed $1 instead)
+#   - MAX_TOTAL_RISK_PCT: 15% of bankroll total (DISABLED - using fixed $1 instead)
 #   - DAILY_LOSS_CAP_PCT: 5% of bankroll (2026 best practice - halt trading)
 #   - CLUSTER_STOP_PCT: 3% of bankroll (half of daily cap)
+#   - FIXED_EXPOSURE_CAP_USD: $1.00 max exposure (NEW - single source of truth)
 #
 # With $40 equity:
-#   - Cycle cap: $0.20 (0.5%) → conservative for 5-second cycles
-#   - Total cap: $6.00 (15%) → production safety cap
+#   - Fixed exposure cap: $1.00 (NEW - replaces percentage-based sizing)
+#   - Total cap: $6.00 (15%) → production safety cap (fallback)
 #   - Daily loss: $2.00 (5%) → automatic halt trigger
 # ═══════════════════════════════════════════════════════════════════════════
-# CRITICAL FIX: Aligned with kalshi_crypto_15m_v2.yaml profile (2026-07-04)
-# Profile specifies: max_cycle_risk_pct: 0.005 (0.5%), max_total_risk_pct: 0.15 (15%)
-_DEFAULT_CYCLE_RISK_PCT = "0.005"  # 0.5% per cycle - aligned with profile
+# CRITICAL FIX: Aligned with kalshi_crypto_15m_v2.yaml profile (2026-07-08)
+# Profile specifies: fixed_exposure_cap_usd: 1.00 (NEW), max_cycle_risk_pct: 0.05 (DISABLED)
+_DEFAULT_CYCLE_RISK_PCT = "0.05"  # 5% per cycle - DISABLED (using fixed $1 instead)
 # Read from env var to allow profile-driven configuration (but default to profile value)
 MAX_CYCLE_RISK_PCT: float = float(os.getenv("MAX_CYCLE_RISK_PCT", _DEFAULT_CYCLE_RISK_PCT))
-MAX_TOTAL_RISK_PCT: float = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.15"))  # 15% total max - aligned with profile
+MAX_TOTAL_RISK_PCT: float = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.15"))  # 15% total max - DISABLED (using fixed $1 instead)
+# NEW: Fixed $1 exposure cap (2026-07-08)
+FIXED_EXPOSURE_CAP_USD: float = float(os.getenv("FIXED_EXPOSURE_CAP_USD", "1.00"))  # $1 max exposure
 
 # Daily and cluster risk caps (auto-scale with bankroll)
 # DAILY_LOSS_CAP_PCT = 5% of bankroll (2026 best practice - halt trading)
