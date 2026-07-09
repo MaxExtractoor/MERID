@@ -1503,20 +1503,23 @@ class KalshiRiskManager:
                             return False, reason, "per_asset_contracts_cap"
 
             # 3c. Per-asset notional cap (from RiskEnvelope with floor applied)
+            # 2026-07-09: DISABLED - global allocator handles allocation at grid level
+            # The global allocator at agent grid level now manages edge-based allocation under venue cap
+            # Per-asset caps are no longer enforced here to allow best edges to use available venue cap
             # CRITICAL FIX (2026-06-27): Use asset_notional instead of category_notional proxy
             # This ensures per-asset exposure limits are correctly tracked per asset (BTC, ETH, etc.)
-            if asset and self._config.asset_max_notional_usd:
-                asset_key = asset.upper()
-                if asset_key in self._config.asset_max_notional_usd:
-                    asset_cap = self._config.asset_max_notional_usd[asset_key]
-                    if asset_cap > 0:
-                        # Get current asset notional from state (sum of all positions for this specific asset)
-                        current_asset_notional = self._state.asset_notional.get(asset_key, 0.0)
-                        new_asset_notional = current_asset_notional + notional_usd
-                        if new_asset_notional > asset_cap:
-                            reason = f"Asset '{asset_key}' notional ${new_asset_notional:.2f} exceeds cap ${asset_cap:.2f}"
-                            self._log_breach("asset_notional_cap", reason)
-                            return False, reason, "asset_notional_cap"
+            # if asset and self._config.asset_max_notional_usd:
+            #     asset_key = asset.upper()
+            #     if asset_key in self._config.asset_max_notional_usd:
+            #         asset_cap = self._config.asset_max_notional_usd[asset_key]
+            #         if asset_cap > 0:
+            #             # Get current asset notional from state (sum of all positions for this specific asset)
+            #             current_asset_notional = self._state.asset_notional.get(asset_key, 0.0)
+            #             new_asset_notional = current_asset_notional + notional_usd
+            #             if new_asset_notional > asset_cap:
+            #                 reason = f"Asset '{asset_key}' notional ${new_asset_notional:.2f} exceeds cap ${asset_cap:.2f}"
+            #                 self._log_breach("asset_notional_cap", reason)
+            #                 return False, reason, "asset_notional_cap"
 
             # 4. Category exposure (legacy — keep for backward compatibility)
             # FIX (2026-05-11): Skip category cap for crypto since it's the only category being traded

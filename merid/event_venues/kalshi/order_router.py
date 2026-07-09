@@ -1802,17 +1802,10 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
             new_contracts = current_contracts + intent.count
             new_notional = (new_contracts * intent.price_cents) / 100.0
             
-            # Check per-asset limit
-            asset_max_notional = risk_envelope.asset_max_notional_usd.get(asset, 0.0)
-            
-            if new_notional > asset_max_notional:
-                logger.warning(
-                    "[CHECK-INTENT-RISK] asset=%s new_notional=%.2f > asset_max=%.2f - REJECTING",
-                    asset, new_notional, asset_max_notional
-                )
-                _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "asset_notional_exceeded")
-                _increment_validation_gate_metric("ROUTER_VALIDATION", "asset_notional_exceeded")
-                return f"asset_notional_exceeded: {new_notional:.2f} > {asset_max_notional:.2f}"
+            # 2026-07-09: DISABLED per-asset cap check - global allocator handles allocation
+            # The global allocator at agent grid level now manages edge-based allocation under venue cap
+            # Per-asset caps are no longer enforced here to allow best edges to use available venue cap
+            # This prevents the $0.20 per-asset cap rejection issue where good edges were blocked despite venue cap having room
             
             # Check total position limit across all assets using actual position cache API
             all_positions = position_cache.get_all_positions(validate_freshness=False)
@@ -1841,8 +1834,8 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
                 return f"total_notional_exceeded: {total_with_order:.2f} > {max_total_notional:.2f}"
             
             logger.info(
-                "[CHECK-INTENT-RISK] Position check passed: asset=%s new_notional=%.2f asset_max=%.2f existing_total=%.2f (%d positions) order_notional=%.2f total_with_order=%.2f max_total=%.2f",
-                asset, new_notional, asset_max_notional, total_position_notional, position_count, order_notional, total_with_order, max_total_notional
+                "[CHECK-INTENT-RISK] Position check passed: asset=%s new_notional=%.2f existing_total=%.2f (%d positions) order_notional=%.2f total_with_order=%.2f max_total=%.2f",
+                asset, new_notional, total_position_notional, position_count, order_notional, total_with_order, max_total_notional
             )
     except Exception as risk_check_err:
         # CRITICAL: If risk check fails, REJECT the order to prevent over-trading
@@ -3121,20 +3114,28 @@ def _check_bankroll_risk_cap(intent: OrderIntent) -> Optional[OrderResult]:
         # Extract asset from ticker (e.g., KXBTC15M-26JUL060115-15 -> BTC)
         asset = extract_asset_from_ticker(intent.ticker)
         
-        # Get per-asset cap from risk envelope
-        if asset and asset in envelope_config.asset_max_notional_usd:
-            effective_max = envelope_config.asset_max_notional_usd[asset]
-            logger.debug(
-                "[BANKROLL-CAP] Using risk envelope per-asset cap: asset=%s cap=$%.2f",
-                asset, effective_max
-            )
-        else:
-            # Fallback to max_single_order_notional_usd if asset-specific cap not found
-            effective_max = envelope_config.max_single_order_notional_usd
-            logger.warning(
-                "[BANKROLL-CAP] Asset %s not found in envelope caps, using max_single_order=$%.2f",
-                asset, effective_max
-            )
+        # 2026-07-09: DISABLED per-asset cap usage - global allocator handles allocation at grid level
+        # Use max_single_order_notional_usd instead of per-asset caps
+        # This allows best edges to use available venue cap without artificial per-asset limits
+        # if asset and asset in envelope_config.asset_max_notional_usd:
+        #     effective_max = envelope_config.asset_max_notional_usd[asset]
+        #     logger.debug(
+        #         "[BANKROLL-CAP] Using risk envelope per-asset cap: asset=%s cap=$%.2f",
+        #         asset, effective_max
+        #     )
+        # else:
+        #     # Fallback to max_single_order_notional_usd if asset-specific cap not found
+        #     effective_max = envelope_config.max_single_order_notional_usd
+        #     logger.warning(
+        #         "[BANKROLL-CAP] Asset %s not found in envelope caps, using max_single_order=$%.2f",
+        #         asset, effective_max
+        #     )
+        # Use max_single_order_notional_usd (venue cap per order)
+        effective_max = envelope_config.max_single_order_notional_usd
+        logger.debug(
+            "[BANKROLL-CAP] Using max_single_order cap: asset=%s cap=$%.2f",
+            asset, effective_max
+        )
     except Exception as e:
         logger.error("[BANKROLL-CAP] Failed to get risk envelope config: %s", e)
         # Fallback to previous calculation if envelope service fails
