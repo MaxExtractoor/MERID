@@ -7,7 +7,7 @@ import re
 from typing import Any, Optional, Dict
 from dataclasses import dataclass, field
 
-from utils.logger import get_logger
+from utils.logger import get_logger, format_price
 
 logger = get_logger("merid.prediction.agent_grid_15m")
 
@@ -3228,24 +3228,10 @@ class LeanAgent15m:
                                self.config.name, ticker, coarse_filter_threshold, spread_cents)
                 return False
             
-            # INDUSTRY ALIGNMENT: Convert spread to basis points for regime-aware validation
-            # Use mid price as reference for bp calculation
-            # CRITICAL FIX: Multiply by 10000 (not 100) for correct basis point conversion
-            # 1 basis point = 0.01%, so spread ratio * 10000 = basis points
-            mid_price_cents = (best_bid + best_ask) / 2
-            if mid_price_cents > 0:
-                spread_bp = (spread_cents / mid_price_cents) * 10000
-                # 2026 BEST PRACTICE: Use dynamic spread threshold based on volatility regime
-                # "Blow your spreads out when the market's volatility does"
-                dynamic_threshold_bp = self._get_dynamic_spread_threshold(ticker)
-                if spread_bp > dynamic_threshold_bp:
-                    logger.warning("[MARKET-VALIDATION] asset=%s ticker=%s spread too wide=%.1fbp > dynamic_max=%dbp (cents=%d regime=%s)",
-                                 self.config.name, ticker, spread_bp, dynamic_threshold_bp, spread_cents,
-                                 self._classify_volatility_regime(ticker)[0])
-                    return False
-                logger.info("[MARKET-VALIDATION] asset=%s ticker=%s spread OK=%.1fbp <= dynamic_max=%dbp (cents=%d regime=%s)",
-                           self.config.name, ticker, spread_bp, dynamic_threshold_bp, spread_cents,
-                           self._classify_volatility_regime(ticker)[0])
+            # CRITICAL FIX: Remove basis point validation for binary options
+            # Binary options have 0-100c price range, making BP calculations inappropriate
+            # A 37c spread on 50c mid = 74% = 7400bp, which looks extreme but is normal for binary options
+            # Use cents-based validation only, which is correctly configured with 40c coarse filter
             # Legacy check in cents for backward compatibility
             if spread_cents > self.config.max_spread_cents:
                 logger.warning("[MARKET-VALIDATION] asset=%s ticker=%s spread too wide=%dc > max=%dc",

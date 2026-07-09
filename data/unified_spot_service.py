@@ -47,6 +47,22 @@ from data.spot_sla_config import get_spot_max_age
 logger = get_logger("data.unified_spot_service")
 
 # =============================================================================
+# Price Formatting Helper
+# =============================================================================
+
+def format_price(asset: str, price: float) -> str:
+    """Format price with appropriate decimal places based on asset."""
+    asset_precision = {
+        "BTC": 2,
+        "ETH": 2,
+        "SOL": 4,
+        "XRP": 4,
+        "DOGE": 7
+    }
+    precision = asset_precision.get(asset.upper(), 4)
+    return f"{price:.{precision}f}"
+
+# =============================================================================
 # Coinbase Exchange API Authentication Helpers
 # =============================================================================
 
