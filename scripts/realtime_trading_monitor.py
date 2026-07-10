@@ -56,11 +56,11 @@ class Trade:
     velocity: float
     rsi: float
     macd_hist: float
+    time_to_expiry_sec: float
     macd_line: Optional[float] = None  # MACD line value
     macd_signal: Optional[float] = None  # MACD signal line value
     trend: Optional[str] = None  # Trend direction (UP, DOWN, SIDEWAYS)
     histogram: Optional[float] = None  # MACD histogram value
-    time_to_expiry_sec: float
     # Threshold metrics for fine-tuning
     min_edge_threshold: Optional[float] = None  # Minimum edge threshold applied
     max_spread_threshold: Optional[int] = None  # Maximum spread threshold applied
@@ -1524,7 +1524,7 @@ class RealtimeTradingMonitor:
 def main():
     parser = argparse.ArgumentParser(description='Real-time trading activity monitor')
     parser.add_argument('--log-file', default='logs/full.log', help='Path to log file')
-    parser.add_argument('--duration', type=int, default=30, help='Duration in minutes')
+    parser.add_argument('--duration', type=int, default=360, help='Duration in minutes (default: 360 = 6 hours)')
     
     args = parser.parse_args()
     
