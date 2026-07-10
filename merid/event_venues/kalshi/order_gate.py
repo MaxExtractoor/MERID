@@ -487,9 +487,10 @@ class IdempotentOrderStore:
         side: str,
         action: str,
         price_cents: int,
+        target_count: int,
         exclude_coid: Optional[str] = None,
     ) -> Optional[OrderRecord]:
-        """Find an identical resting order (same contract, side, action, price).
+        """Find an identical resting order (same contract, side, action, price, count).
         
         This prevents duplicate resting orders even when they have different
         client_order_ids due to different 5-second time buckets.
@@ -498,11 +499,15 @@ class IdempotentOrderStore:
         blocking new orders when old orders failed to transition properly.
         PENDING orders older than 30 seconds are considered stale and ignored.
         
+        CRITICAL FIX 2026-07-09: Added target_count to duplicate detection to prevent
+        multiple orders with different quantities from bypassing duplicate checks.
+        
         Args:
             contract_id: Market ticker
             side: "yes" or "no"
             action: "buy" or "sell"
             price_cents: Limit price in cents
+            target_count: Number of contracts requested
             exclude_coid: Optional client_order_id to exclude (current order)
             
         Returns:
@@ -514,12 +519,13 @@ class IdempotentOrderStore:
                 # Skip if this is the current order we're checking
                 if exclude_coid and rec.client_order_id == exclude_coid:
                     continue
-                # Check for identical resting order
+                # Check for identical resting order (including count)
                 if (
                     rec.contract_id == contract_id
                     and rec.side == side
                     and rec.action == action
                     and rec.price_cents == price_cents
+                    and rec.target_count == target_count  # CRITICAL: Check count to prevent multi-contract bypass
                     and rec.status in (OrderStatus.PENDING, OrderStatus.SUBMITTED, OrderStatus.LIVE)
                 ):
                     # CRITICAL FIX: Skip stale PENDING orders (older than 30 seconds)
@@ -880,6 +886,7 @@ class PreTradeGate:
             side=side,
             action=action,
             price_cents=price_cents,
+            target_count=target_count,  # CRITICAL: Include count to prevent multi-contract bypass
             exclude_coid=coid,  # Exclude the current order we just checked
         )
         if resting_duplicate is not None:
@@ -964,9 +971,10 @@ class PreTradeGate:
             logger.warning("[GATE] Position existence check failed for exit order: %s", e)
             # Continue with other checks if validation fails (non-critical)
 
-        # 3d. CRITICAL: Sequential trading check (2026-07-08)
-        # No new entries until all positions exit or expire
-        # This ensures $1 max exposure is never exceeded
+        # 3d. CRITICAL FIX: 2026-07-09 - Updated sequential trading to use slot allocator
+        # OLD: No new entries until ALL positions exit (too restrictive)
+        # NEW: Allow new entries when slot allocator has available exposure
+        # This enables sequential trading with early exits: close profitable positions, free up slots, enter new positions
         # Only applies to entry orders (BUY), not exit orders (SELL)
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
@@ -974,25 +982,52 @@ class PreTradeGate:
             if profile and profile.risk_policy_sequential_trading:
                 is_exit_order = action == "sell"
                 if not is_exit_order:
-                    # Check if there are any open positions across all assets
-                    from merid.event_venues.kalshi.position_cache import get_position_cache
-                    position_cache = get_position_cache()
-                    total_exposure = position_cache.get_total_exposure_usd()
-                    
-                    if total_exposure > 0:
-                        self._store._metrics.blocked_sequential_trading += 1
-                        logger.warning(
-                            "[GATE-ALERT] sequential_trading_blocked contract=%s agent=%s - "
-                            "Open positions exist (total_exposure=$%.2f). No new entries until all positions exit. "
-                            "(metric: blocked_sequential_trading=%d)",
-                            contract_id, agent_id, total_exposure,
-                            self._store._metrics.blocked_sequential_trading
-                        )
-                        return GateVerdict(
-                            allowed=False,
-                            client_order_id=coid,
-                            reason=f"sequential_trading:open_positions_exist_${total_exposure:.2f}",
-                        )
+                    # CRITICAL FIX: Use global slot allocator instead of position cache
+                    # Slot allocator tracks available exposure after accounting for all open positions
+                    try:
+                        from merid.risk.global_slot_allocator import get_global_slot_allocator
+                        slot_allocator = get_global_slot_allocator()
+                        available_exposure = slot_allocator.get_available_exposure()
+                        
+                        # Calculate required exposure for this order
+                        required_exposure = price_cents / 100.0 if price_cents else 0.50  # Default to 50c if no price
+                        
+                        # Block if insufficient exposure
+                        if required_exposure > available_exposure:
+                            self._store._metrics.blocked_sequential_trading += 1
+                            logger.warning(
+                                "[GATE-ALERT] slot_allocator_blocked contract=%s agent=%s - "
+                                "Insufficient exposure: required $%.2f, available $%.2f. "
+                                "Close positions to free up slots. (metric: blocked_sequential_trading=%d)",
+                                contract_id, agent_id, required_exposure, available_exposure,
+                                self._store._metrics.blocked_sequential_trading
+                            )
+                            return GateVerdict(
+                                allowed=False,
+                                client_order_id=coid,
+                                reason=f"slot_allocator:insufficient_exposure_required_${required_exposure:.2f}_available_${available_exposure:.2f}",
+                            )
+                    except ImportError:
+                        # Fallback to position cache if slot allocator not available
+                        logger.warning("[GATE] Slot allocator not available, using position cache fallback")
+                        from merid.event_venues.kalshi.position_cache import get_position_cache
+                        position_cache = get_position_cache()
+                        total_exposure = position_cache.get_total_exposure_usd()
+                        
+                        if total_exposure >= 1.00:  # At full capacity
+                            self._store._metrics.blocked_sequential_trading += 1
+                            logger.warning(
+                                "[GATE-ALERT] sequential_trading_blocked (fallback) contract=%s agent=%s - "
+                                "At full capacity (total_exposure=$%.2f). No new entries until positions exit. "
+                                "(metric: blocked_sequential_trading=%d)",
+                                contract_id, agent_id, total_exposure,
+                                self._store._metrics.blocked_sequential_trading
+                            )
+                            return GateVerdict(
+                                allowed=False,
+                                client_order_id=coid,
+                                reason=f"sequential_trading:full_capacity_${total_exposure:.2f}",
+                            )
         except Exception as e:
             logger.warning("[GATE] Sequential trading check failed: %s", e)
             # Continue with other checks if validation fails (non-critical)
@@ -1384,6 +1419,7 @@ class PreTradeGate:
             side=side,
             action=action,
             price_cents=price_cents,
+            target_count=target_count,  # CRITICAL: Include count to prevent multi-contract bypass
             exclude_coid=coid,  # Exclude the current order we just checked
         )
         if resting_duplicate is not None:

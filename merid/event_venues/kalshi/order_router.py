@@ -1561,9 +1561,10 @@ def simulate_paper_fill(
     rng = _rng if _rng is not None else _random_module
 
     requested_count = max(0, int(intent.count))
-    # CRITICAL FIX: Clamp to 55-75 cents to prevent degenerate pricing
-    # This aligns with kalshi_crypto_15m_v2.yaml price_range [55, 75]
-    requested_price = max(55, min(75, int(intent.price_cents)))
+    # CRITICAL FIX: Clamp to 10-50 cents to prevent degenerate pricing
+    # This aligns with kalshi_crypto_15m_v2.yaml price_range [10, 50]
+    # 2026-07-09: Fixed max from 75c to 50c to match profile price_range.max_price_cents
+    requested_price = max(10, min(50, int(intent.price_cents)))
 
     # Basic side-aware slippage in cents from configured basis points.
     slippage_cents = max(0, int(round(requested_price * PAPER_SLIPPAGE_BPS / 10_000)))
@@ -1572,9 +1573,10 @@ def simulate_paper_fill(
 
     # Buy pays up; sell receives down.
     side_sign = 1 if intent.action == "buy" else -1
-    # CRITICAL FIX: Clamp to 55-75 cents to prevent extreme purchases
-    # This aligns with kalshi_crypto_15m_v2.yaml price_range [55, 75]
-    fill_price = max(55, min(75, requested_price + (side_sign * slippage_cents)))
+    # CRITICAL FIX: Clamp to 10-50 cents to prevent extreme purchases
+    # This aligns with kalshi_crypto_15m_v2.yaml price_range [10, 50]
+    # 2026-07-09: Fixed max from 75c to 50c to match profile price_range.max_price_cents
+    fill_price = max(10, min(50, requested_price + (side_sign * slippage_cents)))
 
     # Partial fill simulation when size > 1 contract.
     partial_fill = False
@@ -4912,10 +4914,11 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         # CRASH-007: Validate inputs before fee calculation
         # CRITICAL: Add price range validation to prevent degenerate trades
         # Minimum 5 cents prevents 1 cent data quality issues
-        # Maximum 75 cents prevents buying at 89-99 cents with poor expected returns
-        if intent.price_cents < 5 or intent.price_cents > 75 or intent.count <= 0:
+        # Maximum 50 cents prevents buying at 51-99 cents with poor expected returns
+        # 2026-07-09: Fixed max from 75c to 50c to match profile price_range.max_price_cents
+        if intent.price_cents < 5 or intent.price_cents > 50 or intent.count <= 0:
             logger.error(
-                "[CRASH-007] Invalid order parameters for %s: price_cents=%s count=%s — rejecting (price must be 5-75 cents)",
+                "[CRASH-007] Invalid order parameters for %s: price_cents=%s count=%s — rejecting (price must be 5-50 cents)",
                 intent.ticker, intent.price_cents, intent.count
             )
             return OrderResult(
@@ -5020,6 +5023,11 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             )
 
         # Normal execution: place real order
+        # CRITICAL FIX: Record order placement for duplicate detection BEFORE submission
+        # This prevents race condition where multiple identical orders can be submitted
+        # before the first one is recorded in the duplicate tracker
+        _record_order_placed(intent)
+
         # Log order intent before API call for lifecycle traceability
         trace_id = intent.client_tag or generate_trace_id()
         logger.info(
@@ -5260,8 +5268,7 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         # Order successfully submitted to exchange - record in rate limiter
         _record_successful_order()
         
-        # Record order placement for duplicate detection
-        _record_order_placed(intent)
+        # Note: _record_order_placed(intent) already called BEFORE submission to prevent race condition
 
         placed = placed_res.data
         requested_count = int(placed.size)
@@ -5971,66 +5978,44 @@ def _run_pre_trade_gate(
                         latency_ms=round((_time.monotonic() - t0) * 1000, 2),
                     )
                 
-                # CRITICAL: Run window-based risk limit check even with upstream reservation
-                # This prevents oversized trades from bypassing the 3% per agent / 5% total window limits
+                # CRITICAL FIX: 2026-07-09 - Use global slot allocator instead of window-based limits
+                # OLD: Window-based risk limit check (3% per agent, 5% total) - DISABLED
+                # NEW: Slot-based $1 exposure cap with exit order bypass
+                # This prevents oversized trades from bypassing the $1 exposure limit
                 try:
-                    from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
-                    envelope = get_kalshi_crypto_15m_risk_envelope()
-                    if envelope:
-                        import time
+                    # Exit orders bypass exposure checks (they reduce exposure)
+                    if not _is_exit_order(intent):
+                        from merid.risk.global_slot_allocator import get_global_slot_allocator
+                        slot_allocator = get_global_slot_allocator()
+                        
                         order_notional_usd = (intent.count * intent.price_cents) / 100.0
-                        # CRITICAL FIX 2026-07-08: Extract asset for per-asset 3% limit check
-                        asset = extract_asset_from_ticker(intent.ticker) if intent.ticker else None
-                        logger.info(
-                            "[order-router-WINDOW-CHECK] Checking window limit (upstream path): agent=%s asset=%s notional=$%.2f count=%d price=%dc",
-                            _agent, asset or "N/A", order_notional_usd, intent.count, intent.price_cents
-                        )
-                        window_allowed, window_reason = envelope.check_window_limit(
-                            agent_id=_agent,
-                            order_notional_usd=order_notional_usd,
-                            current_ts=time.time(),
-                            asset=asset
-                        )
-                        logger.info(
-                            "[order-router-WINDOW-CHECK] Window limit result (upstream path): allowed=%s reason=%s",
-                            window_allowed, window_reason
-                        )
-                        if not window_allowed:
+                        available_exposure = slot_allocator.get_available_exposure()
+                        
+                        # Check if order would exceed available exposure
+                        if order_notional_usd > available_exposure:
                             logger.warning(
-                                "[order-router-WINDOW-BLOCK] window_limit_blocked (upstream path) coid=%s ticker=%s agent=%s notional=$%.2f reason=%s",
-                                _upstream_coid[:16], intent.ticker, _agent, order_notional_usd, window_reason,
+                                "[order-router-SLOT-ALLOCATOR-BLOCK] insufficient_exposure (upstream path) coid=%s ticker=%s agent=%s notional=$%.2f available=$%.2f",
+                                _upstream_coid[:16], intent.ticker, _agent, order_notional_usd, available_exposure,
                             )
                             return OrderResult(
                                 status="rejected",
                                 mode=mode,
-                                reason=f"window_limit:{window_reason}",
+                                reason=f"slot_allocator:insufficient_exposure_required_${order_notional_usd:.2f}_available_${available_exposure:.2f}",
                                 latency_ms=round((_time.monotonic() - t0) * 1000, 2),
                             )
+                        else:
+                            logger.info(
+                                "[order-router-SLOT-ALLOCATOR-CHECK] Exposure check passed (upstream path): agent=%s notional=$%.2f available=$%.2f",
+                                _agent, order_notional_usd, available_exposure
+                            )
                     else:
-                        logger.error(
-                            "[order-router-WINDOW-BLOCK] envelope_is_none - window limit check failed, rejecting order for safety. "
-                            "coid=%s ticker=%s agent=%s notional=$%.2f",
-                            _upstream_coid[:16], intent.ticker, _agent, order_notional_usd,
+                        logger.info(
+                            "[order-router-SLOT-ALLOCATOR-BYPASS] Exit order bypasses exposure check (upstream path): ticker=%s action=%s",
+                            intent.ticker, intent.action
                         )
-                        return OrderResult(
-                            status="rejected",
-                            mode=mode,
-                            reason="window_limit:envelope_is_none",
-                            latency_ms=round((_time.monotonic() - t0) * 1000, 2),
-                        )
-                except Exception as e:
-                    logger.error(
-                        "[order-router-WINDOW-BLOCK] window_limit_check_failed - rejecting order for safety. "
-                        "coid=%s ticker=%s agent=%s notional=$%.2f error=%s",
-                        _upstream_coid[:16], intent.ticker, _agent, order_notional_usd, str(e),
-                        exc_info=True
-                    )
-                    return OrderResult(
-                        status="rejected",
-                        mode=mode,
-                        reason=f"window_limit:check_failed:{str(e)[:50]}",
-                        latency_ms=round((_time.monotonic() - t0) * 1000, 2),
-                    )
+                except Exception as slot_err:
+                    logger.warning("[order-router] Slot allocator check failed (upstream path): %s", slot_err)
+                    # Continue with other checks if slot allocator fails
                 
                 logger.debug(
                     "[order-router] pre_trade_gate using upstream reservation coid=%s ticker=%s",

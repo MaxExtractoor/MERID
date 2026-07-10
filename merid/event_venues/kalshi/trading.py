@@ -49,15 +49,18 @@ class KalshiTrader:
 
         Returns (allowed, reason).  Fail-closed: any import/runtime error blocks the order.
         """
-        # 0. Price range validation (min/max entry constraints)
-        # Aligns with production stack: kalshi_tools.py and order_router.py enforce [50, 70] cents
-        # This prevents <50¢ lottery tickets (10.4% win rate) and >70¢ low-profit trades
-        if price_cents < 50 or price_cents > 70:
-            logger.warning(
-                "[TRADING-PY-PRICE-VALIDATION] price_cents=%d outside valid range [50, 70] - REJECTING (prevents degenerate pricing)",
-                price_cents
+        # CRITICAL FIX: 2026-07-09 - Enforce max 1 contract per order
+        # This prevents multi-contract orders from bypassing the global $1 exposure cap
+        if count > 1:
+            logger.error(
+                "[KalshiTrader] Order rejected: count=%d exceeds max 1 contract per order | ticker=%s",
+                count, ticker
             )
-            return False, f"invalid_price_range:{price_cents}c (must be 50-70c)"
+            return False, f"max_contracts_exceeded:count={count}>1"
+
+        # 2026-07-05 FIX: REMOVED price range validation [50, 70]
+        # This check was preventing orders from filling at actual market prices
+        # Orders now use actual market mid-spread prices for proper execution
 
         # 1. Global kill switch
         try:
