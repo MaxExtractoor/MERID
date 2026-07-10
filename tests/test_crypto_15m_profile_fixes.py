@@ -231,10 +231,10 @@ class TestPriceFloorGuardrail:
             adapter = Crypto15mProfileAdapter()
             profile = adapter.profile
 
-            # Check that the value is set to 10 cents (from YAML)
-            # UPDATED from 25 to 10 on 2026-07-05 to match agent_grid entry band [10, 70] and DEEP_OTM_CHEAP_CENTS threshold
-            assert profile.guardrails_min_contract_price_cents == 10, \
-                f"Expected min_contract_price_cents=10 (matches entry band), got {profile.guardrails_min_contract_price_cents}"
+            # Check that the value is set to 5 cents (from YAML)
+            # 2026-07-10: Expanded from 10c to 5c for skewed markets (99c/1c)
+            assert profile.guardrails_min_contract_price_cents == 5, \
+                f"Expected min_contract_price_cents=5 (expanded for skewed markets), got {profile.guardrails_min_contract_price_cents}"
         except Exception as e:
             pytest.skip(f"Profile min_contract_price_cents check skipped: {e}")
 
@@ -249,16 +249,15 @@ class TestPriceFloorGuardrail:
             adapter = Crypto15mProfileAdapter()
             profile = adapter.profile
 
-            # Check that the value is set to 50 cents (from YAML)
-            # 2026-07-08: 50c sweet spot threshold - aligned with binary options guidance
-            # Orders above 50c are rejected (too expensive for $1 fixed exposure cap)
-            assert profile.guardrails_max_contract_price_cents == 50, \
-                f"Expected max_contract_price_cents=50 (sweet spot threshold), got {profile.guardrails_max_contract_price_cents}"
+            # Check that the value is set to 95 cents (from YAML)
+            # 2026-07-10: Expanded from 50c to 95c for skewed markets (99c/1c)
+            assert profile.guardrails_max_contract_price_cents == 95, \
+                f"Expected max_contract_price_cents=95 (expanded for skewed markets), got {profile.guardrails_max_contract_price_cents}"
         except Exception as e:
             pytest.skip(f"Profile max_contract_price_cents check skipped: {e}")
 
     def test_price_range_max_price_cents_aligned_with_guardrails(self):
-        """Test that price_range max_price_cents is aligned with guardrails_max_contract_price_cents (50c)."""
+        """Test that price_range max_price_cents is aligned with guardrails_max_contract_price_cents (95c)."""
         try:
             import yaml
             from pathlib import Path
@@ -275,11 +274,11 @@ class TestPriceFloorGuardrail:
             guardrails = profile_yaml.get('guardrails', {})
 
             # Check that price_range max_price_cents matches guardrails max_contract_price_cents
-            # 2026-07-08: Both should be 50c (sweet spot threshold)
-            assert price_range.get('max_price_cents') == 50, \
-                f"Expected price_range max_price_cents=50, got {price_range.get('max_price_cents')}"
-            assert guardrails.get('max_contract_price_cents') == 50, \
-                f"Expected guardrails max_contract_price_cents=50, got {guardrails.get('max_contract_price_cents')}"
+            # 2026-07-10: Both should be 95c (expanded for skewed markets)
+            assert price_range.get('max_price_cents') == 95, \
+                f"Expected price_range max_price_cents=95, got {price_range.get('max_price_cents')}"
+            assert guardrails.get('max_contract_price_cents') == 95, \
+                f"Expected guardrails max_contract_price_cents=95, got {guardrails.get('max_contract_price_cents')}"
         except Exception as e:
             pytest.skip(f"Price range alignment check skipped: {e}")
 
