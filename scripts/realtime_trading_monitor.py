@@ -56,6 +56,10 @@ class Trade:
     velocity: float
     rsi: float
     macd_hist: float
+    macd_line: Optional[float] = None  # MACD line value
+    macd_signal: Optional[float] = None  # MACD signal line value
+    trend: Optional[str] = None  # Trend direction (UP, DOWN, SIDEWAYS)
+    histogram: Optional[float] = None  # MACD histogram value
     time_to_expiry_sec: float
     # Threshold metrics for fine-tuning
     min_edge_threshold: Optional[float] = None  # Minimum edge threshold applied
@@ -70,6 +74,8 @@ class Trade:
     exit_price_cents: Optional[int] = None
     pnl_usd: Optional[float] = None
     reason: Optional[str] = None  # If rejected
+    strike_price: Optional[float] = None  # Strike price for the 15-minute window
+    event_price: Optional[float] = None  # Price at the time of event (generation/rejection)
 
 
 @dataclass
@@ -134,6 +140,10 @@ class AssetStats:
     
     # Individual trades
     trades: List[Trade] = field(default_factory=list)
+    
+    # Detailed event tracking
+    candidate_events: List[Dict[str, Any]] = field(default_factory=list)
+    rejection_events: List[Dict[str, Any]] = field(default_factory=list)
     
     def summary(self) -> str:
         """Generate summary string."""
@@ -220,6 +230,10 @@ class RealtimeTradingMonitor:
         'velocity_magnitude': re.compile(r'velocity=([\d.-]+)'),
         'rsi_value': re.compile(r'rsi=([\d.]+)'),
         'macd_hist': re.compile(r'macd_hist=([\d.-]+)'),
+        'macd_line': re.compile(r'macd_line=([\d.-]+)'),
+        'macd_signal': re.compile(r'macd_signal=([\d.-]+)'),
+        'trend': re.compile(r'trend=(\w+)'),
+        'histogram': re.compile(r'histogram=([\d.-]+)'),
         'time_to_expiry': re.compile(r'time_to_expiry=([\d.]+)s'),
         'confidence': re.compile(r'confidence=([\d.]+)'),
         'model_prob': re.compile(r'model_prob=([\d.]+)'),
@@ -239,10 +253,16 @@ class RealtimeTradingMonitor:
         'exit_order_bypass': re.compile(r'\[EXIT-ORDER\] Exit order bypassed slot allocation'),
         # Min decision minute patterns
         'min_decision_minute': re.compile(r'\[MIN-DECISION-MINUTE\] asset=(\w+)_15M min_decision_minute=(\d+)'),
-        'trading_window_skip': re.compile(r'\[TRADING-WINDOW\] asset=(\w+)_15M time_to_expiry=([\d.]+)s < min_time_to_expiry=(\d+)s')
+        'trading_window_skip': re.compile(r'\[TRADING-WINDOW\] asset=(\w+)_15M time_to_expiry=([\d.]+)s < min_time_to_expiry=(\d+)s'),
+        # Strike price and event price patterns
+        'strike_price': re.compile(r'strike_price=([\d.]+)'),
+        'spot_price': re.compile(r'spot_price=([\d.]+)'),
+        'market_price': re.compile(r'market_price=([\d.]+)'),
+        'candidate_price': re.compile(r'\[CANDIDATE-GENERATED\] asset=(\w+)_15M.*price=([\d.]+)'),
+        'rejection_price': re.compile(r'\[([A-Z-]+)\] asset=(\w+)_15M.*price=([\d.]+)')
     }
     
-    def __init__(self, log_file: str, duration_minutes: int = 30):
+    def __init__(self, log_file: str, duration_minutes: int = 360):
         self.log_file = Path(log_file)
         self.duration_minutes = duration_minutes
         self.start_time = datetime.now()
@@ -640,6 +660,49 @@ class RealtimeTradingMonitor:
             if regime_match:
                 regime = regime_match.group(1)
             
+            # Additional technical indicators
+            macd_line = None
+            macd_line_match = self.PATTERNS['macd_line'].search(message)
+            if macd_line_match:
+                macd_line = float(macd_line_match.group(1))
+            
+            macd_signal = None
+            macd_signal_match = self.PATTERNS['macd_signal'].search(message)
+            if macd_signal_match:
+                macd_signal = float(macd_signal_match.group(1))
+            
+            trend = None
+            trend_match = self.PATTERNS['trend'].search(message)
+            if trend_match:
+                trend = trend_match.group(1)
+            
+            histogram = None
+            histogram_match = self.PATTERNS['histogram'].search(message)
+            if histogram_match:
+                histogram = float(histogram_match.group(1))
+            
+            # Strike price and event price
+            strike_price = None
+            strike_match = self.PATTERNS['strike_price'].search(message)
+            if strike_match:
+                strike_price = float(strike_match.group(1))
+            
+            event_price = None
+            # Try candidate price first
+            candidate_price_match = self.PATTERNS['candidate_price'].search(message)
+            if candidate_price_match:
+                event_price = float(candidate_price_match.group(2))
+            else:
+                # Try spot price
+                spot_price_match = self.PATTERNS['spot_price'].search(message)
+                if spot_price_match:
+                    event_price = float(spot_price_match.group(1))
+                else:
+                    # Try market price
+                    market_price_match = self.PATTERNS['market_price'].search(message)
+                    if market_price_match:
+                        event_price = float(market_price_match.group(1))
+            
             # Map to asset
             mapped_asset = self._extract_asset(ticker)
             if mapped_asset and mapped_asset in self.stats:
@@ -667,12 +730,18 @@ class RealtimeTradingMonitor:
                     velocity=velocity,
                     rsi=rsi,
                     macd_hist=macd_hist,
+                    macd_line=macd_line,
+                    macd_signal=macd_signal,
+                    trend=trend,
+                    histogram=histogram,
                     time_to_expiry_sec=time_to_expiry,
                     min_edge_threshold=min_edge_threshold,
                     max_spread_threshold=max_spread_threshold,
                     velocity_threshold=velocity_threshold,
                     confidence_threshold=confidence_threshold,
                     regime=regime,
+                    strike_price=strike_price,
+                    event_price=event_price,
                     outcome='PENDING'
                 )
                 self.stats[mapped_asset].trades.append(trade)
