@@ -79,15 +79,15 @@ class TestKalshiCrypto15mRiskEnvelope:
         assert envelope.agent_max_no_position == 3
 
     def test_bankroll_tiered_per_trade_risk_small_bankroll(self):
-        """Test that small bankroll (<$100) uses uniform 3% per-trade risk (2026-07-06: tiered logic disabled)."""
+        """Test that small bankroll uses fixed $1.00 exposure model (2026-07-10: percentage-based disabled)."""
         envelope = KalshiCrypto15mRiskEnvelope(
             profile_capital_usd=50.0,
             live_bankroll_usd=50.0,  # Small bankroll
-            max_single_order_notional_usd=5.0,  # 10% of $50
-            max_total_notional_usd=7.5,  # 15% of $50
+            max_single_order_notional_usd=1.0,  # Fixed $1.00 exposure cap
+            max_total_notional_usd=1.0,  # Fixed $1.00 total exposure cap
             max_concurrent_trades=3,
-            agent_max_notional_usd=1.5,
-            asset_max_notional_usd={"BTC": 1.5, "ETH": 1.5, "SOL": 1.5, "XRP": 1.5, "DOGE": 1.5},  # 3% each
+            agent_max_notional_usd=1.0,
+            asset_max_notional_usd={"BTC": 1.0, "ETH": 1.0, "SOL": 1.0, "XRP": 1.0, "DOGE": 1.0},
             max_daily_loss_usd=200.0,
             drawdown_halt_pct=0.10,
             drawdown_unwind_pct=0.15,
@@ -111,49 +111,43 @@ class TestKalshiCrypto15mRiskEnvelope:
             correlation_multiplier=1.0,
             guardrails_per_window_risk_pct=0.03,
             guardrails_total_venue_risk_pct=0.05,
-            per_agent_window_limit_usd=1.5,
-            total_venue_window_limit_usd=2.5,
+            per_agent_window_limit_usd=1.0,  # Fixed $1.00 exposure cap
+            total_venue_window_limit_usd=1.0,  # Fixed $1.00 total exposure cap
             window_start_ts=0.0,
             agent_window_exposure_usd={},
             total_window_exposure_usd=0.0,
-            agent_resting_exposure_usd={},  # CRITICAL FIX 2026-07-08
-            total_resting_exposure_usd=0.0,  # CRITICAL FIX 2026-07-08
+            agent_resting_exposure_usd={},
+            total_resting_exposure_usd=0.0,
         )
+        # Verify fixed $1.00 exposure model (not percentage-based)
+        assert envelope.max_single_order_notional_usd == 1.0
+        assert envelope.max_total_notional_usd == 1.0
 
-    def test_risk_envelope_defaults_match_3_percent_risk_limit(self):
-        """CRITICAL FIX (2026-07-08): Risk envelope defaults match 3% risk limit from YAML.
-        
-        This test ensures that if profile YAML values are missing, the fallback defaults
-        in kalshi_crypto_15m_risk_envelope.py still enforce the 3% risk limit (not 5%).
-        
-        Previous bug:
-        - max_single_order_pct default was 0.05 (5%) instead of 0.03 (3%)
-        
-        This could allow orders to exceed the 3% risk limit if YAML values were missing.
-        """
+    def test_risk_envelope_defaults_match_fixed_exposure_cap(self):
+        """Test that risk envelope uses fixed $1.00 exposure model (2026-07-10: percentage-based disabled)."""
         import inspect
         from merid.risk.profiles import kalshi_crypto_15m_risk_envelope
         
         source = inspect.getsource(kalshi_crypto_15m_risk_envelope)
         
-        # Verify 0.03 default is in the source
-        assert "venue.get('max_single_order_pct', 0.03)" in source, \
-            "Risk envelope should use 0.03 default for max_single_order_pct"
+        # Verify fixed $1.00 exposure cap is in the source
+        assert "MERID_FIXED_EXPOSURE_CAP_USD" in source, \
+            "Risk envelope should use MERID_FIXED_EXPOSURE_CAP_USD for fixed exposure cap"
         
-        # Verify old buggy default is NOT in the source
-        assert "venue.get('max_single_order_pct', 0.05)" not in source, \
-            "Risk envelope should NOT use 0.05 default for max_single_order_pct (buggy)"
+        # Verify old percentage-based defaults are NOT in the source
+        assert "venue.get('max_single_order_pct', 0.03)" not in source, \
+            "Risk envelope should NOT use 0.03 default for max_single_order_pct (percentage-based obsolete)"
 
     def test_bankroll_tiered_per_trade_risk_medium_bankroll(self):
-        """Test that medium bankroll ($100-$1k) uses uniform 3% per-trade risk (2026-07-06: tiered logic disabled)."""
+        """Test that medium bankroll uses fixed $1.00 exposure model (2026-07-10: percentage-based disabled)."""
         envelope = KalshiCrypto15mRiskEnvelope(
             profile_capital_usd=500.0,
             live_bankroll_usd=500.0,  # Medium bankroll
-            max_single_order_notional_usd=50.0,  # 10% of $500
-            max_total_notional_usd=75.0,  # 15% of $500
+            max_single_order_notional_usd=1.0,  # Fixed $1.00 exposure cap
+            max_total_notional_usd=1.0,  # Fixed $1.00 total exposure cap
             max_concurrent_trades=3,
-            agent_max_notional_usd=15.0,
-            asset_max_notional_usd={"BTC": 15.0, "ETH": 15.0, "SOL": 15.0, "XRP": 15.0, "DOGE": 15.0},  # 3% each
+            agent_max_notional_usd=1.0,
+            asset_max_notional_usd={"BTC": 1.0, "ETH": 1.0, "SOL": 1.0, "XRP": 1.0, "DOGE": 1.0},
             max_daily_loss_usd=2000.0,
             drawdown_halt_pct=0.10,
             drawdown_unwind_pct=0.15,
@@ -177,28 +171,29 @@ class TestKalshiCrypto15mRiskEnvelope:
             correlation_multiplier=1.0,
             guardrails_per_window_risk_pct=0.03,
             guardrails_total_venue_risk_pct=0.05,
-            per_agent_window_limit_usd=15.0,
-            total_venue_window_limit_usd=25.0,
+            per_agent_window_limit_usd=1.0,  # Fixed $1.00 exposure cap
+            total_venue_window_limit_usd=1.0,  # Fixed $1.00 total exposure cap
             window_start_ts=0.0,
             agent_window_exposure_usd={},
             total_window_exposure_usd=0.0,
-            agent_resting_exposure_usd={},  # CRITICAL FIX 2026-07-08
-            total_resting_exposure_usd=0.0,  # CRITICAL FIX 2026-07-08
+            agent_resting_exposure_usd={},
+            total_resting_exposure_usd=0.0,
         )
-        # All bankrolls should use uniform 3% per-trade risk (tiered logic disabled 2026-07-06)
-        assert envelope.get_per_trade_risk_pct() == 0.03
+        # Verify fixed $1.00 exposure model (not percentage-based)
+        assert envelope.max_single_order_notional_usd == 1.0
+        assert envelope.max_total_notional_usd == 1.0
 
     def test_bankroll_tiered_per_trade_risk_large_bankroll(self):
-        """Test that large bankroll (>$1k) uses uniform 3% per-trade risk (2026-07-06: tiered logic disabled)."""
+        """Test that large bankroll uses fixed $1.00 exposure model (2026-07-10: percentage-based disabled)."""
         envelope = KalshiCrypto15mRiskEnvelope(
             profile_capital_usd=5000.0,
             live_bankroll_usd=5000.0,  # Large bankroll
-            max_single_order_notional_usd=500.0,  # 10% of $5000
-            max_total_notional_usd=750.0,  # 15% of $5000
+            max_single_order_notional_usd=1.0,  # Fixed $1.00 exposure cap
+            max_total_notional_usd=1.0,  # Fixed $1.00 total exposure cap
             max_concurrent_trades=3,
-            agent_max_notional_usd=150.0,
-            asset_max_notional_usd={"BTC": 150.0, "ETH": 150.0, "SOL": 150.0, "XRP": 150.0, "DOGE": 150.0},  # 3% each
-            max_daily_loss_usd=20000.0,
+            agent_max_notional_usd=1.0,
+            asset_max_notional_usd={"BTC": 1.0, "ETH": 1.0, "SOL": 1.0, "XRP": 1.0, "DOGE": 1.0},
+            max_daily_loss_usd=2000.0,
             drawdown_halt_pct=0.10,
             drawdown_unwind_pct=0.15,
             agent_max_orders_per_window=10,
@@ -221,21 +216,25 @@ class TestKalshiCrypto15mRiskEnvelope:
             correlation_multiplier=1.0,
             guardrails_per_window_risk_pct=0.03,
             guardrails_total_venue_risk_pct=0.05,
-            per_agent_window_limit_usd=150.0,
-            total_venue_window_limit_usd=250.0,
+            per_agent_window_limit_usd=1.0,  # Fixed $1.00 exposure cap
+            total_venue_window_limit_usd=1.0,  # Fixed $1.00 total exposure cap
             window_start_ts=0.0,
             agent_window_exposure_usd={},
             total_window_exposure_usd=0.0,
-            agent_resting_exposure_usd={},  # CRITICAL FIX 2026-07-08
-            total_resting_exposure_usd=0.0,  # CRITICAL FIX 2026-07-08
+            agent_resting_exposure_usd={},
+            total_resting_exposure_usd=0.0,
         )
-        # All bankrolls should use uniform 3% per-trade risk (tiered logic disabled 2026-07-06)
-        assert envelope.get_per_trade_risk_pct() == 0.03
+        # Verify fixed $1.00 exposure model (not percentage-based)
+        assert envelope.max_single_order_notional_usd == 1.0
+        assert envelope.max_total_notional_usd == 1.0
 
     @patch.dict("os.environ", {"MERID_PROFILE": "kalshi_crypto_15m_v2"})
     @patch("merid.event_venues.kalshi.bankroll_service_v2.get_equity_for_risk_calc_sync")
     def test_compute_envelope_uses_live_bankroll_when_profile_capital_zero(self, mock_bankroll):
-        """Test that envelope uses live bankroll when profile capital_usd is 0."""
+        """Test that envelope uses live bankroll when profile capital_usd is 0.
+        
+        CRITICAL FIX (2026-07-10): Uses fixed $1.00 exposure model (not percentage-based).
+        """
         # Mock bankroll service to return $50
         mock_bankroll.return_value = 50.0
         
@@ -246,10 +245,9 @@ class TestKalshiCrypto15mRiskEnvelope:
         assert envelope.profile_capital_usd == 0.0
         # Verify live bankroll used ($50 from mock)
         assert envelope.live_bankroll_usd == 50.0
-        # Verify max_single_order derived from 3% of live bankroll (not 10%)
-        assert envelope.max_single_order_notional_usd == 1.5  # 3% of $50
-        # Verify max_total_notional derived from 15% of live bankroll (conservative cycle risk)
-        assert envelope.max_total_notional_usd == 7.5  # 15% of $50
+        # CRITICAL FIX 2026-07-10: Fixed $1.00 exposure model (not percentage-based)
+        assert envelope.max_single_order_notional_usd == 1.0  # Fixed $1.00 exposure cap
+        assert envelope.max_total_notional_usd == 1.0  # Fixed $1.00 total exposure cap
         # Verify max_concurrent_trades from profile
         assert envelope.max_concurrent_trades == 8
 
@@ -296,14 +294,9 @@ class TestKalshiCrypto15mRiskEnvelope:
             assert envelope.live_bankroll_usd == 34.01
             assert envelope.profile_capital_usd == 0.0  # From YAML
             
-            # Verify risk limits are computed from live bankroll
-            # 3% of $34.01 = ~$1.02 per agent window limit
-            expected_per_agent_limit = 34.01 * 0.03
-            assert abs(envelope.per_agent_window_limit_usd - expected_per_agent_limit) < 0.01
-            
-            # 5% of $34.01 = ~$1.70 total venue window limit
-            expected_total_venue_limit = 34.01 * 0.05
-            assert abs(envelope.total_venue_window_limit_usd - expected_total_venue_limit) < 0.01
+            # CRITICAL FIX 2026-07-10: Fixed $1.00 exposure model (not percentage-based)
+            assert envelope.per_agent_window_limit_usd == 1.0  # Fixed $1.00 exposure cap
+            assert envelope.total_venue_window_limit_usd == 1.0  # Fixed $1.00 total exposure cap
 
     def test_risk_envelope_uses_profile_capital_in_validation_mode(self):
         """Test that risk envelope uses profile capital when MERID_VALIDATION_MODE is true.
@@ -336,10 +329,9 @@ class TestKalshiCrypto15mRiskEnvelope:
                     # In validation mode with profile_capital > 0, should use profile capital
                     assert envelope.profile_capital_usd == 1000.0
                     
-                    # Risk limits should be computed from profile capital (1000), not live bankroll (34.01)
-                    # 3% of $1000 = $30 per agent window limit
-                    expected_per_agent_limit = 1000.0 * 0.03
-                    assert abs(envelope.per_agent_window_limit_usd - expected_per_agent_limit) < 0.01
+                    # CRITICAL FIX 2026-07-10: Fixed $1.00 exposure model (not percentage-based)
+                    assert envelope.per_agent_window_limit_usd == 1.0  # Fixed $1.00 exposure cap
+                    assert envelope.total_venue_window_limit_usd == 1.0  # Fixed $1.00 total exposure cap
                     
         finally:
             # Restore original capital_usd
@@ -633,8 +625,8 @@ class TestWindowBasedRiskLimitEnforcement:
             correlation_multiplier=1.0,
             guardrails_per_window_risk_pct=0.03,  # 3% per agent
             guardrails_total_venue_risk_pct=0.05,  # 5% total
-            per_agent_window_limit_usd=3.0,  # 3% of $100
-            total_venue_window_limit_usd=5.0,  # 5% of $100
+            per_agent_window_limit_usd=1.0,  # Fixed $1.00 exposure cap (2026-07-10)
+            total_venue_window_limit_usd=1.0,  # Fixed $1.00 total exposure cap (2026-07-10)
             window_start_ts=0.0,  # Required field
             agent_window_exposure_usd={},  # Required field
             total_window_exposure_usd=0.0,  # Required field
@@ -654,8 +646,9 @@ class TestWindowBasedRiskLimitEnforcement:
         # Verify values are correct
         assert envelope.guardrails_per_window_risk_pct == 0.03
         assert envelope.guardrails_total_venue_risk_pct == 0.05
-        assert envelope.per_agent_window_limit_usd == 3.0
-        assert envelope.total_venue_window_limit_usd == 5.0
+        # CRITICAL FIX 2026-07-10: Fixed $1.00 exposure model (not percentage-based)
+        assert envelope.per_agent_window_limit_usd == 1.0  # Fixed $1.00 exposure cap
+        assert envelope.total_venue_window_limit_usd == 1.0  # Fixed $1.00 total exposure cap
 
     def test_window_limit_methods_exist(self):
         """Test that window limit methods exist in envelope."""
@@ -695,8 +688,8 @@ class TestWindowBasedRiskLimitEnforcement:
             correlation_multiplier=1.0,
             guardrails_per_window_risk_pct=0.03,
             guardrails_total_venue_risk_pct=0.05,
-            per_agent_window_limit_usd=3.0,
-            total_venue_window_limit_usd=5.0,
+            per_agent_window_limit_usd=1.0,  # Fixed $1.00 exposure cap (2026-07-10)
+            total_venue_window_limit_usd=1.0,  # Fixed $1.00 total exposure cap (2026-07-10)
             window_start_ts=0.0,
             agent_window_exposure_usd={},
             total_window_exposure_usd=0.0,
@@ -753,8 +746,8 @@ class TestWindowBasedRiskLimitEnforcement:
             correlation_multiplier=1.0,
             guardrails_per_window_risk_pct=0.03,
             guardrails_total_venue_risk_pct=0.05,
-            per_agent_window_limit_usd=3.0,
-            total_venue_window_limit_usd=5.0,
+            per_agent_window_limit_usd=1.0,  # Fixed $1.00 exposure cap (2026-07-10)
+            total_venue_window_limit_usd=1.0,  # Fixed $1.00 total exposure cap (2026-07-10)
             window_start_ts=0.0,
             agent_window_exposure_usd={},
             total_window_exposure_usd=0.0,
