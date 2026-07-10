@@ -6141,6 +6141,35 @@ class LeanAgentGrid15m:
                     if not asset:
                         asset = candidate.get('asset', 'UNKNOWN')
                     
+                    # CRITICAL FIX: Check if there's already a resting order for this ticker/price/side
+                    # This prevents duplicate order generation when the same candidate is selected repeatedly
+                    ticker = candidate.get('ticker', '')
+                    price_cents = int(candidate.get('price_cents', 50))
+                    side = candidate.get('side', 'yes')
+                    action = candidate.get('action', 'buy')
+                    
+                    has_resting_order = False
+                    if self.order_gate:
+                        try:
+                            from merid.event_venues.kalshi.order_gate import OrderStatus
+                            # Check for existing resting orders with same ticker, price, side, action
+                            resting_orders = self.order_gate.get_resting_orders()
+                            for resting_order in resting_orders:
+                                if (resting_order.contract_id == ticker and 
+                                    resting_order.price_cents == price_cents and
+                                    resting_order.side == side and
+                                    resting_order.action == action and
+                                    resting_order.status in (OrderStatus.PENDING, OrderStatus.SUBMITTED, OrderStatus.LIVE)):
+                                    has_resting_order = True
+                                    logger.info("[GLOBAL-ALLOCATOR] Skipping candidate with existing resting order: ticker=%s price=%dc side=%s", 
+                                               ticker, price_cents, side)
+                                    break
+                        except Exception as e:
+                            logger.warning("[GLOBAL-ALLOCATOR] Failed to check for resting orders: %s", e)
+                    
+                    if has_resting_order:
+                        continue  # Skip this candidate - there's already a resting order
+                    
                     # Get current position notional for this asset
                     current_position_notional = 0.0
                     if self.position_cache:
@@ -6157,10 +6186,10 @@ class LeanAgentGrid15m:
                     
                     order_candidate = OrderCandidate(
                         asset=asset,
-                        ticker=candidate.get('ticker', ''),
-                        side=candidate.get('side', 'yes'),
-                        action=candidate.get('action', 'buy'),
-                        price_cents=int(candidate.get('price_cents', 50)),
+                        ticker=ticker,
+                        side=side,
+                        action=action,
+                        price_cents=price_cents,
                         count=int(candidate.get('count', 1)),
                         edge_pct=float(candidate.get('edge_pct', 0.0)),
                         confidence=float(candidate.get('confidence', 0.5)),
