@@ -488,10 +488,16 @@ def get_kalshi_health_snapshot(loop_tick: int = 0) -> KalshiHealthSnapshot:
     
     # Check WS bridge - use canonical singleton, not app.state.ws_bridge
     # The singleton is the source of truth used by market_state and ws_bridge consumers
+    # CRITICAL FIX: Only mark as unhealthy if WS disconnected AND MD is stale
+    # If MD is fresh (REST polling working), allow trading even if WS is disconnected
     try:
         from merid.event_venues.kalshi.ws_bridge import get_bridge
+        from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+        import time
 
         ws_bridge = get_bridge()
+        market_state_store = get_kalshi_market_state_store()
+        
         if ws_bridge:
             summary = ws_bridge.summary()
             snapshot.ws_connected = summary.get("running", False)
@@ -501,10 +507,36 @@ def get_kalshi_health_snapshot(loop_tick: int = 0) -> KalshiHealthSnapshot:
         else:
             snapshot.ws_connected = False
         
-        # Only mark as unhealthy if we can definitively determine WS is disconnected
-        if not snapshot.ws_connected and ws_bridge is not None:
+        # Check if MD is fresh (REST polling fallback working)
+        md_fresh = False
+        if market_state_store:
+            # Check if any of the 5 crypto assets have fresh MD
+            crypto_assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+            fresh_count = 0
+            for asset in crypto_assets:
+                # Get all markets for this asset
+                asset_states = [s for s in market_state_store._states.values() 
+                              if asset in s.market_id]
+                if asset_states:
+                    # Check if any state is fresh (age < 120s)
+                    for state in asset_states:
+                        if state.last_book_update_ts > 0:
+                            age = time.time() - state.last_book_update_ts
+                            if age < 120:  # 120s staleness threshold
+                                fresh_count += 1
+                                break
+            md_fresh = fresh_count >= 1  # At least 1 asset has fresh MD
+        
+        # Only mark as unhealthy if WS disconnected AND MD is stale
+        # If MD is fresh (REST polling working), allow trading even if WS is disconnected
+        if not snapshot.ws_connected and ws_bridge is not None and not md_fresh:
             snapshot.status = OverallStatus.UNHEALTHY
             reasons.append("ws_disconnected")
+        elif not snapshot.ws_connected and md_fresh:
+            # WS disconnected but MD fresh - mark as degraded, not unhealthy
+            if snapshot.status == OverallStatus.HEALTHY:
+                snapshot.status = OverallStatus.DEGRADED
+                reasons.append("ws_disconnected_but_md_fresh")
     except Exception as e:
         logger.debug(f"WS bridge check failed: {e}")
         snapshot.ws_connected = False

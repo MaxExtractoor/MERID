@@ -1335,7 +1335,7 @@ async def internal_place_order(order_data: dict):
             ticker=order_data.get('ticker'),
             side=order_data.get('side', 'yes'),
             action=order_data.get('action', 'buy'),
-            price_cents=order_data.get('price_cents', 50),
+            price_cents=order_data.get('price_cents', 25),  # 2026-07-09: Changed from 50 to 25 (midpoint of 10-50c sweet spot)
             count=order_data.get('count', 1),
             mode=order_data.get('mode'),  # Use None to let router decide
             order_type=order_data.get('order_type', 'limit'),
@@ -3081,9 +3081,10 @@ async def _run_startup_phases_v20260530(app):
     # CRITICAL: Set global agent grid instance for external reset calls
     # This allows the catalog to reset strip order counts when market IDs change
     try:
-        from merid.prediction.agent_grid_15m import set_agent_grid_instance
+        from merid.prediction.agent_grid_15m import set_agent_grid_instance, set_agent_grid
         set_agent_grid_instance(agent_grid)
-        logger.info("[STARTUP] P1.10: Global agent grid instance set for catalog reset")
+        set_agent_grid(agent_grid)  # Also set the singleton used by API endpoints
+        logger.info("[STARTUP] P1.10: Global agent grid instance set for catalog reset and API")
     except Exception as e:
         logger.warning("[STARTUP] Failed to set global agent grid instance: %s", e)
     
