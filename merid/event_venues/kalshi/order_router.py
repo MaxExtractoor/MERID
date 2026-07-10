@@ -183,7 +183,7 @@ def check_market_microstructure(
     no_ask_cents: int,
     yes_depth: int,
     no_depth: int,
-    max_spread_cents: float = 30.0,  # 2026-07-10: OPTIMIZED to 30c - harmonizes with 10c-50c entry price sweet spot (industry research: 3-8c typical, 30c quality filter)
+    max_spread_cents: float = 100.0,  # 2026-07-10: Updated from 30c to 100c to accommodate wider spreads in current market conditions
     min_depth_usd: float = 10.0,  # 2026-07-05: Lowered from 200.0 to 10.0 based on research - $50 threshold too high for weekend/low-volume liquidity
     min_yes_depth: int = 1,
     min_no_depth: int = 1
@@ -691,13 +691,13 @@ def resolve_window_policy(
     elif regime == "aggressive":
         min_tte_secs = 90  # 1.5 min
     
-    # Spread gate (aligned with profile guardrails max_spread_cents=30)
-    # CRITICAL FIX: Reduced from 50c to 30c to harmonize with guardrails and 10-50c sweet spot (2026-07-10)
-    max_spread_cents = 30  # Aligned with profile guardrails
+    # Spread gate (aligned with profile guardrails max_spread_cents=100)
+    # 2026-07-10: Updated from 30c to 100c to accommodate wider spreads in current market conditions
+    max_spread_cents = 100  # Aligned with profile guardrails
     if regime == "conservative":
-        max_spread_cents = 30  # Conservative also uses 30c (standardized)
+        max_spread_cents = 100  # Conservative also uses 100c (standardized)
     elif regime == "aggressive":
-        max_spread_cents = 30  # Aggressive uses standard guardrails threshold
+        max_spread_cents = 100  # Aggressive uses standard guardrails threshold
     
     return WindowResolution(
         window_id=window_id,
@@ -1562,10 +1562,10 @@ def simulate_paper_fill(
     rng = _rng if _rng is not None else _random_module
 
     requested_count = max(0, int(intent.count))
-    # CRITICAL FIX: Clamp to 10-50 cents to prevent degenerate pricing
-    # This aligns with kalshi_crypto_15m_v2.yaml price_range [10, 50]
-    # 2026-07-09: Fixed max from 75c to 50c to match profile price_range.max_price_cents
-    requested_price = max(10, min(50, int(intent.price_cents)))
+    # CRITICAL FIX: Clamp to profile price_range (5-95c) to prevent degenerate pricing
+    # This aligns with kalshi_crypto_15m_v2.yaml price_range [5, 95]
+    # 2026-07-10: Fixed to 5-95c to match profile price_range
+    requested_price = max(5, min(95, int(intent.price_cents)))
 
     # Basic side-aware slippage in cents from configured basis points.
     slippage_cents = max(0, int(round(requested_price * PAPER_SLIPPAGE_BPS / 10_000)))
@@ -1574,10 +1574,10 @@ def simulate_paper_fill(
 
     # Buy pays up; sell receives down.
     side_sign = 1 if intent.action == "buy" else -1
-    # CRITICAL FIX: Clamp to 10-50 cents to prevent extreme purchases
-    # This aligns with kalshi_crypto_15m_v2.yaml price_range [10, 50]
-    # 2026-07-09: Fixed max from 75c to 50c to match profile price_range.max_price_cents
-    fill_price = max(10, min(50, requested_price + (side_sign * slippage_cents)))
+    # CRITICAL FIX: Clamp to profile price_range (5-95c) to prevent extreme purchases
+    # This aligns with kalshi_crypto_15m_v2.yaml price_range [5, 95]
+    # 2026-07-10: Fixed to 5-95c to match profile price_range
+    fill_price = max(5, min(95, requested_price + (side_sign * slippage_cents)))
 
     # Partial fill simulation when size > 1 contract.
     partial_fill = False
