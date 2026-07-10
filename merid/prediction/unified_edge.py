@@ -670,7 +670,7 @@ class UnifiedEdgeComputer:
         # Even if edge is positive, reject if spread is too wide for the given edge
         if spread_cents is not None:
             # Get max spread for edge from profile
-            max_spread_for_edge = 10  # Default fallback (2026-07-09 optimized from 20c)
+            max_spread_for_edge = 20  # Default fallback (2026-07-10: aligned with profile default 20c)
             try:
                 from merid.risk.profiles.crypto_15m_profile import get_active_profile
                 profile_adapter = get_active_profile()

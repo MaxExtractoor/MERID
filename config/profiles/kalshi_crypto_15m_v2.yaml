@@ -302,8 +302,10 @@ dynamic_sizing:
 # Order Scaling Configuration
 # Institutional-grade scaling strategies (TWAP, iceberg, adaptive)
 # Splits large orders into child orders to reduce market impact and signaling
+# 2026-07-09: DISABLED - conflicts with 1-contract-per-order slot-based model
+# Order scaling requires orders >= 3 contracts, but slot model enforces 1 contract max
 order_scaling:
-  enabled: true  # ENABLED for production with scaling strategies
+  enabled: false  # DISABLED: Conflicts with 1-contract-per-order slot-based model
   strategy: "adaptive"  # Strategy: "twap", "iceberg", "adaptive"
   min_child_orders: 2  # Minimum number of child orders
   max_child_orders: 5  # Maximum number of child orders
@@ -311,8 +313,8 @@ order_scaling:
   participation_rate: 0.10  # Max 10% of market volume
   visible_pct: 0.10  # Iceberg: 10% visible
   edge_threshold: 0.02  # 2% edge minimum for scaling
-  size_threshold_contracts: 3  # Scale only if size >= 3 contracts
-  description: "Order scaling: TWAP/iceberg/adaptive for large orders"
+  size_threshold_contracts: 1  # 2026-07-09: Reduced from 3 to 1 (but scaling is disabled)
+  description: "Order scaling: TWAP/iceberg/adaptive for large orders - DISABLED for slot-based model"
 
 # ── Momentum/FVG Mode Parameters ───────────────────────────────────────────
 # Parameters for momentum_fvg signal mode (when enabled)
@@ -522,7 +524,7 @@ venue:
 universe:
   min_volume: 5  # Minimum 5 contracts volume (relaxed from default 50 for 15m crypto)
   min_open_interest: 1  # Minimum 1 contract open interest (relaxed from default 10)
-  max_spread_cents: 10  # 2026-07-09: OPTIMIZED to 10c - optimal balance between fill quality and trade frequency (industry research: 3-5c typical for crypto markets, 10c upper bound of moderate-liquidity range)
+  max_spread_cents: 20  # 2026-07-09: OPTIMIZED to 20c - default balance between fill quality and trade frequency (industry research: 15c-25c range, 20c recommended) - aligned with guardrails.max_spread_cents (single source of truth)
   description: "Coarse liquidity prefilter for 15m crypto markets - tuned for exactly 5 markets per asset"
 
 # ── Throttling (Order Rate Limits) ───────────────────────────────────────────
@@ -567,7 +569,7 @@ failsafe:
 price_range:
   min_price_cents: 10  # Lower bound of sweet spot (10-50c)
   max_price_cents: 50  # 2026-07-08: Upper bound of sweet spot (10-50c) - aligned with binary options guidance
-  description: "Valid price range in cents for order execution (10-50c sweet spot for fixed $1 exposure model)"
+  description: "Valid price range in cents for order execution (10-50c sweet spot for momentum-based trading with fixed $1 exposure model)"
 
 # ── Per-Asset Caps (BTC/ETH/SOL/XRP/DOGE) ─────────────────────────────────
 # Each asset has its own notional as percentage of capital, NOT hardcoded USD values.
@@ -959,8 +961,9 @@ guardrails:
   # SIMPLIFIED: Single spread rule instead of complex edge-dependent mapping
   # For edge < 2%: do not trade (avoid low edge & wide spread)
   # For edge >= 2%: require spread <= 20c and edge >= 1.1x spread
+  # 2026-07-10: ALIGNED to 20c to match universe.max_spread_cents (single source of truth)
   max_spread_for_edge:
-    "default": 25  # INCREASED: 25c (up from 15c - aligned with 75c guardrails for realistic trading)
+    "default": 20  # ALIGNED: 20c (matches universe.max_spread_cents - industry research recommended default)
   depth_size_multiplier: 1.5  # Depth must be >= 1.5x order size (relaxed from 3.0x to reduce rejections)
   # Regime/drawdown trap prevention
   regime_cooldown_enabled: false  # DISABLED: Asset halting based on PnL performance (industry advises against variance-based changes, let drawdown limits handle risk)
@@ -1090,10 +1093,11 @@ kelly:
 # ── Contract Caps ─────────────────────────────────────────────────────────
 # Hard caps on total contracts across all positions (not bankroll-scaled)
 # These are venue-level limits to prevent excessive position concentration
+# 2026-07-09: Reduced all caps to align with slot-based model and $1 exposure cap
 contract_caps:
-  max_contracts_total: 5000  # Max total contracts across all assets
-  max_contracts_per_asset: 1750  # Max contracts per asset (BTC, ETH, etc.)
-  max_contracts_per_cluster: 750  # Max contracts per asset/timeframe/overlap-window
+  max_contracts_total: 4  # Max total contracts across all assets (aligns with max_concurrent_positions=4)
+  max_contracts_per_asset: 1  # Max contracts per asset (slot-based: 1 contract per order)
+  max_contracts_per_cluster: 1  # Max contracts per asset/timeframe/overlap-window (slot-based)
   max_single_order_contracts: 1  # CRITICAL FIX (2026-07-08): Reduced from 10 to 1 to enforce 3% risk limit (10 contracts can exceed 3% at low prices)
 
 # ── Risk Policy ───────────────────────────────────────────────────────────
@@ -1427,7 +1431,7 @@ fee_aware_edge:
 # 50c threshold blocks extreme data quality issues (82-91c spreads with YES ask=99c) while allowing normal trading
 market_microstructure:
   enabled: true  # Enable market microstructure filters
-  max_spread_cents: 75  # 2026-07-05: UNIFIED to 75c - aligned with guardrails.max_spread_cents and crypto_15m_profile.py (single source of truth)
+  max_spread_cents: 20  # 2026-07-09: UNIFIED to 20c - aligned with guardrails.max_spread_cents and universe.max_spread_cents (single source of truth)
   min_depth_usd: 0.0  # DISABLED: System uses limit orders which wait for fills, not market orders. Kalshi 15m crypto markets have sufficient liquidity. Depth thresholds are primarily for market orders to prevent slippage.
   min_yes_depth: 1  # Minimum YES depth threshold
   min_no_depth: 1  # Minimum NO depth threshold
