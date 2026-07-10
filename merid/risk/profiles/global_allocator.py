@@ -11,9 +11,12 @@ Core idea:
 
 This ensures:
 - Best edges get prioritized
-- Total exposure ≤ venue cap
+- Total exposure ≤ venue cap (shared $1 pool across all assets)
 - No artificial per-asset limits
 - Concentration on highest expected returns
+- 1 contract per asset per window
+- Entry prices in 5c-95c range (expanded for skewed markets)
+- Confidence ≥ 50% (matches agent grid: 0.5 + edge/100), edge ≥ 2.0% (actual percentage)
 """
 
 from dataclasses import dataclass
@@ -55,24 +58,38 @@ class GlobalAllocator:
     """
     Global allocator for multi-asset position sizing.
     
-    Implements top-N edge knapsack under venue cap.
+    Implements top-N edge knapsack under venue cap with shared $1 pool.
+    
+    CRITICAL RULES:
+    - $1 total exposure cap across ALL assets (shared pool, not per-asset)
+    - 1 contract per asset per window
+    - Entry price must be in 5c-95c range (expanded for skewed markets)
+    - Confidence must be ≥ 50% (matches agent grid: 0.5 + edge/100)
+    - Edge must be ≥ 2.0% (matches agent grid edge units - actual percentage)
+    - Assets compete for capital (no per-asset budgets)
     """
     
     def __init__(
         self,
         venue_cap_usd: float = 1.00,
-        min_edge_pct: float = 2.0,  # Minimum edge to be considered
+        min_edge_pct: float = 2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units (actual percentage, not decimal)
+        min_confidence: float = 0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence calculation (0.5 + edge/100)
+        min_price_cents: int = 5,  # 2026-07-10: Minimum entry price (5c) - expanded for skewed markets
+        max_price_cents: int = 95,  # 2026-07-10: Maximum entry price (95c) - expanded for skewed markets
         max_single_asset_fraction: float = 1.00,  # Max 100% of cap per asset (allows single order to use full venue cap)
         enable_correlation_control: bool = False,
     ):
         self.venue_cap_usd = venue_cap_usd
         self.min_edge_pct = min_edge_pct
+        self.min_confidence = min_confidence
+        self.min_price_cents = min_price_cents
+        self.max_price_cents = max_price_cents
         self.max_single_asset_fraction = max_single_asset_fraction
         self.enable_correlation_control = enable_correlation_control
         
         logger.info(
-            "[GLOBAL-ALLOCATOR] Initialized: venue_cap=$%.2f, min_edge=%.1f%%, max_single=%.1f%%",
-            venue_cap_usd, min_edge_pct, max_single_asset_fraction * 100
+            "[GLOBAL-ALLOCATOR] Initialized: venue_cap=$%.2f, min_edge=%.3f%%, min_conf=%.0f%%, price_range=[%dc-%dc], max_single=%.1f%%",
+            venue_cap_usd, min_edge_pct, min_confidence * 100, min_price_cents, max_price_cents, max_single_asset_fraction * 100
         )
     
     def allocate(
@@ -81,7 +98,10 @@ class GlobalAllocator:
         current_positions: Optional[Dict[str, float]] = None
     ) -> List[OrderCandidate]:
         """
-        Allocate orders based on edge ranking under venue cap.
+        Allocate orders based on edge ranking under venue cap with shared $1 pool.
+        
+        CRITICAL: This implements the shared $1 pool model where assets compete for capital.
+        No per-asset budgets - total exposure across all assets must be ≤ $1.00.
         
         Args:
             candidates: List of all potential orders from agents
@@ -96,40 +116,65 @@ class GlobalAllocator:
         
         current_positions = current_positions or {}
         
-        # Filter by minimum edge
+        # Filter by minimum edge (0.05%)
         filtered = [c for c in candidates if c.edge_pct >= self.min_edge_pct]
         if len(filtered) < len(candidates):
             logger.info(
-                "[GLOBAL-ALLOCATOR] Filtered %d/%d candidates below min edge %.1f%%",
+                "[GLOBAL-ALLOCATOR] Filtered %d/%d candidates below min edge %.3f%%",
                 len(candidates) - len(filtered), len(candidates), self.min_edge_pct
             )
         
-        if not filtered:
-            logger.info("[GLOBAL-ALLOCATOR] No candidates above minimum edge threshold")
+        # Filter by minimum confidence (50%)
+        conf_filtered = [c for c in filtered if c.confidence >= self.min_confidence]
+        if len(conf_filtered) < len(filtered):
+            logger.info(
+                "[GLOBAL-ALLOCATOR] Filtered %d/%d candidates below min confidence %.0f%%",
+                len(filtered) - len(conf_filtered), len(filtered), self.min_confidence * 100
+            )
+        
+        # Filter by price range (5c-95c)
+        price_filtered = [c for c in conf_filtered if self.min_price_cents <= c.price_cents <= self.max_price_cents]
+        if len(price_filtered) < len(conf_filtered):
+            logger.info(
+                "[GLOBAL-ALLOCATOR] Filtered %d/%d candidates outside price range [%dc-%dc]",
+                len(conf_filtered) - len(price_filtered), len(conf_filtered), self.min_price_cents, self.max_price_cents
+            )
+        
+        if not price_filtered:
+            logger.info("[GLOBAL-ALLOCATOR] No candidates passed all filters (edge, confidence, price)")
             return []
         
         # Sort by edge score (descending)
-        sorted_candidates = sorted(filtered, key=lambda c: c.edge_score, reverse=True)
+        sorted_candidates = sorted(price_filtered, key=lambda c: c.edge_score, reverse=True)
         logger.info(
-            "[GLOBAL-ALLOCATOR] Sorted %d candidates by edge score (best=%.1f%%, worst=%.1f%%)",
+            "[GLOBAL-ALLOCATOR] Sorted %d candidates by edge score (best=%.3f%%, worst=%.3f%%)",
             len(sorted_candidates), sorted_candidates[0].edge_pct, sorted_candidates[-1].edge_pct
         )
         
-        # Greedy fill under venue cap
+        # Greedy fill under venue cap (shared $1 pool)
         chosen = []
         used_notional = 0.0
         asset_allocation = {}
+        asset_order_count = {}  # Track order count per asset to enforce 1 order per asset
         
         for candidate in sorted_candidates:
-            # Check if this order would exceed venue cap
+            # CRITICAL: Enforce 1 contract per asset per window
+            if candidate.asset in asset_order_count:
+                logger.info(
+                    "[GLOBAL-ALLOCATOR] SKIP %s: already has order in this window (1 order per asset limit)",
+                    candidate.asset
+                )
+                continue
+            
+            # Check if this order would exceed venue cap (shared $1 pool)
             if used_notional + candidate.notional_usd > self.venue_cap_usd:
                 logger.info(
-                    "[GLOBAL-ALLOCATOR] SKIP %s: would exceed cap ($%.2f + $%.2f > $%.2f)",
+                    "[GLOBAL-ALLOCATOR] SKIP %s: would exceed shared $1 cap ($%.2f + $%.2f > $%.2f)",
                     candidate.asset, used_notional, candidate.notional_usd, self.venue_cap_usd
                 )
                 continue
             
-            # Check per-asset concentration limit
+            # Check per-asset concentration limit (should be 1.0 for shared pool model)
             asset_current = current_positions.get(candidate.asset, 0.0)
             asset_with_order = asset_allocation.get(candidate.asset, 0.0) + candidate.notional_usd
             max_asset_notional = self.venue_cap_usd * self.max_single_asset_fraction
@@ -145,15 +190,16 @@ class GlobalAllocator:
             chosen.append(candidate)
             used_notional += candidate.notional_usd
             asset_allocation[candidate.asset] = asset_allocation.get(candidate.asset, 0.0) + candidate.notional_usd
+            asset_order_count[candidate.asset] = asset_order_count.get(candidate.asset, 0) + 1
             
             logger.info(
-                "[GLOBAL-ALLOCATOR] CHOOSE %s: edge=%.1f%%, notional=$%.2f, total_used=$%.2f",
-                candidate.asset, candidate.edge_pct, candidate.notional_usd, used_notional
+                "[GLOBAL-ALLOCATOR] CHOOSE %s: edge=%.3f%%, conf=%.0f%%, price=%dc, notional=$%.2f, total_used=$%.2f",
+                candidate.asset, candidate.edge_pct, candidate.confidence * 100, candidate.price_cents, candidate.notional_usd, used_notional
             )
         
         logger.info(
-            "[GLOBAL-ALLOCATOR] Allocation complete: %d/%d chosen, total_notional=$%.2f/%.2f",
-            len(chosen), len(candidates), used_notional, self.venue_cap_usd
+            "[GLOBAL-ALLOCATOR] Allocation complete: %d/%d chosen, total_notional=$%.2f/$%.2f (%.1f%% utilization)",
+            len(chosen), len(candidates), used_notional, self.venue_cap_usd, (used_notional / self.venue_cap_usd) * 100
         )
         
         return chosen
@@ -200,25 +246,37 @@ def create_global_allocator_from_envelope(envelope: Any) -> GlobalAllocator:
     """
     Create GlobalAllocator from risk envelope configuration.
     
+    CRITICAL: Uses shared $1 pool model with no per-asset rescaling.
+    
     Args:
         envelope: Risk envelope instance
     
     Returns:
-        Configured GlobalAllocator
+        Configured GlobalAllocator with shared $1 pool parameters
     """
     venue_cap = envelope.max_total_notional_usd if hasattr(envelope, 'max_total_notional_usd') else 1.00
     
-    # Optional: read allocator knobs from envelope if available
-    min_edge_pct = 2.0
-    max_single_asset_fraction = 0.70
+    # CRITICAL: Use the shared $1 pool parameters (no per-asset rescaling)
+    min_edge_pct = 2.0  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units (actual percentage)
+    min_confidence = 0.50  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence calculation (0.5 + edge/100)
+    min_price_cents = 5  # 2026-07-10: Expanded from 10c to 5c for skewed markets
+    max_price_cents = 95  # 2026-07-10: Expanded from 50c to 95c for skewed markets
+    max_single_asset_fraction = 1.00  # 100% - allows single asset to use full venue cap (shared pool)
     
+    # Optional: read allocator knobs from envelope if available
     if hasattr(envelope, 'allocator_config'):
         config = envelope.allocator_config
-        min_edge_pct = config.get('min_edge_pct', 2.0)
-        max_single_asset_fraction = config.get('max_single_asset_fraction', 0.70)
+        min_edge_pct = config.get('min_edge_pct', 0.05)
+        min_confidence = config.get('min_confidence', 0.65)
+        min_price_cents = config.get('min_price_cents', 10)
+        max_price_cents = config.get('max_price_cents', 50)
+        max_single_asset_fraction = config.get('max_single_asset_fraction', 1.00)
     
     return GlobalAllocator(
         venue_cap_usd=venue_cap,
         min_edge_pct=min_edge_pct,
+        min_confidence=min_confidence,
+        min_price_cents=min_price_cents,
+        max_price_cents=max_price_cents,
         max_single_asset_fraction=max_single_asset_fraction
     )
