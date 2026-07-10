@@ -78,6 +78,9 @@ class GlobalAllocator:
         max_price_cents: int = 95,  # 2026-07-10: Maximum entry price (95c) - expanded for skewed markets
         max_single_asset_fraction: float = 1.00,  # Max 100% of cap per asset (allows single order to use full venue cap)
         enable_correlation_control: bool = False,
+        # 2026-07-10: Per-asset edge thresholds aligned with risk_parameters.py market entry thresholds
+        # This ensures global allocator doesn't filter candidates that pass signal generation
+        per_asset_min_edge_pct: dict = None,
     ):
         self.venue_cap_usd = venue_cap_usd
         self.min_edge_pct = min_edge_pct
@@ -87,9 +90,26 @@ class GlobalAllocator:
         self.max_single_asset_fraction = max_single_asset_fraction
         self.enable_correlation_control = enable_correlation_control
         
+        # Per-asset edge thresholds (aligned with risk_parameters.py market entry thresholds)
+        # If not provided, use defaults aligned with market entry thresholds
+        if per_asset_min_edge_pct is None:
+            self.per_asset_min_edge_pct = {
+                "BTC": 1.75,   # EDGE_MARKET_ENTRY_BTC
+                "ETH": 2.0,    # EDGE_MARKET_ENTRY_ETH
+                "SOL": 2.5,    # EDGE_MARKET_ENTRY_SOL
+                "XRP": 3.0,    # EDGE_MARKET_ENTRY_XRP
+                "DOGE": 3.5,   # EDGE_MARKET_ENTRY_DOGE
+            }
+        else:
+            self.per_asset_min_edge_pct = per_asset_min_edge_pct
+        
         logger.info(
             "[GLOBAL-ALLOCATOR] Initialized: venue_cap=$%.2f, min_edge=%.3f%%, min_conf=%.0f%%, price_range=[%dc-%dc], max_single=%.1f%%",
             venue_cap_usd, min_edge_pct, min_confidence * 100, min_price_cents, max_price_cents, max_single_asset_fraction * 100
+        )
+        logger.info(
+            "[GLOBAL-ALLOCATOR] Per-asset edge thresholds: %s",
+            ", ".join(f"{k}={v}%" for k, v in self.per_asset_min_edge_pct.items())
         )
     
     def allocate(
@@ -116,12 +136,22 @@ class GlobalAllocator:
         
         current_positions = current_positions or {}
         
-        # Filter by minimum edge (0.05%)
-        filtered = [c for c in candidates if c.edge_pct >= self.min_edge_pct]
+        # Filter by minimum edge (per-asset thresholds aligned with risk_parameters.py)
+        filtered = []
+        for c in candidates:
+            asset_min_edge = self.per_asset_min_edge_pct.get(c.asset, self.min_edge_pct)
+            if c.edge_pct >= asset_min_edge:
+                filtered.append(c)
+            else:
+                logger.info(
+                    "[GLOBAL-ALLOCATOR] SKIP %s: edge=%.3f%% < per_asset_min_edge=%.3f%%",
+                    c.asset, c.edge_pct, asset_min_edge
+                )
+        
         if len(filtered) < len(candidates):
             logger.info(
-                "[GLOBAL-ALLOCATOR] Filtered %d/%d candidates below min edge %.3f%%",
-                len(candidates) - len(filtered), len(candidates), self.min_edge_pct
+                "[GLOBAL-ALLOCATOR] Filtered %d/%d candidates below per-asset min edge thresholds",
+                len(candidates) - len(filtered), len(candidates)
             )
         
         # Filter by minimum confidence (50%)
@@ -246,13 +276,13 @@ def create_global_allocator_from_envelope(envelope: Any) -> GlobalAllocator:
     """
     Create GlobalAllocator from risk envelope configuration.
     
-    CRITICAL: Uses shared $1 pool model with no per-asset rescaling.
+    CRITICAL: Uses shared $1 pool model with per-asset edge thresholds aligned with risk_parameters.py.
     
     Args:
         envelope: Risk envelope instance
     
     Returns:
-        Configured GlobalAllocator with shared $1 pool parameters
+        Configured GlobalAllocator with shared $1 pool parameters and per-asset edge thresholds
     """
     venue_cap = envelope.max_total_notional_usd if hasattr(envelope, 'max_total_notional_usd') else 1.00
     
@@ -263,6 +293,15 @@ def create_global_allocator_from_envelope(envelope: Any) -> GlobalAllocator:
     max_price_cents = 95  # 2026-07-10: Expanded from 50c to 95c for skewed markets
     max_single_asset_fraction = 1.00  # 100% - allows single asset to use full venue cap (shared pool)
     
+    # 2026-07-10: Per-asset edge thresholds aligned with risk_parameters.py market entry thresholds
+    per_asset_min_edge_pct = {
+        "BTC": 1.75,   # EDGE_MARKET_ENTRY_BTC
+        "ETH": 2.0,    # EDGE_MARKET_ENTRY_ETH
+        "SOL": 2.5,    # EDGE_MARKET_ENTRY_SOL
+        "XRP": 3.0,    # EDGE_MARKET_ENTRY_XRP
+        "DOGE": 3.5,   # EDGE_MARKET_ENTRY_DOGE
+    }
+    
     # Optional: read allocator knobs from envelope if available
     if hasattr(envelope, 'allocator_config'):
         config = envelope.allocator_config
@@ -271,6 +310,9 @@ def create_global_allocator_from_envelope(envelope: Any) -> GlobalAllocator:
         min_price_cents = config.get('min_price_cents', 10)
         max_price_cents = config.get('max_price_cents', 50)
         max_single_asset_fraction = config.get('max_single_asset_fraction', 1.00)
+        # Allow envelope to override per-asset thresholds if provided
+        if 'per_asset_min_edge_pct' in config:
+            per_asset_min_edge_pct = config['per_asset_min_edge_pct']
     
     return GlobalAllocator(
         venue_cap_usd=venue_cap,
@@ -278,5 +320,6 @@ def create_global_allocator_from_envelope(envelope: Any) -> GlobalAllocator:
         min_confidence=min_confidence,
         min_price_cents=min_price_cents,
         max_price_cents=max_price_cents,
-        max_single_asset_fraction=max_single_asset_fraction
+        max_single_asset_fraction=max_single_asset_fraction,
+        per_asset_min_edge_pct=per_asset_min_edge_pct
     )
