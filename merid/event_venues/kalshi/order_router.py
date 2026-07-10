@@ -6473,14 +6473,15 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
         if profile_adapter and profile_adapter.profile:
             profile_name = getattr(profile_adapter.profile, 'profile_name', '')
             if profile_name == 'kalshi_crypto_15m_v2':
-                # Check source - only allow agent_grid_15m for this profile
-                allowed_source = "merid.prediction.agent_grid_15m"
-                if intent.source and "kalshi_tools" in intent.source:
+                # Check source - allow both agent_grid_15m and kalshi_tools for this profile
+                # kalshi_tools is used by global allocator for execution (2026-07-10 fix)
+                allowed_sources = ["merid.prediction.agent_grid_15m", "kalshi_tools"]
+                if intent.source and not any(allowed in intent.source for allowed in allowed_sources):
                     latency = (_time.monotonic() - t0) * 1000
                     logger.error(
                         "[PROFILE_BLOCKED_SOURCE] Order rejected: source=%s not allowed for profile=%s "
-                        "(only %s allowed) | ticker=%s | intent_id=%s",
-                        intent.source, profile_name, allowed_source, intent.ticker, intent.intent_id
+                        "(allowed: %s) | ticker=%s | intent_id=%s",
+                        intent.source, profile_name, ", ".join(allowed_sources), intent.ticker, intent.intent_id
                     )
                     logger.info(
                         "[ORDER-BLOCKED] ticker=%s reason=PROFILE_BLOCKED_SOURCE source=%s profile=%s",
@@ -6489,7 +6490,7 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
                     return OrderResult(
                         status="rejected",
                         mode=get_venue_gate().mode,
-                        reason="profile_blocked_source:kalshi_tools_not_allowed_for_kalshi_crypto_15m_v2",
+                        reason=f"profile_blocked_source:{intent.source}_not_allowed_for_kalshi_crypto_15m_v2",
                         latency_ms=round(latency, 2),
                     )
     except Exception as e:
