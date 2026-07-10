@@ -61,7 +61,7 @@ class ExecutionDecision:
 # Thresholds
 _NARROW_SPREAD = 0.03    # 3 cents — cheap to cross
 _WIDE_SPREAD = 0.08      # 8 cents — expensive to cross
-_HIGH_EDGE = 0.04        # 4% edge — worth crossing for (ALIGNED TO 2026 INDUSTRY STANDARD)
+_HIGH_EDGE = 0.0175      # 1.75% edge — worth crossing for (ALIGNED TO 2026 MOLTBOOK RESEARCH)
 _URGENT_MINUTES = 30.0   # < 30 min = urgent
 _DEEP_QUEUE = 200        # > 200 contracts at touch = long wait
 

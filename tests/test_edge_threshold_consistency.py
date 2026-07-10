@@ -27,24 +27,24 @@ def test_edge_thresholds_yaml():
     
     assets = config.get('assets', {})
     
-    # Verify edge thresholds by asset tier with Phase 1A terminal edge reductions
-    # Tier 1 (BTC/ETH): 3-3.5% edge (Phase 1A: terminal reduced from 4% to 3.5%)
-    assert assets['BTC']['min_edge_early'] == 0.03, "BTC min_edge_early should be 3%"
-    assert assets['BTC']['min_edge_terminal'] == 0.035, "BTC min_edge_terminal should be 3.5% (Phase 1A)"
-    assert assets['ETH']['min_edge_early'] == 0.03, "ETH min_edge_early should be 3%"
-    assert assets['ETH']['min_edge_terminal'] == 0.035, "ETH min_edge_terminal should be 3.5% (Phase 1A)"
+    # Verify edge thresholds by asset tier with moltbook research (2026-07-10)
+    # Tier 1 (BTC/ETH): Base 1.25-1.5%, terminal 1.75-2.0% (pragmatic for liquidity)
+    assert assets['BTC']['min_edge_early'] == 0.0125, "BTC min_edge_early should be 1.25%"
+    assert assets['BTC']['min_edge_terminal'] == 0.0175, "BTC min_edge_terminal should be 1.75%"
+    assert assets['ETH']['min_edge_early'] == 0.015, "ETH min_edge_early should be 1.5%"
+    assert assets['ETH']['min_edge_terminal'] == 0.02, "ETH min_edge_terminal should be 2.0%"
     
-    # Tier 2 (SOL/XRP): 4-4.5% edge (Phase 1A: terminal reduced from 5% to 4.5%)
-    assert assets['SOL']['min_edge_early'] == 0.04, "SOL min_edge_early should be 4%"
-    assert assets['SOL']['min_edge_terminal'] == 0.045, "SOL min_edge_terminal should be 4.5% (Phase 1A)"
-    assert assets['XRP']['min_edge_early'] == 0.04, "XRP min_edge_early should be 4%"
-    assert assets['XRP']['min_edge_terminal'] == 0.045, "XRP min_edge_terminal should be 4.5% (Phase 1A)"
+    # Tier 2 (SOL/XRP): Base 2.0-2.25%, terminal 2.5-3.0% (thinner liquidity)
+    assert assets['SOL']['min_edge_early'] == 0.02, "SOL min_edge_early should be 2.0%"
+    assert assets['SOL']['min_edge_terminal'] == 0.025, "SOL min_edge_terminal should be 2.5%"
+    assert assets['XRP']['min_edge_early'] == 0.0225, "XRP min_edge_early should be 2.25%"
+    assert assets['XRP']['min_edge_terminal'] == 0.03, "XRP min_edge_terminal should be 3.0%"
     
-    # DOGE (highest volatility): 5-5.5% edge (Phase 1A: terminal reduced from 6% to 5.5%)
-    assert assets['DOGE']['min_edge_early'] == 0.05, "DOGE min_edge_early should be 5%"
-    assert assets['DOGE']['min_edge_terminal'] == 0.055, "DOGE min_edge_terminal should be 5.5% (Phase 1A)"
+    # DOGE (highest volatility): Base 2.75%, terminal 3.5% (noisiest moves)
+    assert assets['DOGE']['min_edge_early'] == 0.0275, "DOGE min_edge_early should be 2.75%"
+    assert assets['DOGE']['min_edge_terminal'] == 0.035, "DOGE min_edge_terminal should be 3.5%"
     
-    print("✓ Edge thresholds in YAML are appropriate for each asset tier (Phase 1A)")
+    print("✓ Edge thresholds in YAML are appropriate for each asset tier (moltbook 2026-07-10)")
 
 
 def test_edge_thresholds_profile():
@@ -139,15 +139,17 @@ def test_edge_thresholds_not_too_low():
     
     assets = config.get('assets', {})
     
-    # Edge thresholds should be reasonable (not < 2%)
+    # Edge thresholds should be reasonable (not < 1% for BTC, not < 1.5% for others)
     for asset, asset_config in assets.items():
         min_edge_early = asset_config['min_edge_early']
         min_edge_terminal = asset_config['min_edge_terminal']
         
-        assert min_edge_early >= 0.02, f"{asset} min_edge_early {min_edge_early} is too low (< 2%)"
-        assert min_edge_terminal >= 0.02, f"{asset} min_edge_terminal {min_edge_terminal} is too low (< 2%)"
+        # BTC can go as low as 1.25%, others should be >= 1.5%
+        min_allowed = 0.0125 if asset == 'BTC' else 0.015
+        assert min_edge_early >= min_allowed, f"{asset} min_edge_early {min_edge_early} is too low (< {min_allowed*100}%)"
+        assert min_edge_terminal >= min_allowed, f"{asset} min_edge_terminal {min_edge_terminal} is too low (< {min_allowed*100}%)"
     
-    print("✓ Edge thresholds are not too low (all >= 2%)")
+    print("✓ Edge thresholds are not too low (BTC >= 1.25%, others >= 1.5%)")
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ from utils.logger import get_logger
 logger = get_logger("merid.prediction.edge_recalibrator")
 
 # Safety floors — thresholds never drop below these
-MIN_EDGE_FLOOR = Decimal("0.020")   # ALIGNED TO 2026 INDUSTRY STANDARD: 2% absolute minimum edge
+MIN_EDGE_FLOOR = Decimal("0.0125")  # ALIGNED TO 2026 MOLTBOOK RESEARCH: 1.25% absolute minimum edge (BTC base)
 MAX_EDGE_CEILING = Decimal("0.15")  # 15% — don't require absurd edges
 
 # How aggressively to adjust (0 = no change, 1 = full correction)

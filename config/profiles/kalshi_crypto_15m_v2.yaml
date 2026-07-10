@@ -735,12 +735,12 @@ assets:
       value: 1  # 1 contract per order (slot-based exposure management)
       static: profile
       description: "Maximum contracts per order for BTC (1 contract per slot)"
-    # Edge thresholds based on 2026 volatility research (BTC: 45-55% vol, 1.5-3% intraday range)
-    # Tier 1 (core assets): 3-3.5% min edge (Phase 1A: terminal reduced from 4% to 3.5%)
-    min_edge_early: 0.03  # REDUCED from 6% to 3% early edge (achievable in 15m markets)
-    min_edge_mid: 0.03  # REDUCED from 6% to 3% mid edge (achievable in 15m markets)
-    min_edge_late: 0.03  # REDUCED from 6% to 3% late edge (achievable in 15m markets)
-    min_edge_terminal: 0.035  # Phase 1A: REDUCED from 4% to 3.5% terminal edge (achievable in 15m markets)
+    # Edge thresholds based on 2026 moltbook research for 15m Kalshi crypto markets
+    # Tier 1 (core assets): Base 1.25%, terminal 1.75% (pragmatic for BTC liquidity)
+    min_edge_early: 0.0125  # 1.25% base edge (most liquid asset, lowest bar)
+    min_edge_mid: 0.0125  # 1.25% base edge (consistent across early/mid/late)
+    min_edge_late: 0.0125  # 1.25% base edge (consistent across early/mid/late)
+    min_edge_terminal: 0.0175  # 1.75% terminal edge (small bump in last minutes)
     # Distance-from-target filter
     max_distance_pct: 0.015  # 1.5% max distance for BTC (deep liquidity allows tighter bounds)
     # Liquidity and microstructure filters
@@ -762,12 +762,12 @@ assets:
       value: 1  # 1 contract per order (slot-based exposure management)
       static: profile
       description: "Maximum contracts per order for ETH (1 contract per slot)"
-    # Edge thresholds based on 2026 volatility research (ETH: 45.2% vol in April 2026, declining - L2 scaling maturation)
-    # Tier 1 (core assets): 3-3.5% min edge (Phase 1A: terminal reduced from 4% to 3.5%)
-    min_edge_early: 0.03  # REDUCED from 6% to 3% early edge (achievable in 15m markets)
-    min_edge_mid: 0.03  # REDUCED from 6% to 3% mid edge (achievable in 15m markets)
-    min_edge_late: 0.03  # REDUCED from 6% to 3% late edge (achievable in 15m markets)
-    min_edge_terminal: 0.035  # Phase 1A: REDUCED from 4% to 3.5% terminal edge (achievable in 15m markets)
+    # Edge thresholds based on 2026 moltbook research for 15m Kalshi crypto markets
+    # Tier 1 (core assets): Base 1.5%, terminal 2.0% (ETH thinner than BTC)
+    min_edge_early: 0.015  # 1.5% base edge (slightly higher than BTC due to thinner liquidity)
+    min_edge_mid: 0.015  # 1.5% base edge (consistent across early/mid/late)
+    min_edge_late: 0.015  # 1.5% base edge (consistent across early/mid/late)
+    min_edge_terminal: 0.02  # 2.0% terminal edge (small bump in last minutes)
     # Distance-from-target filter
     max_distance_pct: 0.018  # 1.8% max distance for ETH (tightened from 2.0% - declining volatility)
     # Liquidity and microstructure filters
@@ -789,12 +789,12 @@ assets:
       value: 1  # 1 contract per order (slot-based exposure management)
       static: profile
       description: "Maximum contracts per order for SOL (1 contract per slot)"
-    # Edge thresholds based on 2026 volatility research (SOL: 89.6% vol in April 2026, increasing - speculative capital rotation)
-    # Tier 2 (alt assets): 4-4.5% min edge (Phase 1A: terminal reduced from 5% to 4.5%)
-    min_edge_early: 0.04  # REDUCED from 8% to 4% early edge (achievable in 15m markets)
-    min_edge_mid: 0.04  # REDUCED from 8% to 4% mid edge (achievable in 15m markets)
-    min_edge_late: 0.04  # REDUCED from 8% to 4% late edge (achievable in 15m markets)
-    min_edge_terminal: 0.045  # Phase 1A: REDUCED from 5% to 4.5% terminal edge (achievable in 15m markets)
+    # Edge thresholds based on 2026 moltbook research for 15m Kalshi crypto markets
+    # Tier 2 (alt assets): Base 2.0%, terminal 2.5% (SOL thinner than ETH)
+    min_edge_early: 0.02  # 2.0% base edge (higher due to thinner liquidity)
+    min_edge_mid: 0.02  # 2.0% base edge (consistent across early/mid/late)
+    min_edge_late: 0.02  # 2.0% base edge (consistent across early/mid/late)
+    min_edge_terminal: 0.025  # 2.5% terminal edge (small bump in last minutes)
     # Distance-from-target filter
     max_distance_pct: 0.025  # 2.5% max distance for SOL (appropriate for high volatility)
     # Liquidity and microstructure filters
@@ -816,12 +816,12 @@ assets:
       value: 1  # 1 contract per order (slot-based exposure management)
       static: profile
       description: "Maximum contracts per order for XRP (1 contract per slot)"
-    # Edge thresholds based on 2026 volatility research (XRP: ~55% vol, event-driven, beta 1.35)
-    # Tier 2 (alt assets): 4-4.5% min edge (Phase 1A: terminal reduced from 5% to 4.5%)
-    min_edge_early: 0.04  # REDUCED from 7% to 4% early edge (achievable in 15m markets)
-    min_edge_mid: 0.04  # REDUCED from 7% to 4% mid edge (achievable in 15m markets)
-    min_edge_late: 0.04  # REDUCED from 7% to 4% late edge (achievable in 15m markets)
-    min_edge_terminal: 0.045  # Phase 1A: REDUCED from 5% to 4.5% terminal edge (achievable in 15m markets)
+    # Edge thresholds based on 2026 moltbook research for 15m Kalshi crypto markets
+    # Tier 2 (alt assets): Base 2.25%, terminal 3.0% (XRP event-driven, needs precision)
+    min_edge_early: 0.0225  # 2.25% base edge (higher due to event-driven nature)
+    min_edge_mid: 0.0225  # 2.25% base edge (consistent across early/mid/late)
+    min_edge_late: 0.0225  # 2.25% base edge (consistent across early/mid/late)
+    min_edge_terminal: 0.03  # 3.0% terminal edge (small bump in last minutes)
     # Distance-from-target filter
     max_distance_pct: 0.025  # 2.5% max distance for XRP (tightened from 3.0% - event-driven needs precision)
     # Liquidity and microstructure filters
@@ -843,12 +843,12 @@ assets:
       value: 1  # 1 contract per order (slot-based exposure management)
       static: profile
       description: "Maximum contracts per order for DOGE (1 contract per slot)"
-    # Edge thresholds based on 2026 volatility research (DOGE: ~100% vol, sentiment-driven, highest beta 2.70)
-    # Tier 2 (alt assets): 5-5.5% min edge (Phase 1A: terminal reduced from 6% to 5.5%)
-    min_edge_early: 0.05  # REDUCED from 8.5% to 5% early edge (achievable in 15m markets)
-    min_edge_mid: 0.05  # REDUCED from 8.5% to 5% mid edge (achievable in 15m markets)
-    min_edge_late: 0.05  # REDUCED from 8.5% to 5% late edge (achievable in 15m markets)
-    min_edge_terminal: 0.055  # Phase 1A: REDUCED from 6% to 5.5% terminal edge (achievable in 15m markets)
+    # Edge thresholds based on 2026 moltbook research for 15m Kalshi crypto markets
+    # Tier 2 (alt assets): Base 2.75%, terminal 3.5% (DOGE most volatile, noisiest moves)
+    min_edge_early: 0.0275  # 2.75% base edge (highest due to most volatile/noisiest moves)
+    min_edge_mid: 0.0275  # 2.75% base edge (consistent across early/mid/late)
+    min_edge_late: 0.0275  # 2.75% base edge (consistent across early/mid/late)
+    min_edge_terminal: 0.035  # 3.5% terminal edge (small bump in last minutes)
     # Distance-from-target filter
     max_distance_pct: 0.025  # Tightened from 3.0% to 2.5% (sentiment-driven needs precision)
     # Liquidity and microstructure filters

@@ -33,7 +33,7 @@ class FallbackConfig:
     min_age_before_fallback: int = 30  # Minimum age before considering fallback
     
     # Conviction thresholds
-    min_edge_pct: float = 0.04  # Minimum edge for fallback (4%)
+    min_edge_pct: float = 0.0125  # Minimum edge for fallback (1.25% BTC base)
     min_confidence: float = 0.70  # Minimum model confidence
     
     # Time to expiry

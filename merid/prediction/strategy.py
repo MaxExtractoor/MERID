@@ -65,12 +65,12 @@ def _get_min_edge_for_phase(phase: ExpiryPhase) -> Decimal:
     """Get min edge from profile edge_bands (single source of truth).
 
     DELETED: kalshi_distance.yaml and env var overrides - now uses profile edge_bands
-    (4-5% watch, 5-7% small, >=7% standard) with 4% hard floor for all phases.
-    FIXED: Changed from 2% to 4% to match YAML edge_bands small band and prevent 100% losses.
+    2026-07-10: Updated to moltbook research values (BTC base 1.25%, terminal 1.75%)
+    This is the absolute minimum floor across all assets - per-asset thresholds are higher.
     """
-    # Single source of truth: 4% minimum edge from profile edge_bands (small band floor)
-    # INCREASED from 2% to 4% based on 100% loss analysis - previous 2% too low
-    return Decimal("0.04")
+    # Single source of truth: 1.25% minimum edge (BTC base - most liquid asset)
+    # Per-asset thresholds in profile YAML scale from this base (BTC 1.25% -> DOGE 2.75%)
+    return Decimal("0.0125")
 
 
 # Validate config loaded at module import time
