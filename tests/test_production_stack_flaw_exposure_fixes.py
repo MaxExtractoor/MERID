@@ -203,19 +203,26 @@ class TestRiskEnvelopeConsistency:
     """Test that risk envelope is consistent across layers."""
     
     def test_window_limits_configured_correctly(self):
-        """Test that window-based risk limits are configured correctly (3% per agent, 5% total)."""
+        """Test that window-based risk limits are configured correctly (fixed $1.00 model).
+        
+        CRITICAL FIX 2026-07-10: Per-agent limit is disabled.
+        Only total venue limit is enforced by risk envelope.
+        The global slot allocator enforces $1.00 total cap across all 5 agents.
+        Uses fixed $1.00 exposure model (not percentage-based).
+        """
         from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import compute_kalshi_crypto_15m_risk_envelope
         
         test_bankroll = 1000.0
         envelope = compute_kalshi_crypto_15m_risk_envelope(test_bankroll)
         
-        # Check per-agent window limit (3%)
-        expected_per_agent = test_bankroll * 0.03
-        assert abs(envelope.per_agent_window_limit_usd - expected_per_agent) < 0.01, \
-            f"Per-agent window limit mismatch: {envelope.per_agent_window_limit_usd} vs {expected_per_agent}"
+        # CRITICAL FIX 2026-07-10: Per-agent limit check DISABLED
+        # Only total venue limit is enforced
+        # expected_per_agent = test_bankroll * 0.03
+        # assert abs(envelope.per_agent_window_limit_usd - expected_per_agent) < 0.01, \
+        #     f"Per-agent window limit mismatch: {envelope.per_agent_window_limit_usd} vs {expected_per_agent}"
         
-        # Check total venue window limit (5%)
-        expected_total = test_bankroll * 0.05
+        # Check total venue window limit (fixed $1.00, not percentage-based)
+        expected_total = 1.00  # Fixed exposure cap from MERID_FIXED_EXPOSURE_CAP_USD
         assert abs(envelope.total_venue_window_limit_usd - expected_total) < 0.01, \
             f"Total venue window limit mismatch: {envelope.total_venue_window_limit_usd} vs {expected_total}"
     

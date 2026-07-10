@@ -1,3 +1,4 @@
+
 """
 Kalshi Crypto 15m Canonical Risk Envelope
 
@@ -521,40 +522,38 @@ class KalshiCrypto15mRiskEnvelope:
             if asset:
                 current_asset_exposure = _WINDOW_TRACKING_STATE["asset_exposure_usd"].get(asset, 0.0)
         
-        # 2026-07-08: DISABLED percentage-based window limits - using fixed $1 exposure model
-        # Use custom limits if provided, otherwise use fixed $1 exposure cap
+        # 2026-07-10: CRITICAL FIX - DISABLED per-agent limit check
+        # The global slot allocator enforces $1.00 total cap across all 5 agents
+        # Per-agent limit check was blocking each agent at $1.00 individually
+        # This prevented the slot allocator from properly allocating shared capital
+        # Only total venue limit is enforced here
         import os
         fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
-        per_agent_limit_usd = custom_per_agent_limit_pct if custom_per_agent_limit_pct else fixed_exposure_cap_usd
         total_venue_limit_usd = custom_total_venue_limit_pct if custom_total_venue_limit_pct else fixed_exposure_cap_usd
-        new_agent_exposure = current_agent_exposure + order_notional_usd
-        new_agent_total = new_agent_exposure + current_agent_resting  # Executed + Resting
         
-        # Check per-agent window limit (HARD STOP) - includes resting orders
-        if new_agent_total > per_agent_limit_usd:
-            reason = (
-                f"per_agent_window_limit: agent={agent_id} "
-                f"executed=${current_agent_exposure:.2f} + resting=${current_agent_resting:.2f} + order=${order_notional_usd:.2f} "
-                f"= ${new_agent_total:.2f} > limit=${per_agent_limit_usd:.2f} - HARD STOP"
-            )
-            logger.warning(f"[WINDOW-TRACKING] {reason}")
-            return False, reason
+        # CRITICAL FIX 2026-07-10: Per-agent limit check DISABLED
+        # The global slot allocator (global_slot_allocator.py) is the single source of truth
+        # for $1.00 total exposure enforcement across all 5 assets (BTC+ETH+SOL+XRP+DOGE)
+        # This allows agents to compete for the shared $1.00 pool based on edge quality
         
-        # 2026-07-08: DISABLED percentage-based per-asset window limit - using fixed $1 exposure model
+        # 2026-07-10: CRITICAL FIX - DISABLED per-asset limit check
+        # The global slot allocator enforces $1.00 total cap across all 5 assets
+        # Per-asset limit check was redundant and conflicted with slot allocator
+        # Only total venue limit is enforced here
         if asset:
             import os
             fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
-            per_asset_limit_usd = fixed_exposure_cap_usd
-            new_asset_exposure = current_asset_exposure + order_notional_usd
-            
-            if new_asset_exposure > per_asset_limit_usd:
-                reason = (
-                    f"per_asset_window_limit: asset={asset} "
-                    f"executed=${current_asset_exposure:.2f} + order=${order_notional_usd:.2f} "
-                    f"= ${new_asset_exposure:.2f} > limit=${per_asset_limit_usd:.2f} - HARD STOP"
-                )
-                logger.warning(f"[WINDOW-TRACKING] {reason}")
-                return False, reason
+            # Per-asset limit check DISABLED - slot allocator handles this
+            # new_asset_exposure = current_asset_exposure + order_notional_usd
+            # if new_asset_exposure > per_asset_limit_usd:
+            #     reason = (
+            #         f"per_asset_window_limit: asset={asset} "
+            #         f"executed=${current_asset_exposure:.2f} + order=${order_notional_usd:.2f} "
+            #         f"= ${new_asset_exposure:.2f} > limit=${per_asset_limit_usd:.2f} - HARD STOP"
+            #     )
+            #     logger.warning(f"[WINDOW-TRACKING] {reason}")
+            #     return False, reason
+            pass
         
         # Calculate total venue window limit (including resting orders)
         # 2026-07-08: DISABLED percentage-based total venue window limit - using fixed $1 exposure model
@@ -573,8 +572,8 @@ class KalshiCrypto15mRiskEnvelope:
         
         logger.info(
             f"[WINDOW-TRACKING] Window check OK: agent={agent_id} asset={asset or 'N/A'} "
-            f"agent_exposure=${current_agent_exposure:.2f}+${order_notional_usd:.2f} <= ${per_agent_limit_usd:.2f}, "
-            f"venue_exposure=${current_total_exposure:.2f}+${order_notional_usd:.2f} <= ${total_venue_limit_usd:.2f}"
+            f"venue_exposure=${current_total_exposure:.2f}+${order_notional_usd:.2f} <= ${total_venue_limit_usd:.2f} "
+            f"(per-agent limit DISABLED - slot allocator enforces $1.00 total across all 5 assets)"
         )
         return True, ""
     
@@ -1217,14 +1216,16 @@ def compute_kalshi_crypto_15m_risk_envelope(
         f"scaled={total_asset_cap > max_total_notional_usd}"
     )
     logger.info(
-        f"[RISK-ENVELOPE-SNAPSHOT] Global slot allocator enforces ${fixed_exposure_cap_usd:.2f} total exposure across all assets "
-        f"(per-asset caps shown below are upper bounds, actual allocation managed by slot allocator)"
+        f"[RISK-ENVELOPE-SNAPSHOT] CRITICAL: ${fixed_exposure_cap_usd:.2f} is the TOTAL exposure cap across ALL 5 assets (BTC+ETH+SOL+XRP+DOGE)"
+    )
+    logger.info(
+        f"[RISK-ENVELOPE-SNAPSHOT] Per-asset upper bounds below are NOT individual caps - slot allocator enforces ${fixed_exposure_cap_usd:.2f} TOTAL"
     )
     for asset_symbol, cap in asset_max_notional_usd.items():
         # 2026-07-08: DISABLED percentage-based snapshot - using fixed $1 exposure model
         logger.info(
             f"[RISK-ENVELOPE-SNAPSHOT] {asset_symbol}: "
-            f"final_cap=${cap:.2f}"
+            f"upper_bound=${cap:.2f} (NOT a per-asset cap - total cap is ${fixed_exposure_cap_usd:.2f} across all assets)"
         )
     
     return envelope
