@@ -417,7 +417,7 @@ class RealtimeTradingMonitor:
             return
         
         # Market validation rejection (only count FAILED, not VALID)
-        match = self.PATTERNS['market_validation_failed'].search(message)
+        match = self.PATTERNS['market_validation_rejection'].search(message)
         if match:
             asset = match.group(1)
             if asset in self.stats:
