@@ -174,89 +174,67 @@ class GlobalAllocator:
             logger.info("[GLOBAL-ALLOCATOR] No candidates passed all filters (edge, confidence, price)")
             return []
         
-        # Sort by edge score (descending), then by price (ascending) to prioritize cheaper orders with similar edges
-        sorted_candidates = sorted(price_filtered, key=lambda c: (c.edge_score, -c.notional_usd), reverse=True)
-        # Actually, we want: higher edge first, then lower notional (cheaper) first
-        # With reverse=True, we need to negate notional to get ascending order
-        # So: (edge_score, -notional) with reverse=True gives (higher edge, lower notional)
+        # Optimal knapsack-style allocation under $1 cap
+        # For small asset universe (5 assets), brute-force all combinations to find optimal
+        # This ensures we get the best combination of edges that fits under cap
+        from itertools import combinations
+        
+        # Group candidates by asset (1 per asset max)
+        asset_candidates = {}
+        for candidate in price_filtered:
+            if candidate.asset not in asset_candidates:
+                asset_candidates[candidate.asset] = candidate  # Keep best per asset (already sorted by edge)
+        
+        unique_candidates = list(asset_candidates.values())
         logger.info(
-            "[GLOBAL-ALLOCATOR] Sorted %d candidates by edge then price (best=%.3f%%, worst=%.3f%%)",
-            len(sorted_candidates), sorted_candidates[0].edge_pct, sorted_candidates[-1].edge_pct
+            "[GLOBAL-ALLOCATOR] Evaluating %d unique candidates (1 per asset) for optimal $1 cap allocation",
+            len(unique_candidates)
         )
         
-        # Greedy fill under venue cap (shared $1 pool)
-        chosen = []
-        used_notional = 0.0
-        asset_allocation = {}
-        asset_order_count = {}  # Track order count per asset to enforce 1 order per asset
+        best_combination = []
+        best_total_edge = 0.0
+        best_total_notional = 0.0
         
-        for candidate in sorted_candidates:
-            # CRITICAL: Enforce 1 contract per asset per window
-            if candidate.asset in asset_order_count:
-                logger.info(
-                    "[GLOBAL-ALLOCATOR] SKIP %s: already has order in this window (1 order per asset limit)",
-                    candidate.asset
-                )
-                continue
-            
-            # Check if this order would exceed venue cap (shared $1 pool)
-            # If this is the first order and no orders chosen yet, try to fit it anyway
-            # to ensure at least one order executes if possible
-            if used_notional + candidate.notional_usd > self.venue_cap_usd:
-                if not chosen:
-                    # No orders yet - try to find a cheaper candidate that fits
-                    logger.info(
-                        "[GLOBAL-ALLOCATOR] First candidate %s exceeds cap ($%.2f > $%.2f), looking for cheaper alternative",
-                        candidate.asset, candidate.notional_usd, self.venue_cap_usd
-                    )
-                    # Try to find the cheapest candidate that fits under cap
-                    for alt_candidate in sorted_candidates:
-                        if alt_candidate.asset in asset_order_count:
-                            continue
-                        if alt_candidate.notional_usd <= self.venue_cap_usd:
-                            logger.info(
-                                "[GLOBAL-ALLOCATOR] Found cheaper alternative %s ($%.2f <= $%.2f)",
-                                alt_candidate.asset, alt_candidate.notional_usd, self.venue_cap_usd
-                            )
-                            # Use this candidate instead
-                            candidate = alt_candidate
-                            break
-                    else:
-                        # No affordable candidate found
-                        logger.info(
-                            "[GLOBAL-ALLOCATOR] SKIP %s: no affordable candidates under $%.2f cap",
-                            candidate.asset, self.venue_cap_usd
-                        )
-                        continue
-                else:
-                    # Already have orders, skip this one
-                    logger.info(
-                        "[GLOBAL-ALLOCATOR] SKIP %s: would exceed shared $1 cap ($%.2f + $%.2f > $%.2f)",
-                        candidate.asset, used_notional, candidate.notional_usd, self.venue_cap_usd
-                    )
+        # Try all combinations (2^n where n=5, so max 32 combinations)
+        for r in range(1, len(unique_candidates) + 1):
+            for combo in combinations(unique_candidates, r):
+                total_notional = sum(c.notional_usd for c in combo)
+                
+                # Skip if exceeds cap
+                if total_notional > self.venue_cap_usd:
                     continue
-            
-            # Check per-asset concentration limit (should be 1.0 for shared pool model)
-            asset_current = current_positions.get(candidate.asset, 0.0)
-            asset_with_order = asset_allocation.get(candidate.asset, 0.0) + candidate.notional_usd
-            max_asset_notional = self.venue_cap_usd * self.max_single_asset_fraction
-            
-            if asset_with_order > max_asset_notional:
-                logger.info(
-                    "[GLOBAL-ALLOCATOR] SKIP %s: would exceed max single asset allocation ($%.2f > $%.2f)",
-                    candidate.asset, asset_with_order, max_asset_notional
-                )
-                continue
-            
-            # Add to chosen
-            chosen.append(candidate)
-            used_notional += candidate.notional_usd
-            asset_allocation[candidate.asset] = asset_allocation.get(candidate.asset, 0.0) + candidate.notional_usd
-            asset_order_count[candidate.asset] = asset_order_count.get(candidate.asset, 0) + 1
-            
+                
+                # Check per-asset concentration limit
+                combo_valid = True
+                for candidate in combo:
+                    asset_current = current_positions.get(candidate.asset, 0.0)
+                    asset_with_order = candidate.notional_usd
+                    max_asset_notional = self.venue_cap_usd * self.max_single_asset_fraction
+                    if asset_with_order > max_asset_notional:
+                        combo_valid = False
+                        break
+                
+                if not combo_valid:
+                    continue
+                
+                # Calculate total edge score for this combination
+                total_edge = sum(c.edge_score for c in combo)
+                
+                # Prefer combination with higher total edge
+                # If tied, prefer lower notional (cheaper)
+                if total_edge > best_total_edge or (total_edge == best_total_edge and total_notional < best_total_notional):
+                    best_combination = list(combo)
+                    best_total_edge = total_edge
+                    best_total_notional = total_notional
+        
+        chosen = best_combination
+        used_notional = best_total_notional
+        
+        # Log chosen orders
+        for candidate in chosen:
             logger.info(
-                "[GLOBAL-ALLOCATOR] CHOOSE %s: edge=%.3f%%, conf=%.0f%%, price=%dc, notional=$%.2f, total_used=$%.2f",
-                candidate.asset, candidate.edge_pct, candidate.confidence * 100, candidate.price_cents, candidate.notional_usd, used_notional
+                "[GLOBAL-ALLOCATOR] CHOOSE %s: edge=%.3f%%, conf=%.0f%%, price=%dc, notional=$%.2f",
+                candidate.asset, candidate.edge_pct, candidate.confidence * 100, candidate.price_cents, candidate.notional_usd
             )
         
         logger.info(

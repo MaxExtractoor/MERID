@@ -277,5 +277,108 @@ def test_global_allocator_sorts_by_edge_then_price():
     assert len(eth_orders) == 1, f"Expected 1 ETH order (cheaper), got {len(eth_orders)}"
 
 
+def test_global_allocator_optimal_knapsack_allocation():
+    """Test that global allocator uses optimal knapsack allocation for $1 cap."""
+    
+    allocator = GlobalAllocator(venue_cap_usd=1.00, min_edge_pct=2.0)
+    
+    # Create candidates where best combination is not the first two by edge
+    # BTC: 4.0% edge, $0.67 notional
+    # ETH: 3.5% edge, $0.73 notional  
+    # SOL: 3.0% edge, $0.30 notional
+    # Best combo under $1: BTC + SOL = $0.97, total edge = 7.0%
+    # Alternative: ETH alone = $0.73, edge = 3.5%
+    candidates = [
+        OrderCandidate(
+            asset="BTC",
+            ticker="KXBTC15M-26JUL092200-00",
+            side="yes",
+            action="buy",
+            price_cents=67,  # $0.67 notional
+            count=1,
+            edge_pct=4.0,
+            confidence=0.9,
+            model_prob=0.75,
+            agent_name="BTC_15M"
+        ),
+        OrderCandidate(
+            asset="ETH",
+            ticker="KXETH15M-26JUL092200-00",
+            side="yes",
+            action="buy",
+            price_cents=73,  # $0.73 notional
+            count=1,
+            edge_pct=3.5,
+            confidence=0.8,
+            model_prob=0.70,
+            agent_name="ETH_15M"
+        ),
+        OrderCandidate(
+            asset="SOL",
+            ticker="KXSOL15M-26JUL092200-00",
+            side="yes",
+            action="buy",
+            price_cents=30,  # $0.30 notional
+            count=1,
+            edge_pct=3.0,
+            confidence=0.7,
+            model_prob=0.65,
+            agent_name="SOL_15M"
+        ),
+    ]
+    
+    # Allocate orders
+    chosen = allocator.allocate(candidates, current_positions={})
+    
+    # Should choose BTC + SOL (optimal combination under $1)
+    assert len(chosen) == 2, f"Expected 2 orders (optimal combo), got {len(chosen)}"
+    
+    # Verify BTC and SOL were chosen
+    assets = [c.asset for c in chosen]
+    assert "BTC" in assets, "Expected BTC in optimal combination"
+    assert "SOL" in assets, "Expected SOL in optimal combination"
+    assert "ETH" not in assets, "Expected ETH not in optimal combination (worse combo)"
+
+
+def test_global_allocator_all_candidates_exceed_cap():
+    """Test that global allocator handles case where all candidates exceed cap individually."""
+    
+    allocator = GlobalAllocator(venue_cap_usd=1.00, min_edge_pct=2.0)
+    
+    # Create candidates where each exceeds $1 cap alone
+    candidates = [
+        OrderCandidate(
+            asset="BTC",
+            ticker="KXBTC15M-26JUL092200-00",
+            side="yes",
+            action="buy",
+            price_cents=150,  # $1.50 notional (exceeds cap)
+            count=1,
+            edge_pct=5.0,
+            confidence=0.9,
+            model_prob=0.75,
+            agent_name="BTC_15M"
+        ),
+        OrderCandidate(
+            asset="ETH",
+            ticker="KXETH15M-26JUL092200-00",
+            side="yes",
+            action="buy",
+            price_cents=120,  # $1.20 notional (exceeds cap)
+            count=1,
+            edge_pct=4.0,
+            confidence=0.8,
+            model_prob=0.70,
+            agent_name="ETH_15M"
+        ),
+    ]
+    
+    # Allocate orders
+    chosen = allocator.allocate(candidates, current_positions={})
+    
+    # Should choose no orders (all exceed cap)
+    assert len(chosen) == 0, f"Expected 0 orders (all exceed cap), got {len(chosen)}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
