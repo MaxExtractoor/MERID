@@ -176,6 +176,9 @@ class GlobalAllocator:
         
         # Sort by edge score (descending), then by price (ascending) to prioritize cheaper orders with similar edges
         sorted_candidates = sorted(price_filtered, key=lambda c: (c.edge_score, -c.notional_usd), reverse=True)
+        # Actually, we want: higher edge first, then lower notional (cheaper) first
+        # With reverse=True, we need to negate notional to get ascending order
+        # So: (edge_score, -notional) with reverse=True gives (higher edge, lower notional)
         logger.info(
             "[GLOBAL-ALLOCATOR] Sorted %d candidates by edge then price (best=%.3f%%, worst=%.3f%%)",
             len(sorted_candidates), sorted_candidates[0].edge_pct, sorted_candidates[-1].edge_pct
