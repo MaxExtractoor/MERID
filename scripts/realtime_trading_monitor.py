@@ -123,6 +123,15 @@ class AssetStats:
     losses: int = 0
     pending: int = 0
     
+    # Advanced metrics (profit factor, expectancy, drawdown)
+    gross_profit_usd: float = 0.0
+    gross_loss_usd: float = 0.0
+    average_win_usd: float = 0.0
+    average_loss_usd: float = 0.0
+    max_drawdown_usd: float = 0.0
+    current_drawdown_usd: float = 0.0
+    peak_equity_usd: float = 0.0
+    
     # Individual trades
     trades: List[Trade] = field(default_factory=list)
     
@@ -789,8 +798,33 @@ class RealtimeTradingMonitor:
                         self.stats[asset].total_pnl_usd += pnl
                         if outcome == 'WIN':
                             self.stats[asset].wins += 1
+                            self.stats[asset].gross_profit_usd += pnl
                         elif outcome == 'LOSS':
                             self.stats[asset].losses += 1
+                            self.stats[asset].gross_loss_usd += abs(pnl)
+                        
+                        # Update average win/loss
+                        if outcome == 'WIN':
+                            n_wins = self.stats[asset].wins
+                            self.stats[asset].average_win_usd = (
+                                (self.stats[asset].average_win_usd * (n_wins - 1) + pnl) / n_wins
+                            )
+                        elif outcome == 'LOSS':
+                            n_losses = self.stats[asset].losses
+                            self.stats[asset].average_loss_usd = (
+                                (self.stats[asset].average_loss_usd * (n_losses - 1) + abs(pnl)) / n_losses
+                            )
+                        
+                        # Update drawdown tracking
+                        current_equity = self.stats[asset].total_pnl_usd
+                        if current_equity > self.stats[asset].peak_equity_usd:
+                            self.stats[asset].peak_equity_usd = current_equity
+                            self.stats[asset].current_drawdown_usd = 0.0
+                        else:
+                            self.stats[asset].current_drawdown_usd = self.stats[asset].peak_equity_usd - current_equity
+                            if self.stats[asset].current_drawdown_usd > self.stats[asset].max_drawdown_usd:
+                                self.stats[asset].max_drawdown_usd = self.stats[asset].current_drawdown_usd
+                        
                         break
             return
         
@@ -1037,6 +1071,73 @@ class RealtimeTradingMonitor:
         
         if total_wins + total_losses > 0:
             print(f"Overall win rate: {total_wins / (total_wins + total_losses) * 100:.1f}%")
+        
+        # Advanced metrics (profit factor, expectancy, drawdown)
+        print(f"\n{'='*80}")
+        print("ADVANCED TRADING METRICS")
+        print(f"{'='*80}")
+        
+        total_gross_profit = sum(s.gross_profit_usd for s in self.stats.values())
+        total_gross_loss = sum(s.gross_loss_usd for s in self.stats.values())
+        
+        if total_gross_loss > 0:
+            profit_factor = total_gross_profit / total_gross_loss
+            print(f"Profit Factor: {profit_factor:.2f} (gross profit ${total_gross_profit:.2f} / gross loss ${total_gross_loss:.2f})")
+            if profit_factor >= 2.0:
+                print(f"  Status: EXCELLENT (above 2.0)")
+            elif profit_factor >= 1.5:
+                print(f"  Status: SOLID (above 1.5)")
+            elif profit_factor >= 1.0:
+                print(f"  Status: THIN (1.0-1.3, edge exists but razor-thin)")
+            else:
+                print(f"  Status: POOR (below 1.0, losing money)")
+        else:
+            print("Profit Factor: N/A (no losses yet)")
+        
+        # Expectancy calculation
+        if total_wins + total_losses > 0:
+            total_avg_win = sum(s.average_win_usd for s in self.stats.values() if s.average_win_usd > 0)
+            total_avg_loss = sum(s.average_loss_usd for s in self.stats.values() if s.average_loss_usd > 0)
+            win_rate = total_wins / (total_wins + total_losses)
+            loss_rate = total_losses / (total_wins + total_losses)
+            
+            if total_avg_win > 0 and total_avg_loss > 0:
+                expectancy = (win_rate * total_avg_win) - (loss_rate * total_avg_loss)
+                print(f"Expectancy: ${expectancy:.2f} per trade")
+                print(f"  Win rate: {win_rate:.1%}, Avg win: ${total_avg_win:.2f}, Avg loss: ${total_avg_loss:.2f}")
+                if expectancy > 0:
+                    print(f"  Status: POSITIVE (profitable over time)")
+                else:
+                    print(f"  Status: NEGATIVE (losing money over time)")
+        
+        # Average win vs average loss ratio
+        total_avg_win = sum(s.average_win_usd for s in self.stats.values() if s.average_win_usd > 0)
+        total_avg_loss = sum(s.average_loss_usd for s in self.stats.values() if s.average_loss_usd > 0)
+        
+        if total_avg_win > 0 and total_avg_loss > 0:
+            win_loss_ratio = total_avg_win / total_avg_loss
+            print(f"Average Win/Loss Ratio: {win_loss_ratio:.2f}")
+            if win_loss_ratio >= 1.5:
+                print(f"  Status: EXCELLENT (target: >= 1.5x)")
+            elif win_loss_ratio >= 1.0:
+                print(f"  Status: GOOD (at least 1:1)")
+            else:
+                print(f"  Status: POOR (need higher win rate to compensate)")
+        
+        # Drawdown analysis
+        total_max_drawdown = sum(s.max_drawdown_usd for s in self.stats.values())
+        total_current_drawdown = sum(s.current_drawdown_usd for s in self.stats.values())
+        
+        print(f"\nDrawdown Analysis:")
+        print(f"  Maximum Drawdown: ${total_max_drawdown:.2f}")
+        print(f"  Current Drawdown: ${total_current_drawdown:.2f}")
+        
+        # Per-asset drawdown
+        print(f"\n  Per-Asset Drawdown:")
+        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+            stats = self.stats[asset]
+            if stats.max_drawdown_usd > 0 or stats.current_drawdown_usd > 0:
+                print(f"    {asset}: Max ${stats.max_drawdown_usd:.2f}, Current ${stats.current_drawdown_usd:.2f}, Peak ${stats.peak_equity_usd:.2f}")
         
         # Price band analysis
         print(f"\n{'='*80}")
