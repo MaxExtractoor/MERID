@@ -174,10 +174,10 @@ class GlobalAllocator:
             logger.info("[GLOBAL-ALLOCATOR] No candidates passed all filters (edge, confidence, price)")
             return []
         
-        # Sort by edge score (descending)
-        sorted_candidates = sorted(price_filtered, key=lambda c: c.edge_score, reverse=True)
+        # Sort by edge score (descending), then by price (ascending) to prioritize cheaper orders with similar edges
+        sorted_candidates = sorted(price_filtered, key=lambda c: (c.edge_score, -c.notional_usd), reverse=True)
         logger.info(
-            "[GLOBAL-ALLOCATOR] Sorted %d candidates by edge score (best=%.3f%%, worst=%.3f%%)",
+            "[GLOBAL-ALLOCATOR] Sorted %d candidates by edge then price (best=%.3f%%, worst=%.3f%%)",
             len(sorted_candidates), sorted_candidates[0].edge_pct, sorted_candidates[-1].edge_pct
         )
         
@@ -197,12 +197,41 @@ class GlobalAllocator:
                 continue
             
             # Check if this order would exceed venue cap (shared $1 pool)
+            # If this is the first order and no orders chosen yet, try to fit it anyway
+            # to ensure at least one order executes if possible
             if used_notional + candidate.notional_usd > self.venue_cap_usd:
-                logger.info(
-                    "[GLOBAL-ALLOCATOR] SKIP %s: would exceed shared $1 cap ($%.2f + $%.2f > $%.2f)",
-                    candidate.asset, used_notional, candidate.notional_usd, self.venue_cap_usd
-                )
-                continue
+                if not chosen:
+                    # No orders yet - try to find a cheaper candidate that fits
+                    logger.info(
+                        "[GLOBAL-ALLOCATOR] First candidate %s exceeds cap ($%.2f > $%.2f), looking for cheaper alternative",
+                        candidate.asset, candidate.notional_usd, self.venue_cap_usd
+                    )
+                    # Try to find the cheapest candidate that fits under cap
+                    for alt_candidate in sorted_candidates:
+                        if alt_candidate.asset in asset_order_count:
+                            continue
+                        if alt_candidate.notional_usd <= self.venue_cap_usd:
+                            logger.info(
+                                "[GLOBAL-ALLOCATOR] Found cheaper alternative %s ($%.2f <= $%.2f)",
+                                alt_candidate.asset, alt_candidate.notional_usd, self.venue_cap_usd
+                            )
+                            # Use this candidate instead
+                            candidate = alt_candidate
+                            break
+                    else:
+                        # No affordable candidate found
+                        logger.info(
+                            "[GLOBAL-ALLOCATOR] SKIP %s: no affordable candidates under $%.2f cap",
+                            candidate.asset, self.venue_cap_usd
+                        )
+                        continue
+                else:
+                    # Already have orders, skip this one
+                    logger.info(
+                        "[GLOBAL-ALLOCATOR] SKIP %s: would exceed shared $1 cap ($%.2f + $%.2f > $%.2f)",
+                        candidate.asset, used_notional, candidate.notional_usd, self.venue_cap_usd
+                    )
+                    continue
             
             # Check per-asset concentration limit (should be 1.0 for shared pool model)
             asset_current = current_positions.get(candidate.asset, 0.0)
