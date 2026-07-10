@@ -37,10 +37,11 @@ EDGE_MIN_THRESHOLD: float = float(os.getenv("MERID_EDGE_MIN_THRESHOLD", "0.0"))
 # Per-phase edge floors — used by StrategyConfig defaults and any sanity callers that
 # want to check the canonical threshold without importing the strategy module.
 # These must stay in sync with StrategyConfig in merid/prediction/strategy.py.
-EDGE_FLOOR_EARLY: float = float(os.getenv("MERID_PM_MIN_EDGE_EARLY", "0.08"))
-EDGE_FLOOR_MID: float = float(os.getenv("MERID_PM_MIN_EDGE_MID", "0.07"))
-EDGE_FLOOR_LATE: float = float(os.getenv("MERID_PM_MIN_EDGE_LATE", "0.06"))
-EDGE_FLOOR_TERMINAL: float = float(os.getenv("MERID_PM_MIN_EDGE_TERMINAL", "0.06"))
+# 2026-07-10: Updated to moltbook research values (BTC base 1.25%, terminal 1.75%)
+EDGE_FLOOR_EARLY: float = float(os.getenv("MERID_PM_MIN_EDGE_EARLY", "0.0125"))
+EDGE_FLOOR_MID: float = float(os.getenv("MERID_PM_MIN_EDGE_MID", "0.0125"))
+EDGE_FLOOR_LATE: float = float(os.getenv("MERID_PM_MIN_EDGE_LATE", "0.0125"))
+EDGE_FLOOR_TERMINAL: float = float(os.getenv("MERID_PM_MIN_EDGE_TERMINAL", "0.0175"))
 
 # Minimum model confidence (0–1) before a signal may proceed to consensus+execution.
 # Aligned with StrategyConfig.min_confidence (0.50 default).

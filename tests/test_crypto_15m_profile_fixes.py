@@ -305,16 +305,16 @@ class TestPriceFloorGuardrail:
                 f"Expected ETH max_distance_pct=0.018 (1.8%), got {eth_config.get('max_distance_pct')}"
 
             # SOL: increasing volatility (89.6% in April 2026) - higher min_edge
-            # 2026-07-04: Updated to 4% early/mid/late, 5% terminal based on current YAML values
+            # 2026-07-10: Updated to 2.0% early/mid/late, 2.5% terminal based on moltbook research
             sol_config = assets.get('SOL', {})
-            assert sol_config.get('min_edge_early') == 0.04, \
-                f"Expected SOL min_edge_early=0.04 (4%), got {sol_config.get('min_edge_early')}"
-            assert sol_config.get('min_edge_mid') == 0.04, \
-                f"Expected SOL min_edge_mid=0.04 (4%), got {sol_config.get('min_edge_mid')}"
-            assert sol_config.get('min_edge_late') == 0.04, \
-                f"Expected SOL min_edge_late=0.04 (4%), got {sol_config.get('min_edge_late')}"
-            assert sol_config.get('min_edge_terminal') == 0.05, \
-                f"Expected SOL min_edge_terminal=0.05 (5%), got {sol_config.get('min_edge_terminal')}"
+            assert sol_config.get('min_edge_early') == 0.02, \
+                f"Expected SOL min_edge_early=0.02 (2.0%), got {sol_config.get('min_edge_early')}"
+            assert sol_config.get('min_edge_mid') == 0.02, \
+                f"Expected SOL min_edge_mid=0.02 (2.0%), got {sol_config.get('min_edge_mid')}"
+            assert sol_config.get('min_edge_late') == 0.02, \
+                f"Expected SOL min_edge_late=0.02 (2.0%), got {sol_config.get('min_edge_late')}"
+            assert sol_config.get('min_edge_terminal') == 0.025, \
+                f"Expected SOL min_edge_terminal=0.025 (2.5%), got {sol_config.get('min_edge_terminal')}"
 
             # XRP: event-driven - tighter max_distance for precision
             xrp_config = assets.get('XRP', {})
@@ -341,13 +341,13 @@ class TestPriceFloorGuardrail:
             assert "ENTRY_MIN_PRICE_CENTS = 10" in source or "min_price_cents = 10" in source, \
                 "agent_grid_15m.py should use 10c minimum entry price for momentum-based trading"
             
-            # Verify that the maximum entry price is 75c (sweet spot threshold)
-            assert "ENTRY_MAX_PRICE_CENTS = 75" in source or "max_price_cents = 75" in source, \
-                "agent_grid_15m.py should use 75c maximum entry price (sweet spot threshold)"
+            # Verify that the maximum entry price is 50c (sweet spot threshold)
+            assert "ENTRY_MAX_PRICE_CENTS = 50" in source or "max_price_cents = 50" in source, \
+                "agent_grid_15m.py should use 50c maximum entry price (sweet spot threshold)"
             
-            # Verify that the comment mentions 10-75c range
-            assert "10-75c" in source or "10c" in source or "75c" in source, \
-                "agent_grid_15m.py should document the 10-75c range in comments"
+            # Verify that the comment mentions 10-50c range
+            assert "10-50c" in source or "10c" in source or "50c" in source, \
+                "agent_grid_15m.py should document the 10-50c range in comments"
         except Exception as e:
             pytest.skip(f"Agent grid price clamping check skipped: {e}")
 

@@ -23,7 +23,7 @@ from typing import Final
 
 MIN_KALSHI_PRICE_CENTS: Final[int] = 1
 MAX_KALSHI_PRICE_CENTS: Final[int] = 99
-DEFAULT_KALSHI_PRICE_CENTS: Final[int] = 50  # Midpoint fallback when market price unavailable
+DEFAULT_KALSHI_PRICE_CENTS: Final[int] = 25  # 2026-07-09: Changed from 50 to 25 (midpoint of 10-50c sweet spot)
 DEEP_OTM_CHEAP_CENTS: Final[int] = 10  # 2026-07-08: Lower bound of sweet spot (10-50c)
 DEEP_OTM_EXPENSIVE_CENTS: Final[int] = 50  # 2026-07-08: Upper bound of sweet spot (10-50c)
 # Rationale: 10-50c is the sweet spot for entry with favorable risk/reward
@@ -62,19 +62,19 @@ CONFIDENCE_CONFIDENT: Final[float] = 0.75  # DEPRECATED: Use profile.confidence_
 # ============================================================================
 
 # Edge thresholds for order aggressiveness (per asset)
-# UNIFIED: 2% resting (maker), 4% marketable (taker) - aligned with Kalshi fee structure
-# Research: Maker needs 1-2% edge, Taker needs 2-4% edge after fees (Kalshi 2026)
-EDGE_MARKET_ENTRY_BTC: Final[float] = 0.04  # BTC: cross spread if edge >= 4% (taker fee-adjusted)
-EDGE_MARKET_ENTRY_ETH: Final[float] = 0.04  # ETH: cross spread if edge >= 4% (taker fee-adjusted)
-EDGE_MARKET_ENTRY_SOL: Final[float] = 0.04  # SOL: cross spread if edge >= 4% (taker fee-adjusted)
-EDGE_MARKET_ENTRY_XRP: Final[float] = 0.04  # XRP: cross spread if edge >= 4% (taker fee-adjusted)
-EDGE_MARKET_ENTRY_DOGE: Final[float] = 0.04  # DOGE: cross spread if edge >= 4% (taker fee-adjusted)
+# UNIFIED: 1.25% resting (maker), 1.75% marketable (taker) - aligned with moltbook research 2026-07-10
+# Research: Maker needs 1.25% edge (BTC base), Taker needs 1.75% edge after fees (moltbook)
+EDGE_MARKET_ENTRY_BTC: Final[float] = 0.0175  # BTC: cross spread if edge >= 1.75% (taker fee-adjusted)
+EDGE_MARKET_ENTRY_ETH: Final[float] = 0.02  # ETH: cross spread if edge >= 2.0% (taker fee-adjusted)
+EDGE_MARKET_ENTRY_SOL: Final[float] = 0.025  # SOL: cross spread if edge >= 2.5% (taker fee-adjusted)
+EDGE_MARKET_ENTRY_XRP: Final[float] = 0.03  # XRP: cross spread if edge >= 3.0% (taker fee-adjusted)
+EDGE_MARKET_ENTRY_DOGE: Final[float] = 0.035  # DOGE: cross spread if edge >= 3.5% (taker fee-adjusted)
 
-EDGE_RESTING_ENTRY_BTC: Final[float] = 0.02  # BTC: join spread if edge >= 2% (maker fee-adjusted)
-EDGE_RESTING_ENTRY_ETH: Final[float] = 0.02  # ETH: join spread if edge >= 2% (maker fee-adjusted)
-EDGE_RESTING_ENTRY_SOL: Final[float] = 0.02  # SOL: join spread if edge >= 2% (maker fee-adjusted)
-EDGE_RESTING_ENTRY_XRP: Final[float] = 0.02  # XRP: join spread if edge >= 2% (maker fee-adjusted)
-EDGE_RESTING_ENTRY_DOGE: Final[float] = 0.02  # DOGE: join spread if edge >= 2% (maker fee-adjusted)
+EDGE_RESTING_ENTRY_BTC: Final[float] = 0.0125  # BTC: join spread if edge >= 1.25% (maker fee-adjusted)
+EDGE_RESTING_ENTRY_ETH: Final[float] = 0.015  # ETH: join spread if edge >= 1.5% (maker fee-adjusted)
+EDGE_RESTING_ENTRY_SOL: Final[float] = 0.02  # SOL: join spread if edge >= 2.0% (maker fee-adjusted)
+EDGE_RESTING_ENTRY_XRP: Final[float] = 0.0225  # XRP: join spread if edge >= 2.25% (maker fee-adjusted)
+EDGE_RESTING_ENTRY_DOGE: Final[float] = 0.0275  # DOGE: join spread if edge >= 2.75% (maker fee-adjusted)
 
 # Edge threshold for canceling resting orders (edge decay below this triggers cancel)
 EDGE_CANCEL_THRESHOLD_BTC: Final[float] = 0.50

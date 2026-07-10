@@ -290,7 +290,7 @@ MARKET_ORDER_FALLBACK_CONFIG = {
     "min_age_before_fallback": int(os.getenv("MERID_MIN_AGE_BEFORE_FALLBACK", "30")),  # Minimum age
     
     # Conviction thresholds
-    "min_edge_pct": float(os.getenv("MERID_MIN_EDGE_PCT", "0.04")),  # 4% minimum edge
+    "min_edge_pct": float(os.getenv("MERID_MIN_EDGE_PCT", "0.0125")),  # 1.25% minimum edge (BTC base)
     "min_confidence": float(os.getenv("MERID_MIN_CONFIDENCE", "0.70")),  # 70% minimum confidence
     
     # Time to expiry

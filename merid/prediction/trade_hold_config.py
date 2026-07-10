@@ -54,10 +54,10 @@ class EntryWindowConfig:
 
 @dataclass
 class StrategyThresholds:
-    min_edge_early: Decimal = Decimal("0.04")  # ALIGNED TO 2026 INDUSTRY STANDARD: 4% upper bound
-    min_edge_mid: Decimal = Decimal("0.03")  # ALIGNED TO 2026 INDUSTRY STANDARD: 3% mid-range
-    min_edge_late: Decimal = Decimal("0.02")  # ALIGNED TO 2026 INDUSTRY STANDARD: 2% floor
-    min_edge_terminal: Decimal = Decimal("0.04")  # ALIGNED TO 2026 INDUSTRY STANDARD: 4% terminal
+    min_edge_early: Decimal = Decimal("0.0125")  # ALIGNED TO 2026 MOLTBOOK RESEARCH: 1.25% base (BTC)
+    min_edge_mid: Decimal = Decimal("0.0125")  # ALIGNED TO 2026 MOLTBOOK RESEARCH: 1.25% base (BTC)
+    min_edge_late: Decimal = Decimal("0.0125")  # ALIGNED TO 2026 MOLTBOOK RESEARCH: 1.25% base (BTC)
+    min_edge_terminal: Decimal = Decimal("0.0175")  # ALIGNED TO 2026 MOLTBOOK RESEARCH: 1.75% terminal (BTC)
     min_arb_edge: Decimal = Decimal("0.005")
     min_confidence: Decimal = Decimal("0.50")  # ALIGNED TO 2026 INDUSTRY STANDARD: 50% (was 60%)
     min_volume: Decimal = Decimal("0")

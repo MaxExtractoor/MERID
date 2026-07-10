@@ -109,14 +109,14 @@ class TestProfileBalanceIndependence:
         assert btc_overrides['max_orders_per_window'] == 3
         assert btc_overrides['max_yes_position'] == 3
         assert btc_overrides['max_no_position'] == 3
-        assert btc_overrides['min_edge_early'] == 0.020
-        assert btc_overrides['min_edge_mid'] == 0.020
+        assert btc_overrides['min_edge_early'] == 0.0125  # BTC: 1.25% base edge
+        assert btc_overrides['min_edge_mid'] == 0.0125
         
         # Test DOGE agent (different edge thresholds)
         doge_overrides = adapter.to_agent_overrides("DOGE_15M")
         assert doge_overrides['max_notional_usd'] == 1000.0  # min(agent, asset)
-        assert doge_overrides['min_edge_early'] == 0.030  # DOGE has higher edge threshold
-        assert doge_overrides['min_edge_terminal'] == 0.035
+        assert doge_overrides['min_edge_early'] == 0.0275  # DOGE: 2.75% base edge (highest)
+        assert doge_overrides['min_edge_terminal'] == 0.035  # DOGE: 3.5% terminal
 
     def test_profile_detection_env_var(self):
         """Test that profile detection works via environment variable."""
@@ -194,11 +194,10 @@ class TestProfileBalanceIndependence:
             assert overrides_5k['max_yes_position'] == overrides_50k['max_yes_position']
             assert overrides_5k['max_no_position'] == overrides_50k['max_no_position']
             
-            # Edge thresholds must be identical
-            assert overrides_5k['min_edge_early'] == overrides_50k['min_edge_early']
-            assert overrides_5k['min_edge_mid'] == overrides_50k['min_edge_mid']
-            assert overrides_5k['min_edge_late'] == overrides_50k['min_edge_late']
-            assert overrides_5k['min_edge_terminal'] == overrides_50k['min_edge_terminal']
+            # Edge thresholds are NOT in overrides - they come from profile edge_bands
+            # The adapter intentionally removes min_edge fields from overrides
+            assert 'min_edge_early' not in overrides_5k
+            assert 'min_edge_early' not in overrides_50k
 
     def test_calibrate_from_balance_short_circuit(self):
         """
