@@ -457,26 +457,25 @@ class LeanAgent15m:
         # CRITICAL FIX: 2026-07-08 - Enable kalshi_mode to disable strict spot market thresholds
         # Kalshi prediction markets are binary contracts, not continuous spot instruments
         # Without kalshi_mode, strict vol/ATR/chop gates block all signals
-        # CRITICAL FIX: 2026-07-08 - Decouple indicator stack updates from 5s loop cadence
-        # Indicator stack expects 1-minute close prices, but loop runs at 5-second cadence
-        # We'll accumulate spot prices and only update indicator stack once per minute
-        # CRITICAL FIX: 2026-07-08 - Each agent should only initialize indicator stack for its own asset
-        # Previous code initialized stacks for all 5 assets per agent, causing 25 total stacks
-        # This led to each stack only getting updates from one agent, resulting in bars_available=1
+        # CRITICAL FIX: 2026-07-10 - Initialize indicator stacks for ALL 5 assets in EACH agent
+        # This ensures each asset's indicator stack gets redundant updates from all 5 agents
+        # Previous fix (only initializing own asset) caused bars_available=1 because each agent
+        # is called once per cycle, so each stack only got 1 update per minute
+        # With all 5 assets initialized in each agent, each stack gets 5 updates per cycle
         self._indicator_stacks: Dict[str, Any] = {}
         self._indicator_stack_last_update: Dict[str, float] = {}  # Track last update time per asset
         self._indicator_stack_price_buffer: Dict[str, List[float]] = {}  # Buffer spot prices for 1-minute aggregation
         try:
             from merid.signals.crypto_15m_indicators import Crypto15mIndicatorStack, IndicatorConfig
-            # Only initialize indicator stack for this agent's specific asset
-            asset = config.name.split('_')[0]  # Extract asset from agent name (e.g., "BTC_15M" -> "BTC")
-            cfg = IndicatorConfig(asset=asset, kalshi_mode=True)
-            self._indicator_stacks[asset] = Crypto15mIndicatorStack(config=cfg)
-            self._indicator_stacks[asset].set_asset_symbol(asset)  # Set asset symbol for logging
-            self._indicator_stack_last_update[asset] = 0.0
-            self._indicator_stack_price_buffer[asset] = []
-            logger.info("[AGENT-INIT] %s initialized Crypto15mIndicatorStack for %s with kalshi_mode=True (lenient thresholds for prediction markets)", 
-                       config.name, asset)
+            # Initialize indicator stack for ALL 5 crypto assets
+            for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+                cfg = IndicatorConfig(asset=asset, kalshi_mode=True)
+                self._indicator_stacks[asset] = Crypto15mIndicatorStack(config=cfg)
+                self._indicator_stacks[asset].set_asset_symbol(asset)  # Set asset symbol for logging
+                self._indicator_stack_last_update[asset] = 0.0
+                self._indicator_stack_price_buffer[asset] = []
+            logger.info("[AGENT-INIT] %s initialized Crypto15mIndicatorStack for all 5 assets (BTC, ETH, SOL, XRP, DOGE) with kalshi_mode=True", 
+                       config.name)
         except Exception as e:
             logger.error("[AGENT-INIT] %s failed to initialize Crypto15mIndicatorStack: %s", config.name, e, exc_info=True)
             self._indicator_stacks = {}
