@@ -753,36 +753,10 @@ class LeanAgent15m:
         # CRITICAL FIX: 2026-07-01 - Update volume history for volume confirmation filter
         self._volume_history[asset].append((current_time, volume))
         
-        # CRITICAL FIX: 2026-07-08 - Update Crypto15mIndicatorStack with 1-minute aggregated close price
-        # Indicator stack expects 1-minute close prices, but loop runs at 5-second cadence
-        # We accumulate spot prices and only update indicator stack once per minute
-        if asset in self._indicator_stacks:
-            try:
-                # Buffer spot price for 1-minute aggregation
-                self._indicator_stack_price_buffer[asset].append(spot_price)
-                
-                # Check if 1 minute has elapsed since last update
-                current_time = time.time()
-                last_update = self._indicator_stack_last_update[asset]
-                time_since_update = current_time - last_update
-                
-                # Update indicator stack once per minute (60 seconds)
-                if time_since_update >= 60.0:
-                    # Use the last price in the buffer as the 1-minute close
-                    if self._indicator_stack_price_buffer[asset]:
-                        minute_close = self._indicator_stack_price_buffer[asset][-1]
-                        logger.info("[INDICATOR-STACK-UPDATE-BEFORE] asset=%s minute_close=%.2f buffer_size=%d calling update()", 
-                                   asset, minute_close, len(self._indicator_stack_price_buffer[asset]))
-                        self._indicator_stacks[asset].update(minute_close)
-                        self._indicator_stack_last_update[asset] = current_time
-                        self._indicator_stack_price_buffer[asset] = []  # Clear buffer
-                        logger.info("[INDICATOR-STACK-UPDATE] asset=%s minute_close=%.2f updated in Crypto15mIndicatorStack (1-minute aggregation)", 
-                                   asset, minute_close)
-                else:
-                    logger.debug("[INDICATOR-STACK-BUFFER] asset=%s buffered price=%.2f (%.1fs since last update, waiting for 60s)", 
-                               asset, spot_price, time_since_update)
-            except Exception as e:
-                logger.warning("[INDICATOR-STACK-UPDATE] asset=%s failed to update Crypto15mIndicatorStack: %s", asset, e)
+        # CRITICAL FIX: 2026-07-10 - REMOVED old indicator stack update logic from _update_price_history
+        # This logic has been moved to collect_order_candidate where each agent fetches spot prices
+        # for ALL 5 assets and updates all indicator stacks with redundant updates
+        # This prevents the bars_available=1 bug by ensuring each stack gets 5 updates per cycle
         
         # CRITICAL FIX: 2026-07-07 - Update FVG forecaster with OHLC data
         # FVG forecaster needs candle data to detect Fair Value Gaps
