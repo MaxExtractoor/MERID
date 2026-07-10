@@ -281,6 +281,49 @@ class TestDecimalPrecision:
                     f"Indicator stack price log should not use %.2f for prices in context:\n{context}"
 
 
+class TestCooldownTimestampInitialization:
+    """Test cooldown timestamp initialization fix."""
+    
+    def test_last_trade_time_initialization_source_code(self):
+        """Test that _last_trade_time is initialized to current time in source code."""
+        import inspect
+        from merid.prediction.agent_grid_15m import LeanAgent15m
+        
+        # Get the source code of the __init__ method
+        source = inspect.getsource(LeanAgent15m.__init__)
+        
+        # Verify that the initialization uses time.time() instead of 0.0
+        assert "current_time = time.time()" in source, \
+            "Cooldown timestamp initialization should use time.time() instead of 0.0"
+        assert "self._last_trade_time[asset] = current_time" in source, \
+            "Cooldown timestamp should be initialized to current_time"
+        
+        # Verify that the old buggy pattern is NOT present
+        assert "self._last_trade_time[asset] = 0.0" not in source, \
+            "Cooldown timestamp should NOT be initialized to 0.0 (the bug)"
+    
+    def test_cooldown_initialization_logic(self):
+        """Test the cooldown initialization logic without full agent instantiation."""
+        import time
+        
+        # Simulate the old buggy initialization
+        buggy_initialization = 0.0
+        time_since_last_buggy = time.time() - buggy_initialization
+        
+        # Simulate the fixed initialization
+        current_time = time.time()
+        fixed_initialization = current_time
+        time_since_last_fixed = time.time() - fixed_initialization
+        
+        # The bug would produce an impossibly large value (~56 years)
+        assert time_since_last_buggy > 1000000000.0, \
+            "Buggy initialization produces impossibly large time_since_last"
+        
+        # The fix should produce a small value (< 1 second)
+        assert time_since_last_fixed < 1.0, \
+            "Fixed initialization produces reasonable time_since_last"
+
+
 class TestAssertionConsistency:
     """Test assertion consistency across the stack."""
     

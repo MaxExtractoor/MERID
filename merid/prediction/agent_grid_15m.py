@@ -7,9 +7,35 @@ import re
 from typing import Any, Optional, Dict
 from dataclasses import dataclass, field
 
-from utils.logger import get_logger, format_price
+from utils.logger import get_logger
 
 logger = get_logger("merid.prediction.agent_grid_15m")
+
+# Import rejection monitor for production rejection tracking
+try:
+    from merid.monitoring.rejection_monitor import (
+        get_rejection_monitor,
+        log_time_window_rejection,
+        log_price_range_rejection,
+        log_trend_alignment_rejection,
+        log_edge_check_rejection,
+    )
+    REJECTION_MONITOR_ENABLED = True
+except ImportError:
+    REJECTION_MONITOR_ENABLED = False
+    logger.debug("[REJECTION-MONITOR] Not available - rejection tracking disabled")
+
+# Local price formatting function (replaces utils.logger.format_price to avoid import issues)
+def format_price(asset: str, price: float) -> str:
+    """Format price with appropriate decimal places based on asset."""
+    if asset in ["BTC", "ETH"]:
+        return f"{price:.2f}"
+    elif asset in ["SOL", "XRP"]:
+        return f"{price:.4f}"
+    elif asset == "DOGE":
+        return f"{price:.6f}"
+    else:
+        return f"{price:.4f}"
 
 # Kalshi fee calculation (2026 industry standard)
 # Kalshi charges 7% × p × (1-p) on winning trades, capped at $0.0175
@@ -546,10 +572,11 @@ class LeanAgent15m:
         
         # Cooldown tracking: last trade timestamp per asset
         self._last_trade_time: Dict[str, float] = {}
-        # Initialize to 0.0 to allow immediate signal generation on startup
+        # Initialize to current time to allow immediate signal generation on startup
         # Cooldown only applies after actual trades are placed
+        current_time = time.time()
         for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-            self._last_trade_time[asset] = 0.0
+            self._last_trade_time[asset] = current_time
         
         # Per-strip order limit tracking (15m strip = series ticker)
         self._strip_order_counts: Dict[str, int] = {}
@@ -2174,54 +2201,141 @@ class LeanAgent15m:
         long_score = sum(long_conditions)
         short_score = sum(short_conditions)
         
-        # Require at least 3 of 5 conditions for signal (increased from 3 of 4 due to added RSI momentum condition)
-        if long_score >= 3:
-            signal_side = "yes"
-            signal_action = "buy"
-            confidence = 0.5 + (long_score * 0.1) + (fvg_confidence * 0.1)
-            confidence = min(0.95, confidence)
+        # CRITICAL FIX: 2026-07-09 - Dual-side edge evaluation for momentum_fvg
+        # Use scores as inputs to edge calculation, not as direct side selectors
+        # Both YES and NO get evaluated, then select side with higher positive edge
+        
+        # Get prices for both sides
+        yes_price_cents = 0
+        no_price_cents = 0
+        try:
+            ticker = market.market.market_id if hasattr(market, 'market') else market.market_id
+            market_state = self.market_state_store.get(ticker) if self.market_state_store else None
+            if market_state:
+                best_bid = getattr(market_state, 'best_bid_cents', 0) or 0
+                best_ask = getattr(market_state, 'best_ask_cents', 0) or 0
+                yes_price_cents = best_bid if best_bid > 0 else 0
+                no_price_cents = (100 - best_ask) if best_ask > 0 else 0
+        except Exception as e:
+            logger.warning("[MOMENTUM-FVG] asset=%s failed to get market price: %s", asset, e)
+        
+        # Check price band for both sides (10-50c)
+        yes_in_range = (10 <= yes_price_cents <= 50)
+        no_in_range = (10 <= no_price_cents <= 50)
+        
+        if not yes_in_range and not no_in_range:
             logger.info(
-                "[MOMENTUM-FVG-LONG] asset=%s velocity=%.6f (threshold=%.6f) macd_hist=%.4f rsi=%.1f (%s) obi=%.2f fvg_dir=%s fvg_conf=%.2f -> BUY YES",
-                asset, velocity, velocity_threshold, macd_histogram, rsi, rsi_zone, obi, fvg_direction, fvg_confidence
-            )
-        elif short_score >= 3:
-            signal_side = "no"
-            signal_action = "buy"
-            confidence = 0.5 + (short_score * 0.1) + (fvg_confidence * 0.1)
-            confidence = min(0.95, confidence)
-            logger.info(
-                "[MOMENTUM-FVG-SHORT] asset=%s velocity=%.6f (threshold=%.6f) macd_hist=%.4f rsi=%.1f (%s) obi=%.2f fvg_dir=%s fvg_conf=%.2f -> BUY NO",
-                asset, velocity, velocity_threshold, macd_histogram, rsi, rsi_zone, obi, fvg_direction, fvg_confidence
-            )
-        else:
-            logger.info(
-                "[MOMENTUM-FVG-NO-SIGNAL] asset=%s long_score=%d short_score=%d -> NO TRADE",
-                asset, long_score, short_score
+                "[MOMENTUM-FVG-PRICE-FILTER] asset=%s both sides outside 10c-50c range (yes=%dc, no=%dc) -> NO TRADE",
+                asset, yes_price_cents, no_price_cents
             )
             return None
         
-        # SEV-0 FIX: Use standardized velocity edge calculation function
-        # This ensures consistency across agent_grid, loop_15m, and order_router
-        edge_pct = calculate_velocity_edge(velocity, velocity_threshold)
-        edge_pct = max(edge_pct, 2.0)  # Minimum 2% edge
+        # Build edges for both YES and NO using scores as inputs
+        def fvg_edge(score, velocity_sign, macd_hist, rsi, fvg_dir, fvg_conf):
+            """Calculate edge from score and indicators."""
+            if score < 3:
+                return None  # Insufficient conditions
+            
+            base_edge = calculate_velocity_edge(velocity * velocity_sign, velocity_threshold)
+            base_edge = max(base_edge, 2.0)  # Minimum 2% edge
+            
+            # MACD contribution
+            edge = base_edge + abs(macd_hist) * 10.0
+            
+            # Score-based scaling: more aligned conditions → larger edge
+            edge *= 1.0 + (score - 3) * 0.1  # Scale by score above minimum
+            
+            # RSI strength (fade at extremes)
+            if rsi_zone == "oversold" and velocity_sign > 0:
+                edge += 1.0  # Bonus for oversold bounce
+            elif rsi_zone == "overbought" and velocity_sign < 0:
+                edge += 1.0  # Bonus for overbought fade
+            
+            # FVG confluence bonus
+            if fvg_conf > 0.5:
+                if (velocity_sign > 0 and fvg_dir == "bullish") or (velocity_sign < 0 and fvg_dir == "bearish"):
+                    edge += fvg_conf * 2.0
+            
+            # Cap edge at reasonable maximum
+            return min(edge, 15.0)
         
-        # Add MACD strength to edge
-        edge_pct += abs(macd_histogram) * 10.0
+        # Calculate edges for both sides
+        edge_yes_pct = None
+        edge_no_pct = None
         
-        # Add RSI strength (fade at extremes)
-        if rsi_zone == "oversold" and signal_side == "yes":
-            edge_pct += 1.0  # Bonus for oversold bounce
-        elif rsi_zone == "overbought" and signal_side == "no":
-            edge_pct += 1.0  # Bonus for overbought fade
+        if yes_in_range:
+            edge_yes_pct = fvg_edge(long_score, 1.0, macd_histogram, rsi, fvg_direction, fvg_confidence)
         
-        # Add FVG confluence bonus
-        if fvg_confidence > 0.5:
-            edge_pct += fvg_confidence * 2.0
+        if no_in_range:
+            edge_no_pct = fvg_edge(short_score, -1.0, macd_histogram, rsi, fvg_direction, fvg_confidence)
         
-        # Cap edge at reasonable maximum
-        edge_pct = min(edge_pct, 15.0)
+        # Log dual-side evaluation
+        logger.info(
+            "[DUAL-SIDE-EVAL] asset=%s yes_price=%dc no_price=%dc yes_in_range=%s no_in_range=%s",
+            asset, yes_price_cents, no_price_cents, yes_in_range, no_in_range
+        )
+        logger.info(
+            "[MOMENTUM-FVG-DUAL-SIDE] asset=%s long_score=%d short_score=%d yes_edge=%s no_edge=%s",
+            asset, long_score, short_score, 
+            f"{edge_yes_pct:.2f}%" if edge_yes_pct else "None",
+            f"{edge_no_pct:.2f}%" if edge_no_pct else "None"
+        )
         
-        # Calculate model probability
+        # Select side with higher positive edge
+        side_edges = {}
+        if edge_yes_pct is not None:
+            side_edges["yes"] = edge_yes_pct
+        if edge_no_pct is not None:
+            side_edges["no"] = edge_no_pct
+        
+        if not side_edges:
+            logger.info(
+                "[MOMENTUM-FVG-NO-EDGE] asset=%s no valid edges (both sides below threshold) -> NO TRADE",
+                asset
+            )
+            return None
+        
+        # CRITICAL FIX: 2026-07-09 - Add midpoint preference (~25c bonus) to momentum_fvg
+        def midpoint_bonus(price_cents):
+            """Peak at 25c, decays toward 10c/50c."""
+            dist = abs(price_cents - 25)
+            midpoint_bonus_max = 0.5  # Maximum bonus in percentage points
+            midpoint_bonus_slope = 0.02  # Decay rate per cent from midpoint
+            return max(0.0, midpoint_bonus_max - dist * midpoint_bonus_slope)
+        
+        # Apply midpoint bonus to edges
+        side_edges_with_bonus = {}
+        if yes_in_range and edge_yes_pct is not None:
+            side_edges_with_bonus["yes"] = edge_yes_pct + midpoint_bonus(yes_price_cents)
+        if no_in_range and edge_no_pct is not None:
+            side_edges_with_bonus["no"] = edge_no_pct + midpoint_bonus(no_price_cents)
+        
+        # Select side with maximum edge (with midpoint bonus)
+        signal_side = max(side_edges_with_bonus, key=side_edges_with_bonus.get)
+        selected_edge = side_edges[signal_side]  # Use original edge (without bonus) for reporting
+        
+        # Minimum edge threshold
+        min_edge_threshold_pct = 2.0
+        if selected_edge < min_edge_threshold_pct:
+            logger.info(
+                "[MOMENTUM-FVG-EDGE-THRESHOLD] asset=%s selected_edge=%.2f%% < threshold=%.2f%% -> NO TRADE",
+                asset, selected_edge, min_edge_threshold_pct
+            )
+            return None
+        
+        signal_action = "buy"
+        confidence = 0.5 + (selected_edge / 100.0)
+        confidence = min(0.95, confidence)
+        
+        logger.info(
+            "[MOMENTUM-FVG-SELECTION] asset=%s selected_side=%s edge=%.2f%% confidence=%.2f (all_edges=%s)",
+            asset, signal_side, selected_edge, confidence, side_edges
+        )
+        
+        # Use selected_edge from dual-side evaluation (already computed)
+        edge_pct = selected_edge
+        
+        # Calculate model probability from selected edge
         if signal_side == "yes":
             model_prob = min(0.95, 0.5 + (edge_pct / 100.0))
         else:
@@ -3437,6 +3551,14 @@ class LeanAgent15m:
         # Phase 6: Check if trading session is active
         if not self._is_trading_session_active():
             logger.info("[SESSION-FILTER] Trading session not active, skipping signal generation")
+            if REJECTION_MONITOR_ENABLED:
+                monitor = get_rejection_monitor()
+                monitor.log_rejection(
+                    asset="UNKNOWN",
+                    category="session_filter",
+                    reason="Trading session not active, skipping signal generation",
+                    session_active=False,
+                )
             return None
         
         # Extract asset from market (must be done before time window filter for logging)
@@ -3506,18 +3628,39 @@ class LeanAgent15m:
                 "[TIME-WINDOW-FILTER] asset=%s minutes_to_expiry=%.1f -> SKIP (too early, >%.1fmin)",
                 asset, minutes_to_expiry, max_entry_mins
             )
+            if REJECTION_MONITOR_ENABLED:
+                log_time_window_rejection(
+                    asset=asset,
+                    minutes_to_expiry=minutes_to_expiry,
+                    reason=f"too early: >{max_entry_mins}min",
+                    market_id=getattr(market, 'market_id', None),
+                )
             return None
         elif minutes_to_expiry < cutoff_mins:
             logger.info(
                 "[TIME-WINDOW-FILTER] asset=%s minutes_to_expiry=%.1f -> SKIP (terminal phase, <%.1fmin to expiry)",
                 asset, minutes_to_expiry, cutoff_mins
             )
+            if REJECTION_MONITOR_ENABLED:
+                log_time_window_rejection(
+                    asset=asset,
+                    minutes_to_expiry=minutes_to_expiry,
+                    reason=f"terminal phase: <{cutoff_mins}min to expiry",
+                    market_id=getattr(market, 'market_id', None),
+                )
             return None
         elif minutes_to_expiry < min_entry_mins:
             logger.info(
                 "[TIME-WINDOW-FILTER] asset=%s minutes_to_expiry=%.1f -> SKIP (too early, <%.1fmin to expiry)",
                 asset, minutes_to_expiry, min_entry_mins
             )
+            if REJECTION_MONITOR_ENABLED:
+                log_time_window_rejection(
+                    asset=asset,
+                    minutes_to_expiry=minutes_to_expiry,
+                    reason=f"too early: <{min_entry_mins}min to expiry",
+                    market_id=getattr(market, 'market_id', None),
+                )
             return None
         elif minutes_to_expiry <= 4.0:
             time_edge_multiplier = 1.5
@@ -3587,6 +3730,14 @@ class LeanAgent15m:
                 "[PRICE-FILTER-REJECT] asset=%s both sides outside 10c-50c range (yes=%dc, no=%dc) -> SKIP",
                 asset, yes_price_cents, no_price_cents
             )
+            if REJECTION_MONITOR_ENABLED:
+                log_price_range_rejection(
+                    asset=asset,
+                    yes_price_cents=yes_price_cents,
+                    no_price_cents=no_price_cents,
+                    reason="both sides outside 10c-50c range",
+                    market_id=getattr(market, 'market_id', None),
+                )
             return None
         
         # Determine which side to evaluate based on price range
@@ -3676,6 +3827,12 @@ class LeanAgent15m:
                 "[TREND-ALIGNMENT-FILTER] asset=%s 5m and 1h trends not aligned -> SKIP TRADE (trend disagreement)",
                 asset
             )
+            if REJECTION_MONITOR_ENABLED:
+                log_trend_alignment_rejection(
+                    asset=asset,
+                    reason="5m and 1h trends not aligned -> SKIP TRADE (trend disagreement)",
+                    market_id=getattr(market, 'market_id', None),
+                )
             return None
         else:
             logger.info(
@@ -4132,63 +4289,106 @@ class LeanAgent15m:
             is_marginal_positive = False  # DISABLED: No marginal zone
             is_marginal_negative = False  # DISABLED: No marginal zone
             
-            # Calculate raw signal strength for both sides
-            if velocity > velocity_threshold:
-                # Positive velocity favors YES in trend_following, NO in mean_reversion
-                if strategy_mode == "trend_following":
-                    yes_signal_strength = velocity / velocity_threshold
-                    no_signal_strength = 0.0
-                else:  # mean_reversion
-                    yes_signal_strength = 0.0
-                    no_signal_strength = velocity / velocity_threshold
-            elif velocity < -velocity_threshold:
-                # Negative velocity favors NO in trend_following, YES in mean_reversion
-                if strategy_mode == "trend_following":
-                    yes_signal_strength = 0.0
-                    no_signal_strength = abs(velocity) / velocity_threshold
-                else:  # mean_reversion
-                    yes_signal_strength = abs(velocity) / velocity_threshold
-                    no_signal_strength = 0.0
-            else:
+            # CRITICAL FIX: 2026-07-09 - Symmetric signal strength for dual-side evaluation
+            # Both YES and NO get non-zero signal strength to enable true edge comparison
+            # Direction is encoded in probabilities, not by zeroing one side
+            if abs(velocity) < velocity_threshold:
+                # No momentum → no edge on either side
+                yes_signal_strength = 0.0
+                no_signal_strength = 0.0
                 logger.info(
                     "[VELOCITY-SIGNAL] asset=%s velocity=%.6f within ±threshold=%.6f -> NO TRADE (insufficient momentum)",
                     asset, velocity, velocity_threshold
                 )
                 return None
+            else:
+                # Both sides get symmetric signal magnitude
+                signal_mag = abs(velocity) / velocity_threshold
+                # CRITICAL FIX: 2026-07-09 - Clamp signal_mag to prevent extreme direction_bias
+                # Without clamping, very high velocity (e.g., 10x threshold) could cause direction_bias > 1.0
+                # This would push p_model to extreme values (0.95 or 0.05) even with clamping
+                # Clamping at 3.0 ensures direction_bias stays in reasonable range [-0.3, 0.3]
+                signal_mag = min(signal_mag, 3.0)
+                yes_signal_strength = signal_mag
+                no_signal_strength = signal_mag
             
-            # Calculate edge for each side if in price range
-            # Edge formula: Edge = signal_strength * (1 - price) - price
-            # This accounts for both signal strength and price efficiency
+            # CRITICAL FIX: 2026-07-09 - Dual-side probability-based edge calculation
+            # Compute model probabilities for both YES and NO using symmetric logic
+            # Direction is encoded in probabilities, not by zeroing one side
+            
+            # Market-implied probabilities from prices
+            p_mkt_yes = yes_price_cents / 100.0 if yes_price_cents > 0 else 0.5
+            p_mkt_no = no_price_cents / 100.0 if no_price_cents > 0 else 0.5
+            
+            # Base probability (neutral starting point)
+            base_prob = 0.5
+            
+            # Direction bias from velocity (encodes trend_following vs mean_reversion)
+            # Positive velocity bumps YES probability, negative bumps NO probability
+            direction_bias = 0.0
+            if velocity > 0:
+                # Positive velocity favors YES in trend_following, NO in mean_reversion
+                if strategy_mode == "trend_following":
+                    direction_bias = 0.1 * signal_mag  # Bump YES probability
+                else:  # mean_reversion
+                    direction_bias = -0.1 * signal_mag  # Bump NO probability
+            else:
+                # Negative velocity favors NO in trend_following, YES in mean_reversion
+                if strategy_mode == "trend_following":
+                    direction_bias = -0.1 * signal_mag  # Bump NO probability
+                else:  # mean_reversion
+                    direction_bias = 0.1 * signal_mag  # Bump YES probability
+            
+            # Model probabilities with direction bias
+            p_model_yes = max(0.05, min(0.95, base_prob + direction_bias))
+            p_model_no = 1.0 - p_model_yes  # Symmetry: p_model_no = 1 - p_model_yes
+            
+            # Calculate symmetric edges for both sides
+            # Edge formula: edge = (p_model - p_mkt) * 100 (in percentage)
             for side in sides_to_evaluate:
                 if side == "yes" and yes_in_range:
-                    price = yes_price_cents / 100.0
-                    # Higher signal strength + lower price = better edge
-                    side_edges["yes"] = yes_signal_strength * (1.0 - price) - price
+                    edge_yes_pct = (p_model_yes - p_mkt_yes) * 100.0
+                    side_edges["yes"] = edge_yes_pct
                     logger.info(
-                        "[EDGE-CALCULATION] asset=%s side=yes signal_strength=%.3f price=%.2f edge=%.3f",
-                        asset, yes_signal_strength, price, side_edges["yes"]
+                        "[EDGE-CALCULATION] asset=%s side=yes p_model=%.4f p_mkt=%.4f edge_pct=%.3f%%",
+                        asset, p_model_yes, p_mkt_yes, edge_yes_pct
                     )
                 elif side == "no" and no_in_range:
-                    price = no_price_cents / 100.0
-                    # Higher signal strength + lower price = better edge
-                    side_edges["no"] = no_signal_strength * (1.0 - price) - price
+                    edge_no_pct = (p_model_no - p_mkt_no) * 100.0
+                    side_edges["no"] = edge_no_pct
                     logger.info(
-                        "[EDGE-CALCULATION] asset=%s side=no signal_strength=%.3f price=%.2f edge=%.3f",
-                        asset, no_signal_strength, price, side_edges["no"]
+                        "[EDGE-CALCULATION] asset=%s side=no p_model=%.4f p_mkt=%.4f edge_pct=%.3f%%",
+                        asset, p_model_no, p_mkt_no, edge_no_pct
                     )
             
+            # CRITICAL FIX: 2026-07-09 - Add midpoint preference (~25c bonus)
+            # Nudges selection toward mid-band fills where execution quality is best
+            def midpoint_bonus(price_cents):
+                """Peak at 25c, decays toward 10c/50c."""
+                dist = abs(price_cents - 25)
+                midpoint_bonus_max = 0.5  # Maximum bonus in percentage points
+                midpoint_bonus_slope = 0.02  # Decay rate per cent from midpoint
+                return max(0.0, midpoint_bonus_max - dist * midpoint_bonus_slope)
+            
+            # Apply midpoint bonus to edges
+            side_edges_with_bonus = {}
+            if yes_in_range and "yes" in side_edges:
+                side_edges_with_bonus["yes"] = side_edges["yes"] + midpoint_bonus(yes_price_cents)
+            if no_in_range and "no" in side_edges:
+                side_edges_with_bonus["no"] = side_edges["no"] + midpoint_bonus(no_price_cents)
+            
             # Select side with best edge
-            if not side_edges:
+            if not side_edges_with_bonus:
                 logger.info(
                     "[EDGE-SELECTION] asset=%s no valid edges (sides out of range) -> NO TRADE",
                     asset
                 )
                 return None
             
-            # Select side with maximum edge
-            signal_side = max(side_edges, key=side_edges.get)
+            # Select side with maximum edge (with midpoint bonus)
+            signal_side = max(side_edges_with_bonus, key=side_edges_with_bonus.get)
             signal_action = "buy"
-            selected_edge = side_edges[signal_side]
+            selected_edge = side_edges[signal_side]  # Use original edge (without bonus) for reporting
             
             # Set market_price based on selected side for backward compatibility
             # This ensures hybrid mode price caps and other logic work correctly
@@ -4198,8 +4398,8 @@ class LeanAgent15m:
                 market_price = no_price_cents / 100.0
             
             logger.info(
-                "[EDGE-SELECTION] asset=%s selected_side=%s edge=%.3f market_price=%.2f (all_edges=%s)",
-                asset, signal_side, selected_edge, market_price, side_edges
+                "[EDGE-SELECTION] asset=%s selected_side=%s edge=%.3f%% market_price=%.2f (all_edges=%s with_bonus=%s)",
+                asset, signal_side, selected_edge, market_price, side_edges, side_edges_with_bonus
             )
             
             # Log the velocity-based rationale

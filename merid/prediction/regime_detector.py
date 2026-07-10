@@ -66,7 +66,7 @@ class RegimeDetector:
         self.refit_interval = refit_interval
         self.random_state = random_state
         
-        self.model: Optional[hmm.GaussianHMM] = None
+        self.model: Optional['hmm.GaussianHMM'] = None
         self.state_labels: Dict[int, Regime] = {}  # Map HMM state index to Regime
         self.last_refit_idx: int = 0
         self.feature_history: List[Tuple[int, np.ndarray]] = []  # (timestamp, features)
@@ -112,7 +112,7 @@ class RegimeDetector:
         
         return np.array([log_return, volatility, momentum])
     
-    def _train_model(self, features: np.ndarray) -> Optional[hmm.GaussianHMM]:
+    def _train_model(self, features: np.ndarray) -> Optional['hmm.GaussianHMM']:
         """
         Train HMM on feature data.
         
@@ -169,7 +169,7 @@ class RegimeDetector:
             )
             return None
     
-    def _label_states(self, model: hmm.GaussianHMM) -> Dict[int, Regime]:
+    def _label_states(self, model: 'hmm.GaussianHMM') -> Dict[int, Regime]:
         """
         Label HMM states as bull/choppy/bear based on mean returns.
         
