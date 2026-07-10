@@ -3546,70 +3546,89 @@ class LeanAgent15m:
         }
         min_price_cents = min_entry_prices.get(asset, 10)  # Default to 10c
         
-        # Get current market price
-        market_price_cents = 0
+        # Get current market price for BOTH YES and NO sides
+        # CRITICAL FIX: Evaluate both YES and NO contracts within 10c-50c sweet spot
+        # Select best edge - don't force YES or NO decision
+        yes_price_cents = 0
+        no_price_cents = 0
         try:
             ticker = market.market.market_id if hasattr(market, 'market') else market.market_id
             market_state = self.market_state_store.get(ticker) if self.market_state_store else None
             if market_state:
                 best_bid = getattr(market_state, 'best_bid_cents', 0) or 0
                 best_ask = getattr(market_state, 'best_ask_cents', 0) or 0
-                if best_bid > 0 and best_ask > 0:
-                    market_price_cents = (best_bid + best_ask) // 2
-                elif best_bid > 0:
-                    market_price_cents = best_bid
-                elif best_ask > 0:
-                    market_price_cents = best_ask
+                
+                # YES price is the bid (price to buy YES)
+                yes_price_cents = best_bid if best_bid > 0 else 0
+                
+                # NO price is derived from YES price: NO = 100 - YES
+                # In binary markets, YES + NO = 100 cents
+                no_price_cents = (100 - best_ask) if best_ask > 0 else 0
+                
+                logger.info(
+                    "[DUAL-SIDE-PRICE] asset=%s ticker=%s yes_price=%dc no_price=%dc (derived from bid=%dc ask=%dc)",
+                    asset, ticker, yes_price_cents, no_price_cents, best_bid, best_ask
+                )
         except Exception as e:
             logger.warning("[PRICE-FILTER-ERROR] asset=%s failed to get market price: %s", asset, e)
         
-        # Hard ban below 10c (lottery ticket behavior)
-        # This aligns with profile guardrails_min_contract_price_cents = 10
-        if market_price_cents > 0 and market_price_cents < 10:
+        # Check which sides are within 10c-50c sweet spot
+        yes_in_range = (10 <= yes_price_cents <= 50)
+        no_in_range = (10 <= no_price_cents <= 50)
+        
+        logger.info(
+            "[PRICE-RANGE-CHECK] asset=%s yes_price=%dc in_range=%s no_price=%dc in_range=%s",
+            asset, yes_price_cents, yes_in_range, no_price_cents, no_in_range
+        )
+        
+        # If neither side is in range, skip trading
+        if not yes_in_range and not no_in_range:
             logger.info(
-                "[PRICE-FILTER-HARD-BAN] asset=%s price_cents=%d -> SKIP (below 10c hard ban - lottery ticket behavior)",
-                asset, market_price_cents
+                "[PRICE-FILTER-REJECT] asset=%s both sides outside 10c-50c range (yes=%dc, no=%dc) -> SKIP",
+                asset, yes_price_cents, no_price_cents
             )
             return None
         
-        # Standard mode: enforce per-asset minimum (10c for all crypto assets)
-        if market_price_cents > 0 and market_price_cents < min_price_cents:
-            logger.info(
-                "[PRICE-FILTER-MINIMUM] asset=%s price_cents=%d -> SKIP (below minimum %dc - poor EV per CEPR research)",
-                asset, market_price_cents, min_price_cents
-            )
-            return None
-        elif market_price_cents > 0:
-            logger.info(
-                "[PRICE-FILTER-PASS] asset=%s price_cents=%d -> PASS (above minimum %dc)",
-                asset, market_price_cents, min_price_cents
-            )
+        # Determine which side to evaluate based on price range
+        # If both in range, we'll evaluate both and select best edge later
+        # If only one in range, evaluate that side
+        sides_to_evaluate = []
+        if yes_in_range:
+            sides_to_evaluate.append("yes")
+        if no_in_range:
+            sides_to_evaluate.append("no")
         
-        # Price-bucket EV diagnostic logging
-        if market_price_cents > 0:
-            if 10 <= market_price_cents <= 14:
-                price_bucket = "10-14c"
-            elif 15 <= market_price_cents <= 19:
-                price_bucket = "15-19c"
-            elif 20 <= market_price_cents <= 24:
-                price_bucket = "20-24c"
-            elif 25 <= market_price_cents <= 29:
-                price_bucket = "25-29c"
-            elif 30 <= market_price_cents <= 39:
-                price_bucket = "30-39c"
-            elif 40 <= market_price_cents <= 49:
-                price_bucket = "40-49c"
-            elif 50 <= market_price_cents <= 65:
-                price_bucket = "50-65c"
-            elif 66 <= market_price_cents <= 70:
-                price_bucket = "66-70c"
-            else:
-                price_bucket = f"{market_price_cents}c"
-            
-            logger.info(
-                "[PRICE-BUCKET-DIAGNOSTIC] asset=%s price_cents=%d bucket=%s (for EV tracking)",
-                asset, market_price_cents, price_bucket
-            )
+        logger.info(
+            "[DUAL-SIDE-EVALUATION] asset=%s will evaluate sides: %s",
+            asset, sides_to_evaluate
+        )
+        
+        # Price-bucket EV diagnostic logging for both sides
+        for side, price_cents in [("yes", yes_price_cents), ("no", no_price_cents)]:
+            if price_cents > 0:
+                if 10 <= price_cents <= 14:
+                    price_bucket = "10-14c"
+                elif 15 <= price_cents <= 19:
+                    price_bucket = "15-19c"
+                elif 20 <= price_cents <= 24:
+                    price_bucket = "20-24c"
+                elif 25 <= price_cents <= 29:
+                    price_bucket = "25-29c"
+                elif 30 <= price_cents <= 39:
+                    price_bucket = "30-39c"
+                elif 40 <= price_cents <= 49:
+                    price_bucket = "40-49c"
+                elif 50 <= price_cents <= 65:
+                    price_bucket = "50-65c"
+                elif 66 <= price_cents <= 70:
+                    price_bucket = "66-70c"
+                else:
+                    price_bucket = f"{price_cents}c"
+                
+                logger.info(
+                    "[PRICE-BUCKET-DIAGNOSTIC] asset=%s side=%s price_cents=%d bucket=%s (for EV tracking)",
+                    asset, side, price_cents, price_bucket
+                )
         
         # CRITICAL FIX: Update price history (including ADX) in _generate_signal path
         # The system uses _generate_signal instead of collect_order_candidate for signal generation
@@ -4080,12 +4099,12 @@ class LeanAgent15m:
         # - Velocity threshold is the correct signal generation mechanism for momentum trading
         # Strike-based logic is inappropriate for 15m crypto scalping and has been removed
         
-        # CRITICAL FIX: Apply regime-aware velocity-to-side mapping
+        # CRITICAL FIX: Apply regime-aware velocity-to-side mapping with dual-side evaluation
         # The strategy_mode (trend_following vs mean_reversion) determines how velocity maps to signal side
         # - trend_following: positive velocity -> YES, negative velocity -> NO
         # - mean_reversion: positive velocity -> NO (expect reversion down), negative velocity -> YES (expect reversion up)
-        # This was previously missing, causing the system to always use trend_following logic regardless of regime
-        # CRITICAL FIX: Only apply velocity threshold logic if panic fade signal was NOT generated
+        # NEW: Evaluate edge for both YES and NO sides, select best edge within 10c-50c range
+        # This allows the indicator stack to determine which side has better EV, not forced YES/NO decision
         
         # 2026-07-04: CRITICAL FIX - Removed NO-side conviction multiplier for symmetry
         # Previous asymmetry (1.5x NO threshold) was blocking valid NO-side signals
@@ -4102,48 +4121,110 @@ class LeanAgent15m:
         yes_bias_margin = 0.0  # REMOVED: No marginal zone - signals fire at threshold
         no_conviction_multiplier = 1.0  # NO side now uses same threshold as YES (symmetric)
         
+        # Calculate edge for both YES and NO sides based on velocity
+        # Edge = p(true) × $1.00 - Market_Price
+        # For YES: p(true) based on positive velocity, Market_Price = yes_price_cents/100
+        # For NO: p(true) based on negative velocity, Market_Price = no_price_cents/100
+        side_edges = {}
+        
         if not panic_fade_signal:
             # Calculate marginal velocity zone (DISABLED - no marginal zone)
             is_marginal_positive = False  # DISABLED: No marginal zone
             is_marginal_negative = False  # DISABLED: No marginal zone
             
+            # Calculate raw signal strength for both sides
             if velocity > velocity_threshold:
+                # Positive velocity favors YES in trend_following, NO in mean_reversion
                 if strategy_mode == "trend_following":
-                    signal_side = "yes"
-                    signal_action = "buy"
-                    logger.info(
-                        "[VELOCITY-SIGNAL] asset=%s velocity=%.6f > threshold=%.6f mode=trend_following -> BUY YES (positive momentum)",
-                        asset, velocity, velocity_threshold
-                    )
+                    yes_signal_strength = velocity / velocity_threshold
+                    no_signal_strength = 0.0
                 else:  # mean_reversion
-                    signal_side = "no"
-                    signal_action = "buy"
-                    logger.info(
-                        "[VELOCITY-SIGNAL] asset=%s velocity=%.6f > threshold=%.6f mode=mean_reversion -> BUY NO (expect reversion down)",
-                        asset, velocity, velocity_threshold
-                    )
+                    yes_signal_strength = 0.0
+                    no_signal_strength = velocity / velocity_threshold
             elif velocity < -velocity_threshold:
-                # Symmetric threshold: NO side uses same threshold as YES (no_conviction_multiplier = 1.0)
+                # Negative velocity favors NO in trend_following, YES in mean_reversion
                 if strategy_mode == "trend_following":
-                    signal_side = "no"
-                    signal_action = "buy"
-                    logger.info(
-                        "[VELOCITY-SIGNAL] asset=%s velocity=%.6f < -threshold=%.6f mode=trend_following -> BUY NO (negative momentum)",
-                        asset, velocity, velocity_threshold
-                    )
+                    yes_signal_strength = 0.0
+                    no_signal_strength = abs(velocity) / velocity_threshold
                 else:  # mean_reversion
-                    signal_side = "yes"
-                    signal_action = "buy"
-                    logger.info(
-                        "[VELOCITY-SIGNAL] asset=%s velocity=%.6f < -threshold=%.6f mode=mean_reversion -> BUY YES (expect reversion up)",
-                        asset, velocity, velocity_threshold
-                    )
+                    yes_signal_strength = abs(velocity) / velocity_threshold
+                    no_signal_strength = 0.0
             else:
                 logger.info(
                     "[VELOCITY-SIGNAL] asset=%s velocity=%.6f within ±threshold=%.6f -> NO TRADE (insufficient momentum)",
                     asset, velocity, velocity_threshold
                 )
                 return None
+            
+            # Calculate edge for each side if in price range
+            # Edge formula: Edge = signal_strength * (1 - price) - price
+            # This accounts for both signal strength and price efficiency
+            for side in sides_to_evaluate:
+                if side == "yes" and yes_in_range:
+                    price = yes_price_cents / 100.0
+                    # Higher signal strength + lower price = better edge
+                    side_edges["yes"] = yes_signal_strength * (1.0 - price) - price
+                    logger.info(
+                        "[EDGE-CALCULATION] asset=%s side=yes signal_strength=%.3f price=%.2f edge=%.3f",
+                        asset, yes_signal_strength, price, side_edges["yes"]
+                    )
+                elif side == "no" and no_in_range:
+                    price = no_price_cents / 100.0
+                    # Higher signal strength + lower price = better edge
+                    side_edges["no"] = no_signal_strength * (1.0 - price) - price
+                    logger.info(
+                        "[EDGE-CALCULATION] asset=%s side=no signal_strength=%.3f price=%.2f edge=%.3f",
+                        asset, no_signal_strength, price, side_edges["no"]
+                    )
+            
+            # Select side with best edge
+            if not side_edges:
+                logger.info(
+                    "[EDGE-SELECTION] asset=%s no valid edges (sides out of range) -> NO TRADE",
+                    asset
+                )
+                return None
+            
+            # Select side with maximum edge
+            signal_side = max(side_edges, key=side_edges.get)
+            signal_action = "buy"
+            selected_edge = side_edges[signal_side]
+            
+            # Set market_price based on selected side for backward compatibility
+            # This ensures hybrid mode price caps and other logic work correctly
+            if signal_side == "yes":
+                market_price = yes_price_cents / 100.0
+            else:
+                market_price = no_price_cents / 100.0
+            
+            logger.info(
+                "[EDGE-SELECTION] asset=%s selected_side=%s edge=%.3f market_price=%.2f (all_edges=%s)",
+                asset, signal_side, selected_edge, market_price, side_edges
+            )
+            
+            # Log the velocity-based rationale
+            if velocity > velocity_threshold:
+                if strategy_mode == "trend_following":
+                    logger.info(
+                        "[VELOCITY-SIGNAL] asset=%s velocity=%.6f > threshold=%.6f mode=trend_following -> BUY %s (positive momentum, best edge)",
+                        asset, velocity, velocity_threshold, signal_side.upper()
+                    )
+                else:  # mean_reversion
+                    logger.info(
+                        "[VELOCITY-SIGNAL] asset=%s velocity=%.6f > threshold=%.6f mode=mean_reversion -> BUY %s (expect reversion down, best edge)",
+                        asset, velocity, velocity_threshold, signal_side.upper()
+                    )
+            elif velocity < -velocity_threshold:
+                if strategy_mode == "trend_following":
+                    logger.info(
+                        "[VELOCITY-SIGNAL] asset=%s velocity=%.6f < -threshold=%.6f mode=trend_following -> BUY %s (negative momentum, best edge)",
+                        asset, velocity, velocity_threshold, signal_side.upper()
+                    )
+                else:  # mean_reversion
+                    logger.info(
+                        "[VELOCITY-SIGNAL] asset=%s velocity=%.6f < -threshold=%.6f mode=mean_reversion -> BUY %s (expect reversion up, best edge)",
+                        asset, velocity, velocity_threshold, signal_side.upper()
+                    )
         
         # 2026-07-05 INDUSTRY ALIGNMENT: 15M Noise Filters
         # 15-minute timeframes are prone to false signals due to microstructure noise

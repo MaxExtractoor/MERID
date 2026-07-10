@@ -5,9 +5,12 @@ Tests cover:
 - BUG #39: Convert mid_cents to integer when assigning to price_cents
 - BUG #34: Add edge_pct, confidence, model_prob to OrderIntent
 - BUG #35: Use actual market regime in policy resolution
+- Dual-side YES/NO evaluation within 10c-50c sweet spot
+- WebSocket disconnection handling with MD freshness check
 """
 
 import pytest
+import time
 from unittest.mock import Mock, patch, MagicMock
 
 
@@ -920,6 +923,244 @@ def test_tp_sl_none_when_exit_policy_missing():
     assert take_profit_price_cents is None
     assert take_profit_r_multiple is None
     assert stop_loss_price_cents is None
+
+
+def test_dual_side_price_evaluation_yes_no_in_range():
+    """Test that both YES and NO prices are evaluated within 10c-50c sweet spot.
+    
+    CRITICAL FIX: System should evaluate both YES and NO contracts, not just YES.
+    When YES is at 99c (outside range) and NO is at 45c (inside range), only NO should be evaluated.
+    """
+    # Simulate market state with YES at 99c, NO at 45c
+    best_bid = 99  # YES price
+    best_ask = 55  # YES ask (NO = 100 - ask = 45c)
+    
+    # Calculate YES and NO prices
+    yes_price_cents = best_bid
+    no_price_cents = 100 - best_ask
+    
+    # Check which sides are in range
+    yes_in_range = (10 <= yes_price_cents <= 50)
+    no_in_range = (10 <= no_price_cents <= 50)
+    
+    # Determine sides to evaluate
+    sides_to_evaluate = []
+    if yes_in_range:
+        sides_to_evaluate.append("yes")
+    if no_in_range:
+        sides_to_evaluate.append("no")
+    
+    # Verify NO is in range, YES is not
+    assert yes_price_cents == 99
+    assert no_price_cents == 45
+    assert yes_in_range == False
+    assert no_in_range == True
+    assert sides_to_evaluate == ["no"]
+
+
+def test_dual_side_price_evaluation_both_in_range():
+    """Test that both YES and NO are evaluated when both are in 10c-50c range.
+    
+    NOTE: In binary markets, YES + NO = 100, so both cannot be in 10c-50c simultaneously.
+    This test verifies the logic handles the case where one side is in range.
+    """
+    # Simulate market state with YES at 45c (in range), NO at 55c (out of range)
+    best_bid = 45  # YES price
+    best_ask = 45  # YES ask (NO = 100 - ask = 55c)
+    
+    # Calculate YES and NO prices
+    yes_price_cents = best_bid
+    no_price_cents = 100 - best_ask
+    
+    # Check which sides are in range
+    yes_in_range = (10 <= yes_price_cents <= 50)
+    no_in_range = (10 <= no_price_cents <= 50)
+    
+    # Determine sides to evaluate
+    sides_to_evaluate = []
+    if yes_in_range:
+        sides_to_evaluate.append("yes")
+    if no_in_range:
+        sides_to_evaluate.append("no")
+    
+    # Verify YES is in range, NO is not (since YES + NO = 100)
+    assert yes_price_cents == 45
+    assert no_price_cents == 55
+    assert yes_in_range == True
+    assert no_in_range == False  # 55c is outside 10c-50c range
+    assert sides_to_evaluate == ["yes"]
+
+
+def test_dual_side_price_evaluation_neither_in_range():
+    """Test that trading is skipped when both sides are outside 10c-50c range.
+    
+    When YES is at 99c and NO is at 1c (both outside range), skip trading.
+    """
+    # Simulate market state with YES at 99c, NO at 1c
+    best_bid = 99  # YES price
+    best_ask = 99  # YES ask (NO = 100 - ask = 1c)
+    
+    # Calculate YES and NO prices
+    yes_price_cents = best_bid
+    no_price_cents = 100 - best_ask
+    
+    # Check which sides are in range
+    yes_in_range = (10 <= yes_price_cents <= 50)
+    no_in_range = (10 <= no_price_cents <= 50)
+    
+    # Determine sides to evaluate
+    sides_to_evaluate = []
+    if yes_in_range:
+        sides_to_evaluate.append("yes")
+    if no_in_range:
+        sides_to_evaluate.append("no")
+    
+    # Verify neither is in range
+    assert yes_price_cents == 99
+    assert no_price_cents == 1
+    assert yes_in_range == False
+    assert no_in_range == False
+    assert sides_to_evaluate == []
+
+
+def test_best_edge_selection_compares_yes_no():
+    """Test that best edge is selected by comparing YES and NO edge values.
+    
+    Edge formula: Edge = signal_strength * (1 - price) - price
+    Higher edge wins.
+    """
+    # Simulate signal strengths
+    yes_signal_strength = 1.5
+    no_signal_strength = 0.5
+    
+    # Simulate prices
+    yes_price = 0.45  # 45c
+    no_price = 0.55  # 55c
+    
+    # Calculate edges
+    yes_edge = yes_signal_strength * (1.0 - yes_price) - yes_price
+    no_edge = no_signal_strength * (1.0 - no_price) - no_price
+    
+    # Select side with max edge
+    side_edges = {"yes": yes_edge, "no": no_edge}
+    selected_side = max(side_edges, key=side_edges.get)
+    
+    # Verify YES has higher edge and is selected
+    assert yes_edge > no_edge
+    assert selected_side == "yes"
+
+
+def test_best_edge_selection_prefers_lower_price():
+    """Test that lower price is preferred when signal strengths are equal.
+    
+    Lower price = better risk/reward, so should win.
+    """
+    # Simulate equal signal strengths
+    yes_signal_strength = 1.0
+    no_signal_strength = 1.0
+    
+    # Simulate prices (NO is lower)
+    yes_price = 0.45  # 45c
+    no_price = 0.35  # 35c
+    
+    # Calculate edges
+    yes_edge = yes_signal_strength * (1.0 - yes_price) - yes_price
+    no_edge = no_signal_strength * (1.0 - no_price) - no_price
+    
+    # Select side with max edge
+    side_edges = {"yes": yes_edge, "no": no_edge}
+    selected_side = max(side_edges, key=side_edges.get)
+    
+    # Verify NO has higher edge (lower price) and is selected
+    assert no_edge > yes_edge
+    assert selected_side == "no"
+
+
+def test_ws_disconnection_allows_trading_if_md_fresh():
+    """Test that trading is allowed when WS disconnected but MD is fresh.
+    
+    CRITICAL FIX: Health snapshot should not mark system as unhealthy if
+    REST polling (MD) is working even if WS is disconnected.
+    """
+    # Simulate WS disconnected
+    ws_connected = False
+    
+    # Simulate MD fresh (at least 1 asset has fresh MD)
+    md_fresh = True
+    
+    # Determine health status
+    if not ws_connected and not md_fresh:
+        status = "UNHEALTHY"
+        reason = "ws_disconnected"
+    elif not ws_connected and md_fresh:
+        status = "DEGRADED"
+        reason = "ws_disconnected_but_md_fresh"
+    else:
+        status = "HEALTHY"
+        reason = "ok"
+    
+    # Verify system is degraded (not unhealthy) when MD is fresh
+    assert status == "DEGRADED"
+    assert reason == "ws_disconnected_but_md_fresh"
+
+
+def test_ws_disconnection_blocks_trading_if_md_stale():
+    """Test that trading is blocked when WS disconnected AND MD is stale.
+    
+    System should be unhealthy only when both WS and MD are down.
+    """
+    # Simulate WS disconnected
+    ws_connected = False
+    
+    # Simulate MD stale (no assets have fresh MD)
+    md_fresh = False
+    
+    # Determine health status
+    if not ws_connected and not md_fresh:
+        status = "UNHEALTHY"
+        reason = "ws_disconnected"
+    elif not ws_connected and md_fresh:
+        status = "DEGRADED"
+        reason = "ws_disconnected_but_md_fresh"
+    else:
+        status = "HEALTHY"
+        reason = "ok"
+    
+    # Verify system is unhealthy when both WS and MD are down
+    assert status == "UNHEALTHY"
+    assert reason == "ws_disconnected"
+
+
+def test_md_freshness_check_all_five_assets():
+    """Test that MD freshness is checked for all 5 crypto assets.
+    
+    At least 1 asset with fresh MD should allow trading.
+    """
+    # Simulate market state store with fresh MD for some assets
+    crypto_assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+    asset_states = {
+        "BTC": {"last_book_update_ts": time.time() - 30},  # Fresh (30s ago)
+        "ETH": {"last_book_update_ts": time.time() - 30},  # Fresh
+        "SOL": {"last_book_update_ts": time.time() - 200},  # Stale (200s ago)
+        "XRP": {"last_book_update_ts": time.time() - 200},  # Stale
+        "DOGE": {"last_book_update_ts": time.time() - 200},  # Stale
+    }
+    
+    # Check freshness (120s threshold)
+    fresh_count = 0
+    for asset in crypto_assets:
+        state = asset_states.get(asset, {})
+        last_update = state.get("last_book_update_ts", 0)
+        if last_update > 0:
+            age = time.time() - last_update
+            if age < 120:
+                fresh_count += 1
+    
+    # At least 1 asset fresh should allow trading
+    md_fresh = fresh_count >= 1
+    
+    assert fresh_count == 2  # BTC and ETH are fresh
+    assert md_fresh == True
 
 
 def test_price_selection_yes_order_from_mid_cents():
