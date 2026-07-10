@@ -121,6 +121,7 @@ class WSBridgeHealth:
 import numbers
 import os
 import queue  # Thread-safe queue for cross-thread communication
+import asyncio  # For asyncio.Queue in dual-queue pattern
 
 # CRITICAL DIAGNOSTIC: Log module load to confirm code version
 from utils.logger import get_logger
@@ -458,9 +459,17 @@ class KalshiWebSocketBridge:
         # Per-type counters
         self._type_counts: Dict[str, int] = defaultdict(int)
 
-        # Thread-safe queue for cross-thread communication (forwarder thread)
-        # Changed from asyncio.Queue to queue.Queue for cross-thread safety
-        self._queue: queue.Queue = queue.Queue(maxsize=_BRIDGE_QUEUE_SIZE)
+        # DUAL-QUEUE BRIDGE PATTERN (2026 best practice):
+        # - queue.Queue for thread-safe producer (WebSocket client)
+        # - asyncio.Queue for async consumer (forwarder loop)
+        # - Drain task bridges the two queues
+        # This prevents deadlock and ensures proper async/threading separation
+        self._thread_queue: queue.Queue = queue.Queue(maxsize=_BRIDGE_QUEUE_SIZE)  # Thread-side queue
+        self._async_queue: Optional[asyncio.Queue] = None  # Async-side queue (created in forwarder thread)
+        self._drain_task: Optional[asyncio.Task] = None  # Drain task bridging queues
+        
+        # Legacy queue reference for backward compatibility (will be deprecated)
+        self._queue: queue.Queue = self._thread_queue
 
         # UI coalescing: latest QuoteEvent per market, flushed every 100ms
         self._ui_coalesce_task: Optional[asyncio.Task] = None
@@ -1808,6 +1817,11 @@ class KalshiWebSocketBridge:
                     - This prevents loop closure in one thread from breaking other components
                     - unified_spot_service and market_catalog use the default loop via run_in_executor(None, ...)
                     - This design isolates the forwarder from the main FastAPI event loop
+                    
+                    DUAL-QUEUE BRIDGE PATTERN:
+                    - Create asyncio.Queue in this thread's event loop
+                    - Start drain task to bridge queue.Queue → asyncio.Queue
+                    - Forward loop consumes from asyncio.Queue
                     """
                     import threading
                     import traceback
@@ -1823,9 +1837,14 @@ class KalshiWebSocketBridge:
                         # which use loop.run_in_executor(None, ...) with the default loop
                         logger.info("[WS-FORWARD-THREAD] Event loop created (thread-local, not set globally)")
                         
-                        # Run the forward loop
-                        logger.info("[WS-FORWARD-THREAD] About to run forward loop")
-                        loop.run_until_complete(self._forward_loop())
+                        # CRITICAL FIX: Create asyncio.Queue in this thread's event loop
+                        # This is the async-side queue for the dual-queue bridge pattern
+                        self._async_queue = asyncio.Queue(maxsize=_BRIDGE_QUEUE_SIZE)
+                        logger.info("[WS-FORWARD-THREAD] asyncio.Queue created for dual-queue bridge")
+                        
+                        # Run the forward loop with drain task
+                        logger.info("[WS-FORWARD-THREAD] About to run forward loop with drain task")
+                        loop.run_until_complete(self._forward_loop_with_drain())
                         logger.info("[WS-FORWARD-THREAD] Forward loop completed")
                     except Exception as e:
                         logger.error(f"[WS-FORWARD-THREAD] Thread crashed: {e}", exc_info=True)
@@ -2891,14 +2910,15 @@ class KalshiWebSocketBridge:
             self._coalesce_queue()
         
         # CRITICAL FIX: Thread-safe queue operations for cross-event-loop calls
+        # DUAL-QUEUE BRIDGE PATTERN: Put into thread_queue (thread-safe)
         try:
-            # Use put_nowait for thread-safe operation
-            self._queue.put_nowait(event)
+            # Use put_nowait for thread-safe operation on thread_queue
+            self._thread_queue.put_nowait(event)
             self._ws_events_enqueued += 1  # Track successful enqueues
         except queue.Full:
             # Drop oldest to make room
             try:
-                dropped = self._queue.get_nowait()
+                dropped = self._thread_queue.get_nowait()
                 # Track if we dropped a fill
                 if isinstance(dropped, dict) and dropped.get("type") == "fill":
                     self._fills_dropped += 1
@@ -2953,17 +2973,92 @@ class KalshiWebSocketBridge:
         finally:
             logger.info("[WS-BRIDGE] health_logger_loop exiting, shutdown=%s", self._shutdown.is_set())
 
+    async def _forward_loop_with_drain(self) -> None:
+        """Run forward loop with drain task for dual-queue bridge pattern.
+        
+        This method:
+        1. Starts the drain task (queue.Queue → asyncio.Queue)
+        2. Runs the forward loop (consumes from asyncio.Queue)
+        3. Ensures proper cleanup on shutdown
+        
+        DUAL-QUEUE BRIDGE PATTERN (2026 best practice):
+        - Thread-safe queue.Queue for producer (WebSocket client)
+        - Async-safe asyncio.Queue for consumer (forwarder loop)
+        - Drain task bridges the two queues using run_in_executor
+        """
+        # CRITICAL DIAGNOSTIC: Log entry to confirm loop is running
+        logger.info("[WS-FORWARDER-LOOP] Entry point reached, starting dual-queue bridge")
+        print("[WS-FORWARDER-LOOP] Entry point reached, starting dual-queue bridge", flush=True)
+        
+        # CRITICAL DIAGNOSTIC: Log queue state at startup
+        logger.info("[WS-FORWARDER-LOOP] Queue state at startup: thread_q=%d async_q=%d shutdown=%s", 
+                   self._thread_queue.qsize(), self._async_queue.qsize() if self._async_queue else 0, self._shutdown.is_set())
+        
+        # Start drain task to bridge thread_queue → async_queue
+        self._drain_task = asyncio.create_task(self._drain_thread_queue(), name="kalshi-ws-drain")
+        logger.info("[WS-FORWARDER-LOOP] Drain task started")
+        
+        try:
+            # Run the forward loop (now consumes from async_queue)
+            await self._forward_loop()
+        finally:
+            # Cleanup drain task
+            if self._drain_task and not self._drain_task.done():
+                self._drain_task.cancel()
+                try:
+                    await self._drain_task
+                except asyncio.CancelledError:
+                    logger.info("[WS-FORWARDER-LOOP] Drain task cancelled")
+    
+    async def _drain_thread_queue(self) -> None:
+        """Drain task that bridges queue.Queue → asyncio.Queue.
+        
+        This task runs in the forwarder thread's event loop and:
+        1. Uses run_in_executor to blockingly get from queue.Queue (thread-safe)
+        2. Puts items into asyncio.Queue (async-safe)
+        3. Handles shutdown gracefully
+        
+        This is the key to the dual-queue bridge pattern - it allows
+        thread-safe producers to communicate with async consumers.
+        """
+        loop = asyncio.get_running_loop()
+        logger.info("[WS-DRAIN-TASK] Starting drain task")
+        
+        while not self._shutdown.is_set():
+            try:
+                # Use run_in_executor to blockingly get from thread_queue
+                # This yields control to the event loop while waiting
+                event = await loop.run_in_executor(None, self._thread_queue.get)
+                
+                # Put into async_queue (non-blocking, yields if full)
+                if self._async_queue:
+                    try:
+                        await asyncio.wait_for(self._async_queue.put(event), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        logger.warning("[WS-DRAIN-TASK] async_queue full, dropping event")
+                        self._events_dropped += 1
+            except Exception as e:
+                if not self._shutdown.is_set():
+                    logger.error(f"[WS-DRAIN-TASK] Error: {e}", exc_info=True)
+                break
+        
+        logger.info("[WS-DRAIN-TASK] Drain task exiting")
+    
     async def _forward_loop(self) -> None:
-        """Continuously drain the queue and publish to the event bus.
+        """Continuously drain the async queue and publish to the event bus.
 
-        WINDOWS FIX: Running in dedicated thread with own event loop to prevent blocking.
+        DUAL-QUEUE BRIDGE PATTERN:
+        - Now consumes from self._async_queue (asyncio.Queue)
+        - Events come from drain task which bridges thread_queue → async_queue
+        - This ensures proper async/threading separation
         """
         # CRITICAL DIAGNOSTIC: Log entry to confirm loop is running
         logger.info("[WS-FORWARDER-LOOP] Entry point reached, starting event processing")
         print("[WS-FORWARDER-LOOP] Entry point reached, starting event processing", flush=True)
         
         # CRITICAL DIAGNOSTIC: Log queue state at startup
-        logger.info("[WS-FORWARDER-LOOP] Queue state at startup: size=%d, shutdown=%s", self._queue.qsize(), self._shutdown.is_set())
+        logger.info("[WS-FORWARDER-LOOP] Queue state at startup: async_q=%d shutdown=%s", 
+                   self._async_queue.qsize() if self._async_queue else 0, self._shutdown.is_set())
         
         # Budget tracking for fair scheduling
         _MAX_BATCH_SIZE = 200  # Increased from 50 to 200 to drain queue faster during high volume
@@ -3211,10 +3306,10 @@ class KalshiWebSocketBridge:
                     if (_time.monotonic() - batch_start) * 1000 > _BATCH_TIMEOUT_MS:
                         break
 
-                    # Try to get event with very short timeout for responsiveness
+                    # Try to get event from async_queue (non-blocking, yields if empty)
                     try:
-                        event = self._queue.get(timeout=0.001)
-                    except queue.Empty:
+                        event = await asyncio.wait_for(self._async_queue.get(), timeout=0.001)
+                    except asyncio.TimeoutError:
                         break  # No more events, yield
                     
                     event_counter += 1

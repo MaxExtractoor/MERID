@@ -204,7 +204,11 @@ class RealtimeTradingMonitor:
         'cooldown_rejection': re.compile(r'\[COOLDOWN-CHECK\] asset=(\w+) in cooldown'),
         'strip_limit_rejection': re.compile(r'\[STRIP-LIMIT-CHECK\]'),
         'price_validation_rejection': re.compile(r'\[PRICE-VALIDATION\] ticker=(\w+).*deviation=(\d+)c'),
-        'market_validation_rejection': re.compile(r'\[MARKET-VALIDATION\] asset=(\w+)_15M.*regime=(\w+)'),
+        'market_validation_rejection': re.compile(r'\[MARKET-VALIDATION-FAILED\] asset=(\w+)_15M'),
+        'no_signal': re.compile(r'\[NO-SIGNAL\] asset=(\w+)_15M'),
+        'momentum_fvg_no_edge': re.compile(r'\[MOMENTUM-FVG-NO-EDGE\] asset=(\w+)'),
+        'price_filter_reject': re.compile(r'\[PRICE-FILTER-REJECT\] asset=(\w+)'),
+        'trading_window_skip': re.compile(r'\[TRADING-WINDOW\] asset=(\w+)_15M'),
         'order_attempted': re.compile(r'\[15M-LOOP\] Order routed successfully: ticker=(\w+) side=(\w+) count=(\d+) result=(.+)'),
         'order_rejected': re.compile(r'\[ORDER-ROUTER\] .* ticker=(\w+).*'),
         'order_filled': re.compile(r'\[15M-LOOP\].*filled.*ticker=(\w+)'),
@@ -412,13 +416,48 @@ class RealtimeTradingMonitor:
                 self.stats[asset].candidates_rejected[reason] += 1
             return
         
-        # Market validation rejection
-        match = self.PATTERNS['market_validation_rejection'].search(message)
+        # Market validation rejection (only count FAILED, not VALID)
+        match = self.PATTERNS['market_validation_failed'].search(message)
         if match:
             asset = match.group(1)
-            regime = match.group(2)
             if asset in self.stats:
-                reason = f'market_validation_regime_{regime}'
+                reason = 'market_validation_failed'
+                self.stats[asset].candidates_rejected[reason] += 1
+            return
+        
+        # No signal generated
+        match = self.PATTERNS['no_signal'].search(message)
+        if match:
+            asset = match.group(1)
+            if asset in self.stats:
+                reason = 'no_signal'
+                self.stats[asset].candidates_rejected[reason] += 1
+            return
+        
+        # Momentum FVG no edge
+        match = self.PATTERNS['momentum_fvg_no_edge'].search(message)
+        if match:
+            asset = match.group(1)
+            if asset in self.stats:
+                reason = 'momentum_fvg_no_edge'
+                self.stats[asset].candidates_rejected[reason] += 1
+            return
+        
+        # Price filter reject
+        match = self.PATTERNS['price_filter_reject'].search(message)
+        if match:
+            asset = match.group(1)
+            if asset in self.stats:
+                reason = 'price_filter_reject'
+                self.stats[asset].candidates_rejected[reason] += 1
+            return
+        
+        # Trading window skip
+        match = self.PATTERNS['trading_window_skip'].search(message)
+        if match:
+            asset = match.group(1)
+            if asset in self.stats:
+                reason = 'trading_window_skip'
                 self.stats[asset].candidates_rejected[reason] += 1
             return
         
