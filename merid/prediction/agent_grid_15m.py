@@ -5527,13 +5527,15 @@ class LeanAgent15m:
                         update_spot_price = None
                         update_spot_data = None
                         
+                        # CRITICAL FIX: spot_provider.get() is synchronous, not async
+                        # Do NOT use await - this was causing the indicator stack updates to fail
                         if hasattr(self.spot_provider, 'get'):
-                            result = await self.spot_provider.get(update_asset)
-                            if hasattr(result, 'price_usd'):
-                                update_spot_price = result.price_usd
+                            result = self.spot_provider.get(update_asset)
+                            if result is not None and hasattr(result, 'price'):
+                                update_spot_price = result.price
                                 update_spot_data = result
                         elif hasattr(self.spot_provider, 'get_spot_price'):
-                            update_spot_price = await self.spot_provider.get_spot_price(update_asset)
+                            update_spot_price = self.spot_provider.get_spot_price(update_asset)
                         
                         if update_spot_price:
                             # Buffer spot price for 1-minute aggregation
