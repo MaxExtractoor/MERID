@@ -37,16 +37,26 @@ def _make_event_market(
     category: str = "",
     yes_bid: int = 45,
     yes_ask: int = 55,
-) -> SimpleNamespace:
+) -> "EventMarket":
+    """Create an EventMarket object for testing.
+    
+    2026-07-10: Updated to return proper EventMarket instead of SimpleNamespace
+    to fix type mismatch with _enrich.
+    """
+    from merid.event_venues.base import EventMarket
+    from decimal import Decimal
+    
     end = end_date or datetime.now(timezone.utc) + timedelta(hours=2)
-    return SimpleNamespace(
+    return EventMarket(
         market_id=market_id,
+        venue="kalshi",
         question=question,
         description="",
+        outcomes=[],
         category=category,
-        volume=volume,
-        open_interest=open_interest,
         end_date=end,
+        volume=Decimal(str(volume)),
+        open_interest=Decimal(str(open_interest)),
         raw_data={
             "status": status,
             "yes_bid": yes_bid,
@@ -250,7 +260,16 @@ class TestBug03AtomicExposureCap:
     """check_and_reserve() must be atomic; concurrent callers must not jointly exceed the cap."""
 
     def test_check_and_reserve_is_atomic(self):
-        from merid.event_venues.kalshi.category_exposure import CategoryExposureTracker
+        """check_and_reserve() must be atomic; concurrent callers must not jointly exceed the cap.
+        
+        2026-07-10: Suppress deprecation warning - CategoryExposureTracker is deprecated but
+        still functional. The test is specifically testing the atomicity of check_and_reserve
+        which may not exist in UnifiedRiskManager.
+        """
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            from merid.event_venues.kalshi.category_exposure import CategoryExposureTracker
 
         tracker = CategoryExposureTracker(
             category_caps={"crypto": 100.0},
@@ -438,6 +457,7 @@ class TestBug05CategoryValidation:
         assert cm.category == "economics"
 
     def test_empty_api_category_falls_back_to_ticker(self):
+        """mkt.category='' falls back to ticker-based detection."""
         mkt = _make_event_market(
             market_id="KXCPI-25JUN",
             category="",
@@ -538,26 +558,40 @@ class TestBug07LiquidityDefaults:
 
     def test_zero_volume_market_fails_liquidity(self):
         from merid.event_venues.kalshi.universe import _passes_liquidity, UniverseConfig
+        import os
         cm = _make_catalog_market(volume=0.0, open_interest=50.0)
-        cfg = UniverseConfig(min_volume=50, min_open_interest=10)
+        os.environ['MERID_UNIVERSE_MIN_VOLUME'] = '50'
+        os.environ['MERID_UNIVERSE_MIN_OI'] = '10'
+        cfg = UniverseConfig()
         assert _passes_liquidity(cm, cfg) is False
 
     def test_zero_oi_market_fails_liquidity(self):
         from merid.event_venues.kalshi.universe import _passes_liquidity, UniverseConfig
+        import os
         cm = _make_catalog_market(volume=200.0, open_interest=0.0)
-        cfg = UniverseConfig(min_volume=50, min_open_interest=10)
+        os.environ['MERID_UNIVERSE_MIN_VOLUME'] = '50'
+        os.environ['MERID_UNIVERSE_MIN_OI'] = '10'
+        cfg = UniverseConfig()
         assert _passes_liquidity(cm, cfg) is False
 
     def test_no_book_market_with_wide_spread_fails(self):
         from merid.event_venues.kalshi.universe import _passes_liquidity, UniverseConfig
+        import os
         cm = _make_catalog_market(volume=200.0, open_interest=50.0, yes_bid=10, yes_ask=90)
-        cfg = UniverseConfig(min_volume=50, min_open_interest=10, max_spread_cents=15)
+        os.environ['MERID_UNIVERSE_MIN_VOLUME'] = '50'
+        os.environ['MERID_UNIVERSE_MIN_OI'] = '10'
+        os.environ['MERID_UNIVERSE_MAX_SPREAD_CENTS'] = '30'  # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
+        cfg = UniverseConfig()
         assert _passes_liquidity(cm, cfg) is False
 
     def test_liquid_market_passes(self):
         from merid.event_venues.kalshi.universe import _passes_liquidity, UniverseConfig
+        import os
         cm = _make_catalog_market(volume=200.0, open_interest=50.0, yes_bid=46, yes_ask=54)
-        cfg = UniverseConfig(min_volume=50, min_open_interest=10, max_spread_cents=15)
+        os.environ['MERID_UNIVERSE_MIN_VOLUME'] = '50'
+        os.environ['MERID_UNIVERSE_MIN_OI'] = '10'
+        os.environ['MERID_UNIVERSE_MAX_SPREAD_CENTS'] = '30'  # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
+        cfg = UniverseConfig()
         assert _passes_liquidity(cm, cfg) is True
 
 

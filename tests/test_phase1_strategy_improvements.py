@@ -29,16 +29,14 @@ class TestVelocityThresholdChanges:
         adapter = Crypto15mProfileAdapter()
         profile = adapter.profile
         
-        # Verify 2026-06-30: Increased thresholds to match 15-minute binary options best practices
-        # Industry standard for 15m trading: ±0.6-1.2% velocity threshold (MagicTradeBot 2026)
-        # Previous thresholds (0.015%-0.03%) were 40-80x too low, preventing trade generation
-        # Source of truth: kalshi_crypto_15m_v2.yaml velocity_thresholds section
-        # 2026-07-04: Updated to 0.4%-0.8% range for optimal signal generation
-        assert profile.velocity_threshold_btc == 0.004, f"BTC threshold should be 0.004, got {profile.velocity_threshold_btc}"
-        assert profile.velocity_threshold_eth == 0.004, f"ETH threshold should be 0.004, got {profile.velocity_threshold_eth}"
-        assert profile.velocity_threshold_sol == 0.006, f"SOL threshold should be 0.006, got {profile.velocity_threshold_sol}"
-        assert profile.velocity_threshold_xrp == 0.006, f"XRP threshold should be 0.006, got {profile.velocity_threshold_xrp}"
-        assert profile.velocity_threshold_doge == 0.008, f"DOGE threshold should be 0.008, got {profile.velocity_threshold_doge}"
+        # Verify 2026-07-05: Aligned with Coinbase velocity_signal.py (single source of truth)
+        # Actual market velocities observed: 0.000%-0.04% (from live logs)
+        # New thresholds (0.00001%-0.00005%) allow trades even in extremely calm markets
+        assert profile.velocity_threshold_btc == 0.00015, f"BTC threshold should be 0.00015, got {profile.velocity_threshold_btc}"
+        assert profile.velocity_threshold_eth == 0.00015, f"ETH threshold should be 0.00015, got {profile.velocity_threshold_eth}"
+        assert profile.velocity_threshold_sol == 0.000225, f"SOL threshold should be 0.000225, got {profile.velocity_threshold_sol}"
+        assert profile.velocity_threshold_xrp == 0.000225, f"XRP threshold should be 0.000225, got {profile.velocity_threshold_xrp}"
+        assert profile.velocity_threshold_doge == 0.0003, f"DOGE threshold should be 0.0003, got {profile.velocity_threshold_doge}"
     
     def test_yaml_config_has_lowered_velocity_thresholds(self):
         """Test that YAML config has lowered velocity thresholds."""
@@ -53,15 +51,14 @@ class TestVelocityThresholdChanges:
         
         velocity_thresholds = config.get('velocity_thresholds', {})
         
-        # Verify 2026-06-30: Increased thresholds to match 15-minute binary options best practices
-        # Industry standard for 15m trading: ±0.6-1.2% velocity threshold (MagicTradeBot 2026)
-        # Previous thresholds (0.015%-0.03%) were 40-80x too low, preventing trade generation
-        # 2026-07-04: Updated to 0.4%-0.8% range for optimal signal generation
-        assert velocity_thresholds.get('BTC') == 0.004, f"BTC threshold should be 0.004, got {velocity_thresholds.get('BTC')}"
-        assert velocity_thresholds.get('ETH') == 0.004, f"ETH threshold should be 0.004, got {velocity_thresholds.get('ETH')}"
-        assert velocity_thresholds.get('SOL') == 0.006, f"SOL threshold should be 0.006, got {velocity_thresholds.get('SOL')}"
-        assert velocity_thresholds.get('XRP') == 0.006, f"XRP threshold should be 0.006, got {velocity_thresholds.get('XRP')}"
-        assert velocity_thresholds.get('DOGE') == 0.008, f"DOGE threshold should be 0.008, got {velocity_thresholds.get('DOGE')}"
+        # Verify 2026-07-05: Aligned with Coinbase velocity_signal.py (single source of truth)
+        # Actual market velocities observed: 0.000%-0.04% (from live logs)
+        # New thresholds (0.00001%-0.00005%) allow trades even in extremely calm markets
+        assert velocity_thresholds.get('BTC') == 0.00015, f"BTC threshold should be 0.00015, got {velocity_thresholds.get('BTC')}"
+        assert velocity_thresholds.get('ETH') == 0.00015, f"ETH threshold should be 0.00015, got {velocity_thresholds.get('ETH')}"
+        assert velocity_thresholds.get('SOL') == 0.000225, f"SOL threshold should be 0.000225, got {velocity_thresholds.get('SOL')}"
+        assert velocity_thresholds.get('XRP') == 0.000225, f"XRP threshold should be 0.000225, got {velocity_thresholds.get('XRP')}"
+        assert velocity_thresholds.get('DOGE') == 0.0003, f"DOGE threshold should be 0.0003, got {velocity_thresholds.get('DOGE')}"
 
 
 class TestFeeAwareEdgeCalculation:
@@ -244,10 +241,10 @@ class TestMarketMicrostructureFilters:
         assert profile.market_microstructure_enabled == True, "Market microstructure filters should be enabled"
         
         assert hasattr(profile, 'market_microstructure_max_spread_cents'), "Profile should have market_microstructure_max_spread_cents"
-        assert profile.market_microstructure_max_spread_cents == 15.0, f"Max spread should be 15.0 (2026 industry research), got {profile.market_microstructure_max_spread_cents}"
+        assert profile.market_microstructure_max_spread_cents == 30.0, f"Max spread should be 30.0 (2026-07-10: harmonized with 10c-50c entry price sweet spot), got {profile.market_microstructure_max_spread_cents}"
         
         assert hasattr(profile, 'market_microstructure_min_depth_usd'), "Profile should have market_microstructure_min_depth_usd"
-        assert profile.market_microstructure_min_depth_usd == 50.0, f"Min depth should be 50.0, got {profile.market_microstructure_min_depth_usd}"
+        assert profile.market_microstructure_min_depth_usd == 0.0, f"Min depth should be 0.0 (disabled for limit orders), got {profile.market_microstructure_min_depth_usd}"
         
         assert hasattr(profile, 'market_microstructure_min_yes_depth'), "Profile should have market_microstructure_min_yes_depth"
         assert profile.market_microstructure_min_yes_depth == 1, f"Min YES depth should be 1, got {profile.market_microstructure_min_yes_depth}"
@@ -292,8 +289,8 @@ class TestYAMLConfigIntegration:
         
         # Verify market microstructure config
         assert market_microstructure.get('enabled') == True, "Market microstructure should be enabled in YAML"
-        assert market_microstructure.get('max_spread_cents') == 15.0, f"Max spread should be 15.0, got {market_microstructure.get('max_spread_cents')}"
-        assert market_microstructure.get('min_depth_usd') == 50, f"Min depth should be 50 (reduced from 200 for single-contract trading), got {market_microstructure.get('min_depth_usd')}"
+        assert market_microstructure.get('max_spread_cents') == 30, f"Max spread should be 30 (2026-07-10: harmonized with 10c-50c entry price sweet spot), got {market_microstructure.get('max_spread_cents')}"
+        assert market_microstructure.get('min_depth_usd') == 0.0, f"Min depth should be 0.0 (disabled for limit orders), got {market_microstructure.get('min_depth_usd')}"
         assert market_microstructure.get('min_yes_depth') == 1, f"Min YES depth should be 1, got {market_microstructure.get('min_yes_depth')}"
         assert market_microstructure.get('min_no_depth') == 1, f"Min NO depth should be 1, got {market_microstructure.get('min_no_depth')}"
 

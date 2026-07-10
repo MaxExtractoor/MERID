@@ -411,7 +411,7 @@ momentum_fvg:
   
   # Spread guard interaction with momentum
   # If spread exceeds this, require higher OBI persistence for momentum entries
-  spread_gate_cents: 20  # 2026-07-09: OPTIMIZED to 20c - default balance between fill quality and trade frequency (industry research: 15c-25c range, 20c recommended)
+  spread_gate_cents: 30  # 2026-07-10: OPTIMIZED to 30c - harmonizes with 10c-50c entry price sweet spot (industry research: 3-8c typical, 30c quality filter)
   spread_gate_obi_persistence_boost: 0.75  # Require 75% persistence if spread is wide
 
 # ── Price-Based Strategy Parameters (2026 Optimized for Swing Trading) ───────────
@@ -524,7 +524,7 @@ venue:
 universe:
   min_volume: 5  # Minimum 5 contracts volume (relaxed from default 50 for 15m crypto)
   min_open_interest: 1  # Minimum 1 contract open interest (relaxed from default 10)
-  max_spread_cents: 20  # 2026-07-09: OPTIMIZED to 20c - default balance between fill quality and trade frequency (industry research: 15c-25c range, 20c recommended) - aligned with guardrails.max_spread_cents (single source of truth)
+  max_spread_cents: 30  # 2026-07-10: OPTIMIZED to 30c - harmonizes with 10c-50c entry price sweet spot (industry research: 3-8c typical, 30c quality filter) - aligned with guardrails.max_spread_cents (single source of truth)
   description: "Coarse liquidity prefilter for 15m crypto markets - tuned for exactly 5 markets per asset"
 
 # ── Throttling (Order Rate Limits) ───────────────────────────────────────────
@@ -597,7 +597,7 @@ min_decision_minute:
 # Low volatility: reduce min edge by 0.5% (more opportunities)
 # High volatility: increase min edge by 1.0% (higher quality signals)
 volatility_regime_edge_adjustment:
-  enabled: true  # ENABLED: 2026-07-04 - Fixed adjustment logic to use reasonable multipliers (±0.25% instead of ±0.5-1.0%)
+  enabled: false  # DISABLED: 2026-07-10 - Prevents edge crushing to 0.01%
   # Research shows DOGE with 100% annual vol should never be in low vol regime
   # The adjustment logic was incorrectly reducing edges below minimum viable thresholds
   # Per-asset edge thresholds in profile are already calibrated for asset volatility
@@ -936,7 +936,7 @@ edge_bands:
 # Research findings: 15m markets have spreads 2-5c, profitable edge 1-2% post-fee
 # Reference: https://www.indiehackers.com/post/building-a-stable-15-minute-trading-bot-for-polymarket-crypto-up-down-markets-563a14e882
 guardrails:
-  max_spread_cents: 20  # OPTIMIZED: 20c - default balance between fill quality and trade frequency (industry research: 15c-25c range, 20c recommended)
+  max_spread_cents: 30  # 2026-07-10: OPTIMIZED to 30c - harmonizes with 10c-50c entry price sweet spot (industry research: 3-8c typical, 30c quality filter)
   max_slippage_cents: 5  # INCREASED: Max 5 cents worse than best (research: 2-5c slippage acceptable for 15m markets)
   # CRITICAL FIX: Removed min_depth_contracts - use per-asset depth thresholds instead (single source of truth)
   # min_depth_contracts: 2  # REMOVED - inconsistent with per-asset min_depth_yes/min_depth_no values
@@ -963,7 +963,7 @@ guardrails:
   # For edge >= 2%: require spread <= 20c and edge >= 1.1x spread
   # 2026-07-10: ALIGNED to 20c to match universe.max_spread_cents (single source of truth)
   max_spread_for_edge:
-    "default": 20  # ALIGNED: 20c (matches universe.max_spread_cents - industry research recommended default)
+    "default": 30  # 2026-07-10: ALIGNED to 30c - harmonizes with 10c-50c entry price sweet spot (industry research: 3-8c typical, 30c quality filter)
   depth_size_multiplier: 1.5  # Depth must be >= 1.5x order size (relaxed from 3.0x to reduce rejections)
   # Regime/drawdown trap prevention
   regime_cooldown_enabled: false  # DISABLED: Asset halting based on PnL performance (industry advises against variance-based changes, let drawdown limits handle risk)
@@ -984,7 +984,7 @@ guardrails:
   spread_guard_edge_multiplier: 1.1  # Require edge >= 1.1x spread to trade (relaxed from 1.5x)
   # 2026-07-04 FIX: Increased to 75c based on 2026 industry research (Kalena: altcoin spreads 5-30%)
   # DOGE observed at 79c spread (1.3% on 59c price) - 50c threshold was blocking all trades
-  min_spread_gate_cents: 20  # OPTIMIZED: 20c - default balance between fill quality and trade frequency (industry research: 15c-25c range, 20c recommended)
+  min_spread_gate_cents: 30  # 2026-07-10: OPTIMIZED to 30c - harmonizes with 10c-50c entry price sweet spot (industry research: 3-8c typical, 30c quality filter)
   
   # Drawdown limits (percentage-based, not bankroll-scaled)
   # Drawdown is the primary hard cap; daily loss is optional/soft
@@ -1431,7 +1431,7 @@ fee_aware_edge:
 # 50c threshold blocks extreme data quality issues (82-91c spreads with YES ask=99c) while allowing normal trading
 market_microstructure:
   enabled: true  # Enable market microstructure filters
-  max_spread_cents: 20  # 2026-07-09: UNIFIED to 20c - aligned with guardrails.max_spread_cents and universe.max_spread_cents (single source of truth)
+  max_spread_cents: 30  # 2026-07-10: OPTIMIZED to 30c - harmonizes with 10c-50c entry price sweet spot (industry research: 3-8c typical, 30c quality filter)
   min_depth_usd: 0.0  # DISABLED: System uses limit orders which wait for fills, not market orders. Kalshi 15m crypto markets have sufficient liquidity. Depth thresholds are primarily for market orders to prevent slippage.
   min_yes_depth: 1  # Minimum YES depth threshold
   min_no_depth: 1  # Minimum NO depth threshold

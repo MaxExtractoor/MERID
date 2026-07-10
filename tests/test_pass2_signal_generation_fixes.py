@@ -9,6 +9,7 @@ Tests cover the 5 high-leverage bugs fixed in signal generation:
 """
 
 import pytest
+import time
 from unittest.mock import Mock, MagicMock, patch
 from dataclasses import dataclass, fields
 
@@ -31,7 +32,7 @@ class TestBug7SpreadGate:
         config = LeanAgentConfig(
             name="BTC_15M",
             series_tickers=["KXBTC15M"],
-            max_spread_cents=50,  # Strict threshold for test
+            max_spread_cents=30,  # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
         )
         
         agent = LeanAgent15m(
@@ -50,6 +51,7 @@ class TestBug7SpreadGate:
         market_state.min_depth_no = 10
         market_state.best_bid_cents = 50
         market_state.best_ask_cents = 110  # Spread = 60 > max_spread_cents(50)
+        market_state.last_update_ts = time.time()  # Current time
         
         market = Mock()
         market.market.ticker = "KXBTCD-26JUN111330-30"
@@ -67,7 +69,7 @@ class TestBug7SpreadGate:
         config = LeanAgentConfig(
             name="BTC_15M",
             series_tickers=["KXBTC15M"],
-            max_spread_cents=100,
+            max_spread_cents=30,  # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
         )
         
         agent = LeanAgent15m(
@@ -86,6 +88,7 @@ class TestBug7SpreadGate:
         market_state.min_depth_no = 10
         market_state.best_bid_cents = 50
         market_state.best_ask_cents = 55  # Spread = 5 < max_spread_cents(100)
+        market_state.last_update_ts = time.time()  # Current time
         
         market = Mock()
         market.market.ticker = "KXBTCD-26JUN111330-30"
@@ -218,6 +221,7 @@ class TestBug12DepthThresholdConfigurable:
         market_state.min_depth_no = 10
         market_state.best_bid_cents = 50
         market_state.best_ask_cents = 55
+        market_state.last_update_ts = time.time()  # Current time
         
         market = Mock()
         market.market.ticker = "KXBTCD-26JUN111330-30"

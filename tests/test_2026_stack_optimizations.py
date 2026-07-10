@@ -38,9 +38,9 @@ class TestMaxOrdersPerCycle:
         assert "throttling" in profile
         assert "max_orders_per_15m_window" in profile["throttling"]
         
-        # Check value is 5 (current configuration)
+        # Check value is 12 (current configuration - 2026-07-10: increased from 5 to 12 for $1+/15m target)
         max_orders = profile["throttling"]["max_orders_per_15m_window"]
-        assert max_orders == 5, f"Expected 5, got {max_orders}"
+        assert max_orders == 12, f"Expected 12, got {max_orders}"
     
     def test_max_orders_per_15m_window_reasonable(self):
         """Test that max_orders_per_15m_window is within reasonable bounds."""
@@ -342,9 +342,9 @@ class TestOBIProfileConfiguration:
         # Should be enabled
         assert obi["enabled"] is True, "OBI filter should be enabled"
         
-        # Strong threshold should be 0.85 (2026-07-03: increased for crypto volatility)
-        assert obi["strong_threshold"] == 0.85, \
-            f"Expected strong_threshold=0.85, got {obi['strong_threshold']}"
+        # Strong threshold should be 0.70 (2026-07-10: reduced for crypto volatility)
+        assert obi["strong_threshold"] == 0.70, \
+            f"Expected strong_threshold=0.70, got {obi['strong_threshold']}"
         
         # Moderate threshold should be 0.3
         assert obi["moderate_threshold"] == 0.3, \
@@ -377,19 +377,19 @@ class TestOBIProfileConfiguration:
         
         per_asset = obi["per_asset_strong_threshold"]
         
-        # BTC/ETH should have 85% threshold (high volatility, deep book)
-        assert per_asset["BTC"] == 0.85, \
-            f"Expected BTC threshold=0.85, got {per_asset['BTC']}"
-        assert per_asset["ETH"] == 0.85, \
-            f"Expected ETH threshold=0.85, got {per_asset['ETH']}"
+        # BTC/ETH should have 70% threshold (high volatility, deep book)
+        assert per_asset["BTC"] == 0.70, \
+            f"Expected BTC threshold=0.70, got {per_asset['BTC']}"
+        assert per_asset["ETH"] == 0.70, \
+            f"Expected ETH threshold=0.70, got {per_asset['ETH']}"
         
-        # SOL/XRP/DOGE should have 80% threshold (high volatility, thinner book)
-        assert per_asset["SOL"] == 0.80, \
-            f"Expected SOL threshold=0.80, got {per_asset['SOL']}"
-        assert per_asset["XRP"] == 0.80, \
-            f"Expected XRP threshold=0.80, got {per_asset['XRP']}"
-        assert per_asset["DOGE"] == 0.80, \
-            f"Expected DOGE threshold=0.80, got {per_asset['DOGE']}"
+        # SOL/XRP/DOGE should have 65% threshold (high volatility, thinner book)
+        assert per_asset["SOL"] == 0.65, \
+            f"Expected SOL threshold=0.65, got {per_asset['SOL']}"
+        assert per_asset["XRP"] == 0.65, \
+            f"Expected XRP threshold=0.65, got {per_asset['XRP']}"
+        assert per_asset["DOGE"] == 0.65, \
+            f"Expected DOGE threshold=0.65, got {per_asset['DOGE']}"
         
         # Top levels should be between 1 and 10
         assert 1 <= obi["top_levels"] <= 10, \
@@ -596,10 +596,10 @@ class TestZeroValueBugFixes:
 
 
 class TestMaxSpreadCentsFix:
-    """Test max_spread_cents unified to 15c based on 2026 industry research."""
+    """Test max_spread_cents unified to 30c based on 2026 industry research and 10c-50c entry price sweet spot."""
     
     def test_guardrails_max_spread_cents(self):
-        """Test that guardrails max_spread_cents is 15c based on 2026 industry research."""
+        """Test that guardrails max_spread_cents is 30c based on 2026 industry research and 10c-50c entry price sweet spot."""
         with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
             profile = yaml.safe_load(f)
         
@@ -608,12 +608,12 @@ class TestMaxSpreadCentsFix:
         # Check max_spread_cents exists
         assert "max_spread_cents" in guardrails
         
-        # Should be 15 (unified from 20c/50c conflicts based on 2026 industry research)
+        # Should be 30 (harmonized with 10c-50c entry price sweet spot - industry research: 3-8c typical, 30c quality filter)
         max_spread = guardrails["max_spread_cents"]
-        assert max_spread == 15, f"Expected max_spread_cents=15, got {max_spread}"
+        assert max_spread == 30, f"Expected max_spread_cents=30, got {max_spread}"
     
     def test_market_microstructure_max_spread_cents(self):
-        """Test that market_microstructure max_spread_cents is 15c based on 2026 industry research."""
+        """Test that market_microstructure max_spread_cents is 30c based on 2026 industry research and 10c-50c entry price sweet spot."""
         with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
             profile = yaml.safe_load(f)
         
@@ -625,9 +625,9 @@ class TestMaxSpreadCentsFix:
         # Check max_spread_cents exists
         assert "max_spread_cents" in micro
         
-        # Should be 15 (unified from 50c conflicts based on 2026 industry research)
+        # Should be 30 (harmonized with 10c-50c entry price sweet spot - industry research: 3-8c typical, 30c quality filter)
         max_spread = micro["max_spread_cents"]
-        assert max_spread == 15, f"Expected max_spread_cents=15, got {max_spread}"
+        assert max_spread == 30, f"Expected max_spread_cents=30, got {max_spread}"
 
 
 class TestADXThresholdRelaxation:

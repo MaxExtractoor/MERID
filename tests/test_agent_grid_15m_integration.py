@@ -1453,12 +1453,12 @@ def test_spread_thresholds_2026_standards():
 
     # Verify market microstructure spread threshold is aligned with profile YAML
     # Note: max_spread_cents is about bid-ask spread (liquidity), not entry price
-    # This remains at 75c for DOGE spreads that can exceed 50c
+    # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
     guardrails = raw.get('guardrails', {})
     max_spread_cents = guardrails.get('max_spread_cents', 100)
 
-    assert max_spread_cents == 75, \
-        f"Market microstructure spread threshold should be 75c per profile YAML, got {max_spread_cents}"
+    assert max_spread_cents == 30, \
+        f"Market microstructure spread threshold should be 30c per profile YAML, got {max_spread_cents}"
     
     # Verify TTE regime spread thresholds are aligned with current configuration
     from merid.risk.tte_regime import TTERegimeConfig
