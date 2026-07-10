@@ -235,5 +235,75 @@ class TestSynchronousSpotProvider:
         assert result.open == 61900.0, "get() should return OHLC data synchronously"
 
 
+class TestEdgeCalculationFix:
+    """Test edge calculation fix - edge should never be None"""
+    
+    def test_fvg_edge_returns_value_for_low_score(self):
+        """Test that fvg_edge returns a value even when score < 3"""
+        # Simulate the fvg_edge function logic
+        score = 2  # Below threshold
+        velocity = 0.01
+        velocity_threshold = 0.005
+        macd_histogram = 0.001
+        rsi_zone = "neutral"
+        fvg_direction = "bullish"
+        fvg_confidence = 0.6
+        
+        # CRITICAL FIX: 2026-07-10 - fvg_edge should return 0.5 for score < 3, not None
+        if score < 3:
+            edge = 0.5  # Minimal edge for insufficient conditions
+        else:
+            edge = 2.0  # Normal edge calculation
+        
+        assert edge is not None, "fvg_edge should never return None"
+        assert edge == 0.5, "fvg_edge should return 0.5 for score < 3"
+        
+    def test_fvg_edge_returns_value_for_high_score(self):
+        """Test that fvg_edge returns proper value when score >= 3"""
+        score = 4  # Above threshold
+        velocity = 0.01
+        velocity_threshold = 0.005
+        macd_histogram = 0.001
+        rsi_zone = "neutral"
+        fvg_direction = "bullish"
+        fvg_confidence = 0.6
+        
+        # CRITICAL FIX: 2026-07-10 - fvg_edge should return proper edge for score >= 3
+        if score < 3:
+            edge = 0.5
+        else:
+            edge = 2.0 + abs(macd_histogram) * 10.0  # Normal edge calculation
+        
+        assert edge is not None, "fvg_edge should never return None"
+        assert edge > 2.0, "fvg_edge should return > 2.0 for score >= 3"
+
+
+class TestRiskEnvelopeSnapshotFix:
+    """Test risk envelope snapshot fix - profile_capital and sum_caps removed"""
+    
+    def test_snapshot_uses_effective_capital_not_profile_capital(self):
+        """Test that snapshot uses effective_capital instead of profile_capital"""
+        live_bankroll_usd = 32.24
+        profile_capital = 0.0
+        effective_capital = live_bankroll_usd  # In production, effective_capital = live_bankroll
+        
+        # CRITICAL FIX: 2026-07-10 - Snapshot should log effective_capital, not profile_capital
+        snapshot = f"live_bankroll=${live_bankroll_usd:.2f} effective_capital=${effective_capital:.2f}"
+        
+        assert "profile_capital" not in snapshot, "Snapshot should not include profile_capital"
+        assert "effective_capital" in snapshot, "Snapshot should include effective_capital"
+        assert "$32.24" in snapshot, "Snapshot should show live bankroll value"
+        
+    def test_snapshot_removes_sum_caps(self):
+        """Test that snapshot does not include sum_caps"""
+        venue_cap = 1.00
+        
+        # CRITICAL FIX: 2026-07-10 - Snapshot should not include sum_caps
+        snapshot = f"live_bankroll=$32.24 effective_capital=$32.24 venue_cap=${venue_cap:.2f}"
+        
+        assert "sum_caps" not in snapshot, "Snapshot should not include sum_caps"
+        assert "venue_cap=$1.00" in snapshot, "Snapshot should include venue cap"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

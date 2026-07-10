@@ -1123,8 +1123,10 @@ def compute_kalshi_crypto_15m_risk_envelope(
     # Previous logic: Scale all caps down proportionally to fit exactly into venue cap
     # This was causing equal $0.20 caps per asset, defeating edge-based allocation
     
-    # Calculate total_asset_cap for logging (even though we don't rescale)
-    total_asset_cap = sum(asset_max_notional_usd.values())
+    # CRITICAL FIX: 2026-07-10 - Removed sum_caps calculation since global allocator
+    # enforces $1.00 total exposure cap across all assets. The sum of per-asset caps
+    # is no longer relevant since the global allocator dynamically allocates under
+    # the venue cap based on edge ranking, not fixed per-asset allocations.
     
     # total_asset_cap = sum(asset_max_notional_usd.values())
     # if total_asset_cap > max_total_notional_usd:
@@ -1207,13 +1209,14 @@ def compute_kalshi_crypto_15m_risk_envelope(
     )
     
     # ── Log Envelope Snapshot ───────────────────────────────────────────────────
+    # CRITICAL FIX: 2026-07-10 - Removed profile_capital and sum_caps from snapshot
+    # profile_capital is only used in validation mode, not production
+    # sum_caps is no longer relevant since global allocator enforces $1.00 total cap
     logger.info(
         "[RISK-ENVELOPE-SNAPSHOT] "
         f"live_bankroll=${live_bankroll_usd:.2f} "
-        f"profile_capital=${profile_capital:.2f} "
-        f"venue_cap=${max_total_notional_usd:.2f} "
-        f"sum_caps=${total_asset_cap:.2f} "
-        f"scaled={total_asset_cap > max_total_notional_usd}"
+        f"effective_capital=${effective_capital:.2f} "
+        f"venue_cap=${max_total_notional_usd:.2f}"
     )
     logger.info(
         f"[RISK-ENVELOPE-SNAPSHOT] CRITICAL: ${fixed_exposure_cap_usd:.2f} is the TOTAL exposure cap across ALL 5 assets (BTC+ETH+SOL+XRP+DOGE)"
