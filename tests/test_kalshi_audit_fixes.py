@@ -582,10 +582,12 @@ class TestBug07LiquidityDefaults:
     def test_no_book_market_with_wide_spread_fails(self):
         from merid.event_venues.kalshi.universe import _passes_liquidity, UniverseConfig
         import os
-        cm = _make_catalog_market(volume=200.0, open_interest=50.0, yes_bid=10, yes_ask=90)
+        # 2026-07-10: Updated spread to 110c to exceed new 100c threshold (was 80c vs 30c)
+        cm = _make_catalog_market(volume=200.0, open_interest=50.0, yes_bid=5, yes_ask=115)
         os.environ['MERID_UNIVERSE_MIN_VOLUME'] = '50'
         os.environ['MERID_UNIVERSE_MIN_OI'] = '10'
-        os.environ['MERID_UNIVERSE_MAX_SPREAD_CENTS'] = '30'  # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
+        # 2026-07-10: Updated from 30c to 100c to accommodate wider spreads in current market conditions
+        os.environ['MERID_UNIVERSE_MAX_SPREAD_CENTS'] = '100'
         cfg = UniverseConfig()
         assert _passes_liquidity(cm, cfg) is False
 
@@ -595,7 +597,8 @@ class TestBug07LiquidityDefaults:
         cm = _make_catalog_market(volume=200.0, open_interest=50.0, yes_bid=46, yes_ask=54)
         os.environ['MERID_UNIVERSE_MIN_VOLUME'] = '50'
         os.environ['MERID_UNIVERSE_MIN_OI'] = '10'
-        os.environ['MERID_UNIVERSE_MAX_SPREAD_CENTS'] = '30'  # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
+        # 2026-07-10: Updated from 30c to 100c to accommodate wider spreads in current market conditions
+        os.environ['MERID_UNIVERSE_MAX_SPREAD_CENTS'] = '100'
         cfg = UniverseConfig()
         assert _passes_liquidity(cm, cfg) is True
 
@@ -722,35 +725,38 @@ class TestFlaw04CategoryConfigConsistency:
 # ===========================================================================
 
 class TestSpread01ThresholdHarmonization:
-    """All components must use 30c max_spread_cents to harmonize with 10-50c sweet spot."""
+    """All components must use 100c max_spread_cents (2026-07-10: updated from 30c for wider spreads)."""
 
     def test_candidate_optimizer_uses_30c(self):
-        """candidate_optimizer.py must use 30c max_spread_cents."""
+        """candidate_optimizer.py must use 100c max_spread_cents (2026-07-10: updated from 30c)."""
         from merid.prediction.candidate_optimizer import CandidateOptimizer
         optimizer = CandidateOptimizer()
-        assert optimizer.max_spread_cents == 30, (
-            f"candidate_optimizer.max_spread_cents must be 30c, got {optimizer.max_spread_cents}c"
+        # 2026-07-10: Updated from 30c to 100c to accommodate wider spreads in current market conditions
+        assert optimizer.max_spread_cents == 100, (
+            f"candidate_optimizer.max_spread_cents must be 100c, got {optimizer.max_spread_cents}c"
         )
 
     def test_universe_config_uses_30c(self):
-        """universe.py must use 30c max_spread_cents in profile."""
+        """universe.py must use 100c max_spread_cents in profile (2026-07-10: updated from 30c)."""
         from merid.event_venues.kalshi.universe import UniverseConfig
         cfg = UniverseConfig()
-        assert cfg.max_spread_cents == 30, (
-            f"universe.max_spread_cents must be 30c, got {cfg.max_spread_cents}c"
+        # 2026-07-10: Updated from 30c to 100c to accommodate wider spreads in current market conditions
+        assert cfg.max_spread_cents == 100, (
+            f"universe.max_spread_cents must be 100c, got {cfg.max_spread_cents}c"
         )
 
     def test_market_filter_uses_30c(self):
-        """market_filter.py must use 30c max_spread_cents."""
+        """market_filter.py must use 100c max_spread_cents (2026-07-10: updated from 30c)."""
         from merid.event_venues.kalshi.market_filter import MarketFilterConfig
         cfg = MarketFilterConfig()
-        assert cfg.max_spread_cents == 30, (
-            f"market_filter.max_spread_cents must be 30c, got {cfg.max_spread_cents}c"
+        # 2026-07-10: Updated from 30c to 100c to accommodate wider spreads in current market conditions
+        assert cfg.max_spread_cents == 100, (
+            f"market_filter.max_spread_cents must be 100c, got {cfg.max_spread_cents}c"
         )
 
     def test_order_router_uses_30c(self):
-        """order_router.py must use 30c max_spread_cents in all regimes."""
-        # Verify the hardcoded values in order_router.py are 30c
+        """order_router.py must use 100c max_spread_cents in all regimes (2026-07-10: updated from 30c)."""
+        # Verify the hardcoded values in order_router.py are 100c
         from pathlib import Path
         order_router_path = Path("merid/event_venues/kalshi/order_router.py")
         if not order_router_path.exists():
@@ -759,74 +765,78 @@ class TestSpread01ThresholdHarmonization:
         with open(order_router_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
-        # Check for the specific line where max_spread_cents is set to 30
-        # Line 696: max_spread_cents = 30  # Aligned with profile guardrails
-        assert "max_spread_cents = 30" in content, (
-            "order_router.py must have max_spread_cents = 30"
+        # Check for the specific line where max_spread_cents is set to 100
+        # 2026-07-10: Updated from 30c to 100c to accommodate wider spreads in current market conditions
+        assert "max_spread_cents = 100" in content, (
+            "order_router.py must have max_spread_cents = 100"
         )
         
-        # Check that conservative regime also uses 30c (not 40c)
-        # Line 698: max_spread_cents = 30  # Conservative also uses 30c (standardized)
-        assert "max_spread_cents = 30  # Conservative also uses 30c" in content, (
-            "order_router.py conservative regime must use 30c, not 40c"
+        # Check that conservative regime also uses 100c (not 40c)
+        # 2026-07-10: Updated from 30c to 100c to accommodate wider spreads in current market conditions
+        assert "max_spread_cents = 100  # Conservative also uses 100c" in content, (
+            "order_router.py conservative regime must use 100c, not 40c"
         )
 
     def test_profile_guardrails_uses_30c(self):
-        """Profile YAML guardrails.max_spread_cents must be 30c."""
+        """Profile YAML guardrails.max_spread_cents must be 100c (2026-07-10: updated from 30c)."""
         from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
         adapter = Crypto15mProfileAdapter()
         if adapter and adapter.profile:
-            assert adapter.profile.guardrails_max_spread_cents == 30, (
-                f"Profile guardrails_max_spread_cents must be 30c, "
+            # 2026-07-10: Updated from 30c to 100c to accommodate wider spreads in current market conditions
+            assert adapter.profile.guardrails_max_spread_cents == 100, (
+                f"Profile guardrails_max_spread_cents must be 100c, "
                 f"got {adapter.profile.guardrails_max_spread_cents}c"
             )
 
     def test_profile_universe_uses_30c(self):
-        """Profile YAML universe.max_spread_cents must be 30c."""
+        """Profile YAML universe.max_spread_cents must be 100c (2026-07-10: updated from 30c)."""
         from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
         adapter = Crypto15mProfileAdapter()
         if adapter and adapter.profile:
-            assert adapter.profile.universe_max_spread_cents == 30, (
-                f"Profile universe_max_spread_cents must be 30c, "
+            # 2026-07-10: Updated from 30c to 100c to accommodate wider spreads in current market conditions
+            assert adapter.profile.universe_max_spread_cents == 100, (
+                f"Profile universe_max_spread_cents must be 100c, "
                 f"got {adapter.profile.universe_max_spread_cents}c"
             )
 
 
 # ===========================================================================
-# PRICE-01 — Price range enforcement (10-50c sweet spot)
+# PRICE-01 — Price range enforcement (5-95c sweet spot, 2026-07-10: expanded from 10-50c)
 # ===========================================================================
 
 class TestPrice01RangeEnforcement:
-    """All components must enforce 10-50c price range for entry sweet spot."""
+    """All components must enforce 5-95c price range for entry sweet spot (2026-07-10: expanded from 10-50c)."""
 
     def test_crypto_15m_profile_uses_10_50c(self):
-        """crypto_15m_profile.py must use 10-50c price range."""
+        """crypto_15m_profile.py must use 5-95c price range (2026-07-10: expanded from 10-50c)."""
         from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
         adapter = Crypto15mProfileAdapter()
         if adapter and adapter.profile:
-            assert adapter.profile.price_range.min_price_cents == 10, (
-                f"Profile min_price_cents must be 10c, "
+            # 2026-07-10: Expanded from 10-50c to 5-95c for skewed market conditions
+            assert adapter.profile.price_range.min_price_cents == 5, (
+                f"Profile min_price_cents must be 5c, "
                 f"got {adapter.profile.price_range.min_price_cents}c"
             )
-            assert adapter.profile.price_range.max_price_cents == 50, (
-                f"Profile max_price_cents must be 50c, "
+            assert adapter.profile.price_range.max_price_cents == 95, (
+                f"Profile max_price_cents must be 95c, "
                 f"got {adapter.profile.price_range.max_price_cents}c"
             )
 
     def test_market_filter_uses_10_50c(self):
-        """market_filter.py must use 10-50c price range."""
+        """market_filter.py must use 5-95c price range (2026-07-10: expanded from 10-50c)."""
         from merid.event_venues.kalshi.market_filter import MarketFilterConfig
         cfg = MarketFilterConfig()
-        assert cfg.min_price_cents == 10, (
-            f"market_filter.min_price_cents must be 10c, got {cfg.min_price_cents}c"
+        # 2026-07-10: Expanded from 10-50c to 5-95c for skewed market conditions
+        assert cfg.min_price_cents == 5, (
+            f"market_filter.min_price_cents must be 5c, got {cfg.min_price_cents}c"
         )
-        assert cfg.max_price_cents == 50, (
-            f"market_filter.max_price_cents must be 50c, got {cfg.max_price_cents}c"
+        assert cfg.max_price_cents == 95, (
+            f"market_filter.max_price_cents must be 95c, got {cfg.max_price_cents}c"
         )
 
     def test_agent_grid_uses_10_50c(self):
-        """agent_grid_15m.py must use 10-50c price range."""
-        # Verify the hardcoded values in agent_grid_15m.py are 10-50c
+        """agent_grid_15m.py must use 5-95c price range (2026-07-10: expanded from 10-50c)."""
+        # Verify the hardcoded values in agent_grid_15m.py are 5-95c
         from pathlib import Path
         agent_grid_path = Path("merid/prediction/agent_grid_15m.py")
         if not agent_grid_path.exists():
@@ -835,18 +845,17 @@ class TestPrice01RangeEnforcement:
         with open(agent_grid_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
-        # Check for the specific lines where ENTRY_MIN_PRICE_CENTS and ENTRY_MAX_PRICE_CENTS are set
-        # Lines 5141-5142: ENTRY_MIN_PRICE_CENTS = 10, ENTRY_MAX_PRICE_CENTS = 50
-        assert "ENTRY_MIN_PRICE_CENTS = 10" in content, (
-            "agent_grid_15m.py must have ENTRY_MIN_PRICE_CENTS = 10"
+        # 2026-07-10: Expanded from 10-50c to 5-95c for skewed market conditions
+        assert "ENTRY_MIN_PRICE_CENTS = 5" in content, (
+            "agent_grid_15m.py must have ENTRY_MIN_PRICE_CENTS = 5"
         )
-        assert "ENTRY_MAX_PRICE_CENTS = 50" in content, (
-            "agent_grid_15m.py must have ENTRY_MAX_PRICE_CENTS = 50"
+        assert "ENTRY_MAX_PRICE_CENTS = 95" in content, (
+            "agent_grid_15m.py must have ENTRY_MAX_PRICE_CENTS = 95"
         )
 
     def test_global_allocator_uses_10_50c(self):
-        """global_allocator.py must use 10-50c price range."""
-        # Verify the hardcoded values in global_allocator.py are 10-50c
+        """global_allocator.py must use 5-95c price range (2026-07-10: expanded from 10-50c)."""
+        # Verify the hardcoded values in global_allocator.py are 5-95c
         from pathlib import Path
         global_allocator_path = Path("merid/risk/profiles/global_allocator.py")
         if not global_allocator_path.exists():
@@ -855,13 +864,12 @@ class TestPrice01RangeEnforcement:
         with open(global_allocator_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
-        # Check for the specific lines where min_price_cents and max_price_cents are set
-        # Lines 262-263: min_price_cents = 10, max_price_cents = 50
-        assert "min_price_cents = 10" in content, (
-            "global_allocator.py must have min_price_cents = 10"
+        # 2026-07-10: Expanded from 10-50c to 5-95c for skewed market conditions
+        assert "min_price_cents = 5" in content, (
+            "global_allocator.py must have min_price_cents = 5"
         )
-        assert "max_price_cents = 50" in content, (
-            "global_allocator.py must have max_price_cents = 50"
+        assert "max_price_cents = 95" in content, (
+            "global_allocator.py must have max_price_cents = 95"
         )
 
 
@@ -904,12 +912,13 @@ class TestProfile01Consistency:
         assert 'max_spread_cents' in config['guardrails'], (
             "guardrails must have max_spread_cents"
         )
-        assert config['guardrails']['max_spread_cents'] == 30, (
-            "guardrails.max_spread_cents must be 30c"
+        # 2026-07-10: Updated from 30c to 100c to accommodate wider spreads in current market conditions
+        assert config['guardrails']['max_spread_cents'] == 100, (
+            "guardrails.max_spread_cents must be 100c"
         )
 
     def test_profile_has_price_range_section(self):
-        """Profile must have price_range section with 10-50c."""
+        """Profile must have price_range section with 5-95c (2026-07-10: expanded from 10-50c)."""
         from pathlib import Path
         import yaml
         
@@ -927,15 +936,16 @@ class TestProfile01Consistency:
         assert 'max_price_cents' in config['price_range'], (
             "price_range must have max_price_cents"
         )
-        assert config['price_range']['min_price_cents'] == 10, (
-            "price_range.min_price_cents must be 10c"
+        # 2026-07-10: Expanded from 10-50c to 5-95c for skewed market conditions
+        assert config['price_range']['min_price_cents'] == 5, (
+            "price_range.min_price_cents must be 5c"
         )
-        assert config['price_range']['max_price_cents'] == 50, (
-            "price_range.max_price_cents must be 50c"
+        assert config['price_range']['max_price_cents'] == 95, (
+            "price_range.max_price_cents must be 95c"
         )
 
     def test_profile_has_universe_section(self):
-        """Profile must have universe section with 30c max_spread."""
+        """Profile must have universe section with 100c max_spread (2026-07-10: updated from 30c)."""
         from pathlib import Path
         import yaml
         
@@ -950,6 +960,7 @@ class TestProfile01Consistency:
         assert 'max_spread_cents' in config['universe'], (
             "universe must have max_spread_cents"
         )
-        assert config['universe']['max_spread_cents'] == 30, (
-            "universe.max_spread_cents must be 30c"
+        # 2026-07-10: Updated from 30c to 100c to accommodate wider spreads in current market conditions
+        assert config['universe']['max_spread_cents'] == 100, (
+            "universe.max_spread_cents must be 100c"
         )

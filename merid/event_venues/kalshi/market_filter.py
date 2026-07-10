@@ -765,20 +765,21 @@ class MarketFilterConfig:
     min_open_interest: int = 10
 
     # Maximum bid-ask spread in cents (e.g. 8 = max 8c spread)
-    # CRITICAL FIX: Increased from 12c to 30c to harmonize with profile guardrails and 10-50c sweet spot (2026-07-10)
-    # Previous 12c was too tight and blocking valid trades with realistic spreads (15-25c range)
-    max_spread_cents: int = 30
+    # CRITICAL FIX: Increased from 12c to 30c to 100c to accommodate wider spreads in current market conditions (2026-07-10)
+    # Previous 30c was still too tight for current market conditions with wider spreads
+    max_spread_cents: int = 100
 
     # Minimum best-bid price (filter out near-zero contracts)
-    # 2026-07-09: Reduced from 50c to 10c to align with profile YAML 10-50c sweet spot
-    # Previous 50c minimum was forcing agents to always trade at 50c instead of 10-50c range
-    # Profile YAML: price_range.min_price_cents = 10, price_range.max_price_cents = 50
-    min_price_cents: int = 10
+    # 2026-07-10: Reduced from 10c to 5c to align with profile YAML 5-95c sweet spot for skewed market conditions
+    # Previous 10c minimum was still too restrictive for skewed markets
+    # Profile YAML: price_range.min_price_cents = 5, price_range.max_price_cents = 95
+    min_price_cents: int = 5
 
     # Maximum best-bid price (filter out near-certain contracts)
-    # CRITICAL FIX: Reduced from 70c to 50c to align with 10-50c sweet spot (2026-07-10)
-    # Prevents low-profit trades at high prices (50-70c) with poor risk/reward
-    max_price_cents: int = 50
+    # 2026-07-10: Increased from 50c to 95c to align with profile YAML 5-95c sweet spot for skewed market conditions
+    # Previous 50c maximum was too restrictive for skewed markets
+    # Profile YAML: price_range.min_price_cents = 5, price_range.max_price_cents = 95
+    max_price_cents: int = 95
 
     # Only include markets for these underlyings.
     # Empty list = allow all underlyings (full Kalshi platform coverage).
