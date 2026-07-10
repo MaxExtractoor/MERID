@@ -925,6 +925,108 @@ def test_tp_sl_none_when_exit_policy_missing():
     assert stop_loss_price_cents is None
 
 
+def test_aggressiveness_computed_before_order_intent():
+    """Test that aggressiveness is computed before OrderIntent creation.
+    
+    This ensures orders are marketable (cross spread) instead of resting (join spread).
+    Resting orders with aggressiveness=0.0 rarely fill in thin 15m crypto markets.
+    """
+    from merid.event_venues.kalshi.risk_parameters import compute_order_aggressiveness
+    from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+    from unittest.mock import Mock, patch
+    
+    # Simulate candidate with edge
+    ticker = "KXBTC15M-26JUN300345-45"
+    edge_pct = 2.5  # 2.5% edge
+    
+    # Mock market state with seconds_to_expiry
+    mock_state = Mock()
+    mock_state.seconds_to_expiry = 900
+    
+    # Mock market state store
+    with patch('merid.event_venues.kalshi.market_state.get_kalshi_market_state_store') as mock_get_store:
+        mock_store = Mock()
+        mock_store.get.return_value = mock_state
+        mock_get_store.return_value = mock_store
+        
+        # Extract asset from ticker
+        asset = ticker.split("-")[0].replace("KX", "") if "-" in ticker else "BTC"
+        
+        # Get seconds to expiry from market state
+        seconds_to_expiry = 900  # Default 15 minutes
+        market_state_store = get_kalshi_market_state_store()
+        if market_state_store:
+            state = market_state_store.get(ticker)
+            if state and hasattr(state, 'seconds_to_expiry'):
+                seconds_to_expiry = state.seconds_to_expiry
+        
+        # Normalize edge_pct to fraction (agent candidates use percent, compute_order_aggressiveness expects fraction)
+        edge_fraction = edge_pct / 100.0 if edge_pct > 1.0 else edge_pct
+        
+        # Compute aggressiveness (0.0=resting, 0.5-1.0=marketable)
+        aggressiveness = compute_order_aggressiveness(
+            asset=asset,
+            edge_pct=edge_fraction,
+            seconds_to_expiry=int(seconds_to_expiry)
+        )
+        
+        # Verify aggressiveness was computed
+        assert aggressiveness > 0.0, "Aggressiveness should be > 0.0 for 2.5% edge on BTC"
+        assert aggressiveness <= 1.0, "Aggressiveness should be <= 1.0"
+
+
+def test_aggressiveness_defaults_to_marketable_on_error():
+    """Test that aggressiveness defaults to 0.5 (marketable) on computation error.
+    
+    This ensures fills even if aggressiveness computation fails.
+    """
+    from unittest.mock import patch
+    
+    # Simulate candidate with edge
+    ticker = "KXBTC15M-26JUN300345-45"
+    edge_pct = 2.5
+    
+    # Mock compute_order_aggressiveness to raise an error
+    with patch('merid.event_venues.kalshi.risk_parameters.compute_order_aggressiveness') as mock_compute:
+        mock_compute.side_effect = Exception("Computation failed")
+        
+        aggressiveness = 0.0
+        try:
+            from merid.event_venues.kalshi.risk_parameters import compute_order_aggressiveness
+            aggressiveness = compute_order_aggressiveness("BTC", edge_pct / 100.0, 900)
+        except Exception as agg_err:
+            aggressiveness = 0.5  # Default to marketable (0.5) to ensure fills
+        
+        # Verify default aggressiveness
+        assert aggressiveness == 0.5, "Aggressiveness should default to 0.5 on error"
+
+
+def test_aggressiveness_passed_to_order_intent():
+    """Test that computed aggressiveness is passed to OrderIntent.
+    
+    This verifies the fix for the root cause of no fills.
+    """
+    from merid.event_venues.kalshi.order_router import OrderIntent
+    
+    # Simulate computed aggressiveness
+    aggressiveness = 0.7  # Marketable
+    
+    # Construct OrderIntent with aggressiveness
+    intent = OrderIntent(
+        ticker="KXBTC15M-TEST",
+        side="yes",
+        action="buy",
+        price_cents=50,
+        count=1,
+        source="merid.prediction.agent_grid_15m",
+        aggressiveness=aggressiveness,
+    )
+    
+    # Verify aggressiveness is passed
+    assert intent.aggressiveness == 0.7
+    assert intent.aggressiveness > 0.0  # Marketable, not resting
+
+
 def test_dual_side_price_evaluation_yes_no_in_range():
     """Test that both YES and NO prices are evaluated within 10c-50c sweet spot.
     

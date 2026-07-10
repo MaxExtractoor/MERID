@@ -1178,6 +1178,46 @@ class Kalshi15mLoop:
                 contracts_to_close or "full",
             )
             
+            # CRITICAL FIX: 2026-07-09 - Exit orders bypass slot allocation
+            # Exit orders reduce exposure, so they should always be allowed even at full $1 capacity
+            # This ensures positions can be closed to lock in profits without waiting for window end
+            try:
+                from merid.risk.global_slot_allocator import get_global_slot_allocator, AllocationRequest
+                from config.kalshi_crypto_config import kalshi_ticker_to_asset
+                
+                slot_allocator = get_global_slot_allocator()
+                asset = kalshi_ticker_to_asset(position.market_id) if position.market_id else None
+                
+                # Create exit order allocation request (bypasses slot allocation)
+                exit_request = AllocationRequest(
+                    agent_id="position_monitor",
+                    asset=asset or "unknown",
+                    ticker=position.market_id,
+                    entry_price_cents=exit_price_cents,
+                    edge_pct=0.0,  # Exit orders don't have edge
+                    spread_cents=0,  # Exit orders don't care about spread
+                    is_exit_order=True  # CRITICAL: Mark as exit order to bypass allocation
+                )
+                
+                # Request allocation (will bypass due to is_exit_order=True)
+                allocated, reason, _ = slot_allocator.request_allocation(exit_request)
+                
+                if not allocated and reason != "EXIT_ORDER_BYPASS":
+                    logger.warning(
+                        "[EXIT-ORDER] Slot allocator rejected exit order (should not happen): %s",
+                        reason
+                    )
+                else:
+                    logger.info(
+                        "[EXIT-ORDER] Exit order bypassed slot allocation: asset=%s ticker=%s",
+                        asset, position.market_id
+                    )
+            except Exception as slot_err:
+                logger.warning(
+                    "[EXIT-ORDER] Failed to check slot allocator for exit order (non-critical): %s",
+                    slot_err
+                )
+            
             from merid.event_venues.kalshi.order_router import OrderIntent, route_order_async
 
             # CRITICAL FIX: Convert to Kalshi format (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
@@ -1583,10 +1623,10 @@ class Kalshi15mLoop:
                                                     price_cents = yes_mid
                                 if price_cents <= 0:
                                     logger.warning(
-                                        "[15m-LOOP] No real price available for sizing ticker=%s - using conservative 50c placeholder",
+                                        "[15m-LOOP] No real price available for sizing ticker=%s - using conservative 25c placeholder (midpoint of 10-50c sweet spot)",
                                         ticker
                                     )
-                                    price_cents = 50
+                                    price_cents = 25  # 2026-07-09: Fixed to 25c (midpoint of 10-50c sweet spot)
                             
                                 # Get edge and confidence from candidate
                                 edge_pct = Decimal(str(candidate.get("edge_pct", 0.0)))
@@ -2592,6 +2632,14 @@ class Kalshi15mLoop:
                 risk_profile_loaded and
                 top3_gate_available
             )
+            
+            # DIAGNOSTIC: Log infra_ready components for debugging pipeline_ready=False
+            if not infra_ready:
+                logger.warning(
+                    "[INFRA-READY-DEBUG] infra_ready=False - catalog_ok=%s ws_ok=%s live_bankroll_valid=%s bankroll_source_valid=%s risk_profile_loaded=%s top3_gate_available=%s",
+                    catalog_ok, ws_ok, live_bankroll_valid, bankroll_source_valid, risk_profile_loaded, top3_gate_available
+                )
+            
             markets_expected = markets_expected_now()
             markets_present = markets_present_count > 0
 
@@ -3739,41 +3787,41 @@ class Kalshi15mLoop:
                             if market_state.best_bid_cents and market_state.best_ask_cents:
                                 yes_mid = (market_state.best_bid_cents + market_state.best_ask_cents) // 2
                                 raw_price_cents = 100 - yes_mid
-                                # CRITICAL FIX: Clamp to 10-50c entry range to match profile guardrails
-                                price_cents = max(10, min(50, raw_price_cents))
+                                # CRITICAL FIX: Clamp to profile price_range (5-95c) to match profile YAML
+                                price_cents = max(5, min(95, raw_price_cents))
                                 logger.info("[15M-LOOP] ticker=%s NO order: YES_mid=%d -> NO_mid=%d (raw=%d, clamped=%d)", ticker, yes_mid, price_cents, raw_price_cents, price_cents)
                             elif market_state.mid_cents:
                                 raw_price_cents = 100 - int(market_state.mid_cents)
-                                # CRITICAL FIX: Clamp to 10-50c entry range to match profile guardrails
-                                price_cents = max(10, min(50, raw_price_cents))
+                                # CRITICAL FIX: Clamp to profile price_range (5-95c) to match profile YAML
+                                price_cents = max(5, min(95, raw_price_cents))
                                 logger.info("[15M-LOOP] ticker=%s NO order: YES_mid_cents=%.2f -> NO_mid=%d (raw=%d, clamped=%d)", ticker, market_state.mid_cents, price_cents, raw_price_cents, price_cents)
                             else:
-                                logger.warning("[15M-LOOP] NO order but no market state data for %s, using default 50c", ticker)
-                                price_cents = 50
+                                logger.warning("[15M-LOOP] NO order but no market state data for %s, using default 25c", ticker)
+                                price_cents = 50  # 2026-07-10: Changed to 50 (midpoint of 5-95c profile range)
                         else:
                             # YES order: use YES mid-price
                             if market_state.mid_cents:
                                 # BUG #39 FIX: Convert mid_cents to integer
                                 # mid_cents is a float from unified_market_state.py but order router requires integer
                                 raw_price_cents = int(market_state.mid_cents)
-                                # CRITICAL FIX: Clamp to 10-50c entry range to match profile guardrails
-                                price_cents = max(10, min(50, raw_price_cents))
+                                # CRITICAL FIX: Clamp to profile price_range (5-95c) to match profile YAML
+                                price_cents = max(5, min(95, raw_price_cents))
                                 logger.info("[15M-LOOP] ticker=%s YES order: price_cents from mid_cents=%d (raw=%.2f, clamped=%d)", ticker, price_cents, market_state.mid_cents, price_cents)
                             elif market_state.best_bid_cents and market_state.best_ask_cents:
                                 # Use mid of bid/ask if mid not available
                                 raw_price_cents = (market_state.best_bid_cents + market_state.best_ask_cents) // 2
-                                # CRITICAL FIX: Clamp to 10-50c entry range to match profile guardrails
-                                price_cents = max(10, min(50, raw_price_cents))
+                                # CRITICAL FIX: Clamp to profile price_range (5-95c) to match profile YAML
+                                price_cents = max(5, min(95, raw_price_cents))
                                 logger.info("[15M-LOOP] ticker=%s YES order: price_cents from bid/ask mid=%d (raw=%d, clamped=%d) (bid=%d, ask=%d)", ticker, price_cents, raw_price_cents, price_cents, market_state.best_bid_cents, market_state.best_ask_cents)
                             else:
-                                logger.warning("[15M-LOOP] YES order but no market state data for %s, using default 50c", ticker)
-                                price_cents = 50
+                                logger.warning("[15M-LOOP] YES order but no market state data for %s, using default 25c", ticker)
+                                price_cents = 50  # 2026-07-10: Changed to 50 (midpoint of 5-95c profile range)
                     else:
                         logger.warning("[15M-LOOP] No market state available for %s, using default 50c", ticker)
-                        price_cents = 50
+                        price_cents = 50  # 2026-07-10: Changed to 50 (midpoint of 5-95c profile range)
                 except Exception as e:
                     logger.warning("[15M-LOOP] Failed to get price from market state for %s: %s", ticker, e)
-                    price_cents = 50
+                    price_cents = 50  # 2026-07-10: Changed to 50 (midpoint of 5-95c profile range)
             else:
                 logger.info("[15M-LOOP] ticker=%s price_cents from candidate=%d (side=%s)", ticker, price_cents, candidate.get("side"))
             
@@ -3934,22 +3982,70 @@ class Kalshi15mLoop:
             trace_id = str(uuid.uuid4())[:8]
             candidate["trace_id"] = trace_id
 
-            # PRE-SEND ASSERT: Ensure order price is within 10-50c entry range
-            if not (10 <= price_cents <= 50):
+            # PRE-SEND ASSERT: Ensure order price is within profile price_range (5-95c)
+            # Profile YAML: kalshi_crypto_15m_v2.yaml price_range.min_price_cents=5, max_price_cents=95
+            if not (5 <= price_cents <= 95):
                 logger.error(
-                    "[PRE-SEND-ASSERT-FAILED] trace_id=%s price_cents=%d outside entry range [10,50] ticker=%s side=%s edge_pct=%s "
+                    "[PRE-SEND-ASSERT-FAILED] trace_id=%s price_cents=%d outside profile price_range [5,95] ticker=%s side=%s edge_pct=%s "
                     "candidate_price_cents=%s source=%s",
                     trace_id, price_cents, ticker, kalshi_side, edge_pct,
                     candidate.get("price_cents", "N/A"), "merid.prediction.agent_grid_15m"
                 )
-                raise AssertionError(f"Order price {price_cents}c outside entry range [10,50] for ticker={ticker}")
+                raise AssertionError(f"Order price {price_cents}c outside profile price_range [5,95] for ticker={ticker}")
 
+            # CRITICAL FIX: 2026-07-09 - Enforce max 1 contract per order for $1 hard limit
+            # This prevents agents from exceeding the $1 exposure cap by trading multiple contracts
+            if count != 1:
+                logger.error(
+                    "[PRE-SEND-ASSERT-FAILED] trace_id=%s count=%d != 1 for ticker=%s - "
+                    "hard limit: max 1 contract per order to enforce $1 exposure cap",
+                    trace_id, count, ticker
+                )
+                raise AssertionError(f"Order count {count} != 1 for ticker={ticker} - max 1 contract per order")
+
+            # CRITICAL FIX: Compute aggressiveness from edge before creating OrderIntent
+            # This ensures orders are marketable (cross spread) instead of resting (join spread)
+            # Resting orders with aggressiveness=0.0 rarely fill in thin 15m crypto markets
+            aggressiveness = 0.0
+            try:
+                from merid.event_venues.kalshi.risk_parameters import compute_order_aggressiveness
+                from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                
+                # Extract asset from ticker
+                asset = ticker.split("-")[0].replace("KX", "") if "-" in ticker else "BTC"
+                
+                # Get seconds to expiry from market state
+                seconds_to_expiry = 900  # Default 15 minutes
+                market_state_store = get_kalshi_market_state_store()
+                if market_state_store:
+                    state = market_state_store.get(ticker)
+                    if state and hasattr(state, 'seconds_to_expiry'):
+                        seconds_to_expiry = state.seconds_to_expiry
+                
+                # Normalize edge_pct to fraction (agent candidates use percent, compute_order_aggressiveness expects fraction)
+                edge_fraction = edge_pct / 100.0 if edge_pct > 1.0 else edge_pct
+                
+                # Compute aggressiveness (0.0=resting, 0.5-1.0=marketable)
+                aggressiveness = compute_order_aggressiveness(
+                    asset=asset,
+                    edge_pct=edge_fraction,
+                    seconds_to_expiry=int(seconds_to_expiry)
+                )
+                
+                logger.info(
+                    "[15M-LOOP] Computed aggressiveness: ticker=%s asset=%s edge_pct=%.2f%% aggressiveness=%.2f tte=%ds",
+                    ticker, asset, edge_fraction * 100, aggressiveness, seconds_to_expiry
+                )
+            except Exception as agg_err:
+                logger.warning("[15M-LOOP] Failed to compute aggressiveness: %s, using default 0.5 (marketable)", agg_err)
+                aggressiveness = 0.5  # Default to marketable (0.5) to ensure fills
+            
             intent = OrderIntent(
                 ticker=ticker,
                 side=kalshi_side,  # CRITICAL FIX: Use Kalshi-formatted side (BUY_YES, SELL_YES, BUY_NO, SELL_NO)
                 action=action_raw,  # Keep as lowercase "buy"/"sell" for early validation
                 price_cents=price_cents,  # BUG #2 FIX: Add required price_cents field
-                count=count,
+                count=1,  # CRITICAL FIX: 2026-07-09 - Hard limit: max 1 contract per order
                 source="merid.prediction.agent_grid_15m",  # Use 'source' instead of 'caller_module'
                 agent_id=agent_id,  # CRITICAL: Pass actual agent_id for authorization
                 edge_pct=edge_pct,  # BUG #34 FIX: Add edge_pct from candidate
@@ -3970,6 +4066,8 @@ class Kalshi15mLoop:
                 # CRITICAL FIX: 2026-07-07 - Explicitly set post_only=False to prevent Kalshi API rejection
                 # Error "Post_only_but_execution_type_can't_rest" occurs when post_only=True but order can't rest
                 post_only=False,
+                # CRITICAL FIX: Add aggressiveness to ensure orders are marketable (cross spread) instead of resting
+                aggressiveness=aggressiveness,  # 0.0=resting, 0.5-1.0=marketable
                 # CRITICAL FIX: Add client_tag for TP/SL registration with position cache
                 client_tag=client_tag,
                 # CRITICAL FIX: Add exit targets from resolved exit policy
