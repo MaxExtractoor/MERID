@@ -54,7 +54,8 @@ class UniverseConfig:
     """Liquidity and scope gates for the universe pools.
 
     CRITICAL FIX: Read from profile YAML instead of environment variables (single source of truth)
-    Profile values: min_volume=5, min_open_interest=1, max_spread_cents=40 (from kalshi_crypto_15m_v2.yaml)
+    Profile values: min_volume=5, min_open_interest=1, max_spread_cents=30 (from kalshi_crypto_15m_v2.yaml)
+    CRITICAL FIX: Updated max_spread_cents from 40c to 30c to harmonize with guardrails (2026-07-10)
     Fallback to risk_parameters defaults if profile not available.
     """
     # Read from profile YAML (single source of truth)

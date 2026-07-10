@@ -414,7 +414,7 @@ class Crypto15mProfile:
     # Reference: Kalena 2026 research - altcoin spreads 5-30% in 15m markets
     # 75c threshold allows realistic trading while blocking extreme data quality issues
     market_microstructure_enabled: bool = True  # Enable market microstructure filters
-    market_microstructure_max_spread_cents: float = 40.0  # OPTIMIZED: 40c aligned with 10c-50c entry range (down from 75c)
+    market_microstructure_max_spread_cents: float = 30.0  # 2026-07-10: OPTIMIZED to 30c - harmonizes with 10c-50c entry price sweet spot
     market_microstructure_min_depth_usd: float = 0.0  # DISABLED: System uses limit orders which wait for fills, not market orders. Kalshi 15m crypto markets have sufficient liquidity. Depth thresholds are primarily for market orders to prevent slippage.
     market_microstructure_min_yes_depth: int = 1  # Minimum YES depth threshold
     market_microstructure_min_no_depth: int = 1  # Minimum NO depth threshold
@@ -472,10 +472,11 @@ class Crypto15mProfile:
     guardrails_adaptive_risk_bands: list = field(default_factory=list)
 
     # Price range configuration for entry band restrictions
+    # CRITICAL FIX: Reduced max_price_cents from 70c to 50c to align with 10-50c sweet spot (2026-07-10)
     price_range: 'PriceRange' = field(default_factory=lambda: PriceRange(
         min_price_cents=10,
-        max_price_cents=70,
-        description='Valid price range in cents for order execution'
+        max_price_cents=50,
+        description='Valid price range in cents for order execution (10-50c sweet spot)'
     ))
 
     @property
@@ -743,11 +744,24 @@ class Crypto15mProfileAdapter:
                 agent_max_notional_pct = agent_max_notional_pct.get('value', 0.03)  # FIXED: Default 0.03 to match YAML (3% per agent)
             
             # Compute USD values from capital
-            # Ensure all computed values are floats to prevent type errors
-            venue_max_single_order_usd = float(capital_usd) * float(venue_max_single_order_pct)
-            venue_max_total_notional_usd = float(capital_usd) * float(venue_max_total_notional_pct)
-            venue_max_category_notional_usd = float(capital_usd) * float(venue_max_category_notional_pct)
-            agent_max_notional_usd = float(capital_usd) * float(agent_max_notional_pct)
+            # CRITICAL FIX: 2026-07-09 - Handle capital_usd=0 case to prevent zero caps
+            # When capital_usd=0 (derive from bankroll), set USD caps to 0 and compute dynamically at runtime
+            # This prevents division by zero and ensures dynamic bankroll computation works correctly
+            if capital_usd == 0.0:
+                # Set USD caps to 0 - will be computed dynamically from live bankroll at runtime
+                venue_max_single_order_usd = 0.0
+                venue_max_total_notional_usd = 0.0
+                venue_max_category_notional_usd = 0.0
+                agent_max_notional_usd = 0.0
+                logger.info(
+                    "[PROFILE-LOAD] capital_usd=0 - USD caps set to 0, will compute dynamically from live bankroll at runtime"
+                )
+            else:
+                # Ensure all computed values are floats to prevent type errors
+                venue_max_single_order_usd = float(capital_usd) * float(venue_max_single_order_pct)
+                venue_max_total_notional_usd = float(capital_usd) * float(venue_max_total_notional_pct)
+                venue_max_category_notional_usd = float(capital_usd) * float(venue_max_category_notional_pct)
+                agent_max_notional_usd = float(capital_usd) * float(agent_max_notional_pct)
             
             # PERCENTAGE CONSISTENCY ASSERTIONS: Prevent invalid config at load time
             # These ensure the profile is internally consistent before runtime
@@ -853,10 +867,11 @@ class Crypto15mProfileAdapter:
                 price_based_sell_threshold=raw.get('price_based', {}).get('sell_threshold', 0.90),
                 
                 # Price range configuration for entry band restrictions
-                # CRITICAL FIX: max_price_cents default 75 to match guardrails_max_contract_price_cents (75c sweet spot threshold)
+                # CRITICAL FIX: max_price_cents default 50 to match guardrails_max_contract_price_cents (50c sweet spot threshold)
+                # 2026-07-09: Fixed max from 75c to 50c to match profile price_range.max_price_cents
                 price_range=PriceRange(
                     min_price_cents=raw.get('price_range', {}).get('min_price_cents', 10),
-                    max_price_cents=raw.get('price_range', {}).get('max_price_cents', 75),  # CRITICAL FIX: Default 75c to match guardrails (was 70)
+                    max_price_cents=raw.get('price_range', {}).get('max_price_cents', 50),  # CRITICAL FIX: Default 50c to match guardrails (was 75)
                     description=raw.get('price_range', {}).get('description', 'Valid price range in cents for order execution')
                 ),
                 
@@ -975,7 +990,7 @@ class Crypto15mProfileAdapter:
                 # OTM filtering for 15-minute crypto
                 guardrails_max_dist_pct_trade=guardrails.get('max_dist_pct_trade', 2.5),  # CRITICAL FIX: Default 2.5 to match YAML (was 2.0)
                 guardrails_min_contract_price_cents=guardrails.get('min_contract_price_cents', 10),  # CRITICAL FIX: Default 10c to match YAML (10c minimum for momentum-based trading)
-                guardrails_max_contract_price_cents=guardrails.get('max_contract_price_cents', 75),  # CRITICAL FIX: Default 75c to match YAML (75c sweet spot threshold - intentional)
+                guardrails_max_contract_price_cents=guardrails.get('max_contract_price_cents', 50),  # CRITICAL FIX: Default 50c to match YAML (50c sweet spot threshold - 2026-07-09 fixed from 75c)
                 guardrails_max_same_side_per_strip=guardrails.get('max_same_side_per_strip', 5),  # CRITICAL FIX: Default 5 to match YAML (was 2)
                 # Time trap prevention (entry window narrowing)
                 guardrails_max_entry_mins=guardrails.get('max_entry_mins', 15.0),  # CRITICAL FIX: Default 15 to match YAML (was 12)
@@ -1123,7 +1138,7 @@ class Crypto15mProfileAdapter:
                 fee_aware_edge_fee_per_contract=raw.get('fee_aware_edge', {}).get('fee_per_contract', 0.07),
                 # Phase 1: Market microstructure filters configuration
                 market_microstructure_enabled=raw.get('market_microstructure', {}).get('enabled', True),
-                market_microstructure_max_spread_cents=raw.get('market_microstructure', {}).get('max_spread_cents', 50.0),
+                market_microstructure_max_spread_cents=raw.get('market_microstructure', {}).get('max_spread_cents', 30.0),
                 market_microstructure_min_depth_usd=raw.get('market_microstructure', {}).get('min_depth_usd', 0.0),
                 market_microstructure_min_yes_depth=raw.get('market_microstructure', {}).get('min_yes_depth', 1),
                 market_microstructure_min_no_depth=raw.get('market_microstructure', {}).get('min_no_depth', 1),

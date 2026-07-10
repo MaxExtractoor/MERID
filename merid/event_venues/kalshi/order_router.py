@@ -183,7 +183,7 @@ def check_market_microstructure(
     no_ask_cents: int,
     yes_depth: int,
     no_depth: int,
-    max_spread_cents: float = 10.0,  # 2026-07-09: Optimized to 10c based on industry research (moderate-liquidity range upper bound)
+    max_spread_cents: float = 30.0,  # 2026-07-10: OPTIMIZED to 30c - harmonizes with 10c-50c entry price sweet spot (industry research: 3-8c typical, 30c quality filter)
     min_depth_usd: float = 10.0,  # 2026-07-05: Lowered from 200.0 to 10.0 based on research - $50 threshold too high for weekend/low-volume liquidity
     min_yes_depth: int = 1,
     min_no_depth: int = 1
@@ -691,12 +691,13 @@ def resolve_window_policy(
     elif regime == "aggressive":
         min_tte_secs = 90  # 1.5 min
     
-    # Spread gate (RELAXED: aligned with profile max_spread_cents=50)
-    max_spread_cents = 50  # RELAXED: Increased from 40 to 50 to match profile
+    # Spread gate (aligned with profile guardrails max_spread_cents=30)
+    # CRITICAL FIX: Reduced from 50c to 30c to harmonize with guardrails and 10-50c sweet spot (2026-07-10)
+    max_spread_cents = 30  # Aligned with profile guardrails
     if regime == "conservative":
-        max_spread_cents = 60  # Conservative allows wider spreads
+        max_spread_cents = 30  # Conservative also uses 30c (standardized)
     elif regime == "aggressive":
-        max_spread_cents = 50  # RELAXED: Increased from 30 to 50 to match profile
+        max_spread_cents = 30  # Aggressive uses standard guardrails threshold
     
     return WindowResolution(
         window_id=window_id,
@@ -3182,6 +3183,20 @@ def _check_bankroll_risk_cap(intent: OrderIntent) -> Optional[OrderResult]:
         #     )
         # Use max_single_order_notional_usd (venue cap per order)
         effective_max = envelope_config.max_single_order_notional_usd
+        # CRITICAL FIX: 2026-07-09 - Check for zero effective_max (capital_usd=0 case)
+        # If effective_max is 0, all orders would be rejected, preventing trading
+        # This happens when profile has capital_usd=0 (derive from bankroll) but dynamic computation fails
+        if effective_max <= 0:
+            logger.error(
+                "[BANKROLL-CAP] effective_max=$%.2f (zero or negative) - REJECTING order (capital_usd=0 case, dynamic computation failed)",
+                effective_max
+            )
+            return OrderResult(
+                status="rejected",
+                mode=TradingMode.LIVE,
+                reason=f"bankroll_cap_zero: effective_max=${effective_max:.2f} (capital_usd=0, dynamic computation failed)",
+                latency_ms=0.0
+            )
         logger.debug(
             "[BANKROLL-CAP] Using max_single_order cap: asset=%s cap=$%.2f",
             asset, effective_max
@@ -3194,6 +3209,18 @@ def _check_bankroll_risk_cap(intent: OrderIntent) -> Optional[OrderResult]:
         max_total_risk_usd = effective_equity_usd * risk_fraction
         per_edge_estimate = max_total_risk_usd / 3.0
         effective_max = per_edge_estimate * 1.5
+        # CRITICAL FIX: 2026-07-09 - Check for zero effective_max in fallback calculation
+        if effective_max <= 0:
+            logger.error(
+                "[BANKROLL-CAP] Fallback effective_max=$%.2f (zero or negative) - REJECTING order",
+                effective_max
+            )
+            return OrderResult(
+                status="rejected",
+                mode=TradingMode.LIVE,
+                reason=f"bankroll_cap_fallback_zero: effective_max=${effective_max:.2f}",
+                latency_ms=0.0
+            )
         logger.warning(
             "[BANKROLL-CAP] Using fallback calculation: effective_max=$%.2f (risk_fraction=%.4f)",
             effective_max, risk_fraction
