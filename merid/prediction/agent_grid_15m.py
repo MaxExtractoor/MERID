@@ -5542,6 +5542,52 @@ class LeanAgent15m:
             # CRITICAL FIX: Pass spot_data for OHLC-based ADX/ATR calculation
             self._update_price_history(asset, spot_price, spot_data)
             
+            # CRITICAL FIX: 2026-07-10 - Fetch spot prices for ALL 5 assets and update all indicator stacks
+            # This provides redundant updates to each asset's indicator stack from all 5 agents
+            # Each agent has indicator stacks for all 5 assets, so each stack gets 5 updates per cycle
+            # This prevents the bars_available=1 bug that was causing MACD=0
+            for update_asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+                if update_asset in self._indicator_stacks:
+                    try:
+                        # Fetch spot price for this asset
+                        update_spot_price = None
+                        update_spot_data = None
+                        
+                        if hasattr(self.spot_provider, 'get'):
+                            result = await self.spot_provider.get(update_asset)
+                            if hasattr(result, 'price_usd'):
+                                update_spot_price = result.price_usd
+                                update_spot_data = result
+                        elif hasattr(self.spot_provider, 'get_spot_price'):
+                            update_spot_price = await self.spot_provider.get_spot_price(update_asset)
+                        
+                        if update_spot_price:
+                            # Buffer spot price for 1-minute aggregation
+                            self._indicator_stack_price_buffer[update_asset].append(update_spot_price)
+                            
+                            # Check if 1 minute has elapsed since last update
+                            current_time = time.time()
+                            last_update = self._indicator_stack_last_update[update_asset]
+                            time_since_update = current_time - last_update
+                            
+                            # Update indicator stack once per minute (60 seconds)
+                            if time_since_update >= 60.0:
+                                # Use the last price in the buffer as the 1-minute close
+                                if self._indicator_stack_price_buffer[update_asset]:
+                                    minute_close = self._indicator_stack_price_buffer[update_asset][-1]
+                                    logger.info("[INDICATOR-STACK-UPDATE-BEFORE] asset=%s minute_close=%.2f buffer_size=%d calling update() [from agent=%s]", 
+                                               update_asset, minute_close, len(self._indicator_stack_price_buffer[update_asset]), self.config.name)
+                                    self._indicator_stacks[update_asset].update(minute_close)
+                                    self._indicator_stack_last_update[update_asset] = current_time
+                                    self._indicator_stack_price_buffer[update_asset] = []  # Clear buffer
+                                    logger.info("[INDICATOR-STACK-UPDATE] asset=%s minute_close=%.2f updated in Crypto15mIndicatorStack (1-minute aggregation) [from agent=%s]", 
+                                               update_asset, minute_close, self.config.name)
+                            else:
+                                logger.debug("[INDICATOR-STACK-BUFFER] asset=%s buffered price=%.2f (%.1fs since last update, waiting for 60s) [from agent=%s]", 
+                                           update_asset, update_spot_price, time_since_update, self.config.name)
+                    except Exception as e:
+                        logger.warning("[INDICATOR-STACK-UPDATE] asset=%s failed to update Crypto15mIndicatorStack from agent=%s: %s", update_asset, self.config.name, e)
+            
             # Get market from market state store - use available markets instead of computing from time
             market = None
             try:
