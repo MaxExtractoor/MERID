@@ -234,7 +234,7 @@ class LeanAgentConfig:
     name: str  # Agent name (e.g., "BTC_15M")
     series_tickers: list[str]  # Series tickers to trade (e.g., ["KXBTC15M"])
     signal_mode: str = "trend"  # Signal mode: "trend", "mean_reversion", "momentum_fvg", "hybrid", "price_based"
-    max_spread_cents: int = 100  # Maximum spread in cents
+    max_spread_cents: int = 30  # 2026-07-10: OPTIMIZED to 30c - harmonizes with 10c-50c entry price sweet spot (industry research: 3-8c typical, 30c quality filter)
     min_time_to_expiry_s: int = 180  # Minimum time to expiry in seconds
     max_time_to_expiry_s: int = 900  # Maximum time to expiry in seconds
     per_strip_order_limit: int = 200  # Maximum orders per 15m strip (increased from 50 to 200 for 2026 high-frequency standards)
@@ -572,11 +572,10 @@ class LeanAgent15m:
         
         # Cooldown tracking: last trade timestamp per asset
         self._last_trade_time: Dict[str, float] = {}
-        # Initialize to current time to allow immediate signal generation on startup
+        # Initialize to 0.0 to allow immediate signal generation on startup
         # Cooldown only applies after actual trades are placed
-        current_time = time.time()
         for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-            self._last_trade_time[asset] = current_time
+            self._last_trade_time[asset] = 0.0
         
         # Per-strip order limit tracking (15m strip = series ticker)
         self._strip_order_counts: Dict[str, int] = {}
@@ -3510,7 +3509,7 @@ class LeanAgent15m:
             # 2026-07-09: Coarse filter check (20c) - first gate to reject pathological spreads
             # This prevents wide spreads (20c-90c) from even being considered
             # 2026-07-09: Updated from 40c to 20c based on industry research (15c-25c range, 20c recommended)
-            coarse_filter_threshold = 20  # Aligned with guardrails.max_spread_cents
+            coarse_filter_threshold = 30  # 2026-07-10: OPTIMIZED to 30c - harmonizes with 10c-50c entry price sweet spot (industry research: 3-8c typical, 30c quality filter)
             if spread_cents > coarse_filter_threshold:
                 logger.warning("[MARKET-VALIDATION] asset=%s ticker=%s spread exceeds coarse filter=%dc (spread=%dc)",
                                self.config.name, ticker, coarse_filter_threshold, spread_cents)

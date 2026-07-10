@@ -26,6 +26,14 @@ from utils.logger import get_logger
 
 logger = get_logger("merid.prediction.unified_edge")
 
+# Import rejection monitor for production rejection tracking
+try:
+    from merid.monitoring.rejection_monitor import get_rejection_monitor, log_edge_check_rejection
+    REJECTION_MONITOR_ENABLED = True
+except ImportError:
+    REJECTION_MONITOR_ENABLED = False
+    logger.debug("[REJECTION-MONITOR] Not available - rejection tracking disabled")
+
 # Import canonical OrderbookSnapshot and microstructure utilities
 # This is the single source of truth for order book representation
 from merid.event_venues.kalshi.unified_market_state import OrderbookSnapshot
@@ -379,6 +387,14 @@ class UnifiedEdgeComputer:
         
         # Check 1: Spread too wide (liquidity/quality filter)
         if spread_cents is not None and spread_cents > self.max_spread_cents:
+            if REJECTION_MONITOR_ENABLED:
+                log_edge_check_rejection(
+                    asset=asset,
+                    reason=f"spread_too_wide: bid={best_yes_bid}c ask={best_yes_ask}c spread={spread_cents}c > {self.max_spread_cents}c threshold",
+                    spread_cents=spread_cents,
+                    threshold_value=self.max_spread_cents,
+                    actual_value=spread_cents,
+                )
             return EdgeCheckResult(
                 passes=False,
                 reason=f"spread_too_wide: bid={best_yes_bid}c ask={best_yes_ask}c spread={spread_cents}c > {self.max_spread_cents}c threshold",
@@ -390,6 +406,14 @@ class UnifiedEdgeComputer:
         
         # Check 2: Spread percentage too high
         if spread_pct is not None and spread_pct > max_spread_pct:
+            if REJECTION_MONITOR_ENABLED:
+                log_edge_check_rejection(
+                    asset=asset,
+                    reason=f"spread_pct_too_high: bid={best_yes_bid}c ask={best_yes_ask}c spread={spread_cents}c ({spread_pct:.1%}) > {max_spread_pct:.1%} threshold",
+                    spread_cents=spread_cents,
+                    threshold_value=max_spread_pct,
+                    actual_value=spread_pct,
+                )
             return EdgeCheckResult(
                 passes=False,
                 reason=f"spread_pct_too_high: bid={best_yes_bid}c ask={best_yes_ask}c spread={spread_cents}c ({spread_pct:.1%}) > {max_spread_pct:.1%} threshold",
@@ -427,6 +451,13 @@ class UnifiedEdgeComputer:
         contract_price_cents = contract.mid_price_cents
         
         if contract_price_cents < min_price_cents:
+            if REJECTION_MONITOR_ENABLED:
+                log_edge_check_rejection(
+                    asset=asset,
+                    reason=f"longshot_trap_price_too_low: asset={asset} side={contract.side} price={contract_price_cents}c < {min_price_cents}c threshold (deep OTM longshot rejected)",
+                    threshold_value=min_price_cents,
+                    actual_value=contract_price_cents,
+                )
             return EdgeCheckResult(
                 passes=False,
                 reason=f"longshot_trap_price_too_low: asset={asset} side={contract.side} price={contract_price_cents}c < {min_price_cents}c threshold (deep OTM longshot rejected)",
@@ -437,6 +468,13 @@ class UnifiedEdgeComputer:
             )
         
         if contract_price_cents > max_price_cents:
+            if REJECTION_MONITOR_ENABLED:
+                log_edge_check_rejection(
+                    asset=asset,
+                    reason=f"low_profit_trap_price_too_high: asset={asset} side={contract.side} price={contract_price_cents}c > {max_price_cents}c threshold (low-profit trade rejected - payout only {100 - contract_price_cents}¢)",
+                    threshold_value=max_price_cents,
+                    actual_value=contract_price_cents,
+                )
             return EdgeCheckResult(
                 passes=False,
                 reason=f"low_profit_trap_price_too_high: asset={asset} side={contract.side} price={contract_price_cents}c > {max_price_cents}c threshold (low-profit trade rejected - payout only {100 - contract_price_cents}¢)",
@@ -670,7 +708,7 @@ class UnifiedEdgeComputer:
         # Even if edge is positive, reject if spread is too wide for the given edge
         if spread_cents is not None:
             # Get max spread for edge from profile
-            max_spread_for_edge = 20  # Default fallback (2026-07-10: aligned with profile default 20c)
+            max_spread_for_edge = 30  # Default fallback (2026-07-10: OPTIMIZED to 30c - harmonizes with 10c-50c entry price sweet spot)
             try:
                 from merid.risk.profiles.crypto_15m_profile import get_active_profile
                 profile_adapter = get_active_profile()
@@ -699,6 +737,15 @@ class UnifiedEdgeComputer:
         
         # Check 6: Net edge insufficient (profitability filter)
         if edge_result.net_edge_cents < min_edge_cents:
+            if REJECTION_MONITOR_ENABLED:
+                log_edge_check_rejection(
+                    asset=asset,
+                    reason=f"edge_insufficient: bid={best_yes_bid}c ask={best_yes_ask}c spread={spread_cents}c ({spread_pct:.1%}) q={edge_result.model_win_prob*100:.0f}c raw_edge={edge_result.raw_edge_cents:.2f}c spread_cost={edge_result.spread_cost_cents:.2f}c fees={edge_result.fee_cost_cents:.2f}c net_edge={edge_result.net_edge_cents:.2f}c < {min_edge_cents:.2f}c threshold",
+                    edge_cents=edge_result.net_edge_cents,
+                    spread_cents=spread_cents,
+                    threshold_value=min_edge_cents,
+                    actual_value=edge_result.net_edge_cents,
+                )
             return EdgeCheckResult(
                 passes=False,
                 reason=f"edge_insufficient: bid={best_yes_bid}c ask={best_yes_ask}c spread={spread_cents}c ({spread_pct:.1%}) q={edge_result.model_win_prob*100:.0f}c raw_edge={edge_result.raw_edge_cents:.2f}c spread_cost={edge_result.spread_cost_cents:.2f}c fees={edge_result.fee_cost_cents:.2f}c net_edge={edge_result.net_edge_cents:.2f}c < {min_edge_cents:.2f}c threshold",

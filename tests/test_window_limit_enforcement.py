@@ -62,6 +62,8 @@ class TestWindowLimitEnforcement:
             window_start_ts=0.0,
             agent_window_exposure_usd={},
             total_window_exposure_usd=0.0,
+            agent_resting_exposure_usd={},
+            total_resting_exposure_usd=0.0,
         )
         return envelope
     

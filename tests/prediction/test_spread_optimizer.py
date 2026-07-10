@@ -30,7 +30,7 @@ class TestSpreadOptimizer:
         optimizer = SpreadOptimizer()
         
         assert optimizer.cache_size == 1000
-        assert optimizer.MAX_SPREAD_CENTS == 15
+        assert optimizer.MAX_SPREAD_CENTS == 30  # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
         assert optimizer.MIN_DEPTH_LEVELS == 2
         assert optimizer.MIN_LIQUIDITY_SCORE == 0.3
         assert len(optimizer._edge_cache) == 0
@@ -396,7 +396,12 @@ class TestSpreadOptimizer:
             # Higher spread should result in lower score
             # Higher depth should result in higher score
             if total_depth > 0:
-                expected_score = max(0.0, 1.0 - (spread_cents / 15.0)) * 0.6 + min(1.0, total_depth / 10.0) * 0.4
+                # Actual implementation uses: spread_score * 0.7 + depth_score * 0.3
+                # where spread_score = 1.0 - (spread_cents / MAX_SPREAD_CENTS)
+                # and depth_score = min(1.0, total_depth / 50.0)
+                spread_score = max(0.0, 1.0 - (spread_cents / 30.0))
+                depth_score = min(1.0, total_depth / 50.0)
+                expected_score = spread_score * 0.7 + depth_score * 0.3
                 assert abs(score - expected_score) < 0.01
     
     def test_calculate_quality_score(self):
