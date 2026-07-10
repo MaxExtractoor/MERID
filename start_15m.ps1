@@ -13,7 +13,7 @@
 
 param(
     [int]$Port = 8011,
-    [string]$ServerHost = "0.0.0.0",
+    [string]$ServerHost = "127.0.0.1",
     [string]$Profile = "kalshi_crypto_15m_v2"
 )
 
