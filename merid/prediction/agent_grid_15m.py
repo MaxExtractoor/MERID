@@ -247,9 +247,11 @@ class LeanAgentConfig:
     max_volatility_threshold: float = 0.02  # Maximum 2% volatility to avoid extreme volatility spikes
     # POSITION MANAGEMENT (2026 best practices)
     # 2026 FIX: Added max concurrent positions limit to prevent over-accumulation
-    # Industry standard: 10-25 concurrent positions (Kalshibot, PolyTrack, production bots)
-    # Our system had 144 open positions with $23 bankroll - over-leveraged and unmanageable
-    max_concurrent_positions: int = 15  # Maximum total open positions across all assets
+    # 2026-07-09: Set to 4 to align with $1 exposure cap at typical prices (25c)
+    # At 25c/contract: 4 positions = $1.00 exactly at cap
+    # Slot allocator enforces $1 hard cap, but this aligns soft limit with hard limit
+    # This is TOTAL across all 5 assets (BTC+ETH+SOL+XRP+DOGE), not per-asset
+    max_concurrent_positions: int = 4  # Maximum total open positions across all assets
     # DYNAMIC SPREAD THRESHOLD: Volatility-regime-based spread filtering (2026 best practice)
     # Based on research: "Blow your spreads out when the market's volatility does"
     # Uses 3 regimes with different spread limits: calm, elevated, violent
@@ -2226,32 +2228,111 @@ class LeanAgent15m:
             model_prob = max(0.05, 0.5 - (edge_pct / 100.0))
         
         # Calculate price_cents from market state (mid price)
-        price_cents = 50  # Default fallback
+        price_cents = 25  # 2026-07-09: Changed from 50 to 25 (midpoint of 10-50c sweet spot)
+        price_source = "default_25c"
         try:
             ticker = market.market.market_id if hasattr(market, 'market') else market.market_id
+            logger.info("[PRICE-CENTS-DEBUG] asset=%s ticker=%s market_state_store_available=%s", asset, ticker, self.market_state_store is not None)
             market_state = self.market_state_store.get(ticker) if self.market_state_store else None
+            logger.info("[PRICE-CENTS-DEBUG] asset=%s ticker=%s market_state_found=%s", asset, ticker, market_state is not None)
             if market_state:
                 best_bid = getattr(market_state, 'best_bid_cents', 0) or 0
                 best_ask = getattr(market_state, 'best_ask_cents', 0) or 0
+                logger.info("[PRICE-CENTS-DEBUG] asset=%s ticker=%s best_bid=%d best_ask=%d", asset, ticker, best_bid, best_ask)
                 if best_bid > 0 and best_ask > 0:
                     price_cents = int((best_bid + best_ask) / 2)
+                    price_source = "mid_bid_ask"
                 elif best_bid > 0:
                     price_cents = int(best_bid)
+                    price_source = "bid_only"
                 elif best_ask > 0:
                     price_cents = int(best_ask)
+                    price_source = "ask_only"
+                else:
+                    logger.warning("[PRICE-CENTS-DEBUG] asset=%s ticker=%s bid/ask both zero, using default 25c", asset, ticker)
+            else:
+                logger.warning("[PRICE-CENTS-DEBUG] asset=%s ticker=%s market_state is None, using default 25c", asset, ticker)
         except Exception as e:
             logger.warning("[MOMENTUM-FVG] Failed to get price_cents from market state: %s", e)
         
-        # CRITICAL FIX: Clamp price_cents to 10-50c entry range to match profile guardrails
-        # 2026-07-09: Raw market price can be 70c+ which gets rejected by DEEP_OTM_POLICY
-        raw_price_cents = price_cents
-        clamped_price_cents = max(10, min(50, raw_price_cents))
+        logger.info("[PRICE-CENTS-DEBUG] asset=%s final_price_cents=%d source=%s", asset, price_cents, price_source)
         
-        # PRICE_PATH: Log raw vs clamped price for debugging
-        logger.error(
-            "[PRICE_PATH] raw_price_cents=%d clamped_price_cents=%d asset=%s edge_pct=%s "
-            "source=agent_grid_15m_momentum_fvg",
-            raw_price_cents, clamped_price_cents, asset, edge_pct
+        # CRITICAL FIX: Search orderbook for prices in 10-50c sweet spot band
+        # 2026-07-09: Do NOT clamp prices above 50c. Instead, search for valid prices in the band.
+        # If no prices exist in 10-50c range, drop the candidate (no trade).
+        raw_price_cents = price_cents
+        
+        # Check if price is within sweet spot band
+        if 10 <= raw_price_cents <= 50:
+            # Price is already in valid range - use it directly
+            clamped_price_cents = raw_price_cents
+            logger.info(
+                "[PRICE-SELECTION] asset=%s raw_price_cents=%d in sweet spot [10c-50c] - using directly",
+                asset, raw_price_cents
+            )
+        else:
+            # Price is outside sweet spot - search orderbook for valid prices
+            logger.warning(
+                "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside sweet spot [10c-50c] - searching orderbook",
+                asset, raw_price_cents
+            )
+            
+            # Try to find a price in the sweet spot from the orderbook
+            price_cents = None
+            try:
+                ticker = market.market.market_id if hasattr(market, 'market') else market.market_id
+                market_state = self.market_state_store.get(ticker) if self.market_state_store else None
+                
+                if market_state:
+                    # Get YES orderbook (ascending by price)
+                    yes_book = getattr(market_state, 'yes_book', [])
+                    if yes_book:
+                        # Find cheapest YES price within [10c, 50c] with size >= 1
+                        valid_prices = [p for (p, size) in yes_book if 10 <= p <= 50 and size >= 1]
+                        if valid_prices:
+                            price_cents = min(valid_prices)  # Use cheapest acceptable price
+                            logger.info(
+                                "[PRICE-SELECTION] asset=%s found %d valid prices in sweet spot, using cheapest=%d",
+                                asset, len(valid_prices), price_cents
+                            )
+                        else:
+                            logger.warning(
+                                "[PRICE-SELECTION] asset=%s no YES prices in sweet spot [10c-50c] - dropping candidate",
+                                asset
+                            )
+                            return None  # Drop candidate - no valid price in sweet spot
+                    else:
+                        logger.warning(
+                            "[PRICE-SELECTION] asset=%s orderbook not available - dropping candidate",
+                            asset
+                        )
+                        return None
+                else:
+                    logger.warning(
+                        "[PRICE-SELECTION] asset=%s market state not available - dropping candidate",
+                        asset
+                    )
+                    return None
+            except Exception as e:
+                logger.error(
+                    "[PRICE-SELECTION] asset=%s error searching orderbook: %s - dropping candidate",
+                    asset, e
+                )
+                return None
+            
+            clamped_price_cents = price_cents
+        
+        # Final validation - ensure we have a valid price in the sweet spot
+        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 50):
+            logger.error(
+                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in sweet spot [10c-50c] - dropping candidate",
+                asset, clamped_price_cents
+            )
+            return None
+        
+        logger.info(
+            "[PRICE-SELECTION] asset=%s final entry price=%d (within sweet spot [10c-50c])",
+            asset, clamped_price_cents
         )
         
         price_cents = clamped_price_cents
@@ -2428,22 +2509,88 @@ class LeanAgent15m:
         logger.info("[PRICE-BASED-CONFIDENCE] asset=%s action=%s price=%.2f edge_pct=%.2f%% confidence=%.2f",
                     asset, signal_action, market_price, edge_pct, confidence)
         
-        # CRITICAL FIX: Clamp price_cents to 10-50c entry range to match profile guardrails
-        # 2026-07-09: Raw market price can be 70c+ which gets rejected by DEEP_OTM_POLICY
+        # CRITICAL FIX: Search orderbook for prices in 10-50c sweet spot band
+        # 2026-07-09: Do NOT clamp prices above 50c. Instead, search for valid prices in the band.
+        # If no prices exist in 10-50c range, drop the candidate (no trade).
         raw_price_cents = int(market_price * 100)
-        clamped_price_cents = max(10, min(50, raw_price_cents))
         
-        # PRICE_PATH: Log raw vs clamped price for debugging
-        logger.error(
-            "[PRICE_PATH] raw_price_cents=%d clamped_price_cents=%d asset=%s edge_pct=%s "
-            "market_price=%s source=agent_grid_15m_price_based",
-            raw_price_cents, clamped_price_cents, asset, edge_pct, market_price
+        # Check if price is within sweet spot band
+        if 10 <= raw_price_cents <= 50:
+            # Price is already in valid range - use it directly
+            clamped_price_cents = raw_price_cents
+            logger.info(
+                "[PRICE-SELECTION] asset=%s raw_price_cents=%d in sweet spot [10c-50c] - using directly",
+                asset, raw_price_cents
+            )
+        else:
+            # Price is outside sweet spot - search orderbook for valid prices
+            logger.warning(
+                "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside sweet spot [10c-50c] - searching orderbook",
+                asset, raw_price_cents
+            )
+            
+            # Try to find a price in the sweet spot from the orderbook
+            price_cents = None
+            try:
+                ticker = market.market.market_id if hasattr(market, 'market') else market.market_id
+                market_state = self.market_state_store.get(ticker) if self.market_state_store else None
+                
+                if market_state:
+                    # Get YES orderbook (ascending by price)
+                    yes_book = getattr(market_state, 'yes_book', [])
+                    if yes_book:
+                        # Find cheapest YES price within [10c, 50c] with size >= 1
+                        valid_prices = [p for (p, size) in yes_book if 10 <= p <= 50 and size >= 1]
+                        if valid_prices:
+                            price_cents = min(valid_prices)  # Use cheapest acceptable price
+                            logger.info(
+                                "[PRICE-SELECTION] asset=%s found %d valid prices in sweet spot, using cheapest=%d",
+                                asset, len(valid_prices), price_cents
+                            )
+                        else:
+                            logger.warning(
+                                "[PRICE-SELECTION] asset=%s no YES prices in sweet spot [10c-50c] - dropping candidate",
+                                asset
+                            )
+                            return None  # Drop candidate - no valid price in sweet spot
+                    else:
+                        logger.warning(
+                            "[PRICE-SELECTION] asset=%s orderbook not available - dropping candidate",
+                            asset
+                        )
+                        return None
+                else:
+                    logger.warning(
+                        "[PRICE-SELECTION] asset=%s market state not available - dropping candidate",
+                        asset
+                    )
+                    return None
+            except Exception as e:
+                logger.error(
+                    "[PRICE-SELECTION] asset=%s error searching orderbook: %s - dropping candidate",
+                    asset, e
+                )
+                return None
+            
+            clamped_price_cents = price_cents
+        
+        # Final validation - ensure we have a valid price in the sweet spot
+        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 50):
+            logger.error(
+                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in sweet spot [10c-50c] - dropping candidate",
+                asset, clamped_price_cents
+            )
+            return None
+        
+        logger.info(
+            "[PRICE-SELECTION] asset=%s final entry price=%d (within sweet spot [10c-50c])",
+            asset, clamped_price_cents
         )
         
         return {
             "side": signal_side,
             "action": signal_action,
-            "price_cents": clamped_price_cents,  # CRITICAL: Use clamped price
+            "price_cents": clamped_price_cents,  # CRITICAL: Use selected price
             "confidence": confidence,  # Dynamic edge-based confidence (not hardcoded)
             "model_prob": model_prob,  # Clamped to valid range [0.05, 0.95]
             "edge_pct": edge_pct,  # CRITICAL: Calculate edge for price-based strategy
@@ -4580,40 +4727,12 @@ class LeanAgent15m:
             if signal_side == "yes":
                 # YES: use YES mid-price
                 price_cents = int((best_bid + best_ask) / 2)
-                
-                # CRITICAL FIX: Clamp price_cents to 10-50c entry range to match profile guardrails
-                # 2026-07-09: Raw market price can be 70c+ which gets rejected by DEEP_OTM_POLICY
-                raw_price_cents = price_cents
-                clamped_price_cents = max(10, min(50, raw_price_cents))
-                
-                # PRICE_PATH: Log raw vs clamped price for debugging
-                logger.error(
-                    "[PRICE_PATH] raw_price_cents=%d clamped_price_cents=%d asset=%s edge_pct=%s "
-                    "source=agent_grid_15m_velocity_yes",
-                    raw_price_cents, clamped_price_cents, asset, edge_pct
-                )
-                
-                price_cents = clamped_price_cents
             else:  # signal_side == "no"
                 # NO: calculate NO bid/ask from YES bid/ask, then use NO mid-price
                 # NO_bid = 100 - YES_ask, NO_ask = 100 - YES_bid
                 no_bid = 100 - best_ask
                 no_ask = 100 - best_bid
                 price_cents = int((no_bid + no_ask) / 2)
-                
-                # CRITICAL FIX: Clamp price_cents to 10-50c entry range to match profile guardrails
-                # 2026-07-09: Raw market price can be 70c+ which gets rejected by DEEP_OTM_POLICY
-                raw_price_cents = price_cents
-                clamped_price_cents = max(10, min(50, raw_price_cents))
-                
-                # PRICE_PATH: Log raw vs clamped price for debugging
-                logger.error(
-                    "[PRICE_PATH] raw_price_cents=%d clamped_price_cents=%d asset=%s edge_pct=%s "
-                    "source=agent_grid_15m_velocity_no",
-                    raw_price_cents, clamped_price_cents, asset, edge_pct
-                )
-                
-                price_cents = clamped_price_cents
                 
                 logger.info("[PRICE-CALC-NO] asset=%s YES_bid=%d YES_ask=%d -> NO_bid=%d NO_ask=%d NO_mid=%d",
                            asset, best_bid, best_ask, no_bid, no_ask, price_cents)
@@ -4625,55 +4744,99 @@ class LeanAgent15m:
             # Fallback to bid only
             if signal_side == "yes":
                 price_cents = best_bid
-                # CRITICAL FIX: Clamp price_cents to 10-50c entry range to match profile guardrails
-                raw_price_cents = price_cents
-                clamped_price_cents = max(10, min(50, raw_price_cents))
-                logger.error(
-                    "[PRICE_PATH] raw_price_cents=%d clamped_price_cents=%d asset=%s edge_pct=%s "
-                    "source=agent_grid_15m_velocity_yes_bid_fallback",
-                    raw_price_cents, clamped_price_cents, asset, edge_pct
-                )
-                price_cents = clamped_price_cents
             else:
                 # NO: NO_ask = 100 - YES_bid
                 price_cents = 100 - best_bid
-                # CRITICAL FIX: Clamp price_cents to 10-50c entry range to match profile guardrails
-                raw_price_cents = price_cents
-                clamped_price_cents = max(10, min(50, raw_price_cents))
-                logger.error(
-                    "[PRICE_PATH] raw_price_cents=%d clamped_price_cents=%d asset=%s edge_pct=%s "
-                    "source=agent_grid_15m_velocity_no_bid_fallback",
-                    raw_price_cents, clamped_price_cents, asset, edge_pct
-                )
-                price_cents = clamped_price_cents
         elif best_ask:
             # Fallback to ask only
             if signal_side == "yes":
                 price_cents = best_ask
-                # CRITICAL FIX: Clamp price_cents to 10-50c entry range to match profile guardrails
-                raw_price_cents = price_cents
-                clamped_price_cents = max(10, min(50, raw_price_cents))
-                logger.error(
-                    "[PRICE_PATH] raw_price_cents=%d clamped_price_cents=%d asset=%s edge_pct=%s "
-                    "source=agent_grid_15m_velocity_yes_ask_fallback",
-                    raw_price_cents, clamped_price_cents, asset, edge_pct
-                )
-                price_cents = clamped_price_cents
             else:
                 # NO: NO_bid = 100 - YES_ask
                 price_cents = 100 - best_ask
-                # CRITICAL FIX: Clamp price_cents to 10-50c entry range to match profile guardrails
-                raw_price_cents = price_cents
-                clamped_price_cents = max(10, min(50, raw_price_cents))
-                logger.error(
-                    "[PRICE_PATH] raw_price_cents=%d clamped_price_cents=%d asset=%s edge_pct=%s "
-                    "source=agent_grid_15m_velocity_no_ask_fallback",
-                    raw_price_cents, clamped_price_cents, asset, edge_pct
-                )
-                price_cents = clamped_price_cents
         else:
             # No market data - use neutral price (already in range)
-            price_cents = 50
+            price_cents = 25  # 2026-07-09: Changed from 50 to 25 (midpoint of 10-50c sweet spot)
+        
+        # CRITICAL FIX: Search orderbook for prices in 10-50c sweet spot band
+        # 2026-07-09: Do NOT clamp prices above 50c. Instead, search for valid prices in the band.
+        # If no prices exist in 10-50c range, drop the candidate (no trade).
+        raw_price_cents = price_cents
+        
+        # Check if price is within sweet spot band
+        if 10 <= raw_price_cents <= 50:
+            # Price is already in valid range - use it directly
+            clamped_price_cents = raw_price_cents
+            logger.info(
+                "[PRICE-SELECTION] asset=%s raw_price_cents=%d in sweet spot [10c-50c] - using directly",
+                asset, raw_price_cents
+            )
+        else:
+            # Price is outside sweet spot - search orderbook for valid prices
+            logger.warning(
+                "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside sweet spot [10c-50c] - searching orderbook",
+                asset, raw_price_cents
+            )
+            
+            # Try to find a price in the sweet spot from the orderbook
+            price_cents = None
+            try:
+                ticker = market.market.market_id if hasattr(market, 'market') else market.market_id
+                market_state = self.market_state_store.get(ticker) if self.market_state_store else None
+                
+                if market_state:
+                    # Get YES orderbook (ascending by price)
+                    yes_book = getattr(market_state, 'yes_book', [])
+                    if yes_book:
+                        # Find cheapest YES price within [10c, 50c] with size >= 1
+                        valid_prices = [p for (p, size) in yes_book if 10 <= p <= 50 and size >= 1]
+                        if valid_prices:
+                            price_cents = min(valid_prices)  # Use cheapest acceptable price
+                            logger.info(
+                                "[PRICE-SELECTION] asset=%s found %d valid prices in sweet spot, using cheapest=%d",
+                                asset, len(valid_prices), price_cents
+                            )
+                        else:
+                            logger.warning(
+                                "[PRICE-SELECTION] asset=%s no YES prices in sweet spot [10c-50c] - dropping candidate",
+                                asset
+                            )
+                            return None  # Drop candidate - no valid price in sweet spot
+                    else:
+                        logger.warning(
+                            "[PRICE-SELECTION] asset=%s orderbook not available - dropping candidate",
+                            asset
+                        )
+                        return None
+                else:
+                    logger.warning(
+                        "[PRICE-SELECTION] asset=%s market state not available - dropping candidate",
+                        asset
+                    )
+                    return None
+            except Exception as e:
+                logger.error(
+                    "[PRICE-SELECTION] asset=%s error searching orderbook: %s - dropping candidate",
+                    asset, e
+                )
+                return None
+            
+            clamped_price_cents = price_cents
+        
+        # Final validation - ensure we have a valid price in the sweet spot
+        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 50):
+            logger.error(
+                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in sweet spot [10c-50c] - dropping candidate",
+                asset, clamped_price_cents
+            )
+            return None
+        
+        logger.info(
+            "[PRICE-SELECTION] asset=%s final entry price=%d (within sweet spot [10c-50c])",
+            asset, clamped_price_cents
+        )
+        
+        price_cents = clamped_price_cents
         
         # MAKER-FIRST ENTRY PRICING (2026-07-05 RESEARCH FIX)
         # Previous version anchored YES buys at best_ask - offset, which on wide books
