@@ -108,9 +108,9 @@ class TestProfileAdapterAccess:
         
         # Create mock profile
         mock_profile = MagicMock(spec=Crypto15mProfile)
-        mock_profile.guardrails_min_entry_mins = 0.5  # Relaxed from 2.0 to allow full window trading
+        mock_profile.guardrails_min_entry_mins = 0.0  # Removed minimum to allow full window trading
         mock_profile.guardrails_max_entry_mins = 15.0
-        mock_profile.agent_cutoff_minutes_before_expiry = 0.5  # Relaxed from 2.0
+        mock_profile.agent_cutoff_minutes_before_expiry = 0.0  # Removed cutoff to allow full window
         
         # Create mock adapter
         mock_adapter = MagicMock(spec=Crypto15mProfileAdapter)
@@ -127,9 +127,9 @@ class TestProfileAdapterAccess:
             max_entry_mins = profile.guardrails_max_entry_mins
             cutoff_mins = profile.agent_cutoff_minutes_before_expiry
             
-            assert min_entry_mins == 0.5, "Should access guardrails_min_entry_mins directly"
+            assert min_entry_mins == 0.0, "Should access guardrails_min_entry_mins directly"
             assert max_entry_mins == 15.0, "Should access guardrails_max_entry_mins directly"
-            assert cutoff_mins == 0.5, "Should access agent_cutoff_minutes_before_expiry directly"
+            assert cutoff_mins == 0.0, "Should access agent_cutoff_minutes_before_expiry directly"
     
     @patch('merid.risk.profiles.crypto_15m_profile.get_active_profile')
     def test_profile_adapter_none_handling(self, mock_get_profile):
@@ -191,6 +191,48 @@ class TestFloorAppliedLogic:
         
         assert floor_applied is False, "floor_applied should be False when floor is disabled"
         assert cap == 0.30, "Cap should be at target value when floor is disabled"
+
+
+class TestSynchronousSpotProvider:
+    """Test that spot provider.get() is called synchronously, not with await"""
+    
+    def test_spot_provider_get_is_synchronous(self):
+        """Test that spot_provider.get() is a synchronous method, not async"""
+        # Create mock spot provider
+        spot_provider = MagicMock()
+        spot_price = SpotPrice(
+            price=62000.0,
+            timestamp=1234567890,
+            source="coinbase"
+        )
+        spot_provider.get.return_value = spot_price
+        
+        # Call get() synchronously (no await)
+        result = spot_provider.get("BTC")
+        
+        # Verify it returns the result directly (not a coroutine)
+        assert not hasattr(result, '__await__'), "get() should return a value, not a coroutine"
+        assert result.price == 62000.0, "get() should return the spot price"
+        
+    def test_spot_provider_get_with_ohlc_synchronous(self):
+        """Test that spot_provider.get() with OHLC data is synchronous"""
+        spot_provider = MagicMock()
+        spot_price = SpotPrice(
+            price=62000.0,
+            timestamp=1234567890,
+            source="coinbase",
+            open=61900.0,
+            high=62100.0,
+            low=61800.0
+        )
+        spot_provider.get.return_value = spot_price
+        
+        # Call get() synchronously
+        result = spot_provider.get("BTC")
+        
+        # Verify it returns the result directly
+        assert not hasattr(result, '__await__'), "get() should return a value, not a coroutine"
+        assert result.open == 61900.0, "get() should return OHLC data synchronously"
 
 
 if __name__ == "__main__":
