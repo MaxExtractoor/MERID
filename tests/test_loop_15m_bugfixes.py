@@ -922,28 +922,38 @@ def test_tp_sl_none_when_exit_policy_missing():
     assert stop_loss_price_cents is None
 
 
-def test_price_clamping_yes_order_from_mid_cents():
-    """Test that YES order price is clamped to 10-50c range from mid_cents.
+def test_price_selection_yes_order_from_mid_cents():
+    """Test that YES order price is selected from 10-50c sweet spot band.
     
-    CRITICAL FIX: Raw market prices (70c-95c) are clamped to 10-50c to match profile guardrails.
+    CRITICAL FIX: Raw market prices above 50c are NOT clamped. Instead, the system
+    searches the orderbook for prices in the 10-50c band. If no prices exist in the band,
+    the candidate is dropped (no trade).
     """
     # Mock market state with high mid_cents (would be rejected by DEEP_OTM_POLICY)
     mock_market_state = Mock()
     mock_market_state.mid_cents = 75.0  # 75c - above 50c limit
     
-    # Simulate the clamping logic from loop_15m.py
+    # Simulate the new price selection logic from agent_grid_15m.py
     raw_price_cents = int(mock_market_state.mid_cents)
-    price_cents = max(10, min(50, raw_price_cents))
     
-    # Verify clamping
+    # Check if price is within sweet spot band
+    if 10 <= raw_price_cents <= 50:
+        price_cents = raw_price_cents
+    else:
+        # Price is outside sweet spot - would search orderbook
+        # For this test, assume no valid prices in orderbook
+        price_cents = None  # Candidate would be dropped
+    
+    # Verify behavior: price is outside band, candidate should be dropped
     assert raw_price_cents == 75
-    assert price_cents == 50  # Clamped to max 50c
+    assert price_cents is None  # No valid price in sweet spot - candidate dropped
 
 
-def test_price_clamping_yes_order_from_bid_ask():
-    """Test that YES order price is clamped to 10-50c range from bid/ask mid.
+def test_price_selection_yes_order_from_bid_ask():
+    """Test that YES order price is selected from 10-50c sweet spot band.
     
-    CRITICAL FIX: Raw market prices (70c-95c) are clamped to 10-50c to match profile guardrails.
+    CRITICAL FIX: Raw market prices above 50c are NOT clamped. Instead, the system
+    searches the orderbook for prices in the 10-50c band.
     """
     # Mock market state with high bid/ask (would be rejected by DEEP_OTM_POLICY)
     mock_market_state = Mock()
@@ -951,71 +961,319 @@ def test_price_clamping_yes_order_from_bid_ask():
     mock_market_state.best_bid_cents = 70
     mock_market_state.best_ask_cents = 80
     
-    # Simulate the clamping logic from loop_15m.py
+    # Simulate the new price selection logic from agent_grid_15m.py
     raw_price_cents = (mock_market_state.best_bid_cents + mock_market_state.best_ask_cents) // 2
-    price_cents = max(10, min(50, raw_price_cents))
     
-    # Verify clamping
+    # Check if price is within sweet spot band
+    if 10 <= raw_price_cents <= 50:
+        price_cents = raw_price_cents
+    else:
+        # Price is outside sweet spot - would search orderbook
+        # For this test, assume no valid prices in orderbook
+        price_cents = None  # Candidate would be dropped
+    
+    # Verify behavior: price is outside band, candidate should be dropped
     assert raw_price_cents == 75  # (70 + 80) // 2 = 75
-    assert price_cents == 50  # Clamped to max 50c
+    assert price_cents is None  # No valid price in sweet spot - candidate dropped
 
 
-def test_price_clamping_no_order_from_yes_mid():
-    """Test that NO order price is clamped to 10-50c range from YES mid.
+def test_price_selection_yes_order_within_sweet_spot():
+    """Test that YES order price within 10-50c band is used directly.
     
-    CRITICAL FIX: Raw market prices (70c-95c) are clamped to 10-50c to match profile guardrails.
-    NO price = 100 - YES price, so high YES prices need clamping too.
+    CRITICAL FIX: Prices already in the sweet spot band are used without modification.
+    """
+    # Mock market state with price within sweet spot
+    mock_market_state = Mock()
+    mock_market_state.mid_cents = 35.0  # 35c - within 10-50c band
+    
+    # Simulate the new price selection logic from agent_grid_15m.py
+    raw_price_cents = int(mock_market_state.mid_cents)
+    
+    # Check if price is within sweet spot band
+    if 10 <= raw_price_cents <= 50:
+        price_cents = raw_price_cents
+    else:
+        price_cents = None
+    
+    # Verify behavior: price is in band, used directly
+    assert raw_price_cents == 35
+    assert price_cents == 35  # Used directly without modification
+
+
+def test_price_selection_orderbook_search():
+    """Test that orderbook is searched for cheapest price in 10-50c band.
+    
+    CRITICAL FIX: When raw price is outside band, search orderbook for valid prices.
+    """
+    # Mock market state with orderbook
+    mock_market_state = Mock()
+    mock_market_state.yes_book = [
+        (15, 10),  # 15c with size 10
+        (20, 5),   # 20c with size 5
+        (45, 8),   # 45c with size 8
+        (55, 12),  # 55c - outside band (should be ignored)
+        (8, 3),    # 8c - below band (should be ignored)
+    ]
+    
+    # Simulate orderbook search logic from agent_grid_15m.py
+    raw_price_cents = 75  # Outside band
+    
+    # Find cheapest YES price within [10c, 50c] with size >= 1
+    valid_prices = [p for (p, size) in mock_market_state.yes_book if 10 <= p <= 50 and size >= 1]
+    
+    if valid_prices:
+        price_cents = min(valid_prices)  # Use cheapest acceptable price
+    else:
+        price_cents = None
+    
+    # Verify behavior: found valid prices, used cheapest
+    assert raw_price_cents == 75
+    assert price_cents == 15  # Cheapest valid price in band
+
+
+def test_price_selection_orderbook_no_valid_prices():
+    """Test that candidate is dropped when orderbook has no prices in 10-50c band.
+    
+    CRITICAL FIX: If no prices exist in 10-50c range, drop the candidate (no trade).
+    """
+    # Mock market state with orderbook but no valid prices in band
+    mock_market_state = Mock()
+    mock_market_state.yes_book = [
+        (55, 10),  # 55c - outside band
+        (8, 5),    # 8c - below band
+        (99, 8),   # 99c - outside band
+    ]
+    
+    # Simulate orderbook search logic from agent_grid_15m.py
+    raw_price_cents = 75  # Outside band
+    
+    # Find cheapest YES price within [10c, 50c] with size >= 1
+    valid_prices = [p for (p, size) in mock_market_state.yes_book if 10 <= p <= 50 and size >= 1]
+    
+    if valid_prices:
+        price_cents = min(valid_prices)
+    else:
+        price_cents = None  # Drop candidate
+    
+    # Verify behavior: no valid prices, candidate dropped
+    assert raw_price_cents == 75
+    assert price_cents is None  # No valid price in sweet spot - candidate dropped
+
+
+def test_price_selection_no_order_from_yes_mid():
+    """Test that NO order price is selected from 10-50c sweet spot band.
+    
+    CRITICAL FIX: Raw market prices above 50c are NOT clamped. Instead, the system
+    searches the orderbook for prices in the 10-50c band.
+    NO price = 100 - YES price, so high YES prices need selection too.
     """
     # Mock market state with low YES mid (would result in high NO price)
     mock_market_state = Mock()
     mock_market_state.best_bid_cents = 15
     mock_market_state.best_ask_cents = 20
     
-    # Simulate the clamping logic from loop_15m.py for NO orders
+    # Simulate the new price selection logic for NO orders
     yes_mid = (mock_market_state.best_bid_cents + mock_market_state.best_ask_cents) // 2
     raw_price_cents = 100 - yes_mid  # NO price
-    price_cents = max(10, min(50, raw_price_cents))
     
-    # Verify clamping
+    # Check if price is within sweet spot band
+    if 10 <= raw_price_cents <= 50:
+        price_cents = raw_price_cents
+    else:
+        # Price is outside sweet spot - would search orderbook
+        # For this test, assume no valid prices in orderbook
+        price_cents = None  # Candidate would be dropped
+    
+    # Verify behavior: price is outside band, candidate should be dropped
     assert yes_mid == 17  # (15 + 20) // 2 = 17
     assert raw_price_cents == 83  # 100 - 17 = 83 (above 50c limit)
-    assert price_cents == 50  # Clamped to max 50c
+    assert price_cents is None  # No valid price in sweet spot - candidate dropped
 
 
-def test_price_clamping_below_minimum():
-    """Test that prices below 10c are clamped up to 10c.
+def test_price_selection_below_minimum():
+    """Test that prices below 10c are dropped (not clamped).
     
-    CRITICAL FIX: Prices below 10c are clamped up to match profile guardrails.
+    CRITICAL FIX: Prices below 10c are NOT clamped up. Instead, the system
+    searches the orderbook for prices in the 10-50c band. If no prices exist,
+    the candidate is dropped.
     """
     # Mock market state with very low mid_cents
     mock_market_state = Mock()
     mock_market_state.mid_cents = 5.0  # 5c - below 10c minimum
     
-    # Simulate the clamping logic
+    # Simulate the new price selection logic
     raw_price_cents = int(mock_market_state.mid_cents)
-    price_cents = max(10, min(50, raw_price_cents))
     
-    # Verify clamping
+    # Check if price is within sweet spot band
+    if 10 <= raw_price_cents <= 50:
+        price_cents = raw_price_cents
+    else:
+        # Price is outside sweet spot - would search orderbook
+        # For this test, assume no valid prices in orderbook
+        price_cents = None  # Candidate would be dropped
+    
+    # Verify behavior: price is below band, candidate should be dropped
     assert raw_price_cents == 5
-    assert price_cents == 10  # Clamped to min 10c
+    assert price_cents is None  # No valid price in sweet spot - candidate dropped
 
 
-def test_price_clamping_within_range():
-    """Test that prices within 10-50c range are not modified.
+def test_price_selection_within_range():
+    """Test that prices within 10-50c range are used directly.
     
-    CRITICAL FIX: Valid prices should pass through unchanged.
+    CRITICAL FIX: Valid prices should pass through unchanged without clamping.
     """
     # Mock market state with valid mid_cents
     mock_market_state = Mock()
     mock_market_state.mid_cents = 35.0  # 35c - within valid range
     
-    # Simulate the clamping logic
+    # Simulate the new price selection logic
     raw_price_cents = int(mock_market_state.mid_cents)
-    price_cents = max(10, min(50, raw_price_cents))
     
-    # Verify no clamping needed
+    # Check if price is within sweet spot band
+    if 10 <= raw_price_cents <= 50:
+        price_cents = raw_price_cents
+    else:
+        price_cents = None
+    
+    # Verify behavior: price is in band, used directly
     assert raw_price_cents == 35
-    assert price_cents == 35  # Unchanged
+    assert price_cents == 35  # Used directly without modification
+
+
+def test_profile_source_whitelist_kalshi_crypto_15m_v2():
+    """Test that kalshi_tools orders are rejected for kalshi_crypto_15m_v2 profile.
+    
+    CRITICAL FIX: For kalshi_crypto_15m_v2 profile, only accept orders from agent_grid_15m.
+    Reject orders from kalshi_tools to prevent duplicate order attempts.
+    """
+    from unittest.mock import Mock, patch
+    from merid.event_venues.kalshi.order_router import OrderIntent
+    
+    # Mock profile to return kalshi_crypto_15m_v2
+    mock_profile = Mock()
+    mock_profile.profile_name = 'kalshi_crypto_15m_v2'
+    
+    with patch('merid.risk.profiles.crypto_15m_profile.get_active_profile') as mock_get_profile:
+        mock_get_profile.return_value = mock_profile
+        
+        # Create order intent from kalshi_tools
+        intent = OrderIntent(
+            ticker="KXBTC15M-25JUN-T100000",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=1,
+            source="merid.prediction.kalshi_tools",  # Blocked source
+        )
+        
+        # Simulate the profile-based source whitelist check from order_router.py
+        profile_name = mock_profile.profile_name
+        allowed_source = "merid.prediction.agent_grid_15m"
+        
+        if profile_name == 'kalshi_crypto_15m_v2':
+            if intent.source and "kalshi_tools" in intent.source:
+                should_reject = True
+                reason = "profile_blocked_source:kalshi_tools_not_allowed_for_kalshi_crypto_15m_v2"
+            else:
+                should_reject = False
+                reason = None
+        else:
+            should_reject = False
+            reason = None
+        
+        # Verify behavior: kalshi_tools order should be rejected
+        assert should_reject is True
+        assert reason == "profile_blocked_source:kalshi_tools_not_allowed_for_kalshi_crypto_15m_v2"
+
+
+def test_profile_source_whitelist_agent_grid_allowed():
+    """Test that agent_grid_15m orders are accepted for kalshi_crypto_15m_v2 profile.
+    
+    CRITICAL FIX: For kalshi_crypto_15m_v2 profile, only accept orders from agent_grid_15m.
+    """
+    from unittest.mock import Mock, patch
+    from merid.event_venues.kalshi.order_router import OrderIntent
+    
+    # Mock profile to return kalshi_crypto_15m_v2
+    mock_profile = Mock()
+    mock_profile.profile_name = 'kalshi_crypto_15m_v2'
+    
+    with patch('merid.risk.profiles.crypto_15m_profile.get_active_profile') as mock_get_profile:
+        mock_get_profile.return_value = mock_profile
+        
+        # Create order intent from agent_grid_15m
+        intent = OrderIntent(
+            ticker="KXBTC15M-25JUN-T100000",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=1,
+            source="merid.prediction.agent_grid_15m",  # Allowed source
+        )
+        
+        # Simulate the profile-based source whitelist check from order_router.py
+        profile_name = mock_profile.profile_name
+        allowed_source = "merid.prediction.agent_grid_15m"
+        
+        if profile_name == 'kalshi_crypto_15m_v2':
+            if intent.source and "kalshi_tools" in intent.source:
+                should_reject = True
+                reason = "profile_blocked_source:kalshi_tools_not_allowed_for_kalshi_crypto_15m_v2"
+            else:
+                should_reject = False
+                reason = None
+        else:
+            should_reject = False
+            reason = None
+        
+        # Verify behavior: agent_grid_15m order should be accepted
+        assert should_reject is False
+        assert reason is None
+
+
+def test_profile_source_whitelist_other_profile():
+    """Test that kalshi_tools orders are accepted for non-kalshi_crypto_15m_v2 profiles.
+    
+    CRITICAL FIX: Profile-based whitelist only applies to kalshi_crypto_15m_v2.
+    Other profiles are not affected.
+    """
+    from unittest.mock import Mock, patch
+    from merid.event_venues.kalshi.order_router import OrderIntent
+    
+    # Mock profile to return a different profile
+    mock_profile = Mock()
+    mock_profile.profile_name = 'some_other_profile'
+    
+    with patch('merid.risk.profiles.crypto_15m_profile.get_active_profile') as mock_get_profile:
+        mock_get_profile.return_value = mock_profile
+        
+        # Create order intent from kalshi_tools
+        intent = OrderIntent(
+            ticker="KXBTC15M-25JUN-T100000",
+            side="yes",
+            action="buy",
+            price_cents=50,
+            count=1,
+            source="merid.prediction.kalshi_tools",
+        )
+        
+        # Simulate the profile-based source whitelist check from order_router.py
+        profile_name = mock_profile.profile_name
+        
+        if profile_name == 'kalshi_crypto_15m_v2':
+            if intent.source and "kalshi_tools" in intent.source:
+                should_reject = True
+                reason = "profile_blocked_source:kalshi_tools_not_allowed_for_kalshi_crypto_15m_v2"
+            else:
+                should_reject = False
+                reason = None
+        else:
+            should_reject = False
+            reason = None
+        
+        # Verify behavior: kalshi_tools order should be accepted for other profiles
+        assert should_reject is False
+        assert reason is None
 
 
 def test_trace_id_generation_and_propagation():

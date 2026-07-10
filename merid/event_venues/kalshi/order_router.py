@@ -2652,23 +2652,40 @@ def _apply_depth_based_order_sizing(intent: OrderIntent, state: Optional[Any]) -
     - If requested size exceeds available depth at best price, cap it
     - This prevents large orders from failing due to insufficient liquidity
     
+    CRITICAL: Slot-based model enforces 1 contract per order. This function
+    should never increase count beyond 1. It can only reduce count if
+    requested_count > 1 (which shouldn't happen in slot-based model).
+    
     Args:
         intent: Order intent with requested count
         state: KalshiMarketState with depth information
         
     Returns:
-        Adjusted count (capped at available liquidity)
+        Adjusted count (capped at available liquidity, never exceeds 1)
     """
     requested_count = intent.count
     
-    # If no state available, return requested size
+    # CRITICAL FIX: Slot-based model enforces 1 contract per order
+    # Never allow depth-based sizing to increase count beyond 1
+    if requested_count <= 1:
+        # Already at or below slot limit, return as-is
+        return requested_count
+    
+    # If requested_count > 1 (shouldn't happen in slot-based model), cap at 1
+    logger.warning(
+        "[DEPTH-BASED-SIZING] ticker=%s requested_count=%d exceeds slot limit of 1, capping to 1",
+        intent.ticker, requested_count
+    )
+    requested_count = 1
+    
+    # If no state available, return capped size
     if state is None:
         return requested_count
     
     # Get top of book size (liquidity at best price)
     top_of_book_size = getattr(state, 'top_of_book_size', 0)
     
-    # If no liquidity data available, return requested size
+    # If no liquidity data available, return capped size
     if top_of_book_size <= 0:
         return requested_count
     
@@ -2681,6 +2698,9 @@ def _apply_depth_based_order_sizing(intent: OrderIntent, state: Optional[Any]) -
     # Kalshi rejects count_fp="0.00", so we must return at least 1 if requested_count >= 1
     if max_size == 0 and requested_count >= 1:
         max_size = 1
+    
+    # Never allow max_size to exceed 1 (slot-based model)
+    max_size = min(max_size, 1)
     
     if requested_count > max_size:
         logger.info(
@@ -6416,6 +6436,38 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
         intent.count,
         intent.source
     )
+    
+    # ── Profile-based source whitelist (kalshi_crypto_15m_v2) ─────────────
+    # For kalshi_crypto_15m_v2 profile, only accept orders from agent_grid_15m
+    # Reject orders from kalshi_tools to prevent duplicate order attempts
+    try:
+        from merid.risk.profiles.crypto_15m_profile import get_active_profile
+        profile_adapter = get_active_profile()
+        if profile_adapter and profile_adapter.profile:
+            profile_name = getattr(profile_adapter.profile, 'profile_name', '')
+            if profile_name == 'kalshi_crypto_15m_v2':
+                # Check source - only allow agent_grid_15m for this profile
+                allowed_source = "merid.prediction.agent_grid_15m"
+                if intent.source and "kalshi_tools" in intent.source:
+                    latency = (_time.monotonic() - t0) * 1000
+                    logger.error(
+                        "[PROFILE_BLOCKED_SOURCE] Order rejected: source=%s not allowed for profile=%s "
+                        "(only %s allowed) | ticker=%s | intent_id=%s",
+                        intent.source, profile_name, allowed_source, intent.ticker, intent.intent_id
+                    )
+                    logger.info(
+                        "[ORDER-BLOCKED] ticker=%s reason=PROFILE_BLOCKED_SOURCE source=%s profile=%s",
+                        intent.ticker, intent.source, profile_name
+                    )
+                    return OrderResult(
+                        status="rejected",
+                        mode=get_venue_gate().mode,
+                        reason="profile_blocked_source:kalshi_tools_not_allowed_for_kalshi_crypto_15m_v2",
+                        latency_ms=round(latency, 2),
+                    )
+    except Exception as e:
+        # If profile check fails, log warning but don't block the order
+        logger.warning("[PROFILE_CHECK] Failed to check profile for source whitelist: %s", e)
     
     # ALERT THRESHOLDS MONITORING: Track order submission
     try:

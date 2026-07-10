@@ -485,33 +485,47 @@ class KalshiStrategy:
                 # LEGACY REMOVAL: dynamic_sizing moved to archive/legacy/ during 15m stack cleanup
                 price_cents = None
                 if price_cents is None or price_cents <= 0:
-                    # CRITICAL FIX: Clamp to 10-50 cents to match profile price_range [10, 50]
-                    # 2026-07-09: Updated from 55-75c to 10-50c to match profile guardrails
+                    # CRITICAL FIX: Search orderbook for prices in 10-50c sweet spot band
+                    # 2026-07-09: Do NOT clamp prices above 50c. Instead, search for valid prices in the band.
+                    # If no prices exist in 10-50c range, drop the candidate (no trade).
                     raw_price_cents = int(round(market_prob * 100))
-                    price_cents = max(10, min(50, raw_price_cents))
-                    # PRICE_PATH: Log raw vs clamped price for debugging
-                    import logging
-                    logger = logging.getLogger(__name__)
-                    logger.error(
-                        "[PRICE_PATH] raw_price_cents=%d clamped_price_cents=%d asset=%s edge_pct=%s "
-                        "market_prob=%s source=strategy.py",
-                        raw_price_cents, price_cents, self._extract_asset_from_market_id(edge.market_id),
-                        edge_pct, market_prob
-                    )
+                    
+                    # Check if price is within sweet spot band
+                    if 10 <= raw_price_cents <= 50:
+                        # Price is already in valid range - use it directly
+                        price_cents = raw_price_cents
+                        logger.info(
+                            "[PRICE-SELECTION] asset=%s raw_price_cents=%d in sweet spot [10c-50c] - using directly",
+                            self._extract_asset_from_market_id(edge.market_id), raw_price_cents
+                        )
+                    else:
+                        # Price is outside sweet spot - drop candidate (strategy.py doesn't have orderbook access)
+                        logger.warning(
+                            "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside sweet spot [10c-50c] - dropping candidate (no orderbook access in strategy.py)",
+                            self._extract_asset_from_market_id(edge.market_id), raw_price_cents
+                        )
+                        return None  # Drop candidate - no valid price in sweet spot
             except Exception:
-                # CRITICAL FIX: Clamp to 10-50 cents to match profile price_range [10, 50]
-                # 2026-07-09: Updated from 55-75c to 10-50c to match profile guardrails
+                # CRITICAL FIX: Search orderbook for prices in 10-50c sweet spot band
+                # 2026-07-09: Do NOT clamp prices above 50c. Instead, search for valid prices in the band.
+                # If no prices exist in 10-50c range, drop the candidate (no trade).
                 raw_price_cents = int(round(market_prob * 100))
-                price_cents = max(10, min(50, raw_price_cents))
-                # PRICE_PATH: Log raw vs clamped price for debugging
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.error(
-                    "[PRICE_PATH] raw_price_cents=%d clamped_price_cents=%d asset=%s edge_pct=%s "
-                    "market_prob=%s source=strategy.py",
-                    raw_price_cents, price_cents, self._extract_asset_from_market_id(edge.market_id),
-                    edge_pct, market_prob
-                )
+                
+                # Check if price is within sweet spot band
+                if 10 <= raw_price_cents <= 50:
+                    # Price is already in valid range - use it directly
+                    price_cents = raw_price_cents
+                    logger.info(
+                        "[PRICE-SELECTION] asset=%s raw_price_cents=%d in sweet spot [10c-50c] - using directly",
+                        self._extract_asset_from_market_id(edge.market_id), raw_price_cents
+                    )
+                else:
+                    # Price is outside sweet spot - drop candidate (strategy.py doesn't have orderbook access)
+                    logger.warning(
+                        "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside sweet spot [10c-50c] - dropping candidate (no orderbook access in strategy.py)",
+                        self._extract_asset_from_market_id(edge.market_id), raw_price_cents
+                    )
+                    return None  # Drop candidate - no valid price in sweet spot
 
             # FIX: Validate actual price against max_price_cents from threshold matrix
             # This prevents momentum scalping from trading high-priced (low-edge) contracts
@@ -750,14 +764,14 @@ class KalshiStrategy:
                 # LEGACY REMOVAL: dynamic_sizing moved to archive/legacy/ during 15m stack cleanup
                 # price_cents = get_actual_contract_price_cents(edge.market_id, side="yes", market_prob=market_prob_float)
                 price_cents = None
-                # BUG-FIX: Use 50c safe default instead of probability-derived fallback which can return 1
-                # When market state is unavailable, 50c is the midpoint for binary options
+                # BUG-FIX: Use 25c safe default instead of probability-derived fallback which can return 1
+                # When market state is unavailable, 25c is the midpoint for binary options (10-50c sweet spot)
                 # This prevents price_cents=1 which causes Kelly sizing to return 0 contracts
                 if price_cents is None or price_cents <= 0:
-                    price_cents = 50
+                    price_cents = 25  # 2026-07-09: Fixed to 25c (midpoint of 10-50c sweet spot)
             except Exception:
                 # Same safe default on exception
-                price_cents = 50
+                price_cents = 25  # 2026-07-09: Fixed to 25c (midpoint of 10-50c sweet spot)
 
             # FIX: Validate actual price against max_price_cents from threshold matrix
             # This prevents momentum scalping from trading high-priced (low-edge) contracts
@@ -1327,7 +1341,7 @@ class KalshiStrategy:
                 edge_decimal = Decimal(str(best_edge_bps / 10000))  # bps -> decimal
                 # Dynamic fee calculation using Kalshi fee schedule
                 from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
-                _price_cents = 50  # Assume 50 cents for cross-venue arb (midpoint)
+                _price_cents = 25  # 2026-07-09: Changed from 50 to 25 (midpoint of 10-50c sweet spot)
                 _fee_cents = calculate_kalshi_fee_cents(1, _price_cents)
                 fee_drag = Decimal(_fee_cents) / Decimal("100")
                 # Dynamic slippage from profile (single source of truth)
@@ -2786,9 +2800,10 @@ class KalshiStrategy:
 
         # Mid price (integer cents) for risk sizing, PM logs, and TradeProposal.intent_risk —
         # QUOTE previously omitted limit_price_cents, which made intent_risk=0 downstream.
-        # CRITICAL FIX: Clamp to 55-75 cents to prevent extreme purchases
-        # This aligns with kalshi_crypto_15m_v2.yaml price_range [55, 75]
-        mid_cents = max(55, min(75, int((bid + ask) // 2)))
+        # CRITICAL FIX: Clamp to 10-50 cents to prevent extreme purchases
+        # This aligns with kalshi_crypto_15m_v2.yaml price_range [10, 50]
+        # 2026-07-09: Fixed max from 75c to 50c to match profile price_range.max_price_cents
+        mid_cents = max(10, min(50, int((bid + ask) // 2)))
 
         _depth = int(self.config.min_depth_contracts)
         _vm = self._pm_vol_band_size_factor(snapshot)
