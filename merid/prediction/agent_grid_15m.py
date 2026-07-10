@@ -2206,8 +2206,14 @@ class LeanAgent15m:
         # Build edges for both YES and NO using scores as inputs
         def fvg_edge(score, velocity_sign, macd_hist, rsi, fvg_dir, fvg_conf):
             """Calculate edge from score and indicators."""
+            # CRITICAL FIX: 2026-07-10 - Always return an edge value, even if score < 3
+            # This prevents edge=None which was causing no_edge to be None
+            # Instead, use a lower base edge for scores below threshold
+            
             if score < 3:
-                return None  # Insufficient conditions
+                # Return minimal edge for low scores instead of None
+                # This allows both sides to have edge values for comparison
+                return 0.5  # Minimal edge for insufficient conditions
             
             base_edge = calculate_velocity_edge(velocity * velocity_sign, velocity_threshold)
             base_edge = max(base_edge, 2.0)  # Minimum 2% edge
