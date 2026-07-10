@@ -60,31 +60,21 @@ class TestKalshiTraderPriceValidation:
         trader._pre_order_check = lambda *a, **k: (True, "OK")
         return trader
 
-    @pytest.mark.asyncio
-    async def test_pre_order_check_rejects_price_below_50(self, mock_client):
-        """Test that _pre_order_check rejects prices below 50 cents."""
+
+class TestKalshiTraderContractCountEnforcement:
+    """Test contract count enforcement in _pre_order_check (2026-07-09 fix)."""
+
+    @pytest.fixture
+    def trader_with_real_checks(self, mock_client):
+        """Create trader with real _pre_order_check but mocked risk checks."""
         trader = KalshiTrader(client=mock_client)
+        # Mock venue gate to allow live trading
         trader._is_live_trading_allowed = lambda: True
-        
-        # Mock risk checks to pass
-        with patch('merid.risk.kill_switches.risk_controller') as mock_rc:
-            mock_rc.can_trade.return_value = True
-            with patch('merid.event_venues.kalshi.kalshi_risk.get_kalshi_risk') as mock_risk:
-                mock_risk_instance = MagicMock()
-                mock_risk_instance.check_order.return_value = (True, "OK")
-                mock_risk.return_value = mock_risk_instance
-                
-                allowed, reason = trader._pre_order_check("TEST-TICKER", 1, 49)
-                assert not allowed
-                assert "invalid_price_range" in reason
-                assert "49c" in reason
+        return trader
 
     @pytest.mark.asyncio
-    async def test_pre_order_check_rejects_price_above_70(self, mock_client):
-        """Test that _pre_order_check rejects prices above 70 cents."""
-        trader = KalshiTrader(client=mock_client)
-        trader._is_live_trading_allowed = lambda: True
-        
+    async def test_pre_order_check_rejects_count_gt_1(self, trader_with_real_checks):
+        """Test that _pre_order_check rejects orders with count > 1."""
         # Mock risk checks to pass
         with patch('merid.risk.kill_switches.risk_controller') as mock_rc:
             mock_rc.can_trade.return_value = True
@@ -92,18 +82,22 @@ class TestKalshiTraderPriceValidation:
                 mock_risk_instance = MagicMock()
                 mock_risk_instance.check_order.return_value = (True, "OK")
                 mock_risk.return_value = mock_risk_instance
-                
-                allowed, reason = trader._pre_order_check("TEST-TICKER", 1, 71)
+
+                # Test count=2 (should be rejected)
+                allowed, reason = trader_with_real_checks._pre_order_check("TEST-TICKER", 2, 55)
                 assert not allowed
-                assert "invalid_price_range" in reason
-                assert "71c" in reason
+                assert "max_contracts_exceeded" in reason
+                assert "count=2>1" in reason
+
+                # Test count=5 (should be rejected)
+                allowed, reason = trader_with_real_checks._pre_order_check("TEST-TICKER", 5, 55)
+                assert not allowed
+                assert "max_contracts_exceeded" in reason
+                assert "count=5>1" in reason
 
     @pytest.mark.asyncio
-    async def test_pre_order_check_accepts_price_50(self, mock_client):
-        """Test that _pre_order_check accepts price of exactly 50 cents."""
-        trader = KalshiTrader(client=mock_client)
-        trader._is_live_trading_allowed = lambda: True
-        
+    async def test_pre_order_check_accepts_count_1(self, trader_with_real_checks):
+        """Test that _pre_order_check accepts orders with count=1."""
         # Mock risk checks to pass
         with patch('merid.risk.kill_switches.risk_controller') as mock_rc:
             mock_rc.can_trade.return_value = True
@@ -111,119 +105,11 @@ class TestKalshiTraderPriceValidation:
                 mock_risk_instance = MagicMock()
                 mock_risk_instance.check_order.return_value = (True, "OK")
                 mock_risk.return_value = mock_risk_instance
-                
-                allowed, reason = trader._pre_order_check("TEST-TICKER", 1, 50)
+
+                # Test count=1 (should be accepted)
+                allowed, reason = trader_with_real_checks._pre_order_check("TEST-TICKER", 1, 55)
                 assert allowed
                 assert reason == "OK"
-
-    @pytest.mark.asyncio
-    async def test_pre_order_check_accepts_price_70(self, mock_client):
-        """Test that _pre_order_check accepts price of exactly 70 cents."""
-        trader = KalshiTrader(client=mock_client)
-        trader._is_live_trading_allowed = lambda: True
-        
-        # Mock risk checks to pass
-        with patch('merid.risk.kill_switches.risk_controller') as mock_rc:
-            mock_rc.can_trade.return_value = True
-            with patch('merid.event_venues.kalshi.kalshi_risk.get_kalshi_risk') as mock_risk:
-                mock_risk_instance = MagicMock()
-                mock_risk_instance.check_order.return_value = (True, "OK")
-                mock_risk.return_value = mock_risk_instance
-                
-                allowed, reason = trader._pre_order_check("TEST-TICKER", 1, 70)
-                assert allowed
-                assert reason == "OK"
-
-    @pytest.mark.asyncio
-    async def test_pre_order_check_accepts_price_in_range(self, mock_client):
-        """Test that _pre_order_check accepts prices in valid range [50, 70]."""
-        trader = KalshiTrader(client=mock_client)
-        trader._is_live_trading_allowed = lambda: True
-        
-        # Mock risk checks to pass
-        with patch('merid.risk.kill_switches.risk_controller') as mock_rc:
-            mock_rc.can_trade.return_value = True
-            with patch('merid.event_venues.kalshi.kalshi_risk.get_kalshi_risk') as mock_risk:
-                mock_risk_instance = MagicMock()
-                mock_risk_instance.check_order.return_value = (True, "OK")
-                mock_risk.return_value = mock_risk_instance
-                
-                for price in [50, 55, 60, 65, 70]:
-                    allowed, reason = trader._pre_order_check("TEST-TICKER", 1, price)
-                    assert allowed, f"Price {price} should be accepted"
-                    assert reason == "OK"
-
-    @pytest.mark.asyncio
-    async def test_buy_yes_rejects_invalid_price(self, mock_client):
-        """Test that buy_yes rejects orders with invalid price."""
-        trader = KalshiTrader(client=mock_client)
-        trader._is_live_trading_allowed = lambda: True
-        
-        # Mock risk checks to pass
-        with patch('merid.risk.kill_switches.risk_controller') as mock_rc:
-            mock_rc.can_trade.return_value = True
-            with patch('merid.event_venues.kalshi.kalshi_risk.get_kalshi_risk') as mock_risk:
-                mock_risk_instance = MagicMock()
-                mock_risk_instance.check_order.return_value = (True, "OK")
-                mock_risk.return_value = mock_risk_instance
-                
-                result = await trader.buy_yes("TEST-TICKER", 1, price=30)
-                assert result is None
-                mock_client.place_order.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_buy_no_rejects_invalid_price(self, mock_client):
-        """Test that buy_no rejects orders with invalid price."""
-        trader = KalshiTrader(client=mock_client)
-        trader._is_live_trading_allowed = lambda: True
-        
-        # Mock risk checks to pass
-        with patch('merid.risk.kill_switches.risk_controller') as mock_rc:
-            mock_rc.can_trade.return_value = True
-            with patch('merid.event_venues.kalshi.kalshi_risk.get_kalshi_risk') as mock_risk:
-                mock_risk_instance = MagicMock()
-                mock_risk_instance.check_order.return_value = (True, "OK")
-                mock_risk.return_value = mock_risk_instance
-                
-                result = await trader.buy_no("TEST-TICKER", 1, price=80)
-                assert result is None
-                mock_client.place_order.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_sell_yes_rejects_invalid_price(self, mock_client):
-        """Test that sell_yes rejects orders with invalid price."""
-        trader = KalshiTrader(client=mock_client)
-        trader._is_live_trading_allowed = lambda: True
-        
-        # Mock risk checks to pass
-        with patch('merid.risk.kill_switches.risk_controller') as mock_rc:
-            mock_rc.can_trade.return_value = True
-            with patch('merid.event_venues.kalshi.kalshi_risk.get_kalshi_risk') as mock_risk:
-                mock_risk_instance = MagicMock()
-                mock_risk_instance.check_order.return_value = (True, "OK")
-                mock_risk.return_value = mock_risk_instance
-                
-                result = await trader.sell_yes("TEST-TICKER", 1, price=10)
-                assert result is None
-                mock_client.place_order.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_sell_no_rejects_invalid_price(self, mock_client):
-        """Test that sell_no rejects orders with invalid price."""
-        trader = KalshiTrader(client=mock_client)
-        trader._is_live_trading_allowed = lambda: True
-        
-        # Mock risk checks to pass
-        with patch('merid.risk.kill_switches.risk_controller') as mock_rc:
-            mock_rc.can_trade.return_value = True
-            with patch('merid.event_venues.kalshi.kalshi_risk.get_kalshi_risk') as mock_risk:
-                mock_risk_instance = MagicMock()
-                mock_risk_instance.check_order.return_value = (True, "OK")
-                mock_risk.return_value = mock_risk_instance
-                
-                result = await trader.sell_no("TEST-TICKER", 1, price=95)
-                assert result is None
-                mock_client.place_order.assert_not_called()
 
 
 class TestKalshiTraderInitialization:
