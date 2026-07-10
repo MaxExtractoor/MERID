@@ -6228,7 +6228,9 @@ class LeanAgentGrid15m:
                             
                             if order_result and order_result.success:
                                 executed_count += 1
-                                logger.info("[GLOBAL-ALLOCATOR-EXECUTE-SUCCESS] asset=%s order_id=%s", order.asset, order_result.order_id)
+                                # Handle both ToolResult (duplicate/idempotent) and OrderResult objects
+                                order_id = getattr(order_result, 'order_id', 'duplicate/idempotent')
+                                logger.info("[GLOBAL-ALLOCATOR-EXECUTE-SUCCESS] asset=%s order_id=%s", order.asset, order_id)
                             else:
                                 # Handle both ToolResult and OrderResult objects
                                 reason = "Unknown"
