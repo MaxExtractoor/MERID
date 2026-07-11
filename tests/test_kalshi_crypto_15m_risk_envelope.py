@@ -585,7 +585,7 @@ class TestEdgeBandConfiguration:
 
 
 class TestWindowBasedRiskLimitEnforcement:
-    """Test window-based risk limit enforcement (3% per-agent, 5% total per 15m window)."""
+    """Test window-based risk limit enforcement (fixed $1.00 exposure cap per 15m window)."""
 
     def test_window_limit_fields_exist(self):
         """Test that window limit fields exist in envelope."""
@@ -623,10 +623,10 @@ class TestWindowBasedRiskLimitEnforcement:
             correlation_tracking_enabled=True,
             correlation_threshold=0.5,
             correlation_multiplier=1.0,
-            guardrails_per_window_risk_pct=0.03,  # 3% per agent
-            guardrails_total_venue_risk_pct=0.05,  # 5% total
-            per_agent_window_limit_usd=1.0,  # Fixed $1.00 exposure cap (2026-07-10)
-            total_venue_window_limit_usd=1.0,  # Fixed $1.00 total exposure cap (2026-07-10)
+            guardrails_per_window_risk_pct=0.03,  # DEPRECATED: Not used (fixed $1 cap instead)
+            guardrails_total_venue_risk_pct=0.05,  # DEPRECATED: Not used (fixed $1 cap instead)
+            per_agent_window_limit_usd=1.0,  # DEPRECATED: Not used (fixed $1 cap instead)
+            total_venue_window_limit_usd=1.0,  # Fixed $1.00 total exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
             window_start_ts=0.0,  # Required field
             agent_window_exposure_usd={},  # Required field
             total_window_exposure_usd=0.0,  # Required field

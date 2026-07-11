@@ -34,7 +34,7 @@ _WINDOW_TRACKING_STATE: Dict[str, Any] = {
     "agent_resting_exposure_usd": {},  # agent_id -> cumulative resting order notional this window (CRITICAL FIX 2026-07-08)
     "total_resting_exposure_usd": 0.0,  # cumulative resting order notional across all agents this window (CRITICAL FIX 2026-07-08)
     "peak_bankroll_usd": 0.0,  # CRITICAL FIX 2026-07-08: Peak bankroll at window start for consistent 5% calculation
-    "asset_exposure_usd": {},  # CRITICAL FIX 2026-07-08: asset -> cumulative executed notional this window (3% per-asset limit)
+    "asset_exposure_usd": {},  # CRITICAL FIX 2026-07-08: asset -> cumulative executed notional this window (for tracking, not enforcement)
 }
 
 
@@ -231,14 +231,16 @@ class KalshiCrypto15mRiskEnvelope:
     max_cycle_risk_pct: float  # Maximum risk per cycle as percentage of capital
     
     # ── Window-Based Risk Tracking (2026-07-06: HARD STOP) ─────────────────
-    # Per-agent per-window limit: 3% per agent per 15-minute window
-    # Total venue per-window limit: 5% across all agents per 15-minute window
-    guardrails_per_window_risk_pct: float  # 3% per agent per 15m window (HARD STOP)
-    guardrails_total_venue_risk_pct: float  # 5% total across all agents per 15m window (HARD STOP)
+    # CRITICAL: Uses fixed $1.00 exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
+    # Percentage-based limits (3% per-agent, 5% total venue) are DISABLED
+    # Global slot allocator enforces $1.00 total cap across all 5 assets
+    # These fields are retained for backward compatibility but not used in enforcement
+    guardrails_per_window_risk_pct: float  # DEPRECATED: Not used (fixed $1 cap instead)
+    guardrails_total_venue_risk_pct: float  # DEPRECATED: Not used (fixed $1 cap instead)
     
     # Computed window limits in USD (for easy access)
-    per_agent_window_limit_usd: float  # 3% of capital in USD
-    total_venue_window_limit_usd: float  # 5% of capital in USD
+    per_agent_window_limit_usd: float  # DEPRECATED: Not used (fixed $1 cap instead)
+    total_venue_window_limit_usd: float  # Fixed $1.00 exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
     
     # Window tracking state
     window_start_ts: float  # Timestamp when current 15m window started
@@ -499,8 +501,7 @@ class KalshiCrypto15mRiskEnvelope:
         # CRITICAL FIX (2026-07-08): Add assertions to validate inputs
         assert self.live_bankroll_usd > 0, "Bankroll must be positive for window limit check"
         # 2026-07-08: DISABLED percentage-based assertions - using fixed $1 exposure model
-        # assert self.guardrails_per_window_risk_pct > 0, "Per-agent window limit must be positive"
-        # assert self.guardrails_total_venue_risk_pct > 0, "Total venue window limit must be positive"
+        # Percentage-based limits are obsolete; system uses MERID_FIXED_EXPOSURE_CAP_USD=$1.00
         assert order_notional_usd > 0, "Order notional must be positive"
         assert agent_id, "Agent ID must be provided"
         
@@ -517,46 +518,27 @@ class KalshiCrypto15mRiskEnvelope:
             current_total_resting = _WINDOW_TRACKING_STATE["total_resting_exposure_usd"]
             # CRITICAL FIX 2026-07-08: Use peak bankroll at window start for consistent limits
             peak_bankroll_usd = _WINDOW_TRACKING_STATE["peak_bankroll_usd"] or self.live_bankroll_usd
-            # CRITICAL FIX 2026-07-08: Get per-asset exposure for 3% limit check
+            # Track per-asset exposure for monitoring (not enforcement - fixed $1 cap used instead)
             current_asset_exposure = 0.0
             if asset:
                 current_asset_exposure = _WINDOW_TRACKING_STATE["asset_exposure_usd"].get(asset, 0.0)
         
-        # 2026-07-10: CRITICAL FIX - DISABLED per-agent limit check
-        # The global slot allocator enforces $1.00 total cap across all 5 agents
-        # Per-agent limit check was blocking each agent at $1.00 individually
-        # This prevented the slot allocator from properly allocating shared capital
-        # Only total venue limit is enforced here
+        # CRITICAL: System uses fixed $1.00 exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
+        # Percentage-based limits (3% per-agent, 5% total venue) are DISABLED
+        # Global slot allocator is the single source of truth for $1.00 total cap enforcement
         import os
         fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
         total_venue_limit_usd = custom_total_venue_limit_pct if custom_total_venue_limit_pct else fixed_exposure_cap_usd
         
-        # CRITICAL FIX 2026-07-10: Per-agent limit check DISABLED
-        # The global slot allocator (global_slot_allocator.py) is the single source of truth
-        # for $1.00 total exposure enforcement across all 5 assets (BTC+ETH+SOL+XRP+DOGE)
-        # This allows agents to compete for the shared $1.00 pool based on edge quality
-        
-        # 2026-07-10: CRITICAL FIX - DISABLED per-asset limit check
-        # The global slot allocator enforces $1.00 total cap across all 5 assets
-        # Per-asset limit check was redundant and conflicted with slot allocator
-        # Only total venue limit is enforced here
+        # Per-agent and per-asset limit checks are DISABLED
+        # The global slot allocator (global_slot_allocator.py) enforces $1.00 total cap
+        # across all 5 assets (BTC+ETH+SOL+XRP+DOGE) based on edge quality competition
         if asset:
-            import os
-            fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
             # Per-asset limit check DISABLED - slot allocator handles this
-            # new_asset_exposure = current_asset_exposure + order_notional_usd
-            # if new_asset_exposure > per_asset_limit_usd:
-            #     reason = (
-            #         f"per_asset_window_limit: asset={asset} "
-            #         f"executed=${current_asset_exposure:.2f} + order=${order_notional_usd:.2f} "
-            #         f"= ${new_asset_exposure:.2f} > limit=${per_asset_limit_usd:.2f} - HARD STOP"
-            #     )
-            #     logger.warning(f"[WINDOW-TRACKING] {reason}")
-            #     return False, reason
             pass
         
         # Calculate total venue window limit (including resting orders)
-        # 2026-07-08: DISABLED percentage-based total venue window limit - using fixed $1 exposure model
+        # CRITICAL: Uses fixed $1.00 exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
         new_total_exposure = current_total_exposure + order_notional_usd
         new_total_venue = new_total_exposure + current_total_resting  # Executed + Resting
         
@@ -573,7 +555,7 @@ class KalshiCrypto15mRiskEnvelope:
         logger.info(
             f"[WINDOW-TRACKING] Window check OK: agent={agent_id} asset={asset or 'N/A'} "
             f"venue_exposure=${current_total_exposure:.2f}+${order_notional_usd:.2f} <= ${total_venue_limit_usd:.2f} "
-            f"(per-agent limit DISABLED - slot allocator enforces $1.00 total across all 5 assets)"
+            f"(fixed $1 cap enforced by slot allocator across all 5 assets)"
         )
         return True, ""
     
@@ -599,7 +581,7 @@ class KalshiCrypto15mRiskEnvelope:
         
         # CRITICAL (2026-07-06): Write to module-level shared state so the
         # recorded exposure survives envelope recomputation and is visible to
-        # subsequent check_window_limit() calls (3%/5% allowance decrement).
+        # subsequent check_window_limit() calls (fixed $1 cap enforcement).
         import time as _time_mod
         with _WINDOW_TRACKING_LOCK:
             _roll_window_if_needed_locked(_time_mod.time(), self.live_bankroll_usd)
@@ -607,7 +589,7 @@ class KalshiCrypto15mRiskEnvelope:
                 _WINDOW_TRACKING_STATE["agent_exposure_usd"].get(agent_id, 0.0) + order_notional_usd
             )
             _WINDOW_TRACKING_STATE["total_exposure_usd"] += order_notional_usd
-            # CRITICAL FIX 2026-07-08: Track per-asset exposure for 3% limit
+            # CRITICAL FIX 2026-07-08: Track per-asset exposure for monitoring (not enforcement)
             if asset:
                 _WINDOW_TRACKING_STATE["asset_exposure_usd"][asset] = (
                     _WINDOW_TRACKING_STATE["asset_exposure_usd"].get(asset, 0.0) + order_notional_usd

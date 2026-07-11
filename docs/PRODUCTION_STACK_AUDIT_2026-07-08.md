@@ -12,7 +12,7 @@ This audit examined the production stack for high-leverage bugs that could cause
 1. **Upstream (Configuration Layer):** Profile YAML, risk limits, asset-specific configurations
 2. **Midstream (Risk Envelope Layer):** Risk envelope calculations, profile adapter, percentage-to-USD conversions
 3. **Downstream (Sizing Layer):** Unified sizing, agent grid, position size multipliers
-4. **Window-Based Risk Tracking:** 3% per agent / 5% total per 15m window HARD STOPs
+4. **Window-Based Risk Tracking:** Fixed $1.00 exposure cap per 15m window (MERID_FIXED_EXPOSURE_CAP_USD)
 5. **Legacy Contamination:** Risk of legacy code paths in production
 6. **5-Asset Consistency:** BTC, ETH, SOL, XRP, DOGE treatment across the stack
 
@@ -28,10 +28,11 @@ This audit examined the production stack for high-leverage bugs that could cause
 
 **Key Findings:**
 - Window-based risk limits correctly defined as HARD STOPS:
-  - `guardrails_per_window_risk_pct: 0.03` (3% per agent per 15m window)
-  - `guardrails_total_venue_risk_pct: 0.05` (5% total across all agents per 15m window)
+  - System uses fixed $1.00 exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
+  - Percentage-based limits (3% per-agent, 5% total venue) are DISABLED
+  - Global slot allocator enforces $1.00 total cap across all 5 assets
 - Dynamic sizing is DISABLED to prevent interference with window-based limits
-- All 5 assets (BTC, ETH, SOL, XRP, DOGE) have consistent per-asset caps (3% each)
+- All 5 assets (BTC, ETH, SOL, XRP, DOGE) have consistent treatment
 - Volatility regime edge adjustment is ENABLED with reasonable multipliers (±0.25%)
 - Time-of-day risk scaling is ENABLED with session-based multipliers
 
@@ -48,11 +49,11 @@ This audit examined the production stack for high-leverage bugs that could cause
 **Status:** ✅ Correctly implements window-based risk tracking
 
 **Key Findings:**
-- Module-level window tracking state (`_WINDOW_TRACKING_STATE`) correctly implemented for 3%/5% HARD STOPs
+- Module-level window tracking state (`_WINDOW_TRACKING_STATE`) correctly implemented for fixed $1.00 cap
 - Per-trade risk is uniformly 3% (tiered micro-account logic DISABLED)
 - Adaptive risk bands with drawdown-based multipliers (100%, 80%, 50%, 25%, 0%)
 - Correlation multiplier is present but correlation tracking is disabled in YAML
-- Window limit enforcement is implemented in `check_window_limit()`
+- Window limit enforcement is implemented in `check_window_limit()` using fixed $1.00 cap
 - `refund_order_execution()` reverses optimistic exposure recording for rejected/unfilled orders
 
 **No critical bugs found in midstream risk envelope layer.**

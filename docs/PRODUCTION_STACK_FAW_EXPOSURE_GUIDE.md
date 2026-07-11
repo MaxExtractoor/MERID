@@ -23,7 +23,7 @@ The `production_stack_flaw_exposure.py` script performs comprehensive end-to-end
 - Percentage-to-USD conversions
 - Per-asset cap enforcement
 - Agent default enforcement
-- Window-based risk tracking (3% per agent, 5% total per 15m window)
+- Window-based risk tracking (fixed $1.00 exposure cap per 15m window - MERID_FIXED_EXPOSURE_CAP_USD)
 
 ### DOWNSTREAM (Sizing Layer)
 - Unified sizing (`merid/prediction/unified_sizing.py`)
