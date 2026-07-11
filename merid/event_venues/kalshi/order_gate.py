@@ -528,13 +528,15 @@ class IdempotentOrderStore:
                     and rec.target_count == target_count  # CRITICAL: Check count to prevent multi-contract bypass
                     and rec.status in (OrderStatus.PENDING, OrderStatus.SUBMITTED, OrderStatus.LIVE)
                 ):
-                    # CRITICAL FIX: Skip stale PENDING orders (older than 30 seconds)
+                    # CRITICAL FIX: Skip stale PENDING orders (older than 5 seconds)
                     # These are likely failed orders that never transitioned properly
+                    # CRITICAL FIX 2026-07-10: Reduced threshold from 30s to 5s to match time bucket width
+                    # This prevents stale PENDING orders from blocking new orders when the 5s bucket changes
                     if rec.status == OrderStatus.PENDING:
                         age_seconds = now - rec.updated_at
-                        if age_seconds > 30:
+                        if age_seconds > 5:
                             logger.debug(
-                                "[find_resting_duplicate] Skipping stale PENDING order coid=%s age=%.1fs (threshold=30s)",
+                                "[find_resting_duplicate] Skipping stale PENDING order coid=%s age=%.1fs (threshold=5s)",
                                 rec.client_order_id, age_seconds
                             )
                             continue
@@ -979,7 +981,7 @@ class PreTradeGate:
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
             profile = get_active_profile()
-            if profile and profile.risk_policy_sequential_trading:
+            if profile and hasattr(profile, 'risk_policy_sequential_trading') and profile.risk_policy_sequential_trading:
                 is_exit_order = action == "sell"
                 if not is_exit_order:
                     # CRITICAL FIX: Use global slot allocator instead of position cache
