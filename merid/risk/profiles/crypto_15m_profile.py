@@ -477,6 +477,13 @@ class Crypto15mProfile:
         max_price_cents=50,
         description='Valid price range in cents for order execution (10c-50c canonical band)'
     ))
+    
+    # Dynamic threshold configuration (2026-07-11)
+    # Canonical thresholds for normal regime, crisis thresholds for extreme volatility
+    canonical: 'CanonicalConfig' = field(default_factory=lambda: CanonicalConfig())
+    crisis: 'CrisisConfig' = field(default_factory=lambda: CrisisConfig())
+    regime_detection: 'RegimeDetectionConfig' = field(default_factory=lambda: RegimeDetectionConfig())
+    coarse_filters: 'CoarseFiltersConfig' = field(default_factory=lambda: CoarseFiltersConfig())
 
     @property
     def momentum_fvg(self) -> Dict[str, Any]:
@@ -548,6 +555,111 @@ class PriceRange:
     min_price_cents: int
     max_price_cents: int
     description: str
+
+
+@dataclass
+class PriceRangeConfig:
+    """Price range configuration for dynamic thresholds."""
+    min_cents: int
+    max_cents: int
+
+
+@dataclass
+class SpreadConfig:
+    """Spread configuration for dynamic thresholds."""
+    max_cents: int
+    min_gate_cents: int
+
+
+@dataclass
+class LiquidityConfig:
+    """Liquidity configuration for dynamic thresholds."""
+    min_volume_24h: int
+    min_depth_top_of_book: int
+    max_spread_cents: int
+
+
+@dataclass
+class CanonicalConfig:
+    """Canonical thresholds for normal regime (87% of market time)."""
+    price_range: PriceRangeConfig = field(default_factory=lambda: PriceRangeConfig(
+        min_cents=10,
+        max_cents=50
+    ))
+    spread: SpreadConfig = field(default_factory=lambda: SpreadConfig(
+        max_cents=30,
+        min_gate_cents=30
+    ))
+    liquidity: LiquidityConfig = field(default_factory=lambda: LiquidityConfig(
+        min_volume_24h=500,
+        min_depth_top_of_book=100,
+        max_spread_cents=30
+    ))
+
+
+@dataclass
+class CrisisConfig:
+    """Crisis thresholds for extreme volatility (13% of market time)."""
+    price_range: PriceRangeConfig = field(default_factory=lambda: PriceRangeConfig(
+        min_cents=5,
+        max_cents=95
+    ))
+    spread: SpreadConfig = field(default_factory=lambda: SpreadConfig(
+        max_cents=100,
+        min_gate_cents=30
+    ))
+    liquidity: LiquidityConfig = field(default_factory=lambda: LiquidityConfig(
+        min_volume_24h=500,
+        min_depth_top_of_book=100,
+        max_spread_cents=100
+    ))
+
+
+@dataclass
+class ATRThresholds:
+    """ATR thresholds for regime detection."""
+    LOW: float = 1.0
+    NORMAL: float = 2.0
+    HIGH: float = 3.0
+    EXTREME: float = 4.0
+
+
+@dataclass
+class RegimeAdjustmentFactors:
+    """Adjustment factors for each regime."""
+    price_range_multiplier: float = 1.0
+    spread_multiplier: float = 1.0
+    position_size_multiplier: float = 1.0
+
+
+@dataclass
+class RegimeDetectionConfig:
+    """Regime detection configuration."""
+    enabled: bool = True
+    method: str = "ATR"
+    lookback_periods: int = 14
+    hysteresis_periods: int = 3
+    thresholds: ATRThresholds = field(default_factory=ATRThresholds)
+    adjustment_factors: Dict[str, RegimeAdjustmentFactors] = field(default_factory=dict)
+
+
+@dataclass
+class GateConfig:
+    """Configuration for a single coarse filter gate."""
+    name: str
+    enabled: bool = True
+    min_minutes: int = 5
+    max_minutes: int = 1440
+    assets: list = field(default_factory=list)
+    dynamic: bool = False
+    min_implied_yield_pct: int = 50
+    min_edge_vs_model_pct: int = 5
+
+
+@dataclass
+class CoarseFiltersConfig:
+    """Coarse filter configuration."""
+    gates: list = field(default_factory=list)
 
 
 @dataclass
@@ -874,6 +986,12 @@ class Crypto15mProfileAdapter:
                     description=raw.get('price_range', {}).get('description', 'Valid price range in cents for order execution')
                 ),
                 
+                # Dynamic threshold configuration (2026-07-11)
+                canonical=self._parse_canonical_config(raw.get('canonical', {})),
+                crisis=self._parse_crisis_config(raw.get('crisis', {})),
+                regime_detection=self._parse_regime_detection_config(raw.get('regime_detection', {})),
+                coarse_filters=self._parse_coarse_filters_config(raw.get('coarse_filters', {})),
+                
                 # Momentum/FVG mode parameters
                 momentum_fvg_rsi_long_min=momentum_fvg_config.get('momentum_rsi_long_min', 55.0),
                 momentum_fvg_rsi_short_max=momentum_fvg_config.get('momentum_rsi_short_max', 45.0),
@@ -954,7 +1072,7 @@ class Crypto15mProfileAdapter:
                 
                 # Per-agent defaults (percentage-based, normalize dict format)
                 agent_max_notional_pct=self._normalize_percentage_value(agent_defaults.get('max_notional_pct', 0.03)),  # FIXED: Default 0.03 to match YAML (3% per agent)
-                agent_max_orders_per_window=agent_defaults.get('max_orders_per_window', 20),  # FIXED: Default 20 to match YAML (was 3)
+                agent_max_orders_per_window=agent_defaults.get('max_orders_per_window', 24),  # FIXED: Default 24 to match YAML (2026-07-11: increased from 20)
                 agent_max_yes_position=agent_defaults.get('max_yes_position', 3),
                 agent_max_no_position=agent_defaults.get('max_no_position', 3),
                 agent_max_concurrent_trades=agent_defaults.get('max_concurrent_trades', 5),  # FIXED: Default 5 to match YAML (was 3),
@@ -1062,10 +1180,10 @@ class Crypto15mProfileAdapter:
                 # Throttling (order rate limits)
                 throttling_global_orders_window_sec=float(throttling.get('global_orders_window_sec', 60.0)),
                 throttling_global_orders_limit=int(throttling.get('global_orders_limit', 20)),
-                throttling_per_asset_cooldown_sec=float(throttling.get('per_asset_cooldown_sec', 10.0)),
+                throttling_per_asset_cooldown_sec=float(throttling.get('per_asset_cooldown_sec', 3.0)),  # 2026-07-11: updated to 3s for 15m alignment
                 throttling_per_strip_order_limit=int(throttling.get('per_strip_order_limit', 1)),
                 throttling_per_strip_notional_usd=float(throttling.get('per_strip_notional_usd', 0.0)),
-                throttling_max_orders_per_15m_window=int(throttling.get('max_orders_per_15m_window', 5)),
+                throttling_max_orders_per_15m_window=int(throttling.get('max_orders_per_15m_window', 24)),  # 2026-07-11: updated to 24 for 15m alignment
                 throttling_consecutive_loss_pause=int(throttling.get('consecutive_loss_pause', 3)),
                 throttling_max_session_risk_pct=self._normalize_percentage_value(throttling.get('max_session_risk_pct', 0.10)),
                 
@@ -1379,6 +1497,101 @@ class Crypto15mProfileAdapter:
         )
         
         return dynamic_cap
+    
+    def _parse_canonical_config(self, raw: Dict) -> CanonicalConfig:
+        """Parse canonical configuration from YAML."""
+        price_range_raw = raw.get('price_range', {})
+        spread_raw = raw.get('spread', {})
+        liquidity_raw = raw.get('liquidity', {})
+        
+        return CanonicalConfig(
+            price_range=PriceRangeConfig(
+                min_cents=price_range_raw.get('min_cents', 10),
+                max_cents=price_range_raw.get('max_cents', 50)
+            ),
+            spread=SpreadConfig(
+                max_cents=spread_raw.get('max_cents', 30),
+                min_gate_cents=spread_raw.get('min_gate_cents', 30)
+            ),
+            liquidity=LiquidityConfig(
+                min_volume_24h=liquidity_raw.get('min_volume_24h', 500),
+                min_depth_top_of_book=liquidity_raw.get('min_depth_top_of_book', 100),
+                max_spread_cents=liquidity_raw.get('max_spread_cents', 30)
+            )
+        )
+    
+    def _parse_crisis_config(self, raw: Dict) -> CrisisConfig:
+        """Parse crisis configuration from YAML."""
+        price_range_raw = raw.get('price_range', {})
+        spread_raw = raw.get('spread', {})
+        liquidity_raw = raw.get('liquidity', {})
+        
+        return CrisisConfig(
+            price_range=PriceRangeConfig(
+                min_cents=price_range_raw.get('min_cents', 5),
+                max_cents=price_range_raw.get('max_cents', 95)
+            ),
+            spread=SpreadConfig(
+                max_cents=spread_raw.get('max_cents', 100),
+                min_gate_cents=spread_raw.get('min_gate_cents', 30)
+            ),
+            liquidity=LiquidityConfig(
+                min_volume_24h=liquidity_raw.get('min_volume_24h', 500),
+                min_depth_top_of_book=liquidity_raw.get('min_depth_top_of_book', 100),
+                max_spread_cents=liquidity_raw.get('max_spread_cents', 100)
+            )
+        )
+    
+    def _parse_regime_detection_config(self, raw: Dict) -> RegimeDetectionConfig:
+        """Parse regime detection configuration from YAML."""
+        thresholds_raw = raw.get('thresholds', {})
+        atr_raw = thresholds_raw.get('atr_pct', {})
+        
+        atr_thresholds = ATRThresholds(
+            LOW=atr_raw.get('LOW', 1.0),
+            NORMAL=atr_raw.get('NORMAL', 2.0),
+            HIGH=atr_raw.get('HIGH', 3.0),
+            EXTREME=atr_raw.get('EXTREME', 4.0)
+        )
+        
+        # Parse adjustment factors
+        adjustment_factors_raw = raw.get('adjustment_factors', {})
+        adjustment_factors = {}
+        for regime_name, factors_raw in adjustment_factors_raw.items():
+            adjustment_factors[regime_name] = RegimeAdjustmentFactors(
+                price_range_multiplier=factors_raw.get('price_range_multiplier', 1.0),
+                spread_multiplier=factors_raw.get('spread_multiplier', 1.0),
+                position_size_multiplier=factors_raw.get('position_size_multiplier', 1.0)
+            )
+        
+        return RegimeDetectionConfig(
+            enabled=raw.get('enabled', True),
+            method=raw.get('method', 'ATR'),
+            lookback_periods=raw.get('lookback_periods', 14),
+            hysteresis_periods=raw.get('hysteresis_periods', 3),
+            thresholds=atr_thresholds,
+            adjustment_factors=adjustment_factors
+        )
+    
+    def _parse_coarse_filters_config(self, raw: Dict) -> CoarseFiltersConfig:
+        """Parse coarse filters configuration from YAML."""
+        gates_raw = raw.get('gates', [])
+        gates = []
+        
+        for gate_raw in gates_raw:
+            gate = GateConfig(
+                name=gate_raw.get('name', ''),
+                enabled=gate_raw.get('enabled', True),
+                min_minutes=gate_raw.get('min_minutes', 5),
+                max_minutes=gate_raw.get('max_minutes', 1440),
+                assets=gate_raw.get('assets', []),
+                dynamic=gate_raw.get('dynamic', False),
+                min_implied_yield_pct=gate_raw.get('min_implied_yield_pct', 50),
+                min_edge_vs_model_pct=gate_raw.get('min_edge_vs_model_pct', 5)
+            )
+            gates.append(gate)
+        
+        return CoarseFiltersConfig(gates=gates)
     
     def _normalize_contracts_value(self, value: Any) -> int:
         """

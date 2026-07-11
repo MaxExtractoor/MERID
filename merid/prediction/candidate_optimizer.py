@@ -97,33 +97,25 @@ class CandidateOptimizer:
         legacy_min_liquidity_score = 0.05  # Legacy default
         legacy_min_quality_score = 0.05  # Legacy default
         
-        self.max_spread_cents = 75  # 2026-07-11: Canonical spread filter (75c) - aligned with historical requirement
+        # 2026-07-11: Use dynamic threshold manager for regime-aware spread thresholds
+        try:
+            from merid.event_venues.kalshi.dynamic_thresholds import get_dynamic_threshold_manager
+            threshold_manager = get_dynamic_threshold_manager()
+            self.max_spread_cents = threshold_manager.get_max_spread_cents()
+            logger.info(
+                "[OPTIMIZER-CONFIG] Using dynamic spread threshold from threshold manager: %dc (regime=%s)",
+                self.max_spread_cents, threshold_manager.get_regime()
+            )
+        except Exception as e:
+            logger.warning(
+                "[OPTIMIZER-CONFIG] Failed to load dynamic spread threshold: %s, using fallback 30c", e
+            )
+            self.max_spread_cents = 30  # Canonical fallback
+        
         self.MIN_DEPTH_LEVELS = 1  # Reduced from 2 to allow one-sided markets
         self.MIN_LIQUIDITY_SCORE = 0.05  # Reduced from 0.1 to allow one-sided markets
         self.MIN_QUALITY_SCORE = 0.05  # Reduced from 0.1 to allow one-sided markets
         self.MAX_MINUTES_TO_EXPIRY = 30  # Maximum minutes to expiry
-        
-        try:
-            from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
-            adapter = Crypto15mProfileAdapter()
-            if adapter and adapter.profile:
-                self.max_spread_cents = adapter.profile.guardrails_max_spread_cents
-                # Load depth/liquidity/quality thresholds from profile if available
-                if hasattr(adapter.profile, 'guardrails_min_depth_contracts'):
-                    self.MIN_DEPTH_LEVELS = adapter.profile.guardrails_min_depth_contracts
-                logger.info(
-                    "[OPTIMIZER-CONFIG] Loaded thresholds from profile kalshi_crypto_15m.yaml: "
-                    "max_spread_cents=%d, min_depth_levels=%d, min_liquidity_score=%.3f, min_quality_score=%.3f "
-                    "(overriding legacy defaults: spread=%d, depth=%d, liq=%.3f, qual=%.3f)",
-                    self.max_spread_cents, self.MIN_DEPTH_LEVELS, self.MIN_LIQUIDITY_SCORE, self.MIN_QUALITY_SCORE,
-                    legacy_max_spread, legacy_min_depth_levels, legacy_min_liquidity_score, legacy_min_quality_score
-                )
-        except Exception as e:
-            logger.warning(
-                "[OPTIMIZER-CONFIG] Failed to load thresholds from profile: %s, using legacy defaults "
-                "(spread=%d, depth=%d, liq=%.3f, qual=%.3f)",
-                e, legacy_max_spread, legacy_min_depth_levels, legacy_min_liquidity_score, legacy_min_quality_score
-            )
         
         # Performance tracking
         self._total_candidates_generated = 0

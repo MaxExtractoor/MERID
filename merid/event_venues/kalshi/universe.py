@@ -58,7 +58,33 @@ class UniverseConfig:
     CRITICAL FIX: Updated max_spread_cents from 40c to 30c to harmonize with guardrails (2026-07-10)
     Fallback to risk_parameters defaults if profile not available.
     """
-    # Read from profile YAML (single source of truth)
+    # 2026-07-11: Use dynamic threshold manager for regime-aware spread thresholds
+    try:
+        from merid.event_venues.kalshi.dynamic_thresholds import get_dynamic_threshold_manager
+        threshold_manager = get_dynamic_threshold_manager()
+        max_spread_cents = threshold_manager.get_max_spread_cents()
+        logger.info(
+            "[universe] Using dynamic spread threshold from threshold manager: %dc (regime=%s)",
+            max_spread_cents, threshold_manager.get_regime()
+        )
+    except Exception as e:
+        logger.warning(
+            "[universe] Failed to load dynamic spread threshold: %s, using profile fallback", e
+        )
+        # Fallback to profile YAML (single source of truth)
+        try:
+            from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
+            profile_adapter = Crypto15mProfileAdapter()
+            profile = profile_adapter.profile
+            max_spread_cents = getattr(profile, 'universe_max_spread_cents', UNIVERSE_MAX_SPREAD_CENTS_DEFAULT)
+        except Exception as e2:
+            logger.warning(
+                "[universe] Failed to load universe config from profile: %s (using risk_parameters defaults)",
+                e2
+            )
+            max_spread_cents = int(os.getenv("MERID_UNIVERSE_MAX_SPREAD_CENTS", str(UNIVERSE_MAX_SPREAD_CENTS_DEFAULT)))
+    
+    # Read volume and OI from profile YAML (single source of truth)
     try:
         from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
         profile_adapter = Crypto15mProfileAdapter()
@@ -66,7 +92,6 @@ class UniverseConfig:
         
         min_volume = getattr(profile, 'universe_min_volume', UNIVERSE_MIN_VOLUME_DEFAULT)
         min_open_interest = getattr(profile, 'universe_min_open_interest', UNIVERSE_MIN_OPEN_INTEREST_DEFAULT)
-        max_spread_cents = getattr(profile, 'universe_max_spread_cents', UNIVERSE_MAX_SPREAD_CENTS_DEFAULT)
     except Exception as e:
         # Fallback to risk_parameters defaults if profile not available
         logger.warning(
@@ -75,7 +100,6 @@ class UniverseConfig:
         )
         min_volume = int(os.getenv("MERID_UNIVERSE_MIN_VOLUME", str(UNIVERSE_MIN_VOLUME_DEFAULT)))
         min_open_interest = int(os.getenv("MERID_UNIVERSE_MIN_OI", str(UNIVERSE_MIN_OPEN_INTEREST_DEFAULT)))
-        max_spread_cents = int(os.getenv("MERID_UNIVERSE_MAX_SPREAD_CENTS", str(UNIVERSE_MAX_SPREAD_CENTS_DEFAULT)))
     
     # Allow env var override for testing (but profile is primary source)
     min_volume = int(os.getenv("MERID_UNIVERSE_MIN_VOLUME", str(min_volume)))

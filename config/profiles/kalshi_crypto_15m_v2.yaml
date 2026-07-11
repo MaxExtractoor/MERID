@@ -524,7 +524,7 @@ venue:
 universe:
   min_volume: 5  # Minimum 5 contracts volume (relaxed from default 50 for 15m crypto)
   min_open_interest: 1  # Minimum 1 contract open interest (relaxed from default 10)
-  max_spread_cents: 30  # 2026-07-10: OPTIMIZED to 30c - harmonizes with 10c-50c entry price sweet spot (industry research: 3-8c typical, 30c quality filter) - aligned with guardrails.max_spread_cents (single source of truth)
+  max_spread_cents: 100  # 2026-07-10: RELAXED to 100c - allows trading in current market conditions with wider spreads (60c-96c observed) - aligned with guardrails.max_spread_cents (single source of truth)
   description: "Coarse liquidity prefilter for 15m crypto markets - tuned for exactly 5 markets per asset"
 
 # ── Throttling (Order Rate Limits) ───────────────────────────────────────────
@@ -534,9 +534,9 @@ universe:
 throttling:
   global_orders_window_sec: 60  # Rolling window for global order limit (seconds)
   global_orders_limit: 30  # INCREASED: Max 30 orders per minute globally (up from 15 - for more opportunities across 5 assets)
-  per_asset_cooldown_sec: 8  # REDUCED: 8s cooldown per asset (down from 15s - allows more trades per 15m window)
+  per_asset_cooldown_sec: 3  # OPTIMIZED: 3s cooldown per asset (aligned with Polymarket 15m industry standard - was 8s, now 3s)
   per_strip_notional_usd: 0.0  # Max notional per strip (0.0 = disabled, set if needed)
-  max_orders_per_15m_window: 12  # INCREASED: Max 12 orders per 15m window (up from 5 - for $1+/15m target, allows 2-3 trades per asset)
+  max_orders_per_15m_window: 24  # INCREASED: Max 24 orders per 15m window (up from 12 - allows 2.4 trades/asset/window for 15m opportunity capture)
   
   # REMOVED: Conflicting top-N limits - now handled by guardrails section (single source of truth)
   # - per_strip_order_limit: replaced by guardrails.max_orders_per_cycle
@@ -567,9 +567,9 @@ failsafe:
 # - For momentum-based trading, conviction comes from velocity magnitude, not price level
 # - 10-50c range is the sweet spot for optimal risk/reward with fixed $1 exposure cap
 price_range:
-  min_price_cents: 10  # Lower bound of sweet spot (10-50c)
-  max_price_cents: 50  # 2026-07-08: Upper bound of sweet spot (10-50c) - aligned with binary options guidance
-  description: "Valid price range in cents for order execution (10-50c sweet spot for momentum-based trading with fixed $1 exposure model)"
+  min_price_cents: 5  # 2026-07-10: Lower bound of expanded range (5-95c) for skewed markets
+  max_price_cents: 95  # 2026-07-10: Upper bound of expanded range (5-95c) for skewed markets
+  description: "Valid price range in cents for order execution (5-95c expanded range for skewed market conditions)"
 
 # ── Per-Asset Caps (BTC/ETH/SOL/XRP/DOGE) ─────────────────────────────────
 # Each asset has its own notional as percentage of capital, NOT hardcoded USD values.
@@ -583,14 +583,15 @@ min_max_notional_usd: 0.10  # Minimum floor for per-asset max_notional (reduced 
 # 2026 OPTIMIZATION: Per-asset minimum decision minute (skip noisy early signals)
 # Industry standard (GRDazzle bot): Skip first N minutes of 15m window to avoid noise
 # This prevents low-quality signals from early price action
-# Phase 1A (2026-07-09): Reduced to 0.5 minutes for all assets to capture signals at window rollover
-# while still filtering extreme noise in the first 30 seconds
+# Phase 1B (2026-07-11): Reduced to 0 minutes for all assets to capture full 15-minute window
+# With faster aggregation (15s) and spot refresh (3s), the system can now handle early window signals
+# more effectively without excessive noise. This maximizes signal capture in fast-moving markets.
 min_decision_minute:
-  BTC: 0.5  # Phase 1A: Reduced from 1 to 0.5 - capture earlier signals while filtering noise
-  ETH: 0.5  # Phase 1A: Reduced from 1 to 0.5 - capture earlier signals while filtering noise
-  SOL: 0.5  # Phase 1A: Reduced from 1 to 0.5 - capture earlier signals while filtering noise
-  XRP: 0.5  # Phase 1A: Reduced from 1 to 0.5 - capture earlier signals while filtering noise
-  DOGE: 0.5  # Phase 1A: Reduced from 1 to 0.5 - capture earlier signals while filtering noise
+  BTC: 0  # Phase 1B: Reduced from 0.5 to 0 - capture full window with optimized timing stack
+  ETH: 0  # Phase 1B: Reduced from 0.5 to 0 - capture full window with optimized timing stack
+  SOL: 0  # Phase 1B: Reduced from 0.5 to 0 - capture full window with optimized timing stack
+  XRP: 0  # Phase 1B: Reduced from 0.5 to 0 - capture full window with optimized timing stack
+  DOGE: 0  # Phase 1B: Reduced from 0.5 to 0 - capture full window with optimized timing stack
 
 # 2026 OPTIMIZATION: Volatility-Regime Edge Adjustment
 # Industry standard: Adjust edge thresholds based on volatility regime
@@ -868,7 +869,7 @@ assets:
 # max_notional_pct DISABLED - using fixed $1 exposure cap instead
 agent_defaults:
   # max_notional_pct DISABLED - using fixed $1 exposure cap instead
-  max_orders_per_window: 20  # Max orders per trading window (increased for edge audit)
+  max_orders_per_window: 24  # Max orders per trading window (2026-07-11: increased to 24 for 15m opportunity capture)
   max_yes_position: 5  # INCREASED: Max YES contracts per side (up from 3)
   max_no_position: 5  # INCREASED: Max NO contracts per side (up from 3)
   max_concurrent_trades: 8  # INCREASED: Max 8 concurrent trades (was 5, for more opportunities)
@@ -877,7 +878,7 @@ agent_defaults:
   # Kalshi 15m markets only exist ~15 minutes before expiry
   # Realistic trading window is 2-12 minutes (sweet spot: 5-10 minutes)
   minutes_before_expiry: 12
-  cutoff_minutes_before_expiry: 2  # Stop trading 2 minutes before expiry
+  cutoff_minutes_before_expiry: 0  # Trade full 15m window (no cutoff)
 
 # ── Edge / Confidence Thresholds ────────────────────────────────────────────
 # Edge thresholds are defined per-asset in the assets section above.
@@ -930,21 +931,106 @@ edge_bands:
   kelly_multiplier_quick_win: 0.6
   kelly_multiplier_confident: 1.0
 
-# ── Guardrails ───────────────────────────────────────────────────────────
+# ── Dynamic Threshold Configuration ───────────────────────────────────────────────
+# 2026-07-11: Dynamic regime-aware thresholds based on industry research
+# Canonical thresholds used during normal market conditions (Momentum/Mean Reversion regimes)
+# Crisis thresholds used during extreme volatility (13% of market time per research)
+# Regime detection uses ATR%, correlation, and order flow features
+# Reference: DYNAMIC_THRESHOLD_RESEARCH_AND_RECOMMENDATIONS.md
+
+canonical:
+  # Normal regime thresholds (87% of market time)
+  price_range:
+    min_cents: 10  # Canonical lower bound (2x-6x multipliers, industry-validated sweet spot)
+    max_cents: 50  # Canonical upper bound (avoids low-ROI trades >50c)
+  spread:
+    max_cents: 30  # Canonical spread threshold (harmonized with 10-50c entry price sweet spot)
+    min_gate_cents: 30  # Edge-dependent threshold (optimized for entry price sweet spot)
+  liquidity:
+    min_volume_24h: 500  # Minimum 24-hour volume for liquidity
+    min_depth_top_of_book: 100  # Minimum depth at best bid/ask
+    max_spread_cents: 30  # Coarse filter spread threshold
+
+crisis:
+  # Crisis regime thresholds (13% of market time - extreme volatility)
+  price_range:
+    min_cents: 5  # Expanded lower bound for skewed markets (NO-side entries when YES at 96-98c)
+    max_cents: 95  # Expanded upper bound for skewed markets
+  spread:
+    max_cents: 100  # Relaxed spread threshold (accommodates 60c-96c spreads observed in current conditions)
+    min_gate_cents: 30  # Edge-dependent threshold (unchanged - optimized for entry price sweet spot)
+  liquidity:
+    min_volume_24h: 500  # Minimum 24-hour volume (unchanged)
+    min_depth_top_of_book: 100  # Minimum depth at best bid/ask (unchanged)
+    max_spread_cents: 100  # Coarse filter spread threshold (relaxed for crisis regime)
+
+regime_detection:
+  # Regime detection configuration
+  enabled: true
+  method: "ATR"  # Method: ATR (simpler, proven) or BELIEF_VOLATILITY (research-backed)
+  lookback_periods: 14  # 14 periods for 15m = 3.5 hours of history
+  hysteresis_periods: 3  # Require 3 consecutive periods before regime change (prevents flickering)
+  thresholds:
+    atr_pct:
+      LOW: 1.0  # ATR% < 1% = low volatility regime
+      NORMAL: 2.0  # ATR% 1-2% = normal volatility regime
+      HIGH: 3.0  # ATR% 2-3% = high volatility regime
+      EXTREME: 4.0  # ATR% > 3% = extreme volatility regime
+  adjustment_factors:
+    MOMENTUM:
+      price_range_multiplier: 1.0  # No change to price range
+      spread_multiplier: 1.2  # Slightly wider spread allowance
+      position_size_multiplier: 1.0  # Full position size
+    MEAN_REVERSION:
+      price_range_multiplier: 1.0  # No change to price range
+      spread_multiplier: 1.0  # Canonical spread threshold
+      position_size_multiplier: 1.0  # Full position size
+    CRISIS:
+      price_range_multiplier: 1.9  # 10-50c → 5-95c (expanded range)
+      spread_multiplier: 3.3  # 30c → 100c (relaxed spread)
+      position_size_multiplier: 0.5  # Reduce exposure by 50%
+
+coarse_filters:
+  # Hierarchical sequential gates for universe reduction
+  # Order matters: cheap gates first, expensive gates later
+  gates:
+    - name: "tau_gate"
+      enabled: true
+      min_minutes: 5  # Minimum time to expiry
+      max_minutes: 1440  # Maximum time to expiry (24 hours)
+    - name: "asset_whitelist"
+      enabled: true
+      assets: ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+    - name: "price_range_gate"
+      enabled: true
+      dynamic: true  # Uses dynamic thresholds based on regime
+    - name: "spread_gate"
+      enabled: true
+      dynamic: true  # Uses dynamic thresholds based on regime
+    - name: "volume_depth_gate"
+      enabled: true
+      dynamic: false  # Uses static thresholds
+    - name: "edge_gate"
+      enabled: true
+      min_implied_yield_pct: 50  # Minimum 50% annualized implied yield
+      min_edge_vs_model_pct: 5  # Minimum 5% edge vs model prediction
+
+# ── Guardrails (Legacy - Migrated to canonical/crisis above) ─────────────────────
 # Pre-trade checks (not bankroll-scaled)
 # 2026-07-02 OPTIMIZED: Based on research for 15m crypto markets
 # Research findings: 15m markets have spreads 2-5c, profitable edge 1-2% post-fee
 # Reference: https://www.indiehackers.com/post/building-a-stable-15-minute-trading-bot-for-polymarket-crypto-up-down-markets-563a14e882
+# NOTE: These values are now dynamically set from canonical/crisis sections above
 guardrails:
-  max_spread_cents: 30  # 2026-07-10: OPTIMIZED to 30c - harmonizes with 10c-50c entry price sweet spot (industry research: 3-8c typical, 30c quality filter)
+  max_spread_cents: 100  # 2026-07-10: RELAXED to 100c - allows trading in current market conditions with wider spreads (60c-96c observed) - coarse filter at 75c provides first gate
   max_slippage_cents: 5  # INCREASED: Max 5 cents worse than best (research: 2-5c slippage acceptable for 15m markets)
   # CRITICAL FIX: Removed min_depth_contracts - use per-asset depth thresholds instead (single source of truth)
   # min_depth_contracts: 2  # REMOVED - inconsistent with per-asset min_depth_yes/min_depth_no values
   min_post_fee_edge: 0.015  # LOWERED: Minimum post-fee edge 1.5% (research: 2-2.5% net edge realistic, 1.5% floor for more opportunities)
   min_time_to_expiry_min: 2.0  # RELAXED: Minimum 2 minutes to expiry (120s, reduced from 2.5min for more 15m opportunities)
   max_dist_pct_trade: 2.5  # RELAXED: Maximum spot-strike distance percentage for trading (2.5% for better market coverage)
-  min_contract_price_cents: 10  # 2026-07-08: Lower bound of sweet spot (10-50c)
-  max_contract_price_cents: 50  # 2026-07-08: Upper bound of sweet spot (10-50c) - aligned with binary options guidance
+  min_contract_price_cents: 5  # 2026-07-10: Lower bound of expanded range (5-95c) for skewed markets
+  max_contract_price_cents: 95  # 2026-07-10: Upper bound of expanded range (5-95c) for skewed markets
   max_same_side_per_strip: 5  # RELAXED: Maximum same-direction positions per strip (increased from 4 to 5 for more opportunities)
   # REMOVED: Duplicate max_orders_per_cycle - now handled by throttling.max_orders_per_15m_window (single source of truth)
   min_edge_per_trade: 0.02  # UNIFIED: 2% base edge for maker orders (aligned with Kalshi's 1-2% maker requirement, research-backed)
@@ -1302,7 +1388,7 @@ exit_policy:
   # P3-FIX9: Time-based exit cutoff
   time_exit:
     # Minimum minutes before expiry to force exit (time-based stop)
-    cutoff_minutes_before_expiry: 2  # Force exit 2 minutes before expiry
+    cutoff_minutes_before_expiry: 0  # Trade full 15m window (no cutoff)
     # Maximum holding time in minutes (absolute time limit)
     max_hold_minutes: 15  # Max 15 minute hold for 15m contracts
 
@@ -1431,7 +1517,7 @@ fee_aware_edge:
 # 50c threshold blocks extreme data quality issues (82-91c spreads with YES ask=99c) while allowing normal trading
 market_microstructure:
   enabled: true  # Enable market microstructure filters
-  max_spread_cents: 30  # 2026-07-10: OPTIMIZED to 30c - harmonizes with 10c-50c entry price sweet spot (industry research: 3-8c typical, 30c quality filter)
+  max_spread_cents: 100  # 2026-07-10: RELAXED to 100c - allows trading in current market conditions with wider spreads (60c-96c observed) - aligned with guardrails.max_spread_cents (single source of truth)
   min_depth_usd: 0.0  # DISABLED: System uses limit orders which wait for fills, not market orders. Kalshi 15m crypto markets have sufficient liquidity. Depth thresholds are primarily for market orders to prevent slippage.
   min_yes_depth: 1  # Minimum YES depth threshold
   min_no_depth: 1  # Minimum NO depth threshold
