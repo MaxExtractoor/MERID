@@ -10,6 +10,16 @@ import logging
 import asyncio
 from pathlib import Path
 
+# OPTIMIZATION: Enable uvloop for 2-4x faster async I/O performance
+try:
+    import uvloop
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+    logger = logging.getLogger("web.main_15m_lean")
+    logger.info("[UVLOOP] Enabled uvloop for optimized async performance")
+except ImportError:
+    logger = logging.getLogger("web.main_15m_lean")
+    logger.warning("[UVLOOP] uvloop not available, using default asyncio")
+
 # Use get_logger for consistent logging across the production stack
 from utils.logger import get_logger
 logger = get_logger("web.main_15m_lean")
@@ -394,7 +404,7 @@ async def lifespan(app: FastAPI):
         profile_adapter = get_active_profile()
         if profile_adapter and hasattr(profile_adapter, 'profile'):
             profile_name = getattr(profile_adapter.profile, 'profile_name', 'unknown')
-            profile_version = getattr(profile_adapter.profile, 'version', 'unknown')
+            profile_version = getattr(profile_adapter.profile, 'profile_version', 'unknown')
             guardrails_min = getattr(profile_adapter.profile, 'guardrails_min_contract_price_cents', 'N/A')
             guardrails_max = getattr(profile_adapter.profile, 'guardrails_max_contract_price_cents', 'N/A')
             logger.error(

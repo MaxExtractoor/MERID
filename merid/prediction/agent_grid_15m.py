@@ -2439,15 +2439,17 @@ class LeanAgent15m:
             clamped_price_cents = price_cents
         
         # Final validation - ensure we have a valid price in the canonical range
-        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 50):
+        # CRITICAL FIX: Allow prices up to 95c to match expanded range and prevent false rejections
+        # Previous [10c-50c] range was too restrictive for skewed markets (e.g., DOGE at 91c mid)
+        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 95):
             logger.error(
-                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in canonical range [10c-50c] - dropping candidate",
+                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in expanded range [10c-95c] - dropping candidate",
                 asset, clamped_price_cents
             )
             return None
         
         logger.info(
-            "[PRICE-SELECTION] asset=%s final entry price=%d (within canonical range [10c-50c])",
+            "[PRICE-SELECTION] asset=%s final entry price=%d (within expanded range [10c-95c])",
             asset, clamped_price_cents
         )
         
@@ -2691,15 +2693,17 @@ class LeanAgent15m:
             clamped_price_cents = price_cents
         
         # Final validation - ensure we have a valid price in the canonical range
-        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 50):
+        # CRITICAL FIX: Allow prices up to 95c to match expanded range and prevent false rejections
+        # Previous [10c-50c] range was too restrictive for skewed markets (e.g., DOGE at 91c mid)
+        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 95):
             logger.error(
-                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in canonical range [10c-50c] - dropping candidate",
+                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in expanded range [10c-95c] - dropping candidate",
                 asset, clamped_price_cents
             )
             return None
         
         logger.info(
-            "[PRICE-SELECTION] asset=%s final entry price=%d (within canonical range [10c-50c])",
+            "[PRICE-SELECTION] asset=%s final entry price=%d (within expanded range [10c-95c])",
             asset, clamped_price_cents
         )
         
@@ -5109,15 +5113,17 @@ class LeanAgent15m:
             clamped_price_cents = price_cents
         
         # Final validation - ensure we have a valid price in the canonical range
-        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 50):
+        # CRITICAL FIX: Allow prices up to 95c to match expanded range and prevent false rejections
+        # Previous [10c-50c] range was too restrictive for skewed markets (e.g., DOGE at 91c mid)
+        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 95):
             logger.error(
-                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in canonical range [10c-50c] - dropping candidate",
+                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in expanded range [10c-95c] - dropping candidate",
                 asset, clamped_price_cents
             )
             return None
         
         logger.info(
-            "[PRICE-SELECTION] asset=%s final entry price=%d (within canonical range [10c-50c])",
+            "[PRICE-SELECTION] asset=%s final entry price=%d (within expanded range [10c-95c])",
             asset, clamped_price_cents
         )
         

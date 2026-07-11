@@ -2403,7 +2403,7 @@ def _validate_deep_otm_policy(intent: OrderIntent) -> Optional[str]:
         profile_adapter = get_active_profile()
         if profile_adapter and hasattr(profile_adapter, 'profile'):
             profile_name = getattr(profile_adapter.profile, 'profile_name', 'unknown')
-            profile_version = getattr(profile_adapter.profile, 'version', 'unknown')
+            profile_version = getattr(profile_adapter.profile, 'profile_version', 'unknown')
             guardrails_max = getattr(profile_adapter.profile, 'guardrails_max_contract_price_cents', 'N/A')
             guardrails_min = getattr(profile_adapter.profile, 'guardrails_min_contract_price_cents', 'N/A')
             logger.error(
@@ -2612,10 +2612,10 @@ def _validate_price_against_orderbook(intent: OrderIntent, state: Optional[Any])
         )
     
     # Check 1: Price should be within reasonable range of mid price
-    # Allow up to 40 cents deviation from mid for limit orders (increased for 15m scalping)
-    # CRITICAL FIX 2026-07-10: Increased from 15c to 40c to prevent false rejections
-    # 15m options have wider price ranges; 15c was too strict and blocking valid orders
-    max_deviation_cents = 40
+    # Allow up to 50 cents deviation from mid for limit orders (increased for 15m scalping)
+    # CRITICAL FIX 2026-07-11: Increased from 40c to 50c to handle skewed markets (e.g., DOGE at 91c mid)
+    # 15m options have wider price ranges; previous thresholds were too strict for skewed conditions
+    max_deviation_cents = 50
     if abs(order_price - validation_mid_cents) > max_deviation_cents:
         logger.warning(
             "[PRICE-VALIDATION] ticker=%s limit order price=%dc too far from mid=%dc (deviation=%dc > %dc threshold)",
