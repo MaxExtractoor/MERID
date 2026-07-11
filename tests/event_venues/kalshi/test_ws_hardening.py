@@ -1,5 +1,6 @@
 """Tests for KalshiWebSocket hardening — error handling, sequence tracking,
-backpressure, reconnect, and observability."""
+backpressure, reconnect, and observability.
+"""
 
 import asyncio
 import json
@@ -278,7 +279,7 @@ class TestReconnect:
 
 class TestBackpressure:
     def test_queue_has_bounded_size(self, ws):
-        assert ws._msg_queue.maxsize == 32768  # Increased from 16384 to handle burst traffic
+        assert ws._msg_queue.maxsize == 65536  # Increased from 32768 to handle burst traffic
 
     def test_queue_accepts_messages(self, ws):
         ws._msg_queue.put_nowait({"type": "ticker"})

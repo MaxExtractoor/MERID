@@ -189,47 +189,49 @@ class TestDisconnectReconnectBackoff:
 class TestSequenceGapRecovery:
     """Test sequence gap detection and orderbook recovery."""
 
-    def test_sequence_gap_detected_and_logged(self):
+    @pytest.mark.asyncio
+    async def test_sequence_gap_detected_and_logged(self):
         """Verify sequence gaps are detected and logged."""
         ws = KalshiWebSocket()
-        
+
         # Initialize sequence
         ws._last_seq["KXBTC-24FEB16"] = 100
         ws._ob_initialised.add("KXBTC-24FEB16")
         ws._ob_snapshots["KXBTC-24FEB16"] = {"type": "orderbook_snapshot", "ticker": "KXBTC-24FEB16"}
-        
+
         # Simulate message with gap (expect 101, got 110)
         message = {
             "seq": 110,
             "ticker": "KXBTC-24FEB16",
             "type": "orderbook_delta"
         }
-        
+
         result = ws._check_sequence(message)
-        
+
         # Message should be accepted (returns True)
         assert result is True
-        
+
         # Gap counter should increase
         assert ws._seq_gaps == 9  # Gap of 9 messages
-        
+
         # Orderbook cache should be invalidated
         assert "KXBTC-24FEB16" not in ws._ob_initialised
         assert "KXBTC-24FEB16" not in ws._ob_snapshots
 
-    def test_sequence_gap_invalidates_orderbook_cache(self):
+    @pytest.mark.asyncio
+    async def test_sequence_gap_invalidates_orderbook_cache(self):
         """Verify sequence gap invalidates cached orderbook."""
         ws = KalshiWebSocket()
-        
+
         # Set up cached orderbook
         market_id = "KINX-24MAR15"
         ws._last_seq[market_id] = 50
         ws._ob_initialised.add(market_id)
         ws._ob_snapshots[market_id] = {"yes_bid": 60, "no_bid": 39}
-        
+
         # Message with gap
         message = {"seq": 60, "ticker": market_id}
-        
+
         ws._check_sequence(message)
         
         # Cache should be invalidated (stale snapshot removed so get_live_prices cannot serve corrupt books)
@@ -297,27 +299,30 @@ class TestReconnectResilience:
         ws = KalshiWebSocket()
         ws._running = True
         ws._reconnect_delay = 1.0
-        
+
         # Mock connect to fail multiple times
         connect_attempts = []
-        
+        call_count = 0
+
         async def mock_connect():
+            nonlocal call_count
+            call_count += 1
             connect_attempts.append(time.time())
-            if len(connect_attempts) < 3:
+            if call_count < 3:
                 raise ConnectionError("Connection refused")
             # Succeed on 3rd attempt
-        
+
         ws.connect = mock_connect
-        
+
         with patch('asyncio.sleep', new_callable=AsyncMock):
             # First attempt fails
             await ws._reconnect()
             assert len(connect_attempts) == 1
-            
+
             # Second attempt fails
             await ws._reconnect()
             assert len(connect_attempts) == 2
-            
+
             # Third attempt succeeds
             await ws._reconnect()
             assert len(connect_attempts) == 3

@@ -60,37 +60,40 @@ class TestWebSocketMessageProcessingFix:
             }),
             asyncio.CancelledError()  # End the loop
         ])
-        
+
         ws_client._ws = mock_ws
         ws_client._running = True
-        
+
         # Mock the message queue and other dependencies
         ws_client._msg_queue = MagicMock()
         ws_client._msg_queue.maxsize = 1000
         ws_client._msg_queue.put_nowait = MagicMock()
         ws_client._msg_queue.qsize = MagicMock(return_value=0)
-        
+
         # Mock sequence check
         ws_client._check_sequence = MagicMock(return_value=True)
-        
+
         # Mock message priority classification
         ws_client._classify_message_priority = MagicMock(return_value=1)
-        
+
         # Track processed messages
         processed_messages = []
-        
+
         def capture_put_nowait(item):
             priority, data = item
             processed_messages.append(data)
-        
+
         ws_client._msg_queue.put_nowait.side_effect = capture_put_nowait
-        
+
         # Run the message processing
         with patch('time.monotonic', return_value=123456789.0):
             try:
                 await ws_client._process_messages_until_disconnect()
             except asyncio.CancelledError:
                 pass  # Expected termination
+            finally:
+                # Ensure proper cleanup
+                ws_client._running = False
         
         # Verify that the orderbook_delta message was processed
         assert len(processed_messages) == 1
