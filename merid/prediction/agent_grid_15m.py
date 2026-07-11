@@ -571,11 +571,15 @@ class LeanAgent15m:
             self._macd_history[asset] = collections.deque(maxlen=self._macd_window_size)
         
         # Cooldown tracking: last trade timestamp per asset
+        # CRITICAL FIX 2026-07-10: Use time.monotonic() instead of time.time()
+        # time.time() returns Unix timestamp (absolute time), while time.monotonic() returns
+        # relative time suitable for calculating time differences. Using time.time() causes
+        # incorrect cooldown calculations when initialized to 0.0 (results in ~56 years).
         self._last_trade_time: Dict[str, float] = {}
-        # Initialize to 0.0 to allow immediate signal generation on startup
+        # Initialize to current monotonic time to allow immediate signal generation on startup
         # Cooldown only applies after actual trades are placed
         for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-            self._last_trade_time[asset] = 0.0
+            self._last_trade_time[asset] = time.monotonic()
         
         # Per-strip order limit tracking (15m strip = series ticker)
         # CRITICAL FIX: 2026-07-10 - Reset strip order counts on agent initialization
@@ -942,7 +946,7 @@ class LeanAgent15m:
             pnl_usd: PnL of the trade in USD (positive for profit, negative for loss)
             trade_risk_usd: Risk amount of the trade in USD (for session risk cap tracking)
         """
-        self._last_trade_time[asset] = time.time()
+        self._last_trade_time[asset] = time.monotonic()
         
         # 2026 Research-Based Risk Management: Increment session order count
         self._session_order_count += 1
@@ -5373,8 +5377,8 @@ class LeanAgent15m:
             # The cooldown was temporarily disabled for debugging, but this caused
             # 100% of bankroll to be used in positions. Cooldown is now re-enabled.
             cooldown_seconds = self._calculate_dynamic_cooldown(asset)
-            last_trade_time = self._last_trade_time.get(asset, 0.0)
-            time_since_last_trade = time.time() - last_trade_time
+            last_trade_time = self._last_trade_time.get(asset, time.monotonic())
+            time_since_last_trade = time.monotonic() - last_trade_time
             
             logger.info("[COLLECT-COOLDOWN] agent=%s asset=%s time_since_last=%.1fs cooldown=%.1fs", 
                        self.config.name, asset, time_since_last_trade, cooldown_seconds)
@@ -5391,8 +5395,11 @@ class LeanAgent15m:
             if current_time - self._session_start_time > self._session_window_sec:
                 # Reset session counters
                 self._session_order_count = 0
+                self._session_risk_usd = 0.0  # CRITICAL FIX: Reset session risk cap with window
+                self._consecutive_losses = {asset: 0 for asset in self._consecutive_losses}  # CRITICAL FIX: Reset consecutive losses with window
+                self._consecutive_loss_pause_until = {asset: 0.0 for asset in self._consecutive_loss_pause_until}  # CRITICAL FIX: Reset pause times with window
                 self._session_start_time = current_time
-                logger.info("[SESSION-RESET] agent=%s session window reset", self.config.name)
+                logger.info("[SESSION-RESET] agent=%s session window reset (order_count=0, session_risk=0, consecutive_losses=0)", self.config.name)
             
             if self._session_order_count >= self.config.max_orders_per_15m_window:
                 logger.info(
@@ -6169,7 +6176,7 @@ class LeanAgentGrid15m:
                     action = candidate.get('action', 'buy')
                     
                     has_resting_order = False
-                    if self.order_gate:
+                    if hasattr(self, 'order_gate') and self.order_gate:
                         try:
                             from merid.event_venues.kalshi.order_gate import OrderStatus
                             # Check for existing resting orders with same ticker, price, side, action
@@ -6278,29 +6285,9 @@ class LeanAgentGrid15m:
                                 order.asset, ticker, side, price_cents, count, order.edge_pct
                             )
                             
-                            # CRITICAL FIX (2026-07-10): Increment session order count and update cooldown on order SUBMISSION, not just fill
-                            # This prevents excessive order submissions when orders don't fill immediately (e.g., resting limit orders)
-                            # Previously, session count was only incremented on fills, allowing unlimited submissions until fills occurred
-                            try:
-                                # Get the agent for this order
-                                agent = self.get_agent(agent_name)
-                                if agent:
-                                    # Increment session order count
-                                    agent._session_order_count += 1
-                                    logger.info(
-                                        "[SESSION-ORDER-SUBMISSION] agent=%s session_orders=%d (incremented on submission, not fill)",
-                                        agent.config.name, agent._session_order_count
-                                    )
-                                    
-                                    # Update cooldown on submission
-                                    asset = agent.config.name.split('_')[0]
-                                    agent._last_trade_time[asset] = time.time()
-                                    logger.info(
-                                        "[COOLDOWN-SUBMISSION] agent=%s asset=%s cooldown updated on submission",
-                                        agent.config.name, asset
-                                    )
-                            except Exception as e:
-                                logger.warning("[SESSION-COOLDOWN-UPDATE-FAILED] Failed to update session/cooldown on submission: %s", e)
+                            # CRITICAL FIX (2026-07-10): Session order count and cooldown are updated on FILL, not submission
+                            # This prevents perpetual cooldown blocks when orders don't fill (e.g., resting limit orders)
+                            # The update_cooldown_on_fill method handles both session count and cooldown on successful fills
                             
                             # Set default TP/SL
                             stop_loss_price_cents = max(1, price_cents - 5)
