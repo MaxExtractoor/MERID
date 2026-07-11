@@ -3,8 +3,8 @@
 Test: Window Limit Enforcement for 15M Kalshi Crypto Trading Stack
 
 This test verifies that window-based risk limits are enforced correctly:
-- 3% per-agent per 15-minute window limit
-- 5% total venue per 15-minute window limit
+- Fixed $1.00 total venue per 15-minute window limit (MERID_FIXED_EXPOSURE_CAP_USD)
+- Per-agent and per-asset percentage-based limits are DISABLED
 - Window tracking methods exist and work correctly
 - Position closures release window capacity
 

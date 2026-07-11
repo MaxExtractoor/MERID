@@ -1,8 +1,9 @@
 """
 End-to-end test for window-based risk limits.
 
-CRITICAL FIX (2026-07-08): End-to-end test for 3% per-agent / 5% total venue
+CRITICAL FIX (2026-07-08): End-to-end test for fixed $1.00 exposure cap
 window limits with position closure and re-entry.
+Percentage-based limits (3% per-agent, 5% total venue) are DISABLED.
 """
 
 import pytest
