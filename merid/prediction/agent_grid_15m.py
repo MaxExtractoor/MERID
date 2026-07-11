@@ -6264,6 +6264,30 @@ class LeanAgentGrid15m:
                                 order.asset, ticker, side, price_cents, count, order.edge_pct
                             )
                             
+                            # CRITICAL FIX (2026-07-10): Increment session order count and update cooldown on order SUBMISSION, not just fill
+                            # This prevents excessive order submissions when orders don't fill immediately (e.g., resting limit orders)
+                            # Previously, session count was only incremented on fills, allowing unlimited submissions until fills occurred
+                            try:
+                                # Get the agent for this order
+                                agent = self.get_agent(agent_name)
+                                if agent:
+                                    # Increment session order count
+                                    agent._session_order_count += 1
+                                    logger.info(
+                                        "[SESSION-ORDER-SUBMISSION] agent=%s session_orders=%d (incremented on submission, not fill)",
+                                        agent.config.name, agent._session_order_count
+                                    )
+                                    
+                                    # Update cooldown on submission
+                                    asset = agent.config.name.split('_')[0]
+                                    agent._last_trade_time[asset] = time.time()
+                                    logger.info(
+                                        "[COOLDOWN-SUBMISSION] agent=%s asset=%s cooldown updated on submission",
+                                        agent.config.name, asset
+                                    )
+                            except Exception as e:
+                                logger.warning("[SESSION-COOLDOWN-UPDATE-FAILED] Failed to update session/cooldown on submission: %s", e)
+                            
                             # Set default TP/SL
                             stop_loss_price_cents = max(1, price_cents - 5)
                             take_profit_r_multiple = 1.0
