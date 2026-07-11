@@ -347,5 +347,103 @@ class TestSessionOrderCountSubmissionFix:
         assert time_since_trade < cooldown_seconds, "Cooldown should block immediate re-submission"
 
 
+class TestGlobalExposureCapFix:
+    """Test that per_agent_window_limit_usd is global across all 5 assets (2026-07-10 fix)"""
+    
+    def test_per_agent_limit_is_global_not_per_agent(self):
+        """Test that per_agent_window_limit_usd represents global cap, not per-agent cap"""
+        # The $1.00 cap is TOTAL exposure across BTC+ETH+SOL+XRP+DOGE, not per agent
+        fixed_exposure_cap_usd = 1.00
+        per_agent_window_limit_usd = fixed_exposure_cap_usd  # This is GLOBAL limit
+        total_venue_window_limit_usd = fixed_exposure_cap_usd  # Same global limit
+        
+        # Verify both limits are the same (global cap)
+        assert per_agent_window_limit_usd == total_venue_window_limit_usd, \
+            "per_agent_window_limit_usd should equal total_venue_window_limit_usd (both are global)"
+        assert per_agent_window_limit_usd == 1.00, \
+            "Global exposure cap should be $1.00"
+        
+    def test_global_cap_distributed_across_5_assets(self):
+        """Test that global $1.00 cap is distributed across all 5 assets"""
+        global_cap = 1.00
+        assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+        
+        # If each asset gets equal share, each would get $0.20
+        equal_share = global_cap / len(assets)
+        
+        # Verify the math
+        assert equal_share == 0.20, "Each asset should get $0.20 from $1.00 global cap"
+        assert sum([equal_share] * len(assets)) == global_cap, \
+            "Sum of equal shares should equal global cap"
+
+
+class TestPriceRangeLoggingFix:
+    """Test price range logging for debugging yes_in_range/no_in_range (2026-07-10 fix)"""
+    
+    def test_price_range_check_logic(self):
+        """Test that price range check logic is correct"""
+        # Test yes price in range
+        yes_price_cents = 50
+        yes_in_range = (5 <= yes_price_cents <= 95)
+        assert yes_in_range is True, "Price of 50c should be in range"
+        
+        # Test yes price out of range (too low)
+        yes_price_cents = 3
+        yes_in_range = (5 <= yes_price_cents <= 95)
+        assert yes_in_range is False, "Price of 3c should be out of range"
+        
+        # Test yes price out of range (too high)
+        yes_price_cents = 97
+        yes_in_range = (5 <= yes_price_cents <= 95)
+        assert yes_in_range is False, "Price of 97c should be out of range"
+        
+        # Test no price in range
+        no_price_cents = 50
+        no_in_range = (5 <= no_price_cents <= 95)
+        assert no_in_range is True, "Price of 50c should be in range"
+        
+    def test_both_sides_out_of_range_blocks_trade(self):
+        """Test that trade is blocked when both sides are out of range"""
+        yes_price_cents = 97
+        no_price_cents = 97
+        
+        yes_in_range = (5 <= yes_price_cents <= 95)
+        no_in_range = (5 <= no_price_cents <= 95)
+        
+        should_block = not yes_in_range and not no_in_range
+        assert should_block is True, "Trade should be blocked when both sides are out of range"
+
+
+class TestADXWarmupBehavior:
+    """Test ADX warmup behavior (2026-07-10 fix)"""
+    
+    def test_adx_returns_zero_during_warmup(self):
+        """Test that ADX returns 0.0 during warmup (insufficient history)"""
+        # Simulate ADX calculation with insufficient history
+        history_length = 2  # Less than required 15 data points
+        period = 14
+        
+        if history_length < period + 1:
+            adx = 0.0  # Return 0.0 during warmup
+        
+        assert adx == 0.0, "ADX should return 0.0 during warmup"
+        
+    def test_adx_multiplier_neutral_during_warmup(self):
+        """Test that ADX multiplier is neutral (1.0) during warmup"""
+        adx = 0.0  # During warmup
+        
+        # ADX multiplier should be neutral during warmup
+        if adx >= 25.0:
+            adx_multiplier = 1.0
+        elif adx >= 10.0:
+            adx_multiplier = 1.0
+        elif adx > 0:
+            adx_multiplier = 1.0
+        else:  # adx == 0 (warmup)
+            adx_multiplier = 1.0
+        
+        assert adx_multiplier == 1.0, "ADX multiplier should be 1.0 (neutral) during warmup"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

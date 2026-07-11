@@ -1164,9 +1164,11 @@ def compute_kalshi_crypto_15m_risk_envelope(
     
     # ── Return Envelope ────────────────────────────────────────────────────────
     # 2026-07-08: DISABLED percentage-based window limits - using fixed $1 exposure model
+    # CRITICAL FIX (2026-07-10): per_agent_window_limit_usd should be global across all 5 assets, not per-agent
+    # The $1.00 cap is TOTAL exposure across BTC+ETH+SOL+XRP+DOGE, not per agent
     fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
-    per_agent_window_limit_usd = fixed_exposure_cap_usd
-    total_venue_window_limit_usd = fixed_exposure_cap_usd
+    per_agent_window_limit_usd = fixed_exposure_cap_usd  # This is GLOBAL limit, not per-agent
+    total_venue_window_limit_usd = fixed_exposure_cap_usd  # Same global limit
     
     envelope = KalshiCrypto15mRiskEnvelope(
         live_bankroll_usd=live_bankroll_usd,

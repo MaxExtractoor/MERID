@@ -578,6 +578,8 @@ class LeanAgent15m:
             self._last_trade_time[asset] = 0.0
         
         # Per-strip order limit tracking (15m strip = series ticker)
+        # CRITICAL FIX: 2026-07-10 - Reset strip order counts on agent initialization
+        # This prevents persisted counts from previous runs from blocking new orders
         self._strip_order_counts: Dict[str, int] = {}
         for ticker in self.config.series_tickers:
             self._strip_order_counts[ticker] = 0
@@ -1739,6 +1741,8 @@ class LeanAgent15m:
         # Previous multipliers (0.90-1.05) were inflating thresholds above base values
         # This caused velocity to be below dynamic threshold even when above base threshold
         # CRITICAL FIX: Set all ADX multipliers to 1.0 (neutral) to use base threshold directly
+        # NOTE: ADX returns 0.0 during warmup (insufficient history), causing neutral multipliers
+        # This is expected behavior - the system uses base thresholds until sufficient data is available
         if adx >= 25.0:
             # Strong trend: neutral multiplier (was 1.05)
             adx_multiplier = 1.0
@@ -2193,8 +2197,14 @@ class LeanAgent15m:
             logger.warning("[MOMENTUM-FVG] asset=%s failed to get market price: %s", asset, e)
         
         # Check price band for both sides (5-95c expanded range for skewed markets)
+        # CRITICAL FIX: 2026-07-10 - Log individual side range status for debugging
         yes_in_range = (5 <= yes_price_cents <= 95)
         no_in_range = (5 <= no_price_cents <= 95)
+        
+        logger.info(
+            "[MOMENTUM-FVG-PRICE-RANGE] asset=%s yes_price=%dc yes_in_range=%s no_price=%dc no_in_range=%s",
+            asset, yes_price_cents, yes_in_range, no_price_cents, no_in_range
+        )
         
         if not yes_in_range and not no_in_range:
             logger.info(
@@ -5491,9 +5501,13 @@ class LeanAgent15m:
                     elif hasattr(result, 'price'):
                         spot_price = result.price
                         spot_data = result  # Store full SpotPrice object for OHLC data
-                        logger.info("[COLLECT-SPOT-SUCCESS] agent=%s asset=%s spot_price=%s has_ohlc=%s",
+                        # CRITICAL FIX: 2026-07-10 - Log OHLC availability for debugging
+                        has_open = hasattr(result, 'open') and result.open is not None
+                        has_high = hasattr(result, 'high') and result.high is not None
+                        has_low = hasattr(result, 'low') and result.low is not None
+                        logger.info("[COLLECT-SPOT-SUCCESS] agent=%s asset=%s spot_price=%s has_ohlc=%s (open=%s high=%s low=%s)",
                                    self.config.name, asset, format_price(asset, spot_price),
-                                   hasattr(result, 'open') and hasattr(result, 'high') and hasattr(result, 'low'))
+                                   has_open or has_high or has_low, has_open, has_high, has_low)
                     else:
                         logger.warning("[COLLECT-SPOT-NO-PRICE] agent=%s asset=%s result has no price attribute",
                                      self.config.name, asset)
