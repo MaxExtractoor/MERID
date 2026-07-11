@@ -54,15 +54,15 @@ class WindowAuditor:
     CRITICAL RULES TO VERIFY:
     - Sum of prices of all traded contracts in a window ≤ 100c ($1.00)
     - No asset has more than 1 contract per window
-    - All entry prices are in [5c, 95c] range (expanded for skewed markets)
+    - All entry prices are in [10c, 50c] range (canonical band)
     - Total risk across all assets ≤ $1.00 (shared pool, not per-asset)
     """
     
     def __init__(
         self,
         max_total_risk_usd: float = 1.00,
-        min_price_cents: int = 5,  # 2026-07-10: Expanded from 10c to 5c for skewed markets
-        max_price_cents: int = 95,  # 2026-07-10: Expanded from 50c to 95c for skewed markets
+        min_price_cents: int = 10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
+        max_price_cents: int = 50,  # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
         max_contracts_per_asset: int = 1
     ):
         self.max_total_risk_usd = max_total_risk_usd
@@ -212,8 +212,8 @@ def create_window_auditor_from_envelope(envelope: Any) -> WindowAuditor:
     max_total_risk_usd = envelope.max_total_notional_usd if hasattr(envelope, 'max_total_notional_usd') else 1.00
     
     # Use price range from profile guardrails if available
-    min_price_cents = 5  # 2026-07-10: Expanded from 10c to 5c for skewed markets
-    max_price_cents = 95  # 2026-07-10: Expanded from 50c to 95c for skewed markets
+    min_price_cents = 10  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
+    max_price_cents = 50  # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
     
     if hasattr(envelope, 'guardrails_min_contract_price_cents'):
         min_price_cents = envelope.guardrails_min_contract_price_cents

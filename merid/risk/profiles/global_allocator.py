@@ -74,8 +74,8 @@ class GlobalAllocator:
         venue_cap_usd: float = 1.00,
         min_edge_pct: float = 2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units (actual percentage, not decimal)
         min_confidence: float = 0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence calculation (0.5 + edge/100)
-        min_price_cents: int = 5,  # 2026-07-10: Minimum entry price (5c) - expanded for skewed markets
-        max_price_cents: int = 95,  # 2026-07-10: Maximum entry price (95c) - expanded for skewed markets
+        min_price_cents: int = 10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
+        max_price_cents: int = 50,  # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
         max_single_asset_fraction: float = 1.00,  # Max 100% of cap per asset (allows single order to use full venue cap)
         enable_correlation_control: bool = False,
         # 2026-07-10: Per-asset edge thresholds aligned with risk_parameters.py market entry thresholds
@@ -299,8 +299,8 @@ def create_global_allocator_from_envelope(envelope: Any) -> GlobalAllocator:
     # CRITICAL: Use the shared $1 pool parameters (no per-asset rescaling)
     min_edge_pct = 2.0  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units (actual percentage)
     min_confidence = 0.50  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence calculation (0.5 + edge/100)
-    min_price_cents = 5  # 2026-07-10: Expanded from 10c to 5c for skewed markets
-    max_price_cents = 95  # 2026-07-10: Expanded from 50c to 95c for skewed markets
+    min_price_cents = 10  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
+    max_price_cents = 50  # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
     max_single_asset_fraction = 1.00  # 100% - allows single asset to use full venue cap (shared pool)
     
     # 2026-07-10: Per-asset edge thresholds aligned with risk_parameters.py market entry thresholds
