@@ -1161,10 +1161,12 @@ class KalshiWebSocket(EventVenueStream):
 
     async def _process_messages_until_disconnect(self) -> None:
         """Process WebSocket messages until connection fails.
-        
+
         HARDENING-FIX: Enforces single recv loop with lock to prevent ConcurrencyError
         when multiple tasks try to read from the same WS connection.
         """
+        raw_message_count = 0
+
         while self._running and self._ws:
             try:
                 # HARDENING-FIX: Acquire recv lock to prevent concurrent recv() calls
@@ -1175,6 +1177,9 @@ class KalshiWebSocket(EventVenueStream):
                     # Add timeout to detect stale connections (60s for more tolerant detection)
                     # Increased from 10s to prevent premature reconnections during quiet market periods
                     msg = await asyncio.wait_for(self._ws.recv(), timeout=60.0)
+
+                    # Track message count for metrics
+                    raw_message_count += 1
                 # HARDENING-FIX: Release lock before processing to avoid blocking other recv attempts
                 # The lock only protects the recv() call itself, not message processing
                 
