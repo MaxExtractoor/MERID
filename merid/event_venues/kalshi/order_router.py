@@ -2863,12 +2863,28 @@ def _determine_dynamic_order_type(intent: OrderIntent, state: Optional[Any]) -> 
         )
         return "limit", intent.time_in_force or "gtc"
     
-    # Check 1: Time to expiry - use market orders within 5 minutes
+    # Check 1: Time to expiry - use market orders within threshold from profile
+    # CRITICAL FIX (2026-07-11): Read IOC threshold from profile instead of hardcoding 300s
+    ioc_threshold_seconds = 300  # Default fallback
+    try:
+        from merid.risk.profiles.crypto_15m_profile import get_profile_config
+        profile_config = get_profile_config()
+        ioc_threshold_seconds = profile_config.venue_invariants_ioc_auto_below_seconds
+        logger.debug(
+            "[DYNAMIC-ORDER-TYPE] Using IOC threshold from profile: %ds",
+            ioc_threshold_seconds
+        )
+    except Exception as e:
+        logger.warning(
+            "[DYNAMIC-ORDER-TYPE] Failed to read IOC threshold from profile, using default 300s: %s",
+            e
+        )
+    
     seconds_to_expiry = getattr(state, 'seconds_to_expiry', None)
-    if seconds_to_expiry is not None and seconds_to_expiry <= 300:  # 5 minutes
+    if seconds_to_expiry is not None and seconds_to_expiry <= ioc_threshold_seconds:
         logger.info(
-            "[DYNAMIC-ORDER-TYPE] ticker=%s using market order due to expiry proximity (%.0fs remaining)",
-            intent.ticker, seconds_to_expiry
+            "[DYNAMIC-ORDER-TYPE] ticker=%s using market order due to expiry proximity (%.0fs remaining, threshold=%ds)",
+            intent.ticker, seconds_to_expiry, ioc_threshold_seconds
         )
         return "market", "gtc"
     
