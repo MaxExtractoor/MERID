@@ -520,10 +520,14 @@ class KalshiWebSocket(EventVenueStream):
                 # If both fail, this is a fundamental incompatibility
                 logger.error(f"[WS-CONNECT-DIAG] Both additional_headers and extra_headers failed: {e2}")
                 raise ConnectionError(f"WebSocket headers not supported on this event loop - REST fallback required: {e2}")
-        except websockets.exceptions.InvalidStatusCode as e:
-            # Structured logging for WS_UPSTREAM stage - auth failure
-            logger.error("[WS_UPSTREAM] event=auth_failed status=%d uri=%s", e.status_code, self.config.ws_base_url)
-            raise ConnectionError(f"WebSocket authentication failed: HTTP {e.status_code}")
+        except Exception as e:
+            # Handle both old and new websockets exception types
+            if hasattr(e, 'status_code'):
+                # Structured logging for WS_UPSTREAM stage - auth failure
+                logger.error("[WS_UPSTREAM] event=auth_failed status=%d uri=%s", e.status_code, self.config.ws_base_url)
+                raise ConnectionError(f"WebSocket authentication failed: HTTP {e.status_code}")
+            else:
+                raise
         except websockets.exceptions.WebSocketException as e:
             # Structured logging for WS_UPSTREAM stage - connection error
             logger.error("[WS_UPSTREAM] event=connect_error error=%s uri=%s", str(e), self.config.ws_base_url)

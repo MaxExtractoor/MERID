@@ -155,22 +155,26 @@ class TestKalshiWebSocketConnectionErrors:
         """Listen triggers reconnect on connection error."""
         ws_client._running = True
         ws_client._ws = AsyncMock()
-        
+
         # Simulate connection error during listen
         async def raise_error():
             raise ConnectionError("Connection lost")
             yield  # Make it a generator
-        
+
         ws_client._ws.__aiter__ = lambda self: raise_error()
-        
+
         with patch.object(ws_client, '_reconnect', new_callable=AsyncMock) as mock_reconnect:
             # Stop after first reconnect attempt
             async def stop_running():
                 ws_client._running = False
             mock_reconnect.side_effect = stop_running
-            
-            await ws_client.listen(AsyncMock())
-            mock_reconnect.assert_called_once()
+
+            try:
+                await ws_client.listen(AsyncMock())
+                mock_reconnect.assert_called_once()
+            finally:
+                # Ensure proper cleanup
+                ws_client._running = False
     
     @pytest.mark.asyncio
     async def test_close_clears_subscriptions(self, ws_client):
@@ -200,13 +204,19 @@ class TestKalshiWebSocketAuth:
         """
         mock_ws = AsyncMock()
         with patch('websockets.connect', new_callable=AsyncMock, return_value=mock_ws) as mock_connect:
-            await ws_client.connect()
+            try:
+                await ws_client.connect()
 
-            call_kwargs = mock_connect.call_args[1]
-            headers = call_kwargs.get("additional_headers") or call_kwargs.get("extra_headers") or {}
-            assert 'KALSHI-ACCESS-KEY' in headers
-            assert 'KALSHI-ACCESS-SIGNATURE' in headers
-            assert 'KALSHI-ACCESS-TIMESTAMP' in headers
+                call_kwargs = mock_connect.call_args[1]
+                headers = call_kwargs.get("additional_headers") or call_kwargs.get("extra_headers") or {}
+                assert 'KALSHI-ACCESS-KEY' in headers
+                assert 'KALSHI-ACCESS-SIGNATURE' in headers
+                assert 'KALSHI-ACCESS-TIMESTAMP' in headers
+            finally:
+                # Ensure proper cleanup
+                ws_client._running = False
+                if ws_client._ws:
+                    await ws_client.close()
 
     @pytest.mark.asyncio
     async def test_connect_raises_when_no_private_key_path(self):
