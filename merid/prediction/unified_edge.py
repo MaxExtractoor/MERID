@@ -424,25 +424,25 @@ class UnifiedEdgeComputer:
             )
         
         # Check 2.75: Minimum contract price floor (longshot trap prevention)
-        min_price_cents = 5  # 2026-07-10: Expanded from 20c to 5c for skewed markets
+        min_price_cents = 10  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
             profile_adapter = get_active_profile()
             if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_min_contract_price_cents'):
                 min_price_cents = profile_adapter.profile.guardrails_min_contract_price_cents
         except Exception as e:
-            logger.debug("[EDGE-CHECK] Failed to load min_contract_price_cents from profile: %s, using default 5c", e)
+            logger.debug("[EDGE-CHECK] Failed to load min_contract_price_cents from profile: %s, using default 10c", e)
         
         # Check 2.76: Maximum contract price ceiling (low-profit trap prevention)
-        # 2026-07-10: Expanded to 95c to handle skewed markets (99c/1c)
-        max_price_cents = 95  # Default fallback (95 cents / $0.95) - aligned with profile
+        # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
+        max_price_cents = 50  # Default fallback (50 cents / $0.50) - aligned with profile
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
             profile_adapter = get_active_profile()
             if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_max_contract_price_cents'):
                 max_price_cents = profile_adapter.profile.guardrails_max_contract_price_cents
         except Exception as e:
-            logger.debug("[EDGE-CHECK] Failed to load max_contract_price_cents from profile: %s, using default 95c", e)
+            logger.debug("[EDGE-CHECK] Failed to load max_contract_price_cents from profile: %s, using default 50c", e)
         
         # Get contract price from mid_price_cents (ContractState only has mid_price_cents)
         # For YES contracts, mid_price_cents is the YES price

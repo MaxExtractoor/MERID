@@ -183,7 +183,7 @@ def check_market_microstructure(
     no_ask_cents: int,
     yes_depth: int,
     no_depth: int,
-    max_spread_cents: float = 100.0,  # 2026-07-10: Updated from 30c to 100c to accommodate wider spreads in current market conditions
+    max_spread_cents: float = 75.0,  # 2026-07-11: Canonical spread filter (75c) - aligned with historical requirement
     min_depth_usd: float = 10.0,  # 2026-07-05: Lowered from 200.0 to 10.0 based on research - $50 threshold too high for weekend/low-volume liquidity
     min_yes_depth: int = 1,
     min_no_depth: int = 1
@@ -691,13 +691,13 @@ def resolve_window_policy(
     elif regime == "aggressive":
         min_tte_secs = 90  # 1.5 min
     
-    # Spread gate (aligned with profile guardrails max_spread_cents=100)
-    # 2026-07-10: Updated from 30c to 100c to accommodate wider spreads in current market conditions
-    max_spread_cents = 100  # Aligned with profile guardrails
+    # Spread gate (aligned with canonical spread filter 75c)
+    # 2026-07-11: Canonical spread filter (75c) - aligned with historical requirement
+    max_spread_cents = 75  # Canonical spread filter
     if regime == "conservative":
-        max_spread_cents = 100  # Conservative also uses 100c (standardized)
+        max_spread_cents = 75  # Conservative also uses 75c (standardized)
     elif regime == "aggressive":
-        max_spread_cents = 100  # Aggressive uses standard guardrails threshold
+        max_spread_cents = 75  # Aggressive uses standard guardrails threshold
     
     return WindowResolution(
         window_id=window_id,
@@ -2612,9 +2612,10 @@ def _validate_price_against_orderbook(intent: OrderIntent, state: Optional[Any])
         )
     
     # Check 1: Price should be within reasonable range of mid price
-    # Allow up to 25 cents deviation from mid for limit orders (increased from 10 for 15m scalping)
-    # TEST FIX: Lower threshold to 15c to match test expectations (test uses 20c deviation)
-    max_deviation_cents = 15
+    # Allow up to 40 cents deviation from mid for limit orders (increased for 15m scalping)
+    # CRITICAL FIX 2026-07-10: Increased from 15c to 40c to prevent false rejections
+    # 15m options have wider price ranges; 15c was too strict and blocking valid orders
+    max_deviation_cents = 40
     if abs(order_price - validation_mid_cents) > max_deviation_cents:
         logger.warning(
             "[PRICE-VALIDATION] ticker=%s limit order price=%dc too far from mid=%dc (deviation=%dc > %dc threshold)",
@@ -3855,9 +3856,9 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         # SEV-0 FIX: Global freshness SLA — block orders if market data is >5s stale
         # This prevents the 476s blind periods and ensures "never blind again"
         try:
-            # 2026 BEST PRACTICE: Allow up to 30s staleness for graceful degradation
-            # Previous strict 5s threshold was blocking valid orders in fast-moving markets
-            _MARKET_DATA_MAX_STALENESS_S = float(os.getenv("KALSHI_MARKET_DATA_MAX_STALENESS_S", "30"))
+            # 2026 BEST PRACTICE: Allow up to 60s staleness for graceful degradation
+            # Increased from 30s to reduce false positives from temporary WebSocket delays
+            _MARKET_DATA_MAX_STALENESS_S = float(os.getenv("KALSHI_MARKET_DATA_MAX_STALENESS_S", "60"))
         except NameError as ne:
             logger.error(f"[DEBUG] NameError at line 1924: {ne}, os in locals: {'os' in locals()}, os in globals: {'os' in globals()}")
             raise
@@ -4961,11 +4962,11 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         # CRASH-007: Validate inputs before fee calculation
         # CRITICAL: Add price range validation to prevent degenerate trades
         # Minimum 5 cents prevents 1 cent data quality issues
-        # Maximum 50 cents prevents buying at 51-99 cents with poor expected returns
-        # 2026-07-09: Fixed max from 75c to 50c to match profile price_range.max_price_cents
-        if intent.price_cents < 5 or intent.price_cents > 50 or intent.count <= 0:
+        # Maximum 95 cents matches profile price_range.max_price_cents for skewed markets
+        # 2026-07-10: Fixed max from 50c to 95c to match profile kalshi_crypto_15m_v2.yaml
+        if intent.price_cents < 5 or intent.price_cents > 95 or intent.count <= 0:
             logger.error(
-                "[CRASH-007] Invalid order parameters for %s: price_cents=%s count=%s — rejecting (price must be 5-50 cents)",
+                "[CRASH-007] Invalid order parameters for %s: price_cents=%s count=%s — rejecting (price must be 5-95 cents)",
                 intent.ticker, intent.price_cents, intent.count
             )
             return OrderResult(

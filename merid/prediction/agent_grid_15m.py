@@ -2200,10 +2200,10 @@ class LeanAgent15m:
         except Exception as e:
             logger.warning("[MOMENTUM-FVG] asset=%s failed to get market price: %s", asset, e)
         
-        # Check price band for both sides (5-95c expanded range for skewed markets)
-        # CRITICAL FIX: 2026-07-10 - Log individual side range status for debugging
-        yes_in_range = (5 <= yes_price_cents <= 95)
-        no_in_range = (5 <= no_price_cents <= 95)
+        # Check price band for both sides (10c-50c canonical range)
+        # CRITICAL FIX: 2026-07-11 - Aligned with GlobalSlotAllocator canonical band
+        yes_in_range = (10 <= yes_price_cents <= 50)
+        no_in_range = (10 <= no_price_cents <= 50)
         
         logger.info(
             "[MOMENTUM-FVG-PRICE-RANGE] asset=%s yes_price=%dc yes_in_range=%s no_price=%dc no_in_range=%s",
@@ -2212,7 +2212,7 @@ class LeanAgent15m:
         
         if not yes_in_range and not no_in_range:
             logger.info(
-                "[MOMENTUM-FVG-PRICE-FILTER] asset=%s both sides outside 5c-95c range (yes=%dc, no=%dc) -> NO TRADE",
+                "[MOMENTUM-FVG-PRICE-FILTER] asset=%s both sides outside 10c-50c range (yes=%dc, no=%dc) -> NO TRADE",
                 asset, yes_price_cents, no_price_cents
             )
             return None
@@ -2403,8 +2403,8 @@ class LeanAgent15m:
                     # Get YES orderbook (ascending by price)
                     yes_book = getattr(market_state, 'yes_book', [])
                     if yes_book:
-                        # Find cheapest YES price within [5c, 95c] with size >= 1
-                        valid_prices = [p for (p, size) in yes_book if 5 <= p <= 95 and size >= 1]
+                        # Find cheapest YES price within [10c, 50c] with size >= 1
+                        valid_prices = [p for (p, size) in yes_book if 10 <= p <= 50 and size >= 1]
                         if valid_prices:
                             price_cents = min(valid_prices)  # Use cheapest acceptable price
                             logger.info(
@@ -2413,10 +2413,10 @@ class LeanAgent15m:
                             )
                         else:
                             logger.warning(
-                                "[PRICE-SELECTION] asset=%s no YES prices in expanded range [5c-95c] - dropping candidate",
+                                "[PRICE-SELECTION] asset=%s no YES prices in canonical range [10c-50c] - dropping candidate",
                                 asset
                             )
-                            return None  # Drop candidate - no valid price in expanded range
+                            return None  # Drop candidate - no valid price in canonical range
                     else:
                         logger.warning(
                             "[PRICE-SELECTION] asset=%s orderbook not available - dropping candidate",
@@ -2438,16 +2438,16 @@ class LeanAgent15m:
             
             clamped_price_cents = price_cents
         
-        # Final validation - ensure we have a valid price in the expanded range
-        if clamped_price_cents is None or not (5 <= clamped_price_cents <= 95):
+        # Final validation - ensure we have a valid price in the canonical range
+        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 50):
             logger.error(
-                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in expanded range [5c-95c] - dropping candidate",
+                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in canonical range [10c-50c] - dropping candidate",
                 asset, clamped_price_cents
             )
             return None
         
         logger.info(
-            "[PRICE-SELECTION] asset=%s final entry price=%d (within expanded range [5c-95c])",
+            "[PRICE-SELECTION] asset=%s final entry price=%d (within canonical range [10c-50c])",
             asset, clamped_price_cents
         )
         
@@ -2655,8 +2655,8 @@ class LeanAgent15m:
                     # Get YES orderbook (ascending by price)
                     yes_book = getattr(market_state, 'yes_book', [])
                     if yes_book:
-                        # Find cheapest YES price within [5c, 95c] with size >= 1
-                        valid_prices = [p for (p, size) in yes_book if 5 <= p <= 95 and size >= 1]
+                        # Find cheapest YES price within [10c, 50c] with size >= 1
+                        valid_prices = [p for (p, size) in yes_book if 10 <= p <= 50 and size >= 1]
                         if valid_prices:
                             price_cents = min(valid_prices)  # Use cheapest acceptable price
                             logger.info(
@@ -2665,10 +2665,10 @@ class LeanAgent15m:
                             )
                         else:
                             logger.warning(
-                                "[PRICE-SELECTION] asset=%s no YES prices in expanded range [5c-95c] - dropping candidate",
+                                "[PRICE-SELECTION] asset=%s no YES prices in canonical range [10c-50c] - dropping candidate",
                                 asset
                             )
-                            return None  # Drop candidate - no valid price in expanded range
+                            return None  # Drop candidate - no valid price in canonical range
                     else:
                         logger.warning(
                             "[PRICE-SELECTION] asset=%s orderbook not available - dropping candidate",
@@ -2690,16 +2690,16 @@ class LeanAgent15m:
             
             clamped_price_cents = price_cents
         
-        # Final validation - ensure we have a valid price in the expanded range
-        if clamped_price_cents is None or not (5 <= clamped_price_cents <= 95):
+        # Final validation - ensure we have a valid price in the canonical range
+        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 50):
             logger.error(
-                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in expanded range [5c-95c] - dropping candidate",
+                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in canonical range [10c-50c] - dropping candidate",
                 asset, clamped_price_cents
             )
             return None
         
         logger.info(
-            "[PRICE-SELECTION] asset=%s final entry price=%d (within expanded range [5c-95c])",
+            "[PRICE-SELECTION] asset=%s final entry price=%d (within canonical range [10c-50c])",
             asset, clamped_price_cents
         )
         
@@ -3512,7 +3512,7 @@ class LeanAgent15m:
             # 2026-07-09: Coarse filter check (20c) - first gate to reject pathological spreads
             # This prevents wide spreads (20c-90c) from even being considered
             # 2026-07-09: Updated from 40c to 20c based on industry research (15c-25c range, 20c recommended)
-            coarse_filter_threshold = 100  # 2026-07-10: RELAXED to 100c - allows trading in current market conditions with wider spreads (60c-96c observed)
+            coarse_filter_threshold = 75  # 2026-07-11: Canonical spread filter (75c) - aligned with historical requirement
             if spread_cents > coarse_filter_threshold:
                 logger.warning("[MARKET-VALIDATION] asset=%s ticker=%s spread exceeds coarse filter=%dc (spread=%dc)",
                                self.config.name, ticker, coarse_filter_threshold, spread_cents)
@@ -5073,8 +5073,8 @@ class LeanAgent15m:
                     # Get YES orderbook (ascending by price)
                     yes_book = getattr(market_state, 'yes_book', [])
                     if yes_book:
-                        # Find cheapest YES price within [5c, 95c] with size >= 1
-                        valid_prices = [p for (p, size) in yes_book if 5 <= p <= 95 and size >= 1]
+                        # Find cheapest YES price within [10c, 50c] with size >= 1
+                        valid_prices = [p for (p, size) in yes_book if 10 <= p <= 50 and size >= 1]
                         if valid_prices:
                             price_cents = min(valid_prices)  # Use cheapest acceptable price
                             logger.info(
@@ -5083,10 +5083,10 @@ class LeanAgent15m:
                             )
                         else:
                             logger.warning(
-                                "[PRICE-SELECTION] asset=%s no YES prices in expanded range [5c-95c] - dropping candidate",
+                                "[PRICE-SELECTION] asset=%s no YES prices in canonical range [10c-50c] - dropping candidate",
                                 asset
                             )
-                            return None  # Drop candidate - no valid price in expanded range
+                            return None  # Drop candidate - no valid price in canonical range
                     else:
                         logger.warning(
                             "[PRICE-SELECTION] asset=%s orderbook not available - dropping candidate",
@@ -5108,16 +5108,16 @@ class LeanAgent15m:
             
             clamped_price_cents = price_cents
         
-        # Final validation - ensure we have a valid price in the expanded range
-        if clamped_price_cents is None or not (5 <= clamped_price_cents <= 95):
+        # Final validation - ensure we have a valid price in the canonical range
+        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 50):
             logger.error(
-                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in expanded range [5c-95c] - dropping candidate",
+                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in canonical range [10c-50c] - dropping candidate",
                 asset, clamped_price_cents
             )
             return None
         
         logger.info(
-            "[PRICE-SELECTION] asset=%s final entry price=%d (within expanded range [5c-95c])",
+            "[PRICE-SELECTION] asset=%s final entry price=%d (within canonical range [10c-50c])",
             asset, clamped_price_cents
         )
         
@@ -5142,14 +5142,14 @@ class LeanAgent15m:
                 ENTRY_MIN_PRICE_CENTS = profile_adapter.profile.price_range.min_price_cents
                 ENTRY_MAX_PRICE_CENTS = profile_adapter.profile.price_range.max_price_cents
             else:
-                # Fallback to profile-compatible range if profile not available
-                # Profile YAML: kalshi_crypto_15m_v2.yaml price_range [5, 95]
-                ENTRY_MIN_PRICE_CENTS = 5  # Profile-compatible lower bound
-                ENTRY_MAX_PRICE_CENTS = 95  # Profile-compatible upper bound
+                # Fallback to canonical range if profile not available
+                # Profile YAML: kalshi_crypto_15m_v2.yaml price_range [10, 50]
+                ENTRY_MIN_PRICE_CENTS = 10  # Canonical lower bound
+                ENTRY_MAX_PRICE_CENTS = 50  # Canonical upper bound
         except Exception as e:
-            logger.warning("[SIGNAL-GEN] Failed to load price_range from profile: %s, using fallback 5-95c", e)
-            ENTRY_MIN_PRICE_CENTS = 5  # Profile-compatible lower bound
-            ENTRY_MAX_PRICE_CENTS = 95  # Profile-compatible upper bound
+            logger.warning("[SIGNAL-GEN] Failed to load price_range from profile: %s, using fallback 10-50c", e)
+            ENTRY_MIN_PRICE_CENTS = 10  # Canonical lower bound
+            ENTRY_MAX_PRICE_CENTS = 50  # Canonical upper bound
         
         MARKETABLE_EDGE_PCT = 4.0  # matches EDGE_MARKET_ENTRY_* (0.04) in risk_parameters.py
         
@@ -5650,7 +5650,7 @@ class LeanAgent15m:
                                 elif isinstance(close_time_ts, str):
                                     try:
                                         close_time_ts = datetime.fromisoformat(close_time_ts.replace('Z', '+00:00')).timestamp()
-                                    except:
+                                    except (ValueError, AttributeError):
                                         continue
                                 elif not isinstance(close_time_ts, (int, float)):
                                     continue
@@ -5855,9 +5855,21 @@ class LeanAgent15m:
                     )
                     return None
             
-            # Calculate minutes to expiry
+            # CRITICAL FIX: Use normalized minutes_to_expiry from market object
+            # This ensures we use the canonical expiry time from contract_normalization.py
+            # which prioritizes close_ts over end_date for 15m contracts
             minutes_to_expiry = 0
-            if hasattr(market, 'close_time'):
+            if hasattr(market, 'minutes_to_expiry') and market.minutes_to_expiry is not None:
+                # Use normalized minutes_to_expiry (canonical field from catalog)
+                minutes_to_expiry = market.minutes_to_expiry
+            elif hasattr(market, 'close_time'):
+                # Fallback to manual calculation if normalized field not available
+                # This should not happen in production with proper catalog normalization
+                logger.warning(
+                    "[AGENT-GRID-15M] asset=%s using manual minutes_to_expiry calculation (normalized field missing). "
+                    "This indicates catalog normalization may not be working correctly.",
+                    self.config.name
+                )
                 close_time = market.close_time
                 now = time.time()
                 

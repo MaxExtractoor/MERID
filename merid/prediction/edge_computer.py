@@ -104,8 +104,8 @@ class LegacyEdgeBackend(EdgeComputer):
             # Spread guard check
             spread_cents = int(state.spread_cents) if state and hasattr(state, "spread_cents") else 0
 
-            # Simple spread guard (max 60 cents spread)
-            max_spread_cents = 60
+            # Simple spread guard (max 75 cents spread)
+            max_spread_cents = 75  # 2026-07-11: Canonical spread filter (75c) - aligned with historical requirement
             if spread_cents > max_spread_cents:
                 logger.info(
                     "[LEGACY-EDGE] %s asset=%s ticker=%s spread=%d cents > %d cents - blocking entry",
@@ -126,9 +126,9 @@ class LegacyEdgeBackend(EdgeComputer):
                 if best_bid > 0 and best_ask > 0:
                     price_cents = (best_bid + best_ask) // 2
                 else:
-                    price_cents = 50
+                    price_cents = 25  # 2026-07-09: Fixed to 25c (midpoint of 10-50c sweet spot)
             else:
-                price_cents = 50
+                price_cents = 25  # 2026-07-09: Fixed to 25c (midpoint of 10-50c sweet spot)
 
             # CRITICAL: Check minimum contract price floor (blocks deep OTM longshots)
             # This guardrail prevents trading ultra-low priced contracts that are statistically losing

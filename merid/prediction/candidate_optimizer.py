@@ -97,7 +97,7 @@ class CandidateOptimizer:
         legacy_min_liquidity_score = 0.05  # Legacy default
         legacy_min_quality_score = 0.05  # Legacy default
         
-        self.max_spread_cents = 30  # CRITICAL FIX: Reduced from 70c to 30c to harmonize with profile guardrails and 10c-50c sweet spot
+        self.max_spread_cents = 75  # 2026-07-11: Canonical spread filter (75c) - aligned with historical requirement
         self.MIN_DEPTH_LEVELS = 1  # Reduced from 2 to allow one-sided markets
         self.MIN_LIQUIDITY_SCORE = 0.05  # Reduced from 0.1 to allow one-sided markets
         self.MIN_QUALITY_SCORE = 0.05  # Reduced from 0.1 to allow one-sided markets

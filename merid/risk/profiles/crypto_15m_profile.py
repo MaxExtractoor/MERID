@@ -408,13 +408,12 @@ class Crypto15mProfile:
     # Previous 100c was too permissive, accepting illiquid markets with poor fill quality
     # Research shows BTC typically has 2c spreads in middle of window, other assets slightly wider
     # 95c spreads observed in logs are abnormal (data quality or extreme thinness)
-    # 2026-07-10: RELAXED to 100c - aligned with 5c-95c entry range (up from 40c)
-    # CRITICAL FIX: Previous 50c was blocking trades that should be allowed per YAML guardrails (75c)
+    # 2026-07-11: Canonical spread filter (75c) - aligned with historical requirement
     # Research: DOGE spreads can exceed 50c (observed 79c spread = 1.3% on 59c price)
     # Reference: Kalena 2026 research - altcoin spreads 5-30% in 15m markets
     # 75c threshold allows realistic trading while blocking extreme data quality issues
     market_microstructure_enabled: bool = True  # Enable market microstructure filters
-    market_microstructure_max_spread_cents: float = 100.0  # 2026-07-10: RELAXED to 100c - allows trading in current market conditions with wider spreads (60c-96c observed)
+    market_microstructure_max_spread_cents: float = 75.0  # 2026-07-11: Canonical spread filter (75c) - aligned with historical requirement
     market_microstructure_min_depth_usd: float = 0.0  # DISABLED: System uses limit orders which wait for fills, not market orders. Kalshi 15m crypto markets have sufficient liquidity. Depth thresholds are primarily for market orders to prevent slippage.
     market_microstructure_min_yes_depth: int = 1  # Minimum YES depth threshold
     market_microstructure_min_no_depth: int = 1  # Minimum NO depth threshold
@@ -472,11 +471,11 @@ class Crypto15mProfile:
     guardrails_adaptive_risk_bands: list = field(default_factory=list)
 
     # Price range configuration for entry band restrictions
-    # 2026-07-10: Expanded to 5c-95c to handle skewed markets (99c/1c)
+    # 2026-07-11: Canonical price band (10c-50c) - aligned with GlobalSlotAllocator
     price_range: 'PriceRange' = field(default_factory=lambda: PriceRange(
-        min_price_cents=5,
-        max_price_cents=95,
-        description='Valid price range in cents for order execution (5c-95c expanded for skewed markets)'
+        min_price_cents=10,
+        max_price_cents=50,
+        description='Valid price range in cents for order execution (10c-50c canonical band)'
     ))
 
     @property

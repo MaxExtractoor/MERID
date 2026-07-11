@@ -28,8 +28,8 @@ class TestGlobalAllocator:
             venue_cap_usd=1.00,
             min_edge_pct=2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units
             min_confidence=0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence
-            min_price_cents=5,  # 2026-07-10: Expanded from 10c to 5c for skewed markets
-            max_price_cents=95  # 2026-07-10: Expanded from 50c to 95c for skewed markets
+            min_price_cents=10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
+            max_price_cents=50  # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
         )
         
         candidates = [
@@ -50,13 +50,13 @@ class TestGlobalAllocator:
             ),
             OrderCandidate(
                 asset="XRP", ticker="KXXRP15M-TEST", side="yes", action="buy",
-                price_cents=20, count=1, edge_pct=2.7, confidence=0.55,
-                model_prob=0.82, agent_name="XRP_15M"
+                price_cents=20, count=1, edge_pct=3.5, confidence=0.55,
+                model_prob=0.82, agent_name="XRP_15M"  # Above XRP min (3.0%)
             ),
             OrderCandidate(
                 asset="DOGE", ticker="KXDOGE15M-TEST", side="yes", action="buy",
-                price_cents=20, count=1, edge_pct=2.6, confidence=0.55,
-                model_prob=0.81, agent_name="DOGE_15M"
+                price_cents=20, count=1, edge_pct=4.0, confidence=0.55,
+                model_prob=0.81, agent_name="DOGE_15M"  # Above DOGE min (3.5%)
             ),
         ]
         
@@ -85,8 +85,8 @@ class TestGlobalAllocator:
             venue_cap_usd=1.00,
             min_edge_pct=2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units
             min_confidence=0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence
-            min_price_cents=5,  # 2026-07-10: Expanded from 10c to 5c for skewed markets
-            max_price_cents=95  # 2026-07-10: Expanded from 50c to 95c for skewed markets
+            min_price_cents=10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
+            max_price_cents=50  # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
         )
         
         candidates = [
@@ -144,8 +144,8 @@ class TestGlobalAllocator:
             venue_cap_usd=1.00,
             min_edge_pct=2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units
             min_confidence=0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence
-            min_price_cents=5,  # 2026-07-10: Expanded from 10c to 5c for skewed markets
-            max_price_cents=95  # 2026-07-10: Expanded from 50c to 95c for skewed markets
+            min_price_cents=10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
+            max_price_cents=50  # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
         )
         
         candidates = [
@@ -184,15 +184,15 @@ class TestGlobalAllocator:
     
     def test_price_range_filtering(self):
         """
-        Scenario: Candidates with prices outside [5c, 95c] range.
+        Scenario: Candidates with prices outside [10c, 50c] canonical range.
         Expected: Only candidates within range are considered.
         """
         allocator = GlobalAllocator(
             venue_cap_usd=1.00,
             min_edge_pct=2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units
             min_confidence=0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence
-            min_price_cents=5,  # 2026-07-10: Expanded from 10c to 5c for skewed markets
-            max_price_cents=95  # 2026-07-10: Expanded from 50c to 95c for skewed markets
+            min_price_cents=10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
+            max_price_cents=50  # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
         )
         
         candidates = [
@@ -208,13 +208,13 @@ class TestGlobalAllocator:
             ),
             OrderCandidate(
                 asset="SOL", ticker="KXSOL15M-TEST", side="yes", action="buy",
-                price_cents=97, count=1, edge_pct=2.2, confidence=0.55,
-                model_prob=0.83, agent_name="SOL_15M"  # Above max (95c)
+                price_cents=97, count=1, edge_pct=3.0, confidence=0.55,
+                model_prob=0.83, agent_name="SOL_15M"  # Above max (50c)
             ),
             OrderCandidate(
                 asset="XRP", ticker="KXXRP15M-TEST", side="yes", action="buy",
-                price_cents=30, count=1, edge_pct=2.1, confidence=0.55,
-                model_prob=0.82, agent_name="XRP_15M"  # Within range
+                price_cents=30, count=1, edge_pct=3.5, confidence=0.55,
+                model_prob=0.82, agent_name="XRP_15M"  # Within range, above XRP min (3.0%)
             ),
         ]
         
@@ -240,8 +240,8 @@ class TestGlobalAllocator:
             venue_cap_usd=1.00,
             min_edge_pct=2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units
             min_confidence=0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence
-            min_price_cents=5,  # 2026-07-10: Expanded from 10c to 5c for skewed markets
-            max_price_cents=95  # 2026-07-10: Expanded from 50c to 95c for skewed markets
+            min_price_cents=10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
+            max_price_cents=50  # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
         )
         
         candidates = [
@@ -279,8 +279,8 @@ class TestGlobalAllocator:
             venue_cap_usd=1.00,
             min_edge_pct=2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units
             min_confidence=0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence
-            min_price_cents=5,  # 2026-07-10: Expanded from 10c to 5c for skewed markets
-            max_price_cents=95  # 2026-07-10: Expanded from 50c to 95c for skewed markets
+            min_price_cents=10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
+            max_price_cents=50  # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
         )
         
         candidates = [
@@ -318,8 +318,8 @@ class TestGlobalAllocator:
             venue_cap_usd=1.00,
             min_edge_pct=2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units
             min_confidence=0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence
-            min_price_cents=5,  # 2026-07-10: Expanded from 10c to 5c for skewed markets
-            max_price_cents=95  # 2026-07-10: Expanded from 50c to 95c for skewed markets
+            min_price_cents=10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
+            max_price_cents=50  # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
         )
         
         candidates = [

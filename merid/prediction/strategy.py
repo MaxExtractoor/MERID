@@ -485,47 +485,45 @@ class KalshiStrategy:
                 # LEGACY REMOVAL: dynamic_sizing moved to archive/legacy/ during 15m stack cleanup
                 price_cents = None
                 if price_cents is None or price_cents <= 0:
-                    # CRITICAL FIX: Search orderbook for prices in 10-50c sweet spot band
-                    # 2026-07-09: Do NOT clamp prices above 50c. Instead, search for valid prices in the band.
-                    # If no prices exist in 10-50c range, drop the candidate (no trade).
+                    # 2026-07-11: Canonical price band (10c-50c) - aligned with GlobalSlotAllocator
+                    # Previous 5-95c range was misaligned with allocator enforcement
                     raw_price_cents = int(round(market_prob * 100))
                     
-                    # Check if price is within sweet spot band
+                    # Check if price is within canonical range (10c-50c)
                     if 10 <= raw_price_cents <= 50:
                         # Price is already in valid range - use it directly
                         price_cents = raw_price_cents
                         logger.info(
-                            "[PRICE-SELECTION] asset=%s raw_price_cents=%d in sweet spot [10c-50c] - using directly",
+                            "[PRICE-SELECTION] asset=%s raw_price_cents=%d in canonical range [10c-50c] - using directly",
                             self._extract_asset_from_market_id(edge.market_id), raw_price_cents
                         )
                     else:
-                        # Price is outside sweet spot - drop candidate (strategy.py doesn't have orderbook access)
+                        # Price is outside canonical range - drop candidate (strategy.py doesn't have orderbook access)
                         logger.warning(
-                            "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside sweet spot [10c-50c] - dropping candidate (no orderbook access in strategy.py)",
+                            "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside canonical range [10c-50c] - dropping candidate (no orderbook access in strategy.py)",
                             self._extract_asset_from_market_id(edge.market_id), raw_price_cents
                         )
-                        return None  # Drop candidate - no valid price in sweet spot
+                        return None  # Drop candidate - no valid price in expanded range
             except Exception:
-                # CRITICAL FIX: Search orderbook for prices in 10-50c sweet spot band
-                # 2026-07-09: Do NOT clamp prices above 50c. Instead, search for valid prices in the band.
-                # If no prices exist in 10-50c range, drop the candidate (no trade).
+                # 2026-07-11: Canonical price band (10c-50c) - aligned with GlobalSlotAllocator
+                # Previous 5-95c range was misaligned with allocator enforcement
                 raw_price_cents = int(round(market_prob * 100))
                 
-                # Check if price is within sweet spot band
+                # Check if price is within canonical range (10c-50c)
                 if 10 <= raw_price_cents <= 50:
                     # Price is already in valid range - use it directly
                     price_cents = raw_price_cents
                     logger.info(
-                        "[PRICE-SELECTION] asset=%s raw_price_cents=%d in sweet spot [10c-50c] - using directly",
+                        "[PRICE-SELECTION] asset=%s raw_price_cents=%d in canonical range [10c-50c] - using directly",
                         self._extract_asset_from_market_id(edge.market_id), raw_price_cents
                     )
                 else:
-                    # Price is outside sweet spot - drop candidate (strategy.py doesn't have orderbook access)
+                    # Price is outside canonical range - drop candidate (strategy.py doesn't have orderbook access)
                     logger.warning(
-                        "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside sweet spot [10c-50c] - dropping candidate (no orderbook access in strategy.py)",
+                        "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside canonical range [10c-50c] - dropping candidate (no orderbook access in strategy.py)",
                         self._extract_asset_from_market_id(edge.market_id), raw_price_cents
                     )
-                    return None  # Drop candidate - no valid price in sweet spot
+                    return None  # Drop candidate - no valid price in expanded range
 
             # FIX: Validate actual price against max_price_cents from threshold matrix
             # This prevents momentum scalping from trading high-priced (low-edge) contracts
