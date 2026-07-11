@@ -2789,16 +2789,37 @@ class KalshiWebSocketBridge:
         PRESSURE_STOP = int(MAX_QUEUE * 0.9)
         
         if current_qsize >= PRESSURE_STOP:
-            logger.error(
-                "[WS-BACKPRESSURE] queue_size=%d >= %d - throttling producer (dropping event)",
+            # P1 FIX: Instead of dropping, use ring buffer overflow strategy
+            # Drop oldest non-fill event to make room for new event
+            logger.warning(
+                "[WS-BACKPRESSURE] queue_size=%d >= %d - using ring buffer overflow (drop oldest non-fill)",
                 current_qsize, PRESSURE_STOP,
             )
-            # Drop this event to provide backpressure (can't await in sync context)
-            self._events_dropped += 1
-            if ws_events_dropped_total:
-                event_type = event.get("type") if isinstance(event, dict) else "unknown"
-                ws_events_dropped_total.labels(event_type=event_type).inc()
-            return  # Drop this event to throttle producer
+            
+            # Try to drop oldest non-fill event from queue
+            try:
+                # Get oldest event from queue
+                oldest = self._queue.get_nowait()
+                event_type = oldest.get("type") if isinstance(oldest, dict) else "unknown"
+                
+                # If oldest is not a fill, count as dropped and continue
+                if event_type != "fill":
+                    self._events_dropped += 1
+                    if ws_events_dropped_total:
+                        ws_events_dropped_total.labels(event_type=event_type).inc()
+                    logger.debug("[WS-BACKPRESSURE] Dropped oldest non-fill event (type=%s)", event_type)
+                else:
+                    # Oldest was a fill, put it back and drop current instead
+                    self._queue.put_nowait(oldest)
+                    self._events_dropped += 1
+                    current_event_type = event.get("type") if isinstance(event, dict) else "unknown"
+                    if ws_events_dropped_total:
+                        ws_events_dropped_total.labels(event_type=current_event_type).inc()
+                    logger.warning("[WS-BACKPRESSURE] Oldest was fill, dropping current event (type=%s)", current_event_type)
+                    return
+            except queue.Empty:
+                # Queue was actually empty, should not happen but handle gracefully
+                pass
         
         # Log high queue pressure for observability
         if queue_pressure > 0.8 and self._events_dropped % 10 == 0:

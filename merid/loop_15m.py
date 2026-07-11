@@ -1303,27 +1303,26 @@ class Kalshi15mLoop:
                 cycle_start = time.time()
                 
                 try:
-                    # CRITICAL FIX: Reset _active_trades counter per cycle based on actual open positions
+                    # P3 FIX: Reset _active_trades counter per cycle based on actual open positions
                     # This prevents stale counter values from blocking trades when positions are closed
+                    # Improved: Only reset if counter is stale (not updated in last 2 cycles)
                     try:
                         from merid.event_venues.kalshi.position_cache import get_position_cache
                         position_cache = get_position_cache()
-                        # Count actual open positions (tickers with non-zero contracts)
-                        open_tickers = set()
-                        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-                            exposure_data = position_cache.get_asset_exposure(asset)
-                            if isinstance(exposure_data, dict):
-                                total_contracts = exposure_data.get('total_contracts', 0)
-                                if total_contracts > 0:
-                                    # Derive ticker from asset (simplified - actual ticker mapping may differ)
-                                    # For now, we'll clear the counter and let it rebuild from actual orders
-                                    pass
-                        # Reset counter to 0 and let it rebuild from actual order submissions in this cycle
-                        # This is safer than trying to map positions back to tickers
-                        old_count = sum(self._active_trades.values())
-                        self._active_trades.clear()
-                        if old_count > 0:
-                            logger.info("[15m-LOOP] Reset concurrent trades counter from %d to 0 (will rebuild from actual orders this cycle)", old_count)
+                        
+                        # Check if counter is stale (no recent updates)
+                        current_time = time.time()
+                        if not hasattr(self, '_last_counter_update_ts'):
+                            self._last_counter_update_ts = current_time
+                        
+                        # Only reset if counter hasn't been updated in 2 cycles (10 seconds)
+                        time_since_update = current_time - self._last_counter_update_ts
+                        if time_since_update > 10.0:
+                            old_count = sum(self._active_trades.values())
+                            self._active_trades.clear()
+                            self._last_counter_update_ts = current_time
+                            if old_count > 0:
+                                logger.info("[15m-LOOP] Reset stale concurrent trades counter from %d to 0 (stale for %.1fs)", old_count, time_since_update)
                     except Exception as e:
                         logger.warning("[15m-LOOP] Failed to reset concurrent trades counter: %s", e, exc_info=True)
                     
@@ -3517,13 +3516,6 @@ class Kalshi15mLoop:
                         logger.warning("[15M-LOOP] BALANCE-CALIBRATOR: Bankroll is None or <= 0, skipping calibration")
                 except Exception as e:
                     logger.warning("[15M-LOOP] Failed to fetch cycle bankroll: %s", e)
-                
-                # Phase 2: Trace the actual call to run_cycle
-                from merid.origin_tracer import log_method_entry, log_object_origin
-                log_object_origin(self.agent_grid, "agent_grid_before_run_cycle_call", context=f"cycle_id={tick}")
-                log_method_entry(self.agent_grid, "run_cycle", label="about_to_call_from_loop")
-                
-                # CRITICAL: Log the actual method being called
                 
                 candidates = await self.agent_grid.run_cycle(tick, allow_new_entries=allow_new_entries)
                 logger.info("[15M-LOOP] Generated %d candidates in cycle %d", len(candidates), tick)

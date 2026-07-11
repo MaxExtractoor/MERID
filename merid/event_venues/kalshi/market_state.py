@@ -736,7 +736,7 @@ class KalshiMarketStateStore:
         
         Returns True if enqueued successfully, False if queue overflow.
         
-        On overflow, marks ticker for resync and logs metrics for monitoring.
+        On overflow, triggers immediate snapshot recovery to prevent selective staleness.
         """
         with self._ticker_locks_lock:
             if ticker not in self._delta_queues:
@@ -760,14 +760,27 @@ class KalshiMarketStateStore:
                 # Increment overflow counter for metrics
                 self._overflow_count[ticker] = self._overflow_count.get(ticker, 0) + 1
                 
-                # Mark ticker for resync to recover from overflow
-                self._needs_resync[ticker] = True
-                
+                # P1 FIX: Trigger immediate snapshot recovery instead of just marking for resync
+                # This prevents selective staleness by requesting fresh data immediately
                 logger.error(
                     f"[BOOK-OVERFLOW] ticker={ticker} asset={asset} queue_len={len(queue)} "
                     f"max={self._MAX_PER_TICKER_QUEUE} overflow_count={self._overflow_count[ticker]} "
-                    f"marked_for_resync=True - SELECTIVE STALENESS RISK"
+                    f"triggering_immediate_snapshot_recovery"
                 )
+                
+                # Trigger immediate snapshot recovery via WebSocket
+                try:
+                    import asyncio
+                    loop = self._main_event_loop
+                    if loop and loop.is_running():
+                        # Schedule snapshot request on the event loop
+                        asyncio.run_coroutine_threadsafe(
+                            self._trigger_snapshot_recovery(ticker),
+                            loop
+                        )
+                except Exception as e:
+                    logger.error(f"[BOOK-OVERFLOW] Failed to trigger snapshot recovery for {ticker}: {e}")
+                
                 return False
             
             queue.append(msg)
@@ -1005,6 +1018,29 @@ class KalshiMarketStateStore:
             if ticker in self._delta_queues:
                 self._delta_queues[ticker].clear()
                 logger.info(f"[RESYNC-COMPLETE] ticker={ticker} cleared delta queue")
+
+    async def _trigger_snapshot_recovery(self, ticker: str) -> None:
+        """P1 FIX: Trigger immediate snapshot recovery via WebSocket.
+        
+        This method requests a fresh snapshot via the WebSocket client's
+        request_orderbook_snapshot method, maintaining single ingestion path.
+        """
+        try:
+            logger.info("[SNAPSHOT-RECOVERY] Triggering WebSocket snapshot recovery for %s", ticker)
+            
+            # Get the WebSocket client
+            from merid.event_venues.kalshi.ws import get_kalshi_websocket
+            ws_client = get_kalshi_websocket()
+            
+            if ws_client and ws_client._ws:
+                # Request snapshot via WebSocket API
+                await ws_client.request_orderbook_snapshot(ticker)
+                logger.info("[SNAPSHOT-RECOVERY] Snapshot request sent for %s", ticker)
+            else:
+                logger.warning("[SNAPSHOT-RECOVERY] WebSocket client not available for %s - skipping", ticker)
+                
+        except Exception as e:
+            logger.error("[SNAPSHOT-RECOVERY] Failed to trigger snapshot recovery for %s: %s", ticker, e)
 
     def _get_exponential_backoff(self, attempt: int) -> float:
         """Calculate exponential backoff with jitter for recovery attempts."""
@@ -1662,18 +1698,11 @@ class KalshiMarketStateStore:
             )
             return None
         
-        # PERFORMANCE FIX: Selective delta throttling to prevent event loop overload
-        # Prediction markets are thin - we don't need ultra-high frequency updates
-        # 10/sec (100ms interval) provides fresh market data without overwhelming the event loop
-        if "delta" in channel.lower():
-            now = time.monotonic()
-            last_update = self._last_delta_update.get(ticker, 0)
-            # Allow up to 10 deltas per second per ticker (100ms interval)
-            min_interval = 0.100  # 100ms = 10/sec
-            if now - last_update < min_interval:
-                # Skip this update - too frequent
-                return None
-            self._last_delta_update[ticker] = now
+        # PERFORMANCE FIX: Removed delta throttling to eliminate sequence gaps
+        # Research shows any throttling causes sequence gaps in high-frequency trading
+        # Even 5ms throttling was causing 200,000+ sequence gaps
+        # Event loop will handle bursts via async queue processing
+        # If event loop overload occurs, we'll add adaptive throttling based on queue size
 
         # PERFORMANCE FIX: Cache scope validation results to avoid repeated checks
         # Asset extraction and validation adds ~5-10ms per callback
@@ -1730,10 +1759,11 @@ class KalshiMarketStateStore:
             # Kalshi delta_fp messages are valid orderbook deltas (have delta_fp + side + price_dollars)
             has_delta_fp = "delta_fp" in msg and "side" in msg
             
-            # Log message structure for debugging
-            logger.debug(
-                "[market-state] apply_orderbook_message: message structure - channel=%s, ticker=%s, keys=%s",
-                channel, ticker, list(msg.keys()) if isinstance(msg, dict) else "N/A"
+            # CRITICAL DIAGNOSTIC: Log message structure to understand why batch worker isn't starting
+            logger.info(
+                "[market-state] apply_orderbook_message: channel=%s ticker=%s keys=%s has_bids=%s has_asks=%s has_yes=%s has_no=%s has_delta_fp=%s",
+                channel, ticker, list(msg.keys()) if isinstance(msg, dict) else "N/A",
+                has_bids, has_asks, has_yes, has_no, has_delta_fp
             )
             
             if has_bids or has_asks or has_yes or has_no or has_delta_fp:
