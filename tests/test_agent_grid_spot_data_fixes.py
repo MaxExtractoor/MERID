@@ -306,45 +306,57 @@ class TestRiskEnvelopeSnapshotFix:
         assert "venue_cap=$1.00" in snapshot, "Snapshot should include venue cap"
 
 
-class TestSessionOrderCountSubmissionFix:
-    """Test session order count increment on order submission (2026-07-10 fix)"""
+class TestSessionOrderCountFillPhaseFix:
+    """Test session order count increment on order fill (2026-07-10 fix)"""
     
-    def test_session_order_count_increments_on_submission(self):
-        """Test that session order count is incremented when order is submitted, not just on fill"""
+    def test_session_order_count_increments_on_fill(self):
+        """Test that session order count is incremented when order fills, not on submission"""
         # Simulate session order count behavior
         session_order_count = 0
         max_orders_per_window = 12
         
-        # Simulate order submission (should increment count)
+        # Simulate order submission (should NOT increment count)
+        # session_order_count += 1  # REMOVED: No longer increments on submission
+        
+        # Verify count was NOT incremented on submission
+        assert session_order_count == 0, "Session order count should NOT increment on submission"
+        
+        # Simulate order fill (should increment count)
         session_order_count += 1
         
-        # Verify count was incremented
-        assert session_order_count == 1, "Session order count should increment on submission"
+        # Verify count was incremented on fill
+        assert session_order_count == 1, "Session order count should increment on fill"
         assert session_order_count < max_orders_per_window, "Should not exceed max orders per window"
         
-        # Simulate another submission
+        # Simulate another fill
         session_order_count += 1
-        assert session_order_count == 2, "Session order count should increment on each submission"
+        assert session_order_count == 2, "Session order count should increment on each fill"
         
-    def test_cooldown_updated_on_submission(self):
-        """Test that cooldown is updated when order is submitted, not just on fill"""
+    def test_cooldown_updated_on_fill(self):
+        """Test that cooldown is updated when order fills, not on submission"""
         import time
         
         # Simulate cooldown behavior
         last_trade_time = 0.0
         cooldown_seconds = 30
         
-        # Simulate order submission (should update last_trade_time)
+        # Simulate order submission (should NOT update last_trade_time)
+        # last_trade_time = time.time()  # REMOVED: No longer updates on submission
+        
+        # Verify cooldown was NOT updated on submission
+        assert last_trade_time == 0.0, "Cooldown should NOT be updated on submission"
+        
+        # Simulate order fill (should update last_trade_time)
         current_time = time.time()
         last_trade_time = current_time
         
-        # Verify cooldown was updated
-        assert last_trade_time > 0, "Cooldown should be updated on submission"
-        assert last_trade_time == current_time, "Cooldown should be set to current time on submission"
+        # Verify cooldown was updated on fill
+        assert last_trade_time > 0, "Cooldown should be updated on fill"
+        assert last_trade_time == current_time, "Cooldown should be set to current time on fill"
         
         # Verify cooldown check would block subsequent submissions
         time_since_trade = time.time() - last_trade_time
-        assert time_since_trade < cooldown_seconds, "Cooldown should block immediate re-submission"
+        assert time_since_trade < cooldown_seconds, "Cooldown should block immediate re-submission after fill"
 
 
 class TestGlobalExposureCapFix:

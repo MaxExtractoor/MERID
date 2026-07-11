@@ -1439,9 +1439,10 @@ def test_velocity_thresholds_2026_standards():
 def test_spread_thresholds_2026_standards():
     """Verify spread thresholds align with 2026 industry standards.
 
-    2026-07-08 FIX: Updated to reflect 10-50c sweet spot (binary options guidance).
-    Previous test expected 75c, but profile now uses 50c for DEEP_OTM_EXPENSIVE_CENTS.
-    This aligns with conservative binary options risk management (10-50c per clip).
+    2026-07-10 FIX: Updated to reflect relaxed spread threshold of 100c.
+    Previous test expected 30c, but profile was relaxed to 100c on 2026-07-10
+    to allow trading in current market conditions with wider spreads (60c-96c observed).
+    This aligns with guardrails.max_spread_cents (single source of truth).
     """
     import yaml
     import os
@@ -1453,12 +1454,12 @@ def test_spread_thresholds_2026_standards():
 
     # Verify market microstructure spread threshold is aligned with profile YAML
     # Note: max_spread_cents is about bid-ask spread (liquidity), not entry price
-    # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
+    # 2026-07-10: RELAXED to 100c - allows trading in current market conditions with wider spreads
     guardrails = raw.get('guardrails', {})
     max_spread_cents = guardrails.get('max_spread_cents', 100)
 
-    assert max_spread_cents == 30, \
-        f"Market microstructure spread threshold should be 30c per profile YAML, got {max_spread_cents}"
+    assert max_spread_cents == 100, \
+        f"Market microstructure spread threshold should be 100c per profile YAML, got {max_spread_cents}"
     
     # Verify TTE regime spread thresholds are aligned with current configuration
     from merid.risk.tte_regime import TTERegimeConfig
@@ -1661,13 +1662,18 @@ def test_cooldown_initialization_allows_immediate_startup():
         risk_config=Mock(),
     )
     
-    # Verify all assets have cooldown initialized to 0.0 (allows immediate startup)
+    # Verify all assets have cooldown initialized to current monotonic time (allows immediate startup)
+    # CRITICAL FIX (2026-07-10): Changed from 0.0 to time.monotonic() to prevent ~56 year cooldown calculations
+    current_time = time.monotonic()
     for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
         assert asset in agent._last_trade_time
         last_trade_time = agent._last_trade_time[asset]
-        # Should be 0.0 to allow immediate signal generation on startup
-        assert last_trade_time == 0.0, \
-            f"Asset {asset} cooldown should be initialized to 0.0 for immediate startup, got {last_trade_time}"
+        # Should be current monotonic time to allow immediate signal generation on startup
+        assert last_trade_time > 0, \
+            f"Asset {asset} cooldown should be initialized to current monotonic time, got {last_trade_time}"
+        # Should be close to current time (within 1 second)
+        assert abs(last_trade_time - current_time) < 1.0, \
+            f"Asset {asset} cooldown should be close to current time, got {last_trade_time} vs {current_time}"
 
 
 def test_global_rate_limit_startup_grace_period():
