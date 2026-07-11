@@ -1052,6 +1052,10 @@ class KalshiMarketCatalog:
                     for m in markets_list:
                         # CRITICAL FIX: Filter out expired markets before adding to raw_markets
                         # This prevents markets expired hours ago from being logged and processed
+                        # NOTE: For 15m crypto contracts, end_date may be incorrect. Use loose filter
+                        # to avoid incorrectly rejecting valid markets. The -5.0 minute buffer is safe
+                        # because even if end_date is wrong (e.g., 6 hours ahead), minutes_to_expiry
+                        # would be positive, not negative, so valid markets won't be filtered out.
                         if m.end_date:
                             minutes_to_expiry = (m.end_date - now_utc).total_seconds() / 60.0
                             if minutes_to_expiry < -5.0:  # Allow slight buffer, but reject truly old markets
@@ -1993,17 +1997,18 @@ class KalshiMarketCatalog:
         
         # DEBUG: Log raw_data keys for 15m crypto markets to understand status field
         if timeframe == "15m" and asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-            logger.debug("[RAW-DATA-DEBUG] market_id=%s raw_data_keys=%s api_status=%s close_ts=%s close_time_utc=%s", mkt.market_id, list(raw_data.keys())[:20], api_status, close_ts, close_time_utc)
+            logger.info("[RAW-DATA-DEBUG] market_id=%s raw_data_keys=%s api_status=%s close_ts=%s close_time_utc=%s", mkt.market_id, list(raw_data.keys())[:30], api_status, close_ts, close_time_utc)
         
         if timeframe == "15m" and asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
             # CRITICAL REFACTOR: Use Kalshi's close_ts as primary source of truth
-            # Priority: close_ts (from API) > expected_expiration_time > expiration_time > end_date > close_time > ticker inference
+            # Priority: close_ts (from API) > expected_expiration_time > expiration_time > close_time > end_date > ticker inference
             # This ensures we use Kalshi's ground truth epoch timestamp when available
+            # CRITICAL FIX: Pass close_time and end_date separately to let normalization function handle priority
             normalized = normalize_kalshi_contract(
                 ticker=mkt.market_id,
                 expiration_time=None,  # Not available in EventMarket
                 expected_expiration_time=None,  # Not available in EventMarket
-                end_date=close_time_utc or mkt.end_date,  # Prefer close_ts-derived time
+                end_date=mkt.end_date,  # Pass original end_date separately
                 close_time=close_time_utc or getattr(mkt, 'close_time', None),  # Prefer close_ts-derived time
                 now=now
             )
@@ -2027,14 +2032,32 @@ class KalshiMarketCatalog:
                     mkt.market_id, asset, normalized.status_reason
                 )
             
-            # Log normalization result for debugging
+            # Extract expiry source from status_reason for explicit logging
+            # Format: "Contract expires at 2026-07-11T10:15:00+00:00 (source: end_date)"
+            expiry_source = "unknown"
+            if "(source:" in normalized.status_reason:
+                expiry_source = normalized.status_reason.split("(source:")[-1].rstrip(")").strip()
+            
+            # CRITICAL ALERT: Alert if close_ts_used=False on 15m ticker patterns
+            # This indicates the contract is using end_date instead of the authoritative close_ts
+            if close_ts is None and expiry_source == "end_date":
+                logger.error(
+                    "[CATALOG-15M-ALERT] ticker=%s asset=%s close_ts_used=False (source=%s). "
+                    "15m contract is using end_date instead of close_ts. This is a time-source normalization bug. "
+                    "Expected close_ts from Kalshi API for 15m contracts.",
+                    mkt.market_id, asset, expiry_source
+                )
+            
+            # Log normalization result with explicit source tracking
             logger.info(
-                "[CATALOG-NORMALIZE] ticker=%s asset=%s api_status=%s health_status=%s seconds_to_expiry=%.1f minutes_to_expiry=%.1f reason=%s close_ts_used=%s",
-                mkt.market_id, asset, api_status, normalized.status, normalized.seconds_to_expiry, normalized.minutes_to_expiry, normalized.status_reason, str(close_ts is not None)
+                "[CATALOG-NORMALIZE] ticker=%s asset=%s api_status=%s health_status=%s seconds_to_expiry=%.1f minutes_to_expiry=%.1f reason=%s source=%s close_ts_used=%s",
+                mkt.market_id, asset, api_status, normalized.status, normalized.seconds_to_expiry, normalized.minutes_to_expiry, normalized.status_reason, expiry_source, str(close_ts is not None)
             )
         else:
             # Non-15m or non-crypto: use original logic (legacy path)
             # TODO: Eventually migrate these to use normalization function as well
+            # NOTE: This path is NOT used for 15m crypto contracts (BTC/ETH/SOL/XRP/DOGE)
+            # which use the normalization function above with close_ts priority
             if mkt.end_date and mkt.end_date > now:
                 minutes_to_expiry = (mkt.end_date - now).total_seconds() / 60.0
                 health_status = "ok"
