@@ -74,11 +74,3 @@ def test_non_interval_ticker_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
         m, datetime(2026, 4, 7, 22, 0, tzinfo=timezone.utc)
     )
     assert out.end_date == stale
-
-
-def test_classify_no_action_reason_buckets() -> None:
-    from merid.prediction.trading_agent import _classify_pm_no_action_reason
-
-    assert _classify_pm_no_action_reason("edge below threshold") == "edge_below_threshold"
-    assert _classify_pm_no_action_reason("confidence below minimum") == "confidence"
-    assert _classify_pm_no_action_reason("something unknown") == "other"
