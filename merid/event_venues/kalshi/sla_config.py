@@ -155,15 +155,27 @@ def get_md_max_age_seconds(minutes_to_expiry: Optional[float] = None) -> float:
     Returns:
         Maximum age in seconds. If minutes_to_expiry is provided, returns
         stricter threshold for contracts near expiry.
+    
+    Timing-aware thresholds for 15m markets:
+    - Far from expiry (>10 min): 120s (base threshold)
+    - Near expiry (2-10 min): 60s (stricter)
+    - Very near expiry (<2 min): 10s (very strict - ensures fresh data for exits)
     """
-    base_threshold = MD_SLA.block_threshold_ms / 1000.0
+    base_threshold = MD_SLA.block_threshold_ms / 1000.0  # 120s
 
     # Timing-aware SLA: stricter threshold near expiry
     # MD needs to be fresher than spot since it's directly used for pricing
-    # RELAXED: Use base threshold (120s) for all cases to prevent false positives
-    # Timing-aware checks are too strict for real-world trading conditions
+    # CRITICAL FIX (2026-07-11): Enable timing-aware thresholds for exit safety
     if minutes_to_expiry is not None:
-        # DISABLED: Use base threshold regardless of expiry to allow trading
-        return base_threshold
+        if minutes_to_expiry < 2.0:
+            # Very near expiry: require very fresh data (10s)
+            return 10.0
+        elif minutes_to_expiry < 10.0:
+            # Near expiry: stricter threshold (60s)
+            return 60.0
+        else:
+            # Far from expiry: use base threshold (120s)
+            return base_threshold
     else:
+        # No expiry info: use base threshold
         return base_threshold

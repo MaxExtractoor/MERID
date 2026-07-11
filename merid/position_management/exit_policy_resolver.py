@@ -58,6 +58,8 @@ class ExitPolicyResolver:
         current_edge_pct: Optional[float] = None,
         volatility_regime: Optional[str] = None,
         candles: Optional[List] = None,
+        md_age_ms: Optional[int] = None,
+        max_age_ms: Optional[float] = None,
     ) -> ExitPolicy:
         """
         Resolve exit policy for a position.
@@ -69,6 +71,8 @@ class ExitPolicyResolver:
             current_edge_pct: Current edge percentage (optional)
             volatility_regime: Volatility regime (optional)
             candles: Recent candle data for pattern detection (optional)
+            md_age_ms: Current market data age in milliseconds (optional, for stale data check)
+            max_age_ms: Maximum allowed age in milliseconds (optional, for stale data check)
             
         Returns:
             ExitPolicy with action and reason
@@ -91,7 +95,7 @@ class ExitPolicyResolver:
         )
         
         # Evaluate policy
-        policy.evaluate(current_edge_pct, candles)
+        policy.evaluate(current_edge_pct, candles, md_age_ms, max_age_ms)
         
         logger.debug(
             "[EXIT-POLICY-RESOLVER] position=%s action=%s reason=%s R=%.2f",

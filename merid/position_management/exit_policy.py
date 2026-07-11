@@ -55,6 +55,8 @@ class ExitReason(str, Enum):
     RATCHET_FLOOR = "ratchet_floor"  # 2026 FIX: Exit when price drops below ratchet floor (80-85c profit protection)
     RATCHET_TRIM = "ratchet_trim"  # 2026-07-05: Partial close to trim position when >1 contract and price >80c
     DYNAMIC_TAKE_PROFIT = "dynamic_take_profit"  # 2026-07-06: Laddered exit based on entry price for consistent profits
+    STALE_DATA = "stale_data"  # 2026-07-11: Exit when market data becomes stale (P0 safety fix)
+    ADAPTIVE_TIMING = "adaptive_timing"  # 2026-07-11: Exit based on historical performance (distinct from generic time_stop)
 
 
 @dataclass
@@ -286,20 +288,49 @@ class ExitPolicy:
         """
         return self.risk_kill_switch
     
-    def evaluate(self, current_edge_pct: Optional[float] = None, candles: Optional[List] = None) -> None:
+    def evaluate_stale_data(self, md_age_ms: int, max_age_ms: float) -> bool:
+        """
+        Evaluate stale data exit condition (P0 safety fix).
+        
+        CRITICAL FIX (2026-07-11): Auto-exit positions when market data becomes stale.
+        This prevents holding exposure on untrustworthy data.
+        
+        Exit if:
+        - MD age exceeds maximum allowed age for current time-to-expiry
+        
+        Args:
+            md_age_ms: Current market data age in milliseconds
+            max_age_ms: Maximum allowed age in milliseconds (from timing-aware SLA)
+        
+        Returns:
+            True if stale data should trigger exit
+        """
+        if md_age_ms < 0:
+            # No data - consider as stale
+            return True
+        
+        if md_age_ms > max_age_ms:
+            # Data is stale - force exit
+            return True
+        
+        return False
+    
+    def evaluate(self, current_edge_pct: Optional[float] = None, candles: Optional[List] = None, md_age_ms: Optional[int] = None, max_age_ms: Optional[float] = None) -> None:
         """
         Evaluate all exit policies and set action/reason.
         
         CRITICAL FIX: 2026-07-06 - Documented exit precedence order
         CRITICAL FIX: 2026-07-06 - Removed LOSS_CAP (counter-productive, break-even handles it)
+        CRITICAL FIX: 2026-07-11 - Added stale data check (P0 safety fix)
         Priority order (highest to lowest):
         1. RISK (highest priority - kill switch)
-        2. EXTREME_PROFIT (99c YES / 1c NO - guaranteed win, mandatory exit)
-        3. RATCHET_FLOOR (profit protection - exit when price drops below ratchet floor)
-        4. CANDLE_REVERSAL (momentum reversal)
-        5. ADAPTIVE_TIMING (historical performance-based)
-        6. TIME_STOP
-        7. EDGE_DECAY
+        2. STALE_DATA (P0 - exit when MD becomes stale)
+        3. EXTREME_PROFIT (99c YES / 1c NO - guaranteed win, mandatory exit)
+        4. RATCHET_FLOOR (profit protection - exit when price drops below ratchet floor)
+        5. CANDLE_REVERSAL (momentum reversal)
+        6. ADAPTIVE_TIMING (historical performance-based)
+        7. TIME_STOP
+        8. EDGE_DECAY
         
         Note: EXTREME_PROFIT and RATCHET_FLOOR are handled in position_monitor/resolver, not here.
         This method handles the core exit policy evaluation.
@@ -308,12 +339,21 @@ class ExitPolicy:
         Args:
             current_edge_pct: Current edge percentage (optional, for edge decay check)
             candles: Recent candle data (optional, for candle reversal check)
+            md_age_ms: Current market data age in milliseconds (optional, for stale data check)
+            max_age_ms: Maximum allowed age in milliseconds (optional, for stale data check)
         """
         # Check risk layer first (highest priority)
         if self.evaluate_risk():
             self.action = ExitAction.EXIT_MARKET
             self.reason = ExitReason.RISK
             return
+        
+        # Check stale data (P0 safety fix - exit when MD becomes stale)
+        if md_age_ms is not None and max_age_ms is not None:
+            if self.evaluate_stale_data(md_age_ms, max_age_ms):
+                self.action = ExitAction.EXIT_MARKET
+                self.reason = ExitReason.STALE_DATA
+                return
         
         # Check candle reversal (momentum reversal signal)
         if self.evaluate_candle_reversal(candles):
@@ -322,10 +362,10 @@ class ExitPolicy:
             return
         
         # Check adaptive timing (historical performance-based)
-        # CRITICAL FIX: 2026-07-06 - Adaptive exit timing is integrated and functional
+        # CRITICAL FIX: 2026-07-11 - Use distinct ADAPTIVE_TIMING reason for better debuggability
         if self.evaluate_adaptive_timing():
             self.action = ExitAction.EXIT_MARKET
-            self.reason = ExitReason.TIME_STOP  # Reuse TIME_STOP for adaptive timing
+            self.reason = ExitReason.ADAPTIVE_TIMING  # Distinct from generic TIME_STOP
             return
         
         # Check time stop

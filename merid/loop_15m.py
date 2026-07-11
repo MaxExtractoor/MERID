@@ -2166,7 +2166,9 @@ class Kalshi15mLoop:
                                 md_age = time.monotonic() - state.last_book_update_ts
                                 # Uses SLA threshold from sla_config for timing-aware MD freshness check
                                 from merid.event_venues.kalshi.sla_config import get_md_max_age_seconds
-                                max_age_seconds = get_md_max_age_seconds(None)  # Use base threshold
+                                # CRITICAL FIX (2026-07-11): Use timing-aware threshold for catalog window check
+                                minutes_to_expiry = min_to_expiry if min_to_expiry is not None else None
+                                max_age_seconds = get_md_max_age_seconds(minutes_to_expiry)
                                 md_stale = md_age > max_age_seconds
                                 
                                 # DIAGNOSTIC: Log impossible ages to identify timebase mismatch

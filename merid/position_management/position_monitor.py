@@ -116,9 +116,16 @@ class PositionMonitor:
             notional_usd = (position.size * position.avg_entry_price_cents) / 100.0
             
             # Release exposure using risk envelope (which has window tracking)
-            from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
-            envelope = get_kalshi_crypto_15m_risk_envelope()
-            envelope.record_position_closure(position.market_id, notional_usd)
+            try:
+                from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+                envelope = get_kalshi_crypto_15m_risk_envelope()
+                envelope.record_position_closure(position.market_id, notional_usd)
+            except RuntimeError as e:
+                # Bankroll not ready - log warning but don't crash
+                logger.warning(
+                    "[POSITION-MONITOR] Failed to release window exposure: %s (bankroll service unavailable)",
+                    e
+                )
             
             logger.info(
                 "[POSITION-MONITOR] Released window capacity: market=%s notional=$%.2f exit_reason=%s",
@@ -657,6 +664,29 @@ class PositionMonitor:
             self._emit_exit_intent(position, ExitReason.TRAIL, current_price_cents)
             return
         
+        # CRITICAL FIX (2026-07-11): Emergency flatten in last 60 seconds
+        # Force full exit regardless of other conditions to ensure position doesn't expire
+        # Get time to expiry from market state
+        time_to_expiry_seconds = 900.0  # Default 15 minutes
+        try:
+            from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+            store = get_kalshi_market_state_store()
+            state = store.get(position.market_id)
+            if state and state.seconds_to_expiry:
+                time_to_expiry_seconds = state.seconds_to_expiry
+        except Exception as e:
+            logger.debug("[POSITION-MONITOR] Could not get time to expiry for emergency flatten: %s", e)
+        
+        # Emergency flatten: force exit in last 60 seconds
+        if time_to_expiry_seconds <= 60.0:
+            logger.warning(
+                "[POSITION-MONITOR] EMERGENCY FLATTEN: position=%s time_to_expiry=%.1fs - forcing full exit",
+                position.position_id[:8],
+                time_to_expiry_seconds
+            )
+            self._emit_exit_intent(position, ExitReason.TIME_STOP, current_price_cents)  # Full exit
+            return  # Exit immediately, don't check other conditions
+        
         # CRITICAL FIX: 2026-07-07 - Staged time-based exits
         # Re-implemented from position_cache with proper callback routing
         # This ensures proper agent_id, swing mode logic, and exit intent callback error handling
@@ -779,6 +809,36 @@ class PositionMonitor:
         except Exception as e:
             logger.debug("[POSITION-MONITOR] Could not get candles for pattern detection: %s", e)
         
+        # CRITICAL FIX (2026-07-11): Get MD age for stale data check
+        md_age_ms = None
+        max_age_ms = None
+        try:
+            from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+            from merid.event_venues.kalshi.sla_config import get_md_max_age_seconds
+            
+            store = get_kalshi_market_state_store()
+            state = store.get(position.market_id)
+            
+            if state and hasattr(state, 'last_update_ts'):
+                # Calculate MD age in milliseconds
+                import time
+                md_age_ms = int((time.time() - state.last_update_ts) * 1000)
+                
+                # Get timing-aware max age based on time to expiry
+                minutes_to_expiry = time_to_expiry / 60.0 if time_to_expiry else None
+                max_age_seconds = get_md_max_age_seconds(minutes_to_expiry)
+                max_age_ms = max_age_seconds * 1000
+                
+                logger.debug(
+                    "[POSITION-MONITOR] MD staleness check: position=%s age_ms=%d max_age_ms=%d minutes_to_expiry=%.1f",
+                    position.position_id[:8],
+                    md_age_ms,
+                    max_age_ms,
+                    minutes_to_expiry or 0
+                )
+        except Exception as e:
+            logger.debug("[POSITION-MONITOR] Could not get MD age for stale data check: %s", e)
+        
         # Resolve exit policy
         policy = resolver.resolve(
             position=position,
@@ -786,6 +846,8 @@ class PositionMonitor:
             time_to_expiry_seconds=time_to_expiry,
             volatility_regime=None,  # TODO: add volatility regime
             candles=candles,
+            md_age_ms=md_age_ms,
+            max_age_ms=max_age_ms,
         )
         
         if policy.action == ExitAction.EXIT_MARKET:
