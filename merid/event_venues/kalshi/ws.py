@@ -186,6 +186,10 @@ class KalshiWebSocket(EventVenueStream):
         # so reconnect can replay each via the correct subscribe call.
         self._event_ticker_subscriptions: set = set()   # values passed as event_ticker=
         self._ticker_subscriptions: set = set()          # values passed as market_tickers=
+        
+        # P1 FIX: Track subscription IDs (sid) for update_subscription commands
+        # Maps channel type to subscription ID returned by Kalshi
+        self._subscription_ids: Dict[str, int] = {}  # channel -> sid
 
         # ── Callback handling with PHASE 1 safety ───────────────────────────
         # PHASE 1 FIX: Initialize with safe no-op async callback to prevent NoneType errors
@@ -866,6 +870,42 @@ class KalshiWebSocket(EventVenueStream):
         await self._ws.send(json.dumps(message))
         logger.info("[WS-LIST-SUBS] list_subscriptions command sent")
 
+    async def request_orderbook_snapshot(self, market_ticker: str) -> None:
+        """Request orderbook snapshot via WebSocket update_subscription get_snapshot.
+
+        This uses Kalshi's WebSocket API to fetch a fresh snapshot without modifying
+        the subscription, maintaining single ingestion path through the bridge queue.
+
+        Args:
+            market_ticker: Market ticker to request snapshot for
+        """
+        if not self._ws:
+            logger.warning("[WS-GET-SNAPSHOT] WebSocket not connected - skipping")
+            return
+
+        # Get the subscription ID for orderbook_delta channel
+        sid = self._subscription_ids.get("orderbook_delta")
+        
+        if sid is None:
+            logger.warning("[WS-GET-SNAPSHOT] No subscription ID tracked for orderbook_delta - falling back to REST")
+            # Fallback to REST if we don't have the sid tracked
+            await self._sync_sequence_gap_with_rest(market_ticker, 0, 0)
+            return
+
+        message = {
+            "id": self._next_sub_id(),
+            "cmd": "update_subscription",
+            "params": {
+                "sid": sid,
+                "market_tickers": [market_ticker],
+                "action": "get_snapshot"
+            }
+        }
+
+        logger.info("[WS-GET-SNAPSHOT] Requesting snapshot for %s via WebSocket (sid=%s)", market_ticker, sid)
+        await self._ws.send(json.dumps(message))
+        logger.info("[WS-GET-SNAPSHOT] Snapshot request sent for %s", market_ticker)
+
     def get_diagnostic_counters(self) -> Dict[str, int]:
         """Get diagnostic counters for health monitoring.
 
@@ -1276,6 +1316,15 @@ class KalshiWebSocket(EventVenueStream):
                     # CRITICAL DIAGNOSTIC: Log subscription confirmations
                     if msg_type in ("subscribed", "ok", "error"):
                         logger.info("[WS-SUB-CONFIRM] type=%s id=%s msg=%s", msg_type, data.get("id"), data.get("msg", {}))
+                        
+                        # P1 FIX: Capture subscription ID (sid) for update_subscription commands
+                        if msg_type == "subscribed":
+                            msg_data = data.get("msg", {})
+                            channel = msg_data.get("channel")
+                            sid = data.get("sid")
+                            if channel and sid:
+                                self._subscription_ids[channel] = sid
+                                logger.info("[WS-SUB-ID-TRACK] channel=%s sid=%s", channel, sid)
 
                     # TARGETED DEBUG: Log orderbook_delta messages with reduced frequency (every 50th message)
                     if data.get("type") == "orderbook_delta":
@@ -1919,76 +1968,27 @@ class KalshiWebSocket(EventVenueStream):
         return True
 
     async def _sync_sequence_gap_with_rest(self, market_id: str, expected_seq: int, actual_seq: int) -> None:
-        """SEV-0 FIX: Sync sequence gaps with REST snapshot recovery.
+        """SEV-0 FIX: Sync sequence gaps with WebSocket snapshot recovery.
         
-        When a sequence gap is detected, fetch a fresh REST snapshot to restore
-        data consistency and mark the ticker as rebuilding until sync completes.
+        When a sequence gap is detected, request a fresh snapshot via WebSocket
+        update_subscription get_snapshot to restore data consistency.
+        
+        This maintains single ingestion path through the bridge queue, avoiding
+        the previous REST bypass that violated the invariant.
         """
         try:
-            logger.info(f"[WS-SYNC] Starting REST sync for {market_id} gap {expected_seq}->{actual_seq}")
+            logger.info(f"[WS-SYNC] Starting WebSocket snapshot sync for {market_id} gap {expected_seq}->{actual_seq}")
             
             # Mark ticker as rebuilding to prevent trading during sync
             self._ob_initialised.discard(market_id)
             
-            # Fetch fresh REST snapshot
-            from merid.event_venues.kalshi.client import get_kalshi_client
-            client = get_kalshi_client()
+            # Request snapshot via WebSocket API (single ingestion path)
+            await self.request_orderbook_snapshot(market_id)
             
-            result = await asyncio.wait_for(
-                client._request_with_resilience(
-                    "GET", f"/markets/{market_id}/orderbook",
-                    operation_name=f"sync_gap({market_id})"
-                ),
-                timeout=5.0
-            )
-            
-            if result.success and result.data:
-                # Apply fresh snapshot to market state store
-                from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
-                store = get_kalshi_market_state_store()
-                
-                # Parse REST response
-                data = result.data
-                no_levels = []
-                yes_levels = []
-                orderbook_fp = data.get("orderbook_fp", {})
-                if "no_dollars" in orderbook_fp:
-                    no_levels = [[float(price), float(size)] for price, size in orderbook_fp["no_dollars"]]
-                if "yes_dollars" in orderbook_fp:
-                    yes_levels = [[float(price), float(size)] for price, size in orderbook_fp["yes_dollars"]]
-
-                # Create snapshot message
-                snapshot_msg = {
-                    "ticker": market_id,
-                    "type": "orderbook_snapshot",
-                    "no": no_levels,
-                    "yes": yes_levels,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                }
-                
-                # P0 DEBUG: Log REST sync for sequence gap recovery
-                logger.info("[REST-SYNC] ticker=%s source=sequence_gap_recovery", market_id)
-                # P0 FIX: Removed direct apply_orderbook_message call - this bypasses bridge queue
-                # REST sync should go through bridge queue like all other WS data for single ingestion path
-                # TODO: Convert to WsEvent and enqueue to bridge queue instead
-                # For now, apply directly with explicit provenance for tracking
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, store.apply_orderbook_message, snapshot_msg, "rest_sync")
-                
-                logger.info(f"[WS-SYNC] REST sync completed for {market_id}, book restored")
-                
-                # Verify book state after sync
-                state = store.get(market_id)
-                if state and state.book_initialized:
-                    logger.info(f"[WS-SYNC] Book verified for {market_id}: bid={state.best_bid_cents}, ask={state.best_ask_cents}")
-                else:
-                    logger.warning(f"[WS-SYNC] Book still uninitialized for {market_id} after REST sync")
-                    
-            else:
-                logger.error(f"[WS-SYNC] REST sync failed for {market_id}: {result}")
+            logger.info(f"[WS-SYNC] WebSocket snapshot request sent for {market_id}")
                 
         except Exception as e:
-            logger.error(f"[WS-SYNC] Exception during REST sync for {market_id}: {type(e).__name__}: {e}")
+            logger.error(f"[WS-SYNC] Exception during WebSocket snapshot sync for {market_id}: {type(e).__name__}: {e}")
     
     def _get_event_loop_lag_ms(self) -> float:
         """Get current event-loop lag from the lag monitor.

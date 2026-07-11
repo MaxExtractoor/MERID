@@ -1201,7 +1201,7 @@ class UnifiedEdgeComputer:
         Returns:
             Buffer in probability space (0.0 to 1.0)
         """
-        # P1: Load calibration config if available
+        # P2 FIX: Load calibration config if available with improved logging
         calibration_config = self._load_calibration_config()
         
         # Conservative defaults (will be overridden by calibration once data is available)
@@ -1218,14 +1218,18 @@ class UnifiedEdgeComputer:
             # This is a rough conversion - actual relationship depends on volatility
             calibrated_lag_buffer_seconds = asset_metrics.get("recommended_latency_buffer", 0)
             lag_buffer_prob = min(0.05, calibrated_lag_buffer_seconds * 0.005)  # Cap at 5%
-            logger.debug(
+            logger.info(
                 "[LATENCY-BUFFER] Using calibrated buffer for %s: %.3fs -> %.3f prob",
                 asset, calibrated_lag_buffer_seconds, lag_buffer_prob
             )
         else:
-            # Use default tick-based buffer
+            # Use default tick-based buffer with warning
             lag_buffer_prob = DEFAULT_LAG_BUFFER_TICKS * 0.01
-            logger.debug("[LATENCY-BUFFER] Using default buffer for %s", asset)
+            logger.warning(
+                "[LATENCY-BUFFER] No calibration data for %s - using default buffer (%.3f prob). "
+                "Consider running latency calibration to improve execution accuracy.",
+                asset, lag_buffer_prob
+            )
         
         # Get spread from orderbook
         spread_cents = 0
