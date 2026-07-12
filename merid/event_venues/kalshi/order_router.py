@@ -106,8 +106,11 @@ _resting_orders_lock = threading.Lock()
 # Key: (ticker, side, action, price_cents) -> timestamp of last order
 _duplicate_order_tracker: Dict[tuple, float] = {}
 _duplicate_order_lock = threading.Lock()
-# Time window in seconds to consider an order a duplicate (default: 60 seconds)
-_DUPLICATE_ORDER_WINDOW_SECONDS = 60
+# Time window in seconds to consider an order a duplicate
+# CRITICAL FIX (2026-07-12): Reduced from 60s to 5s to match 15m crypto agent cadence
+# The 60s window was blocking legitimate re-submissions, causing 65% rejection rate
+# order_gate.py handles sophisticated duplicate detection with 5s buckets for 15m agents
+_DUPLICATE_ORDER_WINDOW_SECONDS = 5
 
 
 # =============================================================================
@@ -2847,7 +2850,7 @@ def _determine_dynamic_order_type(intent: OrderIntent, state: Optional[Any]) -> 
     SWEET SPOT LOGIC:
     - If current price is in optimal range (40-55c): use market order for immediate fill
     - If current price is below optimal range (<40c): place limit order at 40-45c sweet spot
-    - If current price is above optimal range (>55c): skip (blocked by MAX_OPEN_PRICE_CENTS=55)
+    - If current price is above optimal range (>55c): skip (blocked by MAX_OPEN_PRICE_CENTS=75)
     
     Args:
         intent: Order intent with current order_type and time_in_force

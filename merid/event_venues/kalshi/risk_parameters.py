@@ -23,7 +23,7 @@ from typing import Final
 
 MIN_KALSHI_PRICE_CENTS: Final[int] = 1
 MAX_KALSHI_PRICE_CENTS: Final[int] = 99
-DEFAULT_KALSHI_PRICE_CENTS: Final[int] = 25  # 2026-07-09: Changed from 50 to 25 (midpoint of 10-50c sweet spot)
+DEFAULT_KALSHI_PRICE_CENTS: Final[int] = 42  # 2026-07-12: Changed to 42 (midpoint of 10-75c range)
 DEEP_OTM_CHEAP_CENTS: Final[int] = 10  # 2026-07-12: Lower bound (10c) maintained for low-profit trap prevention
 DEEP_OTM_EXPENSIVE_CENTS: Final[int] = 75  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
 # Rationale: 10-75c range matches actual market conditions and dynamic_take_profit zones (25-70c)
@@ -36,8 +36,8 @@ MID_BAND_HIGH_CENTS: Final[int] = 80
 
 # Minimum price for opening orders (anti-dust)
 MIN_OPEN_PRICE_CENTS: Final[int] = 2
-MAX_OPEN_PRICE_CENTS: Final[int] = 50  # 2026-07-08: Upper bound of sweet spot (10-50c)
-# Rationale: Sweet spot for optimal sizing is 10c-50c (cheaper entries = easier loss recovery)
+MAX_OPEN_PRICE_CENTS: Final[int] = 75  # 2026-07-12: Expanded to 75c for current market conditions
+# Rationale: Sweet spot for optimal sizing is 10c-75c (cheaper entries = easier loss recovery)
 # Fixed $1 exposure cap applies regardless of price
 
 # ============================================================================

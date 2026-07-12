@@ -76,7 +76,7 @@ class TestCoarseFilter:
     
     def test_price_range_gate(self):
         """Test dynamic price range gate."""
-        # Valid candidate (within canonical range 10-50c)
+        # Valid candidate (within canonical range 10-75c)
         candidate = MarketCandidate(
             ticker="BTC-15m-UP",
             price_cents=30,
@@ -95,7 +95,7 @@ class TestCoarseFilter:
         assert self.filter._price_range_gate(candidate) is False
         
         # Invalid candidate (above range)
-        candidate.price_cents = 60
+        candidate.price_cents = 80
         assert self.filter._price_range_gate(candidate) is False
     
     def test_spread_gate(self):

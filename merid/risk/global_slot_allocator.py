@@ -86,7 +86,7 @@ class GlobalSlotAllocator:
     # Hard limits
     MAX_EXPOSURE_USD = 1.00
     MIN_ENTRY_CENTS = 10
-    MAX_ENTRY_CENTS = 50
+    MAX_ENTRY_CENTS = 75  # 2026-07-12: Expanded from 50c to 75c for current market conditions
     MAX_CONTRACTS_PER_ORDER = 1
     
     def __init__(self):
