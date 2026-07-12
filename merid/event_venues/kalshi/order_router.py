@@ -42,7 +42,6 @@ from typing import Any, Dict, List, Optional
 
 from merid.prediction.venue_gate import get_venue_gate
 from merid.prediction.trading_mode import TradingMode
-from trading.trade_mode import get_trade_mode
 from utils.logger import get_logger
 from merid.event_venues.kalshi.rate_limiter import get_rate_limiter
 
@@ -747,9 +746,9 @@ def resolve_window_policy(
     target_spot_band_pct = 0.06
     deep_otm_allowed = False
     
-    # TTE window (from ASSET_PROFILE)
-    min_tte_secs = 150  # 2.5 min
-    max_tte_secs = 720  # 12 min
+    # TTE window (from ASSET_PROFILE) - aligned with full 15-minute window trading
+    min_tte_secs = 30   # 0.5 min (block last 30 seconds only)
+    max_tte_secs = 900  # 15 min (full 15-minute window)
     
     if regime == "conservative":
         min_tte_secs = 240  # 4 min
@@ -1569,14 +1568,22 @@ class OrderResult:
 # ── Paper fill simulation ─────────────────────────────────────────────────
 
 def _resolve_mode(override: Optional[TradingMode]) -> TradingMode:
-    """Resolve mode from explicit override or canonical process-wide mode."""
+    """Resolve mode from explicit override or canonical process-wide mode.
+    
+    CRITICAL FIX (2026-07-15): Use VenueGate as the canonical source of truth for
+    trading mode in the Kalshi venue stack. Previously, this function attempted to
+    convert between two incompatible TradingMode enums (merid.prediction.trading_mode
+    vs trading.trade_mode), which could cause orders to be routed to paper fill
+    simulation instead of live execution.
+    
+    VenueGate is the single source of truth for Kalshi venue mode and properly
+    enforces the live trading safety interlocks (MERID_PM_TRADING_MODE,
+    MERID_PM_LIVE_ENABLED, MERID_ALLOW_LIVE_TRADES).
+    """
     if override is not None:
         return override
-    try:
-        return TradingMode(get_trade_mode().value)
-    except Exception as _e:
-        logger.debug("_resolve_mode: get_trade_mode failed, falling back to venue_gate: %s", _e)
-        return get_venue_gate().mode
+    # Use VenueGate as the canonical source of truth for Kalshi venue mode
+    return get_venue_gate().mode
 
 
 def _mode_value(mode: TradingMode) -> str:
@@ -2021,8 +2028,10 @@ def _log_price_band_config() -> None:
         _price_band_min_edge, _price_band_min_edge * 100, _price_band_min_confidence
     )
 
-# Log configuration at module load
-_log_price_band_config()
+# 2026-07-15: REMOVED _log_price_band_config() call at module load
+# Price band validation (48-52c) was removed from production on 2026-06-29
+# This logging function is no longer needed and was causing confusion
+# _log_price_band_config()
 
 
 def _validate_price_band(intent: OrderIntent) -> Optional[str]:
@@ -7575,27 +7584,17 @@ async def route_batch_orders_async(
                 latency_ms=0.0,
             ))
         else:
-            # Price band validation (reject 48-52c without exceptional edge)
-            price_error = _validate_price_band(intent)
-            if price_error:
+            # Signal metadata validation (require edge, confidence, model_prob for opening orders)
+            signal_error = _validate_signal_metadata(intent)
+            if signal_error:
                 pre_validated_results.append(OrderResult(
                     status="rejected",
                     mode=_resolve_mode(intent.mode),
-                    reason=f"price_band:{price_error}",
+                    reason=f"signal_validation:{signal_error}",
                     latency_ms=0.0,
                 ))
             else:
-                # Signal metadata validation (require edge, confidence, model_prob for opening orders)
-                signal_error = _validate_signal_metadata(intent)
-                if signal_error:
-                    pre_validated_results.append(OrderResult(
-                        status="rejected",
-                        mode=_resolve_mode(intent.mode),
-                        reason=f"signal_validation:{signal_error}",
-                        latency_ms=0.0,
-                    ))
-                else:
-                    valid_orders.append(intent)
+                valid_orders.append(intent)
 
     # Route valid orders with concurrency limit
     semaphore = asyncio.Semaphore(max_concurrent)

@@ -3682,10 +3682,13 @@ class KalshiFillsLedger:
 
         # Determine if this is a LIVE trade (real money)
         # This is critical for bankroll reconciliation
+        # CRITICAL FIX (2026-07-15): Use VenueGate as canonical source of truth for Kalshi venue mode
+        # Previously used trading.trade_mode which is a different enum than merid.prediction.trading_mode
         try:
-            from trading.trade_mode import get_trade_mode, TradeMode
-            current_mode = get_trade_mode()
-            is_live_trade = (current_mode == TradeMode.LIVE)
+            from merid.prediction.venue_gate import get_venue_gate
+            from merid.prediction.trading_mode import TradingMode
+            gate = get_venue_gate()
+            is_live_trade = (gate.mode == TradingMode.LIVE)
         except Exception:
             # Fallback: check env var directly
             is_live_trade = os.getenv("MERID_PM_TRADING_MODE", "").lower() == "live" and \
