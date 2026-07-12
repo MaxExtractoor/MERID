@@ -203,7 +203,7 @@ class DynamicThresholdManager:
     def _get_fallback_canonical(self) -> Dict:
         """Fallback canonical thresholds if profile not updated."""
         return {
-            "price_range": {"min_cents": 10, "max_cents": 50},
+            "price_range": {"min_cents": 10, "max_cents": 75},  # 2026-07-12: Expanded to 75c for market conditions
             "spread": {"max_cents": 30, "min_gate_cents": 30},
             "liquidity": {"min_volume_24h": 500, "min_depth_top_of_book": 100}
         }

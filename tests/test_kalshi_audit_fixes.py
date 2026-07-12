@@ -933,12 +933,12 @@ class TestProfile01Consistency:
         assert 'max_price_cents' in config['price_range'], (
             "price_range must have max_price_cents"
         )
-        # 2026-07-12: Canonical 10-50c range per commit c5ac4a18
+        # 2026-07-12: Canonical 10-75c range (expanded for market conditions)
         assert config['price_range']['min_price_cents'] == 10, (
             "price_range.min_price_cents must be 10c"
         )
-        assert config['price_range']['max_price_cents'] == 50, (
-            "price_range.max_price_cents must be 50c"
+        assert config['price_range']['max_price_cents'] == 75, (
+            "price_range.max_price_cents must be 75c (expanded for market conditions)"
         )
 
     def test_profile_has_universe_section(self):

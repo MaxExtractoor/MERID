@@ -211,12 +211,12 @@ class GlobalExecutionGuard:
             if price_cents <= 0 or price_cents >= 100:
                 return False, f"Invalid price_cents: {price_cents} (must be 1-99)"
             
-            # CRITICAL: Price range guard - enforce 10-50c range for Kalshi crypto 15m
-            # This aligns with profile YAML: price_range.min_price_cents = 10, price_range.max_price_cents = 50
-            # 2026-07-09: Changed from 50-70c to 10-50c to match profile sweet spot
-            # Prevents <10¢ lottery tickets and >50¢ low-profit trades
+            # CRITICAL: Price range guard - enforce 10-75c range for Kalshi crypto 15m
+            # This aligns with profile YAML: price_range.min_price_cents = 10, price_range.max_price_cents = 75
+            # 2026-07-12: Changed from 10-50c to 10-75c to match expanded market conditions
+            # Prevents <10¢ lottery tickets and >75¢ low-profit trades
             min_price_cents = 10  # 10 cents minimum (lower bound of sweet spot)
-            max_price_cents = 50  # 50 cents maximum (upper bound of sweet spot)
+            max_price_cents = 75  # 75 cents maximum (upper bound of expanded range)
             
             # Allow profile override for different strategies
             try:

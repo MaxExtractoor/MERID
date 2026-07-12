@@ -28,23 +28,23 @@ class TestEntryPriceBandFix:
         assert price_range["min_price_cents"] == 10, \
             f"Expected min_price_cents=10, got {price_range['min_price_cents']}"
         
-        # Check max_price_cents is 50 (aligned with DEEP_OTM_EXPENSIVE_CENTS)
+        # Check max_price_cents is 75 (expanded for market conditions)
         assert "max_price_cents" in price_range
-        assert price_range["max_price_cents"] == 50, \
-            f"Expected max_price_cents=50, got {price_range['max_price_cents']}"
+        assert price_range["max_price_cents"] == 75, \
+            f"Expected max_price_cents=75, got {price_range['max_price_cents']}"
     
     def test_price_range_wider_than_previous(self):
-        """Test that price_range is 10-50c (wider minimum, aligned maximum)."""
+        """Test that price_range is 10-75c (wider minimum, expanded maximum)."""
         with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
             profile = yaml.safe_load(f)
         
         price_range = profile["price_range"]
         
-        # Range should be 10-50c (aligned with DEEP_OTM_EXPENSIVE_CENTS)
+        # Range should be 10-75c (expanded for market conditions)
         assert price_range["min_price_cents"] == 10, \
             f"min_price_cents should be 10, got {price_range['min_price_cents']}"
-        assert price_range["max_price_cents"] == 50, \
-            f"max_price_cents should be 50, got {price_range['max_price_cents']}"
+        assert price_range["max_price_cents"] == 75, \
+            f"max_price_cents should be 75, got {price_range['max_price_cents']}"
     
     def test_price_range_allows_current_market_conditions(self):
         """Test that price_range allows NO-side entries (10-50c)."""
@@ -58,21 +58,21 @@ class TestEntryPriceBandFix:
         # when markets are in high-probability states (NO contracts priced 10-50c)
         assert price_range["min_price_cents"] == 10, \
             f"min_price_cents should be 10, got {price_range['min_price_cents']}"
-        assert price_range["max_price_cents"] == 50, \
-            f"max_price_cents should be 50, got {price_range['max_price_cents']}"
+        assert price_range["max_price_cents"] == 75, \
+            f"max_price_cents should be 75, got {price_range['max_price_cents']}"
     
     def test_price_range_description_mentions_momentum(self):
-        """Test that price_range description mentions momentum-based trading."""
+        """Test that price_range description mentions market conditions."""
         with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
             profile = yaml.safe_load(f)
         
         price_range = profile["price_range"]
         
-        # Check description mentions momentum
+        # Check description mentions market conditions (updated from momentum to market conditions)
         assert "description" in price_range
         description = price_range["description"].lower()
-        assert "momentum" in description, \
-            f"Description should mention momentum, got: {price_range['description']}"
+        assert "market" in description or "conditions" in description, \
+            f"Description should mention market conditions, got: {price_range['description']}"
     
     def test_agent_grid_uses_profile_price_range(self):
         """Test that agent_grid_15m.py loads price_range from profile."""

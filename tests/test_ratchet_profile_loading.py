@@ -108,12 +108,12 @@ class TestRatchetProfileLoading:
             assert hasattr(profile.price_range, "max_price_cents")
             assert hasattr(profile.price_range, "description")
             
-            # Verify values match YAML (10-50c for momentum-based trading)
-            # 2026-07-09: Updated max from 70c to 50c to align with profile price_range.max_price_cents
+            # Verify values match YAML (10-75c for momentum-based trading)
+            # 2026-07-12: Updated max from 50c to 75c to align with expanded market conditions
             assert profile.price_range.min_price_cents == 10, \
                 f"Expected min_price_cents=10, got {profile.price_range.min_price_cents}"
-            assert profile.price_range.max_price_cents == 50, \
-                f"Expected max_price_cents=50, got {profile.price_range.max_price_cents}"
+            assert profile.price_range.max_price_cents == 75, \
+                f"Expected max_price_cents=75, got {profile.price_range.max_price_cents}"
             
             # Verify description is present
             assert profile.price_range.description is not None
@@ -138,10 +138,10 @@ class TestRatchetProfileLoading:
         assert "max_price_cents" in price_range_config
         assert "description" in price_range_config
         
-        # Verify values match expected (10-50c for momentum-based trading)
-        # 2026-07-09: Updated max from 70c to 50c to align with profile price_range.max_price_cents
+        # Verify values match expected (10-75c for momentum-based trading)
+        # 2026-07-12: Updated max from 50c to 75c to align with expanded market conditions
         assert price_range_config["min_price_cents"] == 10
-        assert price_range_config["max_price_cents"] == 50
+        assert price_range_config["max_price_cents"] == 75
 
 
 if __name__ == "__main__":

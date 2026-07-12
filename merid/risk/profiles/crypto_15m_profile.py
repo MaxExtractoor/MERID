@@ -978,11 +978,11 @@ class Crypto15mProfileAdapter:
                 price_based_sell_threshold=raw.get('price_based', {}).get('sell_threshold', 0.90),
                 
                 # Price range configuration for entry band restrictions
-                # CRITICAL FIX: max_price_cents default 50 to match guardrails_max_contract_price_cents (50c sweet spot threshold)
-                # 2026-07-09: Fixed max from 75c to 50c to match profile price_range.max_price_cents
+                # CRITICAL FIX: max_price_cents default 75 to match guardrails_max_contract_price_cents (75c expanded range)
+                # 2026-07-12: Fixed max from 50c to 75c to match profile price_range.max_price_cents (expanded for market conditions)
                 price_range=PriceRange(
                     min_price_cents=raw.get('price_range', {}).get('min_price_cents', 10),
-                    max_price_cents=raw.get('price_range', {}).get('max_price_cents', 50),  # CRITICAL FIX: Default 50c to match guardrails (was 75)
+                    max_price_cents=raw.get('price_range', {}).get('max_price_cents', 75),  # CRITICAL FIX: Default 75c to match guardrails (was 50)
                     description=raw.get('price_range', {}).get('description', 'Valid price range in cents for order execution')
                 ),
                 
@@ -1507,7 +1507,7 @@ class Crypto15mProfileAdapter:
         return CanonicalConfig(
             price_range=PriceRangeConfig(
                 min_cents=price_range_raw.get('min_cents', 10),
-                max_cents=price_range_raw.get('max_cents', 50)
+                max_cents=price_range_raw.get('max_cents', 75)  # 2026-07-12: Expanded to 75c for market conditions
             ),
             spread=SpreadConfig(
                 max_cents=spread_raw.get('max_cents', 30),
