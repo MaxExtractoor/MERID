@@ -4598,36 +4598,20 @@ class LeanAgent15m:
 
         # Minimum edge threshold (per-asset aligned with risk_parameters.py market entry thresholds)
 
-        # 2026-07-10: Aligned with EDGE_MARKET_ENTRY thresholds to prevent filtering valid candidates
-
-        per_asset_min_edge_threshold = {
-
-            "BTC": 1.75,   # EDGE_MARKET_ENTRY_BTC
-
-            "ETH": 2.0,    # EDGE_MARKET_ENTRY_ETH
-
-            "SOL": 2.5,    # EDGE_MARKET_ENTRY_SOL
-
-            "XRP": 3.0,    # EDGE_MARKET_ENTRY_XRP
-
-            "DOGE": 3.5,   # EDGE_MARKET_ENTRY_DOGE
-
-        }
-
-        min_edge_threshold_pct = per_asset_min_edge_threshold.get(asset, 2.0)
-
+        # 2026-07-12: Use centralized edge validation from risk_parameters.py
+        # All edge values now in FRACTION units (0.0-1.0) for consistency
+        from merid.event_venues.kalshi.risk_parameters import validate_edge
         
-
-        if selected_edge < min_edge_threshold_pct:
-
+        # Convert selected_edge from PERCENT to FRACTION for validation
+        selected_edge_fraction = selected_edge / 100.0 if selected_edge > 1.0 else selected_edge
+        
+        is_valid, reason = validate_edge(selected_edge_fraction, asset, confidence)
+        
+        if not is_valid:
             logger.info(
-
-                "[MOMENTUM-FVG-EDGE-THRESHOLD] asset=%s selected_edge=%.2f%% < per_asset_threshold=%.2f%% -> NO TRADE",
-
-                asset, selected_edge, min_edge_threshold_pct
-
+                "[MOMENTUM-FVG-EDGE-THRESHOLD] asset=%s selected_edge=%.6f (%.2f%%) - %s -> NO TRADE",
+                asset, selected_edge_fraction, selected_edge, reason
             )
-
             return None
 
         
@@ -11786,9 +11770,7 @@ class LeanAgent15m:
 
                 "minutes_to_expiry": minutes_to_expiry,
 
-                "edge": signal.get("edge_pct", 0.0),  # CRITICAL: Use "edge" field for loop_15m validation
-
-                "edge_pct": signal.get("edge_pct", 0.0),  # BUG #36 FIX: Carry edge from signal
+                "edge_pct": signal.get("edge_pct", 0.0),  # CRITICAL: Single source of truth for edge (FRACTION units)
 
                 "confidence": signal.get("confidence", 0.5),  # BUG #36 FIX: Carry confidence from signal
 

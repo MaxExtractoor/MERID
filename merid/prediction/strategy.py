@@ -475,8 +475,8 @@ class KalshiStrategy:
             from merid.event_venues.kalshi.position_sizer import get_position_sizer
             sizer = get_position_sizer()
 
-            # Convert edge fields to sizer inputs
-            edge_pct = float(edge.net_edge) * 100.0  # fraction → percent
+            # Convert edge fields to sizer inputs (keep in FRACTION units - single source of truth)
+            edge_pct = float(edge.net_edge)  # FRACTION units (0.0-1.0)
             market_prob = float(edge.market_prob)
             
             # FIX: Fetch actual contract price from market state instead of using probability-derived price
