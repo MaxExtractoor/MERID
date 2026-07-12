@@ -765,8 +765,8 @@ class MarketFilterConfig:
     min_open_interest: int = 10
 
     # Maximum bid-ask spread in cents (e.g. 8 = max 8c spread)
-    # 2026-07-11: Canonical spread filter (75c) - aligned with historical requirement
-    max_spread_cents: int = 75
+    # 2026-07-11: Use dynamic threshold manager for regime-aware spread thresholds
+    max_spread_cents: int = 75  # Fallback, will be overridden by dynamic thresholds
 
     # Minimum best-bid price (filter out near-zero contracts)
     # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator

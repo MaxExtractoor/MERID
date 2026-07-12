@@ -104,8 +104,15 @@ class LegacyEdgeBackend(EdgeComputer):
             # Spread guard check
             spread_cents = int(state.spread_cents) if state and hasattr(state, "spread_cents") else 0
 
-            # Simple spread guard (max 75 cents spread)
-            max_spread_cents = 75  # 2026-07-11: Canonical spread filter (75c) - aligned with historical requirement
+            # 2026-07-11: Use dynamic threshold manager for regime-aware spread thresholds
+            max_spread_cents = 75  # Fallback
+            try:
+                from merid.event_venues.kalshi.dynamic_thresholds import get_dynamic_threshold_manager
+                threshold_manager = get_dynamic_threshold_manager()
+                max_spread_cents = threshold_manager.get_max_spread_cents()
+            except Exception as e:
+                logger.debug("[LEGACY-EDGE] Failed to load dynamic spread threshold: %s, using fallback 75c", e)
+            
             if spread_cents > max_spread_cents:
                 logger.info(
                     "[LEGACY-EDGE] %s asset=%s ticker=%s spread=%d cents > %d cents - blocking entry",

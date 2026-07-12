@@ -149,14 +149,15 @@ class IndicatorConfig:
     vol_high_threshold: float = 1.20   # above = chaos, stay out
 
     # ── Liquidity filter ──────────────────────────────────────────────
-    max_spread_cents: int = 8          # wider → skip
+    # 2026-07-11: Use dynamic threshold manager for regime-aware spread thresholds
+    max_spread_cents: int = 8          # wider → skip (fallback, will be overridden by dynamic thresholds)
     min_depth_at_price: int = 3        # fewer contracts → skip
 
     # ── Price buffer ──────────────────────────────────────────────────
     max_bars: int = 250                # keep ~4 hours of 1m bars (increased from 120 to support EMA(200))
-    min_bars_required: int = 52        # Need sufficient history for EMA/MACD calculations
+    min_bars_required: int = 20        # CRITICAL FIX: Reduced from 52 to 20 for 15-minute markets. Research shows 52 minutes warmup is excessive. 20 bars (20 minutes) aligns with 15-minute market cycles while providing sufficient data for EMA/MACD.
     min_bars_cold_start: int = 1       # Cold start: allow trading with minimal bars during initialization (reduced to match actual warmup data availability of 2-3 bars)
-    min_bars_for_macd: int = 30        # MACD needs more history
+    min_bars_for_macd: int = 15        # Reduced from 30 to align with new min_bars_required
 
     # ── Fair Value Gap (FVG) detection ────────────────────────────────
     fvg_enabled: bool = True
@@ -169,7 +170,9 @@ class IndicatorConfig:
     fvg_ignore_immediate_fill: bool = True  # Skip gaps filled by next candle
     
     # ── Staleness threshold for price data (seconds) ─────────────────────
-    # For 15m momentum strategy, reject data older than 30s
+    # CRITICAL FIX: Reduced from 120s to 30s to align with 15s aggregation and 3s spot refresh
+    # With faster aggregation (15s) and spot refresh (3s), 120s was too conservative
+    # 30s allows for 2 aggregation windows of buffer while rejecting truly stale data
     staleness_threshold_seconds: float = 30.0
     
     # ── FVG Pullback logic (OPTIMIZED 2026-05-10) ───────────────────────
@@ -680,13 +683,8 @@ class Crypto15mIndicatorStack:
                           (price > 0) if price is not None else False)
             return
         self._last_price_timestamp = timestamp
-        prev = self._prices[-1] if self._prices else price
+        prev = self._prices[-1] if len(self._prices) > 0 else price
         self._prices.append(price)
-        
-        # CRITICAL FIX: 2026-07-08 - Log price history length for debugging bars_available=1 issue
-        from utils.logger import format_price
-        logger.info("[INDICATOR-STACK-UPDATE] asset=%s instance_id=%d price=%s bars_before=%d bars_after=%d maxlen=%d",
-                     self._asset_symbol, self._instance_id, format_price(self._asset_symbol, price), len(self._prices) - 1, len(self._prices), self._prices.maxlen)
 
         n = len(self._prices)
 
@@ -840,14 +838,13 @@ class Crypto15mIndicatorStack:
                         zone = self._detect_fvg(list(self._fvg_window), atr)
                         if zone:
                             self._fvg_zones.append(zone)
-                            from utils.logger import format_price
                             logger.debug(
                                 "FVG detected: %s %s zone at %s-%s (strength=%s)",
                                 self._asset_symbol or "unknown",
                                 zone.direction,
-                                format_price(self._asset_symbol, zone.bottom),
-                                format_price(self._asset_symbol, zone.top),
-                                format_price(self._asset_symbol, zone.strength),
+                                round(zone.bottom, 2),
+                                round(zone.top, 2),
+                                round(zone.strength, 2),
                             )
 
     def set_liquidity(self, spread_cents: Optional[int], depth: Optional[int]) -> None:
@@ -916,38 +913,55 @@ class Crypto15mIndicatorStack:
                 snap.chop_reason = f"stale_price_data_{age_seconds:.1f}s"
                 return snap
 
-        price = self._prices[-1]
-        snap.price = price
-        prices_list = list(self._prices)
+        # Check if we have any prices before accessing
+        if n == 0:
+            logger.warning("[INDICATOR-STACK-SNAPSHOT] No prices available for %s, returning empty snapshot", self._asset_symbol)
+            snap.trade_allowed = False
+            snap.chop_reason = "no_price_data"
+            return snap
+
+        try:
+            price = self._prices[-1]
+            snap.price = price
+            prices_list = list(self._prices)
+        except IndexError as e:
+            logger.error("[INDICATOR-STACK-SNAPSHOT] IndexError accessing prices for %s: n=%d error=%s", self._asset_symbol, n, e)
+            snap.trade_allowed = False
+            snap.chop_reason = f"index_error_{e}"
+            return snap
 
         # ── 1a. EMA(50) trend regime ─────────────────────────────────
         if self._ema_trend_initialized:
             snap.ema_trend = self._ema_trend
             snap.price_above_trend_ema = price > self._ema_trend
-            
+
             # Compute EMA slope (rate of change) for trend regime classification
             # Use recent EMA values to compute slope
             if n >= self.cfg.ema_trend_period + 5:
                 # Get recent EMA values by recomputing from recent prices
-                recent_prices = prices_list[-5:]  # Last 5 bars
-                if len(recent_prices) >= 5:
-                    # Simple slope: (current_ema - ema_5_bars_ago) / 5
-                    # This is a proxy for the true EMA slope
-                    ema_5_bars_ago = sum(prices_list[-(self.cfg.ema_trend_period + 5):-5]) / self.cfg.ema_trend_period
-                    snap.ema_slope = (self._ema_trend - ema_5_bars_ago) / 5.0
-                    
-                    # Classify trend regime based on slope and price position
-                    # Threshold: slope as % of price
-                    slope_pct = abs(snap.ema_slope) / price if price > 0 else 0
-                    slope_threshold = 0.0005  # 0.05% per bar = 0.5% per 10 bars
-                    
-                    if slope_pct > slope_threshold:
-                        if snap.ema_slope > 0:
-                            snap.trend_regime = "trend_up"
-                        else:
-                            snap.trend_regime = "trend_down"
-                    else:
-                        snap.trend_regime = "range"
+                try:
+                    recent_prices = prices_list[-5:]  # Last 5 bars
+                    if len(recent_prices) >= 5 and len(prices_list) >= self.cfg.ema_trend_period + 5:
+                        # Simple slope: (current_ema - ema_5_bars_ago) / 5
+                        # This is a proxy for the true EMA slope
+                        ema_5_bars_ago = sum(prices_list[-(self.cfg.ema_trend_period + 5):-5]) / self.cfg.ema_trend_period
+                        snap.ema_slope = (self._ema_trend - ema_5_bars_ago) / 5.0
+                except IndexError as e:
+                    logger.warning("[INDICATOR-STACK-SNAPSHOT] IndexError computing EMA slope for %s: %s", self._asset_symbol, e)
+                    snap.ema_slope = 0.0
+
+            # Classify trend regime based on slope and price position
+            # Threshold: slope as % of price
+            slope_pct = abs(snap.ema_slope) / price if price > 0 else 0
+            slope_threshold = 0.0005  # 0.05% per bar = 0.5% per 10 bars
+
+            if slope_pct > slope_threshold:
+                if snap.ema_slope > 0:
+                    snap.trend_regime = "trend_up"
+                else:
+                    snap.trend_regime = "trend_down"
+            else:
+                snap.trend_regime = "range"
 
         # ── 1a. EMA(200) macro regime ───────────────────────────────────
         if self._ema_200_initialized:
@@ -1145,8 +1159,10 @@ class Crypto15mIndicatorStack:
         # ── 6. Realized volatility (annualized from 1m returns) ───────
         vol_window = min(self.cfg.vol_window_bars, n - 1)
         if vol_window >= 5:
+            # Ensure range starts at 1 to avoid index -1 when i - 1 is computed
+            start_idx = max(1, n - vol_window)
             returns = [(prices_list[i] / prices_list[i - 1]) - 1.0
-                       for i in range(n - vol_window, n)]
+                       for i in range(start_idx, n)]
             mean_r = sum(returns) / len(returns)
             var_r = sum((r - mean_r) ** 2 for r in returns) / len(returns)
             std_1m = math.sqrt(var_r) if var_r > 0 else 0.0
