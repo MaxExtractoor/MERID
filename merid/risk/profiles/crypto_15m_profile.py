@@ -173,9 +173,9 @@ class Crypto15mProfile:
     guardrails_per_trade_risk_pct: float  # Per-trade risk percentage (sizing control)
     guardrails_min_time_to_expiry_min: int  # Minimum time to expiry for entry in minutes
     
-    # Window-based risk limits (2026-07-06: HARD STOP)
-    guardrails_per_window_risk_pct: float  # 3% per agent per 15m window (HARD STOP)
-    guardrails_total_venue_risk_pct: float  # 5% total across all agents per 15m window (HARD STOP)
+    # Window-based risk limits REMOVED (2026-07-08: Fixed $1 exposure cap)
+    # Previous percentage-based limits (3% per agent, 5% total) replaced by fixed $1 slot allocation
+    # Risk is now enforced via global_slot_allocator with fixed $1.00 exposure cap
     guardrails_drawdown_halt_pct: float
     guardrails_drawdown_unwind_pct: float
     guardrails_max_daily_loss_usd: float
@@ -403,17 +403,13 @@ class Crypto15mProfile:
     # Previous 15c was too restrictive for 15m crypto contracts
     # 2026 OPTIMIZATION: Reduced min depth to $50 for single-contract trading
     # Previous $200 was too high for 1-contract orders; aligns with guardrails min_depth_contracts=2
-    # 2026-07-01 FIX: Reduced spread threshold to 10c to align with 2026 industry standards
-    # Industry research shows 5-10c is standard for 15m binary options to ensure good fills
-    # Previous 100c was too permissive, accepting illiquid markets with poor fill quality
+    # 2026-07-12: ALIGNED with industry research - 20c max for 15m crypto (industry: 15-20c for short-duration markets)
+    # Industry research shows 5-10c is standard for liquid markets, 15-20c for 15m crypto
+    # Previous 75c was too permissive, accepting extremely illiquid markets
     # Research shows BTC typically has 2c spreads in middle of window, other assets slightly wider
-    # 95c spreads observed in logs are abnormal (data quality or extreme thinness)
-    # 2026-07-11: Canonical spread filter (75c) - aligned with historical requirement
-    # Research: DOGE spreads can exceed 50c (observed 79c spread = 1.3% on 59c price)
-    # Reference: Kalena 2026 research - altcoin spreads 5-30% in 15m markets
-    # 75c threshold allows realistic trading while blocking extreme data quality issues
+    # 20c threshold allows realistic trading while blocking extreme illiquidity
     market_microstructure_enabled: bool = True  # Enable market microstructure filters
-    market_microstructure_max_spread_cents: float = 75.0  # 2026-07-11: Canonical spread filter (75c) - aligned with historical requirement
+    market_microstructure_max_spread_cents: float = 20.0  # 2026-07-12: ALIGNED with industry research - 20c max for 15m crypto
     market_microstructure_min_depth_usd: float = 0.0  # DISABLED: System uses limit orders which wait for fills, not market orders. Kalshi 15m crypto markets have sufficient liquidity. Depth thresholds are primarily for market orders to prevent slippage.
     market_microstructure_min_yes_depth: int = 1  # Minimum YES depth threshold
     market_microstructure_min_no_depth: int = 1  # Minimum NO depth threshold
@@ -908,13 +904,9 @@ class Crypto15mProfileAdapter:
             guardrails_drawdown_unwind_pct = self._normalize_percentage_value(guardrails.get('drawdown_unwind_pct', 0.25))  # CRITICAL FIX: 25% - aligned with profile (was 0.15)
             guardrails_per_trade_risk_pct = self._normalize_percentage_value(guardrails.get('per_trade_risk_pct', 0.03))  # CRITICAL FIX: 3% - aligned with profile (was 0.008)
             
-            # Parse window-based risk limits (2026-07-06: HARD STOP)
-            guardrails_per_window_risk_pct = self._normalize_percentage_value(
-                raw.get('guardrails_per_window_risk_pct', 0.03)
-            )  # 3% per agent per 15m window (HARD STOP)
-            guardrails_total_venue_risk_pct = self._normalize_percentage_value(
-                raw.get('guardrails_total_venue_risk_pct', 0.05)
-            )  # 5% total across all agents per 15m window (HARD STOP)
+            # Window-based risk limits REMOVED (2026-07-08: Fixed $1 exposure cap)
+            # Previous percentage-based limits (3% per agent, 5% total) replaced by fixed $1 slot allocation
+            # Risk is now enforced via global_slot_allocator with fixed $1.00 exposure cap
             
             # Parse Kelly
             kelly = raw.get('kelly', {})
@@ -1098,8 +1090,7 @@ class Crypto15mProfileAdapter:
                 guardrails_min_post_fee_edge=self._normalize_percentage_value(guardrails.get('min_post_fee_edge', 0.02)),  # FIXED: Default 0.02 to match YAML (was 0.01)
                 guardrails_per_trade_risk_pct=guardrails_per_trade_risk_pct,  # Per-trade risk percentage (sizing control)
                 guardrails_min_time_to_expiry_min=guardrails.get('min_time_to_expiry_min', 2.5),  # FIXED: Default 2.5 to match YAML (was 3)
-                guardrails_per_window_risk_pct=guardrails_per_window_risk_pct,  # 3% per agent per 15m window (HARD STOP)
-                guardrails_total_venue_risk_pct=guardrails_total_venue_risk_pct,  # 5% total across all agents per 15m window (HARD STOP)
+                # Window-based risk limits REMOVED (2026-07-08: Fixed $1 exposure cap)
                 guardrails_drawdown_halt_pct=guardrails_drawdown_halt_pct,
                 guardrails_drawdown_unwind_pct=guardrails_drawdown_unwind_pct,
                 guardrails_max_daily_loss_usd=guardrails.get('max_daily_loss_usd', 200.0),
@@ -1111,7 +1102,7 @@ class Crypto15mProfileAdapter:
                 guardrails_max_same_side_per_strip=guardrails.get('max_same_side_per_strip', 5),  # CRITICAL FIX: Default 5 to match YAML (was 2)
                 # Time trap prevention (entry window narrowing)
                 guardrails_max_entry_mins=guardrails.get('max_entry_mins', 15.0),  # CRITICAL FIX: Default 15 to match YAML (was 12)
-                guardrails_min_entry_mins=guardrails.get('min_entry_mins', 2.0),  # Default 2 minutes
+                guardrails_min_entry_mins=guardrails.get('min_entry_mins', 0.5),  # 2026-07-12: Default 0.5min to match YAML (full 15m window, block last 30s only)
                 # Microstructure trap prevention
                 guardrails_depth_size_multiplier=guardrails.get('depth_size_multiplier', 3.0),  # Default 3x
                 # Regime/drawdown trap prevention

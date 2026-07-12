@@ -185,7 +185,7 @@ def check_market_microstructure(
     no_ask_cents: int,
     yes_depth: int,
     no_depth: int,
-    max_spread_cents: float = 75.0,  # 2026-07-11: Canonical spread filter (75c) - aligned with historical requirement
+    max_spread_cents: float = 20.0,  # 2026-07-12: ALIGNED with industry research - 20c max for 15m crypto (industry: 15-20c for short-duration markets)
     min_depth_usd: float = 10.0,  # 2026-07-05: Lowered from 200.0 to 10.0 based on research - $50 threshold too high for weekend/low-volume liquidity
     min_yes_depth: int = 1,
     min_no_depth: int = 1
@@ -755,8 +755,8 @@ def resolve_window_policy(
     elif regime == "aggressive":
         min_tte_secs = 90  # 1.5 min
     
-    # 2026-07-11: Use dynamic threshold manager for regime-aware spread thresholds
-    max_spread_cents = 75  # Fallback
+    # 2026-07-12: Use dynamic threshold manager for regime-aware spread thresholds
+    max_spread_cents = 20  # Fallback (aligned with industry research)
     try:
         from merid.event_venues.kalshi.dynamic_thresholds import get_dynamic_threshold_manager
         threshold_manager = get_dynamic_threshold_manager()
@@ -2888,11 +2888,16 @@ def _apply_risk_based_order_sizing(intent: OrderIntent, bankroll_usd: Optional[D
         
         price_cents = intent.price_cents
         
+        # Get model_prob from intent for Kelly Criterion (2026-07-12)
+        model_prob = getattr(intent, 'model_prob', None)
+        
         # Compute order size using unified_sizing (enforces 3% per-trade limit)
+        # 2026-07-12: Kelly Criterion integration - pass model_prob for edge filtering
         count, notional_usd, metadata = compute_order_size(
             bankroll_usd=bankroll_usd,
             price_cents=price_cents,
             asset=asset,
+            model_prob=model_prob,  # 2026-07-12: Kelly Criterion
         )
         
         # If unified_sizing returns 0, reject the order (exceeds 3% limit)
@@ -3708,11 +3713,11 @@ def _release_gate_record(intent: OrderIntent, reason: str = "") -> None:
 
 
 def _record_price_execution(intent: OrderIntent) -> None:
-    """Record successful price execution for repeat prevention and window-based risk tracking.
+    """Record successful price execution for repeat prevention and slot-based risk tracking.
     
     CRITICAL: This must be called after successful order execution to update:
     1. Price execution history in the order gate (prevents repeat price execution)
-    2. Window-based risk exposure in the risk envelope (tracks 3% per agent, 5% total per 15m)
+    2. Slot-based exposure tracking in global_slot_allocator (tracks fixed $1 exposure cap)
     """
     try:
         from merid.event_venues.kalshi.order_gate import get_pre_trade_gate
@@ -5597,9 +5602,9 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         except Exception as e:
             logger.debug(f"Gate mark submitted/filled failed: {e}")
 
-        # CRITICAL FIX: 2026-07-08 - Record window exposure after successful venue submission
-        # This is the ONLY place where window exposure is tracked for live orders
-        # Without this, the 3% per agent / 5% total per 15m window limits are NEVER enforced
+        # CRITICAL FIX: 2026-07-08 - Record slot exposure after successful venue submission
+        # This is the ONLY place where slot exposure is tracked for live orders
+        # Without this, the fixed $1 exposure cap would not be enforced
         try:
             from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
             envelope = get_kalshi_crypto_15m_risk_envelope()
@@ -5728,11 +5733,11 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             except Exception as _rr:
                 logger.debug("UnifiedRiskManager record_fill failed (non-fatal): %s", _rr)
             
-            # CRITICAL FIX (2026-07-07): Removed duplicate window exposure recording
-            # Window exposure is now recorded ONLY in position_cache.on_fill() to prevent double-counting
+            # CRITICAL FIX (2026-07-07): Removed duplicate slot exposure recording
+            # Slot exposure is now recorded ONLY in position_cache.on_fill() to prevent double-counting
             # Previous recording here caused the same fill to be counted twice, effectively halving
-            # the window limits (3% per-agent became 1.5%, 5% total venue became 2.5%)
-            # position_cache.on_fill() is the canonical source for window exposure tracking
+            # the effective exposure cap
+            # position_cache.on_fill() is the canonical source for slot exposure tracking
 
         # BUG-B fix: sell fills reduce open exposure — release the notional from the
         # tracker so category caps reflect the true remaining open position.
@@ -6198,6 +6203,7 @@ def _run_pre_trade_gate(
                     entry_price_cents=intent.price_cents,
                     edge_pct=getattr(intent, 'edge_pct', 0.0),
                     spread_cents=0,
+                    confidence=getattr(intent, 'confidence', 0.5),  # 2026-07-12: Pass confidence from intent
                     is_exit_order=False
                 )
                 

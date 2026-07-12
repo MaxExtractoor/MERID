@@ -46,14 +46,13 @@ class TTERegimeConfig:
     terminal_edge_multiplier: float = 2.0  # Require very high edge
     
     # Spread tolerance (aligned with 2026 industry standards for 15m binary options)
-    # Updated 2026-07-01: Reduced from 40-10c to 10-5c to align with industry research
-    # Industry standard: 5-10c maximum spread for 15m binary options
+    # Updated 2026-07-12: ALIGNED with industry research - 20c max for 15m crypto (industry: 15-20c for short-duration markets)
     # NOTE: These TTE-specific thresholds are intentionally tighter than dynamic threshold manager
     # because markets close to expiry have less time to recover from wide spreads and higher illiquidity risk
-    normal_max_spread_cents: int = 10
-    approaching_max_spread_cents: int = 8
-    critical_max_spread_cents: int = 6
-    terminal_max_spread_cents: int = 5
+    normal_max_spread_cents: int = 20  # At most the general max spread
+    approaching_max_spread_cents: int = 6  # Tighter as expiry approaches
+    critical_max_spread_cents: int = 4  # Even tighter near expiry
+    terminal_max_spread_cents: int = 3  # Tightest in terminal regime
     
     # Minimum depth requirements (aligned with profile guardrails to avoid conflicts)
     # Profile: Tier1 (BTC/ETH) = 10, Tier2 (SOL/XRP/DOGE) = 5

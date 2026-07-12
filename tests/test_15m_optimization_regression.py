@@ -76,8 +76,8 @@ class Test15mOptimizationRegression:
         """Ensure backward compatibility for unchanged params"""
         config = DEFAULT_15M_CONFIG
 
-        # These should remain unchanged
-        assert config.rsi_period == 8
+        # CRITICAL FIX: 2026-07-12 - RSI period changed from 8 to 14 for 15-minute markets
+        assert config.rsi_period == 14
         assert config.macd_fast == 8
         assert config.macd_slow == 21
         assert config.macd_signal == 5
@@ -117,11 +117,11 @@ class Test15mOptimizationRegression:
         with open("c:/Dev/MERID/config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
             profile = yaml.safe_load(f)
 
-        # Verify profile has guardrails.max_spread_cents set to 100
-        # 2026-07-10: RELAXED to 100c - allows trading in current market conditions with wider spreads (60c-96c observed)
+        # Verify profile has guardrails.max_spread_cents set to 20
+        # 2026-07-12: ALIGNED with industry research - 20c max for 15m crypto (industry: 15-20c for short-duration markets)
         assert "guardrails" in profile
         assert "max_spread_cents" in profile["guardrails"]
-        assert profile["guardrails"]["max_spread_cents"] == 100
+        assert profile["guardrails"]["max_spread_cents"] == 20
 
         # Check candidate_optimizer.py uses profile-driven max_spread_cents
         with open("c:/Dev/MERID/merid/prediction/candidate_optimizer.py", "r", encoding="utf-8") as f:

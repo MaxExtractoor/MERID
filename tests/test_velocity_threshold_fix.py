@@ -178,8 +178,8 @@ def test_spread_limit_unification():
         with open(profile_path, 'r', encoding='utf-8') as f:
             profile_content = f.read()
         
-        assert "market_microstructure_max_spread_cents: float = 30.0" in profile_content, \
-            "Profile spread limit should be 30c (harmonized with 10c-50c entry price sweet spot)"
+        assert "market_microstructure_max_spread_cents: float = 20.0" in profile_content, \
+            "Profile spread limit should be 20c (aligned with industry research)"
         assert "market_microstructure_max_spread_cents: float = 75.0" not in profile_content, \
             "Old 75c spread limit should be removed from profile"
         
@@ -189,29 +189,29 @@ def test_spread_limit_unification():
             config = yaml.safe_load(f)
         
         # Check guardrails spread limit (liquidity threshold, not entry price)
-        # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
+        # 2026-07-12: ALIGNED with industry research - 20c max for 15m crypto (industry: 15-20c for short-duration markets)
         guardrails = config.get('guardrails', {})
-        assert guardrails.get('max_spread_cents') == 30, \
-            f"Guardrails max_spread_cents should be 30 (liquidity), got {guardrails.get('max_spread_cents')}"
-        assert guardrails.get('min_spread_gate_cents') == 30, \
-            f"Guardrails min_spread_gate_cents should be 30, got {guardrails.get('min_spread_gate_cents')}"
+        assert guardrails.get('max_spread_cents') == 20, \
+            f"Guardrails max_spread_cents should be 20 (liquidity), got {guardrails.get('max_spread_cents')}"
+        assert guardrails.get('min_spread_gate_cents') == 8, \
+            f"Guardrails min_spread_gate_cents should be 8, got {guardrails.get('min_spread_gate_cents')}"
 
         # Check universe spread limit (liquidity threshold, not entry price)
         universe = config.get('universe', {})
-        assert universe.get('max_spread_cents') == 30, \
-            f"Universe max_spread_cents should be 30 (liquidity), got {universe.get('max_spread_cents')}"
+        assert universe.get('max_spread_cents') == 20, \
+            f"Universe max_spread_cents should be 20 (liquidity), got {universe.get('max_spread_cents')}"
 
         # Check guardrails max_contract_price_cents (entry price threshold)
-        # 2026-07-08: Updated to 50c for sweet spot (10-50c)
-        assert guardrails.get('max_contract_price_cents') == 50, \
-            f"Guardrails max_contract_price_cents should be 50 (entry price), got {guardrails.get('max_contract_price_cents')}"
+        # 2026-07-12: Expanded to 75c for 10-75c canonical range
+        assert guardrails.get('max_contract_price_cents') == 75, \
+            f"Guardrails max_contract_price_cents should be 75 (entry price), got {guardrails.get('max_contract_price_cents')}"
         
         # Check momentum_fvg spread gate
         momentum_fvg = config.get('momentum_fvg', {})
-        assert momentum_fvg.get('spread_gate_cents') == 30, \
-            f"Momentum_fvg spread_gate_cents should be 30, got {momentum_fvg.get('spread_gate_cents')}"
+        assert momentum_fvg.get('spread_gate_cents') == 10, \
+            f"Momentum_fvg spread_gate_cents should be 10, got {momentum_fvg.get('spread_gate_cents')}"
         
-        print("✓ Spread limits unified to 30c across all configuration sources")
+        print("✓ Spread limits aligned with industry research across all configuration sources")
     except FileNotFoundError as e:
         pytest.skip(f"Could not find configuration file: {e}")
 
