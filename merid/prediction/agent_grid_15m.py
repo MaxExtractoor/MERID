@@ -7160,21 +7160,21 @@ class LeanAgent15m:
 
         # - min_decision_minute: per-asset minimum minute to start trading (default 1)
 
-        # - guardrails.min_entry_mins: minimum time to expiry for entry (2.0min)
+        # - guardrails.min_entry_mins: minimum time to expiry for entry (0.5min - block last 30s only)
 
-        # - guardrails.max_entry_mins: maximum time to expiry for entry (15.0min)
+        # - guardrails.max_entry_mins: maximum time to expiry for entry (15.0min - full 15m window)
 
-        # - guardrails.cutoff_minutes_before_expiry: stop trading N minutes before expiry (2min)
+        # - guardrails.cutoff_minutes_before_expiry: stop trading N minutes before expiry (0min - no cutoff)
 
         
 
         # Get timing configuration from profile YAML
 
-        min_entry_mins = 2.0  # Default from guardrails.min_entry_mins
+        min_entry_mins = 0.5  # Default from guardrails.min_entry_mins (full 15m window, block last 30s only)
 
-        max_entry_mins = 15.0  # Default from guardrails.max_entry_mins
+        max_entry_mins = 15.0  # Default from guardrails.max_entry_mins (full 15-minute window)
 
-        cutoff_mins = 2.0  # Default from guardrails.cutoff_minutes_before_expiry
+        cutoff_mins = 0.0  # Default from guardrails.cutoff_minutes_before_expiry (no cutoff)
 
         
 
@@ -10268,11 +10268,11 @@ class LeanAgent15m:
 
         except Exception as e:
 
-            logger.warning("[SIGNAL-GEN] Failed to load dynamic price range: %s, using fallback 10-50c", e)
+            logger.warning("[SIGNAL-GEN] Failed to load dynamic price range: %s, using fallback 10-75c", e)
 
             ENTRY_MIN_PRICE_CENTS = 10  # Canonical lower bound
 
-            ENTRY_MAX_PRICE_CENTS = 50  # Canonical upper bound
+            ENTRY_MAX_PRICE_CENTS = 75  # Canonical upper bound (2026-07-12: expanded from 50c to 75c)
 
         
 
@@ -12723,7 +12723,6 @@ class LeanAgentGrid15m:
 
                                 stop_loss_price_cents=stop_loss_price_cents,
 
-                                take_profit_price_cents=take_profit_price_cents,  # CRITICAL FIX: Pass TP price
                                 take_profit_r_multiple=take_profit_r_multiple,
 
                                 model_prob=model_prob,
