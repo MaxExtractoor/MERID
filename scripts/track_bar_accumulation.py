@@ -24,6 +24,7 @@ from pathlib import Path
 from collections import defaultdict
 import time
 import sys
+import json
 
 
 class BarAccumulationTracker:
@@ -35,38 +36,56 @@ class BarAccumulationTracker:
         self.warmup_complete = defaultdict(bool)  # asset -> bool
         self.first_seen = defaultdict(lambda: None)  # asset -> first timestamp
         self.last_seen = defaultdict(lambda: None)  # asset -> last timestamp
-        self.min_bars_required = 20
+        # CRITICAL FIX: 2026-07-12 - Updated from 20 to 30 for MACD(8,21,5) warmup
+        self.min_bars_required = 30
         
     def parse_log_line(self, line):
         """Parse a log line for MOMENTUM-FVG-WARMUP messages."""
+        # Try to parse as JSON first
+        try:
+            log_entry = json.loads(line.strip())
+            message = log_entry.get('message', '')
+            timestamp = log_entry.get('ts', '')
+        except (json.JSONDecodeError, AttributeError):
+            # Fall back to plain text parsing
+            message = line
+            timestamp = None
+        
         # Pattern: [MOMENTUM-FVG-WARMUP] asset=ASSET bars_available=N (requires 20) - warming up
         pattern = r'\[MOMENTUM-FVG-WARMUP\] asset=(\w+) bars_available=(\d+) \(requires (\d+)\)'
-        match = re.search(pattern, line)
+        match = re.search(pattern, message)
         
         if match:
             asset = match.group(1)
             bar_count = int(match.group(2))
             required = int(match.group(3))
             
-            # Extract timestamp from log line
-            timestamp_pattern = r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})'
-            timestamp_match = re.search(timestamp_pattern, line)
-            timestamp = timestamp_match.group(1) if timestamp_match else None
+            # Format timestamp if present
+            if timestamp:
+                # Convert ISO format to readable format
+                try:
+                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    timestamp = dt.strftime('%Y-%m-%d %H:%M:%S')
+                except ValueError:
+                    timestamp = timestamp[:19]  # Fallback to first 19 chars
             
             return asset, bar_count, required, timestamp
         
         # Also check for INDICATOR-STACK messages (fully warmed)
         pattern2 = r'\[MOMENTUM-FVG-INDICATOR-STACK\] asset=(\w+) bars_available=(\d+)'
-        match2 = re.search(pattern2, line)
+        match2 = re.search(pattern2, message)
         
         if match2:
             asset = match2.group(1)
             bar_count = int(match2.group(2))
             
-            # Extract timestamp
-            timestamp_pattern = r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})'
-            timestamp_match = re.search(timestamp_pattern, line)
-            timestamp = timestamp_match.group(1) if timestamp_match else None
+            # Format timestamp if present
+            if timestamp:
+                try:
+                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    timestamp = dt.strftime('%Y-%m-%d %H:%M:%S')
+                except ValueError:
+                    timestamp = timestamp[:19]
             
             return asset, bar_count, self.min_bars_required, timestamp
         
@@ -164,7 +183,9 @@ class BarAccumulationTracker:
 
 def find_latest_log_file():
     """Find the latest log file in the output directory."""
-    output_dir = Path("c:/Dev/MERID/output")
+    # Use relative path from script location
+    script_dir = Path(__file__).parent.parent
+    output_dir = script_dir / "output"
     
     if not output_dir.exists():
         return None

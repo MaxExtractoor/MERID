@@ -344,7 +344,8 @@ def test_new_diagnostic_fields():
     
     # Verify some specific values
     assert snap.rsi_tf == "15m"
-    assert snap.rsi_period == 8  # default period
+    # CRITICAL FIX: 2026-07-12 - RSI period changed from 8 to 14 for 15-minute markets
+    assert snap.rsi_period == 14  # default period
     assert snap.config_version == "v1"
     assert snap.session_tag in ["US_trading", "Asia_session", "Europe_trading", "weekend", "off_hours", "unknown"]
     assert snap.trend_regime in ["range", "trend_up", "trend_down"]
@@ -476,7 +477,9 @@ def test_macd_zero_line_filter():
     
     # In downtrend, MACD line should be negative (good for short signals)
     assert snap2.macd_line < 0
-    assert snap2.macd_zero_line_ok is False  # False means not good for longs (i.e., good for shorts)
+    # CRITICAL FIX: 2026-07-12 - MACD zero-line filter disabled in profile YAML
+    # With filter disabled, zero_line_ok is always True (direction check applied in signal gen)
+    assert snap2.macd_zero_line_ok is True
 
 
 def test_macd_histogram_momentum_filter():
