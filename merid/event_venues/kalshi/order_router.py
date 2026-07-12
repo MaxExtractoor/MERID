@@ -283,6 +283,68 @@ def get_resting_orders() -> List[RestingOrder]:
         return list(_resting_orders.values())
 
 
+def _resolve_requested_count(placed_size, intent_count: int) -> int:
+    """Resolve the requested contract count for fill reconciliation.
+
+    Kalshi's create-order response may omit or zero the `size` field even for
+    accepted orders. Falling back to the intent count keeps fill-percentage and
+    filled/partial status classification correct.
+    """
+    try:
+        size = int(placed_size or 0)
+    except (TypeError, ValueError):
+        size = 0
+    return size if size > 0 else int(intent_count)
+
+
+def _effective_post_only(post_only: bool, aggressiveness: float) -> bool:
+    """Resolve the post_only flag actually sent to the venue.
+
+    Marketable orders (aggressiveness > 0) are priced to cross the spread by the
+    marketable-limit logic; submitting them post_only would either trigger a
+    Kalshi "post-only cross" rejection or leave the order resting unfilled.
+    post_only is therefore only honored for resting orders (aggressiveness == 0).
+    """
+    return bool(post_only) and float(aggressiveness or 0.0) == 0.0
+
+
+def _check_open_resting_order(intent: OrderIntent) -> Optional[str]:
+    """Reject opening orders when a live resting order already exists for the
+    same ticker + side + action.
+
+    This is the structural guard against order stacking: the time-window
+    duplicate check (5s) only suppresses rapid identical re-submissions, while
+    this guard prevents the 15m loop from stacking a new GTC order on top of an
+    existing unfilled one on every loop iteration. Exits (sell actions) are
+    never blocked so positions can always be closed.
+    """
+    action_lower = (intent.action or "").lower()
+    if action_lower != "buy":
+        return None
+
+    try:
+        from merid.event_venues.kalshi.resting_order_monitor import get_resting_order_monitor
+        monitor = get_resting_order_monitor()
+        open_order_id = monitor.find_open_order(
+            ticker=intent.ticker,
+            side=intent.side,
+            action=intent.action,
+        )
+    except Exception as _guard_err:
+        logger.debug("[OPEN-ORDER-GUARD] Monitor lookup failed (fail-open): %s", _guard_err)
+        return None
+
+    if open_order_id:
+        logger.warning(
+            "[OPEN-ORDER-GUARD] ticker=%s side=%s action=%s has live resting order %s - "
+            "rejecting new submission to prevent order stacking",
+            intent.ticker, intent.side, intent.action, open_order_id,
+        )
+        return f"open_order_exists:{open_order_id}"
+
+    return None
+
+
 def _check_duplicate_order(intent: OrderIntent) -> Optional[str]:
     """Check if this order is a duplicate of a recently placed order.
     
@@ -1795,6 +1857,16 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
         _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "duplicate_order")
         _increment_validation_gate_metric("ROUTER_VALIDATION", "duplicate_order")
         return duplicate_rejection
+
+    # CRITICAL FIX (2026-07-12): Structural anti-stacking guard.
+    # The 5s duplicate window above only suppresses rapid identical re-submissions;
+    # without this guard the 15m loop (5s cadence) stacks a NEW resting GTC order
+    # on the book every window expiry for the same unfilled signal.
+    open_order_rejection = _check_open_resting_order(intent)
+    if open_order_rejection:
+        _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "open_order_exists")
+        _increment_validation_gate_metric("ROUTER_VALIDATION", "open_order_exists")
+        return open_order_rejection
     
     # 2026-07-05 FIX: REMOVED price range validation [50, 70]
     # This check was preventing orders from filling at actual market prices
@@ -4905,7 +4977,7 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             time_in_force=tif,
             expiration_ts=gtt_exp,
             client_order_id=intent.client_tag,  # Uses dedup client_order_id from cache
-            post_only=intent.post_only,  # Wire post_only flag for maker-only orders
+            post_only=_effective_post_only(intent.post_only, intent.aggressiveness),  # Never post_only on marketable orders
             source="agent_grid",  # Mark as pipeline order
         )
 
@@ -5376,7 +5448,9 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         # Note: _record_order_placed(intent) already called BEFORE submission to prevent race condition
 
         placed = placed_res.data
-        requested_count = int(placed.size)
+        # CRITICAL FIX (2026-07-12): Kalshi's create-order response may omit/zero `size`.
+        # Fall back to the intent count so fill-pct and filled/partial status logic stay correct.
+        requested_count = _resolve_requested_count(placed.size, intent.count)
         filled_count = int(placed.filled_size)
         remaining_count = int(placed.remaining_size) if placed.remaining_size is not None else max(0, requested_count - filled_count)
         fill_price_cents = int((placed.price or Decimal(intent.price_cents) / Decimal("100")) * 100)
@@ -5444,8 +5518,8 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 _ok, _err = _sanity.apply_fill(
                     order_id=_venue_oid,
                     fill_id=_fill_id,
-                    _score = _ctx.combined_score,
-                    _regime = _ctx.fg_regime,
+                    ticker=intent.ticker,
+                    side=intent.side,
                     filled_count=filled_count,
                     price_cents=fill_price_cents,
                     strategy_group=intent.source or "default",
@@ -6049,6 +6123,76 @@ def _run_pre_trade_gate(
         # ── 2. Pre-trade gate (dedup + fill-awareness) ────────────────
         gate = get_pre_trade_gate()
 
+        # CRITICAL FIX (2026-07-12): Hard slot allocation for ALL orders (not just upstream path)
+        # This prevents the $1 exposure cap bypass where multiple orders pass the passive
+        # exposure check simultaneously before any fills occur. The slot must be allocated
+        # BEFORE any order routing to ensure atomic exposure reservation.
+        _allocated_slot_id = None
+        try:
+            from merid.risk.global_slot_allocator import get_global_slot_allocator, AllocationRequest
+            
+            slot_allocator = get_global_slot_allocator()
+            
+            # Exit orders bypass slot allocation (they reduce exposure)
+            if not _is_exit_order(intent):
+                # Extract asset from ticker for allocation request
+                asset = None
+                ticker_upper = intent.ticker.upper()
+                if "BTC" in ticker_upper:
+                    asset = "BTC"
+                elif "ETH" in ticker_upper:
+                    asset = "ETH"
+                elif "SOL" in ticker_upper:
+                    asset = "SOL"
+                elif "XRP" in ticker_upper:
+                    asset = "XRP"
+                elif "DOGE" in ticker_upper:
+                    asset = "DOGE"
+                
+                # Create allocation request
+                allocation_request = AllocationRequest(
+                    agent_id=_agent,
+                    asset=asset or "UNKNOWN",
+                    ticker=intent.ticker,
+                    entry_price_cents=intent.price_cents,
+                    edge_pct=getattr(intent, 'edge_pct', 0.0),
+                    spread_cents=0,
+                    is_exit_order=False
+                )
+                
+                # Request slot allocation (this is the HARD BLOCK)
+                allocated, reason, _allocated_slot_id = slot_allocator.request_allocation(allocation_request)
+                
+                if not allocated:
+                    logger.warning(
+                        "[order-router-SLOT-ALLOCATOR-HARD-BLOCK] asset=%s ticker=%s agent=%s price=%dc notional=$%.2f - %s",
+                        asset, intent.ticker, _agent, intent.price_cents, (intent.count * intent.price_cents) / 100.0, reason
+                    )
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason=f"slot_allocator_hard_block:{reason}",
+                        latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                    )
+                
+                logger.info(
+                    "[order-router-SLOT-ALLOCATED] asset=%s ticker=%s agent=%s price=%dc slot_id=%s total_exposure=$%.2f",
+                    asset, intent.ticker, _agent, intent.price_cents, _allocated_slot_id, slot_allocator.get_total_exposure()
+                )
+            else:
+                logger.info(
+                    "[order-router-SLOT-ALLOCATOR-BYPASS] Exit order bypasses slot allocation: ticker=%s action=%s",
+                    intent.ticker, intent.action
+                )
+        except Exception as slot_err:
+            logger.error("[order-router] Slot allocation failed (fail-closed): %s", slot_err)
+            return OrderResult(
+                status="rejected",
+                mode=mode,
+                reason=f"slot_allocator_error:{slot_err}",
+                latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+            )
+
         # Upstream-reservation fast-path (BUG: dual-PENDING leak fix):
         # If the caller has already passed a ``client_tag`` that maps to an
         # existing PENDING record in the gate's idempotent store (e.g. CT
@@ -6072,6 +6216,16 @@ def _run_pre_trade_gate(
                     logger.debug("[order-router] Failed to load min_contract_price_cents from profile: %s, using default 10c", e)
                 
                 if intent.price_cents < min_price_cents:
+                    # CRITICAL FIX (2026-07-12): Release slot on price guard rejection
+                    if _allocated_slot_id:
+                        try:
+                            from merid.risk.global_slot_allocator import get_global_slot_allocator
+                            slot_allocator = get_global_slot_allocator()
+                            slot_allocator.release_slot(_allocated_slot_id)
+                            logger.info("[order-router] Released slot_id=%s on price guard rejection", _allocated_slot_id)
+                        except Exception as release_err:
+                            logger.warning("[order-router] Failed to release slot on price guard rejection: %s", release_err)
+                    
                     logger.warning(
                         "[order-router] PRICE_GUARD_BYPASS_BLOCKED coid=%s ticker=%s side=%s price=%dc < %dc threshold (deep OTM longshot rejected - upstream reservation path)",
                         _upstream_coid[:16], intent.ticker, intent.side, intent.price_cents, min_price_cents,
@@ -6083,44 +6237,9 @@ def _run_pre_trade_gate(
                         latency_ms=round((_time.monotonic() - t0) * 1000, 2),
                     )
                 
-                # CRITICAL FIX: 2026-07-09 - Use global slot allocator instead of window-based limits
-                # OLD: Window-based risk limit check (3% per agent, 5% total) - DISABLED
-                # NEW: Slot-based $1 exposure cap with exit order bypass
-                # This prevents oversized trades from bypassing the $1 exposure limit
-                try:
-                    # Exit orders bypass exposure checks (they reduce exposure)
-                    if not _is_exit_order(intent):
-                        from merid.risk.global_slot_allocator import get_global_slot_allocator
-                        slot_allocator = get_global_slot_allocator()
-                        
-                        order_notional_usd = (intent.count * intent.price_cents) / 100.0
-                        available_exposure = slot_allocator.get_available_exposure()
-                        
-                        # Check if order would exceed available exposure
-                        if order_notional_usd > available_exposure:
-                            logger.warning(
-                                "[order-router-SLOT-ALLOCATOR-BLOCK] insufficient_exposure (upstream path) coid=%s ticker=%s agent=%s notional=$%.2f available=$%.2f",
-                                _upstream_coid[:16], intent.ticker, _agent, order_notional_usd, available_exposure,
-                            )
-                            return OrderResult(
-                                status="rejected",
-                                mode=mode,
-                                reason=f"slot_allocator:insufficient_exposure_required_${order_notional_usd:.2f}_available_${available_exposure:.2f}",
-                                latency_ms=round((_time.monotonic() - t0) * 1000, 2),
-                            )
-                        else:
-                            logger.info(
-                                "[order-router-SLOT-ALLOCATOR-CHECK] Exposure check passed (upstream path): agent=%s notional=$%.2f available=$%.2f",
-                                _agent, order_notional_usd, available_exposure
-                            )
-                    else:
-                        logger.info(
-                            "[order-router-SLOT-ALLOCATOR-BYPASS] Exit order bypasses exposure check (upstream path): ticker=%s action=%s",
-                            intent.ticker, intent.action
-                        )
-                except Exception as slot_err:
-                    logger.warning("[order-router] Slot allocator check failed (upstream path): %s", slot_err)
-                    # Continue with other checks if slot allocator fails
+                # CRITICAL FIX (2026-07-12): Removed passive exposure check from upstream path
+                # The hard slot allocation at the top of this function now enforces the $1 cap
+                # for ALL orders, making this passive check redundant and potentially race-condition prone
                 
                 logger.debug(
                     "[order-router] pre_trade_gate using upstream reservation coid=%s ticker=%s",
@@ -6200,6 +6319,16 @@ def _run_pre_trade_gate(
                     )
             
             # Non-idempotent rejection (risk check, etc.) → reject as before
+            # CRITICAL FIX (2026-07-12): Release slot on gate rejection
+            if _allocated_slot_id:
+                try:
+                    from merid.risk.global_slot_allocator import get_global_slot_allocator
+                    slot_allocator = get_global_slot_allocator()
+                    slot_allocator.release_slot(_allocated_slot_id)
+                    logger.info("[order-router] Released slot_id=%s on gate rejection: %s", _allocated_slot_id, verdict.reason)
+                except Exception as release_err:
+                    logger.warning("[order-router] Failed to release slot on gate rejection: %s", release_err)
+            
             logger.warning(
                 "[order-router] GATE BLOCKED: %s — %s",
                 intent.ticker, verdict.reason,
@@ -6216,6 +6345,16 @@ def _run_pre_trade_gate(
 
     except Exception as exc:
         # Gate infrastructure failure → fail-closed
+        # CRITICAL FIX (2026-07-12): Release slot on exception
+        if _allocated_slot_id:
+            try:
+                from merid.risk.global_slot_allocator import get_global_slot_allocator
+                slot_allocator = get_global_slot_allocator()
+                slot_allocator.release_slot(_allocated_slot_id)
+                logger.info("[order-router] Released slot_id=%s on gate exception: %s", _allocated_slot_id, exc)
+            except Exception as release_err:
+                logger.warning("[order-router] Failed to release slot on gate exception: %s", release_err)
+        
         latency = (_time.monotonic() - t0) * 1000
         logger.error("[order-router] pre_trade_gate error (fail-closed): %s", exc)
         return OrderResult(
