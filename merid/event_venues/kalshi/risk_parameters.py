@@ -24,10 +24,9 @@ from typing import Final
 MIN_KALSHI_PRICE_CENTS: Final[int] = 1
 MAX_KALSHI_PRICE_CENTS: Final[int] = 99
 DEFAULT_KALSHI_PRICE_CENTS: Final[int] = 25  # 2026-07-09: Changed from 50 to 25 (midpoint of 10-50c sweet spot)
-DEEP_OTM_CHEAP_CENTS: Final[int] = 5  # 2026-07-10: Lower bound of expanded range (5-95c) for skewed markets
-DEEP_OTM_EXPENSIVE_CENTS: Final[int] = 95  # 2026-07-10: Upper bound of expanded range (5-95c) for skewed markets
-# Rationale: 5-95c expanded range allows trading in high-conviction (YES > 50c) and low-conviction (NO > 50c) markets
-# Previous 10-50c range was too restrictive for current market conditions
+DEEP_OTM_CHEAP_CENTS: Final[int] = 10  # 2026-07-12: Canonical lower bound (10c) per commit c5ac4a18
+DEEP_OTM_EXPENSIVE_CENTS: Final[int] = 50  # 2026-07-12: Canonical upper bound (50c) per commit c5ac4a18
+# Rationale: 10-50c canonical range is the industry-validated sweet spot for optimal risk/reward
 # Fixed $1 exposure model: cheaper entries enable easier loss recovery
 MAX_PRICE_DIFFERENCE_CENTS: Final[int] = 50  # Max realistic price jump (data error threshold)  
 

@@ -148,7 +148,11 @@ def _probe_kalshi_client() -> DependencyStatus:
 
 
 def _probe_kalshi_ws() -> DependencyStatus:
-    """Check Kalshi WebSocket bridge status."""
+    """Check Kalshi WebSocket bridge status.
+    
+    Note: During startup grace period (10 minutes), bridge not running is expected
+    and will be reported as DEGRADED with context about startup timing.
+    """
     dep = DependencyStatus(name="kalshi_websocket", critical=False)
     try:
         from merid.event_venues.kalshi.ws_bridge import get_bridge
@@ -166,8 +170,17 @@ def _probe_kalshi_ws() -> DependencyStatus:
                 dep.status = DepStatus.DEGRADED
                 dep.message = "Bridge running but underlying WS not connected"
         else:
-            dep.status = DepStatus.DEGRADED
-            dep.message = "WebSocket bridge not running — HTTP fallback active"
+            # Check if within startup grace period
+            now = time.time()
+            startup_elapsed = now - _ws_bridge_startup_time
+            if startup_elapsed < _WS_BRIDGE_STARTUP_GRACE_PERIOD:
+                dep.status = DepStatus.DEGRADED
+                dep.message = f"WebSocket bridge not running — HTTP fallback active (startup grace period: {startup_elapsed:.0f}s/{_WS_BRIDGE_STARTUP_GRACE_PERIOD}s)"
+                dep.details = {"startup_elapsed_seconds": startup_elapsed, "grace_period_seconds": _WS_BRIDGE_STARTUP_GRACE_PERIOD}
+            else:
+                dep.status = DepStatus.DEGRADED
+                dep.message = "WebSocket bridge not running — HTTP fallback active (startup grace period exceeded)"
+                dep.details = {"startup_elapsed_seconds": startup_elapsed, "grace_period_seconds": _WS_BRIDGE_STARTUP_GRACE_PERIOD}
     except ImportError:
         dep.status = DepStatus.DOWN
         dep.message = "WebSocket bridge module not available"
@@ -246,6 +259,10 @@ _PROBES: List[Callable[[], DependencyStatus]] = [
 _last_results: Dict[str, DependencyStatus] = {}
 _results_lock = threading.Lock()
 _MIN_CHECK_INTERVAL = 10.0  # Don't re-check more than once per 10s
+
+# WebSocket bridge startup tracking
+_ws_bridge_startup_time: float = time.time()
+_WS_BRIDGE_STARTUP_GRACE_PERIOD = 600  # 10 minutes grace period for startup
 
 
 def check_all_dependencies(force: bool = False) -> Dict[str, Any]:

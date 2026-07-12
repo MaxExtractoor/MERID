@@ -229,7 +229,7 @@ class TestGlobalAllocator:
         assert "BTC" not in assets, "BTC should be filtered (3c below min)"
         assert "SOL" not in assets, "SOL should be filtered (97c above max)"
         
-        print(f"[PASS] Test passed: Price range filtering -> {len(chosen)} selected (only within [5c-95c])")
+        print(f"[PASS] Test passed: Price range filtering -> {len(chosen)} selected (only within [10c-50c])")
     
     def test_confidence_filtering(self):
         """

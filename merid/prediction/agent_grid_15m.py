@@ -4704,19 +4704,17 @@ class LeanAgent15m:
 
         
 
-        # 2026-07-10: Expanded price range to 5c-95c for skewed market conditions
+        # 2026-07-12: Canonical price range 10c-50c per commit c5ac4a18
 
-        # Previous 10-50c range was too restrictive for current market conditions
-
-        # If no prices exist in 5-95c range, drop the candidate (no trade).
+        # If no prices exist in 10-50c range, drop the candidate (no trade).
 
         raw_price_cents = price_cents
 
         
 
-        # Check if price is within expanded range (5c-95c)
+        # Check if price is within canonical range (10c-50c)
 
-        if 5 <= raw_price_cents <= 95:
+        if 10 <= raw_price_cents <= 50:
 
             # Price is already in valid range - use it directly
 
@@ -4724,7 +4722,7 @@ class LeanAgent15m:
 
             logger.info(
 
-                "[PRICE-SELECTION] asset=%s raw_price_cents=%d in expanded range [5c-95c] - using directly",
+                "[PRICE-SELECTION] asset=%s raw_price_cents=%d in canonical range [10c-50c] - using directly",
 
                 asset, raw_price_cents
 
@@ -4732,11 +4730,11 @@ class LeanAgent15m:
 
         else:
 
-            # Price is outside expanded range - search orderbook for valid prices
+            # Price is outside canonical range - search orderbook for valid prices
 
             logger.warning(
 
-                "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside expanded range [5c-95c] - searching orderbook",
+                "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside canonical range [10c-50c] - searching orderbook",
 
                 asset, raw_price_cents
 
@@ -4744,7 +4742,7 @@ class LeanAgent15m:
 
             
 
-            # Try to find a price in the expanded range from the orderbook
+            # Try to find a price in the canonical range from the orderbook
 
             price_cents = None
 
@@ -4774,7 +4772,7 @@ class LeanAgent15m:
 
                             logger.info(
 
-                                "[PRICE-SELECTION] asset=%s found %d valid prices in expanded range, using cheapest=%d",
+                                "[PRICE-SELECTION] asset=%s found %d valid prices in canonical range, using cheapest=%d",
 
                                 asset, len(valid_prices), price_cents
 
@@ -4836,15 +4834,13 @@ class LeanAgent15m:
 
         # Final validation - ensure we have a valid price in the canonical range
 
-        # CRITICAL FIX: Allow prices up to 95c to match expanded range and prevent false rejections
+        # CRITICAL FIX: 2026-07-12 - Use canonical 10-50c range aligned with GlobalAllocator and commit c5ac4a18
 
-        # Previous [10c-50c] range was too restrictive for skewed markets (e.g., DOGE at 91c mid)
-
-        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 95):
+        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 50):
 
             logger.error(
 
-                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in expanded range [10c-95c] - dropping candidate",
+                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in canonical range [10c-50c] - dropping candidate",
 
                 asset, clamped_price_cents
 
@@ -5212,19 +5208,17 @@ class LeanAgent15m:
 
         
 
-        # 2026-07-10: Expanded price range to 5c-95c for skewed market conditions
+        # 2026-07-12: Canonical price range 10c-50c per commit c5ac4a18
 
-        # Previous 10-50c range was too restrictive for current market conditions
-
-        # If no prices exist in 5-95c range, drop the candidate (no trade).
+        # If no prices exist in 10-50c range, drop the candidate (no trade).
 
         raw_price_cents = int(market_price * 100)
 
         
 
-        # Check if price is within expanded range (5c-95c)
+        # Check if price is within canonical range (10c-50c)
 
-        if 5 <= raw_price_cents <= 95:
+        if 10 <= raw_price_cents <= 50:
 
             # Price is already in valid range - use it directly
 
@@ -5232,7 +5226,7 @@ class LeanAgent15m:
 
             logger.info(
 
-                "[PRICE-SELECTION] asset=%s raw_price_cents=%d in expanded range [5c-95c] - using directly",
+                "[PRICE-SELECTION] asset=%s raw_price_cents=%d in canonical range [10c-50c] - using directly",
 
                 asset, raw_price_cents
 
@@ -5240,11 +5234,11 @@ class LeanAgent15m:
 
         else:
 
-            # Price is outside expanded range - search orderbook for valid prices
+            # Price is outside canonical range - search orderbook for valid prices
 
             logger.warning(
 
-                "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside expanded range [5c-95c] - searching orderbook",
+                "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside canonical range [10c-50c] - searching orderbook",
 
                 asset, raw_price_cents
 
@@ -5252,7 +5246,7 @@ class LeanAgent15m:
 
             
 
-            # Try to find a price in the expanded range from the orderbook
+            # Try to find a price in the canonical range from the orderbook
 
             price_cents = None
 
@@ -5282,7 +5276,7 @@ class LeanAgent15m:
 
                             logger.info(
 
-                                "[PRICE-SELECTION] asset=%s found %d valid prices in expanded range, using cheapest=%d",
+                                "[PRICE-SELECTION] asset=%s found %d valid prices in canonical range, using cheapest=%d",
 
                                 asset, len(valid_prices), price_cents
 
@@ -5344,15 +5338,13 @@ class LeanAgent15m:
 
         # Final validation - ensure we have a valid price in the canonical range
 
-        # CRITICAL FIX: Allow prices up to 95c to match expanded range and prevent false rejections
+        # CRITICAL FIX: 2026-07-12 - Use canonical 10-50c range aligned with GlobalAllocator and commit c5ac4a18
 
-        # Previous [10c-50c] range was too restrictive for skewed markets (e.g., DOGE at 91c mid)
-
-        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 95):
+        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 50):
 
             logger.error(
 
-                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in expanded range [10c-95c] - dropping candidate",
+                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in canonical range [10c-50c] - dropping candidate",
 
                 asset, clamped_price_cents
 
@@ -7326,25 +7318,25 @@ class LeanAgent15m:
 
         # - Entry prices < $0.10 are rejected by DEEP_OTM_POLICY (lottery zone)
 
-        # - Expanded entry band [5c, 95c] for skewed market conditions (2026-07-10 fix)
+        # - Canonical entry band [10c, 50c] per commit c5ac4a18
 
-        # - This aligns agent grid with profile, order_gate, and order_router (all 5c minimum)
+        # - This aligns agent grid with profile, order_gate, and order_router (all 10c minimum)
 
         min_entry_prices = {
 
-            'BTC': 5,
+            'BTC': 10,
 
-            'ETH': 5,
+            'ETH': 10,
 
-            'SOL': 5,
+            'SOL': 10,
 
-            'XRP': 5,
+            'XRP': 10,
 
-            'DOGE': 5
+            'DOGE': 10
 
         }
 
-        min_price_cents = min_entry_prices.get(asset, 5)  # Default to 5c
+        min_price_cents = min_entry_prices.get(asset, 10)  # Default to 10c
 
         
 
@@ -10052,19 +10044,17 @@ class LeanAgent15m:
 
         
 
-        # 2026-07-10: Expanded price range to 5c-95c for skewed market conditions
+        # 2026-07-12: Canonical price range 10c-50c per commit c5ac4a18
 
-        # Previous 10-50c range was too restrictive for current market conditions
-
-        # If no prices exist in 5-95c range, drop the candidate (no trade).
+        # If no prices exist in 10-50c range, drop the candidate (no trade).
 
         raw_price_cents = price_cents
 
         
 
-        # Check if price is within expanded range (5c-95c)
+        # Check if price is within canonical range (10c-50c)
 
-        if 5 <= raw_price_cents <= 95:
+        if 10 <= raw_price_cents <= 50:
 
             # Price is already in valid range - use it directly
 
@@ -10072,7 +10062,7 @@ class LeanAgent15m:
 
             logger.info(
 
-                "[PRICE-SELECTION] asset=%s raw_price_cents=%d in expanded range [5c-95c] - using directly",
+                "[PRICE-SELECTION] asset=%s raw_price_cents=%d in canonical range [10c-50c] - using directly",
 
                 asset, raw_price_cents
 
@@ -10080,11 +10070,11 @@ class LeanAgent15m:
 
         else:
 
-            # Price is outside expanded range - search orderbook for valid prices
+            # Price is outside canonical range - search orderbook for valid prices
 
             logger.warning(
 
-                "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside expanded range [5c-95c] - searching orderbook",
+                "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside canonical range [10c-50c] - searching orderbook",
 
                 asset, raw_price_cents
 
@@ -10092,7 +10082,7 @@ class LeanAgent15m:
 
             
 
-            # Try to find a price in the expanded range from the orderbook
+            # Try to find a price in the canonical range from the orderbook
 
             price_cents = None
 
@@ -10122,7 +10112,7 @@ class LeanAgent15m:
 
                             logger.info(
 
-                                "[PRICE-SELECTION] asset=%s found %d valid prices in expanded range, using cheapest=%d",
+                                "[PRICE-SELECTION] asset=%s found %d valid prices in canonical range, using cheapest=%d",
 
                                 asset, len(valid_prices), price_cents
 
@@ -10184,15 +10174,13 @@ class LeanAgent15m:
 
         # Final validation - ensure we have a valid price in the canonical range
 
-        # CRITICAL FIX: Allow prices up to 95c to match expanded range and prevent false rejections
+        # CRITICAL FIX: 2026-07-12 - Use canonical 10-50c range aligned with GlobalAllocator and commit c5ac4a18
 
-        # Previous [10c-50c] range was too restrictive for skewed markets (e.g., DOGE at 91c mid)
-
-        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 95):
+        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 50):
 
             logger.error(
 
-                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in expanded range [10c-95c] - dropping candidate",
+                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in canonical range [10c-50c] - dropping candidate",
 
                 asset, clamped_price_cents
 

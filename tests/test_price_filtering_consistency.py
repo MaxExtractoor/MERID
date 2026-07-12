@@ -19,7 +19,7 @@ class TestPriceFilteringConsistency:
     """Test price filtering consistency across all layers."""
     
     def test_profile_yaml_min_price_is_10c(self):
-        """Test that profile YAML sets min_contract_price_cents to 10."""
+        """Test that profile YAML sets min_contract_price_cents to 10 (canonical range per commit c5ac4a18)."""
         with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
             profile = yaml.safe_load(f)
         
@@ -29,19 +29,19 @@ class TestPriceFilteringConsistency:
         assert min_price == 10, \
             f"Profile guardrails_min_contract_price_cents should be 10, got {min_price}"
     
-    def test_profile_yaml_max_price_is_75c(self):
-        """Test that profile YAML sets max_contract_price_cents to 75."""
+    def test_profile_yaml_max_price_is_50c(self):
+        """Test that profile YAML sets max_contract_price_cents to 50 (canonical range per commit c5ac4a18)."""
         with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
             profile = yaml.safe_load(f)
         
         guardrails = profile.get("guardrails", {})
         max_price = guardrails.get("max_contract_price_cents")
         
-        assert max_price == 75, \
-            f"Profile guardrails_max_contract_price_cents should be 75, got {max_price}"
+        assert max_price == 50, \
+            f"Profile guardrails_max_contract_price_cents should be 50, got {max_price}"
     
     def test_risk_parameters_deep_otm_cheap_is_10c(self):
-        """Test that risk_parameters.py DEEP_OTM_CHEAP_CENTS is 10."""
+        """Test that risk_parameters.py DEEP_OTM_CHEAP_CENTS is 10 (canonical range per commit c5ac4a18)."""
         with open("merid/event_venues/kalshi/risk_parameters.py", "r", encoding="utf-8") as f:
             content = f.read()
         
@@ -53,8 +53,8 @@ class TestPriceFilteringConsistency:
         assert value == 10, \
             f"DEEP_OTM_CHEAP_CENTS should be 10, got {value}"
     
-    def test_risk_parameters_deep_otm_expensive_is_75c(self):
-        """Test that risk_parameters.py DEEP_OTM_EXPENSIVE_CENTS is 75."""
+    def test_risk_parameters_deep_otm_expensive_is_50c(self):
+        """Test that risk_parameters.py DEEP_OTM_EXPENSIVE_CENTS is 50 (canonical range per commit c5ac4a18)."""
         with open("merid/event_venues/kalshi/risk_parameters.py", "r", encoding="utf-8") as f:
             content = f.read()
         
@@ -63,11 +63,11 @@ class TestPriceFilteringConsistency:
         assert match, "DEEP_OTM_EXPENSIVE_CENTS not found in risk_parameters.py"
         
         value = int(match.group(1))
-        assert value == 75, \
-            f"DEEP_OTM_EXPENSIVE_CENTS should be 75, got {value}"
+        assert value == 50, \
+            f"DEEP_OTM_EXPENSIVE_CENTS should be 50, got {value}"
     
     def test_agent_grid_min_entry_prices_are_10c(self):
-        """Test that agent_grid_15m.py min_entry_prices are all 10c."""
+        """Test that agent_grid_15m.py min_entry_prices are all 10c (canonical range per commit c5ac4a18)."""
         with open("merid/prediction/agent_grid_15m.py", "r", encoding="utf-8") as f:
             content = f.read()
         
@@ -98,16 +98,16 @@ class TestPriceFilteringConsistency:
         assert "PRICE-FILTER-LOW-PRICE" not in content, \
             "agent_grid_15m.py should not have PRICE-FILTER-LOW-PRICE logic"
     
-    def test_agent_grid_hard_ban_below_10c(self):
-        """Test that agent_grid_15m.py hard bans below 10c."""
+    def test_agent_grid_expanded_range_5c_95c(self):
+        """Test that agent_grid_15m.py uses expanded 5c-95c range for skewed markets."""
         with open("merid/prediction/agent_grid_15m.py", "r", encoding="utf-8") as f:
             content = f.read()
         
-        # Check that hard ban below 10c is present
-        assert "market_price_cents < 10" in content, \
-            "agent_grid_15m.py should hard ban below 10c"
-        assert "PRICE-FILTER-HARD-BAN" in content, \
-            "agent_grid_15m.py should have PRICE-FILTER-HARD-BAN logic"
+        # Check that expanded range is present
+        assert "5 <= yes_price_cents <= 95" in content, \
+            "agent_grid_15m.py should use 5c-95c expanded range"
+        assert "5 <= no_price_cents <= 95" in content, \
+            "agent_grid_15m.py should use 5c-95c expanded range for NO side"
     
     def test_order_gate_uses_profile_min_price(self):
         """Test that order_gate.py uses profile guardrails_min_contract_price_cents."""
@@ -147,7 +147,7 @@ class TestPriceFilteringConsistency:
             "unified_edge.py should have longshot_trap logic"
     
     def test_profile_adapter_defaults_match_yaml(self):
-        """Test that profile adapter defaults match YAML values."""
+        """Test that profile adapter defaults match YAML values (expanded range for skewed markets)."""
         with open("merid/risk/profiles/crypto_15m_profile.py", "r", encoding="utf-8") as f:
             content = f.read()
         
@@ -168,11 +168,11 @@ class TestPriceFilteringConsistency:
         )
         assert max_match, "guardrails_max_contract_price_cents default not found"
         max_default = int(max_match.group(1))
-        assert max_default == 75, \
-            f"Profile adapter default for max should be 75, got {max_default}"
+        assert max_default == 50, \
+            f"Profile adapter default for max should be 50, got {max_default}"
     
     def test_all_layers_consistent_10c_minimum(self):
-        """Test that all layers are consistent with 10c minimum."""
+        """Test that all layers are consistent with 10c minimum (canonical range per commit c5ac4a18)."""
         # Profile YAML
         with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
             profile = yaml.safe_load(f)
@@ -199,8 +199,8 @@ class TestPriceFilteringConsistency:
         assert profile_min == risk_min == agent_min, \
             f"Inconsistent minimums: profile={profile_min}, risk={risk_min}, agent={agent_min}"
     
-    def test_all_layers_consistent_75c_maximum(self):
-        """Test that all layers are consistent with 75c maximum."""
+    def test_all_layers_consistent_50c_maximum(self):
+        """Test that all layers are consistent with 50c maximum (canonical range per commit c5ac4a18)."""
         # Profile YAML
         with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
             profile = yaml.safe_load(f)
@@ -215,10 +215,10 @@ class TestPriceFilteringConsistency:
         # Profile price_range
         price_range_max = profile["price_range"]["max_price_cents"]
         
-        # All should be 75
-        assert profile_max == 75, f"Profile max is {profile_max}, expected 75"
-        assert risk_max == 75, f"Risk max is {risk_max}, expected 75"
-        assert price_range_max == 75, f"Price range max is {price_range_max}, expected 75"
+        # All should be 50
+        assert profile_max == 50, f"Profile max is {profile_max}, expected 50"
+        assert risk_max == 50, f"Risk max is {risk_max}, expected 50"
+        assert price_range_max == 50, f"Price range max is {price_range_max}, expected 50"
         
         # All should be equal
         assert profile_max == risk_max == price_range_max, \

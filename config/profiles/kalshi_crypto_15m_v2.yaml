@@ -567,9 +567,9 @@ failsafe:
 # - For momentum-based trading, conviction comes from velocity magnitude, not price level
 # - 10-50c range is the sweet spot for optimal risk/reward with fixed $1 exposure cap
 price_range:
-  min_price_cents: 5  # 2026-07-10: Lower bound of expanded range (5-95c) for skewed markets
-  max_price_cents: 95  # 2026-07-10: Upper bound of expanded range (5-95c) for skewed markets
-  description: "Valid price range in cents for order execution (5-95c expanded range for skewed market conditions)"
+  min_price_cents: 10  # 2026-07-12: CRITICAL FIX - Canonical lower bound (10c) aligned with GlobalSlotAllocator and commit c5ac4a18
+  max_price_cents: 50  # 2026-07-12: CRITICAL FIX - Canonical upper bound (50c) aligned with GlobalSlotAllocator and commit c5ac4a18
+  description: "Valid price range in cents for order execution (10-50c canonical range - industry-validated sweet spot)"
 
 # ── Per-Asset Caps (BTC/ETH/SOL/XRP/DOGE) ─────────────────────────────────
 # Each asset has its own notional as percentage of capital, NOT hardcoded USD values.
@@ -953,9 +953,11 @@ canonical:
 
 crisis:
   # Crisis regime thresholds (13% of market time - extreme volatility)
+  # CRITICAL FIX: 2026-07-12 - Align with canonical 10-50c range per commit c5ac4a18
+  # Crisis regime should use same price range but relaxed spread/position sizing
   price_range:
-    min_cents: 5  # Expanded lower bound for skewed markets (NO-side entries when YES at 96-98c)
-    max_cents: 95  # Expanded upper bound for skewed markets
+    min_cents: 10  # Canonical lower bound (aligned with canonical regime)
+    max_cents: 50  # Canonical upper bound (aligned with canonical regime)
   spread:
     max_cents: 100  # Relaxed spread threshold (accommodates 60c-96c spreads observed in current conditions)
     min_gate_cents: 30  # Edge-dependent threshold (unchanged - optimized for entry price sweet spot)
@@ -986,7 +988,7 @@ regime_detection:
       spread_multiplier: 1.0  # Canonical spread threshold
       position_size_multiplier: 1.0  # Full position size
     CRISIS:
-      price_range_multiplier: 1.9  # 10-50c → 5-95c (expanded range)
+      price_range_multiplier: 1.0  # 2026-07-12: Keep canonical 10-50c range (no expansion)
       spread_multiplier: 3.3  # 30c → 100c (relaxed spread)
       position_size_multiplier: 0.5  # Reduce exposure by 50%
 
@@ -1029,8 +1031,8 @@ guardrails:
   min_post_fee_edge: 0.015  # LOWERED: Minimum post-fee edge 1.5% (research: 2-2.5% net edge realistic, 1.5% floor for more opportunities)
   min_time_to_expiry_min: 2.0  # RELAXED: Minimum 2 minutes to expiry (120s, reduced from 2.5min for more 15m opportunities)
   max_dist_pct_trade: 2.5  # RELAXED: Maximum spot-strike distance percentage for trading (2.5% for better market coverage)
-  min_contract_price_cents: 5  # 2026-07-10: Lower bound of expanded range (5-95c) for skewed markets
-  max_contract_price_cents: 95  # 2026-07-10: Upper bound of expanded range (5-95c) for skewed markets
+  min_contract_price_cents: 10  # 2026-07-12: CRITICAL FIX - Canonical lower bound (10c) aligned with GlobalSlotAllocator and commit c5ac4a18
+  max_contract_price_cents: 50  # 2026-07-12: CRITICAL FIX - Canonical upper bound (50c) aligned with GlobalSlotAllocator and commit c5ac4a18
   max_same_side_per_strip: 5  # RELAXED: Maximum same-direction positions per strip (increased from 4 to 5 for more opportunities)
   # REMOVED: Duplicate max_orders_per_cycle - now handled by throttling.max_orders_per_15m_window (single source of truth)
   min_edge_per_trade: 0.02  # UNIFIED: 2% base edge for maker orders (aligned with Kalshi's 1-2% maker requirement, research-backed)

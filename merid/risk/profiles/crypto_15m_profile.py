@@ -1106,8 +1106,8 @@ class Crypto15mProfileAdapter:
                 guardrails_max_position_value_usd=guardrails.get('max_position_value_usd', 100000.0),  # Default $100k
                 # OTM filtering for 15-minute crypto
                 guardrails_max_dist_pct_trade=guardrails.get('max_dist_pct_trade', 2.5),  # CRITICAL FIX: Default 2.5 to match YAML (was 2.0)
-                guardrails_min_contract_price_cents=guardrails.get('min_contract_price_cents', 5),  # 2026-07-10: Default 5c to match YAML (expanded range for skewed markets)
-                guardrails_max_contract_price_cents=guardrails.get('max_contract_price_cents', 95),  # 2026-07-10: Default 95c to match YAML (expanded range for skewed markets)
+                guardrails_min_contract_price_cents=guardrails.get('min_contract_price_cents', 10),  # 2026-07-12: Default 10c to match YAML (canonical range per commit c5ac4a18)
+                guardrails_max_contract_price_cents=guardrails.get('max_contract_price_cents', 50),  # 2026-07-12: Default 50c to match YAML (canonical range per commit c5ac4a18)
                 guardrails_max_same_side_per_strip=guardrails.get('max_same_side_per_strip', 5),  # CRITICAL FIX: Default 5 to match YAML (was 2)
                 # Time trap prevention (entry window narrowing)
                 guardrails_max_entry_mins=guardrails.get('max_entry_mins', 15.0),  # CRITICAL FIX: Default 15 to match YAML (was 12)
