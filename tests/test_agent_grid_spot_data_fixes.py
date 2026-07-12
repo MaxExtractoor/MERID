@@ -393,25 +393,25 @@ class TestPriceRangeLoggingFix:
     """Test price range logging for debugging yes_in_range/no_in_range (2026-07-10 fix)"""
     
     def test_price_range_check_logic(self):
-        """Test that price range check logic is correct"""
+        """Test that price range check logic is correct (10-75c canonical range)"""
         # Test yes price in range
         yes_price_cents = 50
-        yes_in_range = (5 <= yes_price_cents <= 95)
+        yes_in_range = (10 <= yes_price_cents <= 75)
         assert yes_in_range is True, "Price of 50c should be in range"
         
         # Test yes price out of range (too low)
         yes_price_cents = 3
-        yes_in_range = (5 <= yes_price_cents <= 95)
+        yes_in_range = (10 <= yes_price_cents <= 75)
         assert yes_in_range is False, "Price of 3c should be out of range"
         
         # Test yes price out of range (too high)
         yes_price_cents = 97
-        yes_in_range = (5 <= yes_price_cents <= 95)
+        yes_in_range = (10 <= yes_price_cents <= 75)
         assert yes_in_range is False, "Price of 97c should be out of range"
         
         # Test no price in range
         no_price_cents = 50
-        no_in_range = (5 <= no_price_cents <= 95)
+        no_in_range = (10 <= no_price_cents <= 75)
         assert no_in_range is True, "Price of 50c should be in range"
         
     def test_both_sides_out_of_range_blocks_trade(self):
@@ -419,8 +419,8 @@ class TestPriceRangeLoggingFix:
         yes_price_cents = 97
         no_price_cents = 97
         
-        yes_in_range = (5 <= yes_price_cents <= 95)
-        no_in_range = (5 <= no_price_cents <= 95)
+        yes_in_range = (10 <= yes_price_cents <= 75)
+        no_in_range = (10 <= no_price_cents <= 75)
         
         should_block = not yes_in_range and not no_in_range
         assert should_block is True, "Trade should be blocked when both sides are out of range"

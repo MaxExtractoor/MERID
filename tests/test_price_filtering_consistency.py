@@ -98,16 +98,16 @@ class TestPriceFilteringConsistency:
         assert "PRICE-FILTER-LOW-PRICE" not in content, \
             "agent_grid_15m.py should not have PRICE-FILTER-LOW-PRICE logic"
     
-    def test_agent_grid_expanded_range_5c_95c(self):
-        """Test that agent_grid_15m.py uses expanded 5c-95c range for skewed markets."""
+    def test_agent_grid_expanded_range_10c_75c(self):
+        """Test that agent_grid_15m.py uses canonical 10-75c range for normal trading."""
         with open("merid/prediction/agent_grid_15m.py", "r", encoding="utf-8") as f:
             content = f.read()
         
-        # Check that expanded range is present
-        assert "5 <= yes_price_cents <= 95" in content, \
-            "agent_grid_15m.py should use 5c-95c expanded range"
-        assert "5 <= no_price_cents <= 95" in content, \
-            "agent_grid_15m.py should use 5c-95c expanded range for NO side"
+        # Check that canonical range is present (10-75c for normal trading)
+        assert "10 <= yes_price_cents <= 75" in content, \
+            "agent_grid_15m.py should use 10-75c canonical range"
+        assert "10 <= no_price_cents <= 75" in content, \
+            "agent_grid_15m.py should use 10-75c canonical range for NO side"
     
     def test_order_gate_uses_profile_min_price(self):
         """Test that order_gate.py uses profile guardrails_min_contract_price_cents."""
@@ -168,8 +168,8 @@ class TestPriceFilteringConsistency:
         )
         assert max_match, "guardrails_max_contract_price_cents default not found"
         max_default = int(max_match.group(1))
-        assert max_default == 50, \
-            f"Profile adapter default for max should be 50, got {max_default}"
+        assert max_default == 75, \
+            f"Profile adapter default for max should be 75, got {max_default}"
     
     def test_all_layers_consistent_10c_minimum(self):
         """Test that all layers are consistent with 10c minimum (canonical range per commit c5ac4a18)."""
