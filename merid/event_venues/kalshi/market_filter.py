@@ -773,8 +773,8 @@ class MarketFilterConfig:
     min_price_cents: int = 10
 
     # Maximum best-bid price (filter out near-certain contracts)
-    # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
-    max_price_cents: int = 50
+    # 2026-07-12: Canonical price band (75c) - expanded for market conditions
+    max_price_cents: int = 75
 
     # Only include markets for these underlyings.
     # Empty list = allow all underlyings (full Kalshi platform coverage).

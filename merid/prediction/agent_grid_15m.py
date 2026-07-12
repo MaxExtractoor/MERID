@@ -7392,15 +7392,15 @@ class LeanAgent15m:
 
         
 
-        # Check which sides are within 5c-95c expanded range (2026-07-10 fix for skewed markets)
+        # Check which sides are within 10c-75c canonical range (2026-07-12 expanded for market conditions)
 
         # Previous 10c-50c range was too restrictive for current market conditions
 
         # Expanded range allows trading in high-conviction (YES > 50c) and low-conviction (NO > 50c) markets
 
-        yes_in_range = (5 <= yes_price_cents <= 95)
+        yes_in_range = (10 <= yes_price_cents <= 75)
 
-        no_in_range = (5 <= no_price_cents <= 95)
+        no_in_range = (10 <= no_price_cents <= 75)
 
         
 

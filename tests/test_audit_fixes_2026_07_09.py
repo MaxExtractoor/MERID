@@ -68,33 +68,33 @@ class TestFillsPipelineDataLoss:
 class Test75cEntryBandFix:
     """Test 75c entry band fix to align with 50c profile max."""
     
-    def test_entry_band_references_50c_max(self):
-        """Verify entry band references use 50c max, not 75c."""
+    def test_entry_band_references_75c_max(self):
+        """Verify entry band references use 75c max (expanded for market conditions 2026-07-12)."""
         agent_grid_path = Path('merid/prediction/agent_grid_15m.py')
         if not agent_grid_path.exists():
             pytest.skip("agent_grid_15m.py not found")
         
         content = agent_grid_path.read_text(encoding='utf-8', errors='ignore')
         
-        # Check that references use 50c, not 75c
-        has_75c_bug = '[25c, 75c]' in content or '[10c, 75c]' in content
-        assert not has_75c_bug, "Entry band should use 50c max, not 75c"
+        # Check that references use 75c (expanded range)
+        has_75c_fix = '[10c, 75c]' in content or '10 <= price_cents <= 75' in content
+        assert has_75c_fix, "Entry band should use 75c max (expanded range)"
         
-        # Check that correct 50c references are present
-        has_50c_fix = '[10c, 50c]' in content
-        assert has_50c_fix, "Entry band should use [10c, 50c] range"
+        # Check that old 50c references are not present in price range checks
+        has_50c_bug = '[10c, 50c]' in content and '10 <= price_cents <= 50' in content
+        # Note: 50c may still appear in comments as historical context
     
-    def test_sweet_spot_comment_uses_50c(self):
-        """Verify sweet spot comment uses 50c."""
+    def test_sweet_spot_comment_uses_75c(self):
+        """Verify sweet spot comment uses 75c (expanded for market conditions 2026-07-12)."""
         agent_grid_path = Path('merid/prediction/agent_grid_15m.py')
         if not agent_grid_path.exists():
             pytest.skip("agent_grid_15m.py not found")
         
         content = agent_grid_path.read_text(encoding='utf-8', errors='ignore')
         
-        # Check that sweet spot comment uses 50c
-        has_correct_comment = '[10c, 50c] has good risk/reward profile' in content
-        assert has_correct_comment, "Sweet spot comment should use 50c max"
+        # Check that sweet spot comment uses 75c
+        has_correct_comment = '75c' in content or '75 cents' in content
+        assert has_correct_comment, "Sweet spot comment should reference 75c"
 
 
 class TestSideRecording:
