@@ -3649,6 +3649,24 @@ def _route_sync_non_live(intent: OrderIntent, mode: TradingMode, t0: float) -> O
     )
 
 
+def _release_allocated_slot(intent: OrderIntent) -> None:
+    """Release the allocated slot from the global slot allocator.
+    
+    CRITICAL FIX (2026-07-12): This prevents slot leaks when orders fail
+    after passing the pre-trade gate in _route_live. The slot_id is stored
+    on intent._allocated_slot_id by _run_pre_trade_gate.
+    """
+    slot_id = getattr(intent, '_allocated_slot_id', None)
+    if slot_id:
+        try:
+            from merid.risk.global_slot_allocator import get_global_slot_allocator
+            slot_allocator = get_global_slot_allocator()
+            slot_allocator.release_slot(slot_id)
+            logger.info("[order-router] Released allocated slot_id=%s for ticker=%s", slot_id, intent.ticker)
+        except Exception as release_err:
+            logger.warning("[order-router] Failed to release allocated slot_id=%s: %s", slot_id, release_err)
+
+
 def _release_gate_record(intent: OrderIntent, reason: str = "") -> None:
     """Mark the pre-trade gate record as REJECTED so the slot is freed.
 
@@ -3657,7 +3675,12 @@ def _release_gate_record(intent: OrderIntent, reason: str = "") -> None:
     
     CRASH-013: Uses intent_id as fallback when client_tag is missing to ensure
     cleanup happens even if gate stamping failed.
+    
+    CRITICAL FIX (2026-07-12): Also releases the allocated slot to prevent leaks.
     """
+    # CRITICAL FIX (2026-07-12): Release allocated slot if present
+    _release_allocated_slot(intent)
+    
     # CRASH-013: Use intent_id as fallback for gate cleanup
     tag = intent.client_tag or intent.intent_id
     if not tag:
@@ -5640,6 +5663,13 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         elif filled_count > 0:
             status = "partial_live"
         
+        # CRITICAL FIX (2026-07-12): Release allocated slot on fill (complete or partial)
+        # The slot was allocated to reserve exposure during order submission. Once the order
+        # is filled (even partially), the exposure is now tracked by position management,
+        # so the slot can be released to allow new orders.
+        if filled_count > 0:
+            _release_allocated_slot(intent)
+        
         # ALERT THRESHOLDS MONITORING: Track order fill and latency
         if filled_count > 0:
             try:
@@ -6127,6 +6157,7 @@ def _run_pre_trade_gate(
         # This prevents the $1 exposure cap bypass where multiple orders pass the passive
         # exposure check simultaneously before any fills occur. The slot must be allocated
         # BEFORE any order routing to ensure atomic exposure reservation.
+        # CRITICAL FIX (2026-07-12): Store slot_id on intent for downstream release in _route_live
         _allocated_slot_id = None
         try:
             from merid.risk.global_slot_allocator import get_global_slot_allocator, AllocationRequest
@@ -6179,11 +6210,16 @@ def _run_pre_trade_gate(
                     "[order-router-SLOT-ALLOCATED] asset=%s ticker=%s agent=%s price=%dc slot_id=%s total_exposure=$%.2f",
                     asset, intent.ticker, _agent, intent.price_cents, _allocated_slot_id, slot_allocator.get_total_exposure()
                 )
+                
+                # CRITICAL FIX (2026-07-12): Store slot_id on intent for downstream release
+                # This allows _route_live to release the slot on post-gate failures
+                intent._allocated_slot_id = _allocated_slot_id
             else:
                 logger.info(
                     "[order-router-SLOT-ALLOCATOR-BYPASS] Exit order bypasses slot allocation: ticker=%s action=%s",
                     intent.ticker, intent.action
                 )
+                intent._allocated_slot_id = None
         except Exception as slot_err:
             logger.error("[order-router] Slot allocation failed (fail-closed): %s", slot_err)
             return OrderResult(
