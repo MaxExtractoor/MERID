@@ -150,7 +150,7 @@ class IndicatorConfig:
 
     # ── Liquidity filter ──────────────────────────────────────────────
     # 2026-07-11: Use dynamic threshold manager for regime-aware spread thresholds
-    max_spread_cents: int = 8          # wider → skip (fallback, will be overridden by dynamic thresholds)
+    max_spread_cents: int = 30         # wider → skip (canonical default from dynamic threshold system)
     min_depth_at_price: int = 3        # fewer contracts → skip
 
     # ── Price buffer ──────────────────────────────────────────────────

@@ -343,8 +343,17 @@ def evaluate_dynamic_window(
     # Early side check
     # CRITICAL FIX: Removed hardcoded depth threshold (10 contracts) - now uses liquidity-aware check
     # Depth thresholds are now per-asset from risk profile, not global constants
+    # 2026-07-11: Updated spread check from 5c to use dynamic threshold manager
+    max_spread_for_early = 5  # Default fallback
+    try:
+        from merid.event_venues.kalshi.dynamic_thresholds import get_dynamic_threshold_manager
+        threshold_manager = get_dynamic_threshold_manager()
+        max_spread_for_early = threshold_manager.get_max_spread_cents()
+    except Exception:
+        pass  # Use default fallback
+    
     if time_since_open < min_from_open:
-        reason = WindowReason.TOO_EARLY_VOL_HIGH if vol_regime in ("HIGH", "EXTREME") else WindowReason.TOO_EARLY_SPREAD_WIDE if spread_cents >= 5 else WindowReason.TOO_EARLY_EXECUTION_POOR if execution_slippage > 1.0 else WindowReason.TOO_EARLY_RECENT_INVARIANT
+        reason = WindowReason.TOO_EARLY_VOL_HIGH if vol_regime in ("HIGH", "EXTREME") else WindowReason.TOO_EARLY_SPREAD_WIDE if spread_cents >= max_spread_for_early else WindowReason.TOO_EARLY_EXECUTION_POOR if execution_slippage > 1.0 else WindowReason.TOO_EARLY_RECENT_INVARIANT
         
         return DynamicWindowResult(
             would_allow_trade=False,

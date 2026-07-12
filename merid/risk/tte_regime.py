@@ -48,6 +48,8 @@ class TTERegimeConfig:
     # Spread tolerance (aligned with 2026 industry standards for 15m binary options)
     # Updated 2026-07-01: Reduced from 40-10c to 10-5c to align with industry research
     # Industry standard: 5-10c maximum spread for 15m binary options
+    # NOTE: These TTE-specific thresholds are intentionally tighter than dynamic threshold manager
+    # because markets close to expiry have less time to recover from wide spreads and higher illiquidity risk
     normal_max_spread_cents: int = 10
     approaching_max_spread_cents: int = 8
     critical_max_spread_cents: int = 6

@@ -24,11 +24,10 @@ from typing import Final
 MIN_KALSHI_PRICE_CENTS: Final[int] = 1
 MAX_KALSHI_PRICE_CENTS: Final[int] = 99
 DEFAULT_KALSHI_PRICE_CENTS: Final[int] = 25  # 2026-07-09: Changed from 50 to 25 (midpoint of 10-50c sweet spot)
-DEEP_OTM_CHEAP_CENTS: Final[int] = 10  # 2026-07-08: Lower bound of sweet spot (10-50c)
-DEEP_OTM_EXPENSIVE_CENTS: Final[int] = 50  # 2026-07-08: Upper bound of sweet spot (10-50c)
-# Rationale: 10-50c is the sweet spot for entry with favorable risk/reward
-# Above 50c: Too expensive for $1 fixed exposure cap, limited profit room
-# Below 10c: Lottery zone (deep OTM, also rejected)
+DEEP_OTM_CHEAP_CENTS: Final[int] = 5  # 2026-07-10: Lower bound of expanded range (5-95c) for skewed markets
+DEEP_OTM_EXPENSIVE_CENTS: Final[int] = 95  # 2026-07-10: Upper bound of expanded range (5-95c) for skewed markets
+# Rationale: 5-95c expanded range allows trading in high-conviction (YES > 50c) and low-conviction (NO > 50c) markets
+# Previous 10-50c range was too restrictive for current market conditions
 # Fixed $1 exposure model: cheaper entries enable easier loss recovery
 MAX_PRICE_DIFFERENCE_CENTS: Final[int] = 50  # Max realistic price jump (data error threshold)  
 
@@ -363,7 +362,8 @@ UNIVERSE_MIN_VOLUME_DEFAULT: Final[int] = 50
 UNIVERSE_MIN_OPEN_INTEREST_DEFAULT: Final[int] = 10
 
 # Maximum bid-ask spread for universe inclusion
-UNIVERSE_MAX_SPREAD_CENTS_DEFAULT: Final[int] = 15
+# 2026-07-11: Updated from 15c to 30c to align with dynamic threshold system canonical default
+UNIVERSE_MAX_SPREAD_CENTS_DEFAULT: Final[int] = 30
 
 # Maximum markets per agent sweep
 UNIVERSE_MAX_PER_AGENT_DEFAULT: Final[int] = 50

@@ -200,8 +200,8 @@ def check_market_microstructure(
         no_ask_cents: NO ask price in cents
         yes_depth: YES depth (number of contracts)
         no_depth: NO depth (number of contracts)
-        max_spread_cents: Maximum allowed spread in cents (default 8 cents)
-        min_depth_usd: Minimum depth in USD within 3 cents of mid (default $200)
+        max_spread_cents: Maximum allowed spread in cents (default 75c, uses dynamic threshold manager)
+        min_depth_usd: Minimum depth in USD within 3 cents of mid (default $10)
         min_yes_depth: Minimum YES depth threshold (default 1)
         min_no_depth: Minimum NO depth threshold (default 1)
     

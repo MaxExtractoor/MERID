@@ -38,9 +38,9 @@ class TestMaxOrdersPerCycle:
         assert "throttling" in profile
         assert "max_orders_per_15m_window" in profile["throttling"]
         
-        # Check value is 12 (current configuration - 2026-07-10: increased from 5 to 12 for $1+/15m target)
+        # Check value is 24 (current configuration - 2026-07-10: increased from 5 to 24 for $1+/15m target)
         max_orders = profile["throttling"]["max_orders_per_15m_window"]
-        assert max_orders == 12, f"Expected 12, got {max_orders}"
+        assert max_orders == 24, f"Expected 24, got {max_orders}"
     
     def test_max_orders_per_15m_window_reasonable(self):
         """Test that max_orders_per_15m_window is within reasonable bounds."""
@@ -596,10 +596,10 @@ class TestZeroValueBugFixes:
 
 
 class TestMaxSpreadCentsFix:
-    """Test max_spread_cents unified to 30c based on 2026 industry research and 10c-50c entry price sweet spot."""
+    """Test max_spread_cents unified to 100c based on 2026-07-10 relaxation for wider market spreads."""
     
     def test_guardrails_max_spread_cents(self):
-        """Test that guardrails max_spread_cents is 30c based on 2026 industry research and 10c-50c entry price sweet spot."""
+        """Test that guardrails max_spread_cents is 100c (relaxed for current market conditions)."""
         with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
             profile = yaml.safe_load(f)
         
@@ -608,12 +608,12 @@ class TestMaxSpreadCentsFix:
         # Check max_spread_cents exists
         assert "max_spread_cents" in guardrails
         
-        # Should be 30 (harmonized with 10c-50c entry price sweet spot - industry research: 3-8c typical, 30c quality filter)
+        # Should be 100 (2026-07-10: RELAXED to 100c - allows trading in current market conditions with wider spreads 60c-96c observed)
         max_spread = guardrails["max_spread_cents"]
-        assert max_spread == 30, f"Expected max_spread_cents=30, got {max_spread}"
+        assert max_spread == 100, f"Expected max_spread_cents=100, got {max_spread}"
     
     def test_market_microstructure_max_spread_cents(self):
-        """Test that market_microstructure max_spread_cents is 30c based on 2026 industry research and 10c-50c entry price sweet spot."""
+        """Test that market_microstructure max_spread_cents is 100c (relaxed for current market conditions)."""
         with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
             profile = yaml.safe_load(f)
         
@@ -625,9 +625,9 @@ class TestMaxSpreadCentsFix:
         # Check max_spread_cents exists
         assert "max_spread_cents" in micro
         
-        # Should be 30 (harmonized with 10c-50c entry price sweet spot - industry research: 3-8c typical, 30c quality filter)
+        # Should be 100 (2026-07-10: RELAXED to 100c - allows trading in current market conditions with wider spreads 60c-96c observed)
         max_spread = micro["max_spread_cents"]
-        assert max_spread == 30, f"Expected max_spread_cents=30, got {max_spread}"
+        assert max_spread == 100, f"Expected max_spread_cents=100, got {max_spread}"
 
 
 class TestADXThresholdRelaxation:

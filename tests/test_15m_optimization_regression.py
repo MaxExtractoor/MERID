@@ -117,10 +117,11 @@ class Test15mOptimizationRegression:
         with open("c:/Dev/MERID/config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
             profile = yaml.safe_load(f)
 
-        # Verify profile has guardrails.max_spread_cents set to 30
+        # Verify profile has guardrails.max_spread_cents set to 100
+        # 2026-07-10: RELAXED to 100c - allows trading in current market conditions with wider spreads (60c-96c observed)
         assert "guardrails" in profile
         assert "max_spread_cents" in profile["guardrails"]
-        assert profile["guardrails"]["max_spread_cents"] == 30
+        assert profile["guardrails"]["max_spread_cents"] == 100
 
         # Check candidate_optimizer.py uses profile-driven max_spread_cents
         with open("c:/Dev/MERID/merid/prediction/candidate_optimizer.py", "r", encoding="utf-8") as f:
