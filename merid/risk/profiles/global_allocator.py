@@ -162,7 +162,7 @@ class GlobalAllocator:
                 len(filtered) - len(conf_filtered), len(filtered), self.min_confidence * 100
             )
         
-        # Filter by price range (10c-50c canonical range)
+        # Filter by price range (10c-75c canonical range)
         price_filtered = [c for c in conf_filtered if self.min_price_cents <= c.price_cents <= self.max_price_cents]
         if len(price_filtered) < len(conf_filtered):
             logger.info(
