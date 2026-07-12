@@ -151,7 +151,7 @@ class TestDynamicThresholdManager:
         fallback = self.manager._get_fallback_canonical()
         
         assert fallback["price_range"]["min_cents"] == 10
-        assert fallback["price_range"]["max_cents"] == 50
+        assert fallback["price_range"]["max_cents"] == 75  # 2026-07-12: Expanded to 75c
         assert fallback["spread"]["max_cents"] == 30
         assert fallback["spread"]["min_gate_cents"] == 30
         assert fallback["liquidity"]["min_volume_24h"] == 500

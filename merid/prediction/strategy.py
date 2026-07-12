@@ -2799,10 +2799,10 @@ class KalshiStrategy:
 
         # Mid price (integer cents) for risk sizing, PM logs, and TradeProposal.intent_risk —
         # QUOTE previously omitted limit_price_cents, which made intent_risk=0 downstream.
-        # CRITICAL FIX: Clamp to 10-50 cents to prevent extreme purchases
-        # This aligns with kalshi_crypto_15m_v2.yaml price_range [10, 50]
-        # 2026-07-09: Fixed max from 75c to 50c to match profile price_range.max_price_cents
-        mid_cents = max(10, min(50, int((bid + ask) // 2)))
+        # CRITICAL FIX: Clamp to 10-75 cents to prevent extreme purchases
+        # This aligns with kalshi_crypto_15m_v2.yaml price_range [10, 75]
+        # 2026-07-12: Fixed max from 50c to 75c to match profile price_range.max_price_cents (expanded for market conditions)
+        mid_cents = max(10, min(75, int((bid + ask) // 2)))
 
         _depth = int(self.config.min_depth_contracts)
         _vm = self._pm_vol_band_size_factor(snapshot)

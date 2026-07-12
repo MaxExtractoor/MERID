@@ -307,7 +307,7 @@ class RegimeDetector:
                 "position_size_multiplier": 1.0
             },
             Regime.CRISIS: {
-                "price_range_multiplier": 1.9,  # 10-50c → 5-95c
+                "price_range_multiplier": 1.9,  # 10-75c → 5-95c (expanded range during crisis)
                 "spread_multiplier": 3.3,     # 30c → 100c
                 "position_size_multiplier": 0.5
             }

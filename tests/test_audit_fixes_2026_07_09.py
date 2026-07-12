@@ -152,17 +152,17 @@ class TestPositionSizingLimits:
 class TestProfileConfiguration:
     """Test profile configuration consistency."""
     
-    def test_price_range_max_is_50c(self):
-        """Verify profile price_range.max_price_cents is 50."""
+    def test_price_range_max_is_75c(self):
+        """Verify profile price_range.max_price_cents is 75 (expanded for market conditions)."""
         profile_path = Path('config/profiles/kalshi_crypto_15m_v2.yaml')
         if not profile_path.exists():
             pytest.skip("kalshi_crypto_15m_v2.yaml not found")
         
         content = profile_path.read_text(encoding='utf-8', errors='ignore')
         
-        # Check that price_range max is 50c
-        has_50c_max = 'max_price_cents: 50' in content
-        assert has_50c_max, "price_range.max_price_cents should be 50"
+        # Check that price_range max is 75c (expanded from 50c for market conditions)
+        has_75c_max = 'max_price_cents: 75' in content
+        assert has_75c_max, "price_range.max_price_cents should be 75"
     
     def test_price_range_min_is_10c(self):
         """Verify profile price_range.min_price_cents is 10."""

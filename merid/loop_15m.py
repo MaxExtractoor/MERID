@@ -3977,15 +3977,15 @@ class Kalshi15mLoop:
             candidate["trace_id"] = trace_id
 
             # PRE-SEND ASSERT: Ensure order price is within profile price_range (10c-50c)
-            # Profile YAML: kalshi_crypto_15m_v2.yaml price_range.min_price_cents=10, max_price_cents=50
-            if not (10 <= price_cents <= 50):
+            # Profile YAML: kalshi_crypto_15m_v2.yaml price_range.min_price_cents=10, max_price_cents=75
+            if not (10 <= price_cents <= 75):
                 logger.error(
-                    "[PRE-SEND-ASSERT-FAILED] trace_id=%s price_cents=%d outside profile price_range [10,50] ticker=%s side=%s edge_pct=%s "
+                    "[PRE-SEND-ASSERT-FAILED] trace_id=%s price_cents=%d outside profile price_range [10,75] ticker=%s side=%s edge_pct=%s "
                     "candidate_price_cents=%s source=%s",
                     trace_id, price_cents, ticker, kalshi_side, edge_pct,
                     candidate.get("price_cents", "N/A"), "merid.prediction.agent_grid_15m"
                 )
-                raise AssertionError(f"Order price {price_cents}c outside profile price_range [10,50] for ticker={ticker}")
+                raise AssertionError(f"Order price {price_cents}c outside profile price_range [10,75] for ticker={ticker}")
 
             # CRITICAL FIX: 2026-07-09 - Enforce max 1 contract per order for $1 hard limit
             # This prevents agents from exceeding the $1 exposure cap by trading multiple contracts
