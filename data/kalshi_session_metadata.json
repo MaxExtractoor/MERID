@@ -3,7 +3,9 @@
   "session_realized_pnl": "0",
   "session_unrealized_pnl": "0",
   "cumulative_realized_pnl": "0",
-  "processed_fill_ids": [],
+  "processed_fill_ids": [
+    "82df142e-5823-597f-0e4e-5c71ff668add"
+  ],
   "last_eod_snapshot_date": "2026-07-12",
-  "timestamp": "2026-07-12T02:03:53.209893+00:00"
+  "timestamp": "2026-07-12T02:55:52.324597+00:00"
 }
