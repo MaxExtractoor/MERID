@@ -493,13 +493,22 @@ class CandidateOptimizer:
             
             # Also check if state has orderbook object with depth data
             if hasattr(state, 'orderbook') and state.orderbook:
-                logger.info(
-                    "[CANDIDATE-OPTIMIZER] ORDERBOOK-DEPTH market_id=%s "
-                    "yes_bids=%s no_bids=%s",
-                    market_id,
-                    len(state.orderbook.yes_bids) if hasattr(state.orderbook, 'yes_bids') else 0,
-                    len(state.orderbook.no_bids) if hasattr(state.orderbook, 'no_bids') else 0,
-                )
+                try:
+                    yes_bids_len = len(state.orderbook.yes_bids) if hasattr(state.orderbook, 'yes_bids') and hasattr(state.orderbook.yes_bids, '__len__') else 0
+                    no_bids_len = len(state.orderbook.no_bids) if hasattr(state.orderbook, 'no_bids') and hasattr(state.orderbook.no_bids, '__len__') else 0
+                    logger.info(
+                        "[CANDIDATE-OPTIMIZER] ORDERBOOK-DEPTH market_id=%s "
+                        "yes_bids=%s no_bids=%s",
+                        market_id,
+                        yes_bids_len,
+                        no_bids_len,
+                    )
+                except (TypeError, AttributeError):
+                    # Handle case where orderbook fields are Mock objects or not iterable
+                    logger.info(
+                        "[CANDIDATE-OPTIMIZER] ORDERBOOK-DEPTH market_id=%s (unable to measure depth)",
+                        market_id,
+                    )
             
             # Log what we found
             logger.info(
