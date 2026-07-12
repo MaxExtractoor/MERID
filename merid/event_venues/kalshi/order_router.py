@@ -2989,13 +2989,14 @@ def _determine_dynamic_order_type(intent: OrderIntent, state: Optional[Any]) -> 
     # CRITICAL FIX (2026-07-11): Read IOC threshold from profile instead of hardcoding 300s
     ioc_threshold_seconds = 300  # Default fallback
     try:
-        from merid.risk.profiles.crypto_15m_profile import get_profile_config
-        profile_config = get_profile_config()
-        ioc_threshold_seconds = profile_config.venue_invariants_ioc_auto_below_seconds
-        logger.debug(
-            "[DYNAMIC-ORDER-TYPE] Using IOC threshold from profile: %ds",
-            ioc_threshold_seconds
-        )
+        from merid.risk.profiles.crypto_15m_profile import get_active_profile
+        profile_adapter = get_active_profile()
+        if profile_adapter and hasattr(profile_adapter, 'profile'):
+            ioc_threshold_seconds = profile_adapter.profile.venue_invariants.ioc_auto_below_seconds
+            logger.debug(
+                "[DYNAMIC-ORDER-TYPE] Using IOC threshold from profile: %ds",
+                ioc_threshold_seconds
+            )
     except Exception as e:
         logger.warning(
             "[DYNAMIC-ORDER-TYPE] Failed to read IOC threshold from profile, using default 300s: %s",
