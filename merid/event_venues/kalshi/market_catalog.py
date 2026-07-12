@@ -895,7 +895,7 @@ class KalshiMarketCatalog:
 
             # 1. Fetch priority series with rate limiting and retry logic for 429 errors
             # CRITICAL FIX: Use REST API directly for crypto 15m series to bypass public API rate limits
-            # CRITICAL FIX: Add max_expiration_time filter to fetch only markets within 16 minutes to prevent old tickers
+            # CRITICAL FIX: Add max_expiration_time filter to fetch only markets within 30 minutes to prevent old tickers
             async def _fetch_series_with_retry(series: str, now_utc: datetime, max_retries: int = 3):
                 for attempt in range(max_retries):
                     try:
@@ -917,6 +917,12 @@ class KalshiMarketCatalog:
                         if result.success and result.data:
                             markets = result.data
                             logger.info("[CATALOG-FETCH] Fetched series=%s count=%d via REST API", series, len(markets))
+                            # CRITICAL DIAGNOSTIC: Log individual market details for 15m crypto series
+                            if series in ["KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M"]:
+                                for m in markets[:5]:  # Log first 5 markets to avoid spam
+                                    logger.info("[CATALOG-FETCH-DETAIL] series=%s market_id=%s status=%s close_time=%s expiration_time=%s",
+                                        series, m.get('market_id', 'unknown'), m.get('status', 'unknown'),
+                                        m.get('close_time', 'N/A'), m.get('expiration_time', 'N/A'))
                             return series, result
                         else:
                             logger.warning("[CATALOG-FETCH] REST API error for series=%s: %s", series, result.error)
@@ -1031,7 +1037,8 @@ class KalshiMarketCatalog:
                         try:
                             # CRITICAL FIX: Add max_expiration_time filter to prevent fetching markets expired hours ago
                             # This prevents old markets from being logged and processed
-                            max_expiry = now_utc + timedelta(minutes=16)
+                            # Aligned with snapshot MAX_MINUTES_TO_EXPIRY (17 min) for consistency
+                            max_expiry = now_utc + timedelta(minutes=17)
                             debug_result = await asyncio.wait_for(
                                 self._client.list_markets_result(
                                     MarketFilter(active_only=False, limit=200, search=series, max_expiration_time=max_expiry)
@@ -2828,10 +2835,11 @@ class KalshiMarketCatalog:
         active_markets = []
         allowed_assets = {"BTC", "ETH", "SOL", "XRP", "DOGE"}
         
-        # Entry window: -2 to 30 minutes to expiry
+        # Entry window: -2 to 17 minutes to expiry
         # Allow negative MTE to include markets that just opened (next window)
+        # 17 minutes gives current window (0-15 min) + 2 min buffer for transition
         MIN_MINUTES_TO_EXPIRY = -2.0
-        MAX_MINUTES_TO_EXPIRY = 30.0
+        MAX_MINUTES_TO_EXPIRY = 17.0
         
         now = datetime.now(timezone.utc)
         
