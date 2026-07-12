@@ -29,7 +29,7 @@ class TestGlobalAllocator:
             min_edge_pct=2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units
             min_confidence=0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence
             min_price_cents=10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
-            max_price_cents=50  # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
+            max_price_cents=75  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
         )
         
         candidates = [
@@ -86,7 +86,7 @@ class TestGlobalAllocator:
             min_edge_pct=2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units
             min_confidence=0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence
             min_price_cents=10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
-            max_price_cents=50  # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
+            max_price_cents=75  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
         )
         
         candidates = [
@@ -145,7 +145,7 @@ class TestGlobalAllocator:
             min_edge_pct=2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units
             min_confidence=0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence
             min_price_cents=10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
-            max_price_cents=50  # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
+            max_price_cents=75  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
         )
         
         candidates = [
@@ -184,7 +184,7 @@ class TestGlobalAllocator:
     
     def test_price_range_filtering(self):
         """
-        Scenario: Candidates with prices outside [10c, 50c] canonical range.
+        Scenario: Candidates with prices outside [10c, 75c] expanded range.
         Expected: Only candidates within range are considered.
         """
         allocator = GlobalAllocator(
@@ -192,7 +192,7 @@ class TestGlobalAllocator:
             min_edge_pct=2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units
             min_confidence=0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence
             min_price_cents=10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
-            max_price_cents=50  # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
+            max_price_cents=75  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
         )
         
         candidates = [
@@ -241,7 +241,7 @@ class TestGlobalAllocator:
             min_edge_pct=2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units
             min_confidence=0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence
             min_price_cents=10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
-            max_price_cents=50  # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
+            max_price_cents=75  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
         )
         
         candidates = [
@@ -280,7 +280,7 @@ class TestGlobalAllocator:
             min_edge_pct=2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units
             min_confidence=0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence
             min_price_cents=10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
-            max_price_cents=50  # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
+            max_price_cents=75  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
         )
         
         candidates = [
@@ -319,7 +319,7 @@ class TestGlobalAllocator:
             min_edge_pct=2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units
             min_confidence=0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence
             min_price_cents=10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
-            max_price_cents=50  # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
+            max_price_cents=75  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
         )
         
         candidates = [

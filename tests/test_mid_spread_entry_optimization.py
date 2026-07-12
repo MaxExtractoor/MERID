@@ -9,7 +9,7 @@ Key features tested:
 - Time-decay adjustment (patient early, aggressive late)
 - Edge-based adjustment (high edge = patient, low edge = aggressive)
 - Fallback when no orderbook data
-- Price clamping to 55-75c range
+- Price clamping to 10-50c range (2026-07-09: updated from 55-75c to match profile)
 - YES vs NO side logic
 """
 

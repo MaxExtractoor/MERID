@@ -16,95 +16,49 @@ from merid.event_venues.kalshi.sla_config import (
 
 
 class TestSpotMaxAgeSeconds:
-    """Tests for get_spot_max_age_seconds with timing-aware thresholds"""
+    """Tests for get_spot_max_age_seconds with single hard threshold"""
     
-    def test_btc_timing_buckets(self):
-        """Test BTC timing-aware thresholds match design"""
-        # < 2 min to expiry: ≤ 5s
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=0.5) == 5.0
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=1.0) == 5.0
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=1.9) == 5.0
-        
-        # 2-5 min to expiry: ≤ 10s
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=2.0) == 10.0
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=3.0) == 10.0
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=4.5) == 10.0
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=4.9) == 10.0
-        
-        # 5-10 min to expiry: ≤ 15s
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=5.0) == 15.0
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=7.0) == 15.0
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=9.5) == 15.0
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=9.9) == 15.0
-        
-        # >= 10 min to expiry: base threshold (60s for BTC)
+    def test_single_threshold_for_all_assets(self):
+        """Test that all assets use the same 60s threshold (new design)"""
+        # New design: single hard threshold (60s) for all assets
+        # minutes_to_expiry is now unused (spot is reference anchor, not primary trading venue)
+        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=0.5) == 60.0
+        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=1.0) == 60.0
         assert get_spot_max_age_seconds('BTC', minutes_to_expiry=10.0) == 60.0
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=12.0) == 60.0
         assert get_spot_max_age_seconds('BTC', minutes_to_expiry=15.0) == 60.0
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=30.0) == 60.0
-    
-    def test_eth_timing_buckets(self):
-        """Test ETH timing-aware thresholds"""
-        # ETH should have same timing buckets as BTC
-        assert get_spot_max_age_seconds('ETH', minutes_to_expiry=1.0) == 5.0
-        assert get_spot_max_age_seconds('ETH', minutes_to_expiry=3.0) == 10.0
-        assert get_spot_max_age_seconds('ETH', minutes_to_expiry=7.0) == 15.0
-        assert get_spot_max_age_seconds('ETH', minutes_to_expiry=15.0) == 60.0
-    
-    def test_sol_timing_buckets(self):
-        """Test SOL timing-aware thresholds"""
-        assert get_spot_max_age_seconds('SOL', minutes_to_expiry=1.0) == 5.0
-        assert get_spot_max_age_seconds('SOL', minutes_to_expiry=3.0) == 10.0
-        assert get_spot_max_age_seconds('SOL', minutes_to_expiry=7.0) == 15.0
-        # SOL may have different base threshold
-        sol_base = get_spot_max_age_seconds('SOL', minutes_to_expiry=15.0)
-        assert sol_base >= 15.0
-    
-    def test_xrp_timing_buckets(self):
-        """Test XRP timing-aware thresholds"""
-        assert get_spot_max_age_seconds('XRP', minutes_to_expiry=1.0) == 5.0
-        assert get_spot_max_age_seconds('XRP', minutes_to_expiry=3.0) == 10.0
-        assert get_spot_max_age_seconds('XRP', minutes_to_expiry=7.0) == 15.0
-    
-    def test_doge_timing_buckets(self):
-        """Test DOGE timing-aware thresholds"""
-        assert get_spot_max_age_seconds('DOGE', minutes_to_expiry=1.0) == 5.0
-        assert get_spot_max_age_seconds('DOGE', minutes_to_expiry=3.0) == 10.0
-        assert get_spot_max_age_seconds('DOGE', minutes_to_expiry=7.0) == 15.0
+        
+        assert get_spot_max_age_seconds('ETH', minutes_to_expiry=1.0) == 60.0
+        assert get_spot_max_age_seconds('ETH', minutes_to_expiry=10.0) == 60.0
+        
+        assert get_spot_max_age_seconds('SOL', minutes_to_expiry=1.0) == 60.0
+        assert get_spot_max_age_seconds('SOL', minutes_to_expiry=10.0) == 60.0
+        
+        assert get_spot_max_age_seconds('XRP', minutes_to_expiry=1.0) == 60.0
+        assert get_spot_max_age_seconds('XRP', minutes_to_expiry=10.0) == 60.0
+        
+        assert get_spot_max_age_seconds('DOGE', minutes_to_expiry=1.0) == 60.0
+        assert get_spot_max_age_seconds('DOGE', minutes_to_expiry=10.0) == 60.0
     
     def test_no_minutes_to_expiry_uses_base_threshold(self):
         """Test that None minutes_to_expiry uses base threshold"""
         btc_with_none = get_spot_max_age_seconds('BTC', minutes_to_expiry=None)
         btc_with_10min = get_spot_max_age_seconds('BTC', minutes_to_expiry=10.0)
-        assert btc_with_none == btc_with_10min
+        assert btc_with_none == btc_with_10min == 60.0
     
     def test_boundary_conditions(self):
-        """Test boundary conditions between timing buckets"""
-        # Exactly at boundaries
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=2.0) == 10.0
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=5.0) == 15.0
+        """Test boundary conditions (all return 60s in new design)"""
+        # All return 60s regardless of minutes_to_expiry
+        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=0.0) == 60.0
+        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=2.0) == 60.0
+        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=5.0) == 60.0
         assert get_spot_max_age_seconds('BTC', minutes_to_expiry=10.0) == 60.0
-        
-        # Just below boundaries
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=1.99) == 5.0
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=4.99) == 10.0
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=9.99) == 15.0
-        
-        # Just above boundaries
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=2.01) == 10.0
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=5.01) == 15.0
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=10.01) == 60.0
+        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=15.0) == 60.0
     
     def test_negative_minutes_to_expiry(self):
         """Test handling of negative minutes_to_expiry (already expired)"""
-        # Should treat as < 2 min bucket (most strict)
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=-1.0) == 5.0
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=-10.0) == 5.0
-    
-    def test_zero_minutes_to_expiry(self):
-        """Test handling of zero minutes_to_expiry (at expiry)"""
-        # Should treat as < 2 min bucket (most strict)
-        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=0.0) == 5.0
+        # Still returns 60s (single threshold)
+        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=-1.0) == 60.0
+        assert get_spot_max_age_seconds('BTC', minutes_to_expiry=-10.0) == 60.0
 
 
 class TestSpotStatus:

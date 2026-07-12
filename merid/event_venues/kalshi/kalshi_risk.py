@@ -1352,18 +1352,22 @@ class KalshiRiskManager:
                 catalog = get_market_catalog()
                 market = catalog.get_market(ticker)
                 
-                # STAGE 2 FIX: Use normalized minutes_to_expiry from catalog (canonical field)
-                # Fallback to end_date for non-15m or legacy markets (temporary)
+                # CRITICAL FIX: Use normalized minutes_to_expiry from catalog (canonical field)
+                # This ensures we use the canonical expiry time from contract_normalization.py
+                # which prioritizes close_ts over end_date for 15m contracts
                 minutes_to_expiry = None
                 if market and hasattr(market, 'minutes_to_expiry') and market.minutes_to_expiry is not None:
+                    # Use normalized minutes_to_expiry (canonical field from catalog)
                     minutes_to_expiry = market.minutes_to_expiry
                 elif market and hasattr(market, 'end_date') and market.end_date:
-                    # Temporary fallback for legacy markets (will be removed in STAGE 4)
-                    minutes_to_expiry = (market.end_date - now).total_seconds() / 60.0
-                    logger.warning(
-                        "[RISK-LEGACY-FALLBACK] ticker=%s using end_date fallback (minutes_to_expiry not normalized)",
+                    # Fallback for non-15m or legacy markets (should not happen for 15m crypto)
+                    # This is a safety net, but indicates catalog normalization may not be working
+                    logger.error(
+                        "[RISK-LEGACY-FALLBACK] ticker=%s using end_date fallback (minutes_to_expiry not normalized). "
+                        "This indicates catalog normalization may not be working correctly for 15m contracts.",
                         ticker
                     )
+                    minutes_to_expiry = (market.end_date - now).total_seconds() / 60.0
                 
                 if minutes_to_expiry is not None:
                     edge_pct = edge * 100  # Convert decimal to percentage

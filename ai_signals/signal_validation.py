@@ -161,7 +161,7 @@ class SignalValidation:
         # Default validation rules
         self.default_rules = {
             ValidationRule.CONFIDENCE_THRESHOLD: {
-                "min_confidence": 0.6,
+                "min_confidence": 0.65,  # FIX: Aligned with US compliance and production config (was 0.60)
                 "weight": 0.3
             },
             ValidationRule.RISK_LIMIT: {

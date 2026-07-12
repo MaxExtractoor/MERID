@@ -132,7 +132,14 @@ class MakerTakerPolicyEngine:
     """
 
     # Default thresholds
-    AGGRESSIVE_THRESHOLD_PCT = 5.0  # CONSERVATIVE: 5% edge required to take
+    # 2026-07-05 RESEARCH FIX: Re-enabled the aggressive threshold (was 0.0 "testing" hack).
+    # The 0.0 hack forced EVERY order to taker with negative net edge (edge_net_fees=-1.0%),
+    # bleeding fees on zero-edge orders. Root cause (velocity-magnitude edges of 0.03%) is
+    # fixed upstream: agent_grid_15m now emits probability-based edges (>= 3-5% per asset).
+    # Threshold semantics: edge NET of taker fees must exceed this to cross the spread;
+    # otherwise post maker (post_only) and let the swing come to us. 2.0% net-of-taker-fee
+    # aligns with EDGE_MARKET_ENTRY (4% raw) at typical mid-band prices (~1.4% taker fee).
+    AGGRESSIVE_THRESHOLD_PCT = 2.0
     ARB_MIN_EDGE_PCT = 0.5  # 0.5% minimum for arb legs
 
     def __init__(
@@ -209,7 +216,23 @@ class MakerTakerPolicyEngine:
             edge_net_of_taker = edge_pct - taker_fee_pct
             edge_net_of_maker = edge_pct - maker_fee_pct
 
-            if crosses_spread and edge_net_of_taker >= self.aggressive_threshold_pct:
+            # CRITICAL FIX: 2026-07-05 - Force taker mode when threshold is 0.0
+            # This allows velocity-based signals to execute regardless of edge
+            if self.aggressive_threshold_pct == 0.0:
+                return RoleDecision(
+                    recommended_role=LiquidityRole.TAKER,
+                    expected_role=LiquidityRole.TAKER,
+                    should_execute=True,
+                    post_only=False,
+                    reason=(
+                        f"AGGRESSIVE (forced taker): Threshold disabled (0.0). "
+                        f"Edge {edge_pct:.2f}% net of taker fee {edge_net_of_taker:.3f}%"
+                    ),
+                    threshold_pct=self.aggressive_threshold_pct,
+                    fee_cents_estimate=taker_fee_cents,
+                    edge_net_of_fees_pct=edge_net_of_taker,
+                )
+            elif crosses_spread and edge_net_of_taker >= self.aggressive_threshold_pct:
                 # Worth taking liquidity
                 return RoleDecision(
                     recommended_role=LiquidityRole.TAKER,
@@ -226,10 +249,13 @@ class MakerTakerPolicyEngine:
                 )
             else:
                 # Use maker to save fees
+                # CRITICAL FIX: 2026-07-05 - Disable should_execute check when threshold is 0.0
+                # This allows velocity-based signals to execute even if edge < fees
+                should_execute = edge_net_of_maker > 0 if self.aggressive_threshold_pct > 0 else True
                 return RoleDecision(
                     recommended_role=LiquidityRole.MAKER,
                     expected_role=LiquidityRole.MAKER if not crosses_spread else LiquidityRole.TAKER,
-                    should_execute=edge_net_of_maker > 0,
+                    should_execute=should_execute,
                     post_only=True,
                     reason=(
                         f"AGGRESSIVE (maker): Edge {edge_pct:.2f}% insufficient to cross. "

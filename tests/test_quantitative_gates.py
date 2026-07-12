@@ -25,7 +25,7 @@ class TestQuantitativeGates:
         """Test gates initialization with default config."""
         assert self.gates.config.min_brier_score == 0.25
         assert self.gates.config.min_recent_accuracy == 0.6
-        assert self.gates.config.min_confidence == 0.3
+        assert self.gates.config.min_confidence == 0.65  # FIX: Aligned with production config (was 0.30)
         assert self.gates.config.max_confidence == 0.95
     
     def test_accuracy_gate_pass(self):
@@ -554,7 +554,7 @@ class TestGateConfig:
         
         assert config.min_brier_score == 0.25
         assert config.min_recent_accuracy == 0.6
-        assert config.min_confidence == 0.3
+        assert config.min_confidence == 0.65  # FIX: Aligned with production config (was 0.30)
         assert config.max_confidence == 0.95
         assert config.min_recent_predictions == 3
         assert config.max_prediction_age_days == 30
@@ -576,7 +576,7 @@ class TestGateConfig:
         assert config.min_recent_accuracy == 0.8
         assert config.max_team_size == 10
         # Other values should be defaults
-        assert config.min_confidence == 0.3
+        assert config.min_confidence == 0.65  # FIX: Aligned with production config (was 0.30)
 
 
 if __name__ == "__main__":

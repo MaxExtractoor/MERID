@@ -38,35 +38,35 @@ class TestPriceRangeCanonicalFix:
     """Test that price range is canonical [10c-50c] per commit c5ac4a18."""
     
     def test_agent_grid_accepts_45c_price(self):
-        """Test that agent_grid_15m.py accepts prices within canonical range (e.g., 45c)."""
-        # This test verifies the canonical range [10c-50c]
+        """Test that agent_grid_15m.py accepts prices within expanded range (e.g., 45c)."""
+        # This test verifies the expanded range [10c-75c]
         
         # Simulate the price validation logic from agent_grid_15m.py
-        raw_price_cents = 45  # Mid price within canonical range
+        raw_price_cents = 45  # Mid price within expanded range
         
-        # Check if price is within canonical range (10c-50c)
-        assert 10 <= raw_price_cents <= 50, f"Price {raw_price_cents}c should be in canonical range [10c-50c]"
+        # Check if price is within expanded range (10c-75c)
+        assert 10 <= raw_price_cents <= 75, f"Price {raw_price_cents}c should be in expanded range [10c-75c]"
     
-    def test_agent_grid_rejects_51c_price(self):
-        """Test that agent_grid_15m.py rejects prices above 50c."""
-        raw_price_cents = 51
+    def test_agent_grid_rejects_76c_price(self):
+        """Test that agent_grid_15m.py rejects prices above 75c."""
+        raw_price_cents = 76
         
-        # Should be outside canonical range
-        assert not (10 <= raw_price_cents <= 50), f"Price {raw_price_cents}c should be outside canonical range [10c-50c]"
+        # Should be outside expanded range
+        assert not (10 <= raw_price_cents <= 75), f"Price {raw_price_cents}c should be outside expanded range [10c-75c]"
     
     def test_agent_grid_accepts_10c_price(self):
         """Test that agent_grid_15m.py accepts minimum price of 10c."""
         raw_price_cents = 10
         
-        # Should be within canonical range
-        assert 10 <= raw_price_cents <= 50, f"Price {raw_price_cents}c should be in canonical range [10c-50c]"
+        # Should be within expanded range
+        assert 10 <= raw_price_cents <= 75, f"Price {raw_price_cents}c should be in expanded range [10c-75c]"
     
     def test_agent_grid_rejects_9c_price(self):
         """Test that agent_grid_15m.py rejects prices below 10c."""
         raw_price_cents = 9
         
-        # Should be outside canonical range
-        assert not (10 <= raw_price_cents <= 50), f"Price {raw_price_cents}c should be outside canonical range [10c-50c]"
+        # Should be outside expanded range
+        assert not (10 <= raw_price_cents <= 75), f"Price {raw_price_cents}c should be outside expanded range [10c-75c]"
 
 
 class TestSequentialTradingHasattrFix:

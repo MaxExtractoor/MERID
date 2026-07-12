@@ -41,6 +41,7 @@ class TradeRecord:
     entry_ts: float
     predicted_edge: float
     confidence: float
+    velocity: Optional[float] = None  # Spot velocity at signal time (used for side accuracy analysis)
     exit_price_cents: Optional[int] = None
     exit_ts: Optional[float] = None
     profit_usd: Optional[Decimal] = None
@@ -135,6 +136,7 @@ class AgentPerformanceTracker:
         contracts: int,
         predicted_edge: float = 0.0,
         confidence: float = 0.5,
+        velocity: Optional[float] = None,
     ) -> None:
         """Record an order fill (trade entry).
         
@@ -146,6 +148,7 @@ class AgentPerformanceTracker:
             contracts: Number of contracts filled
             predicted_edge: Agent's predicted edge (0.0 to 1.0)
             confidence: Agent's confidence in signal (0.0 to 1.0)
+            velocity: Spot velocity at signal time (used for side accuracy analysis)
         """
         # P0 FIX: Thread-safe fill recording with RLock (BUG-UPSTREAM-2)
         with self._fill_lock:
@@ -158,6 +161,7 @@ class AgentPerformanceTracker:
                 entry_ts=time.time(),
                 predicted_edge=predicted_edge,
                 confidence=confidence,
+                velocity=velocity,
             )
             
             # BUG-W fix: composite key prevents multi-agent same-market collision

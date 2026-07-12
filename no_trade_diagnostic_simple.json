@@ -1,0 +1,54 @@
+{
+  "timestamp": "2026-07-07T21:11:26.071784+00:00",
+  "server_logs": {
+    "log_file": "c:\\Dev\\MERID\\logs\\full.log",
+    "log_exists": true,
+    "order_attempts": 40,
+    "order_submissions": 0,
+    "signal_generation": 4,
+    "errors": [],
+    "recent_entries": [
+      "{\"ts\": \"2026-07-07T21:11:22.143373+00:00\", \"level\": \"INFO\", \"logger\": \"merid.event_venues.kalshi.market_catalog\", \"message\": \"[CATALOG-NORMALIZE] ticker=KXBTC15M-26JUL072015-15 asset=BTC api_status=initialized health_status=ok seconds_to_expiry=11022.5 minutes_to_expiry=183.7 reason=Contract expires at 2026-07-08T00:15:00+00:00 (source: end_date) close_ts_used=False\"}",
+      "{\"ts\": \"2026-07-07T21:11:22.143373+00:00\", \"level\": \"INFO\", \"logger\": \"merid.prediction.agent_grid_15m\", \"message\": \"[COLLECT-ALL-TICKERS] agent=DOGE_15M total_tickers=5\"}",
+      "{\"ts\": \"2026-07-07T21:11:22.145019+00:00\", \"level\": \"INFO\", \"logger\": \"merid.event_venues.kalshi.market_catalog\", \"message\": \"[CATALOG-NORMALIZE] ticker=KXBTC15M-26JUL072000-00 asset=BTC api_status=initialized health_status=ok seconds_to_expiry=10122.5 minutes_to_expiry=168.7 reason=Contract expires at 2026-07-08T00:00:00+00:00 (source: end_date) close_ts_used=False\"}",
+      "{\"ts\": \"2026-07-07T21:11:22.145019+00:00\", \"level\": \"INFO\", \"logger\": \"merid.prediction.agent_grid_15m\", \"message\": \"[COLLECT-SAMPLE-TICKERS] agent=DOGE_15M sample_tickers=['KXBTC15M-26JUL071715-15', 'KXETH15M-26JUL071715-15', 'KXSOL15M-26JUL071715-15', 'KXXRP15M-26JUL071715-15', 'KXDOGE15M-26JUL071715-15']\"}",
+      "{\"ts\": \"2026-07-07T21:11:22.146977+00:00\", \"level\": \"INFO\", \"logger\": \"merid.event_venues.kalshi.market_catalog\", \"message\": \"[CATALOG-NORMALIZE] ticker=KXBTC15M-26JUL071945-45 asset=BTC api_status=initialized health_status=ok seconds_to_expiry=9222.5 minutes_to_expiry=153.7 reason=Contract expires at 2026-07-07T23:45:00+00:00 (source: end_date) close_ts_used=False\"}",
+      "{\"ts\": \"2026-07-07T21:11:22.146977+00:00\", \"level\": \"INFO\", \"logger\": \"merid.prediction.agent_grid_15m\", \"message\": \"[COLLECT-SERIES-PREFIX] agent=DOGE_15M series_prefix=KXDOGE15M\"}",
+      "{\"ts\": \"2026-07-07T21:11:22.148571+00:00\", \"level\": \"INFO\", \"logger\": \"merid.event_venues.kalshi.market_catalog\", \"message\": \"[CATALOG-NORMALIZE] ticker=KXBTC15M-26JUL071930-30 asset=BTC api_status=initialized health_status=ok seconds_to_expiry=8322.5 minutes_to_expiry=138.7 reason=Contract expires at 2026-07-07T23:30:00+00:00 (source: end_date) close_ts_used=False\"}",
+      "{\"ts\": \"2026-07-07T21:11:22.152529+00:00\", \"level\": \"INFO\", \"logger\": \"merid.prediction.agent_grid_15m\", \"message\": \"[COLLECT-MATCHING-TICKERS] agent=DOGE_15M matching=1 tickers=['KXDOGE15M-26JUL071715-15']\"}",
+      "{\"ts\": \"2026-07-07T21:11:22.152839+00:00\", \"level\": \"INFO\", \"logger\": \"merid.event_venues.kalshi.market_catalog\", \"message\": \"[CATALOG-NORMALIZE] ticker=KXBTC15M-26JUL071915-15 asset=BTC api_status=initialized health_status=ok seconds_to_expiry=7422.5 minutes_to_expiry=123.7 reason=Contract expires at 2026-07-07T23:15:00+00:00 (source: end_date) close_ts_used=False\"}",
+      "{\"ts\": \"2026-07-07T21:11:22.153840+00:00\", \"level\": \"INFO\", \"logger\": \"merid.prediction.agent_grid_15m\", \"message\": \"[MARKET-SELECTION-DEBUG] asset=DOGE_15M ticker=KXDOGE15M-26JUL071715-15 time_to_expiry=217.8s\"}",
+      "{\"ts\": \"2026-07-07T21:11:22.153840+00:00\", \"level\": \"INFO\", \"logger\": \"merid.event_venues.kalshi.market_catalog\", \"message\": \"[CATALOG-NORMALIZE] ticker=KXBTC15M-26JUL071900-00 asset=BTC api_status=initialized health_status=ok seconds_to_expiry=6522.5 minutes_to_expiry=108.7 reason=Contract expires at 2026-07-07T23:00:00+00:00 (source: end_date) close_ts_used=False\"}",
+      "{\"ts\": \"2026-07-07T21:11:22.156436+00:00\", \"level\": \"INFO\", \"logger\": \"merid.prediction.agent_grid_15m\", \"message\": \"[MARKET-SELECTION] asset=DOGE_15M ticker=KXDOGE15M-26JUL071715-15 selected (time_to_expiry=217.8s, in trading window)\"}",
+      "{\"ts\": \"2026-07-07T21:11:22.156436+00:00\", \"level\": \"INFO\", \"logger\": \"merid.event_venues.kalshi.market_catalog\", \"message\": \"[CATALOG-NORMALIZE] ticker=KXBTC15M-26JUL071845-45 asset=BTC api_status=initialized health_status=ok seconds_to_expiry=5622.5 minutes_to_expiry=93.7 reason=Contract expires at 2026-07-07T22:45:00+00:00 (source: end_date) close_ts_used=False\"}",
+      "{\"ts\": \"2026-07-07T21:11:22.303105+00:00\", \"level\": \"INFO\", \"logger\": \"merid.event_venues.kalshi.market_catalog\", \"message\": \"[CATALOG-NORMALIZE] ticker=KXBTC15M-26JUL071830-30 asset=BTC api_status=initialized health_status=ok seconds_to_expiry=4722.5 minutes_to_expiry=78.7 reason=Contract expires at 2026-07-07T22:30:00+00:00 (source: end_date) close_ts_used=False\"}",
+      "{\"ts\": \"2026-07-07T21:11:22.333114+00:00\", \"level\": \"INFO\", \"logger\": \"merid.prediction.agent_grid_15m\", \"message\": \"[MIN-DECISION-MINUTE] asset=DOGE_15M min_decision_minute=1 (from profile YAML)\"}",
+      "{\"ts\": \"2026-07-07T21:11:22.333114+00:00\", \"level\": \"INFO\", \"logger\": \"merid.event_venues.kalshi.market_catalog\", \"message\": \"[CATALOG-NORMALIZE] ticker=KXBTC15M-26JUL071815-15 asset=BTC api_status=initialized health_status=ok seconds_to_expiry=3822.5 minutes_to_expiry=63.7 reason=Contract expires at 2026-07-07T22:15:00+00:00 (source: end_date) close_ts_used=False\"}",
+      "{\"ts\": \"2026-07-07T21:11:22.334638+00:00\", \"level\": \"INFO\", \"logger\": \"merid.prediction.agent_grid_15m\", \"message\": \"[TRADING-WINDOW] asset=DOGE_15M time_to_expiry=217.8s within trading window [60s, 900s] -> PROCEED\"}",
+      "{\"ts\": \"2026-07-07T21:11:22.334638+00:00\", \"level\": \"INFO\", \"logger\": \"merid.event_venues.kalshi.market_catalog\", \"message\": \"[CATALOG-NORMALIZE] ticker=KXBTC15M-26JUL071800-00 asset=BTC api_status=initialized health_status=ok seconds_to_expiry=2922.5 minutes_to_expiry=48.7 reason=Contract expires at 2026-07-07T22:00:00+00:00 (source: end_date) close_ts_used=False\"}",
+      "{\"ts\": \"2026-07-07T21:11:22.336656+00:00\", \"level\": \"INFO\", \"logger\": \"merid.event_venues.kalshi.market_catalog\", \"message\": \"[CATALOG-NORMALIZE] ticker=KXBTC15M-26JUL071745-45 asset=BTC api_status=initialized health_status=ok seconds_to_expiry=2022.5 minutes_to_expiry=33.7 reason=Contract expires at 2026-07-07T21:45:00+00:00 (source: end_date) close_ts_used=False\"}",
+      "{\"ts\": \"2026-07-07T21:11:22.337128+00:00\", \"level\": \"INFO\", \"logger\": \"merid.prediction.agent_grid_15m\", \"message\": \"[MARKET-STATE-STORE] asset=DOGE_15M ticker=KXDOGE15M-26JUL071715-15 from state store (total matching=1)\"}"
+    ]
+  },
+  "window_exposure": {
+    "window_tracking_file": null,
+    "window_exhausted": false,
+    "per_agent_exposure": {},
+    "total_exposure": 0.0
+  },
+  "position_state": {
+    "position_file": null,
+    "open_positions": 0,
+    "total_positions": 0
+  },
+  "market_catalog": {
+    "catalog_file": null,
+    "markets_discovered": 0,
+    "crypto_markets": 0
+  },
+  "kill_switch": {
+    "kill_switch_file": "c:\\Dev\\MERID\\data\\risk_kill_switch.json",
+    "active": false,
+    "reason": ""
+  }
+}

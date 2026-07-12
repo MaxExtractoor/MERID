@@ -922,10 +922,8 @@ class DynamicRiskEngine:
             # Sell: go down from mid towards bid
             limit_price_cents = max(best_bid_cents, mid_cents - ticks_from_mid)
         
-        # CRITICAL FIX: Clamp to profile price_range (5-95c) to prevent extreme purchases
-        # This aligns with kalshi_crypto_15m_v2.yaml price_range [5, 95]
-        # 2026-07-10: Fixed to 5-95c to match profile price_range
-        limit_price_cents = max(5, min(95, limit_price_cents))
+        # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-50c range per commit c5ac4a18
+        limit_price_cents = max(10, min(50, limit_price_cents))
         
         computation_time_ms = (time.time() - t0) * 1000
         

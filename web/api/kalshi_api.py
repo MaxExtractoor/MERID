@@ -5616,7 +5616,7 @@ async def btc15m_risk_evaluate_endpoint(
             asset=proposal.get("asset", ""),
             timeframe=proposal.get("timeframe", ""),
             side=proposal.get("side", "yes"),
-            price_cents=proposal.get("price_cents", 50),
+            price_cents=proposal.get("price_cents", 25),  # 2026-07-09: Changed from 50 to 25 (midpoint of 10-50c sweet spot)
             intent_risk=proposal.get("intent_risk", 0.25),
             tags=proposal.get("tags", []),
             fear_greed=proposal.get("fear_greed"),

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Process-wide GlobalRiskGuard singleton.
 
 DEPRECATED: This module is deprecated in favor of UnifiedRiskManager.
@@ -31,31 +33,28 @@ if os.getenv("ALLOW_DEPRECATED_RISK_GUARDS", "").lower() not in ("1", "true", "y
    )
 
 # Legacy documentation (deprecated):
-
-Canonical risk gate for all Kalshi PM order submissions. Extracted from
-``merid.trading.kalshi_continuous_trader`` so that every caller - the
-``KalshiContinuousTrader`` loop, ``KalshiTradingAgent`` (agent grid, 35 agents),
-crypto lanes (``btc15m_lane``, ``crypto15m_lane``), web manual trades, and any
-future order source - shares the **same** per-cycle / total risk envelope
-on a **unified** ``equity_cents`` source.
-
-See ``docs/TRADING_OWNERSHIP_DECISION.md`` for the policy context and
-``docs/ORDER_FLOW_AND_OVERTRADING_AUDIT.md`` for the full wiring.
-
-Invariants enforced (per ``check_order`` call):
-    1. Sum of ``max_loss_cents`` for all approved orders in the current cycle
-       <= ``max_cycle_risk_pct * equity_cents``.
-    2. ``existing_risk_cents + cycle_new_risk_cents`` <=
-       ``max_total_risk_pct * equity_cents``.
-    3. If any invariant would be violated, the guard logs CRITICAL and
-       returns ``(False, reason)``.
-
-Thread-safe via a single re-entrant lock. Cycle accumulator is process-wide
-so concurrent callers (CT + agent grid + lanes) cannot each consume the full
-envelope independently.
-"""
-
-from __future__ import annotations
+#
+# Canonical risk gate for all Kalshi PM order submissions. Extracted from
+# ``merid.trading.kalshi_continuous_trader`` so that every caller - the
+# ``KalshiContinuousTrader`` loop, ``KalshiTradingAgent`` (agent grid, 35 agents),
+# crypto lanes (``btc15m_lane``, ``crypto15m_lane``), web manual trades, and any
+# future order source - shares the **same** per-cycle / total risk envelope
+# on a **unified** ``equity_cents`` source.
+#
+# See ``docs/TRADING_OWNERSHIP_DECISION.md`` for the policy context and
+# ``docs/ORDER_FLOW_AND_OVERTRADING_AUDIT.md`` for the full wiring.
+#
+# Invariants enforced (per ``check_order`` call):
+#     1. Sum of ``max_loss_cents`` for all approved orders in the current cycle
+#        <= ``max_cycle_risk_pct * equity_cents``.
+#     2. ``existing_risk_cents + cycle_new_risk_cents`` <=
+#        ``max_total_risk_pct * equity_cents``.
+#     3. If any invariant would be violated, the guard logs CRITICAL and
+#        returns ``(False, reason)``.
+#
+# Thread-safe via a single re-entrant lock. Cycle accumulator is process-wide
+# so concurrent callers (CT + agent grid + lanes) cannot each consume the full
+# envelope independently.
 
 import logging
 import os
@@ -815,7 +814,7 @@ def compute_intent_max_loss_cents(
 ) -> int:
     """Compute max-loss for an ``OrderIntent`` in cents.
 
-    Binary Kalshi contracts settle at 100c or 0c.
+    Binary Kalshi contracts settle at 100 cents or 0 cents.
         long YES bought at P:  max_loss = P * count
         long NO  bought at P:  max_loss = P * count  (same - pay P, lose P if wrong)
     Only meaningful for ``action == "buy"``; sells reduce exposure and should

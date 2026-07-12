@@ -515,6 +515,33 @@ class KalshiPositionCache:
                             "[POSITION-CACHE] Released window exposure on sell fill: agent=%s notional=$%.2f market=%s fill_id=%s",
                             agent_id, position_notional_usd, market_id, fill_id or "N/A"
                         )
+                        
+                        # CRITICAL FIX: 2026-07-09 - Release global slot allocator slot on position closure
+                        # This allows re-entry within the same window when positions close early
+                        try:
+                            from merid.risk.global_slot_allocator import get_global_slot_allocator
+                            slot_allocator = get_global_slot_allocator()
+                            # Release slot by asset (more precise than agent_id)
+                            # Since exit orders bypass allocation, we release by asset to free up exposure
+                            released_count = slot_allocator.release_by_asset(asset) if asset else 0
+                            if released_count > 0:
+                                logger.info(
+                                    "[POSITION-CACHE] Released %d slot(s) from global allocator for asset=%s on sell fill",
+                                    released_count, asset
+                                )
+                            else:
+                                # Fallback: try releasing by agent_id if asset release didn't work
+                                released_count = slot_allocator.release_by_agent(agent_id)
+                                if released_count > 0:
+                                    logger.info(
+                                        "[POSITION-CACHE] Released %d slot(s) from global allocator for agent=%s on sell fill (fallback)",
+                                        released_count, agent_id
+                                    )
+                        except Exception as slot_err:
+                            logger.warning(
+                                "[POSITION-CACHE] Failed to release slot from global allocator: %s",
+                                slot_err
+                            )
                     except RuntimeError as e:
                         # Bankroll not ready - log warning but don't crash
                         logger.warning(
@@ -1078,7 +1105,9 @@ class KalshiPositionCache:
     def get_total_exposure_usd(self) -> float:
         """Get total exposure in USD across all open positions.
         
-        This is used for sequential trading checks to ensure $1 max exposure.
+        CRITICAL FIX: 2026-07-09 - This is now a FALLBACK for exposure tracking
+        Primary source of truth is GlobalSlotAllocator for $1 exposure cap
+        This method is kept for legacy compatibility and fallback scenarios
         
         Returns:
             Total exposure in USD (sum of contracts * price for all open positions)

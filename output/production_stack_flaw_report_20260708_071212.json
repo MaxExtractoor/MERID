@@ -1,0 +1,237 @@
+{
+  "summary": {
+    "total_flaws": 7,
+    "total_tests": 9,
+    "total_duration_seconds": 12.46,
+    "passed_tests": 6,
+    "failed_tests": 3
+  },
+  "severity_breakdown": {
+    "CRITICAL": 1,
+    "HIGH": 2,
+    "MEDIUM": 4
+  },
+  "category_breakdown": {
+    "CONFIGURATION": 2,
+    "RESILIENCE": 3,
+    "LATENCY": 1,
+    "COMPUTATIONAL_LOAD": 1
+  },
+  "layer_breakdown": {
+    "UPSTREAM": 1,
+    "DOWNSTREAM": 1,
+    "END_TO_END": 5
+  },
+  "test_results": [
+    {
+      "test_name": "Upstream Configuration",
+      "passed": false,
+      "duration_ms": 0.55,
+      "flaw_count": 1,
+      "flaws": [
+        {
+          "category": "CONFIGURATION",
+          "severity": "CRITICAL",
+          "layer": "UPSTREAM",
+          "component": "Profile YAML",
+          "description": "Failed to load profile YAML: 'charmap' codec can't decode byte 0x90 in position 4: character maps to <undefined>",
+          "evidence": "'charmap' codec can't decode byte 0x90 in position 4: character maps to <undefined>",
+          "recommendation": "Fix profile YAML syntax and structure",
+          "timestamp": "2026-07-08T07:11:59.664261+00:00"
+        }
+      ]
+    },
+    {
+      "test_name": "Midstream Risk Envelope",
+      "passed": true,
+      "duration_ms": 5097.45,
+      "flaw_count": 0,
+      "flaws": []
+    },
+    {
+      "test_name": "Downstream Sizing",
+      "passed": false,
+      "duration_ms": 176.15,
+      "flaw_count": 1,
+      "flaws": [
+        {
+          "category": "CONFIGURATION",
+          "severity": "HIGH",
+          "layer": "DOWNSTREAM",
+          "component": "Unified Sizing",
+          "description": "Failed to test unified sizing: cannot import name 'UnifiedSizing' from 'merid.prediction.unified_sizing' (C:\\Dev\\MERID\\merid\\prediction\\unified_sizing.py)",
+          "evidence": "cannot import name 'UnifiedSizing' from 'merid.prediction.unified_sizing' (C:\\Dev\\MERID\\merid\\prediction\\unified_sizing.py)",
+          "recommendation": "Fix unified sizing imports and structure",
+          "timestamp": "2026-07-08T07:12:04.941828+00:00"
+        }
+      ]
+    },
+    {
+      "test_name": "End-to-End Data Flow",
+      "passed": true,
+      "duration_ms": 5317.25,
+      "flaw_count": 0,
+      "flaws": []
+    },
+    {
+      "test_name": "Resilience",
+      "passed": false,
+      "duration_ms": 22.09,
+      "flaw_count": 3,
+      "flaws": [
+        {
+          "category": "RESILIENCE",
+          "severity": "MEDIUM",
+          "layer": "END_TO_END",
+          "component": "Circuit Breaker",
+          "description": "Circuit breaker implementation not found",
+          "evidence": "ImportError when importing merid.hardening.circuit_breaker",
+          "recommendation": "Implement circuit breaker for fault tolerance",
+          "timestamp": "2026-07-08T07:12:10.262456+00:00"
+        },
+        {
+          "category": "RESILIENCE",
+          "severity": "HIGH",
+          "layer": "END_TO_END",
+          "component": "Kill Switch",
+          "description": "Kill switch implementation not found",
+          "evidence": "ImportError when importing merid.risk.kill_switches",
+          "recommendation": "Implement kill switch for emergency shutdown",
+          "timestamp": "2026-07-08T07:12:10.262974+00:00"
+        },
+        {
+          "category": "RESILIENCE",
+          "severity": "MEDIUM",
+          "layer": "END_TO_END",
+          "component": "Disaster Recovery",
+          "description": "Disaster recovery implementation not found",
+          "evidence": "ImportError when importing recovery.disaster_recovery",
+          "recommendation": "Implement disaster recovery procedures",
+          "timestamp": "2026-07-08T07:12:10.283427+00:00"
+        }
+      ]
+    },
+    {
+      "test_name": "Latency Performance",
+      "passed": true,
+      "duration_ms": 44.28,
+      "flaw_count": 1,
+      "flaws": [
+        {
+          "category": "LATENCY",
+          "severity": "MEDIUM",
+          "layer": "END_TO_END",
+          "component": "Latency Monitoring",
+          "description": "Latency monitoring implementation not found",
+          "evidence": "ImportError when importing monitoring.brier_metrics",
+          "recommendation": "Implement latency monitoring for performance tracking",
+          "timestamp": "2026-07-08T07:12:10.316408+00:00"
+        }
+      ]
+    },
+    {
+      "test_name": "Asset Tracking",
+      "passed": true,
+      "duration_ms": 264.93,
+      "flaw_count": 0,
+      "flaws": []
+    },
+    {
+      "test_name": "Computational Load",
+      "passed": true,
+      "duration_ms": 1142.82,
+      "flaw_count": 1,
+      "flaws": [
+        {
+          "category": "COMPUTATIONAL_LOAD",
+          "severity": "MEDIUM",
+          "layer": "END_TO_END",
+          "component": "Object Count",
+          "description": "High object count: 351562",
+          "evidence": "len(gc.get_objects()) = 351562",
+          "recommendation": "Investigate potential memory leaks, implement object pooling",
+          "timestamp": "2026-07-08T07:12:11.743199+00:00"
+        }
+      ]
+    },
+    {
+      "test_name": "Consistency Across Layers",
+      "passed": true,
+      "duration_ms": 370.88,
+      "flaw_count": 0,
+      "flaws": []
+    }
+  ],
+  "all_flaws": [
+    {
+      "category": "CONFIGURATION",
+      "severity": "CRITICAL",
+      "layer": "UPSTREAM",
+      "component": "Profile YAML",
+      "description": "Failed to load profile YAML: 'charmap' codec can't decode byte 0x90 in position 4: character maps to <undefined>",
+      "evidence": "'charmap' codec can't decode byte 0x90 in position 4: character maps to <undefined>",
+      "recommendation": "Fix profile YAML syntax and structure",
+      "timestamp": "2026-07-08T07:11:59.664261+00:00"
+    },
+    {
+      "category": "CONFIGURATION",
+      "severity": "HIGH",
+      "layer": "DOWNSTREAM",
+      "component": "Unified Sizing",
+      "description": "Failed to test unified sizing: cannot import name 'UnifiedSizing' from 'merid.prediction.unified_sizing' (C:\\Dev\\MERID\\merid\\prediction\\unified_sizing.py)",
+      "evidence": "cannot import name 'UnifiedSizing' from 'merid.prediction.unified_sizing' (C:\\Dev\\MERID\\merid\\prediction\\unified_sizing.py)",
+      "recommendation": "Fix unified sizing imports and structure",
+      "timestamp": "2026-07-08T07:12:04.941828+00:00"
+    },
+    {
+      "category": "RESILIENCE",
+      "severity": "MEDIUM",
+      "layer": "END_TO_END",
+      "component": "Circuit Breaker",
+      "description": "Circuit breaker implementation not found",
+      "evidence": "ImportError when importing merid.hardening.circuit_breaker",
+      "recommendation": "Implement circuit breaker for fault tolerance",
+      "timestamp": "2026-07-08T07:12:10.262456+00:00"
+    },
+    {
+      "category": "RESILIENCE",
+      "severity": "HIGH",
+      "layer": "END_TO_END",
+      "component": "Kill Switch",
+      "description": "Kill switch implementation not found",
+      "evidence": "ImportError when importing merid.risk.kill_switches",
+      "recommendation": "Implement kill switch for emergency shutdown",
+      "timestamp": "2026-07-08T07:12:10.262974+00:00"
+    },
+    {
+      "category": "RESILIENCE",
+      "severity": "MEDIUM",
+      "layer": "END_TO_END",
+      "component": "Disaster Recovery",
+      "description": "Disaster recovery implementation not found",
+      "evidence": "ImportError when importing recovery.disaster_recovery",
+      "recommendation": "Implement disaster recovery procedures",
+      "timestamp": "2026-07-08T07:12:10.283427+00:00"
+    },
+    {
+      "category": "LATENCY",
+      "severity": "MEDIUM",
+      "layer": "END_TO_END",
+      "component": "Latency Monitoring",
+      "description": "Latency monitoring implementation not found",
+      "evidence": "ImportError when importing monitoring.brier_metrics",
+      "recommendation": "Implement latency monitoring for performance tracking",
+      "timestamp": "2026-07-08T07:12:10.316408+00:00"
+    },
+    {
+      "category": "COMPUTATIONAL_LOAD",
+      "severity": "MEDIUM",
+      "layer": "END_TO_END",
+      "component": "Object Count",
+      "description": "High object count: 351562",
+      "evidence": "len(gc.get_objects()) = 351562",
+      "recommendation": "Investigate potential memory leaks, implement object pooling",
+      "timestamp": "2026-07-08T07:12:11.743199+00:00"
+    }
+  ]
+}

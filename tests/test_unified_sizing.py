@@ -202,7 +202,7 @@ class TestUnifiedSizing(unittest.TestCase):
             self.assertGreaterEqual(notional_usd, Decimal("0"))
     
     def test_sizing_metadata_complete(self):
-        """Test that metadata contains all required fields."""
+        """Test that metadata contains all required fields for fixed $1 exposure model."""
         bankroll = Decimal("100.00")
         price_cents = 50
         asset = "BTC"
@@ -213,15 +213,18 @@ class TestUnifiedSizing(unittest.TestCase):
             asset=asset,
         )
         
+        # 2026-07-09: Updated metadata keys for fixed $1 exposure model
+        # Old percentage-based keys removed: risk_pct_effective, max_notional_usd, contracts_from_notional, max_contracts_cap, per_asset_risk_pct
+        # New fixed exposure keys added: fixed_exposure_cap_usd, available_exposure_usd, existing_exposure_usd, contract_count, order_notional_usd
         required_keys = [
             "bankroll_usd",
-            "risk_pct_effective",
-            "max_notional_usd",
             "price_cents",
             "asset",
-            "contracts_from_notional",
-            "max_contracts_cap",
-            "per_asset_risk_pct",
+            "contract_count",
+            "order_notional_usd",
+            "existing_exposure_usd",
+            "available_exposure_usd",
+            "fixed_exposure_cap_usd",
         ]
         
         for key in required_keys:

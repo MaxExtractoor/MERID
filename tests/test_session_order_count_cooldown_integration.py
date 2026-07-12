@@ -103,10 +103,10 @@ class TestSessionOrderCountCooldownIntegration:
         import merid.event_venues.kalshi.order_router as order_router_module
         order_router_module._startup_time = time.time() - _MIN_STARTUP_GRACE_PERIOD - 1
         
-        # Verify rate limiting constants are set correctly
+        # Verify rate limiting constants are set correctly (2026-07-11: optimized for 15m markets)
         assert _MAX_ORDERS_PER_MINUTE == 30, "Max orders per minute should be 30"
-        assert _MIN_SECONDS_BETWEEN_ORDERS == 0.3, "Min seconds between orders should be 0.3"
-        assert _MIN_STARTUP_GRACE_PERIOD == 20.0, "Startup grace period should be 20s"
+        assert _MIN_SECONDS_BETWEEN_ORDERS == 0.1, "Min seconds between orders should be 0.1 (optimized for 15m)"
+        assert _MIN_STARTUP_GRACE_PERIOD == 5.0, "Startup grace period should be 5s (optimized for 15m)"
         
         # Test startup grace period (should block orders immediately after startup)
         order_router_module._startup_time = time.time()  # Reset to current time

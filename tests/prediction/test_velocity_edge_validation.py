@@ -148,32 +148,32 @@ class TestVelocityEdgeValidation:
         # Even with -30% edge, strong velocity should generate signal
         assert abs(velocity_strong) > velocity_threshold
 
-    def test_logistic_mapping_produces_neutral_probability(self):
-        """Test that logistic mapping from velocity produces p_model≈0.50.
+    def test_logistic_mapping_produces_meaningful_probability_shifts(self):
+        """Test that logistic mapping from velocity produces meaningful probability shifts.
         
-        With reduced alpha_1 coefficients (2-5 instead of 600-1000),
-        even large velocities produce p_model close to 0.50.
-        This is by design for momentum trading.
+        With increased alpha_1 coefficients (200-500 instead of 2-5),
+        velocities at threshold (0.4%-0.8%) produce significant probability shifts.
+        This is by design for momentum trading to generate viable edge.
         """
         # Test with typical velocity values
         alpha_0 = 0.0
-        alpha_1 = 2.0  # Reduced from 1000.0
+        alpha_1 = 200.0  # Updated to 2026-07-04 industry standard
         
-        # Large positive velocity
-        velocity = 0.001  # 0.1% per second
+        # Velocity at threshold (0.4%)
+        velocity = 0.004  # 0.4% per second
         raw_logit = alpha_0 + alpha_1 * velocity
         p_model = 1.0 / (1.0 + math.exp(-raw_logit))
         
-        # p_model should be close to 0.50
-        assert 0.45 < p_model < 0.55, f"Expected p_model≈0.50, got {p_model}"
+        # p_model should be significantly above 0.50 (bullish signal)
+        assert p_model > 0.65, f"Expected p_model>0.65 for positive velocity, got {p_model}"
         
-        # Large negative velocity
-        velocity = -0.001  # -0.1% per second
+        # Negative velocity at threshold
+        velocity = -0.004  # -0.4% per second
         raw_logit = alpha_0 + alpha_1 * velocity
         p_model = 1.0 / (1.0 + math.exp(-raw_logit))
         
-        # p_model should be close to 0.50
-        assert 0.45 < p_model < 0.55, f"Expected p_model≈0.50, got {p_model}"
+        # p_model should be significantly below 0.50 (bearish signal)
+        assert p_model < 0.35, f"Expected p_model<0.35 for negative velocity, got {p_model}"
 
     def test_no_min_edge_check_in_agent_grid(self):
         """Test that agent_grid_15m.py does not have min_edge check for velocity signals.

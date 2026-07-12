@@ -190,13 +190,13 @@ class OrderManager:
         self,
         client: Any = None,
         on_fill: Optional[FillCallback] = None,
-        poll_interval: float = 0.25,
+        poll_interval: float = 1.0,  # 2026-07-11: increased from 0.25s to 1.0s for 15m market alignment
     ) -> None:
         """
         Args:
             client: KalshiVenueClient or compatible async client.
             on_fill: Callback invoked on each incremental fill.
-            poll_interval: Default seconds between status polls.
+            poll_interval: Default seconds between status polls (2026-07-11: increased to 1.0s for 15m alignment).
         """
         self._client = client
         self._on_fill = on_fill
@@ -439,7 +439,7 @@ class OrderManager:
     async def wait_for_fill(
         self,
         order_id: str,
-        timeout_s: float = 10.0,
+        timeout_s: float = 15.0,  # 2026-07-11: increased from 10s to 15s to align with execution queue pending timeout
         poll_interval: Optional[float] = None,
         cancel_on_timeout: bool = True,
     ) -> WaitResult:
@@ -447,7 +447,7 @@ class OrderManager:
 
         Args:
             order_id: Order to wait for.
-            timeout_s: Max seconds to wait.
+            timeout_s: Max seconds to wait (2026-07-11: increased to 15s to align with execution queue).
             poll_interval: Override default poll interval.
             cancel_on_timeout: If True, cancel remaining size on timeout.
 

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
 Quick test script to verify bucket analysis functionality.
+
+NOTE: This test is skipped because prediction_arbitrage_analyst is in the legacy folder
+and is not part of the core 15m crypto trading system.
 """
 
-import asyncio
-import json
 import pytest
-from agents.prediction_arbitrage_analyst import PredictionArbitrageAnalystAgent
 
-pytestmark = pytest.mark.skip(reason="Async test needs refactoring - KeyError issues")
+pytest.skip("prediction_arbitrage_analyst is in legacy folder, not part of 15m crypto system", allow_module_level=True)
 
 async def test_bucket_analysis():
     """Test the bucket analysis functionality."""

@@ -1,0 +1,33 @@
+{
+  "timestamp": "2026-07-08T04:11:53.663956",
+  "profile": "kalshi_crypto_15m_v2",
+  "summary": {
+    "total_issues": 1,
+    "critical_issues": 0,
+    "high_issues": 0,
+    "medium_issues": 0,
+    "low_issues": 1
+  },
+  "components_checked": [
+    "position_sizing",
+    "risk_management",
+    "performance_metrics",
+    "calibration",
+    "edge_calculation",
+    "velocity_model",
+    "correlation_tracking"
+  ],
+  "issues": [
+    {
+      "category": "velocity_model",
+      "severity": "low",
+      "component": "Velocity model testing",
+      "issue": "No velocity model responsiveness tests found",
+      "impact": "Cannot verify that velocity model produces meaningful probability shifts across velocity range.",
+      "recommendation": "Add unit tests that verify probability shifts across velocity range (e.g., 0% \u2192 30%, 50% \u2192 70%, 100% \u2192 90%).",
+      "evidence": {
+        "responsiveness_tests": false
+      }
+    }
+  ]
+}

@@ -1,0 +1,146 @@
+{
+  "timestamp": "2026-07-07T18:52:51.497202",
+  "summary": {
+    "UPSTREAM_CRITICAL": 1,
+    "DOWNSTREAM_CRITICAL": 1,
+    "DOWNSTREAM_LOW": 1,
+    "DOWNSTREAM_HIGH": 1,
+    "EXIT_POLICY_MEDIUM": 1,
+    "END_TO_END_HIGH": 5,
+    "END_TO_END_LOW": 2
+  },
+  "findings": [
+    {
+      "layer": "UPSTREAM",
+      "severity": "CRITICAL",
+      "category": "CONFIGURATION",
+      "component": "kalshi_crypto_15m_v2.yaml",
+      "description": "Failed to load profile YAML",
+      "expected": "Profile YAML loads successfully",
+      "actual": "Load failed: 'charmap' codec can't decode byte 0x90 in position 4: character maps to <undefined>",
+      "impact": "Cannot audit configuration - profile is inaccessible",
+      "recommendation": "Fix profile YAML syntax or path"
+    },
+    {
+      "layer": "DOWNSTREAM",
+      "severity": "CRITICAL",
+      "category": "IMPLEMENTATION",
+      "component": "unified_sizing.py",
+      "description": "Window limit check not integrated in sizing",
+      "expected": "check_window_limit call before sizing",
+      "actual": "Window limit check not found",
+      "impact": "Orders may exceed 3% per-agent / 5% total venue window limits",
+      "recommendation": "Integrate check_window_limit in compute_order_size"
+    },
+    {
+      "layer": "DOWNSTREAM",
+      "severity": "LOW",
+      "category": "IMPLEMENTATION",
+      "component": "order_router.py",
+      "description": "Could not read order router source",
+      "expected": "Source file readable",
+      "actual": "Error: 'charmap' codec can't decode byte 0x90 in position 32950: character maps to <undefined>",
+      "impact": "Cannot verify order router implementation",
+      "recommendation": "Check file permissions or path"
+    },
+    {
+      "layer": "DOWNSTREAM",
+      "severity": "HIGH",
+      "category": "IMPLEMENTATION",
+      "component": "unified_sizing.py._get_regime_position_size_multiplier",
+      "description": "Regime sizing multiplier may not be disabled",
+      "expected": "return 1.0 (disabled)",
+      "actual": "May return other values",
+      "impact": "Regime sizing could interfere with 3% per-asset / 5% per-window limits",
+      "recommendation": "Ensure _get_regime_position_size_multiplier returns 1.0"
+    },
+    {
+      "layer": "EXIT_POLICY",
+      "severity": "MEDIUM",
+      "category": "DOCUMENTATION",
+      "component": "exit_policy.py.ExitReason",
+      "description": "Exit precedence order may not match expected",
+      "expected": "['EXTREME_PROFIT', 'DYNAMIC_TAKE_PROFIT', 'RATCHET_FLOOR', 'RATCHET_TRIM', 'RISK', 'CANDLE_REVERSAL', 'ADAPTIVE_TIMING', 'TIME_STOP', 'EDGE_DECAY', 'STOP_LOSS', 'TRAIL', 'TAKE_PROFIT', 'SCALE_OUT', 'MANUAL']",
+      "actual": "['EXTREME_PROFIT']",
+      "impact": "Exit precedence may be incorrect, leading to wrong exit behavior",
+      "recommendation": "Update exit precedence documentation to match expected order"
+    },
+    {
+      "layer": "END_TO_END",
+      "severity": "HIGH",
+      "category": "CONSISTENCY",
+      "component": "Risk parameter chain",
+      "description": "Parameter per_window_risk_pct missing in layers: profile, unified_sizing",
+      "expected": "per_window_risk_pct referenced in all layers",
+      "actual": "Missing in: profile, unified_sizing",
+      "impact": "per_window_risk_pct may not be consistently applied across the stack",
+      "recommendation": "Ensure per_window_risk_pct is referenced in all layers"
+    },
+    {
+      "layer": "END_TO_END",
+      "severity": "HIGH",
+      "category": "CONSISTENCY",
+      "component": "Risk parameter chain",
+      "description": "Parameter total_venue_risk_pct missing in layers: profile, unified_sizing",
+      "expected": "total_venue_risk_pct referenced in all layers",
+      "actual": "Missing in: profile, unified_sizing",
+      "impact": "total_venue_risk_pct may not be consistently applied across the stack",
+      "recommendation": "Ensure total_venue_risk_pct is referenced in all layers"
+    },
+    {
+      "layer": "END_TO_END",
+      "severity": "HIGH",
+      "category": "CONSISTENCY",
+      "component": "Risk parameter chain",
+      "description": "Parameter max_notional_pct missing in layers: profile",
+      "expected": "max_notional_pct referenced in all layers",
+      "actual": "Missing in: profile",
+      "impact": "max_notional_pct may not be consistently applied across the stack",
+      "recommendation": "Ensure max_notional_pct is referenced in all layers"
+    },
+    {
+      "layer": "END_TO_END",
+      "severity": "HIGH",
+      "category": "CONSISTENCY",
+      "component": "Risk parameter chain",
+      "description": "Parameter bankroll_cap_pct missing in layers: profile, risk_envelope",
+      "expected": "bankroll_cap_pct referenced in all layers",
+      "actual": "Missing in: profile, risk_envelope",
+      "impact": "bankroll_cap_pct may not be consistently applied across the stack",
+      "recommendation": "Ensure bankroll_cap_pct is referenced in all layers"
+    },
+    {
+      "layer": "END_TO_END",
+      "severity": "LOW",
+      "category": "IMPLEMENTATION",
+      "component": "order_router.py",
+      "description": "Could not check window limit enforcement",
+      "expected": "Source file readable",
+      "actual": "Error: 'charmap' codec can't decode byte 0x90 in position 32950: character maps to <undefined>",
+      "impact": "Cannot verify window limit enforcement",
+      "recommendation": "Check file permissions or path"
+    },
+    {
+      "layer": "END_TO_END",
+      "severity": "HIGH",
+      "category": "IMPLEMENTATION",
+      "component": "unified_sizing.py.compute_order_size",
+      "description": "Window limit check not integrated",
+      "expected": "check_window_limit call",
+      "actual": "check_window_limit not found",
+      "impact": "Window limits may be bypassed at this enforcement point",
+      "recommendation": "Integrate check_window_limit in this component"
+    },
+    {
+      "layer": "END_TO_END",
+      "severity": "LOW",
+      "category": "IMPLEMENTATION",
+      "component": "kalshi_crypto_15m_v2.yaml",
+      "description": "Could not check asset consistency in profile",
+      "expected": "Profile YAML readable",
+      "actual": "Error: 'charmap' codec can't decode byte 0x90 in position 4: character maps to <undefined>",
+      "impact": "Cannot verify asset consistency",
+      "recommendation": "Check file permissions or path"
+    }
+  ]
+}

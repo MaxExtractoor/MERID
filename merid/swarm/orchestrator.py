@@ -12,14 +12,15 @@ logger = get_logger("merid.swarm.orchestrator")
 # PROFILE-GATED: For kalshi_crypto_15m_v2, use profile edge bands (4-7% = 400-700 bps)
 MIN_EDGE_BPS = 10.0  # 0.10% - PROFILE-GATED for kalshi_crypto_15m_v2
 MAX_F_USED = 0.35
-MAX_SIZE_CONTRACTS = 100
+MAX_SIZE_CONTRACTS = 1  # 2026-07-09: Reduced from 100 to 1 to align with slot-based model and $1 exposure cap
 
 # Symbol-specific limits (can be loaded from config)
+# 2026-07-09: All max_size_contracts reduced to 1 to enforce slot-based model
 SYMBOL_LIMITS = {
-    "BTC": {"max_f_used": 0.35, "max_size_contracts": 100},
-    "ETH": {"max_f_used": 0.30, "max_size_contracts": 150},
-    "SOL": {"max_f_used": 0.25, "max_size_contracts": 200},
-    "XRP": {"max_f_used": 0.25, "max_size_contracts": 250},
+    "BTC": {"max_f_used": 0.35, "max_size_contracts": 1},
+    "ETH": {"max_f_used": 0.30, "max_size_contracts": 1},
+    "SOL": {"max_f_used": 0.25, "max_size_contracts": 1},
+    "XRP": {"max_f_used": 0.25, "max_size_contracts": 1},
 }
 
 

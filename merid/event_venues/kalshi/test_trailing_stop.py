@@ -94,7 +94,7 @@ class TestTrailingStop:
             venue_max_orders_per_minute=30,
             venue_max_orders_per_hour=300,
             agent_max_notional_pct=0.02,
-            agent_max_orders_per_window=20,
+            agent_max_orders_per_window=24,  # 2026-07-11: updated to 24 for 15m alignment
             agent_max_yes_position=3,
             agent_max_no_position=3,
             agent_max_concurrent_trades=5,

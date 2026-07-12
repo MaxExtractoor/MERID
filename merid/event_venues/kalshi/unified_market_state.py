@@ -284,12 +284,23 @@ class UnifiedMarketState:
         *,
         max_book_age_s: float = 5.0,
         max_index_age_s: float = 30.0,
-        max_spread_cents: float = 15.0,
+        max_spread_cents: float = None,
     ) -> bool:
         """PROTECT gate: True when state is fresh, spread is tight, and no stale flags.
 
         Defaults are conservative — callers should tighten for live trading.
+        2026-07-11: max_spread_cents now uses dynamic threshold manager if not provided.
         """
+        # Use dynamic threshold manager for spread if not explicitly provided
+        if max_spread_cents is None:
+            try:
+                from merid.event_venues.kalshi.dynamic_thresholds import get_dynamic_threshold_manager
+                threshold_manager = get_dynamic_threshold_manager()
+                max_spread_cents = threshold_manager.get_max_spread_cents()
+            except Exception:
+                # Fallback to conservative default if dynamic threshold manager unavailable
+                max_spread_cents = 30.0  # Canonical default from dynamic threshold system
+
         if self.book_stale or self.index_stale or self.spread_blown:
             return False
         if self.book_updated_ts and self.book_age_s > max_book_age_s:

@@ -503,8 +503,8 @@ def _parse_risk_limits(raw: Dict[str, Any]) -> AgentRiskLimits:
     )
 
 
-# 15m scalper: configurable cutoff (OPTIMIZED 2026-05-10: was 2 min, now 3 min)
-_MIN_CUTOFF_MINUTES = int(os.getenv("SCALPER15M_MIN_CUTOFF_MINUTES", "3"))  # 3 min default for 15m
+# 15m scalper: configurable cutoff (OPTIMIZED 2026-07-10: removed minimum to allow full 15m window)
+_MIN_CUTOFF_MINUTES = int(os.getenv("SCALPER15M_MIN_CUTOFF_MINUTES", "0"))  # 0 min default for 15m (trade full window)
 
 
 def _parse_strategy_overrides(block: Any) -> Dict[str, Any]:
@@ -537,12 +537,7 @@ def _parse_strategy_overrides(block: Any) -> Dict[str, Any]:
 
 def _parse_entry_window(raw: Dict[str, Any]) -> EntryWindowConfig:
     cutoff = raw.get("cutoff_minutes_before_expiry", _MIN_CUTOFF_MINUTES)
-    if cutoff < _MIN_CUTOFF_MINUTES:
-        logger.warning(
-            "cutoff_minutes_before_expiry=%s is below minimum %s — clamping to %s",
-            cutoff, _MIN_CUTOFF_MINUTES, _MIN_CUTOFF_MINUTES,
-        )
-        cutoff = _MIN_CUTOFF_MINUTES
+    # Removed minimum cutoff check to allow full 15m window trading (2026-07-10)
     # 15m scalper: longer entry window (30 min vs 10 min)
     is_scalper = os.getenv("STRATEGY_MODE", "").upper() == "MOMENTUM_SCALPER"
     default_minutes = 30 if is_scalper else 10

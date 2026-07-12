@@ -178,10 +178,10 @@ def test_spread_limit_unification():
         with open(profile_path, 'r', encoding='utf-8') as f:
             profile_content = f.read()
         
-        assert "market_microstructure_max_spread_cents: float = 75.0" in profile_content, \
-            "Profile spread limit should be 75c (unified with guardrails)"
-        assert "market_microstructure_max_spread_cents: float = 50.0" not in profile_content, \
-            "Old 50c spread limit should be removed from profile"
+        assert "market_microstructure_max_spread_cents: float = 30.0" in profile_content, \
+            "Profile spread limit should be 30c (harmonized with 10c-50c entry price sweet spot)"
+        assert "market_microstructure_max_spread_cents: float = 75.0" not in profile_content, \
+            "Old 75c spread limit should be removed from profile"
         
         # Check YAML spread limits
         config_path = "config/profiles/kalshi_crypto_15m_v2.yaml"
@@ -189,17 +189,17 @@ def test_spread_limit_unification():
             config = yaml.safe_load(f)
         
         # Check guardrails spread limit (liquidity threshold, not entry price)
-        # This remains at 75c for DOGE spreads that can exceed 50c
+        # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
         guardrails = config.get('guardrails', {})
-        assert guardrails.get('max_spread_cents') == 75, \
-            f"Guardrails max_spread_cents should be 75 (liquidity), got {guardrails.get('max_spread_cents')}"
-        assert guardrails.get('min_spread_gate_cents') == 75, \
-            f"Guardrails min_spread_gate_cents should be 75, got {guardrails.get('min_spread_gate_cents')}"
+        assert guardrails.get('max_spread_cents') == 30, \
+            f"Guardrails max_spread_cents should be 30 (liquidity), got {guardrails.get('max_spread_cents')}"
+        assert guardrails.get('min_spread_gate_cents') == 30, \
+            f"Guardrails min_spread_gate_cents should be 30, got {guardrails.get('min_spread_gate_cents')}"
 
         # Check universe spread limit (liquidity threshold, not entry price)
         universe = config.get('universe', {})
-        assert universe.get('max_spread_cents') == 75, \
-            f"Universe max_spread_cents should be 75 (liquidity), got {universe.get('max_spread_cents')}"
+        assert universe.get('max_spread_cents') == 30, \
+            f"Universe max_spread_cents should be 30 (liquidity), got {universe.get('max_spread_cents')}"
 
         # Check guardrails max_contract_price_cents (entry price threshold)
         # 2026-07-08: Updated to 50c for sweet spot (10-50c)
@@ -208,10 +208,10 @@ def test_spread_limit_unification():
         
         # Check momentum_fvg spread gate
         momentum_fvg = config.get('momentum_fvg', {})
-        assert momentum_fvg.get('spread_gate_cents') == 75, \
-            f"Momentum_fvg spread_gate_cents should be 75, got {momentum_fvg.get('spread_gate_cents')}"
+        assert momentum_fvg.get('spread_gate_cents') == 30, \
+            f"Momentum_fvg spread_gate_cents should be 30, got {momentum_fvg.get('spread_gate_cents')}"
         
-        print("✓ Spread limits unified to 75c across all configuration sources")
+        print("✓ Spread limits unified to 30c across all configuration sources")
     except FileNotFoundError as e:
         pytest.skip(f"Could not find configuration file: {e}")
 

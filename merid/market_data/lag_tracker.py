@@ -36,9 +36,19 @@ import math
 import time
 import logging
 
-from utils.logger import format_price
-
 logger = logging.getLogger(__name__)
+
+# Local price formatting function (replaces utils.logger.format_price to avoid import issues)
+def format_price(asset: str, price: float) -> str:
+    """Format price with appropriate decimal places based on asset."""
+    if asset in ["BTC", "ETH"]:
+        return f"{price:.2f}"
+    elif asset in ["SOL", "XRP"]:
+        return f"{price:.4f}"
+    elif asset == "DOGE":
+        return f"{price:.6f}"
+    else:
+        return f"{price:.4f}"
 
 
 @dataclass

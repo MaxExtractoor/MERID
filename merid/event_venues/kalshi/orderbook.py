@@ -274,26 +274,11 @@ class LocalOrderbook:
         Raises:
             KalshiOrderbookShapeError: If delta shape is invalid
         """
-        # PERFORMANCE FIX: Skip delta validation to reduce callback latency
-        # Validation adds ~5-10ms per callback. We'll rely on the WS bridge's validation instead.
-        # try:
-        #     validate_orderbook_delta(delta)
-        # except KalshiOrderbookShapeError as e:
-        #     logger.error(
-        #         f"[ORDERBOOK-SHAPE-ERROR] Invalid delta for {self.ticker}: {e}. "
-        #         f"Delta keys: {list(delta.keys()) if isinstance(delta, dict) else 'N/A'}"
-        #     )
-        #     raise
+        # PERFORMANCE FIX: Validation removed - rely on WS bridge validation
+        # This reduces callback latency by ~5-10ms per delta
         
         if not self._initialized:
-            # PERFORMANCE FIX: Skip alert manager call to reduce callback latency
-            # Alert manager calls add ~10-20ms per callback
-            # logger.warning(f"Dropping delta for {self.ticker} - no snapshot yet")
-            # try:
-            #     from merid.prediction.alerts import get_alert_manager
-            #     get_alert_manager().fire_staleness(self.ticker, 0)
-            # except Exception as e:
-            #     logger.debug(f"Staleness alert failed: {e}")
+            # PERFORMANCE FIX: Alert manager calls removed - reduces latency by ~10-20ms
             return
 
         side = delta.get("side", "yes")

@@ -1,0 +1,21 @@
+{
+  "cycle_id": "manual_test",
+  "cycle_start_ts": 1783480500.0,
+  "cycle_end_ts": 1783481400.0,
+  "passed": true,
+  "findings": [
+    {
+      "layer": "data",
+      "severity": "medium",
+      "check_name": "required_assets_in_catalog",
+      "intended_behavior": "All 5 required assets present in catalog",
+      "actual_behavior": "Market catalog instance not available",
+      "mismatch_details": "get_market_catalog() returned None (catalog not initialized - may be running in test mode)",
+      "timestamp": 1783480514.8535087,
+      "cycle_id": "manual_test"
+    }
+  ],
+  "total_findings": 1,
+  "critical_findings": 0,
+  "high_findings": 0
+}

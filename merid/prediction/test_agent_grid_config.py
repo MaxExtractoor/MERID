@@ -33,24 +33,24 @@ class TestAgentGridConfigAlignment:
         assert config.min_entry_price_no == 0.30, "min_entry_price_no should be 0.30 (aligned with profile YAML)"
     
     def test_max_orders_per_15m_window_aligned_with_profile_yaml(self):
-        """Test that max_orders_per_15m_window is aligned with profile YAML (12)."""
+        """Test that max_orders_per_15m_window is aligned with profile YAML (24)."""
         config = LeanAgentConfig(
             name="BTC_15M",
             series_tickers=["KXBTC15M"],
         )
         
-        # Verify max orders per 15m window matches profile YAML
-        assert config.max_orders_per_15m_window == 12, "max_orders_per_15m_window should be 12 (aligned with profile YAML)"
+        # Verify max orders per 15m window matches profile YAML (2026-07-11: updated to 24)
+        assert config.max_orders_per_15m_window == 24, "max_orders_per_15m_window should be 24 (aligned with profile YAML)"
     
     def test_per_asset_cooldown_aligned_with_profile_yaml(self):
-        """Test that per_asset_cooldown_s is aligned with profile YAML (8 seconds)."""
+        """Test that per_asset_cooldown_s is aligned with profile YAML (3 seconds)."""
         config = LeanAgentConfig(
             name="BTC_15M",
             series_tickers=["KXBTC15M"],
         )
         
-        # Verify cooldown matches profile YAML
-        assert config.per_asset_cooldown_s == 8, "per_asset_cooldown_s should be 8 (aligned with profile YAML)"
+        # Verify cooldown matches profile YAML (2026-07-11: updated to 3s)
+        assert config.per_asset_cooldown_s == 3, "per_asset_cooldown_s should be 3 (aligned with profile YAML)"
     
     def test_all_5_assets_have_per_asset_velocity_thresholds(self):
         """Test that all 5 crypto assets have appropriate per-asset velocity thresholds."""

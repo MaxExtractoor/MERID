@@ -17,7 +17,7 @@ class TestADXFilter:
             name="BTC_15M",
             series_tickers=["KXBTC15M"],
             signal_mode="trend",
-            velocity_threshold=0.0002,
+            velocity_threshold=0.004,  # Updated to 2026 industry standard (0.4%)
             regime_detector_enabled=False  # Disable for simpler testing
         )
     
@@ -105,7 +105,7 @@ class TestVolumeConfirmation:
             name="BTC_15M",
             series_tickers=["KXBTC15M"],
             signal_mode="trend",
-            velocity_threshold=0.0002,
+            velocity_threshold=0.004,  # Updated to 2026 industry standard (0.4%)
             regime_detector_enabled=False
         )
     
@@ -220,10 +220,10 @@ class TestVolumeConfirmation:
         # Call _update_price_history which extracts volume
         mock_agent._update_price_history(asset, spot_price, spot_data)
         
-        # Verify volume defaults to 1.0 when not available
+        # Verify volume defaults to 100.0 (OHLC proxy) when not available
         assert len(mock_agent._volume_history[asset]) > 0
         last_volume = mock_agent._volume_history[asset][-1][1]
-        assert last_volume == 1.0
+        assert last_volume == 100.0  # OHLC proxy value
 
 
 class TestMultiTimeframeAlignment:
@@ -236,7 +236,7 @@ class TestMultiTimeframeAlignment:
             name="BTC_15M",
             series_tickers=["KXBTC15M"],
             signal_mode="trend",
-            velocity_threshold=0.0002,
+            velocity_threshold=0.004,  # Updated to 2026 industry standard (0.4%)
             regime_detector_enabled=False
         )
     

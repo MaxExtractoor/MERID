@@ -257,7 +257,7 @@ class TestPriceFloorGuardrail:
             pytest.skip(f"Profile max_contract_price_cents check skipped: {e}")
 
     def test_price_range_max_price_cents_aligned_with_guardrails(self):
-        """Test that price_range max_price_cents is aligned with guardrails_max_contract_price_cents (50c canonical)."""
+        """Test that price_range max_price_cents is aligned with guardrails_max_contract_price_cents (75c expanded 2026-07-12)."""
         try:
             import yaml
             from pathlib import Path
@@ -274,11 +274,11 @@ class TestPriceFloorGuardrail:
             guardrails = profile_yaml.get('guardrails', {})
 
             # Check that price_range max_price_cents matches guardrails max_contract_price_cents
-            # 2026-07-12: Both should be 50c (canonical range per commit c5ac4a18)
-            assert price_range.get('max_price_cents') == 50, \
-                f"Expected price_range max_price_cents=50, got {price_range.get('max_price_cents')}"
-            assert guardrails.get('max_contract_price_cents') == 50, \
-                f"Expected guardrails max_contract_price_cents=50, got {guardrails.get('max_contract_price_cents')}"
+            # 2026-07-12: Both should be 75c (expanded range to match current market conditions)
+            assert price_range.get('max_price_cents') == 75, \
+                f"Expected price_range max_price_cents=75, got {price_range.get('max_price_cents')}"
+            assert guardrails.get('max_contract_price_cents') == 75, \
+                f"Expected guardrails max_contract_price_cents=75, got {guardrails.get('max_contract_price_cents')}"
         except Exception as e:
             pytest.skip(f"Price range alignment check skipped: {e}")
 

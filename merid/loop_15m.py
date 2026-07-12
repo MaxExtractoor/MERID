@@ -3781,13 +3781,13 @@ class Kalshi15mLoop:
                             if market_state.best_bid_cents and market_state.best_ask_cents:
                                 yes_mid = (market_state.best_bid_cents + market_state.best_ask_cents) // 2
                                 raw_price_cents = 100 - yes_mid
-                                # CRITICAL FIX: Clamp to profile price_range (5-95c) to match profile YAML
-                                price_cents = max(5, min(95, raw_price_cents))
+                                # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-50c range per commit c5ac4a18
+                                price_cents = max(10, min(50, raw_price_cents))
                                 logger.info("[15M-LOOP] ticker=%s NO order: YES_mid=%d -> NO_mid=%d (raw=%d, clamped=%d)", ticker, yes_mid, price_cents, raw_price_cents, price_cents)
                             elif market_state.mid_cents:
                                 raw_price_cents = 100 - int(market_state.mid_cents)
-                                # CRITICAL FIX: Clamp to profile price_range (5-95c) to match profile YAML
-                                price_cents = max(5, min(95, raw_price_cents))
+                                # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-50c range per commit c5ac4a18
+                                price_cents = max(10, min(50, raw_price_cents))
                                 logger.info("[15M-LOOP] ticker=%s NO order: YES_mid_cents=%.2f -> NO_mid=%d (raw=%d, clamped=%d)", ticker, market_state.mid_cents, price_cents, raw_price_cents, price_cents)
                             else:
                                 logger.warning("[15M-LOOP] NO order but no market state data for %s, using default 25c", ticker)
@@ -3798,14 +3798,14 @@ class Kalshi15mLoop:
                                 # BUG #39 FIX: Convert mid_cents to integer
                                 # mid_cents is a float from unified_market_state.py but order router requires integer
                                 raw_price_cents = int(market_state.mid_cents)
-                                # CRITICAL FIX: Clamp to profile price_range (5-95c) to match profile YAML
-                                price_cents = max(5, min(95, raw_price_cents))
+                                # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-50c range per commit c5ac4a18
+                                price_cents = max(10, min(50, raw_price_cents))
                                 logger.info("[15M-LOOP] ticker=%s YES order: price_cents from mid_cents=%d (raw=%.2f, clamped=%d)", ticker, price_cents, market_state.mid_cents, price_cents)
                             elif market_state.best_bid_cents and market_state.best_ask_cents:
                                 # Use mid of bid/ask if mid not available
                                 raw_price_cents = (market_state.best_bid_cents + market_state.best_ask_cents) // 2
-                                # CRITICAL FIX: Clamp to profile price_range (5-95c) to match profile YAML
-                                price_cents = max(5, min(95, raw_price_cents))
+                                # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-50c range per commit c5ac4a18
+                                price_cents = max(10, min(50, raw_price_cents))
                                 logger.info("[15M-LOOP] ticker=%s YES order: price_cents from bid/ask mid=%d (raw=%d, clamped=%d) (bid=%d, ask=%d)", ticker, price_cents, raw_price_cents, price_cents, market_state.best_bid_cents, market_state.best_ask_cents)
                             else:
                                 logger.warning("[15M-LOOP] YES order but no market state data for %s, using default 25c", ticker)

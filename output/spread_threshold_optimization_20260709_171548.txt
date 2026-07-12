@@ -1,0 +1,93 @@
+================================================================================
+SPREAD THRESHOLD OPTIMIZATION REPORT
+Test Date: 2026-07-09T17:15:48.037570+00:00
+================================================================================
+
+Threshold    Pass Rate    Avg Spread   Avg Depth    Avg Quality 
+--------------------------------------------------------------------------------
+5           c 16.0        % 2.2         c 57           0.83        
+10          c 56.0        % 7.3         c 45           0.73        
+15          c 80.0        % 10.6        c 40           0.67        
+20          c 96.0        % 10.3        c 34           0.66        
+25          c 100.0       % 11.4        c 34           0.65        
+30          c 100.0       % 12.2        c 35           0.63        
+
+================================================================================
+OPTIMAL THRESHOLD: 10c
+RATIONALE: Threshold 10c achieves 56.0% pass rate, providing balanced trade frequency without sacrificing quality. Average quality score of 0.73 indicates acceptable market conditions. Average depth of 45 contracts suggests manageable slippage risk for $1 exposure model. Compared to current 20c threshold (96.0% pass rate, 0.66 quality, 34 depth), this provides +0.07 higher quality and +11 more depth with 56.0% pass rate.
+================================================================================
+
+DETAILED RESULTS:
+
+Threshold: 5c
+  Total markets tested: 25
+  Markets passing filter: 4
+  Pass rate: 16.0%
+  Avg spread: 2.2c
+  Avg depth YES: 57
+  Avg depth NO: 50
+  Avg liquidity score: 53.25
+  Avg quality score: 0.83
+  Candidates per asset: {'BTC': 1, 'ETH': 1, 'SOL': 1, 'XRP': 1, 'DOGE': 0}
+  Recommendations: STRICT: Limited trading opportunities, HIGH QUALITY: Good market quality, DEEP LIQUIDITY: Low slippage risk
+
+Threshold: 10c
+  Total markets tested: 25
+  Markets passing filter: 14
+  Pass rate: 56.0%
+  Avg spread: 7.3c
+  Avg depth YES: 45
+  Avg depth NO: 43
+  Avg liquidity score: 44.29
+  Avg quality score: 0.73
+  Candidates per asset: {'BTC': 5, 'ETH': 3, 'SOL': 2, 'XRP': 3, 'DOGE': 1}
+  Recommendations: RELAXED: Good trade frequency, HIGH QUALITY: Good market quality, DEEP LIQUIDITY: Low slippage risk
+
+Threshold: 15c
+  Total markets tested: 25
+  Markets passing filter: 20
+  Pass rate: 80.0%
+  Avg spread: 10.6c
+  Avg depth YES: 40
+  Avg depth NO: 37
+  Avg liquidity score: 38.40
+  Avg quality score: 0.67
+  Candidates per asset: {'BTC': 5, 'ETH': 5, 'SOL': 4, 'XRP': 4, 'DOGE': 2}
+  Recommendations: VERY RELAXED: May include low-quality markets, MODERATE QUALITY: Acceptable quality, MODERATE DEPTH: Manageable slippage
+
+Threshold: 20c
+  Total markets tested: 25
+  Markets passing filter: 24
+  Pass rate: 96.0%
+  Avg spread: 10.3c
+  Avg depth YES: 34
+  Avg depth NO: 36
+  Avg liquidity score: 35.40
+  Avg quality score: 0.66
+  Candidates per asset: {'BTC': 5, 'ETH': 5, 'SOL': 5, 'XRP': 4, 'DOGE': 5}
+  Recommendations: VERY RELAXED: May include low-quality markets, MODERATE QUALITY: Acceptable quality, MODERATE DEPTH: Manageable slippage
+
+Threshold: 25c
+  Total markets tested: 25
+  Markets passing filter: 25
+  Pass rate: 100.0%
+  Avg spread: 11.4c
+  Avg depth YES: 34
+  Avg depth NO: 35
+  Avg liquidity score: 34.82
+  Avg quality score: 0.65
+  Candidates per asset: {'BTC': 5, 'ETH': 5, 'SOL': 5, 'XRP': 5, 'DOGE': 5}
+  Recommendations: VERY RELAXED: May include low-quality markets, MODERATE QUALITY: Acceptable quality, MODERATE DEPTH: Manageable slippage
+
+Threshold: 30c
+  Total markets tested: 25
+  Markets passing filter: 25
+  Pass rate: 100.0%
+  Avg spread: 12.2c
+  Avg depth YES: 35
+  Avg depth NO: 33
+  Avg liquidity score: 34.14
+  Avg quality score: 0.63
+  Candidates per asset: {'BTC': 5, 'ETH': 5, 'SOL': 5, 'XRP': 5, 'DOGE': 5}
+  Recommendations: VERY RELAXED: May include low-quality markets, MODERATE QUALITY: Acceptable quality, MODERATE DEPTH: Manageable slippage
+

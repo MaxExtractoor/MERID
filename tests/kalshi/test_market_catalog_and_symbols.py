@@ -553,16 +553,16 @@ class TestKalshiSymbolEdgeCases:
             # Step 3: Validate entry window helper exists and works
             from merid.event_venues.kalshi.invariants import is_within_entry_window_by_minutes
             
-            # Test valid window (5 minutes before expiry, window 12-2)
-            assert is_within_entry_window_by_minutes(5, 12, 2) is True, \
-                "Entry window should accept 5 minutes (within 12-2 window)"
+            # Test valid window (5 minutes before expiry, window 12-0)
+            assert is_within_entry_window_by_minutes(5, 12, 0) is True, \
+                "Entry window should accept 5 minutes (within 12-0 window)"
             
-            # Test too close (1 minute before expiry, cutoff 2)
-            assert is_within_entry_window_by_minutes(1, 12, 2) is False, \
-                "Entry window should reject 1 minute (below cutoff 2)"
+            # Test at cutoff (0 minutes before expiry, cutoff 0)
+            assert is_within_entry_window_by_minutes(0, 12, 0) is True, \
+                "Entry window should accept 0 minutes (at cutoff 0)"
             
             # Test too far (20 minutes before expiry, window 12)
-            assert is_within_entry_window_by_minutes(20, 12, 2) is False, \
+            assert is_within_entry_window_by_minutes(20, 12, 0) is False, \
                 "Entry window should reject 20 minutes (above window 12)"
             
             # Step 4: Validate catalog enrichment sets minutes_to_expiry to 0.0 on error

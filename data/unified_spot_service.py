@@ -161,10 +161,10 @@ class UnifiedSpotService:
         self._cache_lock = threading.Lock()  # Thread-safe cache access
         self._running = False
         self._refresh_task: Optional[asyncio.Task] = None
-        self._refresh_interval_s = 5.0  # Refresh every 5 seconds (was 30s - too slow for velocity calc)
+        self._refresh_interval_s = 3.0  # CRITICAL FIX: Reduced from 5s to 3s for faster price updates. Prediction markets move fast and stale data is costly. 3s polling is within rate limits while providing fresher data.
         # Price history for volatility regime detection (2026 best practice)
         self._price_history: Dict[str, list] = {}  # asset -> list of (timestamp, price) tuples
-        self._max_history_length = 3600  # Keep 1 hour of history (5s interval * 720 points)
+        self._max_history_length = 3600  # Keep 1 hour of history (3s interval * 1200 points)
         logger.info("[UNIFIED-SPOT] UnifiedSpotService initialized (simplified production version)")
 
     def is_ready(self) -> bool:

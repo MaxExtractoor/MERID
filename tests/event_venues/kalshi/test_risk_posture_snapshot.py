@@ -25,7 +25,7 @@ def test_risk_posture_http_endpoint() -> None:
     app = FastAPI()
     app.include_router(router)
     client = TestClient(app)
-    r = client.get("/api/v1/system/risk-posture")
+    r = client.get("/system/risk-posture")
     assert r.status_code == 200
     body = r.json()
     assert body["schema_version"] == SNAPSHOT_SCHEMA_VERSION

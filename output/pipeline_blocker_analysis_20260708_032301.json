@@ -1,0 +1,174 @@
+{
+  "timestamp": "2026-07-08T03:22:56.833062+00:00",
+  "analysis_duration_seconds": 5.0785253047943115,
+  "issues": [
+    {
+      "layer": "upstream",
+      "severity": "critical",
+      "category": "config",
+      "description": "Profile missing required field: profile",
+      "details": "Profile YAML is missing profile",
+      "timestamp": "2026-07-08T03:22:57.005854+00:00",
+      "evidence": {
+        "missing_field": "profile"
+      }
+    },
+    {
+      "layer": "upstream",
+      "severity": "critical",
+      "category": "config",
+      "description": "Profile missing required field: risk_limits",
+      "details": "Profile YAML is missing risk_limits",
+      "timestamp": "2026-07-08T03:22:57.005854+00:00",
+      "evidence": {
+        "missing_field": "risk_limits"
+      }
+    },
+    {
+      "layer": "upstream",
+      "severity": "high",
+      "category": "config",
+      "description": "Upstream analysis failed",
+      "details": "Bankroll not ready: $None",
+      "timestamp": "2026-07-08T03:23:01.571898+00:00",
+      "evidence": {
+        "traceback": "Traceback (most recent call last):\n  File \"C:\\Dev\\MERID\\analyze_trading_pipeline_blockers.py\", line 214, in analyze_upstream\n    results[\"risk_limits\"] = self._check_risk_limits_consistency()\n                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Dev\\MERID\\analyze_trading_pipeline_blockers.py\", line 429, in _check_risk_limits_consistency\n    risk_env = get_kalshi_crypto_15m_risk_envelope()\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Dev\\MERID\\merid\\risk\\profiles\\kalshi_crypto_15m_risk_envelope.py\", line 1082, in get_kalshi_crypto_15m_risk_envelope\n    raise RuntimeError(f\"Bankroll not ready: ${live_bankroll_usd}\")\nRuntimeError: Bankroll not ready: $None\n"
+      }
+    },
+    {
+      "layer": "midstream",
+      "severity": "low",
+      "category": "config",
+      "description": "Bankroll not ready",
+      "details": "Bankroll service not initialized (expected in standalone mode, not an issue in production)",
+      "timestamp": "2026-07-08T03:23:01.576040+00:00",
+      "evidence": {
+        "error": "Bankroll not ready: $None"
+      }
+    }
+  ],
+  "metrics": {
+    "latency_p50": 11.65,
+    "latency_p95": 14.299999999999997,
+    "latency_p99": 15.02,
+    "latency_p999": 15.182000000000002,
+    "queue_depths": {
+      "order_queue": 0,
+      "fill_queue": 0
+    },
+    "lock_contention": {},
+    "buffer_usage_percent": {
+      "market_data_buffer": 0.0,
+      "order_buffer": 0.0,
+      "fill_buffer": 0.0
+    },
+    "sequence_gaps_found": 0,
+    "thread_states": {
+      "MainThread": "running"
+    }
+  },
+  "upstream": {
+    "profile_validation": {
+      "valid": false,
+      "errors": [
+        "Missing required field: profile",
+        "Missing required field: risk_limits"
+      ],
+      "warnings": []
+    },
+    "risk_limits": {},
+    "asset_config": {},
+    "environment": {}
+  },
+  "midstream": {
+    "risk_envelope": {
+      "bankroll": null,
+      "venue_cap": null,
+      "asset_caps": {},
+      "calculation_issues": [
+        "Bankroll not ready (expected in standalone mode)"
+      ]
+    },
+    "profile_adapter": {
+      "profile_loaded": true,
+      "adapter_issues": []
+    },
+    "conversions": {
+      "test_conversions": [],
+      "conversion_issues": [
+        "Bankroll not ready (expected in standalone mode)"
+      ]
+    },
+    "asset_caps": {
+      "caps_enforced": true,
+      "enforcement_issues": [
+        "Bankroll not ready (expected in standalone mode)"
+      ]
+    }
+  },
+  "downstream": {
+    "unified_sizing": {
+      "sizing_module_loaded": true,
+      "sizing_issues": []
+    },
+    "position_multipliers": {
+      "multipliers_disabled": true,
+      "multiplier_issues": []
+    },
+    "order_queues": {
+      "queue_depths": {
+        "order_queue": 0,
+        "fill_queue": 0
+      },
+      "queue_issues": []
+    },
+    "lock_contention": {
+      "locks_analyzed": 1,
+      "contention_detected": false,
+      "contention_issues": []
+    },
+    "buffer_status": {
+      "buffers_checked": 3,
+      "buffer_status": {
+        "market_data_buffer": 0.0,
+        "order_buffer": 0.0,
+        "fill_buffer": 0.0
+      },
+      "buffer_issues": []
+    }
+  },
+  "end_to_end": {
+    "latency_analysis": {
+      "samples_collected": 10,
+      "p50_ms": 11.65,
+      "p95_ms": 14.299999999999997,
+      "p99_ms": 15.02,
+      "p999_ms": 15.182000000000002,
+      "latency_issues": []
+    },
+    "sequence_validation": {
+      "feeds_checked": 5,
+      "gaps_found": 0,
+      "gap_details": [],
+      "sequence_issues": []
+    },
+    "state_drift": {
+      "components_checked": 3,
+      "drift_detected": false,
+      "drift_details": [],
+      "state_issues": []
+    },
+    "memory_patterns": {
+      "memory_usage_mb": 72.65234375,
+      "allocation_rate_per_sec": 0,
+      "gc_collections": 158,
+      "memory_issues": []
+    },
+    "thread_blocking": {
+      "threads_checked": 1,
+      "blocked_threads": 0,
+      "blocking_details": [],
+      "blocking_issues": []
+    }
+  }
+}

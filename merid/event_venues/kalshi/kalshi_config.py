@@ -39,16 +39,19 @@ class KalshiConfig:
 
 
 # Environment-specific URLs per Kalshi docs
+# CRITICAL FIX: 2026-07-07 - Use elections API endpoints for crypto markets
+# The external-api endpoints do not support elections markets (crypto 15m)
+# Elections API is the correct endpoint for KXBTC15M, KXETH15M, etc.
 _ENV_CONFIGS = {
     "prod": {
-        "rest_base_url": "https://external-api.kalshi.com/trade-api/v2",
-        "ws_base_url": "wss://external-api-ws.kalshi.com/trade-api/ws/v2",
-        "public_rest_api_url": "https://external-api.kalshi.com/trade-api/v2",
+        "rest_base_url": "https://api.elections.kalshi.com/trade-api/v2",
+        "ws_base_url": "wss://api.elections.kalshi.com/trade-api/ws/v2",
+        "public_rest_api_url": "https://api.elections.kalshi.com/trade-api/v2",
     },
     "demo": {
-        "rest_base_url": "https://external-api.demo.kalshi.co/trade-api/v2",
-        "ws_base_url": "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2",
-        "public_rest_api_url": "https://external-api.demo.kalshi.co/trade-api/v2",
+        "rest_base_url": "https://demo-api.kalshi.co/trade-api/v2",
+        "ws_base_url": "wss://demo-api.kalshi.co/trade-api/ws/v2",
+        "public_rest_api_url": "https://demo-api.kalshi.co/trade-api/v2",
     },
 }
 

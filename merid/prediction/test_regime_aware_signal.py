@@ -15,45 +15,173 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from merid.prediction.regime_detector import Regime, RegimeDetection
 
 
-class TestMinimumEntryPrices:
-    """Test minimum entry price filters based on 2026-07-03 trade history analysis."""
+class TestSignalAlignmentValidation:
+    """Test cross-signal alignment validation between velocity and OBI.
     
-    def test_minimum_entry_price_50c_all_assets(self):
-        """Test that all assets now have 50c minimum entry price."""
-        min_entry_prices = {
-            'BTC': 50,
-            'ETH': 50,
-            'SOL': 50,
-            'XRP': 50,
-            'DOGE': 50
-        }
-        
-        for asset, min_price in min_entry_prices.items():
-            assert min_price == 50, f"{asset} should have 50c minimum, got {min_price}"
+    2026-07-05 FIX: Prevent contradictory signals (e.g., velocity=BUY YES, OBI=sell)
     
-    def test_price_below_50c_rejected(self):
-        """Test that prices below 50c are rejected."""
-        market_price_cents = 45  # Below 50c
-        min_price_cents = 50
-        
-        should_trade = market_price_cents >= min_price_cents
-        assert not should_trade, "Price below 50c should be rejected"
+    Note: Velocity signals use "yes"/"no" (side), while OBI signals use "buy"/"sell" (action).
+    Alignment mapping: velocity "yes" aligns with OBI "buy" (buying YES), velocity "no" aligns with OBI "sell" (buying NO).
+    """
     
-    def test_price_at_50c_accepted(self):
-        """Test that price at exactly 50c is accepted."""
-        market_price_cents = 50  # At threshold
-        min_price_cents = 50
+    def test_velocity_buy_yes_obi_buy_aligned(self):
+        """Velocity BUY YES with OBI BUY should pass (signals aligned)."""
+        velocity_signal = "yes"  # BUY YES from velocity
+        obi_signal = "STRONG_BUY"  # OBI agrees (buy direction)
         
-        should_trade = market_price_cents >= min_price_cents
-        assert should_trade, "Price at 50c should be accepted"
+        # Extract OBI direction
+        obi_direction = None
+        if obi_signal in ["STRONG_BUY", "BUY"]:
+            obi_direction = "buy"
+        elif obi_signal in ["STRONG_SELL", "SELL"]:
+            obi_direction = "sell"
+        
+        # Check alignment (yes aligns with buy, no aligns with sell)
+        signals_aligned = (obi_direction is None) or (
+            (velocity_signal == "yes" and obi_direction == "buy") or
+            (velocity_signal == "no" and obi_direction == "sell")
+        )
+        assert signals_aligned, "Velocity BUY YES with OBI BUY should be aligned"
     
-    def test_price_above_50c_accepted(self):
-        """Test that prices above 50c are accepted."""
-        market_price_cents = 55  # Above threshold
-        min_price_cents = 50
+    def test_velocity_buy_yes_obi_sell_contradiction(self):
+        """Velocity BUY YES with OBI SELL should be rejected (signals contradict)."""
+        velocity_signal = "yes"  # BUY YES from velocity
+        obi_signal = "STRONG_SELL"  # OBI disagrees (sell direction)
         
-        should_trade = market_price_cents >= min_price_cents
-        assert should_trade, "Price above 50c should be accepted"
+        # Extract OBI direction
+        obi_direction = None
+        if obi_signal in ["STRONG_BUY", "BUY"]:
+            obi_direction = "buy"
+        elif obi_signal in ["STRONG_SELL", "SELL"]:
+            obi_direction = "sell"
+        
+        # Check alignment (yes aligns with buy, no aligns with sell)
+        signals_aligned = (obi_direction is None) or (
+            (velocity_signal == "yes" and obi_direction == "buy") or
+            (velocity_signal == "no" and obi_direction == "sell")
+        )
+        assert not signals_aligned, "Velocity BUY YES with OBI SELL should be contradictory"
+    
+    def test_velocity_buy_no_obi_sell_aligned(self):
+        """Velocity BUY NO with OBI SELL should pass (signals aligned)."""
+        velocity_signal = "no"  # BUY NO from velocity
+        obi_signal = "SELL"  # OBI agrees (sell direction)
+        
+        # Extract OBI direction
+        obi_direction = None
+        if obi_signal in ["STRONG_BUY", "BUY"]:
+            obi_direction = "buy"
+        elif obi_signal in ["STRONG_SELL", "SELL"]:
+            obi_direction = "sell"
+        
+        # Check alignment (yes aligns with buy, no aligns with sell)
+        signals_aligned = (obi_direction is None) or (
+            (velocity_signal == "yes" and obi_direction == "buy") or
+            (velocity_signal == "no" and obi_direction == "sell")
+        )
+        assert signals_aligned, "Velocity BUY NO with OBI SELL should be aligned"
+    
+    def test_velocity_buy_no_obi_buy_contradiction(self):
+        """Velocity BUY NO with OBI BUY should be rejected (signals contradict)."""
+        velocity_signal = "no"  # BUY NO from velocity
+        obi_signal = "BUY"  # OBI disagrees (buy direction)
+        
+        # Extract OBI direction
+        obi_direction = None
+        if obi_signal in ["STRONG_BUY", "BUY"]:
+            obi_direction = "buy"
+        elif obi_signal in ["STRONG_SELL", "SELL"]:
+            obi_direction = "sell"
+        
+        # Check alignment (yes aligns with buy, no aligns with sell)
+        signals_aligned = (obi_direction is None) or (
+            (velocity_signal == "yes" and obi_direction == "buy") or
+            (velocity_signal == "no" and obi_direction == "sell")
+        )
+        assert not signals_aligned, "Velocity BUY NO with OBI BUY should be contradictory"
+    
+    def test_obi_neutral_allows_any_velocity(self):
+        """OBI NEUTRAL should allow any velocity signal (no contradiction)."""
+        velocity_signal = "yes"  # BUY YES from velocity
+        obi_signal = "NEUTRAL"  # OBI neutral
+        
+        # Extract OBI direction
+        obi_direction = None
+        if obi_signal in ["STRONG_BUY", "BUY"]:
+            obi_direction = "buy"
+        elif obi_signal in ["STRONG_SELL", "SELL"]:
+            obi_direction = "sell"
+        
+        # Check alignment (neutral OBI has no direction, so always aligned)
+        signals_aligned = (obi_direction is None) or (
+            (velocity_signal == "yes" and obi_direction == "buy") or
+            (velocity_signal == "no" and obi_direction == "sell")
+        )
+        assert signals_aligned, "OBI NEUTRAL should allow any velocity signal"
+
+
+class TestNegativeEdgeValidation:
+    """Test negative edge validation in momentum mode (REMOVED 2026-07-05).
+    
+    REMOVED 2026-07-05: The -20% edge threshold check was removed because:
+    1. p_model is derived from velocity via logistic mapping, not independent probability estimation
+    2. Comparing velocity-transformed probability to market-implied probability is meaningless
+    3. Momentum trading conviction comes from velocity exceeding threshold, not probability edge
+    4. The edge gate was already disabled for momentum (line 3513-3515 in agent_grid_15m.py)
+    
+    Momentum signals are now validated solely by velocity threshold, not probability edge.
+    """
+    
+    def test_all_edges_allowed_for_momentum(self):
+        """All edges should be allowed in momentum mode (edge check removed)."""
+        # These would have been rejected before the fix
+        edge_pct_values = [5.0, -10.0, -30.0, -50.0, -20.0]
+        
+        for edge_pct in edge_pct_values:
+            # With the fix, all edges are allowed for momentum signals
+            # Only the max_edge threshold (90%) remains as a sanity check
+            assert abs(edge_pct) <= 90.0, f"Edge {edge_pct}% should be allowed (below 90% sanity check)"
+
+
+class TestSweetSpotEntryBand:
+    """Test sweet-spot entry band [25c, 75c] (2026-07-05 research fix).
+    
+    Entries below 25c are lottery tickets (<30c zone has 10.4% win rate);
+    entries above 75c have no profit room to ratchet to the 99c exit.
+    """
+    
+    ENTRY_MIN_PRICE_CENTS = 25
+    ENTRY_MAX_PRICE_CENTS = 75
+    
+    def test_price_below_band_rejected(self):
+        """Prices below 25c are rejected (lottery zone)."""
+        market_price_cents = 20
+        should_trade = self.ENTRY_MIN_PRICE_CENTS <= market_price_cents <= self.ENTRY_MAX_PRICE_CENTS
+        assert not should_trade, "Price below 25c should be rejected"
+    
+    def test_price_at_band_floor_accepted(self):
+        """Price at exactly 25c is accepted."""
+        market_price_cents = 25
+        should_trade = self.ENTRY_MIN_PRICE_CENTS <= market_price_cents <= self.ENTRY_MAX_PRICE_CENTS
+        assert should_trade, "Price at 25c should be accepted"
+    
+    def test_cheap_sweet_spot_accepted(self):
+        """Cheap entries (30-50c) are accepted - core of the swing-catching strategy."""
+        for market_price_cents in (30, 40, 45, 50):
+            should_trade = self.ENTRY_MIN_PRICE_CENTS <= market_price_cents <= self.ENTRY_MAX_PRICE_CENTS
+            assert should_trade, f"Cheap entry at {market_price_cents}c should be accepted"
+    
+    def test_price_at_band_cap_accepted(self):
+        """Price at exactly 75c is accepted."""
+        market_price_cents = 75
+        should_trade = self.ENTRY_MIN_PRICE_CENTS <= market_price_cents <= self.ENTRY_MAX_PRICE_CENTS
+        assert should_trade, "Price at 75c should be accepted"
+    
+    def test_price_above_band_rejected(self):
+        """Prices above 75c are rejected (chasing, no profit room to 99c exit)."""
+        for market_price_cents in (76, 85, 98, 99):
+            should_trade = self.ENTRY_MIN_PRICE_CENTS <= market_price_cents <= self.ENTRY_MAX_PRICE_CENTS
+            assert not should_trade, f"Price at {market_price_cents}c should be rejected (no chasing)"
 
 
 class TestYesSideBias:
@@ -85,23 +213,23 @@ class TestYesSideBias:
         is_marginal_negative = (velocity < 0) and (velocity > -velocity_threshold * (1 + yes_bias_margin))
         assert is_marginal_negative, "Negative velocity within 20% of threshold should trigger marginal zone"
     
-    def test_yes_bias_returns_yes_signal(self):
-        """Test that YES-side bias returns YES signal for marginal velocity."""
-        velocity = 0.00011  # Marginal positive
+    def test_marginal_velocity_produces_no_trade(self):
+        """2026-07-05 RESEARCH FIX: marginal velocity (no conviction) must NOT trade.
+        
+        The old YES-side bias traded marginal signals, producing zero-edge candidates
+        that chased 98-99c asks. No conviction = no trade.
+        """
+        velocity = 0.00011  # Marginal positive (within 20% of threshold)
         velocity_threshold = 0.0001
         yes_bias_margin = 0.2
         
         is_marginal_positive = (velocity > 0) and (velocity < velocity_threshold * (1 + yes_bias_margin))
         
-        if is_marginal_positive:
-            signal_side = "yes"
-            signal_action = "buy"
-        else:
-            signal_side = None
-            signal_action = None
+        # Marginal zone now results in NO TRADE (skip), not a YES-bias entry
+        signal_side = None if is_marginal_positive else "yes"
         
-        assert signal_side == "yes", "Marginal velocity should trigger YES bias"
-        assert signal_action == "buy", "YES bias should be a buy action"
+        assert is_marginal_positive, "Velocity should be in the marginal zone"
+        assert signal_side is None, "Marginal velocity must produce NO TRADE (no conviction)"
 
 
 class TestNoSideConviction:

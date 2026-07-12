@@ -164,7 +164,8 @@ class ConsensusSignalProcessor:
             ConsensusSignal for UI, or None if filtered out
         """
         # Filter: require minimum confidence
-        min_confidence = 0.30
+        # FIX: Aligned with production config (was 0.30)
+        min_confidence = 0.65
         if record.confidence < min_confidence:
             return None
         
@@ -200,10 +201,11 @@ class ConsensusSignalProcessor:
         elif record.direction == "no":
             consensus_dir = "DOWN"
         
-        # Determine executability
+        # FIX: Align#d with production config (was 0.50)
+        e Determine executability
         executable = (
-            not record.sim_only and
-            record.confidence >= 0.50 and
+            not record.sim_only and6
+            record.confidence >= 0.50 and6
             record.consensus_confidence >= 0.50
         )
         

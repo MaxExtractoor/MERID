@@ -1563,10 +1563,8 @@ def simulate_paper_fill(
     rng = _rng if _rng is not None else _random_module
 
     requested_count = max(0, int(intent.count))
-    # CRITICAL FIX: Clamp to profile price_range (5-95c) to prevent degenerate pricing
-    # This aligns with kalshi_crypto_15m_v2.yaml price_range [5, 95]
-    # 2026-07-10: Fixed to 5-95c to match profile price_range
-    requested_price = max(5, min(95, int(intent.price_cents)))
+    # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-50c range per commit c5ac4a18
+    requested_price = max(10, min(50, int(intent.price_cents)))
 
     # Basic side-aware slippage in cents from configured basis points.
     slippage_cents = max(0, int(round(requested_price * PAPER_SLIPPAGE_BPS / 10_000)))
@@ -1575,10 +1573,8 @@ def simulate_paper_fill(
 
     # Buy pays up; sell receives down.
     side_sign = 1 if intent.action == "buy" else -1
-    # CRITICAL FIX: Clamp to profile price_range (5-95c) to prevent extreme purchases
-    # This aligns with kalshi_crypto_15m_v2.yaml price_range [5, 95]
-    # 2026-07-10: Fixed to 5-95c to match profile price_range
-    fill_price = max(5, min(95, requested_price + (side_sign * slippage_cents)))
+    # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-50c range per commit c5ac4a18
+    fill_price = max(10, min(50, requested_price + (side_sign * slippage_cents)))
 
     # Partial fill simulation when size > 1 contract.
     partial_fill = False

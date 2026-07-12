@@ -172,40 +172,48 @@ class TraceStore:
 
     def get_trace(self, trace_id: str) -> Optional[Dict[str, Any]]:
         conn = sqlite3.connect(self._db_path)
-        row = conn.execute("SELECT data FROM traces WHERE trace_id = ?", (trace_id,)).fetchone()
-        conn.close()
-        return json.loads(row[0]) if row else None
+        try:
+            row = conn.execute("SELECT data FROM traces WHERE trace_id = ?", (trace_id,)).fetchone()
+            return json.loads(row[0]) if row else None
+        finally:
+            conn.close()
 
     def get_traces_for_task(self, task_id: str) -> List[Dict[str, Any]]:
         conn = sqlite3.connect(self._db_path)
-        rows = conn.execute(
-            "SELECT data FROM traces WHERE task_id = ? ORDER BY started_at", (task_id,)
-        ).fetchall()
-        conn.close()
-        return [json.loads(r[0]) for r in rows]
+        try:
+            rows = conn.execute(
+                "SELECT data FROM traces WHERE task_id = ? ORDER BY started_at", (task_id,)
+            ).fetchall()
+            return [json.loads(r[0]) for r in rows]
+        finally:
+            conn.close()
 
     def get_recent_traces(self, agent_id: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
         conn = sqlite3.connect(self._db_path)
-        if agent_id:
-            rows = conn.execute(
-                "SELECT data FROM traces WHERE agent_id = ? ORDER BY started_at DESC LIMIT ?",
-                (agent_id, limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT data FROM traces ORDER BY started_at DESC LIMIT ?", (limit,)
-            ).fetchall()
-        conn.close()
-        return [json.loads(r[0]) for r in rows]
+        try:
+            if agent_id:
+                rows = conn.execute(
+                    "SELECT data FROM traces WHERE agent_id = ? ORDER BY started_at DESC LIMIT ?",
+                    (agent_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT data FROM traces ORDER BY started_at DESC LIMIT ?", (limit,)
+                ).fetchall()
+            return [json.loads(r[0]) for r in rows]
+        finally:
+            conn.close()
 
     def get_stats(self) -> Dict[str, Any]:
         conn = sqlite3.connect(self._db_path)
-        total = conn.execute("SELECT COUNT(*) FROM traces").fetchone()[0]
-        by_state = {}
-        for row in conn.execute("SELECT terminal_state, COUNT(*) FROM traces GROUP BY terminal_state"):
-            by_state[row[0] or "unknown"] = row[1]
-        conn.close()
-        return {"total_traces": total, "by_terminal_state": by_state}
+        try:
+            total = conn.execute("SELECT COUNT(*) FROM traces").fetchone()[0]
+            by_state = {}
+            for row in conn.execute("SELECT terminal_state, COUNT(*) FROM traces GROUP BY terminal_state"):
+                by_state[row[0] or "unknown"] = row[1]
+            return {"total_traces": total, "by_terminal_state": by_state}
+        finally:
+            conn.close()
 
 
 # ── Singleton ────────────────────────────────────────────────────────

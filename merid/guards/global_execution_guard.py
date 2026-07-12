@@ -1,4 +1,4 @@
-"""Unified Global Execution Guard — Final safety net for ALL order paths.
+"""Unified Global Execution Guard - Final safety net for ALL order paths.
 
 DEPRECATED: This module is deprecated in favor of UnifiedRiskManager.
 Use merid.risk.unified_risk_manager instead.
@@ -101,12 +101,12 @@ class GuardDecision:
 
 
 class GlobalExecutionGuard:
-    """Unified execution guard — SINGLE chokepoint for ALL order paths.
-    
+    """Unified execution guard - SINGLE chokepoint for ALL order paths.
+
     This is a process-wide singleton that tracks total notional exposure
     and enforces the 3% bankroll cap (2026 best practice) regardless of which execution path
     the order came from.
-    
+
     SAFETY INVARIANTS:
     1. All orders MUST call check_order() before submission
     2. Total notional cannot exceed 3% of configured bankroll (MAX_CYCLE_RISK_PCT from core.settings)
@@ -144,7 +144,7 @@ class GlobalExecutionGuard:
             self._halt_reason: str = ""
             self._initialized = True
             
-            logger.info("[GLOBAL_GUARD] Initialized — all order paths must route through this guard")
+            logger.info("[GLOBAL_GUARD] Initialized - all order paths must route through this guard")
     
     def check_order(
         self,
@@ -155,7 +155,7 @@ class GlobalExecutionGuard:
         asset: Optional[str] = None,
         action: Optional[str] = None,
     ) -> Tuple[bool, str]:
-        """Check if order is allowed — THE UNIFIED GATE.
+        """Check if order is allowed - THE UNIFIED GATE.
         
         ALL execution paths MUST call this before submitting orders.
         
@@ -211,11 +211,12 @@ class GlobalExecutionGuard:
             if price_cents <= 0 or price_cents >= 100:
                 return False, f"Invalid price_cents: {price_cents} (must be 1-99)"
             
-            # CRITICAL: Price range guard - enforce 50-70c range for Kalshi crypto 15m
-            # This aligns with production stack: kalshi_tools.py, order_router.py, trading.py
-            # Prevents <50¢ lottery tickets (10.4% win rate) and >70¢ low-profit trades
-            min_price_cents = 50  # 50 cents minimum
-            max_price_cents = 70  # 70 cents maximum
+            # CRITICAL: Price range guard - enforce 10-50c range for Kalshi crypto 15m
+            # This aligns with profile YAML: price_range.min_price_cents = 10, price_range.max_price_cents = 50
+            # 2026-07-09: Changed from 50-70c to 10-50c to match profile sweet spot
+            # Prevents <10¢ lottery tickets and >50¢ low-profit trades
+            min_price_cents = 10  # 10 cents minimum (lower bound of sweet spot)
+            max_price_cents = 50  # 50 cents maximum (upper bound of sweet spot)
             
             # Allow profile override for different strategies
             try:
@@ -225,7 +226,7 @@ class GlobalExecutionGuard:
                     min_price_cents = profile_adapter.profile.guardrails_min_contract_price_cents
                 if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_max_contract_price_cents'):
                     max_price_cents = profile_adapter.profile.guardrails_max_contract_price_cents
-            except Exception as e:
+            except Exception as e:15
                 logger.debug("[GLOBAL_GUARD] Failed to load price limits from profile: %s, using defaults 50-70c", e)
             
             if price_cents < min_price_cents:
@@ -419,7 +420,7 @@ class GlobalExecutionGuard:
                 )
                 return False, f"RATE_LIMIT_HOUR: {max_per_hour} orders/hour exceeded"
             
-            # 6. All checks passed — record the order
+            # 6. All checks passed - record the order
             self._total_notional_usd = new_total
             self._orders_this_minute += 1
             self._orders_this_hour += 1
@@ -520,7 +521,7 @@ class GlobalExecutionGuard:
             }
     
     def emergency_halt(self, reason: str) -> None:
-        """Emergency halt — block ALL orders immediately."""
+        """Emergency halt - block ALL orders immediately."""
         with self._lock:
             self._emergency_halt = True
             self._halt_reason = reason

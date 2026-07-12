@@ -972,7 +972,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
     # 2026-07-08: DISABLED percentage-based calculations - using fixed $1 exposure model
     fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
     agent_max_notional_usd = fixed_exposure_cap_usd
-    agent_max_orders_per_window = agent_defaults.get('max_orders_per_window', 20)  # FIXED: Default 20 to match YAML (was 3)
+    agent_max_orders_per_window = agent_defaults.get('max_orders_per_window', 24)  # FIXED: Default 24 to match YAML (2026-07-11: increased from 20)
     agent_max_yes_position = agent_defaults.get('max_yes_position', 5)  # FIXED: Default 5 to match YAML
     agent_max_no_position = agent_defaults.get('max_no_position', 5)  # FIXED: Default 5 to match YAML
     

@@ -222,3 +222,142 @@ class TestVolumeConfirmationFilter:
         # Volume confirmation will fail with default
         passes_filter = volume >= min_volume_threshold
         assert passes_filter is False
+
+
+class TestVolumeFilterFix20260705:
+    """Test suite for 2026-07-05 volume filter fix.
+    
+    This test validates that the broken volume filter has been disabled
+    and documents the root cause and fix.
+    """
+    
+    def test_broken_volume_filter_disabled(self):
+        """Test that the broken volume filter is disabled in agent_grid_15m.py."""
+        from pathlib import Path
+        
+        agent_grid_path = Path(__file__).parent.parent / "merid" / "prediction" / "agent_grid_15m.py"
+        
+        if not agent_grid_path.exists():
+            pytest.skip("agent_grid_15m.py not found")
+        
+        content = agent_grid_path.read_text(encoding='utf-8')
+        
+        # Verify the broken filter is disabled
+        assert "DISABLED: 2026-07-05 - Fixed broken volume filter" in content, \
+            "agent_grid_15m.py should have comment explaining volume filter disable"
+        
+        # Verify the old broken implementation is removed
+        assert "avg_volume_threshold = 1000000" not in content, \
+            "agent_grid_15m.py should not have the broken 1M threshold"
+        
+        # Verify the fix comment explains the root cause
+        assert "60-second candle volume" in content, \
+            "agent_grid_15m.py should document the root cause (wrong volume metric)"
+        
+        assert "wrong metric" in content or "wrong threshold" in content, \
+            "agent_grid_15m.py should document the root cause (wrong metric/threshold)"
+    
+    def test_volume_filter_config_disabled(self):
+        """Test that volume_filter is disabled in profile config."""
+        from pathlib import Path
+        
+        profile_path = Path(__file__).parent.parent / "config" / "profiles" / "kalshi_crypto_15m_v2.yaml"
+        
+        if not profile_path.exists():
+            pytest.skip("kalshi_crypto_15m_v2.yaml not found")
+        
+        # Read raw file to check for documentation in comments
+        with open(profile_path, 'r', encoding='utf-8') as f:
+            raw_content = f.read()
+        
+        # Verify volume_filter section exists in raw content
+        assert 'volume_filter:' in raw_content, \
+            "kalshi_crypto_15m_v2.yaml should have volume_filter section"
+        
+        # Verify volume_filter is disabled
+        assert 'enabled: false' in raw_content.lower() or 'enabled: False' in raw_content, \
+            "volume_filter should be disabled in config"
+        
+        # Verify config documents the fix (check raw content for comments)
+        assert '2026-07-05' in raw_content or 'broken' in raw_content, \
+            "volume_filter config should document the 2026-07-05 fix in comments"
+    
+    def test_volume_filter_best_practices_documented(self):
+        """Test that 2026 best practices are documented in config."""
+        from pathlib import Path
+        import yaml
+        
+        profile_path = Path(__file__).parent.parent / "config" / "profiles" / "kalshi_crypto_15m_v2.yaml"
+        
+        if not profile_path.exists():
+            pytest.skip("kalshi_crypto_15m_v2.yaml not found")
+        
+        with open(profile_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+        
+        # Verify best practices are documented
+        volume_filter_config = str(config['volume_filter'])
+        
+        # Check for key 2026 best practices
+        best_practice_keywords = [
+            'z_score',
+            'relative',
+            'rolling',
+            'multi-timeframe',
+            'AnomIQ'
+        ]
+        
+        found_keywords = [kw for kw in best_practice_keywords if kw.lower() in volume_filter_config.lower()]
+        
+        # At least some best practices should be documented
+        assert len(found_keywords) >= 2, \
+            f"volume_filter config should document 2026 best practices (found: {found_keywords})"
+    
+    def test_coarse_liquidity_filters_still_active(self):
+        """Test that coarse liquidity filters are still active (universe.min_volume)."""
+        from pathlib import Path
+        import yaml
+        
+        profile_path = Path(__file__).parent.parent / "config" / "profiles" / "kalshi_crypto_15m_v2.yaml"
+        
+        if not profile_path.exists():
+            pytest.skip("kalshi_crypto_15m_v2.yaml not found")
+        
+        with open(profile_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+        
+        # Verify universe.min_volume is still active
+        assert 'universe' in config, \
+            "config should have universe section"
+        
+        assert 'min_volume' in config['universe'], \
+            "universe should have min_volume filter"
+        
+        assert config['universe']['min_volume'] >= 1, \
+            "universe.min_volume should be >= 1 contract"
+    
+    def test_per_asset_volume_24h_filters_still_active(self):
+        """Test that per-asset min_volume_24h_usd filters are still active."""
+        from pathlib import Path
+        import yaml
+        
+        profile_path = Path(__file__).parent.parent / "config" / "profiles" / "kalshi_crypto_15m_v2.yaml"
+        
+        if not profile_path.exists():
+            pytest.skip("kalshi_crypto_15m_v2.yaml not found")
+        
+        with open(profile_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+        
+        # Verify per-asset min_volume_24h_usd filters exist
+        assets = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE']
+        
+        for asset in assets:
+            assert asset in config['assets'], \
+                f"config should have {asset} asset configuration"
+            
+            assert 'min_volume_24h_usd' in config['assets'][asset], \
+                f"{asset} should have min_volume_24h_usd filter"
+            
+            assert config['assets'][asset]['min_volume_24h_usd'] > 0, \
+                f"{asset} min_volume_24h_usd should be > 0"

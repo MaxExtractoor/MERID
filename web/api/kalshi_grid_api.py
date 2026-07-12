@@ -878,7 +878,7 @@ async def run_canary_trade() -> Dict[str, Any]:
             ticker=ticker,
             side="yes",
             action="buy",
-            price_cents=50,
+            price_cents=25,  # 2026-07-09: Changed from 50 to 25 (midpoint of 10-50c sweet spot)
             count=1,
             mode=TradingMode.PAPER,
             time_in_force="gtc",

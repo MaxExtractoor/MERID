@@ -314,6 +314,112 @@ class TestPositionExit:
         assert position.exited_at is not None
 
 
+class TestExtremeProfitExit:
+    """Tests for extreme profit exit (99c YES / 1c NO)."""
+    
+    def test_extreme_profit_yes_at_99c(self):
+        """Test YES position triggers extreme profit exit at 99c."""
+        position = Position(
+            market_id="KXBTC15M-1234",
+            series_ticker="KXBTC15M",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,
+        )
+        
+        # At 99c, should trigger extreme profit exit
+        assert position.should_trigger_extreme_profit(99) is True
+        
+        # At 100c, should also trigger
+        assert position.should_trigger_extreme_profit(100) is True
+    
+    def test_extreme_profit_yes_below_99c(self):
+        """Test YES position does not trigger extreme profit exit below 99c."""
+        position = Position(
+            market_id="KXBTC15M-1234",
+            series_ticker="KXBTC15M",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,
+        )
+        
+        # At 98c, should not trigger
+        assert position.should_trigger_extreme_profit(98) is False
+        
+        # At 50c (entry), should not trigger
+        assert position.should_trigger_extreme_profit(50) is False
+    
+    def test_extreme_profit_no_at_1c(self):
+        """Test NO position triggers extreme profit exit at 1c."""
+        position = Position(
+            market_id="KXBTC15M-1234",
+            series_ticker="KXBTC15M",
+            side=PositionSide.NO,
+            size=10,
+            avg_entry_price_cents=50,
+        )
+        
+        # At 1c, should trigger extreme profit exit
+        assert position.should_trigger_extreme_profit(1) is True
+        
+        # At 0c, should also trigger
+        assert position.should_trigger_extreme_profit(0) is True
+    
+    def test_extreme_profit_no_above_1c(self):
+        """Test NO position does not trigger extreme profit exit above 1c."""
+        position = Position(
+            market_id="KXBTC15M-1234",
+            series_ticker="KXBTC15M",
+            side=PositionSide.NO,
+            size=10,
+            avg_entry_price_cents=50,
+        )
+        
+        # At 2c, should not trigger
+        assert position.should_trigger_extreme_profit(2) is False
+        
+        # At 50c (entry), should not trigger
+        assert position.should_trigger_extreme_profit(50) is False
+    
+    def test_extreme_profit_all_assets_yes(self):
+        """Test extreme profit exit works for all 5 crypto assets (YES positions)."""
+        assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+        
+        for asset in assets:
+            position = Position(
+                market_id=f"KX{asset}15M-1234",
+                series_ticker=f"KX{asset}15M",
+                side=PositionSide.YES,
+                size=10,
+                avg_entry_price_cents=50,
+            )
+            
+            # At 99c, should trigger extreme profit exit for all assets
+            assert position.should_trigger_extreme_profit(99) is True, f"Failed for {asset} YES at 99c"
+            
+            # At 98c, should not trigger for any asset
+            assert position.should_trigger_extreme_profit(98) is False, f"Failed for {asset} YES at 98c"
+    
+    def test_extreme_profit_all_assets_no(self):
+        """Test extreme profit exit works for all 5 crypto assets (NO positions)."""
+        assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+        
+        for asset in assets:
+            position = Position(
+                market_id=f"KX{asset}15M-1234",
+                series_ticker=f"KX{asset}15M",
+                side=PositionSide.NO,
+                size=10,
+                avg_entry_price_cents=50,
+            )
+            
+            # At 1c, should trigger extreme profit exit for all assets
+            assert position.should_trigger_extreme_profit(1) is True, f"Failed for {asset} NO at 1c"
+            
+            # At 2c, should not trigger for any asset
+            assert position.should_trigger_extreme_profit(2) is False, f"Failed for {asset} NO at 2c"
+
+
 class TestProbabilityAdjustedTrailing:
     """Tests for probability-adjusted trailing stop logic."""
     

@@ -42,10 +42,10 @@ class TestDepthPopulationFix:
         """Create a mock profile with microstructure enabled."""
         profile = Mock()
         profile.market_microstructure_enabled = True
-        profile.market_microstructure_max_spread_cents = 70
-        profile.market_microstructure_min_depth_usd = 50
-        profile.market_microstructure_min_yes_depth = 10
-        profile.market_microstructure_min_no_depth = 10
+        profile.market_microstructure_max_spread_cents = 30  # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
+        profile.market_microstructure_min_depth_usd = 0.0  # Disabled for limit orders
+        profile.market_microstructure_min_yes_depth = 1
+        profile.market_microstructure_min_no_depth = 1
         profile.fee_aware_edge_enabled = False
         return profile
     

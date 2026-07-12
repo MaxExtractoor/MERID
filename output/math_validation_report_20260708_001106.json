@@ -1,0 +1,55 @@
+{
+  "timestamp": "2026-07-08T04:10:54.555634",
+  "profile": "kalshi_crypto_15m_v2",
+  "summary": {
+    "total_issues": 3,
+    "critical_issues": 0,
+    "high_issues": 0,
+    "medium_issues": 1,
+    "low_issues": 2
+  },
+  "components_checked": [
+    "position_sizing",
+    "risk_management",
+    "performance_metrics",
+    "calibration",
+    "edge_calculation",
+    "velocity_model",
+    "correlation_tracking"
+  ],
+  "issues": [
+    {
+      "category": "velocity_model",
+      "severity": "low",
+      "component": "Velocity model testing",
+      "issue": "No velocity model responsiveness tests found",
+      "impact": "Cannot verify that velocity model produces meaningful probability shifts across velocity range.",
+      "recommendation": "Add unit tests that verify probability shifts across velocity range (e.g., 0% \u2192 30%, 50% \u2192 70%, 100% \u2192 90%).",
+      "evidence": {
+        "responsiveness_tests": false
+      }
+    },
+    {
+      "category": "correlation_tracking",
+      "severity": "medium",
+      "component": "Correlation tracking across stack",
+      "issue": "Correlation matrix validation not implemented",
+      "impact": "Invalid correlation matrices (non-symmetric, non-positive-definite) can cause numerical errors in risk calculations.",
+      "recommendation": "Add validation checks: symmetry (C == C.T), positive definiteness (all eigenvalues > 0), diagonal = 1.",
+      "evidence": {
+        "matrix_validation": false
+      }
+    },
+    {
+      "category": "correlation_tracking",
+      "severity": "low",
+      "component": "Correlation tracking across stack",
+      "issue": "Correlation tracking may not be regime-dependent",
+      "impact": "Correlations vary by market regime (crisis vs normal). Static correlations may misestimate risk in regime transitions.",
+      "recommendation": "Consider implementing regime-dependent correlation matrices. Use different correlations for bull/bear/crisis regimes.",
+      "evidence": {
+        "regime_correlation": false
+      }
+    }
+  ]
+}

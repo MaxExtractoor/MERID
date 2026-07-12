@@ -19,7 +19,7 @@ class TestTop3SelectionSpec:
     """Tests for the formal specification and invariants."""
     
     def test_max_assets_is_3(self):
-        """Invariant 1: At most 3 assets can be selected."""
+        """Invariant 1: At most 3 assets can be selected (CRITICAL FIX: was 5, now 3)."""
         spec = Top3SelectionSpec()
         assert spec.MAX_ASSETS == 3
     

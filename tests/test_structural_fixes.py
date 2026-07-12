@@ -184,8 +184,8 @@ def test_spread_threshold_alignment():
     
     optimizer = CandidateOptimizer()
     
-    # Should be aligned with signal gate threshold (40 cents)
-    assert optimizer.MAX_SPREAD_CENTS == 40
+    # Should be aligned with signal gate threshold (30 cents - 2026-07-10: harmonized with 10c-50c entry price sweet spot)
+    assert optimizer.max_spread_cents == 30
     
     # Test filtering logic directly
     market = {
@@ -210,7 +210,7 @@ def test_spread_threshold_alignment():
     assert spread_cents == 50
     
     # Test that spreads above threshold would be filtered
-    assert spread_cents > optimizer.MAX_SPREAD_CENTS  # 50 > 40
+    assert spread_cents > optimizer.max_spread_cents  # 50 > 30
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

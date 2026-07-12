@@ -396,7 +396,9 @@ class PositionMonitor:
                                     contracts_to_close,
                                 )
                                 self._emit_exit_intent(position, ExitReason.RATCHET_TRIM, current_price_cents, contracts_to_close)
-                                # Update position size after trim (don't remove from monitoring)
+                                # CRITICAL FIX: Update position size after trim (don't remove from monitoring)
+                                # Note: Position.size is updated here, but PositionCache.contracts is updated via fill callback
+                                # This creates a temporary desync until the fill is processed, which is acceptable
                                 position.size = trim_to_contracts
                                 # CRITICAL: Continue to check other exit conditions (don't return early)
                             elif position.side == PositionSide.NO and current_price_cents <= (100 - trim_threshold):
@@ -411,7 +413,9 @@ class PositionMonitor:
                                     contracts_to_close,
                                 )
                                 self._emit_exit_intent(position, ExitReason.RATCHET_TRIM, current_price_cents, contracts_to_close)
-                                # Update position size after trim (don't remove from monitoring)
+                                # CRITICAL FIX: Update position size after trim (don't remove from monitoring)
+                                # Note: Position.size is updated here, but PositionCache.contracts is updated via fill callback
+                                # This creates a temporary desync until the fill is processed, which is acceptable
                                 position.size = trim_to_contracts
                                 # CRITICAL: Continue to check other exit conditions (don't return early)
                     
@@ -540,10 +544,13 @@ class PositionMonitor:
         # Many trades never reach 1R before reversing, causing avoidable losses
         # Activate trailing after min_profit_cents from profile (default 12 cents, align with 2026 research)
         # CRITICAL FIX: 2026-07-06 - Activate aggressive trailing (2c distance) when price crosses 80c profit zone
+        # CRITICAL FIX: 2026-07-12 - Implement activation delay to prevent noise-triggered trailing
+        # Record when profit threshold is reached, then wait for activation_delay_sec before activating
         if not position.trailing_activated:
             # Check if position has minimum profit to activate trailing
             min_profit_cents = 12  # Default from profile (align with 2026 research)
             profit_zone_activation_cents = 80  # CRITICAL FIX: 2026-07-06 - Activate aggressive trailing at 80c
+            activation_delay_sec = 30  # Default activation delay from profile
             try:
                 from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
                 if is_profile_active():
@@ -551,6 +558,7 @@ class PositionMonitor:
                     profile = adapter.profile
                     min_profit_cents = profile.trailing_stop_min_profit_cents
                     profit_zone_activation_cents = profile.trailing_stop_profit_zone_activation_cents
+                    activation_delay_sec = profile.trailing_stop_activation_delay_sec
             except Exception as e:
                 logger.debug("[POSITION-MONITOR] Could not read trailing config from profile: %s", e)
             
@@ -560,34 +568,61 @@ class PositionMonitor:
             else:
                 profit_cents = position.avg_entry_price_cents - current_price_cents
             
-            # Activate trailing if minimum profit threshold reached
+            # Check if profit threshold reached
             if profit_cents >= min_profit_cents:
-                position.trailing_activated = True
-                # CRITICAL FIX: 2026-07-06 - Check if in profit zone (80c for YES, 20c for NO)
-                in_profit_zone = False
-                if position.side == PositionSide.YES and current_price_cents >= profit_zone_activation_cents:
-                    in_profit_zone = True
-                    position.trailing_profit_zone_activated = True
-                elif position.side == PositionSide.NO and current_price_cents <= (100 - profit_zone_activation_cents):
-                    in_profit_zone = True
-                    position.trailing_profit_zone_activated = True
-                
-                if in_profit_zone:
+                # Record timestamp when threshold first reached
+                if position.trailing_profit_threshold_reached_at is None:
+                    position.trailing_profit_threshold_reached_at = datetime.utcnow().timestamp()
                     logger.info(
-                        "[POSITION-MONITOR] TRAILING activated (AGGRESSIVE 2c mode): position=%s price=%dc profit=%dc R=%.2f - in 80-85c profit zone",
+                        "[POSITION-MONITOR] TRAILING profit threshold reached: position=%s price=%dc profit=%dc - waiting %ds delay before activation",
                         position.position_id[:8],
                         current_price_cents,
                         profit_cents,
-                        position.r_multiple,
+                        activation_delay_sec,
                     )
+                
+                # Check if activation delay has elapsed
+                now = datetime.utcnow().timestamp()
+                # Ensure activation_delay_sec is a float (handle Mock objects in tests)
+                if not isinstance(activation_delay_sec, (int, float)):
+                    activation_delay_sec = 30.0  # Default fallback
+                delay_elapsed = (now - position.trailing_profit_threshold_reached_at) >= activation_delay_sec
+                
+                if delay_elapsed:
+                    position.trailing_activated = True
+                    # CRITICAL FIX: 2026-07-06 - Check if in profit zone (80c for YES, 20c for NO)
+                    in_profit_zone = False
+                    if position.side == PositionSide.YES and current_price_cents >= profit_zone_activation_cents:
+                        in_profit_zone = True
+                        position.trailing_profit_zone_activated = True
+                    elif position.side == PositionSide.NO and current_price_cents <= (100 - profit_zone_activation_cents):
+                        in_profit_zone = True
+                        position.trailing_profit_zone_activated = True
+                    
+                    if in_profit_zone:
+                        logger.info(
+                            "[POSITION-MONITOR] TRAILING activated (AGGRESSIVE 2c mode): position=%s price=%dc profit=%dc R=%.2f - in 80-85c profit zone (delay elapsed)",
+                            position.position_id[:8],
+                            current_price_cents,
+                            profit_cents,
+                            position.r_multiple,
+                        )
+                    else:
+                        logger.info(
+                            "[POSITION-MONITOR] TRAILING activated (normal 5c mode): position=%s price=%dc profit=%dc R=%.2f threshold=%dc (delay elapsed)",
+                            position.position_id[:8],
+                            current_price_cents,
+                            profit_cents,
+                            position.r_multiple,
+                            min_profit_cents,
+                        )
                 else:
-                    logger.info(
-                        "[POSITION-MONITOR] TRAILING activated (normal 5c mode): position=%s price=%dc profit=%dc R=%.2f threshold=%dc",
+                    # Still waiting for delay to elapse
+                    logger.debug(
+                        "[POSITION-MONITOR] TRAILING waiting for activation delay: position=%s elapsed=%.1fs/%.1fs",
                         position.position_id[:8],
-                        current_price_cents,
-                        profit_cents,
-                        position.r_multiple,
-                        min_profit_cents,
+                        now - position.trailing_profit_threshold_reached_at,
+                        activation_delay_sec,
                     )
         else:
             # CRITICAL FIX: 2026-07-06 - Check if position entered profit zone after trailing was already activated
@@ -708,8 +743,12 @@ class PositionMonitor:
         except Exception as e:
             logger.debug("[POSITION-MONITOR] Could not get time to expiry for staged exit: %s", e)
         
-        # Calculate time since entry (approximate for 15m window)
-        time_since_entry_seconds = 900.0 - time_to_expiry_seconds
+        # CRITICAL FIX: Use position.time_since_entry_seconds for accuracy
+        # This is calculated from position.opened_at and is more accurate than
+        # the approximation (900 - time_to_expiry) which assumes position opened
+        # at market start. If position was opened mid-window, the approximation
+        # would be wrong, causing staged exits to trigger at incorrect times.
+        time_since_entry_seconds = position.time_since_entry_seconds
         if time_since_entry_seconds < 0:
             time_since_entry_seconds = 0
         
@@ -749,7 +788,9 @@ class PositionMonitor:
                         # Emit partial exit intent
                         self._emit_exit_intent(position, ExitReason.TIME_STOP, current_price_cents, contracts_to_close)
                         
-                        # Update position size after trim (don't remove from monitoring)
+                        # CRITICAL FIX: Update position size after trim (don't remove from monitoring)
+                        # Note: Position.size is updated here, but PositionCache.contracts is updated via fill callback
+                        # This creates a temporary desync until the fill is processed, which is acceptable
                         position.size -= contracts_to_close
                         logger.info(
                             "[POSITION-MONITOR] STAGED-EXIT trimmed position: position=%s new_size=%d closed=%d",

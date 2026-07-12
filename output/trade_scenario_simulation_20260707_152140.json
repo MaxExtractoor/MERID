@@ -1,0 +1,689 @@
+{
+  "profile": "kalshi_crypto_15m_v2",
+  "bankroll_usd": 100.0,
+  "timestamp": "2026-07-07T15:21:40.416558+00:00",
+  "results": [
+    {
+      "scenario": "normal_btc_entry_sweet_spot",
+      "outcome": "passed",
+      "passed_checks": [
+        "price_range: 35c within [10, 75]",
+        "min_edge: 5.00% >= 2.5%",
+        "min_confidence: 0.70 >= threshold",
+        "per_asset_cap: BTC order=$0.35 within cap",
+        "window_limit: BTC_15M order=$0.35 within 3%/5% window limits"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "order_notional_usd": 0.35,
+        "fee_cents": 0.5573750000000001,
+        "fee_usd": 0.005573750000000001,
+        "gross_profit_cents": 20,
+        "net_profit_cents": 19.442625,
+        "net_profit_usd": 0.19442625
+      }
+    },
+    {
+      "scenario": "normal_eth_entry_sweet_spot",
+      "outcome": "passed",
+      "passed_checks": [
+        "price_range: 40c within [10, 75]",
+        "min_edge: 4.00% >= 2.5%",
+        "min_confidence: 0.68 >= threshold",
+        "per_asset_cap: ETH order=$0.40 within cap",
+        "window_limit: ETH_15M order=$0.40 within 3%/5% window limits"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "order_notional_usd": 0.4,
+        "fee_cents": 0.6720000000000002,
+        "fee_usd": 0.006720000000000001,
+        "gross_profit_cents": 20,
+        "net_profit_cents": 19.328,
+        "net_profit_usd": 0.19328
+      }
+    },
+    {
+      "scenario": "window_limit_per_agent_boundary",
+      "outcome": "passed",
+      "passed_checks": [
+        "price_range: 50c within [10, 75]",
+        "min_edge: 3.00% >= 2.5%",
+        "min_confidence: 0.65 >= threshold",
+        "per_asset_cap: BTC order=$0.50 within cap",
+        "window_limit: BTC_15M order=$0.50 within 3%/5% window limits"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "order_notional_usd": 0.5,
+        "fee_cents": 0.8750000000000001,
+        "fee_usd": 0.00875,
+        "gross_profit_cents": 20,
+        "net_profit_cents": 19.125,
+        "net_profit_usd": 0.19125
+      }
+    },
+    {
+      "scenario": "price_range_below_minimum",
+      "outcome": "failed",
+      "passed_checks": [
+        "min_edge: 20.00% >= 2.5%",
+        "min_confidence: 0.80 >= threshold",
+        "per_asset_cap: DOGE order=$0.05 within cap",
+        "window_limit: DOGE_15M order=$0.05 within 3%/5% window limits"
+      ],
+      "failed_checks": [
+        "price_range: price_below_minimum: 5c < 10c (lottery zone)"
+      ],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "order_notional_usd": 0.05,
+        "fee_cents": 0.016625,
+        "fee_usd": 0.00016625,
+        "gross_profit_cents": 10,
+        "net_profit_cents": 9.983375,
+        "net_profit_usd": 0.09983375
+      }
+    },
+    {
+      "scenario": "price_range_above_maximum",
+      "outcome": "failed",
+      "passed_checks": [
+        "per_asset_cap: BTC order=$0.80 within cap",
+        "window_limit: BTC_15M order=$0.80 within 3%/5% window limits"
+      ],
+      "failed_checks": [
+        "price_range: price_above_maximum: 80c > 75c (moonshot territory)",
+        "min_edge: edge_below_minimum: 2.00% < 2.50%",
+        "min_confidence: confidence_below_minimum: 0.60 < 0.65"
+      ],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "order_notional_usd": 0.8,
+        "fee_cents": 0.896,
+        "fee_usd": 0.008960000000000001,
+        "gross_profit_cents": 15,
+        "net_profit_cents": 14.104,
+        "net_profit_usd": 0.14104
+      }
+    },
+    {
+      "scenario": "price_range_at_minimum",
+      "outcome": "passed",
+      "passed_checks": [
+        "price_range: 10c within [10, 75]",
+        "min_edge: 15.00% >= 2.5%",
+        "min_confidence: 0.75 >= threshold",
+        "per_asset_cap: DOGE order=$0.10 within cap",
+        "window_limit: DOGE_15M order=$0.10 within 3%/5% window limits"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "order_notional_usd": 0.1,
+        "fee_cents": 0.06300000000000001,
+        "fee_usd": 0.0006300000000000001,
+        "gross_profit_cents": 15,
+        "net_profit_cents": 14.937,
+        "net_profit_usd": 0.14937
+      }
+    },
+    {
+      "scenario": "price_range_at_maximum",
+      "outcome": "passed",
+      "passed_checks": [
+        "price_range: 75c within [10, 75]",
+        "min_edge: 3.00% >= 2.5%",
+        "min_confidence: 0.65 >= threshold",
+        "per_asset_cap: BTC order=$0.75 within cap",
+        "window_limit: BTC_15M order=$0.75 within 3%/5% window limits"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "order_notional_usd": 0.75,
+        "fee_cents": 0.9843750000000001,
+        "fee_usd": 0.009843750000000002,
+        "gross_profit_cents": 15,
+        "net_profit_cents": 14.015625,
+        "net_profit_usd": 0.14015625
+      }
+    },
+    {
+      "scenario": "edge_below_minimum",
+      "outcome": "failed",
+      "passed_checks": [
+        "price_range: 45c within [10, 75]",
+        "per_asset_cap: SOL order=$0.45 within cap",
+        "window_limit: SOL_15M order=$0.45 within 3%/5% window limits"
+      ],
+      "failed_checks": [
+        "min_edge: edge_below_minimum: 2.00% < 2.50%",
+        "min_confidence: confidence_below_minimum: 0.60 < 0.65"
+      ],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "order_notional_usd": 0.45,
+        "fee_cents": 0.7796250000000003,
+        "fee_usd": 0.007796250000000004,
+        "gross_profit_cents": 5,
+        "net_profit_cents": 4.220375,
+        "net_profit_usd": 0.04220375
+      }
+    },
+    {
+      "scenario": "edge_at_minimum",
+      "outcome": "passed",
+      "passed_checks": [
+        "price_range: 40c within [10, 75]",
+        "min_edge: 2.50% >= 2.5%",
+        "min_confidence: 0.65 >= threshold",
+        "per_asset_cap: XRP order=$0.40 within cap",
+        "window_limit: XRP_15M order=$0.40 within 3%/5% window limits"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "order_notional_usd": 0.4,
+        "fee_cents": 0.6720000000000002,
+        "fee_usd": 0.006720000000000001,
+        "gross_profit_cents": 10,
+        "net_profit_cents": 9.328,
+        "net_profit_usd": 0.09327999999999999
+      }
+    },
+    {
+      "scenario": "confidence_below_minimum",
+      "outcome": "failed",
+      "passed_checks": [
+        "price_range: 35c within [10, 75]",
+        "min_edge: 5.00% >= 2.5%",
+        "per_asset_cap: ETH order=$0.35 within cap",
+        "window_limit: ETH_15M order=$0.35 within 3%/5% window limits"
+      ],
+      "failed_checks": [
+        "min_confidence: confidence_below_minimum: 0.60 < 0.65"
+      ],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "order_notional_usd": 0.35,
+        "fee_cents": 0.5573750000000001,
+        "fee_usd": 0.005573750000000001,
+        "gross_profit_cents": 20,
+        "net_profit_cents": 19.442625,
+        "net_profit_usd": 0.19442625
+      }
+    },
+    {
+      "scenario": "multi_asset_btc_normal",
+      "outcome": "passed",
+      "passed_checks": [
+        "price_range: 35c within [10, 75]",
+        "min_edge: 4.00% >= 2.5%",
+        "min_confidence: 0.68 >= threshold",
+        "per_asset_cap: BTC order=$0.35 within cap",
+        "window_limit: BTC_15M order=$0.35 within 3%/5% window limits"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "order_notional_usd": 0.35,
+        "fee_cents": 0.5573750000000001,
+        "fee_usd": 0.005573750000000001,
+        "gross_profit_cents": 20,
+        "net_profit_cents": 19.442625,
+        "net_profit_usd": 0.19442625
+      }
+    },
+    {
+      "scenario": "multi_asset_eth_normal",
+      "outcome": "passed",
+      "passed_checks": [
+        "price_range: 35c within [10, 75]",
+        "min_edge: 4.00% >= 2.5%",
+        "min_confidence: 0.68 >= threshold",
+        "per_asset_cap: ETH order=$0.35 within cap",
+        "window_limit: ETH_15M order=$0.35 within 3%/5% window limits"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "order_notional_usd": 0.35,
+        "fee_cents": 0.5573750000000001,
+        "fee_usd": 0.005573750000000001,
+        "gross_profit_cents": 20,
+        "net_profit_cents": 19.442625,
+        "net_profit_usd": 0.19442625
+      }
+    },
+    {
+      "scenario": "multi_asset_sol_normal",
+      "outcome": "passed",
+      "passed_checks": [
+        "price_range: 35c within [10, 75]",
+        "min_edge: 4.00% >= 2.5%",
+        "min_confidence: 0.68 >= threshold",
+        "per_asset_cap: SOL order=$0.35 within cap",
+        "window_limit: SOL_15M order=$0.35 within 3%/5% window limits"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "order_notional_usd": 0.35,
+        "fee_cents": 0.5573750000000001,
+        "fee_usd": 0.005573750000000001,
+        "gross_profit_cents": 20,
+        "net_profit_cents": 19.442625,
+        "net_profit_usd": 0.19442625
+      }
+    },
+    {
+      "scenario": "multi_asset_xrp_normal",
+      "outcome": "passed",
+      "passed_checks": [
+        "price_range: 35c within [10, 75]",
+        "min_edge: 4.00% >= 2.5%",
+        "min_confidence: 0.68 >= threshold",
+        "per_asset_cap: XRP order=$0.35 within cap",
+        "window_limit: XRP_15M order=$0.35 within 3%/5% window limits"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "order_notional_usd": 0.35,
+        "fee_cents": 0.5573750000000001,
+        "fee_usd": 0.005573750000000001,
+        "gross_profit_cents": 20,
+        "net_profit_cents": 19.442625,
+        "net_profit_usd": 0.19442625
+      }
+    },
+    {
+      "scenario": "multi_asset_doge_normal",
+      "outcome": "passed",
+      "passed_checks": [
+        "price_range: 35c within [10, 75]",
+        "min_edge: 4.00% >= 2.5%",
+        "min_confidence: 0.68 >= threshold",
+        "per_asset_cap: DOGE order=$0.35 within cap",
+        "window_limit: DOGE_15M order=$0.35 within 3%/5% window limits"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "order_notional_usd": 0.35,
+        "fee_cents": 0.5573750000000001,
+        "fee_usd": 0.005573750000000001,
+        "gross_profit_cents": 20,
+        "net_profit_cents": 19.442625,
+        "net_profit_usd": 0.19442625
+      }
+    },
+    {
+      "scenario": "high_volatility_btc",
+      "outcome": "passed",
+      "passed_checks": [
+        "price_range: 30c within [10, 75]",
+        "min_edge: 8.00% >= 2.5%",
+        "min_confidence: 0.72 >= threshold",
+        "per_asset_cap: BTC order=$0.30 within cap",
+        "window_limit: BTC_15M order=$0.30 within 3%/5% window limits"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "order_notional_usd": 0.3,
+        "fee_cents": 0.441,
+        "fee_usd": 0.00441,
+        "gross_profit_cents": 30,
+        "net_profit_cents": 29.559,
+        "net_profit_usd": 0.29559
+      }
+    },
+    {
+      "scenario": "low_volatility_eth",
+      "outcome": "passed",
+      "passed_checks": [
+        "price_range: 45c within [10, 75]",
+        "min_edge: 3.00% >= 2.5%",
+        "min_confidence: 0.66 >= threshold",
+        "per_asset_cap: ETH order=$0.45 within cap",
+        "window_limit: ETH_15M order=$0.45 within 3%/5% window limits"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "order_notional_usd": 0.45,
+        "fee_cents": 0.7796250000000003,
+        "fee_usd": 0.007796250000000004,
+        "gross_profit_cents": 10,
+        "net_profit_cents": 9.220374999999999,
+        "net_profit_usd": 0.09220374999999999
+      }
+    },
+    {
+      "scenario": "tte_very_short",
+      "outcome": "passed",
+      "passed_checks": [
+        "price_range: 40c within [10, 75]",
+        "min_edge: 4.00% >= 2.5%",
+        "min_confidence: 0.68 >= threshold",
+        "per_asset_cap: BTC order=$0.40 within cap",
+        "window_limit: BTC_15M order=$0.40 within 3%/5% window limits"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "order_notional_usd": 0.4,
+        "fee_cents": 0.6720000000000002,
+        "fee_usd": 0.006720000000000001,
+        "gross_profit_cents": 15,
+        "net_profit_cents": 14.328,
+        "net_profit_usd": 0.14328
+      }
+    },
+    {
+      "scenario": "tte_very_long",
+      "outcome": "passed",
+      "passed_checks": [
+        "price_range: 35c within [10, 75]",
+        "min_edge: 3.00% >= 2.5%",
+        "min_confidence: 0.66 >= threshold",
+        "per_asset_cap: ETH order=$0.35 within cap",
+        "window_limit: ETH_15M order=$0.35 within 3%/5% window limits"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "order_notional_usd": 0.35,
+        "fee_cents": 0.5573750000000001,
+        "fee_usd": 0.005573750000000001,
+        "gross_profit_cents": 15,
+        "net_profit_cents": 14.442625,
+        "net_profit_usd": 0.14442625
+      }
+    },
+    {
+      "scenario": "fee_impact_high_probability",
+      "outcome": "passed",
+      "passed_checks": [
+        "price_range: 70c within [10, 75]",
+        "min_edge: 3.00% >= 2.5%",
+        "min_confidence: 0.70 >= threshold",
+        "per_asset_cap: BTC order=$0.70 within cap",
+        "window_limit: BTC_15M order=$0.70 within 3%/5% window limits"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "order_notional_usd": 0.7,
+        "fee_cents": 1.0290000000000001,
+        "fee_usd": 0.01029,
+        "gross_profit_cents": 15,
+        "net_profit_cents": 13.971,
+        "net_profit_usd": 0.13971
+      }
+    },
+    {
+      "scenario": "fee_impact_low_probability",
+      "outcome": "passed",
+      "passed_checks": [
+        "price_range: 15c within [10, 75]",
+        "min_edge: 10.00% >= 2.5%",
+        "min_confidence: 0.75 >= threshold",
+        "per_asset_cap: DOGE order=$0.15 within cap",
+        "window_limit: DOGE_15M order=$0.15 within 3%/5% window limits"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "order_notional_usd": 0.15,
+        "fee_cents": 0.13387500000000002,
+        "fee_usd": 0.0013387500000000003,
+        "gross_profit_cents": 15,
+        "net_profit_cents": 14.866125,
+        "net_profit_usd": 0.14866125
+      }
+    },
+    {
+      "scenario": "exit_99c_yes_mandatory",
+      "outcome": "passed",
+      "passed_checks": [
+        "exit_order_bypass: exit orders bypass non-critical checks",
+        "max_contracts_exit: 1 within limit",
+        "window_capacity_released: position closure released window capacity",
+        "extreme_profit_99c: YES at 99c triggers mandatory exit"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "exit_notional_usd": 0.99
+      }
+    },
+    {
+      "scenario": "exit_99c_yes_below_threshold",
+      "outcome": "failed",
+      "passed_checks": [
+        "exit_order_bypass: exit orders bypass non-critical checks",
+        "max_contracts_exit: 1 within limit",
+        "window_capacity_released: position closure released window capacity"
+      ],
+      "failed_checks": [
+        "99c_exit_failed: expected exit at 98c"
+      ],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "exit_notional_usd": 0.98
+      }
+    },
+    {
+      "scenario": "exit_ratchet_floor_breach",
+      "outcome": "passed",
+      "passed_checks": [
+        "exit_order_bypass: exit orders bypass non-critical checks",
+        "max_contracts_exit: 1 within limit",
+        "window_capacity_released: position closure released window capacity",
+        "ratchet_floor: YES dropped to 80c <= floor 80c"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "exit_notional_usd": 0.8
+      }
+    },
+    {
+      "scenario": "exit_ratchet_floor_above_floor",
+      "outcome": "failed",
+      "passed_checks": [
+        "exit_order_bypass: exit orders bypass non-critical checks",
+        "max_contracts_exit: 1 within limit",
+        "window_capacity_released: position closure released window capacity"
+      ],
+      "failed_checks": [
+        "ratchet_floor_failed: expected exit at 81c"
+      ],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "exit_notional_usd": 0.81
+      }
+    },
+    {
+      "scenario": "exit_ratchet_trim_multi_contract",
+      "outcome": "failed",
+      "passed_checks": [
+        "exit_order_bypass: exit orders bypass non-critical checks",
+        "window_capacity_released: position closure released window capacity",
+        "ratchet_trim: YES at 80c >= 80c, trim 4 contracts"
+      ],
+      "failed_checks": [
+        "max_contracts_per_order: 4 > 1"
+      ],
+      "warnings": [
+        "outcome_mismatch: expected=passed, actual=failed"
+      ],
+      "errors": [],
+      "computed_values": {
+        "exit_notional_usd": 3.2,
+        "contracts_to_close": 4
+      }
+    },
+    {
+      "scenario": "exit_ratchet_trim_single_contract",
+      "outcome": "failed",
+      "passed_checks": [
+        "exit_order_bypass: exit orders bypass non-critical checks",
+        "max_contracts_exit: 0 within limit",
+        "window_capacity_released: position closure released window capacity"
+      ],
+      "failed_checks": [
+        "ratchet_trim_failed: expected trim at 80c"
+      ],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "exit_notional_usd": 0.0
+      }
+    },
+    {
+      "scenario": "exit_window_capacity_release",
+      "outcome": "passed",
+      "passed_checks": [
+        "exit_order_bypass: exit orders bypass non-critical checks",
+        "max_contracts_exit: 1 within limit",
+        "window_capacity_released: position closure released window capacity"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "exit_notional_usd": 0.6
+      }
+    },
+    {
+      "scenario": "exit_max_contracts_within_limit",
+      "outcome": "failed",
+      "passed_checks": [
+        "exit_order_bypass: exit orders bypass non-critical checks",
+        "window_capacity_released: position closure released window capacity"
+      ],
+      "failed_checks": [
+        "max_contracts_per_order: 5 > 1"
+      ],
+      "warnings": [
+        "outcome_mismatch: expected=passed, actual=failed"
+      ],
+      "errors": [],
+      "computed_values": {
+        "exit_notional_usd": 2.5
+      }
+    },
+    {
+      "scenario": "exit_max_contracts_exceeds_limit",
+      "outcome": "failed",
+      "passed_checks": [
+        "exit_order_bypass: exit orders bypass non-critical checks",
+        "window_capacity_released: position closure released window capacity"
+      ],
+      "failed_checks": [
+        "max_contracts_per_order: 15 > 1"
+      ],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "exit_notional_usd": 7.5
+      }
+    },
+    {
+      "scenario": "exit_bypass_non_critical_checks",
+      "outcome": "passed",
+      "passed_checks": [
+        "exit_order_bypass: exit orders bypass non-critical checks",
+        "max_contracts_exit: 1 within limit",
+        "window_capacity_released: position closure released window capacity"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "exit_notional_usd": 0.7
+      }
+    },
+    {
+      "scenario": "exit_sequence_ratchet_then_99c",
+      "outcome": "failed",
+      "passed_checks": [
+        "exit_order_bypass: exit orders bypass non-critical checks",
+        "window_capacity_released: position closure released window capacity",
+        "extreme_profit_99c: YES at 99c triggers mandatory exit"
+      ],
+      "failed_checks": [
+        "max_contracts_per_order: 3 > 1"
+      ],
+      "warnings": [
+        "outcome_mismatch: expected=passed, actual=failed"
+      ],
+      "errors": [],
+      "computed_values": {
+        "exit_notional_usd": 2.9699999999999998
+      }
+    },
+    {
+      "scenario": "exit_break_even",
+      "outcome": "passed",
+      "passed_checks": [
+        "exit_order_bypass: exit orders bypass non-critical checks",
+        "max_contracts_exit: 1 within limit",
+        "window_capacity_released: position closure released window capacity"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "exit_notional_usd": 0.5
+      }
+    },
+    {
+      "scenario": "exit_with_loss",
+      "outcome": "passed",
+      "passed_checks": [
+        "exit_order_bypass: exit orders bypass non-critical checks",
+        "max_contracts_exit: 1 within limit",
+        "window_capacity_released: position closure released window capacity"
+      ],
+      "failed_checks": [],
+      "warnings": [],
+      "errors": [],
+      "computed_values": {
+        "exit_notional_usd": 0.3
+      }
+    }
+  ]
+}

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from merid.agents.base_agent import BaseAgent
-from merid.memory.store import reality_memory
-from merid.social.social_aware_quant import get_social_aware_quant_engine
+from agents.base_agent import BaseAgent
+from memory.store import reality_memory
+from social.social_aware_quant import get_social_aware_quant_engine
 
 # CRITICAL FIX: Lazy import to break circular import chain
 # core.social_strategy_router -> governance.multi_agent_risk_controls -> 

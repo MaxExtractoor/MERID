@@ -209,7 +209,7 @@ def test_microstructure_removed_from_trade_allowed():
         snap.vol_gate_ok
         and snap.atr_move_ok
         and snap.chop_gate_ok
-        and snap.bars_available >= 52  # default min_bars_required
+        and snap.bars_available >= 20  # default min_bars_required
     )
     
     # trade_allowed should be True despite liquidity_ok=False
@@ -229,7 +229,7 @@ def test_microstructure_removed_from_trade_allowed():
         snap2.vol_gate_ok
         and snap2.atr_move_ok
         and snap2.chop_gate_ok
-        and snap2.bars_available >= 52
+        and snap2.bars_available >= 20
     )
     
     assert snap2.trade_allowed is True, "trade_allowed should be True when TA gates pass with good liquidity"
@@ -500,33 +500,117 @@ def test_macd_histogram_momentum_filter():
 def test_rsi_macd_confluence_scoring():
     """Verify RSI+MACD confluence scoring (boost when both agree)."""
     stack = Crypto15mIndicatorStack()
-    
+
     # Feed 60 bars of uptrend with RSI oversold + MACD positive = strong long confluence
     # Start with downtrend to get RSI oversold, then reverse
     for i in range(30):
         stack.update(90000 - i * 20)  # Downtrend
     for i in range(30):
         stack.update(89400 + i * 30)  # Uptrend reversal
-    
+
     snap = stack.snapshot()
     print(f"RSI+MACD confluence: rsi={snap.rsi:.1f}, macd_hist={snap.macd_histogram:.6f}, bias={snap.bias}")
-    
+
     # Verify bias computation considers both RSI and MACD
     assert snap.bias in ("up", "down", "neutral")
     assert snap.bias_confidence >= 0.0
     assert snap.bias_confidence <= 1.0
-    
+
     # Test short confluence scenario
     stack2 = Crypto15mIndicatorStack()
     for i in range(30):
         stack2.update(87000 + i * 20)  # Uptrend
     for i in range(30):
         stack2.update(87600 - i * 30)  # Downtrend reversal
-    
+
     snap2 = stack2.snapshot()
     print(f"RSI+MACD short confluence: rsi={snap2.rsi:.1f}, macd_hist={snap2.macd_histogram:.6f}, bias={snap2.bias}")
-    
+
     assert snap2.bias in ("up", "down", "neutral")
+
+
+def test_snapshot_handles_empty_deque():
+    """Verify snapshot() handles empty deque gracefully without IndexError."""
+    stack = Crypto15mIndicatorStack()
+
+    # Call snapshot without any data
+    snap = stack.snapshot()
+
+    print(f"Empty deque snapshot: bars_available={snap.bars_available}, trade_allowed={snap.trade_allowed}, chop_reason={snap.chop_reason}")
+
+    # Should return empty snapshot with trade_allowed=False
+    assert snap.bars_available == 0
+    assert snap.trade_allowed is False
+    assert snap.chop_reason == "no_price_data"
+
+
+def test_snapshot_handles_insufficient_data_for_ema_slope():
+    """Verify snapshot() handles insufficient data for EMA slope calculation."""
+    stack = Crypto15mIndicatorStack()
+
+    # Feed only 20 bars (less than ema_trend_period + 5 = 21 + 5 = 26)
+    for i in range(20):
+        stack.update(87000 + i * 10)
+
+    snap = stack.snapshot()
+
+    print(f"Insufficient EMA slope data: bars_available={snap.bars_available}, ema_slope={snap.ema_slope:.6f}")
+
+    # Should not raise IndexError, ema_slope should be 0.0
+    assert snap.bars_available == 20
+    assert snap.ema_slope == 0.0
+    # Note: trade_allowed depends on other gates (volatility, chop, etc.) - not asserting it here since it's not the focus of this test
+
+
+def test_snapshot_handles_insufficient_data_for_volatility():
+    """Verify snapshot() handles insufficient data for realized volatility calculation."""
+    stack = Crypto15mIndicatorStack()
+
+    # Feed only 3 bars (less than vol_window_bars = 30)
+    for i in range(3):
+        stack.update(87000 + i * 10)
+
+    snap = stack.snapshot()
+
+    print(f"Insufficient volatility data: bars_available={snap.bars_available}, realized_vol={snap.realized_vol_annualized:.6f}")
+
+    # Should not raise IndexError, realized_vol should be 0.0
+    assert snap.bars_available == 3
+    assert snap.realized_vol_annualized == 0.0
+
+
+def test_update_with_timestamp_handles_empty_deque():
+    """Verify update_with_timestamp() handles empty deque gracefully."""
+    import time
+    stack = Crypto15mIndicatorStack()
+
+    # Update with first price (deque is empty) using current timestamp
+    current_timestamp = time.time()
+    stack.update_with_timestamp(87000.0, current_timestamp)
+
+    snap = stack.snapshot()
+
+    print(f"After first update: bars_available={snap.bars_available}, price={snap.price:.0f}")
+
+    # Should have 1 bar
+    assert snap.bars_available == 1
+    assert snap.price == 87000.0
+
+
+def test_snapshot_handles_edge_case_single_bar():
+    """Verify snapshot() handles single bar edge case."""
+    stack = Crypto15mIndicatorStack()
+
+    # Feed only 1 bar
+    stack.update(87000.0)
+
+    snap = stack.snapshot()
+
+    print(f"Single bar snapshot: bars_available={snap.bars_available}, price={snap.price:.0f}")
+
+    # Should not raise IndexError
+    assert snap.bars_available == 1
+    assert snap.price == 87000.0
 
 
 if __name__ == "__main__":
@@ -559,4 +643,24 @@ if __name__ == "__main__":
     test_per_asset_rsi_thresholds()
     print("---")
     test_edge_metrics()
+    print("---")
+    test_ema_200_macro_trend_filter()
+    print("---")
+    test_regime_based_rsi_threshold_shifting()
+    print("---")
+    test_macd_zero_line_filter()
+    print("---")
+    test_macd_histogram_momentum_filter()
+    print("---")
+    test_rsi_macd_confluence_scoring()
+    print("---")
+    test_snapshot_handles_empty_deque()
+    print("---")
+    test_snapshot_handles_insufficient_data_for_ema_slope()
+    print("---")
+    test_snapshot_handles_insufficient_data_for_volatility()
+    print("---")
+    test_update_with_timestamp_handles_empty_deque()
+    print("---")
+    test_snapshot_handles_edge_case_single_bar()
     print("\n=== ALL TESTS PASSED ===")

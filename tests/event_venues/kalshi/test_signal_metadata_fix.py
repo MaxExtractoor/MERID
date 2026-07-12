@@ -84,10 +84,10 @@ def test_agent_grid_15m_passes_signal_metadata():
     with open(agent_grid_path, 'r', encoding='utf-8') as f:
         content = f.read()
     
-    # Verify that signal metadata is extracted
-    assert 'model_prob = signal.get("model_prob")' in content, "model_prob extraction missing from agent_grid_15m"
-    assert 'edge_pct = signal.get("edge_pct")' in content, "edge_pct extraction missing from agent_grid_15m"
-    assert 'confidence = signal.get("confidence")' in content, "confidence extraction missing from agent_grid_15m"
+    # Verify that signal metadata is extracted (with or without default values)
+    assert 'signal.get("model_prob"' in content, "model_prob extraction missing from agent_grid_15m"
+    assert 'signal.get("edge_pct"' in content, "edge_pct extraction missing from agent_grid_15m"
+    assert 'signal.get("confidence"' in content, "confidence extraction missing from agent_grid_15m"
     
     # Verify that signal metadata is passed to _kalshi_place_order
     assert 'model_prob=model_prob' in content, "model_prob not passed to _kalshi_place_order"

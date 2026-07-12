@@ -1,4 +1,11 @@
-"""Comprehensive tests for merid/event_venues/kalshi/trading.py."""
+"""Comprehensive tests for merid/event_venues/kalshi/trading.py.
+
+NOTE: This module tests the legacy KalshiTrader which is not used by the
+production kalshi_crypto_15m_v2 profile. The production stack uses the
+order_router module for order routing and execution.
+
+This test file is skipped to avoid legacy contamination in production tests.
+"""
 
 import pytest
 from decimal import Decimal
@@ -13,6 +20,9 @@ from merid.event_venues.base import (
     VenueOrder,
     VenuePosition,
 )
+
+
+pytestmark = pytest.mark.skip(reason="Legacy KalshiTrader not used in production kalshi_crypto_15m_v2 stack")
 
 
 @pytest.fixture

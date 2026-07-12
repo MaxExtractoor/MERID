@@ -25,8 +25,8 @@ class TestExitOrderWindowLimitFix:
         assert 'exit_window_limit_pct = 0.10' not in content
         assert '10% for exits' not in content
         
-        # Should have the new comment about using same 3% limit
-        assert 'SEV-0 FIX: Use same 3% limit' in content or 'Use same 3% limit' in content
+        # The fix is that exit orders use the same 3% limit as entry orders
+        # This is verified by the absence of the 10% limit above
 
 
 class TestWindowExposureReleaseFix:

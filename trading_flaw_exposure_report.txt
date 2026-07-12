@@ -1,0 +1,96 @@
+TRADING RISK AND EXECUTION FLAW EXPOSURE REPORT
+================================================================================
+
+SUMMARY:
+  Total flaws: 10
+  CRITICAL: 6
+  HIGH: 3
+  MEDIUM: 1
+  LOW: 0
+
+
+================================================================================
+RISK_GUARD_CONTAMINATION (7 flaws)
+================================================================================
+
+[HIGH] Deprecated risk guard still importable: merid.guards.global_risk_guard
+  Location: merid.guards.global_risk_guard
+  Description: Module merid.guards.global_risk_guard is marked as deprecated but can still be imported. This creates risk of legacy code paths being used in production.
+  Evidence: Module docstring contains 'DEPRECATED': Process-wide GlobalRiskGuard singleton.
+
+DEPRECATED: This module is deprecated in favor of UnifiedRiskManager.
+Use merid.risk.unified_risk_manager instead.
+
+All risk management has been consolidated i
+  Recommendation: Remove deprecated modules or ensure they cannot be imported. Add import-time errors to prevent accidental usage.
+
+[HIGH] Deprecated risk guard still importable: merid.guards.global_execution_guard
+  Location: merid.guards.global_execution_guard
+  Description: Module merid.guards.global_execution_guard is marked as deprecated but can still be imported. This creates risk of legacy code paths being used in production.
+  Evidence: Module docstring contains 'DEPRECATED': Unified Global Execution Guard — Final safety net for ALL order paths.
+
+DEPRECATED: This module is deprecated in favor of UnifiedRiskManager.
+Use merid.risk.unified_risk_manager instead.
+
+All risk man
+  Recommendation: Remove deprecated modules or ensure they cannot be imported. Add import-time errors to prevent accidental usage.
+
+[CRITICAL] Production code imports deprecated GlobalRiskGuard
+  Location: web/main_15m_lean.py
+  Description: File web/main_15m_lean.py imports deprecated GlobalRiskGuard. This creates risk of inconsistent risk enforcement.
+  Evidence: File contains 'global_risk_guard' or 'GlobalRiskGuard'
+  Recommendation: Replace with UnifiedRiskManager. Ensure all risk checks go through single source of truth.
+
+[CRITICAL] Production code imports deprecated GlobalRiskGuard
+  Location: merid/loop_15m.py
+  Description: File merid/loop_15m.py imports deprecated GlobalRiskGuard. This creates risk of inconsistent risk enforcement.
+  Evidence: File contains 'global_risk_guard' or 'GlobalRiskGuard'
+  Recommendation: Replace with UnifiedRiskManager. Ensure all risk checks go through single source of truth.
+
+[CRITICAL] Production code imports deprecated GlobalExecutionGuard
+  Location: merid/loop_15m.py
+  Description: File merid/loop_15m.py imports deprecated GlobalExecutionGuard. This creates risk of inconsistent execution enforcement.
+  Evidence: File contains 'global_execution_guard' or 'GlobalExecutionGuard'
+  Recommendation: Replace with UnifiedRiskManager. Ensure all execution checks go through single source of truth.
+
+[CRITICAL] Production code imports deprecated GlobalRiskGuard
+  Location: merid/event_venues/kalshi/order_router.py
+  Description: File merid/event_venues/kalshi/order_router.py imports deprecated GlobalRiskGuard. This creates risk of inconsistent risk enforcement.
+  Evidence: File contains 'global_risk_guard' or 'GlobalRiskGuard'
+  Recommendation: Replace with UnifiedRiskManager. Ensure all risk checks go through single source of truth.
+
+[CRITICAL] Production code imports deprecated GlobalExecutionGuard
+  Location: merid/event_venues/kalshi/order_router.py
+  Description: File merid/event_venues/kalshi/order_router.py imports deprecated GlobalExecutionGuard. This creates risk of inconsistent execution enforcement.
+  Evidence: File contains 'global_execution_guard' or 'GlobalExecutionGuard'
+  Recommendation: Replace with UnifiedRiskManager. Ensure all execution checks go through single source of truth.
+
+================================================================================
+WINDOW_LIMIT_IMPLEMENTATION (1 flaws)
+================================================================================
+
+[HIGH] PreTradeGate may not have proper window tracking
+  Location: merid/event_venues/kalshi/order_gate.py
+  Description: PreTradeGate source does not contain clear window tracking logic. Window limits may not be enforced correctly.
+  Evidence: Source code missing clear window tracking implementation
+  Recommendation: Implement window tracking state (start timestamp, per-agent exposure, total exposure) and enforce 3% per-agent / 5% total limits in PreTradeGate.check()
+
+================================================================================
+EXIT_SYSTEM_GAP (1 flaws)
+================================================================================
+
+[CRITICAL] Exit system may not release window capacity
+  Location: merid/position_management/position_monitor.py
+  Description: PositionMonitor exit logic does not appear to communicate with risk guards to release window capacity when positions close. This prevents re-entry after exits.
+  Evidence: Source code missing window capacity release logic
+  Recommendation: When position closes (via trailing stop, ratchet, 99c exit), notify risk guards to reduce window exposure and allow re-entry
+
+================================================================================
+LEGACY_CONTAMINATION (1 flaws)
+================================================================================
+
+[MEDIUM] Production file contains legacy pattern: kalshi_continuous_trader
+  Location: merid/event_venues/kalshi/order_router.py
+  Description: File merid/event_venues/kalshi/order_router.py contains legacy pattern 'kalshi_continuous_trader'. May indicate legacy code contamination.
+  Evidence: File contains 'kalshi_continuous_trader'
+  Recommendation: Review and replace with production equivalents if applicable

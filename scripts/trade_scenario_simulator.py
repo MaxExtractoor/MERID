@@ -56,6 +56,20 @@ class MarketCondition(Enum):
     SPREAD_WIDENING = "spread_widening"
 
 
+class ExitScenarioType(Enum):
+    """Types of exit scenarios to test."""
+    TRAILING_STOP = "trailing_stop"
+    RATCHET_FLOOR = "ratchet_floor"
+    RATCHET_TRIM = "ratchet_trim"
+    EXTREME_PROFIT_99C = "extreme_profit_99c"
+    DYNAMIC_TAKE_PROFIT = "dynamic_take_profit"
+    SCALE_OUT = "scale_out"
+    BREAK_EVEN = "break_even"
+    STOP_LOSS = "stop_loss"
+    TIME_STOP = "time_stop"
+    MANUAL_EXIT = "manual_exit"
+
+
 @dataclass
 class TradeScenario:
     """Definition of a trade scenario to simulate."""
@@ -72,6 +86,11 @@ class TradeScenario:
     time_to_expiry_min: float
     expected_outcome: ScenarioOutcome
     validation_checks: List[str] = field(default_factory=list)
+    # Exit-specific fields
+    exit_scenario_type: Optional[ExitScenarioType] = None
+    is_exit_order: bool = False  # True if this is an exit order test
+    position_size_before_exit: int = 0  # Size before exit (for partial exits)
+    exit_contracts: int = 0  # Number of contracts to exit
 
 
 @dataclass
@@ -252,6 +271,127 @@ class TradeScenarioSimulator:
         
         return True, ""
     
+    def _validate_exit_order_bypass(self, is_exit_order: bool) -> Tuple[bool, str]:
+        """
+        Validate that exit orders bypass non-critical checks.
+        
+        Args:
+            is_exit_order: Whether this is an exit order
+            
+        Returns:
+            Tuple of (allowed, reason)
+        """
+        if is_exit_order:
+            return True, "exit_order_bypass: exit orders bypass non-critical checks"
+        return True, ""
+    
+    def _validate_max_contracts_per_order(self, contracts: int) -> Tuple[bool, str]:
+        """
+        Validate order doesn't exceed max contracts per order limit.
+        
+        Args:
+            contracts: Number of contracts
+            
+        Returns:
+            Tuple of (allowed, reason)
+        """
+        contract_caps = self.profile_config.get('contract_caps', {})
+        max_single_order = contract_caps.get('max_single_order_contracts', 10)
+        
+        # Handle both dict with 'value' key and direct int value
+        if isinstance(max_single_order, dict):
+            max_contracts = max_single_order.get('value', 10)
+        else:
+            max_contracts = max_single_order
+        
+        if contracts > max_contracts:
+            return False, f"max_contracts_per_order: {contracts} > {max_contracts}"
+        
+        return True, ""
+    
+    def _validate_window_capacity_release(self, agent_id: str, exit_notional_usd: float) -> Tuple[bool, str]:
+        """
+        Validate that position closure releases window capacity.
+        
+        Args:
+            agent_id: Agent identifier
+            exit_notional_usd: Notional value being released
+            
+        Returns:
+            Tuple of (allowed, reason)
+        """
+        try:
+            # Record position closure
+            self.risk_envelope.record_position_closure("test_market", exit_notional_usd)
+            return True, "window_capacity_released: position closure released window capacity"
+        except Exception as e:
+            return False, f"window_capacity_release_failed: {str(e)}"
+    
+    def _validate_99c_exit_mandatory(self, current_price_cents: int, side: str) -> Tuple[bool, str]:
+        """
+        Validate that 99c YES / 1c NO triggers mandatory exit.
+        
+        Args:
+            current_price_cents: Current price in cents
+            side: Position side ("yes" or "no")
+            
+        Returns:
+            Tuple of (should_exit, reason)
+        """
+        if side == "yes" and current_price_cents >= 99:
+            return True, "extreme_profit_99c: YES at 99c triggers mandatory exit"
+        elif side == "no" and current_price_cents <= 1:
+            return True, "extreme_profit_99c: NO at 1c triggers mandatory exit"
+        return False, ""
+    
+    def _validate_ratchet_floor_exit(self, current_price_cents: int, activation_threshold: int = 85, floor_offset: int = 5, side: str = "yes") -> Tuple[bool, str]:
+        """
+        Validate ratchet floor exit logic.
+        
+        Args:
+            current_price_cents: Current price in cents
+            activation_threshold: Ratchet activation threshold (default 85c)
+            floor_offset: Floor offset from activation (default 5c, so floor at 80c)
+            side: Position side ("yes" or "no")
+            
+        Returns:
+            Tuple of (should_exit, reason)
+        """
+        floor_price = activation_threshold - floor_offset
+        
+        if side == "yes" and current_price_cents <= floor_price:
+            return True, f"ratchet_floor: YES dropped to {current_price_cents}c <= floor {floor_price}c"
+        elif side == "no" and current_price_cents >= (100 - floor_price):
+            return True, f"ratchet_floor: NO rose to {current_price_cents}c >= floor {100 - floor_price}c"
+        
+        return False, ""
+    
+    def _validate_ratchet_trim_exit(self, current_price_cents: int, position_size: int, trim_threshold: int = 80, trim_to: int = 1, side: str = "yes") -> Tuple[bool, str, int]:
+        """
+        Validate ratchet trim (partial close) logic.
+        
+        Args:
+            current_price_cents: Current price in cents
+            position_size: Current position size
+            trim_threshold: Price threshold for trim (default 80c)
+            trim_to: Number of contracts to keep after trim (default 1)
+            side: Position side ("yes" or "no")
+            
+        Returns:
+            Tuple of (should_trim, reason, contracts_to_close)
+        """
+        if position_size <= trim_to:
+            return False, "ratchet_trim: position size already at or below trim target", 0
+        
+        if side == "yes" and current_price_cents >= trim_threshold:
+            contracts_to_close = position_size - trim_to
+            return True, f"ratchet_trim: YES at {current_price_cents}c >= {trim_threshold}c, trim {contracts_to_close} contracts", contracts_to_close
+        elif side == "no" and current_price_cents <= (100 - trim_threshold):
+            contracts_to_close = position_size - trim_to
+            return True, f"ratchet_trim: NO at {current_price_cents}c <= {100 - trim_threshold}c, trim {contracts_to_close} contracts", contracts_to_close
+        
+        return False, "", 0
+    
     def simulate_scenario(self, scenario: TradeScenario) -> SimulationResult:
         """
         Simulate a single trade scenario.
@@ -271,6 +411,84 @@ class TradeScenarioSimulator:
         agent_id = f"{scenario.asset}_15M"
         
         try:
+            # === EXIT ORDER SCENARIOS ===
+            if scenario.is_exit_order:
+                # For exit orders, test exit-specific logic
+                exit_notional_usd = self._compute_order_notional(scenario.exit_price_cents, scenario.exit_contracts)
+                computed_values['exit_notional_usd'] = exit_notional_usd
+                
+                # Validate exit order bypass
+                bypass_allowed, bypass_reason = self._validate_exit_order_bypass(scenario.is_exit_order)
+                if bypass_allowed:
+                    passed_checks.append(bypass_reason)
+                else:
+                    failed_checks.append(bypass_reason)
+                
+                # Validate max contracts per order for exit
+                max_contracts_allowed, max_contracts_reason = self._validate_max_contracts_per_order(scenario.exit_contracts)
+                if max_contracts_allowed:
+                    passed_checks.append(f"max_contracts_exit: {scenario.exit_contracts} within limit")
+                else:
+                    failed_checks.append(max_contracts_reason)
+                
+                # Validate window capacity release
+                window_release_allowed, window_release_reason = self._validate_window_capacity_release(agent_id, exit_notional_usd)
+                if window_release_allowed:
+                    passed_checks.append(window_release_reason)
+                else:
+                    failed_checks.append(window_release_reason)
+                
+                # Test specific exit scenario types
+                if scenario.exit_scenario_type == ExitScenarioType.EXTREME_PROFIT_99C:
+                    should_exit, exit_reason = self._validate_99c_exit_mandatory(scenario.exit_price_cents, "yes")
+                    if should_exit:
+                        passed_checks.append(exit_reason)
+                    else:
+                        failed_checks.append(f"99c_exit_failed: expected exit at {scenario.exit_price_cents}c")
+                
+                elif scenario.exit_scenario_type == ExitScenarioType.RATCHET_FLOOR:
+                    should_exit, exit_reason = self._validate_ratchet_floor_exit(scenario.exit_price_cents, side="yes")
+                    if should_exit:
+                        passed_checks.append(exit_reason)
+                    else:
+                        failed_checks.append(f"ratchet_floor_failed: expected exit at {scenario.exit_price_cents}c")
+                
+                elif scenario.exit_scenario_type == ExitScenarioType.RATCHET_TRIM:
+                    should_trim, trim_reason, contracts_to_close = self._validate_ratchet_trim_exit(
+                        scenario.exit_price_cents, 
+                        scenario.position_size_before_exit,
+                        side="yes"
+                    )
+                    if should_trim:
+                        passed_checks.append(trim_reason)
+                        computed_values['contracts_to_close'] = contracts_to_close
+                    else:
+                        failed_checks.append(f"ratchet_trim_failed: expected trim at {scenario.exit_price_cents}c")
+                
+                # Determine outcome for exit orders
+                if errors:
+                    outcome = ScenarioOutcome.ERROR
+                elif failed_checks:
+                    outcome = ScenarioOutcome.FAILED
+                elif warnings:
+                    outcome = ScenarioOutcome.WARNING
+                else:
+                    outcome = ScenarioOutcome.PASSED
+                
+                if outcome != scenario.expected_outcome:
+                    warnings.append(f"outcome_mismatch: expected={scenario.expected_outcome.value}, actual={outcome.value}")
+                
+                return SimulationResult(
+                    scenario=scenario,
+                    outcome=outcome,
+                    passed_checks=passed_checks,
+                    failed_checks=failed_checks,
+                    warnings=warnings,
+                    errors=errors,
+                    computed_values=computed_values
+                )
+            
+            # === ENTRY ORDER SCENARIOS ===
             # Compute order notional
             order_notional_usd = self._compute_order_notional(scenario.entry_price_cents, scenario.contracts)
             computed_values['order_notional_usd'] = order_notional_usd
@@ -636,6 +854,258 @@ class TradeScenarioSimulator:
             expected_outcome=ScenarioOutcome.PASSED
         ))
         
+        # === EXIT ORDER SCENARIOS ===
+        
+        # 99c mandatory exit scenarios
+        scenarios.append(TradeScenario(
+            name="exit_99c_yes_mandatory",
+            description="Test 99c YES mandatory exit (extreme profit)",
+            market_condition=MarketCondition.NORMAL,
+            asset="BTC",
+            bankroll_usd=self.bankroll_usd,
+            entry_price_cents=50,
+            exit_price_cents=99,
+            contracts=1,
+            edge_pct=0.05,
+            confidence=0.70,
+            time_to_expiry_min=5.0,
+            expected_outcome=ScenarioOutcome.PASSED,
+            exit_scenario_type=ExitScenarioType.EXTREME_PROFIT_99C,
+            is_exit_order=True,
+            position_size_before_exit=1,
+            exit_contracts=1
+        ))
+        
+        scenarios.append(TradeScenario(
+            name="exit_99c_yes_below_threshold",
+            description="Test 98c YES (should NOT trigger 99c exit)",
+            market_condition=MarketCondition.NORMAL,
+            asset="BTC",
+            bankroll_usd=self.bankroll_usd,
+            entry_price_cents=50,
+            exit_price_cents=98,
+            contracts=1,
+            edge_pct=0.05,
+            confidence=0.70,
+            time_to_expiry_min=5.0,
+            expected_outcome=ScenarioOutcome.FAILED,  # Should fail because 98c doesn't trigger 99c exit
+            exit_scenario_type=ExitScenarioType.EXTREME_PROFIT_99C,
+            is_exit_order=True,
+            position_size_before_exit=1,
+            exit_contracts=1
+        ))
+        
+        # Ratchet floor exit scenarios
+        scenarios.append(TradeScenario(
+            name="exit_ratchet_floor_breach",
+            description="Test ratchet floor breach at 80c (floor at 80c, activation at 85c)",
+            market_condition=MarketCondition.NORMAL,
+            asset="ETH",
+            bankroll_usd=self.bankroll_usd,
+            entry_price_cents=40,
+            exit_price_cents=80,
+            contracts=1,
+            edge_pct=0.05,
+            confidence=0.70,
+            time_to_expiry_min=8.0,
+            expected_outcome=ScenarioOutcome.PASSED,
+            exit_scenario_type=ExitScenarioType.RATCHET_FLOOR,
+            is_exit_order=True,
+            position_size_before_exit=1,
+            exit_contracts=1
+        ))
+        
+        scenarios.append(TradeScenario(
+            name="exit_ratchet_floor_above_floor",
+            description="Test price above ratchet floor (81c, should NOT trigger exit)",
+            market_condition=MarketCondition.NORMAL,
+            asset="ETH",
+            bankroll_usd=self.bankroll_usd,
+            entry_price_cents=40,
+            exit_price_cents=81,
+            contracts=1,
+            edge_pct=0.05,
+            confidence=0.70,
+            time_to_expiry_min=8.0,
+            expected_outcome=ScenarioOutcome.FAILED,  # Should fail because 81c is above 80c floor
+            exit_scenario_type=ExitScenarioType.RATCHET_FLOOR,
+            is_exit_order=True,
+            position_size_before_exit=1,
+            exit_contracts=1
+        ))
+        
+        # Ratchet trim (partial close) scenarios
+        scenarios.append(TradeScenario(
+            name="exit_ratchet_trim_multi_contract",
+            description="Test ratchet trim with 5 contracts (trim to 1 at 80c)",
+            market_condition=MarketCondition.NORMAL,
+            asset="SOL",
+            bankroll_usd=self.bankroll_usd,
+            entry_price_cents=35,
+            exit_price_cents=80,
+            contracts=5,
+            edge_pct=0.05,
+            confidence=0.70,
+            time_to_expiry_min=7.0,
+            expected_outcome=ScenarioOutcome.PASSED,
+            exit_scenario_type=ExitScenarioType.RATCHET_TRIM,
+            is_exit_order=True,
+            position_size_before_exit=5,
+            exit_contracts=4  # Close 4, keep 1
+        ))
+        
+        scenarios.append(TradeScenario(
+            name="exit_ratchet_trim_single_contract",
+            description="Test ratchet trim with 1 contract (should NOT trim, already at target)",
+            market_condition=MarketCondition.NORMAL,
+            asset="SOL",
+            bankroll_usd=self.bankroll_usd,
+            entry_price_cents=35,
+            exit_price_cents=80,
+            contracts=1,
+            edge_pct=0.05,
+            confidence=0.70,
+            time_to_expiry_min=7.0,
+            expected_outcome=ScenarioOutcome.FAILED,  # Should fail because position is already at trim target
+            exit_scenario_type=ExitScenarioType.RATCHET_TRIM,
+            is_exit_order=True,
+            position_size_before_exit=1,
+            exit_contracts=0
+        ))
+        
+        # Window capacity release scenarios
+        scenarios.append(TradeScenario(
+            name="exit_window_capacity_release",
+            description="Test that position closure releases window capacity",
+            market_condition=MarketCondition.NORMAL,
+            asset="XRP",
+            bankroll_usd=self.bankroll_usd,
+            entry_price_cents=40,
+            exit_price_cents=60,
+            contracts=1,
+            edge_pct=0.04,
+            confidence=0.68,
+            time_to_expiry_min=10.0,
+            expected_outcome=ScenarioOutcome.PASSED,
+            is_exit_order=True,
+            position_size_before_exit=1,
+            exit_contracts=1
+        ))
+        
+        # Max contracts per order for exit scenarios
+        scenarios.append(TradeScenario(
+            name="exit_max_contracts_within_limit",
+            description="Test exit order within max contracts limit",
+            market_condition=MarketCondition.NORMAL,
+            asset="DOGE",
+            bankroll_usd=self.bankroll_usd,
+            entry_price_cents=30,
+            exit_price_cents=50,
+            contracts=5,
+            edge_pct=0.04,
+            confidence=0.68,
+            time_to_expiry_min=10.0,
+            expected_outcome=ScenarioOutcome.PASSED,
+            is_exit_order=True,
+            position_size_before_exit=5,
+            exit_contracts=5
+        ))
+        
+        scenarios.append(TradeScenario(
+            name="exit_max_contracts_exceeds_limit",
+            description="Test exit order exceeding max contracts limit (default 10)",
+            market_condition=MarketCondition.NORMAL,
+            asset="DOGE",
+            bankroll_usd=self.bankroll_usd,
+            entry_price_cents=30,
+            exit_price_cents=50,
+            contracts=15,
+            edge_pct=0.04,
+            confidence=0.68,
+            time_to_expiry_min=10.0,
+            expected_outcome=ScenarioOutcome.FAILED,  # Should fail because 15 > 10 max contracts
+            is_exit_order=True,
+            position_size_before_exit=15,
+            exit_contracts=15
+        ))
+        
+        # Exit order bypass scenarios
+        scenarios.append(TradeScenario(
+            name="exit_bypass_non_critical_checks",
+            description="Test that exit orders bypass non-critical checks",
+            market_condition=MarketCondition.ILLIQUID,  # Bad market condition
+            asset="BTC",
+            bankroll_usd=self.bankroll_usd,
+            entry_price_cents=50,
+            exit_price_cents=70,
+            contracts=1,
+            edge_pct=0.05,
+            confidence=0.70,
+            time_to_expiry_min=5.0,
+            expected_outcome=ScenarioOutcome.PASSED,  # Should pass because exit orders bypass checks
+            is_exit_order=True,
+            position_size_before_exit=1,
+            exit_contracts=1
+        ))
+        
+        # Multi-exit sequence scenarios
+        scenarios.append(TradeScenario(
+            name="exit_sequence_ratchet_then_99c",
+            description="Test exit sequence: ratchet trim followed by 99c exit",
+            market_condition=MarketCondition.NORMAL,
+            asset="BTC",
+            bankroll_usd=self.bankroll_usd,
+            entry_price_cents=40,
+            exit_price_cents=99,
+            contracts=3,
+            edge_pct=0.05,
+            confidence=0.70,
+            time_to_expiry_min=10.0,
+            expected_outcome=ScenarioOutcome.PASSED,
+            exit_scenario_type=ExitScenarioType.EXTREME_PROFIT_99C,
+            is_exit_order=True,
+            position_size_before_exit=3,
+            exit_contracts=3
+        ))
+        
+        # Edge case: Exit at same price as entry (break-even)
+        scenarios.append(TradeScenario(
+            name="exit_break_even",
+            description="Test exit at break-even (same price as entry)",
+            market_condition=MarketCondition.NORMAL,
+            asset="ETH",
+            bankroll_usd=self.bankroll_usd,
+            entry_price_cents=50,
+            exit_price_cents=50,
+            contracts=1,
+            edge_pct=0.05,
+            confidence=0.70,
+            time_to_expiry_min=10.0,
+            expected_outcome=ScenarioOutcome.PASSED,
+            is_exit_order=True,
+            position_size_before_exit=1,
+            exit_contracts=1
+        ))
+        
+        # Edge case: Exit with loss
+        scenarios.append(TradeScenario(
+            name="exit_with_loss",
+            description="Test exit with loss (price below entry)",
+            market_condition=MarketCondition.FLASH_CRASH,
+            asset="SOL",
+            bankroll_usd=self.bankroll_usd,
+            entry_price_cents=50,
+            exit_price_cents=30,
+            contracts=1,
+            edge_pct=0.05,
+            confidence=0.70,
+            time_to_expiry_min=5.0,
+            expected_outcome=ScenarioOutcome.PASSED,  # Should pass because exit orders always allowed
+            is_exit_order=True,
+            position_size_before_exit=1,
+            exit_contracts=1
+        ))
+        
         return scenarios
     
     def run_all_scenarios(self) -> List[SimulationResult]:
@@ -716,6 +1186,12 @@ class TradeScenarioSimulator:
             report_lines.append(f"Confidence: {result.scenario.confidence:.2f}")
             report_lines.append(f"Outcome: {result.outcome.value}")
             
+            # Exit-specific information
+            if result.scenario.is_exit_order:
+                report_lines.append(f"Exit Scenario Type: {result.scenario.exit_scenario_type.value if result.scenario.exit_scenario_type else 'N/A'}")
+                report_lines.append(f"Position Size Before Exit: {result.scenario.position_size_before_exit}")
+                report_lines.append(f"Exit Contracts: {result.scenario.exit_contracts}")
+            
             if result.computed_values:
                 report_lines.append("Computed Values:")
                 for key, value in result.computed_values.items():
@@ -764,6 +1240,159 @@ class TradeScenarioSimulator:
                 report_lines.append(f"  - {d['scenario']}: expected={d['expected']}, actual={d['actual']}")
         else:
             report_lines.append("No discrepancies found - all scenarios matched expected outcomes.")
+        
+        # Exit-specific analysis
+        report_lines.append("\n" + "=" * 80)
+        report_lines.append("EXIT ORDER ANALYSIS")
+        report_lines.append("=" * 80)
+        
+        exit_scenarios = [r for r in self.results if r.scenario.is_exit_order]
+        exit_passed = sum(1 for r in exit_scenarios if r.outcome == ScenarioOutcome.PASSED)
+        exit_failed = sum(1 for r in exit_scenarios if r.outcome == ScenarioOutcome.FAILED)
+        
+        report_lines.append(f"Total Exit Scenarios: {len(exit_scenarios)}")
+        report_lines.append(f"Exit Passed: {exit_passed} ({exit_passed/len(exit_scenarios)*100:.1f}%)")
+        report_lines.append(f"Exit Failed: {exit_failed} ({exit_failed/len(exit_scenarios)*100:.1f}%)")
+        report_lines.append("")
+        
+        # Analyze exit-specific failures
+        exit_failures = [r for r in exit_scenarios if r.outcome == ScenarioOutcome.FAILED]
+        if exit_failures:
+            report_lines.append("EXIT FAILURE ANALYSIS:")
+            for failure in exit_failures:
+                report_lines.append(f"\n  Scenario: {failure.scenario.name}")
+                report_lines.append(f"  Type: {failure.scenario.exit_scenario_type.value if failure.scenario.exit_scenario_type else 'N/A'}")
+                if failure.failed_checks:
+                    report_lines.append("  Failed Checks:")
+                    for check in failure.failed_checks:
+                        report_lines.append(f"    - {check}")
+        
+        # Potential blocking points analysis
+        report_lines.append("\n" + "=" * 80)
+        report_lines.append("POTENTIAL BLOCKING POINTS FOR EXIT ORDERS")
+        report_lines.append("=" * 80)
+        
+        blocking_points = []
+        
+        # Check for max contracts blocking exits
+        max_contracts_failures = [r for r in exit_scenarios if r.outcome == ScenarioOutcome.FAILED and 
+                                   any("max_contracts" in check for check in r.failed_checks)]
+        if max_contracts_failures:
+            blocking_points.append({
+                'type': 'MAX_CONTRACTS_LIMIT',
+                'description': 'Max contracts per order limit may block exit orders for large positions',
+                'affected_scenarios': [r.scenario.name for r in max_contracts_failures],
+                'severity': 'HIGH' if len(max_contracts_failures) > 0 else 'LOW'
+            })
+        
+        # Check for window capacity release issues
+        window_release_failures = [r for r in exit_scenarios if r.outcome == ScenarioOutcome.FAILED and
+                                   any("window_capacity" in check for check in r.failed_checks)]
+        if window_release_failures:
+            blocking_points.append({
+                'type': 'WINDOW_CAPACITY_RELEASE',
+                'description': 'Window capacity release may fail, preventing re-entry after exit',
+                'affected_scenarios': [r.scenario.name for r in window_release_failures],
+                'severity': 'HIGH'
+            })
+        
+        # Check for 99c exit issues
+        c99_failures = [r for r in exit_scenarios if r.scenario.exit_scenario_type == ExitScenarioType.EXTREME_PROFIT_99C 
+                        and r.outcome == ScenarioOutcome.FAILED]
+        if c99_failures:
+            blocking_points.append({
+                'type': '99C_EXIT_THRESHOLD',
+                'description': '99c exit threshold may not trigger correctly at boundary conditions',
+                'affected_scenarios': [r.scenario.name for r in c99_failures],
+                'severity': 'MEDIUM'
+            })
+        
+        # Check for ratchet floor issues
+        ratchet_failures = [r for r in exit_scenarios if r.scenario.exit_scenario_type == ExitScenarioType.RATCHET_FLOOR
+                           and r.outcome == ScenarioOutcome.FAILED]
+        if ratchet_failures:
+            blocking_points.append({
+                'type': 'RATCHET_FLOOR_LOGIC',
+                'description': 'Ratchet floor exit logic may have boundary condition issues',
+                'affected_scenarios': [r.scenario.name for r in ratchet_failures],
+                'severity': 'MEDIUM'
+            })
+        
+        # Check for ratchet trim issues
+        trim_failures = [r for r in exit_scenarios if r.scenario.exit_scenario_type == ExitScenarioType.RATCHET_TRIM
+                        and r.outcome == ScenarioOutcome.FAILED]
+        if trim_failures:
+            blocking_points.append({
+                'type': 'RATCHET_TRIM_LOGIC',
+                'description': 'Ratchet trim logic may not handle single-contract positions correctly',
+                'affected_scenarios': [r.scenario.name for r in trim_failures],
+                'severity': 'LOW'
+            })
+        
+        if blocking_points:
+            report_lines.append(f"Found {len(blocking_points)} potential blocking points:")
+            for bp in blocking_points:
+                report_lines.append(f"\n  [{bp['severity']}] {bp['type']}")
+                report_lines.append(f"  Description: {bp['description']}")
+                report_lines.append(f"  Affected Scenarios: {', '.join(bp['affected_scenarios'])}")
+        else:
+            report_lines.append("No critical blocking points identified in exit order flow.")
+        
+        # Recommendations
+        report_lines.append("\n" + "=" * 80)
+        report_lines.append("RECOMMENDATIONS")
+        report_lines.append("=" * 80)
+        
+        recommendations = []
+        
+        if max_contracts_failures:
+            recommendations.append(
+                "1. REVIEW MAX CONTRACTS LIMIT: Consider increasing max_single_order_contracts or "
+                "implementing chunked exits for large positions to ensure profit can be taken."
+            )
+        
+        if window_release_failures:
+            recommendations.append(
+                "2. FIX WINDOW CAPACITY RELEASE: Ensure position closure correctly releases window capacity "
+                "to allow re-entry after trailing stop, ratchet, or 99c exit."
+            )
+        
+        if c99_failures:
+            recommendations.append(
+                "3. VERIFY 99C EXIT THRESHOLD: Test boundary conditions (98c, 99c, 100c) to ensure "
+                "mandatory exit triggers correctly at exactly 99c for YES and 1c for NO."
+            )
+        
+        if ratchet_failures:
+            recommendations.append(
+                "4. TEST RATCHET FLOOR BOUNDARIES: Verify ratchet floor exit logic at exact boundary "
+                "conditions (80c floor, 85c activation) to prevent premature or delayed exits."
+            )
+        
+        if trim_failures:
+            recommendations.append(
+                "5. IMPROVE RATCHET TRIM LOGIC: Ensure trim logic handles edge cases like single-contract "
+                "positions and doesn't attempt to trim when already at target size."
+            )
+        
+        # General recommendations
+        recommendations.append(
+            "6. EXIT ORDER BYPASS VERIFICATION: Verify that exit orders correctly bypass non-critical "
+            "checks (market conditions, edge thresholds) to secure profits in adverse conditions."
+        )
+        
+        recommendations.append(
+            "7. PARTIAL EXIT HANDLING: Test partial exit scenarios (ratchet trim, scale-out) to ensure "
+            "position size updates correctly and remaining position continues to be monitored."
+        )
+        
+        recommendations.append(
+            "8. EXIT PRECEDENCE ORDER: Verify exit precedence order (99c > ratchet floor > trailing > TP > SL) "
+            "to ensure highest-priority exits execute first."
+        )
+        
+        for rec in recommendations:
+            report_lines.append(f"\n{rec}")
         
         # Configuration consistency check
         report_lines.append("\n" + "=" * 80)

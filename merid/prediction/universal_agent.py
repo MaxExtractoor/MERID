@@ -491,6 +491,13 @@ class KalshiUniversalAgent:
         markets_passing_shouldtrade = 0
         signal_calls = 0
         
+        # 2026-07-11: Candidate breakdown tracking
+        filtered_by_no_signal = 0
+        filtered_by_edge_threshold = 0
+        filtered_by_risk = 0
+        filtered_by_mode = 0
+        filtered_by_no_snapshot = 0
+        
         try:
             # Initialize subsystems if needed
             self._init_subsystems()
@@ -527,6 +534,7 @@ class KalshiUniversalAgent:
                     # Get category mode for this market
                     mode = get_category_mode(cm.category)
                     if mode not in ["paper", "shadow", "live"]:
+                        filtered_by_mode += 1
                         continue  # Skip invalid modes
                     
                     # Check if market has market data (bid/ask)
@@ -538,12 +546,14 @@ class KalshiUniversalAgent:
                     # Build snapshot and evaluate signal
                     snapshot = self._build_snapshot(cm)
                     if not snapshot:
+                        filtered_by_no_snapshot += 1
                         continue  # Skip if no snapshot available
                     
                     markets_passing_shouldtrade += 1
                     
                     signal = self._strategy.evaluate(snapshot)
                     if not signal:
+                        filtered_by_no_signal += 1
                         continue  # Skip if no signal
                     
                     # Check if signal indicates a trade
@@ -554,6 +564,7 @@ class KalshiUniversalAgent:
                     # Check edge threshold
                     net_edge = float(signal.edge.net_edge) if signal.edge else 0.0
                     if net_edge < self.config.min_edge:
+                        filtered_by_edge_threshold += 1
                         self.logger.debug("[COLLECT-CANDIDATE] Edge too low %s < %s for %s", net_edge, self.config.min_edge, cm.market.market_id)
                         continue  # Skip if edge too low
                     
@@ -573,6 +584,7 @@ class KalshiUniversalAgent:
                                 edge=Decimal(str(net_edge)),
                             )
                             if not check.allowed:
+                                filtered_by_risk += 1
                                 self.logger.debug("[COLLECT-CANDIDATE] Risk blocked %s: %s", cm.market.market_id, check.reason)
                                 continue  # Skip if risk blocks
                         except Exception as exc:
@@ -618,7 +630,13 @@ class KalshiUniversalAgent:
                     continue
             
             # No trading signals found
-            self.logger.info("[COLLECT-CANDIDATE] No trading signals found tick=%d agent=%s (checked %d markets)", tick, self.config.name, len(markets))
+            self.logger.info(
+                "[COLLECT-CANDIDATE] No trading signals found tick=%d agent=%s (checked %d markets) "
+                "breakdown: no_snapshot=%d no_signal=%d edge_threshold=%d risk=%d mode=%d",
+                tick, self.config.name, len(markets),
+                filtered_by_no_snapshot, filtered_by_no_signal, filtered_by_edge_threshold,
+                filtered_by_risk, filtered_by_mode
+            )
             
             # Store pipeline metrics even when no candidate found
             self._last_pipeline_metrics = {
@@ -627,6 +645,11 @@ class KalshiUniversalAgent:
                 'markets_with_spot': markets_with_spot,
                 'markets_passing_shouldtrade': markets_passing_shouldtrade,
                 'signal_calls': signal_calls,
+                'filtered_by_no_snapshot': filtered_by_no_snapshot,
+                'filtered_by_no_signal': filtered_by_no_signal,
+                'filtered_by_edge_threshold': filtered_by_edge_threshold,
+                'filtered_by_risk': filtered_by_risk,
+                'filtered_by_mode': filtered_by_mode,
             }
             
             return None
@@ -641,6 +664,11 @@ class KalshiUniversalAgent:
                 'markets_with_spot': markets_with_spot,
                 'markets_passing_shouldtrade': markets_passing_shouldtrade,
                 'signal_calls': signal_calls,
+                'filtered_by_no_snapshot': filtered_by_no_snapshot,
+                'filtered_by_no_signal': filtered_by_no_signal,
+                'filtered_by_edge_threshold': filtered_by_edge_threshold,
+                'filtered_by_risk': filtered_by_risk,
+                'filtered_by_mode': filtered_by_mode,
             }
             
             return None
