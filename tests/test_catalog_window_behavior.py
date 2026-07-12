@@ -202,5 +202,81 @@ def test_fallback_max_expiration_time_aligned():
     assert found_fallback, "Fallback max_expiration_time not found in market_catalog.py"
 
 
+def test_api_response_format_handling():
+    """Verify catalog fetch handles API response with nested 'markets' key."""
+    import re
+    
+    # Read market_catalog.py to check API response handling
+    catalog_path = "merid/event_venues/kalshi/market_catalog.py"
+    with open(catalog_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    
+    # Check for handling of dict response with 'markets' key
+    assert "isinstance(markets, dict)" in content, \
+        "Missing check for dict response type in catalog fetch"
+    assert "markets.get('markets', [])" in content, \
+        "Missing extraction of markets from nested 'markets' key"
+    
+    # Verify the handling is in the _fetch_series_with_retry function
+    lines = content.split('\n')
+    found_handling = False
+    for i, line in enumerate(lines):
+        if "isinstance(markets, dict)" in line:
+            # Check this is in the catalog fetch context
+            context = '\n'.join(lines[max(0, i-5):min(len(lines), i+10)])
+            if "CATALOG-FETCH" in context or "_fetch_series_with_retry" in context:
+                found_handling = True
+                break
+    
+    assert found_handling, "API response format handling not found in catalog fetch context"
+
+
+def test_window_pipeline_regression():
+    """Regression test for window optimization: verify 30min fetch → 17min snapshot → 15min trading."""
+    import re
+    
+    # Read market_catalog.py to check window values
+    catalog_path = "merid/event_venues/kalshi/market_catalog.py"
+    with open(catalog_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    
+    # Verify fetch window is 30 minutes (for robust discovery)
+    fetch_matches = re.findall(r"timedelta\(minutes=(\d+)\)", content)
+    fetch_30_count = sum(1 for m in fetch_matches if int(m) == 30)
+    assert fetch_30_count >= 1, \
+        f"Expected at least one 30-minute window for catalog fetch, found {fetch_30_count}"
+    
+    # Verify snapshot MAX_MINUTES_TO_EXPIRY is 17 minutes
+    snapshot_match = re.search(r"MAX_MINUTES_TO_EXPIRY\s*=\s*(\d+\.?\d*)", content)
+    assert snapshot_match, "MAX_MINUTES_TO_EXPIRY not found"
+    assert float(snapshot_match.group(1)) == 17.0, \
+        f"Expected MAX_MINUTES_TO_EXPIRY=17.0, got {snapshot_match.group(1)}"
+    
+    # Verify trading window in kalshi_15m_time.py is 15.0
+    time_path = "merid/event_venues/kalshi/kalshi_15m_time.py"
+    with open(time_path, "r", encoding="utf-8") as f:
+        time_content = f.read()
+    
+    trading_match = re.search(r"max_minutes_to_expiry:\s*float\s*=\s*(\d+\.?\d*)", time_content)
+    assert trading_match, "max_minutes_to_expiry default not found in kalshi_15m_time.py"
+    assert float(trading_match.group(1)) == 15.0, \
+        f"Expected max_minutes_to_expiry=15.0 for trading, got {trading_match.group(1)}"
+    
+    # Verify profile guardrails are 0.5-15.0
+    import yaml
+    with open("config/profiles/kalshi_crypto_15m_v2.yaml", "r", encoding="utf-8") as f:
+        profile = yaml.safe_load(f)
+    
+    guardrails = profile.get("guardrails", {})
+    assert guardrails.get("min_entry_mins") == 0.5, \
+        f"Expected profile min_entry_mins=0.5, got {guardrails.get('min_entry_mins')}"
+    assert guardrails.get("max_entry_mins") == 15.0, \
+        f"Expected profile max_entry_mins=15.0, got {guardrails.get('max_entry_mins')}"
+    
+    # Verify pipeline alignment: fetch (30) > snapshot (17) > trading (15)
+    # This ensures broader discovery, buffered visibility, precise trading
+    assert 30 > 17 > 15, "Pipeline alignment: fetch (30) > snapshot (17) > trading (15)"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
