@@ -30,7 +30,7 @@ class TestAdaptiveSignalFusion:
             min_time_to_expiry_s=180,
             max_time_to_expiry_s=900,
             per_strip_order_limit=200,
-            per_asset_cooldown_s=10
+            per_asset_cooldown_s=3  # CRITICAL FIX: 2026-07-12 - Aligned to 3s (was 10s) to match profile YAML
         )
     
     @pytest.fixture

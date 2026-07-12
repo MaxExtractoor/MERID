@@ -540,13 +540,13 @@ class TestDynamicCooldown:
     """Test ATR-based dynamic cooldown system (2026 best practice)."""
     
     def test_dynamic_cooldown_calculates_ratio(self):
-        """Test dynamic cooldown calculates volatility ratio correctly."""
+        """Test dynamic cooldown returns static cooldown from profile (2026-07-11 fix)."""
         config = LeanAgentConfig(
             name="BTC_15M",
             series_tickers=["KXBTC15M"],
-            per_asset_cooldown_s=90,
+            per_asset_cooldown_s=3,  # Aligned with profile YAML (3s cooldown)
         )
-        
+
         agent = LeanAgent15m(
             config=config,
             catalog=Mock(),
@@ -555,36 +555,24 @@ class TestDynamicCooldown:
             order_router=Mock(),
             risk_config=Mock(),
         )
-        
-        # Manually populate volatility history to test the ratio calculation
-        current_time = time.time()
+
+        # CRITICAL FIX: 2026-07-11 - Dynamic cooldown disabled, now returns static cooldown
+        # Volatility-based multiplier was causing 10-22x scaling, inappropriate for 15-minute binary options
+        # Method now returns static cooldown from profile config
         asset = "BTC"
-        
-        # Add 300 volatility data points with average of 1.0
-        for i in range(300):
-            agent._volatility_history[asset].append((current_time - (299 - i), 1.0))
-        
-        # Add spot price history for ATR calculation
-        for i in range(15):
-            agent._spot_price_history[asset].append((current_time - (14 - i), 50000.0 + i))
-        
-        # Current ATR will be ~1.0/50000 = 0.00002
-        # Average ATR will be 1.0
-        # Ratio will be ~0.00002, which is very small
-        # Dynamic cooldown = 90 * 0.00002 = ~0.0018, clamped to 30 minimum
         dynamic_cooldown = agent._calculate_dynamic_cooldown(asset)
-        
-        # Should be clamped to minimum 30s
-        assert dynamic_cooldown == 30.0
+
+        # Should return static cooldown from profile config (3s)
+        assert dynamic_cooldown == 3.0
     
     def test_dynamic_cooldown_insufficient_history(self):
-        """Test dynamic cooldown falls back to static when insufficient history."""
+        """Test dynamic cooldown returns static cooldown regardless of history (2026-07-11 fix)."""
         config = LeanAgentConfig(
             name="BTC_15M",
             series_tickers=["KXBTC15M"],
-            per_asset_cooldown_s=90,
+            per_asset_cooldown_s=3,  # Aligned with profile YAML (3s cooldown)
         )
-        
+
         agent = LeanAgent15m(
             config=config,
             catalog=Mock(),
@@ -593,33 +581,31 @@ class TestDynamicCooldown:
             order_router=Mock(),
             risk_config=Mock(),
         )
-        
+
         # Add insufficient history (< 300 points)
         current_time = time.time()
         asset = "BTC"
-        
+
         for i in range(50):
             price = 50000.0 + i * 10.0
             agent._spot_price_history[asset].append((current_time - (50 - i), price))
             agent._update_volatility_history(asset, price)
-        
-        # Calculate dynamic cooldown
+
+        # CRITICAL FIX: 2026-07-11 - Dynamic cooldown disabled, now returns static cooldown
+        # Method no longer uses volatility history, returns static cooldown from profile config
         dynamic_cooldown = agent._calculate_dynamic_cooldown(asset)
-        
-        # Should fall back to static cooldown or minimum clamp
-        # NOTE: Dynamic cooldown implementation changed to use minimum clamp (30s)
-        # instead of static fallback when insufficient history
-        # This is the correct behavior - minimum clamp prevents excessively long cooldowns
-        assert dynamic_cooldown == 30.0, f"Expected minimum clamp 30.0, got {dynamic_cooldown}"
+
+        # Should return static cooldown from profile config (3s)
+        assert dynamic_cooldown == 3.0, f"Expected static cooldown 3.0, got {dynamic_cooldown}"
     
     def test_dynamic_cooldown_clamping(self):
-        """Test dynamic cooldown is clamped to [30, 180] range."""
+        """Test dynamic cooldown returns static cooldown from profile (2026-07-11 fix)."""
         config = LeanAgentConfig(
             name="BTC_15M",
             series_tickers=["KXBTC15M"],
-            per_asset_cooldown_s=90,
+            per_asset_cooldown_s=3,  # Aligned with profile YAML (3s cooldown)
         )
-        
+
         agent = LeanAgent15m(
             config=config,
             catalog=Mock(),
@@ -628,39 +614,14 @@ class TestDynamicCooldown:
             order_router=Mock(),
             risk_config=Mock(),
         )
-        
-        # Test minimum clamp (extremely low volatility ratio)
-        current_time = time.time()
+
+        # CRITICAL FIX: 2026-07-11 - Dynamic cooldown disabled, now returns static cooldown
+        # Clamping logic removed, method returns static cooldown from profile config
         asset = "BTC"
-        
-        # High average volatility (100.0 per point)
-        for i in range(300):
-            agent._volatility_history[asset].append((current_time - (299 - i), 100.0))
-        
-        # Low current volatility (0.1 per point in spot price)
-        for i in range(15):
-            agent._spot_price_history[asset].append((current_time - (14 - i), 50000.0 + i * 0.1))
-        
         dynamic_cooldown = agent._calculate_dynamic_cooldown(asset)
-        assert dynamic_cooldown == 30.0  # Minimum clamp
-        
-        # Test maximum clamp (extremely high volatility ratio)
-        agent._volatility_history[asset].clear()
-        agent._spot_price_history[asset].clear()
-        
-        # Low average volatility (0.01 per point)
-        for i in range(300):
-            agent._volatility_history[asset].append((current_time - (299 - i), 0.01))
-        
-        # High current volatility (100.0 per point in spot price)
-        for i in range(15):
-            agent._spot_price_history[asset].append((current_time - (14 - i), 50000.0 + i * 100.0))
-        
-        dynamic_cooldown = agent._calculate_dynamic_cooldown(asset)
-        # The ratio will be (100/50000) / 0.01 = 0.002 / 0.01 = 0.2
-        # This is actually less than 1, so it won't hit the max clamp
-        # Let's adjust the test to just verify it doesn't exceed 180
-        assert dynamic_cooldown <= 180.0
+
+        # Should return static cooldown from profile config (3s)
+        assert dynamic_cooldown == 3.0
 
 
 class TestVelocityBiasFix:
@@ -1921,10 +1882,11 @@ class TestIndicatorStackIntegration:
             assert 'rsi_bear_overbought' in momentum_fvg_config
             
             # Verify default values match profile YAML
-            assert momentum_fvg_config['rsi_bull_oversold'] == 40.0
-            assert momentum_fvg_config['rsi_bull_overbought'] == 80.0
-            assert momentum_fvg_config['rsi_bear_oversold'] == 20.0
-            assert momentum_fvg_config['rsi_bear_overbought'] == 60.0
+            # CRITICAL FIX: 2026-07-12 - Scaled thresholds for RSI(14) instead of RSI(8)
+            assert momentum_fvg_config['rsi_bull_oversold'] == 35.0
+            assert momentum_fvg_config['rsi_bull_overbought'] == 75.0
+            assert momentum_fvg_config['rsi_bear_oversold'] == 25.0
+            assert momentum_fvg_config['rsi_bear_overbought'] == 65.0
         except Exception as e:
             # If profile loading fails, skip this test
             pytest.skip(f"Profile loading failed: {e}")
@@ -1935,14 +1897,15 @@ class TestIndicatorStackIntegration:
             from merid.risk.profiles.crypto_15m_profile import get_crypto_15m_profile
             profile = get_crypto_15m_profile()
             momentum_fvg_config = profile.momentum_fvg  # This returns a dict
-            
+
             # Verify MACD filter settings are accessible in the dict
             assert 'macd_zero_line_filter_enabled' in momentum_fvg_config
             assert 'macd_histogram_momentum_filter_enabled' in momentum_fvg_config
             assert 'macd_histogram_expansion_bars' in momentum_fvg_config
-            
+
+            # CRITICAL FIX: 2026-07-12 - MACD zero-line filter disabled in profile YAML
             # Verify default values match profile YAML
-            assert momentum_fvg_config['macd_zero_line_filter_enabled'] == True
+            assert momentum_fvg_config['macd_zero_line_filter_enabled'] == False
             assert momentum_fvg_config['macd_histogram_momentum_filter_enabled'] == True
             assert momentum_fvg_config['macd_histogram_expansion_bars'] == 2
         except Exception as e:

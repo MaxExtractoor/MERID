@@ -117,8 +117,9 @@ def test_warmup_requirements_reduced():
     stack = Crypto15mIndicatorStack(config=cfg)
     
     # Verify min_bars_cold_start is lower than min_bars_required
+    # CRITICAL FIX: 2026-07-12 - min_bars_required changed from 20 to 30 for MACD(8,21,5) warmup
     assert cfg.min_bars_cold_start == 1
-    assert cfg.min_bars_required == 20
+    assert cfg.min_bars_required == 30
     
     # Feed only 10 bars (cold start threshold)
     for i in range(10):
@@ -196,10 +197,10 @@ def test_macd_dead_zone_zero():
     
     profile = profile_adapter.profile
     
-    # Verify macd_dead_zone is 0.0 (disabled during warmup)
+    # CRITICAL FIX: 2026-07-12 - macd_dead_zone changed from 0.0 to 0.0001 to prevent noise trading
     # momentum_fvg is a property that returns a dict
     momentum_fvg = profile.momentum_fvg
-    assert momentum_fvg.get('macd_dead_zone', 0.0) == 0.0
+    assert momentum_fvg.get('macd_dead_zone', 0.0001) == 0.0001
 
 
 if __name__ == "__main__":

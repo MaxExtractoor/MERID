@@ -167,37 +167,39 @@ class TestDepthThresholdFixes:
 
 
 class TestMinBarsRequiredFix:
-    """Test min_bars_required fix - reduced from 52 to 20 for 15-minute markets."""
-    
-    def test_indicators_min_bars_required_is_20(self):
-        """Test that crypto_15m_indicators.py min_bars_required is 20 (not 52)."""
+    """Test min_bars_required fix - updated from 20 to 30 for MACD(8,21,5) warmup."""
+
+    def test_indicators_min_bars_required_is_30(self):
+        """Test that crypto_15m_indicators.py min_bars_required is 30 (for MACD warmup)."""
         indicators_path = Path(__file__).parent.parent / "merid" / "signals" / "crypto_15m_indicators.py"
-        
+
         if not indicators_path.exists():
             pytest.skip("crypto_15m_indicators.py not found")
-        
+
         content = indicators_path.read_text(encoding='utf-8')
-        
-        # Check that min_bars_required is 20 (not 52)
-        assert "min_bars_required: int = 20" in content, \
-            "min_bars_required should be 20 for 15-minute markets"
-        
-        # Check comment mentions 15-minute markets
-        assert "15-minute markets" in content, \
-            "Comment should mention 15-minute markets"
+
+        # CRITICAL FIX: 2026-07-12 - min_bars_required changed from 20 to 30 for MACD(8,21,5) warmup
+        # Check that min_bars_required is 30 (not 20 or 52)
+        assert "min_bars_required: int = 30" in content, \
+            "min_bars_required should be 30 for MACD(8,21,5) warmup"
+
+        # Check comment mentions MACD(8,21,5)
+        assert "MACD(8,21,5)" in content, \
+            "Comment should mention MACD(8,21,5)"
     
-    def test_indicators_min_bars_for_macd_is_15(self):
-        """Test that min_bars_for_macd is 15 (aligned with new min_bars_required)."""
+    def test_indicators_min_bars_for_macd_is_26(self):
+        """Test that min_bars_for_macd is 26 (MACD(8,21,5) needs 21+5=26 bars)."""
         indicators_path = Path(__file__).parent.parent / "merid" / "signals" / "crypto_15m_indicators.py"
-        
+
         if not indicators_path.exists():
             pytest.skip("crypto_15m_indicators.py not found")
-        
+
         content = indicators_path.read_text(encoding='utf-8')
-        
-        # Check that min_bars_for_macd is 15
-        assert "min_bars_for_macd: int = 15" in content, \
-            "min_bars_for_macd should be 15 for MACD calculations"
+
+        # CRITICAL FIX: 2026-07-12 - min_bars_for_macd changed from 15 to 26 for MACD(8,21,5)
+        # MACD(8,21,5) needs 21 (slow) + 5 (signal) = 26 bars minimum
+        assert "min_bars_for_macd: int = 26" in content, \
+            "min_bars_for_macd should be 26 for MACD(8,21,5) calculations"
 
 
 class TestThresholdConsistency:

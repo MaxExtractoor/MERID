@@ -151,7 +151,7 @@ class TestTrailingStop:
             strategy_policy_max_md_staleness_sec=120.0,
             throttling_global_orders_window_sec=60.0,
             throttling_global_orders_limit=20,
-            throttling_per_asset_cooldown_sec=10.0,
+            throttling_per_asset_cooldown_sec=3.0,  # CRITICAL FIX: 2026-07-12 - Aligned to 3s (was 10s) to match profile YAML
             throttling_per_strip_order_limit=1,
             throttling_per_strip_notional_usd=0.0,
             universe_min_volume=5,
