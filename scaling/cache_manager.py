@@ -181,6 +181,10 @@ class CacheManager:
         # US compliance
         self.compliance_audit: deque = deque(maxlen=10000)
         
+        # Redis error deduplication
+        self._last_redis_error_time: float = 0
+        self._redis_error_dedup_window: float = 300  # 5 minutes
+        
         logger.info("CacheManager initialized")
     
     async def start(self):
@@ -405,7 +409,11 @@ class CacheManager:
         """Initialize Redis connection."""
         try:
             if not REDIS_AVAILABLE:
-                logger.warning("Redis not available, using mock cache")
+                # Deduplication: only log once per 5 minutes
+                now = time.time()
+                if now - self._last_redis_error_time > self._redis_error_dedup_window:
+                    logger.warning("Redis not available, using mock cache (advisory component - trading continues)")
+                    self._last_redis_error_time = now
                 self.redis_client = MockRedis()
                 self.redis_available = True
                 return
@@ -429,7 +437,11 @@ class CacheManager:
             logger.info("Redis connection established")
             
         except Exception as e:
-            logger.error(f"Failed to connect to Redis: {e}")
+            # Deduplication: only log once per 5 minutes
+            now = time.time()
+            if now - self._last_redis_error_time > self._redis_error_dedup_window:
+                logger.error(f"Failed to connect to Redis: {e} (advisory component - using mock cache, trading continues)")
+                self._last_redis_error_time = now
             self.redis_client = MockRedis()
             self.redis_available = True
     

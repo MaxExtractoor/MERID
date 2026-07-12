@@ -15,18 +15,23 @@ from core.settings import REDIS_URL
 
 
 class CacheAdapter:
-    """Best-effort Redis cache with in-memory fallback."""
+    """Best-effort Redis cache with in-memory fallback.
+    
+    Redis is an ADVISORY component - trading continues with in-memory fallback.
+    """
 
     def __init__(self) -> None:
         self.logger = get_logger("core.cache")
         self._local_store: Dict[str, Any] = {}
         self._local_expiry: Dict[str, float] = {}
         self._lock = threading.RLock()
+        self._last_redis_error_time: float = 0
+        self._redis_error_dedup_window: float = 300  # 5 minutes
         self._client = self._init_client()
 
     def _init_client(self):
         if redis is None:
-            self.logger.warning("redis library not installed, falling back to in-memory cache.")
+            self.logger.warning("redis library not installed, falling back to in-memory cache (advisory component).")
             return None
         try:
             client = redis.Redis.from_url(REDIS_URL, decode_responses=True, socket_timeout=3, socket_connect_timeout=3)
@@ -39,7 +44,11 @@ class CacheAdapter:
             self.logger.info("Connected to Redis cache at %s", _safe_url)
             return client
         except Exception as exc:  # pragma: no cover - depends on environment
-            self.logger.warning("Redis unavailable (%s). Using in-memory cache.", exc)
+            # Deduplication: only log once per 5 minutes
+            now = time.time()
+            if now - self._last_redis_error_time > self._redis_error_dedup_window:
+                self.logger.warning("Redis unavailable (%s). Using in-memory cache (advisory component - trading continues).", exc)
+                self._last_redis_error_time = now
             return None
 
     def _now(self) -> float:
@@ -63,7 +72,11 @@ class CacheAdapter:
             try:
                 return self._client.get(key)
             except Exception as exc:
-                self.logger.warning("Redis get failed (%s). Falling back to memory.", exc)
+                # Deduplication: only log once per 5 minutes
+                now = time.time()
+                if now - self._last_redis_error_time > self._redis_error_dedup_window:
+                    self.logger.warning("Redis get failed (%s). Falling back to memory (advisory component).", exc)
+                    self._last_redis_error_time = now
         with self._lock:
             expires = self._local_expiry.get(key)
             if expires and expires < self._now():
@@ -78,7 +91,11 @@ class CacheAdapter:
                 self._client.set(key, value, ex=ttl)
                 return
             except Exception as exc:
-                self.logger.warning("Redis set failed (%s). Falling back to memory.", exc)
+                # Deduplication: only log once per 5 minutes
+                now = time.time()
+                if now - self._last_redis_error_time > self._redis_error_dedup_window:
+                    self.logger.warning("Redis set failed (%s). Falling back to memory (advisory component).", exc)
+                    self._last_redis_error_time = now
         with self._lock:
             self._local_store[key] = value
             self._local_expiry[key] = self._now() + ttl

@@ -257,7 +257,7 @@ class TestPriceFloorGuardrail:
             pytest.skip(f"Profile max_contract_price_cents check skipped: {e}")
 
     def test_price_range_max_price_cents_aligned_with_guardrails(self):
-        """Test that price_range max_price_cents is aligned with guardrails_max_contract_price_cents (95c)."""
+        """Test that price_range max_price_cents is aligned with guardrails_max_contract_price_cents (50c canonical)."""
         try:
             import yaml
             from pathlib import Path
@@ -274,11 +274,11 @@ class TestPriceFloorGuardrail:
             guardrails = profile_yaml.get('guardrails', {})
 
             # Check that price_range max_price_cents matches guardrails max_contract_price_cents
-            # 2026-07-10: Both should be 95c (expanded for skewed markets)
-            assert price_range.get('max_price_cents') == 95, \
-                f"Expected price_range max_price_cents=95, got {price_range.get('max_price_cents')}"
-            assert guardrails.get('max_contract_price_cents') == 95, \
-                f"Expected guardrails max_contract_price_cents=95, got {guardrails.get('max_contract_price_cents')}"
+            # 2026-07-12: Both should be 50c (canonical range per commit c5ac4a18)
+            assert price_range.get('max_price_cents') == 50, \
+                f"Expected price_range max_price_cents=50, got {price_range.get('max_price_cents')}"
+            assert guardrails.get('max_contract_price_cents') == 50, \
+                f"Expected guardrails max_contract_price_cents=50, got {guardrails.get('max_contract_price_cents')}"
         except Exception as e:
             pytest.skip(f"Price range alignment check skipped: {e}")
 
@@ -328,7 +328,7 @@ class TestPriceFloorGuardrail:
             pytest.skip(f"Per-asset volatility tuning check skipped: {e}")
 
     def test_agent_grid_price_clamping_minimum_10c(self):
-        """Test that agent_grid_15m.py price clamping uses 10¢ minimum (momentum-based trading)."""
+        """Test that agent_grid_15m.py price clamping uses 10¢ minimum (canonical price_range)."""
         try:
             import inspect
             from merid.prediction.agent_grid_15m import LeanAgent15m
@@ -336,17 +336,17 @@ class TestPriceFloorGuardrail:
             # Get the source code of the _generate_signal method (contains price clamping logic)
             source = inspect.getsource(LeanAgent15m._generate_signal)
 
-            # Verify that the minimum entry price is 10c (updated for momentum-based trading)
-            assert "ENTRY_MIN_PRICE_CENTS = 10" in source or "min_price_cents = 10" in source, \
-                "agent_grid_15m.py should use 10c minimum entry price for momentum-based trading"
+            # Verify that the minimum entry price is 10c (canonical price_range.min_price_cents)
+            assert "10 <= clamped_price_cents <= 50" in source or "min_price_cents = 10" in source, \
+                "agent_grid_15m.py should use 10c minimum entry price (canonical price_range)"
             
-            # Verify that the maximum entry price is 50c (sweet spot threshold)
-            assert "ENTRY_MAX_PRICE_CENTS = 50" in source or "max_price_cents = 50" in source, \
-                "agent_grid_15m.py should use 50c maximum entry price (sweet spot threshold)"
+            # Verify that the maximum entry price is 50c (canonical price_range.max_price_cents)
+            assert "10 <= clamped_price_cents <= 50" in source or "max_price_cents = 50" in source, \
+                "agent_grid_15m.py should use 50c maximum entry price (canonical price_range)"
             
-            # Verify that the comment mentions 10-50c range
+            # Verify that the comment mentions 10-50c canonical range
             assert "10-50c" in source or "10c" in source or "50c" in source, \
-                "agent_grid_15m.py should document the 10-50c range in comments"
+                "agent_grid_15m.py should document the 10-50c canonical range in comments"
         except Exception as e:
             pytest.skip(f"Agent grid price clamping check skipped: {e}")
 
