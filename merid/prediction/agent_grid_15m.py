@@ -4602,15 +4602,13 @@ class LeanAgent15m:
         # All edge values now in FRACTION units (0.0-1.0) for consistency
         from merid.event_venues.kalshi.risk_parameters import validate_edge
         
-        # Convert selected_edge from PERCENT to FRACTION for validation
-        selected_edge_fraction = selected_edge / 100.0 if selected_edge > 1.0 else selected_edge
-        
-        is_valid, reason = validate_edge(selected_edge_fraction, asset, confidence)
+        # selected_edge is now in FRACTION units (no conversion needed)
+        is_valid, reason = validate_edge(selected_edge, asset, confidence)
         
         if not is_valid:
             logger.info(
-                "[MOMENTUM-FVG-EDGE-THRESHOLD] asset=%s selected_edge=%.6f (%.2f%%) - %s -> NO TRADE",
-                asset, selected_edge_fraction, selected_edge, reason
+                "[MOMENTUM-FVG-EDGE-THRESHOLD] asset=%s selected_edge=%.6f - %s -> NO TRADE",
+                asset, selected_edge, reason
             )
             return None
 
@@ -4618,7 +4616,7 @@ class LeanAgent15m:
 
         signal_action = "buy"
 
-        confidence = 0.5 + (selected_edge / 100.0)
+        confidence = 0.5 + selected_edge  # selected_edge in FRACTION units
 
         confidence = min(0.95, confidence)
 
@@ -4626,7 +4624,7 @@ class LeanAgent15m:
 
         logger.info(
 
-            "[MOMENTUM-FVG-SELECTION] asset=%s selected_side=%s edge=%.2f%% confidence=%.2f (all_edges=%s)",
+            "[MOMENTUM-FVG-SELECTION] asset=%s selected_side=%s edge=%.6f confidence=%.2f (all_edges=%s)",
 
             asset, signal_side, selected_edge, confidence, side_edges
 
@@ -4641,14 +4639,15 @@ class LeanAgent15m:
         
 
         # Calculate model probability from selected edge
+        # edge_pct is now in FRACTION units (0.0-1.0), so no division needed
 
         if signal_side == "yes":
 
-            model_prob = min(0.95, 0.5 + (edge_pct / 100.0))
+            model_prob = min(0.95, 0.5 + edge_pct)
 
         else:
 
-            model_prob = max(0.05, 0.5 - (edge_pct / 100.0))
+            model_prob = max(0.05, 0.5 - edge_pct)
 
         
 
@@ -5152,11 +5151,11 @@ class LeanAgent15m:
 
         if signal_side == "yes" and signal_action == "buy":
 
-            edge_pct = (buy_threshold - market_price) / buy_threshold * 100
+            edge_pct = (buy_threshold - market_price) / buy_threshold  # FRACTION units
 
             # Add 2% base edge at threshold crossing (minimum edge for valid trade)
 
-            edge_pct = max(edge_pct, 2.0)
+            edge_pct = max(edge_pct, 0.02)  # 2% = 0.02 in FRACTION
 
             # Dynamic confidence: increases as price moves further below buy_threshold
 
@@ -5172,17 +5171,17 @@ class LeanAgent15m:
 
             # Convert edge_pct to probability adjustment (capped at reasonable range)
 
-            edge_prob_adjustment = min(edge_pct / 100.0, 0.20)  # Cap at 20% adjustment
+            edge_prob_adjustment = min(edge_pct, 0.20)  # Cap at 20% adjustment (edge_pct already in FRACTION)
 
             model_prob = min(0.95, market_price + edge_prob_adjustment)
 
         elif signal_side == "no" and signal_action == "buy":
 
-            edge_pct = (market_price - sell_threshold) / (1.0 - sell_threshold) * 100
+            edge_pct = (market_price - sell_threshold) / (1.0 - sell_threshold)  # FRACTION units
 
             # Add 2% base edge at threshold crossing (minimum edge for valid trade)
 
-            edge_pct = max(edge_pct, 2.0)
+            edge_pct = max(edge_pct, 0.02)  # 2% = 0.02 in FRACTION
 
             # Dynamic confidence: increases as price moves further above sell_threshold
 
@@ -5198,7 +5197,7 @@ class LeanAgent15m:
 
             # Convert edge_pct to probability adjustment (capped at reasonable range)
 
-            edge_prob_adjustment = min(edge_pct / 100.0, 0.20)  # Cap at 20% adjustment
+            edge_prob_adjustment = min(edge_pct, 0.20)  # Cap at 20% adjustment (edge_pct already in FRACTION)
 
             model_prob = max(0.05, market_price - edge_prob_adjustment)
 
@@ -8662,19 +8661,19 @@ class LeanAgent15m:
 
             # Calculate symmetric edges for both sides
 
-            # Edge formula: edge = (p_model - p_mkt) * 100 (in percentage)
+            # Edge formula: edge = (p_model - p_mkt) in FRACTION units (0.0-1.0)
 
             for side in sides_to_evaluate:
 
                 if side == "yes" and yes_in_range:
 
-                    edge_yes_pct = (p_model_yes - p_mkt_yes) * 100.0
+                    edge_yes_pct = (p_model_yes - p_mkt_yes)  # FRACTION units
 
                     side_edges["yes"] = edge_yes_pct
 
                     logger.info(
 
-                        "[EDGE-CALCULATION] asset=%s side=yes p_model=%.4f p_mkt=%.4f edge_pct=%.3f%%",
+                        "[EDGE-CALCULATION] asset=%s side=yes p_model=%.4f p_mkt=%.4f edge_pct=%.6f",
 
                         asset, p_model_yes, p_mkt_yes, edge_yes_pct
 
@@ -8682,13 +8681,13 @@ class LeanAgent15m:
 
                 elif side == "no" and no_in_range:
 
-                    edge_no_pct = (p_model_no - p_mkt_no) * 100.0
+                    edge_no_pct = (p_model_no - p_mkt_no)  # FRACTION units
 
                     side_edges["no"] = edge_no_pct
 
                     logger.info(
 
-                        "[EDGE-CALCULATION] asset=%s side=no p_model=%.4f p_mkt=%.4f edge_pct=%.3f%%",
+                        "[EDGE-CALCULATION] asset=%s side=no p_model=%.4f p_mkt=%.4f edge_pct=%.6f",
 
                         asset, p_model_no, p_mkt_no, edge_no_pct
 
@@ -9654,9 +9653,9 @@ class LeanAgent15m:
 
         # uncertain zone where contracts are cheap enough to have profit room to the 99c exit.
 
-        edge_yes_pct = (p_model - p_mkt) * 100.0
+        edge_yes_pct = (p_model - p_mkt)  # FRACTION units
 
-        edge_no_pct = ((1.0 - p_model) - (1.0 - p_mkt)) * 100.0
+        edge_no_pct = ((1.0 - p_model) - (1.0 - p_mkt))  # FRACTION units
 
         
 

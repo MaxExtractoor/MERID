@@ -3930,7 +3930,7 @@ class Kalshi15mLoop:
                     edge_pct = calculate_velocity_edge(velocity, velocity_threshold)
                 except Exception as e:
                     logger.warning("[15M-LOOP] Failed to use standardized edge calculation: %s, using fallback", e)
-                    edge_pct = abs(velocity) * 100  # Fallback: simple conversion
+                    edge_pct = abs(velocity)  # Fallback: keep in FRACTION units
                 
                 # Compute confidence from velocity magnitude (higher velocity = higher confidence)
                 velocity_magnitude = abs(velocity)

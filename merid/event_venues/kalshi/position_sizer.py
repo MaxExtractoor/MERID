@@ -631,9 +631,9 @@ class PositionSizer:
         loss_amount = price_cents       # cents lost on wrong prediction
 
         # Convert edge to win probability
-        # edge_pct = (true_prob - implied_prob) * 100
+        # edge_pct is in FRACTION units (0.0-1.0)
         implied_prob = price_cents / 100.0
-        est_win_prob = implied_prob + (edge_pct / 100.0)
+        est_win_prob = implied_prob + edge_pct  # edge_pct already in FRACTION
         est_win_prob = max(PROB_MIN_BOUND, min(PROB_MAX_BOUND, est_win_prob))
 
         raw_kelly = kelly_fraction_for_binary(est_win_prob, win_payout, loss_amount)
@@ -641,8 +641,8 @@ class PositionSizer:
         # Edge sanity logging: log p_model, p_market, net_edge, Kelly fraction for auditability
         logger.info(
             "[EDGE_SANITY] agent=%s p_model=%.4f p_market=%.4f net_edge=%.4f raw_kelly=%.6f "
-            "kelly_fraction_config=%.3f edge_pct=%.2f price_cents=%d",
-            agent_name, est_win_prob, implied_prob, edge_pct / 100.0, raw_kelly,
+            "kelly_fraction_config=%.3f edge_pct=%.6f price_cents=%d",
+            agent_name, est_win_prob, implied_prob, edge_pct, raw_kelly,
             cfg.kelly_fraction, edge_pct, price_cents
         )
 
@@ -1102,7 +1102,7 @@ class PositionSizer:
         cfg = self._config
 
         implied_prob = price_cents / 100.0
-        est_win_prob = max(0.01, min(0.99, implied_prob + edge_pct / 100.0))
+        est_win_prob = max(0.01, min(0.99, implied_prob + edge_pct))  # edge_pct already in FRACTION
         win_payout = 100 - price_cents
         loss_amount = price_cents
 
