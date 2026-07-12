@@ -7420,7 +7420,7 @@ class LeanAgent15m:
 
             logger.info(
 
-                "[PRICE-FILTER-REJECT] asset=%s both sides outside 5c-95c range (yes=%dc, no=%dc) -> SKIP",
+                "[PRICE-FILTER-REJECT] asset=%s both sides outside 10c-50c range (yes=%dc, no=%dc) -> SKIP",
 
                 asset, yes_price_cents, no_price_cents
 
