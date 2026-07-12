@@ -235,8 +235,12 @@ class IdempotentOrderStore:
         # CRITICAL: Track price execution history to prevent repeat price execution
         # Key: (contract_id, side, price_cents), Value: timestamp of last execution
         self._price_execution_history: Dict[Tuple[str, str, int], float] = {}
-        # Time window for price repeat check (15 minutes = 900 seconds)
-        self._price_repeat_window_s: float = 900.0
+        # Time window for price repeat check
+        # CRITICAL FIX (2026-07-12): Reduced from 900s (15 min) to 60s (1 min)
+        # The 15-minute window was blocking legitimate re-executions at the same price
+        # after market moves and returns. 60s allows for short-term duplicate prevention
+        # while enabling legitimate trading activity in 15m cycles
+        self._price_repeat_window_s: float = 60.0
 
     def _ensure_async_lock(self) -> asyncio.Lock:
         """Lazy-initialize the async lock in the current event loop."""
@@ -992,7 +996,7 @@ class PreTradeGate:
                         available_exposure = slot_allocator.get_available_exposure()
                         
                         # Calculate required exposure for this order
-                        required_exposure = price_cents / 100.0 if price_cents else 0.50  # Default to 50c if no price
+                        required_exposure = price_cents / 100.0 if price_cents else 0.42  # Default to 42c (midpoint of 10-75c) if no price
                         
                         # Block if insufficient exposure
                         if required_exposure > available_exposure:

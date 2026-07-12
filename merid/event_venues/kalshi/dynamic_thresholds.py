@@ -2,7 +2,7 @@
 Dynamic Threshold Manager for Kalshi 15m Crypto Trading System
 
 Manages dynamic thresholds based on regime detection:
-- Price range (10-50c canonical, 5-95c crisis)
+- Price range (10-75c canonical, 5-95c crisis)
 - Spread threshold (30c canonical, 100c crisis)
 - Liquidity thresholds (static)
 - Position size adjustments
