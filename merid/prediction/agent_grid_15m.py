@@ -12610,6 +12610,44 @@ class LeanAgentGrid15m:
 
                         if original_candidate:
 
+                            # CRITICAL FIX (2026-07-12): Request slot allocation before execution
+                            # This prevents bypassing the $1 exposure cap when global allocator executes orders
+                            # Without this, multiple orders can pass the passive exposure check in order_router
+                            # and exceed the cap before any fills occur
+                            try:
+                                from merid.risk.global_slot_allocator import get_global_slot_allocator, AllocationRequest
+                                
+                                slot_allocator = get_global_slot_allocator()
+                                
+                                # Create allocation request for entry order
+                                allocation_request = AllocationRequest(
+                                    agent_id=order.agent_name,
+                                    asset=order.asset,
+                                    ticker=order.ticker,
+                                    entry_price_cents=order.price_cents,
+                                    edge_pct=order.edge_pct,
+                                    spread_cents=0,  # Not available in OrderCandidate
+                                    is_exit_order=False  # Entry order
+                                )
+                                
+                                # Request slot allocation
+                                allocated, reason, slot_id = slot_allocator.request_allocation(allocation_request)
+                                
+                                if not allocated:
+                                    logger.info(
+                                        "[GLOBAL-ALLOCATOR-SLOT-REJECT] asset=%s ticker=%s price=%dc edge=%.1f%% - %s",
+                                        order.asset, order.ticker, order.price_cents, order.edge_pct, reason
+                                    )
+                                    continue  # Skip this order - no slot available
+                                
+                                logger.info(
+                                    "[GLOBAL-ALLOCATOR-SLOT-ALLOCATED] asset=%s ticker=%s price=%dc slot_id=%s total_exposure=$%.2f",
+                                    order.asset, order.ticker, order.price_cents, slot_id, slot_allocator.get_total_exposure()
+                                )
+                            except Exception as slot_err:
+                                logger.warning("[GLOBAL-ALLOCATOR] Failed to request slot allocation: %s", slot_err)
+                                continue  # Skip this order on allocation failure
+
                             # Execute via direct execution path
 
                             from merid.prediction.kalshi_tools import _kalshi_place_order
@@ -12661,12 +12699,11 @@ class LeanAgentGrid15m:
                             
 
                             # Set default TP/SL
-
+                            # CRITICAL FIX (2026-07-12): Compute TP price from R-multiple to enable exit policy
                             stop_loss_price_cents = max(1, price_cents - 5)
-
                             take_profit_r_multiple = 1.0
-
-                            
+                            risk_cents = abs(price_cents - stop_loss_price_cents)
+                            take_profit_price_cents = price_cents + int(risk_cents * take_profit_r_multiple)
 
                             order_result = await _kalshi_place_order(
 
@@ -12684,6 +12721,7 @@ class LeanAgentGrid15m:
 
                                 stop_loss_price_cents=stop_loss_price_cents,
 
+                                take_profit_price_cents=take_profit_price_cents,  # CRITICAL FIX: Pass TP price
                                 take_profit_r_multiple=take_profit_r_multiple,
 
                                 model_prob=model_prob,
@@ -12723,12 +12761,34 @@ class LeanAgentGrid15m:
                                         reason = order_result.message
 
                                 logger.warning("[GLOBAL-ALLOCATOR-EXECUTE-FAILED] asset=%s reason=%s", order.asset, reason)
+                                
+                                # CRITICAL FIX (2026-07-12): Release slot on execution failure
+                                # If the order failed to execute, we must free the slot for other orders
+                                try:
+                                    if 'slot_id' in locals() and slot_id:
+                                        from merid.risk.global_slot_allocator import get_global_slot_allocator
+                                        slot_allocator = get_global_slot_allocator()
+                                        slot_allocator.release_slot(slot_id)
+                                        logger.info("[GLOBAL-ALLOCATOR-SLOT-RELEASED] asset=%s slot_id=%s (execution failed)", order.asset, slot_id)
+                                except Exception as release_err:
+                                    logger.warning("[GLOBAL-ALLOCATOR] Failed to release slot on execution failure: %s", release_err)
 
                     
 
                     except Exception as e:
 
                         logger.error("[GLOBAL-ALLOCATOR-EXECUTE-ERROR] asset=%s error=%s", order.asset, str(e), exc_info=True)
+                        
+                        # CRITICAL FIX (2026-07-12): Release slot on exception
+                        # If an exception occurred during execution, free the slot for other orders
+                        try:
+                            if 'slot_id' in locals() and slot_id:
+                                from merid.risk.global_slot_allocator import get_global_slot_allocator
+                                slot_allocator = get_global_slot_allocator()
+                                slot_allocator.release_slot(slot_id)
+                                logger.info("[GLOBAL-ALLOCATOR-SLOT-RELEASED] asset=%s slot_id=%s (exception)", order.asset, slot_id)
+                        except Exception as release_err:
+                            logger.warning("[GLOBAL-ALLOCATOR] Failed to release slot on exception: %s", release_err)
 
                 
 

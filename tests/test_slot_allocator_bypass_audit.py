@@ -26,9 +26,13 @@ class TestSlotAllocatorBypassAudit:
         assert "get_global_slot_allocator" in router_source, \
             "order_router.py should import get_global_slot_allocator"
         
-        # Verify slot allocator is used for exposure checks
-        assert "get_available_exposure" in router_source, \
-            "order_router.py should check available exposure from slot allocator"
+        # CRITICAL FIX (2026-07-12): Verify hard slot allocation BEFORE order processing
+        assert "request_allocation" in router_source, \
+            "order_router.py should call request_allocation for hard slot allocation"
+        
+        # Verify slot allocation is a hard block (rejects if fails)
+        assert "slot_allocator_hard_block" in router_source or "slot_allocator:insufficient_exposure" in router_source, \
+            "order_router.py should hard block orders if slot allocation fails"
         
         # Verify exit order bypass exists
         assert "_is_exit_order" in router_source, \
@@ -37,6 +41,10 @@ class TestSlotAllocatorBypassAudit:
         # Verify exit orders bypass slot allocation
         assert "is_exit_order" in router_source.lower() or "exit order bypass" in router_source.lower(), \
             "order_router.py should bypass slot allocation for exit orders"
+        
+        # Verify slot release on rejection paths
+        assert "release_slot" in router_source, \
+            "order_router.py should release slots on rejection/exception paths"
 
     def test_kalshi_tools_uses_order_router(self):
         """Verify kalshi_tools.py routes through order_router (not direct client)."""
@@ -84,6 +92,18 @@ class TestSlotAllocatorBypassAudit:
         # Verify is_exit_order=False for entry orders
         assert "is_exit_order=False" in grid_source, \
             "agent_grid_15m.py should set is_exit_order=False for entry orders"
+        
+        # CRITICAL FIX (2026-07-12): Verify global allocator execution path uses slot allocation
+        assert "GLOBAL-ALLOCATOR-SLOT-ALLOCATED" in grid_source, \
+            "agent_grid_15m.py should log GLOBAL-ALLOCATOR-SLOT-ALLOCATED on successful allocation"
+        
+        # Verify slot allocation happens BEFORE execution
+        assert "GLOBAL-ALLOCATOR-SLOT-ALLOCATED" in grid_source and "GLOBAL-ALLOCATOR-EXECUTE" in grid_source, \
+            "agent_grid_15m.py should allocate slot before GLOBAL-ALLOCATOR-EXECUTE"
+        
+        # Verify slot release on execution failure
+        assert "GLOBAL-ALLOCATOR-SLOT-RELEASED" in grid_source, \
+            "agent_grid_15m.py should release slot on execution failure"
 
     def test_loop_15m_exit_order_bypass(self):
         """Verify loop_15m.py exit orders bypass slot allocation."""
