@@ -916,6 +916,10 @@ class KalshiMarketCatalog:
                         
                         if result.success and result.data:
                             markets = result.data
+                            # Ensure markets is a list before slicing
+                            if not isinstance(markets, list):
+                                logger.warning("[CATALOG-FETCH] Unexpected data type for series=%s: %s, expected list", series, type(markets))
+                                markets = []
                             logger.info("[CATALOG-FETCH] Fetched series=%s count=%d via REST API", series, len(markets))
                             # CRITICAL DIAGNOSTIC: Log individual market details for 15m crypto series
                             if series in ["KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M"]:
