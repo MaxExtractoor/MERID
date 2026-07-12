@@ -903,7 +903,26 @@ class Kalshi15mLoop:
             logger.debug("[15M-LOOP] Cycle %d completed successfully", cycle_id)
             logger.debug("[15M-LOOP-TRACE] _on_tick_async EXIT (cycle %d completed)", cycle_id)
         except Exception as exc:
-            logger.error("[15M-LOOP-TRACE] Exception in _on_tick_async for cycle %d: %s", cycle_id, exc, exc_info=True)
+            # Structured error classification for better debugging and alerting
+            error_msg = str(exc).lower()
+            error_type = type(exc).__name__
+            
+            # Classify error severity
+            if any(keyword in error_msg for keyword in ["authentication", "unauthorized", "forbidden", "credential"]):
+                severity = "CRITICAL"
+                logger.critical("[15M-LOOP-ERROR] AUTH_FAILURE cycle=%d: %s - %s", cycle_id, error_type, exc, exc_info=True)
+            elif any(keyword in error_msg for keyword in ["timeout", "deadline", "timed out"]):
+                severity = "WARNING"
+                logger.warning("[15M-LOOP-ERROR] TIMEOUT cycle=%d: %s - %s", cycle_id, error_type, exc, exc_info=True)
+            elif any(keyword in error_msg for keyword in ["connection", "network", "dns"]):
+                severity = "WARNING"
+                logger.warning("[15M-LOOP-ERROR] NETWORK cycle=%d: %s - %s", cycle_id, error_type, exc, exc_info=True)
+            elif any(keyword in error_msg for keyword in ["memory", "allocation", "out of memory"]):
+                severity = "CRITICAL"
+                logger.critical("[15M-LOOP-ERROR] MEMORY cycle=%d: %s - %s", cycle_id, error_type, exc, exc_info=True)
+            else:
+                severity = "ERROR"
+                logger.error("[15M-LOOP-ERROR] UNEXPECTED cycle=%d severity=%s: %s - %s", cycle_id, severity, error_type, exc, exc_info=True)
 
     async def _run_cycle_wrapper(self, cycle_id: int) -> None:
         """Async wrapper for cycle execution (called from callback)."""
@@ -1196,6 +1215,7 @@ class Kalshi15mLoop:
                     entry_price_cents=exit_price_cents,
                     edge_pct=0.0,  # Exit orders don't have edge
                     spread_cents=0,  # Exit orders don't care about spread
+                    confidence=0.5,  # Default confidence for exit orders
                     is_exit_order=True  # CRITICAL: Mark as exit order to bypass allocation
                 )
                 
@@ -1252,8 +1272,10 @@ class Kalshi15mLoop:
             )
 
             # Create exit OrderIntent
-            # CRITICAL: Use limit order with GTC to create resting order for better fill rate
-            # This allows the exit order to sit on the book and get filled at the desired price
+            # CRITICAL FIX (2026-07-12): Exit orders MUST be marketable (aggressiveness=1.0) to execute immediately
+            # Previous bug: exit orders defaulted to aggressiveness=0.0 (resting), causing them to rest on book
+            # and potentially never fill when market moved away. Exit orders reduce exposure and should
+            # execute immediately to lock in profits or stop losses.
             # CRITICAL FIX: Add exit_policy_id to satisfy order router validation for exit orders
             # Exit orders require exit_policy_id for tracking per _validate_risk_contract_linkage
             intent = OrderIntent(
@@ -1262,12 +1284,13 @@ class Kalshi15mLoop:
                 action=action,  # Keep as lowercase "buy"/"sell" for early validation
                 price_cents=exit_price_cents,
                 count=count,
-                order_type="limit",  # Limit order to create resting order
-                time_in_force="gtc",  # Good till canceled - allows order to rest on book
+                order_type="limit",  # Limit order with marketable aggressiveness = marketable-limit
+                time_in_force="gtc",  # Good till canceled - allows order to rest if not immediately filled
                 source="position_monitor_exit",
                 agent_id="merid.position_management.position_monitor",
                 exit_reason=exit_reason,
                 exit_policy_id=position.exit_policy_id,  # CRITICAL FIX: Required for exit order validation
+                aggressiveness=1.0,  # CRITICAL FIX: Force marketable execution for immediate fill
             )
 
             logger.info(
@@ -1426,8 +1449,8 @@ class Kalshi15mLoop:
                     # CRITICAL: Log candidate details for debugging execution flow
                     for i, candidate in enumerate(candidates):
                         logger.info(
-                            "[15m-LOOP] Candidate %d: ticker=%s side=%s edge=%s edge_pct=%s",
-                            i, candidate.get("ticker"), candidate.get("side"), candidate.get("edge"), candidate.get("edge_pct")
+                            "[15m-LOOP] Candidate %d: ticker=%s side=%s edge_pct=%.6f",
+                            i, candidate.get("ticker"), candidate.get("side"), candidate.get("edge_pct", 0.0)
                         )
                     
                     # Execute candidates using best-edge selection
@@ -1460,8 +1483,8 @@ class Kalshi15mLoop:
                                 logger.warning("[15m-LOOP] Unknown asset from ticker %s: extracted=%s - skipping", ticker, asset)
                                 continue
                             
-                            # Get candidate edge
-                            edge = candidate.get("edge", 0.0) or candidate.get("edge_pct", 0.0)
+                            # Get candidate edge (single source of truth: edge_pct in FRACTION units)
+                            edge = candidate.get("edge_pct", 0.0)
                             side = candidate.get("side", "")
                             logger.info("[15m-LOOP] Candidate details: edge=%.6f side=%s", edge, side)
                             
@@ -1470,9 +1493,9 @@ class Kalshi15mLoop:
                             has_position = abs(current_position) > 0.01  # Small threshold for floating point
                             logger.info("[15m-LOOP] Position check: asset=%s position=%.2f has_position=%s", asset, current_position, has_position)
                             
-                            # Get current best edge for this asset
+                            # Get current best edge for this asset (single source of truth: edge_pct in FRACTION units)
                             current_best = self._best_edge_per_asset.get(asset)
-                            current_best_edge = current_best.get("edge", 0.0) if current_best else 0.0
+                            current_best_edge = current_best.get("edge_pct", 0.0) if current_best else 0.0
                             logger.info("[15m-LOOP] Best edge check: asset=%s current_best=%.6f", asset, current_best_edge)
                             
                             # Best-edge selection logic:
@@ -1480,11 +1503,27 @@ class Kalshi15mLoop:
                             # - If position exists: only execute if edge > current best edge (edge improvement)
                             # - SWING MODE: If swing mode enabled after trailing exit, allow opposite-side entry
                             # - This prevents over-trading and ensures we always execute the best opportunity
-                            # CRITICAL FIX: For velocity-based signals, use minimum edge threshold instead of best-edge comparison
-                            # Velocity-based signals have tiny edges (0.01-0.05%) due to velocity magnitude calculation
-                            # The best-edge logic was blocking all trades because edges were too small to beat current_best
                             should_execute = False
-                            min_edge_threshold = 0.0001  # 0.01% minimum edge for velocity-based signals (was 0.5% - too high)
+                            
+                            # PER-ASSET EDGE THRESHOLD (2026-07-12 FIX)
+                            # Use per-asset thresholds from risk_parameters.py as single source of truth
+                            # This aligns with industry best practices and removes the too-low confidence-based threshold
+                            from merid.event_venues.kalshi.risk_parameters import EDGE_RESTING_ENTRY_BTC, EDGE_RESTING_ENTRY_ETH, EDGE_RESTING_ENTRY_SOL, EDGE_RESTING_ENTRY_XRP, EDGE_RESTING_ENTRY_DOGE
+                            
+                            asset_thresholds = {
+                                "BTC": EDGE_RESTING_ENTRY_BTC,  # 1.25% (0.0125)
+                                "ETH": EDGE_RESTING_ENTRY_ETH,  # 1.5% (0.015)
+                                "SOL": EDGE_RESTING_ENTRY_SOL,  # 2.0% (0.02)
+                                "XRP": EDGE_RESTING_ENTRY_XRP,  # 2.25% (0.0225)
+                                "DOGE": EDGE_RESTING_ENTRY_DOGE,  # 2.75% (0.0275)
+                            }
+                            
+                            min_edge_threshold = asset_thresholds.get(asset, EDGE_RESTING_ENTRY_BTC)
+                            
+                            logger.debug(
+                                "[15m-LOOP] Per-asset threshold: asset=%s min_threshold=%.6f",
+                                asset, min_edge_threshold
+                            )
                             
                             # Check swing mode status for this asset
                             swing_enabled = self._swing_mode.get(asset, {}).get("enabled", False)
@@ -1515,7 +1554,7 @@ class Kalshi15mLoop:
                                     self._best_edge_per_asset[asset] = {
                                         "ticker": ticker,
                                         "side": side,
-                                        "edge": edge,
+                                        "edge_pct": edge,  # Single source of truth: edge_pct in FRACTION units
                                         "candidate": candidate
                                     }
                                     # Disable swing mode after executing reversal
@@ -1627,15 +1666,17 @@ class Kalshi15mLoop:
                                     )
                                     price_cents = 25  # 2026-07-09: Fixed to 25c (midpoint of 10-50c sweet spot)
                             
-                                # Get edge and confidence from candidate
+                                # Get edge, confidence, and model_prob from candidate
                                 edge_pct = Decimal(str(candidate.get("edge_pct", 0.0)))
                                 confidence = Decimal(str(candidate.get("confidence", 0.5)))
+                                model_prob = candidate.get("model_prob", None)  # 2026-07-12: Kelly Criterion integration
                                 
                                 # Extract asset from ticker
                                 asset = ticker.split("-")[0].replace("KX", "") if "-" in ticker else "BTC"
                                 
                                 # Compute dynamic size
                                 # 2026 Research-Based Risk Management: Apply time-of-day risk scaling
+                                # 2026-07-12: Kelly Criterion integration - pass model_prob for edge filtering
                                 time_of_day_multiplier = candidate.get("time_of_day_multiplier", 1.0)
                                 count, notional, metadata = compute_order_size(
                                     bankroll_usd=Decimal(str(bankroll_usd)),
@@ -1643,7 +1684,8 @@ class Kalshi15mLoop:
                                     asset=asset,
                                     edge_pct=edge_pct,
                                     confidence=confidence,
-                                    time_of_day_multiplier=time_of_day_multiplier
+                                    time_of_day_multiplier=time_of_day_multiplier,
+                                    model_prob=model_prob  # 2026-07-12: Kelly Criterion
                                 )
                                 
                                 candidate["count"] = count
@@ -1703,14 +1745,14 @@ class Kalshi15mLoop:
                             self._executed_candidates_this_window.add(candidate_key)
                             
                             # FIX: Do NOT reset cycle guards after each execution
-                            # The UnifiedRiskManager should track total notional across the 15-minute window
-                            # to enforce the 5% total allocation limit. Resetting after each trade defeats this.
+                            # The global_slot_allocator should track total exposure across all positions
+                            # to enforce the fixed $1 exposure cap. Resetting after each trade defeats this.
                             # Cycle reset only happens at the start of a new 15-minute window (line 1366)
                             
                             # CRITICAL FIX: Do NOT clear deduplication cache after each execution
                             # The cache should only be cleared at the start of a new 15-minute window (line 1346)
                             # Clearing it here allows the same order to be placed every 5 seconds, causing agents
-                            # to exceed risk limits. The order gate and window-based risk checks should handle
+                            # to exceed risk limits. The order gate and slot-based risk checks should handle
                             # allowing new orders when conditions change (different price, side, etc.)
                         except Exception as e:
                             logger.error("[15m-LOOP] Failed to execute candidate: %s", e, exc_info=True)
@@ -3566,10 +3608,29 @@ class Kalshi15mLoop:
                 # Log after call
                 log_object_origin(self.agent_grid, "agent_grid_after_run_cycle_call", context=f"cycle_id={tick}")
             except Exception as exc:
-                # CRITICAL: Log any exception in run_cycle with full stack trace
-                logger.error("[15M-LOOP] agent_grid.run_cycle failed: %s", exc, exc_info=True)
+                # CRITICAL: Log any exception in run_cycle with full stack trace and structured classification
+                error_msg = str(exc).lower()
+                error_type = type(exc).__name__
+                
+                # Classify error severity
+                if any(keyword in error_msg for keyword in ["authentication", "unauthorized", "forbidden", "credential"]):
+                    severity = "CRITICAL"
+                    logger.critical("[15M-LOOP] AUTH_FAILURE agent_grid.run_cycle cycle=%d: %s - %s", tick, error_type, exc, exc_info=True)
+                elif any(keyword in error_msg for keyword in ["timeout", "deadline", "timed out"]):
+                    severity = "WARNING"
+                    logger.warning("[15M-LOOP] TIMEOUT agent_grid.run_cycle cycle=%d: %s - %s", tick, error_type, exc, exc_info=True)
+                elif any(keyword in error_msg for keyword in ["connection", "network", "dns"]):
+                    severity = "WARNING"
+                    logger.warning("[15M-LOOP] NETWORK agent_grid.run_cycle cycle=%d: %s - %s", tick, error_type, exc, exc_info=True)
+                elif any(keyword in error_msg for keyword in ["memory", "allocation", "out of memory"]):
+                    severity = "CRITICAL"
+                    logger.critical("[15M-LOOP] MEMORY agent_grid.run_cycle cycle=%d: %s - %s", tick, error_type, exc, exc_info=True)
+                else:
+                    severity = "ERROR"
+                    logger.error("[15M-LOOP] agent_grid.run_cycle failed cycle=%d severity=%s: %s - %s", tick, severity, error_type, exc, exc_info=True)
+                
                 with _diag_open() as f:
-                    f.write(f"[{datetime.now(timezone.utc)}] 15M-LOOP: agent_grid.run_cycle EXCEPTION cycle={tick} error={exc}\n")
+                    f.write(f"[{datetime.now(timezone.utc)}] 15M-LOOP: agent_grid.run_cycle EXCEPTION cycle={tick} severity={severity} error={exc}\n")
                     f.write(f"[{datetime.now(timezone.utc)}] 15M-LOOP: STACK TRACE: {__import__('traceback').format_exc()}\n")
                     f.flush()
                 raise  # Re-raise to be caught by outer handler
@@ -3616,8 +3677,8 @@ class Kalshi15mLoop:
         Returns:
             True if edge is still valid (positive), False otherwise
         """
-        # Check both "edge" and "edge_pct" fields for compatibility
-        edge = candidate.get("edge", candidate.get("edge_pct", 0.0))
+        # Single source of truth: edge_pct in FRACTION units
+        edge = candidate.get("edge_pct", 0.0)
         
         # CRITICAL: Only validate edge for price-based signals
         # Velocity-based signals use velocity magnitude as signal strength, not probability edge
@@ -4016,19 +4077,17 @@ class Kalshi15mLoop:
                     if state and hasattr(state, 'seconds_to_expiry'):
                         seconds_to_expiry = state.seconds_to_expiry
                 
-                # Normalize edge_pct to fraction (agent candidates use percent, compute_order_aggressiveness expects fraction)
-                edge_fraction = edge_pct / 100.0 if edge_pct > 1.0 else edge_pct
-                
                 # Compute aggressiveness (0.0=resting, 0.5-1.0=marketable)
+                # edge_pct is already in FRACTION units (single source of truth)
                 aggressiveness = compute_order_aggressiveness(
                     asset=asset,
-                    edge_pct=edge_fraction,
+                    edge_pct=edge_pct,
                     seconds_to_expiry=int(seconds_to_expiry)
                 )
                 
                 logger.info(
-                    "[15M-LOOP] Computed aggressiveness: ticker=%s asset=%s edge_pct=%.2f%% aggressiveness=%.2f tte=%ds",
-                    ticker, asset, edge_fraction * 100, aggressiveness, seconds_to_expiry
+                    "[15M-LOOP] Computed aggressiveness: ticker=%s asset=%s edge_pct=%.6f aggressiveness=%.2f tte=%ds",
+                    ticker, asset, edge_pct, aggressiveness, seconds_to_expiry
                 )
             except Exception as agg_err:
                 logger.warning("[15M-LOOP] Failed to compute aggressiveness: %s, using default 0.5 (marketable)", agg_err)
@@ -4043,6 +4102,8 @@ class Kalshi15mLoop:
                 source="merid.prediction.agent_grid_15m",  # Use 'source' instead of 'caller_module'
                 agent_id=agent_id,  # CRITICAL: Pass actual agent_id for authorization
                 edge_pct=edge_pct,  # BUG #34 FIX: Add edge_pct from candidate
+                edgepct=edge_pct,  # PHASE 3 FIX: Populate edgepct for fills ledger audit trail
+                netedgecents=edge_pct * price_cents / 100.0 if price_cents > 0 else 0.0,  # PHASE 3 FIX: Populate netedgecents for fills ledger
                 confidence=confidence,  # BUG #34 FIX: Add confidence from candidate
                 model_prob=model_prob,  # BUG #34 FIX: Add model_prob from candidate
                 rationale=candidate.get("rationale"),  # CRITICAL: Pass rationale to skip edge validation for price-based strategy
@@ -4120,8 +4181,12 @@ class Kalshi15mLoop:
             
             # Route order
             result = await route_order_async(intent)
-            logger.info("[15M-LOOP] Order routed successfully: ticker=%s side=%s count=%d result=%s", 
-                       ticker, kalshi_side, count, result)
+            if result and result.status == "rejected":
+                logger.warning("[15M-LOOP] Order REJECTED by router: ticker=%s side=%s count=%d reason=%s latency_ms=%s",
+                               ticker, kalshi_side, count, result.reason, result.latency_ms)
+            else:
+                logger.info("[15M-LOOP] Order routed successfully: ticker=%s side=%s count=%d result=%s",
+                            ticker, kalshi_side, count, result)
             
             # CRITICAL FIX: Record order in KalshiRiskManager for asset_notional tracking
             # This ensures per-asset notional exposure is tracked correctly for risk limits
@@ -4221,10 +4286,8 @@ class Kalshi15mLoop:
             # Add basic envelope info that should always exist
             if hasattr(self._risk_envelope, 'live_bankroll_usd'):
                 risk_envelope_summary["live_bankroll_usd"] = self._risk_envelope.live_bankroll_usd
-            if hasattr(self._risk_envelope, 'per_agent_window_limit_usd'):
-                risk_envelope_summary["per_agent_window_limit_usd"] = self._risk_envelope.per_agent_window_limit_usd
-            if hasattr(self._risk_envelope, 'total_venue_window_limit_usd'):
-                risk_envelope_summary["total_venue_window_limit_usd"] = self._risk_envelope.total_venue_window_limit_usd
+            # REMOVED (2026-07-12): per_agent_window_limit_usd and total_venue_window_limit_usd removed
+            # These were deprecated window-based risk limits, replaced by fixed $1 slot allocation
             
             if risk_envelope_summary:
                 summary["risk_envelope"] = risk_envelope_summary

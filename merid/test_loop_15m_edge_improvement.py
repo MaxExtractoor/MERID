@@ -222,22 +222,19 @@ class TestEdgeImprovementIntegration:
             {
                 "ticker": "KXBTC15M-26JUL031615-15",
                 "side": "yes",
-                "edge": 0.02,
-                "edge_pct": 0.02,
+                "edge_pct": 0.02,  # Single source of truth: edge_pct in FRACTION units
                 "price_cents": 50
             },
             {
                 "ticker": "KXETH15M-26JUL031615-15",
                 "side": "no",
-                "edge": 0.03,
-                "edge_pct": 0.03,
+                "edge_pct": 0.03,  # Single source of truth: edge_pct in FRACTION units
                 "price_cents": 52
             },
             {
                 "ticker": "KXXRP15M-26JUL031615-15",
                 "side": "no",
-                "edge": 0.07,
-                "edge_pct": 0.07,
+                "edge_pct": 0.07,  # Single source of truth: edge_pct in FRACTION units
                 "price_cents": 50
             }
         ]
@@ -264,10 +261,8 @@ class TestEdgeImprovementIntegration:
     def test_candidate_edge_fields_present(self, sample_candidates):
         """Test that candidates have required edge fields."""
         for candidate in sample_candidates:
-            assert "edge" in candidate, "Candidate should have 'edge' field"
-            assert "edge_pct" in candidate, "Candidate should have 'edge_pct' field"
+            assert "edge_pct" in candidate, "Candidate should have 'edge_pct' field (single source of truth)"
             # CRITICAL FIX: Edge can be negative (p_model - p_market), so check abs() instead
-            assert abs(candidate["edge"]) > 0, "Edge magnitude should be positive"
             assert abs(candidate["edge_pct"]) > 0, "Edge percentage magnitude should be positive"
 
 

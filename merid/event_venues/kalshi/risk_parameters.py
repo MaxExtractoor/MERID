@@ -168,6 +168,38 @@ def compute_order_aggressiveness(asset: str, edge_pct: float, seconds_to_expiry:
     else:
         return 0.0  # No trade (edge too low)
 
+def validate_edge(edge_pct: float, asset: str, confidence: float = 0.5) -> tuple[bool, str]:
+    """Validate edge against per-asset thresholds and return (is_valid, reason).
+    
+    This is the centralized edge validation function for the 15m crypto stack.
+    All edge validation should go through this function to ensure consistency.
+    
+    Args:
+        edge_pct: Edge value in FRACTION units (0.0-1.0)
+        asset: Asset name (BTC, ETH, SOL, XRP, DOGE)
+        confidence: Signal confidence (0.0-1.0) - for logging only, not used in threshold
+    
+    Returns:
+        (is_valid, reason): Tuple where is_valid is True if edge meets threshold,
+                            and reason explains the decision
+    """
+    # Map asset to thresholds
+    asset_thresholds = {
+        "BTC": EDGE_RESTING_ENTRY_BTC,  # 1.25% (0.0125)
+        "ETH": EDGE_RESTING_ENTRY_ETH,  # 1.5% (0.015)
+        "SOL": EDGE_RESTING_ENTRY_SOL,  # 2.0% (0.02)
+        "XRP": EDGE_RESTING_ENTRY_XRP,  # 2.25% (0.0225)
+        "DOGE": EDGE_RESTING_ENTRY_DOGE,  # 2.75% (0.0275)
+    }
+    
+    threshold = asset_thresholds.get(asset, EDGE_RESTING_ENTRY_BTC)
+    
+    # Check if edge meets threshold (use absolute value for contrarian signals)
+    if abs(edge_pct) >= threshold:
+        return True, f"Edge {edge_pct:.6f} meets threshold {threshold:.6f} for {asset}"
+    else:
+        return False, f"Edge {edge_pct:.6f} below threshold {threshold:.6f} for {asset}"
+
 # ============================================================================
 # SIZE THRESHOLDS (contracts)
 # ============================================================================

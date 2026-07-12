@@ -6944,22 +6944,19 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
                 if state and hasattr(state, 'seconds_to_expiry'):
                     seconds_to_expiry = state.seconds_to_expiry
             
-            # CRITICAL UNIT FIX (2026-07-05): agent candidates carry edge_pct in PERCENT
-            # units (e.g., 5.2 = 5.2%) while compute_order_aggressiveness thresholds
-            # (EDGE_RESTING_ENTRY/EDGE_MARKET_ENTRY = 0.02/0.04) are FRACTIONS.
-            # Without normalization every order with edge > 0.04% was marked marketable.
-            edge_fraction = intent.edge_pct / 100.0 if intent.edge_pct > 1.0 else intent.edge_pct
+            # edge_pct is now in FRACTION units (single source of truth - 2026-07-12 standardization)
+            # No normalization needed - all edge values use FRACTION (0.0-1.0)
             
             # Compute aggressiveness (0.0=resting, 0.5-1.0=marketable)
             intent.aggressiveness = compute_order_aggressiveness(
                 asset=asset,
-                edge_pct=edge_fraction,
+                edge_pct=intent.edge_pct,
                 seconds_to_expiry=int(seconds_to_expiry)
             )
             
             logger.debug(
-                "[AGGRESSIVENSS-COMPUTE] ticker=%s asset=%s edge_pct=%.2f%% aggressiveness=%.2f tte=%ds",
-                intent.ticker, asset, edge_fraction * 100, intent.aggressiveness, seconds_to_expiry
+                "[AGGRESSIVENSS-COMPUTE] ticker=%s asset=%s edge_pct=%.6f aggressiveness=%.2f tte=%ds",
+                intent.ticker, asset, intent.edge_pct, intent.aggressiveness, seconds_to_expiry
             )
         except Exception as agg_err:
             logger.debug("[AGGRESSIVENSS-COMPUTE] Failed to compute aggressiveness: %s", agg_err)
