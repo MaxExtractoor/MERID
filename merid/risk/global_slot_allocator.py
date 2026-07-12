@@ -66,9 +66,9 @@ class AllocationRequest:
         # Only validate entry price for entry orders
         # Exit orders can be at any price (market orders to close positions)
         if not self.is_exit_order:
-            if self.entry_price_cents < 10 or self.entry_price_cents > 50:
+            if self.entry_price_cents < 10 or self.entry_price_cents > 75:
                 raise ValueError(
-                    f"Entry price {self.entry_price_cents}c outside allowed range [10, 50]"
+                    f"Entry price {self.entry_price_cents}c outside allowed range [10, 75]"
                 )
 
 
