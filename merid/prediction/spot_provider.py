@@ -37,6 +37,11 @@ class SpotSnapshot:
     staleness_ms: float = 0.0
     data_quality_score: float = 1.0
 
+    @property
+    def price(self) -> float:
+        """Alias for price_usd for compatibility with agent_grid_15m.py."""
+        return self.price_usd
+
 
 class SpotProvider:
     """Abstract spot price provider for UnifiedEdgeComputer."""
@@ -136,8 +141,12 @@ class CfbSpotProvider(SpotProvider):
 class UnifiedSpotProvider(SpotProvider):
     """Direct unified_spot_service provider - bypasses HTTP layer."""
 
-    async def get_spot(self, asset: str) -> Optional[SpotSnapshot]:
-        """Get spot directly from unified_spot_service."""
+    def get(self, asset: str) -> Optional[SpotSnapshot]:
+        """Get spot directly from unified_spot_service (synchronous).
+
+        This is the primary method used by agent_grid_15m.py for spot data.
+        Returns SpotSnapshot with OHLC data for ADX/ATR calculations.
+        """
         try:
             from data.unified_spot_service import get_unified_spot_service, SpotError
 
@@ -145,11 +154,12 @@ class UnifiedSpotProvider(SpotProvider):
             spot = service.get(asset.upper())
 
             if spot is None:
+                logger.warning("[UNIFIED-SPOT-PROVIDER] get() returned None for %s", asset)
                 return None
 
             # Check if spot is an error object
             if isinstance(spot, SpotError):
-                logger.warning("[UNIFIED-SPOT-PROVIDER] Spot error for %s: reason=%s message=%s", 
+                logger.warning("[UNIFIED-SPOT-PROVIDER] Spot error for %s: reason=%s message=%s",
                              asset, spot.reason, spot.message)
                 return None
 
@@ -171,6 +181,11 @@ class UnifiedSpotProvider(SpotProvider):
         except Exception as e:
             logger.error("[UNIFIED-SPOT-PROVIDER] Failed to get spot for %s: %s", asset, e, exc_info=True)
             return None
+
+    async def get_spot(self, asset: str) -> Optional[SpotSnapshot]:
+        """Get spot directly from unified_spot_service (async wrapper for compatibility)."""
+        # Synchronous wrapper - the underlying service is already synchronous
+        return self.get(asset)
 
 
 def get_spot_provider(provider_type: str = "unified") -> SpotProvider:
