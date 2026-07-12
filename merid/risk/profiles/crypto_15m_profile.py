@@ -471,11 +471,11 @@ class Crypto15mProfile:
     guardrails_adaptive_risk_bands: list = field(default_factory=list)
 
     # Price range configuration for entry band restrictions
-    # 2026-07-11: Canonical price band (10c-50c) - aligned with GlobalSlotAllocator
+    # 2026-07-12: Canonical price band (10c-75c) - aligned with GlobalSlotAllocator
     price_range: 'PriceRange' = field(default_factory=lambda: PriceRange(
         min_price_cents=10,
-        max_price_cents=50,
-        description='Valid price range in cents for order execution (10c-50c canonical band)'
+        max_price_cents=75,
+        description='Valid price range in cents for order execution (10c-75c canonical band)'
     ))
     
     # Dynamic threshold configuration (2026-07-11)

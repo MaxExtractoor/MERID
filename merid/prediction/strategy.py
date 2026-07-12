@@ -486,42 +486,42 @@ class KalshiStrategy:
                 # LEGACY REMOVAL: dynamic_sizing moved to archive/legacy/ during 15m stack cleanup
                 price_cents = None
                 if price_cents is None or price_cents <= 0:
-                    # 2026-07-11: Canonical price band (10c-50c) - aligned with GlobalSlotAllocator
+                    # 2026-07-12: Canonical price band (10c-75c) - aligned with GlobalSlotAllocator
                     # Previous 5-95c range was misaligned with allocator enforcement
                     raw_price_cents = int(round(market_prob * 100))
                     
-                    # Check if price is within canonical range (10c-50c)
-                    if 10 <= raw_price_cents <= 50:
+                    # Check if price is within canonical range (10c-75c)
+                    if 10 <= raw_price_cents <= 75:
                         # Price is already in valid range - use it directly
                         price_cents = raw_price_cents
                         logger.info(
-                            "[PRICE-SELECTION] asset=%s raw_price_cents=%d in canonical range [10c-50c] - using directly",
+                            "[PRICE-SELECTION] asset=%s raw_price_cents=%d in canonical range [10c-75c] - using directly",
                             self._extract_asset_from_market_id(edge.market_id), raw_price_cents
                         )
                     else:
                         # Price is outside canonical range - drop candidate (strategy.py doesn't have orderbook access)
                         logger.warning(
-                            "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside canonical range [10c-50c] - dropping candidate (no orderbook access in strategy.py)",
+                            "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside canonical range [10c-75c] - dropping candidate (no orderbook access in strategy.py)",
                             self._extract_asset_from_market_id(edge.market_id), raw_price_cents
                         )
                         return None  # Drop candidate - no valid price in expanded range
             except Exception:
-                # 2026-07-11: Canonical price band (10c-50c) - aligned with GlobalSlotAllocator
+                # 2026-07-12: Canonical price band (10c-75c) - aligned with GlobalSlotAllocator
                 # Previous 5-95c range was misaligned with allocator enforcement
                 raw_price_cents = int(round(market_prob * 100))
                 
-                # Check if price is within canonical range (10c-50c)
-                if 10 <= raw_price_cents <= 50:
+                # Check if price is within canonical range (10c-75c)
+                if 10 <= raw_price_cents <= 75:
                     # Price is already in valid range - use it directly
                     price_cents = raw_price_cents
                     logger.info(
-                        "[PRICE-SELECTION] asset=%s raw_price_cents=%d in canonical range [10c-50c] - using directly",
+                        "[PRICE-SELECTION] asset=%s raw_price_cents=%d in canonical range [10c-75c] - using directly",
                         self._extract_asset_from_market_id(edge.market_id), raw_price_cents
                     )
                 else:
                     # Price is outside canonical range - drop candidate (strategy.py doesn't have orderbook access)
                     logger.warning(
-                        "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside canonical range [10c-50c] - dropping candidate (no orderbook access in strategy.py)",
+                        "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside canonical range [10c-75c] - dropping candidate (no orderbook access in strategy.py)",
                         self._extract_asset_from_market_id(edge.market_id), raw_price_cents
                     )
                     return None  # Drop candidate - no valid price in expanded range

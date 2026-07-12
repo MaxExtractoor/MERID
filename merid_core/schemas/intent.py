@@ -120,8 +120,8 @@ class CanonicalOrderIntent:
         action = parts[0] if len(parts) == 2 else "buy"
         side = parts[1] if len(parts) == 2 else "yes"
         price_float = float(d.get("price", 0.5))
-        # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-50c range per commit c5ac4a18
-        price_cents = max(10, min(50, round(price_float * 100)))
+        # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-75c range (expanded for market conditions)
+        price_cents = max(10, min(75, round(price_float * 100)))
         return cls(
             ticker=d.get("market_ticker", ""),
             side=side,
