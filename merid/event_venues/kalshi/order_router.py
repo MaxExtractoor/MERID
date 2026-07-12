@@ -691,13 +691,14 @@ def resolve_window_policy(
     elif regime == "aggressive":
         min_tte_secs = 90  # 1.5 min
     
-    # Spread gate (aligned with canonical spread filter 75c)
-    # 2026-07-11: Canonical spread filter (75c) - aligned with historical requirement
-    max_spread_cents = 75  # Canonical spread filter
-    if regime == "conservative":
-        max_spread_cents = 75  # Conservative also uses 75c (standardized)
-    elif regime == "aggressive":
-        max_spread_cents = 75  # Aggressive uses standard guardrails threshold
+    # 2026-07-11: Use dynamic threshold manager for regime-aware spread thresholds
+    max_spread_cents = 75  # Fallback
+    try:
+        from merid.event_venues.kalshi.dynamic_thresholds import get_dynamic_threshold_manager
+        threshold_manager = get_dynamic_threshold_manager()
+        max_spread_cents = threshold_manager.get_max_spread_cents()
+    except Exception as e:
+        logger.debug("[order-router] Failed to load dynamic spread threshold: %s, using fallback 75c", e)
     
     return WindowResolution(
         window_id=window_id,
@@ -1640,9 +1641,13 @@ def simulate_paper_fill(
 # Global rate limiter to prevent rapid-fire execution
 _global_order_timestamps = []
 _MAX_ORDERS_PER_MINUTE = 30  # Hard cap: 30 orders per minute across all assets (increased from 10 to support 5 assets trading simultaneously)
-_MIN_SECONDS_BETWEEN_ORDERS = 0.3  # Minimum 0.3 seconds between orders (reduced from 0.5s to allow sweet spot execution while preventing rapid-fire)
+_MIN_SECONDS_BETWEEN_ORDERS = 0.1  # Minimum 0.1 seconds between orders (reduced from 0.3s for 15m market opportunity capture)
 _startup_time = _time.time()
-_MIN_STARTUP_GRACE_PERIOD = 20.0  # Minimum 20 seconds before allowing any orders (reduced from 60s for faster trading after restart)
+_MIN_STARTUP_GRACE_PERIOD = 5.0  # Minimum 5 seconds before allowing any orders (reduced from 20s for 15m market alignment)
+
+# End-to-end latency tracking (2026-07-11: added for observability)
+_e2e_latency_samples: List[float] = []
+_MAX_E2E_SAMPLES = 1000
 
 def _check_global_rate_limit() -> Optional[str]:
     """Check global rate limit to prevent rapid-fire execution.
@@ -1706,6 +1711,43 @@ def _record_successful_order() -> None:
         "[GLOBAL-RATE-LIMIT] Recorded successful order: orders_in_last_minute=%d/%d",
         len(_global_order_timestamps), _MAX_ORDERS_PER_MINUTE
     )
+
+
+def _record_e2e_latency(latency_ms: float) -> None:
+    """Record end-to-end latency for observability (2026-07-11).
+    
+    Args:
+        latency_ms: End-to-end latency in milliseconds from signal to fill confirmation
+    """
+    global _e2e_latency_samples
+    _e2e_latency_samples.append(latency_ms)
+    # Keep only last 1000 samples
+    if len(_e2e_latency_samples) > _MAX_E2E_SAMPLES:
+        _e2e_latency_samples.pop(0)
+
+
+def get_e2e_latency_stats() -> dict:
+    """Get end-to-end latency statistics (2026-07-11).
+    
+    Returns:
+        Dict with P50, P95, P99 latency in milliseconds
+    """
+    if not _e2e_latency_samples:
+        return {"p50_ms": 0, "p95_ms": 0, "p99_ms": 0, "sample_count": 0}
+    
+    sorted_samples = sorted(_e2e_latency_samples)
+    sample_count = len(sorted_samples)
+    
+    p50_idx = int(sample_count * 0.5)
+    p95_idx = int(sample_count * 0.95)
+    p99_idx = int(sample_count * 0.99)
+    
+    return {
+        "p50_ms": sorted_samples[p50_idx],
+        "p95_ms": sorted_samples[p95_idx],
+        "p99_ms": sorted_samples[p99_idx],
+        "sample_count": sample_count,
+    }
 
 
 def _check_intent_risk(intent: OrderIntent) -> Optional[str]:

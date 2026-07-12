@@ -130,26 +130,37 @@ def evaluate_dynamic_window(
     import time
     t0 = time.time()
     
-    # Load thresholds from kalshi_crypto_15m profile config
+    # 2026-07-11: Use dynamic threshold manager for regime-aware spread thresholds
     legacy_max_spread = 10  # Legacy default for audit logging
     max_spread_cents = legacy_max_spread
     min_time_to_expiry_min = 2.5  # Default fallback (150s)
     try:
-        from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
-        adapter = Crypto15mProfileAdapter()
-        if adapter and adapter.profile:
-            max_spread_cents = adapter.profile.guardrails_max_spread_cents
-            min_time_to_expiry_min = adapter.profile.guardrails_min_time_to_expiry_min
-            logger.info(
-                "[SPREAD-CONFIG] Loaded max_spread_cents=%d from profile kalshi_crypto_15m.yaml "
-                "(overriding legacy default=%d)",
-                max_spread_cents, legacy_max_spread
-            )
-    except Exception as e:
-        logger.warning(
-            "[SPREAD-CONFIG] Failed to load thresholds from kalshi_crypto_15m profile: %s, using defaults",
-            e
+        from merid.event_venues.kalshi.dynamic_thresholds import get_dynamic_threshold_manager
+        threshold_manager = get_dynamic_threshold_manager()
+        max_spread_cents = threshold_manager.get_max_spread_cents()
+        logger.info(
+            "[SPREAD-CONFIG] Using dynamic spread threshold from threshold manager: %dc (regime=%s)",
+            max_spread_cents, threshold_manager.get_regime()
         )
+    except Exception as e:
+        logger.debug("[SPREAD-CONFIG] Failed to load dynamic spread threshold: %s, using fallback %dc", e, legacy_max_spread)
+        # Fallback to profile
+        try:
+            from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
+            adapter = Crypto15mProfileAdapter()
+            if adapter and adapter.profile:
+                max_spread_cents = adapter.profile.guardrails_max_spread_cents
+                min_time_to_expiry_min = adapter.profile.guardrails_min_time_to_expiry_min
+                logger.info(
+                    "[SPREAD-CONFIG] Loaded max_spread_cents=%d from profile kalshi_crypto_15m.yaml "
+                    "(overriding legacy default=%d)",
+                    max_spread_cents, legacy_max_spread
+                )
+        except Exception as e2:
+            logger.warning(
+                "[SPREAD-CONFIG] Failed to load thresholds from kalshi_crypto_15m profile: %s, using defaults",
+                e2
+            )
     
     # Compute time metrics
     # Convert now to datetime if it's a timestamp (int/float)

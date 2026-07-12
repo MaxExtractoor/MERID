@@ -79,30 +79,24 @@ class SpreadOptimizer:
         self._calculations = 0
         self._errors = 0
         
-        # CRITICAL FIX: Read thresholds from profile for consistency
-        # Default to legacy values if profile unavailable
-        self.MAX_SPREAD_CENTS = 15  # Maximum acceptable spread for quality assessment
-        self.MIN_DEPTH_LEVELS = 2   # Minimum depth levels
-        self.MIN_LIQUIDITY_SCORE = 0.3  # Minimum liquidity score
-        
-        # Try to load from profile for consistency
+        # CRITICAL FIX: 2026-07-11 - Use dynamic threshold manager for regime-aware spread thresholds
+        # Default to legacy values if dynamic thresholds unavailable
+        self.MAX_SPREAD_CENTS = 30  # Fallback
         try:
-            from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
-            profile = Crypto15mProfileAdapter()
-            # Use guardrails.max_spread_cents for consistency (40c for coarse filtering)
-            # But keep optimizer's tighter threshold (15c) for quality assessment
-            # These serve different purposes: coarse filter vs quality metric
+            from merid.event_venues.kalshi.dynamic_thresholds import get_dynamic_threshold_manager
+            threshold_manager = get_dynamic_threshold_manager()
+            self.MAX_SPREAD_CENTS = threshold_manager.get_max_spread_cents()
             logger.info(
-                "[SPREAD-OPTIMIZER] Profile loaded: guardrails.max_spread_cents=%d (coarse filter), "
-                "optimizer.MAX_SPREAD_CENTS=%d (quality metric)",
-                profile.guardrails_max_spread_cents, self.MAX_SPREAD_CENTS
+                "[SPREAD-OPTIMIZER] Using dynamic spread threshold from threshold manager: %dc (regime=%s)",
+                self.MAX_SPREAD_CENTS, threshold_manager.get_regime()
             )
         except Exception as e:
             logger.warning(
-                "[SPREAD-OPTIMIZER] Failed to load profile: %s, using legacy defaults "
-                "(MAX_SPREAD_CENTS=%d, MIN_DEPTH_LEVELS=%d, MIN_LIQUIDITY_SCORE=%.3f)",
-                e, self.MAX_SPREAD_CENTS, self.MIN_DEPTH_LEVELS, self.MIN_LIQUIDITY_SCORE
+                "[SPREAD-OPTIMIZER] Failed to load dynamic spread threshold: %s, using fallback 30c", e
             )
+        
+        self.MIN_DEPTH_LEVELS = 2   # Minimum depth levels
+        self.MIN_LIQUIDITY_SCORE = 0.3  # Minimum liquidity score
         
         logger.info("[SPREAD-OPTIMIZER] Initialized with cache_size=%d", cache_size)
     
