@@ -36,7 +36,8 @@ class CriticConfig:
     staleness_threshold_s: float = 300.0   # 5 min
     critical_staleness_s: float = 600.0    # 10 min
     min_depth: int = 50
-    max_spread: float = 0.08               # 8 cents
+    # 2026-07-11: Updated from 0.08 (8c) to 0.30 (30c) to align with dynamic threshold system canonical default
+    max_spread: float = 0.30               # 30 cents
     check_interval_s: float = 30.0         # How often to sweep
 
 

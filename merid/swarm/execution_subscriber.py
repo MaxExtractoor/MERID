@@ -192,8 +192,9 @@ class ExecutionSubscriber:
                         if bid and ask:
                             spread = ask - bid
                             
-                            # Execute if spread is tight (<= 3 cents) or if we've waited enough
-                            if spread <= 3:
+                            # Execute if spread is tight (<= 5 cents) or if we've waited enough
+                            # 2026-07-11: Updated from 3c to 5c to align with dynamic threshold system canonical default
+                            if spread <= 5:
                                 logger.info(f"Favorable execution timing found for {market_id} (spread {spread}c)")
                                 await self._handle_decision(decision_data)
                                 del self._pending_decisions[market_id]

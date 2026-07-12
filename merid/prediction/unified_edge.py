@@ -308,18 +308,32 @@ class UnifiedEdgeComputer:
 
     def _load_max_spread_cents_from_profile(self) -> int:
         """Load max_spread_cents from profile guardrails configuration.
+        
+        2026-07-11: Use dynamic threshold manager for regime-aware spread thresholds.
+        Fallback to profile guardrails if dynamic threshold manager unavailable.
 
         Returns:
-            max_spread_cents from profile, or 100 as fallback
+            max_spread_cents from dynamic threshold manager or profile, or 30 as fallback
         """
+        # Try dynamic threshold manager first
+        try:
+            from merid.event_venues.kalshi.dynamic_thresholds import get_dynamic_threshold_manager
+            threshold_manager = get_dynamic_threshold_manager()
+            max_spread = threshold_manager.get_max_spread_cents()
+            logger.debug("[EDGE-CHECK] Using dynamic spread threshold: %dc (regime=%s)", max_spread, threshold_manager.get_regime())
+            return max_spread
+        except Exception as e:
+            logger.debug("[EDGE-CHECK] Failed to load dynamic spread threshold: %s, trying profile", e)
+        
+        # Fallback to profile guardrails
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
             profile_adapter = get_active_profile()
             if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_max_spread_cents'):
                 return profile_adapter.profile.guardrails_max_spread_cents
         except Exception as e:
-            logger.debug("[EDGE-CHECK] Failed to load max_spread_cents from profile: %s, using fallback 100c", e)
-        return 100  # Fallback to 100c if profile load fails
+            logger.debug("[EDGE-CHECK] Failed to load max_spread_cents from profile: %s, using fallback 30c", e)
+        return 30  # Fallback to 30c (canonical default) if all else fails
 
     def compute_spread_pct(self, contract: ContractState) -> Optional[float]:
         """
@@ -707,22 +721,31 @@ class UnifiedEdgeComputer:
         # Even if edge is positive, reject if spread is too wide for the given edge
         if spread_cents is not None:
             # Get max spread for edge from profile
-            max_spread_for_edge = 30  # Default fallback (2026-07-10: OPTIMIZED to 30c - harmonizes with 10c-50c entry price sweet spot)
+            # 2026-07-11: Use dynamic threshold manager for regime-aware spread thresholds
+            max_spread_for_edge = 30  # Default fallback (canonical default)
             try:
-                from merid.risk.profiles.crypto_15m_profile import get_active_profile
-                profile_adapter = get_active_profile()
-                if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_max_spread_for_edge'):
-                    edge_pct_map = profile_adapter.profile.guardrails_max_spread_for_edge
-                    # Convert net_edge_cents to percentage for lookup
-                    edge_pct = edge_result.net_edge_cents
-                    if edge_pct < 1.0:
-                        max_spread_for_edge = edge_pct_map.get("1.0", 5)
-                    elif edge_pct < 2.0:
-                        max_spread_for_edge = edge_pct_map.get("2.0", 10)
-                    else:
-                        max_spread_for_edge = edge_pct_map.get("default", 10)  # 2026-07-09 optimized from 20c
+                from merid.event_venues.kalshi.dynamic_thresholds import get_dynamic_threshold_manager
+                threshold_manager = get_dynamic_threshold_manager()
+                max_spread_for_edge = threshold_manager.get_max_spread_cents()
+                logger.debug("[EDGE-CHECK] Using dynamic spread threshold for edge check: %dc (regime=%s)", max_spread_for_edge, threshold_manager.get_regime())
             except Exception as e:
-                logger.debug("[EDGE-CHECK] Failed to load max_spread_for_edge from profile: %s, using default 10c", e)
+                logger.debug("[EDGE-CHECK] Failed to load dynamic spread threshold: %s, trying profile", e)
+                # Fallback to profile guardrails
+                try:
+                    from merid.risk.profiles.crypto_15m_profile import get_active_profile
+                    profile_adapter = get_active_profile()
+                    if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_max_spread_for_edge'):
+                        edge_pct_map = profile_adapter.profile.guardrails_max_spread_for_edge
+                        # Convert net_edge_cents to percentage for lookup
+                        edge_pct = edge_result.net_edge_cents
+                        if edge_pct < 1.0:
+                            max_spread_for_edge = edge_pct_map.get("1.0", 5)
+                        elif edge_pct < 2.0:
+                            max_spread_for_edge = edge_pct_map.get("2.0", 10)
+                        else:
+                            max_spread_for_edge = edge_pct_map.get("default", 10)
+                except Exception as e2:
+                    logger.debug("[EDGE-CHECK] Failed to load max_spread_for_edge from profile: %s, using default 30c", e2)
             
             if spread_cents > max_spread_for_edge:
                 return EdgeCheckResult(

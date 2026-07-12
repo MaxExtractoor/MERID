@@ -433,8 +433,11 @@ class KalshiMarketState:
     # Liquidity audit fields (for MD-HEALTH logging and validation)
     has_bid: bool = False  # whether bid side exists
     has_ask: bool = False  # whether ask side exists
-    min_depth_yes: int = 0  # depth on yes side at best bid
-    min_depth_no: int = 0  # depth on no side at best ask
+    min_depth_yes: int = 0  # depth on yes side at best bid (single-level)
+    min_depth_no: int = 0  # depth on no side at best ask (single-level)
+    depth_10c_yes: int = 0  # window-based depth on yes side (±10c of mid)
+    depth_10c_no: int = 0  # window-based depth on no side (±10c of mid, YES-equivalent)
+    depth_10c: int = 0  # total window-based depth (YES + NO)
     last_update_ts: float = 0.0  # monotonic timestamp of last update
     
     # Aliases for backward compatibility (OBI filter uses these names)
@@ -538,7 +541,8 @@ class KalshiMarketState:
         # Constants for health thresholds
         _MAX_WS_AGE_SECONDS = 5.0  # 5 seconds for transport stale
         _MAX_REST_AGE_SECONDS = 60.0  # 60 seconds for REST stale
-        _SPREAD_THRESHOLD_CENTS = 15  # 15 cents for illiquid threshold
+        # 2026-07-11: Use dynamic threshold manager for regime-aware spread thresholds
+        _SPREAD_THRESHOLD_CENTS = 30  # 30 cents for illiquid threshold (canonical default)
         _DUALITY_EPSILON_CENTS = 2  # 2 cents tolerance for YES+NO sums
         
         # Transport health check

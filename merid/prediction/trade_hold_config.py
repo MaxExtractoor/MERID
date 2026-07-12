@@ -107,7 +107,7 @@ class RiskThresholds:
     max_order_size: int = 0  # 0 = derive from allocation%
     min_post_fee_edge: Decimal = Decimal("0.02")  # ALIGNED TO 2026 INDUSTRY STANDARD: 2% min edge after fees
     tick_size_cents: int = 1
-    max_spread_cents: int = 10
+    max_spread_cents: int = 30  # 2026-07-11: Updated from 10c to 30c to align with dynamic threshold system canonical default
     max_slippage_cents: int = 3
     min_depth_contracts: int = 1
 

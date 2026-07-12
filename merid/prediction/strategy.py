@@ -152,7 +152,8 @@ class StrategyConfig:
     min_depth_contracts: int = 5                      # Min depth at best price
 
     # Market Making
-    mm_max_spread_cents: Decimal = Decimal("10")     # Don't quote if spread > 10c
+    # 2026-07-11: Updated mm_max_spread_cents from 10c to 30c to align with dynamic threshold system canonical default
+    mm_max_spread_cents: Decimal = Decimal("30")     # Don't quote if spread > 30c
     mm_target_spread_cents: Decimal = Decimal("2")   # Try to quote 2c spread
     mm_inventory_limit: int = 50                     # Max contracts to hold per side
     mm_skew_factor: Decimal = Decimal("0.5")         # How much to lean based on inventory

@@ -28,7 +28,8 @@ profiles:
     vol_breakout_neutral_low: ${MERID_PM_VOL_BREAKOUT_LOW:-35}
     vol_breakout_neutral_high: ${MERID_PM_VOL_BREAKOUT_HIGH:-65}
     # MM (15m crypto — standard quotes; ENV-DRIVEN)
-    mm_max_spread_cents: ${MERID_PM_MM_MAX_SPREAD_CENTS:-10}
+    # 2026-07-11: Updated default from 10c to 30c to align with dynamic threshold system canonical default
+    mm_max_spread_cents: ${MERID_PM_MM_MAX_SPREAD_CENTS:-30}
     mm_target_spread_cents: ${MERID_PM_MM_TARGET_SPREAD_CENTS:-2}
     mm_inventory_limit: ${MERID_PM_MM_INVENTORY_LIMIT:-50}
   production:
@@ -44,7 +45,8 @@ profiles:
     vol_breakout_neutral_low: ${MERID_PM_VOL_BREAKOUT_LOW:-35}
     vol_breakout_neutral_high: ${MERID_PM_VOL_BREAKOUT_HIGH:-65}
     # MM (15m crypto — standard quotes; ENV-DRIVEN)
-    mm_max_spread_cents: ${MERID_PM_MM_MAX_SPREAD_CENTS:-10}
+    # 2026-07-11: Updated default from 10c to 30c to align with dynamic threshold system canonical default
+    mm_max_spread_cents: ${MERID_PM_MM_MAX_SPREAD_CENTS:-30}
     mm_target_spread_cents: ${MERID_PM_MM_TARGET_SPREAD_CENTS:-2}
     mm_inventory_limit: ${MERID_PM_MM_INVENTORY_LIMIT:-50}
   crypto_low_edge_dev:

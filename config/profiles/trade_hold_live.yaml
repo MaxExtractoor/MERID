@@ -52,7 +52,8 @@ risk:
   max_orders_per_hour: 60
   min_post_fee_edge: 0.02    # 2% post-fee edge minimum
   tick_size_cents: 1
-  max_spread_cents: 8        # Tighter spread tolerance
+  # 2026-07-11: Updated from 8c to 30c to align with dynamic threshold system canonical default
+  max_spread_cents: 30
   max_slippage_cents: 2
   min_depth_contracts: 1
 

@@ -88,7 +88,8 @@ risk:
   max_orders_per_hour: 200      # Rate limit (not bankroll-scaled)
   min_post_fee_edge: 0.01        # Minimum post-fee edge (fraction)
   tick_size_cents: 1
-  max_spread_cents: 10
+  # 2026-07-11: Updated from 10c to 30c to align with dynamic threshold system canonical default
+  max_spread_cents: 30
   max_slippage_cents: 3
   min_depth_contracts: 1
 

@@ -105,13 +105,25 @@ class ThresholdConfig:
             self._config = yaml.safe_load(f)
     
     def get_spread_threshold(self, asset: str) -> SpreadThresholds:
-        """Get spread thresholds for an asset."""
-        spread_config = self._config.get("spread_thresholds", {})
-        asset_config = spread_config.get(asset, spread_config.get("default", {}))
+        """Get spread thresholds for an asset.
         
-        return SpreadThresholds(
-            max_spread_cents=asset_config.get("max_spread_cents", 5)
-        )
+        2026-07-11: Use dynamic threshold manager for regime-aware spread thresholds.
+        Fallback to config file if dynamic threshold manager unavailable.
+        """
+        # Try dynamic threshold manager first
+        try:
+            from merid.event_venues.kalshi.dynamic_thresholds import get_dynamic_threshold_manager
+            threshold_manager = get_dynamic_threshold_manager()
+            max_spread = threshold_manager.get_max_spread_cents()
+            return SpreadThresholds(max_spread_cents=max_spread)
+        except Exception:
+            # Fallback to config file
+            spread_config = self._config.get("spread_thresholds", {})
+            asset_config = spread_config.get(asset, spread_config.get("default", {}))
+            
+            return SpreadThresholds(
+                max_spread_cents=asset_config.get("max_spread_cents", 30)  # Canonical default
+            )
     
     def get_extreme_price_threshold(self, asset: str) -> ExtremePriceThresholds:
         """Get extreme price thresholds for an asset."""

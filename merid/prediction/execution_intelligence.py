@@ -59,8 +59,9 @@ class ExecutionDecision:
 
 
 # Thresholds
-_NARROW_SPREAD = 0.03    # 3 cents — cheap to cross
-_WIDE_SPREAD = 0.08      # 8 cents — expensive to cross
+# 2026-07-11: Updated spread thresholds to align with dynamic threshold system canonical default
+_NARROW_SPREAD = 0.05    # 5 cents — cheap to cross (updated from 3c)
+_WIDE_SPREAD = 0.30      # 30 cents — expensive to cross (updated from 8c, canonical default)
 _HIGH_EDGE = 0.0175      # 1.75% edge — worth crossing for (ALIGNED TO 2026 MOLTBOOK RESEARCH)
 _URGENT_MINUTES = 30.0   # < 30 min = urgent
 _DEEP_QUEUE = 200        # > 200 contracts at touch = long wait

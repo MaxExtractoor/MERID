@@ -126,7 +126,8 @@ class MarketMakerIntegration:
     }
     
     # Signal-based spread adjustments
-    MAX_SPREAD_WIDENING = 3  # Cents to add in defensive/crisis
+    # 2026-07-11: Updated from 3c to 5c to align with dynamic threshold system canonical default
+    MAX_SPREAD_WIDENING = 5  # Cents to add in defensive/crisis
     
     # BUG-FIX: Made configurable constants for skew calculations (were hardcoded)
     MACRO_SKEW_MULTIPLIER = 5  # Contracts multiplier for macro conviction
