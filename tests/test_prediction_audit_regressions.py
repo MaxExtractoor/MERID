@@ -9,7 +9,7 @@ Bug IDs map to the audit report tickets:
   BUG-01  Wire PaperLadder tier → PredictionRiskConfig notional caps
   BUG-02  Per-agent notional enforcement in check_order()
   BUG-03  Link PaperLadder + PaperSession into single paper→live gate
-  BUG-04  Enforce cutoff_minutes_before_expiry >= 2
+  BUG-04  Enforce cutoff_minutes_before_expiry >= 0 (changed from >= 2)
   BUG-05  Fix arb side='both' to place both YES and NO legs
   BUG-06  Deduct fees from realized PnL in record_close()
   BUG-07  Settlement price override in record_close() for SETTLED_YES/NO
@@ -304,7 +304,7 @@ class TestBUG03_LadderSessionGate:
 
 
 # =============================================================================
-# BUG-04 — cutoff_minutes_before_expiry >= 2 enforced
+# BUG-04 — cutoff_minutes_before_expiry >= 0 enforced (changed from >= 2)
 # =============================================================================
 
 class TestBUG04_CutoffMinimum:
@@ -315,38 +315,52 @@ class TestBUG04_CutoffMinimum:
             "BUG-04: _MIN_CUTOFF_MINUTES constant not found in agent_grid_config.py"
         )
 
-    def test_min_cutoff_value_is_2(self):
-        from merid.prediction.agent_grid_config import _MIN_CUTOFF_MINUTES
-        assert _MIN_CUTOFF_MINUTES == 2, (
-            f"BUG-04: _MIN_CUTOFF_MINUTES should be 2, got {_MIN_CUTOFF_MINUTES}"
-        )
+    def test_min_cutoff_value_is_0(self):
+        import os
+        import importlib
+        # Clear environment variable to test default
+        original_value = os.environ.pop("SCALPER15M_MIN_CUTOFF_MINUTES", None)
+        try:
+            # Reload module to pick up change
+            import merid.prediction.agent_grid_config
+            importlib.reload(merid.prediction.agent_grid_config)
+            from merid.prediction.agent_grid_config import _MIN_CUTOFF_MINUTES
+            # The default in code is 0, but environment may override
+            # This test verifies the default is 0 when env var is not set
+            assert _MIN_CUTOFF_MINUTES == 0, (
+                f"BUG-04: _MIN_CUTOFF_MINUTES should be 0 when env var not set, got {_MIN_CUTOFF_MINUTES}"
+            )
+        finally:
+            # Restore original value
+            if original_value is not None:
+                os.environ["SCALPER15M_MIN_CUTOFF_MINUTES"] = original_value
 
-    def test_parse_entry_window_clamps_cutoff_below_2(self):
+    def test_parse_entry_window_allows_cutoff_0(self):
         from merid.prediction.agent_grid_config import _parse_entry_window
         ew = _parse_entry_window({"minutes_before_expiry": 10, "cutoff_minutes_before_expiry": 0})
-        assert ew.cutoff_minutes_before_expiry == 2, (
-            f"BUG-04: cutoff=0 should be clamped to 2, got {ew.cutoff_minutes_before_expiry}"
+        assert ew.cutoff_minutes_before_expiry == 0, (
+            f"BUG-04: cutoff=0 should be allowed, got {ew.cutoff_minutes_before_expiry}"
         )
 
-    def test_parse_entry_window_clamps_cutoff_of_1(self):
+    def test_parse_entry_window_allows_cutoff_1(self):
         from merid.prediction.agent_grid_config import _parse_entry_window
         ew = _parse_entry_window({"minutes_before_expiry": 5, "cutoff_minutes_before_expiry": 1})
-        assert ew.cutoff_minutes_before_expiry == 2, (
-            f"BUG-04: cutoff=1 should be clamped to 2, got {ew.cutoff_minutes_before_expiry}"
+        assert ew.cutoff_minutes_before_expiry == 1, (
+            f"BUG-04: cutoff=1 should be allowed, got {ew.cutoff_minutes_before_expiry}"
         )
 
-    def test_parse_entry_window_preserves_cutoff_above_2(self):
+    def test_parse_entry_window_preserves_cutoff_above_0(self):
         from merid.prediction.agent_grid_config import _parse_entry_window
         ew = _parse_entry_window({"minutes_before_expiry": 30, "cutoff_minutes_before_expiry": 5})
         assert ew.cutoff_minutes_before_expiry == 5, (
             f"BUG-04: cutoff=5 should be preserved, got {ew.cutoff_minutes_before_expiry}"
         )
 
-    def test_parse_entry_window_default_is_2(self):
+    def test_parse_entry_window_default_is_0(self):
         from merid.prediction.agent_grid_config import _parse_entry_window
         ew = _parse_entry_window({})
-        assert ew.cutoff_minutes_before_expiry == 2, (
-            f"BUG-04: default cutoff should be 2, got {ew.cutoff_minutes_before_expiry}"
+        assert ew.cutoff_minutes_before_expiry == 0, (
+            f"BUG-04: default cutoff should be 0, got {ew.cutoff_minutes_before_expiry}"
         )
 
 

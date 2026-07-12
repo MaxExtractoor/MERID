@@ -390,6 +390,15 @@ class TestThreadSafety:
 class TestCooldown:
     """Rejection cooldown behavior."""
 
+    def test_default_cooldown_values(self):
+        """Test that default cooldown values match 15m alignment (2026-07-11)."""
+        reset_execution_queue()
+        queue = get_execution_queue()
+        
+        # Verify default cooldown values for 15m market alignment
+        assert queue._cooldown_seconds == 5.0, "Default rejection cooldown should be 5s (2026-07-11: reduced from 30s)"
+        assert queue._pending_timeout == 15.0, "Default pending timeout should be 15s (2026-07-11: reduced from 30s)"
+
     def test_cooldown_blocks_reentry(self):
         reset_execution_queue()
         queue = get_execution_queue(

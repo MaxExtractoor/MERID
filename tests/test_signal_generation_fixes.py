@@ -117,8 +117,8 @@ def test_warmup_requirements_reduced():
     stack = Crypto15mIndicatorStack(config=cfg)
     
     # Verify min_bars_cold_start is lower than min_bars_required
-    assert cfg.min_bars_cold_start == 10
-    assert cfg.min_bars_required == 52
+    assert cfg.min_bars_cold_start == 1
+    assert cfg.min_bars_required == 20
     
     # Feed only 10 bars (cold start threshold)
     for i in range(10):
@@ -135,26 +135,26 @@ def test_warmup_requirements_reduced():
 
 # Test 6: Verify MACD dead zone is disabled during warmup
 def test_macd_dead_zone_disabled_warmup():
-    """Test that MACD dead zone is disabled when bars_available < 52."""
+    """Test that MACD dead zone is disabled when bars_available < 20."""
     from merid.signals.crypto_15m_indicators import Crypto15mIndicatorStack, IndicatorConfig
     
     # Create stack with kalshi_mode enabled
     cfg = IndicatorConfig(asset="BTC", kalshi_mode=True)
     stack = Crypto15mIndicatorStack(config=cfg)
     
-    # Feed only 20 bars (warmup mode)
-    for i in range(20):
+    # Feed only 15 bars (warmup mode)
+    for i in range(15):
         stack.update(87450.0 + i * 10)
     
     # Get snapshot
     snap = stack.snapshot()
     
-    # Verify bars_available < 52
-    assert snap.bars_available == 20
+    # Verify bars_available < 20
+    assert snap.bars_available == 15
     
     # In agent_grid_15m.py, this should trigger dead zone = 0.0
     # This test verifies the condition check
-    assert snap.bars_available < 52
+    assert snap.bars_available < 20
 
 
 # Test 7: Verify velocity thresholds are reasonable

@@ -118,7 +118,7 @@ class TickerExecutionState:
     fill_time: Optional[float] = None
     close_time: Optional[float] = None
     last_rejection_time: Optional[float] = None
-    rejection_cooldown_seconds: float = 30.0
+    rejection_cooldown_seconds: float = 5.0
     total_enqueued: int = 0
     total_executed: int = 0
     total_rejected: int = 0
@@ -139,8 +139,8 @@ class TopEdgeExecutionQueue:
     def __init__(
         self,
         max_queue_size: int = 100,
-        pending_timeout_seconds: float = 30.0,
-        cooldown_after_rejection_seconds: float = 30.0,
+        pending_timeout_seconds: float = 15.0,
+        cooldown_after_rejection_seconds: float = 5.0,
     ):
         self._max_size = max_queue_size
         self._pending_timeout = pending_timeout_seconds
@@ -456,8 +456,8 @@ _execution_queue_lock = threading.Lock()
 
 def get_execution_queue(
     max_queue_size: int = 100,
-    pending_timeout_seconds: float = 30.0,
-    cooldown_after_rejection_seconds: float = 30.0,
+    pending_timeout_seconds: float = 15.0,
+    cooldown_after_rejection_seconds: float = 5.0,
 ) -> TopEdgeExecutionQueue:
     """Get or create the global execution queue singleton."""
     global _execution_queue

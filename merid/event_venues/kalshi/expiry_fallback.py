@@ -14,6 +14,9 @@ import re
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from utils.logger import get_logger
+
+logger = get_logger("expiry_fallback")
 
 try:
     from zoneinfo import ZoneInfo
@@ -60,24 +63,33 @@ def _infer_15m_window_end_utc(ticker: str) -> Optional[datetime]:
         day = int(dd_s)
         hh = int(hhmm_s) // 100
         mm = int(hhmm_s) % 100
-        # CRITICAL FIX: The time in the ticker is in Eastern Time (America/New_York), not UTC
-        # The ticker format is KXBTC15M-26JUN140215-15 where 0215 is 02:15 ET
-        # We need to parse it as ET and convert to UTC
+        
+        # CRITICAL FIX: The ticker format is KXBTC15M-26JUL111200-00 where the time is the END time in Eastern Time
+        # The ticker represents the window END time (expiry), not the start time
+        # For example: KXBTC15M-26JUL111200-00 means the market closes at 12:00 ET on July 11, 2026
+        # The market runs for 15 minutes BEFORE this time (11:45-12:00 ET)
+        # This is confirmed by API data: KXDOGE15M-26JUL111200-00 has close_time=2026-07-11T16:00:00Z
+        # Ticker time 1200 ET = 16:00 UTC, which matches API close_time exactly
+        
         if _ET:
-            start_et = datetime(year, month, day, hh, mm, tzinfo=_ET)
-            start_utc = start_et.astimezone(timezone.utc)
+            end_et = datetime(year, month, day, hh, mm, tzinfo=_ET)
+            end_utc = end_et.astimezone(timezone.utc)
         else:
             # Fallback if ZoneInfo not available (treat as UTC, but this is incorrect)
-            start_utc = datetime(year, month, day, hh, mm, tzinfo=timezone.utc)
+            end_utc = datetime(year, month, day, hh, mm, tzinfo=timezone.utc)
     except (ValueError, TypeError):
         return None
-    end_utc = start_utc + timedelta(minutes=15)
+    
+    # CRITICAL FIX: The ticker time IS the expiry time (window end)
+    # No need to add 15 minutes - the ticker already represents the window end
+    # end_utc = end_utc  # (already set above)
+    
     # DEBUG: Log inferred expiry for debugging
     import logging
     logger = logging.getLogger(__name__)
     logger.info(
-        "[EXPIRY-FALLBACK] ticker=%s parsed: %s-%02d-%02d %02d:%02d ET → start_utc=%s end_utc=%s",
-        ticker, year, month, day, hh, mm, start_utc, end_utc
+        "[EXPIRY-FALLBACK] ticker=%s parsed: %s-%02d-%02d %02d:%02d ET → end_utc=%s (ticker time IS expiry)",
+        ticker, year, month, day, hh, mm, end_utc
     )
     return end_utc
 
@@ -113,14 +125,16 @@ def apply_crypto_interval_expiry_fallback(m: EventMarket, now: datetime) -> Even
     if cur is not None and cur.tzinfo is None:
         cur = cur.replace(tzinfo=timezone.utc)
     
-    # Check if existing end_date is reasonable (not in the distant past or future)
+    # Check if existing end_date is reasonable (not in the distant past)
     if cur is not None:
         now_utc = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
         time_diff = (cur - now_utc).total_seconds()
-        # If end_date is within reasonable bounds (e.g., -1 hour to +24 hours), trust it
-        if -3600 <= time_diff <= 86400:
-            logger.debug("[EXPIRY-FALLBACK] Skipping - API end_date is reasonable: ticker=%s end_date=%s", 
-                        m.market_id, cur)
+        # If end_date is in the future (positive time_diff), trust it regardless of magnitude
+        # If end_date is in the past but within -1 hour (recently expired), also trust it
+        # Only replace if end_date is in the distant past (more than 1 hour ago)
+        if time_diff >= -3600:
+            logger.debug("[EXPIRY-FALLBACK] Skipping - API end_date is reasonable: ticker=%s end_date=%s time_diff=%s",
+                        m.market_id, cur, time_diff)
             return m
     
     # Only use ticker inference if API fields are missing or unreasonable

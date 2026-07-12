@@ -120,9 +120,8 @@ class CanonicalOrderIntent:
         action = parts[0] if len(parts) == 2 else "buy"
         side = parts[1] if len(parts) == 2 else "yes"
         price_float = float(d.get("price", 0.5))
-        # CRITICAL FIX: Clamp to 55-75 cents to prevent extreme purchases
-        # This aligns with kalshi_crypto_15m_v2.yaml price_range [55, 75]
-        price_cents = max(55, min(75, round(price_float * 100)))
+        # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-50c range per commit c5ac4a18
+        price_cents = max(10, min(50, round(price_float * 100)))
         return cls(
             ticker=d.get("market_ticker", ""),
             side=side,

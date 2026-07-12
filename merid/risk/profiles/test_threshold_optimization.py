@@ -405,7 +405,7 @@ class TestThresholdOptimization:
             asset_max_notional_usd={'BTC': 1.0, 'ETH': 1.0, 'SOL': 1.0, 'XRP': 1.0, 'DOGE': 1.0},  # Fixed $1 per asset
             asset_depth_thresholds={'BTC': 1.0, 'ETH': 1.0, 'SOL': 1.0, 'XRP': 1.0, 'DOGE': 1.0},
             agent_max_notional_usd=1.0,  # Fixed $1 exposure
-            agent_max_orders_per_window=12,
+            agent_max_orders_per_window=24,  # 2026-07-11: updated to 24 for 15m alignment
             agent_max_yes_position=5,
             agent_max_no_position=5,
             max_cycle_risk_pct=0.0,  # DISABLED - fixed $1 model
@@ -450,7 +450,7 @@ class TestThresholdOptimization:
             asset_max_notional_usd={'BTC': 1.0, 'ETH': 1.0, 'SOL': 1.0, 'XRP': 1.0, 'DOGE': 1.0},  # Fixed $1 per asset
             asset_depth_thresholds={'BTC': 1.0, 'ETH': 1.0, 'SOL': 1.0, 'XRP': 1.0, 'DOGE': 1.0},
             agent_max_notional_usd=1.0,  # Fixed $1 exposure
-            agent_max_orders_per_window=12,
+            agent_max_orders_per_window=24,  # 2026-07-11: updated to 24 for 15m alignment
             agent_max_yes_position=5,
             agent_max_no_position=5,
             max_cycle_risk_pct=0.0,  # DISABLED - fixed $1 model
@@ -495,7 +495,7 @@ class TestThresholdOptimization:
             asset_max_notional_usd={'BTC': 1.0, 'ETH': 1.0, 'SOL': 1.0, 'XRP': 1.0, 'DOGE': 1.0},  # Fixed $1 per asset
             asset_depth_thresholds={'BTC': 1.0, 'ETH': 1.0, 'SOL': 1.0, 'XRP': 1.0, 'DOGE': 1.0},
             agent_max_notional_usd=1.0,  # Fixed $1 exposure
-            agent_max_orders_per_window=12,
+            agent_max_orders_per_window=24,  # 2026-07-11: updated to 24 for 15m alignment
             agent_max_yes_position=5,
             agent_max_no_position=5,
             max_cycle_risk_pct=0.0,  # DISABLED - fixed $1 model

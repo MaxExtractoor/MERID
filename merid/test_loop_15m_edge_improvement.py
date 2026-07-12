@@ -41,18 +41,19 @@ class TestEdgeImprovementThreshold:
         
         should_execute = False
         if has_position:
-            if current_best_edge > 0:
-                # Relative improvement logic
-                edge_improvement_ratio = (edge - current_best_edge) / current_best_edge
+            if abs(current_best_edge) > 0:
+                # Relative improvement logic (using abs for negative edges)
+                edge_improvement_ratio = (abs(edge) - abs(current_best_edge)) / abs(current_best_edge)
                 edge_improvement_threshold = 0.20
                 if edge_improvement_ratio > edge_improvement_threshold:
                     should_execute = True
             else:
                 # No current best edge (first signal with position)
-                if edge > min_edge_threshold:
+                # CRITICAL FIX: Use abs(edge) since edge = p_model - p_market can be negative
+                if abs(edge) > min_edge_threshold:
                     should_execute = True
         
-        assert should_execute is True, "First signal with position should execute when edge > min_threshold"
+        assert should_execute is True, "First signal with position should execute when abs(edge) > min_threshold"
     
     def test_first_signal_below_threshold_skips(self, mock_loop):
         """Test that first signal with position skips if edge is below minimum threshold."""
@@ -64,16 +65,17 @@ class TestEdgeImprovementThreshold:
         
         should_execute = False
         if has_position:
-            if current_best_edge > 0:
-                edge_improvement_ratio = (edge - current_best_edge) / current_best_edge
+            if abs(current_best_edge) > 0:
+                edge_improvement_ratio = (abs(edge) - abs(current_best_edge)) / abs(current_best_edge)
                 edge_improvement_threshold = 0.20
                 if edge_improvement_ratio > edge_improvement_threshold:
                     should_execute = True
             else:
-                if edge > min_edge_threshold:
+                # CRITICAL FIX: Use abs(edge) since edge = p_model - p_market can be negative
+                if abs(edge) > min_edge_threshold:
                     should_execute = True
         
-        assert should_execute is False, "First signal with position should skip when edge < min_threshold"
+        assert should_execute is False, "First signal with position should skip when abs(edge) < min_threshold"
     
     def test_relative_improvement_executes(self, mock_loop):
         """Test that signal executes if it provides >20% relative improvement over current best."""
@@ -85,8 +87,9 @@ class TestEdgeImprovementThreshold:
         
         should_execute = False
         if has_position:
-            if current_best_edge > 0:
-                edge_improvement_ratio = (edge - current_best_edge) / current_best_edge
+            if abs(current_best_edge) > 0:
+                # CRITICAL FIX: Use abs(edge) since edge = p_model - p_market can be negative
+                edge_improvement_ratio = (abs(edge) - abs(current_best_edge)) / abs(current_best_edge)
                 edge_improvement_threshold = 0.20
                 if edge_improvement_ratio > edge_improvement_threshold:
                     should_execute = True
@@ -104,8 +107,9 @@ class TestEdgeImprovementThreshold:
         
         should_execute = False
         if has_position:
-            if current_best_edge > 0:
-                edge_improvement_ratio = (edge - current_best_edge) / current_best_edge
+            if abs(current_best_edge) > 0:
+                # CRITICAL FIX: Use abs(edge) since edge = p_model - p_market can be negative
+                edge_improvement_ratio = (abs(edge) - abs(current_best_edge)) / abs(current_best_edge)
                 edge_improvement_threshold = 0.20
                 if edge_improvement_ratio > edge_improvement_threshold:
                     should_execute = True
@@ -123,10 +127,11 @@ class TestEdgeImprovementThreshold:
         
         should_execute = False
         if not has_position:
-            if edge > min_edge_threshold or edge > current_best_edge:
+            # CRITICAL FIX: Use abs(edge) since edge = p_model - p_market can be negative
+            if abs(edge) > min_edge_threshold or abs(edge) > abs(current_best_edge):
                 should_execute = True
         
-        assert should_execute is True, "Signal with no position should execute when edge > min_threshold"
+        assert should_execute is True, "Signal with no position should execute when abs(edge) > min_threshold"
     
     def test_velocity_signal_edges_are_tiny(self, mock_loop):
         """Test that velocity-based signals have tiny edges (0.01-0.07%)."""
@@ -161,9 +166,50 @@ class TestEdgeImprovementThreshold:
         min_edge_threshold = 0.0001
         
         for edge in velocity_edges:
-            # First signal with position: edge > min_threshold
-            would_execute_new = edge > min_edge_threshold
+            # First signal with position: abs(edge) > min_threshold
+            would_execute_new = abs(edge) > min_edge_threshold
             assert would_execute_new is True, f"New logic should allow velocity edge {edge}%"
+
+    def test_negative_edge_executes_with_abs_comparison(self, mock_loop):
+        """Test that negative edges execute when using abs() comparison.
+        
+        This is the critical fix: edge = p_model - p_market can be negative when
+        model disagrees with market. These are valid contrarian signals and should
+        execute based on magnitude, not direction.
+        """
+        asset = "BTC"
+        edge = -0.15  # -15% edge (model disagrees with market)
+        current_best_edge = 0.0
+        min_edge_threshold = 0.0001
+        has_position = False
+        
+        should_execute = False
+        if not has_position:
+            # CRITICAL FIX: Use abs(edge) since edge = p_model - p_market can be negative
+            if abs(edge) > min_edge_threshold or abs(edge) > abs(current_best_edge):
+                should_execute = True
+        
+        assert should_execute is True, "Negative edge should execute when abs(edge) > min_threshold"
+
+    def test_negative_edge_improvement_with_abs_comparison(self, mock_loop):
+        """Test that negative edges can improve on current best using abs() comparison."""
+        asset = "BTC"
+        edge = -0.20  # -20% edge (stronger disagreement)
+        current_best_edge = -0.15  # -15% current best
+        min_edge_threshold = 0.0001
+        has_position = True
+        
+        should_execute = False
+        if has_position:
+            if abs(current_best_edge) > 0:
+                # CRITICAL FIX: Use abs(edge) since edge = p_model - p_market can be negative
+                edge_improvement_ratio = (abs(edge) - abs(current_best_edge)) / abs(current_best_edge)
+                edge_improvement_threshold = 0.20
+                if edge_improvement_ratio > edge_improvement_threshold:
+                    should_execute = True
+        
+        # 0.20 - 0.15 = 0.05, 0.05 / 0.15 = 0.33 (33% improvement, >20% threshold)
+        assert should_execute is True, "Negative edge should execute with >20% relative improvement"
 
 
 class TestEdgeImprovementIntegration:
@@ -220,8 +266,9 @@ class TestEdgeImprovementIntegration:
         for candidate in sample_candidates:
             assert "edge" in candidate, "Candidate should have 'edge' field"
             assert "edge_pct" in candidate, "Candidate should have 'edge_pct' field"
-            assert candidate["edge"] > 0, "Edge should be positive"
-            assert candidate["edge_pct"] > 0, "Edge percentage should be positive"
+            # CRITICAL FIX: Edge can be negative (p_model - p_market), so check abs() instead
+            assert abs(candidate["edge"]) > 0, "Edge magnitude should be positive"
+            assert abs(candidate["edge_pct"]) > 0, "Edge percentage magnitude should be positive"
 
 
 if __name__ == "__main__":

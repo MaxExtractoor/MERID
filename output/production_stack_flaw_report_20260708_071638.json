@@ -1,0 +1,128 @@
+{
+  "summary": {
+    "total_flaws": 2,
+    "total_tests": 9,
+    "total_duration_seconds": 12.58,
+    "passed_tests": 9,
+    "failed_tests": 0
+  },
+  "severity_breakdown": {
+    "MEDIUM": 2
+  },
+  "category_breakdown": {
+    "RESILIENCE": 1,
+    "LATENCY": 1
+  },
+  "layer_breakdown": {
+    "END_TO_END": 2
+  },
+  "test_results": [
+    {
+      "test_name": "Upstream Configuration",
+      "passed": true,
+      "duration_ms": 172.54,
+      "flaw_count": 0,
+      "flaws": []
+    },
+    {
+      "test_name": "Midstream Risk Envelope",
+      "passed": true,
+      "duration_ms": 5348.89,
+      "flaw_count": 0,
+      "flaws": []
+    },
+    {
+      "test_name": "Downstream Sizing",
+      "passed": true,
+      "duration_ms": 163.5,
+      "flaw_count": 0,
+      "flaws": []
+    },
+    {
+      "test_name": "End-to-End Data Flow",
+      "passed": true,
+      "duration_ms": 5303.84,
+      "flaw_count": 0,
+      "flaws": []
+    },
+    {
+      "test_name": "Resilience",
+      "passed": true,
+      "duration_ms": 10.62,
+      "flaw_count": 1,
+      "flaws": [
+        {
+          "category": "RESILIENCE",
+          "severity": "MEDIUM",
+          "layer": "END_TO_END",
+          "component": "Disaster Recovery",
+          "description": "Disaster recovery implementation not found",
+          "evidence": "ImportError when importing recovery.disaster_recovery",
+          "recommendation": "Implement disaster recovery procedures",
+          "timestamp": "2026-07-08T07:16:36.834855+00:00"
+        }
+      ]
+    },
+    {
+      "test_name": "Latency Performance",
+      "passed": true,
+      "duration_ms": 11.39,
+      "flaw_count": 1,
+      "flaws": [
+        {
+          "category": "LATENCY",
+          "severity": "MEDIUM",
+          "layer": "END_TO_END",
+          "component": "Latency Monitoring",
+          "description": "Latency monitoring implementation not found",
+          "evidence": "ImportError when importing monitoring.brier_metrics",
+          "recommendation": "Implement latency monitoring for performance tracking",
+          "timestamp": "2026-07-08T07:16:36.840290+00:00"
+        }
+      ]
+    },
+    {
+      "test_name": "Asset Tracking",
+      "passed": true,
+      "duration_ms": 62.48,
+      "flaw_count": 0,
+      "flaws": []
+    },
+    {
+      "test_name": "Computational Load",
+      "passed": true,
+      "duration_ms": 1135.57,
+      "flaw_count": 0,
+      "flaws": []
+    },
+    {
+      "test_name": "Consistency Across Layers",
+      "passed": true,
+      "duration_ms": 354.41,
+      "flaw_count": 0,
+      "flaws": []
+    }
+  ],
+  "all_flaws": [
+    {
+      "category": "RESILIENCE",
+      "severity": "MEDIUM",
+      "layer": "END_TO_END",
+      "component": "Disaster Recovery",
+      "description": "Disaster recovery implementation not found",
+      "evidence": "ImportError when importing recovery.disaster_recovery",
+      "recommendation": "Implement disaster recovery procedures",
+      "timestamp": "2026-07-08T07:16:36.834855+00:00"
+    },
+    {
+      "category": "LATENCY",
+      "severity": "MEDIUM",
+      "layer": "END_TO_END",
+      "component": "Latency Monitoring",
+      "description": "Latency monitoring implementation not found",
+      "evidence": "ImportError when importing monitoring.brier_metrics",
+      "recommendation": "Implement latency monitoring for performance tracking",
+      "timestamp": "2026-07-08T07:16:36.840290+00:00"
+    }
+  ]
+}

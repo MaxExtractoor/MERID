@@ -122,10 +122,34 @@ class TestMarketValidationDepthThreshold:
     """Test depth threshold validation logic."""
     
     def test_depth_thresholds(self):
-        """Test that depth thresholds are correctly applied."""
+        """Test that depth thresholds are correctly applied (default to 1 for 15m crypto)."""
         # This test validates the logic without full agent initialization
         # The actual validation is tested in the regime classification tests
+        # Depth thresholds are set to 1 (minimum) for 15m crypto markets
         assert True  # Placeholder for future expansion
+    
+    def test_depth_threshold_allows_one_sided_books(self):
+        """Test that one-sided books are allowed with sufficient depth on trading side."""
+        # Create mock market state with one-sided depth
+        market_state = Mock()
+        market_state.min_depth_yes = 5  # Sufficient YES depth
+        market_state.min_depth_no = 0    # No NO depth
+        
+        market_state_store = Mock()
+        market_state_store.get = Mock(return_value=market_state)
+        
+        agent = Mock()
+        agent.market_state_store = market_state_store
+        agent.config = Mock()
+        agent.config.name = "BTC_15M"
+        
+        from merid.prediction.agent_grid_15m import LeanAgent15m
+        agent._classify_regime = LeanAgent15m._classify_regime.__get__(agent, LeanAgent15m)
+        
+        regime = agent._classify_regime("BTC-26JUN021930-30")
+        
+        # Should classify as one_sided_yes (allowed for TTE > 0.5 minutes)
+        assert regime == "one_sided_yes"
 
 
 class TestTradingWindowLogic:

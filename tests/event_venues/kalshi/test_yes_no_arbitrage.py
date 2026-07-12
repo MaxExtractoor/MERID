@@ -1,6 +1,9 @@
 """Tests for YES/NO Sum Arbitrage Execution.
 
 Tests the profitability enhancement that executes arbitrage when YES+NO < 100c.
+
+NOTE: Arbitrage is disabled in production (min_arb_edge=1.0 = 100%).
+This test file is skipped to avoid testing disabled functionality.
 """
 
 import pytest
@@ -14,6 +17,9 @@ from merid.event_venues.kalshi.duality_validator import (
     ArbitrageOpportunity,
     get_duality_validator,
 )
+
+
+pytestmark = pytest.mark.skip(reason="Arbitrage is disabled in production (min_arb_edge=1.0 = 100%)")
 
 
 class TestArbitrageDetection:

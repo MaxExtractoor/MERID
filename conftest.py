@@ -21,6 +21,10 @@ def pytest_sessionstart(session):
     except RuntimeError:
         # Already set (e.g., on Linux when running under fork)
         pass
+    
+    # Clear SCALPER15M environment variables to ensure consistent test behavior
+    import os
+    os.environ.pop("SCALPER15M_MIN_CUTOFF_MINUTES", None)
 
 
 def _listener_process(log_path: str, queue: mp.Queue):

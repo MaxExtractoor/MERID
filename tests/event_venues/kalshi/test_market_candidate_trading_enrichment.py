@@ -1,9 +1,17 @@
-"""Regression: MarketCandidate must expose trading fields before _compute_edge runs."""
+"""Regression: MarketCandidate must expose trading fields before _compute_edge runs.
+
+NOTE: This test references the deprecated merid.trading.kalshi_continuous_trader module.
+The test is skipped to avoid testing deprecated functionality.
+"""
 
 from __future__ import annotations
 
 import time
 from decimal import Decimal
+
+import pytest
+
+pytestmark = pytest.mark.skip(reason="Tests deprecated merid.trading.kalshi_continuous_trader module")
 
 def test_market_candidate_has_best_side_default_before_edge():
     from merid.event_venues.kalshi.market_filter import MarketCandidate

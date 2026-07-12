@@ -15,7 +15,7 @@ This ensures:
 - No artificial per-asset limits
 - Concentration on highest expected returns
 - 1 contract per asset per window
-- Entry prices in 5c-95c range (expanded for skewed markets)
+- Entry prices in 10c-75c range (expanded for current market conditions - YES prices 60-97c observed)
 - Confidence ≥ 50% (matches agent grid: 0.5 + edge/100), edge ≥ 2.0% (actual percentage)
 """
 
@@ -74,8 +74,8 @@ class GlobalAllocator:
         venue_cap_usd: float = 1.00,
         min_edge_pct: float = 2.0,  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units (actual percentage, not decimal)
         min_confidence: float = 0.50,  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence calculation (0.5 + edge/100)
-        min_price_cents: int = 10,  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
-        max_price_cents: int = 50,  # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
+        min_price_cents: int = 10,  # 2026-07-12: Lower bound (10c) maintained for low-profit trap prevention
+        max_price_cents: int = 75,  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
         max_single_asset_fraction: float = 1.00,  # Max 100% of cap per asset (allows single order to use full venue cap)
         enable_correlation_control: bool = False,
         # 2026-07-10: Per-asset edge thresholds aligned with risk_parameters.py market entry thresholds
@@ -162,7 +162,7 @@ class GlobalAllocator:
                 len(filtered) - len(conf_filtered), len(filtered), self.min_confidence * 100
             )
         
-        # Filter by price range (5c-95c)
+        # Filter by price range (10c-50c canonical range)
         price_filtered = [c for c in conf_filtered if self.min_price_cents <= c.price_cents <= self.max_price_cents]
         if len(price_filtered) < len(conf_filtered):
             logger.info(
@@ -299,8 +299,8 @@ def create_global_allocator_from_envelope(envelope: Any) -> GlobalAllocator:
     # CRITICAL: Use the shared $1 pool parameters (no per-asset rescaling)
     min_edge_pct = 2.0  # 2026-07-10: Changed from 0.05% to 2.0% to match agent grid edge units (actual percentage)
     min_confidence = 0.50  # 2026-07-10: Lowered from 65% to 50% to match agent grid confidence calculation (0.5 + edge/100)
-    min_price_cents = 10  # 2026-07-11: Canonical price band (10c) - aligned with GlobalSlotAllocator
-    max_price_cents = 50  # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
+    min_price_cents = 10  # 2026-07-12: Lower bound (10c) maintained for low-profit trap prevention
+    max_price_cents = 75  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
     max_single_asset_fraction = 1.00  # 100% - allows single asset to use full venue cap (shared pool)
     
     # 2026-07-10: Per-asset edge thresholds aligned with risk_parameters.py market entry thresholds
@@ -318,7 +318,7 @@ def create_global_allocator_from_envelope(envelope: Any) -> GlobalAllocator:
         min_edge_pct = config.get('min_edge_pct', 0.05)
         min_confidence = config.get('min_confidence', 0.65)
         min_price_cents = config.get('min_price_cents', 10)
-        max_price_cents = config.get('max_price_cents', 50)
+        max_price_cents = config.get('max_price_cents', 75)  # 2026-07-12: Default 75c to match current market conditions
         max_single_asset_fraction = config.get('max_single_asset_fraction', 1.00)
         # Allow envelope to override per-asset thresholds if provided
         if 'per_asset_min_edge_pct' in config:

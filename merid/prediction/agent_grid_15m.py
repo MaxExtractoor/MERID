@@ -4358,13 +4358,13 @@ class LeanAgent15m:
 
         
 
-        # Check price band for both sides (10c-50c canonical range)
+        # Check price band for both sides (10c-75c range - expanded for current market conditions)
 
-        # CRITICAL FIX: 2026-07-11 - Aligned with GlobalSlotAllocator canonical band
+        # CRITICAL FIX: 2026-07-12 - Expanded to 75c to match YES prices 60-97c in current market
 
-        yes_in_range = (10 <= yes_price_cents <= 50)
+        yes_in_range = (10 <= yes_price_cents <= 75)
 
-        no_in_range = (10 <= no_price_cents <= 50)
+        no_in_range = (10 <= no_price_cents <= 75)
 
         
 
@@ -4382,7 +4382,7 @@ class LeanAgent15m:
 
             logger.info(
 
-                "[MOMENTUM-FVG-PRICE-FILTER] asset=%s both sides outside 10c-50c range (yes=%dc, no=%dc) -> NO TRADE",
+                "[MOMENTUM-FVG-PRICE-FILTER] asset=%s both sides outside 10c-75c range (yes=%dc, no=%dc) -> NO TRADE",
 
                 asset, yes_price_cents, no_price_cents
 
@@ -4704,17 +4704,17 @@ class LeanAgent15m:
 
         
 
-        # 2026-07-12: Canonical price range 10c-50c per commit c5ac4a18
+        # 2026-07-12: Expanded price range 10c-75c to match actual market conditions (YES prices 60-97c)
 
-        # If no prices exist in 10-50c range, drop the candidate (no trade).
+        # If no prices exist in 10-75c range, drop the candidate (no trade).
 
         raw_price_cents = price_cents
 
         
 
-        # Check if price is within canonical range (10c-50c)
+        # Check if price is within range (10c-75c)
 
-        if 10 <= raw_price_cents <= 50:
+        if 10 <= raw_price_cents <= 75:
 
             # Price is already in valid range - use it directly
 
@@ -4722,7 +4722,7 @@ class LeanAgent15m:
 
             logger.info(
 
-                "[PRICE-SELECTION] asset=%s raw_price_cents=%d in canonical range [10c-50c] - using directly",
+                "[PRICE-SELECTION] asset=%s raw_price_cents=%d in range [10c-75c] - using directly",
 
                 asset, raw_price_cents
 
@@ -4734,7 +4734,7 @@ class LeanAgent15m:
 
             logger.warning(
 
-                "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside canonical range [10c-50c] - searching orderbook",
+                "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside range [10c-75c] - searching orderbook",
 
                 asset, raw_price_cents
 
@@ -4762,9 +4762,9 @@ class LeanAgent15m:
 
                     if yes_book:
 
-                        # Find cheapest YES price within [10c, 50c] with size >= 1
+                        # Find cheapest YES price within [10c, 75c] with size >= 1
 
-                        valid_prices = [p for (p, size) in yes_book if 10 <= p <= 50 and size >= 1]
+                        valid_prices = [p for (p, size) in yes_book if 10 <= p <= 75 and size >= 1]
 
                         if valid_prices:
 
@@ -4782,7 +4782,7 @@ class LeanAgent15m:
 
                             logger.warning(
 
-                                "[PRICE-SELECTION] asset=%s no YES prices in canonical range [10c-50c] - dropping candidate",
+                                "[PRICE-SELECTION] asset=%s no YES prices in range [10c-75c] - dropping candidate",
 
                                 asset
 
@@ -4832,15 +4832,15 @@ class LeanAgent15m:
 
         
 
-        # Final validation - ensure we have a valid price in the canonical range
+        # Final validation - ensure we have a valid price in the range (10c-75c)
 
-        # CRITICAL FIX: 2026-07-12 - Use canonical 10-50c range aligned with GlobalAllocator and commit c5ac4a18
+        # CRITICAL FIX: 2026-07-12 - Use expanded 10-75c range to match current market conditions
 
-        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 50):
+        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 75):
 
             logger.error(
 
-                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in canonical range [10c-50c] - dropping candidate",
+                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in range [10c-75c] - dropping candidate",
 
                 asset, clamped_price_cents
 
@@ -5208,17 +5208,17 @@ class LeanAgent15m:
 
         
 
-        # 2026-07-12: Canonical price range 10c-50c per commit c5ac4a18
+        # 2026-07-12: Expanded price range 10c-75c to match actual market conditions (YES prices 60-97c)
 
-        # If no prices exist in 10-50c range, drop the candidate (no trade).
+        # If no prices exist in 10-75c range, drop the candidate (no trade).
 
         raw_price_cents = int(market_price * 100)
 
         
 
-        # Check if price is within canonical range (10c-50c)
+        # Check if price is within range (10c-75c)
 
-        if 10 <= raw_price_cents <= 50:
+        if 10 <= raw_price_cents <= 75:
 
             # Price is already in valid range - use it directly
 
@@ -5226,7 +5226,7 @@ class LeanAgent15m:
 
             logger.info(
 
-                "[PRICE-SELECTION] asset=%s raw_price_cents=%d in canonical range [10c-50c] - using directly",
+                "[PRICE-SELECTION] asset=%s raw_price_cents=%d in range [10c-75c] - using directly",
 
                 asset, raw_price_cents
 
@@ -5238,7 +5238,7 @@ class LeanAgent15m:
 
             logger.warning(
 
-                "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside canonical range [10c-50c] - searching orderbook",
+                "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside range [10c-75c] - searching orderbook",
 
                 asset, raw_price_cents
 
@@ -5266,9 +5266,9 @@ class LeanAgent15m:
 
                     if yes_book:
 
-                        # Find cheapest YES price within [10c, 50c] with size >= 1
+                        # Find cheapest YES price within [10c, 75c] with size >= 1
 
-                        valid_prices = [p for (p, size) in yes_book if 10 <= p <= 50 and size >= 1]
+                        valid_prices = [p for (p, size) in yes_book if 10 <= p <= 75 and size >= 1]
 
                         if valid_prices:
 
@@ -5286,7 +5286,7 @@ class LeanAgent15m:
 
                             logger.warning(
 
-                                "[PRICE-SELECTION] asset=%s no YES prices in canonical range [10c-50c] - dropping candidate",
+                                "[PRICE-SELECTION] asset=%s no YES prices in range [10c-75c] - dropping candidate",
 
                                 asset
 
@@ -5336,15 +5336,15 @@ class LeanAgent15m:
 
         
 
-        # Final validation - ensure we have a valid price in the canonical range
+        # Final validation - ensure we have a valid price in the range (10c-75c)
 
-        # CRITICAL FIX: 2026-07-12 - Use canonical 10-50c range aligned with GlobalAllocator and commit c5ac4a18
+        # CRITICAL FIX: 2026-07-12 - Use expanded 10-75c range to match current market conditions
 
-        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 50):
+        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 75):
 
             logger.error(
 
-                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in canonical range [10c-50c] - dropping candidate",
+                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in range [10c-75c] - dropping candidate",
 
                 asset, clamped_price_cents
 
@@ -7318,7 +7318,7 @@ class LeanAgent15m:
 
         # - Entry prices < $0.10 are rejected by DEEP_OTM_POLICY (lottery zone)
 
-        # - Canonical entry band [10c, 50c] per commit c5ac4a18
+        # - Entry band [10c, 75c] per 2026-07-12 expansion to match current market conditions
 
         # - This aligns agent grid with profile, order_gate, and order_router (all 10c minimum)
 
@@ -10044,17 +10044,17 @@ class LeanAgent15m:
 
         
 
-        # 2026-07-12: Canonical price range 10c-50c per commit c5ac4a18
+        # 2026-07-12: Expanded price range 10c-75c to match actual market conditions (YES prices 60-97c)
 
-        # If no prices exist in 10-50c range, drop the candidate (no trade).
+        # If no prices exist in 10-75c range, drop the candidate (no trade).
 
         raw_price_cents = price_cents
 
         
 
-        # Check if price is within canonical range (10c-50c)
+        # Check if price is within range (10c-75c)
 
-        if 10 <= raw_price_cents <= 50:
+        if 10 <= raw_price_cents <= 75:
 
             # Price is already in valid range - use it directly
 
@@ -10062,7 +10062,7 @@ class LeanAgent15m:
 
             logger.info(
 
-                "[PRICE-SELECTION] asset=%s raw_price_cents=%d in canonical range [10c-50c] - using directly",
+                "[PRICE-SELECTION] asset=%s raw_price_cents=%d in range [10c-75c] - using directly",
 
                 asset, raw_price_cents
 
@@ -10074,7 +10074,7 @@ class LeanAgent15m:
 
             logger.warning(
 
-                "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside canonical range [10c-50c] - searching orderbook",
+                "[PRICE-SELECTION] asset=%s raw_price_cents=%d outside range [10c-75c] - searching orderbook",
 
                 asset, raw_price_cents
 
@@ -10102,9 +10102,9 @@ class LeanAgent15m:
 
                     if yes_book:
 
-                        # Find cheapest YES price within [10c, 50c] with size >= 1
+                        # Find cheapest YES price within [10c, 75c] with size >= 1
 
-                        valid_prices = [p for (p, size) in yes_book if 10 <= p <= 50 and size >= 1]
+                        valid_prices = [p for (p, size) in yes_book if 10 <= p <= 75 and size >= 1]
 
                         if valid_prices:
 
@@ -10122,7 +10122,7 @@ class LeanAgent15m:
 
                             logger.warning(
 
-                                "[PRICE-SELECTION] asset=%s no YES prices in canonical range [10c-50c] - dropping candidate",
+                                "[PRICE-SELECTION] asset=%s no YES prices in range [10c-75c] - dropping candidate",
 
                                 asset
 
@@ -10172,15 +10172,15 @@ class LeanAgent15m:
 
         
 
-        # Final validation - ensure we have a valid price in the canonical range
+        # Final validation - ensure we have a valid price in the range (10c-75c)
 
-        # CRITICAL FIX: 2026-07-12 - Use canonical 10-50c range aligned with GlobalAllocator and commit c5ac4a18
+        # CRITICAL FIX: 2026-07-12 - Use expanded 10-75c range to match current market conditions
 
-        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 50):
+        if clamped_price_cents is None or not (10 <= clamped_price_cents <= 75):
 
             logger.error(
 
-                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in canonical range [10c-50c] - dropping candidate",
+                "[PRICE-SELECTION-ERROR] asset=%s final price_cents=%d not in range [10c-75c] - dropping candidate",
 
                 asset, clamped_price_cents
 

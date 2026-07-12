@@ -144,9 +144,10 @@ class TestWindowBasedRiskLimits:
             current_ts=time.time()
         )
         
-        # Should be blocked (exceeds $1 per-agent limit)
+        # Should be blocked (exceeds $1 limit - either per-agent or total venue)
         assert allowed is False
-        assert "per_agent_window_limit" in reason
+        # When both limits are equal ($1.00), either can trigger first
+        assert "per_agent_window_limit" in reason or "total_venue_window_limit" in reason
     
     def test_regime_sizing_multiplier_disabled(self):
         """Test that regime sizing multiplier is disabled (returns 1.0)."""

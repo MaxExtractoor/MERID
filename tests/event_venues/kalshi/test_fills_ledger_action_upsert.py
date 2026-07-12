@@ -157,7 +157,7 @@ async def test_intent_resolves_action(ledger):
     ledger.record_intent(
         OrderIntent(
             intent_id="coid-1",
-            market_ticker="KXTEST-3",
+            ticker="KXTEST-3",
             side="yes",
             action="buy",
             count=5,

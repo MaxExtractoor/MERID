@@ -57,12 +57,28 @@ except Exception as e:
 
 # Reset window exposure tracking to prevent stale exposure from blocking orders
 # This handles the case where window exposure is non-zero but position cache shows zero open positions
+# Only reset if there's actually stale exposure (non-zero total exposure)
 try:
-    from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import force_reset_window_exposure
-    force_reset_window_exposure()
-    logger.info("[SINGLETON-RESET] window exposure tracking reset")
+    from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import (
+        force_reset_window_exposure,
+        _WINDOW_TRACKING_STATE,
+        _WINDOW_TRACKING_LOCK
+    )
+    import threading
+
+    # Check if there's stale exposure before resetting
+    with _WINDOW_TRACKING_LOCK:
+        total_exposure = _WINDOW_TRACKING_STATE["total_exposure_usd"]
+
+    if total_exposure > 0.0:
+        # Only reset if there's actual stale exposure
+        force_reset_window_exposure(reason="startup_stale_exposure")
+        logger.info("[SINGLETON-RESET] window exposure tracking reset (stale exposure detected)")
+    else:
+        # No stale exposure - no reset needed
+        logger.info("[SINGLETON-RESET] window exposure tracking clean (no stale exposure)")
 except Exception as e:
-    logger.warning(f"[SINGLETON-RESET] Failed to reset window exposure: {e}")
+    logger.warning(f"[SINGLETON-RESET] Failed to check/reset window exposure: {e}")
 
 # Do NOT reset market_catalog singleton during startup
 # The reset causes the singleton to be None when components try to use it

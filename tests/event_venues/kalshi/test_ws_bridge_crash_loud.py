@@ -7,7 +7,7 @@ features including:
 - Singleton pattern
 - Event counter and logging
 
-NOTE: Legacy bridge (merid_core.kalshi.ws_bridge) has been removed.
+NOTE: LEGACY: Tests deprecated merid.event_venues.kalshi.ws_bridge - 15m lean stack uses merid_core.kalshi.ws_bridge
 """
 
 from __future__ import annotations
@@ -23,6 +23,9 @@ from merid.event_venues.kalshi.ws_bridge import (
     _spawn,
     get_ws_bridge,
 )
+
+
+pytestmark = pytest.mark.skip(reason="LEGACY: Tests deprecated merid.event_venues.kalshi.ws_bridge - 15m lean stack uses merid_core.kalshi.ws_bridge")
 
 
 class TestSpawnCrashLoudWrapper:

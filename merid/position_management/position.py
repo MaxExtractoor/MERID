@@ -74,6 +74,7 @@ class Position:
     unrealized_pnl_cents: int = 0
     r_multiple: float = 0.0
     time_since_entry_seconds: float = 0.0
+    trailing_profit_threshold_reached_at: Optional[float] = None  # Timestamp when profit threshold was reached (for activation delay) - runtime only
     
     # Exit tracking
     exit_triggered: bool = False
@@ -554,6 +555,7 @@ class Position:
             "max_favorable_price_cents": self.max_favorable_price_cents,
             "trailing_activated": self.trailing_activated,
             "trailing_profit_zone_activated": self.trailing_profit_zone_activated,
+            # trailing_profit_threshold_reached_at is runtime-only, not persisted
             "window_resolution_id": self.window_resolution_id,
             "exit_policy_id": self.exit_policy_id,
             "current_price_cents": self.current_price_cents,
@@ -604,6 +606,7 @@ class Position:
             max_favorable_price_cents=data.get("max_favorable_price_cents", 0),
             trailing_activated=data.get("trailing_activated", False),
             trailing_profit_zone_activated=data.get("trailing_profit_zone_activated", False),
+            # trailing_profit_threshold_reached_at is runtime-only, not persisted
             window_resolution_id=data.get("window_resolution_id", ""),
             exit_policy_id=data.get("exit_policy_id", ""),
             current_price_cents=data.get("current_price_cents", 0),

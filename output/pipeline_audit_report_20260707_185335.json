@@ -1,0 +1,133 @@
+{
+  "timestamp": "2026-07-07T18:53:30.307395",
+  "summary": {
+    "UPSTREAM_HIGH": 2,
+    "DOWNSTREAM_CRITICAL": 2,
+    "DOWNSTREAM_HIGH": 2,
+    "EXIT_POLICY_MEDIUM": 1,
+    "END_TO_END_HIGH": 4
+  },
+  "findings": [
+    {
+      "layer": "UPSTREAM",
+      "severity": "HIGH",
+      "category": "CONSISTENCY",
+      "component": "kalshi_crypto_15m_v2.yaml",
+      "description": "Risk parameter mismatch at kelly.hard_cap",
+      "expected": "0.02",
+      "actual": "MISSING",
+      "impact": "Risk limits may not match intended values",
+      "recommendation": "Update kelly.hard_cap to 0.02 in profile YAML"
+    },
+    {
+      "layer": "UPSTREAM",
+      "severity": "HIGH",
+      "category": "CONSISTENCY",
+      "component": "kalshi_crypto_15m_v2.yaml",
+      "description": "Risk parameter mismatch at kelly.global_notional_cap_pct",
+      "expected": "0.02",
+      "actual": "MISSING",
+      "impact": "Risk limits may not match intended values",
+      "recommendation": "Update kelly.global_notional_cap_pct to 0.02 in profile YAML"
+    },
+    {
+      "layer": "DOWNSTREAM",
+      "severity": "CRITICAL",
+      "category": "IMPLEMENTATION",
+      "component": "unified_sizing.py",
+      "description": "Window limit check not integrated in sizing",
+      "expected": "check_window_limit call before sizing",
+      "actual": "Window limit check not found",
+      "impact": "Orders may exceed 3% per-agent / 5% total venue window limits",
+      "recommendation": "Integrate check_window_limit in compute_order_size"
+    },
+    {
+      "layer": "DOWNSTREAM",
+      "severity": "CRITICAL",
+      "category": "IMPLEMENTATION",
+      "component": "order_router.py",
+      "description": "Order execution recording not integrated",
+      "expected": "record_order_execution call after order fill",
+      "actual": "record_order_execution not found",
+      "impact": "Window exposure tracking will not reflect actual executions",
+      "recommendation": "Integrate record_order_execution in order fill handling"
+    },
+    {
+      "layer": "DOWNSTREAM",
+      "severity": "HIGH",
+      "category": "IMPLEMENTATION",
+      "component": "order_router.py",
+      "description": "Order execution refund not integrated",
+      "expected": "refund_order_execution call for rejected/unfilled orders",
+      "actual": "refund_order_execution not found",
+      "impact": "Window exposure may accumulate for rejected/unfilled orders",
+      "recommendation": "Integrate refund_order_execution for rejected/unfilled orders"
+    },
+    {
+      "layer": "DOWNSTREAM",
+      "severity": "HIGH",
+      "category": "IMPLEMENTATION",
+      "component": "unified_sizing.py._get_regime_position_size_multiplier",
+      "description": "Regime sizing multiplier may not be disabled",
+      "expected": "return 1.0 (disabled)",
+      "actual": "May return other values",
+      "impact": "Regime sizing could interfere with 3% per-asset / 5% per-window limits",
+      "recommendation": "Ensure _get_regime_position_size_multiplier returns 1.0"
+    },
+    {
+      "layer": "EXIT_POLICY",
+      "severity": "MEDIUM",
+      "category": "DOCUMENTATION",
+      "component": "exit_policy.py.ExitReason",
+      "description": "Exit precedence order may not match expected",
+      "expected": "['EXTREME_PROFIT', 'DYNAMIC_TAKE_PROFIT', 'RATCHET_FLOOR', 'RATCHET_TRIM', 'RISK', 'CANDLE_REVERSAL', 'ADAPTIVE_TIMING', 'TIME_STOP', 'EDGE_DECAY', 'STOP_LOSS', 'TRAIL', 'TAKE_PROFIT', 'SCALE_OUT', 'MANUAL']",
+      "actual": "['EXTREME_PROFIT']",
+      "impact": "Exit precedence may be incorrect, leading to wrong exit behavior",
+      "recommendation": "Update exit precedence documentation to match expected order"
+    },
+    {
+      "layer": "END_TO_END",
+      "severity": "HIGH",
+      "category": "CONSISTENCY",
+      "component": "Risk parameter chain",
+      "description": "Parameter per_window_risk_pct missing in layers: unified_sizing",
+      "expected": "per_window_risk_pct referenced in all layers",
+      "actual": "Missing in: unified_sizing",
+      "impact": "per_window_risk_pct may not be consistently applied across the stack",
+      "recommendation": "Ensure per_window_risk_pct is referenced in all layers"
+    },
+    {
+      "layer": "END_TO_END",
+      "severity": "HIGH",
+      "category": "CONSISTENCY",
+      "component": "Risk parameter chain",
+      "description": "Parameter total_venue_risk_pct missing in layers: unified_sizing",
+      "expected": "total_venue_risk_pct referenced in all layers",
+      "actual": "Missing in: unified_sizing",
+      "impact": "total_venue_risk_pct may not be consistently applied across the stack",
+      "recommendation": "Ensure total_venue_risk_pct is referenced in all layers"
+    },
+    {
+      "layer": "END_TO_END",
+      "severity": "HIGH",
+      "category": "CONSISTENCY",
+      "component": "Risk parameter chain",
+      "description": "Parameter bankroll_cap_pct missing in layers: risk_envelope",
+      "expected": "bankroll_cap_pct referenced in all layers",
+      "actual": "Missing in: risk_envelope",
+      "impact": "bankroll_cap_pct may not be consistently applied across the stack",
+      "recommendation": "Ensure bankroll_cap_pct is referenced in all layers"
+    },
+    {
+      "layer": "END_TO_END",
+      "severity": "HIGH",
+      "category": "IMPLEMENTATION",
+      "component": "unified_sizing.py.compute_order_size",
+      "description": "Window limit check not integrated",
+      "expected": "check_window_limit call",
+      "actual": "check_window_limit not found",
+      "impact": "Window limits may be bypassed at this enforcement point",
+      "recommendation": "Integrate check_window_limit in this component"
+    }
+  ]
+}

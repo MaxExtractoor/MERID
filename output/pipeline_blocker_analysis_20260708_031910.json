@@ -1,0 +1,200 @@
+{
+  "timestamp": "2026-07-08T03:19:05.061681+00:00",
+  "analysis_duration_seconds": 5.278205633163452,
+  "issues": [
+    {
+      "layer": "upstream",
+      "severity": "high",
+      "category": "config",
+      "description": "Upstream analysis failed",
+      "details": "name 'yaml' is not defined",
+      "timestamp": "2026-07-08T03:19:05.072940+00:00",
+      "evidence": {
+        "traceback": "Traceback (most recent call last):\n  File \"C:\\Dev\\MERID\\analyze_trading_pipeline_blockers.py\", line 208, in analyze_upstream\n    profile_data = yaml.safe_load(f)\n                   ^^^^\nNameError: name 'yaml' is not defined\n"
+      }
+    },
+    {
+      "layer": "midstream",
+      "severity": "high",
+      "category": "config",
+      "description": "Risk envelope verification failed",
+      "details": "Bankroll not ready: $None",
+      "timestamp": "2026-07-08T03:19:09.907526+00:00",
+      "evidence": {
+        "traceback": "Traceback (most recent call last):\n  File \"C:\\Dev\\MERID\\analyze_trading_pipeline_blockers.py\", line 571, in _verify_risk_envelope\n    risk_env = get_kalshi_crypto_15m_risk_envelope()\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Dev\\MERID\\merid\\risk\\profiles\\kalshi_crypto_15m_risk_envelope.py\", line 1082, in get_kalshi_crypto_15m_risk_envelope\n    raise RuntimeError(f\"Bankroll not ready: ${live_bankroll_usd}\")\nRuntimeError: Bankroll not ready: $None\n"
+      }
+    },
+    {
+      "layer": "midstream",
+      "severity": "high",
+      "category": "config",
+      "description": "Profile adapter check failed",
+      "details": "'Crypto15mProfileAdapter' object has no attribute 'get_profile'",
+      "timestamp": "2026-07-08T03:19:10.107398+00:00",
+      "evidence": {
+        "traceback": "Traceback (most recent call last):\n  File \"C:\\Dev\\MERID\\analyze_trading_pipeline_blockers.py\", line 625, in _check_profile_adapter\n    profile = adapter.get_profile()\n              ^^^^^^^^^^^^^^^^^^^\nAttributeError: 'Crypto15mProfileAdapter' object has no attribute 'get_profile'\n"
+      }
+    },
+    {
+      "layer": "midstream",
+      "severity": "medium",
+      "category": "config",
+      "description": "Conversion verification failed",
+      "details": "Bankroll not ready: $None",
+      "timestamp": "2026-07-08T03:19:10.112068+00:00",
+      "evidence": {
+        "traceback": "Traceback (most recent call last):\n  File \"C:\\Dev\\MERID\\analyze_trading_pipeline_blockers.py\", line 665, in _verify_conversions\n    risk_env = get_kalshi_crypto_15m_risk_envelope()\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Dev\\MERID\\merid\\risk\\profiles\\kalshi_crypto_15m_risk_envelope.py\", line 1082, in get_kalshi_crypto_15m_risk_envelope\n    raise RuntimeError(f\"Bankroll not ready: ${live_bankroll_usd}\")\nRuntimeError: Bankroll not ready: $None\n"
+      }
+    },
+    {
+      "layer": "midstream",
+      "severity": "high",
+      "category": "config",
+      "description": "Asset cap verification failed",
+      "details": "Bankroll not ready: $None",
+      "timestamp": "2026-07-08T03:19:10.117492+00:00",
+      "evidence": {
+        "traceback": "Traceback (most recent call last):\n  File \"C:\\Dev\\MERID\\analyze_trading_pipeline_blockers.py\", line 703, in _verify_asset_caps\n    risk_env = get_kalshi_crypto_15m_risk_envelope()\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Dev\\MERID\\merid\\risk\\profiles\\kalshi_crypto_15m_risk_envelope.py\", line 1082, in get_kalshi_crypto_15m_risk_envelope\n    raise RuntimeError(f\"Bankroll not ready: ${live_bankroll_usd}\")\nRuntimeError: Bankroll not ready: $None\n"
+      }
+    },
+    {
+      "layer": "downstream",
+      "severity": "medium",
+      "category": "system",
+      "description": "Cannot import order router for queue analysis",
+      "details": "cannot import name 'OrderRouter' from 'merid.event_venues.kalshi.order_router_15m' (C:\\Dev\\MERID\\merid\\event_venues\\kalshi\\order_router_15m.py)",
+      "timestamp": "2026-07-08T03:19:10.297816+00:00",
+      "evidence": {
+        "import_error": "cannot import name 'OrderRouter' from 'merid.event_venues.kalshi.order_router_15m' (C:\\Dev\\MERID\\merid\\event_venues\\kalshi\\order_router_15m.py)"
+      }
+    },
+    {
+      "layer": "end_to_end",
+      "severity": "medium",
+      "category": "memory",
+      "description": "Excessive GC collections detected",
+      "details": "GC generation 0 collections 158 indicates high allocation rate",
+      "timestamp": "2026-07-08T03:19:10.334310+00:00",
+      "evidence": {
+        "gc_collections": 158
+      }
+    }
+  ],
+  "metrics": {
+    "latency_p50": 11.65,
+    "latency_p95": 14.299999999999997,
+    "latency_p99": 15.02,
+    "latency_p999": 15.182000000000002,
+    "queue_depths": {},
+    "lock_contention": {},
+    "buffer_usage_percent": {
+      "market_data_buffer": 0.0,
+      "order_buffer": 0.0,
+      "fill_buffer": 0.0
+    },
+    "sequence_gaps_found": 0,
+    "thread_states": {
+      "MainThread": "running"
+    }
+  },
+  "upstream": {
+    "profile_validation": {},
+    "risk_limits": {},
+    "asset_config": {},
+    "environment": {}
+  },
+  "midstream": {
+    "risk_envelope": {
+      "bankroll": null,
+      "venue_cap": null,
+      "asset_caps": {},
+      "calculation_issues": [
+        "Risk envelope verification failed: Bankroll not ready: $None"
+      ]
+    },
+    "profile_adapter": {
+      "profile_loaded": false,
+      "adapter_issues": [
+        "Profile adapter check failed: 'Crypto15mProfileAdapter' object has no attribute 'get_profile'"
+      ]
+    },
+    "conversions": {
+      "test_conversions": [],
+      "conversion_issues": [
+        "Conversion verification failed: Bankroll not ready: $None"
+      ]
+    },
+    "asset_caps": {
+      "caps_enforced": true,
+      "enforcement_issues": [
+        "Asset cap verification failed: Bankroll not ready: $None"
+      ]
+    }
+  },
+  "downstream": {
+    "unified_sizing": {
+      "sizing_module_loaded": true,
+      "sizing_issues": []
+    },
+    "position_multipliers": {
+      "multipliers_disabled": true,
+      "multiplier_issues": []
+    },
+    "order_queues": {
+      "queue_depths": {},
+      "queue_issues": [
+        "Cannot import order router: cannot import name 'OrderRouter' from 'merid.event_venues.kalshi.order_router_15m' (C:\\Dev\\MERID\\merid\\event_venues\\kalshi\\order_router_15m.py)"
+      ]
+    },
+    "lock_contention": {
+      "locks_analyzed": 1,
+      "contention_detected": false,
+      "contention_issues": []
+    },
+    "buffer_status": {
+      "buffers_checked": 3,
+      "buffer_status": {
+        "market_data_buffer": 0.0,
+        "order_buffer": 0.0,
+        "fill_buffer": 0.0
+      },
+      "buffer_issues": []
+    }
+  },
+  "end_to_end": {
+    "latency_analysis": {
+      "samples_collected": 10,
+      "p50_ms": 11.65,
+      "p95_ms": 14.299999999999997,
+      "p99_ms": 15.02,
+      "p999_ms": 15.182000000000002,
+      "latency_issues": []
+    },
+    "sequence_validation": {
+      "feeds_checked": 5,
+      "gaps_found": 0,
+      "gap_details": [],
+      "sequence_issues": []
+    },
+    "state_drift": {
+      "components_checked": 3,
+      "drift_detected": false,
+      "drift_details": [],
+      "state_issues": []
+    },
+    "memory_patterns": {
+      "memory_usage_mb": 72.47265625,
+      "allocation_rate_per_sec": 0,
+      "gc_collections": 158,
+      "memory_issues": [
+        "GC collections 158 excessive"
+      ]
+    },
+    "thread_blocking": {
+      "threads_checked": 1,
+      "blocked_threads": 0,
+      "blocking_details": [],
+      "blocking_issues": []
+    }
+  }
+}

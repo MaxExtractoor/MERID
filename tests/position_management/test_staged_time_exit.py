@@ -54,10 +54,17 @@ class TestStagedTimeExit:
         
         monitor.add_position(mock_position)
         
+        # CRITICAL FIX: Set position.opened_at to simulate 5 minutes since entry
+        # The staged exit logic uses position.time_since_entry_seconds which is calculated
+        # from position.opened_at in update_runtime_state(). Setting opened_at ensures
+        # the correct time_since_entry_seconds after update_runtime_state() is called.
+        mock_position.opened_at = datetime.utcnow() - timedelta(seconds=300)  # 5 minutes ago
+        
         # Simulate 5 minutes since entry (10 minutes to expiry)
         with patch('merid.event_venues.kalshi.market_state.get_kalshi_market_state_store') as mock_store:
             mock_state = Mock()
-            mock_state.seconds_to_expiry = 600  # 10 minutes to expiry
+            mock_state.minutes_to_expiry = 10  # 10 minutes to expiry
+            mock_state.seconds_to_expiry = 600  # Also set seconds for compatibility
             mock_store.return_value.get.return_value = mock_state
             
             # Check position at 5 minutes since entry
@@ -81,12 +88,16 @@ class TestStagedTimeExit:
         mock_position.size = 8
         mock_position.staged_exit_stage_0_executed = True
         
+        # CRITICAL FIX: Set position.opened_at to simulate 10 minutes since entry
+        mock_position.opened_at = datetime.utcnow() - timedelta(seconds=600)  # 10 minutes ago
+        
         monitor.add_position(mock_position)
         
         # Simulate 10 minutes since entry (5 minutes to expiry)
         with patch('merid.event_venues.kalshi.market_state.get_kalshi_market_state_store') as mock_store:
             mock_state = Mock()
-            mock_state.seconds_to_expiry = 300  # 5 minutes to expiry
+            mock_state.minutes_to_expiry = 5  # 5 minutes to expiry
+            mock_state.seconds_to_expiry = 300  # Also set seconds for compatibility
             mock_store.return_value.get.return_value = mock_state
             
             # Check position at 10 minutes since entry
@@ -111,12 +122,16 @@ class TestStagedTimeExit:
         mock_position.staged_exit_stage_0_executed = True
         mock_position.staged_exit_stage_1_executed = True
         
+        # CRITICAL FIX: Set position.opened_at to simulate 13 minutes since entry
+        mock_position.opened_at = datetime.utcnow() - timedelta(seconds=780)  # 13 minutes ago
+        
         monitor.add_position(mock_position)
         
         # Simulate 13 minutes since entry (2 minutes to expiry)
         with patch('merid.event_venues.kalshi.market_state.get_kalshi_market_state_store') as mock_store:
             mock_state = Mock()
-            mock_state.seconds_to_expiry = 120  # 2 minutes to expiry
+            mock_state.minutes_to_expiry = 2  # 2 minutes to expiry
+            mock_state.seconds_to_expiry = 120  # Also set seconds for compatibility
             mock_store.return_value.get.return_value = mock_state
             
             # Check position at 13 minutes since entry
@@ -184,10 +199,14 @@ class TestStagedTimeExit:
         
         monitor.add_position(mock_position)
         
+        # CRITICAL FIX: Set position.opened_at to simulate 5 minutes since entry
+        mock_position.opened_at = datetime.utcnow() - timedelta(seconds=300)  # 5 minutes ago
+        
         # Simulate 5 minutes since entry
         with patch('merid.event_venues.kalshi.market_state.get_kalshi_market_state_store') as mock_store:
             mock_state = Mock()
-            mock_state.seconds_to_expiry = 600  # 10 minutes to expiry
+            mock_state.minutes_to_expiry = 10  # 10 minutes to expiry
+            mock_state.seconds_to_expiry = 600  # Also set seconds for compatibility
             mock_store.return_value.get.return_value = mock_state
             
             # Check position at 5 minutes since entry

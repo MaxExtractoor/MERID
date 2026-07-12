@@ -99,18 +99,7 @@ def apply_maker_taker_policy(intent) -> None:
         intent.policy_mode = policy_mode.name
         
         # Apply post_only flag from policy decision
-        # TEMPORARY: Disable post_only to allow orders to execute while debugging NO side pricing
-        intent.post_only = False
-        
-        # TEMPORARY: Force taker mode to cross spread and increase fill probability
-        intent.expected_role = "taker"
-        intent.fee_type = "taker"
-        
-        # TEMPORARY: Disable maker price adjustment to avoid float contamination
-        # The _price_for_side function returns floats which cause validation rejections
-        # Force taker mode to avoid this issue entirely
-        intent.expected_role = "taker"
-        intent.fee_type = "taker"
+        intent.post_only = role_decision.post_only
         
         # Skip maker price adjustment to ensure integer cents
         # if role_decision.recommended_role.value == "maker" and best_bid_cents and best_ask_cents:

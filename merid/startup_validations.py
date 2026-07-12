@@ -755,35 +755,35 @@ def validate_no_test_fills_in_database() -> None:
     try:
         import sqlite3
         conn = sqlite3.connect(str(db_path))
-        cursor = conn.cursor()
-        
-        # Get all distinct market tickers
-        cursor.execute("SELECT DISTINCT market_ticker FROM kalshi_fills")
-        all_tickers = [row[0] for row in cursor.fetchall()]
-        
-        # Check for test tickers
-        from merid.event_venues.kalshi.fills_ledger import _is_test_ticker
-        test_tickers = [t for t in all_tickers if _is_test_ticker(t)]
-        
-        if test_tickers:
-            # Count fills for test tickers
-            placeholders = ",".join("?" * len(test_tickers))
-            cursor.execute(
-                f"SELECT COUNT(*) FROM kalshi_fills WHERE market_ticker IN ({placeholders})",
-                test_tickers
-            )
-            fill_count = cursor.fetchone()[0]
+        try:
+            cursor = conn.cursor()
             
-            conn.close()
+            # Get all distinct market tickers
+            cursor.execute("SELECT DISTINCT market_ticker FROM kalshi_fills")
+            all_tickers = [row[0] for row in cursor.fetchall()]
             
-            raise StartupValidationError(
+            # Check for test tickers
+            from merid.event_venues.kalshi.fills_ledger import _is_test_ticker
+            test_tickers = [t for t in all_tickers if _is_test_ticker(t)]
+            
+            if test_tickers:
+                # Count fills for test tickers
+                placeholders = ",".join("?" * len(test_tickers))
+                cursor.execute(
+                    f"SELECT COUNT(*) FROM kalshi_fills WHERE market_ticker IN ({placeholders})",
+                    test_tickers
+                )
+                fill_count = cursor.fetchone()[0]
+                
+                raise StartupValidationError(
                 f"TEST-FILLS-DB: Found {fill_count} test fills in database for {len(test_tickers)} test tickers: "
                 f"{', '.join(test_tickers[:5])}{'...' if len(test_tickers) > 5 else ''}. "
                 f"Run 'python scripts/clean_test_fills.py --force' to remove them."
             )
         
-        conn.close()
-        logger.info("TEST-FILLS-DB: No test tickers found in fills database (clean)")
+            logger.info("TEST-FILLS-DB: No test tickers found in fills database (clean)")
+        finally:
+            conn.close()
         
     except StartupValidationError:
         raise

@@ -1,4 +1,15 @@
 # Unified Risk Limits Configuration
+# DEPRECATED for kalshi_crypto_15m_v2 profile (MERID_PROFILE=kalshi_crypto_15m_v2)
+#
+# For Kalshi 15m crypto agents (BTC_15M, ETH_15M, SOL_15M, XRP_15M, DOGE_15M):
+#   - All risk limits: Use config/profiles/kalshi_crypto_15m_v2.yaml (SINGLE SOURCE OF TRUTH)
+#   - Fixed $1 exposure cap: risk_policy.fixed_exposure_cap_usd: 1.00
+#   - Per-asset limits: assets.*.max_contracts.value: 1
+#   - Daily loss: guardrails.max_daily_loss_pct: 0.20 (20%)
+#
+# This file is retained for backward compatibility with other profiles only.
+# DO NOT use this file for 15m crypto trading configuration.
+#
 # Single Source of Truth for all risk management parameters
 # All caps are percentages of live bankroll unless otherwise specified
 

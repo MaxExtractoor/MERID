@@ -279,8 +279,12 @@ class KalshiMonitor:
                     )
             
             # Calculate fill rate
-            if self.metrics.orders_submitted > 0:
-                self.metrics.fill_rate = self.metrics.orders_filled / self.metrics.orders_submitted
+            # CRITICAL FIX: Only count orders that were actually submitted to exchange
+            # Exclude orders rejected before submission (e.g., min_price_violation, risk limits)
+            # This gives accurate fill rate for execution quality, not rejection rate
+            orders_actually_submitted = self.metrics.orders_submitted - self.metrics.order_rejection_count
+            if orders_actually_submitted > 0:
+                self.metrics.fill_rate = self.metrics.orders_filled / orders_actually_submitted
                 
                 # Check for low fill rate
                 if self.metrics.fill_rate < self.alert_thresholds.get("low_fill_rate_threshold", 0.2):
@@ -289,6 +293,9 @@ class KalshiMonitor:
                         f"Low fill rate: {self.metrics.fill_rate:.1%} (threshold: {self.alert_thresholds.get('low_fill_rate_threshold', 0.2):.1%})",
                         severity="warning"
                     )
+            elif self.metrics.orders_submitted > 0:
+                # All orders were rejected - fill rate is undefined, set to 0
+                self.metrics.fill_rate = 0.0
             
             # Check for high rejection rate
             if self.metrics.orders_submitted > 0:

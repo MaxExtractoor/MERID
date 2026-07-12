@@ -1,0 +1,2482 @@
+{
+  "order_attempts": [
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:02:52.763387",
+      "agent": "BTC_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:02:52.966712",
+      "asset": "BTC_15M",
+      "time_to_expiry": 727.3,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:02:53.270388",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 1326,
+      "depth_no": 2086
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:02:53.677991",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 1326,
+      "depth_no": 2086
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:02:53.683988",
+      "agent": "ETH_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:02:53.888007",
+      "asset": "ETH_15M",
+      "time_to_expiry": 726.3,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:02:54.191335",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 131,
+      "depth_no": 400
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:02:54.497235",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 131,
+      "depth_no": 400
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:02:54.505279",
+      "agent": "SOL_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:02:54.811020",
+      "asset": "SOL_15M",
+      "time_to_expiry": 725.5,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:02:55.114431",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 6,
+      "depth_no": 100
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:02:55.418702",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 6,
+      "depth_no": 100
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:02:55.420658",
+      "agent": "XRP_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:02:55.623513",
+      "asset": "XRP_15M",
+      "time_to_expiry": 724.6,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:02:55.826435",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 164,
+      "depth_no": 308
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:02:56.130756",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 164,
+      "depth_no": 308
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:02:56.132333",
+      "agent": "DOGE_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:02:56.335147",
+      "asset": "DOGE_15M",
+      "time_to_expiry": 723.9,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:02:56.536977",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 265,
+      "depth_no": 52214
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:02:56.740047",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 265,
+      "depth_no": 52214
+    },
+    {
+      "type": "aggressiveness",
+      "timestamp": "2026-07-10T17:02:59.365020",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "asset": "SOL15M",
+      "edge_pct": 3.16,
+      "aggressiveness": 0.53,
+      "time_to_expiry": 724
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:00.171246",
+      "agent": "BTC_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:00.599039",
+      "asset": "BTC_15M",
+      "time_to_expiry": 719.8,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:00.926849",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 1326,
+      "depth_no": 2086
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:01.232020",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 1326,
+      "depth_no": 2086
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:01.233936",
+      "agent": "ETH_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:01.438613",
+      "asset": "ETH_15M",
+      "time_to_expiry": 718.8,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:01.741817",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 131,
+      "depth_no": 400
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:01.945085",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 131,
+      "depth_no": 400
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:01.947069",
+      "agent": "SOL_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:02.250406",
+      "asset": "SOL_15M",
+      "time_to_expiry": 718.0,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:02.453176",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 6,
+      "depth_no": 100
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:02.656054",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 6,
+      "depth_no": 100
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:02.759636",
+      "agent": "XRP_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:02.964124",
+      "asset": "XRP_15M",
+      "time_to_expiry": 717.3,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:03.305605",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 164,
+      "depth_no": 308
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:03.609402",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 164,
+      "depth_no": 308
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:03.611359",
+      "agent": "DOGE_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:03.814237",
+      "asset": "DOGE_15M",
+      "time_to_expiry": 716.4,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:04.016855",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 265,
+      "depth_no": 52214
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:04.320229",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 265,
+      "depth_no": 52214
+    },
+    {
+      "type": "aggressiveness",
+      "timestamp": "2026-07-10T17:03:05.038128",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "asset": "SOL15M",
+      "edge_pct": 3.16,
+      "aggressiveness": 0.53,
+      "time_to_expiry": 724
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:06.455406",
+      "agent": "BTC_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:06.657558",
+      "asset": "BTC_15M",
+      "time_to_expiry": 713.6,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:06.859176",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 1326,
+      "depth_no": 2086
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:07.062455",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 1326,
+      "depth_no": 2086
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:07.065821",
+      "agent": "ETH_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:07.268998",
+      "asset": "ETH_15M",
+      "time_to_expiry": 712.9,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:07.572870",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 131,
+      "depth_no": 400
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:07.776782",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 131,
+      "depth_no": 400
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:07.778305",
+      "agent": "SOL_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:07.982235",
+      "asset": "SOL_15M",
+      "time_to_expiry": 712.3,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:08.184070",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 6,
+      "depth_no": 100
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:08.451078",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 6,
+      "depth_no": 100
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:08.456159",
+      "agent": "XRP_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:08.659195",
+      "asset": "XRP_15M",
+      "time_to_expiry": 711.6,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:08.861343",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 164,
+      "depth_no": 308
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:09.065404",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 164,
+      "depth_no": 308
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:09.168952",
+      "agent": "DOGE_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:09.271241",
+      "asset": "DOGE_15M",
+      "time_to_expiry": 710.9,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:09.474505",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 29,
+      "depth_no": 52214
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:09.781894",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 29,
+      "depth_no": 52214
+    },
+    {
+      "type": "aggressiveness",
+      "timestamp": "2026-07-10T17:03:12.297015",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "asset": "SOL15M",
+      "edge_pct": 3.16,
+      "aggressiveness": 0.53,
+      "time_to_expiry": 713
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:13.335373",
+      "agent": "BTC_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:13.660774",
+      "asset": "BTC_15M",
+      "time_to_expiry": 706.6,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:13.986678",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 926,
+      "depth_no": 2086
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:14.295974",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 926,
+      "depth_no": 2086
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:14.299493",
+      "agent": "ETH_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:14.501750",
+      "asset": "ETH_15M",
+      "time_to_expiry": 705.7,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:14.704309",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 131,
+      "depth_no": 400
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:14.907572",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 131,
+      "depth_no": 400
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:15.010662",
+      "agent": "SOL_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:15.112825",
+      "asset": "SOL_15M",
+      "time_to_expiry": 705.0,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:15.417028",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 6,
+      "depth_no": 100
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:15.640424",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 6,
+      "depth_no": 100
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:15.748546",
+      "agent": "XRP_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:15.951864",
+      "asset": "XRP_15M",
+      "time_to_expiry": 704.3,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:16.155435",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 5,
+      "depth_no": 308
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:16.463834",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 5,
+      "depth_no": 308
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:16.568989",
+      "agent": "DOGE_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:16.772094",
+      "asset": "DOGE_15M",
+      "time_to_expiry": 703.5,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:16.975678",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 29,
+      "depth_no": 52214
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:17.179775",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 29,
+      "depth_no": 52214
+    },
+    {
+      "type": "aggressiveness",
+      "timestamp": "2026-07-10T17:03:18.004584",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "asset": "ETH15M",
+      "edge_pct": 5.0,
+      "aggressiveness": 0.56,
+      "time_to_expiry": 702
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:18.941508",
+      "agent": "BTC_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:19.144544",
+      "asset": "BTC_15M",
+      "time_to_expiry": 701.1,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:19.346807",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 926,
+      "depth_no": 2086
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:19.550032",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 926,
+      "depth_no": 2086
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:19.652566",
+      "agent": "ETH_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:19.755061",
+      "asset": "ETH_15M",
+      "time_to_expiry": 700.4,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:19.957526",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 131,
+      "depth_no": 400
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:20.161430",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 131,
+      "depth_no": 400
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:20.264783",
+      "agent": "SOL_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:20.467281",
+      "asset": "SOL_15M",
+      "time_to_expiry": 699.8,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:20.781275",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 6,
+      "depth_no": 100
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:20.986989",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 6,
+      "depth_no": 100
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:20.988988",
+      "agent": "XRP_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:21.192507",
+      "asset": "XRP_15M",
+      "time_to_expiry": 699.0,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:21.395328",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 5,
+      "depth_no": 308
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:21.598469",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 5,
+      "depth_no": 308
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:21.701990",
+      "agent": "DOGE_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:21.905261",
+      "asset": "DOGE_15M",
+      "time_to_expiry": 698.4,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:22.109068",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 29,
+      "depth_no": 52214
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:22.311623",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 29,
+      "depth_no": 52214
+    },
+    {
+      "type": "aggressiveness",
+      "timestamp": "2026-07-10T17:03:24.832717",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "asset": "ETH15M",
+      "edge_pct": 5.0,
+      "aggressiveness": 0.56,
+      "time_to_expiry": 702
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:25.539703",
+      "agent": "BTC_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:25.844610",
+      "asset": "BTC_15M",
+      "time_to_expiry": 694.5,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:26.157886",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 926,
+      "depth_no": 2086
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:26.397857",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 926,
+      "depth_no": 2086
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:26.501114",
+      "agent": "ETH_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:26.703986",
+      "asset": "ETH_15M",
+      "time_to_expiry": 693.6,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:27.008167",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 131,
+      "depth_no": 400
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:27.312325",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 131,
+      "depth_no": 400
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:27.415715",
+      "agent": "SOL_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:27.618947",
+      "asset": "SOL_15M",
+      "time_to_expiry": 692.6,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:27.821548",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 6,
+      "depth_no": 100
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:28.127298",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 6,
+      "depth_no": 100
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:28.129427",
+      "agent": "XRP_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:28.332337",
+      "asset": "XRP_15M",
+      "time_to_expiry": 691.9,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:28.636010",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 5,
+      "depth_no": 308
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:28.839640",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 5,
+      "depth_no": 308
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:28.841161",
+      "agent": "DOGE_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:29.044058",
+      "asset": "DOGE_15M",
+      "time_to_expiry": 691.2,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:29.247493",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 29,
+      "depth_no": 52214
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:29.553401",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 29,
+      "depth_no": 52214
+    },
+    {
+      "type": "aggressiveness",
+      "timestamp": "2026-07-10T17:03:30.395980",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "asset": "ETH15M",
+      "edge_pct": 5.0,
+      "aggressiveness": 0.56,
+      "time_to_expiry": 691
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:31.104487",
+      "agent": "BTC_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:31.307211",
+      "asset": "BTC_15M",
+      "time_to_expiry": 689.0,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:31.509395",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 926,
+      "depth_no": 2086
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:31.712751",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 926,
+      "depth_no": 2086
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:31.714752",
+      "agent": "ETH_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:31.917730",
+      "asset": "ETH_15M",
+      "time_to_expiry": 688.3,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:32.119358",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 131,
+      "depth_no": 400
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:32.323099",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 131,
+      "depth_no": 400
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:32.431903",
+      "agent": "SOL_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:32.534176",
+      "asset": "SOL_15M",
+      "time_to_expiry": 687.7,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:32.736739",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 6,
+      "depth_no": 100
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:32.939953",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 6,
+      "depth_no": 100
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:33.043010",
+      "agent": "XRP_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:33.245899",
+      "asset": "XRP_15M",
+      "time_to_expiry": 687.0,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:33.450011",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 5,
+      "depth_no": 308
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:33.656604",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 5,
+      "depth_no": 308
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:33.760053",
+      "agent": "DOGE_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:33.963086",
+      "asset": "DOGE_15M",
+      "time_to_expiry": 686.3,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:34.064889",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 29,
+      "depth_no": 52214
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:34.372599",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 29,
+      "depth_no": 52214
+    },
+    {
+      "type": "aggressiveness",
+      "timestamp": "2026-07-10T17:03:34.777364",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "asset": "ETH15M",
+      "edge_pct": 5.15,
+      "aggressiveness": 0.57,
+      "time_to_expiry": 691
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:36.117072",
+      "agent": "BTC_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:36.504651",
+      "asset": "BTC_15M",
+      "time_to_expiry": 683.9,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:36.924294",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 926,
+      "depth_no": 2086
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:37.241370",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 926,
+      "depth_no": 2086
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:37.243371",
+      "agent": "ETH_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:37.447333",
+      "asset": "ETH_15M",
+      "time_to_expiry": 682.8,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:37.650030",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 131,
+      "depth_no": 400
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:37.854245",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 131,
+      "depth_no": 400
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:37.956933",
+      "agent": "SOL_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:38.159127",
+      "asset": "SOL_15M",
+      "time_to_expiry": 682.1,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:38.568260",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 6,
+      "depth_no": 100
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:38.872275",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 6,
+      "depth_no": 100
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:38.975782",
+      "agent": "XRP_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:39.178751",
+      "asset": "XRP_15M",
+      "time_to_expiry": 681.0,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:39.484859",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 5,
+      "depth_no": 308
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:39.687533",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 5,
+      "depth_no": 308
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:39.689046",
+      "agent": "DOGE_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:39.891781",
+      "asset": "DOGE_15M",
+      "time_to_expiry": 680.3,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:40.095521",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 29,
+      "depth_no": 52214
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:40.298386",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 29,
+      "depth_no": 52214
+    },
+    {
+      "type": "aggressiveness",
+      "timestamp": "2026-07-10T17:03:43.022900",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "asset": "ETH15M",
+      "edge_pct": 5.62,
+      "aggressiveness": 0.58,
+      "time_to_expiry": 680
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:44.147382",
+      "agent": "BTC_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:44.351059",
+      "asset": "BTC_15M",
+      "time_to_expiry": 675.9,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:44.553029",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 926,
+      "depth_no": 2086
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:44.755946",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 926,
+      "depth_no": 2086
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:44.757947",
+      "agent": "ETH_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:44.960601",
+      "asset": "ETH_15M",
+      "time_to_expiry": 675.2,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:45.164181",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 93,
+      "depth_no": 400
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:45.368437",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 93,
+      "depth_no": 400
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:45.471615",
+      "agent": "SOL_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:45.675283",
+      "asset": "SOL_15M",
+      "time_to_expiry": 674.6,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:45.877766",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 506,
+      "depth_no": 100
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:46.081355",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 506,
+      "depth_no": 100
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:46.083581",
+      "agent": "XRP_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:46.287077",
+      "asset": "XRP_15M",
+      "time_to_expiry": 673.9,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:46.590648",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 5,
+      "depth_no": 308
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:46.798580",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 5,
+      "depth_no": 308
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:46.901288",
+      "agent": "DOGE_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:47.103932",
+      "asset": "DOGE_15M",
+      "time_to_expiry": 673.2,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:47.306410",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 26,
+      "depth_no": 1142
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:47.509785",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 26,
+      "depth_no": 1142
+    },
+    {
+      "type": "aggressiveness",
+      "timestamp": "2026-07-10T17:03:48.014541",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "asset": "ETH15M",
+      "edge_pct": 4.55,
+      "aggressiveness": 0.56,
+      "time_to_expiry": 680
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:48.939231",
+      "agent": "BTC_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:49.245133",
+      "asset": "BTC_15M",
+      "time_to_expiry": 671.1,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:49.559470",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 4897,
+      "depth_no": 2086
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:49.970644",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 4897,
+      "depth_no": 2086
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:50.074206",
+      "agent": "ETH_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:50.276970",
+      "asset": "ETH_15M",
+      "time_to_expiry": 670.0,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:50.480657",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 93,
+      "depth_no": 400
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:50.684078",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 93,
+      "depth_no": 400
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:50.787501",
+      "agent": "SOL_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:50.989764",
+      "asset": "SOL_15M",
+      "time_to_expiry": 669.3,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:51.192756",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 506,
+      "depth_no": 100
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:51.396493",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 506,
+      "depth_no": 100
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:51.398493",
+      "agent": "XRP_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:51.607441",
+      "asset": "XRP_15M",
+      "time_to_expiry": 668.6,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:51.809664",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 5,
+      "depth_no": 308
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:52.113460",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 5,
+      "depth_no": 308
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:52.115382",
+      "agent": "DOGE_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:52.318077",
+      "asset": "DOGE_15M",
+      "time_to_expiry": 667.9,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:52.520401",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 26,
+      "depth_no": 1142
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:52.724514",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 26,
+      "depth_no": 1142
+    },
+    {
+      "type": "aggressiveness",
+      "timestamp": "2026-07-10T17:03:55.449660",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "asset": "ETH15M",
+      "edge_pct": 4.31,
+      "aggressiveness": 0.55,
+      "time_to_expiry": 668
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:56.055688",
+      "agent": "BTC_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:56.357966",
+      "asset": "BTC_15M",
+      "time_to_expiry": 664.0,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:56.662088",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 4897,
+      "depth_no": 2086
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:56.865711",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 4897,
+      "depth_no": 2086
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:56.868230",
+      "agent": "ETH_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:57.070479",
+      "asset": "ETH_15M",
+      "time_to_expiry": 663.1,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:57.273040",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 93,
+      "depth_no": 400
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:57.476218",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 93,
+      "depth_no": 400
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:57.480598",
+      "agent": "SOL_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:57.683216",
+      "asset": "SOL_15M",
+      "time_to_expiry": 662.5,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:57.986882",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 506,
+      "depth_no": 100
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:58.190026",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 506,
+      "depth_no": 100
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:58.191595",
+      "agent": "XRP_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:58.413437",
+      "asset": "XRP_15M",
+      "time_to_expiry": 661.8,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:58.726260",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 5,
+      "depth_no": 308
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:58.931427",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 5,
+      "depth_no": 308
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:03:58.933469",
+      "agent": "DOGE_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:03:59.135140",
+      "asset": "DOGE_15M",
+      "time_to_expiry": 661.1,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:59.337607",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 26,
+      "depth_no": 1142
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:03:59.541417",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 26,
+      "depth_no": 1142
+    },
+    {
+      "type": "aggressiveness",
+      "timestamp": "2026-07-10T17:04:00.047790",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "asset": "BTC15M",
+      "edge_pct": 4.0,
+      "aggressiveness": 0.55,
+      "time_to_expiry": 668
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:04:01.061717",
+      "agent": "BTC_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:04:01.379451",
+      "asset": "BTC_15M",
+      "time_to_expiry": 658.9,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:01.802222",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 4897,
+      "depth_no": 2086
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:02.139801",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 4897,
+      "depth_no": 2086
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:04:02.245219",
+      "agent": "ETH_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:04:02.448477",
+      "asset": "ETH_15M",
+      "time_to_expiry": 657.8,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:02.651062",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 93,
+      "depth_no": 400
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:02.854003",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 93,
+      "depth_no": 400
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:04:02.855004",
+      "agent": "SOL_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:04:03.057880",
+      "asset": "SOL_15M",
+      "time_to_expiry": 657.2,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:03.260437",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 506,
+      "depth_no": 100
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:03.463473",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 506,
+      "depth_no": 100
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:04:03.567015",
+      "agent": "XRP_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:04:03.769832",
+      "asset": "XRP_15M",
+      "time_to_expiry": 656.5,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:03.971906",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 5,
+      "depth_no": 308
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:04.174800",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 5,
+      "depth_no": 308
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:04:04.177041",
+      "agent": "DOGE_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:04:04.379765",
+      "asset": "DOGE_15M",
+      "time_to_expiry": 655.9,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:04.581901",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 26,
+      "depth_no": 1142
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:04.784861",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 26,
+      "depth_no": 1142
+    },
+    {
+      "type": "aggressiveness",
+      "timestamp": "2026-07-10T17:04:07.511705",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "asset": "BTC15M",
+      "edge_pct": 4.0,
+      "aggressiveness": 0.55,
+      "time_to_expiry": 657
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:04:08.217763",
+      "agent": "BTC_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:04:08.439765",
+      "asset": "BTC_15M",
+      "time_to_expiry": 651.9,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:08.764941",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 4897,
+      "depth_no": 2086
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:09.070003",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 4897,
+      "depth_no": 2086
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:04:09.072004",
+      "agent": "ETH_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:04:09.375246",
+      "asset": "ETH_15M",
+      "time_to_expiry": 651.0,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:09.678864",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 93,
+      "depth_no": 400
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:09.885305",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 93,
+      "depth_no": 400
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:04:09.887304",
+      "agent": "SOL_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:04:10.091116",
+      "asset": "SOL_15M",
+      "time_to_expiry": 650.1,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:10.394030",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 506,
+      "depth_no": 100
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:10.596791",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 506,
+      "depth_no": 100
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:04:10.599314",
+      "agent": "XRP_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:04:10.801635",
+      "asset": "XRP_15M",
+      "time_to_expiry": 649.4,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:11.004505",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 5,
+      "depth_no": 308
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:11.308267",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 5,
+      "depth_no": 308
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:04:11.310898",
+      "agent": "DOGE_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:04:11.513787",
+      "asset": "DOGE_15M",
+      "time_to_expiry": 648.7,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:11.817686",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 26,
+      "depth_no": 1142
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:12.020739",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 26,
+      "depth_no": 1142
+    },
+    {
+      "type": "aggressiveness",
+      "timestamp": "2026-07-10T17:04:12.528473",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "asset": "BTC15M",
+      "edge_pct": 4.0,
+      "aggressiveness": 0.55,
+      "time_to_expiry": 657
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:04:13.342207",
+      "agent": "BTC_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:04:13.647524",
+      "asset": "BTC_15M",
+      "time_to_expiry": 646.7,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:13.960518",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 4897,
+      "depth_no": 2086
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:14.266985",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 4897,
+      "depth_no": 2086
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:04:14.382596",
+      "agent": "ETH_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:04:14.586009",
+      "asset": "ETH_15M",
+      "time_to_expiry": 645.7,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:14.788556",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 93,
+      "depth_no": 400
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:14.991144",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 93,
+      "depth_no": 400
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:04:14.993260",
+      "agent": "SOL_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:04:15.196702",
+      "asset": "SOL_15M",
+      "time_to_expiry": 645.0,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:15.399579",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 506,
+      "depth_no": 100
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:15.602414",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 506,
+      "depth_no": 100
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:04:15.705114",
+      "agent": "XRP_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:04:15.907950",
+      "asset": "XRP_15M",
+      "time_to_expiry": 644.4,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:16.110602",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 5,
+      "depth_no": 308
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:16.313614",
+      "asset": "XRP_15M",
+      "ticker": "KXXRP15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 5,
+      "depth_no": 308
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:04:16.315615",
+      "agent": "DOGE_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:04:16.517714",
+      "asset": "DOGE_15M",
+      "time_to_expiry": 643.7,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:16.720047",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 26,
+      "depth_no": 1142
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:16.923273",
+      "asset": "DOGE_15M",
+      "ticker": "KXDOGE15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 26,
+      "depth_no": 1142
+    },
+    {
+      "type": "aggressiveness",
+      "timestamp": "2026-07-10T17:04:19.806158",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "asset": "SOL15M",
+      "edge_pct": 4.16,
+      "aggressiveness": 0.55,
+      "time_to_expiry": 647
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:04:21.015835",
+      "agent": "BTC_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:04:21.218745",
+      "asset": "BTC_15M",
+      "time_to_expiry": 639.0,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:21.523498",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 4897,
+      "depth_no": 2086
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:21.726257",
+      "asset": "BTC_15M",
+      "ticker": "KXBTC15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 4897,
+      "depth_no": 2086
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:04:21.727257",
+      "agent": "ETH_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:04:21.930436",
+      "asset": "ETH_15M",
+      "time_to_expiry": 638.3,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:22.132660",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 102,
+      "depth_no": 400
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:22.435882",
+      "asset": "ETH_15M",
+      "ticker": "KXETH15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 102,
+      "depth_no": 400
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:04:22.437880",
+      "agent": "SOL_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:04:22.842928",
+      "asset": "SOL_15M",
+      "time_to_expiry": 637.5,
+      "decision": "PROCEED"
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:23.045944",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 506,
+      "depth_no": 100
+    },
+    {
+      "type": "market_validation",
+      "timestamp": "2026-07-10T17:04:23.249199",
+      "asset": "SOL_15M",
+      "ticker": "KXSOL15M-26JUL101715-15",
+      "regime": "both_sides",
+      "depth_yes": 506,
+      "depth_no": 100
+    },
+    {
+      "type": "position_limit",
+      "timestamp": "2026-07-10T17:04:23.352431",
+      "agent": "XRP_15M",
+      "total_positions": 0,
+      "open_positions": 0
+    },
+    {
+      "type": "trading_window",
+      "timestamp": "2026-07-10T17:04:23.555162",
+      "asset": "XRP_15M",
+      "time_to_expiry": 636.7,
+      "decision": "PROCEED"
+    }
+  ],
+  "market_states": {},
+  "edge_data": {}
+}

@@ -72,7 +72,7 @@ class TestDualQueueBridgePattern:
         assert processed_events[1]["ticker"] == "ETH"
     
     @pytest.mark.asyncio
-    async def test_backpressure_on_full_async_queue(self, thread_queue, event_loop):
+    async def test_backpressure_on_full_async_queue(self, thread_queue):
         """Test that drain task handles backpressure when async_queue is full."""
         async_queue = asyncio.Queue(maxsize=2)  # Small queue to trigger backpressure
         drain_running = threading.Event()
@@ -115,7 +115,7 @@ class TestDualQueueBridgePattern:
             pass
     
     @pytest.mark.asyncio
-    async def test_shutdown_cleanup(self, thread_queue, event_loop):
+    async def test_shutdown_cleanup(self, thread_queue):
         """Test that drain task and forward loop clean up properly on shutdown."""
         async_queue = asyncio.Queue(maxsize=100)
         shutdown_event = asyncio.Event()

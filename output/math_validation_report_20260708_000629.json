@@ -1,0 +1,177 @@
+{
+  "timestamp": "2026-07-08T04:06:02.089716",
+  "profile": "kalshi_crypto_15m_v2",
+  "summary": {
+    "total_issues": 14,
+    "critical_issues": 2,
+    "high_issues": 2,
+    "medium_issues": 8,
+    "low_issues": 2
+  },
+  "components_checked": [
+    "kelly_criterion",
+    "position_sizing",
+    "risk_management",
+    "performance_metrics",
+    "calibration",
+    "edge_calculation",
+    "velocity_model",
+    "correlation_tracking"
+  ],
+  "issues": [
+    {
+      "category": "kelly_criterion",
+      "severity": "critical",
+      "component": "risk/position_sizing.py:_kelly_criterion_sizing",
+      "issue": "Kelly uses heuristic win rate assumption instead of historical data",
+      "impact": "Overestimates optimal position size by 50-200% due to parameter uncertainty",
+      "recommendation": "Replace heuristic assumptions with historical win/loss statistics from actual trade data. Use Bayesian posterior distribution for expected return.",
+      "evidence": {
+        "heuristic_found": "win_rate = 0.5 + (signal_strength * 0.3)"
+      }
+    },
+    {
+      "category": "kelly_criterion",
+      "severity": "critical",
+      "component": "risk/position_sizing.py:_kelly_criterion_sizing",
+      "issue": "Kelly uses heuristic avg win/loss assumptions instead of historical data",
+      "impact": "Kelly fraction is based on arbitrary multipliers (3x vol) rather than actual trade outcomes",
+      "recommendation": "Calculate avg_win and avg_loss from historical trade P&L data. Use empirical distribution, not volatility proxies.",
+      "evidence": {
+        "heuristic_found": "avg_win = position.volatility * position.current_price * 3"
+      }
+    },
+    {
+      "category": "kelly_criterion",
+      "severity": "medium",
+      "component": "Kelly sizing across stack",
+      "issue": "No Bayesian shrinkage for edge estimates detected",
+      "impact": "Overconfident edge estimates lead to oversized positions. Ignores parameter uncertainty.",
+      "recommendation": "Implement Bayesian shrinkage to blend raw edge estimates with priors. Use confidence parameters to weight historical vs prior beliefs.",
+      "evidence": {
+        "bayesian_shrinkage_found": false
+      }
+    },
+    {
+      "category": "kelly_criterion",
+      "severity": "medium",
+      "component": "risk/position_sizing.py:_kelly_criterion_sizing",
+      "issue": "Kelly uses binary formula instead of continuous formula",
+      "impact": "Binary Kelly assumes win/loss outcomes, but trading has continuous returns. May misestimate optimal size.",
+      "recommendation": "Consider using continuous Kelly formula: f* = \u03bc / \u03c3\u00b2 where \u03bc is expected return and \u03c3\u00b2 is variance. Or ensure binary assumptions match actual trade structure.",
+      "evidence": {
+        "formula_type": "binary_kelly_detected"
+      }
+    },
+    {
+      "category": "kelly_criterion",
+      "severity": "medium",
+      "component": "Kelly sizing across stack",
+      "issue": "Kelly sizing may not be regime-aware",
+      "impact": "Fixed Kelly across all market regimes ignores volatility and edge changes. Can oversize in high-vol regimes.",
+      "recommendation": "Implement regime-aware Kelly sizing. Adjust Kelly fraction based on volatility regime (bull/bear/crisis) and edge stability.",
+      "evidence": {
+        "regime_aware_kelly": false
+      }
+    },
+    {
+      "category": "position_sizing",
+      "severity": "medium",
+      "component": "risk/position_sizing.py:_volatility_based_sizing",
+      "issue": "ATR calculation uses simplistic 2 * volatility * price formula",
+      "impact": "ATR should be calculated from historical high/low data, not volatility proxy. May misestimate risk.",
+      "recommendation": "Implement proper ATR calculation using Wilder's smoothing on high/low data. Use historical ATR, not volatility proxy.",
+      "evidence": {
+        "atr_formula": "atr = 2 * position.volatility * position.current_price"
+      }
+    },
+    {
+      "category": "position_sizing",
+      "severity": "medium",
+      "component": "risk/position_sizing.py:_risk_parity_sizing",
+      "issue": "Risk parity ignores correlation matrix",
+      "impact": "Risk parity without correlation underestimates portfolio risk. Correlated positions get too much allocation.",
+      "recommendation": "Include correlation matrix in risk parity calculation. Use true risk contribution: RC_i = w_i * (\u03a3w)_i / \u03c3_p\u00b2",
+      "evidence": {
+        "correlation_in_risk_parity": false
+      }
+    },
+    {
+      "category": "position_sizing",
+      "severity": "high",
+      "component": "merid/prediction/unified_sizing.py",
+      "issue": "Unified sizing may not enforce window-based risk limits (3% per agent, 5% total)",
+      "impact": "Could exceed 15-minute window risk limits. Window tracking is critical for risk management.",
+      "recommendation": "Implement window-based risk limit enforcement. Track cumulative exposure per 15m window and enforce 3% per-agent / 5% total limits.",
+      "evidence": {
+        "window_limits": "per_window_risk not found"
+      }
+    },
+    {
+      "category": "performance_metrics",
+      "severity": "medium",
+      "component": "merid/event_venues/kalshi/performance_comparator.py",
+      "issue": "Sharpe ratio calculated from per-trade PnL instead of time-series returns",
+      "impact": "Per-trade Sharpe doesn't account for time between trades. Overestimates risk-adjusted returns for infrequent trading.",
+      "recommendation": "Calculate Sharpe from time-series returns (equity curve) with proper annualization. Use risk-free rate adjustment.",
+      "evidence": {
+        "sharpe_method": "per-trade PnL used"
+      }
+    },
+    {
+      "category": "calibration",
+      "severity": "medium",
+      "component": "Calibration across stack",
+      "issue": "Logistic regression fitting not detected in calibration code",
+      "impact": "May be using linear calibration or no calibration. Logistic is standard for probability calibration.",
+      "recommendation": "Implement logistic regression calibration using scikit-learn or custom implementation. Ensure proper convergence handling.",
+      "evidence": {
+        "logistic_fitting": false
+      }
+    },
+    {
+      "category": "velocity_model",
+      "severity": "high",
+      "component": "config/profiles/kalshi_crypto_15m_v2.yaml",
+      "issue": "Velocity model logistic coefficients not configured",
+      "impact": "Velocity-to-probability mapping may use default coefficients. May be unresponsive to market velocity.",
+      "recommendation": "Configure velocity_model_alpha_0 and alpha_1 for each asset. Ensure coefficients produce responsive probability shifts.",
+      "evidence": {
+        "velocity_coefficients": "not found in profile"
+      }
+    },
+    {
+      "category": "velocity_model",
+      "severity": "low",
+      "component": "Velocity model testing",
+      "issue": "No velocity model responsiveness tests found",
+      "impact": "Cannot verify that velocity model produces meaningful probability shifts across velocity range.",
+      "recommendation": "Add unit tests that verify probability shifts across velocity range (e.g., 0% \u2192 30%, 50% \u2192 70%, 100% \u2192 90%).",
+      "evidence": {
+        "responsiveness_tests": false
+      }
+    },
+    {
+      "category": "correlation_tracking",
+      "severity": "medium",
+      "component": "Correlation tracking across stack",
+      "issue": "Correlation matrix validation not implemented",
+      "impact": "Invalid correlation matrices (non-symmetric, non-positive-definite) can cause numerical errors in risk calculations.",
+      "recommendation": "Add validation checks: symmetry (C == C.T), positive definiteness (all eigenvalues > 0), diagonal = 1.",
+      "evidence": {
+        "matrix_validation": false
+      }
+    },
+    {
+      "category": "correlation_tracking",
+      "severity": "low",
+      "component": "Correlation tracking across stack",
+      "issue": "Correlation tracking may not be regime-dependent",
+      "impact": "Correlations vary by market regime (crisis vs normal). Static correlations may misestimate risk in regime transitions.",
+      "recommendation": "Consider implementing regime-dependent correlation matrices. Use different correlations for bull/bear/crisis regimes.",
+      "evidence": {
+        "regime_correlation": false
+      }
+    }
+  ]
+}

@@ -801,42 +801,42 @@ class TestSpread01ThresholdHarmonization:
 
 
 # ===========================================================================
-# PRICE-01 — Price range enforcement (10-50c canonical, 2026-07-12: aligned with commit c5ac4a18)
+# PRICE-01 — Price range enforcement (10-75c expanded, 2026-07-12: aligned with current market conditions)
 # ===========================================================================
 
 class TestPrice01RangeEnforcement:
-    """All components must enforce 10-50c canonical price range (2026-07-12: aligned with commit c5ac4a18)."""
+    """All components must enforce 10-75c expanded price range (2026-07-12: aligned with current market conditions)."""
 
-    def test_crypto_15m_profile_uses_10_50c(self):
-        """crypto_15m_profile.py must use 10-50c canonical price range (2026-07-12: aligned with commit c5ac4a18)."""
+    def test_crypto_15m_profile_uses_10_75c(self):
+        """crypto_15m_profile.py must use 10-75c expanded price range (2026-07-12: aligned with current market conditions)."""
         from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
         adapter = Crypto15mProfileAdapter()
         if adapter and adapter.profile:
-            # 2026-07-12: Canonical 10-50c range per commit c5ac4a18
+            # 2026-07-12: Expanded 10-75c range to match current market conditions
             assert adapter.profile.price_range.min_price_cents == 10, (
                 f"Profile min_price_cents must be 10c, "
                 f"got {adapter.profile.price_range.min_price_cents}c"
             )
-            assert adapter.profile.price_range.max_price_cents == 50, (
-                f"Profile max_price_cents must be 50c, "
+            assert adapter.profile.price_range.max_price_cents == 75, (
+                f"Profile max_price_cents must be 75c, "
                 f"got {adapter.profile.price_range.max_price_cents}c"
             )
 
-    def test_market_filter_uses_10_50c(self):
-        """market_filter.py must use 10-50c canonical price range (2026-07-12: aligned with commit c5ac4a18)."""
+    def test_market_filter_uses_10_75c(self):
+        """market_filter.py must use 10-75c expanded price range (2026-07-12: aligned with current market conditions)."""
         from merid.event_venues.kalshi.market_filter import MarketFilterConfig
         cfg = MarketFilterConfig()
-        # 2026-07-12: Canonical 10-50c range per commit c5ac4a18
+        # 2026-07-12: Expanded 10-75c range to match current market conditions
         assert cfg.min_price_cents == 10, (
             f"market_filter.min_price_cents must be 10c, got {cfg.min_price_cents}c"
         )
-        assert cfg.max_price_cents == 50, (
-            f"market_filter.max_price_cents must be 50c, got {cfg.max_price_cents}c"
+        assert cfg.max_price_cents == 75, (
+            f"market_filter.max_price_cents must be 75c, got {cfg.max_price_cents}c"
         )
 
-    def test_agent_grid_uses_10_50c(self):
-        """agent_grid_15m.py must use 10-50c canonical price range (2026-07-12: aligned with commit c5ac4a18)."""
-        # Verify the hardcoded values in agent_grid_15m.py are 10-50c
+    def test_agent_grid_uses_10_75c(self):
+        """agent_grid_15m.py must use 10-75c expanded price range (2026-07-12: aligned with current market conditions)."""
+        # Verify the hardcoded values in agent_grid_15m.py are 10-75c
         from pathlib import Path
         agent_grid_path = Path("merid/prediction/agent_grid_15m.py")
         if not agent_grid_path.exists():
@@ -845,14 +845,14 @@ class TestPrice01RangeEnforcement:
         with open(agent_grid_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
-        # 2026-07-12: Canonical 10-50c range per commit c5ac4a18
-        assert "10 <= clamped_price_cents <= 50" in content, (
-            "agent_grid_15m.py must have 10-50c price clamping"
+        # 2026-07-12: Expanded 10-75c range to match current market conditions
+        assert "10 <= clamped_price_cents <= 75" in content, (
+            "agent_grid_15m.py must have 10-75c price clamping"
         )
 
-    def test_global_allocator_uses_10_50c(self):
-        """global_allocator.py must use 10-50c canonical price range (2026-07-12: aligned with commit c5ac4a18)."""
-        # Verify the hardcoded values in global_allocator.py are 10-50c
+    def test_global_allocator_uses_10_75c(self):
+        """global_allocator.py must use 10-75c expanded price range (2026-07-12: aligned with current market conditions)."""
+        # Verify the hardcoded values in global_allocator.py are 10-75c
         from pathlib import Path
         global_allocator_path = Path("merid/risk/profiles/global_allocator.py")
         if not global_allocator_path.exists():
@@ -861,12 +861,12 @@ class TestPrice01RangeEnforcement:
         with open(global_allocator_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
-        # 2026-07-12: Canonical 10-50c range per commit c5ac4a18
+        # 2026-07-12: Expanded 10-75c range to match current market conditions
         assert "min_price_cents = 10" in content, (
             "global_allocator.py must have min_price_cents = 10"
         )
-        assert "max_price_cents = 50" in content, (
-            "global_allocator.py must have max_price_cents = 50"
+        assert "max_price_cents = 75" in content, (
+            "global_allocator.py must have max_price_cents = 75"
         )
 
 

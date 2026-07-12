@@ -379,7 +379,7 @@ def is_liquid_enough(
     bid_size: int,
     ask_size: int,
     min_size: int = 1,
-    max_spread_cents: int = 10,
+    max_spread_cents: int = 30,  # 2026-07-10: OPTIMIZED to 30c - harmonizes with 10c-50c entry price sweet spot
 ) -> bool:
     """Check if market has sufficient liquidity for trading.
 

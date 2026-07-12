@@ -10,14 +10,20 @@ from datetime import datetime
 # Add the project root to Python path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from trading._legacy.perp.binance_perp import BinancePerpAdapter
-from trading.execution_engine import (
-    TradingExecutionEngine, TradeOrder, OrderType, OrderSide,
-    ExecutionResult, OrderStatus
-)
-from utils.logger import get_logger
-
-logger = get_logger("test_trading_system")
+try:
+    from trading._legacy.perp.binance_perp import BinancePerpAdapter
+    from trading.execution_engine import (
+        TradingExecutionEngine, TradeOrder, OrderType, OrderSide,
+        ExecutionResult, OrderStatus
+    )
+    from utils.logger import get_logger
+    logger = get_logger("test_trading_system")
+except RuntimeError as e:
+    if "Legacy execution module cannot be imported" in str(e):
+        import pytest
+        pytest.skip("Legacy execution module not allowed in production", allow_module_level=True)
+    else:
+        raise
 
 async def test_binance_adapter():
     """Test Binance perpetual adapter functionality"""

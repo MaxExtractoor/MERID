@@ -6,7 +6,7 @@ Tests for the following fixes:
 2. agent_grid_15m.py uses profile staleness values (not hardcoded 120s)
 3. MIN_TIME_TO_EXPIRY default changed from 2 to 3 minutes
 4. Depth thresholds now use risk envelope (not hardcoded tier-based)
-5. min_bars_required restored from 1 to 52 for proper indicator calculations
+5. min_bars_required reduced from 52 to 20 for 15-minute markets (research-based optimization)
 """
 
 import pytest
@@ -167,10 +167,10 @@ class TestDepthThresholdFixes:
 
 
 class TestMinBarsRequiredFix:
-    """Test min_bars_required fix - restored from 1 to 52 for proper indicator calculations."""
+    """Test min_bars_required fix - reduced from 52 to 20 for 15-minute markets."""
     
-    def test_indicators_min_bars_required_is_52(self):
-        """Test that crypto_15m_indicators.py min_bars_required is 52 (not 1)."""
+    def test_indicators_min_bars_required_is_20(self):
+        """Test that crypto_15m_indicators.py min_bars_required is 20 (not 52)."""
         indicators_path = Path(__file__).parent.parent / "merid" / "signals" / "crypto_15m_indicators.py"
         
         if not indicators_path.exists():
@@ -178,20 +178,16 @@ class TestMinBarsRequiredFix:
         
         content = indicators_path.read_text(encoding='utf-8')
         
-        # Check that min_bars_required is 52 (not 1)
-        assert "min_bars_required: int = 52" in content, \
-            "min_bars_required should be 52 for proper EMA/MACD calculations"
+        # Check that min_bars_required is 20 (not 52)
+        assert "min_bars_required: int = 20" in content, \
+            "min_bars_required should be 20 for 15-minute markets"
         
-        # Check that TEMPORARY warmup comment is removed
-        assert "TEMPORARY warmup" not in content, \
-            "TEMPORARY warmup comment should be removed"
-        
-        # Check comment mentions sufficient history
-        assert "Need sufficient history for EMA/MACD calculations" in content, \
-            "Comment should mention need for sufficient history"
+        # Check comment mentions 15-minute markets
+        assert "15-minute markets" in content, \
+            "Comment should mention 15-minute markets"
     
-    def test_indicators_min_bars_for_macd_is_30(self):
-        """Test that min_bars_for_macd is 30 (for MACD calculations)."""
+    def test_indicators_min_bars_for_macd_is_15(self):
+        """Test that min_bars_for_macd is 15 (aligned with new min_bars_required)."""
         indicators_path = Path(__file__).parent.parent / "merid" / "signals" / "crypto_15m_indicators.py"
         
         if not indicators_path.exists():
@@ -199,9 +195,9 @@ class TestMinBarsRequiredFix:
         
         content = indicators_path.read_text(encoding='utf-8')
         
-        # Check that min_bars_for_macd is 30
-        assert "min_bars_for_macd: int = 30" in content, \
-            "min_bars_for_macd should be 30 for MACD calculations"
+        # Check that min_bars_for_macd is 15
+        assert "min_bars_for_macd: int = 15" in content, \
+            "min_bars_for_macd should be 15 for MACD calculations"
 
 
 class TestThresholdConsistency:

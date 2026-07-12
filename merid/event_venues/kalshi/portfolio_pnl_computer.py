@@ -226,11 +226,19 @@ class RealTimePnLComputer:
             self._current_marks[ticker] = mark_price_cents
             self._last_update = datetime.now(timezone.utc)
             
-            # Get current portfolio state
-            # Single-account design: Kalshi venue uses one account per API key
-            # Multi-account not needed for current Kalshi integration
+            # PERFORMANCE FIX: Skip PnL computation when there are no positions
+            # This prevents unnecessary slow callbacks (3+ seconds) on every orderbook update
+            # when the portfolio is empty
             account_id = "default"
             snapshot = self._engine.get_snapshot(account_id, self._current_marks)
+            
+            if not snapshot.positions:
+                # No positions - skip expensive PnL computation
+                logger.debug(
+                    "PnLComputer: price update %s @ %dc skipped (no positions)",
+                    ticker, mark_price_cents
+                )
+                return
             
             # Compute PnL update
             pnl_update = self.compute_portfolio_pnl(

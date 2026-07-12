@@ -562,14 +562,15 @@ failsafe:
 # - Prediction markets have hidden liquidity problems - quoted price ≠ tradeable price for size
 # - Mid-range prices (50-70c) have better depth to absorb scaled child orders
 # - Low prices (<50c) = lottery tickets with 10.4% win rate, thin markets
+# - 10-75c range matches actual market conditions (YES prices 60-97c observed in current market)
 # - High prices (>70c) = low profit potential, thin markets, poor scaling effectiveness
 # - Scaling requires sufficient liquidity to avoid excessive slippage on child orders
 # - For momentum-based trading, conviction comes from velocity magnitude, not price level
-# - 10-50c range is the sweet spot for optimal risk/reward with fixed $1 exposure cap
+# - 2026-07-12: Expanded to 75c max to match dynamic_take_profit zones (25-70c) and actual market conditions
 price_range:
-  min_price_cents: 10  # 2026-07-12: CRITICAL FIX - Canonical lower bound (10c) aligned with GlobalSlotAllocator and commit c5ac4a18
-  max_price_cents: 50  # 2026-07-12: CRITICAL FIX - Canonical upper bound (50c) aligned with GlobalSlotAllocator and commit c5ac4a18
-  description: "Valid price range in cents for order execution (10-50c canonical range - industry-validated sweet spot)"
+  min_price_cents: 10  # 2026-07-12: Lower bound (10c) maintained for low-profit trap prevention
+  max_price_cents: 75  # 2026-07-12: Expanded from 50c to 75c - YES prices consistently 60-97c in current market conditions
+  description: "Valid price range in cents for order execution (10-75c - aligned with dynamic_take_profit zones and actual market conditions)"
 
 # ── Per-Asset Caps (BTC/ETH/SOL/XRP/DOGE) ─────────────────────────────────
 # Each asset has its own notional as percentage of capital, NOT hardcoded USD values.
@@ -941,8 +942,8 @@ edge_bands:
 canonical:
   # Normal regime thresholds (87% of market time)
   price_range:
-    min_cents: 10  # Canonical lower bound (2x-6x multipliers, industry-validated sweet spot)
-    max_cents: 50  # Canonical upper bound (avoids low-ROI trades >50c)
+    min_cents: 10  # Lower bound (low-profit trap prevention)
+    max_cents: 75  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
   spread:
     max_cents: 30  # Canonical spread threshold (harmonized with 10-50c entry price sweet spot)
     min_gate_cents: 30  # Edge-dependent threshold (optimized for entry price sweet spot)
@@ -953,11 +954,11 @@ canonical:
 
 crisis:
   # Crisis regime thresholds (13% of market time - extreme volatility)
-  # CRITICAL FIX: 2026-07-12 - Align with canonical 10-50c range per commit c5ac4a18
-  # Crisis regime should use same price range but relaxed spread/position sizing
+  # 2026-07-12: Aligned with expanded 10-75c range to match actual market conditions
+  # Crisis regime uses same price range but relaxed spread/position sizing
   price_range:
-    min_cents: 10  # Canonical lower bound (aligned with canonical regime)
-    max_cents: 50  # Canonical upper bound (aligned with canonical regime)
+    min_cents: 10  # Lower bound (aligned with canonical regime)
+    max_cents: 75  # 2026-07-12: Expanded to 75c - YES prices consistently 60-97c in current market conditions
   spread:
     max_cents: 100  # Relaxed spread threshold (accommodates 60c-96c spreads observed in current conditions)
     min_gate_cents: 30  # Edge-dependent threshold (unchanged - optimized for entry price sweet spot)
@@ -1031,8 +1032,8 @@ guardrails:
   min_post_fee_edge: 0.015  # LOWERED: Minimum post-fee edge 1.5% (research: 2-2.5% net edge realistic, 1.5% floor for more opportunities)
   min_time_to_expiry_min: 2.0  # RELAXED: Minimum 2 minutes to expiry (120s, reduced from 2.5min for more 15m opportunities)
   max_dist_pct_trade: 2.5  # RELAXED: Maximum spot-strike distance percentage for trading (2.5% for better market coverage)
-  min_contract_price_cents: 10  # 2026-07-12: CRITICAL FIX - Canonical lower bound (10c) aligned with GlobalSlotAllocator and commit c5ac4a18
-  max_contract_price_cents: 50  # 2026-07-12: CRITICAL FIX - Canonical upper bound (50c) aligned with GlobalSlotAllocator and commit c5ac4a18
+  min_contract_price_cents: 10  # 2026-07-12: Lower bound (10c) maintained for low-profit trap prevention
+  max_contract_price_cents: 75  # 2026-07-12: Expanded from 50c to 75c - YES prices consistently 60-97c in current market conditions
   max_same_side_per_strip: 5  # RELAXED: Maximum same-direction positions per strip (increased from 4 to 5 for more opportunities)
   # REMOVED: Duplicate max_orders_per_cycle - now handled by throttling.max_orders_per_15m_window (single source of truth)
   min_edge_per_trade: 0.02  # UNIFIED: 2% base edge for maker orders (aligned with Kalshi's 1-2% maker requirement, research-backed)

@@ -1,0 +1,19 @@
+{
+  "timestamp": "2026-07-07T19:02:53.867161",
+  "summary": {
+    "DOWNSTREAM_HIGH": 1
+  },
+  "findings": [
+    {
+      "layer": "DOWNSTREAM",
+      "severity": "HIGH",
+      "category": "IMPLEMENTATION",
+      "component": "unified_sizing.py._get_regime_position_size_multiplier",
+      "description": "Regime sizing multiplier may not be disabled",
+      "expected": "return 1.0 (disabled)",
+      "actual": "May return other values",
+      "impact": "Regime sizing could interfere with 3% per-asset / 5% per-window limits",
+      "recommendation": "Ensure _get_regime_position_size_multiplier returns 1.0"
+    }
+  ]
+}

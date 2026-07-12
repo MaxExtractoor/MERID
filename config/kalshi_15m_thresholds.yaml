@@ -1,31 +1,39 @@
 # Kalshi 15m Crypto Trading - Threshold Configuration
-# This file defines per-asset and per-timeframe thresholds for market quality checks.
-# All hardcoded literals in market_state/orderbook should be replaced with values from this config.
+# DEPRECATED for kalshi_crypto_15m_v2 profile (MERID_PROFILE=kalshi_crypto_15m_v2)
+#
+# For Kalshi 15m crypto agents (BTC_15M, ETH_15M, SOL_15M, XRP_15M, DOGE_15M):
+#   - All thresholds: Use config/profiles/kalshi_crypto_15m_v2.yaml (SINGLE SOURCE OF TRUTH)
+#   - Spread thresholds: guardrails.max_spread_cents = 100 (dynamic regime-aware)
+#   - Canonical spread: 30c (normal regime), 100c (crisis regime)
+#
+# This file is retained for backward compatibility with other profiles only.
+# DO NOT use this file for 15m crypto trading configuration.
 
 # Profile metadata
 profile:
   name: kalshi_crypto_15m_v2
-  version: "1.0"
-  description: "15m crypto trading thresholds for BTC, ETH, SOL, XRP, DOGE"
+  version: "1.1"
+  description: "15m crypto trading thresholds for BTC, ETH, SOL, XRP, DOGE (DEPRECATED - use kalshi_crypto_15m_v2.yaml)"
 
 # Spread thresholds (in cents)
-# max_spread_cents: Maximum allowed bid-ask spread before market is considered illiquid
+# DEPRECATED: Use guardrails.max_spread_cents in kalshi_crypto_15m_v2.yaml
+# Canonical: 30c (normal regime), 100c (crisis regime)
 spread_thresholds:
   # Per-asset overrides (more lenient for liquid assets)
   BTC:
-    max_spread_cents: 3  # 3 cents for BTC (very liquid)
+    max_spread_cents: 30  # 2026-07-11: Updated to 30c to align with canonical default
   ETH:
-    max_spread_cents: 4  # 4 cents for ETH
+    max_spread_cents: 30  # 2026-07-11: Updated to 30c to align with canonical default
   SOL:
-    max_spread_cents: 5  # 5 cents for SOL
+    max_spread_cents: 30  # 2026-07-11: Updated to 30c to align with canonical default
   XRP:
-    max_spread_cents: 6  # 6 cents for XRP
+    max_spread_cents: 30  # 2026-07-11: Updated to 30c to align with canonical default
   DOGE:
-    max_spread_cents: 7  # 7 cents for DOGE (less liquid)
+    max_spread_cents: 30  # 2026-07-11: Updated to 30c to align with canonical default
   
   # Default for any asset not specified above
   default:
-    max_spread_cents: 5
+    max_spread_cents: 30  # 2026-07-11: Updated to 30c to align with canonical default
 
 # Extreme price thresholds (YES-equivalent cents)
 # extreme_yes_price_min/max: Valid range for YES prices (outside = illiquid or data anomaly)

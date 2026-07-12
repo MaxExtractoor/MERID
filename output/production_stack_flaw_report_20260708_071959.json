@@ -1,0 +1,78 @@
+{
+  "summary": {
+    "total_flaws": 0,
+    "total_tests": 9,
+    "total_duration_seconds": 11.94,
+    "passed_tests": 9,
+    "failed_tests": 0
+  },
+  "severity_breakdown": {},
+  "category_breakdown": {},
+  "layer_breakdown": {},
+  "test_results": [
+    {
+      "test_name": "Upstream Configuration",
+      "passed": true,
+      "duration_ms": 181.82,
+      "flaw_count": 0,
+      "flaws": []
+    },
+    {
+      "test_name": "Midstream Risk Envelope",
+      "passed": true,
+      "duration_ms": 4989.91,
+      "flaw_count": 0,
+      "flaws": []
+    },
+    {
+      "test_name": "Downstream Sizing",
+      "passed": true,
+      "duration_ms": 167.15,
+      "flaw_count": 0,
+      "flaws": []
+    },
+    {
+      "test_name": "End-to-End Data Flow",
+      "passed": true,
+      "duration_ms": 5042.76,
+      "flaw_count": 0,
+      "flaws": []
+    },
+    {
+      "test_name": "Resilience",
+      "passed": true,
+      "duration_ms": 11.01,
+      "flaw_count": 0,
+      "flaws": []
+    },
+    {
+      "test_name": "Latency Performance",
+      "passed": true,
+      "duration_ms": 9.32,
+      "flaw_count": 0,
+      "flaws": []
+    },
+    {
+      "test_name": "Asset Tracking",
+      "passed": true,
+      "duration_ms": 59.43,
+      "flaw_count": 0,
+      "flaws": []
+    },
+    {
+      "test_name": "Computational Load",
+      "passed": true,
+      "duration_ms": 1131.7,
+      "flaw_count": 0,
+      "flaws": []
+    },
+    {
+      "test_name": "Consistency Across Layers",
+      "passed": true,
+      "duration_ms": 336.78,
+      "flaw_count": 0,
+      "flaws": []
+    }
+  ],
+  "all_flaws": []
+}

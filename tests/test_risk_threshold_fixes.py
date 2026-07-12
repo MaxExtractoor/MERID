@@ -264,17 +264,17 @@ class TestLoop15mPriceFallback:
 
 
 class TestDeepOTMThreshold:
-    """Test 75c threshold is consistent across all layers."""
+    """Test 50c threshold is consistent across all layers."""
     
     def test_risk_parameters_deep_otm_expensive(self):
-        """Test DEEP_OTM_EXPENSIVE_CENTS is 75."""
+        """Test DEEP_OTM_EXPENSIVE_CENTS is 50."""
         from merid.event_venues.kalshi.risk_parameters import DEEP_OTM_EXPENSIVE_CENTS
         
-        assert DEEP_OTM_EXPENSIVE_CENTS == 75, \
-            f"Expected DEEP_OTM_EXPENSIVE_CENTS=75, got {DEEP_OTM_EXPENSIVE_CENTS}"
+        assert DEEP_OTM_EXPENSIVE_CENTS == 50, \
+            f"Expected DEEP_OTM_EXPENSIVE_CENTS=50, got {DEEP_OTM_EXPENSIVE_CENTS}"
     
     def test_profile_max_contract_price(self):
-        """Test profile max_contract_price_cents is 75."""
+        """Test profile max_contract_price_cents is 50."""
         import yaml
         from pathlib import Path
         
@@ -283,8 +283,8 @@ class TestDeepOTMThreshold:
             config = yaml.safe_load(f)
         
         max_contract_price_cents = config['guardrails']['max_contract_price_cents']
-        assert max_contract_price_cents == 75, \
-            f"Expected max_contract_price_cents=75 in profile, got {max_contract_price_cents}"
+        assert max_contract_price_cents == 50, \
+            f"Expected max_contract_price_cents=50 in profile, got {max_contract_price_cents}"
 
 
 class TestGlobalExecutionGuardDisabled:

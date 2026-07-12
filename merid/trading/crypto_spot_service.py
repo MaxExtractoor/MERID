@@ -43,9 +43,21 @@ import os
 import httpx
 import requests
 
-from utils.logger import get_logger, format_price
+from utils.logger import get_logger
 
 logger = get_logger("merid.trading.crypto_spot_service")
+
+# Local price formatting function (replaces utils.logger.format_price to avoid import issues)
+def format_price(asset: str, price: float) -> str:
+    """Format price with appropriate decimal places based on asset."""
+    if asset in ["BTC", "ETH"]:
+        return f"{price:.2f}"
+    elif asset in ["SOL", "XRP"]:
+        return f"{price:.4f}"
+    elif asset == "DOGE":
+        return f"{price:.6f}"
+    else:
+        return f"{price:.4f}"
 
 # Asset to symbol mappings (USD-only, aligned with Kalshi's CFB RTI methodology)
 ASSET_TO_COINBASE_PRODUCT = {

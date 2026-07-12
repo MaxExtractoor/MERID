@@ -1,0 +1,42 @@
+{
+  "timestamp": "2026-07-07T19:02:35.227014",
+  "summary": {
+    "UPSTREAM_HIGH": 2,
+    "DOWNSTREAM_HIGH": 1
+  },
+  "findings": [
+    {
+      "layer": "UPSTREAM",
+      "severity": "HIGH",
+      "category": "CONSISTENCY",
+      "component": "kalshi_crypto_15m_v2.yaml",
+      "description": "Risk parameter mismatch at kelly.hard_cap",
+      "expected": "0.02",
+      "actual": "MISSING",
+      "impact": "Risk limits may not match intended values",
+      "recommendation": "Update kelly.hard_cap to 0.02 in profile YAML"
+    },
+    {
+      "layer": "UPSTREAM",
+      "severity": "HIGH",
+      "category": "CONSISTENCY",
+      "component": "kalshi_crypto_15m_v2.yaml",
+      "description": "Risk parameter mismatch at kelly.global_notional_cap_pct",
+      "expected": "0.02",
+      "actual": "MISSING",
+      "impact": "Risk limits may not match intended values",
+      "recommendation": "Update kelly.global_notional_cap_pct to 0.02 in profile YAML"
+    },
+    {
+      "layer": "DOWNSTREAM",
+      "severity": "HIGH",
+      "category": "IMPLEMENTATION",
+      "component": "unified_sizing.py._get_regime_position_size_multiplier",
+      "description": "Regime sizing multiplier may not be disabled",
+      "expected": "return 1.0 (disabled)",
+      "actual": "May return other values",
+      "impact": "Regime sizing could interfere with 3% per-asset / 5% per-window limits",
+      "recommendation": "Ensure _get_regime_position_size_multiplier returns 1.0"
+    }
+  ]
+}

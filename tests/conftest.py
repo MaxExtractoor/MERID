@@ -241,6 +241,16 @@ def disable_network_calls(monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def reset_scalper_env_vars(monkeypatch):
+    """
+    Autouse fixture to reset SCALPER15M environment variables for consistent test behavior.
+    Ensures SCALPER15M_MIN_CUTOFF_MINUTES is not set (uses default of 0).
+    """
+    monkeypatch.delenv("SCALPER15M_MIN_CUTOFF_MINUTES", raising=False)
+    yield
+
+
 @pytest.fixture
 def mock_httpx_client():
     """Fixture providing a mock httpx.AsyncClient for tests."""

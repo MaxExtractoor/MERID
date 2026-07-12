@@ -8,11 +8,17 @@ Fix: Changed fallback from probability-derived (max(1, min(99, int(round(market_
 to safe default of 50 cents, which is the midpoint for binary options.
 
 2026 UPDATE: Price clamping now uses [15, 70] range instead of [1, 99] to prevent $0.99 purchases.
+
+NOTE: This test references the deprecated merid.prediction.dynamic_sizing module.
+The test is skipped to avoid testing deprecated functionality.
 """
 
 import pytest
 from unittest.mock import MagicMock, patch
 from decimal import Decimal
+
+
+pytestmark = pytest.mark.skip(reason="Tests deprecated merid.prediction.dynamic_sizing module")
 
 
 class TestPriceCentsFallbackFix:

@@ -1,4 +1,14 @@
 # Live Session Guardrails for First Restart
+# DEPRECATED for kalshi_crypto_15m_v2 profile (MERID_PROFILE=kalshi_crypto_15m_v2)
+#
+# For Kalshi 15m crypto agents (BTC_15M, ETH_15M, SOL_15M, XRP_15M, DOGE_15M):
+#   - All guardrails: Use config/profiles/kalshi_crypto_15m_v2.yaml (SINGLE SOURCE OF TRUTH)
+#   - Risk limits: guardrails section in kalshi_crypto_15m_v2.yaml
+#   - Rate limits: throttling section in kalshi_crypto_15m_v2.yaml
+#
+# This file is retained for backward compatibility with other profiles only.
+# DO NOT use this file for 15m crypto trading configuration.
+#
 # These are hard limits that will be enforced during the first live session
 
 guardrails:

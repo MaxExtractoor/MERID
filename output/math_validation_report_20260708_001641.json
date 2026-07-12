@@ -1,0 +1,21 @@
+{
+  "timestamp": "2026-07-08T04:16:28.933076",
+  "profile": "kalshi_crypto_15m_v2",
+  "summary": {
+    "total_issues": 0,
+    "critical_issues": 0,
+    "high_issues": 0,
+    "medium_issues": 0,
+    "low_issues": 0
+  },
+  "components_checked": [
+    "position_sizing",
+    "risk_management",
+    "performance_metrics",
+    "calibration",
+    "edge_calculation",
+    "velocity_model",
+    "correlation_tracking"
+  ],
+  "issues": []
+}

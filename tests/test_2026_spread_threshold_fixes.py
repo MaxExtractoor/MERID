@@ -13,14 +13,14 @@ import pytest
 
 
 def test_min_spread_gate_cents_increased_to_30c():
-    """Test that min_spread_gate_cents is increased to 30c based on 2026 research and 10-50c entry price range."""
+    """Test that min_spread_gate_cents is increased to 30c based on 2026 research and 10-75c entry price range."""
     import yaml
     
     # Load the profile YAML directly with UTF-8 encoding
     with open('config/profiles/kalshi_crypto_15m_v2.yaml', 'r', encoding='utf-8') as f:
         profile_config = yaml.safe_load(f)
     
-    # Verify min_spread_gate_cents is 30c (harmonized with 10-50c canonical entry price range)
+    # Verify min_spread_gate_cents is 30c (harmonized with 10-75c expanded entry price range)
     assert profile_config['guardrails']['min_spread_gate_cents'] == 30, \
         f"min_spread_gate_cents should be 30c, got {profile_config['guardrails']['min_spread_gate_cents']}"
 
@@ -80,7 +80,7 @@ def test_spread_gate_allows_doge_realistic_spreads():
     from merid.event_venues.kalshi.order_router import check_market_microstructure
     
     # DOGE observed at 79c spread (1.3% on 59c price)
-    # Use profile's 30c threshold (2026-07-12: harmonized with 10-50c canonical entry price range)
+    # Use profile's 30c threshold (2026-07-12: harmonized with 10-75c expanded entry price range)
     result, reason = check_market_microstructure(
         yes_bid_cents=20,
         yes_ask_cents=99,  # 79c spread

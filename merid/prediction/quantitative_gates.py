@@ -28,7 +28,7 @@ class GateConfig:
     accuracy_window_size: int = 10         # Window for recent accuracy check
     
     # Confidence gates
-    min_confidence: float = 0.3            # Min confidence to participate
+    min_confidence: float = 0.65           # Min confidence to participate (FIX: Aligned with production config, was 0.30)
     max_confidence: float = 0.95           # Max confidence (prevents overconfidence)
     confidence_calibration_threshold: float = 0.15  # Max confidence-accuracy gap
     

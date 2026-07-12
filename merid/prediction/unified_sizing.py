@@ -797,14 +797,23 @@ def compute_order_size(
         profile = adapter.profile
         fixed_exposure_cap_usd = Decimal(str(profile.risk_policy_fixed_exposure_cap_usd))
     
-    # Step 2: Get existing total exposure from position_cache
+    # Step 2: Get existing total exposure from global slot allocator
+    # CRITICAL FIX: 2026-07-09 - Use slot allocator instead of position cache for consistency
+    # Slot allocator is the single source of truth for $1 exposure tracking
     existing_exposure_usd = Decimal("0")
     try:
-        from merid.event_venues.kalshi.position_cache import get_position_cache
-        position_cache = get_position_cache()
-        existing_exposure_usd = Decimal(str(position_cache.get_total_exposure_usd()))
+        from merid.risk.global_slot_allocator import get_global_slot_allocator
+        slot_allocator = get_global_slot_allocator()
+        existing_exposure_usd = Decimal(str(slot_allocator.get_total_exposure()))
     except Exception as e:
-        logger.warning("[UNIFIED-SIZING] Failed to get existing exposure: %s", e)
+        logger.warning("[UNIFIED-SIZING] Failed to get existing exposure from slot allocator: %s", e)
+        # Fallback to position cache if slot allocator not available
+        try:
+            from merid.event_venues.kalshi.position_cache import get_position_cache
+            position_cache = get_position_cache()
+            existing_exposure_usd = Decimal(str(position_cache.get_total_exposure_usd()))
+        except Exception as fallback_err:
+            logger.warning("[UNIFIED-SIZING] Failed to get existing exposure from position cache fallback: %s", fallback_err)
     
     # Step 3: Calculate available exposure
     available_exposure_usd = fixed_exposure_cap_usd - existing_exposure_usd

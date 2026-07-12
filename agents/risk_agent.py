@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from merid.agents.base_agent import BaseAgent
+from agents.base_agent import BaseAgent
 
 ROLE_PROMPT = """
 You are MERID’s chief risk officer.

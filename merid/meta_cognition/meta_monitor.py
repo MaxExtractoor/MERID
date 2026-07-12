@@ -44,7 +44,7 @@ def build_meta_snapshot(app) -> MetaSnapshot:
         if kalshi_client:
             is_demo = kalshi_client.is_demo
             is_live = kalshi_client.is_live
-    except:
+    except (AttributeError, RuntimeError):
         pass
     
     # Get legacy modules

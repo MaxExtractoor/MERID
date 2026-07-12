@@ -38,7 +38,7 @@ def test_profile_config_10c_spread():
     universe = profile.get("universe", {})
     max_spread = universe.get("max_spread_cents", 0)
     
-    assert max_spread == 10, f"Expected universe.max_spread_cents to be 10, got {max_spread}"
+    assert max_spread == 30, f"Expected universe.max_spread_cents to be 30, got {max_spread}"
     print(f"✓ Profile config: universe.max_spread_cents = {max_spread}c")
 
 
@@ -49,7 +49,7 @@ def test_invariants_default_10c():
     sig = inspect.signature(is_liquid_enough)
     default_spread = sig.parameters['max_spread_cents'].default
     
-    assert default_spread == 10, f"Expected is_liquid_enough default to be 10, got {default_spread}"
+    assert default_spread == 30, f"Expected is_liquid_enough default to be 30, got {default_spread}"
     print(f"✓ Invariants default: max_spread_cents = {default_spread}c")
 
 
@@ -60,7 +60,7 @@ def test_order_router_default_10c():
     sig = inspect.signature(check_market_microstructure)
     default_spread = sig.parameters['max_spread_cents'].default
     
-    assert default_spread == 10.0, f"Expected check_market_microstructure default to be 10.0, got {default_spread}"
+    assert default_spread == 30.0, f"Expected check_market_microstructure default to be 30.0, got {default_spread}"
     print(f"✓ Order router default: max_spread_cents = {default_spread}c")
 
 
@@ -72,7 +72,7 @@ def test_unified_edge_default_10c():
     import inspect
     
     source = inspect.getsource(unified_edge)
-    assert "max_spread_for_edge = 10" in source, "Expected max_spread_for_edge fallback to be 10c"
+    assert "max_spread_for_edge = 30" in source, "Expected max_spread_for_edge fallback to be 30c"
     print("✓ Unified edge fallback: max_spread_for_edge = 10c")
 
 

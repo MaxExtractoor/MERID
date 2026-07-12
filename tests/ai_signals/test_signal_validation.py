@@ -77,13 +77,13 @@ class TestValidationRuleConfig:
             rule_id="rule_001",
             rule_name="Min Confidence",
             rule_type=ValidationRule.CONFIDENCE_THRESHOLD,
-            parameters={"min_confidence": 0.6},
+            parameters={"min_confidence": 0.65},  # FIX: Aligned with production config (was 0.60)
             enabled=True,
             severity="error",
             description="Minimum confidence threshold",
         )
         assert rule.enabled is True
-        assert rule.parameters["min_confidence"] == 0.6
+        assert rule.parameters["min_confidence"] == 0.65
 
     def test_risk_limit_rule(self):
         """Test risk limit rule config."""
@@ -320,7 +320,7 @@ class TestValidationLogic:
 
     def test_confidence_validation(self):
         """Test confidence threshold validation."""
-        min_confidence = 0.6
+        min_confidence = 0.65  # FIX: Aligned with production config (was 0.60)
         signal_confidence = 0.75
         
         passes = signal_confidence >= min_confidence
@@ -357,7 +357,7 @@ class TestValidationLogic:
     def test_combined_validation(self):
         """Test combined validation rules."""
         rules = {
-            "confidence": {"value": 0.75, "min": 0.6},
+            "confidence": {"value": 0.75, "min": 0.65},  # FIX: Aligned with production config (was 0.60)
             "risk": {"value": 0.015, "max": 0.02},
             "position": {"value": 0.08, "max": 0.10},
         }

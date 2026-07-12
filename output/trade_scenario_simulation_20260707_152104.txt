@@ -1,0 +1,833 @@
+================================================================================
+MERID 15M TRADE SCENARIO SIMULATION REPORT
+================================================================================
+Profile: kalshi_crypto_15m_v2
+Bankroll: $100.00
+Timestamp: 2026-07-07T15:21:04.176384+00:00
+Total Scenarios: 34
+
+SUMMARY
+----------------------------------------
+Passed: 17 (50.0%)
+Failed: 4 (11.8%)
+Warnings: 0 (0.0%)
+Errors: 13 (38.2%)
+
+DETAILED RESULTS
+----------------------------------------
+
+Scenario: normal_btc_entry_sweet_spot
+Description: Normal BTC entry in sweet spot (25-50c)
+Asset: BTC
+Market Condition: normal
+Entry Price: 35c
+Exit Price: 55c
+Contracts: 1
+Edge: 5.00%
+Confidence: 0.70
+Outcome: passed
+Computed Values:
+  order_notional_usd: 0.3500
+  fee_cents: 0.5574
+  fee_usd: 0.0056
+  gross_profit_cents: 20
+  net_profit_cents: 19.4426
+  net_profit_usd: 0.1944
+Passed Checks:
+  ✓ price_range: 35c within [10, 75]
+  ✓ min_edge: 5.00% >= 2.5%
+  ✓ min_confidence: 0.70 >= threshold
+  ✓ per_asset_cap: BTC order=$0.35 within cap
+  ✓ window_limit: BTC_15M order=$0.35 within 3%/5% window limits
+
+Scenario: normal_eth_entry_sweet_spot
+Description: Normal ETH entry in sweet spot (25-50c)
+Asset: ETH
+Market Condition: normal
+Entry Price: 40c
+Exit Price: 60c
+Contracts: 1
+Edge: 4.00%
+Confidence: 0.68
+Outcome: passed
+Computed Values:
+  order_notional_usd: 0.4000
+  fee_cents: 0.6720
+  fee_usd: 0.0067
+  gross_profit_cents: 20
+  net_profit_cents: 19.3280
+  net_profit_usd: 0.1933
+Passed Checks:
+  ✓ price_range: 40c within [10, 75]
+  ✓ min_edge: 4.00% >= 2.5%
+  ✓ min_confidence: 0.68 >= threshold
+  ✓ per_asset_cap: ETH order=$0.40 within cap
+  ✓ window_limit: ETH_15M order=$0.40 within 3%/5% window limits
+
+Scenario: window_limit_per_agent_boundary
+Description: Test 3% per-agent window limit boundary
+Asset: BTC
+Market Condition: normal
+Entry Price: 50c
+Exit Price: 70c
+Contracts: 1
+Edge: 3.00%
+Confidence: 0.65
+Outcome: passed
+Computed Values:
+  order_notional_usd: 0.5000
+  fee_cents: 0.8750
+  fee_usd: 0.0088
+  gross_profit_cents: 20
+  net_profit_cents: 19.1250
+  net_profit_usd: 0.1913
+Passed Checks:
+  ✓ price_range: 50c within [10, 75]
+  ✓ min_edge: 3.00% >= 2.5%
+  ✓ min_confidence: 0.65 >= threshold
+  ✓ per_asset_cap: BTC order=$0.50 within cap
+  ✓ window_limit: BTC_15M order=$0.50 within 3%/5% window limits
+
+Scenario: price_range_below_minimum
+Description: Test price below 10c minimum (lottery zone)
+Asset: DOGE
+Market Condition: normal
+Entry Price: 5c
+Exit Price: 15c
+Contracts: 1
+Edge: 20.00%
+Confidence: 0.80
+Outcome: failed
+Computed Values:
+  order_notional_usd: 0.0500
+  fee_cents: 0.0166
+  fee_usd: 0.0002
+  gross_profit_cents: 10
+  net_profit_cents: 9.9834
+  net_profit_usd: 0.0998
+Passed Checks:
+  ✓ min_edge: 20.00% >= 2.5%
+  ✓ min_confidence: 0.80 >= threshold
+  ✓ per_asset_cap: DOGE order=$0.05 within cap
+  ✓ window_limit: DOGE_15M order=$0.05 within 3%/5% window limits
+Failed Checks:
+  ✗ price_range: price_below_minimum: 5c < 10c (lottery zone)
+
+Scenario: price_range_above_maximum
+Description: Test price above 75c maximum (moonshot territory)
+Asset: BTC
+Market Condition: normal
+Entry Price: 80c
+Exit Price: 95c
+Contracts: 1
+Edge: 2.00%
+Confidence: 0.60
+Outcome: failed
+Computed Values:
+  order_notional_usd: 0.8000
+  fee_cents: 0.8960
+  fee_usd: 0.0090
+  gross_profit_cents: 15
+  net_profit_cents: 14.1040
+  net_profit_usd: 0.1410
+Passed Checks:
+  ✓ per_asset_cap: BTC order=$0.80 within cap
+  ✓ window_limit: BTC_15M order=$0.80 within 3%/5% window limits
+Failed Checks:
+  ✗ price_range: price_above_maximum: 80c > 75c (moonshot territory)
+  ✗ min_edge: edge_below_minimum: 2.00% < 2.50%
+  ✗ min_confidence: confidence_below_minimum: 0.60 < 0.65
+
+Scenario: price_range_at_minimum
+Description: Test price at 10c minimum boundary
+Asset: DOGE
+Market Condition: normal
+Entry Price: 10c
+Exit Price: 25c
+Contracts: 1
+Edge: 15.00%
+Confidence: 0.75
+Outcome: passed
+Computed Values:
+  order_notional_usd: 0.1000
+  fee_cents: 0.0630
+  fee_usd: 0.0006
+  gross_profit_cents: 15
+  net_profit_cents: 14.9370
+  net_profit_usd: 0.1494
+Passed Checks:
+  ✓ price_range: 10c within [10, 75]
+  ✓ min_edge: 15.00% >= 2.5%
+  ✓ min_confidence: 0.75 >= threshold
+  ✓ per_asset_cap: DOGE order=$0.10 within cap
+  ✓ window_limit: DOGE_15M order=$0.10 within 3%/5% window limits
+
+Scenario: price_range_at_maximum
+Description: Test price at 75c maximum boundary
+Asset: BTC
+Market Condition: normal
+Entry Price: 75c
+Exit Price: 90c
+Contracts: 1
+Edge: 3.00%
+Confidence: 0.65
+Outcome: passed
+Computed Values:
+  order_notional_usd: 0.7500
+  fee_cents: 0.9844
+  fee_usd: 0.0098
+  gross_profit_cents: 15
+  net_profit_cents: 14.0156
+  net_profit_usd: 0.1402
+Passed Checks:
+  ✓ price_range: 75c within [10, 75]
+  ✓ min_edge: 3.00% >= 2.5%
+  ✓ min_confidence: 0.65 >= threshold
+  ✓ per_asset_cap: BTC order=$0.75 within cap
+  ✓ window_limit: BTC_15M order=$0.75 within 3%/5% window limits
+
+Scenario: edge_below_minimum
+Description: Test edge below 2.5% minimum
+Asset: SOL
+Market Condition: normal
+Entry Price: 45c
+Exit Price: 50c
+Contracts: 1
+Edge: 2.00%
+Confidence: 0.60
+Outcome: failed
+Computed Values:
+  order_notional_usd: 0.4500
+  fee_cents: 0.7796
+  fee_usd: 0.0078
+  gross_profit_cents: 5
+  net_profit_cents: 4.2204
+  net_profit_usd: 0.0422
+Passed Checks:
+  ✓ price_range: 45c within [10, 75]
+  ✓ per_asset_cap: SOL order=$0.45 within cap
+  ✓ window_limit: SOL_15M order=$0.45 within 3%/5% window limits
+Failed Checks:
+  ✗ min_edge: edge_below_minimum: 2.00% < 2.50%
+  ✗ min_confidence: confidence_below_minimum: 0.60 < 0.65
+
+Scenario: edge_at_minimum
+Description: Test edge at 2.5% minimum boundary
+Asset: XRP
+Market Condition: normal
+Entry Price: 40c
+Exit Price: 50c
+Contracts: 1
+Edge: 2.50%
+Confidence: 0.65
+Outcome: passed
+Computed Values:
+  order_notional_usd: 0.4000
+  fee_cents: 0.6720
+  fee_usd: 0.0067
+  gross_profit_cents: 10
+  net_profit_cents: 9.3280
+  net_profit_usd: 0.0933
+Passed Checks:
+  ✓ price_range: 40c within [10, 75]
+  ✓ min_edge: 2.50% >= 2.5%
+  ✓ min_confidence: 0.65 >= threshold
+  ✓ per_asset_cap: XRP order=$0.40 within cap
+  ✓ window_limit: XRP_15M order=$0.40 within 3%/5% window limits
+
+Scenario: confidence_below_minimum
+Description: Test confidence below 0.65 minimum
+Asset: ETH
+Market Condition: normal
+Entry Price: 35c
+Exit Price: 55c
+Contracts: 1
+Edge: 5.00%
+Confidence: 0.60
+Outcome: failed
+Computed Values:
+  order_notional_usd: 0.3500
+  fee_cents: 0.5574
+  fee_usd: 0.0056
+  gross_profit_cents: 20
+  net_profit_cents: 19.4426
+  net_profit_usd: 0.1944
+Passed Checks:
+  ✓ price_range: 35c within [10, 75]
+  ✓ min_edge: 5.00% >= 2.5%
+  ✓ per_asset_cap: ETH order=$0.35 within cap
+  ✓ window_limit: ETH_15M order=$0.35 within 3%/5% window limits
+Failed Checks:
+  ✗ min_confidence: confidence_below_minimum: 0.60 < 0.65
+
+Scenario: multi_asset_btc_normal
+Description: Normal entry for BTC in multi-asset context
+Asset: BTC
+Market Condition: normal
+Entry Price: 35c
+Exit Price: 55c
+Contracts: 1
+Edge: 4.00%
+Confidence: 0.68
+Outcome: passed
+Computed Values:
+  order_notional_usd: 0.3500
+  fee_cents: 0.5574
+  fee_usd: 0.0056
+  gross_profit_cents: 20
+  net_profit_cents: 19.4426
+  net_profit_usd: 0.1944
+Passed Checks:
+  ✓ price_range: 35c within [10, 75]
+  ✓ min_edge: 4.00% >= 2.5%
+  ✓ min_confidence: 0.68 >= threshold
+  ✓ per_asset_cap: BTC order=$0.35 within cap
+  ✓ window_limit: BTC_15M order=$0.35 within 3%/5% window limits
+
+Scenario: multi_asset_eth_normal
+Description: Normal entry for ETH in multi-asset context
+Asset: ETH
+Market Condition: normal
+Entry Price: 35c
+Exit Price: 55c
+Contracts: 1
+Edge: 4.00%
+Confidence: 0.68
+Outcome: passed
+Computed Values:
+  order_notional_usd: 0.3500
+  fee_cents: 0.5574
+  fee_usd: 0.0056
+  gross_profit_cents: 20
+  net_profit_cents: 19.4426
+  net_profit_usd: 0.1944
+Passed Checks:
+  ✓ price_range: 35c within [10, 75]
+  ✓ min_edge: 4.00% >= 2.5%
+  ✓ min_confidence: 0.68 >= threshold
+  ✓ per_asset_cap: ETH order=$0.35 within cap
+  ✓ window_limit: ETH_15M order=$0.35 within 3%/5% window limits
+
+Scenario: multi_asset_sol_normal
+Description: Normal entry for SOL in multi-asset context
+Asset: SOL
+Market Condition: normal
+Entry Price: 35c
+Exit Price: 55c
+Contracts: 1
+Edge: 4.00%
+Confidence: 0.68
+Outcome: passed
+Computed Values:
+  order_notional_usd: 0.3500
+  fee_cents: 0.5574
+  fee_usd: 0.0056
+  gross_profit_cents: 20
+  net_profit_cents: 19.4426
+  net_profit_usd: 0.1944
+Passed Checks:
+  ✓ price_range: 35c within [10, 75]
+  ✓ min_edge: 4.00% >= 2.5%
+  ✓ min_confidence: 0.68 >= threshold
+  ✓ per_asset_cap: SOL order=$0.35 within cap
+  ✓ window_limit: SOL_15M order=$0.35 within 3%/5% window limits
+
+Scenario: multi_asset_xrp_normal
+Description: Normal entry for XRP in multi-asset context
+Asset: XRP
+Market Condition: normal
+Entry Price: 35c
+Exit Price: 55c
+Contracts: 1
+Edge: 4.00%
+Confidence: 0.68
+Outcome: passed
+Computed Values:
+  order_notional_usd: 0.3500
+  fee_cents: 0.5574
+  fee_usd: 0.0056
+  gross_profit_cents: 20
+  net_profit_cents: 19.4426
+  net_profit_usd: 0.1944
+Passed Checks:
+  ✓ price_range: 35c within [10, 75]
+  ✓ min_edge: 4.00% >= 2.5%
+  ✓ min_confidence: 0.68 >= threshold
+  ✓ per_asset_cap: XRP order=$0.35 within cap
+  ✓ window_limit: XRP_15M order=$0.35 within 3%/5% window limits
+
+Scenario: multi_asset_doge_normal
+Description: Normal entry for DOGE in multi-asset context
+Asset: DOGE
+Market Condition: normal
+Entry Price: 35c
+Exit Price: 55c
+Contracts: 1
+Edge: 4.00%
+Confidence: 0.68
+Outcome: passed
+Computed Values:
+  order_notional_usd: 0.3500
+  fee_cents: 0.5574
+  fee_usd: 0.0056
+  gross_profit_cents: 20
+  net_profit_cents: 19.4426
+  net_profit_usd: 0.1944
+Passed Checks:
+  ✓ price_range: 35c within [10, 75]
+  ✓ min_edge: 4.00% >= 2.5%
+  ✓ min_confidence: 0.68 >= threshold
+  ✓ per_asset_cap: DOGE order=$0.35 within cap
+  ✓ window_limit: DOGE_15M order=$0.35 within 3%/5% window limits
+
+Scenario: high_volatility_btc
+Description: BTC entry during high volatility regime
+Asset: BTC
+Market Condition: high_volatility
+Entry Price: 30c
+Exit Price: 60c
+Contracts: 1
+Edge: 8.00%
+Confidence: 0.72
+Outcome: passed
+Computed Values:
+  order_notional_usd: 0.3000
+  fee_cents: 0.4410
+  fee_usd: 0.0044
+  gross_profit_cents: 30
+  net_profit_cents: 29.5590
+  net_profit_usd: 0.2956
+Passed Checks:
+  ✓ price_range: 30c within [10, 75]
+  ✓ min_edge: 8.00% >= 2.5%
+  ✓ min_confidence: 0.72 >= threshold
+  ✓ per_asset_cap: BTC order=$0.30 within cap
+  ✓ window_limit: BTC_15M order=$0.30 within 3%/5% window limits
+
+Scenario: low_volatility_eth
+Description: ETH entry during low volatility regime
+Asset: ETH
+Market Condition: low_volatility
+Entry Price: 45c
+Exit Price: 55c
+Contracts: 1
+Edge: 3.00%
+Confidence: 0.66
+Outcome: passed
+Computed Values:
+  order_notional_usd: 0.4500
+  fee_cents: 0.7796
+  fee_usd: 0.0078
+  gross_profit_cents: 10
+  net_profit_cents: 9.2204
+  net_profit_usd: 0.0922
+Passed Checks:
+  ✓ price_range: 45c within [10, 75]
+  ✓ min_edge: 3.00% >= 2.5%
+  ✓ min_confidence: 0.66 >= threshold
+  ✓ per_asset_cap: ETH order=$0.45 within cap
+  ✓ window_limit: ETH_15M order=$0.45 within 3%/5% window limits
+
+Scenario: tte_very_short
+Description: Entry with very short time to expiry (2 min)
+Asset: BTC
+Market Condition: normal
+Entry Price: 40c
+Exit Price: 55c
+Contracts: 1
+Edge: 4.00%
+Confidence: 0.68
+Outcome: passed
+Computed Values:
+  order_notional_usd: 0.4000
+  fee_cents: 0.6720
+  fee_usd: 0.0067
+  gross_profit_cents: 15
+  net_profit_cents: 14.3280
+  net_profit_usd: 0.1433
+Passed Checks:
+  ✓ price_range: 40c within [10, 75]
+  ✓ min_edge: 4.00% >= 2.5%
+  ✓ min_confidence: 0.68 >= threshold
+  ✓ per_asset_cap: BTC order=$0.40 within cap
+  ✓ window_limit: BTC_15M order=$0.40 within 3%/5% window limits
+
+Scenario: tte_very_long
+Description: Entry with long time to expiry (14 min)
+Asset: ETH
+Market Condition: normal
+Entry Price: 35c
+Exit Price: 50c
+Contracts: 1
+Edge: 3.00%
+Confidence: 0.66
+Outcome: passed
+Computed Values:
+  order_notional_usd: 0.3500
+  fee_cents: 0.5574
+  fee_usd: 0.0056
+  gross_profit_cents: 15
+  net_profit_cents: 14.4426
+  net_profit_usd: 0.1444
+Passed Checks:
+  ✓ price_range: 35c within [10, 75]
+  ✓ min_edge: 3.00% >= 2.5%
+  ✓ min_confidence: 0.66 >= threshold
+  ✓ per_asset_cap: ETH order=$0.35 within cap
+  ✓ window_limit: ETH_15M order=$0.35 within 3%/5% window limits
+
+Scenario: fee_impact_high_probability
+Description: High probability trade (70c) with maximum fee impact
+Asset: BTC
+Market Condition: normal
+Entry Price: 70c
+Exit Price: 85c
+Contracts: 1
+Edge: 3.00%
+Confidence: 0.70
+Outcome: passed
+Computed Values:
+  order_notional_usd: 0.7000
+  fee_cents: 1.0290
+  fee_usd: 0.0103
+  gross_profit_cents: 15
+  net_profit_cents: 13.9710
+  net_profit_usd: 0.1397
+Passed Checks:
+  ✓ price_range: 70c within [10, 75]
+  ✓ min_edge: 3.00% >= 2.5%
+  ✓ min_confidence: 0.70 >= threshold
+  ✓ per_asset_cap: BTC order=$0.70 within cap
+  ✓ window_limit: BTC_15M order=$0.70 within 3%/5% window limits
+
+Scenario: fee_impact_low_probability
+Description: Low probability trade (15c) with low fee impact
+Asset: DOGE
+Market Condition: normal
+Entry Price: 15c
+Exit Price: 30c
+Contracts: 1
+Edge: 10.00%
+Confidence: 0.75
+Outcome: passed
+Computed Values:
+  order_notional_usd: 0.1500
+  fee_cents: 0.1339
+  fee_usd: 0.0013
+  gross_profit_cents: 15
+  net_profit_cents: 14.8661
+  net_profit_usd: 0.1487
+Passed Checks:
+  ✓ price_range: 15c within [10, 75]
+  ✓ min_edge: 10.00% >= 2.5%
+  ✓ min_confidence: 0.75 >= threshold
+  ✓ per_asset_cap: DOGE order=$0.15 within cap
+  ✓ window_limit: DOGE_15M order=$0.15 within 3%/5% window limits
+
+Scenario: exit_99c_yes_mandatory
+Description: Test 99c YES mandatory exit (extreme profit)
+Asset: BTC
+Market Condition: normal
+Entry Price: 50c
+Exit Price: 99c
+Contracts: 1
+Edge: 5.00%
+Confidence: 0.70
+Outcome: error
+Exit Scenario Type: extreme_profit_99c
+Position Size Before Exit: 1
+Exit Contracts: 1
+Computed Values:
+  exit_notional_usd: 0.9900
+Passed Checks:
+  ✓ exit_order_bypass: exit orders bypass non-critical checks
+Errors:
+  ✗ simulation_error: 'int' object has no attribute 'get'
+
+Scenario: exit_99c_yes_below_threshold
+Description: Test 98c YES (should NOT trigger 99c exit)
+Asset: BTC
+Market Condition: normal
+Entry Price: 50c
+Exit Price: 98c
+Contracts: 1
+Edge: 5.00%
+Confidence: 0.70
+Outcome: error
+Exit Scenario Type: extreme_profit_99c
+Position Size Before Exit: 1
+Exit Contracts: 1
+Computed Values:
+  exit_notional_usd: 0.9800
+Passed Checks:
+  ✓ exit_order_bypass: exit orders bypass non-critical checks
+Errors:
+  ✗ simulation_error: 'int' object has no attribute 'get'
+
+Scenario: exit_ratchet_floor_breach
+Description: Test ratchet floor breach at 80c (floor at 80c, activation at 85c)
+Asset: ETH
+Market Condition: normal
+Entry Price: 40c
+Exit Price: 80c
+Contracts: 1
+Edge: 5.00%
+Confidence: 0.70
+Outcome: error
+Exit Scenario Type: ratchet_floor
+Position Size Before Exit: 1
+Exit Contracts: 1
+Computed Values:
+  exit_notional_usd: 0.8000
+Passed Checks:
+  ✓ exit_order_bypass: exit orders bypass non-critical checks
+Errors:
+  ✗ simulation_error: 'int' object has no attribute 'get'
+
+Scenario: exit_ratchet_floor_above_floor
+Description: Test price above ratchet floor (81c, should NOT trigger exit)
+Asset: ETH
+Market Condition: normal
+Entry Price: 40c
+Exit Price: 81c
+Contracts: 1
+Edge: 5.00%
+Confidence: 0.70
+Outcome: error
+Exit Scenario Type: ratchet_floor
+Position Size Before Exit: 1
+Exit Contracts: 1
+Computed Values:
+  exit_notional_usd: 0.8100
+Passed Checks:
+  ✓ exit_order_bypass: exit orders bypass non-critical checks
+Errors:
+  ✗ simulation_error: 'int' object has no attribute 'get'
+
+Scenario: exit_ratchet_trim_multi_contract
+Description: Test ratchet trim with 5 contracts (trim to 1 at 80c)
+Asset: SOL
+Market Condition: normal
+Entry Price: 35c
+Exit Price: 80c
+Contracts: 5
+Edge: 5.00%
+Confidence: 0.70
+Outcome: error
+Exit Scenario Type: ratchet_trim
+Position Size Before Exit: 5
+Exit Contracts: 4
+Computed Values:
+  exit_notional_usd: 3.2000
+Passed Checks:
+  ✓ exit_order_bypass: exit orders bypass non-critical checks
+Errors:
+  ✗ simulation_error: 'int' object has no attribute 'get'
+
+Scenario: exit_ratchet_trim_single_contract
+Description: Test ratchet trim with 1 contract (should NOT trim, already at target)
+Asset: SOL
+Market Condition: normal
+Entry Price: 35c
+Exit Price: 80c
+Contracts: 1
+Edge: 5.00%
+Confidence: 0.70
+Outcome: error
+Exit Scenario Type: ratchet_trim
+Position Size Before Exit: 1
+Exit Contracts: 0
+Computed Values:
+  exit_notional_usd: 0.0000
+Passed Checks:
+  ✓ exit_order_bypass: exit orders bypass non-critical checks
+Errors:
+  ✗ simulation_error: 'int' object has no attribute 'get'
+
+Scenario: exit_window_capacity_release
+Description: Test that position closure releases window capacity
+Asset: XRP
+Market Condition: normal
+Entry Price: 40c
+Exit Price: 60c
+Contracts: 1
+Edge: 4.00%
+Confidence: 0.68
+Outcome: error
+Exit Scenario Type: N/A
+Position Size Before Exit: 1
+Exit Contracts: 1
+Computed Values:
+  exit_notional_usd: 0.6000
+Passed Checks:
+  ✓ exit_order_bypass: exit orders bypass non-critical checks
+Errors:
+  ✗ simulation_error: 'int' object has no attribute 'get'
+
+Scenario: exit_max_contracts_within_limit
+Description: Test exit order within max contracts limit
+Asset: DOGE
+Market Condition: normal
+Entry Price: 30c
+Exit Price: 50c
+Contracts: 5
+Edge: 4.00%
+Confidence: 0.68
+Outcome: error
+Exit Scenario Type: N/A
+Position Size Before Exit: 5
+Exit Contracts: 5
+Computed Values:
+  exit_notional_usd: 2.5000
+Passed Checks:
+  ✓ exit_order_bypass: exit orders bypass non-critical checks
+Errors:
+  ✗ simulation_error: 'int' object has no attribute 'get'
+
+Scenario: exit_max_contracts_exceeds_limit
+Description: Test exit order exceeding max contracts limit (default 10)
+Asset: DOGE
+Market Condition: normal
+Entry Price: 30c
+Exit Price: 50c
+Contracts: 15
+Edge: 4.00%
+Confidence: 0.68
+Outcome: error
+Exit Scenario Type: N/A
+Position Size Before Exit: 15
+Exit Contracts: 15
+Computed Values:
+  exit_notional_usd: 7.5000
+Passed Checks:
+  ✓ exit_order_bypass: exit orders bypass non-critical checks
+Errors:
+  ✗ simulation_error: 'int' object has no attribute 'get'
+
+Scenario: exit_bypass_non_critical_checks
+Description: Test that exit orders bypass non-critical checks
+Asset: BTC
+Market Condition: illiquid
+Entry Price: 50c
+Exit Price: 70c
+Contracts: 1
+Edge: 5.00%
+Confidence: 0.70
+Outcome: error
+Exit Scenario Type: N/A
+Position Size Before Exit: 1
+Exit Contracts: 1
+Computed Values:
+  exit_notional_usd: 0.7000
+Passed Checks:
+  ✓ exit_order_bypass: exit orders bypass non-critical checks
+Errors:
+  ✗ simulation_error: 'int' object has no attribute 'get'
+
+Scenario: exit_sequence_ratchet_then_99c
+Description: Test exit sequence: ratchet trim followed by 99c exit
+Asset: BTC
+Market Condition: normal
+Entry Price: 40c
+Exit Price: 99c
+Contracts: 3
+Edge: 5.00%
+Confidence: 0.70
+Outcome: error
+Exit Scenario Type: extreme_profit_99c
+Position Size Before Exit: 3
+Exit Contracts: 3
+Computed Values:
+  exit_notional_usd: 2.9700
+Passed Checks:
+  ✓ exit_order_bypass: exit orders bypass non-critical checks
+Errors:
+  ✗ simulation_error: 'int' object has no attribute 'get'
+
+Scenario: exit_break_even
+Description: Test exit at break-even (same price as entry)
+Asset: ETH
+Market Condition: normal
+Entry Price: 50c
+Exit Price: 50c
+Contracts: 1
+Edge: 5.00%
+Confidence: 0.70
+Outcome: error
+Exit Scenario Type: N/A
+Position Size Before Exit: 1
+Exit Contracts: 1
+Computed Values:
+  exit_notional_usd: 0.5000
+Passed Checks:
+  ✓ exit_order_bypass: exit orders bypass non-critical checks
+Errors:
+  ✗ simulation_error: 'int' object has no attribute 'get'
+
+Scenario: exit_with_loss
+Description: Test exit with loss (price below entry)
+Asset: SOL
+Market Condition: flash_crash
+Entry Price: 50c
+Exit Price: 30c
+Contracts: 1
+Edge: 5.00%
+Confidence: 0.70
+Outcome: error
+Exit Scenario Type: N/A
+Position Size Before Exit: 1
+Exit Contracts: 1
+Computed Values:
+  exit_notional_usd: 0.3000
+Passed Checks:
+  ✓ exit_order_bypass: exit orders bypass non-critical checks
+Errors:
+  ✗ simulation_error: 'int' object has no attribute 'get'
+
+================================================================================
+DISCREPANCY ANALYSIS
+================================================================================
+Found 13 discrepancies:
+  - exit_99c_yes_mandatory: expected=passed, actual=error
+  - exit_99c_yes_below_threshold: expected=failed, actual=error
+  - exit_ratchet_floor_breach: expected=passed, actual=error
+  - exit_ratchet_floor_above_floor: expected=failed, actual=error
+  - exit_ratchet_trim_multi_contract: expected=passed, actual=error
+  - exit_ratchet_trim_single_contract: expected=failed, actual=error
+  - exit_window_capacity_release: expected=passed, actual=error
+  - exit_max_contracts_within_limit: expected=passed, actual=error
+  - exit_max_contracts_exceeds_limit: expected=failed, actual=error
+  - exit_bypass_non_critical_checks: expected=passed, actual=error
+  - exit_sequence_ratchet_then_99c: expected=passed, actual=error
+  - exit_break_even: expected=passed, actual=error
+  - exit_with_loss: expected=passed, actual=error
+
+================================================================================
+EXIT ORDER ANALYSIS
+================================================================================
+Total Exit Scenarios: 13
+Exit Passed: 0 (0.0%)
+Exit Failed: 0 (0.0%)
+
+
+================================================================================
+POTENTIAL BLOCKING POINTS FOR EXIT ORDERS
+================================================================================
+No critical blocking points identified in exit order flow.
+
+================================================================================
+RECOMMENDATIONS
+================================================================================
+
+6. EXIT ORDER BYPASS VERIFICATION: Verify that exit orders correctly bypass non-critical checks (market conditions, edge thresholds) to secure profits in adverse conditions.
+
+7. PARTIAL EXIT HANDLING: Test partial exit scenarios (ratchet trim, scale-out) to ensure position size updates correctly and remaining position continues to be monitored.
+
+8. EXIT PRECEDENCE ORDER: Verify exit precedence order (99c > ratchet floor > trailing > TP > SL) to ensure highest-priority exits execute first.
+
+================================================================================
+CONFIGURATION CONSISTENCY CHECK
+================================================================================
+No configuration consistency issues found.
+
+================================================================================

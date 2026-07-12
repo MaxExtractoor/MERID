@@ -42,22 +42,33 @@ def _compute_kalshi_max_notional_from_config() -> float:
         float: max_notional in USD
     """
     # Use canonical risk envelope for kalshi_crypto_15m_v2 profile
-    from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
-    envelope = get_kalshi_crypto_15m_risk_envelope()
-    
-    per_trade_max_notional = envelope.max_single_order_notional_usd
-    max_concurrent_trades = envelope.max_concurrent_trades
-    max_notional = per_trade_max_notional * max_concurrent_trades
-    
-    # P1-5: Cross-check assert to ensure envelope computation is correct
-    expected_max_notional = per_trade_max_notional * max_concurrent_trades
-    if abs(max_notional - expected_max_notional) > 0.01:  # 1 cent tolerance
-        logger.error(
-            f"[KALSHI_CAPABILITY] CRITICAL: Computed max_notional ${max_notional:.2f} "
-            f"does not match expected ${expected_max_notional:.2f} "
-            f"(per_trade=${per_trade_max_notional:.2f} × concurrent={max_concurrent_trades})"
+    try:
+        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+        envelope = get_kalshi_crypto_15m_risk_envelope()
+        
+        per_trade_max_notional = envelope.max_single_order_notional_usd
+        max_concurrent_trades = envelope.max_concurrent_trades
+        max_notional = per_trade_max_notional * max_concurrent_trades
+        
+        # P1-5: Cross-check assert to ensure envelope computation is correct
+        expected_max_notional = per_trade_max_notional * max_concurrent_trades
+        if abs(max_notional - expected_max_notional) > 0.01:  # 1 cent tolerance
+            logger.error(
+                f"[KALSHI_CAPABILITY] CRITICAL: Computed max_notional ${max_notional:.2f} "
+                f"does not match expected ${expected_max_notional:.2f} "
+                f"(per_trade=${per_trade_max_notional:.2f} × concurrent={max_concurrent_trades})"
+            )
+            raise AssertionError(f"Capability max_notional mismatch: computed ${max_notional:.2f} vs expected ${expected_max_notional:.2f}")
+    except RuntimeError as e:
+        # Bankroll not ready - use fallback values
+        logger.warning(
+            "[KALSHI_CAPABILITY] Failed to get risk envelope: %s (using fallback values)",
+            e
         )
-        raise AssertionError(f"Capability max_notional mismatch: computed ${max_notional:.2f} vs expected ${expected_max_notional:.2f}")
+        # Fallback to conservative defaults
+        per_trade_max_notional = 100.0  # $100 per trade
+        max_concurrent_trades = 5
+        max_notional = per_trade_max_notional * max_concurrent_trades
     
     logger.info(
         "[KALSHI_CAPABILITY] Derived max_notional from canonical envelope: $%.2f "

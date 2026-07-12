@@ -416,6 +416,12 @@ class CatalogMarket:
     api_status: str = "unknown"  # Raw Kalshi API status
     health_status: str = "invalid_metadata"  # Normalization status
     tradeable: bool = False  # Derived flag for tradability
+    # Liquidity fields from raw API data for filtering
+    yes_bid: Optional[float] = None
+    yes_ask: Optional[float] = None
+    yes_bid_size: Optional[float] = None
+    yes_ask_size: Optional[float] = None
+    liquidity: Optional[float] = None
 
 
 @dataclass
@@ -456,14 +462,15 @@ class CatalogSnapshot:
         window = get_kalshi_15m_window()
         logger.info("[GET-CURRENT-15M] asset=%s window.end_utc=%s window.suffix=%s", asset, window.end_utc, window.suffix)
 
-        # Filter to 15m markets for this asset that are NOT settled
+        # Filter to 15m markets for this asset that are NOT settled or finalized
         asset_markets = []
         for m in self.markets:
             if m.asset == asset and m.timeframe == "15m":
                 # Status is in raw_data for EventMarket objects
                 raw_data = m.market.raw_data or {}
                 market_status = raw_data.get("status", "").lower()
-                is_settled = market_status == "settled"
+                # Filter out settled and finalized markets (both are non-tradable)
+                is_settled = market_status in ["settled", "finalized"]
                 if not is_settled:
                     asset_markets.append(m)
 
@@ -895,14 +902,15 @@ class KalshiMarketCatalog:
                         logger.info("[CATALOG-FETCH] Fetching series=%s with REST API (attempt %d/%d)", series, attempt + 1, max_retries)
 
                         # Use REST API directly via _request_with_resilience
-                        # CRITICAL FIX: Add max_expiration_time filter to fetch only markets within 16 minutes
-                        # This reduces data transfer and prevents old tickers from being fetched at the source
-                        max_expiry = now_utc + timedelta(minutes=16)
+                        # CRITICAL FIX: Use max_expiration_time filter to fetch only markets within 30 minutes
+                        # This prevents fetching far-future markets that clutter the catalog
+                        # 30 minutes gives us the current window (0-15 min) plus the next window (15-30 min)
+                        max_expiry = now_utc + timedelta(minutes=30)
                         max_expiry_str = max_expiry.strftime("%Y-%m-%dT%H:%M:%SZ")
 
                         result = await self._client._request_with_resilience(
                             "GET",
-                            f"/markets?series_ticker={series}&limit=200&max_expiration_time={max_expiry_str}",
+                            f"/markets?series_ticker={series}&limit=200&max_expiration_time={max_expiry_str}&status=open",
                             operation_name=f"fetch_series_{series}"
                         )
                         
@@ -966,12 +974,17 @@ class KalshiMarketCatalog:
                 markets_list = []
                 for raw_m in raw_markets_list:
                     try:
+                        # CRITICAL DIAGNOSTIC: Log raw market data before conversion
+                        logger.info("[CATALOG-RAW-MARKET] market_id=%s raw_data=%s", raw_m.get('market_id', 'unknown'), raw_m)
+                        
                         # Parse raw dict to KalshiMarket, then convert to EventMarket
                         kalshi_market = self._client._parse_market(raw_m)
                         if kalshi_market:
+                            logger.info("[CATALOG-PARSE-SUCCESS] market_id=%s parsed successfully", raw_m.get('market_id', 'unknown'))
                             event_market = self._client._to_event_market(kalshi_market)
                             if event_market:
                                 markets_list.append(event_market)
+                                logger.info("[CATALOG-CONVERT-SUCCESS] market_id=%s converted to EventMarket", event_market.market_id)
                             else:
                                 logger.warning("[CATALOG-CONVERT] _to_event_market returned None for market_id=%s", raw_m.get('market_id', 'unknown'))
                         else:
@@ -990,11 +1003,14 @@ class KalshiMarketCatalog:
                 if r.success:
                     # Log ticker canonicality for first 3 markets per series
                     for m in markets_list[:3]:
+                        # Use close_time from raw_data for expiry logging
+                        raw_data = m.raw_data or {}
+                        close_time = raw_data.get('close_time') or raw_data.get('expected_expiration_time') or 'N/A'
                         logger.info(
                             "[CATALOG-TICKER] series=%s ticker=%s expiry=%s",
                             series,
                             m.market_id,
-                            m.close_date if hasattr(m, 'close_date') else 'N/A'
+                            close_time
                         )
                     # DIAGNOSTIC: Log ALL tickers to see what markets are available
                     logger.info(
@@ -1163,7 +1179,21 @@ class KalshiMarketCatalog:
                         cm.market.market_id, mte
                     )
                     continue
-                if 0.0 <= mte <= 15.5:  # Only include non-expired markets (0 to 15.5 min to expiry)
+                # CRITICAL FIX: Filter out zero-liquidity markets
+                # Markets with all zeros for bid/ask/size are not tradeable
+                # Only filter if all liquidity fields are explicitly 0.0 (not None)
+                if (cm.yes_bid is not None and cm.yes_bid == 0.0 and
+                    cm.yes_ask is not None and cm.yes_ask == 0.0 and
+                    cm.yes_bid_size is not None and cm.yes_bid_size == 0.0 and
+                    cm.yes_ask_size is not None and cm.yes_ask_size == 0.0 and
+                    cm.liquidity is not None and cm.liquidity == 0.0):
+                    logger.debug(
+                        "[CATALOG-VISIBILITY-FILTER] Skipping market=%s (zero liquidity - bid/ask/size all 0.00)",
+                        cm.market.market_id
+                    )
+                    continue
+                
+                if -5.0 <= mte <= 20.0:  # Include markets from -5 to 20 min to expiry (next window + current window + buffer)
                     visible_markets.append(cm)
                 else:
                     logger.debug(
@@ -1489,7 +1519,8 @@ class KalshiMarketCatalog:
                 # Status is in raw_data for EventMarket objects
                 raw_data = m.market.raw_data or {}
                 market_status = raw_data.get("status", "").lower()
-                is_settled = market_status == "settled"
+                # Filter out settled and finalized markets (both are non-tradable)
+                is_settled = market_status in ["settled", "finalized"]
                 
                 if not is_settled:
                     # Filter by 0-15 minute entry window
@@ -1647,13 +1678,14 @@ class KalshiMarketCatalog:
         for series_ticker in series_tickers:
             series_markets = [m for m in self._markets if m.series_ticker == series_ticker]
             
-            # SIMPLE 15m FILTER: Include all markets that are NOT settled
+            # SIMPLE 15m FILTER: Include all markets that are NOT settled or finalized
             active_tickers = []
             for m in series_markets:
                 # Status is in raw_data for EventMarket objects
                 raw_data = m.market.raw_data or {}
                 market_status = raw_data.get("status", "").lower()
-                is_settled = market_status == "settled"
+                # Filter out settled and finalized markets (both are non-tradable)
+                is_settled = market_status in ["settled", "finalized"]
                 
                 if not is_settled:
                     active_tickers.append(m.market.market_id)
@@ -1955,6 +1987,39 @@ class KalshiMarketCatalog:
                 strikes.setdefault("strike", float(raw["strike_price"]))
             except (TypeError, ValueError):
                 pass
+        
+        # Extract liquidity fields from raw API data for zero-liquidity filtering
+        yes_bid = None
+        yes_ask = None
+        yes_bid_size = None
+        yes_ask_size = None
+        liquidity = None
+        
+        if raw.get("yes_bid_dollars") is not None:
+            try:
+                yes_bid = float(raw["yes_bid_dollars"])
+            except (TypeError, ValueError):
+                pass
+        if raw.get("yes_ask_dollars") is not None:
+            try:
+                yes_ask = float(raw["yes_ask_dollars"])
+            except (TypeError, ValueError):
+                pass
+        if raw.get("yes_bid_size_fp") is not None:
+            try:
+                yes_bid_size = float(raw["yes_bid_size_fp"])
+            except (TypeError, ValueError):
+                pass
+        if raw.get("yes_ask_size_fp") is not None:
+            try:
+                yes_ask_size = float(raw["yes_ask_size_fp"])
+            except (TypeError, ValueError):
+                pass
+        if raw.get("liquidity_dollars") is not None:
+            try:
+                liquidity = float(raw["liquidity_dollars"])
+            except (TypeError, ValueError):
+                pass
 
         # Merge: ticker-prefix detection is the primary signal.
         # BUG-05 fix: only accept mkt.category if it is a recognised category
@@ -1979,9 +2044,27 @@ class KalshiMarketCatalog:
         raw_data = mkt.raw_data or {}
         api_status = raw_data.get("status", "unknown").lower()
         
-        # CRITICAL: Extract close_ts from raw_data if available (Kalshi's ground truth)
-        close_ts = raw_data.get("close_ts") or raw_data.get("close_time_ts")
+        # CRITICAL FIX 2026-07-11: Extract close_time for ALL contracts (including 15m)
+        # For 15m contracts, API close_time is unreliable for expiry calculation,
+        # but we still extract it for logging and debugging purposes.
+        # The primary expiry source for 15m contracts is ticker-based inference in contract_normalization.py
         close_time_utc = None
+        close_ts = None  # Initialize to avoid UnboundLocalError
+
+        # Extract close_time for ALL contracts (including 15m)
+        close_ts = raw_data.get("close_ts") or raw_data.get("close_time_ts")
+
+        # If no epoch timestamp found, try parsing close_time string (ISO format)
+        if not close_ts and raw_data.get("close_time"):
+            try:
+                close_time_str = raw_data.get("close_time")
+                # Parse ISO format string (e.g., "2026-07-11T10:15:00+00:00")
+                close_time_utc = datetime.fromisoformat(close_time_str.replace('Z', '+00:00'))
+                close_ts = int(close_time_utc.timestamp())
+                logger.info("[CLOSE-TIME-PARSE] Successfully parsed close_time string: %s -> close_ts=%s", close_time_str, close_ts)
+            except (ValueError, TypeError) as e:
+                logger.warning("[CLOSE-TIME-PARSE] Failed to parse close_time string: %s error: %s", raw_data.get("close_time"), e)
+
         if close_ts:
             try:
                 close_time_utc = datetime.fromtimestamp(float(close_ts), tz=timezone.utc)
@@ -2000,18 +2083,38 @@ class KalshiMarketCatalog:
             logger.info("[RAW-DATA-DEBUG] market_id=%s raw_data_keys=%s api_status=%s close_ts=%s close_time_utc=%s", mkt.market_id, list(raw_data.keys())[:30], api_status, close_ts, close_time_utc)
         
         if timeframe == "15m" and asset in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
-            # CRITICAL REFACTOR: Use Kalshi's close_ts as primary source of truth
-            # Priority: close_ts (from API) > expected_expiration_time > expiration_time > close_time > end_date > ticker inference
-            # This ensures we use Kalshi's ground truth epoch timestamp when available
-            # CRITICAL FIX: Pass close_time and end_date separately to let normalization function handle priority
+            # CRITICAL FIX 2026-07-11: For 15m contracts, ticker-based inference is PRIMARY
+            # The API's close_time field is the EVENT close time (when price observation ends),
+            # NOT the contract expiry time. The ticker contains the correct contract expiry.
+            # Priority in contract_normalization.py: ticker inference > expected_expiration_time > expiration_time > close_time > end_date
+            # We pass None for close_time to force ticker-based inference in normalization function
             normalized = normalize_kalshi_contract(
                 ticker=mkt.market_id,
                 expiration_time=None,  # Not available in EventMarket
                 expected_expiration_time=None,  # Not available in EventMarket
-                end_date=mkt.end_date,  # Pass original end_date separately
-                close_time=close_time_utc or getattr(mkt, 'close_time', None),  # Prefer close_ts-derived time
+                end_date=mkt.end_date,  # Pass original end_date separately (fallback only)
+                close_time=None,  # CRITICAL: Pass None to force ticker-based inference for 15m contracts
                 now=now
             )
+            
+            # DEBUG: Log normalization results for 15m contracts
+            logger.info(
+                "[15M-NORMALIZE-DEBUG] ticker=%s asset=%s status=%s seconds_to_expiry=%.1f minutes_to_expiry=%.1f expiry_ts=%s",
+                mkt.market_id, asset, normalized.status, normalized.seconds_to_expiry, normalized.minutes_to_expiry,
+                normalized.expiry_ts.isoformat() if normalized.expiry_ts else None
+            )
+            
+            # CRITICAL FIX 2026-07-11: Hard error for invalid normalized contracts
+            # If normalization fails with invalid_metadata, this is a BUG that must be fixed
+            # Do not silently continue with invalid contracts - fail loudly
+            if normalized.status == "invalid_metadata":
+                logger.error(
+                    "[CATALOG-NORMALIZATION-ERROR] ticker=%s asset=%s normalization failed with invalid_metadata: %s. "
+                    "This is a BUG in the normalization layer or API response. Market will be rejected.",
+                    mkt.market_id, asset, normalized.status_reason
+                )
+                # Return None to reject this market from the catalog
+                return None
             
             # Use normalized values (canonical fields)
             minutes_to_expiry = normalized.minutes_to_expiry
@@ -2127,6 +2230,11 @@ class KalshiMarketCatalog:
             api_status=api_status,
             health_status=health_status,
             tradeable=tradeable,
+            yes_bid=yes_bid,
+            yes_ask=yes_ask,
+            yes_bid_size=yes_bid_size,
+            yes_ask_size=yes_ask_size,
+            liquidity=liquidity,
         )
 
     @staticmethod
@@ -2730,13 +2838,14 @@ class KalshiMarketCatalog:
         logger.info("[SNAPSHOT-CREATE] Starting snapshot creation, total_catalog_markets=%d catalog_id=%s", len(self._markets), id(self))
         
         for m in self._markets:
-            # Filter: non-settled 15m crypto markets within entry window
+            # Filter: non-settled and non-finalized 15m crypto markets within entry window
             raw_data = m.market.raw_data or {}
             market_status = raw_data.get("status", "").lower()
-            is_settled = market_status == "settled"
+            # Filter out settled and finalized markets (both are non-tradable)
+            is_settled = market_status in ["settled", "finalized"]
             
             # DIAGNOSTIC: Log timeframe value for debugging
-            logger.info("[SNAPSHOT-FILTER-DEBUG] ticker=%s asset=%s timeframe=%s status=%s", 
+            logger.info("[SNAPSHOT-FILTER-DEBUG] ticker=%s asset=%s timeframe=%s status=%s",
                         m.market.market_id, m.asset, m.timeframe, market_status)
             
             # CRITICAL FIX: Don't filter by timeframe field - Kalshi API returns N/A for this field
@@ -2831,7 +2940,7 @@ class KalshiMarketCatalog:
         
         from merid.event_venues.kalshi.kalshi_15m_time import select_live_markets_by_ts
 
-        # Filter to 15m markets for this asset that are NOT settled
+        # Filter to 15m markets for this asset that are NOT settled or finalized
         # CRITICAL FIX: Don't filter by timeframe field - Kalshi API returns N/A for this field
         # Instead, rely on series ticker filtering (e.g., KXBTC15M) which identifies 15m markets
         # The series ticker is already validated in the enrichment phase
@@ -2841,7 +2950,8 @@ class KalshiMarketCatalog:
                 # Status is in raw_data for EventMarket objects
                 raw_data = m.market.raw_data or {}
                 market_status = raw_data.get("status", "").lower()
-                is_settled = market_status == "settled"
+                # Filter out settled and finalized markets (both are non-tradable)
+                is_settled = market_status in ["settled", "finalized"]
                 if not is_settled:
                     asset_markets.append(m)
 
