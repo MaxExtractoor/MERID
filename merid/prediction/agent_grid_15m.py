@@ -1408,13 +1408,35 @@ class LeanAgent15m:
 
         else:
 
-            # Fallback to spot price for all OHLC fields
-
-            open_price = spot_price
-
-            high_price = spot_price
-
-            low_price = spot_price
+            # CRITICAL FIX: Use price history to construct valid OHLC when spot_data is None
+            # This prevents high=low which breaks ATR calculation (TR=0 -> ATR=0)
+            # Similar to UnifiedSpotService fallback logic (lines 313-338 in unified_spot_service.py)
+            
+            history = list(self._spot_price_history[asset])
+            
+            if len(history) > 0:
+                # Use recent price history to construct OHLC
+                recent_prices = [entry[1] for entry in history[-10:]]  # Last 10 prices
+                recent_prices.append(spot_price)
+                
+                open_price = recent_prices[0]  # Oldest price as open
+                high_price = max(recent_prices)  # Highest as high
+                low_price = min(recent_prices)   # Lowest as low
+                
+                logger.debug("[OHLC-FALLBACK] asset=%s using price history: O=%s H=%s L=%s C=%s",
+                           asset, format_price(asset, open_price), format_price(asset, high_price),
+                           format_price(asset, low_price), format_price(asset, spot_price))
+            else:
+                # No price history available - add small spread to avoid high=low
+                # This prevents TR=0 which would break ATR calculation
+                spread = spot_price * 0.0001  # 0.01% spread
+                open_price = spot_price
+                high_price = spot_price + spread
+                low_price = spot_price - spread
+                
+                logger.debug("[OHLC-FALLBACK] asset=%s using spread proxy: O=%s H=%s L=%s C=%s",
+                           asset, format_price(asset, open_price), format_price(asset, high_price),
+                           format_price(asset, low_price), format_price(asset, spot_price))
 
         
 
