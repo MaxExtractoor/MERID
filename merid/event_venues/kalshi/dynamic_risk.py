@@ -922,8 +922,8 @@ class DynamicRiskEngine:
             # Sell: go down from mid towards bid
             limit_price_cents = max(best_bid_cents, mid_cents - ticks_from_mid)
         
-        # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-50c range per commit c5ac4a18
-        limit_price_cents = max(10, min(50, limit_price_cents))
+        # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-75c range (expanded for market conditions)
+        limit_price_cents = max(10, min(75, limit_price_cents))
         
         computation_time_ms = (time.time() - t0) * 1000
         

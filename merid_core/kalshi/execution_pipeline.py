@@ -595,8 +595,8 @@ class ExecutionPipeline:
             
             # Convert price from 0-1 to cents (1-99)
             price_cents = int(intent.price * 100)
-            # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-50c range per commit c5ac4a18
-            price_cents = max(10, min(50, price_cents))
+            # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-75c range (expanded for market conditions)
+            price_cents = max(10, min(75, price_cents))
             
             # Create order via REST API (run in thread to avoid blocking the event loop)
             import asyncio as _asyncio

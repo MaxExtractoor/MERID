@@ -1563,8 +1563,8 @@ def simulate_paper_fill(
     rng = _rng if _rng is not None else _random_module
 
     requested_count = max(0, int(intent.count))
-    # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-50c range per commit c5ac4a18
-    requested_price = max(10, min(50, int(intent.price_cents)))
+    # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-75c range (expanded for market conditions)
+    requested_price = max(10, min(75, int(intent.price_cents)))
 
     # Basic side-aware slippage in cents from configured basis points.
     slippage_cents = max(0, int(round(requested_price * PAPER_SLIPPAGE_BPS / 10_000)))
@@ -1573,8 +1573,8 @@ def simulate_paper_fill(
 
     # Buy pays up; sell receives down.
     side_sign = 1 if intent.action == "buy" else -1
-    # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-50c range per commit c5ac4a18
-    fill_price = max(10, min(50, requested_price + (side_sign * slippage_cents)))
+    # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-75c range (expanded for market conditions)
+    fill_price = max(10, min(75, requested_price + (side_sign * slippage_cents)))
 
     # Partial fill simulation when size > 1 contract.
     partial_fill = False

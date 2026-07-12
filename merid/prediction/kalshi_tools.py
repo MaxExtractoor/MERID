@@ -656,9 +656,9 @@ async def _kalshi_place_order(
             # MID-SPREAD ENTRY OPTIMIZATION (2026-07-04): Respect calculated entry price from agent_grid
             # The agent_grid_15m.py now calculates optimal entry prices using mid-spread strategy
             # This clamp is a safety rail to ensure we never submit orders outside valid range
-            # CRITICAL FIX: 2026-07-12 - Use canonical 10-50c range per commit c5ac4a18
+            # CRITICAL FIX: 2026-07-12 - Use canonical 10-75c range (expanded for market conditions)
             original_price = int(price_cents or 50)
-            _pc = max(10, min(50, original_price))
+            _pc = max(10, min(75, original_price))
             
             # Log if price was clamped (indicates mid-spread optimization may need adjustment)
             if _pc != original_price:
@@ -1111,8 +1111,8 @@ def build_live_route_order_intent(
         pc = 0
         otype = "market"
     else:
-        # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-50c range per commit c5ac4a18
-        pc = max(10, min(50, int(price_cents)))
+        # CRITICAL FIX: 2026-07-12 - Clamp to canonical 10-75c range (expanded for market conditions)
+        pc = max(10, min(75, int(price_cents)))
         otype = "limit"
 
     # Compute default TP/SL for 15m crypto entry orders if not provided
