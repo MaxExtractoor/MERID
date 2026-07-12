@@ -299,6 +299,7 @@ async def _kalshi_place_order(
     count: int = 1,
     agent_name: str = "",
     stop_loss_price_cents: Optional[int] = None,
+    take_profit_price_cents: Optional[int] = None,
     take_profit_r_multiple: Optional[float] = None,
     model_prob: Optional[float] = None,
     edge_pct: Optional[float] = None,
@@ -660,10 +661,40 @@ async def _kalshi_place_order(
             original_price = int(price_cents or 50)
             _pc = max(10, min(75, original_price))
             
+            # Liquidity validation: check if clamped price has sufficient orderbook depth
+            try:
+                from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+                market_state_store = get_kalshi_market_state_store()
+                market_state = market_state_store.get(ticker) if market_state_store else None
+                
+                if market_state:
+                    # Check if there's liquidity at or near the clamped price
+                    # For YES orders, check bid depth; for NO orders, check ask depth
+                    side_lower = side.lower() if side else ""
+                    has_liquidity = False
+                    
+                    if side_lower == "yes":
+                        # YES order: need bid liquidity at or above price
+                        if market_state.best_bid_cents and market_state.best_bid_cents >= _pc:
+                            has_liquidity = True
+                    elif side_lower == "no":
+                        # NO order: need bid liquidity at or below price (NO price = 100 - YES)
+                        if market_state.best_bid_cents and (100 - market_state.best_bid_cents) <= _pc:
+                            has_liquidity = True
+                    
+                    if not has_liquidity:
+                        logger.warning(
+                            "[KALSHI-TOOLS-LIQUIDITY] ticker=%s price=%dc has insufficient liquidity at orderbook. "
+                            "best_bid=%dc best_ask=%dc. Proceeding with caution.",
+                            ticker, _pc, market_state.best_bid_cents, market_state.best_ask_cents
+                        )
+            except Exception as liquidity_exc:
+                logger.debug("[KALSHI-TOOLS-LIQUIDITY] Failed to check liquidity for %s: %s", ticker, liquidity_exc)
+            
             # Log if price was clamped (indicates mid-spread optimization may need adjustment)
             if _pc != original_price:
                 logger.warning(
-                    "[KALSHI-TOOLS-PRICE-CLAMP] ticker=%s original_price=%d clamped_to=%d (safety rail 5-95c per profile YAML)",
+                    "[KALSHI-TOOLS-PRICE-CLAMP] ticker=%s original_price=%d clamped_to=%d (safety rail 10-75c per profile YAML)",
                     ticker, original_price, _pc
                 )
             else:
@@ -754,6 +785,7 @@ async def _kalshi_place_order(
                 source="kalshi_tools",
                 agent_id=_agent_name if _agent_name else "kalshi_tools",
                 stop_loss_price_cents=stop_loss_price_cents,
+                take_profit_price_cents=take_profit_price_cents,  # CRITICAL FIX (2026-07-12): Pass TP price to enable exit policy
                 take_profit_r_multiple=take_profit_r_multiple,
                 window_resolution_id=window_resolution_id,
                 exit_policy_id=exit_policy_id,
