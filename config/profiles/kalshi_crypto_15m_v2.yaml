@@ -291,13 +291,13 @@ dynamic_take_profit:
 # Dynamic Position Sizing Configuration
 # Scale position size based on edge and confidence
 dynamic_sizing:
-  enabled: false  # DISABLED: Dynamic sizing multipliers interfere with window-based risk limits (3% per agent, 5% total per 15m window)
+  enabled: false  # DISABLED: Dynamic sizing multipliers interfere with fixed $1 slot allocation model
   base_contracts: 1  # Base size
   edge_multiplier: 2.0  # 2026-07-05: Increased from 0.5 to 2.0 (4x) based on Turbine research - amplify edge impact for small velocity-based edges
   confidence_multiplier: 1.0  # 2026-07-05: Increased from 0.3 to 1.0 (3.3x) based on Turbine research - amplify confidence impact
   max_contracts: 1  # HARD RULE (2026-07-06): 1 contract per order (per-asset limits take precedence)
   min_contracts: 1  # Min contracts per trade
-  description: "Dynamic sizing: scale position based on edge and confidence (2026 research-tuned) - DISABLED to prevent interference with window-based risk limits"
+  description: "Dynamic sizing: scale position based on edge and confidence (2026 research-tuned) - DISABLED to prevent interference with fixed $1 slot allocation"
 
 # Order Scaling Configuration
 # Institutional-grade scaling strategies (TWAP, iceberg, adaptive)
@@ -420,7 +420,7 @@ momentum_fvg:
   
   # Spread guard interaction with momentum
   # If spread exceeds this, require higher OBI persistence for momentum entries
-  spread_gate_cents: 30  # 2026-07-10: OPTIMIZED to 30c - harmonizes with 10c-50c entry price sweet spot (industry research: 3-8c typical, 30c quality filter)
+  spread_gate_cents: 10  # 2026-07-12: ALIGNED with industry research - 10c gate for momentum (industry: 8-10c quality filter for 15m crypto)
   spread_gate_obi_persistence_boost: 0.75  # Require 75% persistence if spread is wide
 
 # ── Price-Based Strategy Parameters (2026 Optimized for Swing Trading) ───────────
@@ -533,7 +533,7 @@ venue:
 universe:
   min_volume: 5  # Minimum 5 contracts volume (relaxed from default 50 for 15m crypto)
   min_open_interest: 1  # Minimum 1 contract open interest (relaxed from default 10)
-  max_spread_cents: 100  # 2026-07-10: RELAXED to 100c - allows trading in current market conditions with wider spreads (60c-96c observed) - aligned with guardrails.max_spread_cents (single source of truth)
+  max_spread_cents: 20  # 2026-07-12: ALIGNED with industry research - 20c max for 15m crypto (industry: 15-20c for short-duration markets, 5-10c for liquid markets)
   description: "Coarse liquidity prefilter for 15m crypto markets - tuned for exactly 5 markets per asset"
 
 # ── Throttling (Order Rate Limits) ───────────────────────────────────────────
@@ -634,13 +634,13 @@ portfolio_heat:
   description: "Portfolio heat tracking: correlation-adjusted exposure monitoring"
 
 # 2026 OPTIMIZATION: Time-of-Day Risk Scaling
-# DISABLED: Time-of-day scaling interferes with 3% per asset / 5% per 15m window risk limits
+# DISABLED: Time-of-day scaling interferes with fixed $1 slot allocation model
 # Industry standard: Adjust risk based on session liquidity
 # US market hours: 100% risk, Asian: 80%, European: 90%, Weekend: 50%
 time_of_day_risk_scaling:
-  enabled: false  # DISABLED: interferes with 3% per asset / 5% per 15m window limits
+  enabled: false  # DISABLED: interferes with fixed $1 slot allocation model
   # RE-ENABLE RISKS: If re-enabled, must update risk envelope to account for time-based scaling
-  # and ensure 3% per asset / 5% per 15m window limits are still respected after multiplier
+  # and ensure fixed $1 exposure cap is still respected after multiplier
   # RE-ENABLE REQUIREMENTS: Update kalshi_crypto_15m_risk_envelope.py to apply time_of_day_multiplier
   # to risk limits, not just order sizes
   us_market_hours: "09:30-16:00 ET"  # US market hours
@@ -651,7 +651,7 @@ time_of_day_risk_scaling:
   asian_multiplier: 0.8  # 80% risk during Asian session (lower liquidity)
   european_multiplier: 0.9  # 90% risk during European session
   weekend_multiplier: 0.8  # 80% risk during weekend (relaxed from 0.5 - use volatility regime instead)
-  description: "Time-of-day risk scaling: DISABLED - interferes with 3% per asset / 5% per 15m window limits"
+  description: "Time-of-day risk scaling: DISABLED - interferes with fixed $1 slot allocation"
 
 # 2026 OPTIMIZATION: Per-Asset Rolling PnL Limits
 # Industry standard: Asset-specific rolling PnL limits based on volatility
@@ -1034,7 +1034,7 @@ coarse_filters:
 # Reference: https://www.indiehackers.com/post/building-a-stable-15-minute-trading-bot-for-polymarket-crypto-up-down-markets-563a14e882
 # NOTE: These values are now dynamically set from canonical/crisis sections above
 guardrails:
-  max_spread_cents: 100  # 2026-07-10: RELAXED to 100c - allows trading in current market conditions with wider spreads (60c-96c observed) - coarse filter at 75c provides first gate
+  max_spread_cents: 20  # 2026-07-12: ALIGNED with industry research - 20c max for 15m crypto (industry: 15-20c for short-duration markets)
   max_slippage_cents: 5  # INCREASED: Max 5 cents worse than best (research: 2-5c slippage acceptable for 15m markets)
   # CRITICAL FIX: Removed min_depth_contracts - use per-asset depth thresholds instead (single source of truth)
   # min_depth_contracts: 2  # REMOVED - inconsistent with per-asset min_depth_yes/min_depth_no values
@@ -1080,9 +1080,8 @@ guardrails:
   # NEW: Spread guard with edge override
   spread_guard_enabled: true  # Enable spread guard
   spread_guard_edge_multiplier: 1.1  # Require edge >= 1.1x spread to trade (relaxed from 1.5x)
-  # 2026-07-04 FIX: Increased to 75c based on 2026 industry research (Kalena: altcoin spreads 5-30%)
-  # DOGE observed at 79c spread (1.3% on 59c price) - 50c threshold was blocking all trades
-  min_spread_gate_cents: 30  # 2026-07-10: OPTIMIZED to 30c - harmonizes with 10c-50c entry price sweet spot (industry research: 3-8c typical, 30c quality filter)
+  # 2026-07-12: ALIGNED with industry research - 8c minimum quality filter (industry: 8-10c for 15m crypto)
+  min_spread_gate_cents: 8  # 2026-07-12: ALIGNED with industry research - 8c minimum quality filter (industry: 8-10c for 15m crypto)
   
   # Drawdown limits (percentage-based, not bankroll-scaled)
   # Drawdown is the primary hard cap; daily loss is optional/soft
@@ -1529,7 +1528,7 @@ fee_aware_edge:
 # 50c threshold blocks extreme data quality issues (82-91c spreads with YES ask=99c) while allowing normal trading
 market_microstructure:
   enabled: true  # Enable market microstructure filters
-  max_spread_cents: 100  # 2026-07-10: RELAXED to 100c - allows trading in current market conditions with wider spreads (60c-96c observed) - aligned with guardrails.max_spread_cents (single source of truth)
+  max_spread_cents: 20  # 2026-07-12: ALIGNED with industry research - 20c max for 15m crypto (industry: 15-20c for short-duration markets)
   min_depth_usd: 0.0  # DISABLED: System uses limit orders which wait for fills, not market orders. Kalshi 15m crypto markets have sufficient liquidity. Depth thresholds are primarily for market orders to prevent slippage.
   min_yes_depth: 1  # Minimum YES depth threshold
   min_no_depth: 1  # Minimum NO depth threshold

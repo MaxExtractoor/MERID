@@ -118,6 +118,7 @@ def compute_side_microstructure(
             )
         
         # CRITICAL FIX: Flag wide spreads as illiquid (>15c threshold)
+        # 2026-07-12: ALIGNED with industry research - 15c warning threshold (below 20c hard rejection)
         WIDE_SPREAD_THRESHOLD = 15
         if view.spread_cents > WIDE_SPREAD_THRESHOLD:
             logger.warning(

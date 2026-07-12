@@ -541,8 +541,8 @@ class KalshiMarketState:
         # Constants for health thresholds
         _MAX_WS_AGE_SECONDS = 5.0  # 5 seconds for transport stale
         _MAX_REST_AGE_SECONDS = 60.0  # 60 seconds for REST stale
-        # 2026-07-11: Use dynamic threshold manager for regime-aware spread thresholds
-        _SPREAD_THRESHOLD_CENTS = 30  # 30 cents for illiquid threshold (canonical default)
+        # 2026-07-12: ALIGNED with industry research - 20c max for 15m crypto (industry: 15-20c for short-duration markets)
+        _SPREAD_THRESHOLD_CENTS = 20  # 20 cents for illiquid threshold (aligned with industry standards)
         _DUALITY_EPSILON_CENTS = 2  # 2 cents tolerance for YES+NO sums
         
         # Transport health check

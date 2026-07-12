@@ -857,21 +857,21 @@ def test_ohlc_data_structure_in_spot_price():
 
 
 def test_price_based_signal_price_clamping():
-    """Test that price_based signal clamps price_cents to 10-50c range.
+    """Test that price_based signal clamps price_cents to 10-75c range.
     
-    CRITICAL FIX: Raw market prices (70c-95c) are clamped to 10-50c to match profile guardrails.
-    This prevents DEEP_OTM_POLICY rejections for orders above 50c.
+    CRITICAL FIX: Raw market prices (70c-95c) are clamped to 10-75c to match profile guardrails.
+    This prevents DEEP_OTM_POLICY rejections for orders above 75c.
     """
-    # Simulate market price above 50c limit
-    market_price = 0.75  # 75c - above 50c limit
+    # Simulate market price above 75c limit
+    market_price = 0.85  # 85c - above 75c limit
     
     # Simulate the clamping logic from agent_grid_15m.py _generate_price_based_signal
     raw_price_cents = int(market_price * 100)
-    clamped_price_cents = max(10, min(50, raw_price_cents))
+    clamped_price_cents = max(10, min(75, raw_price_cents))
     
     # Verify clamping
-    assert raw_price_cents == 75
-    assert clamped_price_cents == 50  # Clamped to max 50c
+    assert raw_price_cents == 85
+    assert clamped_price_cents == 75  # Clamped to max 75c
 
 
 def test_price_based_signal_price_clamping_below_minimum():
@@ -884,7 +884,7 @@ def test_price_based_signal_price_clamping_below_minimum():
     
     # Simulate the clamping logic
     raw_price_cents = int(market_price * 100)
-    clamped_price_cents = max(10, min(50, raw_price_cents))
+    clamped_price_cents = max(10, min(75, raw_price_cents))
     
     # Verify clamping
     assert raw_price_cents == 5
@@ -892,7 +892,7 @@ def test_price_based_signal_price_clamping_below_minimum():
 
 
 def test_price_based_signal_price_clamping_within_range():
-    """Test that price_based signal does not modify prices within 10-50c range.
+    """Test that price_based signal does not modify prices within 10-75c range.
     
     CRITICAL FIX: Valid prices should pass through unchanged.
     """
@@ -901,7 +901,7 @@ def test_price_based_signal_price_clamping_within_range():
     
     # Simulate the clamping logic
     raw_price_cents = int(market_price * 100)
-    clamped_price_cents = max(10, min(50, raw_price_cents))
+    clamped_price_cents = max(10, min(75, raw_price_cents))
     
     # Verify no clamping needed
     assert raw_price_cents == 35
@@ -914,11 +914,11 @@ def test_price_based_signal_includes_clamped_price():
     CRITICAL FIX: Signal should return clamped price_cents, not raw market price.
     """
     # Simulate signal generation with high market price
-    market_price = 0.80  # 80c - above 50c limit
+    market_price = 0.85  # 85c - above 75c limit
     
     # Simulate the clamping and signal return logic
     raw_price_cents = int(market_price * 100)
-    clamped_price_cents = max(10, min(50, raw_price_cents))
+    clamped_price_cents = max(10, min(75, raw_price_cents))
     
     signal = {
         "side": "yes",
@@ -932,9 +932,9 @@ def test_price_based_signal_includes_clamped_price():
     }
     
     # Verify signal uses clamped price
-    assert signal["price_cents"] == 50  # Clamped, not 80
+    assert signal["price_cents"] == 75  # Clamped, not 85
     assert signal["price_cents"] >= 10
-    assert signal["price_cents"] <= 50
+    assert signal["price_cents"] <= 75
 
 
 def test_order_intent_includes_trace_id():
@@ -1454,12 +1454,12 @@ def test_spread_thresholds_2026_standards():
 
     # Verify market microstructure spread threshold is aligned with profile YAML
     # Note: max_spread_cents is about bid-ask spread (liquidity), not entry price
-    # 2026-07-10: RELAXED to 100c - allows trading in current market conditions with wider spreads
+    # 2026-07-12: ALIGNED with industry research - 20c max for 15m crypto (industry: 15-20c for short-duration markets)
     guardrails = raw.get('guardrails', {})
-    max_spread_cents = guardrails.get('max_spread_cents', 100)
+    max_spread_cents = guardrails.get('max_spread_cents', 20)
 
-    assert max_spread_cents == 100, \
-        f"Market microstructure spread threshold should be 100c per profile YAML, got {max_spread_cents}"
+    assert max_spread_cents == 20, \
+        f"Market microstructure spread threshold should be 20c per profile YAML, got {max_spread_cents}"
     
     # Verify TTE regime spread thresholds are aligned with current configuration
     from merid.risk.tte_regime import TTERegimeConfig

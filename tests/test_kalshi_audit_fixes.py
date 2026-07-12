@@ -727,36 +727,36 @@ class TestFlaw04CategoryConfigConsistency:
 class TestSpread01ThresholdHarmonization:
     """All components must use 100c max_spread_cents (2026-07-10: updated from 30c for wider spreads)."""
 
-    def test_candidate_optimizer_uses_30c(self):
-        """candidate_optimizer.py must use 100c max_spread_cents (2026-07-10: updated from 30c)."""
+    def test_candidate_optimizer_uses_20c(self):
+        """candidate_optimizer.py must use 20c max_spread_cents (2026-07-12: aligned with industry research)."""
         from merid.prediction.candidate_optimizer import CandidateOptimizer
         optimizer = CandidateOptimizer()
-        # 2026-07-10: Updated from 30c to 100c to accommodate wider spreads in current market conditions
-        assert optimizer.max_spread_cents == 100, (
-            f"candidate_optimizer.max_spread_cents must be 100c, got {optimizer.max_spread_cents}c"
+        # 2026-07-12: Aligned with industry research - 20c max for 15m crypto (industry: 15-20c for short-duration markets)
+        assert optimizer.max_spread_cents == 20, (
+            f"candidate_optimizer.max_spread_cents must be 20c, got {optimizer.max_spread_cents}c"
         )
 
-    def test_universe_config_uses_30c(self):
-        """universe.py must use 100c max_spread_cents in profile (2026-07-10: updated from 30c)."""
+    def test_universe_config_uses_20c(self):
+        """universe.py must use 20c max_spread_cents in profile (2026-07-12: aligned with industry research)."""
         from merid.event_venues.kalshi.universe import UniverseConfig
         cfg = UniverseConfig()
-        # 2026-07-10: Updated from 30c to 100c to accommodate wider spreads in current market conditions
-        assert cfg.max_spread_cents == 100, (
-            f"universe.max_spread_cents must be 100c, got {cfg.max_spread_cents}c"
+        # 2026-07-12: Aligned with industry research - 20c max for 15m crypto (industry: 15-20c for short-duration markets)
+        assert cfg.max_spread_cents == 20, (
+            f"universe.max_spread_cents must be 20c, got {cfg.max_spread_cents}c"
         )
 
-    def test_market_filter_uses_30c(self):
-        """market_filter.py must use 100c max_spread_cents (2026-07-10: updated from 30c)."""
+    def test_market_filter_uses_20c(self):
+        """market_filter.py must use 20c max_spread_cents (2026-07-12: aligned with industry research)."""
         from merid.event_venues.kalshi.market_filter import MarketFilterConfig
         cfg = MarketFilterConfig()
-        # 2026-07-10: Updated from 30c to 100c to accommodate wider spreads in current market conditions
-        assert cfg.max_spread_cents == 100, (
-            f"market_filter.max_spread_cents must be 100c, got {cfg.max_spread_cents}c"
+        # 2026-07-12: Aligned with industry research - 20c max for 15m crypto (industry: 15-20c for short-duration markets)
+        assert cfg.max_spread_cents == 20, (
+            f"market_filter.max_spread_cents must be 20c, got {cfg.max_spread_cents}c"
         )
 
-    def test_order_router_uses_30c(self):
-        """order_router.py must use 100c max_spread_cents in all regimes (2026-07-10: updated from 30c)."""
-        # Verify the hardcoded values in order_router.py are 100c
+    def test_order_router_uses_20c(self):
+        """order_router.py must use 20c max_spread_cents in all regimes (2026-07-12: aligned with industry research)."""
+        # Verify the hardcoded values in order_router.py are 20c
         from pathlib import Path
         order_router_path = Path("merid/event_venues/kalshi/order_router.py")
         if not order_router_path.exists():
@@ -765,37 +765,37 @@ class TestSpread01ThresholdHarmonization:
         with open(order_router_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
-        # Check for the specific line where max_spread_cents is set to 100
-        # 2026-07-10: Updated from 30c to 100c to accommodate wider spreads in current market conditions
-        assert "max_spread_cents = 100" in content, (
-            "order_router.py must have max_spread_cents = 100"
+        # Check for the specific line where max_spread_cents is set to 20
+        # 2026-07-12: Aligned with industry research - 20c max for 15m crypto (industry: 15-20c for short-duration markets)
+        assert "max_spread_cents = 20" in content, (
+            "order_router.py must have max_spread_cents = 20"
         )
         
-        # Check that conservative regime also uses 100c (not 40c)
-        # 2026-07-10: Updated from 30c to 100c to accommodate wider spreads in current market conditions
-        assert "max_spread_cents = 100  # Conservative also uses 100c" in content, (
-            "order_router.py conservative regime must use 100c, not 40c"
+        # Check that conservative regime also uses 20c
+        # 2026-07-12: Aligned with industry research - 20c max for 15m crypto (industry: 15-20c for short-duration markets)
+        assert "max_spread_cents = 20  # Conservative also uses 20c" in content, (
+            "order_router.py conservative regime must use 20c"
         )
 
-    def test_profile_guardrails_uses_30c(self):
-        """Profile YAML guardrails.max_spread_cents must be 100c (2026-07-10: updated from 30c)."""
+    def test_profile_guardrails_uses_20c(self):
+        """Profile YAML guardrails.max_spread_cents must be 20c (2026-07-12: aligned with industry research)."""
         from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
         adapter = Crypto15mProfileAdapter()
         if adapter and adapter.profile:
-            # 2026-07-10: Updated from 30c to 100c to accommodate wider spreads in current market conditions
-            assert adapter.profile.guardrails_max_spread_cents == 100, (
-                f"Profile guardrails_max_spread_cents must be 100c, "
+            # 2026-07-12: Aligned with industry research - 20c max for 15m crypto (industry: 15-20c for short-duration markets)
+            assert adapter.profile.guardrails_max_spread_cents == 20, (
+                f"Profile guardrails_max_spread_cents must be 20c, "
                 f"got {adapter.profile.guardrails_max_spread_cents}c"
             )
 
-    def test_profile_universe_uses_30c(self):
-        """Profile YAML universe.max_spread_cents must be 100c (2026-07-10: updated from 30c)."""
+    def test_profile_universe_uses_20c(self):
+        """Profile YAML universe.max_spread_cents must be 20c (2026-07-12: aligned with industry research)."""
         from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
         adapter = Crypto15mProfileAdapter()
         if adapter and adapter.profile:
-            # 2026-07-10: Updated from 30c to 100c to accommodate wider spreads in current market conditions
-            assert adapter.profile.universe_max_spread_cents == 100, (
-                f"Profile universe_max_spread_cents must be 100c, "
+            # 2026-07-12: Aligned with industry research - 20c max for 15m crypto (industry: 15-20c for short-duration markets)
+            assert adapter.profile.universe_max_spread_cents == 20, (
+                f"Profile universe_max_spread_cents must be 20c, "
                 f"got {adapter.profile.universe_max_spread_cents}c"
             )
 
