@@ -170,15 +170,9 @@ def test_price_clamping_in_fallback_paths():
     price_cents = max(50, min(70, price_cents))
     assert price_cents == 70, f"Expected 70c, got {price_cents}c"
     
-    # NO calculation from bid
+    # NO calculation from bid (correct formula: NO = 100 - YES)
     best_bid = 90
     price_cents = 100 - best_bid
-    price_cents = max(50, min(70, price_cents))
-    assert price_cents == 50, f"Expected 50c, got {price_cents}c"
-    
-    # NO calculation from ask
-    best_ask = 95
-    price_cents = 100 - best_ask
     price_cents = max(50, min(70, price_cents))
     assert price_cents == 50, f"Expected 50c, got {price_cents}c"
 

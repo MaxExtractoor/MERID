@@ -344,20 +344,20 @@ class TestLiquidityValidation:
         """Test liquidity check for NO orders."""
         side = "no"
         price_cents = 50
-        best_ask_cents = 55  # Ask at 55c means NO price is 45c (100 - 55)
+        best_bid_cents = 45  # Bid at 45c means NO price is 55c (100 - 45)
         
-        # NO order: need ask liquidity such that NO price (100 - ask) is at or below price
-        # If we want to buy NO at 50c, we need ask at 50c or higher (NO price = 100 - ask)
+        # NO order: need bid liquidity such that NO price (100 - bid) is at or below price
+        # If we want to buy NO at 50c, we need bid at 50c or higher (NO price = 100 - bid)
         # Actually, the logic is: NO price = 100 - YES price
-        # So if YES ask is 55c, NO price is 45c. If we want to buy NO at 50c, we need YES ask <= 50c
+        # So if YES bid is 45c, NO price is 55c. If we want to buy NO at 50c, we need YES bid >= 50c
         # Let me re-read the actual implementation...
-        # From the code: if side_lower == "no": if market_state.best_ask_cents and (100 - market_state.best_ask_cents) <= _pc
-        # This checks if the NO price (100 - ask) is <= the clamped price
-        # So if we want to buy NO at 50c, we need (100 - ask) <= 50, which means ask >= 50
+        # From the code: if side_lower == "no": if market_state.best_bid_cents and (100 - market_state.best_bid_cents) <= _pc
+        # This checks if the NO price (100 - bid) is <= the clamped price
+        # So if we want to buy NO at 50c, we need (100 - bid) <= 50, which means bid >= 50
         # Let's use correct values
-        has_liquidity = best_ask_cents and (100 - best_ask_cents) <= price_cents
-        # With ask=55, NO price=45, which is <= 50, so this should be True
-        assert has_liquidity is True
+        has_liquidity = best_bid_cents and (100 - best_bid_cents) <= price_cents
+        # With bid=45, NO price=55, which is > 50, so this should be False
+        assert has_liquidity is False
     
     def test_liquidity_check_insufficient(self):
         """Test that insufficient liquidity is detected."""

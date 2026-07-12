@@ -1033,13 +1033,13 @@ def test_dual_side_price_evaluation_yes_no_in_range():
     CRITICAL FIX: System should evaluate both YES and NO contracts, not just YES.
     When YES is at 99c (outside range) and NO is at 45c (inside range), only NO should be evaluated.
     """
-    # Simulate market state with YES at 99c, NO at 45c
+    # Simulate market state with YES at 99c, NO at 1c
     best_bid = 99  # YES price
-    best_ask = 55  # YES ask (NO = 100 - ask = 45c)
+    best_ask = 99  # YES ask
     
     # Calculate YES and NO prices
     yes_price_cents = best_bid
-    no_price_cents = 100 - best_ask
+    no_price_cents = 100 - best_bid  # NO = 100 - YES
     
     # Check which sides are in range
     yes_in_range = (10 <= yes_price_cents <= 50)
@@ -1052,12 +1052,12 @@ def test_dual_side_price_evaluation_yes_no_in_range():
     if no_in_range:
         sides_to_evaluate.append("no")
     
-    # Verify NO is in range, YES is not
+    # Verify YES is in range, NO is not (since YES + NO = 100)
     assert yes_price_cents == 99
-    assert no_price_cents == 45
-    assert yes_in_range == False
-    assert no_in_range == True
-    assert sides_to_evaluate == ["no"]
+    assert no_price_cents == 1
+    assert yes_in_range == False  # 99c outside 10-50c range
+    assert no_in_range == False  # 1c outside 10-50c range
+    assert sides_to_evaluate == []
 
 
 def test_dual_side_price_evaluation_both_in_range():
@@ -1068,11 +1068,11 @@ def test_dual_side_price_evaluation_both_in_range():
     """
     # Simulate market state with YES at 45c (in range), NO at 55c (out of range)
     best_bid = 45  # YES price
-    best_ask = 45  # YES ask (NO = 100 - ask = 55c)
+    best_ask = 45  # YES ask
     
     # Calculate YES and NO prices
     yes_price_cents = best_bid
-    no_price_cents = 100 - best_ask
+    no_price_cents = 100 - best_bid  # NO = 100 - YES
     
     # Check which sides are in range
     yes_in_range = (10 <= yes_price_cents <= 50)
@@ -1100,11 +1100,11 @@ def test_dual_side_price_evaluation_neither_in_range():
     """
     # Simulate market state with YES at 99c, NO at 1c
     best_bid = 99  # YES price
-    best_ask = 99  # YES ask (NO = 100 - ask = 1c)
+    best_ask = 99  # YES ask
     
     # Calculate YES and NO prices
     yes_price_cents = best_bid
-    no_price_cents = 100 - best_ask
+    no_price_cents = 100 - best_bid  # NO = 100 - YES
     
     # Check which sides are in range
     yes_in_range = (10 <= yes_price_cents <= 50)

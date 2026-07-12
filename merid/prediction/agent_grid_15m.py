@@ -4374,7 +4374,7 @@ class LeanAgent15m:
 
                 yes_price_cents = best_bid if best_bid > 0 else 0
 
-                no_price_cents = (100 - best_ask) if best_ask > 0 else 0
+                no_price_cents = (100 - best_bid) if best_bid > 0 else 0
 
         except Exception as e:
 
@@ -7398,7 +7398,7 @@ class LeanAgent15m:
 
                 # In binary markets, YES + NO = 100 cents
 
-                no_price_cents = (100 - best_ask) if best_ask > 0 else 0
+                no_price_cents = (100 - best_bid) if best_bid > 0 else 0
 
                 
 
@@ -10634,6 +10634,8 @@ class LeanAgent15m:
 
                 spread_cents=spread_cents,
 
+                confidence=confidence,  # 2026-07-12: Pass confidence for priority/tiebreaker
+
                 is_exit_order=False  # Signal generation is for entry orders only
 
             )
@@ -12629,6 +12631,7 @@ class LeanAgentGrid15m:
                                     entry_price_cents=order.price_cents,
                                     edge_pct=order.edge_pct,
                                     spread_cents=0,  # Not available in OrderCandidate
+                                    confidence=order.confidence if hasattr(order, 'confidence') else 0.5,  # 2026-07-12: Pass confidence
                                     is_exit_order=False  # Entry order
                                 )
                                 
