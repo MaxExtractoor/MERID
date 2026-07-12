@@ -104,8 +104,93 @@ class TestHardSlotAllocationInOrderRouter:
             "Order router should release slots"
         
         # Verify release happens in gate rejection path
-        assert "GATE BLOCKED" in router_source or "gate rejection" in router_source.lower(), \
+        assert "gate rejection" in router_source.lower() or "GATE BLOCKED" in router_source, \
             "Order router should release slot on gate rejection"
+    
+    def test_slot_released_on_fill(self):
+        """Verify slot is released when order is filled (complete or partial)."""
+        with open("merid/event_venues/kalshi/order_router.py", "r", encoding="utf-8") as f:
+            router_source = f.read()
+        
+        # Verify slot release on fill
+        assert "_release_allocated_slot" in router_source, \
+            "Order router should have slot release function"
+        
+        # Verify release happens when filled_count > 0
+        assert "if filled_count > 0:" in router_source, \
+            "Order router should check for fills"
+        
+        # Verify _release_allocated_slot is called on fill
+        lines = router_source.split('\n')
+        fill_check_line = None
+        release_call_line = None
+        
+        for i, line in enumerate(lines):
+            if "if filled_count > 0:" in line:
+                fill_check_line = i
+            if "_release_allocated_slot(intent)" in line:
+                release_call_line = i
+        
+        assert fill_check_line is not None, "Fill check should exist"
+        assert release_call_line is not None, "Slot release call should exist"
+        # Release should be near the fill check (within 50 lines to account for code structure)
+        assert abs(release_call_line - fill_check_line) < 50, \
+            "Slot release should be called near fill check"
+    
+    def test_slot_id_stored_on_intent(self):
+        """Verify slot_id is stored on intent for downstream release."""
+        with open("merid/event_venues/kalshi/order_router.py", "r", encoding="utf-8") as f:
+            router_source = f.read()
+        
+        # Verify slot_id is stored on intent
+        assert "intent._allocated_slot_id" in router_source, \
+            "Order router should store slot_id on intent"
+        
+        # Verify storage happens after allocation
+        assert "_allocated_slot_id = slot_allocator.request_allocation" in router_source or \
+               "allocated, reason, _allocated_slot_id = slot_allocator.request_allocation" in router_source, \
+            "Order router should store allocation result"
+    
+    def test_release_allocated_slot_function_exists(self):
+        """Verify _release_allocated_slot helper function exists."""
+        with open("merid/event_venues/kalshi/order_router.py", "r", encoding="utf-8") as f:
+            router_source = f.read()
+        
+        # Verify function exists
+        assert "def _release_allocated_slot" in router_source, \
+            "Order router should have _release_allocated_slot function"
+        
+        # Verify function uses getattr to get slot_id from intent
+        assert "getattr(intent, '_allocated_slot_id'" in router_source, \
+            "Release function should use getattr to get slot_id"
+        
+        # Verify function calls slot_allocator.release_slot
+        assert "slot_allocator.release_slot(slot_id)" in router_source, \
+            "Release function should call slot_allocator.release_slot"
+    
+    def test_slot_release_in_release_gate_record(self):
+        """Verify _release_gate_record calls _release_allocated_slot."""
+        with open("merid/event_venues/kalshi/order_router.py", "r", encoding="utf-8") as f:
+            router_source = f.read()
+        
+        # Verify _release_gate_record calls _release_allocated_slot
+        lines = router_source.split('\n')
+        gate_record_def = None
+        release_call_in_gate = None
+        
+        for i, line in enumerate(lines):
+            if "def _release_gate_record" in line:
+                gate_record_def = i
+            if gate_record_def and "_release_allocated_slot(intent)" in line:
+                release_call_in_gate = i
+                break
+        
+        assert gate_record_def is not None, "_release_gate_record should exist"
+        assert release_call_in_gate is not None, \
+            "_release_gate_record should call _release_allocated_slot"
+        # Release should be within first 30 lines of function
+        assert release_call_in_gate - gate_record_def < 30, \
+            "Slot release should be called early in _release_gate_record"
     
     def test_slot_released_on_gate_exception(self):
         """Verify slot is released when gate raises an exception."""
