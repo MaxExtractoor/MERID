@@ -409,6 +409,35 @@ class TestEndToEndOrderFlow:
                 # The new logic should use exit_policy_id
                 assert False, "order_gate should NOT use action == 'sell' for exit detection"
 
+    def test_order_router_validation_functions_use_is_exit_order(self):
+        """Verify order_router validation functions use _is_exit_order instead of action check."""
+        from merid.event_venues.kalshi.order_router import _validate_signal_metadata
+        from merid.event_venues.kalshi.order_router import _validate_prob_price_consistency
+        from merid.event_venues.kalshi.order_router import _validate_deep_otm_policy
+        from merid.event_venues.kalshi.order_router import _validate_underlying_plausibility
+        from merid.event_venues.kalshi.order_router import _run_shared_risk_guard_and_dedup
+        import inspect
+        
+        # Check each function uses _is_exit_order
+        functions_to_check = [
+            _validate_signal_metadata,
+            _validate_prob_price_consistency,
+            _validate_deep_otm_policy,
+            _validate_underlying_plausibility,
+            _run_shared_risk_guard_and_dedup,
+        ]
+        
+        for func in functions_to_check:
+            source = inspect.getsource(func)
+            # Should use _is_exit_order
+            assert "_is_exit_order" in source, f"{func.__name__} should use _is_exit_order for exit detection"
+            # Should NOT use action == "sell" for exit detection
+            lines = source.split('\n')
+            for line in lines:
+                if 'if intent.action == "sell"' in line and 'return None' in line:
+                    # This is the old buggy pattern
+                    assert False, f"{func.__name__} should NOT use action == 'sell' for exit detection"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -2222,8 +2222,9 @@ def _validate_signal_metadata(intent: OrderIntent) -> Optional[str]:
     BUG #37 FIX: Add special case for 15m velocity-based orders (caller="merid.prediction.agent_grid_15m")
     which uses velocity-based signals. Relax edge_pct and confidence requirements for these orders.
     """
-    # Skip validation for exit orders
-    if intent.action == "sell":
+    # CRITICAL FIX (2026-07-13): Skip validation for exit orders only
+    # Use _is_exit_order to distinguish true exits from NO entry orders
+    if _is_exit_order(intent):
         return None
     
     # BUG #37 FIX: Special case for 15m velocity-based orders
@@ -2482,9 +2483,9 @@ def _validate_prob_price_consistency(intent: OrderIntent) -> Optional[str]:
     if not ENFORCE_PROB_PRICE_CONSISTENCY:
         return None
     
-    # Only for opening orders (buy actions or sell YES which opens a short)
-    # Closing orders (sell to close, sell NO) bypass this check
-    if intent.action == "sell" and intent.side != "yes":
+    # CRITICAL FIX (2026-07-13): Only skip for true exit orders
+    # Use _is_exit_order to distinguish true exits from NO entry orders
+    if _is_exit_order(intent):
         return None
     
     # Map price to implied market probability
@@ -2562,8 +2563,9 @@ def _validate_deep_otm_policy(intent: OrderIntent) -> Optional[str]:
     if not ENFORCE_DEEP_OTM_POLICY:
         return None
     
-    # Only for opening orders
-    if intent.action == "sell":
+    # CRITICAL FIX (2026-07-13): Only skip for true exit orders
+    # Use _is_exit_order to distinguish true exits from NO entry orders
+    if _is_exit_order(intent):
         return None
     
     # Check if in deep OTM band
@@ -3114,8 +3116,9 @@ def _validate_underlying_plausibility(intent: OrderIntent) -> Optional[str]:
     if not ENFORCE_UNDERLYING_PLAUSIBILITY:
         return None
     
-    # Only for opening orders
-    if intent.action == "sell":
+    # CRITICAL FIX (2026-07-13): Only skip for true exit orders
+    # Use _is_exit_order to distinguish true exits from NO entry orders
+    if _is_exit_order(intent):
         return None
     
     # Check if this is a crypto market
@@ -6527,13 +6530,15 @@ def _run_shared_risk_guard_and_dedup(
 ) -> Optional[OrderResult]:
     """Cross-caller dedup + shared GlobalRiskGuard check for entry intents.
 
-    Skips exits (``action == "sell"``) — they reduce exposure.
+    CRITICAL FIX (2026-07-13): Skips true exit orders only — they reduce exposure.
+    Uses _is_exit_order to distinguish true exits from NO entry orders.
 
     Returns a rejection ``OrderResult`` or ``None`` to continue.
     """
-    action = (intent.action or "").lower()
-    if action != "buy":
-        return None  # exits are exempt
+    # CRITICAL FIX (2026-07-13): Use _is_exit_order instead of action check
+    # NO entry orders must NOT bypass risk guard checks
+    if _is_exit_order(intent):
+        return None  # true exits are exempt
 
     # ── Step 1: cross-caller dedup ─────────────────────────────────────
     # 2026 STANDARD: Disabled cross-caller deduplication for 15m crypto trading
