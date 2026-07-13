@@ -212,6 +212,11 @@ class RealtimeTradingMonitor:
         'order_attempted': re.compile(r'\[15M-LOOP\] Order routed successfully: ticker=(\w+) side=(\w+) count=(\d+) result=(.+)'),
         'order_rejected': re.compile(r'\[ORDER-ROUTER\] .* ticker=(\w+).*'),
         'order_filled': re.compile(r'\[15M-LOOP\].*filled.*ticker=(\w+)'),
+        # Production kalshi_tools routing patterns
+        'kalshi_tools_routing': re.compile(r'\[kalshi_tools\] Routing to order_router: (\w+) \| (\w+) (\w+) on (\w+) count=(\d+) price=(\d+)¢'),
+        'exec_path_entry': re.compile(r'\[EXEC-PATH\] ENTRY intent_id=(\w+) ticker=(\w+) side=(\w+) count=(\d+) source=(\w+)'),
+        'kalshi_tools_order_rejected': re.compile(r'\[kalshi_tools\] Order rejected by router: (\w+) reason=(.+)'),
+        'kalshi_tools_order_status': re.compile(r'Order (\w+) via route_order_async'),
         'result_status': re.compile(r'result=([\w_]+)'),
         'fill_confirmation': re.compile(r'status.*filled|filled.*status'),
         'spot_update': re.compile(r'\[UNIFIED-SPOT\] Returning spot price for (\w+):'),
@@ -225,6 +230,14 @@ class RealtimeTradingMonitor:
         'strip_limit': re.compile(r'\[STRIP-LIMIT-CHECK\]'),
         'circuit_breaker': re.compile(r'\[CIRCUIT-BREAKER\]'),
         'kill_switch': re.compile(r'\[KILL-SWITCH\]'),
+        # Updated patterns to match actual log format
+        'no_signal_actual': re.compile(r'\[NO-SIGNAL\] asset=(\w+)_15M no signal generated'),
+        'price_filter_reject_actual': re.compile(r'\[PRICE-FILTER-REJECT\] asset=(\w+) both sides outside 10c-75c range'),
+        'generated_candidates': re.compile(r'\[15m-LOOP\] Generated (\d+) candidates in tick (\d+)'),
+        'starting_execution': re.compile(r'\[15m-LOOP\] Starting execution loop for (\d+) candidates'),
+        'market_validation_valid': re.compile(r'\[MARKET-VALIDATION\] asset=(\w+)_15M ticker=(\w+) VALID'),
+        'market_selection': re.compile(r'\[MARKET-SELECTION\] asset=(\w+)_15M ticker=(\w+) selected'),
+        'price_range_check': re.compile(r'\[PRICE-RANGE-CHECK\] asset=(\w+) yes_price=(\d+)c in_range=(\w+) no_price=(\d+)c in_range=(\w+)'),
         # New patterns for detailed metrics
         'order_construction': re.compile(r'\[ORDER-CONSTRUCTION-AUDIT\] ticker=(\w+) side=(BUY_YES|BUY_NO|SELL_YES|SELL_NO) action=(BUY|SELL) price_cents=(\d+) count=(\d+) agent_id=(\w+).*edge_pct=([\d.]+)'),
         'global_allocator_execute': re.compile(r'\[GLOBAL-ALLOCATOR-EXECUTE\] asset=(\w+) ticker=(\w+) side=(\w+) price=(\d+)c count=(\d+) edge=([\d.]+)%'),
@@ -530,6 +543,74 @@ class RealtimeTradingMonitor:
                 self.stats[asset].orders_rejected[reason] += 1
             return
         
+        # Production kalshi_tools routing patterns
+        match = self.PATTERNS['kalshi_tools_routing'].search(message)
+        if match:
+            intent_id = match.group(1)
+            action = match.group(2)
+            side = match.group(3)
+            ticker = match.group(4)
+            count = int(match.group(5))
+            price_cents = int(match.group(6))
+            asset = self._extract_asset(ticker)
+            if asset and asset in self.stats:
+                self.stats[asset].orders_attempted += 1
+                self.stats[asset].orders_accepted += 1
+                # Record trade
+                trade = Trade(
+                    timestamp=datetime.now(),
+                    ticker=ticker,
+                    side=side,
+                    action=action,
+                    price_cents=price_cents,
+                    count=count,
+                    outcome='PENDING'
+                )
+                self.stats[asset].trades.append(trade)
+            return
+        
+        # EXEC-PATH ENTRY pattern
+        match = self.PATTERNS['exec_path_entry'].search(message)
+        if match:
+            intent_id = match.group(1)
+            ticker = match.group(2)
+            side = match.group(3)
+            count = int(match.group(4))
+            source = match.group(5)
+            asset = self._extract_asset(ticker)
+            if asset and asset in self.stats:
+                # This confirms the order entered the execution pipeline
+                pass
+            return
+        
+        # kalshi_tools order rejected
+        match = self.PATTERNS['kalshi_tools_order_rejected'].search(message)
+        if match:
+            ticker = match.group(1)
+            reason = match.group(2)
+            asset = self._extract_asset(ticker)
+            if asset and asset in self.stats:
+                self.stats[asset].orders_attempted += 1
+                self.stats[asset].orders_rejected['router_rejection'] += 1
+            return
+        
+        # kalshi_tools order status
+        match = self.PATTERNS['kalshi_tools_order_status'].search(message)
+        if match:
+            status = match.group(1)
+            # Extract ticker from context if available
+            ticker_match = re.search(r'ticker=(\w+)', message)
+            if ticker_match:
+                ticker = ticker_match.group(1)
+                asset = self._extract_asset(ticker)
+                if asset and asset in self.stats:
+                    if status == 'filled':
+                        self.stats[asset].fills += 1
+                        if self.stats[asset].trades:
+                            last_trade = self.stats[asset].trades[-1]
+                            last_trade.outcome = 'FILLED'
+            return
+        
         # Spot update
         match = self.PATTERNS['spot_update'].search(message)
         if match:
@@ -628,6 +709,10 @@ class RealtimeTradingMonitor:
         # Catalog refresh
         if '[CATALOG-REFRESH]' in message:
             self.catalog_refreshes += 1
+        
+        # Agent grid cycle (alternative pattern)
+        if '[AGENT-GRID-RUN-CYCLE]' in message:
+            self.agent_cycles += 1
         
         # Order construction (detailed metrics)
         match = self.PATTERNS['order_construction'].search(message)
@@ -1025,6 +1110,73 @@ class RealtimeTradingMonitor:
             if asset in self.stats:
                 self.stats[asset].trading_window_skips += 1
                 self.stats[asset].candidates_rejected[f'trading_window_skip_min_decision_{min_time_to_expiry//60}min'] += 1
+            return
+        
+        # New patterns for actual log format
+        # No signal (actual format)
+        match = self.PATTERNS['no_signal_actual'].search(message)
+        if match:
+            asset = match.group(1)
+            if asset in self.stats:
+                self.stats[asset].no_trade_decisions += 1
+                self.stats[asset].candidates_rejected['no_signal'] += 1
+            return
+        
+        # Price filter reject (actual format)
+        match = self.PATTERNS['price_filter_reject_actual'].search(message)
+        if match:
+            asset = match.group(1)
+            if asset in self.stats:
+                self.stats[asset].candidates_rejected['price_filter_reject'] += 1
+            return
+        
+        # Generated candidates
+        match = self.PATTERNS['generated_candidates'].search(message)
+        if match:
+            num_candidates = int(match.group(1))
+            tick = int(match.group(2))
+            # This is a global count, not per-asset
+            # We'll track it in global stats
+            return
+        
+        # Starting execution loop
+        match = self.PATTERNS['starting_execution'].search(message)
+        if match:
+            num_candidates = int(match.group(1))
+            # This is a global count
+            return
+        
+        # Market validation valid
+        match = self.PATTERNS['market_validation_valid'].search(message)
+        if match:
+            asset = match.group(1)
+            ticker = match.group(2)
+            if asset in self.stats:
+                # This indicates a market passed validation
+                pass
+            return
+        
+        # Market selection
+        match = self.PATTERNS['market_selection'].search(message)
+        if match:
+            asset = match.group(1)
+            ticker = match.group(2)
+            if asset in self.stats:
+                # This indicates a market was selected for trading
+                pass
+            return
+        
+        # Price range check
+        match = self.PATTERNS['price_range_check'].search(message)
+        if match:
+            asset = match.group(1)
+            yes_price = int(match.group(2))
+            yes_in_range = match.group(3) == 'True'
+            no_price = int(match.group(4))
+            no_in_range = match.group(5) == 'True'
+            if asset in self.stats:
+                if not yes_in_range and not no_in_range:
+                    self.stats[asset].candidates_rejected['price_range_check'] += 1
             return
     
     def monitor(self):

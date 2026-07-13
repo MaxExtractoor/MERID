@@ -806,6 +806,7 @@ async def _kalshi_place_order(
             # Route through order_router which enforces global rate limit and cooldown
             result = await route_order_async(intent)
 
+            # Handle all failure statuses from order_router
             if result.status == "rejected":
                 logger.warning(
                     "[kalshi_tools] Order rejected by router: %s reason=%s",
@@ -816,6 +817,22 @@ async def _kalshi_place_order(
                     f"Order rejected: {result.reason}",
                     tool_name="kalshi_place_order",
                 )
+            
+            # Handle ambiguous or unknown statuses
+            if result.status in ("duplicate_unknown",):
+                logger.warning(
+                    "[kalshi_tools] Order status ambiguous: %s reason=%s",
+                    result.status, result.reason
+                )
+                return ToolResult.fail(
+                    ToolErrorCode.INTERNAL,
+                    f"Order status ambiguous: {result.status} - {result.reason}",
+                    tool_name="kalshi_place_order",
+                )
+            
+            # Handle partial fills as success (they're not failures)
+            # partial_live indicates partial fill, which is a successful state
+            # No special handling needed - will be treated as success below
 
             payload = {
                 "order_id": result.order_id if hasattr(result, 'order_id') else intent.intent_id,

@@ -1552,7 +1552,8 @@ class OrderResult:
     """Result of order routing.
 
     Attributes:
-        status: ``"filled_mock"`` | ``"filled_paper"`` | ``"filled_live"`` | ``"rejected"``
+        status: ``"filled_mock"`` | ``"filled_paper"`` | ``"filled_live"`` | ``"partial_live"`` | 
+                ``"accepted_live"`` | ``"submitted_live"`` | ``"rejected"`` | ``"duplicate_unknown"``
         mode: Resolved trading mode
         fill: Fill details (if filled)
         reason: Rejection reason (if rejected)

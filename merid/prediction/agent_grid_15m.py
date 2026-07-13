@@ -4601,24 +4601,22 @@ class LeanAgent15m:
         # 2026-07-12: Use centralized edge validation from risk_parameters.py
         # All edge values now in FRACTION units (0.0-1.0) for consistency
         from merid.event_venues.kalshi.risk_parameters import validate_edge
-        
-        # selected_edge is now in FRACTION units (no conversion needed)
-        is_valid, reason = validate_edge(selected_edge, asset, confidence)
-        
-        if not is_valid:
-            logger.info(
-                "[MOMENTUM-FVG-EDGE-THRESHOLD] asset=%s selected_edge=%.6f - %s -> NO TRADE",
-                asset, selected_edge, reason
-            )
-            return None
-
-        
 
         signal_action = "buy"
 
         confidence = 0.5 + selected_edge  # selected_edge in FRACTION units
 
         confidence = min(0.95, confidence)
+
+        # selected_edge is now in FRACTION units (no conversion needed)
+        is_valid, reason = validate_edge(selected_edge, asset, confidence)
+
+        if not is_valid:
+            logger.info(
+                "[MOMENTUM-FVG-EDGE-THRESHOLD] asset=%s selected_edge=%.6f - %s -> NO TRADE",
+                asset, selected_edge, reason
+            )
+            return None
 
         
 
@@ -12737,13 +12735,18 @@ class LeanAgentGrid15m:
 
                                 if order_result:
 
-                                    if hasattr(order_result, 'reason'):
-
+                                    # ToolResult uses error_message attribute
+                                    if hasattr(order_result, 'error_message') and order_result.error_message:
+                                        reason = order_result.error_message
+                                    # OrderResult uses reason attribute
+                                    elif hasattr(order_result, 'reason') and order_result.reason:
                                         reason = order_result.reason
-
-                                    elif hasattr(order_result, 'message'):
-
+                                    # Fallback to message attribute
+                                    elif hasattr(order_result, 'message') and order_result.message:
                                         reason = order_result.message
+                                    # Last resort: check payload for reason
+                                    elif hasattr(order_result, 'payload') and isinstance(order_result.payload, dict):
+                                        reason = order_result.payload.get('reason', 'Unknown')
 
                                 logger.warning("[GLOBAL-ALLOCATOR-EXECUTE-FAILED] asset=%s reason=%s", order.asset, reason)
                                 
