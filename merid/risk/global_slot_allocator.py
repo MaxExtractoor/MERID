@@ -383,6 +383,31 @@ class GlobalSlotAllocator:
                 "[SLOT-ALLOCATOR] Emergency reset: released %d slots", count
             )
     
+    def clear_slots_on_empty_positions(self, position_count: int) -> None:
+        """Clear all slots when position cache shows no open positions.
+        
+        CRITICAL FIX (2026-07-13): This prevents phantom exposure from previous sessions
+        when slots were not properly released (e.g., shutdown before closure events).
+        Should be called when position cache sync returns zero open positions.
+        
+        Args:
+            position_count: Number of open positions from position cache
+        """
+        if position_count > 0:
+            return  # Don't clear if there are actual positions
+        
+        with self._lock:
+            if not self._slots:
+                return  # Nothing to clear
+            
+            count = len(self._slots)
+            total_exposure = self.get_total_exposure()
+            self._slots.clear()
+            logger.warning(
+                "[SLOT-ALLOCATOR] Cleared %d phantom slots (position_count=%d, phantom_exposure=$%.2f)",
+                count, position_count, total_exposure
+            )
+    
     def get_summary(self) -> Dict:
         """Get allocator summary statistics."""
         with self._lock:

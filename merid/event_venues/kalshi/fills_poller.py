@@ -406,6 +406,28 @@ class FillsPoller:
                             # REST API can temporarily return 0 positions due to API issues
                             # Only clear fills ledger if there's evidence of actual data corruption
                             # This prevents accidental data loss from transient API issues
+                        else:
+                            # CRITICAL FIX (2026-07-13): Clear phantom open positions when REST returns 0
+                            # and fills ledger also shows no computed positions (meaning old closed trades)
+                            await ledger.clear_open_positions_on_empty_cache()
+                            
+                            # CRITICAL FIX (2026-07-13): Clear phantom slots from global slot allocator
+                            # when REST returns 0 positions to fix the $0.66 vs $1.00 exposure discrepancy
+                            try:
+                                from merid.risk.global_slot_allocator import get_global_slot_allocator
+                                slot_allocator = get_global_slot_allocator()
+                                slot_allocator.clear_slots_on_empty_positions(position_count=0)
+                            except Exception as slot_exc:
+                                logger.warning(f"[RECONCILE] Failed to clear phantom slots: {slot_exc}")
+                            
+                            # CRITICAL FIX (2026-07-13): Reset window exposure state to ensure complete sync
+                            # Window exposure tracks cumulative exposure per 15-minute window and can become
+                            # stale if slots were not properly released during previous sessions
+                            try:
+                                from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import force_reset_window_exposure
+                                force_reset_window_exposure(reason="phantom_position_cleanup")
+                            except Exception as window_exc:
+                                logger.warning(f"[RECONCILE] Failed to reset window exposure: {window_exc}")
 
                     # CRITICAL FIX: Resync category_contracts counter with actual positions
                     # This fixes the desync where category_contracts accumulates incorrectly
