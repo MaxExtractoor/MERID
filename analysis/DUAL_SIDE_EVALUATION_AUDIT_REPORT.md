@@ -219,16 +219,16 @@ if not yes_in_range and not no_in_range:
 **Implementation**:
 ```python
 # Check if price is within sweet spot band
-if 10 <= raw_price_cents <= 50:
+if 10 <= raw_price_cents <= 75:
     # Price is already in valid range - use it directly
     clamped_price_cents = raw_price_cents
 else:
     # Price is outside sweet spot - search orderbook for valid prices
     # Try to find a price in the sweet spot from the orderbook
-    yes_book = getattr(market_state, 'yes_book', [])
-    if yes_book:
-        # Find cheapest YES price within [10c, 50c] with size >= 1
-        valid_prices = [p for (p, size) in yes_book if 10 <= p <= 50 and size >= 1]
+    yes_bids = getattr(market_state, 'yes_bids', [])
+    if yes_bids:
+        # Find cheapest YES price within [10c, 75c] with size >= 1
+        valid_prices = [p for (p, size) in yes_bids if 10 <= p <= 75 and size >= 1]
         if valid_prices:
             price_cents = min(valid_prices)
         else:
