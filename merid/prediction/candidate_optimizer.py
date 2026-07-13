@@ -91,7 +91,7 @@ class CandidateOptimizer:
         
         # Load filtering thresholds from kalshi_crypto_15m profile config
         # Legacy defaults are overridden by profile when available
-        # CRITICAL FIX: Set fallback to 30c to harmonize with 10c-50c entry price sweet spot
+        # CRITICAL FIX: Set fallback to 30c to harmonize with 10c-75c canonical range
         legacy_max_spread = 30  # Aligned with profile guardrails (2026-07-10)
         legacy_min_depth_levels = 1  # Legacy default
         legacy_min_liquidity_score = 0.05  # Legacy default
