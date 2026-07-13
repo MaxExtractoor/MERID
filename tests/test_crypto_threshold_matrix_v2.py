@@ -347,8 +347,8 @@ class TestEffectiveCryptoConfigV2(unittest.TestCase):
             sentiment_vol_regime_min_edge=Decimal("0.011"),
             contrarian_sentiment_min=75.0,
             contrarian_model_gap_min=0.10,
-            mm_max_spread_cents=Decimal("30"),  # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
-            pm_risk_max_spread_cents=Decimal("30"),  # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
+            mm_max_spread_cents=Decimal("30"),  # 2026-07-10: Optimized to 30c to harmonize with 10c-75c canonical range
+            pm_risk_max_spread_cents=Decimal("30"),  # 2026-07-10: Optimized to 30c to harmonize with 10c-75c canonical range
             tier_min_edge_floor=Decimal("0.011"),
             kelly_fraction=Decimal("0.10"),
             min_order_notional_usd=0.35,

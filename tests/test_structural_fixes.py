@@ -184,7 +184,7 @@ def test_spread_threshold_alignment():
     
     optimizer = CandidateOptimizer()
     
-    # Should be aligned with signal gate threshold (30 cents - 2026-07-10: harmonized with 10c-50c entry price sweet spot)
+    # Should be aligned with signal gate threshold (30 cents - 2026-07-10: harmonized with 10c-75c canonical range)
     assert optimizer.max_spread_cents == 30
     
     # Test filtering logic directly

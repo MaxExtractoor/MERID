@@ -241,7 +241,7 @@ class TestMarketMicrostructureFilters:
         assert profile.market_microstructure_enabled == True, "Market microstructure filters should be enabled"
         
         assert hasattr(profile, 'market_microstructure_max_spread_cents'), "Profile should have market_microstructure_max_spread_cents"
-        assert profile.market_microstructure_max_spread_cents == 30.0, f"Max spread should be 30.0 (2026-07-10: harmonized with 10c-50c entry price sweet spot), got {profile.market_microstructure_max_spread_cents}"
+        assert profile.market_microstructure_max_spread_cents == 30.0, f"Max spread should be 30.0 (2026-07-10: harmonized with 10c-75c canonical range), got {profile.market_microstructure_max_spread_cents}"
         
         assert hasattr(profile, 'market_microstructure_min_depth_usd'), "Profile should have market_microstructure_min_depth_usd"
         assert profile.market_microstructure_min_depth_usd == 0.0, f"Min depth should be 0.0 (disabled for limit orders), got {profile.market_microstructure_min_depth_usd}"
@@ -289,7 +289,7 @@ class TestYAMLConfigIntegration:
         
         # Verify market microstructure config
         assert market_microstructure.get('enabled') == True, "Market microstructure should be enabled in YAML"
-        assert market_microstructure.get('max_spread_cents') == 30, f"Max spread should be 30 (2026-07-10: harmonized with 10c-50c entry price sweet spot), got {market_microstructure.get('max_spread_cents')}"
+        assert market_microstructure.get('max_spread_cents') == 30, f"Max spread should be 30 (2026-07-10: harmonized with 10c-75c canonical range), got {market_microstructure.get('max_spread_cents')}"
         assert market_microstructure.get('min_depth_usd') == 0.0, f"Min depth should be 0.0 (disabled for limit orders), got {market_microstructure.get('min_depth_usd')}"
         assert market_microstructure.get('min_yes_depth') == 1, f"Min YES depth should be 1, got {market_microstructure.get('min_yes_depth')}"
         assert market_microstructure.get('min_no_depth') == 1, f"Min NO depth should be 1, got {market_microstructure.get('min_no_depth')}"

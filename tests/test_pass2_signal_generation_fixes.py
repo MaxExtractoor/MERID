@@ -32,7 +32,7 @@ class TestBug7SpreadGate:
         config = LeanAgentConfig(
             name="BTC_15M",
             series_tickers=["KXBTC15M"],
-            max_spread_cents=30,  # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
+            max_spread_cents=30,  # 2026-07-10: Optimized to 30c to harmonize with 10c-75c canonical range
         )
         
         agent = LeanAgent15m(
@@ -69,7 +69,7 @@ class TestBug7SpreadGate:
         config = LeanAgentConfig(
             name="BTC_15M",
             series_tickers=["KXBTC15M"],
-            max_spread_cents=30,  # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
+            max_spread_cents=30,  # 2026-07-10: Optimized to 30c to harmonize with 10c-75c canonical range
         )
         
         agent = LeanAgent15m(

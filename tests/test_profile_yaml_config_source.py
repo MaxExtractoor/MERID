@@ -69,7 +69,7 @@ class TestProfileYAMLConfigSource(unittest.TestCase):
             mock_profile = Mock()
             mock_profile.universe_min_volume = 5
             mock_profile.universe_min_open_interest = 1
-            mock_profile.universe_max_spread_cents = 30  # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
+            mock_profile.universe_max_spread_cents = 30  # 2026-07-10: Optimized to 30c to harmonize with 10c-75c canonical range
             mock_adapter.profile = mock_profile
             mock_adapter_class.return_value = mock_adapter
 
@@ -80,7 +80,7 @@ class TestProfileYAMLConfigSource(unittest.TestCase):
                 # Verify profile values were used
                 self.assertEqual(config.min_volume, 5)
                 self.assertEqual(config.min_open_interest, 1)
-                self.assertEqual(config.max_spread_cents, 30)  # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
+                self.assertEqual(config.max_spread_cents, 30)  # 2026-07-10: Optimized to 30c to harmonize with 10c-75c canonical range
 
     def test_strategy_slippage_reads_from_profile(self):
         """Test that strategy slippage reads from profile YAML."""

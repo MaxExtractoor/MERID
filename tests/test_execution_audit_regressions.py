@@ -438,7 +438,7 @@ class TestBUG07_SpreadDepthChecksActive:
         """Unit-level: check_order rejects when spread exceeds max."""
         from merid.prediction.risk import PredictionMarketRisk, PredictionRiskConfig
         cfg = PredictionRiskConfig(
-            max_spread_cents=30,  # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
+            max_spread_cents=30,  # 2026-07-10: Optimized to 30c to harmonize with 10c-75c canonical range
             max_notional_per_market_usd=10_000,
             max_total_notional_usd=100_000,
         )
@@ -460,7 +460,7 @@ class TestBUG07_SpreadDepthChecksActive:
     def test_spread_check_passes_when_spread_tight(self):
         from merid.prediction.risk import PredictionMarketRisk, PredictionRiskConfig
         cfg = PredictionRiskConfig(
-            max_spread_cents=30,  # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
+            max_spread_cents=30,  # 2026-07-10: Optimized to 30c to harmonize with 10c-75c canonical range
             max_notional_per_market_usd=10_000,
             max_total_notional_usd=100_000,
         )

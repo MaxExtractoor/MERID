@@ -297,7 +297,7 @@ class TestUnifiedEdgeFixes:
         assert computer1.calibration is not None
         assert computer1.min_edge_cents == 4.0
         assert computer1.max_spread_pct == 0.70
-        assert computer1.max_spread_cents == 30  # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
+        assert computer1.max_spread_cents == 30  # 2026-07-10: Optimized to 30c to harmonize with 10c-75c canonical range
         
         # Test with custom calibration
         custom_calibration = PerAssetCalibration()

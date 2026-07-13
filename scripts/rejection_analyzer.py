@@ -143,7 +143,7 @@ class RejectionCapture:
             r"\[TIME-WINDOW-FILTER\] asset=(\w+) minutes_to_expiry=([\d.]+) -> (SKIP|REDUCED|OPTIMAL) \((.*?)\)"
         ),
         "price_range": re.compile(
-            r"\[PRICE-FILTER-REJECT\] asset=(\w+) both sides outside 10c-50c range \(yes=(\d+)c, no=(\d+)c\)"
+            r"\[PRICE-FILTER-REJECT\] asset=(\w+) both sides outside 10c-75c range \(yes=(\d+)c, no=(\d+)c\)"
         ),
         "trend_alignment": re.compile(
             r"\[TREND-ALIGNMENT-FILTER\] asset=(\w+) (.*?) -> SKIP"
@@ -220,7 +220,7 @@ class RejectionCapture:
                     timestamp=timestamp,
                     asset=asset,
                     rejection_category="price_range",
-                    rejection_reason="both sides outside 10c-50c range",
+                    rejection_reason="both sides outside 10c-75c range",
                     yes_price_cents=yes_price,
                     no_price_cents=no_price,
                 )
