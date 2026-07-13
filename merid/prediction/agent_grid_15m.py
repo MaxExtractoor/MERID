@@ -4762,14 +4762,15 @@ class LeanAgent15m:
                 if market_state:
 
                     # Get YES orderbook (ascending by price)
+                    # KalshiMarketState stores bids in yes_bids field (not yes_book)
 
-                    yes_book = getattr(market_state, 'yes_book', [])
+                    yes_bids = getattr(market_state, 'yes_bids', [])
 
-                    if yes_book:
+                    if yes_bids:
 
                         # Find cheapest YES price within [10c, 75c] with size >= 1
 
-                        valid_prices = [p for (p, size) in yes_book if 10 <= p <= 75 and size >= 1]
+                        valid_prices = [p for (p, size) in yes_bids if 10 <= p <= 75 and size >= 1]
 
                         if valid_prices:
 
@@ -4799,7 +4800,7 @@ class LeanAgent15m:
 
                         logger.warning(
 
-                            "[PRICE-SELECTION] asset=%s orderbook not available - dropping candidate",
+                            "[PRICE-SELECTION] asset=%s orderbook not available (yes_bids empty) - dropping candidate",
 
                             asset
 
@@ -5266,14 +5267,15 @@ class LeanAgent15m:
                 if market_state:
 
                     # Get YES orderbook (ascending by price)
+                    # KalshiMarketState stores bids in yes_bids field (not yes_book)
 
-                    yes_book = getattr(market_state, 'yes_book', [])
+                    yes_bids = getattr(market_state, 'yes_bids', [])
 
-                    if yes_book:
+                    if yes_bids:
 
                         # Find cheapest YES price within [10c, 75c] with size >= 1
 
-                        valid_prices = [p for (p, size) in yes_book if 10 <= p <= 75 and size >= 1]
+                        valid_prices = [p for (p, size) in yes_bids if 10 <= p <= 75 and size >= 1]
 
                         if valid_prices:
 
@@ -5303,7 +5305,7 @@ class LeanAgent15m:
 
                         logger.warning(
 
-                            "[PRICE-SELECTION] asset=%s orderbook not available - dropping candidate",
+                            "[PRICE-SELECTION] asset=%s orderbook not available (yes_bids empty) - dropping candidate",
 
                             asset
 
@@ -10102,14 +10104,15 @@ class LeanAgent15m:
                 if market_state:
 
                     # Get YES orderbook (ascending by price)
+                    # KalshiMarketState stores bids in yes_bids field (not yes_book)
 
-                    yes_book = getattr(market_state, 'yes_book', [])
+                    yes_bids = getattr(market_state, 'yes_bids', [])
 
-                    if yes_book:
+                    if yes_bids:
 
                         # Find cheapest YES price within [10c, 75c] with size >= 1
 
-                        valid_prices = [p for (p, size) in yes_book if 10 <= p <= 75 and size >= 1]
+                        valid_prices = [p for (p, size) in yes_bids if 10 <= p <= 75 and size >= 1]
 
                         if valid_prices:
 
@@ -10139,7 +10142,7 @@ class LeanAgent15m:
 
                         logger.warning(
 
-                            "[PRICE-SELECTION] asset=%s orderbook not available - dropping candidate",
+                            "[PRICE-SELECTION] asset=%s orderbook not available (yes_bids empty) - dropping candidate",
 
                             asset
 
