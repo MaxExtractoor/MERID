@@ -738,18 +738,24 @@ def calculate_kelly_fraction(
     model_prob: float,
     price_cents: int,
     confidence: float = 0.5,
-    fractional_kelly: float = 0.25
+    fractional_kelly: float = 0.25,
+    side: str = "yes"
 ) -> float:
     """Calculate Kelly fraction for binary option.
     
     Based on Kelly Criterion: f* = (bp - q) / b
     where b = (1 - price) / price (net odds for binary options)
     
+    CRITICAL FIX (2026-07-13): Handle NO-side correctly
+    For NO contracts, model_prob represents probability of NOT outcome (trade wins if event doesn't happen)
+    For YES contracts, model_prob represents probability of YES outcome (trade wins if event happens)
+    
     Args:
         model_prob: True probability of winning (0.0-1.0)
         price_cents: Contract price in cents (10-75)
         confidence: Model confidence (0.0-1.0) for weighting
         fractional_kelly: Kelly fraction multiplier (default 0.25 for quarter-Kelly)
+        side: "yes" or "no" - determines how model_prob is interpreted
     
     Returns:
         Kelly fraction (0.0 to 1.0). Returns 0.0 if edge is negative.
@@ -769,8 +775,18 @@ def calculate_kelly_fraction(
         logger.warning("[KELLY] Invalid price=%.2f, cannot calculate Kelly", price)
         return 0.0
     
+    # CRITICAL FIX (2026-07-13): Adjust model_prob based on side
+    # For NO contracts, model_prob is probability of NOT outcome, but Kelly needs probability of YES outcome
+    # because the payout is based on the YES outcome probability (price = P(YES))
+    side_lower = side.lower() if side else "yes"
+    if side_lower == "no":
+        # For NO: model_prob is P(NOT), convert to P(YES) = 1 - P(NOT)
+        p = 1.0 - model_prob
+    else:
+        # For YES: model_prob is already P(YES)
+        p = model_prob
+    
     b = (1.0 - price) / price  # Net odds
-    p = model_prob
     q = 1.0 - p
     
     # Calculate full Kelly
@@ -779,8 +795,8 @@ def calculate_kelly_fraction(
     # If Kelly is negative, no edge
     if kelly <= 0:
         logger.debug(
-            "[KELLY] Negative edge: model_prob=%.2f price=%.2f b=%.2f kelly=%.4f",
-            model_prob, price, b, kelly
+            "[KELLY] Negative edge: model_prob=%.2f side=%s price=%.2f b=%.2f kelly=%.4f",
+            model_prob, side_lower, price, b, kelly
         )
         return 0.0
     
@@ -795,9 +811,9 @@ def calculate_kelly_fraction(
     final_kelly = min(1.0, weighted_kelly)
     
     logger.debug(
-        "[KELLY] model_prob=%.2f price=%.2f b=%.2f kelly=%.4f "
+        "[KELLY] model_prob=%.2f side=%s price=%.2f b=%.2f kelly=%.4f "
         "fractional=%.4f confidence=%.2f multiplier=%.2f final=%.4f",
-        model_prob, price, b, kelly, fractional, confidence, confidence_multiplier, final_kelly
+        model_prob, side_lower, price, b, kelly, fractional, confidence, confidence_multiplier, final_kelly
     )
     
     return final_kelly
@@ -821,6 +837,7 @@ def compute_order_size(
     time_of_day_multiplier: float = 1.0,  # 2026 Research-Based Risk Management: Time-of-day risk scaling
     tte_seconds: Optional[float] = None,  # Time to expiry in seconds for TTE regime multiplier
     model_prob: Optional[float] = None,  # 2026-07-12: Model probability for Kelly calculation
+    side: str = "yes",  # 2026-07-13: Side for Kelly calculation (yes/no)
 ) -> Tuple[int, Decimal, dict]:
     """Compute order size using fixed $1 total exposure model with Kelly filtering (2026-07-12).
     
@@ -876,7 +893,8 @@ def compute_order_size(
             model_prob=model_prob,
             price_cents=price_cents,
             confidence=confidence_float,
-            fractional_kelly=0.25  # Quarter-Kelly for production
+            fractional_kelly=0.25,  # Quarter-Kelly for production
+            side=side  # 2026-07-13: Pass side for correct Kelly calculation
         )
         
         # If Kelly fraction is 0, reject (no edge)

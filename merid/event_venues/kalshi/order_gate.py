@@ -939,89 +939,30 @@ class PreTradeGate:
         # This is the root cause of agents placing multiple orders at different prices
         # Exit orders (SELL) must have an existing position to close
         # MOVED BEFORE window limit check for logical ordering and testability
-        # CRITICAL FIX (2026-07-13): Only treat orders with exit_policy_id as exit orders
-        # NO entry orders use sell action but are NOT exits - they must have position to close
-        try:
-            # Use exit_policy_id as the primary indicator of exit orders
-            # This aligns with order_router._is_exit_order logic
-            is_exit_order = exit_policy_id is not None
-            if is_exit_order:
-                from merid.event_venues.kalshi.position_cache import get_position_cache
-                position_cache = get_position_cache()
-                position = position_cache.get_position(contract_id)
-                
-                # Check if position exists and has contracts
-                if not position or position.contracts <= 0:
-                    self._store._metrics.blocked_invalid_transition += 1
-                    logger.error(
-                        "[GATE-ALERT] exit_order_without_position contract=%s side=%s agent=%s action=%s - "
-                        "No position exists to close. This order would execute as a new entry trade. REJECTED.",
-                        contract_id, side, agent_id, action
-                    )
-                    return GateVerdict(
-                        allowed=False,
-                        client_order_id=coid,
-                        reason="exit_order_without_position:no_position_to_close",
-                    )
-                
-                # Check if position side matches order side (can't close YES position with SELL NO)
-                if position.side != side:
-                    self._store._metrics.blocked_invalid_transition += 1
-                    logger.error(
-                        "[GATE-ALERT] exit_order_side_mismatch contract=%s position_side=%s order_side=%s agent=%s - "
-                        "Cannot close position with different side. REJECTED.",
-                        contract_id, position.side, side, agent_id
-                    )
-                    return GateVerdict(
-                        allowed=False,
-                        client_order_id=coid,
-                        reason=f"exit_order_side_mismatch:position_{position.side}_order_{side}",
-                    )
-        except Exception as e:
-            logger.warning("[GATE] Position existence check failed for exit order: %s", e)
-            # Continue with other checks if validation fails (non-critical)
+        # CRITICAL FIX (2026-07-13): DISABLED position check in gate.check()
+        # The gate.check() function doesn't have access to the source field, which is required
+        # to properly detect exit orders using _is_exit_order. Without source info, we can't
+        # distinguish between true exit orders (take_profit, stop_loss) and entry orders.
+        # Position validation is now handled in order_router where source is available.
+        # This prevents false rejections of entry orders that have exit_policy_id set.
 
         # 3d. CRITICAL FIX: 2026-07-09 - Updated sequential trading to use slot allocator
         # OLD: No new entries until ALL positions exit (too restrictive)
         # NEW: Allow new entries when slot allocator has available exposure
         # This enables sequential trading with early exits: close profitable positions, free up slots, enter new positions
         # Only applies to entry orders, not exit orders
-        # CRITICAL FIX (2026-07-13): Use exit_policy_id to detect exit orders
-        # NO entry orders use sell action but are NOT exits - they must respect exposure limits
+        # CRITICAL FIX (2026-07-13): DISABLED sequential trading check in gate.check()
+        # The gate.check() function doesn't have access to the source field, which is required
+        # to properly detect exit orders using _is_exit_order. Without source info, we can't
+        # distinguish between true exit orders and entry orders. Sequential trading enforcement
+        # is now handled in order_router where source is available.
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
             profile = get_active_profile()
             if profile and hasattr(profile, 'risk_policy_sequential_trading') and profile.risk_policy_sequential_trading:
-                # Use exit_policy_id as the primary indicator of exit orders
-                # This aligns with order_router._is_exit_order logic
-                is_exit_order = exit_policy_id is not None
-                if not is_exit_order:
-                    # CRITICAL FIX: 2026-07-13 - Use position_cache instead of slot_allocator for exposure check
-                    # Slot allocator now only allocates on fill (post-fill path), so it doesn't have pre-fill exposure.
-                    # Position cache is the single source of truth for actual filled positions.
-                    from merid.event_venues.kalshi.position_cache import get_position_cache
-                    position_cache = get_position_cache()
-                    total_exposure = position_cache.get_total_exposure_usd()
-                    
-                    # Calculate required exposure for this order
-                    required_exposure = price_cents / 100.0 if price_cents else 0.42  # Default to 42c (midpoint of 10-75c) if no price
-                    available_exposure = 1.00 - total_exposure
-                    
-                    # Block if insufficient exposure
-                    if required_exposure > available_exposure:
-                        self._store._metrics.blocked_sequential_trading += 1
-                        logger.warning(
-                            "[GATE-ALERT] position_cache_blocked contract=%s agent=%s - "
-                            "Insufficient exposure: required $%.2f, available $%.2f. "
-                            "Close positions to free up slots. (metric: blocked_sequential_trading=%d)",
-                            contract_id, agent_id, required_exposure, available_exposure,
-                            self._store._metrics.blocked_sequential_trading
-                        )
-                        return GateVerdict(
-                            allowed=False,
-                            client_order_id=coid,
-                            reason=f"position_cache:insufficient_exposure_required_${required_exposure:.2f}_available_${available_exposure:.2f}",
-                        )
+                # DISABLED: Cannot detect exit orders without source field
+                # Sequential trading check moved to order_router
+                pass
         except Exception as e:
             logger.warning("[GATE] Sequential trading check failed: %s", e)
             # Continue with other checks if validation fails (non-critical)

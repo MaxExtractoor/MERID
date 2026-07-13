@@ -2915,13 +2915,18 @@ def _apply_risk_based_order_sizing(intent: OrderIntent, bankroll_usd: Optional[D
         # Get model_prob from intent for Kelly Criterion (2026-07-12)
         model_prob = getattr(intent, 'model_prob', None)
         
+        # Get side for Kelly calculation (2026-07-13)
+        side = intent.side if intent.side else "yes"
+        
         # Compute order size using unified_sizing (enforces 3% per-trade limit)
         # 2026-07-12: Kelly Criterion integration - pass model_prob for edge filtering
+        # 2026-07-13: Pass side for correct Kelly calculation
         count, notional_usd, metadata = compute_order_size(
             bankroll_usd=bankroll_usd,
             price_cents=price_cents,
             asset=asset,
             model_prob=model_prob,  # 2026-07-12: Kelly Criterion
+            side=side  # 2026-07-13: Pass side for Kelly
         )
         
         # If unified_sizing returns 0, reject the order (exceeds 3% limit)
@@ -6271,12 +6276,12 @@ def _run_pre_trade_gate(
                 
                 if intent.price_cents < min_price_cents:
                     # CRITICAL FIX (2026-07-12): Release slot on price guard rejection
-                    if _allocated_slot_id:
+                    if intent._allocated_slot_id:
                         try:
                             from merid.risk.global_slot_allocator import get_global_slot_allocator
                             slot_allocator = get_global_slot_allocator()
-                            slot_allocator.release_slot(_allocated_slot_id)
-                            logger.info("[order-router] Released slot_id=%s on price guard rejection", _allocated_slot_id)
+                            slot_allocator.release_slot(intent._allocated_slot_id)
+                            logger.info("[order-router] Released slot_id=%s on price guard rejection", intent._allocated_slot_id)
                         except Exception as release_err:
                             logger.warning("[order-router] Failed to release slot on price guard rejection: %s", release_err)
                     
@@ -6374,12 +6379,12 @@ def _run_pre_trade_gate(
             
             # Non-idempotent rejection (risk check, etc.) → reject as before
             # CRITICAL FIX (2026-07-12): Release slot on gate rejection
-            if _allocated_slot_id:
+            if intent._allocated_slot_id:
                 try:
                     from merid.risk.global_slot_allocator import get_global_slot_allocator
                     slot_allocator = get_global_slot_allocator()
-                    slot_allocator.release_slot(_allocated_slot_id)
-                    logger.info("[order-router] Released slot_id=%s on gate rejection: %s", _allocated_slot_id, verdict.reason)
+                    slot_allocator.release_slot(intent._allocated_slot_id)
+                    logger.info("[order-router] Released slot_id=%s on gate rejection: %s", intent._allocated_slot_id, verdict.reason)
                 except Exception as release_err:
                     logger.warning("[order-router] Failed to release slot on gate rejection: %s", release_err)
             
@@ -6400,12 +6405,12 @@ def _run_pre_trade_gate(
     except Exception as exc:
         # Gate infrastructure failure → fail-closed
         # CRITICAL FIX (2026-07-12): Release slot on exception
-        if _allocated_slot_id:
+        if intent._allocated_slot_id:
             try:
                 from merid.risk.global_slot_allocator import get_global_slot_allocator
                 slot_allocator = get_global_slot_allocator()
-                slot_allocator.release_slot(_allocated_slot_id)
-                logger.info("[order-router] Released slot_id=%s on gate exception: %s", _allocated_slot_id, exc)
+                slot_allocator.release_slot(intent._allocated_slot_id)
+                logger.info("[order-router] Released slot_id=%s on gate exception: %s", intent._allocated_slot_id, exc)
             except Exception as release_err:
                 logger.warning("[order-router] Failed to release slot on gate exception: %s", release_err)
         
