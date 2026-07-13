@@ -6999,14 +6999,6 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
         len(ACTIVE_CRYPTO_ASSETS)
     )
 
-    # SENTIMENT AUDIT: Log sentiment usage in order intent
-    logger.info(
-        "[SENTIMENT-AUDIT] sentiment_driven=%s source=%s ticker=%s",
-        getattr(intent, 'sentiment_driven', False),
-        intent.source,
-        intent.ticker
-    )
-
     # Structured audit log for production traceability
     logger.info(
         "[AUDIT] caller_check | module=%s | intent=%s | action=%s | count=%d | "

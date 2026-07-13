@@ -4858,7 +4858,7 @@ class LeanAgent15m:
 
         logger.info(
 
-            "[PRICE-SELECTION] asset=%s final entry price=%d (within expanded range [10c-95c])",
+            "[PRICE-SELECTION] asset=%s final entry price=%d (within canonical range [10c-75c])",
 
             asset, clamped_price_cents
 
@@ -5363,7 +5363,7 @@ class LeanAgent15m:
 
         logger.info(
 
-            "[PRICE-SELECTION] asset=%s final entry price=%d (within expanded range [10c-95c])",
+            "[PRICE-SELECTION] asset=%s final entry price=%d (within canonical range [10c-75c])",
 
             asset, clamped_price_cents
 
@@ -8679,7 +8679,7 @@ class LeanAgent15m:
 
                     )
 
-                elif side == "no" and no_in_range:
+                if side == "no" and no_in_range:
 
                     edge_no_pct = (p_model_no - p_mkt_no)  # FRACTION units
 
@@ -10200,7 +10200,7 @@ class LeanAgent15m:
 
         logger.info(
 
-            "[PRICE-SELECTION] asset=%s final entry price=%d (within expanded range [10c-95c])",
+            "[PRICE-SELECTION] asset=%s final entry price=%d (within canonical range [10c-75c])",
 
             asset, clamped_price_cents
 
@@ -11898,19 +11898,9 @@ class LeanAgent15m:
 
             
 
-            # Update strip order count
-
-            if strip_ticker:
-
-                self._strip_order_counts[strip_ticker] = self._strip_order_counts.get(strip_ticker, 0) + 1
-
-                logger.info(
-
-                    "[STRIP-ORDER-COUNT] asset=%s strip=%s orders=%d/%d",
-
-                    asset, strip_ticker, self._strip_order_counts[strip_ticker], self.config.per_strip_order_limit
-
-                )
+            # CRITICAL FIX (2026-07-12): Strip order count should only increment on EXECUTED orders, not candidates
+            # Previously this incremented on every candidate generation, causing misleading counts
+            # Now strip order count is incremented in GLOBAL-ALLOCATOR-EXECUTE-SUCCESS path
 
             
 
@@ -12698,6 +12688,16 @@ class LeanAgentGrid15m:
                                 order_id = getattr(order_result, 'order_id', 'duplicate/idempotent')
 
                                 logger.info("[GLOBAL-ALLOCATOR-EXECUTE-SUCCESS] asset=%s order_id=%s", order.asset, order_id)
+
+                                # CRITICAL FIX (2026-07-12): Increment strip order count only on successful execution
+                                # Previously this was incremented on candidate generation, causing misleading counts
+                                strip_ticker = order.asset + "15M"  # Construct strip ticker
+                                if strip_ticker:
+                                    self._strip_order_counts[strip_ticker] = self._strip_order_counts.get(strip_ticker, 0) + 1
+                                    logger.info(
+                                        "[STRIP-ORDER-COUNT] asset=%s strip=%s orders=%d/%d",
+                                        order.asset, strip_ticker, self._strip_order_counts[strip_ticker], self.config.per_strip_order_limit
+                                    )
 
                             else:
 
