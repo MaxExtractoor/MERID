@@ -413,38 +413,14 @@ class ExecutionSubscriber:
                             break
 
                 if owning_agent is not None:
-                    # CRITICAL FIX (2026-07-12): Request slot allocation before order execution
-                    # This prevents bypassing the $1 global exposure cap
-                    try:
-                        from merid.risk.global_slot_allocator import get_global_slot_allocator, AllocationRequest
-                        slot_allocator = get_global_slot_allocator()
-                        
-                        # Determine if this is an exit order (reduces exposure)
-                        is_exit_order = "sell" in action or "close" in action.lower()
-                        
-                        allocation_request = AllocationRequest(
-                            asset=owning_agent.config.assets[0] if owning_agent.config.assets else "BTC",
-                            notional_usd=(limit_price * size) / 100.0,
-                            is_exit_order=is_exit_order,
-                            order_id=f"execution_subscriber_{market_id}_{int(time.time())}",
-                        )
-                        
-                        allocated, reason, slot_id = slot_allocator.request_allocation(allocation_request)
-                        
-                        if not allocated:
-                            logger.warning(
-                                "[EXECUTION-SUBSCRIBER] Slot allocation failed: %s - blocking order for %s",
-                                reason, market_id
-                            )
-                            return  # Skip order if no slot available
-                        
-                        logger.info(
-                            "[EXECUTION-SUBSCRIBER] Slot allocated: asset=%s ticker=%s slot_id=%s reason=%s",
-                            allocation_request.asset, market_id, slot_id, reason
-                        )
-                    except Exception as slot_err:
-                        logger.error("[EXECUTION-SUBSCRIBER] Slot allocation error: %s - blocking order", slot_err)
-                        return  # Fail-closed: block order if slot allocator fails
+                    # CRITICAL FIX (2026-07-12): Remove slot allocation from execution_subscriber
+                    # Slot allocation is now handled exclusively in order_router.route_order_async
+                    # This prevents double allocation (execution_subscriber → kalshi_tools → order_router)
+                    # which was causing exposure cap exhaustion and slot state corruption
+                    #
+                    # Execution flow is now:
+                    # execution_subscriber → kalshi_tools._kalshi_place_order → order_router.route_order_async
+                    #                                                              → slot_allocator.request_allocation (SINGLE POINT)
                     
                     try:
                         await _kalshi_place_order(
@@ -456,13 +432,7 @@ class ExecutionSubscriber:
                             agent_name=owning_agent.agent_id,
                         )
                     except Exception as order_err:
-                        # Release slot on order execution failure
-                        if not is_exit_order and slot_id:
-                            try:
-                                slot_allocator.release_slot(slot_id)
-                                logger.info("[EXECUTION-SUBSCRIBER] Slot released on execution failure: slot_id=%s", slot_id)
-                            except Exception as release_err:
-                                logger.error("[EXECUTION-SUBSCRIBER] Failed to release slot: %s", release_err)
+                        # Slot release is now handled in order_router
                         raise
                     return
                 logger.warning(
@@ -473,67 +443,24 @@ class ExecutionSubscriber:
             logger.warning("ExecutionSubscriber: AgentGrid routing failed for %s: %s — falling back to direct placement", market_id, exc)
 
         # Fallback: direct order placement
+        # CRITICAL FIX (2026-07-12): Remove slot allocation from execution_subscriber fallback
+        # Slot allocation is now handled exclusively in order_router.route_order_async
+        # This prevents double allocation (execution_subscriber → kalshi_tools → order_router)
+        #
+        # Execution flow is now:
+        # execution_subscriber → kalshi_tools._kalshi_place_order → order_router.route_order_async
+        #                                                              → slot_allocator.request_allocation (SINGLE POINT)
         try:
-            # CRITICAL FIX (2026-07-12): Request slot allocation before direct order placement
-            # This prevents bypassing the $1 global exposure cap in fallback path
-            try:
-                from merid.risk.global_slot_allocator import get_global_slot_allocator, AllocationRequest
-                slot_allocator = get_global_slot_allocator()
-                
-                # Determine if this is an exit order (reduces exposure)
-                is_exit_order = "sell" in action or "close" in action.lower()
-                
-                # Extract asset from market_id for allocation request
-                asset = "BTC"  # Default fallback
-                for crypto_asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-                    if crypto_asset in market_id.upper():
-                        asset = crypto_asset
-                        break
-                
-                allocation_request = AllocationRequest(
-                    asset=asset,
-                    notional_usd=(limit_price * size) / 100.0,
-                    is_exit_order=is_exit_order,
-                    order_id=f"execution_subscriber_fallback_{market_id}_{int(time.time())}",
-                )
-                
-                allocated, reason, slot_id = slot_allocator.request_allocation(allocation_request)
-                
-                if not allocated:
-                    logger.warning(
-                        "[EXECUTION-SUBSCRIBER-FALLBACK] Slot allocation failed: %s - blocking order for %s",
-                        reason, market_id
-                    )
-                    return  # Skip order if no slot available
-                
-                logger.info(
-                    "[EXECUTION-SUBSCRIBER-FALLBACK] Slot allocated: asset=%s ticker=%s slot_id=%s reason=%s",
-                    asset, market_id, slot_id, reason
-                )
-            except Exception as slot_err:
-                logger.error("[EXECUTION-SUBSCRIBER-FALLBACK] Slot allocation error: %s - blocking order", slot_err)
-                return  # Fail-closed: block order if slot allocator fails
-            
-            try:
-                from merid.prediction.kalshi_tools import _kalshi_place_order
-                kalshi_action = "buy" if "buy" in action else "sell"
-                await _kalshi_place_order(
-                    ticker=market_id,
-                    side=side,
-                    action=kalshi_action,
-                    price_cents=limit_price,
-                    count=size,
-                    agent_name="execution_subscriber",
-                )
-            except Exception as order_err:
-                # Release slot on order execution failure
-                if not is_exit_order and slot_id:
-                    try:
-                        slot_allocator.release_slot(slot_id)
-                        logger.info("[EXECUTION-SUBSCRIBER-FALLBACK] Slot released on execution failure: slot_id=%s", slot_id)
-                    except Exception as release_err:
-                        logger.error("[EXECUTION-SUBSCRIBER-FALLBACK] Failed to release slot: %s", release_err)
-                raise
+            from merid.prediction.kalshi_tools import _kalshi_place_order
+            kalshi_action = "buy" if "buy" in action else "sell"
+            await _kalshi_place_order(
+                ticker=market_id,
+                side=side,
+                action=kalshi_action,
+                price_cents=limit_price,
+                count=size,
+                agent_name="execution_subscriber",
+            )
         except Exception as exc:
             raise RuntimeError(f"Direct order placement failed: {exc}") from exc
 
