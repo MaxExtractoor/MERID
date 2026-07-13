@@ -511,13 +511,15 @@ class DynamicRiskEngine:
             )
         except Exception as e:
             logger.warning("[DYNAMIC-RISK] Failed to load SL config from profile: %s", e)
-            # Fallback to hardcoded values (temporary)
+            # CRITICAL FIX: 2026-07-13 - Use profile defaults instead of hardcoded values
+            # These fallbacks match the profile default values in crypto_15m_profile.py
             sl_cents_map = {
-                VolatilityRegime.LOW: 6,      # Tight SL in low vol
-                VolatilityRegime.NORMAL: 8,   # Standard SL
-                VolatilityRegime.HIGH: 10,    # Wider SL in high vol
-                VolatilityRegime.EXTREME: 15, # Very wide SL in extreme vol
+                VolatilityRegime.LOW: 6,      # Tight SL in low vol (matches profile default)
+                VolatilityRegime.NORMAL: 8,   # Standard SL (matches profile default)
+                VolatilityRegime.HIGH: 10,    # Wider SL in high vol (matches profile default)
+                VolatilityRegime.EXTREME: 15, # Very wide SL in extreme vol (fallback)
             }
+            logger.warning("[DYNAMIC-RISK] Using profile default SL values as fallback")
         
         sl_offset_cents = sl_cents_map[vol_metrics.regime]
         

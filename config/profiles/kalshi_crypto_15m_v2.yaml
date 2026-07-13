@@ -211,6 +211,7 @@ trailing_stop:
   min_profit_cents: 12  # Only activate after 12c profit (align with 2026 research: 10-15¢ threshold to avoid noise-triggered exits)
   activation_delay_sec: 30  # Wait 30s before activating
   profit_zone_activation_cents: 80  # Activate aggressive trailing when price crosses 80c
+  giveback_cents: 5  # Giveback amount in cents (40-50% of 12¢ activation threshold per 2026 research)
   description: "Trailing stop: lock in profits as price moves favorably (tightens to 2c in 80-85c zone)"
 
 # Dynamic Risk Configuration

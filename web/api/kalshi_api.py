@@ -3282,7 +3282,15 @@ async def place_order(
                 # If TP computation fails, set a conservative default
                 take_profit_r_multiple = 1.0  # 1R as fallback
                 if stop_loss_price_cents is None:
-                    stop_loss_price_cents = max(1, price_cents - 5)
+                    # CRITICAL FIX: 2026-07-13 - Load SL offset from profile instead of hardcoded 5
+                    sl_offset_cents = 5  # Default fallback
+                    try:
+                        from merid.risk.profiles.crypto_15m_profile import get_active_profile
+                        profile = get_active_profile().profile
+                        sl_offset_cents = profile.dynamic_risk_sl_cents_normal_vol
+                    except Exception as sl_exc:
+                        logger.warning("[API-SL] Failed to load SL config from profile: %s", sl_exc)
+                    stop_loss_price_cents = max(1, price_cents - sl_offset_cents)
 
     # Try old order router first
     try:
