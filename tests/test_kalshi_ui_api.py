@@ -65,7 +65,7 @@ def mock_dependencies():
 
 def test_ui_summary_endpoint_structure(mock_dependencies):
     """Test that /api/v1/kalshi/ui-summary returns expected structure."""
-    from web.main import app
+    from web.main_15m_lean import app
     
     client = TestClient(app)
     response = client.get("/api/v1/kalshi/ui-summary")
@@ -88,7 +88,7 @@ def test_ui_summary_endpoint_structure(mock_dependencies):
 
 def test_ui_summary_positions_structure(mock_dependencies):
     """Test that positions have correct structure."""
-    from web.main import app
+    from web.main_15m_lean import app
     
     # Position is already mocked in fixture with default values
     client = TestClient(app)
@@ -110,7 +110,7 @@ def test_ui_summary_positions_structure(mock_dependencies):
 
 def test_ui_summary_signals_structure(mock_dependencies):
     """Test that signals section has correct structure."""
-    from web.main import app
+    from web.main_15m_lean import app
     
     client = TestClient(app)
     response = client.get("/api/v1/kalshi/ui-summary")
@@ -133,7 +133,7 @@ def test_ui_summary_signals_structure(mock_dependencies):
 
 def test_ui_summary_reconciliation_structure(mock_dependencies):
     """Test that reconciliation section has correct structure."""
-    from web.main import app
+    from web.main_15m_lean import app
     
     client = TestClient(app)
     response = client.get("/api/v1/kalshi/ui-summary")
@@ -153,7 +153,7 @@ def test_ui_summary_reconciliation_structure(mock_dependencies):
 
 def test_ui_summary_grid_structure(mock_dependencies):
     """Test that grid section has correct structure."""
-    from web.main import app
+    from web.main_15m_lean import app
     
     client = TestClient(app)
     response = client.get("/api/v1/kalshi/ui-summary")
@@ -172,7 +172,7 @@ def test_ui_summary_grid_structure(mock_dependencies):
 
 def test_ui_summary_mode_field(mock_dependencies):
     """Test that mode field is present and valid."""
-    from web.main import app
+    from web.main_15m_lean import app
     
     client = TestClient(app)
     response = client.get("/api/v1/kalshi/ui-summary")
@@ -185,7 +185,7 @@ def test_ui_summary_mode_field(mock_dependencies):
 
 def test_ui_summary_graceful_adapter_failure(mock_dependencies):
     """Test that endpoint handles adapter failures gracefully."""
-    from web.main import app
+    from web.main_15m_lean import app
     from unittest.mock import patch, AsyncMock
     
     # Make adapter fail by patching where kalshi_ui imports it
@@ -204,7 +204,7 @@ def test_ui_summary_graceful_adapter_failure(mock_dependencies):
 
 def test_ui_summary_graceful_reconciliation_failure(mock_dependencies):
     """Test that endpoint handles reconciliation failures gracefully."""
-    from web.main import app
+    from web.main_15m_lean import app
     from unittest.mock import patch, MagicMock
     
     # Make reconciler fail by patching where kalshi_ui imports it
@@ -221,7 +221,7 @@ def test_ui_summary_graceful_reconciliation_failure(mock_dependencies):
 
 def test_ui_summary_response_time():
     """Test that UI summary responds within reasonable time."""
-    from web.main import app
+    from web.main_15m_lean import app
     import time
     
     with patch("merid.event_venues.kalshi.venue_adapter.get_kalshi_venue_adapter"), \

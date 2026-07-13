@@ -354,15 +354,17 @@ class KalshiWebSocket(EventVenueStream):
         # Intentionally does nothing - safe default for callback handling
         pass
     
-    def _is_benign_ws_error(self, exc: BaseException) -> bool:
-        """Check if exception is a benign WebSocket/Windows error during close/shutdown.
+    @staticmethod
+    def _is_benign_ws_error_static(exc: BaseException) -> bool:
+        """Static version of _is_benign_ws_error for testing without instance.
 
+        Check if exception is a benign WebSocket/Windows error during close/shutdown.
         These errors are expected during forced WebSocket close or process shutdown
         and should not trigger fatal error handling.
 
-        NOTE: This is the instance method version. A similar classmethod exists in
-        web.asgi_guard.FatalErrorClassifier.is_benign_ws_error() for ASGI-level
-        error classification. Keep logic aligned between both implementations.
+        NOTE: This is the static version for testing. The instance method _is_benign_ws_error
+        calls this. A similar classmethod exists in web.asgi_guard.FatalErrorClassifier.is_benign_ws_error()
+        for ASGI-level error classification. Keep logic aligned between both implementations.
         """
         import errno
 
@@ -396,6 +398,18 @@ class KalshiWebSocket(EventVenueStream):
                 return True
 
         return False
+
+    def _is_benign_ws_error(self, exc: BaseException) -> bool:
+        """Check if exception is a benign WebSocket/Windows error during close/shutdown.
+
+        These errors are expected during forced WebSocket close or process shutdown
+        and should not trigger fatal error handling.
+
+        NOTE: This is the instance method version. A similar classmethod exists in
+        web.asgi_guard.FatalErrorClassifier.is_benign_ws_error() for ASGI-level
+        error classification. Keep logic aligned between both implementations.
+        """
+        return self._is_benign_ws_error_static(exc)
         
     @property
     def venue_name(self) -> str:

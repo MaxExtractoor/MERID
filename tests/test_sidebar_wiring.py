@@ -223,7 +223,7 @@ class TestBackendEndpointReachability(unittest.TestCase):
         # Get all registered FastAPI routes from the module-level app
         cls.registered_routes = set()
         try:
-            from web.main import app
+            from web.main_15m_lean import app
             for route in app.routes:
                 if hasattr(route, "path"):
                     cls.registered_routes.add(route.path)

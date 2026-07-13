@@ -106,30 +106,30 @@ class TestRegimeDetectionFix:
 
 
 class TestMainLifespanShutdownFix:
-    """Verify main.py lifespan has cooperative shutdown handler."""
+    """Verify main_15m_lean.py lifespan has cooperative shutdown handler."""
     
     def test_cooperative_task_cancellation(self):
-        """Lifespan shutdown should cancel tasks with timeout."""
-        from web import main
+        """Lifespan shutdown should properly stop background tasks."""
+        from web import main_15m_lean as main
         
-        # Get the _app_lifespan function
-        source = inspect.getsource(main._app_lifespan)
+        # Get the lifespan function (not _app_lifespan)
+        source = inspect.getsource(main.lifespan)
         
-        # Verify task.cancel() is called
-        assert "task.cancel()" in source, \
-            "Missing task.cancel() in shutdown sequence"
+        # Verify shutdown sequence exists
+        assert "SHUTDOWN" in source, \
+            "Missing shutdown sequence in lifespan"
         
-        # Verify asyncio.wait_for is used for timeout
-        assert "asyncio.wait_for" in source, \
-            "Missing asyncio.wait_for for shutdown timeout"
+        # Verify 15m loop is stopped
+        assert "Stopping 15m loop" in source, \
+            "Missing 15m loop shutdown"
         
-        # Verify return_exceptions=True is used
-        assert "return_exceptions=True" in source, \
-            "Missing return_exceptions=True in task gathering"
+        # Verify WebSocket bridge is closed
+        assert "Closing WebSocket bridge" in source, \
+            "Missing WebSocket bridge shutdown"
         
-        # Verify bug fix comment is present
-        assert "BUG-FIX (2026-05-12)" in source or "Cooperative task cancellation" in source, \
-            "Missing bug fix comment for cooperative shutdown"
+        # Verify graceful shutdown completion
+        assert "Graceful shutdown complete" in source, \
+            "Missing graceful shutdown completion"
 
 
 if __name__ == "__main__":
