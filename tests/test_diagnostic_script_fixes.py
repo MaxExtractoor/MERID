@@ -327,17 +327,17 @@ class TestAssetCoverage:
             assert attr in LeanAgentConfig.__dataclass_fields__
 
 
-class Test50cSweetSpotThreshold:
-    """Test that the 50c sweet spot threshold is correctly implemented (2026-07-08)."""
+class Test75cSweetSpotThreshold:
+    """Test that the 75c sweet spot threshold is correctly implemented (2026-07-12 expanded from 50c)."""
 
     def test_deep_otm_expensive_cents_value(self):
-        """Test that DEEP_OTM_EXPENSIVE_CENTS is 50 (2026-07-08 update)."""
+        """Test that DEEP_OTM_EXPENSIVE_CENTS is 75 (2026-07-12 update)."""
         from merid.event_venues.kalshi.risk_parameters import DEEP_OTM_EXPENSIVE_CENTS
 
-        assert DEEP_OTM_EXPENSIVE_CENTS == 50
+        assert DEEP_OTM_EXPENSIVE_CENTS == 75
 
-    def test_50c_threshold_in_profile_yaml(self):
-        """Test that 50c threshold is reflected in profile YAML."""
+    def test_75c_threshold_in_profile_yaml(self):
+        """Test that 75c threshold is reflected in profile YAML."""
         profile_path = Path("c:/Dev/MERID/config/profiles/kalshi_crypto_15m_v2.yaml")
         with open(profile_path, 'r', encoding='utf-8') as f:
             profile = yaml.safe_load(f)
@@ -345,13 +345,13 @@ class Test50cSweetSpotThreshold:
         # Check guardrails.max_spread_cents (liquidity threshold, not entry price)
         assert 'guardrails' in profile
         guardrails = profile['guardrails']
-        assert guardrails['max_spread_cents'] == 30  # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
+        assert guardrails['max_spread_cents'] == 20  # 2026-07-12: Aligned with industry research - 20c max for 15m crypto
 
         # Check universe.max_spread_cents (liquidity threshold, not entry price)
         assert 'universe' in profile
         universe = profile['universe']
-        assert universe['max_spread_cents'] == 30  # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
+        assert universe['max_spread_cents'] == 20  # 2026-07-12: Aligned with industry research - 20c max for 15m crypto
 
         # Check guardrails max_contract_price_cents (entry price threshold)
-        # 2026-07-08: Updated to 50c for sweet spot (10-50c)
-        assert guardrails['max_contract_price_cents'] == 50
+        # 2026-07-12: Updated to 75c for canonical range (10-75c)
+        assert guardrails['max_contract_price_cents'] == 75

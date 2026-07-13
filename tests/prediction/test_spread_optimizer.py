@@ -30,7 +30,7 @@ class TestSpreadOptimizer:
         optimizer = SpreadOptimizer()
         
         assert optimizer.cache_size == 1000
-        assert optimizer.MAX_SPREAD_CENTS == 30  # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
+        assert optimizer.MAX_SPREAD_CENTS == 30  # 2026-07-10: Optimized to 30c to harmonize with 10c-75c canonical range
         assert optimizer.MIN_DEPTH_LEVELS == 2
         assert optimizer.MIN_LIQUIDITY_SCORE == 0.3
         assert len(optimizer._edge_cache) == 0

@@ -35,7 +35,7 @@ class TestProfileVersionAttributeFix:
 
 
 class TestPriceRangeCanonicalFix:
-    """Test that price range is canonical [10c-50c] per commit c5ac4a18."""
+    """Test that price range is canonical [10c-75c] per 2026-07-12 expansion."""
     
     def test_agent_grid_accepts_45c_price(self):
         """Test that agent_grid_15m.py accepts prices within expanded range (e.g., 45c)."""

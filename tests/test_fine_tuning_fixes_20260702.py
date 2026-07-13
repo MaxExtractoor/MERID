@@ -154,7 +154,7 @@ def test_microstructure_check_allows_10c_spread():
         no_ask_cents=55,
         yes_depth=400,  # 400 contracts at 50c = $200 depth USD
         no_depth=400,
-        max_spread_cents=30.0  # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
+        max_spread_cents=30.0  # 2026-07-10: Optimized to 30c to harmonize with 10c-75c canonical range
     )
     
     assert passes, f"10c spread should pass: {reason}"
