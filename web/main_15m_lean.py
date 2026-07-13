@@ -2074,6 +2074,43 @@ async def _run_full_startup_in_lifespan(app):
             except Exception as e:
                 logger.warning("[STARTUP-STACK] RISK-RESET: Failed to reset category_notional: %s", e, exc_info=True)
             
+            # CRITICAL FIX (2026-07-13): Clear phantom slots from global slot allocator at startup
+            # This prevents false "Insufficient exposure" rejections when there are no actual positions
+            # but phantom slots from previous sessions are still in memory
+            logger.info("[STARTUP-STACK] SLOT-ALLOCATOR-RESET: Clearing phantom slots from global slot allocator")
+            try:
+                from merid.event_venues.kalshi.position_cache import get_position_cache
+                from merid.risk.global_slot_allocator import get_global_slot_allocator
+                
+                position_cache = get_position_cache()
+                slot_allocator = get_global_slot_allocator()
+                
+                # Get current position count from cache
+                all_positions = position_cache.get_all_positions(validate_freshness=False)
+                open_positions = {k: v for k, v in all_positions.items() if v.contracts > 0}
+                position_count = len(open_positions)
+                
+                logger.info(f"[STARTUP-STACK] SLOT-ALLOCATOR-RESET: Current position_count={position_count}")
+                
+                # Only clear slots if there are no actual positions
+                if position_count == 0:
+                    slot_allocator.clear_slots_on_empty_positions(position_count=0)
+                    logger.info("[STARTUP-STACK] SLOT-ALLOCATOR-RESET: Cleared phantom slots (position_count=0)")
+                else:
+                    logger.info(f"[STARTUP-STACK] SLOT-ALLOCATOR-RESET: Skipping clear (position_count={position_count} > 0)")
+            except Exception as e:
+                logger.warning("[STARTUP-STACK] SLOT-ALLOCATOR-RESET: Failed to clear phantom slots: %s", e, exc_info=True)
+            
+            # CRITICAL FIX (2026-07-13): Reset window exposure at startup to clear stale exposure tracking
+            # This prevents false "window exposure exceeded" rejections from previous sessions
+            logger.info("[STARTUP-STACK] WINDOW-EXPOSURE-RESET: Resetting window exposure tracking")
+            try:
+                from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import force_reset_window_exposure
+                force_reset_window_exposure(reason="startup_phantom_cleanup")
+                logger.info("[STARTUP-STACK] WINDOW-EXPOSURE-RESET: Window exposure reset complete")
+            except Exception as e:
+                logger.warning("[STARTUP-STACK] WINDOW-EXPOSURE-RESET: Failed to reset window exposure: %s", e, exc_info=True)
+            
             # CRITICAL: Call BalanceCalibrator to calibrate CategoryExposureTracker with percentage-based caps
             # This fixes the hardcoded $50 correlation stack cap bug
             logger.info("[STARTUP-STACK] BALANCE-CALIBRATOR: About to calibrate CategoryExposureTracker with initial bankroll")

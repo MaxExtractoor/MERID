@@ -1434,6 +1434,69 @@ class Kalshi15mLoop:
                             self._swing_mode[asset] = {"enabled": False, "exited_side": None, "exit_time": None}
                         logger.info("[15m-LOOP] Reset swing mode for new window")
                         
+                        # CRITICAL FIX (2026-07-13): Clear phantom slots from global slot allocator on timeframe transition
+                        # This prevents false "Insufficient exposure" rejections when old slots from previous timeframe persist
+                        logger.info("[15m-LOOP] TIMEFRAME-RESET: Clearing phantom slots from global slot allocator")
+                        try:
+                            from merid.event_venues.kalshi.position_cache import get_position_cache
+                            from merid.risk.global_slot_allocator import get_global_slot_allocator
+                            
+                            position_cache = get_position_cache()
+                            slot_allocator = get_global_slot_allocator()
+                            
+                            # Get current position count from cache
+                            all_positions = position_cache.get_all_positions(validate_freshness=False)
+                            open_positions = {k: v for k, v in all_positions.items() if v.contracts > 0}
+                            position_count = len(open_positions)
+                            
+                            logger.info(f"[15m-LOOP] TIMEFRAME-RESET: Current position_count={position_count}")
+                            
+                            # Clear slots on timeframe transition regardless of position count
+                            # New timeframe = fresh start for slot allocation
+                            slot_allocator.clear_slots_on_empty_positions(position_count=0)
+                            logger.info("[15m-LOOP] TIMEFRAME-RESET: Cleared all slots for new timeframe")
+                            
+                            # CRITICAL FIX (2026-07-13): Reset window exposure on timeframe transition
+                            # New timeframe should start with fresh window exposure tracking
+                            logger.info("[15m-LOOP] TIMEFRAME-RESET: Resetting window exposure tracking")
+                            try:
+                                from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import force_reset_window_exposure
+                                force_reset_window_exposure(reason="timeframe_transition")
+                                logger.info("[15m-LOOP] TIMEFRAME-RESET: Window exposure reset complete")
+                            except Exception as e:
+                                logger.warning("[15m-LOOP] TIMEFRAME-RESET: Failed to reset window exposure: %s", e, exc_info=True)
+                        except Exception as e:
+                            logger.warning("[15m-LOOP] TIMEFRAME-RESET: Failed to clear slots: %s", e, exc_info=True)
+                        
+                        # CRITICAL FIX (2026-07-13): Clear position cache on timeframe transition ONLY if no actual positions
+                        # This prevents losing track of positions held across timeframe boundaries
+                        # Position cache is only cleared if position_count=0 (no actual open positions)
+                        if position_count == 0:
+                            logger.info("[15m-LOOP] TIMEFRAME-RESET: Clearing position cache for new timeframe (position_count=0)")
+                            try:
+                                from merid.event_venues.kalshi.position_cache import get_position_cache
+                                position_cache = get_position_cache()
+                                await position_cache.clear()  # Use async clear() for mutex protection
+                                logger.info("[15m-LOOP] TIMEFRAME-RESET: Position cache cleared")
+                            except Exception as e:
+                                logger.warning("[15m-LOOP] TIMEFRAME-RESET: Failed to clear position cache: %s", e, exc_info=True)
+                        else:
+                            logger.info(f"[15m-LOOP] TIMEFRAME-RESET: Skipping position cache clear (position_count={position_count} > 0)")
+                        
+                        # CRITICAL FIX (2026-07-13): Clear fills ledger open positions on timeframe transition ONLY if no actual positions
+                        # This prevents losing track of positions held across timeframe boundaries
+                        if position_count == 0:
+                            logger.info("[15m-LOOP] TIMEFRAME-RESET: Clearing fills ledger open positions for new timeframe (position_count=0)")
+                            try:
+                                from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+                                ledger = get_fills_ledger()
+                                await ledger.clear_open_positions_on_empty_cache()
+                                logger.info("[15m-LOOP] TIMEFRAME-RESET: Fills ledger open positions cleared")
+                            except Exception as e:
+                                logger.warning("[15m-LOOP] TIMEFRAME-RESET: Failed to clear fills ledger: %s", e, exc_info=True)
+                        else:
+                            logger.info(f"[15m-LOOP] TIMEFRAME-RESET: Skipping fills ledger clear (position_count={position_count} > 0)")
+                        
                         # Reset UnifiedRiskManager cycle tracking
                         from merid.risk.unified_risk_manager import get_unified_risk_manager
                         risk_mgr = get_unified_risk_manager()
@@ -3526,6 +3589,69 @@ class Kalshi15mLoop:
                     )
                     self._current_window_suffix = current_window.suffix
                     self._executed_candidates_this_window.clear()
+                    
+                    # CRITICAL FIX (2026-07-13): Clear phantom slots from global slot allocator on timeframe transition
+                    # This prevents false "Insufficient exposure" rejections when old slots from previous timeframe persist
+                    logger.info("[15m-LOOP] TIMEFRAME-RESET: Clearing phantom slots from global slot allocator")
+                    try:
+                        from merid.event_venues.kalshi.position_cache import get_position_cache
+                        from merid.risk.global_slot_allocator import get_global_slot_allocator
+                        
+                        position_cache = get_position_cache()
+                        slot_allocator = get_global_slot_allocator()
+                        
+                        # Get current position count from cache
+                        all_positions = position_cache.get_all_positions(validate_freshness=False)
+                        open_positions = {k: v for k, v in all_positions.items() if v.contracts > 0}
+                        position_count = len(open_positions)
+                        
+                        logger.info(f"[15m-LOOP] TIMEFRAME-RESET: Current position_count={position_count}")
+                        
+                        # Clear slots on timeframe transition regardless of position count
+                        # New timeframe = fresh start for slot allocation
+                        slot_allocator.clear_slots_on_empty_positions(position_count=0)
+                        logger.info("[15m-LOOP] TIMEFRAME-RESET: Cleared all slots for new timeframe")
+                        
+                        # CRITICAL FIX (2026-07-13): Reset window exposure on timeframe transition
+                        # New timeframe should start with fresh window exposure tracking
+                        logger.info("[15m-LOOP] TIMEFRAME-RESET: Resetting window exposure tracking")
+                        try:
+                            from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import force_reset_window_exposure
+                            force_reset_window_exposure(reason="timeframe_transition")
+                            logger.info("[15m-LOOP] TIMEFRAME-RESET: Window exposure reset complete")
+                        except Exception as e:
+                            logger.warning("[15m-LOOP] TIMEFRAME-RESET: Failed to reset window exposure: %s", e, exc_info=True)
+                    except Exception as e:
+                        logger.warning("[15m-LOOP] TIMEFRAME-RESET: Failed to clear slots: %s", e, exc_info=True)
+                    
+                    # CRITICAL FIX (2026-07-13): Clear position cache on timeframe transition ONLY if no actual positions
+                    # This prevents losing track of positions held across timeframe boundaries
+                    # Position cache is only cleared if position_count=0 (no actual open positions)
+                    if position_count == 0:
+                        logger.info("[15m-LOOP] TIMEFRAME-RESET: Clearing position cache for new timeframe (position_count=0)")
+                        try:
+                            from merid.event_venues.kalshi.position_cache import get_position_cache
+                            position_cache = get_position_cache()
+                            await position_cache.clear()  # Use async clear() for mutex protection
+                            logger.info("[15m-LOOP] TIMEFRAME-RESET: Position cache cleared")
+                        except Exception as e:
+                            logger.warning("[15m-LOOP] TIMEFRAME-RESET: Failed to clear position cache: %s", e, exc_info=True)
+                    else:
+                        logger.info(f"[15m-LOOP] TIMEFRAME-RESET: Skipping position cache clear (position_count={position_count} > 0)")
+                    
+                    # CRITICAL FIX (2026-07-13): Clear fills ledger open positions on timeframe transition ONLY if no actual positions
+                    # This prevents losing track of positions held across timeframe boundaries
+                    if position_count == 0:
+                        logger.info("[15m-LOOP] TIMEFRAME-RESET: Clearing fills ledger open positions for new timeframe (position_count=0)")
+                        try:
+                            from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+                            ledger = get_fills_ledger()
+                            await ledger.clear_open_positions_on_empty_cache()
+                            logger.info("[15m-LOOP] TIMEFRAME-RESET: Fills ledger open positions cleared")
+                        except Exception as e:
+                            logger.warning("[15m-LOOP] TIMEFRAME-RESET: Failed to clear fills ledger: %s", e, exc_info=True)
+                    else:
+                        logger.info(f"[15m-LOOP] TIMEFRAME-RESET: Skipping fills ledger clear (position_count={position_count} > 0)")
                     
                     # Reset UnifiedRiskManager cycle tracking
                     from merid.risk.unified_risk_manager import get_unified_risk_manager

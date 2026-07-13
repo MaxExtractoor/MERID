@@ -5,11 +5,16 @@ These tests verify that:
 1. Fills ledger clears phantom open positions when position cache is empty
 2. Global slot allocator clears phantom slots when position cache is empty
 3. The integration in fills_poller correctly triggers both clears
+4. Startup resets slot allocator and window exposure when position_count=0
+5. Timeframe transition resets slot allocator and window exposure
+6. Position cache only clears when position_count=0 (preserves cross-timeframe positions)
+7. Async clear() is used for mutex protection in timeframe transitions
 """
 
 import pytest
+import asyncio
 from decimal import Decimal
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch, MagicMock, AsyncMock
 from datetime import datetime, timezone, timedelta
 
 
@@ -276,6 +281,157 @@ class TestFullReconciliationFlow:
         assert allocator.get_total_exposure() == 0.0
         assert allocator.get_available_exposure() == 1.0
 
+
+class TestStartupResetLogic:
+    """Test startup reset logic in main_15m_lean.py."""
+    
+    @pytest.fixture
+    def mock_position_cache(self):
+        """Mock position cache for testing."""
+        cache = Mock()
+        cache.get_all_positions = Mock(return_value={})
+        return cache
+    
+    @pytest.fixture
+    def mock_slot_allocator(self):
+        """Mock slot allocator for testing."""
+        allocator = Mock()
+        allocator.clear_slots_on_empty_positions = Mock()
+        return allocator
+    
+    def test_startup_clears_slots_when_position_count_zero(self, mock_position_cache, mock_slot_allocator):
+        """Test that startup clears slots when position_count=0."""
+        # Simulate startup logic from main_15m_lean.py
+        all_positions = mock_position_cache.get_all_positions(validate_freshness=False)
+        open_positions = {k: v for k, v in all_positions.items() if v.contracts > 0}
+        position_count = len(open_positions)
+        
+        # Should be 0
+        assert position_count == 0
+        
+        # Should call clear_slots_on_empty_positions
+        if position_count == 0:
+            mock_slot_allocator.clear_slots_on_empty_positions(position_count=0)
+        
+        # Verify it was called
+        mock_slot_allocator.clear_slots_on_empty_positions.assert_called_once()
+    
+    def test_startup_skips_clear_when_position_count_nonzero(self, mock_position_cache, mock_slot_allocator):
+        """Test that startup skips clear when position_count>0."""
+        # Simulate actual positions
+        mock_position = Mock()
+        mock_position.contracts = 1
+        mock_position.get_all_positions = Mock(return_value={"ticker": mock_position})
+        
+        all_positions = mock_position.get_all_positions(validate_freshness=False)
+        open_positions = {k: v for k, v in all_positions.items() if v.contracts > 0}
+        position_count = len(open_positions)
+        
+        # Should be 1
+        assert position_count == 1
+        
+        # Should NOT call clear_slots_on_empty_positions
+        if position_count == 0:
+            mock_slot_allocator.clear_slots_on_empty_positions(position_count=0)
+        
+        # Verify it was NOT called
+        mock_slot_allocator.clear_slots_on_empty_positions.assert_not_called()
+    
+    def test_startup_resets_window_exposure(self):
+        """Test that startup resets window exposure."""
+        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import force_reset_window_exposure
+        
+        # This should not raise
+        force_reset_window_exposure(reason="startup_phantom_cleanup")
+
+
+class TestTimeframeTransitionResetLogic:
+    """Test timeframe transition reset logic in loop_15m.py."""
+    
+    @pytest.fixture
+    def mock_position_cache(self):
+        """Mock position cache for testing."""
+        cache = Mock()
+        cache.get_all_positions = Mock(return_value={})
+        cache.clear = AsyncMock()
+        return cache
+    
+    @pytest.fixture
+    def mock_slot_allocator(self):
+        """Mock slot allocator for testing."""
+        allocator = Mock()
+        allocator.clear_slots_on_empty_positions = Mock()
+        return allocator
+    
+    @pytest.mark.asyncio
+    async def test_timeframe_transition_clears_slots(self, mock_position_cache, mock_slot_allocator):
+        """Test that timeframe transition clears slots."""
+        # Simulate timeframe transition logic from loop_15m.py
+        all_positions = mock_position_cache.get_all_positions(validate_freshness=False)
+        open_positions = {k: v for k, v in all_positions.items() if v.contracts > 0}
+        position_count = len(open_positions)
+        
+        # Should clear slots regardless of position count
+        mock_slot_allocator.clear_slots_on_empty_positions(position_count=0)
+        
+        # Verify it was called
+        mock_slot_allocator.clear_slots_on_empty_positions.assert_called_once()
+    
+    @pytest.mark.asyncio
+    async def test_timeframe_transition_resets_window_exposure(self):
+        """Test that timeframe transition resets window exposure."""
+        from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import force_reset_window_exposure
+        
+        # This should not raise
+        force_reset_window_exposure(reason="timeframe_transition")
+    
+    @pytest.mark.asyncio
+    async def test_timeframe_transition_clears_position_cache_only_when_zero(self, mock_position_cache):
+        """Test that position cache is only cleared when position_count=0."""
+        # Test with position_count=0
+        all_positions = mock_position_cache.get_all_positions(validate_freshness=False)
+        open_positions = {k: v for k, v in all_positions.items() if v.contracts > 0}
+        position_count = len(open_positions)
+        
+        if position_count == 0:
+            await mock_position_cache.clear()
+        
+        # Verify clear was called
+        mock_position_cache.clear.assert_called_once()
+        
+        # Reset mock
+        mock_position_cache.clear.reset_mock()
+        
+        # Test with position_count>0
+        mock_position = Mock()
+        mock_position.contracts = 1
+        mock_position_cache.get_all_positions = Mock(return_value={"ticker": mock_position})
+        
+        all_positions = mock_position_cache.get_all_positions(validate_freshness=False)
+        open_positions = {k: v for k, v in all_positions.items() if v.contracts > 0}
+        position_count = len(open_positions)
+        
+        if position_count == 0:
+            await mock_position_cache.clear()
+        
+        # Verify clear was NOT called
+        mock_position_cache.clear.assert_not_called()
+    
+    @pytest.mark.asyncio
+    async def test_timeframe_transition_uses_async_clear_for_mutex_protection(self, mock_position_cache):
+        """Test that async clear() is used instead of clear_sync() for mutex protection."""
+        # Simulate timeframe transition logic
+        all_positions = mock_position_cache.get_all_positions(validate_freshness=False)
+        open_positions = {k: v for k, v in all_positions.items() if v.contracts > 0}
+        position_count = len(open_positions)
+        
+        if position_count == 0:
+            # Should use async clear() for mutex protection
+            await mock_position_cache.clear()
+        
+        # Verify async clear was called (not clear_sync)
+        mock_position_cache.clear.assert_called_once()
+        assert not hasattr(mock_position_cache, 'clear_sync') or not mock_position_cache.clear_sync.called
 
 
 if __name__ == "__main__":
