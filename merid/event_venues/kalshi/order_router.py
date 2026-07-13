@@ -5693,12 +5693,59 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         elif filled_count > 0:
             status = "partial_live"
         
-        # CRITICAL FIX (2026-07-12): Release allocated slot on fill (complete or partial)
-        # The slot was allocated to reserve exposure during order submission. Once the order
-        # is filled (even partially), the exposure is now tracked by position management,
-        # so the slot can be released to allow new orders.
-        if filled_count > 0:
-            _release_allocated_slot(intent)
+        # CRITICAL FIX (2026-07-13): Allocate slot on fill (not release)
+        # Previous behavior: Slot was allocated pre-submission and released on fill
+        # New behavior: Slot is allocated only when order actually fills
+        # This ensures exposure is only counted for FILLED orders, not ACCEPTED-but-unfilled orders
+        if filled_count > 0 and not _is_exit_order(intent):
+            try:
+                from merid.risk.global_slot_allocator import get_global_slot_allocator, AllocationRequest
+                
+                slot_allocator = get_global_slot_allocator()
+                
+                # Extract asset from ticker for allocation request
+                asset = None
+                ticker_upper = intent.ticker.upper()
+                if "BTC" in ticker_upper:
+                    asset = "BTC"
+                elif "ETH" in ticker_upper:
+                    asset = "ETH"
+                elif "SOL" in ticker_upper:
+                    asset = "SOL"
+                elif "XRP" in ticker_upper:
+                    asset = "XRP"
+                elif "DOGE" in ticker_upper:
+                    asset = "DOGE"
+                
+                # Create allocation request
+                allocation_request = AllocationRequest(
+                    agent_id=_agent,
+                    asset=asset or "UNKNOWN",
+                    ticker=intent.ticker,
+                    entry_price_cents=fill_price_cents,  # Use actual fill price
+                    edge_pct=getattr(intent, 'edge_pct', 0.0),
+                    spread_cents=0,
+                    confidence=getattr(intent, 'confidence', 0.5),
+                    is_exit_order=False
+                )
+                
+                # Request slot allocation
+                allocated, reason, _allocated_slot_id = slot_allocator.request_allocation(allocation_request)
+                
+                if allocated:
+                    logger.info(
+                        "[order-router-SLOT-ALLOCATED-ON-FILL] asset=%s ticker=%s agent=%s fill_price=%dc slot_id=%s total_exposure=$%.2f",
+                        asset, intent.ticker, _agent, fill_price_cents, _allocated_slot_id, slot_allocator.get_total_exposure()
+                    )
+                    # Store slot_id for later release on position close
+                    intent._allocated_slot_id = _allocated_slot_id
+                else:
+                    logger.warning(
+                        "[order-router-SLOT-ALLOCATION-FAILED-ON-FILL] asset=%s ticker=%s fill_price=%dc - %s",
+                        asset, intent.ticker, fill_price_cents, reason
+                    )
+            except Exception as slot_err:
+                logger.error("[order-router] Slot allocation on fill failed: %s", slot_err)
         
         # ALERT THRESHOLDS MONITORING: Track order fill and latency
         if filled_count > 0:
@@ -6183,82 +6230,12 @@ def _run_pre_trade_gate(
         # ── 2. Pre-trade gate (dedup + fill-awareness) ────────────────
         gate = get_pre_trade_gate()
 
-        # CRITICAL FIX (2026-07-12): Hard slot allocation for ALL orders (not just upstream path)
-        # This prevents the $1 exposure cap bypass where multiple orders pass the passive
-        # exposure check simultaneously before any fills occur. The slot must be allocated
-        # BEFORE any order routing to ensure atomic exposure reservation.
-        # CRITICAL FIX (2026-07-12): Store slot_id on intent for downstream release in _route_live
-        _allocated_slot_id = None
-        try:
-            from merid.risk.global_slot_allocator import get_global_slot_allocator, AllocationRequest
-            
-            slot_allocator = get_global_slot_allocator()
-            
-            # Exit orders bypass slot allocation (they reduce exposure)
-            if not _is_exit_order(intent):
-                # Extract asset from ticker for allocation request
-                asset = None
-                ticker_upper = intent.ticker.upper()
-                if "BTC" in ticker_upper:
-                    asset = "BTC"
-                elif "ETH" in ticker_upper:
-                    asset = "ETH"
-                elif "SOL" in ticker_upper:
-                    asset = "SOL"
-                elif "XRP" in ticker_upper:
-                    asset = "XRP"
-                elif "DOGE" in ticker_upper:
-                    asset = "DOGE"
-                
-                # Create allocation request
-                allocation_request = AllocationRequest(
-                    agent_id=_agent,
-                    asset=asset or "UNKNOWN",
-                    ticker=intent.ticker,
-                    entry_price_cents=intent.price_cents,
-                    edge_pct=getattr(intent, 'edge_pct', 0.0),
-                    spread_cents=0,
-                    confidence=getattr(intent, 'confidence', 0.5),  # 2026-07-12: Pass confidence from intent
-                    is_exit_order=_is_exit_order(intent)  # CRITICAL FIX (2026-07-12): Use unified exit order detection
-                )
-                
-                # Request slot allocation (this is the HARD BLOCK)
-                allocated, reason, _allocated_slot_id = slot_allocator.request_allocation(allocation_request)
-                
-                if not allocated:
-                    logger.warning(
-                        "[order-router-SLOT-ALLOCATOR-HARD-BLOCK] asset=%s ticker=%s agent=%s price=%dc notional=$%.2f - %s",
-                        asset, intent.ticker, _agent, intent.price_cents, (intent.count * intent.price_cents) / 100.0, reason
-                    )
-                    return OrderResult(
-                        status="rejected",
-                        mode=mode,
-                        reason=f"slot_allocator_hard_block:{reason}",
-                        latency_ms=round((_time.monotonic() - t0) * 1000, 2),
-                    )
-                
-                logger.info(
-                    "[order-router-SLOT-ALLOCATED] asset=%s ticker=%s agent=%s price=%dc slot_id=%s total_exposure=$%.2f",
-                    asset, intent.ticker, _agent, intent.price_cents, _allocated_slot_id, slot_allocator.get_total_exposure()
-                )
-                
-                # CRITICAL FIX (2026-07-12): Store slot_id on intent for downstream release
-                # This allows _route_live to release the slot on post-gate failures
-                intent._allocated_slot_id = _allocated_slot_id
-            else:
-                logger.info(
-                    "[order-router-SLOT-ALLOCATOR-BYPASS] Exit order bypasses slot allocation: ticker=%s action=%s",
-                    intent.ticker, intent.action
-                )
-                intent._allocated_slot_id = None
-        except Exception as slot_err:
-            logger.error("[order-router] Slot allocation failed (fail-closed): %s", slot_err)
-            return OrderResult(
-                status="rejected",
-                mode=mode,
-                reason=f"slot_allocator_error:{slot_err}",
-                latency_ms=round((_time.monotonic() - t0) * 1000, 2),
-            )
+        # CRITICAL FIX (2026-07-13): REMOVED pre-fill slot allocation
+        # Previous behavior: Slot was allocated BEFORE order submission, causing phantom exposure
+        # when orders returned ACCEPTED with filled=0. This blocked subsequent orders.
+        # New behavior: Slot allocation moved to post-fill path (only when order actually fills).
+        # This ensures exposure is only counted for FILLED orders, not ACCEPTED-but-unfilled orders.
+        intent._allocated_slot_id = None
 
         # Upstream-reservation fast-path (BUG: dual-PENDING leak fix):
         # If the caller has already passed a ``client_tag`` that maps to an

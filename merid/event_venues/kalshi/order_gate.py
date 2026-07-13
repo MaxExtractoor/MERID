@@ -129,9 +129,9 @@ class GateMetrics:
     blocked_invalid_transition: int = 0  # PHASE1-DUP-5: Invalid state transitions
     blocked_price_guard: int = 0  # Price guard rejections (deep OTM or high price)
     blocked_price_repeat: int = 0  # CRITICAL: Block repeat price execution (same ticker+side+price)
-    blocked_window_limit: int = 0  # CRITICAL: Block window-based risk limit violations (3% per agent, 5% total per 15m)
-    blocked_window_limit_entry: int = 0  # Track entry order window limit blocks
-    blocked_window_limit_exit: int = 0  # Track exit order window limit blocks
+    blocked_window_limit: int = 0  # CRITICAL: Block slot-based risk limit violations (fixed $1 exposure cap)
+    blocked_window_limit_entry: int = 0  # Track entry order slot limit blocks
+    blocked_window_limit_exit: int = 0  # Track exit order slot limit blocks
     blocked_exit_policy: int = 0  # CRITICAL: Block orders without exit policy metadata (2026-07-06)
     blocked_exit_policy_invalid: int = 0  # CRITICAL: Block orders with invalid exit policy values (2026-07-08)
     blocked_sequential_trading: int = 0  # CRITICAL: Block new entries when positions exist (2026-07-08)
@@ -988,52 +988,32 @@ class PreTradeGate:
             if profile and hasattr(profile, 'risk_policy_sequential_trading') and profile.risk_policy_sequential_trading:
                 is_exit_order = action == "sell"
                 if not is_exit_order:
-                    # CRITICAL FIX: Use global slot allocator instead of position cache
-                    # Slot allocator tracks available exposure after accounting for all open positions
-                    try:
-                        from merid.risk.global_slot_allocator import get_global_slot_allocator
-                        slot_allocator = get_global_slot_allocator()
-                        available_exposure = slot_allocator.get_available_exposure()
-                        
-                        # Calculate required exposure for this order
-                        required_exposure = price_cents / 100.0 if price_cents else 0.42  # Default to 42c (midpoint of 10-75c) if no price
-                        
-                        # Block if insufficient exposure
-                        if required_exposure > available_exposure:
-                            self._store._metrics.blocked_sequential_trading += 1
-                            logger.warning(
-                                "[GATE-ALERT] slot_allocator_blocked contract=%s agent=%s - "
-                                "Insufficient exposure: required $%.2f, available $%.2f. "
-                                "Close positions to free up slots. (metric: blocked_sequential_trading=%d)",
-                                contract_id, agent_id, required_exposure, available_exposure,
-                                self._store._metrics.blocked_sequential_trading
-                            )
-                            return GateVerdict(
-                                allowed=False,
-                                client_order_id=coid,
-                                reason=f"slot_allocator:insufficient_exposure_required_${required_exposure:.2f}_available_${available_exposure:.2f}",
-                            )
-                    except ImportError:
-                        # Fallback to position cache if slot allocator not available
-                        logger.warning("[GATE] Slot allocator not available, using position cache fallback")
-                        from merid.event_venues.kalshi.position_cache import get_position_cache
-                        position_cache = get_position_cache()
-                        total_exposure = position_cache.get_total_exposure_usd()
-                        
-                        if total_exposure >= 1.00:  # At full capacity
-                            self._store._metrics.blocked_sequential_trading += 1
-                            logger.warning(
-                                "[GATE-ALERT] sequential_trading_blocked (fallback) contract=%s agent=%s - "
-                                "At full capacity (total_exposure=$%.2f). No new entries until positions exit. "
-                                "(metric: blocked_sequential_trading=%d)",
-                                contract_id, agent_id, total_exposure,
-                                self._store._metrics.blocked_sequential_trading
-                            )
-                            return GateVerdict(
-                                allowed=False,
-                                client_order_id=coid,
-                                reason=f"sequential_trading:full_capacity_${total_exposure:.2f}",
-                            )
+                    # CRITICAL FIX: 2026-07-13 - Use position_cache instead of slot_allocator for exposure check
+                    # Slot allocator now only allocates on fill (post-fill path), so it doesn't have pre-fill exposure.
+                    # Position cache is the single source of truth for actual filled positions.
+                    from merid.event_venues.kalshi.position_cache import get_position_cache
+                    position_cache = get_position_cache()
+                    total_exposure = position_cache.get_total_exposure_usd()
+                    
+                    # Calculate required exposure for this order
+                    required_exposure = price_cents / 100.0 if price_cents else 0.42  # Default to 42c (midpoint of 10-75c) if no price
+                    available_exposure = 1.00 - total_exposure
+                    
+                    # Block if insufficient exposure
+                    if required_exposure > available_exposure:
+                        self._store._metrics.blocked_sequential_trading += 1
+                        logger.warning(
+                            "[GATE-ALERT] position_cache_blocked contract=%s agent=%s - "
+                            "Insufficient exposure: required $%.2f, available $%.2f. "
+                            "Close positions to free up slots. (metric: blocked_sequential_trading=%d)",
+                            contract_id, agent_id, required_exposure, available_exposure,
+                            self._store._metrics.blocked_sequential_trading
+                        )
+                        return GateVerdict(
+                            allowed=False,
+                            client_order_id=coid,
+                            reason=f"position_cache:insufficient_exposure_required_${required_exposure:.2f}_available_${available_exposure:.2f}",
+                        )
         except Exception as e:
             logger.warning("[GATE] Sequential trading check failed: %s", e)
             # Continue with other checks if validation fails (non-critical)
