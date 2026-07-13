@@ -405,7 +405,7 @@ momentum_fvg:
   rsi_macd_confluence_enabled: true  # Enable RSI+MACD confluence scoring (boost when both agree)
   
   # Liquidity-aware size scaling (Kalshi-specific tiers)
-  # Based on depth_yes_10c and depth_no_10c from orderbook
+  # Based on depth_10c_yes and depth_10c_no from orderbook
   liquidity_tiers:
     high_threshold: 200  # High liquidity: >=200 contracts (deep BTC 15m)
     high_size_factor: 1.0  # Use full profile risk
