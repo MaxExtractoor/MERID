@@ -5306,8 +5306,10 @@ async def edge_signals_endpoint(
                 confidence = 0.0
                 model_prob = implied_prob
 
-        ev_cents = round((model_prob - implied_prob) * 100, 1)
-        edge_pct = round((model_prob - implied_prob) / max(implied_prob, 0.01) * 100, 1)
+        # Use canonical EV calculation from canonical_buckets
+        from merid.metrics.canonical_buckets import calculate_ev_cents, calculate_edge_pct
+        ev_cents = round(calculate_ev_cents(int(implied_prob * 100), model_prob, "yes", 1), 1)
+        edge_pct = round(calculate_edge_pct(model_prob, implied_prob), 1)
 
         # Confidence bucket
         if confidence >= 0.7:

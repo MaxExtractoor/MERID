@@ -1324,7 +1324,10 @@ class Crypto15mIndicatorStack:
         side: str = "yes",
         contracts: int = 1,
     ) -> tuple:
-        """Compute expected value after Kalshi fees.
+        """Compute expected value after Kalshi fees (canonical implementation).
+
+        This now uses the canonical EV calculation from merid.metrics.canonical_buckets
+        to ensure consistency across the entire codebase.
 
         Args:
             price_cents: Kalshi price in cents (0-100).
@@ -1335,23 +1338,12 @@ class Crypto15mIndicatorStack:
         Returns:
             (net_ev_cents, fee_cents, fee_pct) tuple.
         """
-        p = price_cents / 100.0
-        from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
-        fee_cents = calculate_kalshi_fee_cents(contracts=contracts, price_cents=price_cents)
+        # Use canonical EV calculation
+        from merid.metrics.canonical_buckets import calculate_ev_cents, calculate_kalshi_fee_cents
+        
+        fee_cents = calculate_kalshi_fee_cents(contracts=contracts, price_cents=int(price_cents))
         fee_pct = fee_cents / price_cents if price_cents > 0 else 0.0
-
-        if side == "yes":
-            # Buy YES at price P: win (100 - P - fee), lose (P + fee)
-            win_payout = (100.0 - price_cents - fee_cents) * contracts
-            loss_cost = (price_cents + fee_cents) * contracts
-            ev = model_prob * win_payout - (1.0 - model_prob) * loss_cost
-        else:
-            # Buy NO at (100 - P): win (P - fee), lose (100 - P + fee)
-            no_price = 100.0 - price_cents
-            win_payout = (price_cents - fee_cents) * contracts
-            loss_cost = (no_price + fee_cents) * contracts
-            no_prob = 1.0 - model_prob
-            ev = no_prob * win_payout - model_prob * loss_cost
+        ev = calculate_ev_cents(int(price_cents), model_prob, side, contracts)
 
         return ev, fee_cents, fee_pct
 
