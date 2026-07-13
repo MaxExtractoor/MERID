@@ -327,6 +327,53 @@ class TestGlobalExposureCap:
         assert abs(allocator.get_available_exposure() - 0.10) < 0.01
 
 
+class TestAssetExtraction:
+    """Test robust asset extraction from agent_id."""
+    
+    def test_asset_extraction_from_agent_id(self):
+        """Test that asset extraction handles various agent_id formats correctly."""
+        # Simulate the asset extraction logic from agent_grid_15m.py
+        def extract_asset_from_agent_id(agent_id: str, fallback_asset: str = "UNKNOWN") -> str:
+            """Extract asset from agent_id (e.g., 'BTC_15M' -> 'BTC')."""
+            if agent_id:
+                # Handle common formats: "BTC_15M", "ETH_15m", "SOL_15M", etc.
+                asset = agent_id.split('_')[0].upper() if '_' in agent_id else agent_id.upper()
+                # Validate it's one of the 5 crypto assets
+                if asset not in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                    asset = fallback_asset
+            else:
+                asset = fallback_asset
+            return asset
+        
+        # Test various agent_id formats
+        assert extract_asset_from_agent_id("BTC_15M") == "BTC"
+        assert extract_asset_from_agent_id("ETH_15M") == "ETH"
+        assert extract_asset_from_agent_id("SOL_15M") == "SOL"
+        assert extract_asset_from_agent_id("XRP_15M") == "XRP"
+        assert extract_asset_from_agent_id("DOGE_15M") == "DOGE"
+        
+        # Test lowercase suffix
+        assert extract_asset_from_agent_id("BTC_15m") == "BTC"
+        assert extract_asset_from_agent_id("ETH_15m") == "ETH"
+        
+        # Test mixed case
+        assert extract_asset_from_agent_id("btc_15M") == "BTC"
+        assert extract_asset_from_agent_id("Eth_15M") == "ETH"
+        
+        # Test without underscore (should uppercase and validate)
+        assert extract_asset_from_agent_id("BTC") == "BTC"
+        assert extract_asset_from_agent_id("eth") == "ETH"
+        
+        # Test invalid agent_id (should fallback)
+        assert extract_asset_from_agent_id("INVALID_15M") == "UNKNOWN"
+        assert extract_asset_from_agent_id("INVALID") == "UNKNOWN"
+        assert extract_asset_from_agent_id("") == "UNKNOWN"
+        
+        # Test with fallback asset
+        assert extract_asset_from_agent_id("INVALID_15M", "BTC") == "BTC"
+        assert extract_asset_from_agent_id("", "ETH") == "ETH"
+
+
 class TestCheapestPriceFirstSelection:
     """Test that the global allocator prefers cheapest-price-first selection."""
     
