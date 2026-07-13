@@ -7349,7 +7349,7 @@ class LeanAgent15m:
 
         # Get current market price for BOTH YES and NO sides
 
-        # CRITICAL FIX: Evaluate both YES and NO contracts within 10c-50c sweet spot
+        # CRITICAL FIX: Evaluate both YES and NO contracts within 10c-75c canonical range
 
         # Select best edge - don't force YES or NO decision
 
@@ -8493,7 +8493,7 @@ class LeanAgent15m:
 
         # - mean_reversion: positive velocity -> NO (expect reversion down), negative velocity -> YES (expect reversion up)
 
-        # NEW: Evaluate edge for both YES and NO sides, select best edge within 10c-50c range
+        # NEW: Evaluate edge for both YES and NO sides, select best edge within 10-75c canonical range
 
         # This allows the indicator stack to determine which side has better EV, not forced YES/NO decision
 

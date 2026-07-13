@@ -5,7 +5,7 @@ Tests cover:
 - BUG #39: Convert mid_cents to integer when assigning to price_cents
 - BUG #34: Add edge_pct, confidence, model_prob to OrderIntent
 - BUG #35: Use actual market regime in policy resolution
-- Dual-side YES/NO evaluation within 10c-50c sweet spot
+- Dual-side YES/NO evaluation within 10c-75c canonical range
 - WebSocket disconnection handling with MD freshness check
 """
 
@@ -1028,7 +1028,7 @@ def test_aggressiveness_passed_to_order_intent():
 
 
 def test_dual_side_price_evaluation_yes_no_in_range():
-    """Test that both YES and NO prices are evaluated within 10c-50c sweet spot.
+    """Test that both YES and NO prices are evaluated within 10c-75c canonical range.
     
     CRITICAL FIX: System should evaluate both YES and NO contracts, not just YES.
     When YES is at 99c (outside range) and NO is at 45c (inside range), only NO should be evaluated.
@@ -1055,15 +1055,15 @@ def test_dual_side_price_evaluation_yes_no_in_range():
     # Verify YES is in range, NO is not (since YES + NO = 100)
     assert yes_price_cents == 99
     assert no_price_cents == 1
-    assert yes_in_range == False  # 99c outside 10-50c range
-    assert no_in_range == False  # 1c outside 10-50c range
+    assert yes_in_range == False  # 99c outside 10-75c range
+    assert no_in_range == False  # 1c outside 10-75c range
     assert sides_to_evaluate == []
 
 
 def test_dual_side_price_evaluation_both_in_range():
-    """Test that both YES and NO are evaluated when both are in 10c-50c range.
+    """Test that both YES and NO are evaluated when both are in 10c-75c canonical range.
     
-    NOTE: In binary markets, YES + NO = 100, so both cannot be in 10c-50c simultaneously.
+    NOTE: In binary markets, YES + NO = 100, so both cannot be in 10c-75c simultaneously.
     This test verifies the logic handles the case where one side is in range.
     """
     # Simulate market state with YES at 45c (in range), NO at 55c (out of range)
@@ -1089,12 +1089,12 @@ def test_dual_side_price_evaluation_both_in_range():
     assert yes_price_cents == 45
     assert no_price_cents == 55
     assert yes_in_range == True
-    assert no_in_range == False  # 55c is outside 10c-50c range
+    assert no_in_range == False  # 55c is outside 10-75c range
     assert sides_to_evaluate == ["yes"]
 
 
 def test_dual_side_price_evaluation_neither_in_range():
-    """Test that trading is skipped when both sides are outside 10c-50c range.
+    """Test that trading is skipped when both sides are outside 10c-75c range.
     
     When YES is at 99c and NO is at 1c (both outside range), skip trading.
     """

@@ -81,7 +81,7 @@ class PredictionRiskConfig:
     # Pre-trade checks
     max_slippage_cents: Decimal = Decimal("3")  # Max 3 cents worse than best
     min_depth_contracts: int = 5                 # Min depth at target price
-    max_spread_cents: Decimal = Decimal("30")    # 2026-07-10: OPTIMIZED to 30c - harmonizes with 10c-50c entry price sweet spot (industry research: 3-8c typical, 30c quality filter)
+    max_spread_cents: Decimal = Decimal("30")    # 2026-07-10: OPTIMIZED to 30c - harmonizes with 10c-75c canonical range (industry research: 3-8c typical, 30c quality filter)
     
     # Kalshi Platform Constraints
     min_order_size: int = 1                      # 1 contract min

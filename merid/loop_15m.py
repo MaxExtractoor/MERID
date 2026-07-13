@@ -4037,7 +4037,7 @@ class Kalshi15mLoop:
             trace_id = str(uuid.uuid4())[:8]
             candidate["trace_id"] = trace_id
 
-            # PRE-SEND ASSERT: Ensure order price is within profile price_range (10c-50c)
+            # PRE-SEND ASSERT: Ensure order price is within profile price_range (10c-75c)
             # Profile YAML: kalshi_crypto_15m_v2.yaml price_range.min_price_cents=10, max_price_cents=75
             if not (10 <= price_cents <= 75):
                 logger.error(
