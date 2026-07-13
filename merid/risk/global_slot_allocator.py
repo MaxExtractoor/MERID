@@ -6,10 +6,11 @@ Each contract consumes its entry price from the $1 cap, and slots free up on exi
 
 Key Rules:
 - Max 1 contract per trade (hard enforcement)
-- Entry price must be 10-50c (hard enforcement)
+- Entry price must be 10-75c (hard enforcement)
 - Total exposure across all 5 assets ≤ $1 (hard enforcement)
 - Sequential trading: new entries blocked until $1 frees up
 - Re-entry allowed when positions close (slot recycling)
+- Portfolio-level optimization using numerical methods for optimal allocation
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 from enum import Enum
+import numpy as np
 
 from utils.logger import get_logger
 
@@ -58,6 +60,7 @@ class AllocationRequest:
     entry_price_cents: int
     edge_pct: float
     spread_cents: int
+    confidence: float = 0.5  # Model confidence (0.0-1.0) for priority/tiebreaker
     is_exit_order: bool = False  # CRITICAL: Exit orders bypass slot allocation
     request_time: float = field(default_factory=time.time)
     
@@ -69,6 +72,11 @@ class AllocationRequest:
             if self.entry_price_cents < 10 or self.entry_price_cents > 75:
                 raise ValueError(
                     f"Entry price {self.entry_price_cents}c outside allowed range [10, 75]"
+                )
+            # Validate confidence range
+            if not 0.0 <= self.confidence <= 1.0:
+                raise ValueError(
+                    f"Confidence {self.confidence} outside allowed range [0.0, 1.0]"
                 )
 
 
@@ -88,6 +96,7 @@ class GlobalSlotAllocator:
     MIN_ENTRY_CENTS = 10
     MAX_ENTRY_CENTS = 75  # 2026-07-12: Expanded from 50c to 75c for current market conditions
     MAX_CONTRACTS_PER_ORDER = 1
+    MAX_POSITIONS_PER_ASSET = 1  # 2026-07-13: Only 1 position per asset allowed at a time
     
     def __init__(self):
         self._lock = threading.RLock()  # Use reentrant lock to prevent deadlock
@@ -152,6 +161,15 @@ class GlobalSlotAllocator:
         if entry_price_cents > self.MAX_ENTRY_CENTS:
             return False, f"Entry price {entry_price_cents}c above maximum {self.MAX_ENTRY_CENTS}c"
         
+        # Check per-asset position limit (2026-07-13: Only 1 position per asset)
+        if asset is not None:
+            existing_asset_slots = self.get_slots_by_asset(asset)
+            if len(existing_asset_slots) >= self.MAX_POSITIONS_PER_ASSET:
+                return False, (
+                    f"Asset {asset} already has {len(existing_asset_slots)} position(s), "
+                    f"max {self.MAX_POSITIONS_PER_ASSET} allowed"
+                )
+        
         # Check available exposure
         required_exposure = entry_price_cents / 100.0
         available = self.get_available_exposure()
@@ -161,6 +179,11 @@ class GlobalSlotAllocator:
                 f"Insufficient exposure: required ${required_exposure:.2f}, "
                 f"available ${available:.2f}, total ${self.get_total_exposure():.2f}"
             )
+        
+        # 2026-07-13: DISABLED correlation discount to simplify multi-asset position management
+        # The correlation discount was causing excessive rejections and interfering with
+        # the per-asset position limit and cheapest-price-first selection logic.
+        # Re-enable if needed with proper configuration and testing.
         
         # Check if enough room for minimum entry (10c)
         if available - required_exposure < (self.MIN_ENTRY_CENTS / 100.0):
@@ -219,9 +242,9 @@ class GlobalSlotAllocator:
             self._total_rejections += 1
             logger.info(
                 "[SLOT-ALLOCATOR] Rejected allocation: agent=%s asset=%s "
-                "price=%dc edge=%.2f%% spread=%dc - %s",
+                "price=%dc edge=%.2f%% spread=%dc confidence=%.2f - %s",
                 request.agent_id, request.asset, request.entry_price_cents,
-                request.edge_pct, request.spread_cents, reason
+                request.edge_pct, request.spread_cents, request.confidence, reason
             )
             return False, reason, None
         
@@ -247,11 +270,11 @@ class GlobalSlotAllocator:
             
             logger.info(
                 "[SLOT-ALLOCATOR] Allocated slot: slot_id=%s agent=%s asset=%s "
-                "ticker=%s price=%dc edge=%.2f%% spread=%dc "
+                "ticker=%s price=%dc edge=%.2f%% spread=%dc confidence=%.2f "
                 "total_exposure=$%.2f available=$%.2f slot_count=%d",
                 slot_id, request.agent_id, request.asset, request.ticker,
                 request.entry_price_cents, request.edge_pct, request.spread_cents,
-                total_exposure, available, len(self._slots)
+                request.confidence, total_exposure, available, len(self._slots)
             )
             
             return True, "", slot_id
@@ -385,6 +408,179 @@ class GlobalSlotAllocator:
                     for slot in self._slots.values()
                 ]
             }
+    
+    def optimize_portfolio_allocation(
+        self,
+        opportunities: List[Dict[str, any]],
+        correlation_matrix: Optional[Dict[str, Dict[str, float]]] = None
+    ) -> Dict[str, float]:
+        """
+        Calculate optimal portfolio allocation using numerical optimization.
+        
+        Uses mean-variance optimization with correlation-adjusted risk to find
+        the optimal allocation across available opportunities within the $1 cap.
+        
+        Args:
+            opportunities: List of opportunity dicts with keys:
+                - asset: Asset symbol (e.g., "BTC")
+                - entry_price_cents: Entry price in cents
+                - edge_pct: Expected edge percentage
+                - confidence: Model confidence (0.0-1.0)
+            correlation_matrix: Optional correlation matrix for risk adjustment
+        
+        Returns:
+            Dict mapping asset symbols to optimal exposure in USD
+        """
+        if not opportunities:
+            return {}
+        
+        # Use default correlation matrix if not provided
+        if correlation_matrix is None:
+            try:
+                from merid.risk.correlation_matrix import get_correlation_matrix
+                correlation_matrix = get_correlation_matrix()
+            except Exception as e:
+                logger.warning("[SLOT-ALLOCATOR] Failed to get correlation matrix: %s", e)
+                # Fall back to identity matrix (no correlation)
+                assets = [opp["asset"] for opp in opportunities]
+                correlation_matrix = {asset: {a: 1.0 if asset == a else 0.0 for a in assets} for asset in assets}
+        
+        # Extract assets and expected returns
+        assets = [opp["asset"] for opp in opportunities]
+        n = len(assets)
+        
+        # Expected returns based on edge and confidence
+        expected_returns = np.array([
+            opp["edge_pct"] * opp["confidence"] for opp in opportunities
+        ])
+        
+        # Build correlation matrix as numpy array
+        corr_matrix = np.zeros((n, n))
+        for i, asset_i in enumerate(assets):
+            for j, asset_j in enumerate(assets):
+                corr_matrix[i, j] = correlation_matrix.get(asset_i, {}).get(asset_j, 0.0)
+        
+        # Portfolio variance: w^T * Sigma * w
+        # Using correlation matrix as proxy for covariance (simplified)
+        def portfolio_variance(weights):
+            return np.sqrt(weights.T @ corr_matrix @ weights)
+        
+        # Portfolio return: w^T * mu
+        def portfolio_return(weights):
+            return np.sum(weights * expected_returns)
+        
+        # Objective: Maximize Sharpe ratio (return / risk)
+        def negative_sharpe_ratio(weights):
+            portfolio_vol = portfolio_variance(weights)
+            if portfolio_vol < 1e-6:
+                return -portfolio_return(weights)  # Avoid division by zero
+            return -portfolio_return(weights) / portfolio_vol
+        
+        # Constraints
+        constraints = [
+            # Sum of weights = 1 (full allocation of available capital)
+            {"type": "eq", "fun": lambda w: np.sum(w) - 1.0},
+            # Each weight >= 0 (no short selling)
+            {"type": "ineq", "fun": lambda w: w}
+        ]
+        
+        # Initial guess: equal weights
+        initial_weights = np.ones(n) / n
+        
+        # Bounds: 0 <= weight <= 1
+        bounds = [(0.0, 1.0) for _ in range(n)]
+        
+        try:
+            from scipy.optimize import minimize
+            
+            result = minimize(
+                negative_sharpe_ratio,
+                initial_weights,
+                method="SLSQP",
+                bounds=bounds,
+                constraints=constraints,
+                options={"maxiter": 100, "ftol": 1e-6}
+            )
+            
+            if result.success:
+                optimal_weights = result.x
+            else:
+                logger.warning(
+                    "[SLOT-ALLOCATOR] Optimization failed: %s, using equal weights",
+                    result.message
+                )
+                optimal_weights = initial_weights
+        except ImportError:
+            logger.warning("[SLOT-ALLOCATOR] scipy not available, using equal weights")
+            optimal_weights = initial_weights
+        except Exception as e:
+            logger.warning("[SLOT-ALLOCATOR] Optimization error: %s, using equal weights", e)
+            optimal_weights = initial_weights
+        
+        # Convert weights to USD exposure based on available capital
+        available_capital = self.get_available_exposure()
+        optimal_exposure = {}
+        
+        for i, asset in enumerate(assets):
+            # Exposure = weight * available_capital
+            # But cap at opportunity's entry price (max 1 contract per trade)
+            entry_price_usd = opportunities[i]["entry_price_cents"] / 100.0
+            max_for_asset = min(optimal_weights[i] * available_capital, entry_price_usd)
+            optimal_exposure[asset] = max_for_asset
+        
+        logger.info(
+            "[SLOT-ALLOCATOR] Portfolio optimization: %d opportunities, "
+            "available_capital=$%.2f, optimal_allocation=%s",
+            n, available_capital, optimal_exposure
+        )
+        
+        return optimal_exposure
+    
+    def suggest_allocations(
+        self,
+        opportunities: List[Dict[str, any]]
+    ) -> List[Tuple[str, float, str]]:
+        """
+        Suggest which allocations to make based on portfolio optimization.
+        
+        Args:
+            opportunities: List of opportunity dicts with keys:
+                - asset: Asset symbol
+                - entry_price_cents: Entry price in cents
+                - edge_pct: Expected edge percentage
+                - confidence: Model confidence
+        
+        Returns:
+            List of (asset, suggested_exposure_usd, reason) tuples sorted by priority
+        """
+        if not opportunities:
+            return []
+        
+        # Get optimal portfolio allocation
+        optimal_exposure = self.optimize_portfolio_allocation(opportunities)
+        
+        # Build suggestions with priority based on edge * confidence
+        suggestions = []
+        for opp in opportunities:
+            asset = opp["asset"]
+            suggested = optimal_exposure.get(asset, 0.0)
+            entry_price_usd = opp["entry_price_cents"] / 100.0
+            
+            # Priority score: edge * confidence
+            priority = opp["edge_pct"] * opp["confidence"]
+            
+            if suggested >= entry_price_usd * 0.5:  # At least 50% of entry price
+                reason = f"High priority (edge={opp['edge_pct']:.1%}, conf={opp['confidence']:.2f})"
+                suggestions.append((asset, suggested, reason, priority))
+            elif suggested > 0:
+                reason = f"Medium priority (edge={opp['edge_pct']:.1%}, conf={opp['confidence']:.2f})"
+                suggestions.append((asset, suggested, reason, priority))
+        
+        # Sort by priority (descending)
+        suggestions.sort(key=lambda x: x[3], reverse=True)
+        
+        # Return without priority score
+        return [(asset, exposure, reason) for asset, exposure, reason, _ in suggestions]
 
 
 # Singleton instance

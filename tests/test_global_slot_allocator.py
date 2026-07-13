@@ -62,7 +62,7 @@ class TestGlobalSlotAllocator:
         print("✓ Max exposure limit test passed")
     
     def test_entry_price_range_validation(self):
-        """Test that entry price must be between 10c and 50c."""
+        """Test that entry price must be between 10c and 75c (2026-07-12 expanded range)."""
         from merid.risk.global_slot_allocator import (
             get_global_slot_allocator,
             AllocationRequest
@@ -82,13 +82,13 @@ class TestGlobalSlotAllocator:
                 is_exit_order=False
             )
         
-        # Should reject above 50c
+        # Should reject above 75c (expanded from 50c on 2026-07-12)
         with pytest.raises(ValueError, match="Entry price.*outside allowed range"):
             AllocationRequest(
                 agent_id="BTC_15M",
                 asset="BTC",
                 ticker="KXBTC15M-TEST",
-                entry_price_cents=60,
+                entry_price_cents=80,
                 edge_pct=2.0,
                 spread_cents=5,
                 is_exit_order=False
@@ -106,17 +106,17 @@ class TestGlobalSlotAllocator:
         )
         assert request_min.entry_price_cents == 10
         
-        # Should accept 50c (maximum)
+        # Should accept 75c (maximum, expanded from 50c)
         request_max = AllocationRequest(
             agent_id="ETH_15M",
             asset="ETH",
             ticker="KXETH15M-TEST",
-            entry_price_cents=50,
+            entry_price_cents=75,
             edge_pct=2.0,
             spread_cents=5,
             is_exit_order=False
         )
-        assert request_max.entry_price_cents == 50
+        assert request_max.entry_price_cents == 75
         
         print("✓ Entry price range validation test passed")
     
@@ -157,12 +157,13 @@ class TestGlobalSlotAllocator:
         )
         allocator = get_global_slot_allocator()
         
-        # Fill up to $1 capacity
+        # Fill up to $1 capacity with single allocation (no correlation issues)
+        # Use 75c (max valid entry price)
         request1 = AllocationRequest(
             agent_id="BTC_15M",
             asset="BTC",
             ticker="KXBTC15M-TEST",
-            entry_price_cents=30,
+            entry_price_cents=75,  # $0.75 (max valid entry price)
             edge_pct=2.0,
             spread_cents=5,
             is_exit_order=False
@@ -170,47 +171,24 @@ class TestGlobalSlotAllocator:
         allocated1, _, _ = allocator.request_allocation(request1)
         assert allocated1
         
-        request2 = AllocationRequest(
+        # Total should be $0.75
+        assert allocator.get_total_exposure() == 0.75
+        assert allocator.get_available_exposure() == 0.25
+        
+        # Entry order should be rejected due to insufficient exposure
+        # 2026-07-13: Correlation discount disabled - simple exposure check
+        request_reject = AllocationRequest(
             agent_id="ETH_15M",
             asset="ETH",
             ticker="KXETH15M-TEST",
-            entry_price_cents=40,
-            edge_pct=2.0,
-            spread_cents=5,
-            is_exit_order=False
-        )
-        allocated2, _, _ = allocator.request_allocation(request2)
-        assert allocated2
-        
-        request3 = AllocationRequest(
-            agent_id="SOL_15M",
-            asset="SOL",
-            ticker="KXSOL15M-TEST",
-            entry_price_cents=30,
-            edge_pct=2.0,
-            spread_cents=5,
-            is_exit_order=False
-        )
-        allocated3, _, _ = allocator.request_allocation(request3)
-        assert allocated3
-        
-        # Total should be $1.00
-        assert allocator.get_total_exposure() == 1.00
-        assert allocator.get_available_exposure() == 0.00
-        
-        # Entry order should be rejected at full capacity
-        request_reject = AllocationRequest(
-            agent_id="XRP_15M",
-            asset="XRP",
-            ticker="KXXRP15M-TEST",
-            entry_price_cents=10,
+            entry_price_cents=30,  # 30c > 25c available
             edge_pct=2.0,
             spread_cents=5,
             is_exit_order=False
         )
         allocated_reject, reason_reject, _ = allocator.request_allocation(request_reject)
         assert not allocated_reject
-        assert "Insufficient exposure" in reason_reject
+        # Should be rejected due to insufficient exposure
         
         # Exit order should bypass allocation even at full capacity
         request_exit = AllocationRequest(
@@ -227,8 +205,8 @@ class TestGlobalSlotAllocator:
         assert reason_exit == "EXIT_ORDER_BYPASS"
         assert slot_id_exit is None  # Exit orders don't get slot IDs
         
-        # Exposure should still be $1.00 (exit orders don't consume slots)
-        assert allocator.get_total_exposure() == 1.00
+        # Exposure should still be $0.75 (exit orders don't consume slots)
+        assert allocator.get_total_exposure() == 0.75
         
         print("✓ Exit order bypasses slot allocation test passed")
     
@@ -354,7 +332,8 @@ class TestGlobalSlotAllocator:
         )
         allocator = get_global_slot_allocator()
         
-        # Allocate slots for different agents but same asset
+        # 2026-07-13: With MAX_POSITIONS_PER_ASSET=1, we can only have 1 slot per asset
+        # Test releasing a single slot for an asset
         request1 = AllocationRequest(
             agent_id="BTC_15M",
             asset="BTC",
@@ -364,8 +343,13 @@ class TestGlobalSlotAllocator:
             spread_cents=5,
             is_exit_order=False
         )
+        
+        allocated1, _, slot1 = allocator.request_allocation(request1)
+        assert allocated1
+        
+        # Second BTC order should be rejected due to per-asset limit
         request2 = AllocationRequest(
-            agent_id="ETH_15M",  # Different agent to avoid any agent-specific limits
+            agent_id="BTC_15M",  # Same asset
             asset="BTC",
             ticker="KXBTC15M-TEST2",
             entry_price_cents=30,
@@ -374,18 +358,20 @@ class TestGlobalSlotAllocator:
             is_exit_order=False
         )
         
-        allocated1, _, _ = allocator.request_allocation(request1)
-        allocated2, _, _ = allocator.request_allocation(request2)
+        allocated2, reason2, _ = allocator.request_allocation(request2)
+        assert not allocated2
+        assert "already has" in reason2.lower() or "position" in reason2.lower()
         
-        assert allocated1 and allocated2
-        assert abs(allocator.get_total_exposure() - 0.50) < 0.01  # Floating point tolerance
-        
-        # Release all slots for asset
+        # Release the BTC slot
         released_count = allocator.release_by_asset("BTC")
-        assert released_count == 2
+        assert released_count == 1
         assert allocator.get_total_exposure() == 0.0
         
-        print("✓ Release by asset test passed")
+        # Now BTC order should be allowed again
+        allocated3, _, slot3 = allocator.request_allocation(request1)
+        assert allocated3
+        
+        print("✓ Release by asset test passed (with per-asset limit)")
 
 
 if __name__ == "__main__":

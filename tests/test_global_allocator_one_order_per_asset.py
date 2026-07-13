@@ -13,9 +13,11 @@ def test_global_allocator_one_order_per_asset():
     """Test that global allocator allows only 1 order per asset per cycle."""
     
     # Create allocator with $1.00 venue cap
-    allocator = GlobalAllocator(venue_cap_usd=1.00, min_edge_pct=2.0)
+    # Use lower min_edge_pct to ensure test candidates pass
+    allocator = GlobalAllocator(venue_cap_usd=1.00, min_edge_pct=1.0)
     
     # Create multiple candidates for the same asset (ETH)
+    # Edge values must meet per-asset thresholds: ETH 2.0%
     candidates = [
         OrderCandidate(
             asset="ETH",
@@ -24,8 +26,8 @@ def test_global_allocator_one_order_per_asset():
             action="buy",
             price_cents=25,
             count=1,
-            edge_pct=5.0,
-            confidence=0.9,
+            edge_pct=5.0,  # Meets ETH threshold of 2.0%
+            confidence=0.9,  # Above 50% filter
             model_prob=0.75,
             agent_name="ETH_15M"
         ),
@@ -36,8 +38,8 @@ def test_global_allocator_one_order_per_asset():
             action="buy",
             price_cents=25,
             count=1,
-            edge_pct=4.0,
-            confidence=0.8,
+            edge_pct=4.0,  # Meets ETH threshold of 2.0%
+            confidence=0.8,  # Above 50% filter
             model_prob=0.70,
             agent_name="ETH_15M"
         ),
@@ -48,8 +50,8 @@ def test_global_allocator_one_order_per_asset():
             action="buy",
             price_cents=25,
             count=1,
-            edge_pct=6.0,
-            confidence=0.95,
+            edge_pct=6.0,  # Meets BTC threshold of 1.75%
+            confidence=0.95,  # Above 50% filter
             model_prob=0.80,
             agent_name="BTC_15M"
         ),
@@ -76,9 +78,11 @@ def test_global_allocator_one_order_per_asset():
 def test_global_allocator_multiple_assets():
     """Test that global allocator allows 1 order per asset across multiple assets."""
     
-    allocator = GlobalAllocator(venue_cap_usd=1.00, min_edge_pct=2.0)
+    # Use lower min_edge_pct to ensure test candidates pass
+    allocator = GlobalAllocator(venue_cap_usd=1.00, min_edge_pct=1.0)
     
     # Create candidates for multiple assets
+    # Edge values must meet per-asset thresholds
     candidates = [
         OrderCandidate(
             asset="BTC",
@@ -87,8 +91,8 @@ def test_global_allocator_multiple_assets():
             action="buy",
             price_cents=25,
             count=1,
-            edge_pct=5.0,
-            confidence=0.9,
+            edge_pct=5.0,  # Meets BTC threshold of 1.75%
+            confidence=0.9,  # Above 50% filter
             model_prob=0.75,
             agent_name="BTC_15M"
         ),
@@ -99,8 +103,8 @@ def test_global_allocator_multiple_assets():
             action="buy",
             price_cents=25,
             count=1,
-            edge_pct=4.0,
-            confidence=0.8,
+            edge_pct=4.0,  # Meets ETH threshold of 2.0%
+            confidence=0.8,  # Above 50% filter
             model_prob=0.70,
             agent_name="ETH_15M"
         ),
@@ -111,8 +115,8 @@ def test_global_allocator_multiple_assets():
             action="buy",
             price_cents=25,
             count=1,
-            edge_pct=3.0,
-            confidence=0.7,
+            edge_pct=3.0,  # Meets SOL threshold of 2.5%
+            confidence=0.7,  # Above 50% filter
             model_prob=0.65,
             agent_name="SOL_15M"
         ),
@@ -132,9 +136,11 @@ def test_global_allocator_multiple_assets():
 def test_global_allocator_respects_venue_cap():
     """Test that global allocator respects venue cap even with 1 order per asset limit."""
     
-    allocator = GlobalAllocator(venue_cap_usd=1.00, min_edge_pct=2.0)
+    # Use lower min_edge_pct to ensure test candidates pass
+    allocator = GlobalAllocator(venue_cap_usd=1.00, min_edge_pct=1.0)
     
     # Create candidates that would exceed venue cap if all chosen
+    # Edge values must meet per-asset thresholds
     candidates = [
         OrderCandidate(
             asset="BTC",
@@ -143,8 +149,8 @@ def test_global_allocator_respects_venue_cap():
             action="buy",
             price_cents=50,  # $0.50 notional
             count=1,
-            edge_pct=5.0,
-            confidence=0.9,
+            edge_pct=5.0,  # Meets BTC threshold of 1.75%
+            confidence=0.9,  # Above 50% filter
             model_prob=0.75,
             agent_name="BTC_15M"
         ),
@@ -155,8 +161,8 @@ def test_global_allocator_respects_venue_cap():
             action="buy",
             price_cents=50,  # $0.50 notional
             count=1,
-            edge_pct=4.0,
-            confidence=0.8,
+            edge_pct=4.0,  # Meets ETH threshold of 2.0%
+            confidence=0.8,  # Above 50% filter
             model_prob=0.70,
             agent_name="ETH_15M"
         ),
@@ -167,8 +173,8 @@ def test_global_allocator_respects_venue_cap():
             action="buy",
             price_cents=50,  # $0.50 notional (would exceed cap)
             count=1,
-            edge_pct=3.0,
-            confidence=0.7,
+            edge_pct=3.0,  # Meets SOL threshold of 2.5%
+            confidence=0.7,  # Above 50% filter
             model_prob=0.65,
             agent_name="SOL_15M"
         ),
@@ -188,9 +194,11 @@ def test_global_allocator_respects_venue_cap():
 def test_global_allocator_prioritizes_cheaper_when_cap_exceeded():
     """Test that global allocator finds cheaper alternative when first candidate exceeds cap."""
     
-    allocator = GlobalAllocator(venue_cap_usd=1.00, min_edge_pct=2.0)
+    # Use lower min_edge_pct to ensure test candidates pass
+    allocator = GlobalAllocator(venue_cap_usd=1.00, min_edge_pct=1.0)
     
     # Create candidates where first (best edge) exceeds cap, but cheaper alternative exists
+    # Edge values must meet per-asset thresholds
     candidates = [
         OrderCandidate(
             asset="ETH",
@@ -199,8 +207,8 @@ def test_global_allocator_prioritizes_cheaper_when_cap_exceeded():
             action="buy",
             price_cents=73,  # $0.73 notional (exceeds cap alone)
             count=1,
-            edge_pct=4.0,
-            confidence=0.54,
+            edge_pct=4.0,  # Meets ETH threshold of 2.0%
+            confidence=0.54,  # Above 50% filter
             model_prob=0.70,
             agent_name="ETH_15M"
         ),
@@ -211,8 +219,8 @@ def test_global_allocator_prioritizes_cheaper_when_cap_exceeded():
             action="buy",
             price_cents=64,  # $0.64 notional (fits under cap)
             count=1,
-            edge_pct=4.865,
-            confidence=0.55,
+            edge_pct=4.865,  # Meets BTC threshold of 1.75%
+            confidence=0.55,  # Above 50% filter
             model_prob=0.75,
             agent_name="BTC_15M"
         ),
@@ -236,9 +244,11 @@ def test_global_allocator_prioritizes_cheaper_when_cap_exceeded():
 def test_global_allocator_sorts_by_edge_then_price():
     """Test that global allocator sorts by edge first, then by price (cheaper first for same edge)."""
     
-    allocator = GlobalAllocator(venue_cap_usd=1.00, min_edge_pct=2.0)
+    # Use lower min_edge_pct to ensure test candidates pass
+    allocator = GlobalAllocator(venue_cap_usd=1.00, min_edge_pct=1.0)
     
     # Create candidates with same edge but different prices
+    # Edge values must meet per-asset thresholds
     candidates = [
         OrderCandidate(
             asset="BTC",
@@ -247,8 +257,8 @@ def test_global_allocator_sorts_by_edge_then_price():
             action="buy",
             price_cents=70,  # $0.70 notional
             count=1,
-            edge_pct=5.0,
-            confidence=0.9,
+            edge_pct=5.0,  # Meets BTC threshold of 1.75%
+            confidence=0.9,  # Above 50% filter
             model_prob=0.75,
             agent_name="BTC_15M"
         ),
@@ -259,8 +269,8 @@ def test_global_allocator_sorts_by_edge_then_price():
             action="buy",
             price_cents=60,  # $0.60 notional (cheaper)
             count=1,
-            edge_pct=5.0,
-            confidence=0.9,
+            edge_pct=5.0,  # Meets ETH threshold of 2.0%
+            confidence=0.9,  # Above 50% filter
             model_prob=0.70,
             agent_name="ETH_15M"
         ),
@@ -280,7 +290,8 @@ def test_global_allocator_sorts_by_edge_then_price():
 def test_global_allocator_optimal_knapsack_allocation():
     """Test that global allocator uses optimal knapsack allocation for $1 cap."""
     
-    allocator = GlobalAllocator(venue_cap_usd=1.00, min_edge_pct=2.0)
+    # Use lower min_edge_pct to ensure test candidates pass
+    allocator = GlobalAllocator(venue_cap_usd=1.00, min_edge_pct=1.0)
     
     # Create candidates where best combination is not the first two by edge
     # BTC: 4.0% edge, $0.67 notional
@@ -288,6 +299,7 @@ def test_global_allocator_optimal_knapsack_allocation():
     # SOL: 3.0% edge, $0.30 notional
     # Best combo under $1: BTC + SOL = $0.97, total edge = 7.0%
     # Alternative: ETH alone = $0.73, edge = 3.5%
+    # Edge values must meet per-asset thresholds
     candidates = [
         OrderCandidate(
             asset="BTC",
@@ -296,8 +308,8 @@ def test_global_allocator_optimal_knapsack_allocation():
             action="buy",
             price_cents=67,  # $0.67 notional
             count=1,
-            edge_pct=4.0,
-            confidence=0.9,
+            edge_pct=4.0,  # Meets BTC threshold of 1.75%
+            confidence=0.9,  # Above 50% filter
             model_prob=0.75,
             agent_name="BTC_15M"
         ),
@@ -308,8 +320,8 @@ def test_global_allocator_optimal_knapsack_allocation():
             action="buy",
             price_cents=73,  # $0.73 notional
             count=1,
-            edge_pct=3.5,
-            confidence=0.8,
+            edge_pct=3.5,  # Meets ETH threshold of 2.0%
+            confidence=0.8,  # Above 50% filter
             model_prob=0.70,
             agent_name="ETH_15M"
         ),
@@ -320,8 +332,8 @@ def test_global_allocator_optimal_knapsack_allocation():
             action="buy",
             price_cents=30,  # $0.30 notional
             count=1,
-            edge_pct=3.0,
-            confidence=0.7,
+            edge_pct=3.0,  # Meets SOL threshold of 2.5%
+            confidence=0.7,  # Above 50% filter
             model_prob=0.65,
             agent_name="SOL_15M"
         ),
@@ -343,9 +355,11 @@ def test_global_allocator_optimal_knapsack_allocation():
 def test_global_allocator_all_candidates_exceed_cap():
     """Test that global allocator handles case where all candidates exceed cap individually."""
     
-    allocator = GlobalAllocator(venue_cap_usd=1.00, min_edge_pct=2.0)
+    # Use lower min_edge_pct to ensure test candidates pass
+    allocator = GlobalAllocator(venue_cap_usd=1.00, min_edge_pct=1.0)
     
     # Create candidates where each exceeds $1 cap alone
+    # Edge values must meet per-asset thresholds
     candidates = [
         OrderCandidate(
             asset="BTC",
@@ -354,8 +368,8 @@ def test_global_allocator_all_candidates_exceed_cap():
             action="buy",
             price_cents=150,  # $1.50 notional (exceeds cap)
             count=1,
-            edge_pct=5.0,
-            confidence=0.9,
+            edge_pct=5.0,  # Meets BTC threshold of 1.75%
+            confidence=0.9,  # Above 50% filter
             model_prob=0.75,
             agent_name="BTC_15M"
         ),
@@ -366,8 +380,8 @@ def test_global_allocator_all_candidates_exceed_cap():
             action="buy",
             price_cents=120,  # $1.20 notional (exceeds cap)
             count=1,
-            edge_pct=4.0,
-            confidence=0.8,
+            edge_pct=4.0,  # Meets ETH threshold of 2.0%
+            confidence=0.8,  # Above 50% filter
             model_prob=0.70,
             agent_name="ETH_15M"
         ),

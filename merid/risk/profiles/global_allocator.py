@@ -193,7 +193,7 @@ class GlobalAllocator:
         
         best_combination = []
         best_total_edge = 0.0
-        best_total_notional = 0.0
+        best_total_notional = float('inf')  # Initialize to infinity so first valid combo is selected
         
         # Try all combinations (2^n where n=5, so max 32 combinations)
         for r in range(1, len(unique_candidates) + 1):
@@ -220,8 +220,10 @@ class GlobalAllocator:
                 # Calculate total edge score for this combination
                 total_edge = sum(c.edge_score for c in combo)
                 
-                # Prefer combination with higher total edge
-                # If tied, prefer lower notional (cheaper)
+                # 2026-07-13: Prefer higher edge first, then cheaper price for tiebreaker
+                # Primary: Higher total edge for better expected returns
+                # Secondary: Lower notional (cheaper) to maximize position count under $1 cap
+                # This allows more assets to trade within the $1 cap (e.g., 35c + 55c + 10c = $1)
                 if total_edge > best_total_edge or (total_edge == best_total_edge and total_notional < best_total_notional):
                     best_combination = list(combo)
                     best_total_edge = total_edge
