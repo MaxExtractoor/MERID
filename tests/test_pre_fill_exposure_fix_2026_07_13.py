@@ -369,6 +369,46 @@ class TestEndToEndOrderFlow:
         is_exit = _is_exit_order(intent)
         assert is_exit is False, "YES entry orders must NOT bypass slot allocation"
 
+    def test_position_cache_exit_order_detection(self):
+        """Verify position_cache._is_exit_order_from_action works correctly."""
+        from merid.event_venues.kalshi.position_cache import KalshiPositionCache
+        
+        cache = KalshiPositionCache()
+        
+        # Entry order (no exit markers) should NOT be exit
+        assert cache._is_exit_order_from_action("buy", source="agent_grid_15m") is False
+        assert cache._is_exit_order_from_action("sell", source="agent_grid_15m") is False
+        
+        # Exit order with exit markers should be exit
+        assert cache._is_exit_order_from_action("sell", source="take_profit") is True
+        assert cache._is_exit_order_from_action("sell", source="stop_loss") is True
+        assert cache._is_exit_order_from_action("sell", source="micro_scalp") is True
+        assert cache._is_exit_order_from_action("sell", source="exit") is True
+        assert cache._is_exit_order_from_action("sell", source="close") is True
+        assert cache._is_exit_order_from_action("sell", source="ratchet") is True
+
+    def test_order_gate_exit_detection_consistency(self):
+        """Verify order_gate uses exit_policy_id for exit detection consistently."""
+        # This is a structural test to verify the logic is in place
+        # The actual behavior is tested in integration
+        from merid.event_venues.kalshi.order_gate import PreTradeGate
+        import inspect
+        
+        # Get the check method source
+        source = inspect.getsource(PreTradeGate.check)
+        
+        # Verify exit_policy_id is used for exit detection
+        assert "exit_policy_id is not None" in source, "order_gate should use exit_policy_id for exit detection"
+        
+        # Verify it's NOT using action == "sell" for exit detection
+        # (this would be the old buggy logic)
+        lines = source.split('\n')
+        for i, line in enumerate(lines):
+            if 'is_exit_order = action == "sell"' in line:
+                # Check if this is inside the new logic block (should not be)
+                # The new logic should use exit_policy_id
+                assert False, "order_gate should NOT use action == 'sell' for exit detection"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
