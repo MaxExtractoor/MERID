@@ -97,47 +97,41 @@ class TestWSBenignErrorDetection:
 
     def test_is_benign_ws_error_cancelled(self):
         """CancelledError should be detected as benign."""
-        from web.main import _is_benign_ws_error
-
+        from merid.event_venues.kalshi.ws import KalshiWebSocket
         exc = asyncio.CancelledError()
-        assert _is_benign_ws_error(exc) is True
+        assert KalshiWebSocket._is_benign_ws_error_static(exc) is True
 
     def test_is_benign_ws_error_connection_reset(self):
         """ConnectionResetError should be detected as benign."""
-        from web.main import _is_benign_ws_error
-
+        from merid.event_venues.kalshi.ws import KalshiWebSocket
         exc = ConnectionResetError()
-        assert _is_benign_ws_error(exc) is True
+        assert KalshiWebSocket._is_benign_ws_error_static(exc) is True
 
     def test_is_benign_ws_error_win995(self):
         """WinError 995 should be detected as benign."""
-        from web.main import _is_benign_ws_error
-
+        from merid.event_venues.kalshi.ws import KalshiWebSocket
         # Create an OSError with winerror 995
         exc = OSError("The I/O operation has been aborted")
         exc.winerror = 995
-        assert _is_benign_ws_error(exc) is True
+        assert KalshiWebSocket._is_benign_ws_error_static(exc) is True
 
     def test_is_benign_ws_error_invalid_state(self):
-        """InvalidStateError should be detected as benign."""
-        from web.main import _is_benign_ws_error
-
+        """InvalidStateError should NOT be detected as benign (not in whitelist)."""
+        from merid.event_venues.kalshi.ws import KalshiWebSocket
         exc = asyncio.InvalidStateError("invalid state")
-        assert _is_benign_ws_error(exc) is True
+        assert KalshiWebSocket._is_benign_ws_error_static(exc) is False
 
     def test_is_benign_ws_error_regular_oserror(self):
         """Regular OSError should NOT be detected as benign."""
-        from web.main import _is_benign_ws_error
-
+        from merid.event_venues.kalshi.ws import KalshiWebSocket
         exc = OSError("Some other error")
-        assert _is_benign_ws_error(exc) is False
+        assert KalshiWebSocket._is_benign_ws_error_static(exc) is False
 
     def test_is_benign_ws_error_regular_exception(self):
         """Regular exceptions should NOT be detected as benign."""
-        from web.main import _is_benign_ws_error
-
-        assert _is_benign_ws_error(ValueError("test")) is False
-        assert _is_benign_ws_error(RuntimeError("test")) is False
+        from merid.event_venues.kalshi.ws import KalshiWebSocket
+        assert KalshiWebSocket._is_benign_ws_error_static(ValueError("test")) is False
+        assert KalshiWebSocket._is_benign_ws_error_static(RuntimeError("test")) is False
 
 
 class TestKillSwitchRecordError:

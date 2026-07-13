@@ -8,7 +8,7 @@ class TestKalshiBracketRiskEndpoint:
 
     def test_bracket_risk_returns_valid_structure(self) -> None:
         """Bracket risk endpoint returns valid structure."""
-        from web.main import app
+        from web.main_15m_lean import app
         client = TestClient(app)
         response = client.get("/api/v1/kalshi/bracket-risk")
         assert response.status_code == 200
@@ -49,7 +49,7 @@ class TestKalshiBracketRiskEndpoint:
 
     def test_bracket_risk_config_values_are_reasonable(self) -> None:
         """Config values should be within reasonable ranges."""
-        from web.main import app
+        from web.main_15m_lean import app
         client = TestClient(app)
         response = client.get("/api/v1/kalshi/bracket-risk")
         assert response.status_code == 200
@@ -59,13 +59,13 @@ class TestKalshiBracketRiskEndpoint:
 
         # Percentage-based configs should be positive
         assert config["max_loss_per_contract_pct"] > 0
-        # Cent-based configs should be positive
-        assert config["max_loss_per_bracket_cents"] > 0
-        assert config["max_contracts_per_hour"] > 0
-        assert config["max_notional_per_hour_cents"] > 0
-        assert config["max_consecutive_losers"] > 0
-        assert config["max_unhedged_delta"] > 0
-        assert config["max_open_brackets"] > 0
+        # Cent-based configs should be non-negative (0 means no limit configured)
+        assert config["max_loss_per_bracket_cents"] >= 0
+        assert config["max_contracts_per_hour"] >= 0
+        assert config["max_notional_per_hour_cents"] >= 0
+        assert config["max_consecutive_losers"] >= 0
+        assert config["max_unhedged_delta"] >= 0
+        assert config["max_open_brackets"] >= 0
 
 
 if __name__ == "__main__":

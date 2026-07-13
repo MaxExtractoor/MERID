@@ -8,7 +8,7 @@ class TestRiskAgentEndpoints:
 
     def test_agent_metrics_returns_404_for_unknown_agent(self) -> None:
         """Agent metrics should return 404 for unknown agent."""
-        from web.main import app
+        from web.main_15m_lean import app
         client = TestClient(app)
         response = client.get("/api/v1/risk/agents/nonexistent-agent/metrics")
         assert response.status_code == 404
@@ -18,7 +18,7 @@ class TestRiskAgentEndpoints:
 
     def test_agent_drawdown_history_returns_valid_structure(self) -> None:
         """Drawdown history endpoint returns valid structure."""
-        from web.main import app
+        from web.main_15m_lean import app
         client = TestClient(app)
         response = client.get("/api/v1/risk/agents/test-agent/drawdown-history")
         assert response.status_code == 200
@@ -34,7 +34,7 @@ class TestRiskAgentEndpoints:
 
     def test_agent_equity_history_returns_valid_structure(self) -> None:
         """Equity history endpoint returns valid structure."""
-        from web.main import app
+        from web.main_15m_lean import app
         client = TestClient(app)
         response = client.get("/api/v1/risk/agents/test-agent/equity-history")
         assert response.status_code == 200
@@ -50,7 +50,7 @@ class TestRiskAgentEndpoints:
 
     def test_agent_metrics_with_registered_agent(self) -> None:
         """Agent metrics should work after registering an agent."""
-        from web.main import app
+        from web.main_15m_lean import app
         from merid.risk.agent_metrics import get_agent_metrics_tracker
 
         # Register an agent
@@ -73,7 +73,7 @@ class TestRiskAgentEndpoints:
 
     def test_agent_metrics_history_with_data(self) -> None:
         """Agent metrics history should reflect recorded trades."""
-        from web.main import app
+        from web.main_15m_lean import app
         from merid.risk.agent_metrics import get_agent_metrics_tracker
 
         # Register an agent and record some trades
