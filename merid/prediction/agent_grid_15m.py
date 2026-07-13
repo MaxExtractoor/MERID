@@ -1174,11 +1174,10 @@ class LeanAgent15m:
 
         self._strip_order_counts: Dict[str, int] = {}
 
-        # Initialize from agents' config series_tickers
+        # Initialize from own config series_tickers
         series_tickers = []
-        for agent in self._agents:
-            if hasattr(agent, 'config') and hasattr(agent.config, 'series_tickers'):
-                series_tickers.extend(agent.config.series_tickers)
+        if hasattr(self.config, 'series_tickers'):
+            series_tickers = list(self.config.series_tickers)
 
         for ticker in series_tickers:
 
@@ -4642,24 +4641,12 @@ class LeanAgent15m:
 
         
 
-        # Calculate model probability from selected edge
-        # edge_pct is now in FRACTION units (0.0-1.0), so no division needed
-
-        if signal_side == "yes":
-
-            model_prob = min(0.95, 0.5 + edge_pct)
-
-        else:
-
-            model_prob = max(0.05, 0.5 - edge_pct)
-
-        
-
         # Calculate price_cents from market state (mid price)
+        # CRITICAL: This must be calculated BEFORE model_prob since model_prob depends on price_cents
 
-        price_cents = 25  # 2026-07-09: Changed from 50 to 25 (midpoint of 10-50c sweet spot)
+        price_cents = 42  # 2026-07-13: Changed from 25 to 42 (midpoint of 10-75c canonical range)
 
-        price_source = "default_25c"
+        price_source = "default_42c"
 
         try:
 
@@ -4697,19 +4684,40 @@ class LeanAgent15m:
 
                     price_source = "ask_only"
 
-                else:
-
-                    logger.warning("[PRICE-CENTS-DEBUG] asset=%s ticker=%s bid/ask both zero, using default 25c", asset, ticker)
-
-            else:
-
-                logger.warning("[PRICE-CENTS-DEBUG] asset=%s ticker=%s market_state is None, using default 25c", asset, ticker)
-
         except Exception as e:
 
-            logger.warning("[MOMENTUM-FVG] Failed to get price_cents from market state: %s", e)
+            logger.warning("[PRICE-CENTS-ERROR] asset=%s error getting market price: %s", asset, e)
+
+            price_cents = 42  # Fallback to default
+
+            price_source = "fallback_42c"
 
         
+
+        # Calculate model probability from selected edge
+        # CRITICAL FIX: 2026-07-13 - Anchor model_prob to market price to avoid deployment safety rejections
+        # Previous velocity-based calculation (0.5 + edge_pct) always returned ~0.5, causing massive
+        # distance from market prices (e.g., 74c = 0.74, distance = 0.69 > 0.50 threshold)
+        # New calculation anchors model_prob to market-implied probability, adjusted by edge
+        
+        # Get market-implied probability from price_cents
+        market_prob = price_cents / 100.0 if price_cents > 0 else 0.5
+        
+        # Cap edge adjustment to 20% to prevent extreme probabilities
+        edge_adjustment = min(edge_pct, 0.20)
+        
+        if signal_side == "yes":
+            # For YES: model_prob should be higher than market_prob (we think outcome is more likely)
+            model_prob = min(0.95, market_prob + edge_adjustment)
+        else:
+            # For NO: model_prob should be lower than market_prob (we think outcome is less likely)
+            model_prob = max(0.05, market_prob - edge_adjustment)
+
+        
+
+        logger.info("[PRICE-BASED-DEBUG] asset=%s price_cents=%d price_source=%s market_prob=%.2f edge_pct=%.2f%% edge_adjustment=%.3f model_prob=%.2f",
+
+                    asset, price_cents, price_source, market_prob, edge_pct, edge_adjustment, model_prob)
 
         logger.info("[PRICE-CENTS-DEBUG] asset=%s final_price_cents=%d source=%s", asset, price_cents, price_source)
 
@@ -8701,15 +8709,15 @@ class LeanAgent15m:
 
             
 
-            # CRITICAL FIX: 2026-07-09 - Add midpoint preference (~25c bonus)
+            # CRITICAL FIX: 2026-07-13 - Add midpoint preference (~42.5c bonus for 10-75c range)
 
             # Nudges selection toward mid-band fills where execution quality is best
 
             def midpoint_bonus(price_cents):
 
-                """Peak at 25c, decays toward 10c/50c."""
+                """Peak at 42.5c (midpoint of 10-75c canonical range), decays toward 10c/75c."""
 
-                dist = abs(price_cents - 25)
+                dist = abs(price_cents - 42.5)
 
                 midpoint_bonus_max = 0.5  # Maximum bonus in percentage points
 
@@ -9801,17 +9809,17 @@ class LeanAgent15m:
 
             if asset in ['BTC', 'ETH']:
 
-                # BTC/ETH: 20c minimum
+                # BTC/ETH: 10c minimum (canonical range 10-75c)
 
-                if 20 <= price_cents <= 24:
+                if 10 <= price_cents <= 14:
 
                     price_edge_multiplier = 1.5  # Near minimum, conservative
 
-                elif 25 <= price_cents <= 34:
+                elif 15 <= price_cents <= 24:
 
                     price_edge_multiplier = 1.2  # Slightly above minimum
 
-                elif 35 <= price_cents <= 49:
+                elif 25 <= price_cents <= 49:
 
                     price_edge_multiplier = 1.0  # Normal range
 
@@ -9819,23 +9827,23 @@ class LeanAgent15m:
 
                     price_edge_multiplier = 1.0  # Sweet spot
 
-                elif 66 <= price_cents <= 70:
+                elif 66 <= price_cents <= 75:
 
                     price_edge_multiplier = 1.5  # Near max price
 
             elif asset in ['SOL', 'XRP']:
 
-                # SOL/XRP: 25c minimum
+                # SOL/XRP: 10c minimum (canonical range 10-75c)
 
-                if 25 <= price_cents <= 29:
+                if 10 <= price_cents <= 14:
 
                     price_edge_multiplier = 1.5  # Near minimum, conservative
 
-                elif 30 <= price_cents <= 39:
+                elif 15 <= price_cents <= 24:
 
                     price_edge_multiplier = 1.2  # Slightly above minimum
 
-                elif 40 <= price_cents <= 49:
+                elif 25 <= price_cents <= 49:
 
                     price_edge_multiplier = 1.0  # Normal range
 
@@ -9843,23 +9851,23 @@ class LeanAgent15m:
 
                     price_edge_multiplier = 1.0  # Sweet spot
 
-                elif 66 <= price_cents <= 70:
+                elif 66 <= price_cents <= 75:
 
                     price_edge_multiplier = 1.5  # Near max price
 
             elif asset == 'DOGE':
 
-                # DOGE: 30c minimum (noisiest asset)
+                # DOGE: 10c minimum (canonical range 10-75c)
 
-                if 30 <= price_cents <= 34:
+                if 10 <= price_cents <= 14:
 
                     price_edge_multiplier = 1.5  # Near minimum, conservative
 
-                elif 35 <= price_cents <= 44:
+                elif 15 <= price_cents <= 24:
 
                     price_edge_multiplier = 1.2  # Slightly above minimum
 
-                elif 45 <= price_cents <= 49:
+                elif 25 <= price_cents <= 49:
 
                     price_edge_multiplier = 1.0  # Normal range
 
@@ -9867,7 +9875,7 @@ class LeanAgent15m:
 
                     price_edge_multiplier = 1.0  # Sweet spot
 
-                elif 66 <= price_cents <= 70:
+                elif 66 <= price_cents <= 75:
 
                     price_edge_multiplier = 1.5  # Near max price
 
@@ -12391,11 +12399,17 @@ class LeanAgentGrid15m:
                 for candidate in candidates:
 
                     # Extract asset from agent_id (e.g., "BTC_15M" -> "BTC")
-
-                    asset = candidate.get('agent_id', '').replace('_15M', '').replace('_15m', '')
-
-                    if not asset:
-
+                    # 2026-07-13: Use robust asset extraction to handle various agent_id formats
+                    agent_id = candidate.get('agent_id', '')
+                    
+                    # Try to extract from agent_id first
+                    if agent_id:
+                        # Handle common formats: "BTC_15M", "ETH_15m", "SOL_15M", etc.
+                        asset = agent_id.split('_')[0].upper() if '_' in agent_id else agent_id.upper()
+                        # Validate it's one of the 5 crypto assets
+                        if asset not in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                            asset = candidate.get('asset', 'UNKNOWN')
+                    else:
                         asset = candidate.get('asset', 'UNKNOWN')
 
                     
