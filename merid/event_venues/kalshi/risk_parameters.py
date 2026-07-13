@@ -45,7 +45,10 @@ MAX_OPEN_PRICE_CENTS: Final[int] = 75  # 2026-07-12: Expanded to 75c for current
 # ============================================================================
 
 # Minimum model probability for opening orders
-MIN_MODEL_PROB: Final[float] = 0.60
+# CRITICAL FIX 2026-07-12: Updated from 0.60 to 0.05 to match actual clamping behavior
+# The codebase clamps model_prob to [0.05, 0.95] in multiple locations
+# This constant now reflects the actual minimum used in production
+MIN_MODEL_PROB: Final[float] = 0.05
 
 # Confidence bands
 # 2026-07-06: DEPRECATED - These hardcoded values should be read from profile YAML instead
@@ -169,36 +172,39 @@ def compute_order_aggressiveness(asset: str, edge_pct: float, seconds_to_expiry:
         return 0.0  # No trade (edge too low)
 
 def validate_edge(edge_pct: float, asset: str, confidence: float = 0.5) -> tuple[bool, str]:
-    """Validate edge against per-asset thresholds and return (is_valid, reason).
+    """Validate edge against profile edge_bands threshold and return (is_valid, reason).
     
     This is the centralized edge validation function for the 15m crypto stack.
     All edge validation should go through this function to ensure consistency.
     
+    CRITICAL FIX 2026-07-12: Updated to use profile edge_bands minimum (0.5%) as the single source of truth.
+    Previous hardcoded per-asset thresholds (1.25%-2.75%) conflicted with profile YAML documentation
+    which states edge_bands.*.min_edge_pct is the PRIMARY threshold for trade execution.
+    
+    Edge threshold hierarchy (from profile YAML):
+    1. edge_bands.*.min_edge_pct - PRIMARY: Used for trade execution (0.5% minimum)
+    2. strategy_policy.min_edge - LEGACY: Not actively used, kept for compatibility
+    3. strategies.*.policy.min_edge - Strategy-specific: Used by individual strategies
+    4. Per-asset min_edge_early/mid/late/terminal - IGNORED: Legacy fields, not used
+    
     Args:
         edge_pct: Edge value in FRACTION units (0.0-1.0)
-        asset: Asset name (BTC, ETH, SOL, XRP, DOGE)
+        asset: Asset name (BTC, ETH, SOL, XRP, DOGE) - for logging only, threshold is unified
         confidence: Signal confidence (0.0-1.0) - for logging only, not used in threshold
     
     Returns:
         (is_valid, reason): Tuple where is_valid is True if edge meets threshold,
                             and reason explains the decision
     """
-    # Map asset to thresholds
-    asset_thresholds = {
-        "BTC": EDGE_RESTING_ENTRY_BTC,  # 1.25% (0.0125)
-        "ETH": EDGE_RESTING_ENTRY_ETH,  # 1.5% (0.015)
-        "SOL": EDGE_RESTING_ENTRY_SOL,  # 2.0% (0.02)
-        "XRP": EDGE_RESTING_ENTRY_XRP,  # 2.25% (0.0225)
-        "DOGE": EDGE_RESTING_ENTRY_DOGE,  # 2.75% (0.0275)
-    }
-    
-    threshold = asset_thresholds.get(asset, EDGE_RESTING_ENTRY_BTC)
+    # Use unified edge_bands minimum from profile (0.5% = 0.005)
+    # This aligns with profile YAML edge_bands configuration which is the single source of truth
+    EDGE_BANDS_MINIMUM = 0.005  # 0.5% minimum edge from profile edge_bands
     
     # Check if edge meets threshold (use absolute value for contrarian signals)
-    if abs(edge_pct) >= threshold:
-        return True, f"Edge {edge_pct:.6f} meets threshold {threshold:.6f} for {asset}"
+    if abs(edge_pct) >= EDGE_BANDS_MINIMUM:
+        return True, f"Edge {edge_pct:.6f} meets edge_bands threshold {EDGE_BANDS_MINIMUM:.6f} for {asset}"
     else:
-        return False, f"Edge {edge_pct:.6f} below threshold {threshold:.6f} for {asset}"
+        return False, f"Edge {edge_pct:.6f} below edge_bands threshold {EDGE_BANDS_MINIMUM:.6f} for {asset}"
 
 # ============================================================================
 # SIZE THRESHOLDS (contracts)

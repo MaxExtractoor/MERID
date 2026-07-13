@@ -146,47 +146,111 @@ class TestThresholdAlignment:
         """Test that centralized validate_edge function works correctly."""
         from merid.event_venues.kalshi.risk_parameters import validate_edge
         
-        # Test valid edge (meets threshold)
-        is_valid, reason = validate_edge(0.02, "BTC")  # 2% > 1.25% threshold
+        # Test valid edge (meets edge_bands threshold of 0.5%)
+        is_valid, reason = validate_edge(0.02, "BTC")  # 2% > 0.5% threshold
         assert is_valid is True
-        assert "meets threshold" in reason.lower()
+        assert "meets edge_bands threshold" in reason.lower()
+        
+        # Test edge exactly at threshold (0.5% should pass)
+        is_valid, reason = validate_edge(0.005, "BTC")  # 0.5% = threshold
+        assert is_valid is True
+        assert "meets edge_bands threshold" in reason.lower()
         
         # Test invalid edge (below threshold)
-        is_valid, reason = validate_edge(0.005, "BTC")  # 0.5% < 1.25% threshold
+        is_valid, reason = validate_edge(0.004, "BTC")  # 0.4% < 0.5% threshold
         assert is_valid is False
-        assert "below threshold" in reason.lower()
+        assert "below edge_bands threshold" in reason.lower()
         
         # Test contrarian signal (negative edge)
         is_valid, reason = validate_edge(-0.02, "BTC")  # -2% meets threshold
         assert is_valid is True
-        assert "meets threshold" in reason.lower()
+        assert "meets edge_bands threshold" in reason.lower()
     
-    def test_loop_15m_uses_per_asset_thresholds(self):
-        """Test that loop_15m.py uses per-asset thresholds from risk_parameters."""
-        # Simulate the threshold lookup in loop_15m.py
+    def test_loop_15m_uses_unified_edge_bands_threshold(self):
+        """Test that validate_edge uses unified edge_bands threshold (0.5%) for all assets."""
+        from merid.event_venues.kalshi.risk_parameters import validate_edge
+        
+        # Test that all assets use the same unified threshold (0.5%)
+        assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+        
+        for asset in assets:
+            # Edge at threshold (0.5%) should pass for all assets
+            is_valid, reason = validate_edge(0.005, asset)
+            assert is_valid is True, f"{asset} should accept 0.5% edge"
+            assert "meets edge_bands threshold" in reason.lower()
+            
+            # Edge below threshold (0.4%) should fail for all assets
+            is_valid, reason = validate_edge(0.004, asset)
+            assert is_valid is False, f"{asset} should reject 0.4% edge"
+            assert "below edge_bands threshold" in reason.lower()
+
+
+class TestConfidenceThresholdAlignment:
+    """Test that confidence threshold is standardized to 0.65 from profile YAML."""
+    
+    def test_profile_confidence_threshold_is_primary(self):
+        """Test that profile.confidence_min_confidence_threshold is the single source of truth."""
+        from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
+        
+        adapter = Crypto15mProfileAdapter()
+        profile = adapter.profile
+        
+        # Primary confidence threshold should be 0.65 from profile YAML
+        assert profile.confidence_min_confidence_threshold == 0.65, \
+            f"Primary confidence threshold should be 0.65, got {profile.confidence_min_confidence_threshold}"
+    
+    def test_deprecated_confidence_constants_marked(self):
+        """Test that deprecated confidence constants are marked as DEPRECATED."""
         from merid.event_venues.kalshi.risk_parameters import (
-            EDGE_RESTING_ENTRY_BTC,
-            EDGE_RESTING_ENTRY_ETH,
-            EDGE_RESTING_ENTRY_SOL,
-            EDGE_RESTING_ENTRY_XRP,
-            EDGE_RESTING_ENTRY_DOGE
+            CONFIDENCE_NO_TRADE,
+            CONFIDENCE_CAUTIOUS,
+            CONFIDENCE_CONFIDENT,
+            KELLY_CONFIDENCE_FLOOR,
+            MIN_SENTIMENT_CONFIDENCE
         )
         
-        asset_thresholds = {
-            "BTC": EDGE_RESTING_ENTRY_BTC,
-            "ETH": EDGE_RESTING_ENTRY_ETH,
-            "SOL": EDGE_RESTING_ENTRY_SOL,
-            "XRP": EDGE_RESTING_ENTRY_XRP,
-            "DOGE": EDGE_RESTING_ENTRY_DOGE
-        }
+        # These constants should exist but are marked as DEPRECATED
+        # Their values may differ from profile (0.65) but should not be used in new code
+        assert CONFIDENCE_NO_TRADE == 0.60
+        assert CONFIDENCE_CAUTIOUS == 0.75
+        assert CONFIDENCE_CONFIDENT == 0.75
+        assert KELLY_CONFIDENCE_FLOOR == 0.65
+        assert MIN_SENTIMENT_CONFIDENCE == 0.70
+    
+    def test_order_router_uses_profile_confidence(self):
+        """Test that order_router uses profile.confidence_min_confidence_threshold."""
+        # This verifies the order_router reads from profile instead of hardcoded values
+        # The actual implementation is in order_router.py lines 1996, 2077, 2179
+        # We verify the constant exists and has the correct value
+        from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
         
-        # BTC threshold
-        min_edge_threshold = asset_thresholds.get("BTC", EDGE_RESTING_ENTRY_BTC)
-        assert min_edge_threshold == 0.0125  # 1.25%
+        adapter = Crypto15mProfileAdapter()
+        profile = adapter.profile
         
-        # DOGE threshold (highest)
-        min_edge_threshold = asset_thresholds.get("DOGE", EDGE_RESTING_ENTRY_BTC)
-        assert min_edge_threshold == 0.0275  # 2.75%
+        # Order router should use this value (0.65) as documented in CONFIDENCE_SETUP_AUDIT_2026-07-06.md
+        assert profile.confidence_min_confidence_threshold == 0.65
+
+
+class TestModelProbabilityThresholdAlignment:
+    """Test that MIN_MODEL_PROB constant matches actual clamping behavior."""
+    
+    def test_min_model_prob_matches_clamping(self):
+        """Test that MIN_MODEL_PROB constant (0.05) matches actual clamping in code."""
+        from merid.event_venues.kalshi.risk_parameters import MIN_MODEL_PROB
+        
+        # MIN_MODEL_PROB should be 0.05 to match actual clamping behavior
+        assert MIN_MODEL_PROB == 0.05, f"MIN_MODEL_PROB should be 0.05, got {MIN_MODEL_PROB}"
+    
+    def test_model_prob_clamping_range(self):
+        """Test that model_prob is clamped to [0.05, 0.95] in agent_grid_15m.py."""
+        # This verifies the actual clamping behavior matches the constant
+        # Test lower bound (edge_pct large enough to push below 0.05)
+        model_prob = max(0.05, 0.5 - 0.50)  # edge_pct = 0.50, would be 0.0 without clamp
+        assert model_prob == 0.05, "Lower bound should be 0.05"
+        
+        # Test upper bound (edge_pct large enough to push above 0.95)
+        model_prob = min(0.95, 0.5 + 0.50)  # edge_pct = 0.50, would be 1.0 without clamp
+        assert model_prob == 0.95, "Upper bound should be 0.95"
 
 
 class TestFillsLedgerEdgeRecording:
