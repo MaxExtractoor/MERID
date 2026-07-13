@@ -731,6 +731,79 @@ def _get_dynamic_sizing_min_contracts() -> int:
 
 
 # =============================================================================
+# Kelly Criterion Functions
+# =============================================================================
+
+def calculate_kelly_fraction(
+    model_prob: float,
+    price_cents: int,
+    confidence: float = 0.5,
+    fractional_kelly: float = 0.25
+) -> float:
+    """Calculate Kelly fraction for binary option.
+    
+    Based on Kelly Criterion: f* = (bp - q) / b
+    where b = (1 - price) / price (net odds for binary options)
+    
+    Args:
+        model_prob: True probability of winning (0.0-1.0)
+        price_cents: Contract price in cents (10-75)
+        confidence: Model confidence (0.0-1.0) for weighting
+        fractional_kelly: Kelly fraction multiplier (default 0.25 for quarter-Kelly)
+    
+    Returns:
+        Kelly fraction (0.0 to 1.0). Returns 0.0 if edge is negative.
+    """
+    # Validate inputs
+    if not (0.0 <= model_prob <= 1.0):
+        logger.warning("[KELLY] Invalid model_prob=%.2f, clamping to [0,1]", model_prob)
+        model_prob = max(0.0, min(1.0, model_prob))
+    
+    if not (0.0 <= confidence <= 1.0):
+        logger.warning("[KELLY] Invalid confidence=%.2f, clamping to [0,1]", confidence)
+        confidence = max(0.0, min(1.0, confidence))
+    
+    # Calculate net odds for binary option
+    price = price_cents / 100.0
+    if price <= 0 or price >= 1.0:
+        logger.warning("[KELLY] Invalid price=%.2f, cannot calculate Kelly", price)
+        return 0.0
+    
+    b = (1.0 - price) / price  # Net odds
+    p = model_prob
+    q = 1.0 - p
+    
+    # Calculate full Kelly
+    kelly = (b * p - q) / b
+    
+    # If Kelly is negative, no edge
+    if kelly <= 0:
+        logger.debug(
+            "[KELLY] Negative edge: model_prob=%.2f price=%.2f b=%.2f kelly=%.4f",
+            model_prob, price, b, kelly
+        )
+        return 0.0
+    
+    # Apply fractional Kelly (quarter-Kelly by default for production)
+    fractional = kelly * fractional_kelly
+    
+    # Apply confidence weighting (0.5 to 2.0 multiplier)
+    confidence_multiplier = 0.5 + (confidence * 1.5)  # Maps 0.0→0.5, 0.5→1.25, 1.0→2.0
+    weighted_kelly = fractional * confidence_multiplier
+    
+    # Cap at 1.0 (cannot bet more than 100% of available capital)
+    final_kelly = min(1.0, weighted_kelly)
+    
+    logger.debug(
+        "[KELLY] model_prob=%.2f price=%.2f b=%.2f kelly=%.4f "
+        "fractional=%.4f confidence=%.2f multiplier=%.2f final=%.4f",
+        model_prob, price, b, kelly, fractional, confidence, confidence_multiplier, final_kelly
+    )
+    
+    return final_kelly
+
+
+# =============================================================================
 # Unified Sizing Function
 # =============================================================================
 
@@ -747,18 +820,26 @@ def compute_order_size(
     max_notional_usd: Optional[Decimal] = None,  # NEW: explicit max_notional from profile
     time_of_day_multiplier: float = 1.0,  # 2026 Research-Based Risk Management: Time-of-day risk scaling
     tte_seconds: Optional[float] = None,  # Time to expiry in seconds for TTE regime multiplier
+    model_prob: Optional[float] = None,  # 2026-07-12: Model probability for Kelly calculation
 ) -> Tuple[int, Decimal, dict]:
-    """Compute order size using fixed $1 total exposure model (2026-07-08).
+    """Compute order size using fixed $1 total exposure model with Kelly filtering (2026-07-12).
     
     This is the SINGLE SOURCE OF TRUTH for order sizing in 15m agents.
     All percentage-based sizing has been removed in favor of fixed $1 total exposure.
     
+    NEW (2026-07-12): Kelly Criterion integration
+    - Uses Kelly fraction to filter trades with no edge
+    - Confidence-weighted Kelly for intelligent position sizing
+    - Still respects $1 global cap via slot allocation
+    
     Formula:
-        1. Use fixed $1 exposure cap from profile (fixed_exposure_cap_usd)
-        2. Check existing total exposure from position_cache
-        3. Available exposure = $1 - existing_exposure
-        4. If available_exposure >= contract_cost, allow 1 contract
-        5. Otherwise, reject (no slots available)
+        1. Calculate Kelly fraction from model_prob, price, confidence
+        2. If Kelly fraction is 0, reject (no edge)
+        3. Use fixed $1 exposure cap from profile (fixed_exposure_cap_usd)
+        4. Check existing total exposure from slot allocator
+        5. Available exposure = $1 - existing_exposure
+        6. If available_exposure >= contract_cost, allow 1 contract
+        7. Otherwise, reject (no slots available)
     
     Example with existing_exposure=$0.65, price_cents=35:
         available_exposure = $1.00 - $0.65 = $0.35
@@ -770,6 +851,7 @@ def compute_order_size(
         bankroll_usd: Current bankroll in USD (from Kalshi API) - kept for compatibility
         price_cents: Price per contract in cents (0-99)
         asset: Asset symbol (e.g., "BTC", "ETH", "SOL", "XRP", "DOGE")
+        model_prob: Model probability (0.0-1.0) for Kelly calculation
     
     Returns:
         Tuple of (count, notional_usd, metadata_dict)
@@ -786,6 +868,37 @@ def compute_order_size(
         )
         raise ValueError(f"Invalid price_cents={price_cents} for asset={asset} - must be > 0")
     
+    # 2026-07-12: Kelly Criterion filtering
+    # Calculate Kelly fraction to filter trades with no edge
+    if model_prob is not None:
+        confidence_float = float(confidence) if confidence is not None else 0.5
+        kelly_fraction = calculate_kelly_fraction(
+            model_prob=model_prob,
+            price_cents=price_cents,
+            confidence=confidence_float,
+            fractional_kelly=0.25  # Quarter-Kelly for production
+        )
+        
+        # If Kelly fraction is 0, reject (no edge)
+        if kelly_fraction <= 0:
+            logger.info(
+                "[UNIFIED-SIZING] Kelly filter: asset=%s model_prob=%.2f price=%dc kelly=%.4f - NO EDGE, rejecting",
+                asset, model_prob, price_cents, kelly_fraction
+            )
+            return 0, Decimal("0"), {
+                "bankroll_usd": float(bankroll_usd),
+                "price_cents": price_cents,
+                "asset": asset,
+                "reason": "kelly_no_edge",
+                "model_prob": model_prob,
+                "kelly_fraction": kelly_fraction,
+            }
+        
+        logger.info(
+            "[UNIFIED-SIZING] Kelly filter passed: asset=%s model_prob=%.2f price=%dc kelly=%.4f",
+            asset, model_prob, price_cents, kelly_fraction
+        )
+    
     # 2026-07-08 UPDATE: Fixed $1 total exposure model - slot-based position management
     # All percentage-based sizing has been removed
     # New model: sum of all contract prices must be ≤ $1
@@ -797,23 +910,17 @@ def compute_order_size(
         profile = adapter.profile
         fixed_exposure_cap_usd = Decimal(str(profile.risk_policy_fixed_exposure_cap_usd))
     
-    # Step 2: Get existing total exposure from global slot allocator
-    # CRITICAL FIX: 2026-07-09 - Use slot allocator instead of position cache for consistency
-    # Slot allocator is the single source of truth for $1 exposure tracking
+    # Step 2: Get existing total exposure from position cache
+    # CRITICAL FIX: 2026-07-13 - Use position_cache instead of slot_allocator for exposure check
+    # Slot allocator now only allocates on fill (post-fill path), so it doesn't have pre-fill exposure.
+    # Position cache is the single source of truth for actual filled positions.
     existing_exposure_usd = Decimal("0")
     try:
-        from merid.risk.global_slot_allocator import get_global_slot_allocator
-        slot_allocator = get_global_slot_allocator()
-        existing_exposure_usd = Decimal(str(slot_allocator.get_total_exposure()))
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+        position_cache = get_position_cache()
+        existing_exposure_usd = Decimal(str(position_cache.get_total_exposure_usd()))
     except Exception as e:
-        logger.warning("[UNIFIED-SIZING] Failed to get existing exposure from slot allocator: %s", e)
-        # Fallback to position cache if slot allocator not available
-        try:
-            from merid.event_venues.kalshi.position_cache import get_position_cache
-            position_cache = get_position_cache()
-            existing_exposure_usd = Decimal(str(position_cache.get_total_exposure_usd()))
-        except Exception as fallback_err:
-            logger.warning("[UNIFIED-SIZING] Failed to get existing exposure from position cache fallback: %s", fallback_err)
+        logger.warning("[UNIFIED-SIZING] Failed to get existing exposure from position cache: %s", e)
     
     # Step 3: Calculate available exposure
     available_exposure_usd = fixed_exposure_cap_usd - existing_exposure_usd
@@ -893,6 +1000,19 @@ def compute_order_size(
         "available_exposure_usd": float(available_exposure_usd),
         "fixed_exposure_cap_usd": float(fixed_exposure_cap_usd),
     }
+    
+    # Add Kelly information if model_prob was provided
+    if model_prob is not None:
+        confidence_float = float(confidence) if confidence is not None else 0.5
+        kelly_fraction = calculate_kelly_fraction(
+            model_prob=model_prob,
+            price_cents=price_cents,
+            confidence=confidence_float,
+            fractional_kelly=0.25
+        )
+        metadata["model_prob"] = model_prob
+        metadata["confidence"] = confidence_float
+        metadata["kelly_fraction"] = kelly_fraction
     
     logger.info(
         "[UNIFIED-SIZING] Final sizing: asset=%s contracts=%d notional=$%.2f price=%dc "
