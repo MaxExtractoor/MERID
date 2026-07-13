@@ -4335,6 +4335,61 @@ class Kalshi15mLoop:
                     )
                 except Exception as risk_err:
                     logger.warning("[15M-LOOP] Failed to record order in risk manager: %s", risk_err)
+                
+                # CRITICAL FIX: Record trade entry in RealizedEdgeStore for edge tracking
+                # This enables outcome resolution and realized edge calculation after settlement
+                try:
+                    from merid.metrics.realized_edge import get_realized_edge_store
+                    import time
+                    
+                    edge_store = get_realized_edge_store()
+                    
+                    # Calculate implied probability from price
+                    # For YES: implied = price_cents / 100
+                    # For NO: implied = (100 - price_cents) / 100
+                    if side_raw == "YES":
+                        p_implied = price_cents / 100.0
+                    else:  # NO
+                        p_implied = (100 - price_cents) / 100.0
+                    
+                    # Calculate fee (Kalshi fee is 2 cents per contract)
+                    from merid.prediction.agent_grid_15m import calculate_kalshi_fee_cents
+                    fee_cents = calculate_kalshi_fee_cents(count)
+                    
+                    # Get order_id from result for trade_id
+                    trade_id = result.order_id if hasattr(result, 'order_id') else f"{ticker}_{int(time.time())}"
+                    
+                    # Use asset-specific bucket instead of generic "crypto"
+                    bucket = asset  # BTC, ETH, SOL, XRP, DOGE
+                    
+                    # Determine edge_type based on signal rationale
+                    # Velocity-based signals use velocity magnitude as edge, not probability difference
+                    rationale = candidate.get("rationale", "")
+                    edge_type = "velocity" if rationale and "velocity_based" in rationale else "probability"
+                    
+                    # Record trade entry
+                    edge_store.record_trade_entry(
+                        trade_id=trade_id,
+                        forecaster_id=agent_id,
+                        bucket=bucket,
+                        market_id=ticker,
+                        side=side_raw.lower(),  # "yes" or "no"
+                        action=action_raw.lower(),  # "buy" or "sell"
+                        price_cents=price_cents,
+                        p_model=model_prob,
+                        p_implied=p_implied,
+                        contracts=count,
+                        fee_cents=fee_cents,
+                        timestamp=time.time(),
+                        edge_type=edge_type
+                    )
+                    
+                    logger.info(
+                        "[15M-LOOP] Recorded trade entry in RealizedEdgeStore: trade_id=%s bucket=%s asset=%s ticker=%s side=%s price=%dc model_prob=%.4f implied_prob=%.4f",
+                        trade_id, bucket, asset, ticker, side_raw, price_cents, model_prob, p_implied
+                    )
+                except Exception as edge_err:
+                    logger.warning("[15M-LOOP] Failed to record trade entry in RealizedEdgeStore: %s", edge_err)
             
             # Update position tracking after successful order
             # FIX: Only increment active_trades if order was actually FILLED, not just routed

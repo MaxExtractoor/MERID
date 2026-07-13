@@ -55,6 +55,7 @@ class TradeEdgeRecord:
     contracts: int
     fee_cents: int          # total expected fee
     timestamp: float
+    edge_type: str = "probability"  # "probability" or "velocity"
     resolved: bool = False
     outcome: Optional[int] = None
     realized_pnl_cents: Optional[int] = None
@@ -174,6 +175,7 @@ class RealizedEdgeStore:
                     contracts      INTEGER NOT NULL,
                     fee_cents      INTEGER NOT NULL,
                     timestamp      REAL NOT NULL,
+                    edge_type      TEXT DEFAULT 'probability',
                     resolved       INTEGER DEFAULT 0,
                     outcome        INTEGER,
                     realized_pnl_cents INTEGER,
@@ -195,7 +197,7 @@ class RealizedEdgeStore:
                     sum_pnl_cents   INTEGER DEFAULT 0,
                     sum_fee_cents   INTEGER DEFAULT 0,
                     winning_trades  INTEGER DEFAULT 0,
-                    losing_trades   INTEGER DEFAULT 0,
+                    losing_trades  INTEGER DEFAULT 0,
                     PRIMARY KEY (forecaster_id, bucket)
                 );
             """)
@@ -216,6 +218,7 @@ class RealizedEdgeStore:
         contracts: int,
         fee_cents: int,
         timestamp: Optional[float] = None,
+        edge_type: str = "probability",
     ) -> None:
         """Log edge estimates at the time a trade is placed.
 
@@ -232,6 +235,7 @@ class RealizedEdgeStore:
             contracts: Number of contracts.
             fee_cents: Total expected fee in cents.
             timestamp: Unix timestamp (defaults to now).
+            edge_type: Type of edge - "probability" or "velocity".
         """
         ts = timestamp or time.time()
 
@@ -249,11 +253,11 @@ class RealizedEdgeStore:
                 """INSERT OR IGNORE INTO trade_edges
                    (trade_id, forecaster_id, bucket, market_id, side, action,
                     price_cents, p_model, p_implied, est_edge, contracts,
-                    fee_cents, timestamp)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    fee_cents, timestamp, edge_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (trade_id, forecaster_id, bucket, market_id, side.lower(), action.lower(),
                  price_cents, p_model, p_implied, est_edge, contracts,
-                 fee_cents, ts),
+                 fee_cents, ts, edge_type),
             )
             # Only increment trade_count for genuinely new rows
             if cursor.rowcount > 0:

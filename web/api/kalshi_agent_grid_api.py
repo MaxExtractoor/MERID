@@ -42,37 +42,18 @@ async def get_edge_snapshots(
     asset: str = Query(..., description="Asset ticker (e.g., BTC, ETH)"),
     limit: int = Query(100, description="Maximum number of snapshots to return")
 ) -> Dict[str, Any]:
-    """Get recent edge snapshots for an asset."""
-    try:
-        from merid.prediction.agent_grid_15m import get_edge_snapshots
-        
-        snapshots = get_edge_snapshots(asset, limit)
-        
-        return {
-            "asset": asset,
-            "limit": limit,
-            "count": len(snapshots),
-            "snapshots": [
-                {
-                    "timestamp": s.timestamp,
-                    "market_id": s.market_id,
-                    "best_edge": s.best_edge,
-                    "best_side": s.best_side,
-                    "min_edge_dynamic": s.min_edge_dynamic,
-                    "spread_cents": s.spread_cents,
-                    "depth_yes": s.depth_yes,
-                    "depth_no": s.depth_no,
-                    "skew": s.skew,
-                    "fired_order": s.fired_order,
-                    "reason": s.reason,
-                }
-                for s in snapshots
-            ]
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to get edge snapshots for {asset}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to get edge snapshots: {str(e)}")
+    """Get recent edge snapshots for an asset.
+    
+    NOTE: This endpoint is deprecated. Edge snapshots are now tracked
+    via RealizedEdgeStore. Use the realized edge endpoints instead.
+    """
+    return {
+        "asset": asset,
+        "limit": limit,
+        "count": 0,
+        "snapshots": [],
+        "message": "DEPRECATED: Edge snapshots are now tracked via RealizedEdgeStore. Use realized edge endpoints instead."
+    }
 
 
 @router.get("/scheduler-metrics")

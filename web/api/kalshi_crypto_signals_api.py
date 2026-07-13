@@ -41,8 +41,10 @@ async def get_crypto_edge_signals() -> KalshiEdgeResponse:
             if implied is None or model is None:
                 continue
 
-            ev_cents = (model - implied) * 100
-            edge_pct = model - implied
+            # Use canonical EV calculation from canonical_buckets
+            from merid.metrics.canonical_buckets import calculate_ev_cents, calculate_edge_pct
+            ev_cents = calculate_ev_cents(int(implied * 100), model, "yes", 1)
+            edge_pct = calculate_edge_pct(model, implied)
             confidence = getattr(m, "avg_confidence", 0.0)
             bucket = "high" if confidence > 0.7 else "medium" if confidence > 0.5 else "low"
 

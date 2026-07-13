@@ -7203,11 +7203,11 @@ class LeanAgent15m:
 
                 # Use defaults if profile not available
 
-                min_entry_mins = 2.0
+                min_entry_mins = 0.5  # CRITICAL FIX: 2026-07-13 - Changed from 2.0 to 0.5 for full window trading
 
                 max_entry_mins = 15.0
 
-                cutoff_mins = 2.0
+                cutoff_mins = 0.0  # CRITICAL FIX: 2026-07-13 - Changed from 2.0 to 0.0 for full window trading
 
                 logger.debug("[TIME-WINDOW-CONFIG] asset=%s using defaults (profile not available)", asset)
 
@@ -7215,11 +7215,11 @@ class LeanAgent15m:
 
             logger.warning("[TIME-WINDOW-CONFIG] Failed to load from profile: %s, using defaults", e)
 
-            min_entry_mins = 2.0
+            min_entry_mins = 0.5  # CRITICAL FIX: 2026-07-13 - Changed from 2.0 to 0.5 for full window trading
 
             max_entry_mins = 15.0
 
-            cutoff_mins = 2.0
+            cutoff_mins = 0.0  # CRITICAL FIX: 2026-07-13 - Changed from 2.0 to 0.0 for full window trading
 
         
 
@@ -7496,48 +7496,13 @@ class LeanAgent15m:
         
 
         # Price-bucket EV diagnostic logging for both sides
+        # Use canonical bucket definition for consistency
+        from merid.metrics.canonical_buckets import get_price_bucket
 
         for side, price_cents in [("yes", yes_price_cents), ("no", no_price_cents)]:
 
             if price_cents > 0:
-
-                if 10 <= price_cents <= 14:
-
-                    price_bucket = "10-14c"
-
-                elif 15 <= price_cents <= 19:
-
-                    price_bucket = "15-19c"
-
-                elif 20 <= price_cents <= 24:
-
-                    price_bucket = "20-24c"
-
-                elif 25 <= price_cents <= 29:
-
-                    price_bucket = "25-29c"
-
-                elif 30 <= price_cents <= 39:
-
-                    price_bucket = "30-39c"
-
-                elif 40 <= price_cents <= 49:
-
-                    price_bucket = "40-49c"
-
-                elif 50 <= price_cents <= 65:
-
-                    price_bucket = "50-65c"
-
-                elif 66 <= price_cents <= 70:
-
-                    price_bucket = "66-70c"
-
-                else:
-
-                    price_bucket = f"{price_cents}c"
-
-                
+                price_bucket = get_price_bucket(price_cents)
 
                 logger.info(
 
@@ -11889,6 +11854,46 @@ class LeanAgent15m:
                         else:
 
                             candidate["no_depth"] = getattr(market_state, 'min_depth_no', None)
+
+                        # Add distance band calculation using spot price and strike price
+                        # This enables analysis of edge performance by distance from strike
+                        try:
+                            from merid.metrics.canonical_buckets import get_distance_bucket
+                            import sqlite3
+                            from pathlib import Path
+                            
+                            # Load spot price for asset
+                            spot_data_db = Path("c:/Dev/MERID/data/spot_prices.db")
+                            if spot_data_db.exists():
+                                conn = sqlite3.connect(str(spot_data_db))
+                                cursor = conn.cursor()
+                                cursor.execute("""
+                                    SELECT price_usd FROM spot_prices
+                                    WHERE asset = ? ORDER BY timestamp DESC LIMIT 1
+                                """, (self.config.name,))
+                                row = cursor.fetchone()
+                                conn.close()
+                                
+                                if row:
+                                    spot_price = row[0]
+                                    strike_price = getattr(market_state, 'strike_price_usd', None)
+                                    if strike_price and spot_price > 0:
+                                        distance_pct = abs(spot_price - strike_price) / spot_price * 100
+                                        candidate["distance_band"] = get_distance_bucket(distance_pct)
+                                        candidate["distance_pct"] = distance_pct
+                                    else:
+                                        candidate["distance_band"] = "unknown"
+                                        candidate["distance_pct"] = None
+                                else:
+                                    candidate["distance_band"] = "unknown"
+                                    candidate["distance_pct"] = None
+                            else:
+                                candidate["distance_band"] = "unknown"
+                                candidate["distance_pct"] = None
+                        except Exception as db_err:
+                            logger.warning("[CANDIDATE-DISTANCE-BAND] Failed to calculate distance band: %s", db_err)
+                            candidate["distance_band"] = "unknown"
+                            candidate["distance_pct"] = None
 
             except Exception as e:
 
