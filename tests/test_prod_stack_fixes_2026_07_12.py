@@ -96,9 +96,9 @@ class TestStripOrderCountFix:
         with open("merid/prediction/agent_grid_15m.py", "r", encoding="utf-8") as f:
             content = f.read()
         
-        # Should have the log message
-        assert "[STRIP-ORDER-COUNT] asset=%s strip=%s orders=%d/%d" in content, \
-            "Strip order count log should exist"
+        # Should have the log message (simplified format without per_strip_order_limit)
+        assert "[STRIP-ORDER-COUNT] asset=%s strip=%s orders=%d" in content, \
+            "Strip order count log should exist with simplified format"
         
         # Should be in the execution success section, not candidate generation
         success_section = content.split("[GLOBAL-ALLOCATOR-EXECUTE-SUCCESS]")[1]
@@ -176,6 +176,91 @@ class TestSentimentAuditRemoval:
         # Should still have the audit log
         assert "[AUDIT] caller_check" in content, \
             "AUDIT caller_check log should still exist after sentiment removal"
+
+
+class TestLeanAgentGrid15mAttributeErrorFixes:
+    """Test that AttributeError fixes in LeanAgentGrid15m are correct."""
+
+    def test_no_config_attribute_in_lean_agent_grid(self):
+        """Verify LeanAgentGrid15m does not have a config attribute."""
+        with open("merid/prediction/agent_grid_15m.py", "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        # Find the LeanAgentGrid15m class definition
+        class_start = content.find("class LeanAgentGrid15m:")
+        assert class_start != -1, "LeanAgentGrid15m class should exist"
+        
+        # Find the __init__ method
+        init_start = content.find("def __init__", class_start)
+        assert init_start != -1, "LeanAgentGrid15m should have __init__ method"
+        
+        # Find the next class or end of file to limit scope
+        next_class = content.find("\nclass ", init_start + 1)
+        if next_class == -1:
+            init_section = content[init_start:]
+        else:
+            init_section = content[init_start:next_class]
+        
+        # Should NOT have self.config = config in LeanAgentGrid15m.__init__
+        assert "self.config = config" not in init_section, \
+            "LeanAgentGrid15m should not have self.config attribute (it's initialized from agents)"
+        
+        # Should NOT have config parameter in __init__
+        assert "def __init__(\n\n        self,\n\n        config:" not in init_section, \
+            "LeanAgentGrid15m.__init__ should not take config parameter"
+
+    def test_series_tickers_collected_from_agents(self):
+        """Verify series_tickers are collected from agents' configs in LeanAgent15m."""
+        with open("merid/prediction/agent_grid_15m.py", "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        # Find the LeanAgent15m class definition
+        class_start = content.find("class LeanAgent15m:")
+        assert class_start != -1, "LeanAgent15m class should exist"
+        
+        # Find the __init__ method
+        init_start = content.find("def __init__", class_start)
+        assert init_start != -1, "LeanAgent15m should have __init__ method"
+        
+        # Find the next class or end of file to limit scope
+        next_class = content.find("\nclass ", init_start + 1)
+        if next_class == -1:
+            init_section = content[init_start:]
+        else:
+            init_section = content[init_start:next_class]
+        
+        # Should collect series_tickers from agents
+        assert "series_tickers = []" in init_section, \
+            "Should initialize series_tickers list"
+        
+        assert "for agent in self._agents:" in init_section, \
+            "Should iterate over agents to collect series_tickers"
+        
+        assert "if hasattr(agent, 'config') and hasattr(agent.config, 'series_tickers'):" in init_section, \
+            "Should safely check for config and series_tickers attributes"
+        
+        assert "series_tickers.extend(agent.config.series_tickers)" in init_section, \
+            "Should extend series_tickers from agent configs"
+
+    def test_strip_order_count_log_no_config_reference(self):
+        """Verify strip order count log does not reference self.config."""
+        with open("merid/prediction/agent_grid_15m.py", "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        # Find the GLOBAL-ALLOCATOR-EXECUTE-SUCCESS section
+        assert "[GLOBAL-ALLOCATOR-EXECUTE-SUCCESS]" in content, \
+            "GLOBAL-ALLOCATOR-EXECUTE-SUCCESS log should exist"
+        
+        # The strip order count increment should be in the success path
+        success_section = content.split("[GLOBAL-ALLOCATOR-EXECUTE-SUCCESS]")[1]
+        
+        # Should NOT have self.config.per_strip_order_limit in the log
+        assert "self.config.per_strip_order_limit" not in success_section, \
+            "Strip order count log should not reference self.config (LeanAgentGrid15m has no config)"
+        
+        # Should have the simplified log format
+        assert "[STRIP-ORDER-COUNT] asset=%s strip=%s orders=%d" in success_section, \
+            "Strip order count log should use simplified format without per_strip_order_limit"
 
 
 if __name__ == "__main__":
