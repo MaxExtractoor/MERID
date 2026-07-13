@@ -939,8 +939,12 @@ class PreTradeGate:
         # This is the root cause of agents placing multiple orders at different prices
         # Exit orders (SELL) must have an existing position to close
         # MOVED BEFORE window limit check for logical ordering and testability
+        # CRITICAL FIX (2026-07-13): Only treat orders with exit_policy_id as exit orders
+        # NO entry orders use sell action but are NOT exits - they must have position to close
         try:
-            is_exit_order = action == "sell"
+            # Use exit_policy_id as the primary indicator of exit orders
+            # This aligns with order_router._is_exit_order logic
+            is_exit_order = exit_policy_id is not None
             if is_exit_order:
                 from merid.event_venues.kalshi.position_cache import get_position_cache
                 position_cache = get_position_cache()
@@ -981,12 +985,16 @@ class PreTradeGate:
         # OLD: No new entries until ALL positions exit (too restrictive)
         # NEW: Allow new entries when slot allocator has available exposure
         # This enables sequential trading with early exits: close profitable positions, free up slots, enter new positions
-        # Only applies to entry orders (BUY), not exit orders (SELL)
+        # Only applies to entry orders, not exit orders
+        # CRITICAL FIX (2026-07-13): Use exit_policy_id to detect exit orders
+        # NO entry orders use sell action but are NOT exits - they must respect exposure limits
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
             profile = get_active_profile()
             if profile and hasattr(profile, 'risk_policy_sequential_trading') and profile.risk_policy_sequential_trading:
-                is_exit_order = action == "sell"
+                # Use exit_policy_id as the primary indicator of exit orders
+                # This aligns with order_router._is_exit_order logic
+                is_exit_order = exit_policy_id is not None
                 if not is_exit_order:
                     # CRITICAL FIX: 2026-07-13 - Use position_cache instead of slot_allocator for exposure check
                     # Slot allocator now only allocates on fill (post-fill path), so it doesn't have pre-fill exposure.

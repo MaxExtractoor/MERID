@@ -296,6 +296,28 @@ class KalshiPositionCache:
         
         logger.info("KalshiPositionCache initialized")
 
+    def _is_exit_order_from_action(self, action: str, source: Optional[str] = None) -> bool:
+        """Check if this is an exit order based on action and source.
+        
+        This mirrors the logic in order_router._is_exit_order for consistency.
+        Exit orders REDUCE exposure and should bypass exposure recording.
+        
+        CRITICAL FIX (2026-07-13): Only treat orders with explicit exit markers as exits.
+        Entry orders (both YES buy and NO sell) must record exposure to enforce $1 cap.
+        """
+        # Check source for exit-specific markers first (most reliable indicator)
+        if source:
+            source_lower = source.lower()
+            exit_markers = ["take_profit", "stop_loss", "micro_scalp", "exit", "close", "ratchet"]
+            if any(marker in source_lower for marker in exit_markers):
+                return True
+        
+        # For position_cache.on_fill, we don't have full OrderIntent context
+        # We use action as a fallback, but this is less reliable
+        # CRITICAL: DO NOT treat all sell actions as exits - this bypasses $1 cap
+        # Without explicit exit markers, we conservatively treat as entry order
+        return False
+
     def _ensure_mutex(self) -> asyncio.Lock:
         """Lazy-initialize the mutex in the current event loop."""
         if self._mutex is None:
@@ -462,8 +484,11 @@ class KalshiPositionCache:
                     except Exception as derive_err:
                         logger.debug("[POSITION-CACHE] Could not derive agent_id from ticker: %s", derive_err)
                 
-                # Record exposure if we have agent_id and this is an entry order (buy)
-                if agent_id and action == "buy":
+                # CRITICAL FIX (2026-07-13): Record exposure for entry orders only
+                # Entry orders are those that are NOT exit orders (not just buy actions)
+                # NO entry orders use sell action but still increase exposure
+                # Use the same logic as order_router._is_exit_order for consistency
+                if agent_id and not self._is_exit_order_from_action(action, source=client_order_id):
                     try:
                         envelope = get_kalshi_crypto_15m_risk_envelope()
                         order_notional_usd = (contracts * price_cents) / 100.0
@@ -498,7 +523,9 @@ class KalshiPositionCache:
                 # SEV-0 FIX: Release window exposure for position-reducing fills (sell-side)
                 # This ensures window exposure is released on partial closes and all exit paths
                 # Previously, exposure was only released in remove_position(), missing partial closes
-                if agent_id and action == "sell":
+                # CRITICAL FIX (2026-07-13): Only release for true exit orders, not NO entry orders
+                # Use the same logic as order_router._is_exit_order for consistency
+                if agent_id and self._is_exit_order_from_action(action, source=client_order_id):
                     try:
                         envelope = get_kalshi_crypto_15m_risk_envelope()
                         # Calculate notional to release based on contracts closed
