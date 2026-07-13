@@ -800,6 +800,8 @@ async def _kalshi_place_order(
                 model_prob=model_prob,
                 edge_pct=edge_pct,
                 confidence=confidence,
+                # CRITICAL FIX (2026-07-12): Add rationale to prevent fee_aware_gate rejection
+                rationale=f"momentum_fvg_signal_{_agent_name}" if _agent_name else "kalshi_tools_order",
             )
 
             logger.info(
