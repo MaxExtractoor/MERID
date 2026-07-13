@@ -782,7 +782,11 @@ async def _kalshi_place_order(
                 action=action,
                 price_cents=_pc,
                 count=max(1, min(max_contracts_limit, int(count))),
-                source="kalshi_tools",
+                # CRITICAL FIX (2026-07-12): Use proper source attribution for whitelist compliance
+                # order_router whitelist allows: ["merid.prediction.agent_grid_15m", "kalshi_tools"]
+                # When called from agent_grid_15m, use agent_grid_15m source
+                # When called from execution_subscriber, use kalshi_tools source (fallback)
+                source="merid.prediction.agent_grid_15m" if _agent_name and "15M" in _agent_name.upper() else "kalshi_tools",
                 agent_id=_agent_name if _agent_name else "kalshi_tools",
                 stop_loss_price_cents=stop_loss_price_cents,
                 take_profit_price_cents=take_profit_price_cents,  # CRITICAL FIX (2026-07-12): Pass TP price to enable exit policy

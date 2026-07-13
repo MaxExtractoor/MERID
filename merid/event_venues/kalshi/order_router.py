@@ -6205,7 +6205,7 @@ def _run_pre_trade_gate(
                     edge_pct=getattr(intent, 'edge_pct', 0.0),
                     spread_cents=0,
                     confidence=getattr(intent, 'confidence', 0.5),  # 2026-07-12: Pass confidence from intent
-                    is_exit_order=False
+                    is_exit_order=_is_exit_order(intent)  # CRITICAL FIX (2026-07-12): Use unified exit order detection
                 )
                 
                 # Request slot allocation (this is the HARD BLOCK)
