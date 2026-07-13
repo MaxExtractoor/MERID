@@ -150,6 +150,7 @@ class TestValidateRiskContractLinkage:
             price_cents=50,
             count=10,
             exit_policy_id="ep_123",
+            source="take_profit",  # CRITICAL: Exit marker required for exit detection
         )
         is_valid, error = _validate_risk_contract_linkage(intent)
         assert is_valid is True
@@ -163,13 +164,14 @@ class TestValidateRiskContractLinkage:
             action="sell",  # Exit action
             price_cents=50,
             count=10,
+            source="take_profit",  # CRITICAL: Exit marker required for exit detection
         )
         is_valid, error = _validate_risk_contract_linkage(intent)
         assert is_valid is False
         assert "exit_policy_id" in error
     
-    def test_crypto_15m_sell_action_treated_as_exit(self):
-        """Test that sell action is treated as exit."""
+    def test_crypto_15m_sell_action_with_exit_marker_treated_as_exit(self):
+        """Test that sell action with exit marker is treated as exit."""
         intent = OrderIntent(
             ticker="KXBTC15M-12345",
             side="yes",
@@ -177,9 +179,10 @@ class TestValidateRiskContractLinkage:
             price_cents=50,
             count=10,
             exit_policy_id="ep_123",
+            source="take_profit",  # CRITICAL: Exit marker required for exit detection
         )
         is_valid, error = _validate_risk_contract_linkage(intent)
-        # Sell is exit, so only exit_policy_id required
+        # Sell with exit marker is exit, so only exit_policy_id required
         assert is_valid is True
     
     def test_crypto_15m_buy_action_requires_full_linkage(self):
