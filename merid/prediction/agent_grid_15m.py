@@ -1174,7 +1174,13 @@ class LeanAgent15m:
 
         self._strip_order_counts: Dict[str, int] = {}
 
-        for ticker in self.config.series_tickers:
+        # Initialize from agents' config series_tickers
+        series_tickers = []
+        for agent in self._agents:
+            if hasattr(agent, 'config') and hasattr(agent.config, 'series_tickers'):
+                series_tickers.extend(agent.config.series_tickers)
+
+        for ticker in series_tickers:
 
             self._strip_order_counts[ticker] = 0
 
@@ -1184,7 +1190,7 @@ class LeanAgent15m:
 
         self._current_market_ids: Dict[str, str] = {}
 
-        for ticker in self.config.series_tickers:
+        for ticker in series_tickers:
 
             self._current_market_ids[ticker] = None
 
