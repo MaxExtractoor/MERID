@@ -108,7 +108,7 @@ class TestProfileYAMLConfigSource(unittest.TestCase):
         self.assertEqual(profile.guardrails_max_slippage_cents, 5)  # 5 cents
         self.assertEqual(profile.universe_min_volume, 5)
         self.assertEqual(profile.universe_min_open_interest, 1)
-        self.assertEqual(profile.universe_max_spread_cents, 30)  # 2026-07-10: Optimized to 30c to harmonize with 10c-50c entry price sweet spot
+        self.assertEqual(profile.universe_max_spread_cents, 20)  # 2026-07-12: Aligned with 10c-75c canonical range
 
 
 if __name__ == '__main__':
