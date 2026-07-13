@@ -1733,6 +1733,7 @@ class Kalshi15mLoop:
                                 edge_pct = Decimal(str(candidate.get("edge_pct", 0.0)))
                                 confidence = Decimal(str(candidate.get("confidence", 0.5)))
                                 model_prob = candidate.get("model_prob", None)  # 2026-07-12: Kelly Criterion integration
+                                candidate_side = str(candidate.get("side", "yes")).lower()  # 2026-07-13: Side for Kelly calculation
                                 
                                 # Extract asset from ticker
                                 asset = ticker.split("-")[0].replace("KX", "") if "-" in ticker else "BTC"
@@ -1740,6 +1741,7 @@ class Kalshi15mLoop:
                                 # Compute dynamic size
                                 # 2026 Research-Based Risk Management: Apply time-of-day risk scaling
                                 # 2026-07-12: Kelly Criterion integration - pass model_prob for edge filtering
+                                # 2026-07-13: Pass side for correct Kelly calculation
                                 time_of_day_multiplier = candidate.get("time_of_day_multiplier", 1.0)
                                 count, notional, metadata = compute_order_size(
                                     bankroll_usd=Decimal(str(bankroll_usd)),
@@ -1748,7 +1750,8 @@ class Kalshi15mLoop:
                                     edge_pct=edge_pct,
                                     confidence=confidence,
                                     time_of_day_multiplier=time_of_day_multiplier,
-                                    model_prob=model_prob  # 2026-07-12: Kelly Criterion
+                                    model_prob=model_prob,  # 2026-07-12: Kelly Criterion
+                                    side=candidate_side  # 2026-07-13: Pass side for Kelly
                                 )
                                 
                                 candidate["count"] = count
