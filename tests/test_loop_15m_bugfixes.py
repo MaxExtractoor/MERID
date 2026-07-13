@@ -1344,13 +1344,14 @@ def test_price_selection_yes_order_within_sweet_spot():
 
 
 def test_price_selection_orderbook_search():
-    """Test that orderbook is searched for cheapest price in 10-50c band.
+    """Test that orderbook is searched for cheapest price in 10-75c band.
     
     CRITICAL FIX: When raw price is outside band, search orderbook for valid prices.
+    Field name fix: KalshiMarketState uses yes_bids (not yes_book).
     """
     # Mock market state with orderbook
     mock_market_state = Mock()
-    mock_market_state.yes_book = [
+    mock_market_state.yes_bids = [
         (15, 10),  # 15c with size 10
         (20, 5),   # 20c with size 5
         (45, 8),   # 45c with size 8
@@ -1361,8 +1362,8 @@ def test_price_selection_orderbook_search():
     # Simulate orderbook search logic from agent_grid_15m.py
     raw_price_cents = 75  # Outside band
     
-    # Find cheapest YES price within [10c, 50c] with size >= 1
-    valid_prices = [p for (p, size) in mock_market_state.yes_book if 10 <= p <= 50 and size >= 1]
+    # Find cheapest YES price within [10c, 75c] with size >= 1
+    valid_prices = [p for (p, size) in mock_market_state.yes_bids if 10 <= p <= 75 and size >= 1]
     
     if valid_prices:
         price_cents = min(valid_prices)  # Use cheapest acceptable price
@@ -1375,23 +1376,24 @@ def test_price_selection_orderbook_search():
 
 
 def test_price_selection_orderbook_no_valid_prices():
-    """Test that candidate is dropped when orderbook has no prices in 10-50c band.
+    """Test that candidate is dropped when orderbook has no prices in 10-75c band.
     
-    CRITICAL FIX: If no prices exist in 10-50c range, drop the candidate (no trade).
+    CRITICAL FIX: If no prices exist in 10-75c range, drop the candidate (no trade).
+    Field name fix: KalshiMarketState uses yes_bids (not yes_book).
     """
     # Mock market state with orderbook but no valid prices in band
     mock_market_state = Mock()
-    mock_market_state.yes_book = [
-        (55, 10),  # 55c - outside band
+    mock_market_state.yes_bids = [
+        (76, 10),  # 76c - above band
         (8, 5),    # 8c - below band
-        (99, 8),   # 99c - outside band
+        (99, 8),   # 99c - above band
     ]
     
     # Simulate orderbook search logic from agent_grid_15m.py
     raw_price_cents = 75  # Outside band
     
-    # Find cheapest YES price within [10c, 50c] with size >= 1
-    valid_prices = [p for (p, size) in mock_market_state.yes_book if 10 <= p <= 50 and size >= 1]
+    # Find cheapest YES price within [10c, 75c] with size >= 1
+    valid_prices = [p for (p, size) in mock_market_state.yes_bids if 10 <= p <= 75 and size >= 1]
     
     if valid_prices:
         price_cents = min(valid_prices)
