@@ -3200,6 +3200,33 @@ class KalshiFillsLedger:
                 market_ticker, last_price_cents, self._session_unrealized_pnl
             )
     
+    async def clear_open_positions_on_empty_cache(self) -> None:
+        """Clear open positions when position cache shows no open positions.
+        
+        CRITICAL FIX (2026-07-13): This prevents phantom positions from old fills
+        being reported when the actual system has no open positions. Called when
+        position cache sync returns zero open positions but fills ledger still has
+        _open_positions state from previous sessions.
+        
+        THREAD-SAFETY FIX (2026-07-13): Made async with mutex protection to prevent
+        race conditions with concurrent on_fill() calls that also modify _open_positions.
+        """
+        # Ensure mutex is initialized
+        if self._mutex is None:
+            import asyncio
+            self._mutex = asyncio.Lock()
+        
+        async with self._mutex:
+            if not self._open_positions:
+                return  # Nothing to clear
+            
+            count = len(self._open_positions)
+            self._open_positions = {}
+            logger.warning(
+                "[FILLS-LEDGER] Cleared %d phantom open positions (position cache shows zero open positions)",
+                count
+            )
+    
     def rebuild_session_pnl_from_fills(self) -> None:
         """Rebuild session PnL from historical fills after restart.
         
