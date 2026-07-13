@@ -12695,8 +12695,8 @@ class LeanAgentGrid15m:
                                 if strip_ticker:
                                     self._strip_order_counts[strip_ticker] = self._strip_order_counts.get(strip_ticker, 0) + 1
                                     logger.info(
-                                        "[STRIP-ORDER-COUNT] asset=%s strip=%s orders=%d/%d",
-                                        order.asset, strip_ticker, self._strip_order_counts[strip_ticker], self.config.per_strip_order_limit
+                                        "[STRIP-ORDER-COUNT] asset=%s strip=%s orders=%d",
+                                        order.asset, strip_ticker, self._strip_order_counts[strip_ticker]
                                     )
 
                             else:
