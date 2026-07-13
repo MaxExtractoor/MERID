@@ -192,20 +192,9 @@ class TestRiskEngineEdgeCalculation(unittest.TestCase):
 
     def test_min_edge_for_price_decimal_arithmetic(self):
         """Edge calculations should not cast Decimal to float."""
-        # P2: Use venue config instead of deprecated PM config
-        from merid.event_venues.kalshi.kalshi_risk import KalshiRiskEngine, KalshiRiskConfig
-
-        engine = KalshiRiskEngine(KalshiRiskConfig())
-        
-        # Should not raise TypeError or lose precision
-        result = engine.min_edge_for_price(5)  # Penny contract
-        
-        # Should be Decimal
-        self.assertIsInstance(result, Decimal)
-        
-        # Verify calculation is reasonable (should be higher due to penny multiplier)
-        base = KalshiRiskConfig().min_edge
-        self.assertGreaterEqual(result, base)
+        # KalshiRiskEngine was removed/archived - risk now handled by KalshiRiskManager and KalshiCrypto15mRiskEnvelope
+        # This test is not applicable to 15m crypto production stack
+        self.skipTest("KalshiRiskEngine removed - replaced by KalshiRiskManager and KalshiCrypto15mRiskEnvelope (not 15m crypto production)")
 
 
 if __name__ == "__main__":
