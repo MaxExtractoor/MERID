@@ -1327,16 +1327,23 @@ def _is_exit_order(intent: OrderIntent) -> bool:
     - Stop loss exits (source contains "stop_loss")
     - Micro-scalp exits (source contains "micro_scalp")
     - Any sell action (reduces position)
-    """
-    # SELL actions are exits (they reduce exposure)
-    if intent.action == "sell":
-        return True
     
-    # Check source for exit-specific markers
+    CRITICAL FIX (2026-07-13): Only bypass slot allocation for true exit orders.
+    Entry orders (buy) must ALWAYS allocate slots to enforce $1 exposure cap.
+    Previous logic incorrectly treated all sell actions as exits, but sell orders
+    can also be entry orders (e.g., selling NO contracts to open a short position).
+    """
+    # Check source for exit-specific markers first (most reliable indicator)
     source = (intent.source or "").lower()
     exit_markers = ["take_profit", "stop_loss", "micro_scalp", "exit", "close", "ratchet"]
     if any(marker in source for marker in exit_markers):
         return True
+    
+    # SELL actions are exits ONLY if they're closing an existing position
+    # But we can't reliably determine this without position state
+    # For safety, we now require explicit exit markers in source
+    # This ensures entry orders (even sell-side) always allocate slots
+    # CRITICAL: DO NOT treat all sell actions as exits - this bypasses $1 cap
     
     return False
 

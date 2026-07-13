@@ -311,6 +311,64 @@ class TestEndToEndOrderFlow:
         allocator.release_slot(slot_id2)
         assert allocator.get_total_exposure() == 0.0
 
+    def test_no_entry_orders_must_allocate_slots(self):
+        """CRITICAL: NO entry orders (sell-side) must allocate slots to enforce $1 cap.
+        
+        This is a regression test for the bug where _is_exit_order() treated all sell
+        actions as exits, causing NO entry orders to bypass slot allocation and exceed
+        the $1 exposure cap. The fix requires explicit exit markers in source.
+        """
+        from merid.event_venues.kalshi.order_router import _is_exit_order
+        from merid.event_venues.kalshi.order_router import OrderIntent
+        
+        # Create a NO entry order (sell action, but NOT an exit)
+        # This should NOT be treated as an exit order
+        intent = OrderIntent(
+            ticker="KXETH15M-26JUL130600-00",
+            side="no",
+            action="sell",  # Sell action (entry order for NO contracts)
+            price_cents=25,
+            count=1,
+            source="agent_grid_15m",  # No exit markers
+        )
+        
+        # CRITICAL: This should return False (NOT an exit order)
+        # Entry orders must allocate slots to enforce $1 cap
+        is_exit = _is_exit_order(intent)
+        assert is_exit is False, "NO entry orders must NOT bypass slot allocation"
+        
+        # Verify that orders with exit markers are still treated as exits
+        intent_exit = OrderIntent(
+            ticker="KXETH15M-26JUL130600-00",
+            side="no",
+            action="sell",
+            price_cents=25,
+            count=1,
+            source="take_profit",  # Exit marker
+        )
+        
+        is_exit_with_marker = _is_exit_order(intent_exit)
+        assert is_exit_with_marker is True, "Orders with exit markers should bypass slot allocation"
+
+    def test_yes_entry_orders_must_allocate_slots(self):
+        """YES entry orders (buy action) must allocate slots to enforce $1 cap."""
+        from merid.event_venues.kalshi.order_router import _is_exit_order
+        from merid.event_venues.kalshi.order_router import OrderIntent
+        
+        # Create a YES entry order (buy action)
+        intent = OrderIntent(
+            ticker="KXETH15M-26JUL130600-00",
+            side="yes",
+            action="buy",
+            price_cents=75,
+            count=1,
+            source="agent_grid_15m",
+        )
+        
+        # This should return False (NOT an exit order)
+        is_exit = _is_exit_order(intent)
+        assert is_exit is False, "YES entry orders must NOT bypass slot allocation"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
