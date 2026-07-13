@@ -48,13 +48,15 @@ class TestExitOrderIntegration:
             AllocationRequest
         )
         allocator = get_global_slot_allocator()
+        allocator.reset_all()  # Ensure clean state
         
+        # 2026-07-13: Correlation discount disabled - no patch needed
         # Fill to full capacity
         requests = [
-            AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 25, 2.0, 5, False),
-            AllocationRequest("ETH_15M", "ETH", "KXETH15M-1", 25, 2.0, 5, False),
-            AllocationRequest("SOL_15M", "SOL", "KXSOL15M-1", 25, 2.0, 5, False),
-            AllocationRequest("XRP_15M", "XRP", "KXXRP15M-1", 25, 2.0, 5, False),
+            AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 25, 2.0, 5, 0.5, False),
+            AllocationRequest("ETH_15M", "ETH", "KXETH15M-1", 25, 2.0, 5, 0.5, False),
+            AllocationRequest("SOL_15M", "SOL", "KXSOL15M-1", 25, 2.0, 5, 0.5, False),
+            AllocationRequest("XRP_15M", "XRP", "KXXRP15M-1", 25, 2.0, 5, 0.5, False),
         ]
         
         for req in requests:
@@ -64,13 +66,13 @@ class TestExitOrderIntegration:
         assert abs(allocator.get_total_exposure() - 1.00) < 0.01
         
         # Entry order should be rejected
-        entry_req = AllocationRequest("DOGE_15M", "DOGE", "KXDOGE15M-1", 10, 2.0, 5, False)
+        entry_req = AllocationRequest("DOGE_15M", "DOGE", "KXDOGE15M-1", 10, 2.0, 5, 0.5, False)
         allocated_entry, reason_entry, _ = allocator.request_allocation(entry_req)
         assert not allocated_entry
         assert "Insufficient exposure" in reason_entry
         
         # Exit order should bypass
-        exit_req = AllocationRequest("position_monitor", "BTC", "KXBTC15M-1", 50, 0.0, 0, True)
+        exit_req = AllocationRequest("position_monitor", "BTC", "KXBTC15M-1", 50, 0.0, 0, 0.5, True)
         allocated_exit, reason_exit, _ = allocator.request_allocation(exit_req)
         assert allocated_exit
         assert reason_exit == "EXIT_ORDER_BYPASS"
@@ -86,8 +88,8 @@ class TestExitOrderIntegration:
         allocator = get_global_slot_allocator()
         
         # Allocate slots
-        req1 = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 30, 2.0, 5, False)
-        req2 = AllocationRequest("ETH_15M", "ETH", "KXETH15M-1", 40, 2.0, 5, False)
+        req1 = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 30, 2.0, 5, 0.5, False)
+        req2 = AllocationRequest("ETH_15M", "ETH", "KXETH15M-1", 40, 2.0, 5, 0.5, False)
         
         allocated1, _, slot1 = allocator.request_allocation(req1)
         allocated2, _, slot2 = allocator.request_allocation(req2)
@@ -112,10 +114,12 @@ class TestExitOrderIntegration:
         from decimal import Decimal
         
         allocator = get_global_slot_allocator()
+        allocator.reset_all()  # Ensure clean state
         
-        # Allocate to near capacity using valid entry prices (10-50c)
-        req1 = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 50, 2.0, 5, False)
-        req2 = AllocationRequest("ETH_15M", "ETH", "KXETH15M-1", 40, 2.0, 5, False)
+        # 2026-07-13: Correlation discount disabled - no patch needed
+        # Allocate to near capacity using valid entry prices (10-75c)
+        req1 = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 50, 2.0, 5, 0.5, False)
+        req2 = AllocationRequest("ETH_15M", "ETH", "KXETH15M-1", 40, 2.0, 5, 0.5, False)
         
         allocated1, _, _ = allocator.request_allocation(req1)
         allocated2, _, _ = allocator.request_allocation(req2)
@@ -128,7 +132,8 @@ class TestExitOrderIntegration:
         count, notional, metadata = compute_order_size(
             bankroll_usd=Decimal("100.0"),
             price_cents=30,
-            asset="ETH"
+            asset="ETH",
+            model_prob=0.60  # 2026-07-12: Kelly Criterion integration
         )
         
         # Should return 0 due to insufficient exposure
@@ -144,18 +149,23 @@ class TestExitOrderIntegration:
             AllocationRequest
         )
         allocator = get_global_slot_allocator()
+        allocator.reset_all()  # Ensure clean state
         
-        # Fill to near capacity with valid entry prices (10-50c)
-        req1 = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 50, 2.0, 5, False)
-        req2 = AllocationRequest("ETH_15M", "ETH", "KXETH15M-1", 40, 2.0, 5, False)
+        # 2026-07-13: Correlation discount disabled - no patch needed
+        # Fill to near capacity with valid entry prices (10-75c)
+        req1 = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 50, 2.0, 5, 0.5, False)
+        req2 = AllocationRequest("DOGE_15M", "DOGE", "KXDOGE15M-1", 35, 2.0, 5, 0.5, False)
         
         allocated1, _, _ = allocator.request_allocation(req1)
         allocated2, _, _ = allocator.request_allocation(req2)
         assert allocated1 and allocated2
         
-        # Available should be 10c
+        # Total should be 85c (50c + 35c), leaving 15c available
+        assert abs(allocator.get_total_exposure() - 0.85) < 0.01
+        
+        # Available should be 15c
         available = allocator.get_available_exposure()
-        assert abs(available - 0.10) < 0.01
+        assert abs(available - 0.15) < 0.01
         
         # 20c order should be rejected by gate (insufficient exposure)
         # This would be tested by actual order gate call, but we test the logic here
@@ -168,19 +178,20 @@ class TestExitOrderIntegration:
         """Test that exit orders bypass entry price validation."""
         from merid.risk.global_slot_allocator import AllocationRequest
         
-        # Exit orders should accept any price
-        exit_low = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 5, 0.0, 0, True)
-        exit_high = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 99, 0.0, 0, True)
+        # Exit orders should accept any price (bypass 10-75c validation)
+        # Note: AllocationRequest params are (agent_id, asset, ticker, entry_price_cents, edge_pct, spread_cents, confidence, is_exit_order)
+        exit_low = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 5, 0.0, 0, 0.5, True)
+        exit_high = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 99, 0.0, 0, 0.5, True)
         
         assert exit_low.entry_price_cents == 5
         assert exit_high.entry_price_cents == 99
         
-        # Entry orders should reject out-of-range prices
+        # Entry orders should reject out-of-range prices (10-75c)
         with pytest.raises(ValueError):
-            AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 5, 2.0, 5, False)
+            AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 5, 2.0, 5, 0.5, False)
         
         with pytest.raises(ValueError):
-            AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 99, 2.0, 5, False)
+            AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 80, 2.0, 5, 0.5, False)  # Updated to 80c (above 75c max)
         
         print("✓ Exit order price validation bypass test passed")
     
@@ -191,11 +202,13 @@ class TestExitOrderIntegration:
             AllocationRequest
         )
         allocator = get_global_slot_allocator()
+        allocator.reset_all()  # Ensure clean state
         
+        # 2026-07-13: Correlation discount disabled - no patch needed
         # Initial: BTC 10c + ETH 30c + SOL 20c = 60c used, 40c available
-        req_btc = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 10, 2.0, 5, False)
-        req_eth = AllocationRequest("ETH_15M", "ETH", "KXETH15M-1", 30, 2.0, 5, False)
-        req_sol = AllocationRequest("SOL_15M", "SOL", "KXSOL15M-1", 20, 2.0, 5, False)
+        req_btc = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 10, 2.0, 5, 0.5, False)
+        req_eth = AllocationRequest("ETH_15M", "ETH", "KXETH15M-1", 30, 2.0, 5, 0.5, False)
+        req_sol = AllocationRequest("SOL_15M", "SOL", "KXSOL15M-1", 20, 2.0, 5, 0.5, False)
         
         allocated_btc, _, slot_btc = allocator.request_allocation(req_btc)
         allocated_eth, _, slot_eth = allocator.request_allocation(req_eth)
@@ -205,12 +218,12 @@ class TestExitOrderIntegration:
         assert abs(allocator.get_total_exposure() - 0.60) < 0.01
         
         # DOGE 50c should be rejected (would exceed $1)
-        req_doge = AllocationRequest("DOGE_15M", "DOGE", "KXDOGE15M-1", 50, 2.0, 5, False)
+        req_doge = AllocationRequest("DOGE_15M", "DOGE", "KXDOGE15M-1", 50, 2.0, 5, 0.5, False)
         allocated_doge, reason_doge, _ = allocator.request_allocation(req_doge)
         assert not allocated_doge
         
         # Exit order for BTC should bypass
-        exit_btc = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 50, 0.0, 0, True)
+        exit_btc = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 50, 0.0, 0, 0.5, True)
         allocated_exit, reason_exit, _ = allocator.request_allocation(exit_btc)
         assert allocated_exit
         assert reason_exit == "EXIT_ORDER_BYPASS"
@@ -220,7 +233,7 @@ class TestExitOrderIntegration:
         assert abs(allocator.get_total_exposure() - 0.50) < 0.01
         
         # Now DOGE 40c should be allowed
-        req_doge2 = AllocationRequest("DOGE_15M", "DOGE", "KXDOGE15M-1", 40, 2.0, 5, False)
+        req_doge2 = AllocationRequest("DOGE_15M", "DOGE", "KXDOGE15M-1", 40, 2.0, 5, 0.5, False)
         allocated_doge2, _, slot_doge = allocator.request_allocation(req_doge2)
         assert allocated_doge2
         assert abs(allocator.get_total_exposure() - 0.90) < 0.01
@@ -234,35 +247,37 @@ class TestExitOrderIntegration:
             AllocationRequest
         )
         allocator = get_global_slot_allocator()
+        allocator.reset_all()  # Ensure clean state
         
-        # Fill to capacity
-        req1 = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 50, 2.0, 5, False)
-        req2 = AllocationRequest("ETH_15M", "ETH", "KXETH15M-1", 50, 2.0, 5, False)
+        # 2026-07-13: Correlation discount disabled - no patch needed
+        # Fill to near capacity
+        req1 = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 40, 2.0, 5, 0.5, False)
+        req2 = AllocationRequest("DOGE_15M", "DOGE", "KXDOGE15M-1", 40, 2.0, 5, 0.5, False)
         
         allocated1, _, slot1 = allocator.request_allocation(req1)
         allocated2, _, slot2 = allocator.request_allocation(req2)
         
         assert allocated1 and allocated2
-        assert abs(allocator.get_total_exposure() - 1.00) < 0.01
+        assert abs(allocator.get_total_exposure() - 0.80) < 0.01
         
-        # Entry order should be rejected
-        entry_req = AllocationRequest("SOL_15M", "SOL", "KXSOL15M-1", 10, 2.0, 5, False)
+        # Entry order should be rejected (80c + 25c = 105c > $1.00)
+        entry_req = AllocationRequest("SOL_15M", "SOL", "KXSOL15M-1", 25, 2.0, 5, 0.5, False)
         allocated_entry, _, _ = allocator.request_allocation(entry_req)
         assert not allocated_entry
         
         # Exit order should bypass
-        exit_req = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 50, 0.0, 0, True)
+        exit_req = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 50, 0.0, 0, 0.5, True)
         allocated_exit, _, _ = allocator.request_allocation(exit_req)
         assert allocated_exit
         
         # Release slot
         allocator.release_slot(slot1, exit_price_cents=50)
-        assert abs(allocator.get_total_exposure() - 0.50) < 0.01
+        assert abs(allocator.get_total_exposure() - 0.40) < 0.01  # Was 80c, released 40c, now 40c
         
         # Entry order should now be allowed
         allocated_entry2, _, _ = allocator.request_allocation(entry_req)
         assert allocated_entry2
-        assert abs(allocator.get_total_exposure() - 0.60) < 0.01
+        assert abs(allocator.get_total_exposure() - 0.65) < 0.01  # 40c (DOGE) + 25c (SOL) = 65c
         
         print("✓ Concurrent exit and entry orders test passed")
     
@@ -273,19 +288,20 @@ class TestExitOrderIntegration:
             AllocationRequest
         )
         allocator = get_global_slot_allocator()
+        allocator.reset_all()  # Ensure clean state
         
         # Initial slot count should be 0
         assert allocator.get_slot_count() == 0
         
         # Entry order should consume a slot
-        entry_req = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 30, 2.0, 5, False)
+        entry_req = AllocationRequest("BTC_15M", "BTC", "KXBTC15M-1", 30, 2.0, 5, 0.5, False)
         allocated, _, slot_id = allocator.request_allocation(entry_req)
         assert allocated
         assert slot_id is not None
         assert allocator.get_slot_count() == 1
         
         # Exit order should not consume a slot
-        exit_req = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 50, 0.0, 0, True)
+        exit_req = AllocationRequest("monitor", "BTC", "KXBTC15M-1", 50, 0.0, 0, 0.5, True)
         allocated_exit, _, exit_slot_id = allocator.request_allocation(exit_req)
         assert allocated_exit
         assert exit_slot_id is None  # Exit orders don't get slot IDs
