@@ -353,6 +353,7 @@ class Crypto15mProfile:
     trailing_stop_min_profit_cents: int = 12  # Updated from 3 to 12 (align with 2026 research: 10-15¢ threshold to avoid noise-triggered exits)
     trailing_stop_activation_delay_sec: int = 30
     trailing_stop_profit_zone_activation_cents: int = 80  # CRITICAL FIX: 2026-07-06 - Activate aggressive trailing at 80c
+    trailing_stop_giveback_cents: int = 5  # CRITICAL FIX: 2026-07-13 - Giveback amount in cents (40-50% of 12¢ activation threshold per 2026 research)
     
     # Position Management: Dynamic Risk Configuration
     # Volatility-regime based stop-loss cents for dynamic risk engine
@@ -1265,6 +1266,7 @@ class Crypto15mProfileAdapter:
                 trailing_stop_min_profit_cents=raw.get('trailing_stop', {}).get('min_profit_cents', 12),
                 trailing_stop_activation_delay_sec=raw.get('trailing_stop', {}).get('activation_delay_sec', 30),
                 trailing_stop_profit_zone_activation_cents=raw.get('trailing_stop', {}).get('profit_zone_activation_cents', 80),  # CRITICAL FIX: 2026-07-06
+                trailing_stop_giveback_cents=raw.get('trailing_stop', {}).get('giveback_cents', 5),  # CRITICAL FIX: 2026-07-13
                 # Position Management: Ratchet Profit Floor Configuration
                 ratchet_profit_floor_enabled=raw.get('ratchet_profit_floor', {}).get('enabled', True),
                 ratchet_activation_threshold_cents=raw.get('ratchet_profit_floor', {}).get('activation_threshold_cents', 85),

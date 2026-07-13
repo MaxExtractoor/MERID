@@ -676,6 +676,20 @@ def resolve_exit_policy(
         # Fallback to hardcoded value
         sl_cents_offset = 5
     
+    # CRITICAL FIX: Load trailing_giveback_cents from profile config (2026-07-13)
+    # Previously hardcoded to 5 - now uses profile configuration
+    trailing_giveback_cents = 5  # Default fallback
+    try:
+        from merid.risk.profiles.crypto_15m_profile import get_active_profile
+        profile = get_active_profile().profile
+        # Load from trailing_stop.giveback_cents in profile
+        if hasattr(profile, 'trailing_stop'):
+            trailing_giveback_cents = profile.trailing_stop.giveback_cents
+    except Exception as e:
+        logger.warning("[ORDER-ROUTER] Failed to load trailing giveback config from profile: %s", e)
+        # Fallback to hardcoded value
+        trailing_giveback_cents = 5
+    
     return ExitPolicyResolution(
         policy_id=policy_id,
         asset=asset,
@@ -689,7 +703,7 @@ def resolve_exit_policy(
         sl_r_multiple=0.5,  # Fallback R-multiple for legacy compatibility
         trailing_enabled=True,
         trailing_activation_r=0.8,
-        trailing_giveback_cents=5,
+        trailing_giveback_cents=trailing_giveback_cents,  # CRITICAL FIX: Load from profile config instead of hardcoded 5
         scale_out_enabled=True,
         scale_out_trigger_r=0.7,
         scale_out_fraction=0.5,
