@@ -714,6 +714,23 @@ class DynamicRiskEngine:
         # Dynamic caps based on bankroll (not fixed constants)
         # Per-market cap: 5% of bankroll / worst-case loss per contract
         worst_case_loss_cents = entry_price_cents  # Max loss if goes to 0
+        if worst_case_loss_cents <= 0:
+            logger.warning(
+                "[DYNAMIC-SIZING] Zero or negative entry price: entry=%dc",
+                entry_price_cents
+            )
+            return PositionSizeResult(
+                contracts=0,
+                risk_dollars=0,
+                risk_pct_of_bankroll=0,
+                bankroll_used=0,
+                per_market_cap=0,
+                per_asset_cap=0,
+                global_cap=0,
+                limiting_factor="zero_entry_price",
+                computation_time_ms=(time.time() - t0) * 1000,
+                rationale="Entry price is zero or negative",
+            )
         worst_case_loss_dollars = worst_case_loss_cents / 100.0
         per_market_cap = int((bankroll_usd * 0.05) / worst_case_loss_dollars)
         

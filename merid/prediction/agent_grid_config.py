@@ -415,11 +415,23 @@ class PortfolioRiskConfig:
         
         # Use unified core.settings values instead of deprecated merid.settings
         if self.max_total_notional_usd == 0:
-            self.max_total_notional_usd = Decimal(bankroll_cents * MAX_TOTAL_RISK_PCT) / 100
+            if bankroll_cents <= 0:
+                logger.warning("[AGENT-GRID-CONFIG] Zero or negative bankroll for max_total_notional: %d cents", bankroll_cents)
+                self.max_total_notional_usd = Decimal("0")
+            else:
+                self.max_total_notional_usd = Decimal(bankroll_cents * MAX_TOTAL_RISK_PCT) / 100
         if self.max_daily_loss_usd == 0:
-            self.max_daily_loss_usd = Decimal(bankroll_cents * DAILY_LOSS_CAP_PCT) / 100
+            if bankroll_cents <= 0:
+                logger.warning("[AGENT-GRID-CONFIG] Zero or negative bankroll for max_daily_loss: %d cents", bankroll_cents)
+                self.max_daily_loss_usd = Decimal("0")
+            else:
+                self.max_daily_loss_usd = Decimal(bankroll_cents * DAILY_LOSS_CAP_PCT) / 100
         if self.max_notional_per_asset_usd == 0:
-            self.max_notional_per_asset_usd = Decimal(bankroll_cents * MAX_CYCLE_RISK_PCT) / 100
+            if bankroll_cents <= 0:
+                logger.warning("[AGENT-GRID-CONFIG] Zero or negative bankroll for max_notional_per_asset: %d cents", bankroll_cents)
+                self.max_notional_per_asset_usd = Decimal("0")
+            else:
+                self.max_notional_per_asset_usd = Decimal(bankroll_cents * MAX_CYCLE_RISK_PCT) / 100
         if self.max_margin_utilization_pct == 0:
             self.max_margin_utilization_pct = Decimal("75")  # 75% default
         if self.rebalance_check_interval_seconds == 0:
