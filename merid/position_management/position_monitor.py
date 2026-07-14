@@ -1075,19 +1075,33 @@ class PositionMonitor:
                     
                     for position_id, position in positions_snapshot:
                         state = store.get(position.market_id)
+                        current_price = None
+                        
                         if state and state.mid_cents:
                             # CRITICAL FIX: Use side-aware price for NO positions
                             current_price = self._get_side_aware_price(state, position.side)
-                            if current_price is not None:
-                                await self._check_position(position, current_price)
-                            else:
-                                logger.debug(
-                                    "[POSITION-MONITOR] Could not get side-aware price for %s",
-                                    position.market_id
-                                )
                         else:
-                            logger.debug(
-                                "[POSITION-MONITOR] No market state for %s",
+                            # CRITICAL FIX (2026-07-14): Fallback price handling when market state is stale
+                            # Use position's current_price_cents if available (updated by position cache)
+                            # Otherwise use entry price as last resort to ensure exit conditions can still trigger
+                            if hasattr(position, 'current_price_cents') and position.current_price_cents:
+                                current_price = position.current_price_cents
+                                logger.debug(
+                                    "[POSITION-MONITOR] Using fallback current_price_cents for %s: %dc (market state unavailable)",
+                                    position.market_id, current_price
+                                )
+                            else:
+                                current_price = position.avg_entry_price_cents
+                                logger.warning(
+                                    "[POSITION-MONITOR] Using entry price as fallback for %s: %dc (market state unavailable, no current_price)",
+                                    position.market_id, current_price
+                                )
+                        
+                        if current_price is not None:
+                            await self._check_position(position, current_price)
+                        else:
+                            logger.warning(
+                                "[POSITION-MONITOR] Could not determine price for %s - skipping exit check",
                                 position.market_id
                             )
                 
