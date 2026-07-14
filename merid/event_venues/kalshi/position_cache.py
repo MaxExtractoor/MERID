@@ -482,6 +482,9 @@ class KalshiPositionCache:
                 # Entry orders are those that are NOT exit orders (not just buy actions)
                 # NO entry orders use sell action but still increase exposure
                 # Use the same logic as order_router._is_exit_order for consistency
+                # SEV-1 FIX: Hedge orders reduce net exposure, so they should be treated as exit orders
+                # for exposure accounting purposes. This is now handled by exit_order_utils.py
+                # which includes "hedge" and "hedge_engine" in EXIT_ORDER_MARKERS.
                 if agent_id and not self._is_exit_order_from_action(action, source=client_order_id):
                     try:
                         envelope = get_kalshi_crypto_15m_risk_envelope()
@@ -1505,8 +1508,11 @@ class KalshiPositionCache:
     ) -> str:
         """Look up fill_source from fills_ledger for authoritative classification.
         
-        Task 2: Integrates with fills_ledger to get proper fill_source.
-        Falls back to client_order_id prefix detection if ledger lookup fails.
+        SEV-0 FIX: Improved robustness to prevent race conditions between fill arrival
+        and ledger updates. Uses multiple detection methods in priority order:
+        1. Fills ledger (authoritative source)
+        2. Client order ID prefix (HEDGE_)
+        3. Source field in client_order_id (contains "hedge" or "HEDGE_ENGINE")
         
         Args:
             fill_id: The fill ID to look up in fills_ledger
@@ -1515,19 +1521,32 @@ class KalshiPositionCache:
         Returns:
             "hedge" if hedge fill, "alpha" otherwise
         """
-        # Try to get fill_source from fills_ledger if fill_id provided
+        # Priority 1: Try to get fill_source from fills_ledger if fill_id provided
         if fill_id and self._fills_ledger:
             try:
                 fill = self._fills_ledger.get_fill_by_id(fill_id)
                 if fill and fill.fill_source:
-                    return fill.fill_source
+                    # Validate fill_source value
+                    if fill.fill_source in ("hedge", "alpha", "manual"):
+                        return fill.fill_source
+                    # If fill_source has unexpected value, log and continue to fallback
+                    logger.warning(
+                        f"[POSITION-CACHE] Unexpected fill_source value: {fill.fill_source} "
+                        f"for fill_id={fill_id}, falling back to client_order_id detection"
+                    )
             except Exception as e:
-                logger.warning(f"Failed to lookup fill {fill_id} in ledger: {e}")
+                logger.debug(f"[POSITION-CACHE] Failed to lookup fill {fill_id} in ledger: {e}")
         
-        # Fallback: detect by client_order_id prefix
-        if client_order_id and client_order_id.startswith('HEDGE_'):
-            return "hedge"
+        # Priority 2: Detect by client_order_id prefix (HEDGE_)
+        if client_order_id:
+            if client_order_id.startswith('HEDGE_'):
+                return "hedge"
+            # Priority 3: Check if client_order_id contains hedge markers
+            client_order_id_lower = client_order_id.lower()
+            if "hedge" in client_order_id_lower or "hedge_engine" in client_order_id_lower:
+                return "hedge"
         
+        # Default to alpha if no hedge indicators found
         return "alpha"
     
     async def reconcile_with_fills_ledger(
