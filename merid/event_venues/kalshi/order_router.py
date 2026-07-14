@@ -316,6 +316,9 @@ def _check_open_resting_order(intent: OrderIntent) -> Optional[str]:
     this guard prevents the 15m loop from stacking a new GTC order on top of an
     existing unfilled one on every loop iteration. Exits (sell actions) are
     never blocked so positions can always be closed.
+    
+    2026 BEST PRACTICE: Fail-closed on monitor errors for anti-stacking guard.
+    If the monitor is unavailable, reject new orders to prevent stacking risk.
     """
     action_lower = (intent.action or "").lower()
     if action_lower != "buy":
@@ -330,8 +333,10 @@ def _check_open_resting_order(intent: OrderIntent) -> Optional[str]:
             action=intent.action,
         )
     except Exception as _guard_err:
-        logger.debug("[OPEN-ORDER-GUARD] Monitor lookup failed (fail-open): %s", _guard_err)
-        return None
+        # 2026 BEST PRACTICE: Fail-closed for anti-stacking guard
+        # If monitor is down, reject new orders to prevent stacking risk
+        logger.warning("[OPEN-ORDER-GUARD] Monitor lookup failed (fail-closed): %s - rejecting new order to prevent stacking risk", _guard_err)
+        return "monitor_unavailable:anti_stacking_guard"
 
     if open_order_id:
         logger.warning(
@@ -1919,9 +1924,11 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
     try:
         from merid.event_venues.kalshi.position_cache import get_position_cache
         from merid.risk.profiles.kalshi_crypto_15m_risk_envelope import get_kalshi_crypto_15m_risk_envelope
+        from merid.risk.global_slot_allocator import get_global_slot_allocator
         
         position_cache = get_position_cache()
         risk_envelope = get_kalshi_crypto_15m_risk_envelope()
+        slot_allocator = get_global_slot_allocator()
         
         # Extract asset from ticker
         asset = None
@@ -1938,6 +1945,47 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
             asset = "DOGE"
         
         if asset:
+            # CRITICAL FIX (2026-07-14): Use slot_allocator.can_allocate() for per-asset limit enforcement
+            # This is the authoritative check that enforces MAX_POSITIONS_PER_ASSET=1
+            # Exit orders bypass this check to allow position closure
+            if not _is_exit_order(intent):
+                can_allocate, alloc_reason = slot_allocator.can_allocate(intent.price_cents, asset)
+                if not can_allocate:
+                    logger.error(
+                        "[SLOT-ALLOCATOR-CHECK] REJECTING: asset=%s price=%dc - %s",
+                        asset, intent.price_cents, alloc_reason
+                    )
+                    _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "slot_allocation_failed")
+                    _increment_validation_gate_metric("ROUTER_VALIDATION", "slot_allocation_failed")
+                    return f"slot_allocation_failed:{alloc_reason}"
+                
+                logger.info(
+                    "[SLOT-ALLOCATOR-CHECK] Allocation allowed: asset=%s price=%dc available_exposure=$%.2f",
+                    asset, intent.price_cents, slot_allocator.get_available_exposure()
+                )
+            
+            # CRITICAL FIX (2026-07-14): Hard $1 exposure cap check using slot_allocator
+            # This provides real-time exposure tracking from the authoritative source
+            # Exit orders bypass this check to allow position closure
+            if not _is_exit_order(intent):
+                current_exposure = slot_allocator.get_total_exposure()
+                order_notional = (intent.count * intent.price_cents) / 100.0
+                fixed_exposure_cap = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
+                
+                if current_exposure + order_notional > fixed_exposure_cap:
+                    logger.error(
+                        "[HARD-EXPOSURE-CAP] REJECTING: current_exposure=$%.2f + order_notional=$%.2f > $%.2f cap",
+                        current_exposure, order_notional, fixed_exposure_cap
+                    )
+                    _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "hard_exposure_cap_exceeded")
+                    _increment_validation_gate_metric("ROUTER_VALIDATION", "hard_exposure_cap_exceeded")
+                    return f"hard_exposure_cap_exceeded:${current_exposure:.2f}+${order_notional:.2f}>${fixed_exposure_cap:.2f}"
+                
+                logger.info(
+                    "[HARD-EXPOSURE-CAP] Check passed: current_exposure=$%.2f + order_notional=$%.2f <= $%.2f cap",
+                    current_exposure, order_notional, fixed_exposure_cap
+                )
+            
             # Get current position for this ticker using actual position cache API
             current_position_obj = position_cache.get_position(ticker)
             current_contracts = current_position_obj.contracts if current_position_obj else 0
@@ -1947,12 +1995,7 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
             new_contracts = current_contracts + intent.count
             new_notional = (new_contracts * intent.price_cents) / 100.0
             
-            # 2026-07-09: DISABLED per-asset cap check - global allocator handles allocation
-            # The global allocator at agent grid level now manages edge-based allocation under venue cap
-            # Per-asset caps are no longer enforced here to allow best edges to use available venue cap
-            # This prevents the $0.20 per-asset cap rejection issue where good edges were blocked despite venue cap having room
-            
-            # Check total position limit across all assets using actual position cache API
+            # Check total position limit across all assets using actual position cache API (fallback)
             all_positions = position_cache.get_all_positions(validate_freshness=False)
             total_position_notional = 0.0
             position_count = 0
@@ -1967,7 +2010,7 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
             order_notional = (intent.count * intent.price_cents) / 100.0
             total_with_order = total_position_notional + order_notional
             
-            # Check against total notional cap (venue_cap)
+            # Check against total notional cap (venue_cap) - fallback check
             max_total_notional = risk_envelope.max_total_notional_usd
             if total_with_order > max_total_notional:
                 logger.warning(
@@ -3444,6 +3487,9 @@ def _check_market_regime_gate(
     Safety-net check that prevents order execution when the market regime
     gate has determined the basket is too flat for meaningful trading.
     Applies to new BUY orders only (exits/position management still allowed).
+    
+    2026 BEST PRACTICE: Integrated with SQS-based graduated exposure controls.
+    Uses degradation level from spot service to determine position sizing.
 
     Returns OrderResult if blocked, None if allowed.
     """
@@ -3463,16 +3509,26 @@ def _check_market_regime_gate(
         if last_decision is None:
             return None
 
+        # 2026 BEST PRACTICE: Get degradation level from spot service for graduated exposure
+        degradation_level = "normal"  # Default
+        try:
+            from data.unified_spot_service import get_unified_spot_service
+            spot_service = get_unified_spot_service()
+            degradation_level = spot_service.get_degradation_level()
+        except Exception as sqs_err:
+            logger.debug("[REGIME-GATE] Failed to get degradation level from spot service: %s", sqs_err)
+
         # If BLOCK (and not shadow mode), reject new entries
         if last_decision.action == RegimeAction.BLOCK and not last_decision.shadow_mode:
             latency = (_time.monotonic() - t0) * 1000
             logger.warning(
                 "[order-router] REJECTED by market regime gate: %s — basket too flat (%d/%d assets) | "
-                "reasons=%s",
+                "reasons=%s | degradation_level=%s",
                 intent.ticker,
                 last_decision.flat_count,
                 last_decision.total_assets,
                 last_decision.reason_codes,
+                degradation_level,
             )
             return OrderResult(
                 status="rejected",
@@ -3481,20 +3537,33 @@ def _check_market_regime_gate(
                 latency_ms=round(latency, 2),
             )
 
-        # CRITICAL FIX: Apply REDUCE state sizing reduction
+        # 2026 BEST PRACTICE: Graduated exposure controls based on degradation level
+        # Normal: 100% exposure, Yellow: 40% exposure, Orange: 15% exposure, Red: 0% exposure
+        degradation_multipliers = {
+            "normal": 1.0,
+            "yellow": 0.4,
+            "orange": 0.15,
+            "red": 0.0,
+        }
+        
+        # Apply REDUCE state sizing reduction
         # Previously only logged, now actually reduces position sizes by 50%
         if last_decision.action == RegimeAction.REDUCE:
             logger.info(
-                "[order-router] Market regime REDUCE active: %s — sizing reduced by 50%% (%d/%d flat)",
+                "[order-router] Market regime REDUCE active: %s — sizing reduced by 50%% (%d/%d flat) | degradation_level=%s",
                 intent.ticker,
                 last_decision.flat_count,
                 last_decision.total_assets,
+                degradation_level,
             )
             # Apply 50% size reduction by modifying intent.contracts if present
             # This is a downstream reduction after all other sizing calculations
             if hasattr(intent, 'contracts') and intent.contracts is not None:
                 original_contracts = intent.contracts
-                intent.contracts = max(1, int(original_contracts * 0.5))  # Reduce by 50%, min 1
+                # Apply both regime REDUCE (50%) and degradation multiplier
+                degradation_multiplier = degradation_multipliers.get(degradation_level, 1.0)
+                total_multiplier = 0.5 * degradation_multiplier
+                intent.contracts = max(1, int(original_contracts * total_multiplier))
                 logger.info(
                     "[order-router] REDUCE: Reduced contracts from %d to %d for %s",
                     original_contracts, intent.contracts, intent.ticker
@@ -5464,6 +5533,26 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             )
         
         if not placed_res.success or placed_res.data is None:
+            # CRITICAL FIX (2026-07-13): Notify global_allocator of order rejection for pending order tracking
+            # This removes the asset from pending orders when order is rejected
+            try:
+                from merid.risk.profiles.global_allocator import get_global_allocator
+                allocator = get_global_allocator()
+                if allocator:
+                    # Extract asset from ticker
+                    asset = intent.ticker.split("-")[0][2:] if intent.ticker.startswith("KX") else "UNKNOWN"
+                    # Remove timeframe suffix
+                    import re
+                    asset = re.sub(r'(15M|H1|D1|W1|1M|Y)$', '', asset)
+                    # Use a placeholder order_id since we don't have one for rejected orders
+                    allocator.record_order_rejected(asset, intent.client_tag or "unknown")
+                    logger.info(
+                        "[GLOBAL-ALLOCATOR-NOTIFY] Order rejected: asset=%s client_tag=%s",
+                        asset, intent.client_tag
+                    )
+            except Exception as alloc_err:
+                logger.warning("[GLOBAL-ALLOCATOR-NOTIFY] Failed to notify global_allocator of rejection: %s", alloc_err)
+
             # BUG-03 fix: release the reserved exposure notional on exchange rejection.
             if _exp_tracker and _reserved_category and _reserved_underlying:
                 try:
@@ -5514,6 +5603,26 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         _record_successful_order()
         
         # Note: _record_order_placed(intent) already called BEFORE submission to prevent race condition
+
+        # CRITICAL FIX (2026-07-13): Notify global_allocator of order submission for pending order tracking
+        # This prevents the global_allocator from allowing duplicate orders for the same asset
+        try:
+            from merid.risk.profiles.global_allocator import get_global_allocator
+            allocator = get_global_allocator()
+            if allocator:
+                # Extract asset from ticker
+                asset = intent.ticker.split("-")[0][2:] if intent.ticker.startswith("KX") else "UNKNOWN"
+                # Remove timeframe suffix
+                import re
+                asset = re.sub(r'(15M|H1|D1|W1|1M|Y)$', '', asset)
+                order_notional = (intent.count * intent.price_cents) / 100.0
+                allocator.record_order_submitted(asset, _venue_oid, order_notional)
+                logger.info(
+                    "[GLOBAL-ALLOCATOR-NOTIFY] Order submitted: asset=%s order_id=%s notional=$%.2f",
+                    asset, _venue_oid, order_notional
+                )
+        except Exception as alloc_err:
+            logger.warning("[GLOBAL-ALLOCATOR-NOTIFY] Failed to notify global_allocator: %s", alloc_err)
 
         placed = placed_res.data
         # CRITICAL FIX (2026-07-12): Kalshi's create-order response may omit/zero `size`.
@@ -5708,6 +5817,27 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         elif filled_count > 0:
             status = "partial_live"
         
+        # CRITICAL FIX (2026-07-13): Notify global_allocator of order fill for pending order tracking
+        # This removes the asset from pending orders and updates position tracking
+        if filled_count > 0:
+            try:
+                from merid.risk.profiles.global_allocator import get_global_allocator
+                allocator = get_global_allocator()
+                if allocator:
+                    # Extract asset from ticker
+                    asset = intent.ticker.split("-")[0][2:] if intent.ticker.startswith("KX") else "UNKNOWN"
+                    # Remove timeframe suffix
+                    import re
+                    asset = re.sub(r'(15M|H1|D1|W1|1M|Y)$', '', asset)
+                    fill_notional = (filled_count * fill_price_cents) / 100.0
+                    allocator.record_order_filled(asset, _venue_oid, fill_notional)
+                    logger.info(
+                        "[GLOBAL-ALLOCATOR-NOTIFY] Order filled: asset=%s order_id=%s notional=$%.2f",
+                        asset, _venue_oid, fill_notional
+                    )
+            except Exception as alloc_err:
+                logger.warning("[GLOBAL-ALLOCATOR-NOTIFY] Failed to notify global_allocator of fill: %s", alloc_err)
+
         # CRITICAL FIX (2026-07-13): Allocate slot on fill (not release)
         # Previous behavior: Slot was allocated pre-submission and released on fill
         # New behavior: Slot is allocated only when order actually fills
