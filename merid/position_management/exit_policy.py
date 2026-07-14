@@ -21,25 +21,26 @@ class ExitReason(str, Enum):
     Exit reason types.
     
     CRITICAL FIX: 2026-07-07 - Documented exit precedence order to prevent confusion.
+    CRITICAL FIX: 2026-07-15 - Updated precedence to match actual check order in position_monitor.py
     
     EXIT PRECEDENCE ORDER (highest to lowest priority):
+    This is the ACTUAL check order in position_monitor._check_position():
+    
     1. EXTREME_PROFIT - Exit at 99c YES / 1c NO (guaranteed win, highest priority)
     2. DYNAMIC_TAKE_PROFIT - Laddered exit based on entry price zones (user strategy)
-    3. RATCHET_FLOOR - Exit when price drops below ratchet floor (80-85c profit protection)
-    4. RATCHET_TRIM - Partial close to trim position when >1 contract and price >80c
-    5. RISK - Global risk layer kill switch
-    6. CANDLE_REVERSAL - Exit on candle pattern reversal
-    7. ADAPTIVE_TIMING - Time-based exit with volatility adjustment
-    8. TIME_STOP - Time-based exit (time since entry)
-    9. EDGE_DECAY - Exit when edge decays below threshold
-    10. STOP_LOSS - Stop loss trigger
-    11. TRAIL - Trailing stop trigger
-    12. TAKE_PROFIT - Take profit trigger
-    13. SCALE_OUT - Partial exit at 1.5-2R (Pay Yourself strategy)
-    14. MANUAL - Manual exit
-    15. LOSS_CAP - Exit at 80% loss (PolyTrack research) - DEPRECATED, replaced by RISK
+    3. RATCHET_TRIM - Partial close to trim position when >1 contract and price >80c
+    4. RATCHET_FLOOR - Exit when price drops below ratchet floor (80-85c profit protection)
+    5. STOP_LOSS - Stop loss trigger
+    6. TAKE_PROFIT - Take profit trigger
+    7. BREAK_EVEN - Move SL to entry (not an exit, just SL adjustment)
+    8. SCALE_OUT - Partial exit at 1.5-2R (Pay Yourself strategy)
+    9. TRAILING_STOP - Trailing stop activation (not an exit, just activation)
+    10. STAGED-EXIT - Time-based staged partial exits (TIME_STOP variant)
+    11. EXIT_POLICY_EVALUATION - RISK, STALE_DATA, CANDLE_REVERSAL, ADAPTIVE_TIMING, TIME_STOP, EDGE_DECAY
     
-    NOTE: This precedence order must match the check order in position_monitor._check_position()
+    NOTE: RISK, STALE_DATA, CANDLE_REVERSAL, ADAPTIVE_TIMING, TIME_STOP, EDGE_DECAY are
+    evaluated via exit_policy.evaluate() in position_monitor._check_position() after the
+    position-level checks above. This is the documented precedence order.
     """
     TAKE_PROFIT = "take_profit"
     STOP_LOSS = "stop_loss"
