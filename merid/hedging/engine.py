@@ -324,11 +324,13 @@ class CryptoHedgeEngine:
                     break  # one adjacent horizon per cell
 
         # Step 9: Cross-asset hedging hook — currently disabled.
-        # `TimeframeHedgeRule` has no `cross_asset_enabled` attribute and there is
-        # no `_compute_cross_asset_hedge` method. The YAML default is also
-        # `cross_asset.enabled: false`. When cross-asset hedging is wired in,
-        # gate it on `config.cross_asset_enabled` (top-level) and implement the
-        # method properly. Leaving as no-op to keep same-asset hedging stable.
+        # SEV-1 FIX: Add warning if cross-asset hedging is enabled but not implemented
+        if config.cross_asset_enabled:
+            logger.warning(
+                "[hedge-engine] cross_asset_enabled is True but cross-asset hedging "
+                "is not implemented. This configuration has no effect. "
+                "To enable cross-asset hedging, implement _compute_cross_asset_hedge method."
+            )
         return orders
 
     # ── Helpers ───────────────────────────────────────────────────────

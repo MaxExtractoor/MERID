@@ -103,8 +103,22 @@ class TestExitOrderFromSource:
             "ratchet",
             "trim",
             "scale_out",
+            "hedge",  # SEV-0 FIX: Hedge orders reduce net exposure
+            "hedge_engine",  # SEV-0 FIX: HEDGE_ENGINE source marker
+            "offset_hedging",  # SEV-0 FIX: offset_hedging source marker
         ]
         assert set(EXIT_ORDER_MARKERS) == set(expected_markers)
+
+    def test_hedge_marker_detected(self):
+        """Test that 'hedge' marker is detected (SEV-0 FIX)."""
+        assert is_exit_order_from_source("hedge") is True
+        assert is_exit_order_from_source("offset_hedging") is True
+        assert is_exit_order_from_source("HEDGE") is True  # case insensitive
+
+    def test_hedge_engine_marker_detected(self):
+        """Test that 'hedge_engine' marker is detected (SEV-0 FIX)."""
+        assert is_exit_order_from_source("hedge_engine") is True
+        assert is_exit_order_from_source("HEDGE_ENGINE") is True  # case insensitive
 
 
 class TestExitOrderFromAction:

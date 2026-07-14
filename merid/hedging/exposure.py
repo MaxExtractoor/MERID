@@ -17,8 +17,12 @@ from utils.logger import get_logger
 logger = get_logger("merid.hedging.exposure")
 
 # Task 5 & 6 Fix: Configurable hedge thresholds (not hardcoded)
-HEDGE_NEUTRAL_THRESHOLD_CENTS = int(os.environ.get("HEDGE_NEUTRAL_THRESHOLD_CENTS", "1000"))
-MAX_HEDGE_COVERAGE_RATIO = float(os.environ.get("MAX_HEDGE_COVERAGE_RATIO", "2.0"))
+# SEV-2 FIX: Use consistent environment variable names across the codebase
+# MERID_HEDGE_NEUTRAL_THRESHOLD_CENTS is the canonical name used elsewhere
+HEDGE_NEUTRAL_THRESHOLD_CENTS = int(os.environ.get("MERID_HEDGE_NEUTRAL_THRESHOLD_CENTS", "10"))
+# SEV-2 FIX: Use consistent environment variable name MERID_MAX_HEDGE_COVERAGE_RATIO
+# Default to 1.0 (100% coverage) which is the safer default
+MAX_HEDGE_COVERAGE_RATIO = float(os.environ.get("MERID_MAX_HEDGE_COVERAGE_RATIO", "1.0"))
 
 
 @dataclass
@@ -149,12 +153,19 @@ def build_exposure_snapshot() -> ExposureSnapshot:
             
             # Task 2: Check if position came from hedge fill
             # Use fill_source_map from ledger (primary) or client_order_id prefix (fallback)
+            # SEV-0 FIX: Enhanced fallback to check for hedge markers in client_order_id content
             is_hedge = False
             # BUG-FIX: Actually use fill_source_map we just built
             if pos.fill_id and pos.fill_id in fill_source_map:
                 is_hedge = fill_source_map[pos.fill_id] == "hedge"
             elif hasattr(pos, 'client_order_id') and pos.client_order_id:
-                is_hedge = pos.client_order_id.startswith('HEDGE_')
+                # Priority 1: Check HEDGE_ prefix
+                if pos.client_order_id.startswith('HEDGE_'):
+                    is_hedge = True
+                # Priority 2: Check for hedge markers in content (matches position_cache logic)
+                else:
+                    client_order_id_lower = pos.client_order_id.lower()
+                    is_hedge = "hedge" in client_order_id_lower or "hedge_engine" in client_order_id_lower
             
             if is_hedge:
                 # Hedge exposure - separate tracking
@@ -226,8 +237,8 @@ CRYPTO_BASKET_ASSETS = os.environ.get(
 # Strip whitespace from each asset
 CRYPTO_BASKET_ASSETS = [a.strip().upper() for a in CRYPTO_BASKET_ASSETS if a.strip()]
 
-MAX_HEDGE_COVERAGE_RATIO = float(os.environ.get("MERID_MAX_HEDGE_COVERAGE_RATIO", 1.0))
-HEDGE_NEUTRAL_THRESHOLD_CENTS = int(os.environ.get("MERID_HEDGE_NEUTRAL_THRESHOLD_CENTS", 10))
+# Note: MAX_HEDGE_COVERAGE_RATIO and HEDGE_NEUTRAL_THRESHOLD_CENTS are defined
+# at module level (lines 22-25) to avoid duplication
 
 
 def get_basket_alpha_exposure(

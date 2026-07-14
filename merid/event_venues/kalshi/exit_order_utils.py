@@ -21,6 +21,9 @@ EXIT_ORDER_MARKERS = [
     "ratchet",
     "trim",
     "scale_out",
+    "hedge",  # SEV-0 FIX: Hedge orders reduce net exposure and should be treated as exit orders
+    "hedge_engine",  # SEV-0 FIX: HEDGE_ENGINE source marker for hedge order detection
+    "offset_hedging",  # SEV-0 FIX: offset_hedging source marker for offset hedging strategy
 ]
 
 
