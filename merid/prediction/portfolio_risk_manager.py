@@ -96,7 +96,11 @@ class PortfolioRiskManager:
             bankroll_cents = 0
         
         # Derive absolute limit from bankroll (2x max notional as hard ceiling)
-        absolute_limit = float(bankroll_cents * MAX_TOTAL_RISK_PCT) / 100 * 2.0
+        if bankroll_cents <= 0:
+            logger.warning("[PortfolioRiskManager] Zero or negative bankroll: %d cents", bankroll_cents)
+            absolute_limit = 0.0
+        else:
+            absolute_limit = float(bankroll_cents * MAX_TOTAL_RISK_PCT) / 100 * 2.0
         
         self.risk_limits = {
             "max_equity_risk": RiskLimit(
