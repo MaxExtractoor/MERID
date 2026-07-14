@@ -304,19 +304,13 @@ class KalshiPositionCache:
         
         CRITICAL FIX (2026-07-13): Only treat orders with explicit exit markers as exits.
         Entry orders (both YES buy and NO sell) must record exposure to enforce $1 cap.
-        """
-        # Check source for exit-specific markers first (most reliable indicator)
-        if source:
-            source_lower = source.lower()
-            exit_markers = ["take_profit", "stop_loss", "micro_scalp", "exit", "close", "ratchet"]
-            if any(marker in source_lower for marker in exit_markers):
-                return True
         
-        # For position_cache.on_fill, we don't have full OrderIntent context
-        # We use action as a fallback, but this is less reliable
-        # CRITICAL: DO NOT treat all sell actions as exits - this bypasses $1 cap
-        # Without explicit exit markers, we conservatively treat as entry order
-        return False
+        CRITICAL FIX (2026-07-15): Use shared exit_order_utils module to prevent
+        divergence between order_router.py and position_cache.py.
+        """
+        from merid.event_venues.kalshi.exit_order_utils import is_exit_order_from_action
+        
+        return is_exit_order_from_action(action, source)
 
     def _ensure_mutex(self) -> asyncio.Lock:
         """Lazy-initialize the mutex in the current event loop."""
@@ -509,6 +503,15 @@ class KalshiPositionCache:
                             order_notional_usd=order_notional_usd,
                             asset=asset
                         )
+                        
+                        # 2026-07-13: Record fill in GlobalAllocator for per-asset position tracking
+                        try:
+                            from merid.risk.profiles.global_allocator import get_global_allocator
+                            allocator = get_global_allocator()
+                            if allocator and asset:
+                                allocator.record_order_filled(asset, client_order_id or fill_id or "unknown", order_notional_usd)
+                        except Exception as ga_exc:
+                            logger.debug("[POSITION-CACHE] Failed to record fill in GlobalAllocator: %s", ga_exc)
                     except RuntimeError as e:
                         # Bankroll not ready - log warning but don't crash
                         logger.warning(
@@ -557,13 +560,37 @@ class KalshiPositionCache:
                                     released_count, asset
                                 )
                             else:
+                                # CRITICAL FIX (2026-07-15): Log why asset release failed before using fallback
+                                # This helps diagnose slot allocation issues
+                                logger.warning(
+                                    "[POSITION-CACHE] Asset release returned 0 slots for asset=%s agent=%s market=%s. "
+                                    "This may indicate: 1) No slot was allocated for this position, 2) Asset mismatch, "
+                                    "3) Slot already released. Using agent_id fallback as last resort.",
+                                    asset, agent_id, market_id
+                                )
                                 # Fallback: try releasing by agent_id if asset release didn't work
+                                # WARNING: If agent has multiple positions across assets, this may release wrong slots
                                 released_count = slot_allocator.release_by_agent(agent_id)
                                 if released_count > 0:
-                                    logger.info(
-                                        "[POSITION-CACHE] Released %d slot(s) from global allocator for agent=%s on sell fill (fallback)",
+                                    logger.warning(
+                                        "[POSITION-CACHE] Released %d slot(s) from global allocator for agent=%s on sell fill (fallback - may be incorrect if agent has multiple positions)",
                                         released_count, agent_id
                                     )
+                                else:
+                                    logger.warning(
+                                        "[POSITION-CACHE] Agent release also returned 0 slots for agent=%s. "
+                                        "Slot may have already been released or never allocated.",
+                                        agent_id
+                                    )
+                            
+                            # 2026-07-13: Record position close in GlobalAllocator for per-asset tracking
+                            try:
+                                from merid.risk.profiles.global_allocator import get_global_allocator
+                                allocator = get_global_allocator()
+                                if allocator and asset:
+                                    allocator.record_position_closed(asset)
+                            except Exception as ga_exc:
+                                logger.debug("[POSITION-CACHE] Failed to record position close in GlobalAllocator: %s", ga_exc)
                         except Exception as slot_err:
                             logger.warning(
                                 "[POSITION-CACHE] Failed to release slot from global allocator: %s",
