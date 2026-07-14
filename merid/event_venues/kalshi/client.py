@@ -180,6 +180,14 @@ _KALSHI_READ_TIMEOUT = 45.0
 _KALSHI_WRITE_TIMEOUT = 30.0
 _KALSHI_POOL_TIMEOUT = 15.0
 
+# Circuit breaker for event loop resets (prevents reset storms)
+KALSHI_LOOP_RESET_THRESHOLD = 5  # Max resets in time window
+KALSHI_LOOP_RESET_WINDOW_S = 60.0  # Time window for reset counting
+KALSHI_LOOP_RESET_COOLDOWN_S = 30.0  # Cooldown when circuit breaker trips
+
+# Maximum total retry duration to prevent indefinite retries
+KALSHI_MAX_TOTAL_RETRY_DURATION_S = 120.0  # Max total time spent retrying (2 minutes)
+
 KALSHI_RETRY_STATUSES = {429, 500, 502, 503, 504}
 
 
@@ -404,6 +412,10 @@ class KalshiVenueClient(EventVenueClient):
         # Support both legacy use_demo and unified env field
         if hasattr(self.config, 'env'):
             _env = self.config.env
+            # CRITICAL FIX: Normalize "prod" back to "live" for circuit breaker naming
+            # kalshi_config.py normalizes "live" to "prod", but circuit breakers use "live"/"demo"
+            if _env == "prod":
+                _env = "live"
         elif hasattr(self.config, 'use_demo'):
             _env = "demo" if self.config.use_demo else "live"
         else:
@@ -426,6 +438,11 @@ class KalshiVenueClient(EventVenueClient):
         self._client_loop_id: Optional[int] = None
         self._loop_check_lock = threading.Lock()
         self._client_init_lock: Optional[asyncio.Lock] = None  # Async lock for thread-safe client init
+
+        # Circuit breaker for event loop resets (prevents reset storms)
+        self._loop_reset_history: List[float] = []  # Timestamps of recent resets
+        self._loop_reset_circuit_tripped: bool = False
+        self._loop_reset_circuit_reset_ts: Optional[float] = None
 
         # Circuit-open log suppression: avoid flooding logs when many callers
         # hit an open circuit simultaneously (e.g. 20+ agents per tick)
@@ -574,6 +591,8 @@ class KalshiVenueClient(EventVenueClient):
         Auto-resets client if bound to a different event loop (Windows startup optimization).
         This prevents "Event loop is closed" errors during startup when the client singleton
         was created in a different loop context.
+        
+        Includes circuit breaker for repeated event loop resets to prevent reset storms.
         """
         # Initialize async lock lazily (can't create asyncio.Lock in __init__ without loop)
         # CRITICAL FIX: Check if lock is bound to a different event loop and reset if so
@@ -594,6 +613,50 @@ class KalshiVenueClient(EventVenueClient):
             
             # Check for event-loop mismatch and auto-reset (prevents retry storms)
             if self._http_client is not None and self._is_loop_mismatch():
+                # Check circuit breaker for loop resets
+                now = _time.time()
+                
+                # Clean old reset history outside window
+                self._loop_reset_history = [
+                    ts for ts in self._loop_reset_history
+                    if now - ts < KALSHI_LOOP_RESET_WINDOW_S
+                ]
+                
+                # Check if circuit breaker is tripped
+                if self._loop_reset_circuit_tripped:
+                    if self._loop_reset_circuit_reset_ts and (now - self._loop_reset_circuit_reset_ts < KALSHI_LOOP_RESET_COOLDOWN_S):
+                        # Circuit breaker still tripped - raise error
+                        cooldown_remaining = KALSHI_LOOP_RESET_COOLDOWN_S - (now - self._loop_reset_circuit_reset_ts)
+                        raise RuntimeError(
+                            f"Event loop reset circuit breaker tripped. "
+                            f"Too many resets ({KALSHI_LOOP_RESET_THRESHOLD} in {KALSHI_LOOP_RESET_WINDOW_S}s). "
+                            f"Cooldown: {cooldown_remaining:.1f}s remaining"
+                        )
+                    else:
+                        # Cooldown expired - reset circuit breaker
+                        self._loop_reset_circuit_tripped = False
+                        self._loop_reset_circuit_reset_ts = None
+                        self._loop_reset_history = []
+                        logger.warning("[kalshi] Event loop reset circuit breaker cooldown expired, allowing resets")
+                
+                # Record this reset
+                self._loop_reset_history.append(now)
+                
+                # Check if we've exceeded threshold
+                if len(self._loop_reset_history) >= KALSHI_LOOP_RESET_THRESHOLD:
+                    self._loop_reset_circuit_tripped = True
+                    self._loop_reset_circuit_reset_ts = now
+                    logger.error(
+                        f"[kalshi] Event loop reset circuit breaker TRIPPED: "
+                        f"{len(self._loop_reset_history)} resets in {KALSHI_LOOP_RESET_WINDOW_S}s "
+                        f"(threshold: {KALSHI_LOOP_RESET_THRESHOLD}). "
+                        f"Cooldown for {KALSHI_LOOP_RESET_COOLDOWN_S}s"
+                    )
+                    raise RuntimeError(
+                        f"Event loop reset circuit breaker tripped. "
+                        f"Too many resets ({len(self._loop_reset_history)} in {KALSHI_LOOP_RESET_WINDOW_S}s)"
+                    )
+                
                 logger.debug("[kalshi] Event-loop mismatch detected, resetting HTTP client proactively")
                 await self._reset_http_client_after_loop_error()
 
@@ -847,6 +910,7 @@ class KalshiVenueClient(EventVenueClient):
         url = f"{base_url}{path}"
         start_time = _time.time()
         last_error: Optional[Exception] = None
+        total_retry_start_time = _time.time()  # Track total retry duration
 
         for attempt in range(KALSHI_MAX_RETRIES + 1):
             try:
@@ -912,6 +976,34 @@ class KalshiVenueClient(EventVenueClient):
                     # Check for retryable status codes
                     if response.status_code in KALSHI_RETRY_STATUSES:
                         if attempt < KALSHI_MAX_RETRIES:
+                            # Check total retry duration to prevent indefinite retries
+                            total_retry_duration = _time.time() - total_retry_start_time
+                            if total_retry_duration >= KALSHI_MAX_TOTAL_RETRY_DURATION_S:
+                                logger.error(
+                                    f"[kalshi] {operation_name} exceeded max total retry duration "
+                                    f"({KALSHI_MAX_TOTAL_RETRY_DURATION_S}s). Giving up after {attempt + 1} attempts."
+                                )
+                                error = httpx.HTTPStatusError(
+                                    f"Max total retry duration exceeded: {KALSHI_MAX_TOTAL_RETRY_DURATION_S}s",
+                                    request=response.request,
+                                    response=response,
+                                )
+                                # Emit API metrics for failed request
+                                emit_api_metrics(
+                                    endpoint=path,
+                                    method=method,
+                                    duration_seconds=latency_ms / 1000,
+                                    status_code=response.status_code,
+                                    success=False,
+                                )
+                                return OperationResult.fail(
+                                    error,
+                                    latency_ms=latency_ms,
+                                    retries=attempt,
+                                    operation=operation_name,
+                                    status_code=response.status_code,
+                                )
+                            
                             # Jittered exponential backoff: base^attempt * [1.0, 2.0)
                             # Prevents thundering herd when services recover
                             base_wait = KALSHI_BACKOFF_BASE ** attempt

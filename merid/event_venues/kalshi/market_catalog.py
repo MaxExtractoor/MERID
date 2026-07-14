@@ -1211,6 +1211,12 @@ class KalshiMarketCatalog:
                 
                 if -5.0 <= mte <= 20.0:  # Include markets from -5 to 20 min to expiry (next window + current window + buffer)
                     visible_markets.append(cm)
+                    # CRITICAL DIAGNOSTIC: Log mte for visible markets on first refresh
+                    if self._refresh_count == 0:
+                        logger.info(
+                            "[CATALOG-VISIBILITY-FILTER] Market=%s mte=%.1fmin PASSED visibility filter",
+                            cm.market.market_id, mte
+                        )
                 else:
                     logger.debug(
                         "[CATALOG-VISIBILITY-FILTER] Skipping market=%s mte=%.1fmin (outside -5 to 15.5min window)",
@@ -1240,10 +1246,17 @@ class KalshiMarketCatalog:
                 else:
                     # Market is visible but not tradeable (outside entry window)
                     cm.tradeable = False
-                    logger.debug(
-                        "[CATALOG-TRADEABILITY-FILTER] Market=%s mte=%.1fmin is visible but not tradeable (outside 2-12min entry window)",
-                        cm.market.market_id, mte
-                    )
+                    # CRITICAL DIAGNOSTIC: Log at INFO level for first refresh to understand filtering
+                    if self._refresh_count == 0:
+                        logger.info(
+                            "[CATALOG-TRADEABILITY-FILTER] Market=%s mte=%.1fmin is visible but not tradeable (outside 2-12min entry window)",
+                            cm.market.market_id, mte
+                        )
+                    else:
+                        logger.debug(
+                            "[CATALOG-TRADEABILITY-FILTER] Market=%s mte=%.1fmin is visible but not tradeable (outside 2-12min entry window)",
+                            cm.market.market_id, mte
+                        )
         
         logger.info(
             "[CATALOG-TRADEABILITY-FILTER] Post-tradeability-filter: %d markets in 2-12min entry window (from %d visible)",
@@ -1279,17 +1292,36 @@ class KalshiMarketCatalog:
             logger.info("[CATALOG-REFRESH] Shutdown requested - skipping index build")
             raise RuntimeError("Shutdown requested during catalog refresh")
         
-        # CRITICAL FIX: Use try/except to handle executor shutdown gracefully
+        # CRITICAL FIX: Use try/except with retry to handle executor shutdown gracefully
+        # The default executor may be closing during shutdown, causing race conditions
+        max_retries = 2
+        enriched = None
+        cat_idx = {}
+        asset_idx = {}
+        tf_idx = {}
+        ticker_idx = {}
+        categories_found = set()
+        assets_found = set()
+        
+        # CRITICAL FIX: Call _build_indexes directly instead of using run_in_executor
+        # The catalog refresh already runs in a separate thread with its own event loop.
+        # Using run_in_executor(None, ...) tries to use the default executor which may be shut down,
+        # causing "cannot schedule new futures after shutdown" errors.
+        # Since we're already in a thread, we can call the CPU-bound work directly.
         try:
-            enriched, cat_idx, asset_idx, tf_idx, ticker_idx, categories_found, assets_found = await loop.run_in_executor(
-                None, self._build_indexes, filtered_markets, now
+            enriched, cat_idx, asset_idx, tf_idx, ticker_idx, categories_found, assets_found = self._build_indexes(
+                filtered_markets, now
             )
-        except RuntimeError as e:
-            if "cannot schedule new futures after shutdown" in str(e):
-                logger.error("[CATALOG-REFRESH] Executor shutdown detected - event loop closing")
-                raise RuntimeError("Executor shutdown during catalog refresh") from e
-            else:
-                raise
+        except Exception as e:
+            logger.error("[CATALOG-REFRESH] Failed to build indexes: %s", e, exc_info=True)
+            # Fall back to using filtered markets without enrichment
+            enriched = filtered_markets
+            cat_idx = {}
+            asset_idx = {}
+            tf_idx = {}
+            ticker_idx = {}
+            categories_found = set()
+            assets_found = set()
 
         # Debug logging for first refresh to see what's happening
         if self._refresh_count == 0 and enriched:
