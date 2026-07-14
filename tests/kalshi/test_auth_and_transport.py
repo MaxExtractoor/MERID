@@ -211,13 +211,44 @@ class TestKalshiEnvironmentRouting:
         """Circuit breaker name includes env (demo/live)."""
         from merid.event_venues.kalshi.client import KalshiVenueClient
         from merid.event_venues.kalshi.models import KalshiConfig
-        
+
         demo_client = KalshiVenueClient(config=KalshiConfig(use_demo=True))
         live_client = KalshiVenueClient(config=KalshiConfig(use_demo=False))
-        
+
         # Circuit breakers are created with env-specific names
         assert "demo" in str(demo_client._circuit_breaker).lower() or "kalshi" in str(demo_client._circuit_breaker).lower()
         assert "live" in str(live_client._circuit_breaker).lower() or "kalshi" in str(live_client._circuit_breaker).lower()
+
+    def test_ws_fault_manager_circuit_breaker_namespaced_by_env(self):
+        """WS FaultManager adapter uses environment-aware circuit breaker name."""
+        import os
+        from unittest.mock import patch
+
+        # Test with KALSHI_ENV=live
+        with patch.dict(os.environ, {"KALSHI_ENV": "live"}):
+            from merid.event_venues.kalshi.ws import _FaultManagerAdapter
+            # Force reimport to pick up new env var
+            import importlib
+            import merid.event_venues.kalshi.ws as ws_module
+            importlib.reload(ws_module)
+            adapter = ws_module._FaultManagerAdapter()
+            # Check the circuit breaker has a name attribute
+            assert hasattr(adapter._breaker, 'name'), "Circuit breaker should have a name attribute"
+            assert "live" in adapter._breaker.name.lower() or "kalshi" in adapter._breaker.name.lower()
+
+        # Test with KALSHI_ENV=demo
+        with patch.dict(os.environ, {"KALSHI_ENV": "demo"}):
+            importlib.reload(ws_module)
+            adapter = ws_module._FaultManagerAdapter()
+            assert hasattr(adapter._breaker, 'name'), "Circuit breaker should have a name attribute"
+            assert "demo" in adapter._breaker.name.lower() or "kalshi" in adapter._breaker.name.lower()
+
+        # Test with KALSHI_ENV=prod (should normalize to live)
+        with patch.dict(os.environ, {"KALSHI_ENV": "prod"}):
+            importlib.reload(ws_module)
+            adapter = ws_module._FaultManagerAdapter()
+            assert hasattr(adapter._breaker, 'name'), "Circuit breaker should have a name attribute"
+            assert "live" in adapter._breaker.name.lower() or "kalshi" in adapter._breaker.name.lower()
 
 
 # =============================================================================

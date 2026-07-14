@@ -43,7 +43,18 @@ class _FaultManagerAdapter:
     """Adapter to provide FaultManager interface using merid circuit breaker."""
     
     def __init__(self):
-        self._breaker = get_circuit_breaker("kalshi")
+        # CRITICAL FIX: Use environment-aware circuit breaker name to match client
+        # Normalize to "live" or "demo" based on KALSHI_ENV
+        import os
+        kalshi_env = os.getenv("KALSHI_ENV", "").lower()
+        if kalshi_env == "live" or kalshi_env == "prod":
+            cb_name = "kalshi_live"
+        elif kalshi_env == "demo":
+            cb_name = "kalshi_demo"
+        else:
+            # Default to live if not set
+            cb_name = "kalshi_live"
+        self._breaker = get_circuit_breaker(cb_name)
     
     def can_attempt_reconnect(self, venue: str) -> bool:
         """Check if venue can attempt reconnection based on circuit state."""

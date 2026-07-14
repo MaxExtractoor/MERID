@@ -21,10 +21,11 @@ NOTE: This test file is skipped because it tests reliability audit fixes that ar
 unrelated to the Kalshi config migration task. These tests require settings fields
 and legacy config fields that are not part of the config migration scope.
 """
+from __future__ import annotations
+
 import pytest
 
 pytestmark = pytest.mark.skip(reason="Tests reliability audit fixes unrelated to config migration")
-from __future__ import annotations
 
 import asyncio
 import json
@@ -472,6 +473,28 @@ class TestBUG05_StableCircuitBreakerName:
         assert captured.get("name") == "kalshi_live", (
             f"BUG-05: live client registered CB as {captured.get('name')!r}, "
             "expected 'kalshi_live'"
+        )
+
+    def test_prod_env_normalizes_to_live(self):
+        """Test that config.env='prod' normalizes to 'kalshi_live' for circuit breaker."""
+        from merid.event_venues.kalshi.models import KalshiConfig
+        from merid.event_venues.kalshi.client import KalshiVenueClient
+
+        captured = {}
+
+        def mock_get_cb(name, **kwargs):
+            captured["name"] = name
+            return MagicMock()
+
+        # Mock config with env='prod' (as set by kalshi_config.py)
+        with patch("merid.event_venues.kalshi.client.get_circuit_breaker", side_effect=mock_get_cb):
+            config = KalshiConfig(use_demo=False)
+            # Simulate kalshi_config.py normalization
+            config.env = "prod"
+            KalshiVenueClient(config=config)
+
+        assert captured.get("name") == "kalshi_live", (
+            f"BUG-05: prod env should normalize to 'kalshi_live', got {captured.get('name')!r}"
         )
 
     def test_two_demo_clients_share_same_circuit_breaker_name(self):
