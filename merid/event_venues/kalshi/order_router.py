@@ -1975,6 +1975,24 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
             asset = "DOGE"
         
         if asset:
+            # CRITICAL FIX (2026-07-14): Check for pending orders to prevent duplicate submissions
+            # This prevents multiple orders for the same asset from being submitted before fills occur
+            # which would bypass the MAX_POSITIONS_PER_ASSET=1 limit enforced at fill time
+            if not _is_exit_order(intent):
+                try:
+                    from merid.risk.profiles.global_allocator import get_global_allocator
+                    global_allocator = get_global_allocator()
+                    if global_allocator and global_allocator.has_pending_order(asset):
+                        logger.error(
+                            "[PENDING-ORDER-CHECK] REJECTING: asset=%s has pending order - blocking duplicate submission",
+                            asset
+                        )
+                        _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "pending_order_exists")
+                        _increment_validation_gate_metric("ROUTER_VALIDATION", "pending_order_exists")
+                        return f"pending_order_exists:{asset}"
+                except Exception as ga_err:
+                    logger.warning("[PENDING-ORDER-CHECK] Failed to check pending orders: %s", ga_err)
+            
             # CRITICAL FIX (2026-07-14): Use slot_allocator.can_allocate() for per-asset limit enforcement
             # This is the authoritative check that enforces MAX_POSITIONS_PER_ASSET=1
             # Exit orders bypass this check to allow position closure
