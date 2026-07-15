@@ -2029,7 +2029,8 @@ class KalshiFillsLedger:
         """
         try:
             # Filter out manually closed positions (those detected in reconciliation)
-            positions = self.compute_net_positions()
+            # Use 24-hour filter to exclude stale positions from previous sessions
+            positions = self.compute_net_positions(since_hours=24)
             total = 0.0
             for ticker, pos in positions.items():
                 # Skip markets marked as manually closed in reconciliation

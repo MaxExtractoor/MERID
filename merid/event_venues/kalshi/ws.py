@@ -464,8 +464,10 @@ class KalshiWebSocket(EventVenueStream):
                 )
         
         # Create signature for authentication
-        # Add 5000ms buffer to prevent "header timestamp expired" errors
-        timestamp = str(int(_time.time() * 1000) + 5000)
+        # Add 10000ms buffer to prevent "header timestamp expired" errors
+        # Based on Kalshi API research: timestamps too far in future are rejected
+        # 10s buffer handles network latency while avoiding "timestamp out of range" errors
+        timestamp = str(int(_time.time() * 1000) + 10000)
         method = "GET"
         path = "/trade-api/ws/v2"
         msg_string = timestamp + method + path
