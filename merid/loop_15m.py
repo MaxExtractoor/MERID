@@ -1116,8 +1116,22 @@ class Kalshi15mLoop:
             try:
                 # Register exit callback to trigger exit orders
                 def exit_intent_callback(position, exit_reason, exit_price_cents, contracts_to_close=None):
-                    """Callback when PositionMonitor detects exit condition."""
+                    """Callback when PositionMonitor detects exit condition.
+                    
+                    CRITICAL FIX: 2026-07-15 - Added robustness improvements:
+                    - Exit order failure tracking
+                    - Position state validation before exit
+                    - Idempotency guard to prevent duplicate exits
+                    """
                     try:
+                        # CRITICAL: Check if position already exited (idempotency guard)
+                        if position.exit_triggered:
+                            logger.warning(
+                                "[POSITION-MONITOR-CALLBACK] Exit intent ignored - position already exited: position=%s reason=%s exit_reason=%s",
+                                position.position_id[:8], exit_reason, position.exit_reason
+                            )
+                            return
+                        
                         logger.info(
                             "[POSITION-MONITOR-CALLBACK] Exit intent: position=%s reason=%s price=%dc contracts=%s",
                             position.position_id[:8], exit_reason, exit_price_cents, contracts_to_close or "all"
@@ -1148,7 +1162,21 @@ class Kalshi15mLoop:
                         # Route exit order through order router
                         asyncio.create_task(self._execute_exit_order(position, exit_reason, exit_price_cents, contracts_to_close))
                     except Exception as cb_err:
-                        logger.error("[POSITION-MONITOR-CALLBACK] Failed to execute exit: %s", cb_err, exc_info=True)
+                        logger.error(
+                            "[POSITION-MONITOR-CALLBACK] Failed to execute exit: position=%s reason=%s error=%s",
+                            position.position_id[:8] if hasattr(position, 'position_id') else 'unknown',
+                            exit_reason,
+                            cb_err,
+                            exc_info=True
+                        )
+                        # CRITICAL: Track exit intent failures for monitoring
+                        if not hasattr(self, '_exit_intent_failures'):
+                            self._exit_intent_failures = 0
+                        self._exit_intent_failures += 1
+                        logger.warning(
+                            "[POSITION-MONITOR-CALLBACK] Exit intent failure count: %d",
+                            self._exit_intent_failures
+                        )
 
                 # CRITICAL FIX: Register exit callback BEFORE starting monitor
                 # This prevents race condition where positions are added before callback is registered
@@ -1736,10 +1764,10 @@ class Kalshi15mLoop:
                                                     price_cents = yes_mid
                                 if price_cents <= 0:
                                     logger.warning(
-                                        "[15m-LOOP] No real price available for sizing ticker=%s - using conservative 25c placeholder (midpoint of 10-75c canonical range)",
+                                        "[15m-LOOP] No real price available for sizing ticker=%s - using conservative 42c placeholder (midpoint of 10-75c canonical range)",
                                         ticker
                                     )
-                                    price_cents = 25  # 2026-07-09: Fixed to 25c (midpoint of 10-75c canonical range)
+                                    price_cents = 42  # 2026-07-14: Fixed to 42c (midpoint of 10-75c canonical range)
                             
                                 # Get edge, confidence, and model_prob from candidate
                                 edge_pct = Decimal(str(candidate.get("edge_pct", 0.0)))
@@ -4144,24 +4172,30 @@ class Kalshi15mLoop:
             import uuid
             client_tag = f"15m_{ticker}_{uuid.uuid4().hex[:12]}"
             
-            # CRITICAL FIX: Compute TP/SL from exit policy before OrderIntent creation
-            # For binary options, R (risk per contract) = entry price (max loss is contract price)
-            # TP = entry_price + (R * tp_r_multiple) for long positions
-            # SL = entry_price - (R * sl_r_multiple) for long positions
-            # For 15m crypto, we use the entry price as R since contracts can go to 0
+            # CRITICAL FIX: Compute TP/SL from exit policy before OrderIntent creation (2026-07-15)
+            # For binary options (0-100¢ contracts):
+            # TP = entry_price + (entry_price * tp_r_multiple) where tp_r_multiple is percentage (e.g., 0.15 = 15%)
+            # SL = entry_price +/- sl_cents_offset (absolute cent offset, not percentage)
+            # For YES: SL = entry - sl_cents_offset (protect against price drop)
+            # For NO: SL = entry + sl_cents_offset (protect against price rise)
             if exit_policy and exit_policy.tp_r_multiple:
+                # TP as percentage of entry price (e.g., 15% TP on 42c entry = 42 + 6.3 = 48.3c)
                 take_profit_price_cents = int(price_cents * (1 + exit_policy.tp_r_multiple))
                 take_profit_r_multiple = exit_policy.tp_r_multiple
             else:
                 take_profit_price_cents = None
                 take_profit_r_multiple = None
             
-            # CRITICAL FIX: Use fixed cent SL instead of R-multiple for binary options
-            # Binary options have max loss = entry price (can go to 0), so R-multiple SL
-            # doesn't make sense. Use fixed cent SL from exit_policy.sl_cents instead.
-            # If sl_cents is not set, use a conservative 5 cent SL.
+            # CRITICAL FIX: Use fixed cent SL offset instead of absolute price (2026-07-15)
+            # exit_policy.sl_cents is an offset (e.g., 5c), not an absolute price
+            # For YES: SL = entry - sl_cents_offset (e.g., 42c entry - 5c = 37c SL)
+            # For NO: SL = entry + sl_cents_offset (e.g., 42c entry + 5c = 47c SL)
             if exit_policy and exit_policy.sl_cents:
-                stop_loss_price_cents = exit_policy.sl_cents
+                sl_cents_offset = exit_policy.sl_cents
+                if side_raw == "YES":
+                    stop_loss_price_cents = max(1, price_cents - sl_cents_offset)  # YES: protect against drop
+                else:  # NO
+                    stop_loss_price_cents = min(99, price_cents + sl_cents_offset)  # NO: protect against rise
             elif exit_policy and exit_policy.sl_r_multiple:
                 # Fallback to R-multiple if sl_cents not set (legacy path)
                 # For YES: SL = entry - (entry * sl_r_multiple)

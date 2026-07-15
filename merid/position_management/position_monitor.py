@@ -722,15 +722,43 @@ class PositionMonitor:
             self._emit_exit_intent(position, ExitReason.TIME_STOP, current_price_cents)  # Full exit
             return  # Exit immediately, don't check other conditions
         
-        # CRITICAL FIX: 2026-07-07 - Staged time-based exits
-        # Re-implemented from position_cache with proper callback routing
-        # This ensures proper agent_id, swing mode logic, and exit intent callback error handling
-        # Staged exits close partial positions at predefined time intervals
-        staged_exit_stages = [
-            {"minutes": 5, "percent": 25},   # Close 25% at 5 minutes
-            {"minutes": 10, "percent": 25},  # Close another 25% at 10 minutes
-            {"minutes": 13, "percent": 50},  # Close remaining 50% at 13 minutes
-        ]
+        # CRITICAL FIX: 2026-07-15 - Load staged exit stages from YAML config
+        # Previously hardcoded to 5/10/13 minutes with 25/25/50% - now configurable
+        # staged_time_exit is at top level of YAML, not nested under exit_policy_time_exit
+        staged_exit_stages = []
+        staged_exit_enabled = False
+        
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+            profile = get_active_profile().profile
+            
+            # Load from YAML staged_time_exit section (top level, not nested)
+            # The profile adapter loads it as a separate field
+            if hasattr(profile, 'staged_time_exit'):
+                staged_config = profile.staged_time_exit
+                staged_exit_enabled = staged_config.get('enabled', False)
+                staged_exit_stages = staged_config.get('stages', [])
+                
+                if not staged_exit_stages and staged_exit_enabled:
+                    # Fallback to default if enabled but no stages defined
+                    staged_exit_stages = [
+                        {"minutes": 5, "percent": 25},
+                        {"minutes": 10, "percent": 25},
+                        {"minutes": 13, "percent": 50},
+                    ]
+                    logger.warning("[POSITION-MONITOR] staged_time_exit enabled but no stages defined, using defaults")
+        except Exception as e:
+            logger.warning("[POSITION-MONITOR] Failed to load staged exit config: %s, using defaults", e)
+            # Fallback to hardcoded values
+            staged_exit_stages = [
+                {"minutes": 5, "percent": 25},
+                {"minutes": 10, "percent": 25},
+                {"minutes": 13, "percent": 50},
+            ]
+        
+        # Skip staged exits if disabled
+        if not staged_exit_enabled:
+            staged_exit_stages = []
         
         # Get time to expiry from market state
         time_to_expiry_seconds = 900.0  # Default 15 minutes
