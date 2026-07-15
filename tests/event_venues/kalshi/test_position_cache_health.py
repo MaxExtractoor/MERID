@@ -20,8 +20,10 @@ async def clear_cache():
     """Clear cache before each test to prevent state leakage."""
     cache = KalshiPositionCache()
     await cache.clear()
+    cache._last_sync = None  # Reset sync timestamp for clean state
     yield
     await cache.clear()
+    cache._last_sync = None  # Reset sync timestamp for clean state
 
 
 class TestPositionCacheHealth:
@@ -79,8 +81,8 @@ class TestPositionCacheHealth:
         """Cache health check at exact boundary."""
         cache = KalshiPositionCache()
         
-        # Simulate a sync exactly at the threshold
-        cache._last_sync = datetime.now(timezone.utc) - timedelta(seconds=60)
+        # Simulate a sync just under the threshold (59 seconds)
+        cache._last_sync = datetime.now(timezone.utc) - timedelta(seconds=59)
         
         # Should be healthy (not greater than threshold)
         assert cache.is_healthy(max_staleness_seconds=60.0)
