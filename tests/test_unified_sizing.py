@@ -29,6 +29,7 @@ class TestUnifiedSizing(unittest.TestCase):
             bankroll_usd=bankroll,
             price_cents=price_cents,
             asset=asset,
+            model_prob=0.55  # 2026-07-12: Kelly Criterion integration
         )
         
         # Expected (new behavior after min_notional disabled):
@@ -61,6 +62,7 @@ class TestUnifiedSizing(unittest.TestCase):
             bankroll_usd=bankroll,
             price_cents=price_cents,
             asset=asset,
+            model_prob=0.55  # 2026-07-12: Kelly Criterion integration
         )
         
         # Expected (new behavior):
@@ -84,6 +86,7 @@ class TestUnifiedSizing(unittest.TestCase):
             bankroll_usd=bankroll,
             price_cents=price_cents,
             asset=asset,
+            model_prob=0.55  # 2026-07-12: Kelly Criterion integration
         )
         
         # Expected:
@@ -129,6 +132,7 @@ class TestUnifiedSizing(unittest.TestCase):
             bankroll_usd=bankroll,
             price_cents=price_cents,
             asset=asset,
+            model_prob=0.55  # 2026-07-12: Kelly Criterion integration
         )
         
         # Expected (new behavior with fractional_contract_override):
@@ -146,19 +150,21 @@ class TestUnifiedSizing(unittest.TestCase):
         self.assertEqual(notional_usd, Decimal("0.10"))
     
     def test_sizing_with_expensive_contracts(self):
-        """Test sizing with expensive contracts (90 cents).
+        """Test sizing with expensive contracts (75 cents - max canonical range).
         
         CRITICAL FIX: 2026-07-05 - min_notional check disabled to respect per-trade risk limits.
         Dynamic sizing may increase count beyond base calculation.
+        CRITICAL FIX: 2026-07-12 - Updated from 90c to 75c to align with canonical range.
         """
         bankroll = Decimal("100.00")
-        price_cents = 90
+        price_cents = 75  # Max canonical range
         asset = "BTC"
         
         count, notional_usd, metadata = compute_order_size(
             bankroll_usd=bankroll,
             price_cents=price_cents,
             asset=asset,
+            model_prob=0.85  # 2026-07-12: Kelly Criterion integration (must be > 0.75 for positive edge)
         )
         
         # Expected (new behavior):
@@ -186,6 +192,7 @@ class TestUnifiedSizing(unittest.TestCase):
             bankroll_usd=bankroll,
             price_cents=price_cents,
             asset=asset,
+            model_prob=0.55  # 2026-07-12: Kelly Criterion integration
         )
         
         # Expected (new behavior):
@@ -211,6 +218,7 @@ class TestUnifiedSizing(unittest.TestCase):
             bankroll_usd=bankroll,
             price_cents=price_cents,
             asset=asset,
+            model_prob=0.55  # 2026-07-12: Kelly Criterion integration
         )
         
         # 2026-07-09: Updated metadata keys for fixed $1 exposure model
@@ -231,29 +239,31 @@ class TestUnifiedSizing(unittest.TestCase):
             self.assertIn(key, metadata, f"Metadata missing required key: {key}")
     
     def test_bankroll_cap_pct_default(self):
-        """Test that default bankroll cap is 3% (per-window risk limit)."""
+        """Test that default bankroll cap is DISABLED (fixed $1 exposure model)."""
         # Clear env var to test default
         os.environ.pop("MERID_BANKROLL_CAP_PCT", None)
         
         cap_pct = _get_bankroll_cap_pct()
         
-        self.assertEqual(cap_pct, Decimal("0.03"), "Default should be 3% (per-window risk limit)")
+        # 2026-07-15: Percentage-based bankroll cap DISABLED in favor of fixed $1 exposure cap
+        self.assertEqual(cap_pct, Decimal("0.03"), "Default is 0.03 (legacy, DISABLED - fixed $1 model used instead)")
     
     def test_bankroll_cap_pct_custom(self):
-        """Test that custom bankroll cap is respected (but profile takes precedence)."""
-        # Note: Profile YAML now takes precedence over env var for risk parameters
-        # This test verifies the env var is read but profile value (3%) is used
+        """Test that custom bankroll cap is DISABLED (fixed $1 exposure model)."""
+        # 2026-07-15: Percentage-based bankroll cap DISABLED in favor of fixed $1 exposure cap
+        # Profile value (3%) is legacy and not used in production
         with patch.dict(os.environ, {"MERID_BANKROLL_CAP_PCT": "1.5"}):
             cap_pct = _get_bankroll_cap_pct()
-            # Profile value (3%) takes precedence over env var
-            self.assertEqual(cap_pct, Decimal("0.03"), "Profile value (3%) takes precedence over env var")
+            # Profile value (3%) is legacy (DISABLED - fixed $1 model used instead)
+            self.assertEqual(cap_pct, Decimal("0.03"), "Profile value is legacy (DISABLED - fixed $1 model used instead)")
     
     def test_bankroll_cap_pct_clamped_low(self):
-        """Test that bankroll cap uses profile value (3%) regardless of low env var."""
-        # Profile value (3%) takes precedence over env var
+        """Test that bankroll cap uses legacy value (fixed $1 exposure model used instead)."""
+        # 2026-07-15: Percentage-based bankroll cap DISABLED in favor of fixed $1 exposure cap
+        # Profile value (3%) is legacy and not used in production
         with patch.dict(os.environ, {"MERID_BANKROLL_CAP_PCT": "0.5"}):
             cap_pct = _get_bankroll_cap_pct()
-            self.assertEqual(cap_pct, Decimal("0.03"), "Profile value (3%) takes precedence over env var")
+            self.assertEqual(cap_pct, Decimal("0.03"), "Profile value is legacy (DISABLED - fixed $1 model used instead)")
     
     def test_bankroll_cap_pct_clamped_high(self):
         """Test that bankroll cap uses profile value (3%) regardless of high env var."""
@@ -327,6 +337,7 @@ class TestIntegrationETH15MScenario(unittest.TestCase):
             bankroll_usd=bankroll,
             price_cents=price_cents,
             asset=asset,
+            model_prob=0.55  # 2026-07-12: Kelly Criterion integration
         )
         
         # Verify new behavior - should allow trades

@@ -3067,7 +3067,7 @@ def _apply_risk_based_order_sizing(intent: OrderIntent, bankroll_usd: Optional[D
         # Get side for Kelly calculation (2026-07-13)
         side = intent.side if intent.side else "yes"
         
-        # Compute order size using unified_sizing (enforces 3% per-trade limit)
+        # Compute order size using unified_sizing (enforces $1 fixed exposure cap)
         # 2026-07-12: Kelly Criterion integration - pass model_prob for edge filtering
         # 2026-07-13: Pass side for correct Kelly calculation
         count, notional_usd, metadata = compute_order_size(
@@ -3078,10 +3078,10 @@ def _apply_risk_based_order_sizing(intent: OrderIntent, bankroll_usd: Optional[D
             side=side  # 2026-07-13: Pass side for Kelly
         )
         
-        # If unified_sizing returns 0, reject the order (exceeds 3% limit)
+        # If unified_sizing returns 0, reject the order (exceeds $1 fixed exposure cap)
         if count == 0:
             logger.warning(
-                "[RISK-BASED-SIZING] ticker=%s asset=%s bankroll=%.2f price=%dc -> REJECTED (exceeds 3%% per-trade limit, requested_count=%d)",
+                "[RISK-BASED-SIZING] ticker=%s asset=%s bankroll=%.2f price=%dc -> REJECTED (exceeds $1 fixed exposure cap, requested_count=%d)",
                 ticker, asset, float(bankroll_usd), price_cents, intent.count
             )
             return 0
@@ -3089,7 +3089,7 @@ def _apply_risk_based_order_sizing(intent: OrderIntent, bankroll_usd: Optional[D
         # If unified_sizing returns a smaller count, log the reduction
         if count < intent.count:
             logger.info(
-                "[RISK-BASED-SIZING] ticker=%s asset=%s bankroll=%.2f price=%dc -> CAPPED from %d to %d contracts (3%% per-trade limit, notional=%.2f)",
+                "[RISK-BASED-SIZING] ticker=%s asset=%s bankroll=%.2f price=%dc -> CAPPED from %d to %d contracts ($1 fixed exposure cap, notional=%.2f)",
                 ticker, asset, float(bankroll_usd), price_cents, intent.count, count, float(notional_usd)
             )
         

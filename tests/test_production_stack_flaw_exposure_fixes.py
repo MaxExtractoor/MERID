@@ -61,7 +61,7 @@ class TestUnifiedSizingModule:
         from merid.prediction import unified_sizing
         
         dynamic_enabled = unified_sizing._is_dynamic_sizing_enabled()
-        assert not dynamic_enabled, "Dynamic sizing should be disabled to prevent interference with 3% per asset / 5% per 15m window limits"
+        assert not dynamic_enabled, "Dynamic sizing should be disabled to prevent interference with $1 fixed exposure cap"
 
 
 class TestKillSwitchImplementation:

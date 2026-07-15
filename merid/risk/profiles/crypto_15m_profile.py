@@ -881,24 +881,10 @@ class Crypto15mProfileAdapter:
                 venue_max_category_notional_usd = float(capital_usd) * float(venue_max_category_notional_pct)
                 agent_max_notional_usd = float(capital_usd) * float(agent_max_notional_pct)
             
-            # PERCENTAGE CONSISTENCY ASSERTIONS: Prevent invalid config at load time
-            # These ensure the profile is internally consistent before runtime
-            assert venue_max_single_order_pct <= venue_max_total_notional_pct, \
-                f"CONFIG ERROR: max_single_order_pct ({venue_max_single_order_pct}) must be <= max_total_notional_pct ({venue_max_total_notional_pct})"
-            assert venue_max_category_notional_pct <= venue_max_total_notional_pct, \
-                f"CONFIG ERROR: max_category_notional_pct ({venue_max_category_notional_pct}) must be <= max_total_notional_pct ({venue_max_total_notional_pct})"
-            assert agent_max_notional_pct <= venue_max_single_order_pct, \
-                f"CONFIG ERROR: agent_max_notional_pct ({agent_max_notional_pct}) must be <= max_single_order_pct ({venue_max_single_order_pct})"
-            
-            # Verify per-asset percentages are consistent with category/total caps
-            total_asset_pct = sum(asset_config.max_notional_pct for asset_config in asset_configs.values())
-            assert total_asset_pct <= venue_max_total_notional_pct, \
-                f"CONFIG ERROR: Sum of per-asset max_notional_pct ({total_asset_pct}) must be <= max_total_notional_pct ({venue_max_total_notional_pct})"
-            
-            # Verify each asset's percentage is within category cap
-            for asset_name, asset_config in asset_configs.items():
-                assert asset_config.max_notional_pct <= venue_max_category_notional_pct, \
-                    f"CONFIG ERROR: {asset_name} max_notional_pct ({asset_config.max_notional_pct}) must be <= max_category_notional_pct ({venue_max_category_notional_pct})"
+            # PERCENTAGE CONSISTENCY ASSERTIONS: DISABLED (2026-07-15: Fixed $1 exposure model)
+            # Percentage-based consistency checks removed as percentage fields are DISABLED in YAML
+            # Risk is now enforced via global_slot_allocator with fixed $1.00 exposure cap
+            # All percentage fields (max_single_order_pct, agent_max_notional_pct, etc.) are DISABLED
             
             # Compute per-asset USD values
             for asset_config in asset_configs.values():
@@ -1054,7 +1040,7 @@ class Crypto15mProfileAdapter:
                 momentum_fvg_spread_gate_cents=momentum_fvg_config.get('spread_gate_cents', 40),
                 momentum_fvg_spread_gate_obi_persistence_boost=momentum_fvg_config.get('spread_gate_obi_persistence_boost', 0.75),
                 
-                max_cycle_risk_pct=self._normalize_percentage_value(raw.get('max_cycle_risk_pct', 0.05)),  # CRITICAL FIX: 5% - aligned with profile
+                max_cycle_risk_pct=self._normalize_percentage_value(raw.get('max_cycle_risk_pct', 0.0)),  # 2026-07-15: DISABLED - fixed $1 model (default 0.0)
                 max_cycle_risk_usd=raw.get('max_cycle_risk_usd', 0.0),
                 
                 # Venue-level caps (percentage-based, normalize dict format)

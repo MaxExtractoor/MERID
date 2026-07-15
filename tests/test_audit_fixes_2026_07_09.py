@@ -118,10 +118,10 @@ class TestSideRecording:
 
 
 class TestPositionSizingLimits:
-    """Test position sizing limits for 3% risk enforcement."""
+    """Test position sizing limits for $1 fixed exposure cap enforcement."""
     
     def test_max_contracts_equals_one(self):
-        """Verify max_contracts=1 to enforce 3% risk limit."""
+        """Verify max_contracts=1 to enforce $1 fixed exposure cap."""
         profile_path = Path('config/profiles/kalshi_crypto_15m_v2.yaml')
         if not profile_path.exists():
             pytest.skip("kalshi_crypto_15m_v2.yaml not found")
@@ -130,7 +130,7 @@ class TestPositionSizingLimits:
         
         # Check that max_single_order_contracts is 1
         has_max_contracts_one = 'max_single_order_contracts: 1' in content
-        assert has_max_contracts_one, "max_single_order_contracts should be 1 for 3% risk limit"
+        assert has_max_contracts_one, "max_single_order_contracts should be 1 for $1 fixed exposure cap"
     
     def test_unified_risk_manager_enforces_single_contract(self):
         """Verify UnifiedRiskManager enforces single contract limit."""
