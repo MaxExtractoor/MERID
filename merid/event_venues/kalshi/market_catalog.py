@@ -539,7 +539,7 @@ class KalshiMarketCatalog:
         if refresh_interval_s is None:
             import os
             # CRITICAL FIX: Reduce default refresh interval to 5s for 15m crypto markets
-            # 15m markets have a 10-minute trading window (2-12 min to expiry)
+            # 15m markets have a 15-minute trading window (0.5-15 min to expiry per profile YAML)
             # 5s refresh ensures we catch window rollovers quickly
             refresh_interval_s = float(os.getenv("MERID_KALSHI_CATALOG_REFRESH_INTERVAL_S", "5.0"))
         
@@ -1233,13 +1233,39 @@ class KalshiMarketCatalog:
             len(visible_markets), len(filtered_markets)
         )
         
-        # Tradeability filter: markets eligible for agent entry (2-12 min entry window)
+        # Tradeability filter: markets eligible for agent entry (read from profile YAML)
         # This is separate from visibility to allow agents to see markets but only enter in optimal window
+        # CRITICAL FIX: Read entry window from profile YAML instead of hardcoding 2-12min
+        # Profile YAML (kalshi_crypto_15m_v2.yaml) is the single source of truth:
+        # - min_entry_mins: 0.5 (relaxed to capture early window opportunities)
+        # - max_entry_mins: 15.0 (aligned with 15m market duration)
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+            profile_adapter = get_active_profile()
+            if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_min_entry_mins'):
+                min_entry_mins = profile_adapter.profile.guardrails_min_entry_mins
+            else:
+                min_entry_mins = 0.5  # Fallback to profile default
+        except Exception as e:
+            logger.warning("[CATALOG-TRADEABILITY-FILTER] Failed to load min_entry_mins from profile: %s, using fallback 0.5", e)
+            min_entry_mins = 0.5  # Fallback to profile default
+        
+        try:
+            from merid.risk.profiles.crypto_15m_profile import get_active_profile
+            profile_adapter = get_active_profile()
+            if profile_adapter and hasattr(profile_adapter.profile, 'guardrails_max_entry_mins'):
+                max_entry_mins = profile_adapter.profile.guardrails_max_entry_mins
+            else:
+                max_entry_mins = 15.0  # Fallback to profile default
+        except Exception as e:
+            logger.warning("[CATALOG-TRADEABILITY-FILTER] Failed to load max_entry_mins from profile: %s, using fallback 15.0", e)
+            max_entry_mins = 15.0  # Fallback to profile default
+        
         tradeable_markets = []
         for cm in visible_markets:
             if cm.expires_at:
                 mte = compute_minutes_to_expiry(cm.expires_at, now_utc)
-                if 2.0 <= mte <= 12.0:  # Entry window for optimal trading
+                if min_entry_mins <= mte <= max_entry_mins:  # Entry window from profile YAML
                     tradeable_markets.append(cm)
                     # Mark as tradeable in the CatalogMarket object
                     cm.tradeable = True
@@ -1249,18 +1275,18 @@ class KalshiMarketCatalog:
                     # CRITICAL DIAGNOSTIC: Log at INFO level for first refresh to understand filtering
                     if self._refresh_count == 0:
                         logger.info(
-                            "[CATALOG-TRADEABILITY-FILTER] Market=%s mte=%.1fmin is visible but not tradeable (outside 2-12min entry window)",
-                            cm.market.market_id, mte
+                            "[CATALOG-TRADEABILITY-FILTER] Market=%s mte=%.1fmin is visible but not tradeable (outside %.1f-%.1fmin entry window)",
+                            cm.market.market_id, mte, min_entry_mins, max_entry_mins
                         )
                     else:
                         logger.debug(
-                            "[CATALOG-TRADEABILITY-FILTER] Market=%s mte=%.1fmin is visible but not tradeable (outside 2-12min entry window)",
-                            cm.market.market_id, mte
+                            "[CATALOG-TRADEABILITY-FILTER] Market=%s mte=%.1fmin is visible but not tradeable (outside %.1f-%.1fmin entry window)",
+                            cm.market.market_id, mte, min_entry_mins, max_entry_mins
                         )
         
         logger.info(
-            "[CATALOG-TRADEABILITY-FILTER] Post-tradeability-filter: %d markets in 2-12min entry window (from %d visible)",
-            len(tradeable_markets), len(visible_markets)
+            "[CATALOG-TRADEABILITY-FILTER] Post-tradeability-filter: %d markets in %.1f-%.1fmin entry window (from %d visible)",
+            len(tradeable_markets), min_entry_mins, max_entry_mins, len(visible_markets)
         )
         
         # Use visible markets for indexing and feed (includes all markets in current 15m window)
@@ -2221,9 +2247,9 @@ class KalshiMarketCatalog:
         
         # Compute tradeable flag = DATA availability for the current ~15-minute window.
         # DECOUPLED (2026-06): previously this used is_tradeable() (the 2-12 min ENTRY
-        # window), which starved WS subscription / catalog visibility during minutes
-        # 12-15 and 0-2 of every cycle and tripped HALT_CRITICAL. Entry timing is
-        # enforced authoritatively downstream by agent_grid_15m.check_autonomous_gate
+        # window, now 0.5-15 min per profile YAML), which starved WS subscription / catalog
+        # visibility during minutes 12-15 and 0-2 of every cycle and tripped HALT_CRITICAL.
+        # Entry timing is enforced authoritatively downstream by agent_grid_15m.check_autonomous_gate
         # (profile guardrails min/max_entry_mins) + MIN_TIME_TO_EXPIRY_FOR_ENTRY_MIN.
         from merid.event_venues.kalshi.kalshi_15m_time import is_market_live
         
@@ -2973,7 +2999,7 @@ class KalshiMarketCatalog:
         Selection criteria (via canonical selector):
         - Uses open_time and close_time from Kalshi API (authoritative)
         - Market is "live" if: open_time <= now_utc < close_time
-        - Market is "tradeable" if: 2 <= minutes_to_expiry <= 12 (entry window)
+        - Market is "tradeable" if: 0.5 <= minutes_to_expiry <= 15.0 (entry window per profile YAML)
         - Returns the market with smallest minutes_to_expiry if multiple exist
 
         Args:
