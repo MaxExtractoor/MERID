@@ -97,6 +97,32 @@ MAX_HOLD_SECONDS_15M: Final[int] = 180  # 3 minutes for fast 15m crypto markets
 # Time-to-expiry threshold: use only marketable orders in last N seconds
 MARKET_ONLY_LAST_SECONDS: Final[int] = 150  # 2.5 minutes before expiry
 
+# ============================================================================
+# TOXICITY DETECTION THRESHOLDS (Bot Counter-Trading Prevention)
+# ============================================================================
+# VPIN (Volume-Synchronized Probability of Informed Trading)
+VPIN_THRESHOLD: Final[float] = 0.65  # VPIN threshold for toxic flow detection
+VPIN_WINDOW_SIZE: Final[int] = 50  # Number of trades for VPIN calculation
+
+# Volume Z-score anomaly detection
+VOLUME_Z_THRESHOLD: Final[float] = 8.0  # Z-score threshold for volume anomaly
+VOLUME_WINDOW_SIZE: Final[int] = 100  # Number of trades for volume baseline
+
+# Price divergence detection
+PRICE_DIVERGENCE_THRESHOLD: Final[float] = 0.02  # 2% divergence threshold
+PRICE_WINDOW_SIZE: Final[int] = 30  # Number of price points for divergence
+
+# Entropy-based kill switch
+ENTROPY_THRESHOLD: Final[float] = 2.5  # Entropy threshold for kill switch
+SIGNAL_ENERGY_THRESHOLD: Final[float] = 1000.0  # Signal energy threshold
+ENTROPY_WINDOW_SIZE: Final[int] = 60  # Number of observations for entropy
+KILL_SWITCH_COOLDOWN_SEC: Final[int] = 300  # 5-minute cooldown after trigger
+
+# Toxicity-aware spread adjustment
+TOXICITY_SPREAD_MULTIPLIER_HIGH: Final[float] = 2.5  # Spread multiplier for high toxicity
+TOXICITY_SPREAD_MULTIPLIER_MODERATE: Final[float] = 1.5  # Spread multiplier for moderate toxicity
+TOXICITY_SPREAD_MULTIPLIER_LOW: Final[float] = 1.2  # Spread multiplier for low toxicity
+
 # Probability vs price consistency tolerance (max deviation allowed)
 PROB_PRICE_TOLERANCE_PCT: Final[float] = 0.05  # 5%
 
@@ -196,9 +222,12 @@ def validate_edge(edge_pct: float, asset: str, confidence: float = 0.5) -> tuple
         (is_valid, reason): Tuple where is_valid is True if edge meets threshold,
                             and reason explains the decision
     """
-    # Use unified edge_bands minimum from profile (0.5% = 0.005)
+    # Use unified edge_bands minimum from profile (2.5% = 0.025)
     # This aligns with profile YAML edge_bands configuration which is the single source of truth
-    EDGE_BANDS_MINIMUM = 0.005  # 0.5% minimum edge from profile edge_bands
+    # 2026-07-14: Raised to 2.5% based on industry research (Market Math, Beatpoly)
+    # Industry standard for Kalshi: 3% raw edge minimum
+    # Kalshi 7% winner fee turns <2% edge into breakeven/negative EV
+    EDGE_BANDS_MINIMUM = 0.025  # 2.5% minimum edge from profile edge_bands (industry standard)
     
     # Check if edge meets threshold (use absolute value for contrarian signals)
     if abs(edge_pct) >= EDGE_BANDS_MINIMUM:
@@ -451,13 +480,14 @@ MAX_HOLDING_TIME_SEC: Final[int] = 172800  # 48 hours
 # ============================================================================
 
 # Per-market exposure cap
-# STANDARDIZED: Max 5% of bankroll per market for all 15m crypto agents
-# This prevents concentration risk in any single market
-PER_MARKET_EXPOSURE_CAP_PCT: Final[float] = 0.05  # 5% max per market
+# DEPRECATED: Replaced by fixed $1 global exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
+# The $1 cap applies across all assets (BTC, ETH, SOL, XRP, DOGE) - no per-market percentage limits
+PER_MARKET_EXPOSURE_CAP_PCT: Final[float] = 0.0  # DISABLED - using fixed $1 exposure cap
 
 # Per-strategy exposure cap
-# STANDARDIZED: Max 5% of bankroll per strategy for all 15m crypto agents
-PER_STRATEGY_EXPOSURE_CAP_PCT: Final[float] = 0.05  # 5%
+# DEPRECATED: Replaced by fixed $1 global exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
+# The $1 cap applies across all strategies - no per-strategy percentage limits
+PER_STRATEGY_EXPOSURE_CAP_PCT: Final[float] = 0.0  # DISABLED - using fixed $1 exposure cap
 
 # Maximum drawdown before forced exit
 MAX_DRAWDOWN_PCT: Final[float] = 0.15  # 15%
@@ -467,8 +497,9 @@ MAX_DRAWDOWN_PCT: Final[float] = 0.15  # 15%
 DAILY_LOSS_LIMIT_PCT: Final[float] = 0.10  # 10%
 
 # Venue exposure cap (max total open exposure on Kalshi across all 15m crypto agents)
-# STANDARDIZED: Max 20% of bankroll total on Kalshi venue for all 15m crypto agents
-VENUE_EXPOSURE_CAP_PCT: Final[float] = 0.20  # 20% max total on Kalshi
+# DEPRECATED: Replaced by fixed $1 global exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
+# The $1 cap is the absolute maximum - no venue percentage limits
+VENUE_EXPOSURE_CAP_PCT: Final[float] = 0.0  # DISABLED - using fixed $1 exposure cap
 
 # ============================================================================
 # FEE AWARENESS
@@ -538,7 +569,9 @@ TENOR_MULTIPLIER_GT_14D: Final[float] = 1.3
 KELLY_BASE_FRACTION: Final[float] = 0.20  # Fifth-Kelly
 
 # Maximum Kelly allocation (cap to prevent over-leverage)
-KELLY_MAX_ALLOCATION_PCT: Final[float] = 0.05  # 5% of capital per trade
+# DEPRECATED: Kelly sizing replaced by fixed $1 slot allocation (MERID_FIXED_EXPOSURE_CAP_USD)
+# Each slot is 1 contract, max 1 slot per asset under $1 total cap
+KELLY_MAX_ALLOCATION_PCT: Final[float] = 0.0  # DISABLED - using fixed $1 slot allocation
 
 # Kelly confidence floor (minimum confidence to use Kelly)
 # 2026-07-06: DEPRECATED - This should be read from profile YAML instead
