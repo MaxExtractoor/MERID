@@ -563,6 +563,41 @@ throttling:
 failsafe:
   max_contracts_per_order: 1  # Max contracts per order when in failsafe mode (emergency brake)
 
+# ── Toxicity Detection Configuration (Bot Counter-Trading Prevention) ───────
+# Detects predatory trading behaviors and market manipulation using:
+# - VPIN (Volume-Synchronized Probability of Informed Trading)
+# - Volume Z-score anomaly detection
+# - Price divergence detection
+# - Entropy-based kill switch
+toxicity_detection:
+  enabled: true  # Enable toxicity detection for bot counter-trading prevention
+  
+  # VPIN configuration
+  vpin_threshold: 0.65  # VPIN threshold for toxic flow detection (0-1)
+  vpin_window_size: 50  # Number of trades for VPIN calculation
+  
+  # Volume Z-score configuration
+  volume_z_threshold: 8.0  # Z-score threshold for volume anomaly
+  volume_window_size: 100  # Number of trades for volume baseline
+  
+  # Price divergence configuration
+  price_divergence_threshold: 0.02  # 2% divergence threshold
+  price_window_size: 30  # Number of price points for divergence
+  
+  # Entropy-based kill switch configuration
+  entropy_threshold: 2.5  # Entropy threshold for kill switch
+  signal_energy_threshold: 1000.0  # Signal energy threshold
+  entropy_window_size: 60  # Number of observations for entropy
+  kill_switch_cooldown_sec: 300  # 5-minute cooldown after trigger
+  auto_reset: true  # Auto-reset kill switch after cooldown
+  
+  # Toxicity-aware spread adjustment
+  spread_multiplier_high: 2.5  # Spread multiplier for high toxicity
+  spread_multiplier_moderate: 1.5  # Spread multiplier for moderate toxicity
+  spread_multiplier_low: 1.2  # Spread multiplier for low toxicity
+  
+  description: "Toxicity detection: VPIN, volume Z-score, price divergence, entropy kill switch for bot counter-trading prevention"
+
 # ── Price Range Validation (Critical Risk Control) ─────────────────────────────
 # Prevents degenerate trades at extreme prices (1 cent or 89-99 cents)
 # This is the single source of truth for price validation across the system

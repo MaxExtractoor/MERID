@@ -43,6 +43,14 @@ from merid.event_venues.kalshi.microstructure import (
     compute_depth_at_price,
 )
 
+# Toxicity detection for spread adjustment (bot counter-trading prevention)
+try:
+    from merid.event_venues.kalshi.toxicity_detection import get_toxicity_detector, ToxicityMetrics
+    TOXICITY_DETECTION_ENABLED = True
+except ImportError:
+    TOXICITY_DETECTION_ENABLED = False
+    logger.debug("[TOXICITY-DETECTION] Not available - toxicity-aware spread adjustment disabled")
+
 
 # Volatility regime thresholds (annualized %)
 LOW_VOL = 30
@@ -362,6 +370,44 @@ class UnifiedEdgeComputer:
         spread_pct = spread_cents / mid_cents
         return spread_pct
     
+    def _get_toxicity_spread_multiplier(self, ticker: str) -> float:
+        """Get spread multiplier based on toxicity detection.
+        
+        Higher toxicity = wider spreads to compensate for adverse selection.
+        
+        Args:
+            ticker: Market ticker
+        
+        Returns:
+            Multiplier (1.0 = normal, >1.0 = wider spread)
+        """
+        if not TOXICITY_DETECTION_ENABLED:
+            return 1.0
+        
+        try:
+            detector = get_toxicity_detector(ticker)
+            # Get latest metrics from detector
+            # Note: This returns the last computed metrics, not a new check
+            # The detector should be updated via fill polling or trade events
+            if hasattr(detector, 'market_entropy'):
+                # Create a synthetic metrics object for spread adjustment
+                # In production, this should use the latest computed metrics
+                from merid.event_venues.kalshi.toxicity_detection import ToxicityMetrics
+                metrics = ToxicityMetrics()
+                # Use detector state if available
+                if hasattr(detector, 'market_entropy'):
+                    metrics.market_entropy = getattr(detector, 'market_entropy', 0.0)
+                if hasattr(detector, 'vpin'):
+                    metrics.vpin = getattr(detector, 'vpin', 0.0)
+                if hasattr(detector, 'volume_z_score'):
+                    metrics.volume_z_score = getattr(detector, 'volume_z_score', 0.0)
+                
+                return detector.get_spread_multiplier(metrics)
+        except Exception as e:
+            logger.debug("[TOXICITY-SPREAD] Failed to get spread multiplier: %s", e)
+        
+        return 1.0
+    
     def check_edge(
         self,
         edge_result: EdgeResult,
@@ -399,19 +445,32 @@ class UnifiedEdgeComputer:
         min_edge_cents = self.min_edge_cents
         max_spread_pct = self.max_spread_pct
         
+        # Apply toxicity-aware spread adjustment (bot counter-trading prevention)
+        toxicity_multiplier = self._get_toxicity_spread_multiplier(contract.ticker)
+        if toxicity_multiplier > 1.0:
+            adjusted_max_spread_cents = int(self.max_spread_cents * toxicity_multiplier)
+            logger.info(
+                "[TOXICITY-SPREAD] Adjusted spread threshold for %s: %dc -> %dc (multiplier=%.2f)",
+                contract.ticker, self.max_spread_cents, adjusted_max_spread_cents, toxicity_multiplier
+            )
+            # Use adjusted threshold for this check
+            effective_max_spread_cents = adjusted_max_spread_cents
+        else:
+            effective_max_spread_cents = self.max_spread_cents
+        
         # Check 1: Spread too wide (liquidity/quality filter)
-        if spread_cents is not None and spread_cents > self.max_spread_cents:
+        if spread_cents is not None and spread_cents > effective_max_spread_cents:
             if REJECTION_MONITOR_ENABLED:
                 log_edge_check_rejection(
                     asset=asset,
-                    reason=f"spread_too_wide: bid={best_yes_bid}c ask={best_yes_ask}c spread={spread_cents}c > {self.max_spread_cents}c threshold",
+                    reason=f"spread_too_wide: bid={best_yes_bid}c ask={best_yes_ask}c spread={spread_cents}c > {effective_max_spread_cents}c threshold (toxicity_adj={toxicity_multiplier:.2f})",
                     spread_cents=spread_cents,
-                    threshold_value=self.max_spread_cents,
+                    threshold_value=effective_max_spread_cents,
                     actual_value=spread_cents,
                 )
             return EdgeCheckResult(
                 passes=False,
-                reason=f"spread_too_wide: bid={best_yes_bid}c ask={best_yes_ask}c spread={spread_cents}c > {self.max_spread_cents}c threshold",
+                reason=f"spread_too_wide: bid={best_yes_bid}c ask={best_yes_ask}c spread={spread_cents}c > {effective_max_spread_cents}c threshold (toxicity_adj={toxicity_multiplier:.2f})",
                 edge_result=edge_result,
                 spread_pct=spread_pct,
                 min_edge_cents=min_edge_cents,
@@ -448,8 +507,8 @@ class UnifiedEdgeComputer:
             logger.debug("[EDGE-CHECK] Failed to load min_contract_price_cents from profile: %s, using default 10c", e)
         
         # Check 2.76: Maximum contract price ceiling (low-profit trap prevention)
-        # 2026-07-11: Canonical price band (50c) - aligned with GlobalSlotAllocator
-        max_price_cents = 50  # Default fallback (50 cents / $0.50) - aligned with profile
+        # 2026-07-12: Canonical price band (75c) - aligned with GlobalSlotAllocator
+        max_price_cents = 75  # Default fallback (75 cents / $0.75) - aligned with profile
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
             profile_adapter = get_active_profile()
@@ -549,10 +608,10 @@ class UnifiedEdgeComputer:
         # - TERMINAL: < 2 minutes (block entry)
         time_to_expiry_min = contract.time_to_expiry_seconds / 60.0
         
-        # Get entry window bounds from profile (aligned with TTE regime thresholds)
-        # Default: max_entry = 12min (NORMAL regime), min_entry = 2min (TERMINAL threshold)
-        max_entry_mins = 12.0  # Default fallback (aligned with TTE NORMAL > 10min)
-        min_entry_mins = 2.0   # Default fallback (aligned with TTE TERMINAL < 2min)
+        # Get entry window bounds from profile (aligned with full 15-minute window trading)
+        # Default: max_entry = 15min (full 15m window), min_entry = 0.5min (block last 30s only)
+        max_entry_mins = 15.0  # Default fallback (aligned with profile max_entry_mins)
+        min_entry_mins = 0.5   # Default fallback (aligned with profile min_entry_mins)
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
             profile_adapter = get_active_profile()
@@ -1156,7 +1215,8 @@ class UnifiedEdgeComputer:
         asset: str,
         contract: ContractState,
         order_size: int = 1,
-        order_side: str = "taker"  # "maker" or "taker"
+        order_side: str = "taker",  # "maker" or "taker"
+        intended_order_price_cents: Optional[int] = None,
     ) -> Tuple[float, float]:
         """
         Compute fee-adjusted edge = edge - fee_cost.
@@ -1168,8 +1228,8 @@ class UnifiedEdgeComputer:
         Note: Kalshi fees depend on price and contract count, not explicitly on maker/taker
         in the public docs. The order_side parameter is kept for future flexibility.
         
-        TODO: Use actual intended order price (YES/NO limit) instead of mid_price_cents
-        when available for more accurate fee estimation.
+        FIXED: Now uses actual intended order price when provided for accurate fee estimation.
+        Falls back to mid_price_cents if intended_order_price_cents is not provided.
         
         Args:
             slippage_adjusted_edge: Edge after slippage adjustment
@@ -1177,16 +1237,21 @@ class UnifiedEdgeComputer:
             contract: Contract state with price_cents
             order_size: Order size in contracts
             order_side: "maker" or "taker" (kept for future flexibility)
+            intended_order_price_cents: Actual intended order price (YES/NO limit) in cents.
+                                         If None, uses mid_price_cents as fallback.
         
         Returns:
             Tuple of (fee_adjusted_edge, fee_cost_cents)
         """
         from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
         
+        # Use intended order price if provided, otherwise fall back to mid_price
+        price_for_fee = intended_order_price_cents if intended_order_price_cents is not None else contract.mid_price_cents
+        
         # Use canonical fee formula
         total_fee_cents = calculate_kalshi_fee_cents(
             contracts=order_size,
-            price_cents=contract.mid_price_cents,  # NOTE: Using mid_price; actual order price would be more accurate
+            price_cents=price_for_fee,
         )
         fee_cost_cents = total_fee_cents / max(order_size, 1)
         
@@ -1197,8 +1262,8 @@ class UnifiedEdgeComputer:
         edge_fee_adjusted = slippage_adjusted_edge - fee_cost_prob
         
         logger.debug(
-            "[FEE-ADJUSTMENT] asset=%s side=%s fee=%.2fc (canonical) edge=%.3f->%.3f",
-            asset, order_side, fee_cost_cents, slippage_adjusted_edge, edge_fee_adjusted
+            "[FEE-ADJUSTMENT] asset=%s side=%s price=%dc fee=%.2fc (canonical) edge=%.3f->%.3f",
+            asset, order_side, price_for_fee, fee_cost_cents, slippage_adjusted_edge, edge_fee_adjusted
         )
         
         return edge_fee_adjusted, fee_cost_cents

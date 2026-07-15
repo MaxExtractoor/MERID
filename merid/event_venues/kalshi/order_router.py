@@ -48,6 +48,10 @@ from merid.event_venues.kalshi.rate_limiter import get_rate_limiter
 # PHASE1-DUP-2: Order deduplication cache integration
 from merid.event_venues.kalshi.order_deduplication import get_order_cache
 
+# Toxicity detection integration (bot counter-trading prevention)
+from merid.event_venues.kalshi.toxicity_detection import get_toxicity_detector, ToxicityMetrics
+from merid.event_venues.kalshi.entropy_kill_switch import get_entropy_kill_switch
+
 
 def _dedup_cache():
     """Helper to get the global order deduplication cache singleton."""
@@ -346,6 +350,32 @@ def _check_open_resting_order(intent: OrderIntent) -> Optional[str]:
         )
         return f"open_order_exists:{open_order_id}"
 
+    return None
+
+
+def _check_toxicity_kill_switch(intent: OrderIntent) -> Optional[str]:
+    """Check if entropy kill switch is active for this market.
+    
+    Args:
+        intent: OrderIntent to check
+        
+    Returns:
+        Rejection reason string if kill switch active, None if OK
+    """
+    try:
+        kill_switch = get_entropy_kill_switch()
+        is_allowed, reason = kill_switch.is_trading_allowed(intent.ticker)
+        
+        if not is_allowed:
+            logger.warning(
+                "[TOXICITY-KILL-SWITCH] Order rejected for %s: %s",
+                intent.ticker, reason
+            )
+            return f"kill_switch_active:{reason}"
+    except Exception as e:
+        logger.warning("[TOXICITY-KILL-SWITCH] Check failed (fail-open): %s", e)
+        # Fail-open: allow trading if kill switch check fails
+    
     return None
 
 
@@ -1843,7 +1873,14 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
 
     Returns rejection reason string, or None if OK.
     """
-    # CRITICAL: Check global rate limit FIRST to prevent rapid-fire
+    # CRITICAL: Check entropy kill switch FIRST (bot counter-trading prevention)
+    kill_switch_rejection = _check_toxicity_kill_switch(intent)
+    if kill_switch_rejection:
+        _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "toxicity_kill_switch")
+        _increment_validation_gate_metric("ROUTER_VALIDATION", "toxicity_kill_switch")
+        return kill_switch_rejection
+    
+    # CRITICAL: Check global rate limit to prevent rapid-fire
     rate_limit_rejection = _check_global_rate_limit()
     if rate_limit_rejection:
         _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "global_rate_limit")
