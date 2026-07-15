@@ -139,42 +139,55 @@ catalog_staleness_enforced: false
 # - price_based: Turbine research winner - buy YES when price <= 0.50, sell when price >= 0.70
 # 2026-07-05: Switched to momentum_fvg based on Turbine research - momentum was the only profitable family (78 of 100 strategies)
 # Turbine research showed mean reversion failed completely (0 for 432 variants) on 15-minute markets
-signal_mode: momentum_fvg  # Options: mean_reversion, momentum_fvg, hybrid, price_based, trend - 2026-07-05: Changed from trend to momentum_fvg based on Turbine research
+signal_mode: hybrid  # Options: mean_reversion, momentum_fvg, hybrid, price_based, trend - 2026-07-15: Changed to hybrid to enable panic fade (price_based) as secondary strategy - Turbine research winner (+56.6% ROI)
 
 # ── Phase 1 Profitability Enhancements ─────────────────────────────────────────
 # YES/NO Sum Arbitrage, Market Making, and Correlation Tracking
 
 # YES/NO Sum Arbitrage Configuration
-# When YES+NO < 100c, buy both sides for risk-free profit
+# Gabagool strategy: execute when avg_YES + avg_NO < $0.95 (pair-cost model)
+# This is the proven arbitrage edge from research (150/150 profitable variants)
 yes_no_arbitrage:
   enabled: true  # Set to true to enable arbitrage execution
-  threshold_cents: 3  # Minimum arbitrage edge to execute (3c = 3%)
+  pair_cost_threshold_cents: 95  # Execute when YES + NO < 95c (Gabagool strategy)
   max_size_contracts: 10  # Max contracts per arbitrage trade
   execution_timeout_ms: 500  # Max time to execute both sides (milliseconds)
   description: "YES/NO sum arbitrage: buy both sides when YES_ask + NO_bid < 100c"
 
 # Market Making Configuration
 # Liquidity provision to earn spread income
+# Two-phase market making (poly15m-v3 strategy):
+# Phase 1 (0-720s): Two-sided quoting at $0.50 ± 3¢, refresh every 15s
+# Phase 2 (720-900s): Directional GTC on winning side at $0.52
 market_making:
   enabled: true  # Set to true to enable market making
-  quoting_mode: "two_sided"  # Options: one_sided, two_sided
+  quoting_mode: "two_phase"  # Options: one_sided, two_sided, two_phase
   spread_cents: 2  # Target spread in cents
   inventory_limit_contracts: 50  # Max inventory per asset
   skew_adjustment: true  # Adjust quotes based on inventory imbalance
-  description: "Market making: provide liquidity and earn spread income"
+  phase1_duration_seconds: 720  # Phase 1 duration (12 minutes)
+  phase1_price_center_cents: 50  # Center price for two-sided quoting
+  phase1_spread_cents: 3  # Spread around center price (±3¢)
+  phase1_refresh_interval_seconds: 15  # Refresh quotes every 15s
+  phase1_contracts_per_side: 15  # Contracts per side in Phase 1
+  phase2_price_cents: 52  # Directional quote price in Phase 2
+  phase2_contracts: 15  # Contracts in Phase 2
+  phase2_min_move_pct: 0.0012  # Minimum price move (0.12%) to trigger directional phase
+  description: "Market making: two-phase (poly15m-v3) - Phase 1 two-sided, Phase 2 directional"
 
 # Correlation Tracking Configuration
-# Reduce exposure when assets are highly correlated
-# CRITICAL FIX: DISABLED for 15m crypto prediction markets
-# These are prediction markets on crypto price movements, not spot crypto assets
-# Correlation between prediction market outcomes differs from spot crypto correlation
-# This was blocking multiple assets from trading in the same 15m window
+# 2026-07-15: Re-enabled for BTC sentiment biasing (not exposure reduction)
+# Use BTC as leading indicator to bias ETH/SOL/XRP/DOGE signals
+# This is different from spot crypto correlation - it's about prediction market sentiment flow
 correlation_tracking:
-  enabled: false  # DISABLED: Was blocking multi-asset trading in 15m window
+  enabled: true  # ENABLED: Use BTC sentiment to bias other assets
+  btc_sentiment_bias_enabled: true  # Use BTC as leading indicator for other assets
+  btc_bias_threshold: 0.60  # BTC confidence > 60% to bias other assets
+  btc_bias_multiplier: 0.30  # Boost other asset edge by 30% when BTC confident
   threshold: 0.5  # Correlation threshold for exposure reduction
   max_reduction: 0.4  # Reduce to 40% of combined cap at perfect correlation
   window_days: 30  # Rolling window for correlation calculation
-  description: "Correlation tracking: DISABLED for 15m crypto prediction markets"
+  description: "Correlation tracking: BTC sentiment biasing for prediction market outcomes"
   # 2026 RESEARCH-BASED: Correlation-aware risk management
   real_time_monitoring: true  # Real-time correlation monitoring (not static intervals)
   threshold_high: 0.80  # Treat as ONE position when >0.80 correlation
@@ -290,15 +303,16 @@ dynamic_take_profit:
   description: "Dynamic take profit: laddered exits based on entry price for consistent profits"
 
 # Dynamic Position Sizing Configuration
-# Scale position size based on edge and confidence
+# Scale position size based on edge and confidence (slot-model compatible)
+# 2026-07-15: Re-enabled with slot-model compatibility - scales within $1 fixed exposure cap
 dynamic_sizing:
-  enabled: false  # DISABLED: Dynamic sizing multipliers interfere with fixed $1 slot allocation model
+  enabled: true  # ENABLED: Slot-model compatible - scales contracts within $1 cap based on edge quality
   base_contracts: 1  # Base size
-  edge_multiplier: 2.0  # 2026-07-05: Increased from 0.5 to 2.0 (4x) based on Turbine research - amplify edge impact for small velocity-based edges
-  confidence_multiplier: 1.0  # 2026-07-05: Increased from 0.3 to 1.0 (3.3x) based on Turbine research - amplify confidence impact
-  max_contracts: 1  # HARD RULE (2026-07-06): 1 contract per order (per-asset limits take precedence)
+  edge_multiplier: 2.0  # Amplify edge impact for small velocity-based edges (Turbine research)
+  confidence_multiplier: 1.0  # Amplify confidence impact (Turbine research)
+  max_contracts: 1  # HARD RULE: 1 contract per order to respect $1 fixed exposure cap
   min_contracts: 1  # Min contracts per trade
-  description: "Dynamic sizing: scale position based on edge and confidence (2026 research-tuned) - DISABLED to prevent interference with fixed $1 slot allocation"
+  description: "Dynamic sizing: scale position based on edge and confidence within $1 cap (slot-model compatible)"
 
 # Order Scaling Configuration
 # Institutional-grade scaling strategies (TWAP, iceberg, adaptive)
@@ -924,6 +938,23 @@ confidence:
   # PROFILE-GUARD: crypto_threshold_matrix.yaml is disabled for kalshi_crypto_15m_v2
   use_crypto_threshold_matrix: false
   profile_name: null  # Not used when use_crypto_threshold_matrix=false
+  # 2026-07-15 STANDARDIZED: Confidence calculation method documented
+  # CONFIDENCE CALCULATION METHOD (SINGLE SOURCE OF TRUTH):
+  # confidence = abs(model_prob - 0.5) * 2
+  #
+  # This formula computes confidence as the distance from neutral probability (0.5):
+  # - model_prob = 0.5 (neutral) → confidence = 0.0
+  # - model_prob = 0.75 (75% probability) → confidence = 0.50
+  # - model_prob = 0.90 (90% probability) → confidence = 0.80
+  # - model_prob = 0.10 (10% probability) → confidence = 0.80
+  #
+  # RATIONALE:
+  # - Confidence measures how far the model's probability estimate is from neutral
+  # - Higher distance from 0.5 = higher confidence in the model's prediction
+  # - Symmetric for both YES and NO sides
+  # - Industry standard: distance from neutral probability
+  # - Matches agent grid implementation and profile YAML change log (v2.1.0)
+  #
   # 2026-07-07 REVERT: Confidence threshold gate for high-probability trades
   # REVERTED from 0.80 to 0.65 - 80% threshold was blocking all trades
   # Trade scenario simulation suggested 80% for optimal profitability, but actual signal generation
@@ -1270,6 +1301,17 @@ risk_policy:
     SOL: 5.00  # SOL: $5 max cluster stop-loss (higher due to lower liquidity)
     XRP: 5.00  # XRP: $5 max cluster stop-loss (higher due to lower liquidity)
     DOGE: 5.00  # DOGE: $5 max cluster stop-loss (highest due to lowest liquidity)
+  # ATR-based stop loss configuration (2026-07-15: added for dynamic risk management)
+  atr_stop_loss_enabled: true  # Enable ATR-based stop loss calculation
+  atr_period: 14  # 14-day ATR period (industry standard)
+  atr_stop_loss_multiplier_min: 1.5  # Minimum ATR multiplier for stop loss
+  atr_stop_loss_multiplier_max: 2.0  # Maximum ATR multiplier for stop loss
+  per_asset_atr_multiplier:
+    BTC: 1.5  # BTC: 1.5× ATR (tighter stop due to high liquidity)
+    ETH: 1.5  # ETH: 1.5× ATR (tighter stop due to high liquidity)
+    SOL: 1.8  # SOL: 1.8× ATR (wider stop due to higher volatility)
+    XRP: 2.0  # XRP: 2.0× ATR (widest stop due to lower liquidity)
+    DOGE: 2.0  # DOGE: 2.0× ATR (widest stop due to highest volatility)
   # 2026 STANDARD: Institutional-grade risk controls
   # Daily VaR (Value at Risk) cap - maximum expected loss at 95% confidence
   daily_var_cap_pct: 0.03  # 3% daily VaR cap (institutional standard)
