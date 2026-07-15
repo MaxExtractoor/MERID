@@ -84,22 +84,22 @@ class TestDualSideEvaluation:
         assert abs(p_model_no - (1.0 - p_model_yes)) < 0.0001, "Model probabilities should be symmetric"
     
     def test_price_band_filtering(self):
-        """Test that price band (10-50c) is enforced for both sides."""
+        """Test that price band (10-75c) is enforced for both sides."""
         # Test cases: (yes_price, no_price, expected_yes_in_range, expected_no_in_range)
-        # Note: NO price is derived as 100 - YES, so if YES=25c, NO=75c (out of range)
+        # Note: NO price is derived as 100 - YES, so if YES=25c, NO=75c (in range with 10-75c)
         test_cases = [
-            (25, 75, True, False),  # YES in range, NO out (75c > 50c)
+            (25, 75, True, True),  # YES in range, NO in range (75c <= 75c)
             (5, 95, False, False),  # Both out of range
-            (15, 85, True, False),  # YES in range, NO out
-            (55, 45, False, True),  # NO in range, YES out
+            (15, 85, True, False),  # YES in range, NO out (85c > 75c)
+            (55, 45, True, True),  # Both in range (55c <= 75c, 45c in range)
             (10, 90, True, False),  # YES at min boundary, NO out
-            (30, 70, True, False),  # YES in range, NO out
-            (40, 60, True, False),  # YES in range, NO out
+            (30, 70, True, True),  # Both in range
+            (40, 60, True, True),  # Both in range
         ]
         
         for yes_price, no_price, expected_yes_in_range, expected_no_in_range in test_cases:
-            yes_in_range = (10 <= yes_price <= 50)
-            no_in_range = (10 <= no_price <= 50)
+            yes_in_range = (10 <= yes_price <= 75)
+            no_in_range = (10 <= no_price <= 75)
             
             assert yes_in_range == expected_yes_in_range, f"YES range check failed for {yes_price}c"
             assert no_in_range == expected_no_in_range, f"NO range check failed for {no_price}c"
@@ -107,7 +107,7 @@ class TestDualSideEvaluation:
     def test_midpoint_bonus(self):
         """Test midpoint preference (~25c bonus) logic."""
         def midpoint_bonus(price_cents):
-            """Peak at 25c, decays toward 10c/50c."""
+            """Peak at 25c, decays toward 10c/75c."""
             dist = abs(price_cents - 25)
             midpoint_bonus_max = 0.5
             midpoint_bonus_slope = 0.02

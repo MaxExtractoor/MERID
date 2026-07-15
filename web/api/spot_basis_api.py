@@ -7,7 +7,7 @@ Endpoints:
     GET /api/v1/kalshi/spot-basis         — Current basis state for all 5 assets
     GET /api/v1/kalshi/spot-basis/stats   — Rolling stats (mean, median, p95, etc.)
 
-The tracker is started by web/main.py lifespan; these endpoints are read-only
+The tracker is started by web/main_15m_lean.py lifespan; these endpoints are read-only
 pass-throughs.  All errors are caught and returned as JSON so the frontend
 degrades gracefully instead of 500-ing.
 """

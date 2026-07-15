@@ -1266,37 +1266,37 @@ def test_md_freshness_check_all_five_assets():
 
 
 def test_price_selection_yes_order_from_mid_cents():
-    """Test that YES order price is selected from 10-50c sweet spot band.
+    """Test that YES order price is selected from 10-75c canonical range band.
     
-    CRITICAL FIX: Raw market prices above 50c are NOT clamped. Instead, the system
-    searches the orderbook for prices in the 10-50c band. If no prices exist in the band,
+    CRITICAL FIX: Raw market prices above 75c are NOT clamped. Instead, the system
+    searches the orderbook for prices in the 10-75c band. If no prices exist in the band,
     the candidate is dropped (no trade).
     """
     # Mock market state with high mid_cents (would be rejected by DEEP_OTM_POLICY)
     mock_market_state = Mock()
-    mock_market_state.mid_cents = 75.0  # 75c - above 50c limit
+    mock_market_state.mid_cents = 75.0  # 75c - at 75c limit (canonical range max)
     
     # Simulate the new price selection logic from agent_grid_15m.py
     raw_price_cents = int(mock_market_state.mid_cents)
     
-    # Check if price is within sweet spot band
-    if 10 <= raw_price_cents <= 50:
+    # Check if price is within canonical range band
+    if 10 <= raw_price_cents <= 75:
         price_cents = raw_price_cents
     else:
-        # Price is outside sweet spot - would search orderbook
+        # Price is outside canonical range - would search orderbook
         # For this test, assume no valid prices in orderbook
         price_cents = None  # Candidate would be dropped
     
-    # Verify behavior: price is outside band, candidate should be dropped
+    # Verify behavior: price is at band boundary (75c), should be accepted
     assert raw_price_cents == 75
-    assert price_cents is None  # No valid price in sweet spot - candidate dropped
+    assert price_cents == 75  # Price is within canonical range - candidate accepted
 
 
 def test_price_selection_yes_order_from_bid_ask():
-    """Test that YES order price is selected from 10-50c sweet spot band.
+    """Test that YES order price is selected from 10-75c canonical range band.
     
-    CRITICAL FIX: Raw market prices above 50c are NOT clamped. Instead, the system
-    searches the orderbook for prices in the 10-50c band.
+    CRITICAL FIX: Raw market prices above 75c are NOT clamped. Instead, the system
+    searches the orderbook for prices in the 10-75c band.
     """
     # Mock market state with high bid/ask (would be rejected by DEEP_OTM_POLICY)
     mock_market_state = Mock()
@@ -1307,33 +1307,33 @@ def test_price_selection_yes_order_from_bid_ask():
     # Simulate the new price selection logic from agent_grid_15m.py
     raw_price_cents = (mock_market_state.best_bid_cents + mock_market_state.best_ask_cents) // 2
     
-    # Check if price is within sweet spot band
-    if 10 <= raw_price_cents <= 50:
+    # Check if price is within canonical range band
+    if 10 <= raw_price_cents <= 75:
         price_cents = raw_price_cents
     else:
-        # Price is outside sweet spot - would search orderbook
+        # Price is outside canonical range - would search orderbook
         # For this test, assume no valid prices in orderbook
         price_cents = None  # Candidate would be dropped
     
-    # Verify behavior: price is outside band, candidate should be dropped
+    # Verify behavior: price is at band boundary (75c), should be accepted
     assert raw_price_cents == 75  # (70 + 80) // 2 = 75
-    assert price_cents is None  # No valid price in sweet spot - candidate dropped
+    assert price_cents == 75  # Price is within canonical range - candidate accepted
 
 
 def test_price_selection_yes_order_within_sweet_spot():
-    """Test that YES order price within 10-50c band is used directly.
+    """Test that YES order price within 10-75c band is used directly.
     
-    CRITICAL FIX: Prices already in the sweet spot band are used without modification.
+    CRITICAL FIX: Prices already in the canonical range band are used without modification.
     """
     # Mock market state with price within sweet spot
     mock_market_state = Mock()
-    mock_market_state.mid_cents = 35.0  # 35c - within 10-50c band
+    mock_market_state.mid_cents = 35.0  # 35c - within 10-75c band
     
     # Simulate the new price selection logic from agent_grid_15m.py
     raw_price_cents = int(mock_market_state.mid_cents)
     
-    # Check if price is within sweet spot band
-    if 10 <= raw_price_cents <= 50:
+    # Check if price is within canonical range band
+    if 10 <= raw_price_cents <= 75:
         price_cents = raw_price_cents
     else:
         price_cents = None
@@ -1402,14 +1402,14 @@ def test_price_selection_orderbook_no_valid_prices():
     
     # Verify behavior: no valid prices, candidate dropped
     assert raw_price_cents == 75
-    assert price_cents is None  # No valid price in sweet spot - candidate dropped
+    assert price_cents is None  # No valid price in canonical range - candidate dropped
 
 
 def test_price_selection_no_order_from_yes_mid():
-    """Test that NO order price is selected from 10-50c sweet spot band.
+    """Test that NO order price is selected from 10-75c canonical range band.
     
-    CRITICAL FIX: Raw market prices above 50c are NOT clamped. Instead, the system
-    searches the orderbook for prices in the 10-50c band.
+    CRITICAL FIX: Raw market prices above 75c are NOT clamped. Instead, the system
+    searches the orderbook for prices in the 10-75c band.
     NO price = 100 - YES price, so high YES prices need selection too.
     """
     # Mock market state with low YES mid (would result in high NO price)
@@ -1421,25 +1421,25 @@ def test_price_selection_no_order_from_yes_mid():
     yes_mid = (mock_market_state.best_bid_cents + mock_market_state.best_ask_cents) // 2
     raw_price_cents = 100 - yes_mid  # NO price
     
-    # Check if price is within sweet spot band
-    if 10 <= raw_price_cents <= 50:
+    # Check if price is within canonical range band
+    if 10 <= raw_price_cents <= 75:
         price_cents = raw_price_cents
     else:
-        # Price is outside sweet spot - would search orderbook
+        # Price is outside canonical range - would search orderbook
         # For this test, assume no valid prices in orderbook
         price_cents = None  # Candidate would be dropped
     
     # Verify behavior: price is outside band, candidate should be dropped
     assert yes_mid == 17  # (15 + 20) // 2 = 17
-    assert raw_price_cents == 83  # 100 - 17 = 83 (above 50c limit)
-    assert price_cents is None  # No valid price in sweet spot - candidate dropped
+    assert raw_price_cents == 83  # 100 - 17 = 83 (above 75c limit)
+    assert price_cents is None  # No valid price in canonical range - candidate dropped
 
 
 def test_price_selection_below_minimum():
     """Test that prices below 10c are dropped (not clamped).
     
     CRITICAL FIX: Prices below 10c are NOT clamped up. Instead, the system
-    searches the orderbook for prices in the 10-50c band. If no prices exist,
+    searches the orderbook for prices in the 10-75c band. If no prices exist,
     the candidate is dropped.
     """
     # Mock market state with very low mid_cents
@@ -1449,21 +1449,21 @@ def test_price_selection_below_minimum():
     # Simulate the new price selection logic
     raw_price_cents = int(mock_market_state.mid_cents)
     
-    # Check if price is within sweet spot band
-    if 10 <= raw_price_cents <= 50:
+    # Check if price is within canonical range band
+    if 10 <= raw_price_cents <= 75:
         price_cents = raw_price_cents
     else:
-        # Price is outside sweet spot - would search orderbook
+        # Price is outside canonical range - would search orderbook
         # For this test, assume no valid prices in orderbook
         price_cents = None  # Candidate would be dropped
     
     # Verify behavior: price is below band, candidate should be dropped
     assert raw_price_cents == 5
-    assert price_cents is None  # No valid price in sweet spot - candidate dropped
+    assert price_cents is None  # No valid price in canonical range - candidate dropped
 
 
 def test_price_selection_within_range():
-    """Test that prices within 10-50c range are used directly.
+    """Test that prices within 10-75c range are used directly.
     
     CRITICAL FIX: Valid prices should pass through unchanged without clamping.
     """
@@ -1474,8 +1474,8 @@ def test_price_selection_within_range():
     # Simulate the new price selection logic
     raw_price_cents = int(mock_market_state.mid_cents)
     
-    # Check if price is within sweet spot band
-    if 10 <= raw_price_cents <= 50:
+    # Check if price is within canonical range band
+    if 10 <= raw_price_cents <= 75:
         price_cents = raw_price_cents
     else:
         price_cents = None

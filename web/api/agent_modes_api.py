@@ -105,7 +105,7 @@ async def get_routing_status():
         router = get_agent_mode_router()
         
         status = {}
-        for agent_id in ["btc_15m_regime", "eth_15m_regime", "sol_15m_regime", "xrp_15m_regime", "btc_1h_regime"]:
+        for agent_id in ["btc_15m_regime", "eth_15m_regime", "sol_15m_regime", "xrp_15m_regime", "doge_15m_regime"]:
             status[agent_id] = router.get_agent_routing_status(agent_id)
         
         return {

@@ -930,7 +930,7 @@ class Kalshi15mLoop:
         start = loop.time()
         logger.info("[LOOP-STARTUP-WRAPPER] CYCLE-WRAPPER-ENTER cycle=%d loop_time=%.3f", cycle_id, start)
         
-        # CRITICAL: Call BalanceCalibrator to calibrate CategoryExposureTracker with percentage-based caps
+        # CRITICAL: Call BalanceCalibrator to calibrate CategoryExposureTracker with fixed $1 exposure model
         # This fixes the hardcoded $50 correlation stack cap bug
         logger.info("[15M-LOOP-WRAPPER] BALANCE-CALIBRATOR-ENTER: About to fetch bankroll")
         try:
@@ -938,7 +938,7 @@ class Kalshi15mLoop:
             cycle_bankroll = get_equity_for_risk_calc_sync()
             logger.info("[15M-LOOP-WRAPPER] BALANCE-CALIBRATOR: Fetched bankroll=%s", cycle_bankroll)
             if cycle_bankroll is not None and cycle_bankroll > 0:
-                # CRITICAL: Call BalanceCalibrator to calibrate CategoryExposureTracker with percentage-based caps
+                # CRITICAL: Call BalanceCalibrator to calibrate CategoryExposureTracker with fixed $1 exposure model
                 # This fixes the hardcoded $50 correlation stack cap bug
                 logger.info("[15M-LOOP-WRAPPER] BALANCE-CALIBRATOR: About to call BalanceCalibrator")
                 try:
@@ -1386,7 +1386,7 @@ class Kalshi15mLoop:
                     
                     logger.info("[15m-LOOP] Reloaded positions from cache: %s", self._asset_positions)
                     
-                    # CRITICAL: Call BalanceCalibrator to calibrate CategoryExposureTracker with percentage-based caps
+                    # CRITICAL: Call BalanceCalibrator to calibrate CategoryExposureTracker with fixed $1 exposure model
                     # This fixes the hardcoded $50 correlation stack cap bug
                     logger.info("[15m-LOOP] BALANCE-CALIBRATOR-ENTER: About to fetch bankroll")
                     try:
@@ -1394,7 +1394,7 @@ class Kalshi15mLoop:
                         cycle_bankroll = get_equity_for_risk_calc_sync()
                         logger.info("[15m-LOOP] BALANCE-CALIBRATOR: Fetched bankroll=%s", cycle_bankroll)
                         if cycle_bankroll is not None and cycle_bankroll > 0:
-                            # CRITICAL: Call BalanceCalibrator to calibrate CategoryExposureTracker with percentage-based caps
+                            # CRITICAL: Call BalanceCalibrator to calibrate CategoryExposureTracker with fixed $1 exposure model
                             # This fixes the hardcoded $50 correlation stack cap bug
                             logger.info("[15m-LOOP] BALANCE-CALIBRATOR: About to call BalanceCalibrator")
                             try:
@@ -1568,25 +1568,26 @@ class Kalshi15mLoop:
                             # - This prevents over-trading and ensures we always execute the best opportunity
                             should_execute = False
                             
-                            # PER-ASSET EDGE THRESHOLD (2026-07-12 FIX)
-                            # Use per-asset thresholds from risk_parameters.py as single source of truth
-                            # This aligns with industry best practices and removes the too-low confidence-based threshold
-                            from merid.event_venues.kalshi.risk_parameters import EDGE_RESTING_ENTRY_BTC, EDGE_RESTING_ENTRY_ETH, EDGE_RESTING_ENTRY_SOL, EDGE_RESTING_ENTRY_XRP, EDGE_RESTING_ENTRY_DOGE
+                            # PER-ASSET EDGE THRESHOLD (2026-07-14 FIX)
+                            # Use validate_edge() from risk_parameters.py as single source of truth
+                            # validate_edge() uses unified 2.5% threshold from profile edge_bands (industry standard)
+                            # Previous EDGE_RESTING_ENTRY_* (1.25%-2.75%) were for order aggressiveness (maker vs taker), not trade execution
+                            # This fix aligns with profile YAML edge_bands configuration which is the single source of truth
+                            # Industry standard for Kalshi: 3% raw edge minimum (Market Math, Beatpoly)
+                            # Kalshi 7% winner fee turns <2% edge into breakeven/negative EV
+                            from merid.event_venues.kalshi.risk_parameters import validate_edge
                             
-                            asset_thresholds = {
-                                "BTC": EDGE_RESTING_ENTRY_BTC,  # 1.25% (0.0125)
-                                "ETH": EDGE_RESTING_ENTRY_ETH,  # 1.5% (0.015)
-                                "SOL": EDGE_RESTING_ENTRY_SOL,  # 2.0% (0.02)
-                                "XRP": EDGE_RESTING_ENTRY_XRP,  # 2.25% (0.0225)
-                                "DOGE": EDGE_RESTING_ENTRY_DOGE,  # 2.75% (0.0275)
-                            }
+                            # Validate edge using unified 2.5% threshold from profile edge_bands
+                            is_valid, reason = validate_edge(edge, asset, confidence=0.5)
                             
-                            min_edge_threshold = asset_thresholds.get(asset, EDGE_RESTING_ENTRY_BTC)
+                            if not is_valid:
+                                logger.debug(
+                                    "[15m-LOOP] Edge validation failed: asset=%s edge=%.6f reason=%s",
+                                    asset, edge, reason
+                                )
+                                continue  # Skip if edge below 2.5%
                             
-                            logger.debug(
-                                "[15m-LOOP] Per-asset threshold: asset=%s min_threshold=%.6f",
-                                asset, min_edge_threshold
-                            )
+                            min_edge_threshold = 0.025  # 2.5% unified threshold from profile edge_bands (industry standard)
                             
                             # Check swing mode status for this asset
                             swing_enabled = self._swing_mode.get(asset, {}).get("enabled", False)
@@ -1682,6 +1683,17 @@ class Kalshi15mLoop:
                             if not should_execute:
                                 continue
                             
+                            # CRITICAL FIX (2026-07-13): Check if this candidate was already executed in current 15-minute window
+                            # This prevents re-executing the same ticker+side+price combination multiple times
+                            # The previous bug only added to the set AFTER execution, allowing duplicates
+                            candidate_key = self._get_candidate_key(candidate)
+                            if candidate_key in self._executed_candidates_this_window:
+                                logger.debug(
+                                    "[15m-LOOP] Candidate already executed in current window: ticker=%s side=%s - skipping",
+                                    ticker, side
+                                )
+                                continue
+                            
                             # CRITICAL: Re-validate edge before execution
                             if not self._validate_candidate_edge(candidate):
                                 logger.warning("[15m-LOOP] Candidate edge validation failed: %s - skipping execution", ticker)
@@ -1724,10 +1736,10 @@ class Kalshi15mLoop:
                                                     price_cents = yes_mid
                                 if price_cents <= 0:
                                     logger.warning(
-                                        "[15m-LOOP] No real price available for sizing ticker=%s - using conservative 25c placeholder (midpoint of 10-50c sweet spot)",
+                                        "[15m-LOOP] No real price available for sizing ticker=%s - using conservative 25c placeholder (midpoint of 10-75c canonical range)",
                                         ticker
                                     )
-                                    price_cents = 25  # 2026-07-09: Fixed to 25c (midpoint of 10-50c sweet spot)
+                                    price_cents = 25  # 2026-07-09: Fixed to 25c (midpoint of 10-75c canonical range)
                             
                                 # Get edge, confidence, and model_prob from candidate
                                 edge_pct = Decimal(str(candidate.get("edge_pct", 0.0)))
@@ -3664,7 +3676,7 @@ class Kalshi15mLoop:
                 else:
                     logger.debug("[15m-LOOP] Window unchanged: %s - skipping cycle reset", current_window.suffix)
                 
-                # CRITICAL: Call BalanceCalibrator to calibrate CategoryExposureTracker with percentage-based caps
+                # CRITICAL: Call BalanceCalibrator to calibrate CategoryExposureTracker with fixed $1 exposure model
                 # This fixes the hardcoded $50 correlation stack cap bug
                 logger.info("[15M-LOOP] BALANCE-CALIBRATOR-ENTER: About to fetch bankroll")
                 try:
@@ -3672,7 +3684,7 @@ class Kalshi15mLoop:
                     cycle_bankroll = get_equity_for_risk_calc_sync()
                     logger.info("[15M-LOOP] BALANCE-CALIBRATOR: Fetched bankroll=%s", cycle_bankroll)
                     if cycle_bankroll is not None and cycle_bankroll > 0:
-                        # CRITICAL: Call BalanceCalibrator to calibrate CategoryExposureTracker with percentage-based caps
+                        # CRITICAL: Call BalanceCalibrator to calibrate CategoryExposureTracker with fixed $1 exposure model
                         # This fixes the hardcoded $50 correlation stack cap bug
                         logger.info("[15M-LOOP] BALANCE-CALIBRATOR: About to call BalanceCalibrator")
                         try:
@@ -3785,14 +3797,15 @@ class Kalshi15mLoop:
             candidate: Candidate dict from agent grid
             
         Returns:
-            Unique key string (ticker + side)
-            Note: price_cents and count are not available at candidate generation time,
-            so we use ticker + side which is sufficient to prevent duplicate executions
-            within the same 15-minute window.
+            Unique key string (ticker + side + price_cents)
+            CRITICAL FIX (2026-07-13): Include price_cents to prevent re-executing
+            the same ticker+side at different prices within the same window.
+            This ensures we only execute 1 order per ticker+side+price per 15-minute window.
         """
         ticker = candidate.get("ticker", "")
         side = candidate.get("side", "")
-        return f"{ticker}:{side}"
+        price_cents = candidate.get("price_cents", 0)
+        return f"{ticker}:{side}:{price_cents}"
     
     def _validate_candidate_edge(self, candidate: Dict) -> bool:
         """Re-validate candidate edge before execution to prevent bad trades.

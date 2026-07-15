@@ -1576,7 +1576,7 @@ _crypto_router_instance = None
 
 
 def set_crypto_alert_router(r) -> None:
-    """Called from web/main.py lifespan to register the running CryptoAlertRouter."""
+    """Called from web/main_15m_lean.py lifespan to register the running CryptoAlertRouter."""
     global _crypto_router_instance
     _crypto_router_instance = r
 

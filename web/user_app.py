@@ -82,7 +82,7 @@ def create_user_app() -> FastAPI:
     _app_context.clear()
     _app_context.update(context)
     
-    # CORS middleware — restrict to known origins (match web/main.py policy)
+    # CORS middleware — restrict to known origins (match web/main_15m_lean.py policy)
     _user_cors_origins = context["allowed_origins"] or [
         "http://localhost:5173",
         "http://127.0.0.1:5173",

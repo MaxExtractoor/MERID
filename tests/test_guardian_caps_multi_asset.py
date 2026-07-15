@@ -10,10 +10,13 @@ Run with:
   pytest tests/test_guardian_caps_multi_asset.py -v
 """
 
+import os
+import sys
 import time
 import pytest
 from decimal import Decimal
 from datetime import datetime, timezone
+from types import ModuleType
 from unittest.mock import patch, MagicMock, PropertyMock
 
 from merid.guards import (
@@ -23,6 +26,25 @@ from merid.event_venues.kalshi.fills_ledger import KalshiFill, KalshiFillsLedger
 
 
 ASSETS = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+
+# CT was archived to legacy: resolve source path for CT-internal regression checks.
+# strategy._get_size_cap_for_asset still guards the import (fail-closed when CT enabled).
+_CT_PROD_PATH = "merid/trading/kalshi_continuous_trader.py"
+_CT_ARCHIVE_PATH = "archive/legacy/kalshi_continuous_trader.py"
+CT_SOURCE_PATH = _CT_PROD_PATH if os.path.exists(_CT_PROD_PATH) else (
+    _CT_ARCHIVE_PATH if os.path.exists(_CT_ARCHIVE_PATH) else None
+)
+
+
+def _patch_ct_trader(get_continuous_trader):
+    """Inject a stub kalshi_continuous_trader module (real module is archived).
+
+    strategy._get_size_cap_for_asset imports it lazily inside try/except, so a
+    sys.modules stub is the correct seam for testing both paths.
+    """
+    mod = ModuleType("merid.trading.kalshi_continuous_trader")
+    mod.get_continuous_trader = get_continuous_trader
+    return patch.dict(sys.modules, {"merid.trading.kalshi_continuous_trader": mod})
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -203,7 +225,7 @@ class TestGetSizeCapForAsset:
         """BUG-4 regression: no guardian available → 0.0 (not None)."""
         from merid.prediction.strategy import KalshiStrategy
 
-        with patch("merid.trading.kalshi_continuous_trader.get_continuous_trader", return_value=None), \
+        with _patch_ct_trader(lambda: None), \
              patch.dict("os.environ", {"MERID_ENABLE_KALSHI_CT": "true"}):
             strat = object.__new__(KalshiStrategy)
             cap = strat._get_size_cap_for_asset("BTC")
@@ -215,7 +237,7 @@ class TestGetSizeCapForAsset:
         mock_trader._guardian = None
 
         from merid.prediction.strategy import KalshiStrategy
-        with patch("merid.trading.kalshi_continuous_trader.get_continuous_trader", return_value=mock_trader), \
+        with _patch_ct_trader(lambda: mock_trader), \
              patch.dict("os.environ", {"MERID_ENABLE_KALSHI_CT": "true"}):
             strat = object.__new__(KalshiStrategy)
             cap = strat._get_size_cap_for_asset("ETH")
@@ -223,7 +245,11 @@ class TestGetSizeCapForAsset:
 
     def test_import_error_returns_zero(self):
         from merid.prediction.strategy import KalshiStrategy
-        with patch("merid.trading.kalshi_continuous_trader.get_continuous_trader", side_effect=ImportError("nope")), \
+
+        def _raise(*_a, **_k):
+            raise ImportError("nope")
+
+        with _patch_ct_trader(_raise), \
              patch.dict("os.environ", {"MERID_ENABLE_KALSHI_CT": "true"}):
             strat = object.__new__(KalshiStrategy)
             cap = strat._get_size_cap_for_asset("SOL")
@@ -243,7 +269,7 @@ class TestGetSizeCapForAsset:
         mock_trader._guardian = guardian
 
         from merid.prediction.strategy import KalshiStrategy
-        with patch("merid.trading.kalshi_continuous_trader.get_continuous_trader", return_value=mock_trader):
+        with _patch_ct_trader(lambda: mock_trader):
             strat = object.__new__(KalshiStrategy)
             cap = strat._get_size_cap_for_asset(asset)
             assert cap == expected_cap, f"{asset}: expected {expected_cap}, got {cap}"
@@ -256,7 +282,7 @@ class TestGetSizeCapForAsset:
         mock_trader._guardian = guardian
 
         from merid.prediction.strategy import KalshiStrategy
-        with patch("merid.trading.kalshi_continuous_trader.get_continuous_trader", return_value=mock_trader):
+        with _patch_ct_trader(lambda: mock_trader):
             strat = object.__new__(KalshiStrategy)
             cap = strat._get_size_cap_for_asset("SHIB")
             assert cap == 0.0
@@ -272,7 +298,9 @@ class TestLastGuardCheckAttribute:
     def test_attribute_exists_on_init(self):
         """BUG-5 regression: _last_guard_check must be an instance attribute."""
         import ast
-        source = open("merid/trading/kalshi_continuous_trader.py", encoding="utf-8").read()
+        if CT_SOURCE_PATH is None:
+            pytest.skip("kalshi_continuous_trader removed (archived legacy CT)")
+        source = open(CT_SOURCE_PATH, encoding="utf-8").read()
         tree = ast.parse(source)
         # Check that self._last_guard_check appears in __init__
         found = False
@@ -286,7 +314,9 @@ class TestLastGuardCheckAttribute:
 
     def test_status_snapshot_uses_self(self):
         """Ensure _status_snapshot_inner uses self._last_guard_check, not bare local."""
-        source = open("merid/trading/kalshi_continuous_trader.py", encoding="utf-8").read()
+        if CT_SOURCE_PATH is None:
+            pytest.skip("kalshi_continuous_trader removed (archived legacy CT)")
+        source = open(CT_SOURCE_PATH, encoding="utf-8").read()
         # Find _status_snapshot_inner and check it uses self._last_guard_check
         assert "self._last_guard_check" in source
         # Ensure no bare _last_guard_check reference in status snapshot
@@ -382,7 +412,7 @@ class TestFillsLedgerMultiAsset:
     def test_compute_net_positions_matches_per_market(self):
         """compute_net_positions must agree with compute_position_from_fills per ticker."""
         ledger = _fresh_ledger()
-        tickers = ["KXBTC-T1", "KXETH-T2", "KXSOL-T3"]
+        tickers = ["KXBTC-T1", "KXETH-T2", "KXSOL-T3", "KXXRP-T4", "KXDOGE-T5"]
         for i, ticker in enumerate(tickers):
             fid = f"f_{i}"
             fill = _make_fill(fid, ticker, "yes", "buy", (i + 1), 0.50)
@@ -404,7 +434,9 @@ class TestCTPerAssetCapEnforcement:
 
     def test_ct_has_per_asset_cap_code(self):
         """BUG-7 regression: CT must check guardian caps before placing orders."""
-        source = open("merid/trading/kalshi_continuous_trader.py", encoding="utf-8").read()
+        if CT_SOURCE_PATH is None:
+            pytest.skip("kalshi_continuous_trader removed (archived legacy CT)")
+        source = open(CT_SOURCE_PATH, encoding="utf-8").read()
         # Updated: CT now uses get_effective_live_caps() then effective_caps.get()
         assert "effective_caps.get(_candidate_asset" in source, \
             "CT missing per-asset cap check from guardian"
@@ -532,9 +564,10 @@ class TestEndToEndConsistency:
             except SyntaxError as e:
                 pytest.fail(f"{f} has syntax error: {e}")
 
-        # CT needs explicit utf-8 encoding (has unicode chars)
-        try:
-            source = open("merid/trading/kalshi_continuous_trader.py", encoding="utf-8").read()
-            ast.parse(source)
-        except SyntaxError as e:
-            pytest.fail(f"kalshi_continuous_trader.py has syntax error: {e}")
+        # CT needs explicit utf-8 encoding (has unicode chars); archived to legacy
+        if CT_SOURCE_PATH is not None:
+            try:
+                source = open(CT_SOURCE_PATH, encoding="utf-8").read()
+                ast.parse(source)
+            except SyntaxError as e:
+                pytest.fail(f"kalshi_continuous_trader.py has syntax error: {e}")

@@ -3812,15 +3812,18 @@ class LeanAgent15m:
 
                 if indicator_snap.bars_available < min_bars_required:
 
-                    logger.info(
+                    logger.warning(
 
-                        "[MOMENTUM-FVG-WARMUP] asset=%s bars_available=%d (requires %d) - warming up, using cold start logic",
+                        "[MOMENTUM-FVG-WARMUP] asset=%s bars_available=%d (requires %d) - NOT READY, skipping signal generation",
 
                         asset, indicator_snap.bars_available, min_bars_required
 
                     )
 
-                    # Continue with cold start logic - don't return None
+                    # CRITICAL FIX (2026-07-13): Return None to prevent order execution during warmup
+                    # Previous cold start logic bypassed the 30-bar requirement, allowing orders within 1-2 minutes
+                    # This bypass defeats the purpose of the warmup period and exposes the system to unreliable signals
+                    return None
 
                 else:
 
@@ -4567,7 +4570,7 @@ class LeanAgent15m:
 
         def midpoint_bonus(price_cents):
 
-            """Peak at 25c, decays toward 10c/50c."""
+            """Peak at 25c, decays toward 10c/75c."""
 
             dist = abs(price_cents - 25)
 
@@ -4691,6 +4694,9 @@ class LeanAgent15m:
             price_cents = 42  # Fallback to default
 
             price_source = "fallback_42c"
+            # 2026 BEST PRACTICE: Track fallback activation
+            self._fallback_activations["price_fallback"] += 1
+            self._fallback_timestamps["price_fallback"].append(time.time())
 
         
 
@@ -7769,6 +7775,9 @@ class LeanAgent15m:
                         asset, strike_price
 
                     )
+                    # 2026 BEST PRACTICE: Track fallback activation
+                    self._fallback_activations["strike_fallback"] += 1
+                    self._fallback_timestamps["strike_fallback"].append(time.time())
 
                 
 
@@ -10236,6 +10245,9 @@ class LeanAgent15m:
             ENTRY_MIN_PRICE_CENTS = 10  # Canonical lower bound
 
             ENTRY_MAX_PRICE_CENTS = 75  # Canonical upper bound (2026-07-12: expanded from 50c to 75c)
+            # 2026 BEST PRACTICE: Track fallback activation
+            self._fallback_activations["dynamic_range_fallback"] += 1
+            self._fallback_timestamps["dynamic_range_fallback"].append(time.time())
 
         
 
@@ -11913,7 +11925,24 @@ class LeanAgentGrid15m:
 
         self._rest_sync_interval = 30.0  # seconds
 
-        logger.info("[AGENT-GRID-INIT] LeanAgentGrid15m initialized with %d agents", len(agents))
+        # CRITICAL FIX (2026-07-13): Track executed candidates to prevent duplicate executions
+        # This prevents multiple orders with same ticker/side/price from executing in consecutive cycles
+        self._executed_candidates: Set[str] = set()
+
+        # 2026 BEST PRACTICE: Fallback activation tracking for degradation metrics
+        self._fallback_activations: Dict[str, int] = {
+            "ohlc_fallback": 0,
+            "price_fallback": 0,
+            "strike_fallback": 0,
+            "indicator_stack_fallback": 0,
+            "atr_warmup_fallback": 0,
+            "dynamic_range_fallback": 0,
+        }
+        self._fallback_timestamps: Dict[str, list] = {
+            key: [] for key in self._fallback_activations.keys()
+        }
+
+        logger.info("[AGENT-GRID-INIT] LeanAgentGrid15m initialized with %d agents and fallback tracking", len(agents))
 
     
 
@@ -11959,6 +11988,9 @@ class LeanAgentGrid15m:
 
         self._current_market_ids.clear()
 
+        # CRITICAL FIX (2026-07-13): Clear executed candidates on startup
+        self._executed_candidates.clear()
+
         logger.info("[AGENT-GRID-START] LeanAgentGrid15m started - strip order counts reset")
 
     
@@ -11989,7 +12021,35 @@ class LeanAgentGrid15m:
 
         self._current_market_ids.clear()
 
-        logger.info("[STRIP-RESET-ALL] Reset all strip order counts and market ID tracking")
+        # CRITICAL FIX (2026-07-13): Clear executed candidates on market rollover
+        self._executed_candidates.clear()
+
+        # 2026 BEST PRACTICE: Clear fallback tracking on market rollover
+        for key in self._fallback_activations:
+            self._fallback_activations[key] = 0
+        for key in self._fallback_timestamps:
+            self._fallback_timestamps[key] = []
+
+        logger.info("[STRIP-RESET-ALL] Reset all strip order counts, market ID tracking, and fallback metrics")
+
+    def get_fallback_metrics(self) -> Dict[str, Any]:
+        """Get fallback activation metrics for degradation monitoring (2026 best practice).
+        
+        Returns:
+            Dict with fallback activation counts and recent timestamps
+        """
+        # Calculate recent fallback rate (last 5 minutes)
+        now = time.time()
+        recent_fallbacks = {}
+        for key, timestamps in self._fallback_timestamps.items():
+            recent_count = sum(1 for ts in timestamps if now - ts < 300)
+            recent_fallbacks[key] = recent_count
+        
+        return {
+            "total_activations": dict(self._fallback_activations),
+            "recent_activations_5m": recent_fallbacks,
+            "timestamp": now,
+        }
 
     
 
@@ -12291,7 +12351,16 @@ class LeanAgentGrid15m:
 
                 envelope = get_kalshi_crypto_15m_risk_envelope()
 
-                allocator = create_global_allocator_from_envelope(envelope)
+                # CRITICAL FIX (2026-07-13): Reuse existing allocator singleton to preserve pending order tracking
+                # Creating a new allocator every cycle resets _pending_orders, defeating the purpose
+                from merid.risk.profiles.global_allocator import get_global_allocator, set_global_allocator
+                allocator = get_global_allocator()
+                if allocator is None:
+                    allocator = create_global_allocator_from_envelope(envelope)
+                    set_global_allocator(allocator)
+                    logger.info("[GLOBAL-ALLOCATOR] Created new allocator instance")
+                else:
+                    logger.info("[GLOBAL-ALLOCATOR] Reusing existing allocator instance (preserves pending order tracking)")
 
                 
 
@@ -12331,41 +12400,43 @@ class LeanAgentGrid15m:
 
                     
 
+                    # CRITICAL FIX (2026-07-13): Check for existing resting orders using resting_order_monitor
+                    # This prevents duplicate order submissions when a resting order already exists
+                    # The previous check used self.order_gate which is never set in the production stack
                     has_resting_order = False
 
-                    if hasattr(self, 'order_gate') and self.order_gate:
+                    try:
 
-                        try:
+                        from merid.event_venues.kalshi.resting_order_monitor import get_resting_order_monitor
 
-                            from merid.event_venues.kalshi.order_gate import OrderStatus
+                        monitor = get_resting_order_monitor()
 
-                            # Check for existing resting orders with same ticker, price, side, action
+                        if monitor:
 
-                            resting_orders = self.order_gate.get_resting_orders()
+                            # Check for existing resting orders with same ticker, side, action
+                            # Note: We don't check price_cents here because resting orders may have different prices
+                            # The key is to prevent multiple orders for the same ticker/side/action combination
+                            open_order_id = monitor.find_open_order(
 
-                            for resting_order in resting_orders:
+                                ticker=ticker,
 
-                                if (resting_order.contract_id == ticker and 
+                                side=side,
 
-                                    resting_order.price_cents == price_cents and
+                                action=action
 
-                                    resting_order.side == side and
+                            )
 
-                                    resting_order.action == action and
+                            if open_order_id:
 
-                                    resting_order.status in (OrderStatus.PENDING, OrderStatus.SUBMITTED, OrderStatus.LIVE)):
+                                has_resting_order = True
 
-                                    has_resting_order = True
+                                logger.info("[GLOBAL-ALLOCATOR] Skipping candidate with existing resting order: ticker=%s side=%s action=%s order_id=%s", 
 
-                                    logger.info("[GLOBAL-ALLOCATOR] Skipping candidate with existing resting order: ticker=%s price=%dc side=%s", 
+                                           ticker, side, action, open_order_id)
 
-                                               ticker, price_cents, side)
+                    except Exception as e:
 
-                                    break
-
-                        except Exception as e:
-
-                            logger.warning("[GLOBAL-ALLOCATOR] Failed to check for resting orders: %s", e)
+                        logger.warning("[GLOBAL-ALLOCATOR] Failed to check for resting orders: %s", e)
 
                     
 
@@ -12559,6 +12630,18 @@ class LeanAgentGrid15m:
 
                             
 
+                            # CRITICAL FIX (2026-07-13): Check if this candidate was already executed
+                            # This prevents duplicate executions across consecutive cycles
+                            candidate_key = self._get_candidate_key(ticker, side, price_cents)
+                            if candidate_key in self._executed_candidates:
+                                logger.warning(
+                                    "[GLOBAL-ALLOCATOR] SKIP duplicate execution: ticker=%s side=%s price=%dc (already executed)",
+                                    ticker, side, price_cents
+                                )
+                                continue
+
+                            
+
                             # CRITICAL FIX (2026-07-10): Session order count and cooldown are updated on FILL, not submission
 
                             # This prevents perpetual cooldown blocks when orders don't fill (e.g., resting limit orders)
@@ -12611,6 +12694,14 @@ class LeanAgentGrid15m:
                                 order_id = getattr(order_result, 'order_id', 'duplicate/idempotent')
 
                                 logger.info("[GLOBAL-ALLOCATOR-EXECUTE-SUCCESS] asset=%s order_id=%s", order.asset, order_id)
+
+                                # CRITICAL FIX (2026-07-13): Mark candidate as executed to prevent duplicate executions
+                                candidate_key = self._get_candidate_key(ticker, side, price_cents)
+                                self._executed_candidates.add(candidate_key)
+                                logger.info(
+                                    "[GLOBAL-ALLOCATOR] Marked candidate as executed: ticker=%s side=%s price=%dc (total executed=%d)",
+                                    ticker, side, price_cents, len(self._executed_candidates)
+                                )
 
                                 # CRITICAL FIX (2026-07-12): Increment strip order count only on successful execution
                                 # Previously this was incremented on candidate generation, causing misleading counts
@@ -12710,6 +12801,22 @@ class LeanAgentGrid15m:
         # Get all agents.
 
         return self._agents
+
+    def _get_candidate_key(self, ticker: str, side: str, price_cents: int) -> str:
+        """Generate a unique key for a candidate to detect duplicates.
+        
+        CRITICAL FIX (2026-07-13): This key is used to prevent duplicate executions
+        of the same order across consecutive cycles.
+        
+        Args:
+            ticker: Market ticker
+            side: Order side (yes/no)
+            price_cents: Order price in cents
+        
+        Returns:
+            Unique key string
+        """
+        return f"{ticker}:{side}:{price_cents}"
 
 
 
