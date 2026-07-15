@@ -6854,9 +6854,10 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
         if profile_adapter and profile_adapter.profile:
             profile_name = getattr(profile_adapter.profile, 'profile_name', '')
             if profile_name == 'kalshi_crypto_15m_v2':
-                # Check source - allow both agent_grid_15m and kalshi_tools for this profile
+                # Check source - allow agent_grid_15m, kalshi_tools, and offset_hedging for this profile
                 # kalshi_tools is used by global allocator for execution (2026-07-10 fix)
-                allowed_sources = ["merid.prediction.agent_grid_15m", "kalshi_tools"]
+                # offset_hedging is used for hedge orders that reduce net exposure (2026-07-14 fix)
+                allowed_sources = ["merid.prediction.agent_grid_15m", "kalshi_tools", "offset_hedging"]
                 if intent.source and not any(allowed in intent.source for allowed in allowed_sources):
                     latency = (_time.monotonic() - t0) * 1000
                     logger.error(
