@@ -206,3 +206,118 @@ class TestExitPolicySingleton:
         engine = get_exit_policy_engine(config)
         
         assert engine.config.take_profit_pct == 0.30
+
+
+class TestExitPolicyAllAssets:
+    """Test exit policy works across all 5 crypto assets (BTC, ETH, SOL, XRP, DOGE)."""
+    
+    @pytest.mark.parametrize("asset", ["BTC", "ETH", "SOL", "XRP", "DOGE"])
+    def test_take_profit_trigger_all_assets(self, asset):
+        """Test take-profit trigger works for all crypto assets."""
+        config = ExitPolicyConfig(edge_based_tp=False, confidence_scaling=False)
+        engine = ExitPolicyEngine(config)
+        
+        # Entry at 50 cents, current at 75 cents (50% profit)
+        signal = engine.evaluate_exit(
+            entry_price_cents=50,
+            current_price_cents=75,
+            edge_pct=0.05,
+            confidence=0.8,
+            minutes_held=3.0,
+            side="yes",
+        )
+        
+        assert signal.should_exit == True
+        assert signal.reason == ExitReason.TAKE_PROFIT
+    
+    @pytest.mark.parametrize("asset", ["BTC", "ETH", "SOL", "XRP", "DOGE"])
+    def test_stop_loss_trigger_all_assets(self, asset):
+        """Test stop-loss trigger works for all crypto assets."""
+        engine = ExitPolicyEngine()
+        
+        # Entry at 50 cents, current at 10 cents (80% loss)
+        signal = engine.evaluate_exit(
+            entry_price_cents=50,
+            current_price_cents=10,
+            edge_pct=0.05,
+            confidence=0.8,
+            minutes_held=2.0,
+            side="yes",
+        )
+        
+        assert signal.should_exit == True
+        assert signal.reason == ExitReason.STOP_LOSS
+
+
+class TestExitPolicyBothSides:
+    """Test exit policy works for both YES and NO sides."""
+    
+    def test_yes_position_take_profit(self):
+        """Test take-profit for YES position."""
+        config = ExitPolicyConfig(edge_based_tp=False, confidence_scaling=False)
+        engine = ExitPolicyEngine(config)
+        
+        # YES: Entry 50c, current 75c = 50% profit
+        signal = engine.evaluate_exit(
+            entry_price_cents=50,
+            current_price_cents=75,
+            edge_pct=0.05,
+            confidence=0.8,
+            minutes_held=3.0,
+            side="yes",
+        )
+        
+        assert signal.should_exit == True
+        assert signal.reason == ExitReason.TAKE_PROFIT
+    
+    def test_no_position_take_profit(self):
+        """Test take-profit for NO position."""
+        config = ExitPolicyConfig(edge_based_tp=False, confidence_scaling=False)
+        engine = ExitPolicyEngine(config)
+        
+        # NO: Entry 50c, current 25c = 50% profit (price moved down)
+        signal = engine.evaluate_exit(
+            entry_price_cents=50,
+            current_price_cents=25,
+            edge_pct=0.05,
+            confidence=0.8,
+            minutes_held=3.0,
+            side="no",
+        )
+        
+        assert signal.should_exit == True
+        assert signal.reason == ExitReason.TAKE_PROFIT
+    
+    def test_yes_position_stop_loss(self):
+        """Test stop-loss for YES position."""
+        engine = ExitPolicyEngine()
+        
+        # YES: Entry 50c, current 10c = 80% loss
+        signal = engine.evaluate_exit(
+            entry_price_cents=50,
+            current_price_cents=10,
+            edge_pct=0.05,
+            confidence=0.8,
+            minutes_held=2.0,
+            side="yes",
+        )
+        
+        assert signal.should_exit == True
+        assert signal.reason == ExitReason.STOP_LOSS
+    
+    def test_no_position_stop_loss(self):
+        """Test stop-loss for NO position."""
+        engine = ExitPolicyEngine()
+        
+        # NO: Entry 50c, current 90c = 80% loss (price moved up)
+        signal = engine.evaluate_exit(
+            entry_price_cents=50,
+            current_price_cents=90,
+            edge_pct=0.05,
+            confidence=0.8,
+            minutes_held=2.0,
+            side="no",
+        )
+        
+        assert signal.should_exit == True
+        assert signal.reason == ExitReason.STOP_LOSS
