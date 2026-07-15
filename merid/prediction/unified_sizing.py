@@ -546,13 +546,14 @@ def _get_kelly_multiplier(edge_pct: Optional[Decimal] = None) -> float:
             edge_pct_float = float(edge_pct)
             
             # Determine edge band based on edge_pct
-            # Watch band: 0.5% edge (0.005)
-            if edge_pct_float <= 0.005:
+            # 2026-07-14: Updated to industry standard (2.5% minimum from Market Math, Beatpoly)
+            # Watch band: 2.5% edge (0.025) - log only
+            if edge_pct_float <= 0.025:
                 return 0.0  # No trading in watch band
-            # Small band: 0.5-1% edge (0.005-0.01)
-            elif edge_pct_float <= 0.01:
+            # Small band: 2.5-5% edge (0.025-0.05) - trade with reduced size
+            elif edge_pct_float <= 0.05:
                 return 0.25  # 0.25x Kelly for small band
-            # Standard band: >1% edge (>0.01)
+            # Standard band: >5% edge (>0.05) - trade with standard size
             else:
                 return 0.5  # 0.5x Kelly for standard band
         else:
@@ -775,16 +776,13 @@ def calculate_kelly_fraction(
         logger.warning("[KELLY] Invalid price=%.2f, cannot calculate Kelly", price)
         return 0.0
     
-    # CRITICAL FIX (2026-07-13): Adjust model_prob based on side
-    # For NO contracts, model_prob is probability of NOT outcome, but Kelly needs probability of YES outcome
-    # because the payout is based on the YES outcome probability (price = P(YES))
-    side_lower = side.lower() if side else "yes"
-    if side_lower == "no":
-        # For NO: model_prob is P(NOT), convert to P(YES) = 1 - P(NOT)
-        p = 1.0 - model_prob
-    else:
-        # For YES: model_prob is already P(YES)
-        p = model_prob
+    # CRITICAL FIX (2026-07-15): model_prob is already correct for Kelly formula
+    # agent_grid_15m.py calculates model_prob anchored to market price:
+    # - For YES: model_prob = market_prob + edge_adjustment (probability of YES outcome)
+    # - For NO: model_prob = market_prob - edge_adjustment (probability of YES outcome)
+    # Kelly formula needs probability of winning, which is exactly what model_prob represents
+    # No side-based conversion needed - use model_prob directly
+    p = model_prob
     
     b = (1.0 - price) / price  # Net odds
     q = 1.0 - p
@@ -928,17 +926,17 @@ def compute_order_size(
         profile = adapter.profile
         fixed_exposure_cap_usd = Decimal(str(profile.risk_policy_fixed_exposure_cap_usd))
     
-    # Step 2: Get existing total exposure from position cache
-    # CRITICAL FIX: 2026-07-13 - Use position_cache instead of slot_allocator for exposure check
-    # Slot allocator now only allocates on fill (post-fill path), so it doesn't have pre-fill exposure.
-    # Position cache is the single source of truth for actual filled positions.
+    # Step 2: Get existing total exposure from slot allocator
+    # CRITICAL FIX: 2026-07-13 - Use slot_allocator for exposure check
+    # Slot allocator is the authoritative source for exposure tracking including allocated slots
+    # Position cache only tracks filled positions, not allocated slots
     existing_exposure_usd = Decimal("0")
     try:
-        from merid.event_venues.kalshi.position_cache import get_position_cache
-        position_cache = get_position_cache()
-        existing_exposure_usd = Decimal(str(position_cache.get_total_exposure_usd()))
+        from merid.risk.global_slot_allocator import get_global_slot_allocator
+        slot_allocator = get_global_slot_allocator()
+        existing_exposure_usd = Decimal(str(slot_allocator.get_total_exposure()))
     except Exception as e:
-        logger.warning("[UNIFIED-SIZING] Failed to get existing exposure from position cache: %s", e)
+        logger.warning("[UNIFIED-SIZING] Failed to get existing exposure from slot allocator: %s", e)
     
     # Step 3: Calculate available exposure
     available_exposure_usd = fixed_exposure_cap_usd - existing_exposure_usd
