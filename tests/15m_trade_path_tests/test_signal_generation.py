@@ -238,19 +238,22 @@ def test_agent_grid_no_min_edge_fields():
 
 
 def test_profile_per_trade_risk_pct_3_percent():
-    """Test that profile per_trade_risk_pct is 3% (HIGH FIX #7)."""
+    """Test that profile per_trade_risk_pct is DISABLED (fixed $1 exposure model)."""
     profile_path = Path("c:/Dev/MERID/config/profiles/kalshi_crypto_15m_v2.yaml")
     
     with open(profile_path, 'r', encoding='utf-8') as f:
         profile = yaml.safe_load(f)
     
-    per_trade_risk = profile['guardrails']['per_trade_risk_pct']
-    assert per_trade_risk['value'] == 0.03, \
-        f"per_trade_risk_pct should be 0.03 (3%), got {per_trade_risk['value']}"
+    # 2026-07-15: Percentage-based per_trade_risk_pct DISABLED in favor of fixed $1 exposure cap
+    # This field is NOT present in the YAML anymore
+    guardrails = profile.get('guardrails', {})
+    assert 'per_trade_risk_pct' not in guardrails, \
+        "per_trade_risk_pct should be DISABLED (removed from YAML - fixed $1 model used instead)"
     
-    # Verify no bankroll tiering (removed as dead code)
-    assert 'bankroll_tier_small_usd' not in per_trade_risk, \
-        "Bankroll tiering should be removed (not implemented in code)"
+    # Verify fixed exposure cap is present
+    risk_policy = profile.get('risk_policy', {})
+    assert risk_policy.get('fixed_exposure_cap_usd') == 1.00, \
+        "fixed_exposure_cap_usd should be $1.00"
 
 
 def test_profile_dynamic_sizing_multipliers():
@@ -268,38 +271,37 @@ def test_profile_dynamic_sizing_multipliers():
 
 
 def test_profile_max_cycle_risk_pct_5_percent():
-    """Test that profile max_cycle_risk_pct is 5% (HIGH FIX #5)."""
+    """Test that profile max_cycle_risk_pct is DISABLED (fixed $1 exposure model)."""
     profile_path = Path("c:/Dev/MERID/config/profiles/kalshi_crypto_15m_v2.yaml")
     
     with open(profile_path, 'r', encoding='utf-8') as f:
         profile = yaml.safe_load(f)
     
-    max_cycle_risk = profile['max_cycle_risk_pct']
-    assert max_cycle_risk['value'] == 0.05, \
-        f"max_cycle_risk_pct should be 0.05 (5%), got {max_cycle_risk['value']}"
+    # 2026-07-15: Percentage-based max_cycle_risk_pct DISABLED in favor of fixed $1 exposure cap
+    # This field is set to 0.0 in YAML to satisfy profile validation
+    max_cycle_risk = profile.get('max_cycle_risk_pct')
+    assert max_cycle_risk == 0.0, \
+        f"max_cycle_risk_pct should be 0.0 (DISABLED), got {max_cycle_risk}"
 
 
 def test_profile_max_contracts_hierarchy():
-    """Test that profile has max_contracts hierarchy comments (HIGH FIX #8)."""
+    """Test that profile has max_contracts hierarchy (fixed $1 exposure model)."""
     profile_path = Path("c:/Dev/MERID/config/profiles/kalshi_crypto_15m_v2.yaml")
     
     with open(profile_path, 'r', encoding='utf-8') as f:
         profile = yaml.safe_load(f)
     
-    # Check dynamic_sizing has hierarchy comment
+    # Check dynamic_sizing max_contracts is 1 (fixed $1 exposure cap enforces 1 contract)
     dynamic_sizing = profile['dynamic_sizing']
-    assert dynamic_sizing['max_contracts'] == 3, \
-        "dynamic_sizing max_contracts should be 3 (global cap)"
+    assert dynamic_sizing['max_contracts'] == 1, \
+        "dynamic_sizing max_contracts should be 1 (fixed $1 exposure cap)"
     
-    # Check per-asset max_contracts are PRIMARY limits
+    # Check per-asset max_contracts are 1 (fixed $1 exposure cap enforces 1 contract per asset)
     assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
     for asset in assets:
         asset_config = profile['assets'][asset]
         max_contracts = asset_config['max_contracts']['value']
-        if asset == "DOGE":
-            assert max_contracts == 2, f"{asset} max_contracts should be 2"
-        else:
-            assert max_contracts == 3, f"{asset} max_contracts should be 3"
+        assert max_contracts == 1, f"{asset} max_contracts should be 1 (fixed $1 exposure cap)"
 
 
 def test_profile_no_tier_based_depth_thresholds():

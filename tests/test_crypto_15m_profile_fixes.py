@@ -6,7 +6,7 @@ Tests:
 2. Profile application via apply_profile_to_agent() pure function
 3. Removal of legacy to_agent_overrides() method from agent_grid_config.py
 4. Dynamic max_notional_usd computation from live bankroll
-5. CRITICAL FIX (2026-07-08): Profile adapter defaults match 3% risk limit from YAML
+5. CRITICAL FIX (2026-07-08): Profile adapter defaults DISABLED (fixed $1 exposure model)
 """
 import pytest
 import os

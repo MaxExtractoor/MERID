@@ -105,19 +105,19 @@ def test_price_band_allows_non_50c_prices():
 
 
 def test_risk_based_sizing_applied_before_depth_based_sizing():
-    """Risk-based sizing is applied BEFORE depth-based sizing to prevent depth-based sizing from increasing count beyond 3% limit.
+    """Risk-based sizing is applied BEFORE depth-based sizing to prevent depth-based sizing from increasing count beyond $1 fixed exposure cap.
     
     CRITICAL FIX (2026-07-08): This test ensures the order router applies risk-based sizing
     before depth-based sizing, preventing depth-based sizing from increasing count beyond
-    the 3% per-trade risk limit.
+    the $1 fixed exposure cap.
     
     Scenario:
     - Bankroll: $30.81
-    - 3% limit: $0.92
+    - $1 fixed exposure cap
     - Price: 62¢
     - Risk-based sizing: 1 contract ($0.62)
     - Depth-based sizing: 800 contracts (deep liquidity)
-    - Expected final count: 1 contract (capped by risk limit, not increased by depth)
+    - Expected final count: 1 contract (capped by $1 fixed exposure cap, not increased by depth)
     """
     from merid.event_venues.kalshi.order_router import OrderIntent, _apply_risk_based_order_sizing, _apply_depth_based_order_sizing
     from decimal import Decimal
@@ -149,7 +149,7 @@ def test_risk_based_sizing_applied_before_depth_based_sizing():
     assert final_count == 1, f"Final count should be capped to 1 by risk-based sizing, got {final_count}"
     
     # Verify the order flow: risk -> depth -> risk
-    # This ensures depth-based sizing cannot increase count beyond 3% limit
+    # This ensures depth-based sizing cannot increase count beyond $1 fixed exposure cap
     assert final_count <= risk_capped_count, "Final count should not exceed initial risk-capped count"
 
 
