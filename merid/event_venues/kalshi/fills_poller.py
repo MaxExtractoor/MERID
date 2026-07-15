@@ -396,10 +396,10 @@ class FillsPoller:
                     # CRITICAL FALLBACK: If REST returns 0 positions but we have fills suggesting positions,
                     # use fills ledger as fallback to ensure PositionMonitor can track positions for trailing stop
                     if len(positions) == 0:
-                        computed_positions = ledger.compute_net_positions()
+                        computed_positions = ledger.compute_net_positions(since_hours=1)  # Check for recent positions (1h)
                         if computed_positions:
                             logger.warning(
-                                f"[POSITION-FALLBACK] REST API returned 0 positions but fills ledger shows {len(computed_positions)} positions. "
+                                f"[POSITION-FALLBACK] REST API returned 0 positions but fills ledger shows {len(computed_positions)} recent positions (within 1h). "
                                 f"NOT clearing fills ledger - fills ledger is canonical source. REST API may be temporarily unavailable."
                             )
                             # DO NOT clear fills ledger - fills ledger is the canonical source
@@ -407,9 +407,18 @@ class FillsPoller:
                             # Only clear fills ledger if there's evidence of actual data corruption
                             # This prevents accidental data loss from transient API issues
                         else:
-                            # CRITICAL FIX (2026-07-13): Clear phantom open positions when REST returns 0
-                            # and fills ledger also shows no computed positions (meaning old closed trades)
-                            await ledger.clear_open_positions_on_empty_cache()
+                            # No recent positions (within 1h) - check if there are stale positions (>24h)
+                            stale_positions = ledger.compute_net_positions(since_hours=24)
+                            if stale_positions:
+                                logger.warning(
+                                    f"[POSITION-FALLBACK] REST API returned 0 positions, fills ledger has {len(stale_positions)} stale positions (>1h, within 24h). "
+                                    f"Clearing stale fills ledger entries as they are likely from previous session."
+                                )
+                                await ledger.clear_open_positions_on_empty_cache()
+                            else:
+                                # CRITICAL FIX (2026-07-13): Clear phantom open positions when REST returns 0
+                                # and fills ledger also shows no computed positions (meaning old closed trades)
+                                await ledger.clear_open_positions_on_empty_cache()
                             
                             # CRITICAL FIX (2026-07-13): Clear phantom slots from global slot allocator
                             # when REST returns 0 positions to fix the $0.66 vs $1.00 exposure discrepancy

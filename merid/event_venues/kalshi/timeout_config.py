@@ -52,7 +52,8 @@ WS_EVENT_PUBLISH_TIMEOUT_S: float = 1.0
 # =============================================================================
 
 # Default timeout for REST API calls
-REST_API_TIMEOUT_S: float = 15.0
+# Increased from 15s to 60s due to observed 43s network latency (2026-07-15)
+REST_API_TIMEOUT_S: float = 60.0
 
 # Timeout for orderbook snapshot requests
 ORDERBOOK_SNAPSHOT_TIMEOUT_S: float = 5.0

@@ -2236,7 +2236,8 @@ class KalshiRiskManager:
             self._state.asset_notional.clear()
             
             # Get computed net positions from fills_ledger (filters out manually closed positions)
-            computed_positions = ledger.compute_net_positions()
+            # Use 24-hour filter to exclude stale positions from previous sessions
+            computed_positions = ledger.compute_net_positions(since_hours=24)
             
             logger.debug(
                 "[CATEGORY-RESYNC-DEBUG] Total positions in fills_ledger: %d",

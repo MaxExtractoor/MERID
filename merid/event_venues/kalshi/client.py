@@ -812,8 +812,10 @@ class KalshiVenueClient(EventVenueClient):
             raise RuntimeError("RSA private key not loaded. Check credentials and private_key_path.")
 
         # Timestamp in milliseconds (Kalshi requires this)
-        # Add 5000ms buffer to prevent "header timestamp expired" errors
-        ts_ms = str(int(_time.time() * 1000) + 5000)
+        # Add 10000ms buffer to prevent "header timestamp expired" errors
+        # Based on Kalshi API research: timestamps too far in future are rejected
+        # 10s buffer handles network latency while avoiding "timestamp out of range" errors
+        ts_ms = str(int(_time.time() * 1000) + 10000)
         message = ts_ms + method.upper() + path
         signature = self._private_key.sign(
             message.encode(),
