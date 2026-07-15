@@ -5384,6 +5384,74 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 latency_ms=round((_time.monotonic() - t0) * 1000, 2),
             )
 
+        # CRITICAL FIX (2026-07-14): Allocate slot BEFORE order submission to prevent race condition
+        # Previous implementation allocated slot AFTER fill, allowing multiple orders to pass
+        # can_allocate() simultaneously and all fill before slots were allocated.
+        # This caused multiple contracts per asset to execute in the same 15-minute window.
+        _allocated_slot_id = None
+        if not _is_exit_order(intent):
+            try:
+                from merid.risk.global_slot_allocator import get_global_slot_allocator, AllocationRequest
+                slot_allocator = get_global_slot_allocator()
+                
+                # Extract asset from ticker
+                asset = None
+                ticker_upper = intent.ticker.upper()
+                if "BTC" in ticker_upper:
+                    asset = "BTC"
+                elif "ETH" in ticker_upper:
+                    asset = "ETH"
+                elif "SOL" in ticker_upper:
+                    asset = "SOL"
+                elif "XRP" in ticker_upper:
+                    asset = "XRP"
+                elif "DOGE" in ticker_upper:
+                    asset = "DOGE"
+                
+                # Create allocation request
+                allocation_request = AllocationRequest(
+                    agent_id=intent.agent_id or intent.source or "unknown",
+                    asset=asset or "UNKNOWN",
+                    ticker=intent.ticker,
+                    entry_price_cents=intent.price_cents,
+                    edge_pct=getattr(intent, 'edge_pct', 0.0),
+                    spread_cents=0,
+                    confidence=getattr(intent, 'confidence', 0.5),
+                    is_exit_order=False
+                )
+                
+                # Request slot allocation BEFORE submission
+                allocated, reason, _allocated_slot_id = slot_allocator.request_allocation(allocation_request)
+                
+                if not allocated:
+                    logger.error(
+                        "[SLOT-ALLOCATOR-PRE-SUBMIT] REJECTING: asset=%s ticker=%s price=%dc - %s",
+                        asset, intent.ticker, intent.price_cents, reason
+                    )
+                    return OrderResult(
+                        status="rejected",
+                        mode=mode,
+                        reason=f"slot_allocation_failed:{reason}",
+                        latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                    )
+                
+                logger.info(
+                    "[SLOT-ALLOCATOR-PRE-SUBMIT] Allocated slot before submission: asset=%s ticker=%s price=%dc slot_id=%s",
+                    asset, intent.ticker, intent.price_cents, _allocated_slot_id
+                )
+                
+                # Store slot_id for release if order fails
+                intent._allocated_slot_id = _allocated_slot_id
+            except Exception as slot_err:
+                logger.error("[SLOT-ALLOCATOR-PRE-SUBMIT] Slot allocation failed: %s", slot_err)
+                # Fail open: if slot allocation fails, reject order to prevent over-trading
+                return OrderResult(
+                    status="rejected",
+                    mode=mode,
+                    reason=f"slot_allocation_error:{str(slot_err)}",
+                    latency_ms=round((_time.monotonic() - t0) * 1000, 2),
+                )
+        
         # Normal execution: place real order
         # CRITICAL FIX: Record order placement for duplicate detection BEFORE submission
         # This prevents race condition where multiple identical orders can be submitted
@@ -5581,6 +5649,20 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             )
         
         if not placed_res.success or placed_res.data is None:
+            # CRITICAL FIX (2026-07-14): Release allocated slot on order rejection
+            # Since we now allocate slots BEFORE submission, we must release them on rejection
+            if _allocated_slot_id:
+                try:
+                    from merid.risk.global_slot_allocator import get_global_slot_allocator
+                    slot_allocator = get_global_slot_allocator()
+                    slot_allocator.release_slot(_allocated_slot_id)
+                    logger.info(
+                        "[SLOT-ALLOCATOR-RELEASE] Released slot on rejection: slot_id=%s ticker=%s reason=%s",
+                        _allocated_slot_id, intent.ticker, reason
+                    )
+                except Exception as release_err:
+                    logger.warning("[SLOT-ALLOCATOR-RELEASE] Failed to release slot_id=%s: %s", _allocated_slot_id, release_err)
+            
             # CRITICAL FIX (2026-07-13): Notify global_allocator of order rejection for pending order tracking
             # This removes the asset from pending orders when order is rejected
             try:
@@ -5885,60 +5967,11 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                     )
             except Exception as alloc_err:
                 logger.warning("[GLOBAL-ALLOCATOR-NOTIFY] Failed to notify global_allocator of fill: %s", alloc_err)
-
-        # CRITICAL FIX (2026-07-13): Allocate slot on fill (not release)
-        # Previous behavior: Slot was allocated pre-submission and released on fill
-        # New behavior: Slot is allocated only when order actually fills
-        # This ensures exposure is only counted for FILLED orders, not ACCEPTED-but-unfilled orders
-        if filled_count > 0 and not _is_exit_order(intent):
-            try:
-                from merid.risk.global_slot_allocator import get_global_slot_allocator, AllocationRequest
-                
-                slot_allocator = get_global_slot_allocator()
-                
-                # Extract asset from ticker for allocation request
-                asset = None
-                ticker_upper = intent.ticker.upper()
-                if "BTC" in ticker_upper:
-                    asset = "BTC"
-                elif "ETH" in ticker_upper:
-                    asset = "ETH"
-                elif "SOL" in ticker_upper:
-                    asset = "SOL"
-                elif "XRP" in ticker_upper:
-                    asset = "XRP"
-                elif "DOGE" in ticker_upper:
-                    asset = "DOGE"
-                
-                # Create allocation request
-                allocation_request = AllocationRequest(
-                    agent_id=_agent,
-                    asset=asset or "UNKNOWN",
-                    ticker=intent.ticker,
-                    entry_price_cents=fill_price_cents,  # Use actual fill price
-                    edge_pct=getattr(intent, 'edge_pct', 0.0),
-                    spread_cents=0,
-                    confidence=getattr(intent, 'confidence', 0.5),
-                    is_exit_order=False
-                )
-                
-                # Request slot allocation
-                allocated, reason, _allocated_slot_id = slot_allocator.request_allocation(allocation_request)
-                
-                if allocated:
-                    logger.info(
-                        "[order-router-SLOT-ALLOCATED-ON-FILL] asset=%s ticker=%s agent=%s fill_price=%dc slot_id=%s total_exposure=$%.2f",
-                        asset, intent.ticker, _agent, fill_price_cents, _allocated_slot_id, slot_allocator.get_total_exposure()
-                    )
-                    # Store slot_id for later release on position close
-                    intent._allocated_slot_id = _allocated_slot_id
-                else:
-                    logger.warning(
-                        "[order-router-SLOT-ALLOCATION-FAILED-ON-FILL] asset=%s ticker=%s fill_price=%dc - %s",
-                        asset, intent.ticker, fill_price_cents, reason
-                    )
-            except Exception as slot_err:
-                logger.error("[order-router] Slot allocation on fill failed: %s", slot_err)
+        
+        # CRITICAL FIX (2026-07-14): Slot allocation moved to BEFORE order submission
+        # Post-fill allocation removed to prevent race condition and double-allocation
+        # The slot is now allocated at line 5424 (before client.place_order_result)
+        # This ensures MAX_POSITIONS_PER_ASSET=1 is enforced before orders reach Kalshi
         
         # ALERT THRESHOLDS MONITORING: Track order fill and latency
         if filled_count > 0:
