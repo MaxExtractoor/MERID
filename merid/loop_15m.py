@@ -602,7 +602,16 @@ class Kalshi15mLoop:
         self._last_risk_multiplier = 1.0
         
         # CRITICAL: Track current 15-minute ET window to align cycle resets with Kalshi market windows
-        self._current_window_suffix = None  # Tracks current 15m window suffix (e.g., "26JUN111145-45")
+        # CRITICAL FIX (2026-07-15): Initialize to current window at startup to prevent phantom slot issues
+        # Starting with None causes incorrect first window change detection
+        from merid.event_venues.kalshi.kalshi_15m_time import get_kalshi_15m_window
+        try:
+            initial_window = get_kalshi_15m_window()
+            self._current_window_suffix = initial_window.suffix
+            logger.info("[15m-LOOP] Initialized _current_window_suffix=%s at startup", self._current_window_suffix)
+        except Exception as e:
+            logger.warning("[15m-LOOP] Failed to initialize _current_window_suffix: %s", e)
+            self._current_window_suffix = None  # Fallback to None if initialization fails
         self._executed_candidates_this_window = set()  # Track executed candidates in current window to prevent duplicates
         self._halted_due_to_drawdown = False
         
@@ -1527,7 +1536,7 @@ class Kalshi15mLoop:
                             self._swing_mode[asset] = {"enabled": False, "exited_side": None, "exit_time": None}
                         logger.info("[15m-LOOP] Reset swing mode for new window")
                         
-                        # CRITICAL FIX (2026-07-13): Clear phantom slots from global slot allocator on timeframe transition
+                        # CRITICAL FIX (2026-07-15): Clear phantom slots from global slot allocator on timeframe transition
                         # This prevents false "Insufficient exposure" rejections when old slots from previous timeframe persist
                         logger.info("[15m-LOOP] TIMEFRAME-RESET: Clearing phantom slots from global slot allocator")
                         try:
@@ -1549,7 +1558,7 @@ class Kalshi15mLoop:
                             slot_allocator.clear_slots_on_empty_positions(position_count=0)
                             logger.info("[15m-LOOP] TIMEFRAME-RESET: Cleared all slots for new timeframe")
                             
-                            # CRITICAL FIX (2026-07-13): Reset window exposure on timeframe transition
+                            # CRITICAL FIX (2026-07-15): Reset window exposure on timeframe transition
                             # New timeframe should start with fresh window exposure tracking
                             logger.info("[15m-LOOP] TIMEFRAME-RESET: Resetting window exposure tracking")
                             try:
@@ -1561,7 +1570,7 @@ class Kalshi15mLoop:
                         except Exception as e:
                             logger.warning("[15m-LOOP] TIMEFRAME-RESET: Failed to clear slots: %s", e, exc_info=True)
                         
-                        # CRITICAL FIX (2026-07-13): Clear position cache on timeframe transition ONLY if no actual positions
+                        # CRITICAL FIX (2026-07-15): Clear position cache on timeframe transition ONLY if no actual positions
                         # This prevents losing track of positions held across timeframe boundaries
                         # Position cache is only cleared if position_count=0 (no actual open positions)
                         if position_count == 0:
@@ -1576,7 +1585,7 @@ class Kalshi15mLoop:
                         else:
                             logger.info(f"[15m-LOOP] TIMEFRAME-RESET: Skipping position cache clear (position_count={position_count} > 0)")
                         
-                        # CRITICAL FIX (2026-07-13): Clear fills ledger open positions on timeframe transition ONLY if no actual positions
+                        # CRITICAL FIX (2026-07-15): Clear fills ledger open positions on timeframe transition ONLY if no actual positions
                         # This prevents losing track of positions held across timeframe boundaries
                         if position_count == 0:
                             logger.info("[15m-LOOP] TIMEFRAME-RESET: Clearing fills ledger open positions for new timeframe (position_count=0)")
@@ -3697,6 +3706,16 @@ class Kalshi15mLoop:
                     )
                     self._current_window_suffix = current_window.suffix
                     self._executed_candidates_this_window.clear()
+                    
+                    # Reset best-edge tracking for new window
+                    for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+                        self._best_edge_per_asset[asset] = None
+                    logger.info("[15m-LOOP] Reset best-edge tracking for new window")
+                    
+                    # Reset swing mode for new window (swing mode only valid within same 15m window)
+                    for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+                        self._swing_mode[asset] = {"enabled": False, "exited_side": None, "exit_time": None}
+                    logger.info("[15m-LOOP] Reset swing mode for new window")
                     
                     # CRITICAL FIX (2026-07-13): Clear phantom slots from global slot allocator on timeframe transition
                     # This prevents false "Insufficient exposure" rejections when old slots from previous timeframe persist
