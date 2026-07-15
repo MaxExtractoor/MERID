@@ -747,12 +747,10 @@ assets:
       value: 1  # 1 contract per order (slot-based exposure management)
       static: profile
       description: "Maximum contracts per order for BTC (1 contract per slot)"
-    # Edge thresholds based on 2026 moltbook research for 15m Kalshi crypto markets
-    # Tier 1 (core assets): Base 1.25%, terminal 1.75% (pragmatic for BTC liquidity)
-    min_edge_early: 0.0125  # 1.25% base edge (most liquid asset, lowest bar)
-    min_edge_mid: 0.0125  # 1.25% base edge (consistent across early/mid/late)
-    min_edge_late: 0.0125  # 1.25% base edge (consistent across early/mid/late)
-    min_edge_terminal: 0.0175  # 1.75% terminal edge (small bump in last minutes)
+    # DEPRECATED 2026-07-14: Per-asset min_edge_early/mid/late/terminal fields removed
+    # These conflicted with edge_bands (single source of truth) and were ignored
+    # All edge thresholds now come from edge_bands section (2.5% unified minimum)
+    # Reference: https://marketmath.io/blog/prediction-market-strategy
     # Distance-from-target filter
     max_distance_pct: 0.015  # 1.5% max distance for BTC (deep liquidity allows tighter bounds)
     # Liquidity and microstructure filters
@@ -774,12 +772,10 @@ assets:
       value: 1  # 1 contract per order (slot-based exposure management)
       static: profile
       description: "Maximum contracts per order for ETH (1 contract per slot)"
-    # Edge thresholds based on 2026 moltbook research for 15m Kalshi crypto markets
-    # Tier 1 (core assets): Base 1.5%, terminal 2.0% (ETH thinner than BTC)
-    min_edge_early: 0.015  # 1.5% base edge (slightly higher than BTC due to thinner liquidity)
-    min_edge_mid: 0.015  # 1.5% base edge (consistent across early/mid/late)
-    min_edge_late: 0.015  # 1.5% base edge (consistent across early/mid/late)
-    min_edge_terminal: 0.02  # 2.0% terminal edge (small bump in last minutes)
+    # DEPRECATED 2026-07-14: Per-asset min_edge_early/mid/late/terminal fields removed
+    # These conflicted with edge_bands (single source of truth) and were ignored
+    # All edge thresholds now come from edge_bands section (2.5% unified minimum)
+    # Reference: https://marketmath.io/blog/prediction-market-strategy
     # Distance-from-target filter
     max_distance_pct: 0.018  # 1.8% max distance for ETH (tightened from 2.0% - declining volatility)
     # Liquidity and microstructure filters
@@ -801,12 +797,10 @@ assets:
       value: 1  # 1 contract per order (slot-based exposure management)
       static: profile
       description: "Maximum contracts per order for SOL (1 contract per slot)"
-    # Edge thresholds based on 2026 moltbook research for 15m Kalshi crypto markets
-    # Tier 2 (alt assets): Base 2.0%, terminal 2.5% (SOL thinner than ETH)
-    min_edge_early: 0.02  # 2.0% base edge (higher due to thinner liquidity)
-    min_edge_mid: 0.02  # 2.0% base edge (consistent across early/mid/late)
-    min_edge_late: 0.02  # 2.0% base edge (consistent across early/mid/late)
-    min_edge_terminal: 0.025  # 2.5% terminal edge (small bump in last minutes)
+    # DEPRECATED 2026-07-14: Per-asset min_edge_early/mid/late/terminal fields removed
+    # These conflicted with edge_bands (single source of truth) and were ignored
+    # All edge thresholds now come from edge_bands section (2.5% unified minimum)
+    # Reference: https://marketmath.io/blog/prediction-market-strategy
     # Distance-from-target filter
     max_distance_pct: 0.025  # 2.5% max distance for SOL (appropriate for high volatility)
     # Liquidity and microstructure filters
@@ -828,12 +822,10 @@ assets:
       value: 1  # 1 contract per order (slot-based exposure management)
       static: profile
       description: "Maximum contracts per order for XRP (1 contract per slot)"
-    # Edge thresholds based on 2026 moltbook research for 15m Kalshi crypto markets
-    # Tier 2 (alt assets): Base 2.25%, terminal 3.0% (XRP event-driven, needs precision)
-    min_edge_early: 0.0225  # 2.25% base edge (higher due to event-driven nature)
-    min_edge_mid: 0.0225  # 2.25% base edge (consistent across early/mid/late)
-    min_edge_late: 0.0225  # 2.25% base edge (consistent across early/mid/late)
-    min_edge_terminal: 0.03  # 3.0% terminal edge (small bump in last minutes)
+    # DEPRECATED 2026-07-14: Per-asset min_edge_early/mid/late/terminal fields removed
+    # These conflicted with edge_bands (single source of truth) and were ignored
+    # All edge thresholds now come from edge_bands section (2.5% unified minimum)
+    # Reference: https://marketmath.io/blog/prediction-market-strategy
     # Distance-from-target filter
     max_distance_pct: 0.025  # 2.5% max distance for XRP (tightened from 3.0% - event-driven needs precision)
     # Liquidity and microstructure filters
@@ -855,12 +847,10 @@ assets:
       value: 1  # 1 contract per order (slot-based exposure management)
       static: profile
       description: "Maximum contracts per order for DOGE (1 contract per slot)"
-    # Edge thresholds based on 2026 moltbook research for 15m Kalshi crypto markets
-    # Tier 2 (alt assets): Base 2.75%, terminal 3.5% (DOGE most volatile, noisiest moves)
-    min_edge_early: 0.0275  # 2.75% base edge (highest due to most volatile/noisiest moves)
-    min_edge_mid: 0.0275  # 2.75% base edge (consistent across early/mid/late)
-    min_edge_late: 0.0275  # 2.75% base edge (consistent across early/mid/late)
-    min_edge_terminal: 0.035  # 3.5% terminal edge (small bump in last minutes)
+    # DEPRECATED 2026-07-14: Per-asset min_edge_early/mid/late/terminal fields removed
+    # These conflicted with edge_bands (single source of truth) and were ignored
+    # All edge thresholds now come from edge_bands section (2.5% unified minimum)
+    # Reference: https://marketmath.io/blog/prediction-market-strategy
     # Distance-from-target filter
     max_distance_pct: 0.025  # Tightened from 3.0% to 2.5% (sentiment-driven needs precision)
     # Liquidity and microstructure filters
@@ -881,14 +871,14 @@ assets:
 agent_defaults:
   # max_notional_pct DISABLED - using fixed $1 exposure cap instead
   max_orders_per_window: 24  # Max orders per trading window (2026-07-11: increased to 24 for 15m opportunity capture)
-  max_yes_position: 5  # INCREASED: Max YES contracts per side (up from 3)
-  max_no_position: 5  # INCREASED: Max NO contracts per side (up from 3)
+  max_yes_position: 1  # CRITICAL FIX (2026-07-14): Reduced from 5 to 1 to match max_single_order_contracts=1 and prevent position accumulation
+  max_no_position: 1  # CRITICAL FIX (2026-07-14): Reduced from 5 to 1 to match max_single_order_contracts=1 and prevent position accumulation
   max_concurrent_trades: 8  # INCREASED: Max 8 concurrent trades (was 5, for more opportunities)
   
   # Entry window (time before expiry to start trading)
   # Kalshi 15m markets only exist ~15 minutes before expiry
-  # Realistic trading window is 2-12 minutes (sweet spot: 5-10 minutes)
-  minutes_before_expiry: 12
+  # CRITICAL FIX: 2026-07-13 - Changed from 12 to 15 for full window trading
+  minutes_before_expiry: 15
   cutoff_minutes_before_expiry: 0  # Trade full 15m window (no cutoff)
 
 # ── Edge / Confidence Thresholds ────────────────────────────────────────────
@@ -907,10 +897,12 @@ confidence:
   min_confidence_threshold: 0.65  # REVERTED from 0.80 to 0.65 (minimum confidence to execute trade)
 
 # ── Tiered Edge Band Configuration ───────────────────────────────────────────
-# TIERED STRUCTURE: 0.5% watch, 0.5% small, ≥0.5% standard
-# 2026-07-07 OPTIMIZATION: Reduced thresholds based on trade scenario simulation results
-# Simulation showed 0.5% edge achieved 61.9 profitability score vs 52.2 at 3%
-# Lower edge increases trade frequency and win rate (60.5% at 0.5% vs 55.3% at 3%)
+# TIERED STRUCTURE: 2.5% watch, 2.5-5% small, ≥2.5% standard
+# 2026-07-14 UPDATE: Raised to 2.5% minimum based on industry research
+# Industry standard for Kalshi: 3% raw edge minimum (Market Math, Beatpoly)
+# Kalshi 7% winner fee turns <2% edge into breakeven/negative EV
+# Practical minimum: +2¢ to +3¢ per contract after fees
+# Reference: https://marketmath.io/blog/prediction-market-strategy
 # CRITICAL: Edge bands are the ACTUAL thresholds used (per-asset min_edge fields are ignored)
 # MIN_EDGE HIERARCHY (from highest to lowest priority):
 # 1. edge_bands.*.min_edge_pct - PRIMARY: Used for trade execution (watch/small/standard bands)
@@ -919,18 +911,23 @@ confidence:
 # 4. Per-asset min_edge_early/mid/late/terminal - IGNORED: Legacy fields, not used
 edge_bands:
   enabled: true  # Enable tiered edge band logic
+  # 2026-07-14: RAISED to 2.5% minimum based on industry research
+  # Industry standard for Kalshi: 3% raw edge minimum (Market Math, Beatpoly)
+  # Kalshi 7% winner fee turns <2% edge into breakeven/negative EV
+  # Practical minimum: +2¢ to +3¢ per contract after fees
+  # Reference: https://marketmath.io/blog/prediction-market-strategy
   watch_band:
-    min_edge_pct: 0.005  # 0.5% minimum edge for watch band (REDUCED from 0.8% based on simulation)
-    max_edge_pct: 0.005  # 0.5% maximum edge for watch band (unified with min for consistency)
+    min_edge_pct: 0.025  # 2.5% minimum edge for watch band (RAISED from 0.5% - industry standard)
+    max_edge_pct: 0.025  # 2.5% maximum edge for watch band (unified with min for consistency)
     action: "log_only"  # Log candidates but don't trade
     kelly_multiplier: 0.0  # No sizing in watch band
   small_band:
-    min_edge_pct: 0.005  # 0.5% minimum edge for small band (REDUCED from 1.5% based on simulation)
-    max_edge_pct: 0.01  # 1% maximum edge for small band (REDUCED from 3%)
+    min_edge_pct: 0.025  # 2.5% minimum edge for small band (RAISED from 0.5% - industry standard)
+    max_edge_pct: 0.05  # 5% maximum edge for small band (RAISED from 1% - better band separation)
     action: "trade_small"  # Trade with reduced size
     kelly_multiplier: 0.25  # 0.25x Kelly for small band
   standard_band:
-    min_edge_pct: 0.005  # 0.5% minimum edge for standard band (REDUCED from 3% based on simulation)
+    min_edge_pct: 0.025  # 2.5% minimum edge for standard band (RAISED from 0.5% - industry standard)
     max_edge_pct: 1.0  # No upper limit
     action: "trade_standard"  # Trade with standard size
     kelly_multiplier: 0.50  # 0.5x Kelly for standard band
@@ -1225,9 +1222,9 @@ risk_policy:
   group_notional_cap_pct: 0.05  # 5% of bankroll per group (DISABLED - using fixed $1 instead)
   group_notional_cap_min_usd: 5.00  # Minimum $5 cap (DISABLED - using fixed $1 instead)
   group_notional_cap_max_usd: 2000.0  # Maximum $2000 cap (DISABLED - using fixed $1 instead)
-  # 2026-07-08 UPDATE: Max entry price lowered to 50c for fixed $1 exposure model
-  # Sweet spot is now 10-50c (cheaper entries = easier loss recovery, more slots available)
-  max_entry_price_cents: 50  # Max entry price for new orders
+  # 2026-07-12 UPDATE: Aligned with 10-75c canonical range (guardrails.max_contract_price_cents
+  # and GlobalSlotAllocator.MAX_ENTRY_CENTS are the enforced limits; this key is informational)
+  max_entry_price_cents: 75  # Max entry price for new orders (canonical 10-75c band)
   max_fee_to_notional_pct: 15.0  # Max fee/notional ratio (circuit breaker)
   # 2026 STANDARD: Per-asset cluster stop-loss limits instead of aggregate
   # Each asset (BTC/ETH/SOL/XRP/DOGE) has calibrated limits based on volatility and liquidity
