@@ -1,7 +1,7 @@
 """
-Unit tests for settlement-anchored model win probability.
+Unit tests for settlement-anchored model probability.
 
-Tests verify that compute_model_win_prob() behaves sensibly under RTI-style settlement:
+Tests verify that compute_model_prob() behaves sensibly under RTI-style settlement:
 - 60-second averages
 - Gaussian approximation
 - Proper handling of variance and time decay
@@ -90,7 +90,7 @@ class TestSettlementAnchoredWinProb:
                 time_to_expiry_seconds=contract.time_to_expiry_seconds,
                 orderbook=None,
             )
-            prob_yes = unified_edge.compute_model_win_prob("BTC", spot_ref, contract_yes)
+            prob_yes = unified_edge.compute_model_prob("BTC", spot_ref, contract_yes)
             
             # Test NO side
             contract_no = ContractState(
@@ -102,7 +102,7 @@ class TestSettlementAnchoredWinProb:
                 time_to_expiry_seconds=contract.time_to_expiry_seconds,
                 orderbook=None,
             )
-            prob_no = unified_edge.compute_model_win_prob("BTC", spot_ref, contract_no)
+            prob_no = unified_edge.compute_model_prob("BTC", spot_ref, contract_no)
             
             # Both should be approximately 0.5 (within tolerance for time decay)
             assert 0.45 <= prob_yes <= 0.55, f"YES prob {prob_yes} not near 0.5"
@@ -131,11 +131,11 @@ class TestSettlementAnchoredWinProb:
             
             # Case A: spot = threshold + 1 * std
             spot_ref_a = SpotReference(asset="BTC", price_usd=50000.0 + std, timestamp=datetime.now(timezone.utc), source="test")
-            prob_a = unified_edge.compute_model_win_prob("BTC", spot_ref_a, contract)
+            prob_a = unified_edge.compute_model_prob("BTC", spot_ref_a, contract)
             
             # Case B: spot = threshold + 2 * std
             spot_ref_b = SpotReference(asset="BTC", price_usd=50000.0 + 2 * std, timestamp=datetime.now(timezone.utc), source="test")
-            prob_b = unified_edge.compute_model_win_prob("BTC", spot_ref_b, contract)
+            prob_b = unified_edge.compute_model_prob("BTC", spot_ref_b, contract)
             
             # Monotonicity: prob_b > prob_a
             assert prob_b > prob_a, f"prob_b {prob_b} should be > prob_a {prob_a}"
@@ -160,7 +160,7 @@ class TestSettlementAnchoredWinProb:
             
             # spot = threshold + 4 * std
             spot_ref = SpotReference(asset="BTC", price_usd=50000.0 + 4 * std, timestamp=datetime.now(timezone.utc), source="test")
-            prob = unified_edge.compute_model_win_prob("BTC", spot_ref, contract)
+            prob = unified_edge.compute_model_prob("BTC", spot_ref, contract)
             
             # Very close to 1 but < 1
             assert 0.95 <= prob < 1.0, f"prob {prob} should be close to 1"
@@ -181,7 +181,7 @@ class TestSettlementAnchoredWinProb:
             
             # spot = threshold - 4 * std
             spot_ref = SpotReference(asset="BTC", price_usd=50000.0 - 4 * std, timestamp=datetime.now(timezone.utc), source="test")
-            prob = unified_edge.compute_model_win_prob("BTC", spot_ref, contract)
+            prob = unified_edge.compute_model_prob("BTC", spot_ref, contract)
             
             # Very close to 0 but > 0
             assert 0.0 < prob <= 0.05, f"prob {prob} should be close to 0"
@@ -217,7 +217,7 @@ class TestSettlementAnchoredWinProb:
                     time_to_expiry_seconds=tte,
                     orderbook=None,
                 )
-                prob = unified_edge.compute_model_win_prob("BTC", spot_ref, contract_tte)
+                prob = unified_edge.compute_model_prob("BTC", spot_ref, contract_tte)
                 probs.append(prob)
                 
                 # Check finite
@@ -249,7 +249,7 @@ class TestSettlementAnchoredWinProb:
             
             for spot_price in spot_prices:
                 spot_ref = SpotReference(asset="BTC", price_usd=spot_price, timestamp=datetime.now(timezone.utc), source="test")
-                prob = unified_edge.compute_model_win_prob("BTC", spot_ref, contract)
+                prob = unified_edge.compute_model_prob("BTC", spot_ref, contract)
                 probs.append(prob)
             
             # Check monotonicity: probabilities should increase with spot price
@@ -272,12 +272,12 @@ class TestSettlementAnchoredWinProb:
             
             # YES side: spot > strike -> prob = 1.0
             spot_ref_above = SpotReference(asset="BTC", price_usd=50100.0, timestamp=datetime.now(timezone.utc), source="test")
-            prob_yes_above = unified_edge.compute_model_win_prob("BTC", spot_ref_above, contract)
+            prob_yes_above = unified_edge.compute_model_prob("BTC", spot_ref_above, contract)
             assert prob_yes_above == 1.0, f"YES above threshold should be 1.0, got {prob_yes_above}"
             
             # YES side: spot < strike -> prob = 0.0
             spot_ref_below = SpotReference(asset="BTC", price_usd=49900.0, timestamp=datetime.now(timezone.utc), source="test")
-            prob_yes_below = unified_edge.compute_model_win_prob("BTC", spot_ref_below, contract)
+            prob_yes_below = unified_edge.compute_model_prob("BTC", spot_ref_below, contract)
             assert prob_yes_below == 0.0, f"YES below threshold should be 0.0, got {prob_yes_below}"
             
             # NO side: spot < strike -> prob = 1.0
@@ -290,7 +290,7 @@ class TestSettlementAnchoredWinProb:
                 time_to_expiry_seconds=contract.time_to_expiry_seconds,
                 orderbook=None,
             )
-            prob_no_below = unified_edge.compute_model_win_prob("BTC", spot_ref_below, contract_no)
+            prob_no_below = unified_edge.compute_model_prob("BTC", spot_ref_below, contract_no)
             assert prob_no_below == 1.0, f"NO below threshold should be 1.0, got {prob_no_below}"
     
     def test_no_side_vs_yes_side_complementarity(self, unified_edge, spot_ref):
@@ -330,8 +330,8 @@ class TestSettlementAnchoredWinProb:
             
             for spot_price in spot_prices:
                 spot_ref = SpotReference(asset="BTC", price_usd=spot_price, timestamp=datetime.now(timezone.utc), source="test")
-                prob_yes = unified_edge.compute_model_win_prob("BTC", spot_ref, contract_yes)
-                prob_no = unified_edge.compute_model_win_prob("BTC", spot_ref, contract_no)
+                prob_yes = unified_edge.compute_model_prob("BTC", spot_ref, contract_yes)
+                prob_no = unified_edge.compute_model_prob("BTC", spot_ref, contract_no)
                 
                 # Should sum to approximately 1.0 (allowing for time decay effects)
                 assert 0.9 <= (prob_yes + prob_no) <= 1.1, \
@@ -357,7 +357,7 @@ class TestSettlementAnchoredWinProb:
                 mock_variance.return_value = variance
                 mock_variance.__name__ = 'estimate_settlement_variance'
                 
-                prob = unified_edge.compute_model_win_prob("BTC", spot_ref, contract)
+                prob = unified_edge.compute_model_prob("BTC", spot_ref, contract)
                 probs.append(prob)
         
         # Higher variance should pull probability toward 0.5

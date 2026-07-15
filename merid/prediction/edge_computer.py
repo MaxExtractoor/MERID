@@ -133,9 +133,9 @@ class LegacyEdgeBackend(EdgeComputer):
                 if best_bid > 0 and best_ask > 0:
                     price_cents = (best_bid + best_ask) // 2
                 else:
-                    price_cents = 25  # 2026-07-09: Fixed to 25c (midpoint of 10-75c canonical range)
+                    price_cents = 42  # 2026-07-14: Fixed to 42c (midpoint of 10-75c canonical range)
             else:
-                price_cents = 25  # 2026-07-09: Fixed to 25c (midpoint of 10-75c canonical range)
+                price_cents = 42  # 2026-07-14: Fixed to 42c (midpoint of 10-75c canonical range)
 
             # CRITICAL: Check minimum contract price floor (blocks deep OTM longshots)
             # This guardrail prevents trading ultra-low priced contracts that are statistically losing
@@ -365,7 +365,7 @@ class UnifiedEdgeBackend(EdgeComputer):
                 side=side,
                 price_cents=mid_price_cents,
                 implied_prob=edge_result.market_implied_prob,
-                model_prob=edge_result.model_win_prob,
+                model_prob=edge_result.model_prob,
                 favored_side=favored_side,
                 metadata={
                     "backend": "unified",

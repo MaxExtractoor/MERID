@@ -30,7 +30,7 @@ def simulate_doge_losing_trade():
         edge_risk_adjusted=0.03,
         edge_slippage_adjusted=0.02,
         edge_fee_adjusted=0.02,
-        model_win_prob=0.08,  # 8% win probability (matches $0.08 price)
+        model_prob=0.08,  # 8% win probability (matches $0.08 price)
         market_implied_prob=0.08,  # Market-implied prob from price
         spot_ref=SpotReference(
             asset="DOGE",
@@ -75,7 +75,7 @@ def simulate_xrp_losing_trade():
         edge_risk_adjusted=0.04,
         edge_slippage_adjusted=0.03,
         edge_fee_adjusted=0.03,
-        model_win_prob=0.05,  # 5% win probability (matches $0.05 price)
+        model_prob=0.05,  # 5% win probability (matches $0.05 price)
         market_implied_prob=0.05,  # Market-implied prob from price
         spot_ref=SpotReference(
             asset="XRP",

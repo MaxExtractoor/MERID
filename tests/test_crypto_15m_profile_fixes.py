@@ -337,16 +337,16 @@ class TestPriceFloorGuardrail:
             source = inspect.getsource(LeanAgent15m._generate_signal)
 
             # Verify that the minimum entry price is 10c (canonical price_range.min_price_cents)
-            assert "10 <= clamped_price_cents <= 50" in source or "min_price_cents = 10" in source, \
+            assert "10 <= clamped_price_cents <= 75" in source or "min_price_cents = 10" in source, \
                 "agent_grid_15m.py should use 10c minimum entry price (canonical price_range)"
             
-            # Verify that the maximum entry price is 50c (canonical price_range.max_price_cents)
-            assert "10 <= clamped_price_cents <= 50" in source or "max_price_cents = 50" in source, \
-                "agent_grid_15m.py should use 50c maximum entry price (canonical price_range)"
+            # Verify that the maximum entry price is 75c (canonical price_range.max_price_cents, expanded 2026-07-12)
+            assert "10 <= clamped_price_cents <= 75" in source or "max_price_cents = 75" in source, \
+                "agent_grid_15m.py should use 75c maximum entry price (canonical price_range, expanded for current market conditions)"
             
-            # Verify that the comment mentions 10-50c canonical range
-            assert "10-50c" in source or "10c" in source or "50c" in source, \
-                "agent_grid_15m.py should document the 10-50c canonical range in comments"
+            # Verify that the comment mentions 10-75c canonical range
+            assert "10-75c" in source or "10c" in source or "75c" in source, \
+                "agent_grid_15m.py should document the 10-75c canonical range in comments"
         except Exception as e:
             pytest.skip(f"Agent grid price clamping check skipped: {e}")
 
@@ -381,20 +381,24 @@ class TestEntryMatrixChanges:
             source = inspect.getsource(LeanAgent15m._generate_signal)
 
             # Verify that time window filter is implemented
-            assert "TIME-WINDOW-FILTER" in source, \
+            assert "TIME-WINDOW-FILTER" in source or "TRADING-WINDOW" in source, \
                 "agent_grid_15m.py should implement time window filter"
-            
-            # Verify that first minute is skipped
-            assert "minutes_to_expiry >= 14.0" in source, \
-                "agent_grid_15m.py should skip first minute (≥14 minutes to expiry)"
-            
-            # Verify that last 30 seconds are skipped (updated from 2 minutes to 0.5)
-            assert "minutes_to_expiry <= 0.5" in source, \
-                "agent_grid_15m.py should skip last 30 seconds (≤0.5 minutes to expiry)"
-            
-            # Verify that late entries have edge multiplier
-            assert "time_edge_multiplier = 1.5" in source, \
-                "agent_grid_15m.py should apply 1.5x edge multiplier for late entries (0.5-4 minutes)"
+
+            # CRITICAL FIX: 2026-07-13 - Verify profile-driven config instead of hardcoded checks
+            # The old hardcoded "minutes_to_expiry >= 14.0" and "minutes_to_expiry <= 0.5" were removed
+            # in favor of profile YAML configuration (guardrails_min_entry_mins, guardrails_max_entry_mins, cutoff_minutes_before_expiry)
+            assert "guardrails_min_entry_mins" in source, \
+                "agent_grid_15m.py should read min_entry_mins from profile YAML"
+            assert "guardrails_max_entry_mins" in source, \
+                "agent_grid_15m.py should read max_entry_mins from profile YAML"
+            assert "agent_cutoff_minutes_before_expiry" in source or "cutoff_minutes_before_expiry" in source, \
+                "agent_grid_15m.py should read cutoff_minutes_before_expiry from profile YAML"
+
+            # Verify that old hardcoded checks are NOT present
+            assert "minutes_to_expiry >= 14.0" not in source, \
+                "agent_grid_15m.py should NOT have hardcoded >=14.0 check (use profile config instead)"
+            assert "minutes_to_expiry <= 0.5" not in source, \
+                "agent_grid_15m.py should NOT have hardcoded <=0.5 check (use profile config instead)"
         except Exception as e:
             pytest.skip(f"Time window filter check skipped: {e}")
     
@@ -654,8 +658,8 @@ class TestStrategyPolicyFixes:
             adapter = Crypto15mProfileAdapter()
             profile = adapter.profile
 
-            assert profile.strategy_policy_min_confidence == 0.50, \
-                f"Expected strategy_policy_min_confidence=0.50, got {profile.strategy_policy_min_confidence}"
+            assert profile.strategy_policy_min_confidence == 0.65, \
+                f"Expected strategy_policy_min_confidence=0.65 (profile min_confidence_threshold), got {profile.strategy_policy_min_confidence}"
         except Exception as e:
             pytest.skip(f"Strategy policy min_confidence check skipped: {e}")
 
@@ -717,7 +721,7 @@ class TestSpreadEdgeMultiplierFix:
                 edge_risk_adjusted=0.03,
                 edge_slippage_adjusted=0.02,
                 edge_fee_adjusted=0.02,
-                model_win_prob=0.15,
+                model_prob=0.15,
                 market_implied_prob=0.15,
                 spot_ref=SpotReference(
                     asset="DOGE",
@@ -781,7 +785,7 @@ class TestSpreadEdgeMultiplierFix:
                 edge_risk_adjusted=0.03,
                 edge_slippage_adjusted=0.02,
                 edge_fee_adjusted=0.02,
-                model_win_prob=0.25,
+                model_prob=0.25,
                 market_implied_prob=0.25,
                 spot_ref=SpotReference(
                     asset="DOGE",
@@ -1039,7 +1043,7 @@ class TestProfileApplicationRefactoring:
         # Create a mock profile matching the actual apply_profile_to_agent implementation
         class MockProfile:
             capital_usd = 10000.0
-            per_trade_risk_pct = 0.02  # 2% default used by apply_profile_to_agent
+            per_trade_risk_pct = 0.02  # 2% default (now DISABLED in favor of $1 cap)
         
         # Apply profile with live bankroll
         live_bankroll = 5000.0
@@ -1049,10 +1053,9 @@ class TestProfileApplicationRefactoring:
         assert result is not base_config, "apply_profile_to_agent should return a new object"
         assert result.name == "BTC_15M"
         
-        # Verify dynamic computation from live bankroll using per_trade_risk_pct
-        expected_notional = live_bankroll * MockProfile.per_trade_risk_pct
-        assert float(result.risk_limits.max_notional_usd) == expected_notional, \
-            f"max_notional_usd should be computed from live bankroll: expected {expected_notional}, got {result.risk_limits.max_notional_usd}"
+        # Verify fixed $1 exposure cap (not percentage-based)
+        assert float(result.risk_limits.max_notional_usd) == 1.00, \
+            f"max_notional_usd should be fixed $1.00, got {result.risk_limits.max_notional_usd}"
     
     def test_legacy_to_agent_overrides_removed_from_agent_grid_config(self):
         """Test that legacy to_agent_overrides method is not called in agent_grid_config.py."""
@@ -1091,21 +1094,21 @@ class TestProfileApplicationRefactoring:
             "agent_grid_config.py should not call apply_profile_to_agent (only defined and imported)"
     
     def test_dynamic_max_notional_usd_computation(self):
-        """Test that max_notional_usd is computed dynamically from live bankroll."""
+        """Test that max_notional_usd uses fixed $1 exposure cap (not percentage-based)."""
         from merid.prediction.agent_grid_config import apply_profile_to_agent
         from merid.prediction.agent_grid_config import AgentConfig, AgentRiskLimits, EntryWindowConfig
         from decimal import Decimal
         
-        # Test with different bankroll values using per_trade_risk_pct (2% default)
+        # Test with different bankroll values - all should use fixed $1 cap
         test_cases = [
-            (1000.0, 20.0),  # Low bankroll: 1000 * 0.02 = 20
-            (5000.0, 100.0),  # Medium bankroll: 5000 * 0.02 = 100
-            (10000.0, 200.0),  # High bankroll: 10000 * 0.02 = 200
+            (1000.0, 1.00),  # Low bankroll: fixed $1 cap
+            (5000.0, 1.00),  # Medium bankroll: fixed $1 cap
+            (10000.0, 1.00),  # High bankroll: fixed $1 cap
         ]
         
         class MockProfile:
             capital_usd = 10000.0
-            per_trade_risk_pct = 0.02  # 2% default used by apply_profile_to_agent
+            per_trade_risk_pct = 0.02  # 2% default (now DISABLED in favor of $1 cap)
         
         for live_bankroll, expected in test_cases:
             base_config = AgentConfig(
@@ -1128,10 +1131,9 @@ class TestProfileApplicationRefactoring:
             
             result = apply_profile_to_agent(base_config, MockProfile(), live_bankroll)
             
-            # Verify computation matches expected using per_trade_risk_pct
-            computed = live_bankroll * MockProfile.per_trade_risk_pct
-            assert float(result.risk_limits.max_notional_usd) == computed, \
-                f"Bankroll ${live_bankroll}: expected ${computed}, got ${result.risk_limits.max_notional_usd}"
+            # Verify fixed $1 exposure cap (not percentage-based)
+            assert float(result.risk_limits.max_notional_usd) == expected, \
+                f"Bankroll ${live_bankroll}: expected ${expected}, got ${result.risk_limits.max_notional_usd}"
     
     def test_profile_application_in_15m_agent_grid(self):
         """Test that 15m agent grid uses apply_profile_to_agent."""
@@ -1142,16 +1144,23 @@ class TestProfileApplicationRefactoring:
         pass
 
 def test_profile_adapter_defaults_match_3_percent_risk_limit():
-    """CRITICAL FIX (2026-07-08): Profile adapter defaults match 3% risk limit from YAML.
+    """CRITICAL FIX (2026-07-08): Profile adapter uses fixed $1 exposure cap (not percentage-based).
     
-    This test ensures that if profile YAML values are missing, the fallback defaults
-    in crypto_15m_profile.py still enforce the 3% risk limit (not 5% or 2%).
+    This test ensures that the profile uses the fixed $1 exposure cap model
+    instead of percentage-based risk limits, per the $1 global allocation rule.
     
-    Previous bugs:
-    - max_single_order_pct default was 0.05 (5%) instead of 0.03 (3%)
-    - bankroll_cap_pct default was 0.02 (2%) instead of 0.03 (3%)
+    Previous architecture (DEPRECATED):
+    - max_single_order_pct: 3% of bankroll
+    - bankroll_cap_pct: 3% of bankroll
     
-    These could allow orders to exceed the 3% risk limit if YAML values were missing.
+    Current architecture (2026-07-14):
+    - Fixed $1 exposure cap via MERID_FIXED_EXPOSURE_CAP_USD
+    - Sequential trading to prevent position accumulation
+    - Slot-based position management (sum of contract prices ≤ $1)
+    
+    The YAML comments explicitly state:
+    "max_single_order_pct DISABLED - using fixed $1 exposure cap instead"
+    "bankroll_cap_pct DISABLED - using fixed $1 exposure cap instead"
     """
     from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
     import yaml
@@ -1161,42 +1170,16 @@ def test_profile_adapter_defaults_match_3_percent_risk_limit():
     with open(profile_path, encoding='utf-8') as f:
         profile_yaml = yaml.safe_load(f)
     
-    # Verify YAML has 3% values
+    # Verify venue section exists but does NOT have percentage-based caps
     venue_section = profile_yaml.get('venue', {})
-    assert venue_section.get('max_single_order_pct', {}).get('value') == 0.03, \
-        "YAML should have max_single_order_pct = 0.03 (3%)"
-    assert venue_section.get('bankroll_cap_pct', {}).get('value') == 0.03, \
-        "YAML should have bankroll_cap_pct = 0.03 (3%)"
     
-    # Test that adapter defaults match YAML when values are missing
-    # Simulate missing venue section
-    incomplete_yaml = {
-        'profile_name': 'kalshi_crypto_15m_v2',
-        'capital_usd': 10000.0,
-        'venue': {},  # Empty venue section - should use defaults
-        'agent_defaults': {}
-    }
+    # These fields should NOT exist (disabled in favor of $1 cap)
+    assert 'max_single_order_pct' not in venue_section or venue_section.get('max_single_order_pct') is None, \
+        "max_single_order_pct should be disabled (using fixed $1 cap instead)"
+    assert 'bankroll_cap_pct' not in venue_section or venue_section.get('bankroll_cap_pct') is None, \
+        "bankroll_cap_pct should be disabled (using fixed $1 cap instead)"
     
-    # The adapter should use 0.03 defaults, not 0.05 or 0.02
-    # This is verified by checking the code in crypto_15m_profile.py
-    # Line 713: venue.get('max_single_order_pct', 0.03)  # FIXED: Default 0.03
-    # Line 725: venue.get('bankroll_cap_pct', 0.03)  # FIXED: Default 0.03
-    
-    # We can't easily test the adapter directly without a full environment,
-    # but we can verify the defaults by checking the source code
-    import inspect
-    from merid.risk.profiles import crypto_15m_profile
-    
-    source = inspect.getsource(crypto_15m_profile)
-    
-    # Verify 0.03 defaults are in the source
-    assert "venue.get('max_single_order_pct', 0.03)" in source, \
-        "Profile adapter should use 0.03 default for max_single_order_pct"
-    assert "venue.get('bankroll_cap_pct', 0.03)" in source, \
-        "Profile adapter should use 0.03 default for bankroll_cap_pct"
-    
-    # Verify old buggy defaults are NOT in the source
-    assert "venue.get('max_single_order_pct', 0.05)" not in source, \
-        "Profile adapter should NOT use 0.05 default for max_single_order_pct (buggy)"
-    assert "venue.get('bankroll_cap_pct', 0.02)" not in source, \
-        "Profile adapter should NOT use 0.02 default for bankroll_cap_pct (buggy)"
+    # Verify fixed exposure cap is configured
+    risk_policy = profile_yaml.get('risk_policy', {})
+    assert risk_policy.get('fixed_exposure_cap_usd') == 1.00, \
+        "Fixed exposure cap should be $1.00"

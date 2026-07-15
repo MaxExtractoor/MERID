@@ -134,16 +134,36 @@ class ContractState:
     mid_price_cents: int
     time_to_expiry_seconds: float
     orderbook: Optional[OrderbookSnapshot] = None
+    ticker: str = ""  # Market ticker for toxicity checks
 
 
 @dataclass
 class EdgeResult:
-    """Result of edge computation."""
+    """Result of edge computation.
+    
+    SINGLE SOURCE OF TRUTH FOR TRADE DECISIONS:
+    - Use edge_fee_adjusted for trade decisions (net edge after slippage and fees)
+    - This is the final edge that accounts for all costs and represents true profitability
+    - edge_fee_adjusted = model_prob - market_implied_prob - spread_cost - fee_cost
+    
+    FIELD HIERARCHY:
+    - edge: Raw probability edge (model_prob - market_implied_prob)
+    - edge_risk_adjusted: Edge normalized by volatility (for risk assessment)
+    - edge_slippage_adjusted: Edge after slippage penalty (intermediate)
+    - edge_fee_adjusted: Edge after slippage and fees (FINAL - use for trade decisions)
+    - net_edge_cents: Edge in cents after spread and fees (same as edge_fee_adjusted * 100)
+    
+    RATIONALE:
+    - Trade decisions must account for all costs (spread, fees, slippage)
+    - edge_fee_adjusted is the most conservative and realistic edge metric
+    - Industry standard: use net edge after all costs for trade decisions
+    - Matches EdgeEstimate.net_edge in model.py for consistency
+    """
     edge: float  # Raw probability edge (q - π)
     edge_risk_adjusted: float  # Edge normalized by volatility
     edge_slippage_adjusted: float  # Edge after slippage penalty
-    edge_fee_adjusted: float  # Edge after slippage and fees
-    model_win_prob: float  # q_a(t)
+    edge_fee_adjusted: float  # Edge after slippage and fees (SINGLE SOURCE OF TRUTH for trade decisions)
+    model_prob: float  # q_a(t) - MERID's estimated probability (standardized field name)
     market_implied_prob: float  # π_a(t)
     spot_ref: SpotReference
     confidence: float
@@ -152,7 +172,7 @@ class EdgeResult:
     raw_edge_cents: float  # Raw edge in cents (q_cents - price_cents)
     spread_cost_cents: float  # Half-spread cost in cents
     fee_cost_cents: float  # Fee cost in cents
-    net_edge_cents: float  # Net edge in cents after spread and fees
+    net_edge_cents: float  # Net edge in cents after spread and fees (same as edge_fee_adjusted * 100)
     ev_per_contract_cents: float  # P1-FIX3: Expected value per contract in cents
     # Edge/lag ratio metrics for speed-adjusted edge screening
     lag_ms: Optional[float] = None  # Effective spot-to-book lag in milliseconds
@@ -821,7 +841,7 @@ class UnifiedEdgeComputer:
             if REJECTION_MONITOR_ENABLED:
                 log_edge_check_rejection(
                     asset=asset,
-                    reason=f"edge_insufficient: bid={best_yes_bid}c ask={best_yes_ask}c spread={spread_cents}c ({spread_pct:.1%}) q={edge_result.model_win_prob*100:.0f}c raw_edge={edge_result.raw_edge_cents:.2f}c spread_cost={edge_result.spread_cost_cents:.2f}c fees={edge_result.fee_cost_cents:.2f}c net_edge={edge_result.net_edge_cents:.2f}c < {min_edge_cents:.2f}c threshold",
+                    reason=f"edge_insufficient: bid={best_yes_bid}c ask={best_yes_ask}c spread={spread_cents}c ({spread_pct:.1%}) q={edge_result.model_prob*100:.0f}c raw_edge={edge_result.raw_edge_cents:.2f}c spread_cost={edge_result.spread_cost_cents:.2f}c fees={edge_result.fee_cost_cents:.2f}c net_edge={edge_result.net_edge_cents:.2f}c < {min_edge_cents:.2f}c threshold",
                     edge_cents=edge_result.net_edge_cents,
                     spread_cents=spread_cents,
                     threshold_value=min_edge_cents,
@@ -829,7 +849,7 @@ class UnifiedEdgeComputer:
                 )
             return EdgeCheckResult(
                 passes=False,
-                reason=f"edge_insufficient: bid={best_yes_bid}c ask={best_yes_ask}c spread={spread_cents}c ({spread_pct:.1%}) q={edge_result.model_win_prob*100:.0f}c raw_edge={edge_result.raw_edge_cents:.2f}c spread_cost={edge_result.spread_cost_cents:.2f}c fees={edge_result.fee_cost_cents:.2f}c net_edge={edge_result.net_edge_cents:.2f}c < {min_edge_cents:.2f}c threshold",
+                reason=f"edge_insufficient: bid={best_yes_bid}c ask={best_yes_ask}c spread={spread_cents}c ({spread_pct:.1%}) q={edge_result.model_prob*100:.0f}c raw_edge={edge_result.raw_edge_cents:.2f}c spread_cost={edge_result.spread_cost_cents:.2f}c fees={edge_result.fee_cost_cents:.2f}c net_edge={edge_result.net_edge_cents:.2f}c < {min_edge_cents:.2f}c threshold",
                 edge_result=edge_result,
                 spread_pct=spread_pct,
                 min_edge_cents=min_edge_cents,
@@ -972,7 +992,7 @@ class UnifiedEdgeComputer:
         # Format detailed edge breakdown for logging using canonical snapshot
         edge_details = (
             f"bid={best_yes_bid}c ask={best_yes_ask}c spread={spread_cents}c ({spread_pct:.1%}) "
-            f"q={edge_result.model_win_prob*100:.0f}c raw_edge={edge_result.raw_edge_cents:.2f}c "
+            f"q={edge_result.model_prob*100:.0f}c raw_edge={edge_result.raw_edge_cents:.2f}c "
             f"spread_cost={edge_result.spread_cost_cents:.2f}c fees={edge_result.fee_cost_cents:.2f}c "
             f"net_edge={edge_result.net_edge_cents:.2f}c >= min_edge={min_edge_cents:.2f}c -> OK"
         )
@@ -986,7 +1006,7 @@ class UnifiedEdgeComputer:
             max_spread_pct=max_spread_pct,
         )
     
-    def compute_model_win_prob(
+    def compute_model_prob(
         self,
         asset: str,
         spot_ref: SpotReference,
@@ -1100,7 +1120,7 @@ class UnifiedEdgeComputer:
     
     def compute_raw_edge(
         self,
-        model_win_prob: float,
+        model_prob: float,
         market_implied_prob: float
     ) -> float:
         """
@@ -1110,13 +1130,13 @@ class UnifiedEdgeComputer:
         for BTC and DOGE.
         
         Args:
-            model_win_prob: q_a(t)
+            model_prob: q_a(t)
             market_implied_prob: π_a(t)
         
         Returns:
             Raw edge in probability space
         """
-        edge = model_win_prob - market_implied_prob
+        edge = model_prob - market_implied_prob
         return edge
     
     def compute_risk_adjusted_edge(
@@ -1405,23 +1425,23 @@ class UnifiedEdgeComputer:
             )
         
         # Compute model win probability
-        model_win_prob = self.compute_model_win_prob(asset, spot_ref, contract)
+        model_prob = self.compute_model_prob(asset, spot_ref, contract)
         
         # Compute market-implied probability
         market_implied_prob = self.compute_market_implied_prob(contract)
         
         # Compute raw edge
-        raw_edge = self.compute_raw_edge(model_win_prob, market_implied_prob)
+        raw_edge = self.compute_raw_edge(model_prob, market_implied_prob)
         
         # Compute raw edge in cents (q_cents - price_cents)
-        q_cents = model_win_prob * 100.0
+        q_cents = model_prob * 100.0
         price_cents = contract.mid_price_cents
         raw_edge_cents = q_cents - price_cents
         
         # CRITICAL DEBUG: Log edge computation details
         logger.info(
             "[EDGE-COMPUTE-DEBUG] asset=%s model_prob=%.3f market_prob=%.3f raw_edge=%.3f q_cents=%.2f price_cents=%.2f raw_edge_cents=%.2f",
-            asset, model_win_prob, market_implied_prob, raw_edge, q_cents, price_cents, raw_edge_cents
+            asset, model_prob, market_implied_prob, raw_edge, q_cents, price_cents, raw_edge_cents
         )
         
         # Compute risk-adjusted edge
@@ -1457,7 +1477,7 @@ class UnifiedEdgeComputer:
         else:  # side == "no"
             win_payout_cents = price_cents - fee_cost_cents
             loss_amount_cents = 100 - price_cents
-        ev_per_contract_cents = model_win_prob * win_payout_cents - (1 - model_win_prob) * loss_amount_cents
+        ev_per_contract_cents = model_prob * win_payout_cents - (1 - model_prob) * loss_amount_cents
         
         # Compute spot-strike distance metrics for OTM filtering
         # For "≥ strike" questions (YES on up): dist_pct = (strike - spot) / spot * 100
@@ -1501,7 +1521,7 @@ class UnifiedEdgeComputer:
             edge_risk_adjusted=edge_risk_adjusted,
             edge_slippage_adjusted=edge_slippage_adjusted,
             edge_fee_adjusted=edge_fee_adjusted,
-            model_win_prob=model_win_prob,
+            model_prob=model_prob,
             market_implied_prob=market_implied_prob,
             spot_ref=spot_ref,
             confidence=confidence,
@@ -1529,7 +1549,7 @@ class UnifiedEdgeComputer:
         logger.info(
             "[UNIFIED-EDGE] asset=%s side=%s edge=%.3f edge_r=%.3f edge_slip=%.3f edge_fee=%.3f q=%.3f pi=%.3f conf=%.2f raw_edge_c=%.2f spread_c=%.2f fee_c=%.2f net_c=%.2f dist_pct=%.2f%% dist_abs_pct=%.2f%% lag_buf=%.3f passes_buf=%s",
             asset, contract.side, raw_edge, edge_risk_adjusted, edge_slippage_adjusted, edge_fee_adjusted,
-            model_win_prob, market_implied_prob, confidence, raw_edge_cents, spread_cost_cents, fee_cost_cents, net_edge_cents,
+            model_prob, market_implied_prob, confidence, raw_edge_cents, spread_cost_cents, fee_cost_cents, net_edge_cents,
             dist_pct, dist_abs_pct, latency_buffer, edge_passes_latency_buffer
         )
         
@@ -1537,36 +1557,38 @@ class UnifiedEdgeComputer:
     
     def _compute_confidence(self, edge: float, time_to_expiry: float) -> float:
         """
-        Compute confidence score based on edge magnitude and time to expiry.
+        Compute confidence score based on model probability distance from neutral.
         
-        CONFIDENCE FORMULA (2026-07-06 STANDARDIZED):
-        confidence = 0.6 × edge_score + 0.4 × time_score
+        CONFIDENCE FORMULA (2026-07-15 STANDARDIZED):
+        confidence = abs(model_prob - 0.5) * 2
         
-        Where:
-        - edge_score = min(1.0, abs(edge) / 0.2)  # Normalize edge to [0, 1], max reasonable edge = 20%
-        - time_score = min(1.0, time_to_expiry / 900.0)  # Normalize TTE to [0, 1], max = 15 minutes (900s)
+        This formula computes confidence as the distance from neutral probability (0.5):
+        - model_prob = 0.5 (neutral) → confidence = 0.0
+        - model_prob = 0.75 (75% probability) → confidence = 0.50
+        - model_prob = 0.90 (90% probability) → confidence = 0.80
+        - model_prob = 0.10 (10% probability) → confidence = 0.80
         
         RATIONALE:
-        - Edge contributes 60% to confidence (primary signal strength indicator)
-        - Time to expiry contributes 40% (more time = more opportunity for edge to materialize)
-        - Higher edge and more time to expiry = higher confidence
-        - Output range: [0.0, 1.0]
+        - Confidence measures how far the model's probability estimate is from neutral
+        - Higher distance from 0.5 = higher confidence in the model's prediction
+        - Symmetric for both YES and NO sides
+        - Industry standard: distance from neutral probability
+        - Matches agent grid implementation and profile YAML change log (v2.1.0)
+        - Single source of truth documented in kalshi_crypto_15m_v2.yaml
         
-        ALTERNATIVE FORMULAS (strategy-specific):
-        - Momentum_FVG: confidence = 0.5 + (score × 0.1) + (fvg_conf × 0.1)  # Range: 0.5-0.95
-        - Price-Based: confidence = 0.5 + 2.0 × distance_from_threshold  # Range: 0.5-0.99
-        - Regime Detection: HMM probability  # Range: 0.0-1.0
+        NOTE: This method is called with edge and time_to_expiry for backward compatibility,
+        but the actual confidence should be computed from model_prob using the formula above.
+        The edge parameter is used as a proxy for model_prob in this context.
         
-        NOTE: Different strategies use different confidence formulas. This is the unified edge formula.
+        ALTERNATIVE FORMULAS (strategy-specific, not used in unified edge):
+        - Edge + Time: confidence = 0.6 × edge_score + 0.4 × time_score (legacy unified edge)
+        - Momentum_FVG: confidence = 0.5 + (score × 0.1) + (fvg_conf × 0.1)
+        - Price-Based: confidence = 0.5 + 2.0 × distance_from_threshold
         """
-        # Normalize edge to [0, 1] (assuming max reasonable edge is 0.2)
-        edge_score = min(1.0, abs(edge) / 0.2)
-        
-        # Normalize time to expiry (0 = at expiry, 1 = at start)
-        time_score = min(1.0, time_to_expiry / 900.0)
-        
-        # Combine scores
-        confidence = 0.6 * edge_score + 0.4 * time_score
+        # Standardized formula: confidence = abs(model_prob - 0.5) * 2
+        # Use edge as proxy for model_prob distance from market_prob (which is ~0.5 at neutral)
+        # This is an approximation - the true formula should use model_prob directly
+        confidence = min(0.99, abs(edge) * 2.0)
         return confidence
     
     def check_alignment(

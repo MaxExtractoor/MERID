@@ -130,8 +130,8 @@ def apply_profile_to_agent(
     
     # 8. Log for debugging
     logger.info(
-        "[PROFILE-ADAPTER] Applied profile to agent %s: bankroll=%.2f risk_pct=%.2f%% max_notional=%.2f signal_mode=%s",
-        base_config.name, effective_capital, risk_pct * 100, max_notional_usd,
+        "[PROFILE-ADAPTER] Applied profile to agent %s: bankroll=%.2f max_notional=%.2f signal_mode=%s",
+        base_config.name, effective_capital, max_notional_usd,
         updated_strategy_overrides.get('signal_mode', 'not_set')
     )
     

@@ -520,7 +520,7 @@ class TestEdgeComputerWindowStrikeUsage:
         
         # Mock dependencies
         backend._computer = Mock()
-        backend._computer.compute_edge = Mock(return_value=Mock(edge=0.05, confidence=0.7, market_implied_prob=0.5, model_win_prob=0.55))
+        backend._computer.compute_edge = Mock(return_value=Mock(edge=0.05, confidence=0.7, market_implied_prob=0.5, model_prob=0.55))
         backend._computer.check_edge = Mock(return_value=Mock(passes=True))
         
         # The actual test is that the code path exists and doesn't crash
