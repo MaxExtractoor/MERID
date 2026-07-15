@@ -12,7 +12,8 @@ import pytest
 from dataclasses import replace
 from datetime import datetime
 
-from merid.prediction.unified_edge import EdgeResult, SpotReference, OrderBookSnapshot
+from merid.prediction.unified_edge import EdgeResult, SpotReference
+from merid.event_venues.kalshi.unified_market_state import OrderbookSnapshot
 
 
 class TestEdgeResultLagFields:
@@ -26,7 +27,7 @@ class TestEdgeResultLagFields:
             edge_risk_adjusted=0.08,
             edge_slippage_adjusted=0.07,
             edge_fee_adjusted=0.06,
-            model_win_prob=0.6,
+            model_prob=0.6,
             market_implied_prob=0.5,
             spot_ref=spot_ref,
             confidence=0.8,
@@ -34,7 +35,8 @@ class TestEdgeResultLagFields:
             raw_edge_cents=10.0,
             spread_cost_cents=2.0,
             fee_cost_cents=1.0,
-            net_edge_cents=7.0
+            net_edge_cents=7.0,
+            ev_per_contract_cents=7.0
         )
         
         assert result.lag_ms is None
@@ -48,7 +50,7 @@ class TestEdgeResultLagFields:
             edge_risk_adjusted=0.08,
             edge_slippage_adjusted=0.07,
             edge_fee_adjusted=0.06,
-            model_win_prob=0.6,
+            model_prob=0.6,
             market_implied_prob=0.5,
             spot_ref=spot_ref,
             confidence=0.8,
@@ -57,6 +59,7 @@ class TestEdgeResultLagFields:
             spread_cost_cents=2.0,
             fee_cost_cents=1.0,
             net_edge_cents=7.0,
+            ev_per_contract_cents=7.0,
             lag_ms=500.0,
             edge_lag_ratio=0.14  # 7 cents / 0.5 seconds
         )
@@ -148,7 +151,7 @@ class TestEdgeResultImmutability:
             edge_risk_adjusted=0.08,
             edge_slippage_adjusted=0.07,
             edge_fee_adjusted=0.06,
-            model_win_prob=0.6,
+            model_prob=0.6,
             market_implied_prob=0.5,
             spot_ref=spot_ref,
             confidence=0.8,
@@ -156,7 +159,8 @@ class TestEdgeResultImmutability:
             raw_edge_cents=10.0,
             spread_cost_cents=2.0,
             fee_cost_cents=1.0,
-            net_edge_cents=7.0
+            net_edge_cents=7.0,
+            ev_per_contract_cents=7.0
         )
         
         # Add lag fields using replace
@@ -181,7 +185,7 @@ class TestEdgeResultMetadata:
             edge_risk_adjusted=0.08,
             edge_slippage_adjusted=0.07,
             edge_fee_adjusted=0.06,
-            model_win_prob=0.6,
+            model_prob=0.6,
             market_implied_prob=0.5,
             spot_ref=spot_ref,
             confidence=0.8,
@@ -189,7 +193,8 @@ class TestEdgeResultMetadata:
             raw_edge_cents=10.0,
             spread_cost_cents=2.0,
             fee_cost_cents=1.0,
-            net_edge_cents=7.0
+            net_edge_cents=7.0,
+            ev_per_contract_cents=7.0
         )
         
         assert result.metadata["asset"] == "BTC"
@@ -202,7 +207,7 @@ class TestEdgeResultMetadata:
             edge_risk_adjusted=0.08,
             edge_slippage_adjusted=0.07,
             edge_fee_adjusted=0.06,
-            model_win_prob=0.6,
+            model_prob=0.6,
             market_implied_prob=0.5,
             spot_ref=spot_ref,
             confidence=0.8,
@@ -210,7 +215,8 @@ class TestEdgeResultMetadata:
             raw_edge_cents=10.0,
             spread_cost_cents=2.0,
             fee_cost_cents=1.0,
-            net_edge_cents=7.0
+            net_edge_cents=7.0,
+            ev_per_contract_cents=7.0
         )
         
         assert "asset" not in result.metadata
@@ -250,7 +256,7 @@ class TestEdgeResultNoneSafety:
             edge_risk_adjusted=None,
             edge_slippage_adjusted=None,
             edge_fee_adjusted=None,
-            model_win_prob=None,
+            model_prob=None,
             market_implied_prob=None,
             spot_ref=spot_ref,
             confidence=None,
@@ -259,6 +265,7 @@ class TestEdgeResultNoneSafety:
             spread_cost_cents=None,
             fee_cost_cents=None,
             net_edge_cents=None,
+            ev_per_contract_cents=None,
             lag_ms=None,
             edge_lag_ratio=None
         )
@@ -275,7 +282,7 @@ class TestEdgeResultNoneSafety:
             edge_risk_adjusted=None,
             edge_slippage_adjusted=None,
             edge_fee_adjusted=0.06,
-            model_win_prob=0.6,
+            model_prob=0.6,
             market_implied_prob=0.5,
             spot_ref=spot_ref,
             confidence=0.8,
@@ -284,6 +291,7 @@ class TestEdgeResultNoneSafety:
             spread_cost_cents=None,
             fee_cost_cents=1.0,
             net_edge_cents=9.0,
+            ev_per_contract_cents=9.0,
             lag_ms=None,
             edge_lag_ratio=None
         )
