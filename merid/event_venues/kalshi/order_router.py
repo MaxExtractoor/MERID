@@ -656,26 +656,84 @@ def resolve_exit_policy(
             edge_confidence = None
             net_edge_cents_at_entry = None
     
+    # CRITICAL FIX: Load TP/SL from YAML exit_policy.risk_reward config (2026-07-15)
+    # Previously hardcoded to 0.75/1.0/1.2 - now uses upstream configuration
+    tp_r_multiple = 1.0  # Default fallback
+    tp_min_cents = 3  # Default fallback
+    sl_cents_offset = 5  # Default fallback
+    configured_max_hold_seconds = 900  # Default fallback (15 min from YAML)
+    
+    try:
+        from merid.risk.profiles.crypto_15m_profile import get_active_profile
+        profile = get_active_profile().profile
+        
+        # Load from YAML exit_policy.risk_reward section
+        if hasattr(profile, 'exit_policy_risk_reward'):
+            rr_config = profile.exit_policy_risk_reward
+            
+            # Get asset-specific TP distance percentage
+            tp_distance_pct = rr_config.get('tp_distance_pct', {}).get(asset, 0.15)
+            # Convert percentage to R-multiple for binary options
+            # For binary options: TP = entry + (entry * tp_distance_pct)
+            # This is equivalent to R-multiple = tp_distance_pct
+            tp_r_multiple = tp_distance_pct
+            
+            # Get asset-specific SL distance percentage
+            sl_distance_pct = rr_config.get('sl_distance_pct', {}).get(asset, 0.075)
+            # Convert to fixed cents for binary options (using 42c as reference entry)
+            sl_cents_offset = int(42 * sl_distance_pct)
+        
+        # Load max_hold_minutes from YAML exit_policy.time_exit section (2026-07-15)
+        if hasattr(profile, 'exit_policy_time_exit'):
+            te_config = profile.exit_policy_time_exit
+            max_hold_minutes = te_config.get('max_hold_minutes', 15)
+            configured_max_hold_seconds = max_hold_minutes * 60  # Convert to seconds
+        
+        # Regime adjustments from YAML if available
+        if regime == "conservative":
+            tp_r_multiple *= 0.75  # More conservative TP
+            sl_cents_offset = int(sl_cents_offset * 0.8)
+            configured_max_hold_seconds = int(configured_max_hold_seconds * 1.5)  # Longer hold for conservative
+        elif regime == "aggressive":
+            tp_r_multiple *= 1.2  # More aggressive TP
+            sl_cents_offset = int(sl_cents_offset * 1.2)
+            configured_max_hold_seconds = int(configured_max_hold_seconds * 0.67)  # Shorter hold for aggressive
+        # normal: use configured_max_hold_seconds as-is
+        
+        if not hasattr(profile, 'exit_policy_risk_reward'):
+            # Fallback to hardcoded values if YAML config not available
+            logger.warning("[ORDER-ROUTER] exit_policy_risk_reward not found in profile, using fallback values")
+            if regime == "conservative":
+                tp_r_multiple = 0.75
+                tp_min_cents = 5
+            elif regime == "aggressive":
+                tp_r_multiple = 1.2
+                tp_min_cents = 2
+            else:  # normal
+                tp_r_multiple = 1.0
+                tp_min_cents = 3
+    except Exception as e:
+        logger.warning("[ORDER-ROUTER] Failed to load TP/SL config from profile: %s, using fallback", e)
+        # Fallback to hardcoded values
+        if regime == "conservative":
+            tp_r_multiple = 0.75
+            tp_min_cents = 5
+            configured_max_hold_seconds = 900
+        elif regime == "aggressive":
+            tp_r_multiple = 1.2
+            tp_min_cents = 2
+            configured_max_hold_seconds = 600
+        else:  # normal
+            tp_r_multiple = 1.0
+            tp_min_cents = 3
+            configured_max_hold_seconds = 600
+    
     # Default TP configuration (time-based dynamic R-multiple)
     tp_time_based_r = {
-        "over_7_min": 1.0,
-        "between_4_7_min": 0.75,
-        "under_4_min": 0.5,
+        "over_7_min": tp_r_multiple,  # Use configured TP R-multiple
+        "between_4_7_min": tp_r_multiple * 0.75,
+        "under_4_min": tp_r_multiple * 0.5,
     }
-    
-    # Regime adjustments
-    if regime == "conservative":
-        tp_r_multiple = 0.75  # More conservative TP
-        tp_min_cents = 5
-        configured_max_hold_seconds = 900  # 15 min max hold
-    elif regime == "aggressive":
-        tp_r_multiple = 1.2  # More aggressive TP
-        tp_min_cents = 2
-        configured_max_hold_seconds = 600  # 10 min max hold
-    else:  # normal
-        tp_r_multiple = 1.0
-        tp_min_cents = 3
-        configured_max_hold_seconds = 600  # 10 min max hold
     
     # Align max_hold_seconds with strip expiry
     # Extract TTE from strip context or use configured max as fallback

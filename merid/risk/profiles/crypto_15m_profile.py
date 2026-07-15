@@ -475,6 +475,16 @@ class Crypto15mProfile:
         description='Valid price range in cents for order execution (10c-75c canonical band)'
     ))
     
+    # Exit policy configuration (2026-07-15)
+    # CRITICAL FIX: Load from YAML exit_policy section to enable upstream configuration
+    exit_policy_risk_reward: Dict[str, Any] = field(default_factory=dict)  # TP/SL distance percentages per asset
+    exit_policy_trailing: Dict[str, Any] = field(default_factory=dict)  # Trailing stop configuration
+    exit_policy_time_exit: Dict[str, Any] = field(default_factory=dict)  # Time-based exit configuration
+    
+    # Staged time exit configuration (2026-07-15)
+    # CRITICAL FIX: Load from YAML top-level staged_time_exit section
+    staged_time_exit: Dict[str, Any] = field(default_factory=dict)  # Staged exits at time intervals
+    
     # Dynamic threshold configuration (2026-07-11)
     # Canonical thresholds for normal regime, crisis thresholds for extreme volatility
     canonical: 'CanonicalConfig' = field(default_factory=lambda: CanonicalConfig())
@@ -581,7 +591,7 @@ class CanonicalConfig:
     """Canonical thresholds for normal regime (87% of market time)."""
     price_range: PriceRangeConfig = field(default_factory=lambda: PriceRangeConfig(
         min_cents=10,
-        max_cents=50
+        max_cents=75  # 2026-07-14: Aligned with 10-75c canonical range (was 50c)
     ))
     spread: SpreadConfig = field(default_factory=lambda: SpreadConfig(
         max_cents=30,
@@ -807,10 +817,10 @@ class Crypto15mProfileAdapter:
                     max_contracts=max_contracts,
                     # REMOVED: Per-asset min_edge fields - now using profile edge_bands section
                     # Edge thresholds come from kalshi_crypto_15m_v2.yaml edge_bands section:
-                    # - watch_band: 1-2% (log only)
-                    # - small_band: 2-4% (trade small)
-                    # - standard_band: >=4% (trade standard)
-                    # - kelly_min_edge_pct: 2% (hard floor)
+                    # - watch_band: 2.5% (log only) - industry standard
+                    # - small_band: 2.5-5% (trade small) - industry standard
+                    # - standard_band: >=2.5% (trade standard) - industry standard
+                    # Reference: https://marketmath.io/blog/prediction-market-strategy
                     min_edge_early=0.0,  # Not used - edge_bands instead
                     min_edge_mid=0.0,    # Not used - edge_bands instead
                     min_edge_late=0.0,   # Not used - edge_bands instead
@@ -1166,7 +1176,7 @@ class Crypto15mProfileAdapter:
                 
                 # Strategy policy (normalize dict format for percentage fields)
                 strategy_policy_min_edge=self._normalize_percentage_value(strategy_policy.get('min_edge', 0.05)),
-                strategy_policy_min_confidence=strategy_policy.get('min_confidence', 0.50),
+                strategy_policy_min_confidence=strategy_policy.get('min_confidence', 0.65),  # 2026-07-15: Updated default to 0.65 to match profile YAML single source of truth
                 strategy_policy_max_md_staleness_sec=float(strategy_policy.get('max_md_staleness_sec', 120.0)),
                 
                 # Throttling (order rate limits)
@@ -1199,6 +1209,16 @@ class Crypto15mProfileAdapter:
                 venue_invariants_deep_itm_threshold_cents=self._normalize_contracts_value(raw.get('venue_invariants', {}).get('deep_itm_threshold_cents', 95)),
                 venue_invariants_ioc_auto_below_seconds=self._normalize_contracts_value(raw.get('venue_invariants', {}).get('ioc_auto_below_seconds', 120)),
                 venue_invariants_max_book_staleness_ms=self._normalize_contracts_value(raw.get('venue_invariants', {}).get('max_book_staleness_ms', 30000)),
+                
+                # Exit policy configuration (2026-07-15)
+                # Load from YAML exit_policy section
+                exit_policy_risk_reward=raw.get('exit_policy', {}).get('risk_reward', {}),
+                exit_policy_trailing=raw.get('exit_policy', {}).get('trailing', {}),
+                exit_policy_time_exit=raw.get('exit_policy', {}).get('time_exit', {}),
+                
+                # Staged time exit configuration (2026-07-15)
+                # Load from YAML top-level staged_time_exit section
+                staged_time_exit=raw.get('staged_time_exit', {}),
                 
                 # Legacy path control
                 legacy_disable_balance_calibration=legacy.get('disable_balance_calibration', True),
