@@ -949,6 +949,17 @@ class KalshiPositionCache:
                     except Exception as monitor_err:
                         logger.warning("[POSITION-MONITOR-INTEGRATION] Failed to remove position from monitor: %s", monitor_err)
 
+                    # CRITICAL FIX (2026-07-14): Delete position from cache when fully closed
+                    # This prevents phantom position entries from accumulating and causing
+                    # incorrect position count reporting in agent_grid_15m.py
+                    # Previously, positions with contracts=0 remained in _positions dict,
+                    # causing total_positions to be inflated even though open_positions was correct
+                    del self._positions[market_id]
+                    logger.info(
+                        "[POSITION-CACHE] Deleted closed position from cache: market=%s (contracts=0)",
+                        market_id
+                    )
+
                     # CRITICAL FIX: Record position close in KalshiRiskManager for asset_notional tracking
                     # This ensures per-asset notional exposure is decremented when positions close
                     try:
