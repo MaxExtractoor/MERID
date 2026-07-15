@@ -2057,13 +2057,36 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
             if not _is_exit_order(intent):
                 can_allocate, alloc_reason = slot_allocator.can_allocate(intent.price_cents, asset)
                 if not can_allocate:
-                    logger.error(
-                        "[SLOT-ALLOCATOR-CHECK] REJECTING: asset=%s price=%dc - %s",
-                        asset, intent.price_cents, alloc_reason
-                    )
-                    _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "slot_allocation_failed")
-                    _increment_validation_gate_metric("ROUTER_VALIDATION", "slot_allocation_failed")
-                    return f"slot_allocation_failed:{alloc_reason}"
+                    # CRITICAL FIX (2026-07-15): Check for phantom slot lockout
+                    # If position cache shows 0 positions but allocator rejects, clear phantom slots
+                    try:
+                        from merid.event_venues.kalshi.position_cache import get_position_cache
+                        pos_cache = get_position_cache()
+                        asset_positions = pos_cache.get_positions_by_asset(asset)
+                        if not asset_positions and "already has" in alloc_reason:
+                            logger.warning(
+                                "[SLOT-ALLOCATOR-CHECK] Phantom slot lockout detected: asset=%s has 0 positions but allocator rejects with '%s'. Forcing slot clear.",
+                                asset, alloc_reason
+                            )
+                            slot_allocator.clear_slots_on_empty_positions(position_count=0)
+                            # Retry allocation after clearing phantom slots
+                            can_allocate, alloc_reason = slot_allocator.can_allocate(intent.price_cents, asset)
+                            if can_allocate:
+                                logger.info(
+                                    "[SLOT-ALLOCATOR-CHECK] Phantom slot cleared: asset=%s allocation now allowed",
+                                    asset
+                                )
+                    except Exception as phantom_check_err:
+                        logger.warning("[SLOT-ALLOCATOR-CHECK] Failed phantom slot check: %s", phantom_check_err)
+                    
+                    if not can_allocate:
+                        logger.error(
+                            "[SLOT-ALLOCATOR-CHECK] REJECTING: asset=%s price=%dc - %s",
+                            asset, intent.price_cents, alloc_reason
+                        )
+                        _log_structured_block(intent, OrderStage.ROUTER_VALIDATION, "slot_allocation_failed")
+                        _increment_validation_gate_metric("ROUTER_VALIDATION", "slot_allocation_failed")
+                        return f"slot_allocation_failed:{alloc_reason}"
                 
                 logger.info(
                     "[SLOT-ALLOCATOR-CHECK] Allocation allowed: asset=%s price=%dc available_exposure=$%.2f",
