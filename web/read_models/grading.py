@@ -304,7 +304,7 @@ class ConsensusSignalStream:
     """
     FastAPI WebSocket stream for real-time consensus signals.
     
-    Usage in main.py:
+    Usage in main_15m_lean.py:
         @app.websocket("/ws/consensus-signals")
         async def consensus_signals_ws(websocket: WebSocket):
             await stream.connect(websocket)

@@ -1361,7 +1361,7 @@ async def internal_place_order(order_data: dict):
             ticker=order_data.get('ticker'),
             side=order_data.get('side', 'yes'),
             action=order_data.get('action', 'buy'),
-            price_cents=order_data.get('price_cents', 25),  # 2026-07-09: Changed from 50 to 25 (midpoint of 10-50c sweet spot)
+            price_cents=order_data.get('price_cents', 25),  # 2026-07-09: Changed from 50 to 25 (midpoint of 10-75c canonical range)
             count=order_data.get('count', 1),
             mode=order_data.get('mode'),  # Use None to let router decide
             order_type=order_data.get('order_type', 'limit'),
@@ -2111,7 +2111,7 @@ async def _run_full_startup_in_lifespan(app):
             except Exception as e:
                 logger.warning("[STARTUP-STACK] WINDOW-EXPOSURE-RESET: Failed to reset window exposure: %s", e, exc_info=True)
             
-            # CRITICAL: Call BalanceCalibrator to calibrate CategoryExposureTracker with percentage-based caps
+            # CRITICAL: Call BalanceCalibrator to calibrate CategoryExposureTracker with fixed $1 exposure model
             # This fixes the hardcoded $50 correlation stack cap bug
             logger.info("[STARTUP-STACK] BALANCE-CALIBRATOR: About to calibrate CategoryExposureTracker with initial bankroll")
             try:

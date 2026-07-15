@@ -80,7 +80,7 @@ def get_slippage_agent() -> SlippageAgent:
 @router.get("/arbitrage/scan")
 async def scan_arbitrage_opportunities(
     venues: str = "binance,hyperliquid,dydx",
-    assets: str = "BTC,ETH,SOL"
+    assets: str = "BTC,ETH,SOL,XRP,DOGE"
 ):
     """
     Scan for arbitrage opportunities across venues.
@@ -118,7 +118,7 @@ async def scan_arbitrage_opportunities(
 @router.get("/arbitrage/funding")
 async def scan_funding_rate_arbitrage(
     venues: str = "hyperliquid,dydx,binance",
-    assets: str = "BTC,ETH"
+    assets: str = "BTC,ETH,SOL,XRP,DOGE"
 ):
     """
     Scan for funding rate arbitrage opportunities in perp markets.

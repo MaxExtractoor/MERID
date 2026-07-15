@@ -5626,7 +5626,7 @@ async def btc15m_risk_evaluate_endpoint(
             asset=proposal.get("asset", ""),
             timeframe=proposal.get("timeframe", ""),
             side=proposal.get("side", "yes"),
-            price_cents=proposal.get("price_cents", 25),  # 2026-07-09: Changed from 50 to 25 (midpoint of 10-50c sweet spot)
+            price_cents=proposal.get("price_cents", 25),  # 2026-07-09: Changed from 50 to 25 (midpoint of 10-75c canonical range)
             intent_risk=proposal.get("intent_risk", 0.25),
             tags=proposal.get("tags", []),
             fear_greed=proposal.get("fear_greed"),
@@ -7841,7 +7841,7 @@ async def get_vader_kalshi_adjustment(
 
 @router.post("/sentiment/twitter/stream/start")
 async def start_twitter_stream(
-    assets: str = Query("BTC,ETH,SOL", description="Comma-separated assets to track"),
+    assets: str = Query("BTC,ETH,SOL,XRP,DOGE", description="Comma-separated assets to track"),
 ) -> Dict[str, Any]:
     """Start the Twitter streaming handler for live sentiment."""
     try:

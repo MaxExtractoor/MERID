@@ -13,7 +13,7 @@ Covers all 9 fixes applied:
 
 2026-07-10: Added tests for Trading Blocker Audit fixes:
   SPREAD-01 — Spread threshold harmonization (30c across all components)
-  PRICE-01 — Price range enforcement (10-50c sweet spot)
+  PRICE-01 — Price range enforcement (10-75c canonical range)
   PROFILE-01 — Profile configuration consistency
 """
 

@@ -764,13 +764,13 @@ class KalshiStrategy:
                 # price_cents = get_actual_contract_price_cents(edge.market_id, side="yes", market_prob=market_prob_float)
                 price_cents = None
                 # BUG-FIX: Use 25c safe default instead of probability-derived fallback which can return 1
-                # When market state is unavailable, 25c is the midpoint for binary options (10-50c sweet spot)
+                # When market state is unavailable, 25c is the midpoint for binary options (10-75c canonical range)
                 # This prevents price_cents=1 which causes Kelly sizing to return 0 contracts
                 if price_cents is None or price_cents <= 0:
-                    price_cents = 25  # 2026-07-09: Fixed to 25c (midpoint of 10-50c sweet spot)
+                    price_cents = 25  # 2026-07-09: Fixed to 25c (midpoint of 10-75c canonical range)
             except Exception:
                 # Same safe default on exception
-                price_cents = 25  # 2026-07-09: Fixed to 25c (midpoint of 10-50c sweet spot)
+                price_cents = 25  # 2026-07-09: Fixed to 25c (midpoint of 10-75c canonical range)
 
             # FIX: Validate actual price against max_price_cents from threshold matrix
             # This prevents momentum scalping from trading high-priced (low-edge) contracts
@@ -1340,7 +1340,7 @@ class KalshiStrategy:
                 edge_decimal = Decimal(str(best_edge_bps / 10000))  # bps -> decimal
                 # Dynamic fee calculation using Kalshi fee schedule
                 from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
-                _price_cents = 25  # 2026-07-09: Changed from 50 to 25 (midpoint of 10-50c sweet spot)
+                _price_cents = 25  # 2026-07-09: Changed from 50 to 25 (midpoint of 10-75c canonical range)
                 _fee_cents = calculate_kalshi_fee_cents(1, _price_cents)
                 fee_drag = Decimal(_fee_cents) / Decimal("100")
                 # Dynamic slippage from profile (single source of truth)
@@ -1348,7 +1348,7 @@ class KalshiStrategy:
                     from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
                     profile_adapter = Crypto15mProfileAdapter()
                     profile = profile_adapter.profile
-                    # Convert max_slippage_cents to bps (1 cent = 100 bps at 50c price)
+                    # Convert max_slippage_cents to bps (1 cent = 100 bps at 50c price - canonical range midpoint)
                     _slippage_cents = getattr(profile, 'guardrails_max_slippage_cents', 5)
                     _slippage_bps = _slippage_cents * 100  # Convert cents to bps
                 except Exception as e:
@@ -1613,7 +1613,7 @@ class KalshiStrategy:
             from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
             profile_adapter = Crypto15mProfileAdapter()
             profile = profile_adapter.profile
-            # Convert max_slippage_cents to bps (1 cent = 100 bps at 50c price)
+            # Convert max_slippage_cents to bps (1 cent = 100 bps at 50c price - canonical range midpoint)
             _pre_slippage_cents = getattr(profile, 'guardrails_max_slippage_cents', 5)
             _pre_slippage_bps = _pre_slippage_cents * 100  # Convert cents to bps
         except Exception as e:
@@ -1700,7 +1700,7 @@ class KalshiStrategy:
                     from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
                     profile_adapter = Crypto15mProfileAdapter()
                     profile = profile_adapter.profile
-                    # Convert max_slippage_cents to bps (1 cent = 100 bps at 50c price)
+                    # Convert max_slippage_cents to bps (1 cent = 100 bps at 50c price - canonical range midpoint)
                     _slippage_cents = getattr(profile, 'guardrails_max_slippage_cents', 5)
                     _slippage_bps = _slippage_cents * 100  # Convert cents to bps
                     slippage = _slippage_bps / 10000.0  # Convert bps to decimal

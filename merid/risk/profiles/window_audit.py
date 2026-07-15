@@ -6,7 +6,7 @@ of the shared $1 pool allocation model:
 
 - Sum of prices of all traded contracts in a window ≤ 100c ($1.00)
 - No asset has more than 1 contract per window
-- All entry prices are in [10c, 50c] range
+- All entry prices are in [10c, 75c] range
 - Total risk across all assets ≤ $1.00 (shared pool, not per-asset)
 
 This becomes the "green/red" indicator that the allocator and order builder

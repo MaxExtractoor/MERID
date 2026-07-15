@@ -72,7 +72,7 @@ async def get_paper_vs_shadow_comparison():
         from merid.prediction.agent_performance_tracker import get_agent_performance_tracker
         tracker = get_agent_performance_tracker()
         
-        crypto_agents = ["btc_15m_regime", "eth_15m_regime", "sol_15m_regime", "xrp_15m_regime", "btc_1h_regime"]
+        crypto_agents = ["btc_15m_regime", "eth_15m_regime", "sol_15m_regime", "xrp_15m_regime", "doge_15m_regime"]
         comparison = {}
         
         for agent_id in crypto_agents:
