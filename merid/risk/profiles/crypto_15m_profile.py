@@ -379,11 +379,11 @@ class Crypto15mProfile:
     dynamic_take_profit: dict = field(default_factory=dict)  # Full dynamic take profit config dict
     
     # Position Management: Dynamic Sizing Configuration
-    dynamic_sizing_enabled: bool = False
+    dynamic_sizing_enabled: bool = True  # 2026-07-15: Re-enabled with slot-model compatibility
     dynamic_sizing_base_contracts: int = 1
     dynamic_sizing_edge_multiplier: float = 2.0
     dynamic_sizing_confidence_multiplier: float = 1.0
-    dynamic_sizing_max_contracts: int = 1  # CRITICAL FIX (2026-07-08): Reduced from 3 to 1 to enforce 3% risk limit
+    dynamic_sizing_max_contracts: int = 1  # CRITICAL: 1 contract per order to respect $1 fixed exposure cap
     dynamic_sizing_min_contracts: int = 1
     # Crypto markets are near well-calibrated (slope ~1.08) but still benefit from dynamic adjustment
     calibration_enabled: bool = True  # Enable/disable probability calibration (ENABLED for dynamic adjustment)
@@ -420,7 +420,7 @@ class Crypto15mProfile:
     
     # 2026 Research-Based Risk Management
     # Correlation-aware position sizing
-    correlation_tracking_enabled: bool = False
+    correlation_tracking_enabled: bool = True  # 2026-07-15: Re-enabled for BTC sentiment biasing
     correlation_tracking_real_time_monitoring: bool = False
     correlation_tracking_threshold_high: float = 0.80
     correlation_tracking_threshold_moderate: float = 0.50
@@ -1286,7 +1286,7 @@ class Crypto15mProfileAdapter:
                 # Position Management: Dynamic Take Profit Zones Configuration
                 dynamic_take_profit=raw.get('dynamic_take_profit', {}),
                 # Position Management: Dynamic Sizing Configuration
-                dynamic_sizing_enabled=raw.get('dynamic_sizing', {}).get('enabled', False),
+                dynamic_sizing_enabled=raw.get('dynamic_sizing', {}).get('enabled', True),  # 2026-07-15: Re-enabled default
                 dynamic_sizing_base_contracts=raw.get('dynamic_sizing', {}).get('base_contracts', 1),
                 dynamic_sizing_edge_multiplier=raw.get('dynamic_sizing', {}).get('edge_multiplier', 2.0),
                 dynamic_sizing_confidence_multiplier=raw.get('dynamic_sizing', {}).get('confidence_multiplier', 1.0),
@@ -1297,7 +1297,7 @@ class Crypto15mProfileAdapter:
                 
                 # 2026 Research-Based Risk Management
                 # Correlation-aware position sizing
-                correlation_tracking_enabled=raw.get('correlation_tracking', {}).get('enabled', False),
+                correlation_tracking_enabled=raw.get('correlation_tracking', {}).get('enabled', True),  # 2026-07-15: Re-enabled default
                 correlation_tracking_real_time_monitoring=raw.get('correlation_tracking', {}).get('real_time_monitoring', False),
                 correlation_tracking_threshold_high=raw.get('correlation_tracking', {}).get('threshold_high', 0.80),
                 correlation_tracking_threshold_moderate=raw.get('correlation_tracking', {}).get('threshold_moderate', 0.50),

@@ -345,11 +345,23 @@ from merid.ops.run_summary import RunSummary
 _t3 = _import_time.time()
 logger.debug("[LOOP-15M-IMPORT] run_summary import took %.3fs", _t3 - _t2)
 
-# Import exit policy resolver for take profit/stop loss setup
+# Import Coinbase WebSocket client for external spot velocity signals (Turbine research #1 winner)
 _t4 = _import_time.time()
-from merid.event_venues.kalshi.order_router import resolve_exit_policy
+try:
+    from merid.event_venues.coinbase.ws_client import get_coinbase_client, CoinbaseAsset
+    COINBASE_WS_AVAILABLE = True
+    logger.info("[LOOP-15M-IMPORT] Coinbase WebSocket client available for external velocity signals")
+except ImportError as e:
+    COINBASE_WS_AVAILABLE = False
+    logger.warning("[LOOP-15M-IMPORT] Coinbase WebSocket client not available: %s", e)
 _t5 = _import_time.time()
-logger.debug("[LOOP-15M-IMPORT] resolve_exit_policy import took %.3fs", _t5 - _t4)
+logger.debug("[LOOP-15M-IMPORT] Coinbase WS import took %.3fs", _t5 - _t4)
+
+# Import exit policy resolver for take profit/stop loss setup
+_t6 = _import_time.time()
+from merid.event_venues.kalshi.order_router import resolve_exit_policy
+_t7 = _import_time.time()
+logger.debug("[LOOP-15M-IMPORT] resolve_exit_policy import took %.3fs", _t7 - _t6)
 
 # LEGACY REMOVAL: E2EInvariantChecker from merid.core is legacy code
 # This import violates the 15m stack separation policy
@@ -613,6 +625,19 @@ class Kalshi15mLoop:
         self._asset_positions: Dict[str, float] = {}  # asset -> current notional exposure
         for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
             self._asset_positions[asset] = 0.0
+        
+        # Coinbase WebSocket client for external spot velocity signals (Turbine research #1 winner)
+        self._coinbase_client = None
+        self._coinbase_velocity_signals: Dict[str, Dict] = {}  # asset -> {velocity, timestamp, signal_type}
+        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+            self._coinbase_velocity_signals[asset] = {"velocity": 0.0, "timestamp": 0.0, "signal_type": "none"}
+        
+        if COINBASE_WS_AVAILABLE:
+            try:
+                self._coinbase_client = get_coinbase_client()
+                logger.info("[15M-LOOP] Coinbase WebSocket client initialized for external velocity signals")
+            except Exception as e:
+                logger.warning("[15M-LOOP] Failed to initialize Coinbase WebSocket client: %s", e)
         
         # Active trade tracking for concurrent trade limit enforcement
         self._active_trades: Dict[str, int] = {}  # ticker -> order count
@@ -1110,6 +1135,46 @@ class Kalshi15mLoop:
         loop = asyncio.get_running_loop()
         self._loop_task = loop.create_task(self._run_loop(), name="kalshi_15m_loop")
         logger.info("[15m-LOOP] Background task created: %s", self._loop_task)
+
+        # CRITICAL: Start Coinbase WebSocket for external spot velocity signals (Turbine research #1 winner)
+        if self._coinbase_client:
+            try:
+                # Start WebSocket connection in background task
+                async def start_coinbase_ws():
+                    try:
+                        await self._coinbase_client.connect()
+                        # Set up velocity signal callback
+                        def on_velocity_signal(velocity_signal):
+                            # Map Coinbase asset name to MERID asset name
+                            asset_map = {
+                                "BTC-USD": "BTC",
+                                "ETH-USD": "ETH",
+                                "SOL-USD": "SOL",
+                                "XRP-USD": "XRP",
+                                "DOGE-USD": "DOGE",
+                            }
+                            asset = asset_map.get(velocity_signal.asset, velocity_signal.asset.replace("-USD", ""))
+                            if asset in self._coinbase_velocity_signals:
+                                self._coinbase_velocity_signals[asset] = {
+                                    "velocity": velocity_signal.velocity,
+                                    "timestamp": velocity_signal.timestamp,
+                                    "signal_type": velocity_signal.signal_type,
+                                }
+                                logger.info(
+                                    "[COINBASE-VELOCITY] asset=%s velocity=%.6f signal_type=%s window=%ds",
+                                    asset, velocity_signal.velocity, velocity_signal.signal_type, velocity_signal.window_seconds
+                                )
+                        
+                        self._coinbase_client.on_velocity_signal = on_velocity_signal
+                        # Start listening in background
+                        asyncio.create_task(self._coinbase_client.listen())
+                        logger.info("[15m-LOOP] Coinbase WebSocket started for external velocity signals")
+                    except Exception as e:
+                        logger.error("[15m-LOOP] Failed to start Coinbase WebSocket: %s", e, exc_info=True)
+                
+                asyncio.create_task(start_coinbase_ws())
+            except Exception as e:
+                logger.warning("[15m-LOOP] Failed to start Coinbase WebSocket task: %s", e)
 
         # CRITICAL: Start PositionMonitor for active TP/SL/trailing exit monitoring
         if self._position_monitor:
@@ -3728,7 +3793,10 @@ class Kalshi15mLoop:
                 except Exception as e:
                     logger.warning("[15M-LOOP] Failed to fetch cycle bankroll: %s", e)
                 
-                candidates = await self.agent_grid.run_cycle(tick, allow_new_entries=allow_new_entries)
+                # Pass Coinbase velocity signals to agent grid for external spot velocity integration
+                # (Turbine research #1 winner: Coinbase 1-minute velocity)
+                coinbase_velocity = self._coinbase_velocity_signals if hasattr(self, '_coinbase_velocity_signals') else {}
+                candidates = await self.agent_grid.run_cycle(tick, allow_new_entries=allow_new_entries, coinbase_velocity=coinbase_velocity)
                 logger.info("[15M-LOOP] Generated %d candidates in cycle %d", len(candidates), tick)
                 
                 # Process candidates into orders

@@ -38,7 +38,7 @@ SEQUENCE_ALIGNMENT_WINDOW = 3  # Number of messages to check for sequence alignm
 
 # Arbitrage constants
 ARBITRAGE_ENABLED = os.getenv("MERID_YES_NO_ARBITRAGE_ENABLED", "false").lower() == "true"
-ARBITRAGE_THRESHOLD_CENTS = 3  # Minimum arbitrage edge to execute (3c = 3%)
+ARBITRAGE_THRESHOLD_CENTS = 5  # Gabagool strategy: execute when YES + NO < 95c (pair-cost model)
 ARBITRAGE_MAX_SIZE_CONTRACTS = 10  # Max contracts per arbitrage trade
 
 @dataclass

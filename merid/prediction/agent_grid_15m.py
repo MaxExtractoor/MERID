@@ -811,6 +811,11 @@ class LeanAgent15m:
         # Phase 6: Initialize regime detector for adaptive strategy switching
 
         self._regime_detector_enabled = getattr(config, 'regime_detector_enabled', True)
+        
+        # Coinbase external velocity signals (Turbine research #1 winner)
+        self._coinbase_velocity_signals: Dict[str, Dict] = {}  # asset -> {velocity, timestamp, signal_type}
+        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+            self._coinbase_velocity_signals[asset] = {"velocity": 0.0, "timestamp": 0.0, "signal_type": "none"}
 
         if self._regime_detector_enabled:
 
@@ -5426,7 +5431,23 @@ class LeanAgent15m:
         # Returns weighted average velocity as percentage change.
 
         # CRITICAL FIX: Use milliseconds to match UnifiedSpotService timestamp format
+        
+        # PRIORITY: Use external Coinbase velocity when available (Turbine research #1 winner)
+        # Coinbase 1-minute velocity was the top-performing strategy (+$19,451 P&L)
+        if hasattr(self, '_coinbase_velocity_signals') and asset in self._coinbase_velocity_signals:
+            cb_signal = self._coinbase_velocity_signals[asset]
+            # Check if signal is fresh (within last 2 minutes)
+            current_time = time.time()
+            signal_age = current_time - cb_signal.get('timestamp', 0)
+            if signal_age < 120.0 and cb_signal.get('signal_type') != 'none':
+                # Use Coinbase velocity directly (already normalized per second)
+                logger.info(
+                    "[COINBASE-VELOCITY-USE] asset=%s using external Coinbase velocity=%.6f signal_type=%s age=%.1fs",
+                    asset, cb_signal['velocity'], cb_signal['signal_type'], signal_age
+                )
+                return cb_signal['velocity']
 
+        # Fallback to internal multi-window velocity calculation
         history = list(self._spot_price_history[asset])
 
         if len(history) < 2:
@@ -7584,6 +7605,20 @@ class LeanAgent15m:
 
         
 
+        # HYBRID STRATEGY: Combine momentum_fvg with price_based (panic fade)
+        # 2026-07-15: Enable both strategies - prefer price_based when panic conditions met
+        if self.config.signal_mode == "hybrid":
+            # Try price_based first (panic fade)
+            price_signal = self._generate_price_based_signal(asset, spot_price, market, minutes_to_expiry)
+            if price_signal is not None:
+                logger.info("[HYBRID-SIGNAL] asset=%s using price_based (panic fade) signal", asset)
+                return price_signal
+            # Fallback to momentum_fvg if no price signal
+            logger.info("[HYBRID-SIGNAL] asset=%s falling back to momentum_fvg", asset)
+            return self._generate_momentum_fvg_signal(asset, spot_price, market, minutes_to_expiry)
+
+        
+
         # CRITICAL FIX: 2026-07-06 - Wire MACD/RSI into momentum_fvg signal generation
 
         # MOMENTUM_FVG STRATEGY: Combines velocity, MACD, RSI, OBI, and FVG for enhanced signals
@@ -8296,104 +8331,8 @@ class LeanAgent15m:
         
 
         # HYBRID MODE PRICE CAPS (2026 Optimized)
-
-        # Enforce price discipline in hybrid mode to prevent poor risk/reward trades
-
-        # ADAPTIVE SIGNAL FUSION: Regime-aware price caps (2026 research)
-
-        # Instead of static price caps that block all trades in certain market conditions,
-
-        # use regime detection to dynamically adjust price discipline
-
-        if self.config.signal_mode == "hybrid" and market_price > 0:
-
-            # Detect market regime using ADX and price position
-
-            regime = self._detect_market_regime(asset, spot_price, market_price)
-
-            
-
-            # Adaptive price caps based on regime
-
-            if regime == "trending_strong":
-
-                # Strong trend: allow higher prices (up to 95c) to capture momentum
-
-                max_entry_price_yes = 0.95
-
-                min_entry_price_no = 0.05
-
-                regime_rationale = "strong_trend_momentum"
-
-            elif regime == "trending_weak":
-
-                # Weak trend: moderate price discipline (up to 90c)
-
-                max_entry_price_yes = 0.90
-
-                min_entry_price_no = 0.10
-
-                regime_rationale = "weak_trend_momentum"
-
-            elif regime == "mean_reverting":
-
-                # Mean reversion: strict price discipline (up to 80c)
-
-                max_entry_price_yes = 0.80
-
-                min_entry_price_no = 0.20
-
-                regime_rationale = "mean_reversion_discipline"
-
-            else:
-
-                # Neutral: moderate discipline (up to 85c)
-
-                max_entry_price_yes = 0.85
-
-                min_entry_price_no = 0.15
-
-                regime_rationale = "neutral_market"
-
-            
-
-            # Check if price is within acceptable range for trading
-
-            if market_price > max_entry_price_yes:
-
-                logger.info(
-
-                    "[ADAPTIVE-PRICE-CAP] asset=%s regime=%s market_price=%.2f > max_entry_price_yes=%.2f -> SKIP (overpriced YES entry, rationale=%s)",
-
-                    asset, regime, market_price, max_entry_price_yes, regime_rationale
-
-                )
-
-                return None
-
-            elif market_price < min_entry_price_no:
-
-                logger.info(
-
-                    "[ADAPTIVE-PRICE-CAP] asset=%s regime=%s market_price=%.2f < min_entry_price_no=%.2f -> SKIP (overpriced NO entry, rationale=%s)",
-
-                    asset, regime, market_price, min_entry_price_no, regime_rationale
-
-                )
-
-                return None
-
-            else:
-
-                logger.info(
-
-                    "[ADAPTIVE-PRICE-CAP] asset=%s regime=%s market_price=%.2f within range [%.2f, %.2f] -> PASS (rationale=%s)",
-
-                    asset, regime, market_price, min_entry_price_no, max_entry_price_yes, regime_rationale
-
-                )
-
-        
+        # REMOVED: Hybrid mode now properly combines price_based and momentum_fvg (line 7610)
+        # Adaptive price caps are no longer needed here since each strategy has its own price logic
 
         # Apply regime-aware velocity-to-side mapping with strike price consideration
 
@@ -10035,7 +9974,7 @@ class LeanAgent15m:
 
             # No market data - use neutral price (already in range)
 
-            price_cents = 25  # 2026-07-09: Changed from 50 to 25 (midpoint of 10-50c sweet spot)
+            price_cents = 42  # 2026-07-14: Changed from 25 to 42 (midpoint of 10-75c canonical range)
 
         
 
@@ -10357,7 +10296,7 @@ class LeanAgent15m:
 
             
 
-            # Sweet-spot band enforcement: entries must land in [10c, 50c].
+            # Sweet-spot band enforcement: entries must land in [10c, 75c].
 
             if optimal_price < ENTRY_MIN_PRICE_CENTS:
 
@@ -12155,9 +12094,17 @@ class LeanAgentGrid15m:
 
     
 
-    async def run_cycle(self, tick: int, allow_new_entries: bool = True) -> list[Dict[str, Any]]:
+    async def run_cycle(self, tick: int, allow_new_entries: bool = True, coinbase_velocity: Dict = None) -> list[Dict[str, Any]]:
 
         # Run a single trading cycle across all agents.
+        
+        # coinbase_velocity: External spot velocity signals from Coinbase WebSocket (Turbine research #1 winner)
+        # Format: {asset: {velocity: float, timestamp: float, signal_type: str}}
+        
+        # Store Coinbase velocity signals for use in signal generation
+        if coinbase_velocity:
+            self._coinbase_velocity_signals = coinbase_velocity
+            logger.debug("[AGENT-GRID] Received Coinbase velocity signals: %s", coinbase_velocity)
 
         # CRITICAL FIX: Update indicator stacks for all agents BEFORE sync_from_rest
 
