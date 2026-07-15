@@ -12,6 +12,12 @@ Bug fixes:
 3. REST API timeout increased from 15s to 60s
    - Fixed in: timeout_config.py
    - Reason: Handle observed 43-second network latency
+
+4. Phantom slot lockout fix in order_router.py
+   - Fixed in: order_router.py
+   - Reason: Slot allocator rejecting orders due to stale slots from previous sessions
+   - Mechanism: Detects when allocator rejects due to "already has X position(s)" but position
+     cache shows 0 positions, then clears phantom slots and retries allocation
 """
 
 import pytest
@@ -139,6 +145,105 @@ class TestPositionCacheStalenessFixDetailed:
         
         # Verify the explicit since_hours=24 parameter is used
         assert "since_hours=24" in source, "Should use explicit since_hours=24 parameter"
+
+
+class TestPhantomSlotLockoutFix:
+    """Test phantom slot lockout fix in order_router.py."""
+    
+    def test_phantom_slot_detection_logic_exists(self):
+        """Verify order_router.py has phantom slot detection logic."""
+        from merid.event_venues.kalshi import order_router
+        import inspect
+        
+        # Get the source code of _check_intent_risk method
+        source = inspect.getsource(order_router._check_intent_risk)
+        
+        # Verify the phantom slot detection logic exists
+        assert "phantom slot lockout" in source.lower(), "Should detect phantom slot lockout"
+        assert "get_position_cache" in source, "Should get position cache to check for phantom slots"
+        assert "clear_slots_on_empty_positions" in source, "Should clear phantom slots"
+        assert "retry allocation" in source.lower(), "Should retry allocation after clearing"
+    
+    def test_phantom_slot_clear_on_zero_positions(self):
+        """Verify phantom slots are cleared when position cache shows 0 positions."""
+        from merid.risk.global_slot_allocator import GlobalSlotAllocator, AllocationRequest
+        from merid.event_venues.kalshi.position_cache import KalshiPositionCache
+        from unittest.mock import Mock, patch
+        
+        # Create allocator and add a phantom slot
+        allocator = GlobalSlotAllocator()
+        request = AllocationRequest(
+            agent_id="BTC_15M",
+            asset="BTC",
+            ticker="KXBTC15M-26JUL151645-45",
+            entry_price_cents=75,
+            edge_pct=15.0,
+            spread_cents=10,
+            confidence=0.95
+        )
+        allocator.request_allocation(request)
+        
+        # Verify slot is allocated
+        assert allocator.get_slot_count() == 1, "Should have 1 slot allocated"
+        assert allocator.get_slots_by_asset("BTC") != [], "Should have BTC slot"
+        
+        # Mock position cache to return 0 positions for BTC
+        mock_cache = Mock(spec=KalshiPositionCache)
+        mock_cache.get_positions_by_asset = Mock(return_value=[])
+        
+        # Clear phantom slots
+        allocator.clear_slots_on_empty_positions(position_count=0)
+        
+        # Verify slot is cleared
+        assert allocator.get_slot_count() == 0, "Should have 0 slots after clearing"
+        assert allocator.get_slots_by_asset("BTC") == [], "Should have no BTC slots"
+    
+    def test_phantom_slot_not_cleared_with_actual_positions(self):
+        """Verify phantom slots are NOT cleared when position cache shows actual positions."""
+        from merid.risk.global_slot_allocator import GlobalSlotAllocator, AllocationRequest
+        from merid.event_venues.kalshi.position_cache import KalshiPositionCache
+        from unittest.mock import Mock
+        
+        # Create allocator and add a slot
+        allocator = GlobalSlotAllocator()
+        request = AllocationRequest(
+            agent_id="BTC_15M",
+            asset="BTC",
+            ticker="KXBTC15M-26JUL151645-45",
+            entry_price_cents=75,
+            edge_pct=15.0,
+            spread_cents=10,
+            confidence=0.95
+        )
+        allocator.request_allocation(request)
+        
+        # Verify slot is allocated
+        assert allocator.get_slot_count() == 1, "Should have 1 slot allocated"
+        
+        # Mock position cache to return 1 position for BTC
+        mock_cache = Mock(spec=KalshiPositionCache)
+        mock_cache.get_positions_by_asset = Mock(return_value=[Mock()])
+        
+        # Try to clear phantom slots (should not clear since position_count > 0)
+        allocator.clear_slots_on_empty_positions(position_count=1)
+        
+        # Verify slot is NOT cleared
+        assert allocator.get_slot_count() == 1, "Should still have 1 slot (not cleared)"
+    
+    def test_order_router_phantom_slot_check_code_pattern(self):
+        """Verify the code pattern for phantom slot check in order_router."""
+        from merid.event_venues.kalshi import order_router
+        import inspect
+        
+        # Get the source code of _check_intent_risk method
+        source = inspect.getsource(order_router._check_intent_risk)
+        
+        # Verify the specific code pattern
+        assert "if not can_allocate:" in source, "Should check if allocation failed"
+        assert "asset_positions = pos_cache.get_positions_by_asset(asset)" in source, "Should get asset positions"
+        assert "if not asset_positions and \"already has\" in alloc_reason:" in source, "Should check for phantom slot condition"
+        assert "slot_allocator.clear_slots_on_empty_positions(position_count=0)" in source, "Should clear phantom slots"
+        assert "can_allocate, alloc_reason = slot_allocator.can_allocate(intent.price_cents, asset)" in source, "Should retry allocation"
 
 
 class TestIntegrationScenarios:
