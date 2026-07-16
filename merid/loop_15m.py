@@ -1649,8 +1649,11 @@ class Kalshi15mLoop:
                             from merid.event_venues.kalshi.market_catalog import get_kalshi_market_catalog
                             catalog = get_kalshi_market_catalog()
                             # Force a refresh to get new markets for the new window
-                            await catalog.refresh(force=True)
+                            # Add timeout to prevent indefinite blocking if catalog refresh hangs
+                            await asyncio.wait_for(catalog.refresh(force=True), timeout=30.0)
                             logger.info("[15m-LOOP] WINDOW-CHANGE: Catalog refresh completed for new window")
+                        except asyncio.TimeoutError:
+                            logger.error("[15m-LOOP] WINDOW-CHANGE: Catalog refresh timed out after 30s - will retry on next periodic refresh")
                         except Exception as e:
                             logger.warning(f"[15m-LOOP] WINDOW-CHANGE: Failed to trigger catalog refresh: {e}", exc_info=True)
                         
@@ -3843,8 +3846,11 @@ class Kalshi15mLoop:
                         from merid.event_venues.kalshi.market_catalog import get_kalshi_market_catalog
                         catalog = get_kalshi_market_catalog()
                         # Force a refresh to get new markets for the new window
-                        await catalog.refresh(force=True)
+                        # Add timeout to prevent indefinite blocking if catalog refresh hangs
+                        await asyncio.wait_for(catalog.refresh(force=True), timeout=30.0)
                         logger.info("[15m-LOOP] WINDOW-CHANGE: Catalog refresh completed for new window")
+                    except asyncio.TimeoutError:
+                        logger.error("[15m-LOOP] WINDOW-CHANGE: Catalog refresh timed out after 30s - will retry on next periodic refresh")
                     except Exception as e:
                         logger.warning(f"[15m-LOOP] WINDOW-CHANGE: Failed to trigger catalog refresh: {e}", exc_info=True)
                     
