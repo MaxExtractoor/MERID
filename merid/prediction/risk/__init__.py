@@ -57,5 +57,5 @@ from merid.prediction.risk.sentiment_vol_service import (  # noqa: F401
     explain_sizing_for_position,
 )
 
-# ── Fee schedule re-export (single source in position_sizer) ──────────
-from merid.event_venues.kalshi.position_sizer import kalshi_fee_cents  # noqa: F401
+# ── Fee schedule re-export (single source in fees module) ──────────
+from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents as kalshi_fee_cents  # noqa: F401

@@ -179,43 +179,14 @@ class Test15mStackImportCleanliness:
 class Test15mOrderRouterLean:
     """Test that the 15m order router is lean and has no legacy dependencies."""
     
-    def test_order_router_15m_exists(self):
-        """Test that order_router_15m module exists."""
-        import merid.event_venues.kalshi.order_router_15m
-        assert merid.event_venues.kalshi.order_router_15m is not None
-    
-    def test_order_router_15m_no_legacy_imports(self):
-        """Test that order_router_15m has no legacy imports."""
-        import merid.event_venues.kalshi.order_router_15m as router_module
-        
-        # Get the source file
-        import inspect
-        source_file = inspect.getsourcefile(router_module)
-        assert source_file is not None
-        
-        # Read the source and check for legacy imports
-        with open(source_file, 'r') as f:
-            source = f.read()
-        
-        # Check for legacy import patterns
-        legacy_patterns = [
-            "from merid.paper_config",
-            "from core.paper_session",
-            "from swarm.agent_registry",
-            "from merid.event_venues.kalshi.deployment",
-            "from agents.reflection",
-        ]
-        
-        for pattern in legacy_patterns:
-            assert pattern not in source, f"Found legacy import pattern: {pattern}"
-    
-    def test_order_router_15m_get_singleton(self):
-        """Test that get_kalshi_15m_order_router returns a router instance."""
-        from merid.event_venues.kalshi.order_router_15m import get_kalshi_15m_order_router, Kalshi15mOrderRouter
-        
-        router = get_kalshi_15m_order_router()
-        assert isinstance(router, Kalshi15mOrderRouter)
-        
-        # Calling again should return the same instance (singleton)
-        router2 = get_kalshi_15m_order_router()
-        assert router is router2
+    def test_order_router_15m_removed(self):
+        """Test that legacy order_router_15m module has been removed."""
+        # The legacy order_router_15m.py was deleted in 2026-07-16 audit cleanup
+        # This test verifies it no longer exists
+        import sys
+        try:
+            import merid.event_venues.kalshi.order_router_15m
+            assert False, "Legacy order_router_15m module should have been deleted"
+        except ImportError:
+            # Expected - module should not exist
+            pass

@@ -168,9 +168,18 @@ def _kalshi_fee_rate(contracts: int) -> float:
 def kalshi_fee_cents(price_cents: int, contracts: int) -> int:
     """Compute total Kalshi fee in cents for a trade.
     
+    DEPRECATED (2026-07-16): Use calculate_kalshi_fee_cents from fees module directly.
+    This function is kept for backwards compatibility only.
+    
     DELEGATED to unified fees module: merid.event_venues.kalshi.fees
     Note: Original signature is (price_cents, contracts), unified is (contracts, price_cents)
     """
+    import warnings
+    warnings.warn(
+        "kalshi_fee_cents is deprecated. Use calculate_kalshi_fee_cents from fees module directly.",
+        DeprecationWarning,
+        stacklevel=2
+    )
     return calculate_kalshi_fee_cents(contracts, price_cents)
 
 

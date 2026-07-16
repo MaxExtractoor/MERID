@@ -63,6 +63,9 @@ from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
 def kalshi_fee_cents(price_cents: int, contracts: int) -> int:
     """Calculate Kalshi fee in cents for a trade.
 
+    DEPRECATED (2026-07-16): Use calculate_kalshi_fee_cents from fees module directly.
+    This function is kept for backwards compatibility only.
+
     DELEGATED to unified fees module: merid.event_venues.kalshi.fees
 
     Uses the official Kalshi parabolic formula:
@@ -81,6 +84,12 @@ def kalshi_fee_cents(price_cents: int, contracts: int) -> int:
     Returns:
         Total fee in cents (integer, rounded up)
     """
+    import warnings
+    warnings.warn(
+        "kalshi_fee_cents is deprecated. Use calculate_kalshi_fee_cents from fees module directly.",
+        DeprecationWarning,
+        stacklevel=2
+    )
     return calculate_kalshi_fee_cents(contracts, price_cents)
 
 
@@ -208,7 +217,7 @@ def kelly_size_kalshi(
 
     # Estimate fee per contract using canonical parabolic formula (tier <100)
     payout_per = 100 - price_cents
-    fee_per = math.ceil(kalshi_fee_cents(price_cents, 1))
+    fee_per = math.ceil(calculate_kalshi_fee_cents(1, price_cents))
 
     net_payout = payout_per - fee_per
     if net_payout <= 0:
@@ -231,7 +240,7 @@ def kelly_size_kalshi(
     contracts = max(0, min(contracts, max_contracts))
 
     # Re-check with actual fee tier
-    actual_fee = kalshi_fee_cents(price_cents, contracts)
+    actual_fee = calculate_kalshi_fee_cents(contracts, price_cents)
     actual_net = (100 - price_cents) * contracts - actual_fee
     cost = price_cents * contracts
     if actual_net <= 0 or cost > bankroll_cents:
@@ -474,7 +483,7 @@ def multi_market_kelly_sizes(
 
         # Fee check + fee anomaly detection
         if contracts > 0:
-            fee = kalshi_fee_cents(price_cents, contracts)
+            fee = calculate_kalshi_fee_cents(contracts, price_cents)
             notional = contracts * price_usd
             fee_pct = (fee / 100.0) / notional * 100 if notional > 0 else 0
 
@@ -694,7 +703,7 @@ def kelly_size_from_kalman(
 
     # Fee check
     if contracts > 0:
-        fee = kalshi_fee_cents(price_cents, contracts)
+        fee = calculate_kalshi_fee_cents(contracts, price_cents)
         notional = contracts * (price_cents / 100.0)
         fee_pct = (fee / 100.0) / notional * 100 if notional > 0 else 0
 
@@ -1092,6 +1101,12 @@ class KalshiRiskManager:
     _MAX_BREACH_LOG = 200
 
     def __init__(self, config: Optional[KalshiRiskConfig] = None):
+        import warnings
+        warnings.warn(
+            "KalshiRiskManager is deprecated. Use UnifiedRiskManager from merid.risk.unified_risk_manager instead.",
+            DeprecationWarning,
+            stacklevel=2
+        )
         self._config = config or KalshiRiskConfig()
         self._apply_micro_live_profile_if_requested()
         self._state = RiskState()
@@ -1740,7 +1755,7 @@ class KalshiRiskManager:
 
             # 8. Post-fee edge
             if edge > 0:
-                fee = kalshi_fee_cents(price_cents, contracts)
+                fee = calculate_kalshi_fee_cents(contracts, price_cents)
                 fee_per = fee / max(contracts, 1)
                 payout_per = 100 - price_cents
                 post_fee_edge = edge - (fee_per / payout_per) if payout_per > 0 else 0
@@ -3608,6 +3623,9 @@ def get_live_bankroll_async() -> float:
         Live bankroll in USD, or 0.0 if API call fails (fail-closed)
     """
     # CRITICAL FIX: Skip bankroll access during import time to prevent bankroll service initialization
+    # This function should only be called at runtime after bankroll service is ready
+    logger.warning("[LIVE-BANKROLL-ASYNC] Skipping import-time bankroll fetch, will defer to runtime")
+    return 0.0
     # This function should only be called at runtime after bankroll service is ready
     logger.warning("[LIVE-BANKROLL-ASYNC] Skipping import-time bankroll fetch, will defer to runtime")
     return 0.0

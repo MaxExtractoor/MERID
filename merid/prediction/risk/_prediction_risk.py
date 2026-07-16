@@ -19,7 +19,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from enum import Enum
 from typing import Dict, List, Optional, Set
 
-from merid.event_venues.kalshi.position_sizer import kalshi_fee_cents  # canonical fee schedule
+from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents as kalshi_fee_cents  # canonical fee schedule
 from utils.logger import get_logger
 
 logger = get_logger("merid.prediction.risk")
@@ -855,6 +855,9 @@ class PredictionMarketRisk:
 
         # 10. Post-fee edge minimum (formula is side-aware for binary contracts)
         # BUG-FIX: Default price_cents to 50 if 0 or invalid to avoid post_fee_edge=0
+        # CRITICAL FIX 2026-07-14: Updated threshold from 0.5% to 2.5% to align with profile edge_bands (industry standard)
+        # Industry standard for Kalshi: 3% raw edge minimum (Market Math, Beatpoly)
+        # Kalshi 7% winner fee turns <2% edge into breakeven/negative EV
         _effective_price_cents = price_cents if price_cents > 0 else Decimal("50")
         if edge > 0:
             fee = Decimal(str(kalshi_fee_cents(int(_effective_price_cents), contracts)))
@@ -864,11 +867,11 @@ class PredictionMarketRisk:
             else:
                 payout_per = Decimal("100") - _effective_price_cents  # YES pays 100-price
             post_fee_edge = edge - (fee_per / payout_per) if payout_per > 0 else Decimal("0")
-            if post_fee_edge < Decimal("0.02"):  # ALIGNED TO 2026 INDUSTRY STANDARD: 2% post-fee edge
+            if post_fee_edge < Decimal("0.025"):  # ALIGNED TO 2026 PROFILE EDGE_BANDS: 2.5% post-fee edge (industry standard)
                 return PreTradeCheck(
                     allowed=False,
                     action=RiskAction.REJECT,
-                    reason=f"Post-fee edge {post_fee_edge:.4f} below minimum 0.02",
+                    reason=f"Post-fee edge {post_fee_edge:.4f} below minimum 0.025",
                     market_id=market_id,
                 )
 
