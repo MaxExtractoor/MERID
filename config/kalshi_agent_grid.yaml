@@ -28,19 +28,24 @@ agents:
   strategy_overrides:
     # Edge thresholds handled by profile edge_bands (kalshi_crypto_15m_v2.yaml)
     # Removed min_edge fields to use single source of truth
-    signal_mode: momentum_fvg
+    # CRITICAL FIX 2026-07-16: Aligned signal_mode with profile YAML (hybrid)
+    # Profile YAML is single source of truth for signal_mode
+    # hybrid = momentum_fvg + price_based panic fade (Turbine research winner +56.6% ROI)
+    signal_mode: hybrid
   take_profit:
     enabled: true
-    # TUNED (2026-05-25): Time-based dynamic TP for 15m contracts - aligned with edge
+    # CRITICAL FIX 2026-07-16: Updated time-based R-multiples to align with 2:1 risk/reward ratio
+    # Previous values (1.0R, 0.75R, 0.5R) were based on old exit policy
+    # New values (0.8R, 0.6R, 0.4R) align with 80% TP, 40% SL for positive expected value
     time_based_r_multiple:
-      over_7_min: 1.0
-      between_4_7_min: 0.75
-      under_4_min: 0.5
+      over_7_min: 0.8
+      between_4_7_min: 0.6
+      under_4_min: 0.4
     min_cents: 3
     scale_out_fraction: 0.5
     trailing_enabled: true
     trailing_activation_r_multiple: 0.8
-    trailing_giveback_cents: 3
+    trailing_giveback_cents: 5  # CRITICAL FIX 2026-07-16: Updated from 3 to 5 to match profile
     max_round_trips_per_contract: 2
     min_price_move_for_reentry: 5
     min_edge_after_fees_cents: 2.0
@@ -64,19 +69,24 @@ agents:
   strategy_overrides:
     # Edge thresholds handled by profile edge_bands (kalshi_crypto_15m_v2.yaml)
     # Removed min_edge fields to use single source of truth
-    signal_mode: momentum_fvg
+    # CRITICAL FIX 2026-07-16: Aligned signal_mode with profile YAML (hybrid)
+    # Profile YAML is single source of truth for signal_mode
+    # hybrid = momentum_fvg + price_based panic fade (Turbine research winner +56.6% ROI)
+    signal_mode: hybrid
   take_profit:
     enabled: true
-    # TUNED (2026-05-25): Time-based dynamic TP for 15m contracts - aligned with edge
+    # CRITICAL FIX 2026-07-16: Updated time-based R-multiples to align with 2:1 risk/reward ratio
+    # Previous values (1.0R, 0.75R, 0.5R) were based on old exit policy
+    # New values (0.8R, 0.6R, 0.4R) align with 80% TP, 40% SL for positive expected value
     time_based_r_multiple:
-      over_7_min: 1.0
-      between_4_7_min: 0.75
-      under_4_min: 0.5
+      over_7_min: 0.8
+      between_4_7_min: 0.6
+      under_4_min: 0.4
     min_cents: 3
     scale_out_fraction: 0.5
     trailing_enabled: true
     trailing_activation_r_multiple: 0.8
-    trailing_giveback_cents: 3
+    trailing_giveback_cents: 5  # CRITICAL FIX 2026-07-16: Updated from 3 to 5 to match profile
     max_round_trips_per_contract: 2
     min_price_move_for_reentry: 5
     min_edge_after_fees_cents: 2.0
@@ -100,19 +110,24 @@ agents:
   strategy_overrides:
     # Edge thresholds handled by profile edge_bands (kalshi_crypto_15m_v2.yaml)
     # Removed min_edge fields to use single source of truth
-    signal_mode: momentum_fvg
+    # CRITICAL FIX 2026-07-16: Aligned signal_mode with profile YAML (hybrid)
+    # Profile YAML is single source of truth for signal_mode
+    # hybrid = momentum_fvg + price_based panic fade (Turbine research winner +56.6% ROI)
+    signal_mode: hybrid
   take_profit:
     enabled: true
-    # TUNED (2026-05-25): Time-based dynamic TP for 15m contracts - aligned with edge
+    # CRITICAL FIX 2026-07-16: Updated time-based R-multiples to align with 2:1 risk/reward ratio
+    # Previous values (1.0R, 0.75R, 0.5R) were based on old exit policy
+    # New values (0.8R, 0.6R, 0.4R) align with 80% TP, 40% SL for positive expected value
     time_based_r_multiple:
-      over_7_min: 1.0
-      between_4_7_min: 0.75
-      under_4_min: 0.5
+      over_7_min: 0.8
+      between_4_7_min: 0.6
+      under_4_min: 0.4
     min_cents: 3
     scale_out_fraction: 0.6
     trailing_enabled: true
     trailing_activation_r_multiple: 0.8
-    trailing_giveback_cents: 3
+    trailing_giveback_cents: 5  # CRITICAL FIX 2026-07-16: Updated from 3 to 5 to match profile
     max_round_trips_per_contract: 2
     min_price_move_for_reentry: 6
     min_edge_after_fees_cents: 2.5
@@ -130,7 +145,10 @@ agents:
   strategy_overrides:
     # Edge thresholds handled by profile edge_bands (kalshi_crypto_15m_v2.yaml)
     # Removed min_edge fields to use single source of truth
-    signal_mode: momentum_fvg
+    # CRITICAL FIX 2026-07-16: Aligned signal_mode with profile YAML (hybrid)
+    # Profile YAML is single source of truth for signal_mode
+    # hybrid = momentum_fvg + price_based panic fade (Turbine research winner +56.6% ROI)
+    signal_mode: hybrid
     frequency: fifteen_min
   strike_selection:
     # Distance filtering handled by profile (max_distance_pct in kalshi_crypto_15m_v2.yaml)
@@ -139,16 +157,18 @@ agents:
     deep_otm_allowed: false
   take_profit:
     enabled: true
-    # TUNED (2026-05-25): Time-based dynamic TP for 15m contracts - aligned with edge
+    # CRITICAL FIX 2026-07-16: Updated time-based R-multiples to align with 2:1 risk/reward ratio
+    # Previous values (1.0R, 0.75R, 0.5R) were based on old exit policy
+    # New values (0.8R, 0.6R, 0.4R) align with 80% TP, 40% SL for positive expected value
     time_based_r_multiple:
-      over_7_min: 1.0
-      between_4_7_min: 0.75
-      under_4_min: 0.5
+      over_7_min: 0.8
+      between_4_7_min: 0.6
+      under_4_min: 0.4
     min_cents: 3
     scale_out_fraction: 0.6
     trailing_enabled: true
     trailing_activation_r_multiple: 0.8
-    trailing_giveback_cents: 3
+    trailing_giveback_cents: 5  # CRITICAL FIX 2026-07-16: Updated from 3 to 5 to match profile
     max_round_trips_per_contract: 2
     min_price_move_for_reentry: 6
     min_edge_after_fees_cents: 2.5
@@ -167,7 +187,10 @@ agents:
   strategy_overrides:
     # Edge thresholds handled by profile edge_bands (kalshi_crypto_15m_v2.yaml)
     # Removed min_edge fields to use single source of truth
-    signal_mode: momentum_fvg
+    # CRITICAL FIX 2026-07-16: Aligned signal_mode with profile YAML (hybrid)
+    # Profile YAML is single source of truth for signal_mode
+    # hybrid = momentum_fvg + price_based panic fade (Turbine research winner +56.6% ROI)
+    signal_mode: hybrid
   strike_selection:
     # Distance filtering handled by profile (max_distance_pct in kalshi_crypto_15m_v2.yaml)
     # Removed max_spot_to_strike_pct to use single source of truth
@@ -175,16 +198,18 @@ agents:
     deep_otm_allowed: false
   take_profit:
     enabled: true
-    # TUNED (2026-05-25): Time-based dynamic TP for 15m contracts - aligned with edge
+    # CRITICAL FIX 2026-07-16: Updated time-based R-multiples to align with 2:1 risk/reward ratio
+    # Previous values (1.0R, 0.75R, 0.5R) were based on old exit policy
+    # New values (0.8R, 0.6R, 0.4R) align with 80% TP, 40% SL for positive expected value
     time_based_r_multiple:
-      over_7_min: 1.0
-      between_4_7_min: 0.75
-      under_4_min: 0.5
+      over_7_min: 0.8
+      between_4_7_min: 0.6
+      under_4_min: 0.4
     min_cents: 3
     scale_out_fraction: 0.6
     trailing_enabled: true
     trailing_activation_r_multiple: 0.8
-    trailing_giveback_cents: 3
+    trailing_giveback_cents: 5  # CRITICAL FIX 2026-07-16: Updated from 3 to 5 to match profile
     max_round_trips_per_contract: 2
     min_price_move_for_reentry: 6
     min_edge_after_fees_cents: 2.5

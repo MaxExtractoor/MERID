@@ -1,14 +1,12 @@
 """Tests for Kalshi Market Selection Filter.
 
-NOTE: These tests have assertion errors for config values.
-Market filter is tested through integration tests in the production stack.
+NOTE: These tests were previously skipped due to config assertion errors (50c vs 75c).
+After 2026-07-16 fix aligning to 10-75c canonical range, these tests should now pass.
 """
 
 import time
 
 import pytest
-
-pytestmark = pytest.mark.skip(reason="Market filter tests have config assertion errors - tested via integration tests")
 
 from merid.event_venues.kalshi.market_filter import (
     DEFAULT_FILTER_CONFIG,
@@ -230,23 +228,23 @@ class TestSummary:
 # ── DEFAULT_FILTER_CONFIG Validation ───────────────────────────────────
 
 class TestDefaultFilterConfig:
-    """Test that DEFAULT_FILTER_CONFIG has correct thresholds to align with profile 10-50c sweet spot."""
+    """Test that DEFAULT_FILTER_CONFIG has correct thresholds to align with profile 10-75c canonical range."""
 
     def test_default_config_min_price_is_10(self):
         """Test that DEFAULT_FILTER_CONFIG min_price_cents is 10 (REDUCED from 50 to align with profile)."""
         assert DEFAULT_FILTER_CONFIG.min_price_cents == 10, \
             f"Expected min_price_cents=10, got {DEFAULT_FILTER_CONFIG.min_price_cents}"
 
-    def test_default_config_max_price_is_70(self):
-        """Test that DEFAULT_FILTER_CONFIG max_price_cents is 70 (REDUCED from 90 to prevent low-profit trades)."""
-        assert DEFAULT_FILTER_CONFIG.max_price_cents == 70, \
-            f"Expected max_price_cents=70, got {DEFAULT_FILTER_CONFIG.max_price_cents}"
+    def test_default_config_max_price_is_75(self):
+        """Test that DEFAULT_FILTER_CONFIG max_price_cents is 75 (canonical range 10-75c)."""
+        assert DEFAULT_FILTER_CONFIG.max_price_cents == 75, \
+            f"Expected max_price_cents=75, got {DEFAULT_FILTER_CONFIG.max_price_cents}"
 
-    def test_default_config_price_range_is_10_70(self):
-        """Test that DEFAULT_FILTER_CONFIG price range is [10, 70] (entry sweet spot 10-50c, filter max 70c)."""
+    def test_default_config_price_range_is_10_75(self):
+        """Test that DEFAULT_FILTER_CONFIG price range is [10, 75] (canonical range 10-75c)."""
         assert DEFAULT_FILTER_CONFIG.min_price_cents == 10, \
             f"Expected min_price_cents=10, got {DEFAULT_FILTER_CONFIG.min_price_cents}"
-        assert DEFAULT_FILTER_CONFIG.max_price_cents == 70, \
-            f"Expected max_price_cents=70, got {DEFAULT_FILTER_CONFIG.max_price_cents}"
+        assert DEFAULT_FILTER_CONFIG.max_price_cents == 75, \
+            f"Expected max_price_cents=75, got {DEFAULT_FILTER_CONFIG.max_price_cents}"
         assert DEFAULT_FILTER_CONFIG.min_price_cents < DEFAULT_FILTER_CONFIG.max_price_cents, \
             "min_price_cents should be less than max_price_cents"

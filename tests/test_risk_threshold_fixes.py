@@ -76,13 +76,14 @@ class TestCycleRiskFixes:
             import core.settings
             importlib.reload(core.settings)
             
+            # 2026-07-16: These are legacy defaults; actual enforcement uses fixed_exposure_cap_usd=1.00
             MAX_CYCLE_RISK_PCT = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.05"))
             MAX_TOTAL_RISK_PCT = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.15"))
             
             assert MAX_CYCLE_RISK_PCT == 0.05, \
-                f"Expected 5% cycle risk, got {MAX_CYCLE_RISK_PCT}"
+                f"Expected 5% cycle risk (legacy default, DISABLED for 15m), got {MAX_CYCLE_RISK_PCT}"
             assert MAX_TOTAL_RISK_PCT == 0.15, \
-                f"Expected 15% total risk, got {MAX_TOTAL_RISK_PCT}"
+                f"Expected 15% total risk (legacy default, DISABLED for 15m), got {MAX_TOTAL_RISK_PCT}"
     
     @pytest.mark.skip(reason="global_risk_guard.py is deprecated and has syntax errors. Use merid.risk.unified_risk_manager instead.")
     def test_global_risk_guard_defaults(self):
@@ -94,22 +95,24 @@ class TestCycleRiskFixes:
 
             guard = GlobalRiskGuard()
 
+            # 2026-07-16: These are legacy defaults; actual enforcement uses fixed_exposure_cap_usd=1.00
             assert guard.max_cycle_risk_pct == 0.05, \
-                f"Expected 5% cycle risk, got {guard.max_cycle_risk_pct}"
+                f"Expected 5% cycle risk (legacy default, DISABLED for 15m), got {guard.max_cycle_risk_pct}"
             assert guard.max_total_risk_pct == 0.15, \
-                f"Expected 15% total risk, got {guard.max_total_risk_pct}"
+                f"Expected 15% total risk (legacy default, DISABLED for 15m), got {guard.max_total_risk_pct}"
     
     def test_global_risk_guard_env_fallbacks(self):
         """Test global_risk_guard.py env var fallbacks."""
+        # 2026-07-16: These are legacy defaults; actual enforcement uses fixed_exposure_cap_usd=1.00
         # Test the _load_risk_pcts_from_env function
         with patch.dict(os.environ, {}, clear=True):
             cycle = float(os.getenv("MAX_CYCLE_RISK_PCT", "0.05"))
             total = float(os.getenv("MAX_TOTAL_RISK_PCT", "0.15"))
             
             assert cycle == 0.05, \
-                f"Expected 5% cycle risk fallback, got {cycle}"
+                f"Expected 5% cycle risk fallback (legacy default, DISABLED for 15m), got {cycle}"
             assert total == 0.15, \
-                f"Expected 15% total risk fallback, got {total}"
+                f"Expected 15% total risk fallback (legacy default, DISABLED for 15m), got {total}"
 
 
 class TestKellyFractionFixes:
@@ -210,10 +213,14 @@ class TestDrawdownLimits:
 
 
 class TestRiskLimitsYAML:
-    """Test config/risk_limits.yaml has correct values (5% cycle risk)."""
+    """Test config/risk_limits.yaml matches the fixed $1 exposure model.
+
+    2026-07-16: Percentage-based allocation caps DISABLED (0.0) - the $1 global
+    slot allocator is the single source of truth for exposure.
+    """
     
     def test_risk_limits_yaml_cycle_risk(self):
-        """Test config/risk_limits.yaml has 5% cycle risk."""
+        """Test config/risk_limits.yaml has cycle risk DISABLED (fixed $1 model)."""
         import yaml
         from pathlib import Path
         
@@ -222,11 +229,11 @@ class TestRiskLimitsYAML:
             config = yaml.safe_load(f)
         
         max_cycle_risk_pct = config['bankroll']['max_cycle_risk_pct']
-        assert max_cycle_risk_pct == 0.05, \
-            f"Expected 5% cycle risk in risk_limits.yaml, got {max_cycle_risk_pct}"
+        assert max_cycle_risk_pct == 0.0, \
+            f"Expected 0.0 (DISABLED - fixed $1 model), got {max_cycle_risk_pct}"
     
     def test_risk_limits_yaml_total_risk(self):
-        """Test config/risk_limits.yaml has 25% total risk (legacy value)."""
+        """Test config/risk_limits.yaml has total risk DISABLED (fixed $1 model)."""
         import yaml
         from pathlib import Path
         
@@ -235,8 +242,23 @@ class TestRiskLimitsYAML:
             config = yaml.safe_load(f)
         
         max_total_risk_pct = config['bankroll']['max_total_risk_pct']
-        assert max_total_risk_pct == 0.25, \
-            f"Expected 25% total risk in risk_limits.yaml, got {max_total_risk_pct}"
+        assert max_total_risk_pct == 0.0, \
+            f"Expected 0.0 (DISABLED - fixed $1 model), got {max_total_risk_pct}"
+    
+    def test_risk_limits_yaml_fixed_exposure_cap(self):
+        """Test config/risk_limits.yaml declares the $1 fixed exposure cap."""
+        import yaml
+        from pathlib import Path
+        
+        config_path = Path(__file__).parent.parent / "config" / "risk_limits.yaml"
+        with open(config_path) as f:
+            config = yaml.safe_load(f)
+        
+        assert config.get('fixed_exposure_cap_usd') == 1.00, \
+            f"Expected fixed_exposure_cap_usd=1.00, got {config.get('fixed_exposure_cap_usd')}"
+        # Per-trade pct also disabled; slot model max 1 contract per order
+        assert config['per_trade']['max_notional_pct'] == 0.0
+        assert config['per_trade']['max_contracts'] == 1
 
 
 class TestLoop15mPriceFallback:
@@ -264,17 +286,17 @@ class TestLoop15mPriceFallback:
 
 
 class TestDeepOTMThreshold:
-    """Test 50c threshold is consistent across all layers."""
+    """Test 75c threshold is consistent across all layers (2026-07-12 expanded from 50c)."""
     
     def test_risk_parameters_deep_otm_expensive(self):
-        """Test DEEP_OTM_EXPENSIVE_CENTS is 50."""
+        """Test DEEP_OTM_EXPENSIVE_CENTS is 75."""
         from merid.event_venues.kalshi.risk_parameters import DEEP_OTM_EXPENSIVE_CENTS
         
-        assert DEEP_OTM_EXPENSIVE_CENTS == 50, \
-            f"Expected DEEP_OTM_EXPENSIVE_CENTS=50, got {DEEP_OTM_EXPENSIVE_CENTS}"
+        assert DEEP_OTM_EXPENSIVE_CENTS == 75, \
+            f"Expected DEEP_OTM_EXPENSIVE_CENTS=75, got {DEEP_OTM_EXPENSIVE_CENTS}"
     
     def test_profile_max_contract_price(self):
-        """Test profile max_contract_price_cents is 50."""
+        """Test profile max_contract_price_cents is 75."""
         import yaml
         from pathlib import Path
         
@@ -283,8 +305,8 @@ class TestDeepOTMThreshold:
             config = yaml.safe_load(f)
         
         max_contract_price_cents = config['guardrails']['max_contract_price_cents']
-        assert max_contract_price_cents == 50, \
-            f"Expected max_contract_price_cents=50 in profile, got {max_contract_price_cents}"
+        assert max_contract_price_cents == 75, \
+            f"Expected max_contract_price_cents=75 in profile, got {max_contract_price_cents}"
 
 
 class TestGlobalExecutionGuardDisabled:

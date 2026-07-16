@@ -24,18 +24,29 @@ from merid.risk.profiles.crypto_15m_profile import Crypto15mProfileAdapter
 class TestUnifiedRiskManagerDefaults:
     """Test that UnifiedRiskManager defaults align with profile YAML."""
 
-    def test_max_cycle_risk_pct_aligned(self):
-        """Test that max_cycle_risk_pct matches profile YAML (5%)."""
+    def test_fixed_exposure_cap_default(self):
+        """Test that fixed_exposure_cap_usd defaults to $1.00 (global slot allocator model)."""
         limits = RiskLimits()
-        assert limits.max_cycle_risk_pct == 0.05, (
-            f"Expected 0.05 (5%), got {limits.max_cycle_risk_pct}"
+        assert limits.fixed_exposure_cap_usd == 1.00, (
+            f"Expected 1.00 ($1 global slot allocator cap), got {limits.fixed_exposure_cap_usd}"
+        )
+
+    def test_max_cycle_risk_pct_aligned(self):
+        """Test that max_cycle_risk_pct is DISABLED (fixed $1 exposure model).
+
+        2026-07-16: Percentage-based allocation PRUNED - pct==0.0 defers to the
+        $1 global slot allocator (single source of truth).
+        """
+        limits = RiskLimits()
+        assert limits.max_cycle_risk_pct == 0.0, (
+            f"Expected 0.0 (DISABLED - fixed $1 model), got {limits.max_cycle_risk_pct}"
         )
 
     def test_max_total_risk_pct_aligned(self):
-        """Test that max_total_risk_pct matches profile YAML (15%)."""
+        """Test that max_total_risk_pct is DISABLED (fixed $1 exposure model)."""
         limits = RiskLimits()
-        assert limits.max_total_risk_pct == 0.15, (
-            f"Expected 0.15 (15%), got {limits.max_total_risk_pct}"
+        assert limits.max_total_risk_pct == 0.0, (
+            f"Expected 0.0 (DISABLED - fixed $1 model), got {limits.max_total_risk_pct}"
         )
 
     def test_daily_loss_pct_aligned(self):
@@ -60,12 +71,21 @@ class TestUnifiedRiskManagerDefaults:
         )
 
     def test_per_trade_max_notional_pct_aligned(self):
-        """Test that per_trade_max_notional_pct is DISABLED (fixed $1 exposure model)."""
+        """Test that per_trade_max_notional_pct is DISABLED (fixed $1 exposure model).
+
+        2026-07-16: pct==0.0 makes check_order use fixed_exposure_cap_usd ($1)
+        as the per-trade cap instead of a percentage of bankroll.
+        """
         limits = RiskLimits()
-        # 2026-07-15: Percentage-based per_trade_max_notional_pct DISABLED in favor of fixed $1 exposure cap
-        # This field is retained for backward compatibility but not used in production
-        assert limits.per_trade_max_notional_pct == 0.03, (
-            f"Expected 0.03 (legacy, DISABLED), got {limits.per_trade_max_notional_pct}"
+        assert limits.per_trade_max_notional_pct == 0.0, (
+            f"Expected 0.0 (DISABLED - fixed $1 model), got {limits.per_trade_max_notional_pct}"
+        )
+
+    def test_per_trade_max_contracts_slot_model(self):
+        """Test that per_trade_max_contracts matches slot model (1 contract per order)."""
+        limits = RiskLimits()
+        assert limits.per_trade_max_contracts == 1, (
+            f"Expected 1 (slot model MAX_CONTRACTS_PER_ORDER), got {limits.per_trade_max_contracts}"
         )
 
 
@@ -74,6 +94,7 @@ class TestUnifiedRiskEnforcementCaps:
 
     def test_absolute_max_cycle_risk_pct_aligned(self):
         """Test that ABSOLUTE_MAX_CYCLE_RISK_PCT matches profile YAML (5%)."""
+        # 2026-07-16: Percentage-based ABSOLUTE_MAX_CYCLE_RISK_PCT DISABLED in favor of fixed $1 exposure model
         assert ABSOLUTE_MAX_CYCLE_RISK_PCT == 0.05, (
             f"Expected 0.05 (5%), got {ABSOLUTE_MAX_CYCLE_RISK_PCT}"
         )
@@ -121,16 +142,25 @@ class TestProfileYAMLConsistency:
         )
 
     def test_profile_per_trade_risk_pct(self):
-        """Test that profile per_trade_risk_pct is DISABLED (fixed $1 exposure model)."""
+        """Test that profile per_trade_risk_pct is DISABLED (fixed $1 exposure model).
+
+        2026-07-16: Default changed 0.03 -> 0.0 so absent YAML keys can never
+        resurrect percentage-based caps ($1 global slot allocator is authoritative).
+        """
         adapter = Crypto15mProfileAdapter()
         profile = adapter.profile
-        # 2026-07-15: Percentage-based per_trade_risk_pct DISABLED in favor of fixed $1 exposure cap
-        # This field is retained for backward compatibility but not used in production
-        assert profile.guardrails_per_trade_risk_pct == 0.03, (
-            f"Expected 0.03 (legacy, DISABLED), got {profile.guardrails_per_trade_risk_pct}"
+        assert profile.guardrails_per_trade_risk_pct == 0.0, (
+            f"Expected 0.0 (DISABLED - fixed $1 model), got {profile.guardrails_per_trade_risk_pct}"
         )
-        # Check the guardrails per_trade_risk_pct
-        assert hasattr(profile, 'guardrails_per_trade_risk_pct') or True  # May not have this field directly
+
+    def test_profile_pct_caps_disabled(self):
+        """Test that all profile percentage-based venue/agent caps are DISABLED (0.0)."""
+        adapter = Crypto15mProfileAdapter()
+        profile = adapter.profile
+        assert profile.venue_max_single_order_pct == 0.0
+        assert profile.venue_max_total_notional_pct == 0.0
+        assert profile.venue_bankroll_cap_pct == 0.0
+        assert profile.agent_max_notional_pct == 0.0
 
     def test_profile_max_daily_loss_pct(self):
         """Test that profile max_daily_loss_pct is 5%."""
@@ -206,17 +236,19 @@ class TestRiskParameterCrossValidation:
         assert urm_default == 0.20
 
     def test_per_trade_risk_consistency(self):
-        """Test that per_trade_risk_pct is DISABLED (fixed $1 exposure model)."""
-        # UnifiedRiskManager default (legacy, DISABLED)
+        """Test that per_trade_risk_pct is DISABLED (fixed $1 exposure model).
+
+        2026-07-16: URM per-trade pct is 0.0 (defers to fixed $1 cap).
+        The legacy unified_risk_enforcement module (advisory, not in the 15m live
+        path) retains its 3% clamp ceiling for legacy pct-based configs.
+        """
+        # UnifiedRiskManager default (DISABLED - fixed $1 model)
         urm_default = RiskLimits().per_trade_max_notional_pct
+        assert urm_default == 0.0, f"Expected 0.0 (DISABLED - fixed $1 model), got {urm_default}"
         
-        # unified_risk_enforcement cap (legacy, DISABLED)
+        # Legacy advisory clamp ceiling (only clamps legacy pct configs; unused in 15m live path)
         enforcement_cap = ABSOLUTE_MAX_RISK_PER_TRADE_PCT
-        
-        # 2026-07-15: Percentage-based per_trade_risk_pct DISABLED in favor of fixed $1 exposure cap
-        # Both should be 0.03 (legacy, DISABLED)
-        assert urm_default == 0.03, f"Expected 0.03 (legacy, DISABLED), got {urm_default}"
-        assert enforcement_cap == 0.03, f"Expected 0.03 (legacy, DISABLED), got {enforcement_cap}"
+        assert enforcement_cap == 0.03, f"Expected 0.03 (legacy advisory ceiling), got {enforcement_cap}"
 
 
 class TestUnifiedRiskManagerBehavior:
@@ -239,24 +271,41 @@ class TestUnifiedRiskManagerBehavior:
         total_cap = manager._get_total_cap_usd()
         assert total_cap > 0, f"Expected positive total cap, got ${total_cap:.2f}"
 
-    def test_check_order_allows_within_contract_limit(self):
-        """Test that check_order allows orders within aligned contract limit (2 contracts)."""
-        manager = UnifiedRiskManager()
+    def test_check_order_slot_model_contract_limit(self):
+        """Test check_order under the slot model: 1 contract allowed, 2 rejected.
+
+        2026-07-16: per_trade_max_contracts=1 (slot model MAX_CONTRACTS_PER_ORDER).
+        Per-trade notional cap is the fixed $1 exposure cap, NOT a pct of bankroll.
+        """
         UnifiedRiskManager.reset_for_tests()
+        manager = UnifiedRiskManager()
         
         # Calibrate with $1000 bankroll
         manager.calibrate_from_balance(balance_cents=100000)  # $1000
         
-        # Try to order with 2 contracts - should be within per-trade contract limit (2)
+        # 1 contract at 50c ($0.50 <= $1 fixed cap) - should be allowed
         allowed, reason = manager.check_order(
             ticker="KXBTC15M-TEST",
-            contracts=2,  # 2 contracts is at the limit
+            contracts=1,
             price_cents=50,
             category="crypto",
             underlying="BTC"
         )
+        assert allowed, f"1-contract order should be allowed, but was rejected: {reason}"
         
-        assert allowed, f"Order should be allowed, but was rejected: {reason}"
+        # 2 contracts - should be rejected by slot model contract limit
+        UnifiedRiskManager.reset_for_tests()
+        manager = UnifiedRiskManager()
+        manager.calibrate_from_balance(balance_cents=100000)
+        allowed, reason = manager.check_order(
+            ticker="KXBTC15M-TEST",
+            contracts=2,
+            price_cents=50,
+            category="crypto",
+            underlying="BTC"
+        )
+        assert not allowed, "2-contract order should be rejected under slot model (max 1)"
+        assert "MAX_CONTRACTS" in reason
 
 
 if __name__ == "__main__":

@@ -169,7 +169,7 @@ class DeepTradingBlockerAudit:
                     line_number=0,
                     issue="price_range min_price_cents or max_price_cents not defined",
                     impact="Price range filtering may use incorrect defaults",
-                    recommendation="Add min_price_cents=10 and max_price_cents=50 to price_range"
+                    recommendation="Add min_price_cents=10 and max_price_cents=75 to price_range"
                 )
             else:
                 print(f"✓ price_range.min_price_cents = {min_price}c")
@@ -194,9 +194,9 @@ class DeepTradingBlockerAudit:
                         component="price_range.max_price_cents",
                         file_path=str(profile_path),
                         line_number=0,
-                        issue=f"price_range.max_price_cents = {max_price}c (expected 50c)",
-                        impact="May allow entries above 50c with poor risk/reward",
-                        recommendation="Set max_price_cents to 50c for sweet spot threshold"
+                        issue=f"price_range.max_price_cents = {max_price}c (expected 75c)",
+                        impact="May allow entries above 75c with poor risk/reward",
+                        recommendation="Set max_price_cents to 75c for canonical range"
                     )
             
             # Check universe config
@@ -365,9 +365,9 @@ class DeepTradingBlockerAudit:
                             component=component_name,
                             file_path=file_path,
                             line_number=line_num,
-                            issue=f"max_price_cents = {max_value}c (expected 50c)",
-                            impact="May allow entries above 50c with poor risk/reward",
-                            recommendation="Set max_price_cents to 50c for sweet spot threshold"
+                            issue=f"max_price_cents = {max_value}c (expected 75c)",
+                            impact="May allow entries above 75c with poor risk/reward",
+                            recommendation="Set max_price_cents to 75c for canonical range"
                         )
                     else:
                         print(f"✓ {component_name}: max_price_cents = {max_value}c (line {line_num})")
@@ -781,7 +781,7 @@ class DeepTradingBlockerAudit:
             (r'if\s+velocity\s*==\s*0', "velocity == 0 check (should use tolerance)"),
             (r'if\s+spread\s*==\s*0', "spread == 0 check (should use tolerance)"),
             (r'if\s+depth\s*==\s*0', "depth == 0 check (should use >= 1)"),
-            (r'price_cents\s*=\s*50\s*#.*fallback', "50c fallback (should be 25c midpoint)"),
+            (r'price_cents\s*=\s*50\s*#.*fallback', "50c fallback (should be 42c midpoint for 10-75c range)"),
         ]
         
         for file_path in files_to_check:

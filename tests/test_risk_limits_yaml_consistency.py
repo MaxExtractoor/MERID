@@ -22,10 +22,10 @@ def test_risk_limits_yaml_per_trade_limit_is_correct():
     # Get per-trade limit
     risk_limits_per_trade = risk_limits.get('per_trade', {}).get('max_notional_pct')
     
-    # 2026-07-15: Percentage-based per_trade.max_notional_pct DISABLED in favor of fixed $1 exposure cap
+    # 2026-07-16: Percentage-based per_trade.max_notional_pct DISABLED (0.0) in favor of fixed $1 exposure cap
     # This field is retained for backward compatibility but not used in production
-    assert risk_limits_per_trade == 0.03, \
-        f"Expected per_trade.max_notional_pct to be 0.03 (legacy, DISABLED), got {risk_limits_per_trade}"
+    assert risk_limits_per_trade == 0.0, \
+        f"Expected per_trade.max_notional_pct to be 0.0 (DISABLED for 15m), got {risk_limits_per_trade}"
 
 
 def test_risk_limits_yaml_cycle_limit_is_correct():
@@ -40,10 +40,10 @@ def test_risk_limits_yaml_cycle_limit_is_correct():
     # Get cycle/window limit
     risk_limits_cycle = risk_limits.get('bankroll', {}).get('max_cycle_risk_pct')
     
-    # 2026-07-15: Percentage-based max_cycle_risk_pct DISABLED in favor of fixed $1 exposure cap
+    # 2026-07-16: Percentage-based max_cycle_risk_pct DISABLED (0.0) in favor of fixed $1 exposure cap
     # This field is retained for backward compatibility but not used in production
-    assert risk_limits_cycle == 0.05, \
-        f"Expected bankroll.max_cycle_risk_pct to be 0.05 (legacy, DISABLED), got {risk_limits_cycle}"
+    assert risk_limits_cycle == 0.0, \
+        f"Expected bankroll.max_cycle_risk_pct to be 0.0 (DISABLED for 15m), got {risk_limits_cycle}"
 
 
 def test_risk_limits_yaml_total_limit_is_correct():
@@ -58,10 +58,10 @@ def test_risk_limits_yaml_total_limit_is_correct():
     # Get total venue limit
     risk_limits_total = risk_limits.get('bankroll', {}).get('max_total_risk_pct')
     
-    # 2026-07-15: Percentage-based max_total_risk_pct DISABLED in favor of fixed $1 exposure cap
+    # 2026-07-16: Percentage-based max_total_risk_pct DISABLED (0.0) in favor of fixed $1 exposure cap
     # This field is retained for backward compatibility but not used in production
-    assert risk_limits_total == 0.15, \
-        f"Expected bankroll.max_total_risk_pct to be 0.15 (legacy, DISABLED), got {risk_limits_total}"
+    assert risk_limits_total == 0.0, \
+        f"Expected bankroll.max_total_risk_pct to be 0.0 (DISABLED for 15m), got {risk_limits_total}"
 
 
 def test_risk_limits_yaml_correlated_stack_limit():

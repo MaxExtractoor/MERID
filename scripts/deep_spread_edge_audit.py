@@ -440,7 +440,7 @@ class DeepSpreadEdgeAuditor:
         
         # Check 3: Edge should be meaningfully larger than spread
         if avg_min_edge and universe_max_spread:
-            # Convert edge % to cents (assuming 50c midpoint = 0.50 probability)
+            # Convert edge % to cents (assuming 42.5c midpoint = 0.50 probability for 10-75c canonical range)
             # Edge of 2% at 50c = 1c edge
             edge_in_cents = avg_min_edge * 0.5  # Approximate conversion
             

@@ -383,7 +383,7 @@ class IndicatorSnapshot:
     rsi: float = 50.0
     rsi_zone: str = "neutral"          # "oversold", "overbought", "neutral"
     rsi_tf: str = "15m"               # Timeframe of RSI (e.g., "15m", "5m", "1h")
-    rsi_period: int = 8               # RSI period used
+    rsi_period: int = 14              # CRITICAL FIX: 2026-07-16 - Updated from 8 to 14 for 15-minute markets
     rsi_5m: float = 50.0              # 5m RSI (timing gate)
     rsi_5m_zone: str = "neutral"      # 5m RSI zone
     rsi_1h: float = 50.0              # 1h RSI (regime filter)
