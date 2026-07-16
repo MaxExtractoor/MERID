@@ -828,13 +828,16 @@ class Kalshi15mLoop:
 
         # CRITICAL: Initialize PositionMonitor for profit taking and trailing stop
         # This enables active monitoring of open positions for TP/SL/trailing exit conditions
-        self._position_monitor = None
+        # CRITICAL FIX (2026-07-17): PositionMonitor initialization MUST succeed
+        # Previously, if initialization failed, self._position_monitor remained None,
+        # causing all exit policies to be silently skipped. This is a critical safety violation.
         try:
             from merid.position_management.position_monitor import get_position_monitor
             self._position_monitor = get_position_monitor()
             logger.info("[15m-LOOP] Initialized PositionMonitor for TP/SL/trailing exits")
         except Exception as e:
-            logger.warning("[15m-LOOP] Failed to initialize PositionMonitor: %s", e)
+            logger.error("[15m-LOOP] CRITICAL: Failed to initialize PositionMonitor: %s", e, exc_info=True)
+            raise RuntimeError(f"PositionMonitor initialization failed - exit policies will not execute: {e}")
 
     @property
     def is_running(self) -> bool:
@@ -1197,6 +1200,9 @@ class Kalshi15mLoop:
                 logger.warning("[15m-LOOP] Failed to start Coinbase WebSocket task: %s", e)
 
         # CRITICAL: Start PositionMonitor for active TP/SL/trailing exit monitoring
+        # CRITICAL FIX (2026-07-17): PositionMonitor start MUST succeed
+        # Previously, if start() failed, the system would continue with exit policies disabled.
+        # This is a critical safety violation - all positions would ride to settlement without exit enforcement.
         if self._position_monitor:
             try:
                 # Register exit callback to trigger exit orders
@@ -1299,7 +1305,11 @@ class Kalshi15mLoop:
                 await self._position_monitor.start()
                 logger.info("[15m-LOOP] Started PositionMonitor with exit callback")
             except Exception as e:
-                logger.warning("[15m-LOOP] Failed to start PositionMonitor: %s", e, exc_info=True)
+                logger.error("[15m-LOOP] CRITICAL: Failed to start PositionMonitor: %s", e, exc_info=True)
+                raise RuntimeError(f"PositionMonitor start failed - exit policies will not execute: {e}")
+        else:
+            logger.error("[15m-LOOP] CRITICAL: PositionMonitor is None - exit policies will not execute!")
+            raise RuntimeError("PositionMonitor is None - exit policies will not execute")
 
     async def _execute_exit_order(self, position, exit_reason, exit_price_cents, contracts_to_close=None) -> None:
         """Execute exit order when PositionMonitor triggers exit condition.
@@ -1407,6 +1417,8 @@ class Kalshi15mLoop:
             # execute immediately to lock in profits or stop losses.
             # CRITICAL FIX: Add exit_policy_id to satisfy order router validation for exit orders
             # Exit orders require exit_policy_id for tracking per _validate_risk_contract_linkage
+            # CRITICAL FIX (2026-07-16): Use rationale field instead of non-existent exit_reason field
+            # OrderIntent does not have exit_reason parameter; use rationale for exit reason tracking
             intent = OrderIntent(
                 ticker=position.market_id,
                 side=kalshi_side,  # CRITICAL FIX: Use Kalshi-formatted side (SELL_YES, SELL_NO)
@@ -1417,7 +1429,7 @@ class Kalshi15mLoop:
                 time_in_force="gtc",  # Good till canceled - allows order to rest if not immediately filled
                 source="position_monitor_exit",
                 agent_id="merid.position_management.position_monitor",
-                exit_reason=exit_reason,
+                rationale=f"exit_reason:{exit_reason.value if hasattr(exit_reason, 'value') else exit_reason}",  # Use rationale for exit reason
                 exit_policy_id=position.exit_policy_id,  # CRITICAL FIX: Required for exit order validation
                 aggressiveness=1.0,  # CRITICAL FIX: Force marketable execution for immediate fill
             )

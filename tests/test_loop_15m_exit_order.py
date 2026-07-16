@@ -540,5 +540,204 @@ class TestLoop15mExitOrderExitPolicyId:
         assert error_message is None
 
 
+class TestLoop15mExitReasonParameterFix:
+    """Tests for exit_reason parameter fix (2026-07-16).
+    
+    CRITICAL FIX: OrderIntent does not have exit_reason parameter.
+    Exit orders were failing during construction with TypeError,
+    which prevented them from reaching risk/execution guardrails.
+    Fix: Use rationale field instead of non-existent exit_reason field.
+    """
+    
+    def test_exit_order_without_exit_reason_parameter(self):
+        """Test that exit orders do NOT use exit_reason parameter.
+        
+        This test verifies the fix where exit_reason parameter was removed
+        from OrderIntent construction. The parameter doesn't exist in the
+        OrderIntent class, so passing it causes TypeError.
+        """
+        from merid.event_venues.kalshi.order_router import OrderIntent
+        from merid.position_management.position import Position, PositionSide
+        from merid.position_management.exit_policy import ExitReason
+        
+        # Create a position
+        position = Position(
+            position_id="test-1",
+            market_id="KXBTC15M-TEST",
+            side=PositionSide.YES,
+            size=5,
+            avg_entry_price_cents=50,
+            exit_policy_id="test-policy-123",
+        )
+        
+        # Simulate exit order creation with the FIX (using rationale instead of exit_reason)
+        action = "sell"
+        side_str = position.side.value if hasattr(position.side, 'value') else str(position.side)
+        side_upper = side_str.upper()
+        
+        if side_upper == "YES" and action == "sell":
+            kalshi_side = "SELL_YES"
+        elif side_upper == "NO" and action == "sell":
+            kalshi_side = "SELL_NO"
+        else:
+            kalshi_side = f"{action.upper()}_{side_upper}"
+        
+        exit_reason = ExitReason.STOP_LOSS
+        exit_price_cents = 45
+        count = position.size
+        
+        # Create exit OrderIntent WITHOUT exit_reason parameter (the fix)
+        # Use rationale field instead
+        intent = OrderIntent(
+            ticker=position.market_id,
+            side=kalshi_side,
+            action=action,
+            price_cents=exit_price_cents,
+            count=count,
+            order_type="limit",
+            time_in_force="gtc",
+            source="position_monitor_exit",
+            agent_id="merid.position_management.position_monitor",
+            rationale=f"exit_reason:{exit_reason.value if hasattr(exit_reason, 'value') else exit_reason}",
+            exit_policy_id=position.exit_policy_id,
+            aggressiveness=1.0,
+        )
+        
+        # Verify intent was created successfully
+        assert intent.ticker == "KXBTC15M-TEST"
+        assert intent.side == "SELL_YES"
+        assert intent.rationale == "exit_reason:stop_loss"  # ExitReason.value is lowercase
+        assert intent.exit_policy_id == "test-policy-123"
+        assert intent.aggressiveness == 1.0
+    
+    def test_exit_order_with_exit_reason_parameter_would_fail(self):
+        """Test that passing exit_reason parameter causes TypeError.
+        
+        This test demonstrates the bug: passing exit_reason to OrderIntent
+        causes TypeError because the field doesn't exist in the class.
+        This prevented orders from reaching guardrails.
+        """
+        from merid.event_venues.kalshi.order_router import OrderIntent
+        from merid.position_management.position import Position, PositionSide
+        from merid.position_management.exit_policy import ExitReason
+        
+        # Create a position
+        position = Position(
+            position_id="test-1",
+            market_id="KXBTC15M-TEST",
+            side=PositionSide.YES,
+            size=5,
+            avg_entry_price_cents=50,
+            exit_policy_id="test-policy-123",
+        )
+        
+        exit_reason = ExitReason.STOP_LOSS
+        
+        # Attempting to create OrderIntent with exit_reason parameter (the bug)
+        # This should raise TypeError
+        with pytest.raises(TypeError, match="unexpected keyword argument 'exit_reason'"):
+            intent = OrderIntent(
+                ticker=position.market_id,
+                side="SELL_YES",
+                action="sell",
+                price_cents=45,
+                count=position.size,
+                order_type="limit",
+                time_in_force="gtc",
+                source="position_monitor_exit",
+                agent_id="merid.position_management.position_monitor",
+                exit_reason=exit_reason,  # BUG: This parameter doesn't exist
+                exit_policy_id=position.exit_policy_id,
+                aggressiveness=1.0,
+            )
+    
+    def test_rationale_field_tracks_exit_reason(self):
+        """Test that rationale field properly tracks exit reason.
+        
+        This test verifies that the rationale field is used to track
+        exit reason information, allowing it to be logged and audited.
+        """
+        from merid.event_venues.kalshi.order_router import OrderIntent
+        from merid.position_management.position import Position, PositionSide
+        from merid.position_management.exit_policy import ExitReason
+        
+        # Test different exit reasons
+        exit_reasons = [
+            ExitReason.STOP_LOSS,
+            ExitReason.TAKE_PROFIT,
+            ExitReason.TIME_STOP,
+            ExitReason.RATCHET_TRIM,
+        ]
+        
+        for exit_reason in exit_reasons:
+            position = Position(
+                position_id=f"test-{exit_reason.value}",
+                market_id="KXBTC15M-TEST",
+                side=PositionSide.YES,
+                size=5,
+                avg_entry_price_cents=50,
+                exit_policy_id="test-policy-123",
+            )
+            
+            # Create exit order with rationale tracking exit reason
+            intent = OrderIntent(
+                ticker=position.market_id,
+                side="SELL_YES",
+                action="sell",
+                price_cents=45,
+                count=position.size,
+                order_type="limit",
+                time_in_force="gtc",
+                source="position_monitor_exit",
+                agent_id="merid.position_management.position_monitor",
+                rationale=f"exit_reason:{exit_reason.value if hasattr(exit_reason, 'value') else exit_reason}",
+                exit_policy_id=position.exit_policy_id,
+                aggressiveness=1.0,
+            )
+            
+            # Verify rationale contains exit reason
+            assert f"exit_reason:{exit_reason.value}" in intent.rationale
+    
+    def test_exit_order_reaches_guardrails_after_fix(self):
+        """Test that exit orders reach guardrails after the fix.
+        
+        This test verifies that after removing exit_reason parameter,
+        exit orders can be successfully created and routed through
+        risk/execution guardrails.
+        """
+        from merid.event_venues.kalshi.order_router import OrderIntent, _is_exit_order, _is_crypto_15m_market, _validate_risk_contract_linkage
+        from merid.position_management.position import Position, PositionSide
+        from merid.position_management.exit_policy import ExitReason
+        
+        # Create exit order with the fix (no exit_reason parameter)
+        intent = OrderIntent(
+            ticker="KXBTC15M-TEST",
+            side="SELL_YES",
+            action="sell",
+            price_cents=45,
+            count=5,
+            order_type="limit",
+            time_in_force="gtc",
+            source="position_monitor_exit",
+            agent_id="merid.position_management.position_monitor",
+            rationale="exit_reason:STOP_LOSS",
+            exit_policy_id="test-policy-123",
+            aggressiveness=1.0,
+        )
+        
+        # Verify it's an exit order
+        assert _is_exit_order(intent) is True
+        
+        # Verify it's a crypto 15m market
+        assert _is_crypto_15m_market(intent.ticker) is True
+        
+        # Validate risk contract linkage - should PASS
+        is_valid, error_message = _validate_risk_contract_linkage(intent)
+        
+        # Should be valid (reaches guardrails)
+        assert is_valid is True
+        assert error_message is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
