@@ -100,7 +100,12 @@ logger.info(
 
 
 class SignalAction(str, Enum):
-    """What the strategy recommends."""
+    """What the strategy recommends.
+    
+    CRITICAL: This enum is being integrated with unified signal terminology.
+    For new code, prefer using signal_terminology.Action and signal_terminology.Side
+    separately for clearer separation of concerns.
+    """
     BUY_YES = "buy_yes"
     BUY_NO = "buy_no"
     SELL_YES = "sell_yes"

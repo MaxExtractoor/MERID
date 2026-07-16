@@ -3,6 +3,11 @@
 This module provides canonical type-safe enums for sides and outcomes
 to eliminate stringly-typed "yes/no" inconsistencies across the codebase.
 
+CRITICAL: This module is now integrated with signal_terminology.py for
+unified signal terminology across the entire codebase. The Side and Action
+enums here are the canonical Kalshi-specific definitions, while signal_terminology.py
+provides broader trading signal concepts (Direction, Momentum, Velocity, StrategyMode).
+
 Usage::
 
     from merid.event_venues.kalshi.side_semantics import Side, Outcome, Action
@@ -24,6 +29,13 @@ from __future__ import annotations
 
 from enum import Enum
 from typing import Literal, Optional
+
+# Import unified signal terminology for integration
+try:
+    from merid.prediction.signal_terminology import Side as UnifiedSide, Action as UnifiedAction
+    UNIFIED_TERMINOLOGY_AVAILABLE = True
+except ImportError:
+    UNIFIED_TERMINOLOGY_AVAILABLE = False
 
 
 class Side(str, Enum):

@@ -8,6 +8,9 @@ Implements Hidden Markov Model (HMM) for detecting market regimes:
 
 Based on 2026 best practices from Tradewink and RegimeSense.
 Uses walk-forward training for production safety.
+
+CRITICAL: Uses unified signal terminology from signal_terminology.py
+to prevent signal inversion bugs and ensure consistent side selection.
 """
 
 import numpy as np
@@ -18,6 +21,14 @@ import logging
 from enum import Enum
 
 logger = logging.getLogger(__name__)
+
+# Import unified signal terminology for consistency
+try:
+    from merid.prediction.signal_terminology import StrategyMode
+    UNIFIED_TERMINOLOGY_AVAILABLE = True
+except ImportError:
+    UNIFIED_TERMINOLOGY_AVAILABLE = False
+    logger.warning("signal_terminology not available - using legacy strategy mode strings")
 
 try:
     from hmmlearn import hmm
@@ -295,34 +306,49 @@ class RegimeDetector:
             
         Returns:
             Strategy mode: 'trend_following' or 'mean_reversion'
+            
+        Note:
+            Returns string for backward compatibility. If unified terminology
+            is available, also validates against StrategyMode enum.
         """
         if detection is None:
-            return 'trend_following'  # Default
+            mode = 'trend_following'  # Default
+        else:
+            # CRITICAL FIX: Only use mean_reversion when confidence is high (>0.7)
+            # Low confidence indicates insufficient training data or uncertain regime
+            # In these cases, default to trend_following to avoid signal inversion
+            if detection.confidence < 0.7:
+                logger.debug(
+                    f"[REGIME-DETECTOR] Low confidence {detection.confidence:.2f} < 0.7, "
+                    f"defaulting to trend_following to avoid signal inversion"
+                )
+                mode = 'trend_following'
+            
+            # Trend-following in bull regimes
+            elif detection.regime == Regime.BULL:
+                mode = 'trend_following'
+            
+            # Mean-reversion in choppy regimes (only with high confidence)
+            elif detection.regime == Regime.CHOPPY:
+                logger.warning(
+                    f"[REGIME-DETECTOR] High-confidence CHOPPY regime detected (confidence={detection.confidence:.2f}), "
+                    f"using mean_reversion mode - SIGNAL INVERSION RISK: positive velocity will trigger NO signals"
+                )
+                mode = 'mean_reversion'
+            
+            # Conservative in bear regimes (avoid or very selective)
+            elif detection.regime == Regime.BEAR:
+                mode = 'trend_following'  # Still follow trend, but could be more selective
+            else:
+                mode = 'trend_following'
         
-        # CRITICAL FIX: Only use mean_reversion when confidence is high (>0.7)
-        # Low confidence indicates insufficient training data or uncertain regime
-        # In these cases, default to trend_following to avoid signal inversion
-        if detection.confidence < 0.7:
-            logger.debug(
-                f"[REGIME-DETECTOR] Low confidence {detection.confidence:.2f} < 0.7, "
-                f"defaulting to trend_following to avoid signal inversion"
-            )
-            return 'trend_following'
+        # Validate against unified terminology if available
+        if UNIFIED_TERMINOLOGY_AVAILABLE:
+            try:
+                # Ensure the mode is a valid StrategyMode
+                StrategyMode(mode)
+            except ValueError as e:
+                logger.error(f"[REGIME-DETECTOR] Invalid strategy mode '{mode}': {e}")
+                return 'trend_following'  # Safe default
         
-        # Trend-following in bull regimes
-        if detection.regime == Regime.BULL:
-            return 'trend_following'
-        
-        # Mean-reversion in choppy regimes (only with high confidence)
-        elif detection.regime == Regime.CHOPPY:
-            logger.warning(
-                f"[REGIME-DETECTOR] High-confidence CHOPPY regime detected (confidence={detection.confidence:.2f}), "
-                f"using mean_reversion mode - SIGNAL INVERSION RISK: positive velocity will trigger NO signals"
-            )
-            return 'mean_reversion'
-        
-        # Conservative in bear regimes (avoid or very selective)
-        elif detection.regime == Regime.BEAR:
-            return 'trend_following'  # Still follow trend, but could be more selective
-        
-        return 'trend_following'
+        return mode
