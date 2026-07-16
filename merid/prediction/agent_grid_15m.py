@@ -11659,10 +11659,9 @@ class LeanAgent15m:
                 "hmm_regime_confidence": signal.get("hmm_regime_confidence", 0.0),
 
                 # CRITICAL FIX: Add exit targets to satisfy "no trade without exit" invariant
-
-                "take_profit_r_multiple": 0.5,  # 0.5R take profit (conservative)
-
-                "stop_loss_r_multiple": 0.25,  # 0.25R stop loss (tight risk control)
+                # CRITICAL FIX 2026-07-16: Updated to align with exit_policy.py (80% TP, 40% SL for 2:1 risk/reward)
+                "take_profit_r_multiple": 0.8,  # 0.8R take profit (2:1 risk/reward ratio)
+                "stop_loss_r_multiple": 0.4,  # 0.4R stop loss (2:1 risk/reward ratio)
 
                 # Phase 1: Add market microstructure data for fee-aware edge and microstructure gates
 

@@ -27,7 +27,35 @@ logger = logging.getLogger(__name__)
 
 
 class ExitReason(str, Enum):
-    """Exit reason types aligned with position_management.exit_policy."""
+    """
+    Exit reason types - SINGLE SOURCE OF TRUTH for exit reasons across the system.
+    
+    CRITICAL FIX: 2026-07-15 - Synchronized with position_management.exit_policy.ExitReason
+    All modules must use this enum to ensure consistency in logging, metrics, and callbacks.
+    
+    EXIT PRECEDENCE ORDER (highest to lowest priority):
+    This is the ACTUAL check order in position_monitor._check_position():
+    
+    1. EXTREME_PROFIT - Exit at 99c YES / 1c NO (guaranteed win, highest priority)
+    2. DYNAMIC_TAKE_PROFIT - Laddered exit based on entry price zones (user strategy)
+    3. RATCHET_TRIM - Partial close to trim position when >1 contract and price >80c
+    4. RATCHET_FLOOR - Exit when price drops below ratchet floor (80-85c profit protection)
+    5. STOP_LOSS - Stop loss trigger
+    6. TAKE_PROFIT - Take profit trigger
+    7. TRAIL - Trailing stop trigger
+    8. TIME_STOP - Time-based exit (emergency flatten, staged exits)
+    9. EDGE_DECAY - Edge quality degradation
+    10. CANDLE_REVERSAL - Momentum reversal signal
+    11. ADAPTIVE_TIMING - Historical performance-based timing
+    12. STALE_DATA - Market data staleness (P0 safety fix)
+    13. RISK - Risk kill switch or exposure limit
+    14. SCALE_OUT - Partial position close
+    15. MANUAL - Manual exit
+    16. LOSS_CAP - Loss cap trigger (break-even mechanism)
+    
+    NOTE: EXTREME_PROFIT and RATCHET_FLOOR are handled in position_monitor/resolver, not in ExitPolicy.evaluate().
+    NOTE: LOSS_CAP is handled by position.py break-even mechanism, not in ExitPolicy.evaluate().
+    """
     TAKE_PROFIT = "take_profit"
     STOP_LOSS = "stop_loss"
     TRAIL = "trail"
@@ -43,6 +71,7 @@ class ExitReason(str, Enum):
     DYNAMIC_TAKE_PROFIT = "dynamic_take_profit"
     STALE_DATA = "stale_data"
     ADAPTIVE_TIMING = "adaptive_timing"
+    LOSS_CAP = "loss_cap"
 
 
 @dataclass
@@ -55,12 +84,12 @@ class ExitPolicyConfig:
     """
     # Take-profit configuration
     take_profit_enabled: bool = True
-    take_profit_pct: float = 0.50  # 50% profit target (edge capture ratio)
+    take_profit_pct: float = 0.80  # 80% profit target (edge capture ratio) - CRITICAL FIX 2026-07-16: Changed from 0.50 to achieve positive risk/reward
     min_hold_minutes: float = 2.0  # Minimum hold before TP (prevents noise exits)
     
     # Stop-loss configuration
     stop_loss_enabled: bool = True
-    stop_loss_pct: float = 0.80  # 80% loss trigger (aligned with research)
+    stop_loss_pct: float = 0.40  # 40% loss trigger (aligned with research) - CRITICAL FIX 2026-07-16: Changed from 0.80 to achieve positive risk/reward
     
     # Dynamic thresholds
     edge_based_tp: bool = True  # Adjust TP based on edge quality
