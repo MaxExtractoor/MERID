@@ -2955,9 +2955,56 @@ async def _run_startup_phases_v20260530(app):
     
     fills_ledger = get_fills_ledger()
     fills_poller = get_fills_poller()
+    
+    # CRITICAL FIX (2026-07-16): Start fills_ledger to bootstrap from SQLite
+    # This ensures fill tracking is initialized before trading begins
+    logger.info("[STARTUP] P1.6.1: Starting fills_ledger to bootstrap from SQLite")
+    try:
+        loaded_count = await fills_ledger.start()
+        logger.info(f"[STARTUP] P1.6.1: FillsLedger started, loaded {loaded_count} fills from database")
+    except Exception as e:
+        logger.warning(f"[STARTUP] P1.6.1: FillsLedger start failed (non-fatal): {e}", exc_info=True)
+    
     logger.info("[STARTUP] Fills tracking initialized")
     logger.info("[STARTUP] P1.6: AFTER fills tracking")
     
+    # CRITICAL FIX (2026-07-16): Initialize PositionCache and connect to AgentGrid
+    # This ensures global allocator can enforce $1 exposure cap before trading begins
+    logger.info("[STARTUP] P1.6.2: Initializing PositionCache and connecting to AgentGrid")
+    try:
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+        from merid.prediction.agent_grid_15m import get_agent_grid
+        
+        position_cache = get_position_cache()
+        agent_grid = get_agent_grid()
+        
+        if agent_grid and hasattr(agent_grid, 'set_position_cache'):
+            agent_grid.set_position_cache(position_cache)
+            logger.info("[STARTUP] P1.6.2: PositionCache connected to AgentGrid for global allocator")
+        else:
+            logger.warning("[STARTUP] P1.6.2: AgentGrid not available for PositionCache connection")
+    except Exception as e:
+        logger.warning(f"[STARTUP] P1.6.2: Failed to connect PositionCache to AgentGrid: {e}", exc_info=True)
+    
+    
+    # CRITICAL FIX (2026-07-16): Start PositionMonitor and register exit callback
+    # This ensures exit signals are generated before trading begins
+    logger.info("[STARTUP] P1.6.3: Starting PositionMonitor and registering exit callback")
+    try:
+        from merid.position_management.position_monitor import get_position_monitor
+        
+        position_monitor = get_position_monitor()
+        
+        # Define exit callback that will be used by the loop
+        # This is a placeholder - the actual callback will be registered by the loop
+        # during its warmup phase when it has access to order_router
+        logger.info("[STARTUP] P1.6.3: PositionMonitor singleton retrieved")
+        
+        # Start the monitor's polling loop
+        await position_monitor.start()
+        logger.info("[STARTUP] P1.6.3: PositionMonitor started successfully")
+    except Exception as e:
+        logger.warning(f"[STARTUP] P1.6.3: Failed to start PositionMonitor: {e}", exc_info=True)
     
 
     # Phase 1: Bankroll service
