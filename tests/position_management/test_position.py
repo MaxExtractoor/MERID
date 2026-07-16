@@ -101,12 +101,12 @@ class TestPositionPnL:
             stop_loss_price_cents=60,  # NO SL is higher
         )
         
-        # Price moves down to 40c (good for NO)
+        # Price moves down to 40c (bad for NO - position is long NO)
         position.update_runtime_state(40)
         
         assert position.current_price_cents == 40
-        assert position.unrealized_pnl_cents == 100  # (50-40) * 10
-        assert position.r_multiple == 10.0  # 100 / 10 initial risk
+        assert position.unrealized_pnl_cents == -100  # (40-50) * 10 - side-space convention
+        assert position.r_multiple == -10.0  # -100 / 10 initial risk
     
     def test_pnl_negative(self):
         """Test negative PnL (losing position)."""
@@ -124,6 +124,51 @@ class TestPositionPnL:
         
         assert position.unrealized_pnl_cents == -50  # (45-50) * 10
         assert position.r_multiple == -5.0  # -50 / 10 initial risk
+    
+    def test_update_runtime_state_zero_entry_price(self):
+        """Test update_runtime_state handles zero avg_entry_price_cents without division by zero.
+        
+        CRITICAL FIX (2026-07-16): When both initial_risk_cents and avg_entry_price_cents are 0,
+        r_multiple should be set to 0.0 instead of raising ZeroDivisionError.
+        """
+        position = Position(
+            market_id="KXBTC15M-1234",
+            series_ticker="KXBTC15M",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=0,  # Zero entry price
+            stop_loss_price_cents=None,  # No stop loss, so initial_risk_cents = 0
+        )
+        
+        # Should not raise ZeroDivisionError
+        position.update_runtime_state(50)
+        
+        assert position.current_price_cents == 50
+        assert position.unrealized_pnl_cents == 500  # (50-0) * 10
+        assert position.r_multiple == 0.0  # Should be 0.0, not division by zero
+    
+    def test_update_runtime_state_zero_entry_with_stop_loss(self):
+        """Test update_runtime_state handles zero avg_entry_price_cents with stop loss set.
+        
+        When avg_entry_price_cents is 0, even if stop_loss_price_cents is set,
+        the initial_risk_cents calculation (entry - stop_loss) may be invalid.
+        The fix ensures r_multiple is set to 0.0 instead of raising ZeroDivisionError.
+        """
+        position = Position(
+            market_id="KXBTC15M-1234",
+            series_ticker="KXBTC15M",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=0,  # Zero entry price
+            stop_loss_price_cents=40,  # Stop loss set, but entry is 0 so risk calculation is invalid
+        )
+        
+        # Should not raise ZeroDivisionError, r_multiple should be 0.0
+        position.update_runtime_state(50)
+        
+        assert position.current_price_cents == 50
+        assert position.unrealized_pnl_cents == 500  # (50-0) * 10
+        assert position.r_multiple == 0.0  # Cannot calculate valid R-multiple with zero entry
 
 
 class TestPositionTriggers:
@@ -163,11 +208,11 @@ class TestPositionTriggers:
         # Price at SL
         assert position.should_trigger_stop_loss(60) is True
         
-        # Price above SL
-        assert position.should_trigger_stop_loss(65) is True
+        # Price above SL (should NOT trigger - side-space convention)
+        assert position.should_trigger_stop_loss(65) is False
         
-        # Price below SL
-        assert position.should_trigger_stop_loss(55) is False
+        # Price below SL (should trigger - side-space convention)
+        assert position.should_trigger_stop_loss(55) is True
     
     def test_should_trigger_take_profit_yes(self):
         """Test take profit trigger for YES position."""
@@ -203,11 +248,11 @@ class TestPositionTriggers:
         # Price at TP
         assert position.should_trigger_take_profit(40) is True
         
-        # Price below TP
-        assert position.should_trigger_take_profit(35) is True
+        # Price below TP (should NOT trigger - side-space convention)
+        assert position.should_trigger_take_profit(35) is False
         
-        # Price above TP
-        assert position.should_trigger_take_profit(45) is False
+        # Price above TP (should trigger - side-space convention)
+        assert position.should_trigger_take_profit(45) is True
 
 
 class TestPositionTrailing:
@@ -281,11 +326,11 @@ class TestPositionTrailing:
             trailing_param=0.10,
         )
         
-        # Price moves down to 40c (good for NO)
+        # Price moves down to 40c (bad for NO - position is long NO)
         position.update_runtime_state(40)
         
         assert position.max_favorable_price_cents == 40
-        assert position.get_trail_level() == 44  # 40 * (1 + 0.10) for NO
+        assert position.get_trail_level() == 36  # 40 * (1 - 0.10) - side-space convention
 
 
 class TestPositionExit:
@@ -350,7 +395,7 @@ class TestExtremeProfitExit:
         assert position.should_trigger_extreme_profit(50) is False
     
     def test_extreme_profit_no_at_1c(self):
-        """Test NO position triggers extreme profit exit at 1c."""
+        """Test NO position triggers extreme profit exit at 99c (side-space convention)."""
         position = Position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
@@ -359,14 +404,14 @@ class TestExtremeProfitExit:
             avg_entry_price_cents=50,
         )
         
-        # At 1c, should trigger extreme profit exit
-        assert position.should_trigger_extreme_profit(1) is True
+        # At 99c NO (equivalent to 1c YES), should trigger extreme profit exit
+        assert position.should_trigger_extreme_profit(99) is True
         
-        # At 0c, should also trigger
-        assert position.should_trigger_extreme_profit(0) is True
+        # At 100c NO, should also trigger
+        assert position.should_trigger_extreme_profit(100) is True
     
     def test_extreme_profit_no_above_1c(self):
-        """Test NO position does not trigger extreme profit exit above 1c."""
+        """Test NO position does not trigger extreme profit exit below 99c (side-space convention)."""
         position = Position(
             market_id="KXBTC15M-1234",
             series_ticker="KXBTC15M",
@@ -375,8 +420,8 @@ class TestExtremeProfitExit:
             avg_entry_price_cents=50,
         )
         
-        # At 2c, should not trigger
-        assert position.should_trigger_extreme_profit(2) is False
+        # At 98c NO (equivalent to 2c YES), should not trigger
+        assert position.should_trigger_extreme_profit(98) is False
         
         # At 50c (entry), should not trigger
         assert position.should_trigger_extreme_profit(50) is False
@@ -413,11 +458,11 @@ class TestExtremeProfitExit:
                 avg_entry_price_cents=50,
             )
             
-            # At 1c, should trigger extreme profit exit for all assets
-            assert position.should_trigger_extreme_profit(1) is True, f"Failed for {asset} NO at 1c"
+            # At 99c NO (equivalent to 1c YES), should trigger extreme profit exit for all assets
+            assert position.should_trigger_extreme_profit(99) is True, f"Failed for {asset} NO at 99c"
             
-            # At 2c, should not trigger for any asset
-            assert position.should_trigger_extreme_profit(2) is False, f"Failed for {asset} NO at 2c"
+            # At 98c NO (equivalent to 2c YES), should not trigger for any asset
+            assert position.should_trigger_extreme_profit(98) is False, f"Failed for {asset} NO at 98c"
 
 
 class TestProbabilityAdjustedTrailing:
@@ -516,8 +561,13 @@ class TestProbabilityAdjustedTrailing:
         adjusted_trail = position.get_probability_adjusted_trail_level()
         
         # Adjusted trail should be tighter (closer to max favorable)
+        # For NO in side-space, tighter = higher trail level (closer to max favorable)
         assert adjusted_trail is not None
-        assert adjusted_trail < base_trail  # For NO, tighter = lower trail level
+        # At 15c (0.15 prob), adjustment_factor = 0.6 for NO
+        # base_trail = 15 * (1 - 0.10) = 13.5 -> 13
+        # adjusted_distance = (15 - 13) * 0.6 = 1.2 -> 1
+        # adjusted_trail = 15 - 1 = 14
+        assert adjusted_trail > base_trail  # For NO, tighter = higher trail level
     
     def test_prob_adjusted_trail_no_moderate_probability(self):
         """NO position at moderate probability (0.10-0.30) should have slightly tighter trailing."""
@@ -540,8 +590,13 @@ class TestProbabilityAdjustedTrailing:
         adjusted_trail = position.get_probability_adjusted_trail_level()
         
         # Adjusted trail should be slightly tighter
+        # For NO in side-space, tighter = higher trail level
         assert adjusted_trail is not None
-        assert adjusted_trail < base_trail
+        # At 25c (0.25 prob), adjustment_factor = 0.8 for NO
+        # base_trail = 25 * (1 - 0.10) = 22.5 -> 22
+        # adjusted_distance = (25 - 22) * 0.8 = 2.4 -> 2
+        # adjusted_trail = 25 - 2 = 23
+        assert adjusted_trail > base_trail  # For NO, tighter = higher trail level
     
     def test_prob_adjusted_trail_no_high_probability(self):
         """NO position at high probability (>0.30) should have normal trailing."""

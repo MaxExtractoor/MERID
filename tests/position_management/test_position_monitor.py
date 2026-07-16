@@ -229,6 +229,8 @@ class TestPositionMonitorExitCallback:
             mock_adapter.profile.trailing_stop_min_profit_cents = 12
             mock_adapter.profile.trailing_stop_profit_zone_activation_cents = 80
             mock_adapter.profile.ratchet_profit_floor_enabled = False
+            # Add staged_time_exit config to avoid Mock iteration errors
+            mock_adapter.profile.staged_time_exit = {'enabled': False, 'stages': []}
             mock_profile.return_value = mock_adapter
             
             # Test entry at 27c (should match 25-30 zone, target 55c)
@@ -281,9 +283,11 @@ class TestPositionMonitorExitCallback:
             mock_adapter.profile.trailing_stop_min_profit_cents = 12
             mock_adapter.profile.trailing_stop_profit_zone_activation_cents = 80
             mock_adapter.profile.ratchet_profit_floor_enabled = False
+            # Add staged_time_exit config to avoid Mock iteration errors
+            mock_adapter.profile.staged_time_exit = {'enabled': False, 'stages': []}
             mock_profile.return_value = mock_adapter
             
-            # Test NO position entry at 65c (should mirror to 10c target: 100 - 90)
+            # Test NO position entry at 65c (side-space: NO uses own-side prices directly)
             position = Position(
                 market_id="KXBTC15M-1234",
                 series_ticker="KXBTC15M",
@@ -297,20 +301,20 @@ class TestPositionMonitorExitCallback:
             # Check position to initialize dynamic TP target (price at 68c, not triggering exit)
             asyncio.run(monitor._check_position(position, 68))
             
-            # Target should be mirrored: 100 - 90 = 10c
-            assert position.dynamic_tp_target_cents == 10
+            # Target should be 90c (NO entry 65c matches 60-70 zone, target 90c - side-space convention)
+            assert position.dynamic_tp_target_cents == 90
             
             # Callback should not have been called yet
             callback.assert_not_called()
             
-            # When price drops to 10c, exit should trigger
-            asyncio.run(monitor._check_position(position, 10))
+            # When price rises to 90c, exit should trigger
+            asyncio.run(monitor._check_position(position, 90))
             
             # Callback should be called with DYNAMIC_TAKE_PROFIT
             callback.assert_called_once()
             call_args = callback.call_args
             assert call_args[0][1] == ExitReason.DYNAMIC_TAKE_PROFIT
-            assert call_args[0][2] == 10
+            assert call_args[0][2] == 90
     
     def test_dynamic_take_profit_edge_adjustment(self):
         """Test dynamic take profit edge quality adjustment."""
@@ -340,6 +344,8 @@ class TestPositionMonitorExitCallback:
             mock_adapter.profile.trailing_stop_min_profit_cents = 12
             mock_adapter.profile.trailing_stop_profit_zone_activation_cents = 80
             mock_adapter.profile.ratchet_profit_floor_enabled = False
+            # Add staged_time_exit config to avoid Mock iteration errors
+            mock_adapter.profile.staged_time_exit = {'enabled': False, 'stages': []}
             mock_profile.return_value = mock_adapter
             
             # Test high edge (6%)
@@ -380,6 +386,8 @@ class TestPositionMonitorExitCallback:
             mock_adapter.profile.trailing_stop_min_profit_cents = 12
             mock_adapter.profile.trailing_stop_profit_zone_activation_cents = 80
             mock_adapter.profile.ratchet_profit_floor_enabled = False
+            # Add staged_time_exit config to avoid Mock iteration errors
+            mock_adapter.profile.staged_time_exit = {'enabled': False, 'stages': []}
             mock_profile.return_value = mock_adapter
             
             position = Position(
@@ -429,7 +437,7 @@ class TestPositionMonitorExitCallback:
         assert call_args[0][2] == 99  # exit price
         assert call_args[0][3] is None  # contracts_to_close (full exit)
         
-        # Test NO position at 1c
+        # Test NO position at 99c (side-space: NO extreme profit at 99c own-side)
         monitor_no = PositionMonitor()
         
         callback_no = Mock()
@@ -445,14 +453,14 @@ class TestPositionMonitorExitCallback:
         
         monitor_no.add_position(position_no)
         
-        # Move price to 1c (extreme profit for NO)
-        asyncio.run(monitor_no._check_position(position_no, 1))
+        # Move price to 99c (extreme profit for NO - side-space convention)
+        asyncio.run(monitor_no._check_position(position_no, 99))
         
         # Callback should be called with EXTREME_PROFIT reason
         callback_no.assert_called_once()
         call_args = callback_no.call_args
         assert call_args[0][1] == ExitReason.EXTREME_PROFIT
-        assert call_args[0][2] == 1  # exit price
+        assert call_args[0][2] == 99  # exit price
         assert call_args[0][3] is None  # contracts_to_close (full exit)
 
     @pytest.mark.asyncio
@@ -1361,7 +1369,7 @@ class TestPositionMonitorPositionCacheIntegration:
         # Clean up
         monitor.remove_position(position_yes.position_id)
         
-        # Test NO position at 1c
+        # Test NO position at 99c (side-space: NO extreme profit at 99c own-side)
         position_no = Position(
             market_id="KXBTC15M-TEST-NO",
             series_ticker="KXBTC15M",
@@ -1372,8 +1380,8 @@ class TestPositionMonitorPositionCacheIntegration:
         
         monitor.add_position(position_no)
         
-        # Trigger extreme profit exit at 1c (use await instead of asyncio.run)
-        await monitor._check_position(position_no, 1)
+        # Trigger extreme profit exit at 99c (use await instead of asyncio.run)
+        await monitor._check_position(position_no, 99)
         
         # Wait for async task to complete
         await asyncio.sleep(0.1)
