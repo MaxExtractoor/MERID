@@ -939,13 +939,17 @@ class LeanAgent15m:
 
         self._indicator_stack_price_buffer: Dict[str, List[float]] = {}  # Buffer spot prices for 1-minute aggregation
 
-        try:
+        # CRITICAL FIX: 2026-07-16 - Make indicator stack initialization a hard requirement
+        # Previously soft-failed on exception, which could lead to poor signals without indicators
+        # Now raises exception to fail fast and prevent silent degradation
 
-            from merid.signals.crypto_15m_indicators import Crypto15mIndicatorStack, IndicatorConfig
+        from merid.signals.crypto_15m_indicators import Crypto15mIndicatorStack, IndicatorConfig
 
-            # Initialize indicator stack for ALL 5 crypto assets
+        # Initialize indicator stack for ALL 5 crypto assets
 
-            for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+        for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
+
+            try:
 
                 cfg = IndicatorConfig(asset=asset, kalshi_mode=True)
 
@@ -957,15 +961,23 @@ class LeanAgent15m:
 
                 self._indicator_stack_price_buffer[asset] = []
 
-            logger.info("[AGENT-INIT] %s initialized Crypto15mIndicatorStack for all 5 assets (BTC, ETH, SOL, XRP, DOGE) with kalshi_mode=True", 
+            except Exception as e:
 
-                       config.name)
+                # Hard fail on per-asset initialization to ensure all 5 assets have indicator stacks
 
-        except Exception as e:
+                raise RuntimeError(
 
-            logger.error("[AGENT-INIT] %s failed to initialize Crypto15mIndicatorStack: %s", config.name, e, exc_info=True)
+                    f"[AGENT-INIT] CRITICAL: Failed to initialize Crypto15mIndicatorStack for asset={asset}. "
 
-            self._indicator_stacks = {}
+                    f"This is a hard requirement - all 5 assets (BTC, ETH, SOL, XRP, DOGE) must have indicator stacks. "
+
+                    f"Error: {e}"
+
+                ) from e
+
+        logger.info("[AGENT-INIT] %s initialized Crypto15mIndicatorStack for all 5 assets (BTC, ETH, SOL, XRP, DOGE) with kalshi_mode=True",
+
+                   config.name)
 
         
 
@@ -3744,7 +3756,7 @@ class LeanAgent15m:
 
         # Crypto15mIndicatorStack uses MACD(8,21,5) which needs 21 + 5 = 26 periods minimum
 
-        # RSI(8) needs 8 + 1 = 9 periods minimum
+        # CRITICAL FIX: 2026-07-16 - RSI(14) needs 14 + 1 = 15 periods minimum (updated from RSI(8))
 
         # If insufficient data, skip signal generation to avoid zero/default indicator values
 
@@ -3772,7 +3784,7 @@ class LeanAgent15m:
 
                 min_history_for_macd = 26  # 21 for MACD slow + 5 for signal line (MACD(8,21,5))
 
-                min_history_for_rsi = 9   # 8 for RSI + 1 for calculation (RSI(8))
+                min_history_for_rsi = 15  # CRITICAL FIX: 2026-07-16 - 14 for RSI + 1 for calculation (RSI(14))
 
                 
 
@@ -4895,6 +4907,12 @@ class LeanAgent15m:
 
         
 
+        # CRITICAL FIX: 2026-07-16 - Add SignalFusion microstructure signals to signal output
+        # These signals provide additional confirmation for trades via orderflow and on-chain activity
+        # Currently set to 0.0 as stubs - future integration will pull from SignalFusionAgent
+        orderflow_bias = 0.0  # Positive = buying pressure, negative = selling pressure
+        onchain_velocity = 0.0  # Positive = elevated on-chain activity, negative = muted
+
         # Return signal
 
         return {
@@ -4934,6 +4952,10 @@ class LeanAgent15m:
             "short_score": short_score,
 
             "price_cents": price_cents,  # CRITICAL: Include price_cents for order execution
+
+            # CRITICAL FIX: 2026-07-16 - SignalFusion microstructure signals
+            "orderflow_bias": orderflow_bias,  # Order book imbalance signal
+            "onchain_velocity": onchain_velocity,  # On-chain activity signal
 
             "count": 1,  # CRITICAL: Include default count for order execution
 

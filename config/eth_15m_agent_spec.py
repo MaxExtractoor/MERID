@@ -4,7 +4,7 @@ ETH 15m Agent Spec — regime-aware ETH 15m Kalshi up/down contracts.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Dict, Optional
 
 
 @dataclass
@@ -25,6 +25,10 @@ class Eth15mInputs:
 
     is_crypto_vol_elevated: bool
     current_exposure_pct: float
+
+    # CRITICAL FIX 2026-07-16: Added eth_15m_regime_signal for consistency with other assets
+    # Matches btc_15m_regime_signal, sol_15m_regime_signal, xrp_15m_regime_signal, doge_15m_regime_signal
+    eth_15m_regime_signal: Dict[str, Any]  # From ETH 15m lane
 
 
 @dataclass
