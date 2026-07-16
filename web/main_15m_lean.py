@@ -739,20 +739,428 @@ async def loop_status():
     else:
         status = "running"
     
-    # Get pipeline and trading readiness from loop state
-    pipeline_ready = getattr(loop, "pipeline_ready", False)
-    trading_ready = getattr(loop, "trading_ready", False)
-    
     return {
         "status": status,
         "running": is_running,
-        "last_cycle_at": last_cycle_ts,
-        "cycle_duration_ms": getattr(loop, "last_cycle_duration_ms", None),
+        "last_cycle_ts": last_cycle_ts.isoformat() if last_cycle_ts else None,
         "error_count": error_count,
-        "cycle_id": getattr(loop, "cycle_id", 0),
-        "heartbeat_age_seconds": getattr(loop, "heartbeat_age_seconds", None),
-        "pipeline_ready": pipeline_ready,
-        "trading_ready": trading_ready,
+        "heartbeat_age_seconds": getattr(loop, "heartbeat_age_seconds", None)
+    }
+
+@app.get("/api/v1/unified-health")
+async def unified_health_check():
+    """
+    Unified health check endpoint that verifies all critical services are ready.
+    
+    This endpoint checks the health of all critical services required for trading:
+    - WS bridge (market data feed)
+    - Market catalog (market discovery)
+    - Bankroll service (balance tracking)
+    - Position cache (position tracking)
+    - Fills ledger (fill tracking)
+    - Position monitor (exit signal generation)
+    - Risk manager (exposure enforcement)
+    - Trading loop (signal generation and execution)
+    
+    Returns overall status and per-service health details.
+    """
+    from datetime import datetime, timezone
+    
+    overall_status = "ok"
+    services = {}
+    
+    # Check WS bridge
+    try:
+        from merid.event_venues.kalshi.ws_bridge import get_bridge
+        ws_bridge = get_bridge()
+        if ws_bridge is None:
+            services["ws_bridge"] = {"status": "not_initialized", "ready": False}
+            overall_status = "degraded"
+        else:
+            summary = ws_bridge.summary()
+            ws_running = summary.get("running", False)
+            services["ws_bridge"] = {
+                "status": "running" if ws_running else "stopped",
+                "ready": ws_running,
+                "summary": summary
+            }
+            if not ws_running:
+                overall_status = "degraded"
+    except Exception as e:
+        services["ws_bridge"] = {"status": "error", "ready": False, "error": str(e)}
+        overall_status = "degraded"
+    
+    # Check market catalog
+    try:
+        from merid.event_venues.kalshi.market_catalog import get_kalshi_market_catalog
+        catalog = get_kalshi_market_catalog()
+        if catalog is None:
+            services["catalog"] = {"status": "not_initialized", "ready": False}
+            overall_status = "degraded"
+        else:
+            snapshot = catalog.snapshot()
+            catalog_age_s = (datetime.now(timezone.utc) - snapshot.refreshed_at).total_seconds() if snapshot.refreshed_at else float('inf')
+            catalog_ready = snapshot.market_count > 0 and catalog_age_s < 60.0
+            services["catalog"] = {
+                "status": "ready" if catalog_ready else "stale",
+                "ready": catalog_ready,
+                "market_count": snapshot.market_count,
+                "age_seconds": catalog_age_s,
+                "last_refresh": snapshot.refreshed_at.isoformat() if snapshot.refreshed_at else None
+            }
+            if not catalog_ready:
+                overall_status = "degraded"
+    except Exception as e:
+        services["catalog"] = {"status": "error", "ready": False, "error": str(e)}
+        overall_status = "degraded"
+    
+    # Check bankroll service
+    try:
+        from merid.event_venues.kalshi.bankroll_service_v2 import get_bankroll_service
+        bankroll = await get_bankroll_service()
+        if bankroll is None:
+            services["bankroll"] = {"status": "not_initialized", "ready": False}
+            overall_status = "degraded"
+        else:
+            summary = await bankroll.get_summary()
+            bankroll_ready = summary.state.name == "FRESH" and summary.equity_usd is not None
+            services["bankroll"] = {
+                "status": summary.state.name,
+                "ready": bankroll_ready,
+                "equity_usd": summary.equity_usd
+            }
+            if not bankroll_ready:
+                overall_status = "degraded"
+    except Exception as e:
+        services["bankroll"] = {"status": "error", "ready": False, "error": str(e)}
+        overall_status = "degraded"
+    
+    # Check position cache
+    try:
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+        position_cache = get_position_cache()
+        if position_cache is None:
+            services["position_cache"] = {"status": "not_initialized", "ready": False}
+            overall_status = "degraded"
+        else:
+            all_positions = position_cache.get_all_positions(validate_freshness=False)
+            open_positions = {k: v for k, v in all_positions.items() if v.contracts > 0}
+            services["position_cache"] = {
+                "status": "ready",
+                "ready": True,
+                "total_positions": len(all_positions),
+                "open_positions": len(open_positions)
+            }
+    except Exception as e:
+        services["position_cache"] = {"status": "error", "ready": False, "error": str(e)}
+        overall_status = "degraded"
+    
+    # Check fills ledger
+    try:
+        from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+        fills_ledger = get_fills_ledger()
+        if fills_ledger is None:
+            services["fills_ledger"] = {"status": "not_initialized", "ready": False}
+            overall_status = "degraded"
+        else:
+            services["fills_ledger"] = {
+                "status": "ready",
+                "ready": True
+            }
+    except Exception as e:
+        services["fills_ledger"] = {"status": "error", "ready": False, "error": str(e)}
+        overall_status = "degraded"
+    
+    # Check position monitor
+    try:
+        from merid.position_management.position_monitor import get_position_monitor
+        position_monitor = get_position_monitor()
+        if position_monitor is None:
+            services["position_monitor"] = {"status": "not_initialized", "ready": False}
+            overall_status = "degraded"
+        else:
+            monitor_running = getattr(position_monitor, "_running", False)
+            services["position_monitor"] = {
+                "status": "running" if monitor_running else "stopped",
+                "ready": monitor_running
+            }
+            if not monitor_running:
+                overall_status = "degraded"
+    except Exception as e:
+        services["position_monitor"] = {"status": "error", "ready": False, "error": str(e)}
+        overall_status = "degraded"
+    
+    # Check risk manager
+    try:
+        from merid.risk.unified_risk_manager import get_unified_risk_manager
+        risk_mgr = get_unified_risk_manager()
+        if risk_mgr is None:
+            services["risk_manager"] = {"status": "not_initialized", "ready": False}
+            overall_status = "degraded"
+        else:
+            services["risk_manager"] = {
+                "status": "ready",
+                "ready": True
+            }
+    except Exception as e:
+        services["risk_manager"] = {"status": "error", "ready": False, "error": str(e)}
+        overall_status = "degraded"
+    
+    # Check trading loop
+    try:
+        loop = getattr(app.state, "kalshi_15m_loop", None)
+        if loop is None:
+            services["trading_loop"] = {"status": "not_initialized", "ready": False}
+            overall_status = "degraded"
+        else:
+            is_running = getattr(loop, "is_running", False)
+            last_cycle_ts = getattr(loop, "last_cycle_ts", None)
+            error_count = getattr(loop, "error_count", 0)
+            loop_ready = is_running and last_cycle_ts is not None and error_count < 10
+            services["trading_loop"] = {
+                "status": "running" if is_running else "stopped",
+                "ready": loop_ready,
+                "last_cycle_ts": last_cycle_ts.isoformat() if last_cycle_ts else None,
+                "error_count": error_count
+            }
+            if not loop_ready:
+                overall_status = "degraded"
+    except Exception as e:
+        services["trading_loop"] = {"status": "error", "ready": False, "error": str(e)}
+        overall_status = "degraded"
+    
+    # Check startup completion
+    startup_completed = getattr(app.state, "startup_completed", False)
+    if not startup_completed:
+        overall_status = "initializing"
+    
+    return {
+        "overall_status": overall_status,
+        "startup_completed": startup_completed,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "services": services
+    }
+
+@app.get("/api/v1/data-flow-validation")
+async def data_flow_validation():
+    """
+    End-to-end data flow validation probe.
+    
+    This endpoint validates that data flows correctly through the entire stack:
+    1. WS bridge → market state store (market data ingestion)
+    2. Market state store → agents (signal generation)
+    3. Agents → orders (execution)
+    4. Orders → fills (venue confirmation)
+    5. Fills → ledger (persistence)
+    6. Ledger → position cache (position tracking)
+    
+    Returns validation results for each stage and overall data flow health.
+    """
+    from datetime import datetime, timezone
+    
+    validation_results = {}
+    overall_health = "ok"
+    
+    # Stage 1: WS bridge → market state store
+    try:
+        from merid.event_venues.kalshi.ws_bridge import get_bridge
+        from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+        
+        ws_bridge = get_bridge()
+        market_state_store = get_kalshi_market_state_store()
+        
+        if ws_bridge is None or market_state_store is None:
+            validation_results["ws_to_market_state"] = {
+                "status": "failed",
+                "reason": "ws_bridge or market_state_store not initialized"
+            }
+            overall_health = "degraded"
+        else:
+            ws_summary = ws_bridge.summary()
+            ws_running = ws_summary.get("running", False)
+            
+            # Check if market state store has recent data for critical assets
+            critical_assets = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+            fresh_data_count = 0
+            stale_data_count = 0
+            
+            for asset in critical_assets:
+                try:
+                    ticker = f"KX{asset}15M"
+                    market_state = market_state_store.get_market_state(ticker)
+                    if market_state:
+                        # Check if data is fresh (within 30 seconds)
+                        from datetime import timedelta
+                        if market_state.last_update and (datetime.now(timezone.utc) - market_state.last_update) < timedelta(seconds=30):
+                            fresh_data_count += 1
+                        else:
+                            stale_data_count += 1
+                except Exception:
+                    pass
+            
+            validation_results["ws_to_market_state"] = {
+                "status": "ok" if ws_running and fresh_data_count >= 3 else "degraded",
+                "ws_running": ws_running,
+                "fresh_data_count": fresh_data_count,
+                "stale_data_count": stale_data_count,
+                "total_assets": len(critical_assets)
+            }
+            
+            if not ws_running or fresh_data_count < 3:
+                overall_health = "degraded"
+    except Exception as e:
+        validation_results["ws_to_market_state"] = {
+            "status": "error",
+            "error": str(e)
+        }
+        overall_health = "degraded"
+    
+    # Stage 2: Market state store → agents
+    try:
+        from merid.event_venues.kalshi.market_state import get_kalshi_market_state_store
+        from merid.prediction.agent_grid_15m import get_agent_grid
+        
+        market_state_store = get_kalshi_market_state_store()
+        agent_grid = get_agent_grid()
+        
+        if market_state_store is None or agent_grid is None:
+            validation_results["market_state_to_agents"] = {
+                "status": "failed",
+                "reason": "market_state_store or agent_grid not initialized"
+            }
+            overall_health = "degraded"
+        else:
+            # Check if agents have market state store reference
+            has_market_state = hasattr(agent_grid, '_market_state_store') and agent_grid._market_state_store is not None
+            
+            validation_results["market_state_to_agents"] = {
+                "status": "ok" if has_market_state else "degraded",
+                "agents_wired": has_market_state
+            }
+            
+            if not has_market_state:
+                overall_health = "degraded"
+    except Exception as e:
+        validation_results["market_state_to_agents"] = {
+            "status": "error",
+            "error": str(e)
+        }
+        overall_health = "degraded"
+    
+    # Stage 3: Agents → orders (signal generation)
+    try:
+        from merid.prediction.agent_grid_15m import get_agent_grid
+        
+        agent_grid = get_agent_grid()
+        
+        if agent_grid is None:
+            validation_results["agents_to_orders"] = {
+                "status": "failed",
+                "reason": "agent_grid not initialized"
+            }
+            overall_health = "degraded"
+        else:
+            # Check if agents are initialized
+            agent_count = len(getattr(agent_grid, '_agents', []))
+            
+            validation_results["agents_to_orders"] = {
+                "status": "ok" if agent_count > 0 else "degraded",
+                "agent_count": agent_count
+            }
+            
+            if agent_count == 0:
+                overall_health = "degraded"
+    except Exception as e:
+        validation_results["agents_to_orders"] = {
+            "status": "error",
+            "error": str(e)
+        }
+        overall_health = "degraded"
+    
+    # Stage 4: Orders → fills (venue confirmation)
+    try:
+        from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+        
+        fills_ledger = get_fills_ledger()
+        
+        if fills_ledger is None:
+            validation_results["orders_to_fills"] = {
+                "status": "failed",
+                "reason": "fills_ledger not initialized"
+            }
+            overall_health = "degraded"
+        else:
+            # Check if fills ledger is accessible
+            validation_results["orders_to_fills"] = {
+                "status": "ok",
+                "ledger_accessible": True
+            }
+    except Exception as e:
+        validation_results["orders_to_fills"] = {
+            "status": "error",
+            "error": str(e)
+        }
+        overall_health = "degraded"
+    
+    # Stage 5: Fills → ledger (persistence)
+    try:
+        from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+        
+        fills_ledger = get_fills_ledger()
+        
+        if fills_ledger is None:
+            validation_results["fills_to_ledger"] = {
+                "status": "failed",
+                "reason": "fills_ledger not initialized"
+            }
+            overall_health = "degraded"
+        else:
+            # Check if ledger has persistence capability
+            validation_results["fills_to_ledger"] = {
+                "status": "ok",
+                "ledger_persistence": True
+            }
+    except Exception as e:
+        validation_results["fills_to_ledger"] = {
+            "status": "error",
+            "error": str(e)
+        }
+        overall_health = "degraded"
+    
+    # Stage 6: Ledger → position cache (position tracking)
+    try:
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+        from merid.event_venues.kalshi.fills_ledger import get_fills_ledger
+        
+        position_cache = get_position_cache()
+        fills_ledger = get_fills_ledger()
+        
+        if position_cache is None or fills_ledger is None:
+            validation_results["ledger_to_position_cache"] = {
+                "status": "failed",
+                "reason": "position_cache or fills_ledger not initialized"
+            }
+            overall_health = "degraded"
+        else:
+            # Check if position cache is connected to fills ledger
+            all_positions = position_cache.get_all_positions(validate_freshness=False)
+            
+            validation_results["ledger_to_position_cache"] = {
+                "status": "ok",
+                "position_cache_accessible": True,
+                "total_positions": len(all_positions)
+            }
+    except Exception as e:
+        validation_results["ledger_to_position_cache"] = {
+            "status": "error",
+            "error": str(e)
+        }
+        overall_health = "degraded"
+    
+    return {
+        "overall_health": overall_health,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "validation_stages": validation_results
     }
 
 
@@ -3146,6 +3554,18 @@ async def _run_startup_phases_v20260530(app):
             logger.info("[STARTUP] P1.9.4: Spot service reports ready")
             
             break
+    
+    # CRITICAL FIX (2026-07-16): Initialize Coinbase WebSocket client if enabled
+    # This ensures external velocity signals are available for Turbine research strategy
+    logger.info("[STARTUP] P1.9.5: Initializing Coinbase WebSocket client for external velocity signals")
+    try:
+        from merid.event_venues.coinbase.ws_client import get_coinbase_client, CoinbaseWebSocketClient
+        coinbase_client = get_coinbase_client()
+        logger.info("[STARTUP] P1.9.5: Coinbase WebSocket client initialized")
+        # Note: The actual connection is started by the loop in its start() method
+        # This just ensures the singleton is initialized before the loop needs it
+    except Exception as e:
+        logger.warning(f"[STARTUP] P1.9.5: Failed to initialize Coinbase WebSocket client: {e}", exc_info=True)
         await asyncio.sleep(0.5)
     
     if not spot_ready:

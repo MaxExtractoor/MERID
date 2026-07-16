@@ -1125,6 +1125,14 @@ class Kalshi15mLoop:
         self._started_at = datetime.now(timezone.utc)
         self._stop_event.clear()
         
+        # CRITICAL FIX: Reset warmup timer when loop starts (not at module import)
+        # This ensures agents have 5 minutes to populate history after actual trading begins
+        try:
+            from merid.prediction.agent_grid_15m import reset_warmup_timer
+            reset_warmup_timer()
+        except Exception as e:
+            logger.warning("[15m-LOOP] Failed to reset warmup timer: %s", e)
+        
         # Initialize risk envelope for kalshi_crypto_15m_v2
         profile = os.getenv("MERID_PROFILE", "").lower()
         if profile == "kalshi_crypto_15m_v2":
@@ -1632,6 +1640,19 @@ class Kalshi15mLoop:
                         )
                         self._current_window_suffix = current_window.suffix
                         self._executed_candidates_this_window.clear()
+                        
+                        # CRITICAL FIX (2026-07-16): Trigger catalog refresh on 15m window boundary
+                        # This ensures the catalog is updated immediately when markets roll over
+                        # preventing trading on expired markets during the brief window after rollover
+                        logger.info("[15m-LOOP] WINDOW-CHANGE: Triggering catalog refresh for new 15m window")
+                        try:
+                            from merid.event_venues.kalshi.market_catalog import get_kalshi_market_catalog
+                            catalog = get_kalshi_market_catalog()
+                            # Force a refresh to get new markets for the new window
+                            await catalog.refresh(force=True)
+                            logger.info("[15m-LOOP] WINDOW-CHANGE: Catalog refresh completed for new window")
+                        except Exception as e:
+                            logger.warning(f"[15m-LOOP] WINDOW-CHANGE: Failed to trigger catalog refresh: {e}", exc_info=True)
                         
                         # Reset best-edge tracking for new window
                         for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
@@ -3813,6 +3834,19 @@ class Kalshi15mLoop:
                     )
                     self._current_window_suffix = current_window.suffix
                     self._executed_candidates_this_window.clear()
+                    
+                    # CRITICAL FIX (2026-07-16): Trigger catalog refresh on 15m window boundary
+                    # This ensures the catalog is updated immediately when markets roll over
+                    # preventing trading on expired markets during the brief window after rollover
+                    logger.info("[15m-LOOP] WINDOW-CHANGE: Triggering catalog refresh for new 15m window")
+                    try:
+                        from merid.event_venues.kalshi.market_catalog import get_kalshi_market_catalog
+                        catalog = get_kalshi_market_catalog()
+                        # Force a refresh to get new markets for the new window
+                        await catalog.refresh(force=True)
+                        logger.info("[15m-LOOP] WINDOW-CHANGE: Catalog refresh completed for new window")
+                    except Exception as e:
+                        logger.warning(f"[15m-LOOP] WINDOW-CHANGE: Failed to trigger catalog refresh: {e}", exc_info=True)
                     
                     # Reset best-edge tracking for new window
                     for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
