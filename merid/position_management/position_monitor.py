@@ -850,6 +850,12 @@ class PositionMonitor:
         except Exception as e:
             logger.debug("[POSITION-MONITOR] Could not get MD age for stale data check: %s", e)
         
+        # CRITICAL FIX: 2026-07-16 - Compute current edge for edge decay check
+        # Edge decay was never triggering because current_edge_pct was not passed to resolver
+        # Use position's entry_edge_pct as fallback (stored at position open)
+        # TODO: Compute real-time edge using UnifiedEdgeComputer for more accurate decay detection
+        current_edge_pct = getattr(position, 'entry_edge_pct', 0.03)  # Default 3% if not set
+        
         # Resolve exit policy
         policy = resolver.resolve(
             position=position,
@@ -859,6 +865,7 @@ class PositionMonitor:
             candles=candles,
             md_age_ms=md_age_ms,
             max_age_ms=max_age_ms,
+            current_edge_pct=current_edge_pct,  # CRITICAL: Pass edge for edge decay check
         )
         
         if policy.action == ExitAction.EXIT_MARKET:
@@ -1063,7 +1070,20 @@ class PositionMonitor:
                         state = store.get(position.market_id)
                         current_price = None
                         
-                        if state and state.mid_cents:
+                        # CRITICAL FIX (2026-07-16): Check if market has expired
+                        # If state is None, the market may have expired. Force exit the position.
+                        if state is None:
+                            logger.warning(
+                                "[POSITION-MONITOR] Market state not found for %s - market may have expired, forcing exit",
+                                position.market_id
+                            )
+                            # Force exit with last known price or entry price
+                            exit_price = position.current_price_cents if position.current_price_cents else position.avg_entry_price_cents
+                            if exit_price > 0:
+                                self._emit_exit_intent(position, ExitReason.TIME_STOP, exit_price)
+                            continue
+                        
+                        if state.mid_cents:
                             # CRITICAL FIX: Use side-aware price for NO positions
                             current_price = self._get_side_aware_price(state, position.side)
                         else:

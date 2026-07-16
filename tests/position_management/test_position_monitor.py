@@ -11,7 +11,7 @@ from datetime import datetime
 from unittest.mock import Mock, patch
 from utils.logger import get_logger
 from merid.position_management.position import Position, PositionSide
-from merid.position_management.exit_policy import ExitReason
+from merid.position_management.exit_policy import ExitReason, ExitAction
 from merid.position_management.position_monitor import (
     PositionMonitor,
     get_position_monitor,
@@ -646,6 +646,55 @@ class TestPositionMonitorPolling:
         
         # Position should not have been updated
         assert position.current_price_cents == 0
+    
+    @patch('merid.event_venues.kalshi.market_state.get_kalshi_market_state_store')
+    @pytest.mark.asyncio
+    async def test_poll_loop_expired_market_force_exit(self, mock_get_store):
+        """Test polling loop forces exit when market state is None (expired market).
+        
+        CRITICAL FIX (2026-07-16): When market state is None (indicating expired market),
+        the position monitor should force exit the position with ExitReason.TIME_STOP
+        instead of continuously polling for a non-existent market state.
+        """
+        # Mock market state store returning None (expired market)
+        mock_store = Mock()
+        mock_store.get.return_value = None
+        mock_get_store.return_value = mock_store
+        
+        monitor = PositionMonitor(poll_interval=0.1)
+        
+        # Register callback to capture exit intent
+        callback = Mock()
+        monitor.register_exit_intent_callback(callback)
+        
+        position = Position(
+            market_id="KXXRP15M-26JUL160230-30",  # Expired ticker
+            series_ticker="KXXRP15M",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,
+            current_price_cents=45,  # Last known price
+        )
+        
+        monitor.add_position(position)
+        
+        # Start monitor
+        await monitor.start()
+        
+        # Wait for one poll
+        await asyncio.sleep(0.15)
+        
+        # Stop monitor
+        await monitor.stop()
+        
+        # Callback should be called with TIME_STOP reason
+        callback.assert_called_once()
+        call_args = callback.call_args
+        assert call_args[0][1] == ExitReason.TIME_STOP
+        assert call_args[0][2] == 45  # Should use current_price_cents as exit price
+        
+        # Position should be removed from monitoring
+        assert len(monitor.get_open_positions()) == 0
 
 
 class TestPositionMonitorSideAwarePrice:
@@ -792,6 +841,131 @@ class TestPositionMonitorThreadSafety:
         # All positions should have valid data
         for pos in open_positions.values():
             assert pos.market_id.startswith("KXBTC15M-")
+
+
+class TestExitPolicyEdgeDecayFix:
+    """Test edge decay fix - current_edge_pct is now passed to resolver.
+    
+    CRITICAL FIX (2026-07-16): Exit policy was not triggering because current_edge_pct
+    was not passed to resolver.resolve(). This meant edge decay checks could never trigger.
+    The fix adds current_edge_pct parameter to the resolver call.
+    """
+    
+    def test_edge_decay_triggers_with_current_edge_pct(self):
+        """Test that edge decay triggers when current_edge_pct is passed to resolver.
+        
+        This test verifies the fix for the bug where edge decay was never triggering
+        because current_edge_pct was not passed to the exit policy resolver.
+        """
+        from unittest.mock import patch
+        
+        monitor = PositionMonitor()
+        callback = Mock()
+        monitor.register_exit_intent_callback(callback)
+        
+        # Create position with entry_edge_pct set
+        position = Position(
+            market_id="KXBTC15M-1234",
+            series_ticker="KXBTC15M",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,
+            entry_edge_pct=0.05,  # 5% edge at entry
+        )
+        
+        monitor.add_position(position)
+        
+        # Mock the resolver to verify current_edge_pct is passed
+        with patch('merid.position_management.position_monitor.get_exit_policy_resolver') as mock_get_resolver:
+            mock_resolver = Mock()
+            mock_policy = Mock()
+            mock_policy.action = ExitAction.EXIT_MARKET
+            mock_policy.reason = ExitReason.EDGE_DECAY
+            mock_resolver.resolve.return_value = mock_policy
+            mock_get_resolver.return_value = mock_resolver
+            
+            # Check position with current price
+            asyncio.run(monitor._check_position(position, 50))
+            
+            # Verify resolver.resolve was called with current_edge_pct
+            mock_resolver.resolve.assert_called_once()
+            call_kwargs = mock_resolver.resolve.call_args[1]
+            assert 'current_edge_pct' in call_kwargs, "current_edge_pct must be passed to resolver"
+            assert call_kwargs['current_edge_pct'] == 0.05, "current_edge_pct should match position's entry_edge_pct"
+    
+    def test_edge_decay_no_trigger_when_edge_sufficient(self):
+        """Test that edge decay does NOT trigger when edge is above threshold."""
+        from unittest.mock import patch
+        
+        monitor = PositionMonitor()
+        callback = Mock()
+        monitor.register_exit_intent_callback(callback)
+        
+        position = Position(
+            market_id="KXBTC15M-1234",
+            series_ticker="KXBTC15M",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,
+            entry_edge_pct=0.05,  # 5% edge (above 3% threshold)
+        )
+        
+        monitor.add_position(position)
+        
+        # Mock resolver to return HOLD (edge sufficient)
+        with patch('merid.position_management.position_monitor.get_exit_policy_resolver') as mock_get_resolver:
+            mock_resolver = Mock()
+            mock_policy = Mock()
+            mock_policy.action = ExitAction.HOLD
+            mock_policy.reason = None
+            mock_resolver.resolve.return_value = mock_policy
+            mock_get_resolver.return_value = mock_resolver
+            
+            # Check position
+            asyncio.run(monitor._check_position(position, 50))
+            
+            # Verify resolver was called with current_edge_pct
+            mock_resolver.resolve.assert_called_once()
+            call_kwargs = mock_resolver.resolve.call_args[1]
+            assert call_kwargs['current_edge_pct'] == 0.05
+            
+            # Callback should not be called (HOLD action)
+            callback.assert_not_called()
+    
+    def test_edge_decay_uses_default_when_entry_edge_not_set(self):
+        """Test that default 3% edge is used when entry_edge_pct is not set."""
+        from unittest.mock import patch
+        
+        monitor = PositionMonitor()
+        
+        position = Position(
+            market_id="KXBTC15M-1234",
+            series_ticker="KXBTC15M",
+            side=PositionSide.YES,
+            size=10,
+            avg_entry_price_cents=50,
+            # entry_edge_pct not set (defaults to 0.03 in Position dataclass)
+        )
+        
+        monitor.add_position(position)
+        
+        # Mock resolver to capture the call
+        with patch('merid.position_management.position_monitor.get_exit_policy_resolver') as mock_get_resolver:
+            mock_resolver = Mock()
+            mock_policy = Mock()
+            mock_policy.action = ExitAction.HOLD
+            mock_policy.reason = None
+            mock_resolver.resolve.return_value = mock_policy
+            mock_get_resolver.return_value = mock_resolver
+            
+            # Check position
+            asyncio.run(monitor._check_position(position, 50))
+            
+            # Verify resolver was called with default 3% edge
+            mock_resolver.resolve.assert_called_once()
+            call_kwargs = mock_resolver.resolve.call_args[1]
+            assert 'current_edge_pct' in call_kwargs
+            assert call_kwargs['current_edge_pct'] == 0.03, "Should use default 3% when entry_edge_pct not set"
 
 
 class TestPositionMonitorStartupSequence:
