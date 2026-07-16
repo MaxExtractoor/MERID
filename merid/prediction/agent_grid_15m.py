@@ -10436,6 +10436,20 @@ class LeanAgent15m:
 
         
 
+        # CRITICAL FIX: Compute order aggressiveness at signal generation time
+        # This ensures execution semantics are decided by the signal stack, not overridden by loop
+        aggressiveness = 0.0
+        try:
+            from merid.event_venues.kalshi.risk_parameters import compute_order_aggressiveness
+            seconds_to_expiry = int(minutes_to_expiry * 60)
+            aggressiveness = compute_order_aggressiveness(asset, edge_pct, seconds_to_expiry)
+            logger.info("[SIGNAL-AGGRESSIVENESS] asset=%s edge_pct=%.6f tte=%ds aggressiveness=%.2f",
+                       asset, edge_pct, seconds_to_expiry, aggressiveness)
+        except Exception as agg_err:
+            logger.warning("[SIGNAL-AGGRESSIVENESS-ERROR] asset=%s failed to compute aggressiveness: %s, using default 0.5",
+                         asset, agg_err)
+            aggressiveness = 0.5  # Default to marketable
+
         # Construct signal dictionary
 
         signal = {
@@ -10488,6 +10502,14 @@ class LeanAgent15m:
 
             "strike_source": strike_source,  # Source: "kalshi_floor_strike", "candle_open", "spot_fallback"
 
+            # CRITICAL FIX: Add execution parameters to signal generation
+            # These are now set by signal stack and respected by loop execution
+            "aggressiveness": aggressiveness,  # 0.0=resting, 0.5-1.0=marketable
+
+            "post_only": False,  # Default to False to prevent Kalshi API rejection
+
+            "order_type": "limit",  # Default to limit for maker rebate optimization
+
         }
 
         
@@ -10510,6 +10532,11 @@ class LeanAgent15m:
         # New behavior: Slot allocation moved to order_router post-fill path (only when order actually fills).
         # This ensures exposure is only counted for FILLED orders, not for signals that may not fill.
         signal["slot_id"] = None
+
+        # CRITICAL FIX: Do NOT set count in signal generation
+        # Position sizing is the responsibility of the loop's unified_sizing calculation
+        # This ensures single source of truth for position sizing based on edge, confidence, and $1 cap
+        signal["count"] = 0  # Placeholder, will be set by loop's sizing calculation
 
         logger.info("[SIGNAL-GENERATED] asset=%s side=%s velocity=%.6f edge_pct=%.2f%% confidence=%.2f model_prob=%.2f",
                    asset, signal_side, velocity, edge_pct, confidence, model_prob)
@@ -11608,29 +11635,34 @@ class LeanAgent15m:
 
                 "regime": signal.get("regime", "normal"),  # Phase 2: Carry regime from signal
 
+                # CRITICAL FIX: Carry execution parameters from signal to candidate
+                # These are now set by signal stack and respected by loop execution
+                "aggressiveness": signal.get("aggressiveness", 0.5),  # 0.0=resting, 0.5-1.0=marketable
+
+                "post_only": signal.get("post_only", False),  # Default to False to prevent Kalshi API rejection
+
+                "order_type": signal.get("order_type", "limit"),  # Default to limit for maker rebate optimization
+
                 # CRITICAL FIX: Add price_cents and count for candidate deduplication
 
-                "price_cents": signal.get("price_cents", 0),  # Will be set by order router
+                "price_cents": signal.get("price_cents", 0),  # Set by signal generation, respected by loop
 
-                "count": signal.get("count", 0),  # Will be set by order router
+                "count": 0,  # CRITICAL: Set to 0 initially, loop's sizing calculation will determine final count
 
                 # 2026 Research-Based Risk Management: Apply time-of-day risk scaling to position size
 
                 "time_of_day_multiplier": time_of_day_multiplier,  # Carry multiplier for order router
+
+                # CRITICAL FIX: Carry HMM regime from signal for exit policy
+                "hmm_regime": signal.get("hmm_regime", None),
+
+                "hmm_regime_confidence": signal.get("hmm_regime_confidence", 0.0),
 
                 # CRITICAL FIX: Add exit targets to satisfy "no trade without exit" invariant
 
                 "take_profit_r_multiple": 0.5,  # 0.5R take profit (conservative)
 
                 "stop_loss_r_multiple": 0.25,  # 0.25R stop loss (tight risk control)
-
-                # CRITICAL FIX: 2026-07-01 - Add order type for maker rebate optimization
-
-                # Industry standard: Use limit orders (maker) to earn rebates (-0.05% round trip) vs taker fees (0.15% round trip)
-
-                # Reference: https://www.polytrackhq.app/blog/polymarket-15-minute-crypto-guide
-
-                "order_type": "limit" if self.config.use_limit_orders else "market",
 
                 # Phase 1: Add market microstructure data for fee-aware edge and microstructure gates
 

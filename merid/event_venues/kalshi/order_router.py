@@ -3033,18 +3033,18 @@ def _apply_depth_based_order_sizing(intent: OrderIntent, state: Optional[Any]) -
 
 
 def _apply_risk_based_order_sizing(intent: OrderIntent, bankroll_usd: Optional[Decimal] = None) -> int:
-    """Enforce 3% per-trade risk limit using unified_sizing.
+    """Enforce the fixed $1 exposure cap via unified_sizing (global slot allocator model).
     
-    CRITICAL FIX: This prevents orders exceeding the hard 3% per-trade cap.
-    The order router previously only capped based on liquidity, allowing
-    orders to exceed the 3% bankroll limit (e.g., $1.95 on $33.72 bankroll = 5.8%).
+    2026-07-16: Percentage-based (3%) per-trade sizing is PRUNED. unified_sizing
+    computes slot-based counts from the $1 global exposure cap (the global slot
+    allocator is the single source of truth for exposure).
     
     Args:
         intent: Order intent with requested count, price_cents, and ticker
         bankroll_usd: Optional bankroll value (if None, will fetch from service)
         
     Returns:
-        Adjusted count capped at 3% of bankroll (or 0 if exceeds limit)
+        Adjusted count under the $1 fixed exposure cap (or 0 if no slot available)
     """
     try:
         from merid.prediction.unified_sizing import compute_order_size
@@ -3833,22 +3833,22 @@ def _route_sync_non_live(intent: OrderIntent, mode: TradingMode, t0: float) -> O
         _mode_value(mode),
     )
     
-    # CRITICAL FIX: Enforce 3% per-trade risk limit using unified_sizing
+    # Enforce fixed $1 exposure cap sizing via unified_sizing (global slot allocator model)
     # This applies to MOCK/PAPER modes as well for consistency
     original_count = intent.count
     intent.count = _apply_risk_based_order_sizing(intent)
     
-    # Reject order if risk-based sizing returned 0 (exceeds 3% limit)
+    # Reject order if slot-based sizing returned 0 (exceeds $1 fixed exposure cap)
     if intent.count == 0:
         latency = (_time.monotonic() - t0) * 1000
         logger.warning(
-            "[order-router] Order rejected — exceeds 3%% per-trade risk limit: ticker=%s requested_count=%d price=%dc mode=%s",
+            "[order-router] Order rejected — exceeds $1 fixed exposure cap (global slot allocator): ticker=%s requested_count=%d price=%dc mode=%s",
             intent.ticker, original_count, intent.price_cents, _mode_value(mode)
         )
         return OrderResult(
             status="rejected",
             mode=mode,
-            reason=f"risk_limit_exceeded:order_exceeds_3_percent_cap:requested={original_count},price={intent.price_cents}c",
+            reason=f"risk_limit_exceeded:order_exceeds_fixed_1usd_cap:requested={original_count},price={intent.price_cents}c",
             latency_ms=round(latency, 2),
         )
     
@@ -4182,31 +4182,31 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         original_price = intent.price_cents
         intent.order_type, intent.time_in_force = _determine_dynamic_order_type(intent, state)
         
-        # CRITICAL FIX: Enforce 3% per-trade risk limit BEFORE depth-based sizing
-        # This prevents depth-based sizing from increasing count beyond the risk limit
+        # Enforce $1 fixed exposure cap sizing BEFORE depth-based sizing
+        # This prevents depth-based sizing from increasing count beyond the slot cap
         intent.count = _apply_risk_based_order_sizing(intent)
         
         # Only apply depth-based sizing if risk-based sizing didn't reject the order
         if intent.count > 0:
             intent.count = _apply_depth_based_order_sizing(intent, state)
-            # CRITICAL FIX: Re-apply risk-based sizing AFTER depth-based sizing
-            # This ensures depth-based sizing cannot increase count beyond 3% limit
+            # Re-apply slot-based sizing AFTER depth-based sizing
+            # This ensures depth-based sizing cannot increase count beyond the $1 cap
             intent.count = _apply_risk_based_order_sizing(intent)
         
         intent.price_cents = _adjust_order_price_for_fill_rate(intent, state)
         
-        # Reject order if risk-based sizing returned 0 (exceeds 3% limit)
+        # Reject order if slot-based sizing returned 0 (exceeds $1 fixed exposure cap)
         if intent.count == 0:
             latency = (_time.monotonic() - t0) * 1000
             logger.warning(
-                "[order-router] Live order rejected — exceeds 3%% per-trade risk limit: ticker=%s requested_count=%d price=%dc",
+                "[order-router] Live order rejected — exceeds $1 fixed exposure cap (global slot allocator): ticker=%s requested_count=%d price=%dc",
                 intent.ticker, original_count, original_price
             )
             _release_gate_record(intent, f"risk_limit_exceeded:{intent.ticker}")
             return OrderResult(
                 status="rejected",
                 mode=mode,
-                reason=f"risk_limit_exceeded:order_exceeds_3_percent_cap:requested={original_count},price={original_price}c",
+                reason=f"risk_limit_exceeded:order_exceeds_fixed_1usd_cap:requested={original_count},price={original_price}c",
                 latency_ms=round(latency, 2),
             )
         
@@ -7238,28 +7238,37 @@ async def route_order_async(intent: OrderIntent) -> OrderResult:
             # Extract asset from ticker
             asset = extract_asset_from_ticker(intent.ticker) or "BTC"
             
-            # Get seconds to expiry from market state
-            seconds_to_expiry = 900  # Default 15 minutes
-            market_state_store = get_kalshi_market_state_store()
-            if market_state_store:
-                state = market_state_store.get(intent.ticker)
-                if state and hasattr(state, 'seconds_to_expiry'):
-                    seconds_to_expiry = state.seconds_to_expiry
-            
-            # edge_pct is now in FRACTION units (single source of truth - 2026-07-12 standardization)
-            # No normalization needed - all edge values use FRACTION (0.0-1.0)
-            
-            # Compute aggressiveness (0.0=resting, 0.5-1.0=marketable)
-            intent.aggressiveness = compute_order_aggressiveness(
-                asset=asset,
-                edge_pct=intent.edge_pct,
-                seconds_to_expiry=int(seconds_to_expiry)
-            )
-            
-            logger.debug(
-                "[AGGRESSIVENSS-COMPUTE] ticker=%s asset=%s edge_pct=%.6f aggressiveness=%.2f tte=%ds",
-                intent.ticker, asset, intent.edge_pct, intent.aggressiveness, seconds_to_expiry
-            )
+            # CRITICAL FIX: Respect aggressiveness from signal generation
+            # Signal generation now computes aggressiveness based on edge and time to expiry
+            # Only compute aggressiveness if it's not set (aggressiveness == 0.0)
+            if intent.aggressiveness == 0.0:
+                # Get seconds to expiry from market state
+                seconds_to_expiry = 900  # Default 15 minutes
+                market_state_store = get_kalshi_market_state_store()
+                if market_state_store:
+                    state = market_state_store.get(intent.ticker)
+                    if state and hasattr(state, 'seconds_to_expiry'):
+                        seconds_to_expiry = state.seconds_to_expiry
+                
+                # edge_pct is now in FRACTION units (single source of truth - 2026-07-12 standardization)
+                # No normalization needed - all edge values use FRACTION (0.0-1.0)
+                
+                # Compute aggressiveness (0.0=resting, 0.5-1.0=marketable)
+                intent.aggressiveness = compute_order_aggressiveness(
+                    asset=asset,
+                    edge_pct=intent.edge_pct,
+                    seconds_to_expiry=int(seconds_to_expiry)
+                )
+                
+                logger.debug(
+                    "[AGGRESSIVENSS-COMPUTE] ticker=%s asset=%s edge_pct=%.6f aggressiveness=%.2f tte=%ds",
+                    intent.ticker, asset, intent.edge_pct, intent.aggressiveness, seconds_to_expiry
+                )
+            else:
+                logger.debug(
+                    "[AGGRESSIVENSS-FROM-SIGNAL] ticker=%s using aggressiveness=%.2f from signal generation",
+                    intent.ticker, intent.aggressiveness
+                )
         except Exception as agg_err:
             logger.debug("[AGGRESSIVENSS-COMPUTE] Failed to compute aggressiveness: %s", agg_err)
             # Keep default 0.0 (resting) on error
