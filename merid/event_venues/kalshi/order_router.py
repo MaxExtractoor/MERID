@@ -395,6 +395,9 @@ def _check_toxicity_kill_switch(intent: OrderIntent) -> Optional[str]:
 def _check_duplicate_order(intent: OrderIntent) -> Optional[str]:
     """Check if this order is a duplicate of a recently placed order.
     
+    DEPRECATED (2026-07-16): Use OrderDeduplicationCache from order_deduplication.py instead.
+    This simple in-memory check is being replaced with the more sophisticated deduplication cache.
+    
     Prevents placing multiple identical orders for the same ticker, side, action, and price
     within a short time window. This addresses the issue where agents place multiple
     identical resting limit orders for the same contract price.
@@ -405,6 +408,12 @@ def _check_duplicate_order(intent: OrderIntent) -> Optional[str]:
     Returns:
         Rejection reason string if duplicate, None if OK
     """
+    import warnings
+    warnings.warn(
+        "_check_duplicate_order is deprecated. Use OrderDeduplicationCache from order_deduplication.py instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
     # Extract price in cents (OrderIntent uses price_cents, not price)
     price_cents = intent.price_cents if hasattr(intent, 'price_cents') else 0
     
@@ -1314,6 +1323,12 @@ async def handle_order_group_triggered(group_id: str, group_data: Dict[str, Any]
 @dataclass
 class OrderIntent:
     """Typed order intent for Kalshi markets.
+    
+    CANONICAL ORDER INTENT: This is the single canonical OrderIntent for order routing.
+    All order routing must use this class.
+    
+    NOTE: fills_ledger.OrderIntent is a separate class for fill tracking/reconciliation.
+    These serve different purposes and should not be consolidated.
 
     Attributes:
         ticker: Kalshi market ticker
@@ -1727,12 +1742,21 @@ def _is_live_mode(mode: TradingMode) -> bool:
 def _kalshi_fee_cents(price_cents: int, contracts: int) -> int:
     """Canonical Kalshi fee calculation using unified fees module.
     
+    DEPRECATED (2026-07-16): Use calculate_kalshi_fee_cents from fees module directly.
+    This internal wrapper is being removed to consolidate fee calculation.
+    
     DELEGATED to unified fees module: merid.event_venues.kalshi.fees
     
     Formula: ceil(0.07 * C * P * (1-P)) where:
     - C = number of contracts
     - P = price in dollars (price_cents / 100)
     """
+    import warnings
+    warnings.warn(
+        "_kalshi_fee_cents is deprecated. Use calculate_kalshi_fee_cents from fees module directly.",
+        DeprecationWarning,
+        stacklevel=2
+    )
     return calculate_kalshi_fee_cents(contracts, price_cents)
 
 

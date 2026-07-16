@@ -150,7 +150,9 @@ class TestTradingPipelineAnalyzer(unittest.TestCase):
     
     def test_order_queue_analysis(self):
         """Test order queue depth analysis."""
-        with patch('merid.event_venues.kalshi.order_router_15m.Kalshi15mOrderRouter'):
+        # Legacy order_router_15m was deleted in 2026-07-16 audit cleanup
+        # Test now uses production order_router
+        with patch('merid.event_venues.kalshi.order_router.route_order_async'):
             result = self.analyzer._analyze_order_queues()
             
             self.assertIn("queue_depths", result)

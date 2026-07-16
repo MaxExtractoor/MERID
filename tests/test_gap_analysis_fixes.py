@@ -173,24 +173,15 @@ class TestScaleOutConfigLoading:
 
 
 class TestMockOrderRouterDocumentation:
-    """Test that mock order router has proper documentation."""
+    """Test that mock order router has been removed."""
     
-    def test_order_router_15m_has_warning(self):
-        """Verify order_router_15m.py has clear warning documentation."""
+    def test_order_router_15m_removed(self):
+        """Verify order_router_15m.py has been deleted."""
         order_router_path = project_root / "merid" / "event_venues" / "kalshi" / "order_router_15m.py"
-        content = order_router_path.read_text()
         
-        # Should have warning in docstring
-        assert "⚠️ WARNING: THIS MODULE IS NOT USED IN PRODUCTION ⚠️" in content, \
-            "Should have clear warning that module is not for production"
-        
-        # Should mention production router
-        assert "merid.event_venues.kalshi.order_router.py" in content, \
-            "Should reference the production order router"
-        
-        # Should have correct import guidance
-        assert "from merid.event_venues.kalshi.order_router import route_order_async, OrderIntent" in content, \
-            "Should provide correct import guidance for production use"
+        # File should not exist (deleted in 2026-07-16 audit cleanup)
+        assert not order_router_path.exists(), \
+            "Legacy order_router_15m.py should have been deleted"
 
 
 if __name__ == "__main__":

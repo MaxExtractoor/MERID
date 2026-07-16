@@ -15,7 +15,7 @@ from utils.logger import get_logger
 
 logger = get_logger("merid.event_venues.kalshi.order_deduplication")
 
-_TTL_SECONDS: int = 60  # 1 minute — Reduced from 30 minutes for 15m crypto trading to allow retries while preventing immediate duplicates
+_TTL_SECONDS: int = 5  # 5 seconds — Aligned with order_router.py _DUPLICATE_ORDER_WINDOW_SECONDS to match 15m crypto agent 5s cadence
 
 
 @dataclass

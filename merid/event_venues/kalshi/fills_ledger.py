@@ -362,7 +362,14 @@ class KalshiFill:
 
 @dataclass
 class OrderIntent:
-    """Record of an order intent before it becomes a fill."""
+    """Record of an order intent before it becomes a fill.
+    
+    NOTE: This is NOT a duplicate of order_router.OrderIntent.
+    - order_router.OrderIntent: Used for routing orders through risk checks and execution
+    - fills_ledger.OrderIntent: Used for tracking fill history and reconciliation
+    
+    These serve different purposes and have different fields. Do not consolidate.
+    """
     intent_id: str  # Our internal ID (client_order_id)
     ticker: str  # Renamed from market_ticker to match order_router.OrderIntent
     side: str  # "yes" or "no"
