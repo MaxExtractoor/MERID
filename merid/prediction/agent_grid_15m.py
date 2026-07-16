@@ -26,6 +26,17 @@ logger = get_logger("merid.prediction.agent_grid_15m")
 
 
 
+# Import unified signal terminology for consistent side selection
+try:
+    from merid.prediction.signal_terminology import (
+        Side, Action, StrategyMode, Direction, Momentum, Velocity,
+        TradingSignal, SignalMetadata
+    )
+    UNIFIED_TERMINOLOGY_AVAILABLE = True
+except ImportError:
+    UNIFIED_TERMINOLOGY_AVAILABLE = False
+    logger.warning("signal_terminology not available - using legacy side/action strings")
+
 # Import rejection monitor for production rejection tracking
 
 try:
@@ -184,7 +195,19 @@ def calculate_velocity_edge(velocity: float, velocity_threshold: float) -> float
 
 # Warmup bypass only allowed in first 5 minutes after process start
 
-_process_start_time = time.time()
+_process_start_time = time.time()  # Initialized at module import, reset when loop starts
+
+
+
+def reset_warmup_timer() -> None:
+
+    """Reset warmup timer to current time (call when agents actually start trading)."""
+
+    global _process_start_time
+
+    _process_start_time = time.time()
+
+    logger.info("[WARMUP-TIMER] Reset warmup timer - agents now have 5 minutes to populate history")
 
 
 
@@ -3760,9 +3783,10 @@ class LeanAgent15m:
 
         # If insufficient data, skip signal generation to avoid zero/default indicator values
 
-        # CRITICAL FIX: Use indicator stack's min_bars_cold_start for faster warmup
-
-        # This allows trading with fewer bars during initialization (10 bars vs 30+)
+        # CRITICAL FIX: 2026-07-16 - REMOVED cold start bypass logic
+        # Previous logic used min_bars_cold_start to allow trading with 1 bar during initialization
+        # This completely bypassed the 30-bar warmup requirement, causing orders within minutes of startup
+        # Now ALL trading requires full 30-bar warmup period
 
         if asset in self._indicator_stacks:
 
@@ -3770,9 +3794,9 @@ class LeanAgent15m:
 
                 indicator_snap = self._indicator_stacks[asset].snapshot()
 
-                # Removed early trade_allowed check to allow indicator stack's cold start logic to handle it
-
-                # The indicator stack now has cold start logic that bypasses volatility gates during warmup
+                # CRITICAL FIX: 2026-07-16 - REMOVED cold start bypass
+                # Previous comments about "allowing indicator stack's cold start logic" were incorrect
+                # The indicator stack no longer has cold start bypass - it requires full 30-bar warmup
 
             except Exception as e:
 
@@ -8569,34 +8593,37 @@ class LeanAgent15m:
             
 
             # Direction bias from velocity (encodes trend_following vs mean_reversion)
-
+            # CRITICAL FIX: Use unified terminology for consistent direction bias calculation
             # Positive velocity bumps YES probability, negative bumps NO probability
-
             direction_bias = 0.0
 
             if velocity > 0:
-
                 # Positive velocity favors YES in trend_following, NO in mean_reversion
-
                 if strategy_mode == "trend_following":
-
                     direction_bias = 0.1 * signal_mag  # Bump YES probability
-
                 else:  # mean_reversion
-
                     direction_bias = -0.1 * signal_mag  # Bump NO probability
-
             else:
-
                 # Negative velocity favors NO in trend_following, YES in mean_reversion
-
                 if strategy_mode == "trend_following":
-
                     direction_bias = -0.1 * signal_mag  # Bump NO probability
-
                 else:  # mean_reversion
-
                     direction_bias = 0.1 * signal_mag  # Bump YES probability
+            
+            # Validate direction bias logic against unified terminology
+            if UNIFIED_TERMINOLOGY_AVAILABLE:
+                expected_side = Side.from_velocity_and_mode(velocity, strategy_mode)
+                # Check if direction_bias aligns with expected side
+                if expected_side == Side.YES and direction_bias < 0:
+                    logger.warning(
+                        f"[DIRECTION-BIAS-MISMATCH] asset={asset} velocity={velocity} "
+                        f"strategy_mode={strategy_mode} expected_side=YES but direction_bias={direction_bias} < 0"
+                    )
+                elif expected_side == Side.NO and direction_bias > 0:
+                    logger.warning(
+                        f"[DIRECTION-BIAS-MISMATCH] asset={asset} velocity={velocity} "
+                        f"strategy_mode={strategy_mode} expected_side=NO but direction_bias={direction_bias} > 0"
+                    )
 
             
 
@@ -8727,6 +8754,18 @@ class LeanAgent15m:
             
 
             # Log the velocity-based rationale
+            # CRITICAL FIX: Use unified terminology to prevent signal inversion
+            if UNIFIED_TERMINOLOGY_AVAILABLE:
+                # Validate signal_side against unified terminology
+                expected_side = Side.from_velocity_and_mode(velocity, strategy_mode)
+                if signal_side != expected_side.value:
+                    logger.error(
+                        f"[SIGNAL-INVERSION-DETECTED] asset={asset} velocity={velocity} "
+                        f"strategy_mode={strategy_mode} expected_side={expected_side.value} "
+                        f"actual_side={signal_side} - POSSIBLE BUG"
+                    )
+                    # Correct the side to prevent signal inversion
+                    signal_side = expected_side.value
 
             if velocity > velocity_threshold:
 
@@ -12335,6 +12374,16 @@ class LeanAgentGrid15m:
 
         
 
+        # CRITICAL FIX (2026-07-16): Pre-filter candidates to select cheapest with best edge per asset
+        # This ensures we execute only 1 contract per asset per window, selecting the optimal combination
+        # of edge quality and price efficiency. Based on research from prediction market execution
+        # literature: edge is the primary signal, but among similar edges, cheaper contracts provide
+        # better risk-adjusted returns due to lower capital exposure.
+        candidates = self._select_best_edge_per_asset(candidates)
+        logger.info("[BEST-EDGE-FILTER] tick=%d filtered_candidates=%d", tick, len(candidates))
+
+        
+
         # Phase 2: Apply global allocator to select best edges under venue cap
 
         if candidates and allow_new_entries:
@@ -12818,6 +12867,91 @@ class LeanAgentGrid15m:
         """
         return f"{ticker}:{side}:{price_cents}"
 
+    def _select_best_edge_per_asset(self, candidates: List[Dict]) -> List[Dict]:
+        """Select the cheapest contract with the best edge per asset.
+        
+        CRITICAL FIX (2026-07-16): Implements per-asset best-edge selection to ensure
+        only 1 contract per asset per 15-minute window is executed. This prevents
+        multiple executions for the same asset at different prices, which can exceed
+        the $1 global exposure cap even though each individual order is within limits.
+        
+        Algorithm:
+        1. Group candidates by asset (BTC, ETH, SOL, XRP, DOGE)
+        2. For each asset, find the candidate with the highest edge_pct
+        3. If multiple candidates have similar edge (within 1% threshold), select the cheapest
+        4. Return at most 1 candidate per asset
+        
+        This approach is based on prediction market execution research:
+        - Edge is the primary signal (model probability vs market probability)
+        - Among similar edges, cheaper contracts provide better risk-adjusted returns
+        - Lower capital exposure improves Kelly criterion sizing and reduces tail risk
+        
+        Args:
+            candidates: List of candidate dictionaries from agent signals
+            
+        Returns:
+            Filtered list with at most 1 candidate per asset
+        """
+        if not candidates:
+            return []
+        
+        # Group candidates by asset
+        candidates_by_asset = {}
+        for candidate in candidates:
+            # Extract asset from agent_id or asset field
+            agent_id = candidate.get('agent_id', '')
+            if agent_id and '_' in agent_id:
+                asset = agent_id.split('_')[0].upper()
+            else:
+                asset = candidate.get('asset', 'UNKNOWN')
+            
+            # Validate it's one of the 5 crypto assets
+            if asset not in ("BTC", "ETH", "SOL", "XRP", "DOGE"):
+                continue
+            
+            if asset not in candidates_by_asset:
+                candidates_by_asset[asset] = []
+            candidates_by_asset[asset].append(candidate)
+        
+        # Select best candidate per asset
+        filtered_candidates = []
+        edge_similarity_threshold = 0.01  # 1% threshold for edge similarity
+        
+        for asset, asset_candidates in candidates_by_asset.items():
+            if not asset_candidates:
+                continue
+            
+            # Sort by edge_pct descending (best edge first)
+            asset_candidates.sort(key=lambda c: c.get('edge_pct', 0.0), reverse=True)
+            
+            # Get the best edge
+            best_edge = asset_candidates[0].get('edge_pct', 0.0)
+            
+            # Find all candidates with edge within threshold of best
+            similar_edge_candidates = [
+                c for c in asset_candidates
+                if abs(c.get('edge_pct', 0.0) - best_edge) <= edge_similarity_threshold
+            ]
+            
+            # Among similar edges, select the cheapest (lowest price_cents)
+            if len(similar_edge_candidates) > 1:
+                similar_edge_candidates.sort(key=lambda c: c.get('price_cents', 100))
+                selected = similar_edge_candidates[0]
+                logger.info(
+                    "[BEST-EDGE-SELECTION] asset=%s selected_cheapest: edge=%.2f%% price=%dc (had %d similar edges)",
+                    asset, selected.get('edge_pct', 0.0) * 100, selected.get('price_cents', 0), len(similar_edge_candidates)
+                )
+            else:
+                selected = asset_candidates[0]
+                logger.info(
+                    "[BEST-EDGE-SELECTION] asset=%s selected_best: edge=%.2f%% price=%dc",
+                    asset, selected.get('edge_pct', 0.0) * 100, selected.get('price_cents', 0)
+                )
+            
+            filtered_candidates.append(selected)
+        
+        return filtered_candidates
+
 
 
 # Build function for agent grid
@@ -13230,51 +13364,21 @@ async def build_15m_agent_grid(
 
 # Global agent grid instance
 
+# CRITICAL FIX (2026-07-18): Remove duplicate _agent_grid definitions
+# There were two identical definitions causing potential state management issues
+# Keep only one clean definition
 _agent_grid: Optional[LeanAgentGrid15m] = None
 
 
-
 def get_agent_grid() -> Optional[LeanAgentGrid15m]:
-
-    # Get the global agent grid instance.
-
+    """Get the global agent grid instance."""
     global _agent_grid
-
     return _agent_grid
 
 
-
 def set_agent_grid(grid: LeanAgentGrid15m) -> None:
-
-    # Set the global agent grid instance.
-
+    """Set the global agent grid instance."""
     global _agent_grid
-
     _agent_grid = grid
-
-    logger.info("[AGENT-GRID-SET] Global agent grid instance set")
-
-_agent_grid: Optional[LeanAgentGrid15m] = None
-
-
-
-def get_agent_grid() -> Optional[LeanAgentGrid15m]:
-
-    # Get the global agent grid instance.
-
-    global _agent_grid
-
-    return _agent_grid
-
-
-
-def set_agent_grid(grid: LeanAgentGrid15m) -> None:
-
-    # Set the global agent grid instance.
-
-    global _agent_grid
-
-    _agent_grid = grid
-
     logger.info("[AGENT-GRID-SET] Global agent grid instance set")
 

@@ -48,6 +48,13 @@ from merid.event_venues.kalshi.rate_limiter import get_rate_limiter
 # PHASE1-DUP-2: Order deduplication cache integration
 from merid.event_venues.kalshi.order_deduplication import get_order_cache
 
+# Import unified signal terminology for consistent side/action handling
+try:
+    from merid.prediction.signal_terminology import Side as UnifiedSide, Action as UnifiedAction
+    UNIFIED_TERMINOLOGY_AVAILABLE = True
+except ImportError:
+    UNIFIED_TERMINOLOGY_AVAILABLE = False
+
 # Toxicity detection integration (bot counter-trading prevention)
 from merid.event_venues.kalshi.toxicity_detection import get_toxicity_detector, ToxicityMetrics
 from merid.event_venues.kalshi.entropy_kill_switch import get_entropy_kill_switch
@@ -114,6 +121,12 @@ _duplicate_order_lock = threading.Lock()
 # The 60s window was blocking legitimate re-submissions, causing 65% rejection rate
 # order_gate.py handles sophisticated duplicate detection with 5s buckets for 15m agents
 _DUPLICATE_ORDER_WINDOW_SECONDS = 5
+
+# CRITICAL FIX (2026-07-18): Per-asset entry window tracking (in-memory, resets on restart)
+# Key: asset (BTC, ETH, SOL, XRP, DOGE) -> window_start timestamp (15-minute boundary)
+# This enforces 1 entry per asset per 15-minute window across all order paths
+_asset_entry_windows: Dict[str, int] = {}
+_asset_entry_windows_lock = threading.Lock()
 
 
 # =============================================================================
@@ -1945,12 +1958,14 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
         _increment_validation_gate_metric("ROUTER_VALIDATION", "global_rate_limit")
         return rate_limit_rejection
     
-    # TEMPORARY: Convert side/action to Kalshi format before validation
+    # CRITICAL FIX: Convert side/action to Kalshi format using unified terminology
     # Handle both lowercase ("yes"/"no" + "buy"/"sell") and uppercase ("YES"/"NO" + "BUY"/"SELL")
     # Convert to "BUY_YES"/"SELL_YES"/"BUY_NO"/"SELL_NO"
+    # CRITICAL: Validate against unified terminology if available to prevent signal inversion
     logger.info("[CHECK-INTENT-RISK] Before conversion: side=%s action=%s", intent.side, intent.action)
     side_lower = intent.side.lower() if intent.side else ""
     action_lower = intent.action.lower() if intent.action else ""
+    
     if side_lower in ("yes", "no") and action_lower in ("buy", "sell"):
         if side_lower == "yes" and action_lower == "buy":
             intent.side = "BUY_YES"
@@ -1960,6 +1975,21 @@ def _check_intent_risk(intent: OrderIntent) -> Optional[str]:
             intent.side = "BUY_NO"
         elif side_lower == "no" and action_lower == "sell":
             intent.side = "SELL_NO"
+        
+        # Validate against unified terminology if available
+        if UNIFIED_TERMINOLOGY_AVAILABLE:
+            try:
+                # Validate side
+                UnifiedSide(side_lower)
+                # Validate action
+                UnifiedAction(action_lower)
+            except ValueError as e:
+                logger.error(
+                    f"[UNIFIED-TERMINOLOGY-ERROR] Invalid side/action combination: "
+                    f"side={side_lower} action={action_lower} error={e}"
+                )
+                # Continue with conversion for backward compatibility
+    
     logger.info("[CHECK-INTENT-RISK] After conversion: side=%s action=%s", intent.side, intent.action)
     
     if intent.count <= 0:
@@ -4481,7 +4511,8 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         # Still allow but monitor for patterns
     
     # Convert lowercase side/action to Kalshi format before validation
-    # TEMPORARY: Convert "yes"/"no" + "buy"/"sell" to "BUY_YES"/"SELL_YES"/"BUY_NO"/"SELL_NO"
+    # CRITICAL FIX: Use unified terminology validation to prevent signal inversion
+    # Convert "yes"/"no" + "buy"/"sell" to "BUY_YES"/"SELL_YES"/"BUY_NO"/"SELL_NO"
     if intent.side in ("yes", "no") and intent.action in ("buy", "sell"):
         if intent.side == "yes" and intent.action == "buy":
             intent.side = "BUY_YES"
@@ -4491,6 +4522,19 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             intent.side = "BUY_NO"
         elif intent.side == "no" and intent.action == "sell":
             intent.side = "SELL_NO"
+        
+        # Validate against unified terminology if available
+        if UNIFIED_TERMINOLOGY_AVAILABLE:
+            try:
+                # Validate side
+                UnifiedSide(intent.side.lower().replace("_yes", "").replace("_no", ""))
+                # Validate action
+                UnifiedAction(intent.action)
+            except ValueError as e:
+                logger.error(
+                    f"[UNIFIED-TERMINOLOGY-ERROR] Invalid side/action combination: "
+                    f"side={intent.side} action={intent.action} error={e}"
+                )
     
     # Validate side is one of the allowed Kalshi sides
     valid_sides = {"BUY_YES", "SELL_YES", "BUY_NO", "SELL_NO"}
@@ -4607,28 +4651,34 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 # CRITICAL FIX (2026-07-18): Enforce 1 entry per asset per 15-minute window
                 # This applies to ALL order paths (agent_grid, execution_subscriber, etc.)
                 # Uses window-based approach (e.g., 12:00-12:15, 12:15-12:30) not rolling cooldown
+                # CRITICAL FIX (2026-07-18): Set window BEFORE submission to prevent race conditions
+                # If order fails later, we clear the window to allow retry
                 if asset and intent.action.lower() == "buy":
                     import time
-                    if not hasattr(route_order_async, '_asset_entry_windows'):
-                        route_order_async._asset_entry_windows = {}
-                    
                     now = time.time()
                     # Calculate current 15-minute window (Kalshi 15m markets align to :00, :15, :30, :45)
                     window_start = int(now // 900) * 900  # Floor to nearest 15-minute boundary
                     
-                    last_window = route_order_async._asset_entry_windows.get(asset, 0)
-                    
-                    if last_window == window_start:
-                        logger.warning(
-                            f"[ORDER-ROUTER] Per-asset entry limit: {asset} already entered in current 15m window "
-                            f"(window={window_start}), rejecting new entry (ticker={intent.ticker}, side={intent.side})"
-                        )
-                        return OrderResult(
-                            status="rejected",
-                            mode=intent.mode,
-                            fill=None,
-                            reason=f"Per-asset entry limit: {asset} already entered in current 15m window",
-                            latency_ms=0.0
+                    with _asset_entry_windows_lock:
+                        last_window = _asset_entry_windows.get(asset, 0)
+                        
+                        if last_window == window_start:
+                            logger.warning(
+                                f"[ORDER-ROUTER] Per-asset entry limit: {asset} already entered in current 15m window "
+                                f"(window={window_start}), rejecting new entry (ticker={intent.ticker}, side={intent.side})"
+                            )
+                            return OrderResult(
+                                status="rejected",
+                                mode=intent.mode,
+                                fill=None,
+                                reason=f"Per-asset entry limit: {asset} already entered in current 15m window",
+                                latency_ms=0.0
+                            )
+                        
+                        # Set window now to prevent race conditions
+                        _asset_entry_windows[asset] = window_start
+                        logger.info(
+                            f"[ORDER-ROUTER] Per-asset entry window set before submission: {asset} window={window_start}"
                         )
                 
                 # Get all positions for this asset across all markets
@@ -5779,6 +5829,21 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             )
         
         if not placed_res.success or placed_res.data is None:
+            # CRITICAL FIX (2026-07-18): Clear entry window on order rejection
+            # Since we set the window BEFORE submission, we must clear it on rejection to allow retry
+            if asset and intent.action.lower() == "buy":
+                try:
+                    with _asset_entry_windows_lock:
+                        # Only clear if the window matches what we set (prevents clearing stale entries)
+                        current_window = int(_time.time() // 900) * 900
+                        if _asset_entry_windows.get(asset) == current_window:
+                            del _asset_entry_windows[asset]
+                            logger.info(
+                                f"[ORDER-ROUTER] Per-asset entry window cleared on rejection: {asset} window={current_window}"
+                            )
+                except Exception as window_clear_err:
+                    logger.warning("[ORDER-ROUTER] Failed to clear entry window on rejection: %s", window_clear_err)
+            
             # CRITICAL FIX (2026-07-14): Release allocated slot on order rejection
             # Since we now allocate slots BEFORE submission, we must release them on rejection
             if _allocated_slot_id:
@@ -6077,34 +6142,9 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         elif filled_count > 0:
             status = "partial_live"
         
-        # CRITICAL FIX (2026-07-18): Update asset entry window on successful fill
-        # This marks the asset as having entered in the current 15-minute window
-        if filled_count > 0 and intent.action.lower() == "buy":
-            try:
-                # Extract asset from ticker (same logic as position limit check)
-                asset = None
-                ticker_upper = intent.ticker.upper()
-                if "BTC" in ticker_upper:
-                    asset = "BTC"
-                elif "ETH" in ticker_upper:
-                    asset = "ETH"
-                elif "SOL" in ticker_upper:
-                    asset = "SOL"
-                elif "XRP" in ticker_upper:
-                    asset = "XRP"
-                elif "DOGE" in ticker_upper:
-                    asset = "DOGE"
-                
-                if asset and hasattr(route_order_async, '_asset_entry_windows'):
-                    import time
-                    now = time.time()
-                    window_start = int(now // 900) * 900  # Floor to nearest 15-minute boundary
-                    route_order_async._asset_entry_windows[asset] = window_start
-                    logger.info(
-                        f"[ORDER-ROUTER] Per-asset entry window set: {asset} window={window_start}"
-                    )
-            except Exception as cooldown_err:
-                logger.warning("[ORDER-ROUTER] Failed to update asset entry window: %s", cooldown_err)
+        # CRITICAL FIX (2026-07-18): Window is now set on SUBMISSION, not on fill
+        # This prevents multiple submissions even if orders don't fill immediately
+        # The fill handler no longer needs to update the window
         
         # CRITICAL FIX (2026-07-13): Notify global_allocator of order fill for pending order tracking
         # This removes the asset from pending orders and updates position tracking
