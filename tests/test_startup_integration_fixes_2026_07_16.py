@@ -13,6 +13,10 @@ Fixes tested:
 - GAP #5: RestingOrderMonitor started in startup
 - GAP #6: PositionMonitor started in startup
 - GAP #8: Risk manager calibration with timeout
+- GAP #9: Catalog refresh synchronized with 15m windows
+- GAP #10: Unified health check endpoint
+- GAP #11: Coinbase WS client initialization
+- GAP #12: End-to-end data flow validation probes
 """
 
 import pytest
