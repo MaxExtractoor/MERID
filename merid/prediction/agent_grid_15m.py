@@ -3802,27 +3802,11 @@ class LeanAgent15m:
 
                 logger.error("[MOMENTUM-FVG-DATA-FAILURE] asset=%s indicator stack exception: %s - this is a BUG, not normal warmup", asset, e)
 
-                # Fallback to original check if indicator stack fails
-
-                price_history = list(self._spot_price_history.get(asset, []))
-
-                min_history_for_macd = 26  # 21 for MACD slow + 5 for signal line (MACD(8,21,5))
-
-                min_history_for_rsi = 15  # CRITICAL FIX: 2026-07-16 - 14 for RSI + 1 for calculation (RSI(14))
-
-                
-
-                if len(price_history) < min_history_for_macd:
-
-                    logger.info(
-
-                        "[MOMENTUM-FVG-WARMUP] asset=%s history_length=%d (requires %d for MACD) - warming up",
-
-                        asset, len(price_history), min_history_for_macd
-
-                    )
-
-                    return None
+                # CRITICAL FIX: 2026-07-16 - Removed fallback path
+                # Previous fallback only checked price history length but didn't calculate indicators
+                # If indicator stack fails, fail fast - don't attempt signal generation without proper indicators
+                logger.warning("[MOMENTUM-FVG] asset=%s indicator stack unavailable - skipping signal generation", asset)
+                return None
 
         
 
@@ -7670,6 +7654,26 @@ class LeanAgent15m:
         # MOMENTUM_FVG STRATEGY: Combines velocity, MACD, RSI, OBI, and FVG for enhanced signals
 
         if self.config.signal_mode == "momentum_fvg":
+
+            return self._generate_momentum_fvg_signal(asset, spot_price, market, minutes_to_expiry)
+
+        
+
+        # CRITICAL FIX: 2026-07-16 - Add fallback for unsupported signal modes
+
+        # "trend" and "mean_reversion" modes are defined in config but not implemented as handlers
+
+        # Fallback to momentum_fvg with warning to prevent signal generation failure
+
+        if self.config.signal_mode in ("trend", "mean_reversion"):
+
+            logger.warning(
+
+                "[SIGNAL-MODE-FALLBACK] asset=%s signal_mode=%s not implemented - falling back to momentum_fvg",
+
+                asset, self.config.signal_mode
+
+            )
 
             return self._generate_momentum_fvg_signal(asset, spot_price, market, minutes_to_expiry)
 
@@ -12263,7 +12267,9 @@ class LeanAgentGrid15m:
                                     if update_spot_price:
 
                                         # Buffer spot price for 1-minute aggregation
-
+                                        # NOTE: Indicator stack uses spot prices as proxies for underlying crypto price movement
+                                        # This is intentional - technical indicators (RSI, MACD, EMA) are calculated on the underlying asset,
+                                        # not the Kalshi prediction market prices (which are 0-1 range binary options)
                                         agent._indicator_stack_price_buffer[update_asset].append(update_spot_price)
 
                                         

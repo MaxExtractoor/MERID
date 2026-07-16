@@ -991,8 +991,8 @@ class TestPriceBasedStrategy:
         # Distance from threshold = (0.50 - 0.45) / 0.50 = 0.10
         # Dynamic confidence: 0.50 + 2.0 * 0.10 = 0.70
         assert signal["confidence"] >= 0.50  # Must pass 50% threshold
-        # Verify edge_pct is calculated with new formula
-        assert signal["edge_pct"] >= 2.0  # Minimum 2% base edge
+        # Verify edge_pct is calculated with new formula (edge_pct is in decimal form)
+        assert signal["edge_pct"] >= 0.02  # Minimum 2% base edge (0.02 in decimal)
         # Verify model_prob is adjusted (should be higher than market_price for buy YES)
         assert signal["model_prob"] > 0.45  # model_prob should be adjusted upward
     
@@ -1051,8 +1051,8 @@ class TestPriceBasedStrategy:
         # Distance from threshold = (0.72 - 0.70) / (1.0 - 0.70) = 0.067
         # Dynamic confidence: 0.50 + 2.0 * 0.067 = 0.63
         assert signal["confidence"] >= 0.50  # Must pass 50% threshold
-        # Verify edge_pct is calculated with new formula
-        assert signal["edge_pct"] >= 2.0  # Minimum 2% base edge
+        # Verify edge_pct is calculated with new formula (edge_pct is in decimal form)
+        assert signal["edge_pct"] >= 0.02  # Minimum 2% base edge (0.02 in decimal)
         # Verify model_prob is adjusted (should be lower than market_price for sell YES/betting NO)
         assert signal["model_prob"] < 0.72  # model_prob should be adjusted downward
     

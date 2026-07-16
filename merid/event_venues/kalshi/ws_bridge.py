@@ -28,7 +28,16 @@ from __future__ import annotations
 
 import logging
 import time as _time
-from typing import Dict, Any, Callable
+from typing import Dict, Any, Callable, Optional
+
+# CRITICAL FIX: 2026-07-16 - Wire FVG integration to WebSocket orderbook data
+# This ensures FVG detection receives real-time Kalshi price updates
+try:
+    from merid.prediction.fvg_integration import update_price_from_orderbook, is_fvg_enabled
+    _FVG_INTEGRATION_AVAILABLE = True
+except ImportError:
+    _FVG_INTEGRATION_AVAILABLE = False
+    logging.getLogger(__name__).warning("[WS-BRIDGE] FVG integration not available - FVG signals will be disabled")
 
 
 class WSBridgeHealth:
@@ -420,6 +429,8 @@ class KalshiWebSocketBridge:
         self._fill_dead_letter_lock_init = threading.Lock()  # Thread-safe lazy init
         self._max_dead_letter_size = 1000  # Max fills to queue during reconnection
         self._processing_dead_letter = False
+        self._dead_letter_alert_threshold = 0.8  # Alert when queue is 80% full
+        self._dead_letter_last_alert_ts: float = 0.0  # Last alert timestamp to prevent spam
         
         # DIAGNOSTIC: Track first orderbook message per ticker for WS flow verification
         self._first_orderbook_seen: set = set()
@@ -497,17 +508,16 @@ class KalshiWebSocketBridge:
         self._circuit_breaker_reset_ts: Optional[float] = None
         self._CIRCUIT_BREAKER_THRESHOLD: int = 20  # v9: was 10, now 20 failures in window
         self._CIRCUIT_BREAKER_WINDOW_S: float = 60.0  # 60-second window
-        self._CIRCUIT_BREAKER_COOLDOWN_S: float = 15.0  # v9: was 30, now 15s backoff when tripped
+        self._CIRCUIT_BREAKER_COOLDOWN_S: float = 60.0  # Increased to 60s for sustained WS issues (was 15s)
         
         # EVENT-LOOP-FIX: Cache market_state_store reference to avoid repeated lookups
         self._market_state_store: Optional[Any] = None
         
-        # REST fallback mode for Windows WebSocket header incompatibility
-        # CRITICAL FIX 2026-07-11: DISABLED to force WebSocket operation and diagnose IDLE issue
-        # WebSocket connections are not receiving events from Kalshi, causing no market data
-        # REST polling provides reliable orderbook data as fallback
-        # TODO: Re-enable after diagnosing why WebSocket receives no events
-        self._rest_fallback_mode: bool = False
+        # REST fallback mode for WebSocket reliability
+        # Uses REST polling when WebSocket is unhealthy or not receiving events
+        # This provides resilience during startup, reconnection, or WebSocket issues
+        # WebSocket is primary mode; REST is fallback when WS is degraded
+        self._rest_fallback_mode: bool = False  # Start in WS mode, fallback to REST if needed
         
         # DIAGNOSTIC: Counter for enqueue diagnostic logging
         self._events_enqueued: int = 0
@@ -1031,6 +1041,16 @@ class KalshiWebSocketBridge:
                         logger.info(f"[WS-SUBSCRIPTION] REST orderbook response for {ticker}: {data}")
                         no_levels = []
                         yes_levels = []
+                        
+                        # CRITICAL FIX: Check if data is a dict before calling .get()
+                        # result.data may be a list in some cases, causing AttributeError
+                        if not isinstance(data, dict):
+                            logger.warning(
+                                "[WS-SUBSCRIPTION] Unexpected data type for ticker=%s: expected dict, got %s. Skipping orderbook parsing.",
+                                ticker, type(data).__name__
+                            )
+                            continue
+                        
                         orderbook_fp = data.get("orderbook_fp", {})
                         if "no_dollars" in orderbook_fp:
                             no_levels = [[float(price), float(size)] for price, size in orderbook_fp["no_dollars"]]
@@ -2667,11 +2687,24 @@ class KalshiWebSocketBridge:
                             for f in self._fill_dead_letter_queue
                         ):
                             self._fill_dead_letter_queue.append(raw)
+                            queue_utilization = len(self._fill_dead_letter_queue) / self._max_dead_letter_size
                             logger.warning(
                                 "[WS_BRIDGE_FILL_QUEUED] Fill %s queued to dead-letter for later processing. "
-                                "Queue size: %d/%d",
-                                fill_id, len(self._fill_dead_letter_queue), self._max_dead_letter_size
+                                "Queue size: %d/%d (%.1f%%)",
+                                fill_id, len(self._fill_dead_letter_queue), self._max_dead_letter_size,
+                                queue_utilization * 100
                             )
+                            # Alert when queue is approaching capacity
+                            if queue_utilization >= self._dead_letter_alert_threshold:
+                                now = _time.time()
+                                if now - self._dead_letter_last_alert_ts > 60.0:  # Alert at most once per minute
+                                    logger.critical(
+                                        "[WS_BRIDGE_FILL_QUEUE_ALERT] Dead-letter queue at %.1f%% capacity (%d/%d). "
+                                        "Extended reconnection or fill processing delay detected!",
+                                        queue_utilization * 100, len(self._fill_dead_letter_queue),
+                                        self._max_dead_letter_size
+                                    )
+                                    self._dead_letter_last_alert_ts = now
                     else:
                         # Dead-letter queue is full - this is a critical situation
                         logger.error(
@@ -2980,6 +3013,11 @@ class KalshiWebSocketBridge:
         
         while not self._shutdown.is_set():
             try:
+                # Check if loop is still running before scheduling
+                if loop.is_closed():
+                    logger.warning("[WS-DRAIN-TASK] Event loop closed, exiting drain task")
+                    break
+                
                 # Use run_in_executor to blockingly get from thread_queue
                 # This yields control to the event loop while waiting
                 event = await loop.run_in_executor(None, self._thread_queue.get)
@@ -2991,6 +3029,11 @@ class KalshiWebSocketBridge:
                     except asyncio.TimeoutError:
                         logger.warning("[WS-DRAIN-TASK] async_queue full, dropping event")
                         self._events_dropped += 1
+            except RuntimeError as e:
+                if "cannot schedule new futures after shutdown" in str(e):
+                    logger.warning("[WS-DRAIN-TASK] Executor shutdown detected, exiting drain task")
+                    break
+                raise
             except Exception as e:
                 if not self._shutdown.is_set():
                     logger.error(f"[WS-DRAIN-TASK] Error: {e}", exc_info=True)
@@ -3485,6 +3528,44 @@ class KalshiWebSocketBridge:
                     store = get_kalshi_market_state_store()
                     if ticker and isinstance(msg_body, dict):
                         store.apply_orderbook_message(msg_body, "bridge_queue")
+                        
+                        # CRITICAL FIX: 2026-07-16 - Wire FVG integration to WebSocket orderbook data
+                        # Update FVG store with live Kalshi prices for FVG detection
+                        if _FVG_INTEGRATION_AVAILABLE and is_fvg_enabled():
+                            try:
+                                # Extract bid/ask from market state after update
+                                state = store.get(ticker)
+                                if state and state.best_bid_cents is not None and state.best_ask_cents is not None:
+                                    # Convert cents to 0-1 range for FVG integration
+                                    bid = state.best_bid_cents / 100.0
+                                    ask = state.best_ask_cents / 100.0
+                                    # Extract asset and timeframe from ticker
+                                    asset = None
+                                    timeframe = "15m"  # Default for crypto 15m markets
+                                    if "BTC" in ticker.upper():
+                                        asset = "BTC"
+                                    elif "ETH" in ticker.upper():
+                                        asset = "ETH"
+                                    elif "SOL" in ticker.upper():
+                                        asset = "SOL"
+                                    elif "XRP" in ticker.upper():
+                                        asset = "XRP"
+                                    elif "DOGE" in ticker.upper():
+                                        asset = "DOGE"
+                                    
+                                    if asset:
+                                        update_price_from_orderbook(
+                                            ticker=ticker,
+                                            bid=bid,
+                                            ask=ask,
+                                            timestamp=_time.time(),
+                                            asset=asset,
+                                            timeframe=timeframe
+                                        )
+                            except Exception as fvg_exc:
+                                # Don't fail the orderbook update if FVG update fails
+                                logger.debug("[WS-FORWARDER-FVG] Failed to update FVG for %s: %s", ticker, fvg_exc)
+                        
                         # DIAGNOSTIC: Track parse success
                         try:
                             self._ws_tracker.record_parse_success(ticker)
