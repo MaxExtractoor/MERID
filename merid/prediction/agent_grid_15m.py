@@ -4669,59 +4669,22 @@ class LeanAgent15m:
 
         
 
-        # Calculate price_cents from market state (mid price)
-        # CRITICAL: This must be calculated BEFORE model_prob since model_prob depends on price_cents
+        # CRITICAL FIX: 2026-07-16 - Use actual market prices from dual-side evaluation instead of hardcoded 42c
+        # The dual-side evaluation (lines 4400-4410) already retrieved yes_price_cents and no_price_cents
+        # from market_state_store. We must use those actual prices instead of falling back to 42c.
+        # Using 42c causes model_prob to be calculated from wrong market probability, leading to
+        # Kelly filter rejections despite valid edges (e.g., 9.3% edge rejected because model_prob=0.48
+        # instead of 0.77 when actual price is 68c).
 
-        price_cents = 42  # 2026-07-13: Changed from 25 to 42 (midpoint of 10-75c canonical range)
+        if signal_side == "yes":
+            price_cents = yes_price_cents if yes_price_cents > 0 else 42
+            price_source = "dual_side_yes_price" if yes_price_cents > 0 else "fallback_42c"
+        else:  # signal_side == "no"
+            price_cents = no_price_cents if no_price_cents > 0 else 42
+            price_source = "dual_side_no_price" if no_price_cents > 0 else "fallback_42c"
 
-        price_source = "default_42c"
-
-        try:
-
-            ticker = market.market.market_id if hasattr(market, 'market') else market.market_id
-
-            logger.info("[PRICE-CENTS-DEBUG] asset=%s ticker=%s market_state_store_available=%s", asset, ticker, self.market_state_store is not None)
-
-            market_state = self.market_state_store.get(ticker) if self.market_state_store else None
-
-            logger.info("[PRICE-CENTS-DEBUG] asset=%s ticker=%s market_state_found=%s", asset, ticker, market_state is not None)
-
-            if market_state:
-
-                best_bid = getattr(market_state, 'best_bid_cents', 0) or 0
-
-                best_ask = getattr(market_state, 'best_ask_cents', 0) or 0
-
-                logger.info("[PRICE-CENTS-DEBUG] asset=%s ticker=%s best_bid=%d best_ask=%d", asset, ticker, best_bid, best_ask)
-
-                if best_bid > 0 and best_ask > 0:
-
-                    price_cents = int((best_bid + best_ask) / 2)
-
-                    price_source = "mid_bid_ask"
-
-                elif best_bid > 0:
-
-                    price_cents = int(best_bid)
-
-                    price_source = "bid_only"
-
-                elif best_ask > 0:
-
-                    price_cents = int(best_ask)
-
-                    price_source = "ask_only"
-
-        except Exception as e:
-
-            logger.warning("[PRICE-CENTS-ERROR] asset=%s error getting market price: %s", asset, e)
-
-            price_cents = 42  # Fallback to default
-
-            price_source = "fallback_42c"
-            # 2026 BEST PRACTICE: Track fallback activation
-            self._fallback_activations["price_fallback"] += 1
-            self._fallback_timestamps["price_fallback"].append(time.time())
+        logger.info("[PRICE-CENTS-DEBUG] asset=%s signal_side=%s price_cents=%d source=%s (using dual-side evaluation prices)",
+                    asset, signal_side, price_cents, price_source)
 
         
 
