@@ -85,22 +85,6 @@ class TestCycleRiskFixes:
             assert MAX_TOTAL_RISK_PCT == 0.15, \
                 f"Expected 15% total risk (legacy default, DISABLED for 15m), got {MAX_TOTAL_RISK_PCT}"
     
-    @pytest.mark.skip(reason="global_risk_guard.py is deprecated and has syntax errors. Use merid.risk.unified_risk_manager instead.")
-    def test_global_risk_guard_defaults(self):
-        """Test global_risk_guard.py default values."""
-        import warnings
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=DeprecationWarning)
-            from merid.guards.global_risk_guard import GlobalRiskGuard
-
-            guard = GlobalRiskGuard()
-
-            # 2026-07-16: These are legacy defaults; actual enforcement uses fixed_exposure_cap_usd=1.00
-            assert guard.max_cycle_risk_pct == 0.05, \
-                f"Expected 5% cycle risk (legacy default, DISABLED for 15m), got {guard.max_cycle_risk_pct}"
-            assert guard.max_total_risk_pct == 0.15, \
-                f"Expected 15% total risk (legacy default, DISABLED for 15m), got {guard.max_total_risk_pct}"
-    
     def test_global_risk_guard_env_fallbacks(self):
         """Test global_risk_guard.py env var fallbacks."""
         # 2026-07-16: These are legacy defaults; actual enforcement uses fixed_exposure_cap_usd=1.00
