@@ -230,17 +230,11 @@ class KalshiCrypto15mRiskEnvelope:
     # ── Cycle Risk Cap ───────────────────────────────────────────────────────
     max_cycle_risk_pct: float  # Maximum risk per cycle as percentage of capital
     
-    # ── Window-Based Risk Tracking (2026-07-06: HARD STOP) ─────────────────
+    # ── Window-Based Risk Tracking REMOVED (2026-07-08: Fixed $1 exposure cap) ─────────────────
     # CRITICAL: Uses fixed $1.00 exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
-    # Percentage-based limits (3% per-agent, 5% total venue) are DISABLED
+    # Percentage-based limits (3% per-agent, 5% total venue) REMOVED
     # Global slot allocator enforces $1.00 total cap across all 5 assets
-    # These fields are retained for backward compatibility but not used in enforcement
-    guardrails_per_window_risk_pct: float  # DEPRECATED: Not used (fixed $1 cap instead)
-    guardrails_total_venue_risk_pct: float  # DEPRECATED: Not used (fixed $1 cap instead)
-    
-    # Computed window limits in USD (for easy access)
-    per_agent_window_limit_usd: float  # DEPRECATED: Not used (fixed $1 cap instead)
-    total_venue_window_limit_usd: float  # Fixed $1.00 exposure cap (MERID_FIXED_EXPOSURE_CAP_USD)
+    # Window tracking fields retained for monitoring only, not enforcement
     
     # Window tracking state
     window_start_ts: float  # Timestamp when current 15m window started
@@ -274,6 +268,13 @@ class KalshiCrypto15mRiskEnvelope:
     correlation_tracking_enabled: bool
     correlation_threshold: float  # Threshold for exposure reduction
     correlation_multiplier: float  # Current correlation-based size multiplier
+    
+    # ── Legacy Window Limits (Retained for backward compatibility, not enforced) ─────────────
+    # 2026-07-12: Added these fields to prevent AttributeError when code accesses them
+    # These are set to the fixed $1.00 cap but are NOT used for enforcement
+    # MUST be at the end of dataclass to avoid "non-default argument follows default argument" error
+    per_agent_window_limit_usd: float = 1.00  # Deprecated: Fixed $1 global cap (not per-agent)
+    total_venue_window_limit_usd: float = 1.00  # Deprecated: Fixed $1 global cap (not per-venue)
     
     def update_drawdown(self, current_equity_usd: float):
         """Update drawdown tracking with current equity.
@@ -428,14 +429,14 @@ class KalshiCrypto15mRiskEnvelope:
         """Get base position size (number of contracts) for a single trade.
         
         This is derived from max_single_order_notional_usd and assumes a
-        conservative contract price of 50 cents (typical for 15m crypto futures).
+        conservative contract price of 42 cents (midpoint of 10-75c canonical range).
         
         Returns:
             Base position size as integer number of contracts (minimum 1)
         """
-        # Conservative contract price assumption (50 cents = 0.50 USD)
+        # Conservative contract price assumption (42 cents = 0.42 USD - midpoint of 10-75c canonical range)
         # 15m crypto futures typically trade in the 40-60 cent range
-        assumed_contract_price_usd = 0.50
+        assumed_contract_price_usd = 0.42
         
         # Calculate base size from max single order notional
         base_size = self.max_single_order_notional_usd / assumed_contract_price_usd
@@ -795,6 +796,14 @@ def compute_kalshi_crypto_15m_risk_envelope(
     from pathlib import Path
     import time as _time_mod
     
+    # 2026 BEST PRACTICE: Graceful degradation for bankroll service failures
+    # If bankroll is 0 or invalid, use conservative default ($100) to allow system to continue
+    if live_bankroll_usd is None or live_bankroll_usd <= 0:
+        logger.warning(
+            f"[RISK-ENVELOPE] Invalid bankroll_usd={live_bankroll_usd} - using conservative default $100.00 for graceful degradation"
+        )
+        live_bankroll_usd = 100.0
+    
     # CRITICAL FIX 2026-07-08: Initialize peak bankroll on envelope creation
     # This ensures peak bankroll is set even before first check_window_limit call
     with _WINDOW_TRACKING_LOCK:
@@ -826,22 +835,10 @@ def compute_kalshi_crypto_15m_risk_envelope(
     # Extract Phase 1 profitability enhancements
     correlation_tracking_config = profile_config.get('correlation_tracking', {})
     
-    # Extract window-based risk limits (2026-07-06: HARD STOP)
-    guardrails_per_window_risk_pct_raw = profile_config.get('guardrails_per_window_risk_pct', 0.03)
-    if isinstance(guardrails_per_window_risk_pct_raw, dict):
-        guardrails_per_window_risk_pct = guardrails_per_window_risk_pct_raw.get('value', 0.03)
-    else:
-        guardrails_per_window_risk_pct = guardrails_per_window_risk_pct_raw
-    
-    guardrails_total_venue_risk_pct_raw = profile_config.get('guardrails_total_venue_risk_pct', 0.05)
-    if isinstance(guardrails_total_venue_risk_pct_raw, dict):
-        guardrails_total_venue_risk_pct = guardrails_total_venue_risk_pct_raw.get('value', 0.05)
-    else:
-        guardrails_total_venue_risk_pct = guardrails_total_venue_risk_pct_raw
-    
-    # 2026-07-08: DISABLED percentage-based window limits - using fixed $1 exposure model
+    # Window-based risk limits REMOVED (2026-07-08: Fixed $1 exposure cap)
+    # Previous percentage-based limits (3% per agent, 5% total) replaced by fixed $1 slot allocation
     logger.info(
-        "[RISK-ENVELOPE] Window-based limits: DISABLED (using fixed $1 exposure model)"
+        "[RISK-ENVELOPE] Window-based limits: REMOVED (using fixed $1 exposure model via global_slot_allocator)"
     )
 
     # Extract cycle risk cap (handle nested dict format)
@@ -874,9 +871,9 @@ def compute_kalshi_crypto_15m_risk_envelope(
         raise ValueError("Last adaptive_risk_bands entry must have multiplier 0.0 (halt)")
     
     # Extract drawdown thresholds (handle nested dict format)
-    drawdown_halt_pct_raw = guardrails.get('drawdown_halt_pct', 0.15)
+    drawdown_halt_pct_raw = guardrails.get('drawdown_halt_pct', 0.20)  # FIXED: Default 0.20 to match YAML (2026-07-16 fix)
     if isinstance(drawdown_halt_pct_raw, dict):
-        drawdown_halt_pct = drawdown_halt_pct_raw.get('value', 0.15)
+        drawdown_halt_pct = drawdown_halt_pct_raw.get('value', 0.20)  # FIXED: Default 0.20 to match YAML (2026-07-16 fix)
     else:
         drawdown_halt_pct = drawdown_halt_pct_raw
     
@@ -921,7 +918,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
     max_single_order_notional_usd = fixed_exposure_cap_usd
     max_total_notional_usd = fixed_exposure_cap_usd  # Total exposure cap = $1
     
-    max_concurrent_trades = agent_defaults.get('max_concurrent_trades', 3)
+    max_concurrent_trades = agent_defaults.get('max_concurrent_trades', 8)  # FIXED: Default 8 to match YAML (2026-07-16 fix)
     
     # 2026-07-08: DISABLED percentage-based venue caps - using fixed $1 exposure model
     logger.info(
@@ -973,8 +970,8 @@ def compute_kalshi_crypto_15m_risk_envelope(
     fixed_exposure_cap_usd = float(os.getenv('MERID_FIXED_EXPOSURE_CAP_USD', '1.00'))
     agent_max_notional_usd = fixed_exposure_cap_usd
     agent_max_orders_per_window = agent_defaults.get('max_orders_per_window', 24)  # FIXED: Default 24 to match YAML (2026-07-11: increased from 20)
-    agent_max_yes_position = agent_defaults.get('max_yes_position', 5)  # FIXED: Default 5 to match YAML
-    agent_max_no_position = agent_defaults.get('max_no_position', 5)  # FIXED: Default 5 to match YAML
+    agent_max_yes_position = agent_defaults.get('max_yes_position', 1)  # FIXED: Default 1 to match YAML (2026-07-14 fix)
+    agent_max_no_position = agent_defaults.get('max_no_position', 1)  # FIXED: Default 1 to match YAML (2026-07-14 fix)
     
     # 2026-07-08: DISABLED percentage-based agent defaults - using fixed $1 exposure model
     logger.info(
@@ -997,9 +994,9 @@ def compute_kalshi_crypto_15m_risk_envelope(
         per_trade_risk_pct = per_trade_risk_pct_raw
     
     # Handle nested dict format for drawdown thresholds
-    drawdown_halt_pct_raw = guardrails.get('drawdown_halt_pct', 0.15)
+    drawdown_halt_pct_raw = guardrails.get('drawdown_halt_pct', 0.20)  # FIXED: Default 0.20 to match YAML (2026-07-16 fix)
     if isinstance(drawdown_halt_pct_raw, dict):
-        drawdown_halt_pct = drawdown_halt_pct_raw.get('value', 0.15)
+        drawdown_halt_pct = drawdown_halt_pct_raw.get('value', 0.20)  # FIXED: Default 0.20 to match YAML (2026-07-16 fix)
     else:
         drawdown_halt_pct = drawdown_halt_pct_raw
     
@@ -1165,10 +1162,7 @@ def compute_kalshi_crypto_15m_risk_envelope(
         agent_max_yes_position=agent_max_yes_position,
         agent_max_no_position=agent_max_no_position,
         max_cycle_risk_pct=max_cycle_risk_pct,
-        guardrails_per_window_risk_pct=guardrails_per_window_risk_pct,
-        guardrails_total_venue_risk_pct=guardrails_total_venue_risk_pct,
-        per_agent_window_limit_usd=per_agent_window_limit_usd,
-        total_venue_window_limit_usd=total_venue_window_limit_usd,
+        # Window-based risk limits REMOVED (2026-07-08: Fixed $1 exposure cap)
         window_start_ts=window_start_ts,
         agent_window_exposure_usd=agent_window_exposure_usd,
         total_window_exposure_usd=total_window_exposure_usd,

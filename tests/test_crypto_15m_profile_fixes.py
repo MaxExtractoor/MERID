@@ -159,18 +159,16 @@ class TestCrypto15mProfileLoading:
 
             # If capital_usd is 0 (test environment), verify computation logic with a mock value
             if profile.capital_usd == 0:
-                # Test the computation logic with a mock capital value
-                test_capital = 10000.0  # $10,000 test capital
-                expected_single_order = test_capital * profile.venue_max_single_order_pct
-                expected_total_notional = test_capital * profile.venue_max_total_notional_pct
-                expected_category_notional = test_capital * profile.venue_max_category_notional_pct
-                expected_agent_notional = test_capital * profile.agent_max_notional_pct
-
-                # Verify the computation logic is correct
-                assert expected_single_order > 0, "Computed single order should be positive"
-                assert expected_total_notional > 0, "Computed total notional should be positive"
-                assert expected_category_notional > 0, "Computed category notional should be positive"
-                assert expected_agent_notional > 0, "Computed agent notional should be positive"
+                # 2026-07-16: Percentage-based allocation caps are DISABLED (0.0) in favor of fixed $1 exposure model
+                # Verify that percentage caps are disabled and fixed exposure cap is used instead
+                assert profile.venue_max_single_order_pct == 0.0, "venue_max_single_order_pct should be 0.0 (disabled)"
+                assert profile.venue_max_total_notional_pct == 0.0, "venue_max_total_notional_pct should be 0.0 (disabled)"
+                assert profile.venue_max_category_notional_pct == 0.0, "venue_max_category_notional_pct should be 0.0 (disabled)"
+                assert profile.agent_max_notional_pct == 0.0, "agent_max_notional_pct should be 0.0 (disabled)"
+                
+                # Verify fixed exposure cap is set to $1.00
+                assert profile.risk_policy_fixed_exposure_cap_usd == 1.0, \
+                    f"risk_policy_fixed_exposure_cap_usd should be 1.0, got {profile.risk_policy_fixed_exposure_cap_usd}"
             else:
                 # Check that USD values are computed and positive
                 assert profile.venue_max_single_order_usd > 0, "venue_max_single_order_usd should be positive"

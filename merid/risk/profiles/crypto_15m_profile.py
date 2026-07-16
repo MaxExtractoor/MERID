@@ -839,27 +839,29 @@ class Crypto15mProfileAdapter:
                 logger.info("[PROFILE_WIRING] capital_usd=0 configured - will derive from BankrollServiceV2 during startup")
                 capital_usd = 0.0
             
-            # Compute USD values from percentages
-            # Handle nested dict format: {value: 0.05, dynamic: bankroll, description: "..."}
-            venue_max_single_order_pct = venue.get('max_single_order_pct', 0.03)  # FIXED: Default 0.03 to match YAML (3% per order)
+            # 2026-07-16: Percentage-based caps DISABLED (default 0.0) - the YAML
+            # intentionally omits these keys. Defaults must NOT resurrect pct caps.
+            # The $1 global slot allocator is the single source of truth for exposure.
+            # Handle nested dict format: {value: 0.0, dynamic: bankroll, description: "..."}
+            venue_max_single_order_pct = venue.get('max_single_order_pct', 0.0)  # DISABLED - fixed $1 model
             if isinstance(venue_max_single_order_pct, dict):
-                venue_max_single_order_pct = venue_max_single_order_pct.get('value', 0.05)
+                venue_max_single_order_pct = venue_max_single_order_pct.get('value', 0.0)
             
-            venue_max_total_notional_pct = venue.get('max_total_notional_pct', 0.15)  # FIXED: Default 0.15 to match YAML (15% total venue cap)
+            venue_max_total_notional_pct = venue.get('max_total_notional_pct', 0.0)  # DISABLED - fixed $1 model
             if isinstance(venue_max_total_notional_pct, dict):
-                venue_max_total_notional_pct = venue_max_total_notional_pct.get('value', 0.15)  # FIXED: Default 0.15 to match YAML (15% total venue cap)
+                venue_max_total_notional_pct = venue_max_total_notional_pct.get('value', 0.0)
             
-            venue_max_category_notional_pct = venue.get('max_category_notional_pct', 0.10)
+            venue_max_category_notional_pct = venue.get('max_category_notional_pct', 0.0)  # DISABLED - fixed $1 model
             if isinstance(venue_max_category_notional_pct, dict):
-                venue_max_category_notional_pct = venue_max_category_notional_pct.get('value', 0.10)
+                venue_max_category_notional_pct = venue_max_category_notional_pct.get('value', 0.0)
             
-            venue_bankroll_cap_pct = venue.get('bankroll_cap_pct', 0.03)  # FIXED: Default 0.03 to match YAML (3% per order)
+            venue_bankroll_cap_pct = venue.get('bankroll_cap_pct', 0.0)  # DISABLED - fixed $1 model
             if isinstance(venue_bankroll_cap_pct, dict):
-                venue_bankroll_cap_pct = venue_bankroll_cap_pct.get('value', 0.02)
+                venue_bankroll_cap_pct = venue_bankroll_cap_pct.get('value', 0.0)
             
-            agent_max_notional_pct = agent_defaults.get('max_notional_pct', 0.03)  # FIXED: Default 0.03 to match YAML (3% per agent)
+            agent_max_notional_pct = agent_defaults.get('max_notional_pct', 0.0)  # DISABLED - fixed $1 model
             if isinstance(agent_max_notional_pct, dict):
-                agent_max_notional_pct = agent_max_notional_pct.get('value', 0.03)  # FIXED: Default 0.03 to match YAML (3% per agent)
+                agent_max_notional_pct = agent_max_notional_pct.get('value', 0.0)
             
             # Compute USD values from capital
             # CRITICAL FIX: 2026-07-09 - Handle capital_usd=0 case to prevent zero caps
@@ -899,7 +901,7 @@ class Crypto15mProfileAdapter:
             # Extract drawdown thresholds from nested dict format
             guardrails_drawdown_halt_pct = self._normalize_percentage_value(guardrails.get('drawdown_halt_pct', 0.20))  # CRITICAL FIX: 20% - aligned with profile (was 0.10)
             guardrails_drawdown_unwind_pct = self._normalize_percentage_value(guardrails.get('drawdown_unwind_pct', 0.25))  # CRITICAL FIX: 25% - aligned with profile (was 0.15)
-            guardrails_per_trade_risk_pct = self._normalize_percentage_value(guardrails.get('per_trade_risk_pct', 0.03))  # CRITICAL FIX: 3% - aligned with profile (was 0.008)
+            guardrails_per_trade_risk_pct = self._normalize_percentage_value(guardrails.get('per_trade_risk_pct', 0.0))  # DISABLED (2026-07-16) - fixed $1 model via global slot allocator
             
             # Window-based risk limits REMOVED (2026-07-08: Fixed $1 exposure cap)
             # Previous percentage-based limits (3% per agent, 5% total) replaced by fixed $1 slot allocation
@@ -1043,11 +1045,12 @@ class Crypto15mProfileAdapter:
                 max_cycle_risk_pct=self._normalize_percentage_value(raw.get('max_cycle_risk_pct', 0.0)),  # 2026-07-15: DISABLED - fixed $1 model (default 0.0)
                 max_cycle_risk_usd=raw.get('max_cycle_risk_usd', 0.0),
                 
-                # Venue-level caps (percentage-based, normalize dict format)
-                venue_max_single_order_pct=self._normalize_percentage_value(venue.get('max_single_order_pct', 0.03)),  # FIXED: Default 0.03 to match YAML (3% per order)
-                venue_max_total_notional_pct=self._normalize_percentage_value(venue.get('max_total_notional_pct', 0.15)),  # FIXED: Default 0.15 to match YAML (15% total venue cap)
-                venue_max_category_notional_pct=self._normalize_percentage_value(venue.get('max_category_notional_pct', 0.10)),  # FIXED: Increased from 0.05 to 0.10 to match YAML
-                venue_bankroll_cap_pct=self._normalize_percentage_value(venue.get('bankroll_cap_pct', 0.03)),  # FIXED: Default 0.03 to match YAML (3% per order)
+                # Venue-level caps (percentage-based DISABLED 2026-07-16 - fixed $1 model)
+                # Defaults are 0.0 so absent YAML keys can never resurrect pct caps.
+                venue_max_single_order_pct=self._normalize_percentage_value(venue.get('max_single_order_pct', 0.0)),  # DISABLED - fixed $1 model
+                venue_max_total_notional_pct=self._normalize_percentage_value(venue.get('max_total_notional_pct', 0.0)),  # DISABLED - fixed $1 model
+                venue_max_category_notional_pct=self._normalize_percentage_value(venue.get('max_category_notional_pct', 0.0)),  # DISABLED - fixed $1 model
+                venue_bankroll_cap_pct=self._normalize_percentage_value(venue.get('bankroll_cap_pct', 0.0)),  # DISABLED - fixed $1 model
                 venue_max_orders_per_minute=venue.get('max_orders_per_minute', 30),
                 venue_max_orders_per_hour=venue.get('max_orders_per_hour', 300),
                 
@@ -1059,14 +1062,14 @@ class Crypto15mProfileAdapter:
                 # Per-asset caps
                 asset_configs=asset_configs,
                 
-                # Per-agent defaults (percentage-based, normalize dict format)
-                agent_max_notional_pct=self._normalize_percentage_value(agent_defaults.get('max_notional_pct', 0.03)),  # FIXED: Default 0.03 to match YAML (3% per agent)
+                # Per-agent defaults (percentage-based DISABLED 2026-07-16 - fixed $1 model)
+                agent_max_notional_pct=self._normalize_percentage_value(agent_defaults.get('max_notional_pct', 0.0)),  # DISABLED - fixed $1 model
                 agent_max_orders_per_window=agent_defaults.get('max_orders_per_window', 24),  # FIXED: Default 24 to match YAML (2026-07-11: increased from 20)
-                agent_max_yes_position=agent_defaults.get('max_yes_position', 3),
-                agent_max_no_position=agent_defaults.get('max_no_position', 3),
+                agent_max_yes_position=agent_defaults.get('max_yes_position', 1),  # FIXED: Default 1 to match YAML (2026-07-14 fix)
+                agent_max_no_position=agent_defaults.get('max_no_position', 1),  # FIXED: Default 1 to match YAML (2026-07-14 fix)
                 agent_max_concurrent_trades=agent_defaults.get('max_concurrent_trades', 5),  # FIXED: Default 5 to match YAML (was 3),
-                agent_minutes_before_expiry=agent_defaults.get('minutes_before_expiry', 30),
-                agent_cutoff_minutes_before_expiry=agent_defaults.get('cutoff_minutes_before_expiry', 2),
+                agent_minutes_before_expiry=agent_defaults.get('minutes_before_expiry', 15),  # FIXED: Default 15 to match YAML (2026-07-16 fix)
+                agent_cutoff_minutes_before_expiry=agent_defaults.get('cutoff_minutes_before_expiry', 0),  # FIXED: Default 0 to match YAML (2026-07-16 fix)
                 
                 # Computed agent defaults (USD, derived from capital)
                 agent_max_notional_usd=agent_max_notional_usd,
@@ -1118,7 +1121,7 @@ class Crypto15mProfileAdapter:
                 # Kelly sizing (normalize dict format for percentage fields)
                 # P1-FIX1: fallback default 0.02 to match profile (2% Kelly hard cap)
                 kelly_hard_cap=self._normalize_percentage_value(kelly.get('kelly_hard_cap', 0.02)),
-                kelly_min_edge_pct=self._normalize_percentage_value(kelly.get('kelly_min_edge_pct', 1.0)),
+                kelly_min_edge_pct=self._normalize_percentage_value(kelly.get('kelly_min_edge_pct', 0.015)),  # FIXED: Default 0.015 to match YAML (2026-07-16 fix)
                 kelly_max_edge_pct=self._normalize_percentage_value(kelly.get('kelly_max_edge_pct', 25.0)),
                 kelly_min_win_prob=kelly.get('kelly_min_win_prob', 0.01),
                 kelly_max_win_prob=kelly.get('kelly_max_win_prob', 0.99),
@@ -1167,7 +1170,7 @@ class Crypto15mProfileAdapter:
                 
                 # Throttling (order rate limits)
                 throttling_global_orders_window_sec=float(throttling.get('global_orders_window_sec', 60.0)),
-                throttling_global_orders_limit=int(throttling.get('global_orders_limit', 20)),
+                throttling_global_orders_limit=int(throttling.get('global_orders_limit', 30)),  # FIXED: Default 30 to match YAML (2026-07-16 fix)
                 throttling_per_asset_cooldown_sec=float(throttling.get('per_asset_cooldown_sec', 3.0)),  # 2026-07-11: updated to 3s for 15m alignment
                 throttling_per_strip_order_limit=int(throttling.get('per_strip_order_limit', 1)),
                 throttling_per_strip_notional_usd=float(throttling.get('per_strip_notional_usd', 0.0)),
@@ -1707,36 +1710,18 @@ class Crypto15mProfileAdapter:
         
         asset_config = p.asset_configs.get(asset) if asset else None
         
-        # CRITICAL FIX: Compute max_notional_usd dynamically from live bankroll
-        # If capital_usd is 0 (derive from bankroll), fetch live bankroll and compute USD value
+        # 2026-07-16: Percentage-based max_notional derivation PRUNED.
+        # The $1 global slot allocator is the single source of truth for exposure.
+        # Agent max_notional is the fixed exposure cap upper bound; actual allocation
+        # is enforced by global_slot_allocator ($1.00 TOTAL across all 5 assets).
         max_notional_usd = p.agent_max_notional_usd
-        if p.capital_usd == 0.0:
-            try:
-                from merid.event_venues.kalshi.bankroll_service_v2 import get_equity_for_risk_calc_sync
-                live_bankroll_usd = get_equity_for_risk_calc_sync()
-                if live_bankroll_usd and live_bankroll_usd > 0:
-                    # Compute from live bankroll using agent_max_notional_pct
-                    computed_notional = live_bankroll_usd * p.agent_max_notional_pct
-                    # Apply minimum floor from profile
-                    max_notional_usd = max(computed_notional, p.min_notional_usd)
-                    logger.info(
-                        "[PROFILE-ADAPTER] Computed max_notional_usd for %s from live bankroll: $%.2f (bankroll: $%.2f, pct: %.2f%%)",
-                        agent_name, max_notional_usd, live_bankroll_usd, p.agent_max_notional_pct * 100
-                    )
-                else:
-                    # Fallback to minimum floor if bankroll unavailable
-                    max_notional_usd = p.min_notional_usd
-                    logger.warning(
-                        "[PROFILE-ADAPTER] Live bankroll unavailable for %s, using min_notional_usd: $%.2f",
-                        agent_name, max_notional_usd
-                    )
-            except Exception as e:
-                logger.error(
-                    "[PROFILE-ADAPTER] Failed to compute max_notional_usd from live bankroll for %s: %s - "
-                    "falling back to min_notional_usd",
-                    agent_name, e
-                )
-                max_notional_usd = p.min_notional_usd
+        if p.capital_usd == 0.0 or p.agent_max_notional_pct == 0.0 or max_notional_usd <= 0.0:
+            max_notional_usd = p.risk_policy_fixed_exposure_cap_usd
+            logger.info(
+                "[PROFILE-ADAPTER] Using fixed exposure cap as max_notional_usd for %s: $%.2f "
+                "(global slot allocator enforces $%.2f TOTAL across all assets)",
+                agent_name, max_notional_usd, p.risk_policy_fixed_exposure_cap_usd
+            )
         
         overrides = {
             'max_notional_usd': max_notional_usd,
