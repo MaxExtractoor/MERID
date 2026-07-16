@@ -4581,6 +4581,8 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         # Kalshi creates new markets every 15 minutes with different tickers (e.g., KXBTC15M-26JUL022230-30)
         # Market-specific lookup allows bypass by buying on different tickers for same asset
         # Asset-level aggregation ensures total position across all markets respects limits
+        # CRITICAL FIX (2026-07-18): Enforce 1 entry per asset per 15-minute window
+        # This prevents multiple entries for the same asset within a single 15m timeframe
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
             profile_adapter = get_active_profile()
@@ -4601,6 +4603,33 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                     asset = "XRP"
                 elif "DOGE" in ticker_upper:
                     asset = "DOGE"
+                
+                # CRITICAL FIX (2026-07-18): Enforce 1 entry per asset per 15-minute window
+                # This applies to ALL order paths (agent_grid, execution_subscriber, etc.)
+                # Uses window-based approach (e.g., 12:00-12:15, 12:15-12:30) not rolling cooldown
+                if asset and intent.action.lower() == "buy":
+                    import time
+                    if not hasattr(route_order_async, '_asset_entry_windows'):
+                        route_order_async._asset_entry_windows = {}
+                    
+                    now = time.time()
+                    # Calculate current 15-minute window (Kalshi 15m markets align to :00, :15, :30, :45)
+                    window_start = int(now // 900) * 900  # Floor to nearest 15-minute boundary
+                    
+                    last_window = route_order_async._asset_entry_windows.get(asset, 0)
+                    
+                    if last_window == window_start:
+                        logger.warning(
+                            f"[ORDER-ROUTER] Per-asset entry limit: {asset} already entered in current 15m window "
+                            f"(window={window_start}), rejecting new entry (ticker={intent.ticker}, side={intent.side})"
+                        )
+                        return OrderResult(
+                            status="rejected",
+                            mode=intent.mode,
+                            fill=None,
+                            reason=f"Per-asset entry limit: {asset} already entered in current 15m window",
+                            latency_ms=0.0
+                        )
                 
                 # Get all positions for this asset across all markets
                 from merid.event_venues.kalshi.position_cache import get_position_cache
@@ -6047,6 +6076,35 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
             status = "filled_live"
         elif filled_count > 0:
             status = "partial_live"
+        
+        # CRITICAL FIX (2026-07-18): Update asset entry window on successful fill
+        # This marks the asset as having entered in the current 15-minute window
+        if filled_count > 0 and intent.action.lower() == "buy":
+            try:
+                # Extract asset from ticker (same logic as position limit check)
+                asset = None
+                ticker_upper = intent.ticker.upper()
+                if "BTC" in ticker_upper:
+                    asset = "BTC"
+                elif "ETH" in ticker_upper:
+                    asset = "ETH"
+                elif "SOL" in ticker_upper:
+                    asset = "SOL"
+                elif "XRP" in ticker_upper:
+                    asset = "XRP"
+                elif "DOGE" in ticker_upper:
+                    asset = "DOGE"
+                
+                if asset and hasattr(route_order_async, '_asset_entry_windows'):
+                    import time
+                    now = time.time()
+                    window_start = int(now // 900) * 900  # Floor to nearest 15-minute boundary
+                    route_order_async._asset_entry_windows[asset] = window_start
+                    logger.info(
+                        f"[ORDER-ROUTER] Per-asset entry window set: {asset} window={window_start}"
+                    )
+            except Exception as cooldown_err:
+                logger.warning("[ORDER-ROUTER] Failed to update asset entry window: %s", cooldown_err)
         
         # CRITICAL FIX (2026-07-13): Notify global_allocator of order fill for pending order tracking
         # This removes the asset from pending orders and updates position tracking
