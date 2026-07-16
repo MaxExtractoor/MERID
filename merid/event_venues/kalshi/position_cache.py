@@ -1220,6 +1220,25 @@ class KalshiPositionCache:
             return [position]
         return []
 
+    def get_positions_by_asset(self, asset: str) -> List[CachedPosition]:
+        """Get all open positions for a specific asset.
+
+        Args:
+            asset: Asset symbol (e.g., "BTC", "ETH")
+
+        Returns:
+            List of CachedPosition objects for the given asset with contracts > 0.
+            Market IDs are like KXBTC15M-26MAY241245-45, so we check if asset is in the market_id.
+        """
+        asset_positions = []
+        for market_id, position in self._positions.items():
+            # Check if this position belongs to the requested asset
+            # Market IDs are like KXBTC15M-26MAY241245-45
+            if asset.upper() in market_id.upper():
+                if position.contracts > 0:
+                    asset_positions.append(position)
+        return asset_positions
+
     def get_asset_exposure(self, asset: str) -> Dict[str, Any]:
         """Get total exposure for an asset across all markets.
 

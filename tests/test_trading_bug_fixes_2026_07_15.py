@@ -167,8 +167,7 @@ class TestPhantomSlotLockoutFix:
     def test_phantom_slot_clear_on_zero_positions(self):
         """Verify phantom slots are cleared when position cache shows 0 positions."""
         from merid.risk.global_slot_allocator import GlobalSlotAllocator, AllocationRequest
-        from merid.event_venues.kalshi.position_cache import KalshiPositionCache
-        from unittest.mock import Mock, patch
+        from merid.event_venues.kalshi.position_cache import get_position_cache
         
         # Create allocator and add a phantom slot
         allocator = GlobalSlotAllocator()
@@ -187,9 +186,9 @@ class TestPhantomSlotLockoutFix:
         assert allocator.get_slot_count() == 1, "Should have 1 slot allocated"
         assert allocator.get_slots_by_asset("BTC") != [], "Should have BTC slot"
         
-        # Mock position cache to return 0 positions for BTC
-        mock_cache = Mock(spec=KalshiPositionCache)
-        mock_cache.get_positions_by_asset = Mock(return_value=[])
+        # Get real position cache and verify it returns 0 positions for BTC
+        pos_cache = get_position_cache()
+        asset_positions = pos_cache.get_positions_by_asset("BTC")
         
         # Clear phantom slots
         allocator.clear_slots_on_empty_positions(position_count=0)
@@ -201,8 +200,7 @@ class TestPhantomSlotLockoutFix:
     def test_phantom_slot_not_cleared_with_actual_positions(self):
         """Verify phantom slots are NOT cleared when position cache shows actual positions."""
         from merid.risk.global_slot_allocator import GlobalSlotAllocator, AllocationRequest
-        from merid.event_venues.kalshi.position_cache import KalshiPositionCache
-        from unittest.mock import Mock
+        from merid.event_venues.kalshi.position_cache import get_position_cache, CachedPosition
         
         # Create allocator and add a slot
         allocator = GlobalSlotAllocator()
@@ -220,15 +218,24 @@ class TestPhantomSlotLockoutFix:
         # Verify slot is allocated
         assert allocator.get_slot_count() == 1, "Should have 1 slot allocated"
         
-        # Mock position cache to return 1 position for BTC
-        mock_cache = Mock(spec=KalshiPositionCache)
-        mock_cache.get_positions_by_asset = Mock(return_value=[Mock()])
+        # Get real position cache and add a mock position for BTC
+        pos_cache = get_position_cache()
+        # Add a mock position to simulate actual position
+        pos_cache._positions["KXBTC15M-26JUL151645-45"] = CachedPosition(
+            market_id="KXBTC15M-26JUL151645-45",
+            contracts=1,
+            side="yes",
+            avg_price_cents=75
+        )
         
         # Try to clear phantom slots (should not clear since position_count > 0)
         allocator.clear_slots_on_empty_positions(position_count=1)
         
         # Verify slot is NOT cleared
         assert allocator.get_slot_count() == 1, "Should still have 1 slot (not cleared)"
+        
+        # Clean up the mock position
+        del pos_cache._positions["KXBTC15M-26JUL151645-45"]
     
     def test_order_router_phantom_slot_check_code_pattern(self):
         """Verify the code pattern for phantom slot check in order_router."""
@@ -244,6 +251,132 @@ class TestPhantomSlotLockoutFix:
         assert "if not asset_positions and \"already has\" in alloc_reason:" in source, "Should check for phantom slot condition"
         assert "slot_allocator.clear_slots_on_empty_positions(position_count=0)" in source, "Should clear phantom slots"
         assert "can_allocate, alloc_reason = slot_allocator.can_allocate(intent.price_cents, asset)" in source, "Should retry allocation"
+
+
+class TestGetPositionsByAsset:
+    """Test get_positions_by_asset method in KalshiPositionCache."""
+    
+    def test_get_positions_by_asset_empty(self):
+        """Verify get_positions_by_asset returns empty list when no positions."""
+        from merid.event_venues.kalshi.position_cache import get_position_cache
+        
+        pos_cache = get_position_cache()
+        
+        # Test with no positions
+        btc_positions = pos_cache.get_positions_by_asset("BTC")
+        assert btc_positions == [], "Should return empty list when no BTC positions"
+        
+        eth_positions = pos_cache.get_positions_by_asset("ETH")
+        assert eth_positions == [], "Should return empty list when no ETH positions"
+    
+    def test_get_positions_by_asset_with_positions(self):
+        """Verify get_positions_by_asset returns correct positions for asset."""
+        from merid.event_venues.kalshi.position_cache import get_position_cache, CachedPosition
+        
+        pos_cache = get_position_cache()
+        
+        # Add mock positions for different assets
+        pos_cache._positions["KXBTC15M-26JUL151645-45"] = CachedPosition(
+            market_id="KXBTC15M-26JUL151645-45",
+            contracts=1,
+            side="yes",
+            avg_price_cents=75
+        )
+        pos_cache._positions["KXETH15M-26JUL151645-45"] = CachedPosition(
+            market_id="KXETH15M-26JUL151645-45",
+            contracts=2,
+            side="no",
+            avg_price_cents=50
+        )
+        pos_cache._positions["KXSOL15M-26JUL151645-45"] = CachedPosition(
+            market_id="KXSOL15M-26JUL151645-45",
+            contracts=0,  # Closed position
+            side="yes",
+            avg_price_cents=30
+        )
+        
+        # Test BTC positions
+        btc_positions = pos_cache.get_positions_by_asset("BTC")
+        assert len(btc_positions) == 1, "Should have 1 BTC position"
+        assert btc_positions[0].market_id == "KXBTC15M-26JUL151645-45"
+        assert btc_positions[0].contracts == 1
+        
+        # Test ETH positions
+        eth_positions = pos_cache.get_positions_by_asset("ETH")
+        assert len(eth_positions) == 1, "Should have 1 ETH position"
+        assert eth_positions[0].market_id == "KXETH15M-26JUL151645-45"
+        assert eth_positions[0].contracts == 2
+        
+        # Test SOL positions (should return empty since contracts=0)
+        sol_positions = pos_cache.get_positions_by_asset("SOL")
+        assert len(sol_positions) == 0, "Should return empty list for closed SOL position"
+        
+        # Test asset with no positions
+        doge_positions = pos_cache.get_positions_by_asset("DOGE")
+        assert doge_positions == [], "Should return empty list for DOGE with no positions"
+        
+        # Clean up
+        del pos_cache._positions["KXBTC15M-26JUL151645-45"]
+        del pos_cache._positions["KXETH15M-26JUL151645-45"]
+        del pos_cache._positions["KXSOL15M-26JUL151645-45"]
+    
+    def test_get_positions_by_asset_case_insensitive(self):
+        """Verify get_positions_by_asset is case-insensitive."""
+        from merid.event_venues.kalshi.position_cache import get_position_cache, CachedPosition
+        
+        pos_cache = get_position_cache()
+        
+        # Add a BTC position
+        pos_cache._positions["KXBTC15M-26JUL151645-45"] = CachedPosition(
+            market_id="KXBTC15M-26JUL151645-45",
+            contracts=1,
+            side="yes",
+            avg_price_cents=75
+        )
+        
+        # Test case insensitivity
+        btc_lower = pos_cache.get_positions_by_asset("btc")
+        btc_upper = pos_cache.get_positions_by_asset("BTC")
+        btc_mixed = pos_cache.get_positions_by_asset("BtC")
+        
+        assert len(btc_lower) == 1, "Should find BTC with lowercase"
+        assert len(btc_upper) == 1, "Should find BTC with uppercase"
+        assert len(btc_mixed) == 1, "Should find BTC with mixed case"
+        
+        # Clean up
+        del pos_cache._positions["KXBTC15M-26JUL151645-45"]
+    
+    def test_get_positions_by_asset_multiple_markets_same_asset(self):
+        """Verify get_positions_by_asset returns all positions for asset across markets."""
+        from merid.event_venues.kalshi.position_cache import get_position_cache, CachedPosition
+        
+        pos_cache = get_position_cache()
+        
+        # Add multiple BTC positions (different markets)
+        pos_cache._positions["KXBTC15M-26JUL151645-45"] = CachedPosition(
+            market_id="KXBTC15M-26JUL151645-45",
+            contracts=1,
+            side="yes",
+            avg_price_cents=75
+        )
+        pos_cache._positions["KXBTC15M-26JUL151700-30"] = CachedPosition(
+            market_id="KXBTC15M-26JUL151700-30",
+            contracts=1,
+            side="no",
+            avg_price_cents=25
+        )
+        
+        # Test that both BTC positions are returned
+        btc_positions = pos_cache.get_positions_by_asset("BTC")
+        assert len(btc_positions) == 2, "Should return all 2 BTC positions"
+        
+        market_ids = [p.market_id for p in btc_positions]
+        assert "KXBTC15M-26JUL151645-45" in market_ids
+        assert "KXBTC15M-26JUL151700-30" in market_ids
+        
+        # Clean up
+        del pos_cache._positions["KXBTC15M-26JUL151645-45"]
+        del pos_cache._positions["KXBTC15M-26JUL151700-30"]
 
 
 class TestIntegrationScenarios:
