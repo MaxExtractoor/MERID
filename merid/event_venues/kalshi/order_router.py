@@ -4577,6 +4577,10 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
         
         # CRITICAL FIX (2026-07-08): Enforce per-side position limits (max_yes_position/max_no_position)
         # This prevents unlimited position accumulation despite max_contracts=1 per-order limit
+        # CRITICAL FIX (2026-07-18): Use asset-level aggregation instead of market-specific lookup
+        # Kalshi creates new markets every 15 minutes with different tickers (e.g., KXBTC15M-26JUL022230-30)
+        # Market-specific lookup allows bypass by buying on different tickers for same asset
+        # Asset-level aggregation ensures total position across all markets respects limits
         try:
             from merid.risk.profiles.crypto_15m_profile import get_active_profile
             profile_adapter = get_active_profile()
@@ -4584,23 +4588,39 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                 max_yes = profile_adapter.profile.agent_max_yes_position
                 max_no = profile_adapter.profile.agent_max_no_position
                 
-                # Get existing position from position cache
+                # Extract asset from ticker (BTC, ETH, SOL, XRP, DOGE)
+                asset = None
+                ticker_upper = intent.ticker.upper()
+                if "BTC" in ticker_upper:
+                    asset = "BTC"
+                elif "ETH" in ticker_upper:
+                    asset = "ETH"
+                elif "SOL" in ticker_upper:
+                    asset = "SOL"
+                elif "XRP" in ticker_upper:
+                    asset = "XRP"
+                elif "DOGE" in ticker_upper:
+                    asset = "DOGE"
+                
+                # Get all positions for this asset across all markets
                 from merid.event_venues.kalshi.position_cache import get_position_cache
-                _cached = get_position_cache().get_position(intent.ticker)
                 existing_yes = 0
                 existing_no = 0
-                if _cached is not None:
-                    if _cached.contracts > 0:
-                        existing_yes = _cached.contracts
-                    elif _cached.contracts < 0:
-                        existing_no = abs(_cached.contracts)
+                
+                if asset:
+                    asset_positions = get_position_cache().get_positions_by_asset(asset)
+                    for pos in asset_positions:
+                        if pos.side.lower() == "yes" and pos.contracts > 0:
+                            existing_yes += pos.contracts
+                        elif pos.side.lower() == "no" and pos.contracts < 0:
+                            existing_no += abs(pos.contracts)
                 
                 # Check per-side limit
                 if intent.side.lower() == "yes":
                     new_yes_total = existing_yes + intent.count
                     if new_yes_total > max_yes:
                         logger.warning(
-                            f"[ORDER-ROUTER] Per-side YES limit exceeded: {new_yes_total} > {max_yes} (existing={existing_yes}, new={intent.count})"
+                            f"[ORDER-ROUTER] Per-side YES limit exceeded for {asset}: {new_yes_total} > {max_yes} (existing={existing_yes}, new={intent.count}, ticker={intent.ticker})"
                         )
                         return OrderResult(
                             status="rejected",
@@ -4613,7 +4633,7 @@ async def _route_live(intent: OrderIntent, mode: TradingMode, t0: float) -> Orde
                     new_no_total = existing_no + intent.count
                     if new_no_total > max_no:
                         logger.warning(
-                            f"[ORDER-ROUTER] Per-side NO limit exceeded: {new_no_total} > {max_no} (existing={existing_no}, new={intent.count})"
+                            f"[ORDER-ROUTER] Per-side NO limit exceeded for {asset}: {new_no_total} > {max_no} (existing={existing_no}, new={intent.count}, ticker={intent.ticker})"
                         )
                         return OrderResult(
                             status="rejected",
