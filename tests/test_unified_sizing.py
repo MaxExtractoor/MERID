@@ -9,7 +9,7 @@ import unittest
 from decimal import Decimal
 from unittest.mock import patch
 
-from merid.prediction.unified_sizing import compute_order_size, _get_bankroll_cap_pct, _get_time_of_day_multiplier
+from merid.prediction.unified_sizing import compute_order_size
 
 
 class TestUnifiedSizing(unittest.TestCase):
@@ -238,39 +238,11 @@ class TestUnifiedSizing(unittest.TestCase):
         for key in required_keys:
             self.assertIn(key, metadata, f"Metadata missing required key: {key}")
     
-    def test_bankroll_cap_pct_default(self):
-        """Test that default bankroll cap is DISABLED (fixed $1 exposure model)."""
-        # Clear env var to test default
-        os.environ.pop("MERID_BANKROLL_CAP_PCT", None)
-        
-        cap_pct = _get_bankroll_cap_pct()
-        
-        # 2026-07-15: Percentage-based bankroll cap DISABLED in favor of fixed $1 exposure cap
-        self.assertEqual(cap_pct, Decimal("0.03"), "Default is 0.03 (legacy, DISABLED - fixed $1 model used instead)")
-    
-    def test_bankroll_cap_pct_custom(self):
-        """Test that custom bankroll cap is DISABLED (fixed $1 exposure model)."""
-        # 2026-07-15: Percentage-based bankroll cap DISABLED in favor of fixed $1 exposure cap
-        # Profile value (3%) is legacy and not used in production
-        with patch.dict(os.environ, {"MERID_BANKROLL_CAP_PCT": "1.5"}):
-            cap_pct = _get_bankroll_cap_pct()
-            # Profile value (3%) is legacy (DISABLED - fixed $1 model used instead)
-            self.assertEqual(cap_pct, Decimal("0.03"), "Profile value is legacy (DISABLED - fixed $1 model used instead)")
-    
-    def test_bankroll_cap_pct_clamped_low(self):
-        """Test that bankroll cap uses legacy value (fixed $1 exposure model used instead)."""
-        # 2026-07-15: Percentage-based bankroll cap DISABLED in favor of fixed $1 exposure cap
-        # Profile value (3%) is legacy and not used in production
-        with patch.dict(os.environ, {"MERID_BANKROLL_CAP_PCT": "0.5"}):
-            cap_pct = _get_bankroll_cap_pct()
-            self.assertEqual(cap_pct, Decimal("0.03"), "Profile value is legacy (DISABLED - fixed $1 model used instead)")
-    
-    def test_bankroll_cap_pct_clamped_high(self):
-        """Test that bankroll cap uses profile value (3%) regardless of high env var."""
-        # Profile value (3%) takes precedence over env var
-        with patch.dict(os.environ, {"MERID_BANKROLL_CAP_PCT": "10.0"}):
-            cap_pct = _get_bankroll_cap_pct()
-            self.assertEqual(cap_pct, Decimal("0.03"), "Profile value (3%) takes precedence over env var")
+    # REMOVED: test_bankroll_cap_pct_default, test_bankroll_cap_pct_custom, 
+    # test_bankroll_cap_pct_clamped_low, test_bankroll_cap_pct_clamped_high
+    # These tests used _get_bankroll_cap_pct which was deleted in 2026-07-16
+    # percentage-based allocation pruning. Fixed $1 exposure cap is now the
+    # single source of truth (MERID_FIXED_EXPOSURE_CAP_USD=1.00).
     
     def test_sizing_with_edge_pct(self):
         """Test that edge_pct is accepted (for future edge-scaled sizing)."""
@@ -349,54 +321,10 @@ class TestIntegrationETH15MScenario(unittest.TestCase):
             self.assertLessEqual(notional_usd, Decimal("5.00"), f"Notional ${notional_usd} should be reasonable")
 
 
-class TestTimeOfDayScaling(unittest.TestCase):
-    """Test time-of-day risk scaling multiplier function."""
-
-    def test_time_of_day_multiplier_disabled_returns_1(self):
-        """Test that when time_of_day_risk_scaling_enabled is false, returns 1.0."""
-        # Mock the profile to have time_of_day_risk_scaling_enabled = False
-        with patch('merid.prediction.unified_sizing.get_active_profile') as mock_get_profile:
-            mock_profile_adapter = type('obj', (object,), {
-                '_profile': type('obj', (object,), {
-                    'time_of_day_risk_scaling_enabled': False
-                })()
-            })()
-            mock_get_profile.return_value = mock_profile_adapter
-            
-            multiplier = _get_time_of_day_multiplier("BTC")
-            self.assertEqual(multiplier, 1.0, "Should return 1.0 when disabled")
-
-    def test_time_of_day_multiplier_no_profile_returns_1(self):
-        """Test that when profile is unavailable, returns 1.0."""
-        with patch('merid.prediction.unified_sizing.get_active_profile') as mock_get_profile:
-            mock_get_profile.return_value = None
-            
-            multiplier = _get_time_of_day_multiplier("ETH")
-            self.assertEqual(multiplier, 1.0, "Should return 1.0 when profile unavailable")
-
-    def test_time_of_day_multiplier_error_handling(self):
-        """Test that errors are handled gracefully and return 1.0."""
-        with patch('merid.prediction.unified_sizing.get_active_profile') as mock_get_profile:
-            # Simulate an error during profile access
-            mock_get_profile.side_effect = Exception("Test error")
-            
-            multiplier = _get_time_of_day_multiplier("DOGE")
-            self.assertEqual(multiplier, 1.0, "Should return 1.0 on error")
-
-    def test_time_of_day_multiplier_all_5_assets(self):
-        """Test that time-of-day multiplier works for all 5 crypto assets."""
-        with patch('merid.prediction.unified_sizing.get_active_profile') as mock_get_profile:
-            mock_profile_adapter = type('obj', (object,), {
-                '_profile': type('obj', (object,), {
-                    'time_of_day_risk_scaling_enabled': False
-                })()
-            })()
-            mock_get_profile.return_value = mock_profile_adapter
-            
-            # Test all 5 assets
-            for asset in ["BTC", "ETH", "SOL", "XRP", "DOGE"]:
-                multiplier = _get_time_of_day_multiplier(asset)
-                self.assertEqual(multiplier, 1.0, f"Should return 1.0 for {asset} when disabled")
+# REMOVED: TestTimeOfDayScaling class
+# All tests in this class used _get_time_of_day_multiplier which was deleted in 2026-07-16
+# percentage-based allocation pruning. Time-of-day scaling is now handled
+# differently in the fixed $1 exposure model.
 
 
 if __name__ == "__main__":

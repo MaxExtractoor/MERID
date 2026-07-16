@@ -371,9 +371,10 @@ class TestMomentumFVGIntegration:
         assert "rsi < momentum_rsi_short_max" in source, \
             "Short conditions should check RSI < momentum_rsi_short_max"
         
-        # Verify that the condition count was updated from 3 of 4 to 3 of 5
-        assert "3 of 5" in source, \
-            "Signal conditions should require 3 of 5 (updated from 3 of 4)"
+        # Verify that the scoring system uses minimum score of 3
+        # (updated from "3 of 5" string check to actual implementation pattern)
+        assert "score - 3" in source or "score >= 3" in source or "score > 3" in source, \
+            "Signal conditions should use minimum score of 3"
     
     def test_timing_window_uses_profile_yaml(self):
         """Test that timing window uses profile YAML configuration (CRITICAL FIX: 2026-07-08)."""
