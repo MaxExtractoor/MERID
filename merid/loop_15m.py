@@ -360,6 +360,9 @@ logger.debug("[LOOP-15M-IMPORT] Coinbase WS import took %.3fs", _t5 - _t4)
 # Import exit policy resolver for take profit/stop loss setup
 _t6 = _import_time.time()
 from merid.event_venues.kalshi.order_router import resolve_exit_policy
+# CRITICAL FIX (2026-07-16): ExitReason was referenced in exit_intent_callback but never
+# imported — every partial exit (trim/scale-out/staged) raised NameError and was dropped
+from merid.position_management.exit_policy import ExitReason
 _t7 = _import_time.time()
 logger.debug("[LOOP-15M-IMPORT] resolve_exit_policy import took %.3fs", _t7 - _t6)
 
@@ -1196,6 +1199,11 @@ class Kalshi15mLoop:
                     - Exit order failure tracking
                     - Position state validation before exit
                     - Idempotency guard to prevent duplicate exits
+                    
+                    CRITICAL FIX (2026-07-16): Set exit_triggered BEFORE async task to prevent race conditions
+                    Without this, multiple callbacks could fire before the first async task completes,
+                    causing duplicate exit orders. Setting exit_triggered=True immediately provides
+                    the idempotency guard that the callback was checking for.
                     """
                     try:
                         # CRITICAL: Check if position already exited (idempotency guard)
@@ -1210,6 +1218,17 @@ class Kalshi15mLoop:
                             "[POSITION-MONITOR-CALLBACK] Exit intent: position=%s reason=%s price=%dc contracts=%s",
                             position.position_id[:8], exit_reason, exit_price_cents, contracts_to_close or "all"
                         )
+                        
+                        # CRITICAL FIX (2026-07-16): Set exit_triggered BEFORE async task ONLY for full exits
+                        # For partial exits, we don't set exit_triggered because the position remains monitored
+                        # and can trigger additional exit conditions (e.g., SL after partial TP). Setting
+                        # exit_triggered=True for partial exits would block subsequent exit conditions.
+                        if contracts_to_close is None:
+                            # Full exit - set exit_triggered to prevent duplicate callbacks
+                            position.exit_triggered = True
+                            position.exit_reason = exit_reason
+                            position.exit_price_cents = exit_price_cents
+                            position.exited_at = datetime.utcnow()
                         
                         # CRITICAL: Enable swing mode after trailing exit in profit
                         # This allows YES/NO reversal to capture profits from price swings in both directions
@@ -1413,9 +1432,97 @@ class Kalshi15mLoop:
                     "[EXIT-ORDER] Exit order failed: status=%s error=%s reason=%s",
                     result.status, result.error, result.reason
                 )
+                # CRITICAL FIX (2026-07-16): Re-arm the position for retry on failure
+                self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close)
 
         except Exception as e:
             logger.error("[EXIT-ORDER] Failed to execute exit order: %s", e, exc_info=True)
+            # CRITICAL FIX (2026-07-16): Re-arm the position for retry on failure
+            self._rearm_position_after_failed_exit(position, exit_reason, contracts_to_close)
+
+    def _rearm_position_after_failed_exit(self, position, exit_reason, contracts_to_close=None) -> None:
+        """Re-arm a position in the PositionMonitor after a failed exit order.
+
+        CRITICAL FIX (2026-07-16): Previously a failed/rejected exit order left the
+        position orphaned — removed from monitoring (full exits) with no retry — so a
+        live position rode to settlement with NO exit enforcement. This violates the
+        "all trades are executed with the exit policy" invariant.
+
+        For full exits: reset exit state and re-add to the monitor so the exit
+        condition re-fires on the next poll. For partial exits: the position is still
+        monitored; restore the optimistically-decremented size so the retry closes
+        the correct amount.
+        """
+        try:
+            retry_count = getattr(position, "exit_retry_count", 0) + 1
+            
+            # CRITICAL FIX (2026-07-16): Add retry limit to prevent infinite retry loops
+            # Without this, a position could keep retrying exits indefinitely if orders
+            # keep failing (e.g., during market outage or API issues). Limit to 3 retries.
+            MAX_EXIT_RETRIES = 3
+            if retry_count > MAX_EXIT_RETRIES:
+                logger.error(
+                    "[EXIT-ORDER-RETRY] Position exceeded max exit retries (%d): position=%s market=%s reason=%s - "
+                    "ABANDONING position to settlement (manual intervention required)",
+                    MAX_EXIT_RETRIES,
+                    position.position_id[:8],
+                    position.market_id,
+                    exit_reason.value if hasattr(exit_reason, "value") else exit_reason,
+                )
+                # Do not re-arm - let position ride to settlement
+                return
+            
+            position.exit_retry_count = retry_count
+
+            if contracts_to_close is None:
+                # Full exit failed: clear exit state so monitor checks re-fire
+                position.exit_triggered = False
+                position.exit_reason = None
+                position.exit_price_cents = None
+                position.exited_at = None
+                
+                # CRITICAL FIX (2026-07-16): Clear all trigger flags to allow re-triggering
+                # Without this, partial exit flags (scale_out_triggered, ratchet_trimmed, etc.)
+                # would remain set after a failed full exit retry, preventing those conditions
+                # from ever triggering again on the re-armed position.
+                position.scale_out_triggered = False
+                position.ratchet_trimmed = False
+                position.dynamic_tp_triggered = False
+                position.break_even_triggered = False
+                # Note: trailing_profit_zone_activated is runtime state, not persisted, so it's
+                # automatically reset when the position is re-added to the monitor
+
+                if self._position_monitor:
+                    # add_position is idempotent (skips if position_id already present)
+                    self._position_monitor.add_position(position)
+
+                logger.warning(
+                    "[EXIT-ORDER-RETRY] Re-armed position for exit retry: position=%s market=%s "
+                    "reason=%s retry_count=%d - exit will re-fire on next poll",
+                    position.position_id[:8],
+                    position.market_id,
+                    exit_reason.value if hasattr(exit_reason, "value") else exit_reason,
+                    retry_count,
+                )
+            else:
+                # Partial exit failed: position still monitored; restore trimmed size
+                position.size += contracts_to_close
+                logger.warning(
+                    "[EXIT-ORDER-RETRY] Partial exit failed, restored size: position=%s market=%s "
+                    "size=%d (+%d restored) reason=%s retry_count=%d",
+                    position.position_id[:8],
+                    position.market_id,
+                    position.size,
+                    contracts_to_close,
+                    exit_reason.value if hasattr(exit_reason, "value") else exit_reason,
+                    retry_count,
+                )
+        except Exception as rearm_err:
+            logger.error(
+                "[EXIT-ORDER-RETRY] Failed to re-arm position after failed exit: %s",
+                rearm_err,
+                exc_info=True,
+            )
 
     async def _run_loop(self) -> None:
         """Main loop execution - runs trading cycles at configured cadence."""
@@ -4262,9 +4369,10 @@ class Kalshi15mLoop:
             # CRITICAL FIX: Compute TP/SL from exit policy before OrderIntent creation (2026-07-15)
             # For binary options (0-100¢ contracts):
             # TP = entry_price + (entry_price * tp_r_multiple) where tp_r_multiple is percentage (e.g., 0.15 = 15%)
-            # SL = entry_price +/- sl_cents_offset (absolute cent offset, not percentage)
-            # For YES: SL = entry - sl_cents_offset (protect against price drop)
-            # For NO: SL = entry + sl_cents_offset (protect against price rise)
+            # SL = entry_price - sl_cents_offset (absolute cent offset, not percentage)
+            # CRITICAL FIX (2026-07-16): SIDE-SPACE — price_cents is the position's OWN side
+            # price for BOTH sides (NO intents are priced in NO cents, see NO_mid = 100 - YES_mid
+            # above). Both sides are long their own side: TP above entry, SL below entry.
             if exit_policy and exit_policy.tp_r_multiple:
                 # TP as percentage of entry price (e.g., 15% TP on 42c entry = 42 + 6.3 = 48.3c)
                 take_profit_price_cents = int(price_cents * (1 + exit_policy.tp_r_multiple))
@@ -4275,25 +4383,19 @@ class Kalshi15mLoop:
             
             # CRITICAL FIX: Use fixed cent SL offset instead of absolute price (2026-07-15)
             # exit_policy.sl_cents is an offset (e.g., 5c), not an absolute price
-            # For YES: SL = entry - sl_cents_offset (e.g., 42c entry - 5c = 37c SL)
-            # For NO: SL = entry + sl_cents_offset (e.g., 42c entry + 5c = 47c SL)
+            # CRITICAL FIX (2026-07-16): Side-space — SL sits BELOW own-side entry for BOTH
+            # sides (previous NO branch placed SL above NO entry, i.e. in the PROFIT
+            # direction, so NO "stop losses" fired on winners and never on losers)
             if exit_policy and exit_policy.sl_cents:
                 sl_cents_offset = exit_policy.sl_cents
-                if side_raw == "YES":
-                    stop_loss_price_cents = max(1, price_cents - sl_cents_offset)  # YES: protect against drop
-                else:  # NO
-                    stop_loss_price_cents = min(99, price_cents + sl_cents_offset)  # NO: protect against rise
+                stop_loss_price_cents = max(1, price_cents - sl_cents_offset)
             elif exit_policy and exit_policy.sl_r_multiple:
                 # Fallback to R-multiple if sl_cents not set (legacy path)
-                # For YES: SL = entry - (entry * sl_r_multiple)
-                # For NO: SL = entry + (entry * sl_r_multiple)
-                if side_raw == "YES":
-                    stop_loss_price_cents = int(price_cents * (1 - exit_policy.sl_r_multiple))
-                else:  # NO
-                    stop_loss_price_cents = int(price_cents * (1 + exit_policy.sl_r_multiple))
+                # SL = entry - (entry * sl_r_multiple) in own-side cents
+                stop_loss_price_cents = max(1, int(price_cents * (1 - exit_policy.sl_r_multiple)))
             else:
                 # Default to 5 cent SL if no policy
-                stop_loss_price_cents = max(1, price_cents - 5) if side_raw == "YES" else price_cents + 5
+                stop_loss_price_cents = max(1, price_cents - 5)
             
             # Generate unique trace_id for candidate → order → policy tracking
             import uuid

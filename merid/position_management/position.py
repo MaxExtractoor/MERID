@@ -127,12 +127,12 @@ class Position:
         self.time_since_entry_seconds = (now - self.opened_at).total_seconds()
         
         # Calculate unrealized PnL
-        if self.side == PositionSide.YES:
-            # Long YES: profit if price goes up
-            self.unrealized_pnl_cents = (current_price_cents - self.avg_entry_price_cents) * self.size
-        else:
-            # Long NO: profit if price goes down
-            self.unrealized_pnl_cents = (self.avg_entry_price_cents - current_price_cents) * self.size
+        # CRITICAL FIX (2026-07-16): SIDE-SPACE convention. Entry price (from fills ledger)
+        # and current price (from _get_side_aware_price) are BOTH in the position's own
+        # side space (YES cents for YES positions, NO cents for NO positions).
+        # A position is always LONG its own side, so profit = own-side price rising.
+        # The previous NO branch assumed YES-space current price and inverted NO PnL.
+        self.unrealized_pnl_cents = (current_price_cents - self.avg_entry_price_cents) * self.size
         
         # Calculate R-multiple (PnL per unit of risk)
         if self.initial_risk_cents > 0:
@@ -142,13 +142,9 @@ class Position:
             self.r_multiple = self.unrealized_pnl_cents / self.avg_entry_price_cents
         
         # Update max favorable price for trailing stops
-        if self.side == PositionSide.YES:
-            if current_price_cents > self.max_favorable_price_cents:
-                self.max_favorable_price_cents = current_price_cents
-        else:
-            # For NO, favorable price is lower
-            if self.max_favorable_price_cents == 0 or current_price_cents < self.max_favorable_price_cents:
-                self.max_favorable_price_cents = current_price_cents
+        # CRITICAL FIX (2026-07-16): Side-space — favorable = higher own-side price for BOTH sides
+        if current_price_cents > self.max_favorable_price_cents:
+            self.max_favorable_price_cents = current_price_cents
     
     def get_trail_level(self) -> Optional[int]:
         """
@@ -225,12 +221,8 @@ class Position:
         if self.trailing_type == TrailingType.PERCENT:
             # Percent trail: trail_level = max_favorable * (1 - trail_percent)
             # trailing_param is already a decimal (e.g., 0.10 for 10%)
-            if self.side == PositionSide.YES:
-                # YES: trail below max favorable
-                trail_level = int(self.max_favorable_price_cents * (1 - trailing_param))
-            else:
-                # NO: trail above max favorable (since we want price to go down)
-                trail_level = int(self.max_favorable_price_cents * (1 + trailing_param))
+            # CRITICAL FIX (2026-07-16): Side-space — trail below max favorable for BOTH sides
+            trail_level = int(self.max_favorable_price_cents * (1 - trailing_param))
             return trail_level
         
         elif self.trailing_type == TrailingType.R_MULTIPLE:
@@ -257,12 +249,8 @@ class Position:
             except Exception as e:
                 fixed_distance = int(trailing_param)  # Fallback to param
             
-            if self.side == PositionSide.YES:
-                # YES: trail below max favorable
-                trail_level = self.max_favorable_price_cents - fixed_distance
-            else:
-                # NO: trail above max favorable (since we want price to go down)
-                trail_level = self.max_favorable_price_cents + fixed_distance
+            # CRITICAL FIX (2026-07-16): Side-space — trail below max favorable for BOTH sides
+            trail_level = self.max_favorable_price_cents - fixed_distance
             return trail_level
         
         return None
@@ -288,39 +276,22 @@ class Position:
             return None
         
         # Convert current price to probability (cents to decimal)
+        # CRITICAL FIX (2026-07-16): Side-space — own-side price IS the probability of
+        # this position winning, for BOTH sides (NO price = P(NO wins)).
         current_prob = self.current_price_cents / 100.0
         
-        # Calculate adjustment factor based on probability
-        if self.side == PositionSide.YES:
-            # YES position: higher probability = tighter trailing
-            if current_prob >= 0.90:
-                adjustment_factor = 0.6  # 40% tighter
-            elif current_prob >= 0.70:
-                adjustment_factor = 0.8  # 20% tighter
-            else:
-                adjustment_factor = 1.0  # Normal
+        # Calculate adjustment factor: higher own-side probability = tighter trailing
+        if current_prob >= 0.90:
+            adjustment_factor = 0.6  # 40% tighter
+        elif current_prob >= 0.70:
+            adjustment_factor = 0.8  # 20% tighter
         else:
-            # NO position: lower probability = tighter trailing
-            if current_prob <= 0.10:
-                adjustment_factor = 0.6  # 40% tighter
-            elif current_prob <= 0.30:
-                adjustment_factor = 0.8  # 20% tighter
-            else:
-                adjustment_factor = 1.0  # Normal
+            adjustment_factor = 1.0  # Normal
         
-        # Apply adjustment to trail distance from max favorable
-        if self.side == PositionSide.YES:
-            # For YES: trail is below max favorable
-            # Adjusted trail = max_favorable - (max_favorable - base_trail) * adjustment
-            trail_distance = self.max_favorable_price_cents - base_trail_level
-            adjusted_distance = int(trail_distance * adjustment_factor)
-            adjusted_trail_level = self.max_favorable_price_cents - adjusted_distance
-        else:
-            # For NO: trail is above max favorable
-            # Adjusted trail = max_favorable + (base_trail - max_favorable) * adjustment
-            trail_distance = base_trail_level - self.max_favorable_price_cents
-            adjusted_distance = int(trail_distance * adjustment_factor)
-            adjusted_trail_level = self.max_favorable_price_cents + adjusted_distance
+        # Apply adjustment to trail distance from max favorable (trail below for both sides)
+        trail_distance = self.max_favorable_price_cents - base_trail_level
+        adjusted_distance = int(trail_distance * adjustment_factor)
+        adjusted_trail_level = self.max_favorable_price_cents - adjusted_distance
         
         return adjusted_trail_level
     
@@ -328,9 +299,9 @@ class Position:
         """
         Check if trailing stop should trigger.
         
-        CRITICAL FIX: 2026-07-07 - Verified NO position logic is correct:
-        - YES: trigger if price falls to or below trail level (protect upside)
-        - NO: trigger if price rises to or above trail level (protect downside)
+        CRITICAL FIX: 2026-07-16 - Side-space semantics: current_price_cents is the
+        position's OWN side price. Both sides trigger when own-side price falls
+        to or below the trail level (protect unrealized gains).
         
         Args:
             current_price_cents: Current market price in cents
@@ -342,13 +313,9 @@ class Position:
         if trail_level is None:
             return False
         
-        if self.side == PositionSide.YES:
-            # Long YES: trigger if price falls to or below trail level (protect upside)
-            return current_price_cents <= trail_level
-        else:
-            # Long NO: trigger if price rises to or above trail level (protect downside)
-            # CRITICAL: NO positions profit when YES price falls, so exit when YES price rises
-            return current_price_cents >= trail_level
+        # CRITICAL FIX (2026-07-16): Side-space — own-side price falling to/below the
+        # trail level triggers for BOTH sides (both sides are long their own side)
+        return current_price_cents <= trail_level
     
     def should_trigger_stop_loss(self, current_price_cents: int) -> bool:
         """
@@ -363,12 +330,9 @@ class Position:
         if self.stop_loss_price_cents is None:
             return False
         
-        if self.side == PositionSide.YES:
-            # Long YES: trigger if price falls to or below stop-loss
-            return current_price_cents <= self.stop_loss_price_cents
-        else:
-            # Long NO: trigger if price rises to or above stop-loss
-            return current_price_cents >= self.stop_loss_price_cents
+        # CRITICAL FIX (2026-07-16): Side-space — SL sits BELOW entry in own-side cents
+        # for BOTH sides; trigger when own-side price falls to or below it
+        return current_price_cents <= self.stop_loss_price_cents
     
     def should_trigger_take_profit(self, current_price_cents: int) -> bool:
         """
@@ -383,49 +347,39 @@ class Position:
         if self.take_profit_price_cents is None:
             return False
         
-        if self.side == PositionSide.YES:
-            # Long YES: trigger if price rises to or above take-profit
-            return current_price_cents >= self.take_profit_price_cents
-        else:
-            # Long NO: trigger if price falls to or below take-profit
-            return current_price_cents <= self.take_profit_price_cents
+        # CRITICAL FIX (2026-07-16): Side-space — TP sits ABOVE entry in own-side cents
+        # for BOTH sides; trigger when own-side price rises to or above it
+        return current_price_cents >= self.take_profit_price_cents
     
     def should_trigger_extreme_profit(self, current_price_cents: int, bid_cents: Optional[int] = None, ask_cents: Optional[int] = None) -> bool:
         """
-        Check if extreme profit exit should trigger (99c YES / 1c NO).
+        Check if extreme profit exit should trigger (own side at 99c+).
         
-        2026 FIX: Exit at 99c for YES or 1c for NO to lock in guaranteed wins.
-        At these extreme prices, the probability is near 100% and holding further
-        provides minimal upside with significant risk of reversal.
+        2026 FIX: Exit when the position's OWN side reaches 99c to lock in
+        guaranteed wins. At these extreme prices, the probability is near 100%
+        and holding further provides minimal upside with settlement risk.
         
-        CRITICAL FIX: 2026-07-07 - Added bid/ask spread handling for boundary conditions
-        At extreme prices, bid/ask spread can cause false triggers. Use conservative pricing:
-        - YES: use bid price (what we can actually sell at)
-        - NO: use ask price (what we can actually buy back at)
+        CRITICAL FIX: 2026-07-16 - Side-space semantics: all prices are in the
+        position's own side cents. Use own-side bid for conservative check
+        (what we can actually sell at).
         
         Args:
-            current_price_cents: Current market price in cents (mid price)
-            bid_cents: Current bid price in cents (optional)
-            ask_cents: Current ask price in cents (optional)
+            current_price_cents: Current own-side price in cents (mid price)
+            bid_cents: Current own-side bid price in cents (optional)
+            ask_cents: Current own-side ask price in cents (optional, unused)
             
         Returns:
-            True if price is at extreme profit level (99c YES / 1c NO)
+            True if own-side price is at extreme profit level (99c+)
         """
-        # Use side-aware price if bid/ask available
+        # Use conservative own-side bid if available (what we can actually sell at)
         check_price = current_price_cents
-        if self.side == PositionSide.YES and bid_cents is not None:
-            # YES: we sell to buyer's bid - use bid for conservative check
+        if bid_cents is not None:
             check_price = bid_cents
-        elif self.side == PositionSide.NO and ask_cents is not None:
-            # NO: we buy back at seller's ask - use ask for conservative check
-            check_price = ask_cents
         
-        if self.side == PositionSide.YES:
-            # YES: exit at 99c or higher (guaranteed win)
-            return check_price >= 99
-        else:
-            # NO: exit at 1c or lower (guaranteed win)
-            return check_price <= 1
+        # CRITICAL FIX (2026-07-16): Side-space — a guaranteed win means the position's
+        # OWN side is at 99c+ for BOTH sides (NO at 99c-NO == YES at 1c-YES).
+        # Previous NO branch fired at 1c own-side price, which is a TOTAL LOSS for NO.
+        return check_price >= 99
     
     def should_trigger_break_even(self, current_price_cents: int) -> bool:
         """
@@ -447,10 +401,8 @@ class Position:
             return False
         
         # Calculate current R-multiple
-        if self.side == PositionSide.YES:
-            pnl_cents = current_price_cents - self.avg_entry_price_cents
-        else:
-            pnl_cents = self.avg_entry_price_cents - current_price_cents
+        # CRITICAL FIX (2026-07-16): Side-space — profit = own-side price rising for BOTH sides
+        pnl_cents = current_price_cents - self.avg_entry_price_cents
         
         current_r = pnl_cents / self.initial_risk_cents if self.initial_risk_cents > 0 else 0
         
@@ -487,12 +439,9 @@ class Position:
         if self.scale_out_triggered or self.scale_out_price_cents is None:
             return False
         
-        if self.side == PositionSide.YES:
-            # Long YES: trigger if price rises to or above scale-out target
-            return current_price_cents >= self.scale_out_price_cents
-        else:
-            # Long NO: trigger if price falls to or below scale-out target
-            return current_price_cents <= self.scale_out_price_cents
+        # CRITICAL FIX (2026-07-16): Side-space — scale-out target sits ABOVE entry in
+        # own-side cents for BOTH sides; trigger when own-side price rises to it
+        return current_price_cents >= self.scale_out_price_cents
     
     def trigger_scale_out(self) -> int:
         """

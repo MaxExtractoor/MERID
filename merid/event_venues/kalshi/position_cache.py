@@ -805,18 +805,16 @@ class KalshiPositionCache:
                     tp_r = tp_targets.get("tp_r", 1.0)
                     sl_price = tp_targets.get("sl_price")
                     
-                    # CRITICAL FIX: Reject positions without SL (2026-07-06)
-                    # Previously used hardcoded fallback of price_cents - 5
-                    # Now requires explicit SL to enforce "no trade without exit" invariant
+                    # CRITICAL FIX (2026-07-16): Assign default SL for positions without SL
+                    # Previously rejected positions without SL, leaving them orphaned
+                    # Now assigns default 5c SL to ensure all positions have exit protection
                     if sl_price is None:
-                        logger.error(
+                        sl_price = max(1, price_cents - 5)
+                        logger.warning(
                             "[POSITION-CACHE] Missing SL price for order %s - "
-                            "cannot monitor position for exits (invariant violation)",
-                            client_order_id
+                            "assigned default SL=%dc (entry=%dc) to ensure exit protection",
+                            client_order_id, sl_price, price_cents
                         )
-                        # Flag position as unhealthy and skip monitoring
-                        self._unhealthy_positions.add(market_id)
-                        return
                     
                     risk_cents = abs(price_cents - sl_price)
                     
@@ -1358,6 +1356,80 @@ class KalshiPositionCache:
                         ratchet_activation_timestamp=pos.get("ratchet_activation_timestamp"),
                     )
                     positions_processed += 1
+
+                # CRITICAL FIX (2026-07-16): Add REST-synced positions to PositionMonitor for exit enforcement
+                # This ensures positions are monitored after restart when synced from REST API
+                if positions_processed > 0:
+                    try:
+                        from merid.position_management.position_monitor import get_position_monitor
+                        from merid.position_management.position import Position, PositionSide, TrailingType
+                        
+                        monitor = get_position_monitor()
+                        
+                        # Read profile configuration for trailing stops
+                        trailing_enabled = False
+                        trailing_distance_cents = 5
+                        min_profit_cents = 12
+                        activation_delay_sec = 30
+                        
+                        try:
+                            from merid.risk.profiles.crypto_15m_profile import get_active_profile, is_profile_active
+                            if is_profile_active():
+                                adapter = get_active_profile()
+                                profile = adapter.profile
+                                trailing_enabled = profile.trailing_stop_enabled
+                                trailing_distance_cents = profile.trailing_stop_trailing_distance_cents
+                                min_profit_cents = profile.trailing_stop_min_profit_cents
+                                activation_delay_sec = profile.trailing_stop_activation_delay_sec
+                        except Exception as ts_err:
+                            logger.debug("[POSITION-CACHE] Could not read trailing stop config for REST sync: %s", ts_err)
+                        
+                        # Add each synced position to PositionMonitor
+                        for market_id, cached_pos in self._positions.items():
+                            if cached_pos.contracts <= 0:
+                                continue
+                            
+                            side_enum = PositionSide.YES if cached_pos.side.lower() == "yes" else PositionSide.NO
+                            
+                            # Assign default SL if missing (same logic as fill handling)
+                            sl_price = cached_pos.stop_loss_price_cents
+                            if sl_price is None:
+                                sl_price = max(1, cached_pos.avg_price_cents - 5)
+                                logger.warning(
+                                    "[POSITION-CACHE-REST-SYNC] Missing SL for REST-synced position %s - "
+                                    "assigned default SL=%dc (entry=%dc)",
+                                    market_id, sl_price, cached_pos.avg_price_cents
+                                )
+                            
+                            # Calculate risk for trailing stop
+                            risk_cents = abs(cached_pos.avg_price_cents - sl_price)
+                            
+                            # Mandatory trailing stop (FIXED_CENTS mode)
+                            trailing_type = TrailingType.FIXED_CENTS
+                            trailing_param = trailing_distance_cents
+                            
+                            monitor_position = Position(
+                                position_id=market_id,
+                                market_id=market_id,
+                                side=side_enum,
+                                size=cached_pos.contracts,
+                                avg_entry_price_cents=cached_pos.avg_price_cents,
+                                take_profit_price_cents=cached_pos.take_profit_price_cents,
+                                stop_loss_price_cents=sl_price,
+                                trailing_type=trailing_type,
+                                trailing_param=trailing_param,
+                                exit_policy_id="rest_sync",
+                            )
+                            
+                            monitor.add_position(monitor_position)
+                            logger.info(
+                                "[POSITION-MONITOR-REST-SYNC] Added REST-synced position to monitor: market=%s side=%s size=%d TP=%dc SL=%dc",
+                                market_id, cached_pos.side, cached_pos.contracts,
+                                cached_pos.take_profit_price_cents or 0,
+                                sl_price
+                            )
+                    except Exception as monitor_err:
+                        logger.warning("[POSITION-CACHE-REST-SYNC] Failed to add REST-synced positions to monitor: %s", monitor_err)
 
                 # CRITICAL FIX: Always update _last_sync even when no positions pass filters
                 self._last_sync = datetime.now(timezone.utc)
