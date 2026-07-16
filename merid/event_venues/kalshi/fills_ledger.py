@@ -3094,6 +3094,9 @@ class KalshiFillsLedger:
                     pass
             
             # Calculate unrealized PnL = (current_price - avg_entry_price) * contracts
+            # CRITICAL FIX (2026-07-16): SIDE-SPACE semantics - both YES and NO are long their own side
+            # PnL = (own-side current price - own-side entry price) * contracts
+            # This matches the side-space convention used in position.py and position_cache.py
             price_diff_cents = current_price_cents - avg_entry_price_cents
             unrealized_cents = price_diff_cents * contracts
             unrealized_usd = Decimal(unrealized_cents) / Decimal("100")

@@ -234,6 +234,44 @@ class RestingOrderMonitor:
                 del self._intent_to_order_id[record.intent_id]
             logger.debug(f"[RESTING_ORDER_MONITOR] Unregistered order: kalshi_order_id={kalshi_order_id}")
     
+    def find_open_order(
+        self,
+        ticker: str,
+        side: Optional[str] = None,
+        action: Optional[str] = None,
+    ) -> Optional[str]:
+        """Find a live (non-terminal, unfilled) resting order matching the given keys.
+
+        Used by the order router's anti-stacking guard to prevent submitting a new
+        order while an equivalent one is still resting on the book.
+
+        Args:
+            ticker: Market ticker (case-insensitive match, required)
+            side: Optional side filter (case-insensitive, e.g. "BUY_YES")
+            action: Optional action filter (case-insensitive, e.g. "buy")
+
+        Returns:
+            kalshi_order_id of the first matching live order, or None
+        """
+        ticker_norm = (ticker or "").upper()
+        side_norm = (side or "").upper()
+        action_norm = (action or "").upper()
+
+        for record in list(self._resting_orders.values()):
+            if (record.ticker or "").upper() != ticker_norm:
+                continue
+            if side_norm and (record.side or "").upper() != side_norm:
+                continue
+            if action_norm and (record.action or "").upper() != action_norm:
+                continue
+            if record.status in TERMINAL_STATUSES:
+                continue
+            if record.remaining_size <= 0:
+                continue
+            return record.kalshi_order_id
+
+        return None
+
     def unregister_by_intent_id(self, intent_id: str) -> None:
         """Unregister an order by intent_id (fallback for legacy code).
         
@@ -290,6 +328,36 @@ class RestingOrderMonitor:
             RecheckResult with action and reason
         """
         try:
+            # CRITICAL FIX (2026-07-16): Exempt exit orders from cancel rules
+            # Exit orders (TP, SL, trailing, etc.) should not be cancelled by regime flips,
+            # entry window changes, or other entry-specific conditions. They must be allowed
+            # to execute to ensure position exit enforcement.
+            from merid.event_venues.kalshi.exit_order_utils import is_exit_order_from_source
+            
+            # Check if this is an exit order using client_order_id or intent_id as source
+            is_exit = False
+            if record.client_order_id and is_exit_order_from_source(record.client_order_id):
+                is_exit = True
+            elif record.intent_id and is_exit_order_from_source(record.intent_id):
+                is_exit = True
+            elif record.exit_policy_id and is_exit_order_from_source(record.exit_policy_id):
+                is_exit = True
+            
+            if is_exit:
+                logger.info(
+                    "[RESTING-ORDER-MONITOR] Exit order exempted from cancel rules: kalshi_order_id=%s ticker=%s source=%s - allowing execution",
+                    record.kalshi_order_id, record.ticker, record.client_order_id or record.intent_id
+                )
+                return RecheckResult(
+                    intent_id=record.intent_id,
+                    ticker=record.ticker,
+                    action="keep",
+                    reason="exit_order_exempt",
+                    current_regime=None,
+                    current_vol_tier=None,
+                    model_quality_good=None,
+                )
+            
             from merid.prediction.dynamic_entry_window import resolve_entry_window
             from config.kalshi_crypto_config import kalshi_ticker_to_asset
             

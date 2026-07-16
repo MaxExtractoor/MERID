@@ -271,11 +271,10 @@ class PositionMonitor:
                                     elif edge_pct <= edge_low_threshold:
                                         base_target = int(base_target * edge_low_multiplier)
                                 
-                                # Adjust for NO positions (mirror logic)
-                                if position.side == PositionSide.NO:
-                                    position.dynamic_tp_target_cents = 100 - base_target
-                                else:
-                                    position.dynamic_tp_target_cents = base_target
+                                # CRITICAL FIX (2026-07-16): Side-space — entry and current
+                                # prices are in the position's OWN side cents for BOTH sides,
+                                # so zone targets apply directly (no 100-x mirror for NO)
+                                position.dynamic_tp_target_cents = base_target
                                 
                                 # CRITICAL FIX: 2026-07-07 - Add user communication for infeasible TP targets due to fees
                                 # Check if target is feasible after fees
@@ -283,10 +282,8 @@ class PositionMonitor:
                                     from merid.event_venues.kalshi.fees import calculate_kalshi_fee_cents
                                     
                                     # Calculate gross profit
-                                    if position.side == PositionSide.YES:
-                                        gross_profit = (position.dynamic_tp_target_cents - entry_price) * position.size
-                                    else:
-                                        gross_profit = (entry_price - position.dynamic_tp_target_cents) * position.size
+                                    # CRITICAL FIX (2026-07-16): Side-space — target above entry for BOTH sides
+                                    gross_profit = (position.dynamic_tp_target_cents - entry_price) * position.size
                                     
                                     # Calculate round-trip fees
                                     entry_fee = calculate_kalshi_fee_cents(position.size, entry_price)
@@ -324,22 +321,15 @@ class PositionMonitor:
                     
                     # Check if dynamic TP target is reached
                     # CRITICAL FIX: 2026-07-07 - Added idempotency guard to prevent double exit
+                    # CRITICAL FIX (2026-07-16): Side-space — own-side price rising to target
+                    # triggers for BOTH sides (no NO mirror)
                     if position.dynamic_tp_target_cents is not None and not position.dynamic_tp_triggered and not position.exit_triggered:
-                        if position.side == PositionSide.YES and current_price_cents >= position.dynamic_tp_target_cents:
+                        if current_price_cents >= position.dynamic_tp_target_cents:
                             position.dynamic_tp_triggered = True
                             logger.info(
-                                "[POSITION-MONITOR] DYNAMIC-TP triggered: position=%s price=%dc target=%dc (YES target reached)",
+                                "[POSITION-MONITOR] DYNAMIC-TP triggered: position=%s side=%s price=%dc target=%dc (target reached)",
                                 position.position_id[:8],
-                                current_price_cents,
-                                position.dynamic_tp_target_cents,
-                            )
-                            self._emit_exit_intent(position, ExitReason.DYNAMIC_TAKE_PROFIT, current_price_cents)
-                            return
-                        elif position.side == PositionSide.NO and current_price_cents <= position.dynamic_tp_target_cents:
-                            position.dynamic_tp_triggered = True
-                            logger.info(
-                                "[POSITION-MONITOR] DYNAMIC-TP triggered: position=%s price=%dc target=%dc (NO target reached)",
-                                position.position_id[:8],
+                                position.side.value,
                                 current_price_cents,
                                 position.dynamic_tp_target_cents,
                             )
@@ -381,32 +371,18 @@ class PositionMonitor:
                     # CRITICAL FIX: 2026-07-07 - Removed early return to cascade other exit checks
                     # After trimming, continue checking other exit conditions (extreme profit, dynamic TP, etc.)
                     # This ensures critical exits like 99c are not delayed by trimming
+                    # CRITICAL FIX (2026-07-16): Side-space — own-side price crossing the trim
+                    # threshold triggers for BOTH sides (no 100-x mirror for NO)
                     if trim_enabled and not position.ratchet_trimmed and not position.exit_triggered:
                         if position.size > trim_to_contracts:
-                            if position.side == PositionSide.YES and current_price_cents >= trim_threshold:
+                            if current_price_cents >= trim_threshold:
                                 position.ratchet_trimmed = True
                                 # Emit trim intent (partial close)
                                 contracts_to_close = position.size - trim_to_contracts
                                 logger.info(
-                                    "[POSITION-MONITOR] RATCHET-TRIM triggered: position=%s price=%dc size=%d -> trim to %d contracts (close %d)",
+                                    "[POSITION-MONITOR] RATCHET-TRIM triggered: position=%s side=%s price=%dc size=%d -> trim to %d contracts (close %d)",
                                     position.position_id[:8],
-                                    current_price_cents,
-                                    position.size,
-                                    trim_to_contracts,
-                                    contracts_to_close,
-                                )
-                                self._emit_exit_intent(position, ExitReason.RATCHET_TRIM, current_price_cents, contracts_to_close)
-                                # CRITICAL FIX: Update position size after trim (don't remove from monitoring)
-                                # Note: Position.size is updated here, but PositionCache.contracts is updated via fill callback
-                                # This creates a temporary desync until the fill is processed, which is acceptable
-                                position.size = trim_to_contracts
-                                # CRITICAL: Continue to check other exit conditions (don't return early)
-                            elif position.side == PositionSide.NO and current_price_cents <= (100 - trim_threshold):
-                                position.ratchet_trimmed = True
-                                contracts_to_close = position.size - trim_to_contracts
-                                logger.info(
-                                    "[POSITION-MONITOR] RATCHET-TRIM triggered: position=%s price=%dc size=%d -> trim to %d contracts (close %d)",
-                                    position.position_id[:8],
+                                    position.side.value,
                                     current_price_cents,
                                     position.size,
                                     trim_to_contracts,
@@ -421,26 +397,19 @@ class PositionMonitor:
                     
                     # Activate ratchet when price hits threshold
                     # CRITICAL FIX: 2026-07-07 - Added idempotency guard to prevent double activation
+                    # CRITICAL FIX (2026-07-16): Side-space — own-side price reaching the activation
+                    # threshold triggers for BOTH sides (no 100-x mirror for NO)
                     if not position.ratchet_activated and not position.exit_triggered:
-                        if position.side == PositionSide.YES and current_price_cents >= activation_threshold:
+                        if current_price_cents >= activation_threshold:
                             position.ratchet_activated = True
                             position.ratchet_hold_until = datetime.utcnow().timestamp() + profile.ratchet_min_hold_after_activation_sec
                             logger.info(
-                                "[POSITION-MONITOR] RATCHET activated: position=%s price=%dc threshold=%dc floor=%dc",
+                                "[POSITION-MONITOR] RATCHET activated: position=%s side=%s price=%dc threshold=%dc floor=%dc",
                                 position.position_id[:8],
+                                position.side.value,
                                 current_price_cents,
                                 activation_threshold,
                                 floor_price,
-                            )
-                        elif position.side == PositionSide.NO and current_price_cents <= (100 - activation_threshold):
-                            position.ratchet_activated = True
-                            position.ratchet_hold_until = datetime.utcnow().timestamp() + profile.ratchet_min_hold_after_activation_sec
-                            logger.info(
-                                "[POSITION-MONITOR] RATCHET activated: position=%s price=%dc threshold=%dc floor=%dc",
-                                position.position_id[:8],
-                                current_price_cents,
-                                100 - activation_threshold,
-                                100 - floor_price,
                             )
                     
                     # Check floor breach after activation and hold period
@@ -453,11 +422,14 @@ class PositionMonitor:
                         
                         if can_exit:
                             # CRITICAL FIX: 2026-07-07 - Added idempotency guard to prevent double exit
-                            if position.side == PositionSide.YES and current_price_cents <= floor_price and not position.exit_triggered:
+                            # CRITICAL FIX (2026-07-16): Side-space — own-side price falling to the
+                            # floor triggers for BOTH sides (no 100-x mirror for NO)
+                            if current_price_cents <= floor_price and not position.exit_triggered:
                                 if force_exit:
                                     logger.info(
-                                        "[POSITION-MONITOR] RATCHET-FLOOR-BREACH triggered: position=%s price=%dc floor=%dc - mandatory exit (hold_period=expired)",
+                                        "[POSITION-MONITOR] RATCHET-FLOOR-BREACH triggered: position=%s side=%s price=%dc floor=%dc - mandatory exit (hold_period=expired)",
                                         position.position_id[:8],
+                                        position.side.value,
                                         current_price_cents,
                                         floor_price,
                                     )
@@ -465,27 +437,11 @@ class PositionMonitor:
                                     return
                                 else:
                                     logger.warning(
-                                        "[POSITION-MONITOR] RATCHET-FLOOR-BREACH: position=%s price=%dc floor=%dc (exit not forced)",
+                                        "[POSITION-MONITOR] RATCHET-FLOOR-BREACH: position=%s side=%s price=%dc floor=%dc (exit not forced)",
                                         position.position_id[:8],
+                                        position.side.value,
                                         current_price_cents,
                                         floor_price,
-                                    )
-                            elif position.side == PositionSide.NO and current_price_cents >= (100 - floor_price) and not position.exit_triggered:
-                                if force_exit:
-                                    logger.info(
-                                        "[POSITION-MONITOR] RATCHET-FLOOR-BREACH triggered: position=%s price=%dc floor=%dc - mandatory exit (hold_period=expired)",
-                                        position.position_id[:8],
-                                        current_price_cents,
-                                        100 - floor_price,
-                                    )
-                                    self._emit_exit_intent(position, ExitReason.RATCHET_FLOOR, current_price_cents)
-                                    return
-                                else:
-                                    logger.warning(
-                                        "[POSITION-MONITOR] RATCHET-FLOOR-BREACH: position=%s price=%dc floor=%dc (exit not forced)",
-                                        position.position_id[:8],
-                                        current_price_cents,
-                                        100 - floor_price,
                                     )
         except Exception as e:
             logger.debug("[POSITION-MONITOR] Ratchet profit floor check failed: %s", e)
@@ -563,10 +519,8 @@ class PositionMonitor:
                 logger.debug("[POSITION-MONITOR] Could not read trailing config from profile: %s", e)
             
             # Calculate current profit in cents
-            if position.side == PositionSide.YES:
-                profit_cents = current_price_cents - position.avg_entry_price_cents
-            else:
-                profit_cents = position.avg_entry_price_cents - current_price_cents
+            # CRITICAL FIX (2026-07-16): Side-space — profit = own-side price rising for BOTH sides
+            profit_cents = current_price_cents - position.avg_entry_price_cents
             
             # Check if profit threshold reached
             if profit_cents >= min_profit_cents:
@@ -590,12 +544,10 @@ class PositionMonitor:
                 
                 if delay_elapsed:
                     position.trailing_activated = True
-                    # CRITICAL FIX: 2026-07-06 - Check if in profit zone (80c for YES, 20c for NO)
+                    # CRITICAL FIX: 2026-07-16 - Side-space — profit zone = own-side price >= 80c
+                    # for BOTH sides (no 100-x mirror for NO)
                     in_profit_zone = False
-                    if position.side == PositionSide.YES and current_price_cents >= profit_zone_activation_cents:
-                        in_profit_zone = True
-                        position.trailing_profit_zone_activated = True
-                    elif position.side == PositionSide.NO and current_price_cents <= (100 - profit_zone_activation_cents):
+                    if current_price_cents >= profit_zone_activation_cents:
                         in_profit_zone = True
                         position.trailing_profit_zone_activated = True
                     
@@ -643,18 +595,13 @@ class PositionMonitor:
                 except Exception as e:
                     logger.debug("[POSITION-MONITOR] Could not read profit zone config from profile: %s", e)
                 
-                if position.side == PositionSide.YES and current_price_cents >= profit_zone_activation_cents:
+                # CRITICAL FIX (2026-07-16): Side-space — own-side price >= activation for BOTH sides
+                if current_price_cents >= profit_zone_activation_cents:
                     position.trailing_profit_zone_activated = True
                     logger.info(
-                        "[POSITION-MONITOR] TRAILING switched to AGGRESSIVE 2c mode: position=%s price=%dc - entered 80-85c profit zone",
+                        "[POSITION-MONITOR] TRAILING switched to AGGRESSIVE 2c mode: position=%s side=%s price=%dc - entered 80-85c profit zone",
                         position.position_id[:8],
-                        current_price_cents,
-                    )
-                elif position.side == PositionSide.NO and current_price_cents <= (100 - profit_zone_activation_cents):
-                    position.trailing_profit_zone_activated = True
-                    logger.info(
-                        "[POSITION-MONITOR] TRAILING switched to AGGRESSIVE 2c mode: position=%s price=%dc - entered 80-85c profit zone",
-                        position.position_id[:8],
+                        position.side.value,
                         current_price_cents,
                     )
             else:
@@ -670,18 +617,13 @@ class PositionMonitor:
                 except Exception as e:
                     logger.debug("[POSITION-MONITOR] Could not read profit zone config from profile: %s", e)
                 
-                if position.side == PositionSide.YES and current_price_cents < profit_zone_deactivation_cents:
+                # CRITICAL FIX (2026-07-16): Side-space — own-side price < deactivation for BOTH sides
+                if current_price_cents < profit_zone_deactivation_cents:
                     position.trailing_profit_zone_activated = False
                     logger.info(
-                        "[POSITION-MONITOR] TRAILING switched to NORMAL 5c mode: position=%s price=%dc - exited profit zone (hysteresis)",
+                        "[POSITION-MONITOR] TRAILING switched to NORMAL 5c mode: position=%s side=%s price=%dc - exited profit zone (hysteresis)",
                         position.position_id[:8],
-                        current_price_cents,
-                    )
-                elif position.side == PositionSide.NO and current_price_cents > (100 - profit_zone_deactivation_cents):
-                    position.trailing_profit_zone_activated = False
-                    logger.info(
-                        "[POSITION-MONITOR] TRAILING switched to NORMAL 5c mode: position=%s price=%dc - exited profit zone (hysteresis)",
-                        position.position_id[:8],
+                        position.side.value,
                         current_price_cents,
                     )
         
@@ -981,16 +923,13 @@ class PositionMonitor:
                 contracts_to_close,
             )
         
-        # For partial trims, don't mark as exited or remove from monitoring
-        # Only full exits should remove the position
-        if contracts_to_close is None:
-            # Mark position as exited
-            position.mark_exited(exit_reason.value, exit_price_cents)
-            
-            # Remove from monitoring
-            self.remove_position(position.position_id)
-        
-        # Call callback if registered
+        # CRITICAL FIX (2026-07-16): Dispatch the exit callback BEFORE mark_exited().
+        # Previous ordering set exit_triggered=True and removed the position BEFORE the
+        # callback ran; the loop-side idempotency guard (added 2026-07-15) checks
+        # position.exit_triggered and was silently DROPPING every full exit — no exit
+        # order was ever placed. Callback-first preserves idempotency (a second emission
+        # for the same position still sees exit_triggered=True) while restoring execution.
+        callback_dispatched = False
         if self._exit_intent_callback:
             try:
                 logger.info(
@@ -1001,6 +940,7 @@ class PositionMonitor:
                 )
                 # Pass contracts_to_close to callback for partial close handling
                 self._exit_intent_callback(position, exit_reason, exit_price_cents, contracts_to_close)
+                callback_dispatched = True
                 logger.info(
                     "[POSITION-MONITOR] Exit intent callback completed for position=%s",
                     position.position_id[:8],
@@ -1016,6 +956,24 @@ class PositionMonitor:
                 "[POSITION-MONITOR] No exit intent callback registered - exit order will NOT be placed for position=%s",
                 position.position_id[:8],
             )
+        
+        # For partial trims, don't mark as exited or remove from monitoring
+        # Only full exits should remove the position
+        if contracts_to_close is None:
+            if callback_dispatched:
+                # Mark position as exited and stop monitoring
+                position.mark_exited(exit_reason.value, exit_price_cents)
+                self.remove_position(position.position_id)
+            else:
+                # CRITICAL FIX (2026-07-16): Callback failed or missing — KEEP the position
+                # monitored so the exit re-fires on the next poll instead of orphaning a
+                # live position with no exit enforcement
+                logger.error(
+                    "[POSITION-MONITOR] Exit intent NOT dispatched for position=%s (reason=%s) - "
+                    "keeping position monitored for retry on next poll",
+                    position.position_id[:8],
+                    exit_reason.value,
+                )
     
     def _emit_scale_out_intent(
         self,
