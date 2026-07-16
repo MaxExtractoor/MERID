@@ -254,7 +254,7 @@ ratchet_profit_floor:
 # Staged Time-Based Exit Configuration
 # Partial exits at time intervals for volatile markets
 staged_time_exit:
-  enabled: false  # DISABLED: Bypasses PositionMonitor - TODO: Re-implement in PositionMonitor
+  enabled: true  # CRITICAL FIX: 2026-07-17 - Enabled (logic implemented in PositionMonitor)
   # Staged exits: [minutes, percent_to_close]
   # Example: At 5 min close 40%, at 10 min close 30%, at 13 min close remaining 30%
   stages:
@@ -264,7 +264,7 @@ staged_time_exit:
       percent: 30
     - minutes: 13
       percent: 30
-  description: "Staged time exits: partial liquidation at time intervals (DISABLED - bypasses PositionMonitor)"
+  description: "Staged time exits: partial liquidation at time intervals (enabled in PositionMonitor)"
 
 # Dynamic Take Profit Zones Configuration
 # Laddered exit targets based on entry price for consistent profit taking

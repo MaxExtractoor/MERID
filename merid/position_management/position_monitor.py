@@ -444,7 +444,7 @@ class PositionMonitor:
                                         floor_price,
                                     )
         except Exception as e:
-            logger.debug("[POSITION-MONITOR] Ratchet profit floor check failed: %s", e)
+            logger.warning("[POSITION-MONITOR] Ratchet profit floor check failed: %s", e)
         
         # Check TP/SL next
         if position.should_trigger_stop_loss(current_price_cents):
@@ -516,7 +516,7 @@ class PositionMonitor:
                     profit_zone_activation_cents = profile.trailing_stop_profit_zone_activation_cents
                     activation_delay_sec = profile.trailing_stop_activation_delay_sec
             except Exception as e:
-                logger.debug("[POSITION-MONITOR] Could not read trailing config from profile: %s", e)
+                logger.warning("[POSITION-MONITOR] Could not read trailing config from profile: %s", e)
             
             # Calculate current profit in cents
             # CRITICAL FIX (2026-07-16): Side-space — profit = own-side price rising for BOTH sides
@@ -652,7 +652,7 @@ class PositionMonitor:
             if state and state.seconds_to_expiry:
                 time_to_expiry_seconds = state.seconds_to_expiry
         except Exception as e:
-            logger.debug("[POSITION-MONITOR] Could not get time to expiry for emergency flatten: %s", e)
+            logger.warning("[POSITION-MONITOR] Could not get time to expiry for emergency flatten: %s", e)
         
         # Emergency flatten: force exit in last 60 seconds
         if time_to_expiry_seconds <= 60.0:
@@ -782,7 +782,7 @@ class PositionMonitor:
             if state and state.minutes_to_expiry:
                 time_to_expiry = state.minutes_to_expiry * 60.0
         except Exception as e:
-            logger.debug("[POSITION-MONITOR] Could not get time to expiry: %s", e)
+            logger.warning("[POSITION-MONITOR] Could not get time to expiry: %s", e)
         
         # Get recent candles for candle pattern detection
         candles = None
@@ -818,7 +818,7 @@ class PositionMonitor:
                             'timestamp': ohlcv.timestamp_window_end
                         })
         except Exception as e:
-            logger.debug("[POSITION-MONITOR] Could not get candles for pattern detection: %s", e)
+            logger.warning("[POSITION-MONITOR] Could not get candles for pattern detection: %s", e)
         
         # CRITICAL FIX (2026-07-11): Get MD age for stale data check
         md_age_ms = None
@@ -850,22 +850,91 @@ class PositionMonitor:
         except Exception as e:
             logger.debug("[POSITION-MONITOR] Could not get MD age for stale data check: %s", e)
         
-        # CRITICAL FIX: 2026-07-16 - Compute current edge for edge decay check
+        # CRITICAL FIX: 2026-07-17 - Compute volatility regime for exit policy
+        # Volatility regime detection exists but was not wired to exit policy
+        # This enables volatility-based hold time multipliers (LOW: 1.0x, NORMAL: 0.75x, HIGH: 0.5x, EXTREME: 0.33x)
+        volatility_regime = None
+        try:
+            # Extract asset from position
+            asset = None
+            if "BTC" in position.market_id.upper():
+                asset = "BTC"
+            elif "ETH" in position.market_id.upper():
+                asset = "ETH"
+            elif "SOL" in position.market_id.upper():
+                asset = "SOL"
+            elif "XRP" in position.market_id.upper():
+                asset = "XRP"
+            elif "DOGE" in position.market_id.upper():
+                asset = "DOGE"
+            
+            if asset:
+                from data.unified_spot_service import get_unified_spot_service
+                spot_service = get_unified_spot_service()
+                ohlcv_buffer = spot_service.get_ohlcv_buffer(asset, "15m")
+                
+                if ohlcv_buffer and len(ohlcv_buffer) >= 20:
+                    # Compute realized volatility from OHLCV buffer
+                    import numpy as np
+                    closes = np.array([bar.close for bar in ohlcv_buffer])
+                    returns = np.diff(np.log(closes))
+                    realized_vol = np.std(returns) * np.sqrt(525600)  # Annualized (minutes per year)
+                    
+                    # Classify volatility regime using unified_edge function
+                    from merid.prediction.unified_edge import classify_volatility_regime
+                    volatility_regime = classify_volatility_regime(realized_vol * 100)  # Convert to percentage
+                    
+                    logger.debug(
+                        "[POSITION-MONITOR] Volatility regime: position=%s asset=%s vol=%.2f%% regime=%s",
+                        position.position_id[:8],
+                        asset,
+                        realized_vol * 100,
+                        volatility_regime
+                    )
+        except Exception as e:
+            logger.debug("[POSITION-MONITOR] Could not compute volatility regime: %s", e)
+        
+        # CRITICAL FIX: 2026-07-17 - Compute real-time edge for edge decay check
         # Edge decay was never triggering because current_edge_pct was not passed to resolver
-        # Use position's entry_edge_pct as fallback (stored at position open)
-        # TODO: Compute real-time edge using UnifiedEdgeComputer for more accurate decay detection
-        current_edge_pct = getattr(position, 'entry_edge_pct', 0.03)  # Default 3% if not set
+        # Use EdgeBasedExitEvaluator to compute real-time edge instead of static entry_edge_pct
+        current_edge_pct = None
+        try:
+            from merid.position_management.edge_based_exit_evaluator import EdgeBasedExitEvaluator
+            edge_evaluator = EdgeBasedExitEvaluator()
+            current_edge_pct = edge_evaluator.compute_current_edge(
+                position=position,
+                current_price_cents=current_price_cents,
+                time_to_expiry_seconds=time_to_expiry
+            )
+            
+            if current_edge_pct is None:
+                # Fallback to entry edge if real-time computation fails
+                current_edge_pct = getattr(position, 'entry_edge_pct', 0.03)
+                logger.debug(
+                    "[POSITION-MONITOR] Real-time edge computation failed, using entry edge=%.4f",
+                    current_edge_pct
+                )
+            else:
+                logger.debug(
+                    "[POSITION-MONITOR] Real-time edge computed: position=%s edge=%.4f",
+                    position.position_id[:8],
+                    current_edge_pct
+                )
+        except Exception as e:
+            logger.debug("[POSITION-MONITOR] Could not compute real-time edge: %s", e)
+            # Fallback to entry edge
+            current_edge_pct = getattr(position, 'entry_edge_pct', 0.03)
         
         # Resolve exit policy
         policy = resolver.resolve(
             position=position,
             current_price_cents=current_price_cents,
             time_to_expiry_seconds=time_to_expiry,
-            volatility_regime=None,  # TODO: add volatility regime
+            volatility_regime=volatility_regime,  # CRITICAL: Pass volatility regime
             candles=candles,
             md_age_ms=md_age_ms,
             max_age_ms=max_age_ms,
-            current_edge_pct=current_edge_pct,  # CRITICAL: Pass edge for edge decay check
+            current_edge_pct=current_edge_pct,  # CRITICAL: Pass real-time edge for edge decay check
         )
         
         if policy.action == ExitAction.EXIT_MARKET:
