@@ -61,11 +61,29 @@ class TestStagedTimeExit:
         mock_position.opened_at = datetime.utcnow() - timedelta(seconds=300)  # 5 minutes ago
         
         # Simulate 5 minutes since entry (10 minutes to expiry)
-        with patch('merid.event_venues.kalshi.market_state.get_kalshi_market_state_store') as mock_store:
+        with patch('merid.event_venues.kalshi.market_state.get_kalshi_market_state_store') as mock_store, \
+             patch('merid.risk.profiles.crypto_15m_profile.get_active_profile') as mock_profile:
             mock_state = Mock()
             mock_state.minutes_to_expiry = 10  # 10 minutes to expiry
             mock_state.seconds_to_expiry = 600  # Also set seconds for compatibility
             mock_store.return_value.get.return_value = mock_state
+            
+            # Mock profile with staged_time_exit enabled
+            mock_adapter = Mock()
+            mock_adapter.profile = Mock()
+            mock_adapter.profile.staged_time_exit = {
+                'enabled': True,
+                'stages': [
+                    {"minutes": 5, "percent": 25},
+                    {"minutes": 10, "percent": 25},
+                    {"minutes": 13, "percent": 50},
+                ]
+            }
+            mock_adapter.profile.dynamic_take_profit = {'enabled': False}
+            mock_adapter.profile.trailing_stop_min_profit_cents = 12
+            mock_adapter.profile.trailing_stop_profit_zone_activation_cents = 80
+            mock_adapter.profile.ratchet_profit_floor_enabled = False
+            mock_profile.return_value = mock_adapter
             
             # Check position at 5 minutes since entry
             asyncio.run(monitor._check_position(mock_position, 52))
@@ -94,11 +112,29 @@ class TestStagedTimeExit:
         monitor.add_position(mock_position)
         
         # Simulate 10 minutes since entry (5 minutes to expiry)
-        with patch('merid.event_venues.kalshi.market_state.get_kalshi_market_state_store') as mock_store:
+        with patch('merid.event_venues.kalshi.market_state.get_kalshi_market_state_store') as mock_store, \
+             patch('merid.risk.profiles.crypto_15m_profile.get_active_profile') as mock_profile:
             mock_state = Mock()
             mock_state.minutes_to_expiry = 5  # 5 minutes to expiry
             mock_state.seconds_to_expiry = 300  # Also set seconds for compatibility
             mock_store.return_value.get.return_value = mock_state
+            
+            # Mock profile with staged_time_exit enabled
+            mock_adapter = Mock()
+            mock_adapter.profile = Mock()
+            mock_adapter.profile.staged_time_exit = {
+                'enabled': True,
+                'stages': [
+                    {"minutes": 5, "percent": 25},
+                    {"minutes": 10, "percent": 25},
+                    {"minutes": 13, "percent": 50},
+                ]
+            }
+            mock_adapter.profile.dynamic_take_profit = {'enabled': False}
+            mock_adapter.profile.trailing_stop_min_profit_cents = 12
+            mock_adapter.profile.trailing_stop_profit_zone_activation_cents = 80
+            mock_adapter.profile.ratchet_profit_floor_enabled = False
+            mock_profile.return_value = mock_adapter
             
             # Check position at 10 minutes since entry
             asyncio.run(monitor._check_position(mock_position, 52))
@@ -128,11 +164,29 @@ class TestStagedTimeExit:
         monitor.add_position(mock_position)
         
         # Simulate 13 minutes since entry (2 minutes to expiry)
-        with patch('merid.event_venues.kalshi.market_state.get_kalshi_market_state_store') as mock_store:
+        with patch('merid.event_venues.kalshi.market_state.get_kalshi_market_state_store') as mock_store, \
+             patch('merid.risk.profiles.crypto_15m_profile.get_active_profile') as mock_profile:
             mock_state = Mock()
             mock_state.minutes_to_expiry = 2  # 2 minutes to expiry
             mock_state.seconds_to_expiry = 120  # Also set seconds for compatibility
             mock_store.return_value.get.return_value = mock_state
+            
+            # Mock profile with staged_time_exit enabled
+            mock_adapter = Mock()
+            mock_adapter.profile = Mock()
+            mock_adapter.profile.staged_time_exit = {
+                'enabled': True,
+                'stages': [
+                    {"minutes": 5, "percent": 25},
+                    {"minutes": 10, "percent": 25},
+                    {"minutes": 13, "percent": 50},
+                ]
+            }
+            mock_adapter.profile.dynamic_take_profit = {'enabled': False}
+            mock_adapter.profile.trailing_stop_min_profit_cents = 12
+            mock_adapter.profile.trailing_stop_profit_zone_activation_cents = 80
+            mock_adapter.profile.ratchet_profit_floor_enabled = False
+            mock_profile.return_value = mock_adapter
             
             # Check position at 13 minutes since entry
             asyncio.run(monitor._check_position(mock_position, 52))
@@ -157,10 +211,28 @@ class TestStagedTimeExit:
         monitor.add_position(mock_position)
         
         # Simulate 5 minutes since entry
-        with patch('merid.event_venues.kalshi.market_state.get_kalshi_market_state_store') as mock_store:
+        with patch('merid.event_venues.kalshi.market_state.get_kalshi_market_state_store') as mock_store, \
+             patch('merid.risk.profiles.crypto_15m_profile.get_active_profile') as mock_profile:
             mock_state = Mock()
             mock_state.seconds_to_expiry = 600  # 10 minutes to expiry
             mock_store.return_value.get.return_value = mock_state
+            
+            # Mock profile with staged_time_exit enabled
+            mock_adapter = Mock()
+            mock_adapter.profile = Mock()
+            mock_adapter.profile.staged_time_exit = {
+                'enabled': True,
+                'stages': [
+                    {"minutes": 5, "percent": 25},
+                    {"minutes": 10, "percent": 25},
+                    {"minutes": 13, "percent": 50},
+                ]
+            }
+            mock_adapter.profile.dynamic_take_profit = {'enabled': False}
+            mock_adapter.profile.trailing_stop_min_profit_cents = 12
+            mock_adapter.profile.trailing_stop_profit_zone_activation_cents = 80
+            mock_adapter.profile.ratchet_profit_floor_enabled = False
+            mock_profile.return_value = mock_adapter
             
             # Check position at 5 minutes since entry
             asyncio.run(monitor._check_position(mock_position, 52))
@@ -203,11 +275,29 @@ class TestStagedTimeExit:
         mock_position.opened_at = datetime.utcnow() - timedelta(seconds=300)  # 5 minutes ago
         
         # Simulate 5 minutes since entry
-        with patch('merid.event_venues.kalshi.market_state.get_kalshi_market_state_store') as mock_store:
+        with patch('merid.event_venues.kalshi.market_state.get_kalshi_market_state_store') as mock_store, \
+             patch('merid.risk.profiles.crypto_15m_profile.get_active_profile') as mock_profile:
             mock_state = Mock()
             mock_state.minutes_to_expiry = 10  # 10 minutes to expiry
             mock_state.seconds_to_expiry = 600  # Also set seconds for compatibility
             mock_store.return_value.get.return_value = mock_state
+            
+            # Mock profile with staged_time_exit enabled
+            mock_adapter = Mock()
+            mock_adapter.profile = Mock()
+            mock_adapter.profile.staged_time_exit = {
+                'enabled': True,
+                'stages': [
+                    {"minutes": 5, "percent": 25},
+                    {"minutes": 10, "percent": 25},
+                    {"minutes": 13, "percent": 50},
+                ]
+            }
+            mock_adapter.profile.dynamic_take_profit = {'enabled': False}
+            mock_adapter.profile.trailing_stop_min_profit_cents = 12
+            mock_adapter.profile.trailing_stop_profit_zone_activation_cents = 80
+            mock_adapter.profile.ratchet_profit_floor_enabled = False
+            mock_profile.return_value = mock_adapter
             
             # Check position at 5 minutes since entry
             asyncio.run(monitor._check_position(mock_position, 52))

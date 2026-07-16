@@ -137,9 +137,12 @@ class Position:
         # Calculate R-multiple (PnL per unit of risk)
         if self.initial_risk_cents > 0:
             self.r_multiple = self.unrealized_pnl_cents / self.initial_risk_cents
-        else:
+        elif self.avg_entry_price_cents > 0:
             # If no stop loss set, use entry price as risk proxy
             self.r_multiple = self.unrealized_pnl_cents / self.avg_entry_price_cents
+        else:
+            # Both initial_risk_cents and avg_entry_price_cents are 0 - cannot calculate R-multiple
+            self.r_multiple = 0.0
         
         # Update max favorable price for trailing stops
         # CRITICAL FIX (2026-07-16): Side-space — favorable = higher own-side price for BOTH sides
@@ -281,12 +284,22 @@ class Position:
         current_prob = self.current_price_cents / 100.0
         
         # Calculate adjustment factor: higher own-side probability = tighter trailing
-        if current_prob >= 0.90:
-            adjustment_factor = 0.6  # 40% tighter
-        elif current_prob >= 0.70:
-            adjustment_factor = 0.8  # 20% tighter
-        else:
-            adjustment_factor = 1.0  # Normal
+        # For YES: 0.90+ → 0.6x tighter, 0.70-0.90 → 0.8x, 0.50-0.70 → 1.0x
+        # For NO: 0.10- → 0.6x tighter, 0.10-0.30 → 0.8x, 0.30-0.50 → 1.0x
+        if self.side == PositionSide.YES:
+            if current_prob >= 0.90:
+                adjustment_factor = 0.6  # 40% tighter
+            elif current_prob >= 0.70:
+                adjustment_factor = 0.8  # 20% tighter
+            else:
+                adjustment_factor = 1.0  # Normal
+        else:  # NO
+            if current_prob <= 0.10:
+                adjustment_factor = 0.6  # 40% tighter
+            elif current_prob <= 0.30:
+                adjustment_factor = 0.8  # 20% tighter
+            else:
+                adjustment_factor = 1.0  # Normal
         
         # Apply adjustment to trail distance from max favorable (trail below for both sides)
         trail_distance = self.max_favorable_price_cents - base_trail_level

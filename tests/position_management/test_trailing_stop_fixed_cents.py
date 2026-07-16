@@ -51,14 +51,14 @@ class TestTrailingStopFixedCents:
             trailing_param=5,  # 5 cent trail
         )
         
-        # Max favorable price at 40 cents (lower is better for NO)
-        position.max_favorable_price_cents = 40
-        position.update_runtime_state(45)  # Current price 45 cents
+        # Max favorable price at 60 cents (higher is better for NO - side-space convention)
+        position.max_favorable_price_cents = 60
+        position.update_runtime_state(55)  # Current price 55 cents
         
         trail_level = position.get_trail_level()
         
-        # Trail should be at 45 cents (40 + 5)
-        assert trail_level == 45
+        # Trail should be at 55 cents (60 - 5) - side-space convention
+        assert trail_level == 55
 
     def test_trailing_activation_at_min_profit_cents(self):
         """Test trailing activates at min_profit_cents (12 cents) not 1R."""
