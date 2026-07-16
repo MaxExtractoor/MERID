@@ -1742,6 +1742,12 @@ class Kalshi15mLoop:
                     candidates = await self.agent_grid.run_cycle(tick_id, allow_new_entries=True)
                     logger.info("[15m-LOOP] Generated %d candidates in tick %d", len(candidates), tick_id)
                     
+                    # CRITICAL FIX (2026-07-16): Best-edge selection is now handled in agent_grid_15m._select_best_edge_per_asset
+                    # This ensures only 1 contract per asset per window (cheapest with best edge) is selected
+                    # before candidates are passed to the global allocator. The loop_15m execution logic
+                    # no longer needs to perform duplicate best-edge filtering.
+                    # agent_grid_15m already filtered to at most 1 candidate per asset.
+                    
                     # CRITICAL: Log candidate details for debugging execution flow
                     for i, candidate in enumerate(candidates):
                         logger.info(
@@ -1749,9 +1755,8 @@ class Kalshi15mLoop:
                             i, candidate.get("ticker"), candidate.get("side"), candidate.get("edge_pct", 0.0)
                         )
                     
-                    # Execute candidates using best-edge selection
-                    # Signal generation runs continuously (every 5s), but only best edge per asset executes
-                    logger.info("[15m-LOOP] Starting execution loop for %d candidates", len(candidates))
+                    # Execute candidates (already filtered by agent_grid_15m to 1 per asset)
+                    logger.info("[15m-LOOP] Starting execution loop for %d candidates (pre-filtered by agent_grid_15m)", len(candidates))
                     for candidate in candidates:
                         try:
                             # Extract asset from ticker (e.g., "KXBTC15M-26JUN300345-45" -> "BTC")
@@ -1789,17 +1794,17 @@ class Kalshi15mLoop:
                             has_position = abs(current_position) > 0.01  # Small threshold for floating point
                             logger.info("[15m-LOOP] Position check: asset=%s position=%.2f has_position=%s", asset, current_position, has_position)
                             
-                            # Get current best edge for this asset (single source of truth: edge_pct in FRACTION units)
-                            current_best = self._best_edge_per_asset.get(asset)
-                            current_best_edge = current_best.get("edge_pct", 0.0) if current_best else 0.0
-                            logger.info("[15m-LOOP] Best edge check: asset=%s current_best=%.6f", asset, current_best_edge)
+                            # CRITICAL FIX (2026-07-16): Best-edge selection is now handled in agent_grid_15m
+                            # The loop_15m no longer needs to track best edge per asset since agent_grid_15m
+                            # already ensures only 1 candidate per asset (cheapest with best edge) is returned.
+                            # We only need to check for swing mode and edge validation here.
                             
-                            # Best-edge selection logic:
-                            # - If no position: execute if edge > current best edge OR if edge meets minimum threshold
-                            # - If position exists: only execute if edge > current best edge (edge improvement)
-                            # - SWING MODE: If swing mode enabled after trailing exit, allow opposite-side entry
-                            # - This prevents over-trading and ensures we always execute the best opportunity
-                            should_execute = False
+                            # Check swing mode status for this asset
+                            swing_enabled = self._swing_mode.get(asset, {}).get("enabled", False)
+                            exited_side = self._swing_mode.get(asset, {}).get("exited_side", None)
+                            
+                            # Determine if this is a swing reversal (opposite side to exited position)
+                            is_swing_reversal = swing_enabled and exited_side and side != exited_side
                             
                             # PER-ASSET EDGE THRESHOLD (2026-07-14 FIX)
                             # Use validate_edge() from risk_parameters.py as single source of truth
@@ -1820,101 +1825,24 @@ class Kalshi15mLoop:
                                 )
                                 continue  # Skip if edge below 2.5%
                             
-                            min_edge_threshold = 0.025  # 2.5% unified threshold from profile edge_bands (industry standard)
-                            
-                            # Check swing mode status for this asset
-                            swing_enabled = self._swing_mode.get(asset, {}).get("enabled", False)
-                            exited_side = self._swing_mode.get(asset, {}).get("exited_side", None)
-                            
-                            # Determine if this is a swing reversal (opposite side to exited position)
-                            is_swing_reversal = swing_enabled and exited_side and side != exited_side
-                            
-                            if not has_position:
-                                # No position: execute if edge meets minimum threshold OR beats current best
-                                # OR if swing mode enabled and this is opposite-side reversal
-                                # CRITICAL FIX: Use abs(edge) for comparison since edge = p_model - p_market can be negative
-                                # Negative edges are valid contrarian signals (model disagrees with market)
-                                # Industry standard: edge magnitude matters, not direction, for momentum/contrarian trading
-                                if abs(edge) > min_edge_threshold or abs(edge) > abs(current_best_edge) or is_swing_reversal:
-                                    should_execute = True
-                                    if is_swing_reversal:
-                                        logger.info(
-                                            "[SWING-MODE] Reversal entry: asset=%s from %s to %s edge=%.2f%% - swing mode enabled",
-                                            asset, exited_side, side, edge
-                                        )
-                                    else:
-                                        logger.info(
-                                            "[15m-LOOP] Best-edge selection: asset=%s edge=%.2f%% (abs=%.2f%%) > min_threshold=%.2f%% or current_best=%.2f%% - will execute",
-                                            asset, edge, abs(edge), min_edge_threshold, current_best_edge
-                                        )
-                                    # Update best edge tracking
-                                    self._best_edge_per_asset[asset] = {
-                                        "ticker": ticker,
-                                        "side": side,
-                                        "edge_pct": edge,  # Single source of truth: edge_pct in FRACTION units
-                                        "candidate": candidate
-                                    }
-                                    # Disable swing mode after executing reversal
-                                    if is_swing_reversal:
-                                        self._swing_mode[asset] = {"enabled": False, "exited_side": None, "exit_time": None}
-                                        logger.info("[SWING-MODE] Disabled for asset=%s after reversal entry", asset)
-                                else:
-                                    logger.debug(
-                                        "[15m-LOOP] Best-edge selection: asset=%s edge=%.2f%% (abs=%.2f%%) <= min_threshold=%.2f%% and <= current_best=%.2f%% - skipping",
-                                        asset, edge, abs(edge), min_edge_threshold, current_best_edge
-                                    )
-                            else:
-                                # Has position: only execute if edge improves significantly
-                                # CRITICAL FIX: Use relative improvement (percentage) instead of absolute for velocity-based signals
-                                # Velocity-based signals have tiny edges (0.01-0.07%), so absolute 5% threshold is impossible
-                                # Use 20% relative improvement instead: edge must be 20% better than current best
-                                # CRITICAL FIX: Use abs(edge) for comparison since edge = p_model - p_market can be negative
-                                # Negative edges are valid contrarian signals (model disagrees with market)
-                                if abs(current_best_edge) > 0:
-                                    edge_improvement_ratio = (abs(edge) - abs(current_best_edge)) / abs(current_best_edge)
-                                    edge_improvement_threshold = 0.20  # 20% relative improvement required
-                                    if edge_improvement_ratio > edge_improvement_threshold:
-                                        should_execute = True
-                                        logger.info(
-                                            "[15m-LOOP] Edge improvement: asset=%s edge=%.6f (abs=%.6f, ratio=%.2f%%) > current_best=%.6f + threshold=%.2f%% - will execute",
-                                            asset, edge, abs(edge), edge_improvement_ratio * 100, current_best_edge, edge_improvement_threshold * 100
-                                        )
-                                        # Update best edge tracking
-                                        self._best_edge_per_asset[asset] = {
-                                            "ticker": ticker,
-                                            "side": side,
-                                            "edge": edge,
-                                            "candidate": candidate
-                                        }
-                                    else:
-                                        logger.debug(
-                                            "[15m-LOOP] Edge improvement: asset=%s edge=%.6f (abs=%.6f, ratio=%.2f%%) <= current_best=%.6f + threshold=%.2f%% - skipping (position exists)",
-                                            asset, edge, abs(edge), edge_improvement_ratio * 100, current_best_edge, edge_improvement_threshold * 100
-                                        )
-                                else:
-                                    # No current best edge (first signal with position), execute if edge meets minimum threshold
-                                    # CRITICAL FIX: Use abs(edge) for comparison since edge = p_model - p_market can be negative
-                                    if abs(edge) > min_edge_threshold:
-                                        should_execute = True
-                                        logger.info(
-                                            "[15m-LOOP] First signal with position: asset=%s edge=%.6f (abs=%.6f) > min_threshold=%.6f - will execute",
-                                            asset, edge, abs(edge), min_edge_threshold
-                                        )
-                                        # Update best edge tracking
-                                        self._best_edge_per_asset[asset] = {
-                                            "ticker": ticker,
-                                            "side": side,
-                                            "edge": edge,
-                                            "candidate": candidate
-                                        }
-                                    else:
-                                        logger.debug(
-                                            "[15m-LOOP] First signal with position: asset=%s edge=%.6f (abs=%.6f) <= min_threshold=%.6f - skipping",
-                                            asset, edge, abs(edge), min_edge_threshold
-                                        )
-                            
-                            if not should_execute:
+                            # CRITICAL FIX (2026-07-16): Since agent_grid_15m already filtered to best edge per asset,
+                            # we only need to skip if swing mode is disabled and we have a position (no re-entry)
+                            # Swing mode allows opposite-side entry after trailing exit
+                            if has_position and not is_swing_reversal:
+                                logger.debug(
+                                    "[15m-LOOP] Asset has position and swing mode not enabled: asset=%s - skipping",
+                                    asset
+                                )
                                 continue
+                            
+                            if is_swing_reversal:
+                                logger.info(
+                                    "[SWING-MODE] Reversal entry: asset=%s from %s to %s edge=%.2f%% - swing mode enabled",
+                                    asset, exited_side, side, edge
+                                )
+                                # Disable swing mode after executing reversal
+                                self._swing_mode[asset] = {"enabled": False, "exited_side": None, "exit_time": None}
+                                logger.info("[SWING-MODE] Disabled for asset=%s after reversal entry", asset)
                             
                             # CRITICAL FIX (2026-07-13): Check if this candidate was already executed in current 15-minute window
                             # This prevents re-executing the same ticker+side+price combination multiple times
@@ -2362,12 +2290,13 @@ class Kalshi15mLoop:
                     # FRESH: catalog_age <= 60s, STALE_WARN: 60s < age <= 300s, STALE_BLOCK: age > 300s
                     catalog_fresh = catalog_age_s <= 60.0  # FRESH threshold
                     
-                    # Apply warmup grace period to catalog freshness check
-                    # During warmup, consider catalog fresh even if age exceeds threshold
-                    # This allows the system to start trading while catalog is still initializing
-                    if in_warmup:
-                        catalog_fresh = True  # Warmup grace: allow trading during catalog initialization
-                    elif not catalog_fresh:
+                    # CRITICAL FIX: 2026-07-16 - REMOVED warmup grace period for catalog freshness
+                    # Previous logic allowed trading during catalog initialization by forcing catalog_fresh=True
+                    # This bypassed proper health checks and allowed orders with insufficient data
+                    # Now catalog must pass freshness check naturally - no warmup bypass
+                    # if in_warmup:
+                    #     catalog_fresh = True  # Warmup grace: allow trading during catalog initialization
+                    if not catalog_fresh:
                         catalog_stale_reasons.append(f"catalog_age({catalog_age_s:.1f}s)")
                     
                     # Detect catalog roll (market IDs changed) for WS warmup grace period
@@ -2441,16 +2370,16 @@ class Kalshi15mLoop:
                         ", ".join(catalog_stale_reasons), catalog_age_s, in_warmup
                     )
                 
-                # FINAL OVERRIDE: Force catalog_fresh=True during warmup grace period
-                # This ensures that during the warmup period, the catalog is considered fresh
-                # regardless of other staleness checks, allowing the system to start trading
-                # once WS delivers initial snapshots
-                if in_warmup:
-                    catalog_fresh = True
-                    logger.info(
-                        "[CATALOG-WARMUP-OVERRIDE] Forcing catalog_fresh=True during warmup (%.1fs/%.1fs)",
-                        time_since_roll, self._catalog_warmup_seconds
-                    )
+                # CRITICAL FIX: 2026-07-16 - REMOVED FINAL OVERRIDE warmup bypass
+                # Previous logic forced catalog_fresh=True during warmup regardless of staleness
+                # This bypassed all health checks and allowed orders with insufficient data
+                # Now catalog must pass freshness check naturally - no warmup bypass
+                # if in_warmup:
+                #     catalog_fresh = True
+                #     logger.info(
+                #         "[CATALOG-WARMUP-OVERRIDE] Forcing catalog_fresh=True during warmup (%.1fs/%.1fs)",
+                #         time_since_roll, self._catalog_warmup_seconds
+                #     )
                     
                 
                 # Check MD freshness and depth for all 5 assets
@@ -2583,14 +2512,15 @@ class Kalshi15mLoop:
                                     )
                             else:
                                 age_s = 9999
-                            # Apply warmup grace period to MD freshness check
-                            # During warmup, consider MD fresh even if age exceeds threshold
-                            # This allows the system to start trading while MD is still initializing
-                            if in_warmup:
-                                asset_md_fresh = True  # Warmup grace: allow trading during MD initialization
-                            else:
-                                # Uses canonical SLA threshold from sla_config for timing-aware MD freshness check
-                                # This ensures consistency with agent grid and other layers
+                            # CRITICAL FIX: 2026-07-16 - REMOVED warmup grace period for MD freshness
+                            # Previous logic allowed trading during MD initialization by forcing asset_md_fresh=True
+                            # This bypassed proper health checks and allowed orders with insufficient data
+                            # Now MD must pass freshness check naturally - no warmup bypass
+                            # if in_warmup:
+                            #     asset_md_fresh = True  # Warmup grace: allow trading during MD initialization
+                            # else:
+                            # Uses canonical SLA threshold from sla_config for timing-aware MD freshness check
+                            # This ensures consistency with agent grid and other layers
                                 pass  # Logic continues below
                                 from merid.event_venues.kalshi.sla_config import get_md_max_age_seconds
                                 
@@ -2813,10 +2743,13 @@ class Kalshi15mLoop:
                     catalog_age_s, CATALOG_STALE_BLOCK_SECONDS
                 )
             
-            # Apply warmup grace period to catalog_age_ok as well
-            if in_warmup:
-                catalog_age_ok = True  # Warmup grace: allow trading during catalog initialization
-                catalog_health = "FRESH"  # Override to FRESH during warmup
+            # CRITICAL FIX: 2026-07-16 - REMOVED warmup grace period for catalog_age_ok
+            # Previous logic allowed trading during catalog initialization by forcing catalog_age_ok=True
+            # This bypassed proper health checks and allowed orders with insufficient data
+            # Now catalog must pass age check naturally - no warmup bypass
+            # if in_warmup:
+            #     catalog_age_ok = True  # Warmup grace: allow trading during catalog initialization
+            #     catalog_health = "FRESH"  # Override to FRESH during warmup
             depth_coverage_ready = depth_sufficient_count >= MIN_DEPTH_COVERAGE_FOR_READY
             md_coverage_ok = md_fresh_count >= MIN_MD_COVERAGE_FOR_READY
             
@@ -3112,21 +3045,21 @@ class Kalshi15mLoop:
             # DIAGNOSTIC: Log before warmup override
             
             
-            # FINAL WARMUP OVERRIDE: Force catalog_fresh, catalog_age_ok, md_coverage_ok, ws_forwarder_healthy, and depth_coverage_ready to True during warmup
-            # This must be the last check before no_trade_reason calculation to ensure it overrides
-            # any previous staleness determinations
-            # DESIGN DECISION: Allow trading during warmup to avoid blocking system startup while components initialize
-            if in_warmup:
-                catalog_fresh = True
-                catalog_age_ok = True
-                catalog_health = "FRESH"  # Override to FRESH during warmup
-                md_coverage_ok = True  # Warmup grace: allow trading during MD initialization
-                ws_forwarder_healthy = True  # Warmup grace: allow trading during WS initialization
-                depth_coverage_ready = True  # Warmup grace: allow trading during depth initialization
-                logger.info(
-                    "[CATALOG-WARMUP-FINAL-OVERRIDE] Forcing catalog_fresh=True, catalog_age_ok=True, catalog_health=FRESH, md_coverage_ok=True, ws_forwarder_healthy=True, depth_coverage_ready=True during warmup (%.1fs/%.1fs)",
-                    time_since_roll, self._catalog_warmup_seconds
-                )
+            # CRITICAL FIX: 2026-07-16 - REMOVED warmup override that allowed trading during catalog warmup
+            # Previous logic forced all health checks to True during warmup, allowing orders within seconds of startup
+            # This bypassed the 30-bar indicator warmup requirement and caused orders with insufficient data
+            # Now trading is BLOCKED during warmup - all health checks must pass naturally
+            # if in_warmup:
+            #     catalog_fresh = True
+            #     catalog_age_ok = True
+            #     catalog_health = "FRESH"  # Override to FRESH during warmup
+            #     md_coverage_ok = True  # Warmup grace: allow trading during MD initialization
+            #     ws_forwarder_healthy = True  # Warmup grace: allow trading during WS initialization
+            #     depth_coverage_ready = True  # Warmup grace: allow trading during depth initialization
+            #     logger.info(
+            #         "[CATALOG-WARMUP-FINAL-OVERRIDE] Forcing catalog_fresh=True, catalog_age_ok=True, catalog_health=FRESH, md_coverage_ok=True, ws_forwarder_healthy=True, depth_coverage_ready=True during warmup (%.1fs/%.1fs)",
+            #         time_since_roll, self._catalog_warmup_seconds
+            #     )
                 
             
             # DIAGNOSTIC: Log after warmup override
